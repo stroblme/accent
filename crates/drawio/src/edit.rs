@@ -473,12 +473,30 @@ impl Editor {
         })
     }
 
-    /// A blank page at the end; returns its index.
-    pub fn add_page(&mut self, name: &str) -> usize {
+    /// A blank page put in at index `at`, up to the page count, named as draw.io names a new
+    /// one; returns `at`.
+    pub fn insert_page(&mut self, at: usize) -> Result<usize, Error> {
+        if at > self.file.pages.len() {
+            return Err(Error::NoPage(at));
+        }
         self.edit_pages(|pages| {
-            pages.push(Page::blank(name, &guid()));
-            pages.len() - 1
-        })
+            let page = Page::blank(&page_name(pages), &guid());
+            pages.insert(at, page);
+        });
+        Ok(at)
+    }
+
+    /// Move page `from` so that it is page `to` afterwards, as draw.io's `MovePage` does.
+    pub fn move_page(&mut self, from: usize, to: usize) -> Result<(), Error> {
+        let count = self.file.pages.len();
+        if let Some(out) = [from, to].into_iter().find(|i| *i >= count) {
+            return Err(Error::NoPage(out));
+        }
+        self.edit_pages(|pages| {
+            let page = pages.remove(from);
+            pages.insert(to, page);
+        });
+        Ok(())
     }
 
     pub fn rename_page(&mut self, page: usize, name: &str) -> Result<(), Error> {
@@ -618,6 +636,15 @@ impl Editor {
             }
         }
     }
+}
+
+/// The first `Page-N` from the page count on that no page is called already.
+// diagramly/Pages.js `EditorUi.prototype.createPageName`
+fn page_name(pages: &[Page]) -> String {
+    (pages.len() + 1..)
+        .map(|n| format!("Page-{n}"))
+        .find(|name| pages.iter().all(|p| p.name() != name))
+        .expect("an unbounded range")
 }
 
 /// Import a clipboard page with fresh cell ids (`importGraphModel`). A single

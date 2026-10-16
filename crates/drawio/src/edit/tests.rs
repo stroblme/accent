@@ -521,11 +521,92 @@ fn the_last_page_cannot_be_deleted() {
     assert_eq!(e.file().pages.len(), 1);
 }
 
+/// Three pages in draw.io's own layout, one holding attributes accent does not read.
+const THREE: &str = r#"<mxfile host="Electron" version="24.7.17" pages="3">
+  <diagram name="A" id="a">
+    <mxGraphModel grid="1" gridSize="10" custom="kept">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram name="B" id="b" foo="bar">
+    <mxGraphModel>
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="x" value="X" style="rounded=1;mystery=7;" parent="1" vertex="1" tags="t">
+          <mxGeometry x="10" y="20" width="120" height="60" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram name="C" id="c">
+    <mxGraphModel>
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
+"#;
+
+/// Each `<diagram>` of `xml` as written, in order.
+fn diagrams(xml: &str) -> Vec<&str> {
+    xml.split("  <diagram ").skip(1).collect()
+}
+
+#[test]
+fn a_moved_page_is_written_as_it_was_and_undo_puts_it_back() {
+    let mut e = Editor::new(File::from_bytes(THREE.as_bytes()).unwrap());
+    assert_eq!(e.file().to_xml(), THREE, "the fixture round-trips");
+    e.move_page(2, 0).unwrap();
+    let names: Vec<_> = e.file().pages.iter().map(Page::name).collect();
+    assert_eq!(names, ["C", "A", "B"]);
+    let (before, after) = (diagrams(THREE), e.file().to_xml());
+    let mut moved = diagrams(&after);
+    // The last page's text ends with `</mxfile>`; compare the pages alone.
+    let page = |s: &str| s.trim_end_matches("</mxfile>\n").to_string();
+    moved.rotate_left(1);
+    assert_eq!(
+        moved.iter().map(|s| page(s)).collect::<Vec<_>>(),
+        before.iter().map(|s| page(s)).collect::<Vec<_>>()
+    );
+    e.move_page(0, 2).unwrap();
+    assert_eq!(e.file().pages[2].name(), "C");
+    assert!(e.undo() && e.undo());
+    assert_eq!(e.file().to_xml(), THREE);
+    assert!(matches!(e.move_page(3, 0), Err(Error::NoPage(3))));
+    assert!(matches!(e.move_page(0, 3), Err(Error::NoPage(3))));
+    e.move_page(1, 1).unwrap();
+    assert!(
+        e.can_redo() && !e.can_undo(),
+        "no step for a page left where it is"
+    );
+}
+
+#[test]
+fn an_inserted_page_is_blank_and_named_as_draw_io_names_one() {
+    let mut e = Editor::new(File::from_bytes(THREE.as_bytes()).unwrap());
+    assert_eq!(e.insert_page(1).unwrap(), 1);
+    let names: Vec<_> = e.file().pages.iter().map(Page::name).collect();
+    assert_eq!(names, ["A", "Page-4", "B", "C"]);
+    assert_eq!(e.page(1).unwrap().cells.len(), 2, "the root and a layer");
+    // A name a page already has is passed over.
+    e.rename_page(0, "Page-5").unwrap();
+    assert!(matches!(e.insert_page(5), Err(Error::NoPage(5))));
+    assert_eq!(e.insert_page(4).unwrap(), 4);
+    assert_eq!(e.page(4).unwrap().name(), "Page-6");
+}
+
 #[test]
 fn page_ops_undo() {
     let mut e = editor();
     let before = e.file().pages.clone();
-    assert_eq!(e.add_page("Two"), 1);
+    assert_eq!(e.insert_page(1).unwrap(), 1);
+    assert_eq!(e.page(1).unwrap().name(), "Page-2");
     e.rename_page(1, "Second").unwrap();
     e.set_page_attr(0, "background", Some("#ff0000")).unwrap();
     assert_eq!(e.page(1).unwrap().name(), "Second");

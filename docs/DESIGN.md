@@ -259,7 +259,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 **Outline**
 
-- What the open tab outlines: a text file's symbols from the language layer (a note's headings, a source file's functions and types, nested as the server nests them), a PDF's bookmarks, comments and thumbnail strip (see PDF), or an empty state.
+- What the open tab outlines: a text file's symbols from the language layer (a note's headings, a source file's functions and types, nested as the server nests them), a PDF's bookmarks, comments and thumbnail strip (see PDF), a diagram's pages and their thumbnail strip (see Diagram), or an empty state.
 - A code file no language server has answered with symbols for — none is installed, or it has not answered yet — is outlined from the index's declarations (Architecture, Code declarations), and a server's first symbols replace them: one inside another's span is nested under it, and a run of a type's methods declared outside it (a Rust `impl`) goes under a row naming the type, as rust-analyzer's `impl Index` does.
   The index holds the file as it was last saved, so its rows are asked for again when a save of it lands, a walk ends or it changes elsewhere, never per keystroke: an edit reaches them with its autosave.
   A server that answers with nothing, or fails before it gave anything, leaves them.
@@ -931,7 +931,11 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - A formula label is typeset by WebKit in the file's colours, so a theme switch typesets nothing again, and painted as a picture of its own, cut out of one snapshot of a page's formulas laid out together, as many at a time as a snapshot 8192 px tall holds; when WebKit's process dies under a batch it is typeset again, once, on a new one.
   One WebKit view held by no window typesets for the whole app, every diagram tab and every note's embed, made for the first formula asked for: a view is a web process of its own, and a formula one diagram typeset another shows at once.
   Five minutes after its last formula the view is let go with its processes, as an unseen preview is (Preview); the pictures stay, and the next formula makes another view.
-- Pages are the Outline pane's rows, the one shown selected.
+- Pages are the Outline pane's rows, the one shown selected, over a thumbnail strip that organises them as a PDF's does (PDF): a click goes to the page, dragging a thumbnail moves its page, and the thumbnail under the pointer carries Delete Page (absent on a diagram of one page, which keeps it) and Insert Page Here.
+  A page put in is blank and named as draw.io names one, the first `Page-N` from the page count on that no page has.
+  A thumbnail is its page in the canvas's colours, painted when it first comes on screen and again only once an edit has changed it.
+- A page edit is one undo step: the reader lands on a page put in, and otherwise stays on the page they were reading, wherever it went, or the one that took its place, Undo and Redo included, and the pane's Back and Forward places follow the pages.
+  A note names a diagram's page by its name, so no link changes with one.
 - Group puts the selected cells that share the first one's parent, two at least, into a transparent `group` cell sized to them and in front of its siblings, as draw.io's does; they stay where they are, and the group is selected.
   Ungroup hands a group's cells to its parent, in front, and removes the group when it has no fill, line or picture of its own, keeping it as a shape otherwise.
 - The clipboard is draw.io's: Copy writes the selection as the `<mxGraphModel>` XML draw.io's own Copy writes, as text, the topmost cells with all under them, an arrow whose shape stayed behind let go of it where it is drawn; Cut does the same and removes them, the arrows on them let go.
@@ -1353,7 +1357,8 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 - The canvas's own keys, as a PDF's are, firing actions the palette lists without an accelerator: Undo Diagram Edit `Ctrl+Z`, Redo `Ctrl+Shift+Z` / `Ctrl+Y`, Delete Selection `Delete` / `Backspace` (the arrows on it left where they are drawn, as draw.io's), Delete with Edges `Ctrl+Delete` / `Ctrl+Backspace`, Select All Shapes `Ctrl+A`, Cut Shapes, Copy Shapes and Paste into Diagram `Ctrl+X`, `Ctrl+C` and `Ctrl+V`, Edit Label `Return` (or any character typed over one selected shape, which becomes the label's first), Next and Previous Diagram Page `Page Down` / `Page Up`, and while it is presented `Space` / `Shift+Space` and `Right` / `Left` too, its other keys then doing nothing (Views).
   The arrows nudge the selection a unit and Shift+arrows ten; Space held pans; `Escape` puts the tool down, then clears the selection.
 - Duplicate Selection is `Ctrl+D`, Duplicate Line's chord, and Group `Ctrl+G`, Go to Line's, which a diagram in front answers; `Ctrl+Return` finishes a label being edited; `F2` stays the file's Rename.
-- The tools (Select and Move, Add Rectangle, Add Ellipse, Add Text, Add Connector, Add Image…), Ungroup, Bring to Front, Send to Back, and Add, Rename and Delete Diagram Page are unbound, on the ring and in the palette; a tool picked from the palette brings the ring out, and the same tool twice puts it down.
+- The tools (Select and Move, Add Rectangle, Add Ellipse, Add Text, Add Connector, Add Image…), Ungroup, Bring to Front, Send to Back, and Add, Rename, Delete, Move Up and Move Down Diagram Page are unbound, on the ring and in the palette; a tool picked from the palette brings the ring out, and the same tool twice puts it down.
+  The page commands act on the page shown, Add putting a page after the last: the thumbnail strip is where pages are organised by pointer.
   Invert Diagram Colours is unbound and in the palette alone.
 
 ### History
