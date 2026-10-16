@@ -2,7 +2,8 @@
 //!
 //! `accent-drawio` owns the format; the canvas emits [`Edit`]s. [`DiagramTab::edit`]
 //! applies each change with undo, dirty tracking and autosave. `label` handles label
-//! editing, `props` the Properties pane, and `input` menus, keys and scrolling.
+//! editing, `props` the Properties pane, `input` menus, keys and scrolling, and `strip` the page
+//! thumbnails the Outline pane shows.
 
 pub mod embed;
 pub mod export;
@@ -14,6 +15,7 @@ mod math;
 mod paint;
 mod props;
 mod render;
+mod strip;
 mod tools;
 mod view;
 mod web;
@@ -25,6 +27,7 @@ use std::rc::Rc;
 
 use accent_core::config::{DiagramConfig, DiagramPlace};
 use accent_core::fs::{Digest, Etag};
+use accent_core::page_edit::PageEdit;
 use accent_drawio::{CellId, Editor, File, Point};
 use adw::prelude::*;
 use gtk::{gio, glib};
@@ -37,6 +40,8 @@ use view::{DiagramView, Edit};
 
 type TabHook = Hook<dyn Fn(&Rc<DiagramTab>)>;
 type TextHook = Hook<dyn Fn(&str)>;
+/// The page list changed: where each page that was there is now.
+type RepageHook = Hook<dyn Fn(&Rc<DiagramTab>, &dyn Fn(usize) -> usize)>;
 
 pub struct DiagramTab {
     key: RefCell<String>,
@@ -57,6 +62,10 @@ pub struct DiagramTab {
     ring_tick: RefCell<Option<gtk::TickCallbackId>>,
     /// Properties content shown while this diagram is the active tab.
     props: Rc<props::Props>,
+    /// The page thumbnails, and the buttons and the drag that edit the pages on them: what the
+    /// Outline pane shows under the page names. Built once, so it keeps its scroll.
+    strip: strip::PageStrip,
+    organize: Rc<crate::organize::Organize>,
     /// The label being edited, while one is.
     label: RefCell<Option<Rc<label::LabelEditor>>>,
     spellcheck: Cell<bool>,
@@ -90,6 +99,7 @@ pub struct DiagramTab {
     /// Emitted before explicit page jumps so the pane records the previous position for Back.
     on_jump: TabHook,
     on_pages: TabHook,
+    on_repaged: RepageHook,
     on_selection: TabHook,
     on_history: TabHook,
     on_autosave: TabHook,
@@ -145,6 +155,21 @@ pub fn open(
         "applications-graphics-symbolic",
     )));
 
+    let (strip, thumbs) = strip::PageStrip::new();
+    let organize = crate::organize::Organize::new(
+        &thumbs,
+        &strip,
+        glib::clone!(
+            #[strong]
+            strip,
+            move || strip.layout()
+        ),
+        glib::clone!(
+            #[strong]
+            strip,
+            move |page| strip.picture(page)
+        ),
+    );
     let pages = file.pages.len();
     // A WebKit view is a process; only a diagram that has formulas pays for one.
     let has_math = file.pages.iter().any(|p| p.model_attr("math") == Some("1"));
@@ -160,6 +185,8 @@ pub fn open(
         ring,
         ring_tick: RefCell::new(None),
         props: props::Props::new(),
+        strip,
+        organize,
         label: RefCell::new(None),
         spellcheck: Cell::new(false),
         font: RefCell::new(None),
@@ -179,6 +206,7 @@ pub fn open(
         on_page: Hook::default(),
         on_jump: Hook::default(),
         on_pages: Hook::default(),
+        on_repaged: Hook::default(),
         on_selection: Hook::default(),
         on_history: Hook::default(),
         on_autosave: Hook::default(),
@@ -189,8 +217,21 @@ pub fn open(
         on_toast: Hook::default(),
     });
     if has_math {
-        tab.view.set_typesetter(math::shared());
+        let typesetter = math::shared();
+        tab.view.set_typesetter(typesetter.clone());
+        tab.strip.set_typesetter(typesetter);
     }
+    tab.strip.set_pages(tab.editor.borrow().file());
+    tab.strip.connect_goto(glib::clone!(
+        #[weak]
+        tab,
+        move |page| tab.goto_page(page)
+    ));
+    tab.organize.connect_edit(glib::clone!(
+        #[weak]
+        tab,
+        move |edit| tab.edit_pages(edit)
+    ));
     let zoom = place.zoom.map_or(Zoom::Fit, Zoom::Scale);
     tab.view.restore(zoom, (place.x, place.y));
     tab.restyle();
@@ -472,6 +513,7 @@ impl DiagramTab {
     pub fn restyle(&self) {
         let page = crate::theme::onto(crate::theme::recolour().diagrams, self.inverted.get());
         self.view.set_tint(paint::Tint::onto(page));
+        self.strip.set_tint(paint::Tint::onto(page));
     }
 
     pub fn toggle_invert(&self) {
@@ -517,6 +559,7 @@ impl DiagramTab {
     fn walk(self: &Rc<Self>, back: bool) {
         // A change the Properties pane holds is a step to walk too.
         self.props.flush();
+        let before = self.page_ids();
         let walked = {
             let mut editor = self.editor.borrow_mut();
             match back {
@@ -525,11 +568,8 @@ impl DiagramTab {
             }
         };
         if walked {
-            // An undo may have taken a page away, or brought one back.
-            let last = self.page_count().saturating_sub(1);
-            if self.page_index.get() > last {
-                self.page_index.set(last);
-            }
+            // An undo may have taken a page away, brought one back or moved one.
+            self.repaged(&before);
             self.changed();
             self.on_pages.emit(self);
         }
@@ -558,6 +598,7 @@ impl DiagramTab {
     pub fn allow_web(self: &Rc<Self>, on: bool) {
         self.web.set(on);
         self.view.set_web(on);
+        self.strip.set_web(on);
         self.sync_web();
     }
 
@@ -580,6 +621,7 @@ impl DiagramTab {
             let Some(tab) = tab.upgrade() else { return };
             if fetched > 0 {
                 tab.refresh();
+                tab.strip.forget();
             }
             if failed > 0 {
                 let what = if failed == 1 { "image" } else { "images" };
@@ -594,6 +636,7 @@ impl DiagramTab {
         self.save.modified.set(true);
         self.set_title();
         self.refresh();
+        self.strip.set_pages(self.editor.borrow().file());
         self.sync_web();
         self.fill_props();
         self.on_history.emit(self);
@@ -632,6 +675,7 @@ impl DiagramTab {
         };
         self.view.set_selection(&selection);
         self.view.show(sheet);
+        self.strip.set_framed(self.page_index.get());
     }
 
     /// What a gesture on the canvas asked for.
@@ -938,15 +982,9 @@ impl DiagramTab {
         *self.font.borrow_mut() = font.map(str::to_string);
     }
 
+    /// A blank page after the last, which the reader is taken to.
     pub fn add_page(self: &Rc<Self>) {
-        let name = format!("Page-{}", self.page_count() + 1);
-        let mut index = 0;
-        self.edit(|e, _| {
-            index = e.add_page(&name);
-            Ok(())
-        });
-        self.on_pages.emit(self);
-        self.goto_page(index);
+        self.edit_pages(PageEdit::insert(self.page_count()));
     }
 
     pub fn rename_page(self: &Rc<Self>, name: &str) {
@@ -955,9 +993,81 @@ impl DiagramTab {
         self.on_pages.emit(self);
     }
 
+    /// Take out the page being read, unless it is the only one.
     pub fn delete_page(self: &Rc<Self>) {
-        self.edit(|e, page| e.delete_page(page));
+        self.edit_pages(PageEdit::delete(self.page_index.get()));
+    }
+
+    /// Move the page being read one place up or down, the reader with it.
+    pub fn move_page(self: &Rc<Self>, down: bool) {
+        let from = self.page_index.get();
+        let to = match down {
+            true => Some(from + 1),
+            false => from.checked_sub(1),
+        };
+        if let Some(to) = to.filter(|to| *to < self.page_count()) {
+            self.edit_pages(PageEdit::Move { from, to });
+        }
+    }
+
+    /// Put a blank page in, take one out or move one, as one undo step: the strip's buttons and
+    /// drag and the page commands, one page at a time. The reader lands on a page put in, and
+    /// otherwise stays on the page they were reading, or the one that took its place.
+    pub fn edit_pages(self: &Rc<Self>, edit: PageEdit) {
+        // What the Properties pane or the label editor holds is the page's as it was.
+        self.props.flush();
+        self.finish_label();
+        let before = self.page_ids();
+        let done = {
+            let mut editor = self.editor.borrow_mut();
+            match edit {
+                PageEdit::Insert { at, .. } => editor.insert_page(at).map(drop),
+                PageEdit::Delete { at, .. } => editor.delete_page(at),
+                PageEdit::Move { from, to } => editor.move_page(from, to),
+            }
+        };
+        if let Err(e) = done {
+            return tracing::info!("diagram page edit refused: {e}");
+        }
+        self.repaged(&before);
+        self.changed();
         self.on_pages.emit(self);
+        match edit {
+            PageEdit::Insert { at, .. } => self.goto_page(at),
+            _ => self.on_page.emit(self),
+        }
+    }
+
+    /// Each page's id, to follow the pages through a change of the page list.
+    fn page_ids(&self) -> Vec<Option<String>> {
+        let editor = self.editor.borrow();
+        let ids = editor.file().pages.iter();
+        ids.map(|p| accent_drawio::model::attr(&p.attrs, "id").map(str::to_string))
+            .collect()
+    }
+
+    /// The pages were `before` and may have changed, by an edit or a walk of the history: the
+    /// reader stays on the page they were reading wherever it went, or is on the one that took its
+    /// place, and the window hears where every page went.
+    fn repaged(self: &Rc<Self>, before: &[Option<String>]) {
+        let now = self.page_ids();
+        let went = |page| moved(before, &now, page);
+        if before.len() == now.len() && (0..now.len()).all(|p| went(p) == Some(p)) {
+            return;
+        }
+        let (reading, last) = (self.page_index.get(), now.len().saturating_sub(1));
+        match went(reading) {
+            Some(at) => self.page_index.set(at),
+            None => {
+                self.page_index.set(reading.min(last));
+                self.selection.borrow_mut().clear();
+                self.editor.borrow_mut().set_current_layer(None);
+            }
+        }
+        if let Some(f) = self.on_repaged.get() {
+            f(self, &|page| went(page).unwrap_or(page).min(last));
+        }
+        self.organize.hover();
     }
 
     /// Zoom a step in or out around the middle of the view.
@@ -1027,6 +1137,7 @@ impl DiagramTab {
         self.banner.set_revealed(false);
         self.set_title();
         self.refresh();
+        self.strip.set_pages(self.editor.borrow().file());
         self.sync_web();
         self.fill_props();
         self.on_pages.emit(self);
@@ -1081,6 +1192,23 @@ impl DiagramTab {
 
     pub fn connect_pages(&self, f: impl Fn(&Rc<DiagramTab>) + 'static) {
         self.on_pages.set(Rc::new(f));
+    }
+
+    /// The page list changed: `f` is told where each page that was there went.
+    pub fn connect_repaged(&self, f: impl Fn(&Rc<DiagramTab>, &dyn Fn(usize) -> usize) + 'static) {
+        self.on_repaged.set(Rc::new(f));
+    }
+
+    /// The page thumbnails, for the Outline pane to show under the page names. Built once and
+    /// handed out again on every refresh; whoever shows it takes it out of where it was.
+    pub fn thumbnails(&self) -> gtk::Widget {
+        self.organize.pane.clone().upcast()
+    }
+
+    /// Where the strip's buttons are in `window`: what `ACCENT_BENCH_DIAGRAM=strip:` prints.
+    #[cfg(feature = "bench")]
+    pub fn strip_buttons(&self, window: &gtk::Widget) -> String {
+        self.organize.buttons(window)
     }
 
     pub fn connect_selection(&self, f: impl Fn(&Rc<DiagramTab>) + 'static) {
@@ -1237,6 +1365,22 @@ fn page_names(file: &File) -> Vec<String> {
         .collect()
 }
 
+/// Where page `page` of pages that had the ids `before` is among pages with the ids `now`: found
+/// by its id where that names one page alone, else at its place while the count is the same.
+/// `None` for a page that went.
+fn moved(before: &[Option<String>], now: &[Option<String>], page: usize) -> Option<usize> {
+    let alone = |ids: &[Option<String>], id: &str| {
+        ids.iter().filter(|i| i.as_deref() == Some(id)).count() == 1
+    };
+    match before.get(page)?.as_deref() {
+        Some(id) if alone(before, id) => now
+            .iter()
+            .position(|i| i.as_deref() == Some(id))
+            .filter(|_| alone(now, id)),
+        _ => (before.len() == now.len()).then_some(page),
+    }
+}
+
 /// The page of `file` called `name`, as `![[x.drawio#name]]` and `[[x.drawio#name]]` name one.
 pub fn page_named(file: &File, name: &str) -> Option<usize> {
     page_names(file).iter().position(|n| n == name.trim())
@@ -1256,5 +1400,23 @@ mod tests {
         assert_eq!(page_named(&file, "Page-1"), Some(0));
         assert_eq!(page_named(&file, "Page 2"), Some(1));
         assert_eq!(page_named(&file, "Page-2"), None);
+    }
+
+    #[test]
+    fn a_page_is_followed_by_its_id_through_a_page_edit() {
+        let ids = |ids: &[&str]| -> Vec<Option<String>> {
+            ids.iter()
+                .map(|i| (!i.is_empty()).then(|| i.to_string()))
+                .collect()
+        };
+        let before = ids(&["a", "b", "c"]);
+        // Moved, deleted, and put in in front of.
+        assert_eq!(moved(&before, &ids(&["c", "a", "b"]), 0), Some(1));
+        assert_eq!(moved(&before, &ids(&["a", "c"]), 1), None);
+        assert_eq!(moved(&before, &ids(&["n", "a", "b", "c"]), 2), Some(3));
+        // Without an id of its own a page keeps its place while the count does.
+        let bare = ids(&["", "b", "b"]);
+        assert_eq!(moved(&bare, &ids(&["", "b", "b"]), 2), Some(2));
+        assert_eq!(moved(&bare, &ids(&["", "b"]), 0), None);
     }
 }

@@ -765,7 +765,8 @@ impl App {
             // read is under may be another.
             return self.follow_outline();
         }
-        // A diagram's outline is its pages, as a PDF's is its bookmarks.
+        // A diagram's outline is its pages, as a PDF's is its bookmarks, with their thumbnails
+        // under them.
         if let Some(d) = doc.diagram() {
             let rows: Vec<(sidebar::Line, usize)> = d
                 .page_names()
@@ -778,7 +779,7 @@ impl App {
                 d,
                 move |page| d.goto_page(page)
             );
-            sidebar.set_outline_rows(&doc.key(), &rows, jump, None);
+            sidebar.set_outline_rows(&doc.key(), &rows, jump, Some(&d.thumbnails()));
             return self.follow_outline();
         }
         let Some(tab) = doc.tab() else {

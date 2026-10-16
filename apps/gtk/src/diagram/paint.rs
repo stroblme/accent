@@ -223,7 +223,7 @@ pub fn rgba(c: Color) -> gdk::RGBA {
 /// Canvas colours: original or mapped onto theme paper/ink (`accent_core::recolour`).
 /// White maps to paper, black to ink, other colours retain chroma. Pass tint explicitly
 /// so print and export can use [`Tint::FILE`] independently of the current theme.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Default)]
 pub struct Tint(Option<theme::Page>);
 
 impl Tint {

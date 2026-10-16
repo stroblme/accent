@@ -164,6 +164,15 @@ impl App {
                 app.sync_status();
             }
         }));
+        // The pane's Back and Forward places in the diagram follow its pages, as a PDF's do.
+        let weak = Rc::downgrade(self);
+        tab.connect_repaged(move |tab, map| {
+            if let Some(app) = weak.upgrade() {
+                for pane in app.panes.borrow().iter() {
+                    pane.nav.borrow_mut().repage(&tab.key(), map);
+                }
+            }
+        });
         tab.connect_selection(on(|_, _| {}));
         // An edit keeps a preview, as typing keeps a note's.
         tab.connect_history(on(|app, tab| {
@@ -249,6 +258,8 @@ impl App {
             "diagram-add-page" => tab.add_page(),
             "diagram-rename-page" => self.rename_diagram_page(&tab),
             "diagram-delete-page" => tab.delete_page(),
+            "diagram-move-page-up" => tab.move_page(false),
+            "diagram-move-page-down" => tab.move_page(true),
             "diagram-to-front" => tab.reorder(accent_drawio::ZOrder::ToFront),
             "diagram-to-back" => tab.reorder(accent_drawio::ZOrder::ToBack),
             "diagram-invert" => tab.toggle_invert(),

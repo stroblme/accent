@@ -70,6 +70,8 @@ const LAYERED: &str = r#"<mxfile host="accent">
 ///   prints the model.
 /// - `=preview:<rel>` times no-drag, most-connected-shape live drag and whole-page
 ///   box drag on the largest page.
+/// - `=strip:<rel>` holds the Outline pane's page thumbnails on screen for XTEST to hover,
+///   click and drag along, printing the pages and the strip's buttons every two seconds.
 /// - `=present:<rel>,<pdf>`, `=look:<rel>:<dir>`, `=export:<rel>:<dir>`, `=props:<rel>`,
 ///   `=layers:<rel>` and `=web:<rel>:<url>` probe presentation, recolouring, output,
 ///   Properties, Layers and web images through the corresponding helpers.
@@ -85,6 +87,9 @@ pub(super) fn bench_diagram(app: &Rc<App>, arg: &str) {
     }
     if let Some(rel) = arg.strip_prefix("preview:") {
         return preview(app, rel);
+    }
+    if let Some(rel) = arg.strip_prefix("strip:") {
+        return strip(app, rel);
     }
     if let Some(rel) = arg.strip_prefix("props:") {
         return props(app, rel);
@@ -1380,6 +1385,45 @@ fn web(app: &Rc<App>, rel: &str, url: &str) {
             println!("bench diagram web session={stored:?}");
         }
         bench_quit(&app);
+    });
+}
+
+/// The thumbnail strip held on screen for 40 s: the Outline pane up, and the pages, the one
+/// shown, the strip's buttons and the window's offset on the screen printed every two seconds;
+/// then the pages the file on disk holds.
+fn strip(app: &Rc<App>, rel: &str) {
+    let path = app.root().join(rel);
+    if !path.exists() {
+        std::fs::write(&path, SAMPLE).expect("write the sample diagram");
+    }
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+        app.open_path(&rel);
+        glib::spawn_future_local(async move {
+            files::until(|| app.active_diagram().is_some_and(|tab| tab.laid_out())).await;
+            let Some(tab) = app.active_diagram() else {
+                println!("bench strip no_tab");
+                return bench_quit(&app);
+            };
+            app.show_pane("outline");
+            for _ in 0..20 {
+                let (sx, sy) = app.window.surface_transform();
+                println!(
+                    "bench strip pages={:?} page={} {} surface={sx},{sy}",
+                    tab.page_names(),
+                    tab.page_index(),
+                    tab.strip_buttons(app.window.upcast_ref())
+                );
+                glib::timeout_future(Duration::from_secs(2)).await;
+            }
+            let _ = app.flush_diagram(&tab);
+            let file = std::fs::read(app.root().join(&rel)).unwrap_or_default();
+            let names: Vec<String> = accent_drawio::File::from_bytes(&file)
+                .map(|f| f.pages.iter().map(|p| p.name().to_string()).collect())
+                .unwrap_or_default();
+            println!("bench strip saved={names:?}");
+            bench_quit(&app);
+        });
     });
 }
 
