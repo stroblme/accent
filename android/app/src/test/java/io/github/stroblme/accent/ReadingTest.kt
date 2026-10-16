@@ -40,6 +40,16 @@ class ReadingTest {
         assertEquals(true, over.ready)
     }
 
+    /** A worker gone ends the walk as a failed one does, and says so until the vault reopens. */
+    @Test
+    fun `a worker gone ends the walk and is said until the vault reopens`() {
+        val walking = VaultState(root = "/v", indexing = true, scanned = 40, phase = Phase.INDEX)
+        val gone = walking.workerGone()
+        assertEquals(false, gone.indexing)
+        assertEquals(true, gone.gone)
+        assertEquals(false, VaultState(root = "/v", opening = true).gone)
+    }
+
     /** Indexing notification before and after the file count is known. */
     @Test
     fun `the notification names the vault and counts its files`() {

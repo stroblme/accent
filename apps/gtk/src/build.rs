@@ -78,6 +78,13 @@ pub fn build_window(
     let first = Pane::new(&tab_menu());
     // Hidden until something goes wrong with a connection, which for a local vault is never.
     let connection = adw::Banner::builder().button_label("Reconnect").build();
+    // Hidden until the vault's worker is gone (`Event::WorkerGone`): only a new one, which
+    // Reload Window starts, watches and indexes the vault again.
+    let unwatched = adw::Banner::builder()
+        .title("This vault is no longer watched or indexed")
+        .button_label("Reload Window")
+        .action_name("win.reload-window")
+        .build();
     // Hidden until the first `Progress`, so a warm start that never reports one never shows it.
     // Going visible costs the content 4 px once, at the moment indexing ends; a `GtkRevealer`
     // would slide it away instead if that ever reads as a jump.
@@ -223,6 +230,7 @@ pub fn build_window(
     let toolbar = adw::ToolbarView::new();
     toolbar.add_top_bar(&header);
     toolbar.add_top_bar(&connection);
+    toolbar.add_top_bar(&unwatched);
     // A bottom bar rather than a row inside the content: presentation mode takes it away with the
     // header for one line, and the find bar and the terminal panel stack above it.
     toolbar.add_bottom_bar(statusbar.widget());
@@ -275,6 +283,7 @@ pub fn build_window(
         #[cfg(feature = "bench")]
         toasted: Cell::new(0),
         connection,
+        unwatched,
         retry: Default::default(),
         connect,
         corpus: RefCell::new(Corpus::default()),

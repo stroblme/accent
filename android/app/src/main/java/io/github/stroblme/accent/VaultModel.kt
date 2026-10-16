@@ -146,6 +146,8 @@ data class VaultState(
     val searchFailed: String? = null,
     val doc: Doc? = null,
     val message: String? = null,
+    /** The vault's worker is gone ([Event.WorkerGone]): nothing reads the vault until it reopens. */
+    val gone: Boolean = false,
 ) {
     /** The note in front, if a note is. */
     val note: Open? get() = doc as? Open
@@ -189,6 +191,9 @@ data class VaultState(
 
     /** Clear indexing state after failure or interrupted event reading; retain indexed files. */
     fun walkOver(): VaultState = copy(indexing = false, paused = false, scanned = 0, phase = null)
+
+    /** The walk over for good, said until the vault is opened again. */
+    fun workerGone(): VaultState = walkOver().copy(gone = true)
 }
 
 /** Switcher names in tie-break order: indexed, ignored, missing linked, then aliases. */
@@ -460,11 +465,15 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
             }
             is Event.Conflict -> onConflict(event.original)
             // Over, the progress it had made with it, and not paused. Its error, if this vault has
-            // not said it already, is an [Event.Error] of its own. A worker gone walks no more,
-            // its reason an [Event.Error] too, which ends the walk, and its service, the same.
-            Event.WalkFailed, Event.WorkerGone -> {
+            // not said it already, is an [Event.Error] of its own.
+            Event.WalkFailed -> {
                 seen = null
                 _state.update { it.walkOver() }
+            }
+            // The same, its reason an [Event.Error] too, and for good: the banner asks to reopen.
+            Event.WorkerGone -> {
+                seen = null
+                _state.update { it.workerGone() }
             }
             is Event.Error -> _state.update { it.copy(message = event.message) }
             is Event.Progress -> seen = event.progress
@@ -794,6 +803,12 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         runCatching { vault?.pdfLinks(rel).orEmpty() }
             .onFailure { logged("Cannot read the links into this PDF", it) }
             .getOrNull()
+    }
+
+    /** Open the vault again, its note written first: a new worker after [Event.WorkerGone]. */
+    fun reopen() {
+        val root = _state.value.root ?: return
+        leave { open(root) }
     }
 
     /** Close the vault, retain it in recents, and release its state and handle. */

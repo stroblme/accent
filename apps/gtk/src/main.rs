@@ -254,6 +254,8 @@ struct App {
     /// Persistent reconnect banner for all tabs when a remote vault stops answering.
     /// Use a banner because the disconnected state needs a decision.
     connection: adw::Banner,
+    /// Persistent banner once the vault's worker is gone, offering Reload Window.
+    unwatched: adw::Banner,
     /// The automatic reconnect that banner counts down to.
     retry: reconnect::Retry,
     /// How far a remote vault has got in coming up, across the top of the document column. Only

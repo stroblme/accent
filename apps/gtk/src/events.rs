@@ -365,6 +365,8 @@ impl App {
                 self.statusbar.set_progress(None);
                 self.connect.hide();
                 self.connection_up();
+                // A new server is a new worker on the host.
+                self.unwatched.set_revealed(false);
                 // A new server has each document as the tab last tried to send it, and an edit
                 // refused while it was coming up is newer; the refresh sends that, and asks for
                 // the symbols and folds of a server that has only just heard of the tab.
@@ -419,11 +421,17 @@ impl App {
                 self.connection_refused(&why);
             }
             // No pause: the worker walks again when next asked, and the index stays partial,
-            // `reconciled` with it. Its error, if any is new, is an `Error` of its own. A worker
-            // gone walks no more, its reason an `Error` too, so the walk on screen ends the same.
-            Event::WalkFailed | Event::WorkerGone => {
+            // `reconciled` with it. Its error, if any is new, is an `Error` of its own.
+            Event::WalkFailed => {
                 self.statusbar.set_progress(None);
                 self.statusbar.set_indexing(statusbar::Indexing::Idle);
+            }
+            // The same, its reason an `Error` too, and for good: nothing watches or indexes the
+            // vault until a new worker does, which the banner's Reload Window starts.
+            Event::WorkerGone => {
+                self.statusbar.set_progress(None);
+                self.statusbar.set_indexing(statusbar::Indexing::Idle);
+                self.unwatched.set_revealed(true);
             }
             Event::Error(message) => self.toast(&message),
             // Every tab of the file holds the check, so a switch to one shows it.
