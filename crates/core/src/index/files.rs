@@ -65,6 +65,47 @@ impl Index {
         Ok(out)
     }
 
+    /// Every file that is a symlink of its own, `(rel_path, canonical target)`: one whose
+    /// canonical path is not its folder's and its name. A write to the target is news in the
+    /// target's folder, not in the link's. `canonical_root` stands for the root's folder, which
+    /// has no row.
+    pub fn symlinked_files(
+        &self,
+        canonical_root: &Path,
+    ) -> Result<Vec<(String, std::path::PathBuf)>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT f.rel_path, f.canonical FROM files f
+               LEFT JOIN files d ON d.rel_path = f.parent_dir AND f.parent_dir <> ''
+              WHERE f.kind <> ?1
+                AND f.canonical <> COALESCE(d.canonical, ?2) || '/'
+                    || substr(f.rel_path, length(f.parent_dir) + (f.parent_dir <> '') + 1)",
+        )?;
+        let rows = st.query_map(
+            params![FileKind::Dir.as_i64(), canonical_root.to_string_lossy()],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (rel, canonical) = row?;
+            out.push((rel, canonical.into()));
+        }
+        Ok(out)
+    }
+
+    /// The canonical path of every indexed folder, which differs from its vault path in a folder
+    /// linked in from outside.
+    pub fn dir_canonicals(&self) -> Result<std::collections::HashSet<std::path::PathBuf>> {
+        let mut st = self
+            .conn
+            .prepare_cached("SELECT canonical FROM files WHERE kind = ?1")?;
+        let rows = st.query_map([FileKind::Dir.as_i64()], |r| r.get::<_, String>(0))?;
+        let mut out = std::collections::HashSet::new();
+        for canonical in rows {
+            out.insert(canonical?.into());
+        }
+        Ok(out)
+    }
+
     /// Direct children of `prefix` (`""` for vault root), one lazy-tree level per call. The
     /// indexed `parent_dir` lookup keeps cost proportional to returned children.
     pub fn list_files(&self, prefix: &str) -> Result<Vec<FileRow>> {

@@ -50,6 +50,7 @@ pub(crate) fn spawn(
         unindexed: BTreeSet::new(),
         held: Vec::new(),
         own: HashMap::new(),
+        links: HashMap::new(),
         stop,
         paused: false,
         next_walk: Instant::now(),
@@ -151,6 +152,9 @@ struct Worker {
     /// The etag each file this vault wrote was left at, so the watcher's echo of the write can
     /// be told from another process's change. See [`Worker::mine`].
     own: HashMap<String, Etag>,
+    /// The vault's own symlinks to files, by canonical target, routed the target's news. See
+    /// [`Worker::apply_linked`].
+    links: HashMap<PathBuf, Vec<String>>,
     /// Set by [`Local::stop_indexing`](crate::local::Local::stop_indexing) and by the vault's
     /// `Drop` from another thread, and read inside the walk: the inbox cannot be reached from there.
     stop: Arc<AtomicU8>,
@@ -371,7 +375,7 @@ impl Worker {
                     }
                 }
                 Msg::Saved { rel, .. } => self.update(&rel, true, &mut batched),
-                Msg::Fs(ev) => self.apply(ev, &mut batched),
+                Msg::Fs(ev) => self.apply_linked(ev, &mut batched),
                 #[cfg(test)]
                 Msg::Panic => panic!("the test's own panic"),
             }
@@ -416,9 +420,11 @@ impl Worker {
         // drops the subtree, and indexing the new one adds back the directory row alone, so every
         // note under it would vanish until the next restart. The walk is of that folder: a
         // `chmod` or a `touch` of one reads as the same change, and walked the whole vault. An
-        // *empty* new directory needs no walk, only a watch: see `Batch::rewatch`.
+        // *empty* new directory needs no walk, only a watch: see `Batch::rewatch`. Nor does one
+        // outside the vault, in a folder watched for a symlinked file's target.
         let folder = |p: &Path| {
-            (*p != self.root && has_children(p)).then(|| self.rel(p).unwrap_or_default())
+            (*p != self.root && p.starts_with(&self.root) && has_children(p))
+                .then(|| self.rel(p).unwrap_or_default())
         };
         match msg {
             Msg::Rescan(dir) => Some(dir.clone()),
@@ -476,6 +482,7 @@ impl Worker {
             watcher,
             git_dirs,
             unindexed,
+            links,
             held,
             stop,
             ..
@@ -495,7 +502,8 @@ impl Worker {
                             if dirs != *git_dirs {
                                 *git_dirs = dirs;
                                 // A failure is left to the rebuild after the walk, which reports it.
-                                if let Err(e) = watch(watcher, index, root, git_dirs, unindexed, tx)
+                                if let Err(e) =
+                                    watch(watcher, index, root, git_dirs, unindexed, links, tx)
                                 {
                                     tracing::warn!("watching the vault: {e:#}");
                                 }
@@ -580,6 +588,7 @@ impl Worker {
             &self.root,
             &self.git_dirs,
             &self.unindexed,
+            &mut self.links,
             &self.tx,
         ) {
             self.fail("watching the vault", e);
@@ -655,6 +664,38 @@ impl Worker {
             }
         }
         inside
+    }
+
+    /// [`apply`](Self::apply) `ev`, and again for each of the vault's symlinks to the file it
+    /// names: a write to a target is news in the target's folder, never in the link's.
+    fn apply_linked(&mut self, ev: VaultEvent, b: &mut Batch) {
+        let through = |p: &Path| -> Vec<PathBuf> {
+            let target = (p.parent().and_then(|dir| dir.canonicalize().ok()))
+                .zip(p.file_name())
+                .map(|(dir, name)| dir.join(name));
+            (target
+                .and_then(|target| self.links.get(&target))
+                .into_iter()
+                .flatten())
+            .map(|rel| self.root.join(rel))
+            .collect()
+        };
+        let linked: Vec<VaultEvent> = match &ev {
+            _ if self.links.is_empty() => Vec::new(),
+            VaultEvent::Changed(p) | VaultEvent::ConflictAppeared(p) => {
+                through(p).into_iter().map(VaultEvent::Changed).collect()
+            }
+            VaultEvent::Removed(p) => through(p).into_iter().map(VaultEvent::Removed).collect(),
+            VaultEvent::Renamed { from, to } => (through(from).into_iter())
+                .map(VaultEvent::Removed)
+                .chain(through(to).into_iter().map(VaultEvent::Changed))
+                .collect(),
+            VaultEvent::Git(_) | VaultEvent::Rescan => Vec::new(),
+        };
+        self.apply(ev, b);
+        for ev in linked {
+            self.apply(ev, b);
+        }
     }
 
     fn apply(&mut self, ev: VaultEvent, b: &mut Batch) {
@@ -821,14 +862,16 @@ impl Worker {
     }
 }
 
-/// Update watches for indexed directories, git directories and listed unindexed
-/// folders. Reuse [`Watcher::set_dirs`] to preserve pending events, or create a watcher.
+/// Update watches for indexed directories, git directories, listed unindexed folders and the
+/// folders of symlinked files' targets, refilling `links`. Reuse [`Watcher::set_dirs`] to
+/// preserve pending events, or create a watcher.
 fn watch(
     watcher: &mut Option<Watcher>,
     index: &Index,
     root: &Path,
     git_dirs: &[PathBuf],
     unindexed: &BTreeSet<String>,
+    links: &mut HashMap<PathBuf, Vec<String>>,
     tx: &Sender<Msg>,
 ) -> Result<()> {
     // The watch set is what the walk kept, one watch per directory: a `.venv` the walk refused
@@ -852,6 +895,31 @@ fn watch(
     }
     // One level each, as every other directory here: never the tree under one.
     dirs.extend(unindexed.iter().map(|rel| root.join(rel)));
+    // A file that is a symlink of its own hears of its target in the target's folder, watched
+    // for it unless that folder is watched already under its vault name: a second name for one
+    // folder would rename the first's news. The worker routes the news back ([`Worker::apply_linked`]).
+    links.clear();
+    let linked = index.symlinked_files(root).unwrap_or_else(|e| {
+        tracing::warn!("listing the symlinked files to watch: {e:#}");
+        Vec::new()
+    });
+    if !linked.is_empty() {
+        let mut seen = index.dir_canonicals().unwrap_or_default();
+        seen.insert(root.to_path_buf());
+        seen.extend(
+            unindexed
+                .iter()
+                .filter_map(|rel| root.join(rel).canonicalize().ok()),
+        );
+        for (rel, target) in linked {
+            if let Some(dir) = target.parent()
+                && seen.insert(dir.to_path_buf())
+            {
+                dirs.push(dir.to_path_buf());
+            }
+            links.entry(target).or_default().push(rel);
+        }
+    }
     if let Some(w) = watcher
         && w.set_dirs(&dirs)
     {
