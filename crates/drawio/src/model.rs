@@ -76,6 +76,18 @@ impl File {
     pub fn page(&self, i: usize) -> Result<&Page, Error> {
         self.pages.get(i).ok_or(Error::NoPage(i))
     }
+
+    /// The pages' names as a reader is shown them, and a note's `![[x.drawio#name]]` names one:
+    /// a page with none is "Page N".
+    pub fn page_names(&self) -> Vec<String> {
+        let names = self.pages.iter().enumerate();
+        names
+            .map(|(i, p)| match p.name() {
+                "" => format!("Page {}", i + 1),
+                name => name.to_string(),
+            })
+            .collect()
+    }
 }
 
 /// One `<diagram>`: a page of the file, holding one `<mxGraphModel>`.

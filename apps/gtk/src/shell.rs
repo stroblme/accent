@@ -842,6 +842,7 @@ Usage:
   accent -t, --terminal [DIR]   Open a shell at DIR, or at home
   accent terminal://NAME [DIR]  Open terminal session NAME, and a shell at DIR
   accent --new-window           Show the start screen
+  accent --render-diagram PAGE  Draw page PAGE of a diagram on stdin as PNG
   accent -h, --help             Print this help
   accent --version              Print the version
 
@@ -852,7 +853,8 @@ order named, all in the window of the open vault that holds the first, else in
 a window without a vault. Without PATH the last vault opens, or the start
 screen if there is none. ADDRESS is ssh://[USER@]HOST[:PORT]/PATH, a vault on
 that host, and its NOTE a path in it. DIR may be an ssh:// address, for a shell
-on that host. A session NAME not seen before is made.
+on that host. A session NAME not seen before is made. PAGE counts from 0, and
+the PNG goes to stdout.
 ";
 
 /// Handle help, version and unknown options before forwarding to the running

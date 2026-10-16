@@ -20,6 +20,7 @@ use serde_json::Value;
 mod explore;
 mod graph;
 mod precise;
+mod render;
 mod tools;
 
 /// Maximum read size. Larger notes require section reads; larger images are omitted.

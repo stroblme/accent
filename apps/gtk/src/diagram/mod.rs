@@ -343,7 +343,7 @@ impl DiagramTab {
     }
 
     pub fn page_names(&self) -> Vec<String> {
-        page_names(self.editor.borrow().file())
+        self.editor.borrow().file().page_names()
     }
 
     /// Show page `i`, as a jump the pane's history records.
@@ -1353,18 +1353,6 @@ pub fn web_downloaded(url: &str) -> bool {
     web::path(url).is_file()
 }
 
-/// The names of `file`'s pages as the Outline pane lists them: a page with none is "Page N".
-fn page_names(file: &File) -> Vec<String> {
-    file.pages
-        .iter()
-        .enumerate()
-        .map(|(i, p)| match p.name() {
-            "" => format!("Page {}", i + 1),
-            name => name.to_string(),
-        })
-        .collect()
-}
-
 /// Where page `page` of pages that had the ids `before` is among pages with the ids `now`: found
 /// by its id where that names one page alone, else at its place while the count is the same.
 /// `None` for a page that went.
@@ -1383,7 +1371,7 @@ fn moved(before: &[Option<String>], now: &[Option<String>], page: usize) -> Opti
 
 /// The page of `file` called `name`, as `![[x.drawio#name]]` and `[[x.drawio#name]]` name one.
 pub fn page_named(file: &File, name: &str) -> Option<usize> {
-    page_names(file).iter().position(|n| n == name.trim())
+    file.page_names().iter().position(|n| n == name.trim())
 }
 
 #[cfg(test)]

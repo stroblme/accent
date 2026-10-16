@@ -1,6 +1,9 @@
 //! Export and print the current model, including unsaved edits, through [`render`]
 //! in file colours. PDF and print include all pages; PNG and SVG use the active page.
+//! `accent --render-diagram` draws a page the same way for `accent-cli mcp`.
 
+use std::ffi::OsString;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -45,7 +48,7 @@ pub fn export_to(app: &Rc<App>, tab: &Rc<DiagramTab>, to: Export, dest: PathBuf)
             let typesetter = typesetter.as_ref();
             let bytes = match to {
                 Export::Pdf => render::pdf(&file, typesetter, web).await,
-                Export::Png => render::png(&file, page, typesetter, web).await,
+                Export::Png => render::png(&file, page, typesetter, web, None).await,
                 Export::Svg => render::svg(&file, page, Area::Drawing, typesetter, web).await,
                 Export::Html => return Ok(None),
             }?;
@@ -57,6 +60,45 @@ pub fn export_to(app: &Rc<App>, tab: &Rc<DiagramTab>, to: Export, dest: PathBuf)
             }
         },
     );
+}
+
+/// The longer side of a page `accent --render-diagram` draws, in pixels: what an agent's client
+/// scales a larger picture down to anyway.
+const RENDER_LONGEST: f64 = 1568.0;
+
+/// `accent --render-diagram PAGE`: page PAGE (from 0) of the diagram on stdin as a PNG on stdout,
+/// drawn as Export as PNG… draws it, for `accent-cli mcp`. Answered by this process before
+/// GApplication, so it opens no window and never reaches a running instance. Formulas are drawn
+/// as their TeX and pictures from the web as their boxes: a web process to typeset and a download
+/// per call would cost more than a picture to check an edit by.
+pub fn render_command(mut args: impl Iterator<Item = OsString>) -> Option<glib::ExitCode> {
+    if args.nth(1)? != "--render-diagram" {
+        return None;
+    }
+    Some(match render_stdin(args.next()) {
+        Ok(()) => glib::ExitCode::SUCCESS,
+        Err(why) => {
+            eprintln!("accent: cannot draw the diagram: {why}");
+            glib::ExitCode::FAILURE
+        }
+    })
+}
+
+fn render_stdin(page: Option<OsString>) -> Result<(), String> {
+    let page: usize = page
+        .and_then(|p| p.to_str()?.parse().ok())
+        .ok_or("--render-diagram takes a page number, counted from 0")?;
+    let mut xml = Vec::new();
+    std::io::stdin().read_to_end(&mut xml).map_err(say)?;
+    let file = File::from_bytes(&xml).map_err(say)?;
+    gtk::init().map_err(|e| format!("there is no display to draw on ({e})"))?;
+    let png = render::png(&file, page, None, false, Some(RENDER_LONGEST));
+    let png = glib::MainContext::default().block_on(png)?;
+    std::io::stdout().write_all(&png).map_err(say)
+}
+
+fn say(e: impl std::fmt::Display) -> String {
+    e.to_string()
 }
 
 /// Print…: every page through GTK's print dialog, each fitted to a sheet of the paper chosen.
