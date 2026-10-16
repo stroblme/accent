@@ -860,20 +860,78 @@ fn switch(repo: &Repo, args: &[&str]) -> Result<(), Error> {
     Ok(())
 }
 
-/// Delete a local branch. `force` is `-D`, which deletes one whose commits are not merged
-/// anywhere; without it git refuses that case, which comes back as [`Error::NotMerged`].
+/// Delete a local branch. `force` is `-D`, which deletes one whose commits are not merged.
+/// Without it, a branch with commits HEAD lacks is [`Error::NotMerged`] before git is asked:
+/// `git branch -d` measures a branch that has an upstream against that upstream instead, so a
+/// published branch would go. What `-d` itself refuses then is one whose upstream lacks commits.
 pub fn delete_branch(repo: &Repo, name: &str, force: bool) -> Result<(), Error> {
+    let branch = format!("refs/heads/{name}");
+    let not_merged = |kept| Error::NotMerged {
+        branch: name.to_string(),
+        kept,
+    };
+    if !force && !is_ancestor(repo, &branch, "HEAD")? {
+        return Err(not_merged(match remote_with(repo, &branch)? {
+            Some(remote) => Kept::Remote(remote),
+            None => Kept::Nowhere,
+        }));
+    }
     let flag = match force {
         true => "-D",
         false => "-d",
     };
     match run(&repo.root, &["branch", flag, "--", name], false) {
-        Err(Error::Git(msg)) if msg.contains("not fully merged") => {
-            Err(Error::NotMerged(name.to_string()))
-        }
+        Err(Error::Git(msg)) if msg.contains("not fully merged") => Err(not_merged(Kept::Head)),
         Err(e) => Err(e),
         Ok(_) => Ok(()),
     }
+}
+
+/// Whether `commit` is in the history of `of`. git answers 1 for "no" and more for an error.
+fn is_ancestor(repo: &Repo, commit: &str, of: &str) -> Result<bool, Error> {
+    let out = command(
+        &repo.root,
+        &["merge-base", "--is-ancestor", commit, of],
+        true,
+    )
+    .stdin(Stdio::null())
+    .output()
+    .map_err(|e| Error::io("git", e))?;
+    match out.status.code() {
+        Some(1) => Ok(false),
+        _ => checked(out).map(|_| true),
+    }
+}
+
+/// The first remote-tracking branch whose history holds `commit`, leaving out symbolic ones such
+/// as `origin/HEAD`, which name another branch.
+fn remote_with(repo: &Repo, commit: &str) -> Result<Option<String>, Error> {
+    let out = run(
+        &repo.root,
+        &[
+            "for-each-ref",
+            "--contains",
+            commit,
+            "--format=%(refname:short)%00%(symref)",
+            "refs/remotes",
+        ],
+        true,
+    )?;
+    Ok(String::from_utf8_lossy(&out).lines().find_map(|line| {
+        let (name, symref) = line.split_once('\0')?;
+        symref.is_empty().then(|| name.to_string())
+    }))
+}
+
+/// Where an unmerged branch's commits would still be once it is deleted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Kept {
+    /// In HEAD: git refused because the branch's upstream lacks some of them.
+    Head,
+    /// On this remote-tracking branch, though not in HEAD.
+    Remote(String),
+    /// Nowhere else.
+    Nowhere,
 }
 
 /// What a merge did.
