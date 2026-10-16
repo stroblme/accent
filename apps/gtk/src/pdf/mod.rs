@@ -4,8 +4,8 @@
 //! cached tiles without calling pdfium; `geometry` lays them out and `cache` budgets them.
 //! `tab` owns reading state, with `input`, `reply` and `disk` handling input, results and files.
 //! `tools` and `ring` provide drawing geometry and options; `comment` shows annotations.
-//! `organize` and `drop` edit pages, `export` writes print/export copies, `source` supplies
-//! SyncTeX, and `window` integrates PDF tabs and commands with the app.
+//! `drop` and the thumbnail strip (`crate::organize`) edit pages, `export` writes print/export
+//! copies, `source` supplies SyncTeX, and `window` integrates PDF tabs and commands with the app.
 //!
 //! Re-exports preserve the window's `pdfview::` and `pdftab::` names.
 
@@ -16,7 +16,6 @@ mod drop;
 pub mod export;
 pub mod geometry;
 mod input;
-mod organize;
 pub mod preview;
 pub mod protocol;
 pub mod render;

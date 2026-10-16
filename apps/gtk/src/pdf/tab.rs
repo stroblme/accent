@@ -58,12 +58,10 @@ pub struct PdfTab {
     pub(super) host: gtk::Box,
     /// The drawing tools, floating over the page while the window says they are wanted.
     pub(super) ring: Rc<ring::PdfRing>,
-    /// Thumbnail scroller built once to preserve its parent; rebuilding around the same widget
-    /// would trigger a GTK reparenting critical.
-    pub(super) thumb_strip: gtk::ScrolledWindow,
-    /// The strip with the page buttons and the drop bar floating over it, which is what the
-    /// Outline pane is handed. Built once, for the same reason.
-    pub(super) organize: super::organize::Organize,
+    /// The thumbnail scroller with the page buttons and the drop bar floating over it, which is
+    /// what the Outline pane is handed. Built once to preserve its parent; rebuilding around the
+    /// same widget would trigger a GTK reparenting critical.
+    pub(super) organize: Rc<crate::organize::Organize>,
     /// Requests to the render thread. Dropping it is what ends the thread, so it is dropped with
     /// the tab and nothing else has to be joined.
     pub(super) tx: RefCell<Option<Sender<Request>>>,
@@ -251,8 +249,26 @@ pub fn open(
         thumbs: thumbs.clone(),
         host,
         ring: ring.clone(),
-        organize: super::organize::Organize::new(&thumb_strip),
-        thumb_strip,
+        organize: crate::organize::Organize::new(
+            &thumb_strip,
+            &thumbs,
+            glib::clone!(
+                #[strong]
+                thumbs,
+                move || thumbs.placement().0
+            ),
+            glib::clone!(
+                #[strong]
+                thumbs,
+                move |page| {
+                    let low = thumbs
+                        .cache()
+                        .borrow_mut()
+                        .lowres(page as u32, thumbs.theme());
+                    low.map(|low| low.upcast())
+                }
+            ),
+        ),
         tx: RefCell::new(None),
         waiting: RefCell::default(),
         inverted: Cell::new(false),
@@ -323,7 +339,11 @@ pub fn open(
         move || tab.on_zoom.emit(&tab)
     ));
     tab.wire_strip(&thumbs);
-    tab.wire_organize();
+    tab.organize.connect_edit(glib::clone!(
+        #[weak]
+        tab,
+        move |edit| tab.edit_pages(edit)
+    ));
     tab.wire_drop();
     tab.ring.connect_choice(glib::clone!(
         #[weak]
@@ -834,6 +854,12 @@ impl PdfTab {
     /// textures; whoever puts it somewhere new takes it out of where it was.
     pub fn thumbnails(&self) -> gtk::Widget {
         self.organize.pane.clone().upcast()
+    }
+
+    /// Where the strip's buttons are in `window`: what `ACCENT_BENCH_PDF=strip:` prints.
+    #[cfg(feature = "bench")]
+    pub fn strip_buttons(&self, window: &gtk::Widget) -> String {
+        self.organize.buttons(window)
     }
 
     /// Search the whole document, by case and by whole words where `options` says so, from the

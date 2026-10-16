@@ -194,7 +194,7 @@ pub fn offset_of(layout: &Layout, anchor: Anchor) -> Option<(f64, f64)> {
 
 /// Find the page containing a content coordinate, or the nearest page above it. Binary search
 /// keeps per-scroll, per-drag and per-frame lookups cheap in long documents.
-pub(super) fn page_at(layout: &Layout, y: f64) -> usize {
+pub(crate) fn page_at(layout: &Layout, y: f64) -> usize {
     layout
         .pages
         .partition_point(|rect| f64::from(rect.y) <= y)
@@ -204,7 +204,7 @@ pub(super) fn page_at(layout: &Layout, y: f64) -> usize {
 /// Which gap between pages a content y is nearest: gap `g` is the one above page `g`, so a column
 /// of `n` pages has `n + 1`, the last one below the last page. The top half of a page is nearer
 /// the gap above it; the gap below a page counts as below it.
-pub(super) fn gap_at(layout: &Layout, y: f64) -> usize {
+pub(crate) fn gap_at(layout: &Layout, y: f64) -> usize {
     let page = page_at(layout, y);
     match layout.pages.get(page) {
         Some(rect) if y < f64::from(rect.y + rect.h / 2.0) => page,
@@ -214,7 +214,7 @@ pub(super) fn gap_at(layout: &Layout, y: f64) -> usize {
 }
 
 /// The content y through the middle of gap `g` (see [`gap_at`]).
-pub(super) fn gap_middle(layout: &Layout, gap: usize) -> f32 {
+pub(crate) fn gap_middle(layout: &Layout, gap: usize) -> f32 {
     match gap.checked_sub(1).and_then(|above| layout.pages.get(above)) {
         Some(above) => above.y + above.h + GAP / 2.0,
         None => GAP / 2.0,
@@ -223,7 +223,7 @@ pub(super) fn gap_middle(layout: &Layout, gap: usize) -> f32 {
 
 /// Where a page dragged from `from` lands when it is dropped into gap `gap`, or `None` when the
 /// two gaps either side of it would leave it where it is.
-pub(super) fn move_to(from: usize, gap: usize) -> Option<usize> {
+pub(crate) fn move_to(from: usize, gap: usize) -> Option<usize> {
     if gap == from || gap == from + 1 {
         None
     } else if gap > from {

@@ -209,7 +209,7 @@ impl PdfTab {
         // The page count changed, or the page the reader is on did, with no scroll.
         self.on_page.emit(self);
         // The strip's buttons are over whichever page is under the pointer now.
-        self.hover_thumbnail();
+        self.organize.hover();
         if let Some(f) = self.on_repaged.get() {
             f(self, edit, step);
         }

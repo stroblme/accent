@@ -7,10 +7,10 @@
 //! Pending edits belong to the document, surviving tab closes; remote edits are stored beside
 //! the cached file so the next window can finish them.
 
+use crate::App;
 use crate::doc;
 use crate::pdftab::PdfTab;
 use crate::toasts::Toast;
-use crate::{App, pdfview};
 use accent_api::{KeptLink, PageEdit, RepageReport};
 use gtk::glib;
 use std::cell::RefCell;
@@ -133,12 +133,9 @@ fn at_or_under(key: &str, rel: &str) -> bool {
 impl App {
     /// Update reading locations immediately; queue note-link rewrites after remote upload ([`pages_landed`](Self::pages_landed)).
     pub(crate) fn repaged(self: &Rc<Self>, pdf: &Rc<PdfTab>, edit: PageEdit, step: u32) {
-        let (key, count) = (pdf.key(), pdf.page_count());
+        let (key, last) = (pdf.key(), pdf.page_count().saturating_sub(1));
         // A place on the page that went is on the one that took its place, as the reader is.
-        let map = |at: pdfview::Anchor| {
-            let page = edit.map(at.page).unwrap_or(at.page);
-            pdfview::Anchor { page, ..at }.clamped(count)
-        };
+        let map = |page| edit.map(page).unwrap_or(page).min(last);
         for pane in self.panes.borrow().iter() {
             pane.nav.borrow_mut().repage(&key, map);
         }
