@@ -340,11 +340,17 @@ smoke: gtk-bench vault xvfb
 #
 # `ACCENT_BENCH_COMPLETE` types completions into a note and into a C file answered by
 # `build-aux/fake-lsp.py`, configured for the scratch vault, and is held against `complete.expected`.
+#
+# `ACCENT_BENCH_SWITCHER=goto:…` exits 1 when a note picked in Go to File, from the Files tree or
+# from a note, has not taken the keyboard; the keys are real, through XTEST.
 drills: gtk-bench xvfb
 	$(HEADLESS) ACCENT_BENCH_KEYS=1 timeout 60 $(TARGET_DIR)/accent "$$xdg/vault" >"$$xdg/keys" && \
 	grep '^bench ' "$$xdg/keys" | diff -u apps/gtk/src/bench/keys.expected -
 	$(HEADLESS) sh -c 'echo "# Note" >"$$0/note.md" && \
 		ACCENT_BENCH_CLOSE=1 exec timeout 60 $(TARGET_DIR)/accent "$$0"' "$$xdg/vault"
+	$(HEADLESS) sh -c 'echo "# Alpha" >"$$0/alpha.md" && echo "# Beta" >"$$0/beta.md" && \
+		ACCENT_BENCH_SWITCHER=goto:alpha.md,beta.md exec timeout 60 $(TARGET_DIR)/accent "$$0"' \
+		"$$xdg/vault"
 	$(HEADLESS) sh -c 'echo "# Note" >"$$0/note.md" && mkdir -p "$$XDG_CONFIG_HOME/accent" && \
 		printf "[vaults.\"%s\".lsp.servers]\nc = [\"python3\", \"%s\"]\n" "$$0" "$(CURDIR)/build-aux/fake-lsp.py" \
 			>"$$XDG_CONFIG_HOME/accent/config.toml" && \

@@ -246,7 +246,7 @@ impl App {
                 move |item: &palette::Item| match item {
                     palette::Item::File(rel)
                     | palette::Item::Ignored(rel)
-                    | palette::Item::Alias { rel, .. } => app.open_path(rel),
+                    | palette::Item::Alias { rel, .. } => app.open_as(rel, Opened::Picked),
                     // Followed as the link would be: New File, unless the note has been written
                     // since the list was read.
                     palette::Item::Missing(rel) => app.open_target(rel),
@@ -288,7 +288,7 @@ impl App {
             symbol.line.saturating_sub(1),
             symbol.end_line.saturating_sub(1),
         );
-        self.with_tab(&symbol.rel_path, Opened::Kept, "go to", move |_, tab| {
+        self.with_tab(&symbol.rel_path, Opened::Picked, "go to", move |_, tab| {
             let text = tab.text();
             let lines: Vec<&str> = text.lines().collect();
             tab.goto_pos(lang::name_at(&lines, first, last, &name));
