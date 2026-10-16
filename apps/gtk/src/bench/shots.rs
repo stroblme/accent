@@ -98,8 +98,9 @@ async fn scene_files(app: &Rc<App>, shot: &Shot) {
     let Some(tree) = app.tree.get() else {
         return println!("bench shot no_tree");
     };
-    // A folder's rows arrive after it opens, so each level waits for the one above it.
-    for folder in ["Code", "Submissions", "Submissions/grant-2026"] {
+    // A folder's rows arrive after it opens, so each level waits for the one above it. Code stays
+    // shut, its tint saying it holds a change: open, its rows would push the note's off the list.
+    for folder in ["Submissions", "Submissions/grant-2026"] {
         until(folder, 10_000, || {
             tree::find_row(tree.model(), folder).is_some()
         })
@@ -110,6 +111,13 @@ async fn scene_files(app: &Rc<App>, shot: &Shot) {
     }
     let note = "Submissions/grant-2026/Benchmark Backend.md";
     open_all(app, &[note]).await;
+    // The open note's row lit and on screen, as Reveal in Sidebar leaves it: the tree's selection
+    // follows the tab but never scrolls to it.
+    until("row", 10_000, || {
+        tree::find_row(tree.model(), note).is_some()
+    })
+    .await;
+    tree.reveal(note);
     let tab = tab(app, note);
     focus(app, &pane_of(app, note)).await;
     until("ghost_text", 30_000, || {
