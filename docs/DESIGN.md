@@ -341,8 +341,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Picking a row is `git switch`, a remote row `git switch --track`; whether it is safe is git's call, its first line coming back as a toast and the label returning to the real HEAD where git refuses.
 - Every row but the checked-out one carries a trash button on hover: git refuses to delete HEAD's branch, and a control that cannot work is dead chrome.
   The popover opens with the keyboard on HEAD's row, as a dropdown opens on its selection, so no trash shows until the pointer or the keyboard reaches another row.
-  Deleting first checks that HEAD has the branch's commits, then runs `git branch -d`, which measures a branch with an upstream against that upstream alone: a branch Sync published would otherwise go unasked.
-  Either refusal escalates to `-D` only after an `AdwAlertDialog` saying where the commits would still be — on a remote-tracking branch, in HEAD alone, or nowhere; HEAD is the measure, no guess of ours at a default branch.
+  A branch whose commits HEAD has is deleted (`git branch -D`) without a question, nothing being lost; one with commits HEAD lacks goes only after an `AdwAlertDialog` saying where they would still be, on a remote-tracking branch or nowhere.
+  HEAD is the measure, not `git branch -d`'s, which takes a branch's upstream where it has one, so a branch Sync published would go unasked; and no guess of ours at a default branch.
   Delete Branch… in the palette is the same by keyboard.
   A remote row has no trash: deleting a remote branch is a push, a terminal job.
 - Create Branch… is `git switch -c` from HEAD, with no base picker.

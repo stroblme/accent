@@ -1028,7 +1028,7 @@ fn branches_are_created_and_deleted_and_git_says_when_work_would_be_lost() {
         refused,
         Error::NotMerged {
             branch: "work".to_string(),
-            kept: Kept::Nowhere
+            kept: None
         }
     );
     delete_branch(&repo, "work", true).unwrap();
@@ -1053,7 +1053,7 @@ fn parse_branches_splits_local_from_remote_and_drops_the_symbolic_ones() {
 
 /// `git branch -d` measures a branch with an upstream against that upstream, so a published branch
 /// HEAD lacks would go unasked: it is refused as not merged, naming where its commits still are.
-/// One HEAD has but its upstream lacks is git's own refusal; once both have it, it goes.
+/// One HEAD has goes, though its upstream lacks some of it: nothing is lost.
 #[test]
 fn a_published_branch_head_lacks_is_not_merged_and_one_merged_deletes() {
     if !have_git() {
@@ -1079,7 +1079,7 @@ fn a_published_branch_head_lacks_is_not_merged_and_one_merged_deletes() {
         delete_branch(&repo, "feature", false),
         Err(Error::NotMerged {
             branch: "feature".to_string(),
-            kept: Kept::Remote("origin/feature".to_string())
+            kept: Some("origin/feature".to_string())
         })
     );
     checkout(&repo, "feature").unwrap();
@@ -1087,14 +1087,6 @@ fn a_published_branch_head_lacks_is_not_merged_and_one_merged_deletes() {
     commit_all(&work, "unpushed");
     checkout(&repo, "main").unwrap();
     ok(&work, &["merge", "-q", "feature"]);
-    assert_eq!(
-        delete_branch(&repo, "feature", false),
-        Err(Error::NotMerged {
-            branch: "feature".to_string(),
-            kept: Kept::Head
-        })
-    );
-    ok(&work, &["push", "-q", "origin", "feature"]);
     delete_branch(&repo, "feature", false).unwrap();
     assert_eq!(branches(&repo).unwrap().local, ["main"]);
 }
