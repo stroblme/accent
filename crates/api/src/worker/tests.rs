@@ -150,6 +150,34 @@ fn external_write_to_a_code_file_emits_file_changed() {
     );
 }
 
+/// A note that is a symlink to a file in no watched folder hears of its target being rewritten,
+/// in place or by a rename over it: its target's folder is watched for it. Depends on real
+/// inotify events.
+#[test]
+fn a_symlinked_note_hears_of_its_target() {
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("real.md");
+    std::fs::write(&target, "old\n").unwrap();
+    let root = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(&target, root.path().join("linked.md")).unwrap();
+    let f = Fixture::open_dir(root, VaultConfig::default());
+    let linked = |e: &Event| matches!(e, Event::FileChanged(p) if p == "linked.md");
+
+    std::fs::write(&target, "in place\n").unwrap();
+    assert!(
+        f.wait(linked).is_some(),
+        "a write to the target went unheard"
+    );
+
+    let temp = outside.path().join(".real.md.tmp");
+    std::fs::write(&temp, "renamed over\n").unwrap();
+    std::fs::rename(&temp, &target).unwrap();
+    assert!(
+        f.wait(linked).is_some(),
+        "a rename over the target went unheard"
+    );
+}
+
 /// Verify watches include subdirectories already present at vault open,
 /// so external note edits reach the UI.
 #[test]
