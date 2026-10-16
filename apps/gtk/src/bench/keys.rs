@@ -145,12 +145,15 @@ pub(super) fn bench_keys(app: &Rc<App>) {
 }
 
 /// Where a click on a tab leaves the keyboard, and what the accelerator table makes of it: the
-/// tab in front's label counts as the tab, editing chords and all. In a window of its own.
+/// tab in front's label counts as the tab, editing chords and all, and a shell clicked to the
+/// front has the keyboard in its VTE. In a window of its own; the shell starts no process.
 async fn bench_tab_focus() {
     let tabs = adw::TabView::new();
     let bar = adw::TabBar::builder().view(&tabs).autohide(false).build();
     let note = gtk::TextView::new();
-    tabs.append(&note);
+    let note_page = tabs.append(&note);
+    let shell = vte4::Terminal::new();
+    let shell_page = tabs.append(&crate::terminal::scroller(&shell));
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
     column.append(&bar);
     column.append(&tabs);
@@ -172,6 +175,14 @@ async fn bench_tab_focus() {
     // Where libadwaita puts the keyboard on a second click on the tab in front.
     bar.child_focus(gtk::DirectionType::TabForward);
     print("label");
+    // The shell's tab clicked from the note it was left for: the tab view gives the keyboard back
+    // to the shell, then libadwaita asks the page for it.
+    tabs.set_selected_page(&shell_page);
+    shell.grab_focus();
+    tabs.set_selected_page(&note_page);
+    tabs.set_selected_page(&shell_page);
+    shell_page.child().grab_focus();
+    print("shell");
     window.close();
 }
 

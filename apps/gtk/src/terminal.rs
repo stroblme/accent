@@ -296,6 +296,17 @@ impl Shell {
     }
 }
 
+/// The page of a shell's tab: `view` in a scroller, VTE being scrollable itself and drawing no
+/// scrollbar of its own. The scroller never takes the keyboard: a tab clicked to the front asks
+/// its page for it, after the tab view has given it to the shell (DESIGN.md, Terminal).
+pub(crate) fn scroller(view: &vte4::Terminal) -> gtk::ScrolledWindow {
+    gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .focusable(false)
+        .child(view)
+        .build()
+}
+
 /// Open a shell as a tab of `tabs`, and start it.
 pub fn open(tabs: &adw::TabView, shell: &Shell, key: String) -> Rc<Term> {
     let view = vte4::Terminal::new();
@@ -309,11 +320,7 @@ pub fn open(tabs: &adw::TabView, shell: &Shell, key: String) -> Rc<Term> {
     // the blink itself; System follows GNOME's own cursor-blink setting.
     view.set_cursor_shape(vte4::CursorShape::Underline);
     view.set_cursor_blink_mode(vte4::CursorBlinkMode::System);
-    // VTE is scrollable itself and draws no scrollbar of its own.
-    let scroller = gtk::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .child(&view)
-        .build();
+    let scroller = scroller(&view);
 
     // Before the append, which maps the widget when the pane is on screen and would otherwise fire
     // this signal before there was a handler to hear it: that was a first terminal in VTE's own
