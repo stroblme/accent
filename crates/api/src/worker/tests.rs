@@ -404,6 +404,40 @@ fn a_write_through_another_vault_on_the_same_index_reaches_this_one() {
     );
 }
 
+/// A worker that panics says so on its way out, though the event channel stays open.
+#[test]
+fn a_worker_that_panics_says_it_is_gone() {
+    let root = tempfile::tempdir().unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let (tx, rx) = channel();
+    let (events, event_rx) = channel();
+    // The language providers' sender, which keeps the channel open past the worker.
+    let _providers = events.clone();
+    let worker = spawn(
+        root.path().canonicalize().unwrap(),
+        Index::open(&cache.path().join("index.db")).unwrap(),
+        rx,
+        tx.clone(),
+        events,
+        false,
+        Arc::new(AtomicU8::new(RUN)),
+    )
+    .unwrap();
+    assert!(wait_for(&event_rx, |e| matches!(e, Event::Reconciled(_)), BUDGET).is_some());
+
+    tx.send(Msg::Panic).unwrap();
+    let said = |e: &Event| matches!(e, Event::Error(why) if why.contains("the test's own panic"));
+    assert!(
+        wait_for(&event_rx, said, BUDGET).is_some(),
+        "no reason given"
+    );
+    assert!(
+        wait_for(&event_rx, |e| matches!(e, Event::WorkerGone), BUDGET).is_some(),
+        "nothing heard of the worker's end"
+    );
+    assert!(worker.join().is_ok(), "the panic left the thread");
+}
+
 /// Verify an own save suppresses a late external echo in the same batch
 /// without hiding subsequent external edits. An unwatched `sub` scan
 /// holds the worker while test messages queue together.

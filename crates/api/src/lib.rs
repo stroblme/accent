@@ -65,6 +65,10 @@ pub enum Event {
     /// error is an [`Error`](Self::Error), said once per vault; this is sent on every failed walk,
     /// since it is what ends the walk on screen.
     WalkFailed,
+    /// The vault's worker ended by a panic, its reason an [`Error`](Self::Error) sent just before:
+    /// nothing indexes or watches the vault until it is opened again. The language providers send
+    /// on the same channel, so it never closes and this is how the end is heard.
+    WorkerGone,
     /// The direct children of these directories changed ("" is the vault root). The tree refills
     /// exactly these levels instead of dropping its whole cache.
     DirsChanged(Vec<String>),

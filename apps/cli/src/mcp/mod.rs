@@ -96,8 +96,9 @@ impl Ready {
         for event in events {
             match event {
                 Event::Progress(p) => locked(&self.state).progress = (p.done, p.total),
-                // A failed walk has ended as well; its error, if new, is the line below.
-                Event::Reconciled(_) | Event::WalkFailed => {
+                // A failed walk has ended as well, as has a gone worker's; the error, if new, is the
+                // line below.
+                Event::Reconciled(_) | Event::WalkFailed | Event::WorkerGone => {
                     locked(&self.state).done = true;
                     self.changed.notify_all();
                 }

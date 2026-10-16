@@ -460,8 +460,9 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
             }
             is Event.Conflict -> onConflict(event.original)
             // Over, the progress it had made with it, and not paused. Its error, if this vault has
-            // not said it already, is an [Event.Error] of its own.
-            Event.WalkFailed -> {
+            // not said it already, is an [Event.Error] of its own. A worker gone walks no more,
+            // its reason an [Event.Error] too, which ends the walk, and its service, the same.
+            Event.WalkFailed, Event.WorkerGone -> {
                 seen = null
                 _state.update { it.walkOver() }
             }

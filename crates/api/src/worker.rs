@@ -2,6 +2,7 @@
 //! into one [`Event`].
 
 use std::collections::{BTreeSet, HashMap};
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -19,7 +20,8 @@ use accent_core::watch::{VaultEvent, Watcher};
 use crate::paths::{conflict_original_rel, conflict_pairs};
 use crate::{Etag, Event};
 
-/// Start a vault worker; the returned handle joins it on drop.
+/// Start a vault worker; the returned handle joins it on drop. One that panics ends with
+/// [`Event::WorkerGone`].
 ///
 /// Disable `watch` on Android storage where inotify drops events; the app sends
 /// [`Msg::Rescan`] on foregrounding instead. `stop` holds [`RUN`], [`PAUSE`] or
@@ -55,7 +57,21 @@ pub(crate) fn spawn(
     };
     std::thread::Builder::new()
         .name("accent-vault".to_string())
-        .spawn(move || worker.run())
+        .spawn(move || {
+            let events = worker.events.clone();
+            // The language providers hold the channel open, so a panic is said here or unheard.
+            if let Err(panic) = std::panic::catch_unwind(AssertUnwindSafe(|| worker.run())) {
+                let why = panic
+                    .downcast_ref::<&str>()
+                    .copied()
+                    .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+                    .unwrap_or("a panic");
+                let _ = events.send(Event::Error(format!(
+                    "indexing and watching the vault stopped: {why}"
+                )));
+                let _ = events.send(Event::WorkerGone);
+            }
+        })
         .map_err(|e| accent_core::Error::io("the vault worker", e).into())
 }
 
@@ -103,6 +119,9 @@ pub(crate) enum Msg {
     /// a scan the user stopped.
     Resume,
     Shutdown,
+    /// Panic on the worker's thread, as a bug would.
+    #[cfg(test)]
+    Panic,
 }
 
 /// Owns the writing connection and the watcher. Everything here runs on one thread, so the
@@ -353,6 +372,8 @@ impl Worker {
                 }
                 Msg::Saved { rel, .. } => self.update(&rel, true, &mut batched),
                 Msg::Fs(ev) => self.apply(ev, &mut batched),
+                #[cfg(test)]
+                Msg::Panic => panic!("the test's own panic"),
             }
         }
         // A new directory is watched from now on, not from the next reconcile: watches are
