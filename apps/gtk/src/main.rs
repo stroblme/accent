@@ -42,6 +42,7 @@ mod minimap;
 mod multicaret;
 mod nav;
 mod open;
+mod organize;
 mod palette;
 mod paned;
 mod panes;

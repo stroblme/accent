@@ -325,11 +325,15 @@ impl Nav {
         self.forward.retain(|p| p.key != key);
     }
 
-    /// Remap PDF `key`'s history anchors through `map`, keeping Back attached to pages after reordering.
-    pub fn repage(&mut self, key: &str, map: impl Fn(Anchor) -> Anchor) {
+    /// Remap the pages of `key`'s history places (a PDF's or a diagram's) through `map`, keeping
+    /// Back attached to pages after reordering.
+    pub fn repage(&mut self, key: &str, map: impl Fn(usize) -> usize) {
         for place in self.back.iter_mut().chain(&mut self.forward) {
-            if let (true, Spot::Page(anchor)) = (place.key == key, &mut place.at) {
-                *anchor = map(*anchor);
+            match &mut place.at {
+                _ if place.key != key => {}
+                Spot::Page(anchor) => anchor.page = map(anchor.page),
+                Spot::Sheet(page) => *page = map(*page),
+                Spot::Caret(..) | Spot::Whole => {}
             }
         }
     }
@@ -1130,7 +1134,15 @@ mod tests {
         let mut nav = Nav::default();
         nav.record(page("p.pdf", 0), now);
         nav.record(page("q.pdf", 0), now);
-        nav.repage("p.pdf", |a| Anchor { page: 2, ..a });
+        let sheet = |n| Place {
+            key: "d.drawio".to_string(),
+            mark: None,
+            at: Spot::Sheet(n),
+        };
+        nav.record(sheet(1), now);
+        nav.repage("p.pdf", |_| 2);
+        nav.repage("d.drawio", |n| n + 1);
+        assert_eq!(nav.back(caret("c.md", 1)), Some(sheet(2)));
         assert_eq!(nav.back(caret("c.md", 1)), Some(page("q.pdf", 0)));
         assert_eq!(nav.back(caret("c.md", 1)), Some(page("p.pdf", 2)));
     }
