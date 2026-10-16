@@ -12,6 +12,8 @@ path = "src/main.rs"
 [dependencies]
 accent-core.workspace = true
 accent-api.workspace = true
+# `render_diagram` lists a diagram's pages and finds the one asked for by its name.
+accent-drawio.workspace = true
 anyhow.workspace = true
 # The times `list_dir` and `recent_changes` answer with; core's own.
 chrono.workspace = true

@@ -157,7 +157,11 @@ fn main() -> glib::ExitCode {
     if let Ok(exe) = std::env::current_exe() {
         accent_core::git::set_askpass(exe);
     }
-    // `--help` and the like are answered here, never reaching a running instance.
+    // `--help` and the like are answered here, never reaching a running instance; so is a page
+    // `accent-cli mcp` asks to have drawn.
+    if let Some(code) = diagram::export::render_command(std::env::args_os()) {
+        return code;
+    }
     if let Some(code) = shell::local_command_line(std::env::args_os()) {
         return code;
     }

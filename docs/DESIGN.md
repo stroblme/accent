@@ -71,7 +71,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The Flatpak carries the server for its own machine only, Flathub never accepting a build that holds another architecture's binaries (user decision 2026-10-13), so it refuses a host of the other one, naming the one it carries. sshfs needs no code: a mount is a local vault.
 - **Remote prompts**: `SSH_ASKPASS` points back at accent, which runs as its own dialog under `ACCENT_ASKPASS` — a passphrase or a host key reaches a window, not a terminal nobody watches.
 - **Command line**: read by hand in the running instance (`Shell::command_line`), which GApplication forwards every launch to.
-  `accent --help`, which lists the launch forms, `--version` and an unknown option are answered by the launching process before `app.run` — past it the arguments reach an instance whose terminal is not the caller's, and GApplication's own option parsing would take the flags out of the arguments that hand parsing reads.
+  `accent --help`, which lists the launch forms, `--version`, an unknown option and `--render-diagram` (MCP's) are answered by the launching process before `app.run` — past it the arguments reach an instance whose terminal is not the caller's, and GApplication's own option parsing would take the flags out of the arguments that hand parsing reads.
 - **A master is adopted by a command, not by `ssh -O check`**, which asks only the process on this machine: one that is up but opens no session on the host (a session too many, a login that has lapsed since, as a cluster's key unlocked for hours does) would send every one-shot to a connection of its own that `BatchMode` refuses.
   It is retired with `-O stop` — the shells it carries go on — and a fresh one dials, prompting where the attempt may, so Reconnect is a new login rather than the same failure.
 - **Remote bytes** never travel in the protocol: a reader that needs a real file `fetch`es it over the master into a cache keyed by etag — base64 through a JSON parser is neither fast nor debuggable.
@@ -120,11 +120,13 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - **Diagrams**: `crates/drawio` ports mxGraph's model, routing, shapes and label placement faithfully (the Apache-2.0 parts attributed file by file, with `LICENSE-APACHE` and `NOTICE`), keeps every attribute it does not interpret, and hands the app a UI-neutral display list — a file saved here opens in draw.io as it was, the port can be diffed against later draw.io releases, and Android can paint the same list.
   A formula label is typeset by WebKit, as draw.io's MathJax does.
 - **MCP**: `accent-cli mcp` serves the shared core and index over stdio while the app is closed; writes reach an open window through the shared index.
-  Its 13 tools include `explore`, reads and etag-checked writes; `--read-only` omits the three write tools.
+  Its 14 tools include `explore`, reads, `render_diagram` and etag-checked writes; `--read-only` omits the three write tools.
   `explore` ranks files and passages from the index, shows relevant source with line numbers, links, outlines and call paths, and can ask a language server for a `precise` call hierarchy.
   Return partial index or language-server answers with an explicit reason when a cold walk, missing server or timeout prevents a full answer.
   Keep reads under 1 MiB, pass etags as strings, and confine every given or returned path to the real vault root.
   Run MCP beside a remote vault on its host; the Flatpak runs its bundled `accent-cli`.
+- **MCP draws a diagram page through the app**: `render_diagram` answers a page, by number or name, as a PNG beside every page's number, name and size, drawn by the `accent` beside `accent-cli` (`accent --render-diagram PAGE`, the diagram on stdin) as Export as PNG… draws it, formulas as their TeX and pictures from the web as their boxes, its longer side at most 1568 px — `accent-cli` has no toolkit to draw text with (user decision 2026-10-16).
+  Where there is no app or no display, a remote vault's host above all, the tool says so, and a draw is given 15 s.
 - **Licence**: GPL-3.0-or-later — no commercial intent, GNOME's own licence, free to borrow from Papers and Apostrophe, and compatible with pdfium's BSD.
 
 ## Layout map

@@ -171,25 +171,35 @@ pub async fn svg(
     bytes_of(surface.finish_output_stream())
 }
 
-/// Page `i` of `file`, its drawing, as a PNG at [`PNG_SCALE`] pixels per page unit.
+/// Page `i` of `file`, its drawing, as a PNG at [`PNG_SCALE`] pixels per page unit, or fewer
+/// where its longer side would be more than `longest` pixels.
 pub async fn png(
     file: &File,
     i: usize,
     typesetter: Option<&Rc<Typesetter>>,
     web: bool,
+    longest: Option<f64>,
 ) -> Result<Vec<u8>, String> {
     let drawn = draw(file, i, Area::Drawing, typesetter, web)
         .await
         .ok_or("there is no such page")?;
-    let (w, h) = (drawn.area.w * PNG_SCALE, drawn.area.h * PNG_SCALE);
+    let scale = png_scale((drawn.area.w, drawn.area.h), longest);
+    let (w, h) = (drawn.area.w * scale, drawn.area.h * scale);
     let surface =
         cairo::ImageSurface::create(cairo::Format::ARgb32, w as i32, h as i32).map_err(say)?;
     let cr = cairo::Context::new(&surface).map_err(say)?;
-    drawn.paint(&cr, PNG_SCALE).map_err(say)?;
+    drawn.paint(&cr, scale).map_err(say)?;
     drop(cr);
     let mut bytes = Vec::new();
     surface.write_to_png(&mut bytes).map_err(say)?;
     Ok(bytes)
+}
+
+/// Pixels per page unit for a PNG of an `area` big drawing: [`PNG_SCALE`], or what keeps its
+/// longer side within `longest` pixels.
+fn png_scale(area: (f64, f64), longest: Option<f64>) -> f64 {
+    let side = area.0.max(area.1).max(1.0);
+    longest.map_or(PNG_SCALE, |longest| PNG_SCALE.min(longest / side))
 }
 
 /// How an `area` big page goes onto `paper`: the scale that fills it, aspect kept, and where its
@@ -241,6 +251,14 @@ mod tests {
     fn a_page_is_fitted_to_the_paper_and_centred() {
         assert_eq!(fit((100.0, 50.0), (200.0, 200.0)), (2.0, 0.0, 50.0));
         assert_eq!(fit((850.0, 1100.0), (425.0, 1100.0)), (0.5, 0.0, 275.0));
+    }
+
+    #[test]
+    fn a_png_is_two_pixels_a_unit_unless_that_passes_its_longest_side() {
+        assert_eq!(png_scale((400.0, 300.0), None), PNG_SCALE);
+        assert_eq!(png_scale((400.0, 300.0), Some(1568.0)), PNG_SCALE);
+        assert_eq!(png_scale((1568.0, 300.0), Some(1568.0)), 1.0);
+        assert_eq!(png_scale((100.0, 3136.0), Some(1568.0)), 0.5);
     }
 
     #[test]

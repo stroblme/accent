@@ -35,6 +35,22 @@ struct ReadArgs {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+struct DiagramArgs {
+    /// The draw.io diagram, relative to the vault root.
+    path: String,
+    /// The page, by its number counted from 0 or by its name as the page list gives it; the
+    /// first when left out.
+    page: Option<PageArg>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(untagged)]
+enum PageArg {
+    Number(usize),
+    Name(String),
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 struct PathArgs {
     /// The file, relative to the vault root.
     path: String,
@@ -184,6 +200,60 @@ impl Server {
                     Err(format!("{rel} holds {size} bytes, too many to read"))
                 }
             }
+        })
+        .await
+    }
+
+    /// Draw one page of a draw.io diagram as a PNG, as the app's Export as PNG draws it (formulas
+    /// as their TeX, pictures from the web as dashed boxes), to see an edit made with
+    /// `write_note`. Also returns `{path, etag}` and every page's number, name and size. Needs
+    /// the accent app and a display where this server runs, so not on a remote vault's host.
+    #[tool(annotations(read_only_hint = true))]
+    async fn render_diagram(
+        &self,
+        Parameters(a): Parameters<DiagramArgs>,
+    ) -> Result<CallToolResult, String> {
+        self.blocking(move |s| {
+            let rel = s.inside(&a.path)?;
+            let not_one = || format!("{rel} is not a draw.io diagram");
+            let Read::Text(t) = s.vault.read_text(&rel).map_err(fail)? else {
+                return Err(not_one());
+            };
+            if !accent_core::path::is_diagram(&rel) && !accent_drawio::text::sniff(&t.text) {
+                return Err(not_one());
+            }
+            let file = accent_drawio::File::from_bytes(t.text.as_bytes())
+                .map_err(|e| format!("{}: {e}", not_one()))?;
+            let names = file.page_names();
+            let page = match a.page {
+                None => 0,
+                Some(PageArg::Number(n)) if n < names.len() => n,
+                Some(PageArg::Number(n)) => return Err(format!("{rel} has no page {n}")),
+                Some(PageArg::Name(name)) => names
+                    .iter()
+                    .position(|n| *n == name.trim())
+                    .ok_or_else(|| {
+                        format!("{rel} has no page {name:?}; its pages are {names:?}")
+                    })?,
+            };
+            let png = super::render::png(&t.text, page)?;
+            let pages: Vec<Value> = file
+                .pages
+                .iter()
+                .zip(&names)
+                .enumerate()
+                .map(|(i, (p, name))| {
+                    let (width, height) = p.size();
+                    json!({"page": i, "name": name, "width": width, "height": height})
+                })
+                .collect();
+            let head =
+                json!({"path": rel, "etag": etag_string(t.etag), "page": page, "pages": pages});
+            let data = base64::engine::general_purpose::STANDARD.encode(png);
+            Ok(CallToolResult::success(vec![
+                ContentBlock::text(head.to_string()),
+                ContentBlock::image(data, "image/png"),
+            ]))
         })
         .await
     }

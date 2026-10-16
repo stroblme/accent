@@ -69,6 +69,10 @@ impl Client {
             .args(args)
             .env("XDG_CONFIG_HOME", scratch.dir.join("config"))
             .env("XDG_CACHE_HOME", scratch.dir.join("cache"))
+            // A test never draws on the screen it runs on: `render_diagram` finds no display.
+            .env_remove("DISPLAY")
+            .env_remove("WAYLAND_DISPLAY")
+            .env("GDK_BACKEND", "x11")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -158,7 +162,7 @@ fn names(list: &Value) -> Vec<String> {
     names
 }
 
-const READ_TOOLS: [&str; 10] = [
+const READ_TOOLS: [&str; 11] = [
     "explore",
     "list_backlinks",
     "list_dir",
@@ -167,6 +171,7 @@ const READ_TOOLS: [&str; 10] = [
     "pdf_annotations",
     "read_note",
     "recent_changes",
+    "render_diagram",
     "resolve_link",
     "search_notes",
 ];
@@ -243,7 +248,7 @@ fn mcp_writes_only_over_what_it_read() {
     let scratch = Scratch::new("write");
     let mut c = Client::start(&scratch, &[]);
     c.initialize();
-    assert_eq!(names(&c.ask("tools/list", json!({}))).len(), 13);
+    assert_eq!(names(&c.ask("tools/list", json!({}))).len(), 14);
 
     let (read, _) = c.call("read_note", json!({"path": "a.md"}));
     let etag = serde_json::from_str::<Value>(&read[0]).unwrap()["etag"].clone();
@@ -492,6 +497,43 @@ fn mcp_lists_folders_recent_files_and_missing_notes() {
     assert_eq!(
         said[0],
         r#"[{"linked_from":[{"line":1,"path":"c.md"},{"line":2,"path":"c.md"}],"path":"Later.md"}]"#
+    );
+    c.close();
+}
+
+/// A page is drawn by the app beside `accent-cli`; with no display, or no app, the tool says that
+/// rather than hanging, and a page or file it cannot be is refused before anything is started.
+#[test]
+fn render_diagram_says_why_it_cannot_draw() {
+    let scratch = Scratch::new("render");
+    let diagram = r#"<mxfile><diagram name="One" id="1"><mxGraphModel><root><mxCell id="0"/>
+        </root></mxGraphModel></diagram><diagram id="2"><mxGraphModel><root><mxCell id="0"/>
+        </root></mxGraphModel></diagram></mxfile>"#;
+    std::fs::write(scratch.dir.join("vault/flow.drawio"), diagram).unwrap();
+    let mut c = Client::start(&scratch, &["--read-only"]);
+    c.initialize();
+    let (said, error) = c.call("render_diagram", json!({"path": "a.md"}));
+    assert!(
+        error && said[0].contains("not a draw.io diagram"),
+        "{said:?}"
+    );
+    let (said, error) = c.call(
+        "render_diagram",
+        json!({"path": "flow.drawio", "page": "Two"}),
+    );
+    assert!(error && said[0].contains(r#""One", "Page 2""#), "{said:?}");
+    let (said, error) = c.call("render_diagram", json!({"path": "flow.drawio", "page": 2}));
+    assert!(error && said[0].contains("no page 2"), "{said:?}");
+    let started = Instant::now();
+    let (said, error) = c.call(
+        "render_diagram",
+        json!({"path": "flow.drawio", "page": "Page 2"}),
+    );
+    assert!(error && said[0].contains("accent app"), "{said:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "{:?}",
+        started.elapsed()
     );
     c.close();
 }
