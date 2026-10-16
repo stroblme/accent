@@ -13,7 +13,7 @@
 +
 +
  def bootstrap(values, resamples=RESAMPLES, level=LEVEL, seed=SEED):
-     """A percentile bootstrap interval for the mean of `values`."""
+     """Return a percentile bootstrap interval for the mean of `values`."""
      rng = random.Random(seed)
 -    means = sorted(
 -        statistics.fmean(rng.choices(values, k=len(values)))
@@ -25,7 +25,7 @@
      return means[int(tail * resamples)], means[int((1 - tail) * resamples) - 1]
  
 @@ -49,6 +55,7 @@
-     """One row per backend: how many runs, their mean and its interval."""
+     """Return each backend's run count, mean, interval, and standard deviation."""
      rows = []
      for backend, values in sorted(groups.items()):
 +        values = drop_outliers(values)
@@ -44,7 +44,7 @@
 @@ -65,12 +72,12 @@
  
  def print_table(rows, out=sys.stdout):
-     """The summary as a Markdown table, which the notes paste as it is."""
+     """Print the summary as a Markdown table."""
 -    out.write("| backend | runs | mean | 95 % interval | stdev |\n")
 -    out.write("| ------- | ---- | ---- | ------------- | ----- |\n")
 +    out.write("| backend | runs | mean | 95 % interval | median |\n")
