@@ -137,10 +137,42 @@ pub(super) fn bench_keys(app: &Rc<App>) {
             bench_table(&view);
             bench_whole_words(&view);
             bench_popup_keys(&view).await;
+            bench_tab_focus().await;
             window.close();
             bench_quit(&app);
         });
     });
+}
+
+/// Where a click on a tab leaves the keyboard, and what the accelerator table makes of it: the
+/// tab in front's label counts as the tab, editing chords and all. In a window of its own.
+async fn bench_tab_focus() {
+    let tabs = adw::TabView::new();
+    let bar = adw::TabBar::builder().view(&tabs).autohide(false).build();
+    let note = gtk::TextView::new();
+    tabs.append(&note);
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    column.append(&bar);
+    column.append(&tabs);
+    let window = gtk::Window::builder()
+        .default_width(320)
+        .default_height(240)
+        .child(&column)
+        .build();
+    window.present();
+    glib::timeout_future(Duration::from_millis(200)).await;
+    let print = |when: &str| {
+        let focus = gtk::prelude::GtkWindowExt::focus(&window);
+        let name = focus.as_ref().map(|w| w.type_().name());
+        let keys = crate::actions::Keys::at(focus);
+        println!("bench tab_focus {when} {name:?} {keys:?}");
+    };
+    note.grab_focus();
+    print("document");
+    // Where libadwaita puts the keyboard on a second click on the tab in front.
+    bar.child_focus(gtk::DirectionType::TabForward);
+    print("label");
+    window.close();
 }
 
 /// A column of carets under VS Code's rules: the keys it survives and the ones that end it, a
