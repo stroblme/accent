@@ -121,7 +121,8 @@ use tags::bench_tags;
 ///   `close:<pull|push|fetch>` (close during work), `sync` (sync during fetch),
 ///   `focus` (row keyboard focus), `scroll` (stable scrolled rows), `commit`
 ///   (post-commit focus), `switch` (repository-switch races), `markers:<rel>`
-///   (conflict resolution), `branch` (branch-name validation), `syncall`.
+///   (conflict resolution), `branch` (branch popover, branch-name validation),
+///   `syncall`.
 /// - `ACCENT_BENCH_START=1`: start screen on a `--new-window` launch,
 ///   handled by `start::bench_start` without an `App`.
 /// - `ACCENT_BENCH_KEYS=1`: editor key semantics and completion acceptance.

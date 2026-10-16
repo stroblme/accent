@@ -556,6 +556,18 @@ impl Panel {
         on_click(self, all, |panel| panel.sync_all());
         on_click(self, create, |panel| panel.create_branch());
         on_click(self, merge, |panel| panel.merge_branch());
+        // The popover gives its first row the keyboard, whose `:focus-within` then shows that
+        // row's trash to a pointer nowhere near it. It opens on HEAD's row instead, which has no
+        // trash, as a dropdown opens on its selection.
+        let weak = Rc::downgrade(self);
+        self.branch_menu.connect_show(move |_| {
+            if let Some(panel) = weak.upgrade()
+                && let Some(at) = panel.branch_shown.borrow().1
+                && let Some(row) = panel.branch_list.row_at_index(at as i32)
+            {
+                row.grab_focus();
+            }
+        });
         let weak = Rc::downgrade(self);
         self.banner.connect_button_clicked(move |_| {
             if let Some(panel) = weak.upgrade() {
@@ -782,6 +794,12 @@ impl Panel {
     pub fn branch_counts(&self) -> (usize, usize) {
         let branches = &self.state.borrow().branches;
         (branches.local.len(), branches.remote.len())
+    }
+
+    /// The branch popover. `ACCENT_BENCH_GIT` and nothing else.
+    #[cfg(feature = "bench")]
+    pub fn branch_popover(&self) -> gtk::Popover {
+        self.branch_menu.clone()
     }
 
     /// Whether Commit can be pressed, and its tooltip. `ACCENT_BENCH_GIT` and nothing else.
