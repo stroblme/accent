@@ -38,8 +38,8 @@ printf '[Settings]\ngtk-font-name=Adwaita Sans 11\ngtk-cursor-blink=false\n%s\n%
 	gtk-enable-animations=false gtk-decoration-layout=:minimize,maximize,close \
 	>"$root/xdg/config/gtk-4.0/settings.ini"
 
-# The vault is its own repository: a history of a few days in real chunks, an upstream four
-# commits behind, and Code/analyze.py staged and changed again since.
+# The vault is its own repository: a history of a few days in real chunks, a branch merged back
+# in, an upstream four commits behind, and Code/analyze.py staged and changed again since.
 echo "(Persistent) Split Terminals" >"$vault/whatelse"
 cp "$here/analyze.py" "$vault/Code/analyze.py"
 git -C "$vault" init -q -b main
@@ -62,12 +62,17 @@ commit 4400 "submissions: grant 2026" Submissions/grant-2026
 commit 1560 "code: sweep driver" Code/build.sh Code/Makefile
 commit 1500 "code: project metadata" Code/pyproject.toml Code/tasks.json
 commit 290 "code: sweep statistics" Code/analyze.py
+# The plots on a branch of their own while the readme went in, then merged.
+git -C "$vault" switch -q -c plots
 commit 47 "code: plots" Code/plot.py
-commit 12 "code: readme and licence" Code
+git -C "$vault" switch -q main
+commit 30 "code: readme and licence" Code
+at="@$((now - 12 * 60)) +0000"
+GIT_AUTHOR_DATE=$at GIT_COMMITTER_DATE=$at git -C "$vault" merge -q --no-edit plots
 # A remote the pane's fetch on opening can reach, borrowing the vault's objects.
 git init -q --bare -b main "$root/origin.git"
 echo "$vault/.git/objects" >"$root/origin.git/objects/info/alternates"
-git -C "$root/origin.git" update-ref refs/heads/main "$(git -C "$vault" rev-parse HEAD~4)"
+git -C "$root/origin.git" update-ref refs/heads/main "$(git -C "$vault" rev-parse HEAD~3)"
 git -C "$vault" remote add origin "$root/origin.git"
 git -C "$vault" fetch -q origin
 git -C "$vault" branch -q -u origin/main
