@@ -320,8 +320,9 @@ HEADLESS = xdg=$$(mktemp -d /tmp/accent-headless-XXXXXX) && trap 'rm -rf "$$xdg"
 ## xvfb: start the X server the headless checks draw on, unless it is already up
 xvfb:
 	@command -v Xvfb >/dev/null || { echo "Xvfb is not installed"; exit 1; }
-	@# The display's socket, not `pgrep -f "Xvfb :N"`: that pattern matches the shell running it.
-	@test -S /tmp/.X11-unix/X$(DISPLAY_NUM) || (Xvfb :$(DISPLAY_NUM) -screen 0 1400x900x24 >/dev/null 2>&1 &)
+	@# The pid in the display's lock file, not its socket, which a server that died uncleanly
+	@# leaves behind, nor `pgrep -f "Xvfb :N"`, which matches the shell running it.
+	@kill -0 $$(cat /tmp/.X$(DISPLAY_NUM)-lock 2>/dev/null) 2>/dev/null || (Xvfb :$(DISPLAY_NUM) -screen 0 1400x900x24 >/dev/null 2>&1 &)
 	@sleep 2
 
 ## smoke: headless start-up check, fails on any GTK critical
