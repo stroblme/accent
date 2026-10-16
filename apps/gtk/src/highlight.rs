@@ -576,8 +576,8 @@ pub fn install_csv_tags(buffer: &sourceview5::Buffer) {
 
 /// Tag every cell of `buffer` with its column's tag, replacing whatever was there: a companion's
 /// whole text, which is set at once. The editor keeps a [`Csv`] instead.
-pub fn apply_csv(buffer: &sourceview5::Buffer) {
-    Csv::default().apply(buffer);
+pub fn apply_csv(buffer: &sourceview5::Buffer, delim: Option<u8>) {
+    Csv::default().apply(buffer, delim);
 }
 
 /// A cell as a pass tags it: its characters and its column.
@@ -615,8 +615,9 @@ impl Csv {
     }
 
     /// Tag all cells initially, then edited records until [`Rows::resume`] rejoins unchanged records.
-    /// Clear old tags only within the reread records.
-    pub fn apply(&self, buffer: &sourceview5::Buffer) {
+    /// Clear old tags only within the reread records. `delim` is a TSV's tab, `None` a CSV's
+    /// sniffed delimiter.
+    pub fn apply(&self, buffer: &sourceview5::Buffer, delim: Option<u8>) {
         let mut rows = self.rows.borrow_mut();
         let (before, after) = match (rows.is_some(), self.edited.take()) {
             (true, None) => return,
@@ -634,7 +635,8 @@ impl Csv {
         let (cells, to, delim) = loop {
             let mut until = iter(end);
             until.forward_lines(lines);
-            let read = old.resume(&buffer.text(&iter(from), &until, true), from, end, total);
+            let text = buffer.text(&iter(from), &until, true);
+            let read = old.resume(&text, from, end, total, delim);
             if read.1.is_some() || until.is_end() {
                 break read;
             }
@@ -669,12 +671,20 @@ impl Rows {
     }
 
     /// Read edited `text` from record start `from` until an unchanged start at or beyond `end`.
-    /// Return cells, the resume start if any, and delimiter; resniff only at file start.
-    fn resume(&self, text: &str, from: i32, end: i32, len: i32) -> (Vec<Tagged>, Option<i32>, u8) {
+    /// Return cells, the resume start if any, and delimiter: `fixed`, else sniffed again only at
+    /// the file's start.
+    fn resume(
+        &self,
+        text: &str,
+        from: i32,
+        end: i32,
+        len: i32,
+        fixed: Option<u8>,
+    ) -> (Vec<Tagged>, Option<i32>, u8) {
         let offsets = Offsets::new(text);
         let at = |byte| from + offsets.char_of(byte);
         let delim = match from {
-            0 => csv::delimiter(text),
+            0 => fixed.unwrap_or_else(|| csv::delimiter(text)),
             _ => self.delim,
         };
         let shift = len - self.len;
@@ -748,21 +758,29 @@ mod tests {
     #[test]
     fn a_csv_pass_reads_from_the_edited_record_until_it_is_in_step_again() {
         let old = "a,b\nc,d\ne,f\n";
-        let (cells, _, delim) = Rows::default().resume(old, 0, 0, 12);
+        let (cells, _, delim) = Rows::default().resume(old, 0, 0, 12, None);
         let rows = Rows::default().spliced(&cells, 0, 12, 12, delim);
         // A quote opened before "c" runs on past the edit: every record after it is read again.
         let new = "a,b\n\"c,d\ne,f\n";
         assert_eq!(rows.start_before(4), 4);
         assert_eq!(
-            rows.resume(&new[4..], 4, 5, 13),
+            rows.resume(&new[4..], 4, 5, 13, None),
             (vec![(4, 13, 0)], None, b',')
         );
         // A "d" typed after "d": its record alone, the next one starting where it did.
         let new = "a,b\nc,dd\ne,f\n";
         assert_eq!(rows.start_before(7), 4);
-        let read = rows.resume(&new[4..], 4, 8, 13);
+        let read = rows.resume(&new[4..], 4, 8, 13, None);
         assert_eq!(read, (vec![(4, 5, 0), (6, 8, 1)], Some(9), b','));
         assert_eq!(rows.spliced(&read.0, 4, 9, 13, b',').starts, [0, 4, 9]);
+    }
+
+    #[test]
+    fn a_tsv_is_read_with_tabs_whatever_its_first_line_holds() {
+        // Sniffed, the comma ties with the tab and wins.
+        let text = "Name, given\tAge\n";
+        let (cells, _, delim) = Rows::default().resume(text, 0, 0, 16, Some(b'\t'));
+        assert_eq!((cells, delim), (vec![(0, 11, 0), (12, 15, 1)], b'\t'));
     }
 
     #[test]

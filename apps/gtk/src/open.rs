@@ -1132,10 +1132,16 @@ fn reveal_label(tab: &Rc<crate::diagram::DiagramTab>, at: usize) {
     }
 }
 
-/// Choose text editor styling; CSV uses column colours instead of csv.lang token colours.
+/// Choose text editor styling; a table uses column colours instead of csv.lang token colours. A
+/// TSV is read with tabs whatever its first line holds, where a CSV's delimiter is sniffed.
 fn flavour_of(key: &str) -> Flavour {
-    match doc::file_name(key).rsplit_once('.') {
-        Some((_, ext)) if ext.eq_ignore_ascii_case("csv") => Flavour::Csv,
+    match accent_core::path::file_type(key) {
+        accent_core::path::FileType::Table => {
+            let tsv = key
+                .rsplit_once('.')
+                .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("tsv"));
+            Flavour::Csv(tsv.then_some(b'\t'))
+        }
         _ => Flavour::Code,
     }
 }

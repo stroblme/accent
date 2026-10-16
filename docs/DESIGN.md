@@ -451,7 +451,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - It wraps as prose does: nothing in a document scrolls sideways.
   A wrapped row starts one indent level deeper than its line (VS Code's `wrappingIndent: "indent"`), so it cannot pass for the next line; a note does the same, hanging a list item's rows under its text (its marker measured in the note's font as drawn, so a proportional face's `-` is not taken for a space), except in a fenced block, whose lines wrap as code's do whatever they open with.
   `Alt+Z` unwraps one tab for as long as it is open, for a generated file whose columns are the point.
-- A CSV is code whose columns are coloured by the hue rotation (Colour).
+- A CSV or a TSV is code whose columns are coloured by the hue rotation (Colour), both with RFC 4180's quotes.
+  A TSV is read with tabs whatever its first line holds; a CSV with whichever of `,`, `;` and tab its first line holds most of, the comma on a tie.
   An edit reads it again from the record it is in as far as the first record past it that starts where one started before: a record never starts inside quotes, so the reading from there is the last one's (`highlight::Csv`).
 
 ### Unreadable file

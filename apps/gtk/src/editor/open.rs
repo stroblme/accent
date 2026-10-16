@@ -15,7 +15,7 @@ pub(super) fn build(
     wrap::install(&buffer);
     match flavour {
         Flavour::Note => highlight::install_tags(&buffer),
-        Flavour::Csv => highlight::install_csv_tags(&buffer),
+        Flavour::Csv(_) => highlight::install_csv_tags(&buffer),
         Flavour::Code => {}
     }
     // Every flavour: a note gets diagnostics too (a dangling wikilink is one), and folds its
@@ -101,7 +101,7 @@ pub fn open(
     // `csv.lang` would colour numbers and strings underneath the column tags and fight them.
     let language = match flavour {
         Flavour::Code => guess_language(&path, &text.text),
-        Flavour::Note | Flavour::Csv => None,
+        Flavour::Note | Flavour::Csv(_) => None,
     };
     let (view, buffer) = build(flavour, language, &text.text);
     // Not valid UTF-8: what is on screen is lossy, so it must not be written back.
