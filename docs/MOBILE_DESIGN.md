@@ -193,7 +193,7 @@ The shared architecture is in [DESIGN.md](DESIGN.md).
 - **Foreground indexing**: hold an `IndexingService` of type `dataSync` while walking, with a quiet, ongoing progress notification that returns to the app when tapped.
   Stop the service when the walk ends or pauses; no notification permission is required for the service to run.
 - **PDF rules**: use the shared core for highlights, links and annotation data; Compose handles gestures and drawing.
-- **Settings and sessions are Kotlin's** (`SharedPreferences`) — panes, splits and zoom do not exist here; what the two apps share is the vault, and that is a path.
+- **Recents are Android-local** (`Recents.kt`, `SharedPreferences`); vault, note and command history is kept separately from desktop window sessions.
 - **The rendered view is a `WebView`** over the core's `markdown::to_html`, with the desktop's `accent://` scheme and generated CSS — it is the only thing on the platform that draws MathML.
 - **Mermaid**: serve the shared bootstrap (`vendor/mermaid/bootstrap.js`) and library at `accent://app/`, enabling JavaScript only for notes with Mermaid fences.
   A fresh Content-Security-Policy nonce allows only app scripts; keep the JavaScript interface, file access and network access off, and allow requests only for vault images and the app assets.
@@ -210,6 +210,6 @@ The shared architecture is in [DESIGN.md](DESIGN.md).
 
 ## What is not here, and why
 
-- Git, language servers, ghost text, word suggestions, remote vaults, the terminal, diagrams, splits, comparison, Replace All, the minimap, focus levels and presentation mode remain desktop features.
+- Git, language servers, ghost text, word suggestions, remote vaults, the terminal, the draw.io editor, splits, comparison, Replace All, the minimap, focus levels and presentation mode remain desktop features.
   Add a phone feature only when it helps read the vault, make a small edit or work with a PDF.
 - Deferred rather than refused: a native Compose renderer in place of the WebView, exporting highlights, and the PDF shapes and Adjust tool.
