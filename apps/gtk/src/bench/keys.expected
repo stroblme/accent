@@ -123,3 +123,5 @@ bench popup_return_unselected None shown=false
 bench popup_escape Some(Stop) shown=false
 bench popup_nomatch "alz" shown=false
 bench popup_column Some(Proceed) shown=true carets=true
+bench tab_focus document Some("GtkTextView") Tab
+bench tab_focus label Some("AdwTab") Tab

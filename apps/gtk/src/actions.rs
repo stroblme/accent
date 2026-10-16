@@ -866,9 +866,9 @@ const CAPTURED: &[&str] = &[
 ];
 
 /// The chords that edit the tab in front or move about in it. They are bound only while the
-/// keyboard is in a tab (user decision 2026-10-13), so pressed in the sidebar, a find bar or a
-/// dialog the key is that widget's, and nothing edits the note behind it; the palette still runs
-/// them. The find family goes by the active pane instead.
+/// keyboard is in a tab or on its pane's tab bar (user decisions 2026-10-13 and 2026-10-16), so
+/// pressed in the sidebar, a find bar or a dialog the key is that widget's, and nothing edits the
+/// note behind it; the palette still runs them. The find family goes by the active pane instead.
 const EDITING: &[&str] = &[
     "win.duplicate-line",
     "win.delete-line",
@@ -889,27 +889,38 @@ const EDITING: &[&str] = &[
 ];
 
 /// Where the active window's keyboard is, which decides what the shared accelerator table holds.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Keys {
     /// In a shell, which keeps every chord but [`kept`] ones.
     Shell,
-    /// In a tab: the whole table.
+    /// In a tab, or on a pane's tab bar: the whole table.
     Tab,
     /// Anywhere else, which leaves the [`EDITING`] chords to the focused widget.
     Elsewhere,
 }
 
 impl Keys {
+    /// The table is the application's, so it goes by the active window's focus.
     fn of(gtk_app: &gtk::Application) -> Keys {
-        if terminal::has_focus(gtk_app) {
-            return Keys::Shell;
-        }
-        let focus = gtk_app
-            .active_window()
-            .and_then(|window| gtk::prelude::GtkWindowExt::focus(&window));
-        match focus.is_some_and(|w| w.ancestor(adw::TabView::static_type()).is_some()) {
-            true => Keys::Tab,
-            false => Keys::Elsewhere,
+        Keys::at(
+            gtk_app
+                .active_window()
+                .and_then(|window| gtk::prelude::GtkWindowExt::focus(&window)),
+        )
+    }
+
+    /// Where the keyboard is when `focus` has it. A pane's tab bar counts as its tab: a second
+    /// click on the tab in front leaves the keyboard on its label.
+    pub(crate) fn at(focus: Option<gtk::Widget>) -> Keys {
+        let in_tab = |w: &gtk::Widget| {
+            [adw::TabView::static_type(), adw::TabBar::static_type()]
+                .into_iter()
+                .any(|tabs| w.ancestor(tabs).is_some())
+        };
+        match focus {
+            Some(w) if w.is::<vte4::Terminal>() => Keys::Shell,
+            Some(w) if in_tab(&w) => Keys::Tab,
+            _ => Keys::Elsewhere,
         }
     }
 }

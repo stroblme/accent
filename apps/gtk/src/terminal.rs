@@ -224,15 +224,6 @@ impl Term {
     }
 }
 
-/// Whether the application's focused window has a VTE terminal as its focus widget.
-/// The accelerator table is application-wide, so rebuilding windows must use the active window's focus.
-pub fn has_focus(gtk_app: &gtk::Application) -> bool {
-    gtk_app
-        .active_window()
-        .and_then(|window| gtk::prelude::GtkWindowExt::focus(&window))
-        .is_some_and(|widget| widget.is::<vte4::Terminal>())
-}
-
 /// The command a shell tab runs.
 ///
 /// Remote vaults run shells on the host so builds see the vault's files and repository.

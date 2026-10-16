@@ -1269,7 +1269,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 ### Editing
 
 - Duplicate Line `Ctrl+D`, Delete Line `Ctrl+L`, Insert Line Below `Ctrl+Return`, Toggle Comment `Ctrl+K`, Toggle Word Wrap `Alt+Z`, Scroll Viewport `Ctrl+Up` / `Ctrl+Down`, Add Caret Above / Below `Shift+Alt+Up` / `Shift+Alt+Down`, Add Caret at Next Occurrence `Alt+J`, Select All Occurrences `Ctrl+Shift+L`, Paste as Plain Text (unbound).
-- **The editing chords act only with the keyboard in a tab** (user decision 2026-10-13): in its document or anything over it, a comparison's columns and a diagram's label included.
+- **The editing chords act only with the keyboard in a tab** (user decision 2026-10-13): in its document or anything over it, a comparison's columns and a diagram's label included, and on its pane's tab bar, where a second click on the tab in front leaves the keyboard (user decision 2026-10-16, which takes the tab bar out of "anywhere else").
   Anywhere else — the sidebar, a find bar, a dialog — they are unbound, so the key is the focused widget's (`Ctrl+Down` moves along the Files tree) and nothing edits the note behind it; the palette still runs them on the tab in front.
   They are this section's, Fold and Unfold (Code) and `Ctrl+Shift+V` (Paste as Plain Text over a text tab); the find family goes by the active pane instead (Tabs).
 - Duplicate Line is VS Code's Copy Line Down: every line the selection touches, the caret and selection moving onto the copy.
