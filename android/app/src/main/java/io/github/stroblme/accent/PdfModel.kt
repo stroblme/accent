@@ -131,8 +131,9 @@ class PdfModel(private val session: PdfSession) : AutoCloseable {
         session.linkHighlights(links)
     }
 
-    suspend fun stroke(page: Int, points: List<Point>, style: InkStyle) = on {
-        runCatching { session.addStroke(page.toUInt(), points, style) }
+    /** Draw a stroke through page-point [points], drawn at [scale] pixels per point. */
+    suspend fun stroke(page: Int, points: List<Point>, style: InkStyle, scale: Float) = on {
+        runCatching { session.addStroke(page.toUInt(), points, style, scale) }
         readHistory()
     }
 

@@ -99,6 +99,7 @@ impl PdfTab {
                         page,
                         points,
                         style,
+                        scale: tab.view.placement().0.scale,
                     }),
                 }
             }

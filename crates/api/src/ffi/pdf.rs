@@ -255,13 +255,20 @@ impl PdfSession {
 
     // -------------------------------------------------------------------------------- drawing
 
-    /// Draw a stroke through page-point `points` and return the changed area.
-    pub fn add_stroke(&self, page: u32, points: Vec<Point>, style: InkStyle) -> Answer<pdf::Rect> {
+    /// Draw a stroke through page-point `points`, drawn at `scale` screen pixels per point, and
+    /// return the changed area.
+    pub fn add_stroke(
+        &self,
+        page: u32,
+        points: Vec<Point>,
+        style: InkStyle,
+        scale: f32,
+    ) -> Answer<pdf::Rect> {
         self.with(|s| {
             let page = page as usize;
             let points: Vec<(f32, f32)> = points.into_iter().map(Into::into).collect();
             let before = s.doc.annotation_count(page)?;
-            let area = s.doc.add_ink(page, &points, style.into())?;
+            let area = s.doc.add_ink(page, &points, style.into(), scale)?;
             s.ink.drew(page, before);
             s.ink.dirty = true;
             s.inks.remove(&page);
@@ -461,7 +468,7 @@ mod tests {
         assert_eq!(s.page_count(), 1);
         assert!(!s.dirty());
 
-        s.add_stroke(0, line(), pen()).unwrap();
+        s.add_stroke(0, line(), pen(), 1.0).unwrap();
         assert!(s.dirty());
         assert!(s.history().undo);
         assert_eq!(s.undo().len(), 1);
@@ -494,7 +501,7 @@ mod tests {
         assert!(s.save().unwrap().is_none(), "nothing left to write");
 
         // The file moves under the session, and the next save is refused rather than clobbering.
-        s.add_stroke(0, line(), pen()).unwrap();
+        s.add_stroke(0, line(), pen(), 1.0).unwrap();
         std::fs::write(&path, pdf::blank_pdf(pdf::A4).unwrap()).unwrap();
         assert_ne!(accent_core::fs::Etag::of(&path).unwrap(), etag);
         assert!(
@@ -579,7 +586,7 @@ mod tests {
             return;
         }
         let s = PdfSession::open_bytes(text_pdf()).unwrap();
-        s.add_stroke(0, line(), pen()).unwrap();
+        s.add_stroke(0, line(), pen(), 1.0).unwrap();
         let link = |selection: Vec<u32>| PdfLink {
             src_rel_path: "Note.md".to_string(),
             byte_start: 0,
@@ -607,7 +614,7 @@ mod tests {
             return;
         }
         let s = PdfSession::open_bytes(pdf::blank_pdf(pdf::A4).unwrap()).unwrap();
-        s.add_stroke(0, line(), pen()).unwrap();
+        s.add_stroke(0, line(), pen(), 1.0).unwrap();
         assert!(matches!(s.save(), Err(AccentError::Failed { .. })));
         let bytes = s.save_bytes().unwrap();
         assert!(bytes.starts_with(b"%PDF"), "not a pdf");
