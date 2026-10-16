@@ -340,6 +340,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Its popover lists the local branches, then under a dim Remote heading the remote-tracking branches no local branch shares a name with, then Create Branch… and Merge Branch…: the readout is every branch operation the pane offers.
 - Picking a row is `git switch`, a remote row `git switch --track`; whether it is safe is git's call, its first line coming back as a toast and the label returning to the real HEAD where git refuses.
 - Every row but the checked-out one carries a trash button on hover: git refuses to delete HEAD's branch, and a control that cannot work is dead chrome.
+  The popover opens with the keyboard on HEAD's row, as a dropdown opens on its selection, so no trash shows until the pointer or the keyboard reaches another row.
   Deleting is `git branch -d`, escalating to `-D` only after an `AdwAlertDialog` naming what would be lost — no guess of ours at a default branch.
   Delete Branch… in the palette is the same by keyboard.
   A remote row has no trash: deleting a remote branch is a push, a terminal job.

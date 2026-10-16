@@ -1216,10 +1216,11 @@ pub(super) fn bench_git_markers(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// Create Branch… with names git would refuse typed in (`=branch`): for each, what the line under
-/// the field says, whether it shows, and whether Create is live. Then `my new branch` is created
-/// by answering the dialog, a second after it was typed in (for a screenshot), and the branch HEAD
-/// ends up on is printed: `my-new-branch` is the claim.
+/// The branch popover first ([`bench_branch_popover`]), then Create Branch… with names git would
+/// refuse typed in (`=branch`): for each, what the line under the field says, whether it shows,
+/// and whether Create is live. Then `my new branch` is created by answering the dialog, a second
+/// after it was typed in (for a screenshot), and the branch HEAD ends up on is printed:
+/// `my-new-branch` is the claim.
 pub(super) fn bench_git_branch(app: &Rc<App>) {
     let app = app.clone();
     glib::spawn_future_local(async move {
@@ -1227,6 +1228,7 @@ pub(super) fn bench_git_branch(app: &Rc<App>) {
         let Some(git) = app.git.get().cloned() else {
             return bench_quit(&app);
         };
+        bench_branch_popover(&app, &git).await;
         git.create_branch();
         glib::timeout_future(Duration::from_millis(500)).await;
         let Some(dialog) = app
@@ -1273,6 +1275,95 @@ pub(super) fn bench_git_branch(app: &Rc<App>) {
         println!("bench git_branch head={head:?}");
         bench_quit(&app);
     });
+}
+
+/// The branch popover opened by a click on its button, then by Return on it, then Down: the rows
+/// whose trash shows (`:hover` or `:focus-within` on a row that has one), and which row has the
+/// keyboard; none shows before Down. Then the trash of `beta`, a branch whose commits HEAD lacks:
+/// the question git's refusal asks, answered Cancel. Point it at a repository whose HEAD is not
+/// its first local branch, with such a `beta`.
+async fn bench_branch_popover(app: &Rc<App>, git: &Rc<crate::git::Panel>) {
+    app.show_pane("git");
+    glib::timeout_future(Duration::from_millis(300)).await;
+    let popover = git.branch_popover();
+    let Some(button) = popover.parent() else {
+        return println!("bench git_branch_popover none");
+    };
+    // Each branch row by the name it shows, with its trash where it has one.
+    let rows = || {
+        let mut found = Vec::new();
+        let mut todo = vec![popover.clone().upcast::<gtk::Widget>()];
+        while let Some(w) = todo.pop() {
+            if let Some(row) = w.downcast_ref::<gtk::ListBoxRow>() {
+                let name = find_widget(row.upcast_ref(), &|w| w.is::<gtk::Label>())
+                    .and_downcast::<gtk::Label>()
+                    .map(|l| l.label().to_string())
+                    .unwrap_or_default();
+                let trash = row_button(row.upcast_ref(), "Delete Branch");
+                found.push((name, row.clone(), trash));
+            }
+            let mut child = w.first_child();
+            while let Some(c) = child {
+                child = c.next_sibling();
+                todo.push(c);
+            }
+        }
+        found
+    };
+    let say = |how: &str| {
+        let (mut shown, mut focused) = (Vec::new(), String::new());
+        for (name, row, trash) in rows() {
+            let flags = row.state_flags();
+            let within = flags.contains(gtk::StateFlags::FOCUS_WITHIN);
+            if within {
+                focused = name.clone();
+            }
+            if trash.is_some() && (within || flags.contains(gtk::StateFlags::PRELIGHT)) {
+                shown.push(name);
+            }
+        }
+        println!(
+            "bench git_branch_popover {how} open={} focus={focused:?} trash_shown={shown:?}",
+            popover.is_visible()
+        );
+    };
+    let (dx, dy) = app.window.surface_transform();
+    let at = button
+        .compute_point(
+            &app.window,
+            &graphene::Point::new(10.0, button.height() as f32 / 2.0),
+        )
+        .map(|p| format!("{} {}", p.x() as f64 + dx, p.y() as f64 + dy))
+        .unwrap_or_default();
+    xtest(&format!("move {at}; focus; down; up")).await;
+    say("click");
+    xtest("key Escape").await;
+    xtest("key Return").await;
+    say("return");
+    xtest("key Down").await;
+    say("down");
+    let beta = rows()
+        .into_iter()
+        .find_map(|(name, _, trash)| trash.filter(|_| name == "beta"));
+    let Some(beta) = beta else {
+        return println!("bench git_branch_delete no_beta");
+    };
+    beta.emit_clicked();
+    wait_for(|| !git.busy(), 20000).await;
+    glib::timeout_future(Duration::from_millis(300)).await;
+    let dialog = app
+        .window
+        .visible_dialog()
+        .and_downcast::<adw::AlertDialog>();
+    println!(
+        "bench git_branch_delete asks={:?} says={:?}",
+        dialog.as_ref().and_then(|d| d.heading()),
+        dialog.as_ref().map(|d| d.body())
+    );
+    if let Some(dialog) = dialog {
+        dialog.emit_by_name::<()>("response", &[&"cancel"]);
+        dialog.close();
+    }
 }
 
 /// Sync All (`=syncall`): whether its button is on screen beside the repository chooser, then a
