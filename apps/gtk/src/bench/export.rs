@@ -275,7 +275,7 @@ fn draw_a_stroke(path: &Path) -> anyhow::Result<()> {
         rgba: [0, 0, 255, 255],
         multiply: false,
     };
-    doc.add_ink(0, &[(60.0, 200.0), (200.0, 240.0)], pen)?;
+    doc.add_ink(0, &[(60.0, 200.0), (200.0, 240.0)], pen, 1.0)?;
     let bytes = doc.save()?;
     drop(doc);
     std::fs::write(path, bytes)?;

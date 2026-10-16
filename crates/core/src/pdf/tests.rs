@@ -291,7 +291,8 @@ fn a_copy_carries_the_highlights_and_leaves_the_document_alone() {
         rgba: [0, 0, 255, 255],
         multiply: false,
     };
-    doc.add_ink(0, &[(20.0, 20.0), (60.0, 40.0)], pen).unwrap();
+    doc.add_ink(0, &[(20.0, 20.0), (60.0, 40.0)], pen, 1.0)
+        .unwrap();
     let hl = Highlight {
         page: 1,
         quads: vec![Rect {
@@ -326,7 +327,7 @@ fn ink_round_trips_through_save() {
         rgba: [255, 0, 0, 255],
         multiply: false,
     };
-    doc.add_ink(0, &[(20.0, 20.0), (60.0, 40.0), (100.0, 20.0)], red)
+    doc.add_ink(0, &[(20.0, 20.0), (60.0, 40.0), (100.0, 20.0)], red, 1.0)
         .unwrap();
     assert_eq!(doc.annotation_count(0).unwrap(), before + 1);
 
@@ -357,6 +358,45 @@ fn ink_round_trips_through_save() {
     back.take_ink(0, strokes[0].0).unwrap();
     assert_eq!(back.annotation_count(0).unwrap(), before);
     assert!(back.ink_paths(0).unwrap().is_empty());
+}
+
+/// A small zigzag drawn slowly at two pixels a point: what is stored still reaches every corner
+/// and the end the pen lifted at, within a pixel.
+#[test]
+fn a_small_drawing_keeps_its_corners() {
+    let Some((_dir, mut doc)) = open_tiny() else {
+        return;
+    };
+    let corners = [
+        (20.0, 30.0),
+        (22.0, 24.0),
+        (24.0, 30.0),
+        (26.0, 24.0),
+        (27.0, 27.0),
+    ];
+    // A report every tenth of a point, as a slow pen makes them.
+    let mut points: Vec<(f32, f32)> = corners
+        .windows(2)
+        .flat_map(|w| {
+            let ((ax, ay), (bx, by)) = (w[0], w[1]);
+            (0..30).map(move |i| {
+                let t = i as f32 / 30.0;
+                (ax + t * (bx - ax), ay + t * (by - ay))
+            })
+        })
+        .collect();
+    points.push(corners[4]);
+    let pen = InkStyle {
+        width: 1.0,
+        rgba: [0, 0, 0, 255],
+        multiply: false,
+    };
+    let scale = 2.0;
+    doc.add_ink(0, &points, pen, scale).unwrap();
+    let stored = &doc.ink_paths(0).unwrap()[0].1;
+    for corner in corners {
+        assert!(hit(stored, corner, 1.0 / scale), "{corner:?} in {stored:?}");
+    }
 }
 
 #[test]
@@ -582,7 +622,7 @@ fn an_appended_page_is_the_size_of_the_last_one_and_takes_ink() {
         multiply: false,
     };
     let area = doc
-        .add_ink(1, &[(10.0, 10.0), (100.0, 120.0)], style)
+        .add_ink(1, &[(10.0, 10.0), (100.0, 120.0)], style, 1.0)
         .unwrap();
     assert!(area.width() > 0.0 && area.height() > 0.0, "{area:?}");
     assert_eq!(doc.annotation_count(1).unwrap(), 1);
@@ -679,6 +719,9 @@ fn thin_catmull_rom_and_hit() {
     // Thinning keeps the ends and drops what sits inside the step.
     let pts = [(0.0, 0.0), (0.5, 0.0), (3.0, 0.0)];
     assert_eq!(thin(&pts, 1.0), vec![(0.0, 0.0), (3.0, 0.0)]);
+    // The end stays even within the step, or a stroke ends short of where the pen lifted.
+    let pts = [(0.0, 0.0), (1.0, 0.0), (1.5, 0.0)];
+    assert_eq!(thin(&pts, 1.0), pts);
     // A stroke that never moved is a dot, not an empty path.
     assert_eq!(thin(&[(1.0, 2.0), (1.0, 2.0)], 1.0), vec![(1.0, 2.0)]);
     // No points is no curve, rather than an underflow.
@@ -1006,7 +1049,7 @@ fn a_purge_deletes_what_an_erase_hid_and_nothing_else() {
         rgba: [0, 0, 255, 255],
         multiply: false,
     };
-    doc.add_ink(0, &[(20.0, 20.0), (60.0, 40.0)], style)
+    doc.add_ink(0, &[(20.0, 20.0), (60.0, 40.0)], style, 1.0)
         .unwrap();
     let mut ink = Ink::default();
     let erase = |ink: &mut Ink, doc: &mut PdfDoc| {
@@ -1131,7 +1174,7 @@ fn a_taken_stroke_draws_again_as_it_was() {
         rgba: [0, 128, 0, 255],
         multiply: false,
     };
-    doc.add_ink(0, &[(20.0, 20.0), (60.0, 40.0), (100.0, 20.0)], style)
+    doc.add_ink(0, &[(20.0, 20.0), (60.0, 40.0), (100.0, 20.0)], style, 1.0)
         .unwrap();
     let drawn = doc.inks(0).unwrap().remove(0);
     let (kept, area) = doc.take_ink(0, drawn.index).unwrap();

@@ -82,7 +82,8 @@ pub(super) fn polyline(points: &[(f32, f32)]) -> Vec<Seg> {
     segs
 }
 
-/// Drop points closer than `min` to the last one kept.
+/// Drop points closer than `min` to the last one kept, but never the last: the stroke ends where
+/// the pen lifted.
 ///
 /// A pointer reports on every motion event, so a slow stroke arrives as a cloud of near-identical
 /// points; thinning first is what keeps the curve below from wobbling between them.
@@ -101,6 +102,11 @@ pub fn thin(points: &[(f32, f32)], min: f32) -> Vec<(f32, f32)> {
         && let Some(&p) = points.first()
     {
         out.push(p);
+    }
+    if let Some(&end) = points.last()
+        && out.last() != Some(&end)
+    {
+        out.push(end);
     }
     out
 }

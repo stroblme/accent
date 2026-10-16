@@ -159,11 +159,13 @@ pub enum Request {
         dest: PathBuf,
         done: Sender<Result<(), String>>,
     },
-    /// One free-hand stroke, in that page's own points, drawn the way its tool draws.
+    /// One free-hand stroke, in that page's own points, drawn the way its tool draws at `scale`
+    /// pixels per point.
     Ink {
         page: usize,
         points: Vec<(f32, f32)>,
         style: pdf::InkStyle,
+        scale: f32,
     },
     /// One shape, drawn the way the pen draws.
     Shape {

@@ -275,9 +275,10 @@ fn render_loop(
                     page,
                     points,
                     style,
+                    scale,
                 } => {
                     let before = doc.annotation_count(page).unwrap_or(0);
-                    match doc.add_ink(page, &points, style) {
+                    match doc.add_ink(page, &points, style, scale) {
                         Ok(area) => {
                             ink.drew(page, before);
                             ink.dirty = true;

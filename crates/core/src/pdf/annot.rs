@@ -247,7 +247,9 @@ impl PdfDoc {
     /// Draw one free-hand stroke onto a page as an `/Ink` annotation.
     ///
     /// `points` are in this module's top-left-origin page points, `width` is the stroke width in
-    /// points, `rgb` its colour.
+    /// points, `rgb` its colour. `scale` is the screen pixels per point it was drawn at: the curve
+    /// is fitted through the points a pixel apart there, so it stays within about a pixel of what
+    /// the hand saw at any zoom.
     ///
     // ponytail: the geometry ends up in the annotation's *appearance stream* rather than in an
     // `/InkList` array, because `FPDFAnnot_AddInkStroke` is only reachable through the raw
@@ -256,8 +258,14 @@ impl PdfDoc {
     // wants to reshape the stroke, which would need `/InkList`. Raw bindings are the upgrade.
     /// The box it covers on the page comes back, so a viewer can re-render that much and no
     /// more.
-    pub fn add_ink(&mut self, page: usize, points: &[(f32, f32)], style: InkStyle) -> Result<Rect> {
-        let thinned = thin(points, 1.5);
+    pub fn add_ink(
+        &mut self,
+        page: usize,
+        points: &[(f32, f32)],
+        style: InkStyle,
+        scale: f32,
+    ) -> Result<Rect> {
+        let thinned = thin(points, 1.0 / scale);
         let Some(&first) = thinned.first() else {
             return Ok(Rect::ZERO);
         };

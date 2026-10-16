@@ -338,7 +338,7 @@ fn draw_ink(path: &Path) -> anyhow::Result<()> {
             rgba,
             multiply,
         };
-        doc.add_ink(0, &points, style)?;
+        doc.add_ink(0, &points, style, 1.0)?;
     }
     let bytes = doc.save()?;
     drop(doc);

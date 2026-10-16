@@ -1182,7 +1182,7 @@ private fun Page(
                         scope.launch {
                             when (tool) {
                                 Tool.Eraser -> doc.erase(index, points, ERASER_RADIUS, partial = false)
-                                else -> doc.stroke(index, points, tool.style(colors.primary))
+                                else -> doc.stroke(index, points, tool.style(colors.primary), scale)
                             }
                             generation++
                         }
