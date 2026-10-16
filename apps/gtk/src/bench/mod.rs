@@ -260,7 +260,8 @@ use tags::bench_tags;
 ///   `seed:<rel_note>`: XTEST search/replace shortcuts and box focus.
 /// - `ACCENT_BENCH_HIDDEN=1`: hidden-file visibility and git row colours.
 /// - `ACCENT_BENCH_UNFOLD=<rel>,<rel>,…`: folder expansion; `race:<dir>`,
-///   `renew:<dir>`, `again:<dir>` and `tab:<rel>`: external unindexed changes.
+///   `renew:<dir>`, `again:<dir>` and `tab:<rel>`: external unindexed changes;
+///   `down:<rel>`: a remote tab's file rewritten while the link is down.
 ///   Changing modes write files; use a scratch vault.
 /// - `ACCENT_BENCH_MOVE=<rel>,<rel>,…`: Move to… dialogs and refusal cases.
 ///   Requires a scratch vault under `/tmp`.

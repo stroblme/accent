@@ -55,6 +55,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   On the generated vault a folder of 29 to 760 entries walks in 5–9 ms against the whole vault's 116–130 ms.
 - **A walk reports what it wrote**: every file whose row a walk wrote, directories aside, reaches the window as `Event::FileChanged` once the walk ends, as a watcher event would — the watcher's news of a change a walk took in first reads as no change, and an open tab would never hear of it.
   An open tab reads again only a file its etag says moved.
+  A reconnect is news no walk brings — the old server or another accent on the host may have taken the change in first, and the new server's report can land before the window may ask — so every document open across the drop looks at its file again once the host answers.
   A first index of the generated vault is 39 010 such events, one 20 ms turn of the window's event pump, and 4.5 MB over a remote link.
 - **Delete** is the system trash (`gio::File::trash`) — Syncthing propagates the deletion and Files restores it; on a remote vault it is permanent behind a dialog, the static server having no trash portal.
 - **Moves keep their links**: a rename or move rewrites every wikilink, embed, markdown link, reference definition and HTML `src`/`href` it would leave naming the wrong place, in the notes pointing at what moved and in the moved notes, after one Update Links? question naming only the notes that change.

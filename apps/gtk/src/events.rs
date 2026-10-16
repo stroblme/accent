@@ -384,15 +384,19 @@ impl App {
                 }
                 self.refresh_corpus(false);
                 self.refresh_symbols();
+                // A file the host changed while the link was down is news to no tab: the new
+                // server reports only what its own walk wrote, which the old one or another accent
+                // on the host may have written first, and its report can land before this, when
+                // no stat is answered. So every document open across the drop looks at its file
+                // again, as a watcher's news makes it (a text reads only a file that moved), and a
+                // PDF drawn on meanwhile sends what it holds instead. The session's are read fresh.
+                for doc in self.docs() {
+                    self.changed_on_disk(&doc.key());
+                }
                 self.restore_session();
                 self.sync_active();
-                // What was drawn while the link was down reached only the file here, and the
-                // notes' page links into it were not rewritten: in a tab, or in one closed since.
-                for pdf in self.docs().iter().filter_map(Doc::pdf) {
-                    if pdf.unsent() {
-                        self.push_pdf(pdf);
-                    }
-                }
+                // What was drawn while the link was down in a tab closed since reached only the
+                // file here, and the notes' page links into it were not rewritten.
                 self.push_closed_pdfs();
                 self.relink_all();
                 // A remote shell the drop ended kept its tab, and starts again in it; one whose tab

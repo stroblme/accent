@@ -566,6 +566,9 @@ pub(super) fn bench_unfold(app: &Rc<App>, arg: &str) {
     if let Some(rel) = arg.strip_prefix("tab:") {
         return bench_unfold_tab(app, rel);
     }
+    if let Some(rel) = arg.strip_prefix("down:") {
+        return bench_unfold_down(app, rel);
+    }
     if let Some(dir) = arg.strip_prefix("again:") {
         return bench_unfold_again(app, dir);
     }
@@ -700,6 +703,55 @@ fn bench_unfold_tab(app: &Rc<App>, rel: &str) {
         scroll::in_vault(&app, &format!("printf 'edited outside\\n' > {quoted}"));
         glib::timeout_future(Duration::from_secs(3)).await;
         println!("bench unfold_tab after {:?}", tab.text());
+        bench_quit(&app);
+    });
+}
+
+/// `=down:<rel_file>`, remote only: the file opened in a tab, the link dropped, the file rewritten
+/// on the host while it is down and the link brought back, what the tab holds printed after.
+/// Twice: first the new server's walk is the one to find the change; then `accent-cli index` takes
+/// it into the host's index first, as the old server lingering or an MCP session would.
+fn bench_unfold_down(app: &Rc<App>, rel: &str) {
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let (Some(remote), Ok(server)) = (
+            app.vault().and_then(|v| v.remote()).cloned(),
+            accent_api::link::server(),
+        ) else {
+            println!("bench unfold_down not_remote");
+            return bench_quit(&app);
+        };
+        let connected = || remote.state() == accent_api::remote::State::Connected;
+        until(|| app.reconciled.get() && connected()).await;
+        app.open_path(&rel);
+        until(|| app.tab_for(&rel).is_some()).await;
+        let Some(tab) = app.tab_for(&rel) else {
+            println!("bench unfold_down no_tab");
+            return bench_quit(&app);
+        };
+        glib::timeout_future(Duration::from_secs(1)).await;
+        println!("bench unfold_down before {:?}", tab.text());
+        let quoted = accent_api::ssh::quote(&rel);
+        let index = format!(
+            "{} index --vault {} >/dev/null",
+            accent_api::ssh::server_path(&server.hash),
+            accent_api::ssh::quote(&remote.url().path.to_string_lossy())
+        );
+        for (round, then) in [("walk", "true"), ("index", index.as_str())] {
+            let ended = super::pdf::link_down(&app, &remote).await;
+            // The old server gone with its link, so nothing on the host hears the write but what
+            // runs after it.
+            glib::timeout_future(Duration::from_secs(1)).await;
+            let wrote =
+                scroll::in_vault(&app, &format!("printf '{round}\\n' > {quoted} && {then}"));
+            app.reconnect_now();
+            until(connected).await;
+            glib::timeout_future(Duration::from_secs(3)).await;
+            println!(
+                "bench unfold_down {round} ended={ended} wrote={wrote} {:?}",
+                tab.text()
+            );
+        }
         bench_quit(&app);
     });
 }
