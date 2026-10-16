@@ -279,8 +279,25 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
                 app.sync_active();
             }
             if !app.keyboard_pane().is_some_and(|k| Rc::ptr_eq(&k, &pane)) {
-                app.focus_document(&pane);
+                return app.focus_document(&pane);
             }
+            // From within the pane, a tab the press brings to the front takes the keyboard too,
+            // wherever libadwaita leaves it (on that tab's label once a label has it), so a shell
+            // clicked to is typed into. The tab in front pressed again keeps it on its label,
+            // which is how a click takes the keyboard from a shell (DESIGN.md, Terminal). From an
+            // idle, the press being libadwaita's to handle first.
+            let front = pane.tabs.selected_page();
+            glib::idle_add_local_once(glib::clone!(
+                #[weak]
+                app,
+                #[weak]
+                pane,
+                move || {
+                    if pane.tabs.selected_page() != front {
+                        app.focus_document(&pane);
+                    }
+                }
+            ));
         }
     ));
     pane.bar.add_controller(press);
@@ -582,6 +599,46 @@ pub fn wire_window(app: &Rc<App>) {
     ));
     app.window.add_controller(nav);
 
+    // A click on chrome that takes no focus — a header bar, the title, the status bar, the empty
+    // end of a tab bar — takes the keyboard from a shell, so the window's chords apply again
+    // (DESIGN.md, Terminal). Settled on the release, so a press that drags the window or a divider
+    // changes nothing, nor one whose target takes the keyboard; and only in the active window, so
+    // the click bringing it back to the front leaves the shell typing. A legacy controller, as
+    // `nav` is, for the presses a widget claims.
+    let chrome = gtk::EventControllerLegacy::new();
+    chrome.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let pressed: RefCell<Option<(gtk::Widget, (f64, f64))>> = RefCell::default();
+    chrome.connect_event(glib::clone!(
+        #[weak]
+        app,
+        #[upgrade_or]
+        glib::Propagation::Proceed,
+        move |_, event| {
+            let primary = event
+                .downcast_ref::<gdk::ButtonEvent>()
+                .is_some_and(|event| event.button() == gdk::BUTTON_PRIMARY);
+            match event.event_type() {
+                gdk::EventType::ButtonPress if primary => {
+                    *pressed.borrow_mut() = shell_left(&app, event);
+                }
+                gdk::EventType::ButtonRelease if primary => {
+                    let slop = f64::from(app.window.settings().gtk_dnd_drag_threshold());
+                    if let Some((shell, (x, y))) = pressed.take()
+                        && app.focused().as_ref() == Some(&shell)
+                        && event
+                            .position()
+                            .is_some_and(|(to_x, to_y)| (to_x - x).hypot(to_y - y) <= slop)
+                    {
+                        gtk::prelude::GtkWindowExt::set_focus(&app.window, None::<&gtk::Widget>);
+                    }
+                }
+                _ => {}
+            }
+            glib::Propagation::Proceed
+        }
+    ));
+    app.window.add_controller(chrome);
+
     // Every divider in the window: double-click resets it, and it thickens while dragged.
     paned::watch(
         app.window.upcast_ref(),
@@ -848,6 +905,21 @@ pub fn wire_window(app: &Rc<App>) {
 
 /// Consume Escape to leave presentation before other handlers. Otherwise reveal
 /// chrome and let focused handlers continue. Return whether the event was consumed.
+/// The shell holding the keyboard and where the press was, for a press in the active window
+/// that lands outside the shell's tab: the start of a click on chrome ([`wire_window`]).
+fn shell_left(app: &App, event: &gdk::Event) -> Option<(gtk::Widget, (f64, f64))> {
+    let window = &app.window;
+    let shell = app.focused().filter(|w| w.is::<vte4::Terminal>())?;
+    if !window.is_active() || event.surface() != window.surface() {
+        return None;
+    }
+    let (x, y) = event.position()?;
+    let (dx, dy) = window.surface_transform();
+    let target = window.pick(x - dx, y - dy, gtk::PickFlags::DEFAULT)?;
+    let tab = |w: &gtk::Widget| w.ancestor(adw::TabView::static_type());
+    (tab(&target) != tab(&shell)).then_some((shell, (x, y)))
+}
+
 pub fn escape_first(app: &Rc<App>) -> bool {
     if app.presenting.get().is_none() {
         app.show_chrome();

@@ -566,6 +566,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - The active pane's selected tab keeps Adwaita's filled pill; every other pane's is drawn as an outline, so a split says which pane the keyboard and the next note go to.
   A bar of one tab has no pill either way, and a tab under the pointer takes the hover fill.
 - **The active pane is the one holding the keyboard**: a click into a pane's document or a press on its tab bar gives it the keyboard, as VS Code's editor groups do, and so does a tab moved there or a note open there opened again from another pane (from the sidebar the keyboard stays in the list).
+  The press puts it in the document of the tab it brings to the front, or of the tab in front when the keyboard was outside the pane; the tab in front pressed again from within the pane keeps it on its label.
   A tab that comes to the front of another pane behind the reader's back — a sync deleting the note in front of it — leaves the keyboard and the active pane where they are.
   Close Tab, `Ctrl+Tab`, Back and Forward, the splits, the title, the find bar and focus mode all go by it.
 - A tab is titled with the file's whole name, `.md` included: a vault holds more than notes, and `todo` beside `todo.txt` should not be told apart by an icon.
@@ -1390,6 +1391,9 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 - **A focused shell wins by default**: while a terminal has the keyboard the window keeps a small reserved set and unbinds the rest of this table, so `Ctrl+A`, `Ctrl+C`, `Ctrl+D`, `Ctrl+K`, `Ctrl+L`, `Ctrl+R`, `Ctrl+U` and the rest of readline behave as in any terminal.
   Reserved: `Ctrl+W`, `Ctrl+Tab`, `Ctrl+J`, `Ctrl+E` (Go to File), the three zoom chords, `F11`, the Move Tab chords and any Move Divider is given, and every chord spelled with both `Control` and `Shift`.
   A presented shell gives up `F5` and `Esc` as well, which leave presentation (Views).
+- **A click gives a shell the keyboard, and takes it back** (user decision 2026-10-16): a click on a shell's tab gives the shell the keyboard, from another tab of its pane as from anywhere else, so a tab clicked to is typed into.
+  A second click on that tab leaves the keyboard on its label, where the whole table is the window's (Editing), and a click outside the shell's tab on chrome that takes no focus — a header bar, the title, the status bar, a tab bar's empty end — takes it to nothing, the window's chords but the editing ones applying again.
+  A click that drags, the window or a divider, and the one that brings the window back to the front leave the shell its keyboard.
 - **Forward All Keys** (Preferences → Terminal, `forward_keys_to_terminal`) hands a focused shell the reserved set too, for a program that binds those chords itself.
   The window keeps Copy and Paste in Terminal — they act on the shell, and a terminal sends `Ctrl+Shift+C` on as `Ctrl+C`, which would interrupt the program instead of copying — and `AdwTabView`'s own `Ctrl+PageUp` / `Ctrl+PageDown` and `Alt+1` to `Alt+9`, which are not in this table: they are how the keyboard leaves such a shell.
   A change applies to the shell that has the keyboard at once.
