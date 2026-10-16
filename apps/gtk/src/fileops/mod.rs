@@ -245,23 +245,21 @@ pub fn new_folder(ops: &Rc<Ops>, dir: &str) {
             Err(why) => return (ops.toast)(why),
         };
         let name = basename(&rel).to_string();
-        // Both questions on a worker, each being a round trip on a remote vault.
+        // On a worker, being a round trip on a remote vault.
         let vault = ops.vault.clone();
         glib::spawn_future_local(async move {
             let made = crate::work::off_thread("create", {
                 let (rel, name) = (rel.clone(), name.clone());
                 move || {
-                    // `create_dir_all` is happy to find the directory already there, so the
-                    // collision the user cares about has to be asked about before the call rather
-                    // than read off its error. Asked of the vault and not of this disk: `root()` is
-                    // a path on the *remote* host, so the local `exists` there was always false and
-                    // every clash went through as "Created".
-                    if vault.exists(&rel) {
-                        return Err(format!("Cannot create {name}: it already exists"));
-                    }
-                    vault
-                        .create_dir(&rel, true)
-                        .map_err(|e| made_what_it_could(&vault, &rel, &e.to_string()))
+                    // Without `merge` the folder must be new, so a name taken by the time the call
+                    // lands (Syncthing, another window) is refused as one taken before it, rather
+                    // than merged into.
+                    vault.create_dir(&rel, false).map_err(|e| match e {
+                        Error::Core(Core::AlreadyExists(_)) => {
+                            format!("Cannot create {name}: it already exists")
+                        }
+                        e => made_what_it_could(&vault, &rel, &e.to_string()),
+                    })
                 }
             })
             .await
