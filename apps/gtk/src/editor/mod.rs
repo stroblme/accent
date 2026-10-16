@@ -210,8 +210,9 @@ pub enum Flavour {
     Note,
     /// Anything else that is text: a GtkSourceView language, monospace, the full width.
     Code,
-    /// A CSV, which is code that gets its columns coloured instead of a language.
-    Csv,
+    /// A table, which is code that gets its columns coloured instead of a language: a CSV, its
+    /// delimiter read off its first line, or a TSV, which carries its tab (`Some(b'\t')`).
+    Csv(Option<u8>),
 }
 
 impl Flavour {
@@ -645,7 +646,7 @@ impl Tab {
                 highlight::hang(&self.buffer, &self.view);
             }
             // The column hues are rotated from the accent, which the theme can change under us.
-            Flavour::Csv => highlight::restyle_csv(&self.buffer),
+            Flavour::Csv(_) => highlight::restyle_csv(&self.buffer),
             Flavour::Code => {}
         }
         wrap::measure(&self.view);
@@ -1216,7 +1217,7 @@ impl Tab {
                     })
                     .collect();
             }
-            Flavour::Csv => self.csv.apply(&self.buffer),
+            Flavour::Csv(delim) => self.csv.apply(&self.buffer, delim),
             // Code is coloured by its language through the style scheme, with nothing to derive.
             Flavour::Code => {}
         }

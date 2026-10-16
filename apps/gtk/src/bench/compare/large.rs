@@ -206,7 +206,7 @@ pub(in crate::bench) fn bench_compare_large(app: &Rc<App>, rel: &str) {
             typed.push(worst);
         }
         kinds.push(("type", typed));
-        if tab.flavour() == crate::editor::Flavour::Csv {
+        if matches!(tab.flavour(), crate::editor::Flavour::Csv(_)) {
             println!("bench compare_large csv_tagged={}", csv_tagged(&tab.buffer));
         }
         let mut reread = Vec::new();

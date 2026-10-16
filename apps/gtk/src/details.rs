@@ -158,7 +158,7 @@ fn kind_group(doc: &Doc) -> Option<Group> {
                         fact("Characters", characters),
                     ],
                 ),
-                editor::Flavour::Csv => (
+                editor::Flavour::Csv(_) => (
                     "Table",
                     vec![
                         fact("Rows", lines),

@@ -124,7 +124,7 @@ pub fn style_companion(flavour: Flavour, buffer: &sourceview5::Buffer, view: &so
         Flavour::Note => {
             wrap::refence(view, || highlight::apply(buffer));
         }
-        Flavour::Csv => highlight::apply_csv(buffer),
+        Flavour::Csv(delim) => highlight::apply_csv(buffer, delim),
         Flavour::Code => {}
     }
 }
@@ -135,7 +135,7 @@ pub fn restyle_companion(flavour: Flavour, buffer: &sourceview5::Buffer, view: &
     sync_scheme(buffer);
     match flavour {
         Flavour::Note => highlight::restyle(buffer, view),
-        Flavour::Csv => highlight::restyle_csv(buffer),
+        Flavour::Csv(_) => highlight::restyle_csv(buffer),
         Flavour::Code => {}
     }
     rehang_companion(flavour, buffer, view);

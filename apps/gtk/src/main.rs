@@ -890,8 +890,11 @@ impl App {
                     )),
                     diagnostics::counts(&tab.diagnostics()),
                 ),
-                editor::Flavour::Csv => (
-                    Some(statusbar::code_label(Some("CSV"), &tab.encoding_label())),
+                editor::Flavour::Csv(delim) => (
+                    Some(statusbar::code_label(
+                        Some(if delim == Some(b'\t') { "TSV" } else { "CSV" }),
+                        &tab.encoding_label(),
+                    )),
                     None,
                 ),
             },

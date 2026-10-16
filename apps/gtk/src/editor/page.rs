@@ -571,7 +571,7 @@ impl Tab {
     /// Note headings and fences use existing tag-toggle indices, avoiding a parse or backward
     /// scan. Source files use language-server symbols; CSV has no blocks.
     pub fn update_sticky(&self) {
-        if self.flavour == Flavour::Csv {
+        if matches!(self.flavour, Flavour::Csv(_)) {
             return;
         }
         // The other column of a comparison has no such bar, and one over the editor's first row
@@ -594,7 +594,7 @@ impl Tab {
             Flavour::Code => {
                 lang::innermost(&self.lang.symbols(), top.max(0) as u32).map(|line| line as i32)
             }
-            Flavour::Csv => None,
+            Flavour::Csv(_) => None,
         };
         let Some(line) = line else {
             self.sticky_bar.set_visible(false);

@@ -173,7 +173,7 @@ pub fn language_id(tab: &Tab) -> String {
 /// Skip CSV because styling is local and language queries add no results. Without a vault,
 /// notes use [`outline_alone`] and other files have no language-layer providers.
 pub fn attach(tab: &Rc<Tab>, vault: Option<Arc<Vault>>, hooks: Hooks) {
-    if tab.flavour() == Flavour::Csv {
+    if matches!(tab.flavour(), Flavour::Csv(_)) {
         return;
     }
     *tab.lang.hooks.borrow_mut() = Some(Rc::new(hooks));
