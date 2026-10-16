@@ -584,6 +584,14 @@ impl Worker {
         ) {
             self.fail("watching the vault", e);
         }
+        // Said once, as a failure is: a polled vault hears of a change up to 2 s late, and the
+        // budget is the reader's to raise.
+        if let Some(notice) = self.watcher.as_ref().and_then(Watcher::polling)
+            && self.reported.insert(notice.clone())
+        {
+            tracing::warn!("{notice}");
+            self.emit(Event::Error(notice));
+        }
     }
 
     /// Refresh watches for added or removed branch-ref folders, such as a first
