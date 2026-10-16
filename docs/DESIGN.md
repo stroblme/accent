@@ -26,7 +26,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A reader that can do without an answer logs why it went without, unless the call was cancelled; Android sees the save conflict and a sentence (`ffi::AccentError`).
 - **Plain files are the truth**: the index is a disposable cache, rebuilt on any schema bump and built anew when SQLite cannot read it (said once), and nothing but the user's own files is written into a vault — config in `~/.config/accent/config.toml`, sessions in `~/.local/state/accent/<hash>.json` — so Syncthing never carries UI state between devices.
 - **Never block the UI** on the index, a save or the network: a vault's index and watcher run on one worker thread and report through events, and the window paints from the stored index while the reconcile runs behind it — which is why startup does not depend on vault size.
-  A worker that panics says so on its way out (`Event::WorkerGone`, its reason an error before it), and the apps end the walk on screen: the language providers keep the event channel open, so its end would otherwise go unheard.
+  A worker that panics says so on its way out (`Event::WorkerGone`, its reason an error before it), and the apps end the walk on screen and keep a banner up until a new worker runs (States): the language providers keep the event channel open, so its end would otherwise go unheard.
 - **Index**: use bundled SQLite with FTS5 and WAL so large vaults open from a persistent cache.
   Run `VACUUM` after a schema rebuild to reclaim dropped tables.
 - **A walk reads on a pool and writes on one thread**: each file's read, hash and parse (its markdown, its declarations) run on a thread per core, and the vault's worker writes the rows in the walk's order — SQLite takes one writer, and the walk's order is what writes a folder's row before its children's.
@@ -1600,6 +1600,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
   Its toast offers Undo, which writes back what each file held unless it changed since, naming the file it left alone (or counting them, where several were); there is one undo, the last rewrite's, and none past 64 MB of rewritten files, which the question says.
   So a rewrite's toast takes the place of the one before it, whose Undo would now undo the newer rewrite.
 - A remote vault that stops answering is a banner across the window, every tab being affected and the state lasting.
+  So is a vault whose worker is gone ("This vault is no longer watched or indexed", Reload Window; Reopen on Android), no restart in place: a panic that recurs on the same file would loop. A reconnect takes it down, its new server being a new worker.
   A link that was up comes back on its own: the banner counts down to each attempt ("Lost the connection to host · Reconnecting in 8 s") after 1, 2, 4, 8 and 16 s, then every 30 s, each with `BatchMode=yes`, so it never raises a passphrase dialog over the reader's work.
   Its button, Reconnect Now, is the one attempt that may ask.
 - A first connection that failed and an outage past ten minutes keep a plain Reconnect under the last reason: neither comes back by itself.

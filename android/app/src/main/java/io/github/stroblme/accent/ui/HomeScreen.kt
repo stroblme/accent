@@ -51,6 +51,8 @@ fun HomeScreen(model: VaultModel) {
     }
 
     Scaffold(
+        // Above everything, as long as it lasts: the vault on screen has stopped being read.
+        topBar = { if (state.gone) GoneBanner(onReopen = { model.reopen() }) },
         snackbarHost = { SnackbarHost(snackbar) },
         contentWindowInsets = WindowInsets.safeDrawing,
     ) { padding ->
@@ -143,6 +145,24 @@ fun HomeScreen(model: VaultModel) {
                 )
             }
         }
+    }
+}
+
+/** Say the vault is no longer read, with the one way back. */
+@Composable
+private fun GoneBanner(onReopen: () -> Unit) {
+    // The top bar's slot takes no insets of its own, so the banner keeps clear of the status bar.
+    val clear = WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
+    Column(Modifier.fillMaxWidth().windowInsetsPadding(clear)) {
+        Column(Modifier.padding(horizontal = Gutter, vertical = 8.dp)) {
+            Text(
+                "This vault is no longer read. Changes made elsewhere will not show until it " +
+                    "reopens.",
+                style = MaterialTheme.typography.bodyMedium,
+            )
+            TextButton(onClick = onReopen) { Text("Reopen") }
+        }
+        HorizontalDivider()
     }
 }
 
