@@ -6,6 +6,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use notify::RecursiveMode;
@@ -51,6 +52,32 @@ pub struct Watcher {
     /// What is watched besides the root, so a new set is a diff against it. See
     /// [`set_dirs`](Self::set_dirs).
     dirs: HashSet<PathBuf>,
+    /// Why the vault is polled rather than watched, when it is.
+    polled: Option<Polled>,
+}
+
+/// Why a [`Watcher`] polls.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Polled {
+    /// The vault's folders would take more than 80% of the inotify watch budget.
+    OverBudget,
+    /// inotify refused a watch: the budget is spent, other programs' watches counted too. Polled
+    /// for the watcher's life, since a watch refused again would leave a folder unheard.
+    Refused,
+}
+
+impl Polled {
+    /// What the reader is told, once: what happened, and the way out.
+    fn notice(self) -> String {
+        let why = match self {
+            Polled::OverBudget => "vault uses more than 80% of the inotify watch budget",
+            Polled::Refused => "inotify refused to watch a folder: its watch budget is spent",
+        };
+        format!(
+            "{why}; falling back to 2s polling. Move dependency trees out of the vault, or raise \
+             the budget with: sudo sysctl -w fs.inotify.max_user_watches=524288"
+        )
+    }
 }
 
 /// Stopping happens in `Debouncer::drop`.
@@ -68,31 +95,35 @@ fn over_budget(dir_count: usize) -> bool {
 impl Watcher {
     /// Watch `root` and `dirs` non-recursively so skipped trees do not consume inotify watches.
     /// Symlink paths retain their vault names in events. Fall back to polling near the watch
-    /// budget.
+    /// budget, or once inotify refuses a watch for want of it ([`polling`](Self::polling)).
     ///
     /// New directories require [`set_dirs`](Self::set_dirs). `on_event` runs on the debouncer
     /// thread and must return promptly, handing work to a channel or main context.
     pub fn new(
         root: &Path,
         dirs: &[PathBuf],
-        on_event: impl Fn(VaultEvent) + Send + 'static,
+        on_event: impl Fn(VaultEvent) + Send + Sync + 'static,
     ) -> crate::Result<Watcher> {
-        let dir_count = dirs.len() + 1;
         let refused =
             |e: notify::Error| crate::Error::Io(format!("watching {}: {e}", root.display()));
-        let handler = move |result: DebounceEventResult| match result {
-            Ok(events) => {
-                for event in events {
-                    for mapped in classify(&event.event) {
-                        on_event(mapped);
+        // Shared, as an inotify debouncer refused a watch hands over to a polling one.
+        let on_event = Arc::new(on_event);
+        let handler = || {
+            let on_event = on_event.clone();
+            move |result: DebounceEventResult| match result {
+                Ok(events) => {
+                    for event in events {
+                        for mapped in classify(&event.event) {
+                            on_event(mapped);
+                        }
                     }
                 }
-            }
-            Err(errors) => {
-                for e in &errors {
-                    tracing::warn!(error = %e, "watch error; asking for a rescan");
+                Err(errors) => {
+                    for e in &errors {
+                        tracing::warn!(error = %e, "watch error; asking for a rescan");
+                    }
+                    on_event(VaultEvent::Rescan);
                 }
-                on_event(VaultEvent::Rescan);
             }
         };
 
@@ -101,42 +132,48 @@ impl Watcher {
         // not it holds any: its default, a quarter of the debounce, was 13 wakeups a second of an
         // idle window. Half of it reports a change 300 to 450 ms after it, not 300 to 375.
         let tick = Some(debounce / 2);
-        let backend = if over_budget(dir_count) {
-            tracing::warn!(
-                dir_count,
-                budget = inotify_budget(),
-                "vault uses more than 80% of the inotify watch budget; falling back to 2s polling. \
-                 Move dependency trees out of the vault, or raise the budget with: \
-                 sudo sysctl -w fs.inotify.max_user_watches=524288"
-            );
-            let config = notify::Config::default().with_poll_interval(Duration::from_secs(2));
-            let mut d = new_debouncer_opt::<_, notify::PollWatcher, RecommendedCache>(
-                debounce,
-                tick,
-                handler,
-                RecommendedCache::new(),
-                config,
-            )
-            .map_err(refused)?;
-            watch_all(&mut d, root, dirs).map_err(refused)?;
-            Backend::Poll(d)
-        } else {
-            let mut d = new_debouncer(debounce, tick, handler).map_err(refused)?;
-            watch_all(&mut d, root, dirs).map_err(refused)?;
-            Backend::Native(d)
+        let polled = match over_budget(dirs.len() + 1) {
+            true => Polled::OverBudget,
+            false => {
+                let mut d = new_debouncer(debounce, tick, handler()).map_err(refused)?;
+                if !watch_all(&mut d, root, dirs).map_err(refused)? {
+                    return Ok(Watcher {
+                        backend: Backend::Native(d),
+                        dirs: dirs.iter().cloned().collect(),
+                        polled: None,
+                    });
+                }
+                Polled::Refused
+            }
         };
-
+        let config = notify::Config::default().with_poll_interval(Duration::from_secs(2));
+        let mut d = new_debouncer_opt::<_, notify::PollWatcher, RecommendedCache>(
+            debounce,
+            tick,
+            handler(),
+            RecommendedCache::new(),
+            config,
+        )
+        .map_err(refused)?;
+        watch_all(&mut d, root, dirs).map_err(refused)?;
         Ok(Watcher {
-            backend,
+            backend: Backend::Poll(d),
             dirs: dirs.iter().cloned().collect(),
+            polled: Some(polled),
         })
     }
 
+    /// What to tell the reader when the vault is polled rather than watched, naming the budget.
+    pub fn polling(&self) -> Option<String> {
+        self.polled.map(Polled::notice)
+    }
+
     /// Update directory watches on the existing debouncer, retaining pending events that
-    /// replacing it would lose. Returns `false` without changes if crossing the inotify budget
-    /// requires a new watcher to switch between polling and inotify.
+    /// replacing it would lose. Returns `false` if a new watcher has to switch between polling
+    /// and inotify: the budget crossed either way, or a watch refused for want of it.
     pub fn set_dirs(&mut self, dirs: &[PathBuf]) -> bool {
-        if over_budget(dirs.len() + 1) != matches!(self.backend, Backend::Poll(_)) {
+        let poll = over_budget(dirs.len() + 1) || self.polled == Some(Polled::Refused);
+        if poll != matches!(self.backend, Backend::Poll(_)) {
             return false;
         }
         let next: HashSet<PathBuf> = dirs.iter().cloned().collect();
@@ -147,8 +184,10 @@ impl Watcher {
             }
         }
         for dir in next.difference(&self.dirs) {
-            if let Err(e) = self.backend.watch(dir) {
-                tracing::debug!(dir = %dir.display(), error = %e, "not watching");
+            match self.backend.watch(dir) {
+                Ok(()) => {}
+                Err(e) if starved(&e) => return false,
+                Err(e) => tracing::debug!(dir = %dir.display(), error = %e, "not watching"),
             }
         }
         self.dirs = next;
@@ -182,20 +221,32 @@ impl Backend {
     }
 }
 
+/// Watch `root` and `dirs`, returning `true`, and stopping there, once inotify refuses a watch
+/// for want of budget ([`starved`]).
 fn watch_all<T: notify::Watcher, C: FileIdCache>(
     d: &mut Debouncer<T, C>,
     root: &Path,
     dirs: &[PathBuf],
-) -> notify::Result<()> {
-    d.watch(root, RecursiveMode::NonRecursive)?;
+) -> notify::Result<bool> {
+    match d.watch(root, RecursiveMode::NonRecursive) {
+        Err(e) if starved(&e) => return Ok(true),
+        other => other?,
+    }
     for dir in dirs {
         // A directory the walk saw can be gone by the time we get here — a synced vault moves
         // under us — and one unwatchable folder is no reason to leave the whole vault unwatched.
-        if let Err(e) = d.watch(dir, RecursiveMode::NonRecursive) {
-            tracing::debug!(dir = %dir.display(), error = %e, "not watching");
+        match d.watch(dir, RecursiveMode::NonRecursive) {
+            Ok(()) => {}
+            Err(e) if starved(&e) => return Ok(true),
+            Err(e) => tracing::debug!(dir = %dir.display(), error = %e, "not watching"),
         }
     }
-    Ok(())
+    Ok(false)
+}
+
+/// inotify refusing a watch because the user's budget (`fs.inotify.max_user_watches`) is spent.
+fn starved(e: &notify::Error) -> bool {
+    matches!(e.kind, notify::ErrorKind::MaxFilesWatch)
 }
 
 /// A path inside a repository's own directory.
@@ -356,6 +407,47 @@ mod tests {
         // Let the watcher settle before the test perturbs the directory.
         std::thread::sleep(Duration::from_millis(200));
         (w, rx)
+    }
+
+    /// A watch the kernel refuses for want of budget, which other programs spend as well as ours,
+    /// turns the vault over to polling: a folder left unwatched would never be heard from. Run
+    /// again in a user namespace of its own whose budget is 8 watches; where none can be made
+    /// (no `unshare`, user namespaces refused) there is nothing to run it in.
+    #[test]
+    fn a_refused_watch_turns_the_vault_over_to_polling() {
+        const INNER: &str = "ACCENT_TEST_STARVED";
+        if std::env::var_os(INNER).is_none() {
+            let script = "echo 8 > /proc/sys/user/max_inotify_watches || exit 77; \
+                exec \"$0\" --exact watch::tests::a_refused_watch_turns_the_vault_over_to_polling";
+            let ran = std::process::Command::new("unshare")
+                .args(["-Ur", "sh", "-c", script])
+                .arg(std::env::current_exe().unwrap())
+                .env(INNER, "1")
+                .status();
+            match ran.map(|s| s.code()) {
+                Ok(Some(0)) => {}
+                // What the test harness exits with when the test failed.
+                Ok(Some(101)) => panic!("failed in its own user namespace"),
+                other => eprintln!("no user namespace to spend the watch budget in ({other:?})"),
+            }
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let dirs: Vec<PathBuf> = (0..20).map(|i| root.join(format!("d{i:02}"))).collect();
+        for dir in &dirs {
+            std::fs::create_dir(dir).unwrap();
+        }
+        let (w, rx) = start_with(&root, &dirs);
+        let said = w.polling().unwrap_or_default();
+        assert!(said.contains("fs.inotify.max_user_watches"), "{said:?}");
+
+        std::fs::write(dirs[19].join("late.md"), "late").unwrap();
+        let events = drain(&rx, Duration::from_secs(8));
+        assert!(
+            touches(&events, "late.md"),
+            "the last folder's write went unheard: {events:?}"
+        );
     }
 
     #[test]
