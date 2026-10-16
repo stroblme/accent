@@ -13,9 +13,9 @@ use accent_core::Error as Core;
 pub(super) enum Fail {
     /// Say it and stop, which is every command here but one.
     Say,
-    /// A branch delete git refused because the work is not merged anywhere else: ask, and run it
-    /// again with `--force`. Carries the branch, `delete_branch` needing it a second time.
-    AskToForce(String),
+    /// A branch delete refused because its commits are not merged ([`Core::NotMerged`]): ask,
+    /// and run it again with `--force`.
+    AskToForce,
 }
 
 impl Panel {
@@ -97,9 +97,9 @@ impl Panel {
                         true => format!("{e}; {ON_THE_HOST}"),
                         false => e.to_string(),
                     };
-                    match on_err {
-                        Fail::AskToForce(name) if matches!(e, Error::Core(Core::NotMerged(_))) => {
-                            panel.confirm_delete(name)
+                    match (on_err, e) {
+                        (Fail::AskToForce, Error::Core(Core::NotMerged { branch, kept })) => {
+                            panel.confirm_delete(branch, &kept)
                         }
                         _ => panel.failed(&what, &message),
                     }
@@ -401,14 +401,14 @@ impl Panel {
 
     /// Delete a local branch.
     ///
-    /// `git branch -d` first, so that whether the work would be lost is git's answer and not a
-    /// guess of ours at a default branch. Its one refusal worth escalating is "not fully merged",
-    /// which asks before running `-D`; every other refusal is reported as it comes.
+    /// Unforced first, measured against HEAD and by `git branch -d`, never against a guess of
+    /// ours at a default branch. Its one refusal worth escalating is "not fully merged", which
+    /// asks before running `-D`; every other refusal is reported as it comes.
     pub(super) fn delete_branch(self: &Rc<Self>, name: String, force: bool) {
         let asked = name.clone();
         let on_err = match force {
             true => Fail::Say,
-            false => Fail::AskToForce(name.clone()),
+            false => Fail::AskToForce,
         };
         self.command(
             format!("delete {name}"),
@@ -422,13 +422,29 @@ impl Panel {
         );
     }
 
-    /// The one delete that loses commits, so it asks first (DESIGN.md, States).
-    fn confirm_delete(self: &Rc<Self>, name: String) {
+    /// The one delete that can lose commits, so it asks first (DESIGN.md, States), saying where
+    /// they would still be.
+    fn confirm_delete(self: &Rc<Self>, name: String, kept: &git::Kept) {
+        let head = {
+            let state = self.state.borrow();
+            let status = state.statuses.get(state.selected);
+            status.and_then(|s| s.branch.head.clone())
+        }
+        .unwrap_or_else(|| "HEAD".to_string());
+        let body = match kept {
+            git::Kept::Head => {
+                format!("Its commits are in {head}, but not all of them are on its remote.")
+            }
+            git::Kept::Remote(remote) => {
+                format!("Its commits are not in {head}. They are still on {remote}.")
+            }
+            git::Kept::Nowhere => format!("Its commits are not in {head} and will be lost."),
+        };
         let panel = self.clone();
         dialogs::confirm(
             &self.hooks.window,
             &format!("Delete {name}?"),
-            "Its commits are not merged into any other branch and will be lost.",
+            &body,
             "Delete",
             true,
             move || panel.delete_branch(name, true),
@@ -437,7 +453,7 @@ impl Panel {
 
     /// Pick one of the selected repository's other local branches and delete it: the palette's
     /// Delete Branch…, which is how the keyboard reaches the popover's trash buttons. The pick
-    /// goes down the trash button's own path, asking again where git says the work is not merged.
+    /// goes down the trash button's own path, asking again where the work is not merged.
     pub fn delete_other_branch(self: &Rc<Self>) {
         let others = self.other_branches();
         if others.is_empty() {
@@ -449,7 +465,7 @@ impl Panel {
         form.append(&dialogs::labelled("Branch", &picker));
         let dialog = dialogs::alert(
             "Delete Branch",
-            "A branch whose commits are merged nowhere else asks again before it goes.",
+            "A branch that is not fully merged asks again before it goes.",
             &[
                 ("cancel", "Cancel", adw::ResponseAppearance::Default),
                 ("delete", "Delete", adw::ResponseAppearance::Destructive),

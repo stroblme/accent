@@ -1024,7 +1024,13 @@ fn branches_are_created_and_deleted_and_git_says_when_work_would_be_lost() {
     commit_all(dir, "work moves on");
     checkout(&repo, "main").unwrap();
     let refused = delete_branch(&repo, "work", false).unwrap_err();
-    assert_eq!(refused, Error::NotMerged("work".to_string()));
+    assert_eq!(
+        refused,
+        Error::NotMerged {
+            branch: "work".to_string(),
+            kept: Kept::Nowhere
+        }
+    );
     delete_branch(&repo, "work", true).unwrap();
     assert_eq!(branches(&repo).unwrap().local, ["main"]);
 
@@ -1043,6 +1049,54 @@ fn parse_branches_splits_local_from_remote_and_drops_the_symbolic_ones() {
     assert_eq!(listed.remote, ["origin/main"], "origin/HEAD is a pointer");
     assert_eq!(listed.head.as_deref(), Some("feature/x"));
     assert_eq!(parse_branches(b""), Branches::default());
+}
+
+/// `git branch -d` measures a branch with an upstream against that upstream, so a published branch
+/// HEAD lacks would go unasked: it is refused as not merged, naming where its commits still are.
+/// One HEAD has but its upstream lacks is git's own refusal; once both have it, it goes.
+#[test]
+fn a_published_branch_head_lacks_is_not_merged_and_one_merged_deletes() {
+    if !have_git() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("source");
+    init(&source);
+    write_file(&source, "a.md", "one\n");
+    commit_all(&source, "first");
+    ok(tmp.path(), &["clone", "--bare", "-q", "source", "origin"]);
+    ok(tmp.path(), &["clone", "-q", "origin", "work"]);
+    let work = tmp.path().join("work");
+    configure(&work);
+    let repo = open(&work);
+    create_branch(&repo, "feature", true).unwrap();
+    write_file(&work, "f.md", "f\n");
+    commit_all(&work, "feature");
+    ok(&work, &["push", "-q", "-u", "origin", "feature"]);
+    checkout(&repo, "main").unwrap();
+
+    assert_eq!(
+        delete_branch(&repo, "feature", false),
+        Err(Error::NotMerged {
+            branch: "feature".to_string(),
+            kept: Kept::Remote("origin/feature".to_string())
+        })
+    );
+    checkout(&repo, "feature").unwrap();
+    write_file(&work, "g.md", "g\n");
+    commit_all(&work, "unpushed");
+    checkout(&repo, "main").unwrap();
+    ok(&work, &["merge", "-q", "feature"]);
+    assert_eq!(
+        delete_branch(&repo, "feature", false),
+        Err(Error::NotMerged {
+            branch: "feature".to_string(),
+            kept: Kept::Head
+        })
+    );
+    ok(&work, &["push", "-q", "origin", "feature"]);
+    delete_branch(&repo, "feature", false).unwrap();
+    assert_eq!(branches(&repo).unwrap().local, ["main"]);
 }
 
 /// A clone whose origin has a branch the clone never checked out: the remote-tracking branch is

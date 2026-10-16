@@ -751,7 +751,10 @@ mod tests {
             Error::Core(Core::NotFound("a.md".into())),
             Error::Core(Core::AlreadyExists("a.md".into())),
             Error::Core(Core::ChangedOnDisk { current: etag }),
-            Error::Core(Core::NotMerged("side".into())),
+            Error::Core(Core::NotMerged {
+                branch: "side".into(),
+                kept: accent_core::git::Kept::Remote("origin/side".into()),
+            }),
             Error::Core(Core::Cancelled),
             Error::Core(Core::Io("a.md: denied".into())),
             Error::Core(Core::Index("locked".into())),
