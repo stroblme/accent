@@ -26,6 +26,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A reader that can do without an answer logs why it went without, unless the call was cancelled; Android sees the save conflict and a sentence (`ffi::AccentError`).
 - **Plain files are the truth**: the index is a disposable cache, rebuilt on any schema bump and built anew when SQLite cannot read it (said once), and nothing but the user's own files is written into a vault — config in `~/.config/accent/config.toml`, sessions in `~/.local/state/accent/<hash>.json` — so Syncthing never carries UI state between devices.
 - **Never block the UI** on the index, a save or the network: a vault's index and watcher run on one worker thread and report through events, and the window paints from the stored index while the reconcile runs behind it — which is why startup does not depend on vault size.
+  A worker that panics says so on its way out (`Event::WorkerGone`, its reason an error before it), and the apps end the walk on screen: the language providers keep the event channel open, so its end would otherwise go unheard.
 - **Index**: use bundled SQLite with FTS5 and WAL so large vaults open from a persistent cache.
   Run `VACUUM` after a schema rebuild to reclaim dropped tables.
 - **A walk reads on a pool and writes on one thread**: each file's read, hash and parse (its markdown, its declarations) run on a thread per core, and the vault's worker writes the rows in the walk's order — SQLite takes one writer, and the walk's order is what writes a folder's row before its children's.

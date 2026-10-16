@@ -12,6 +12,9 @@ pub enum Event {
     /// A scan failed without pausing indexing ([`crate::Event::WalkFailed`]).
     /// Its error is reported separately through [`Event::Error`] if not already reported.
     WalkFailed,
+    /// The vault's worker ended by a panic ([`crate::Event::WorkerGone`]), after its reason as an
+    /// [`Event::Error`]: nothing indexes the vault until it is opened again.
+    WorkerGone,
     /// Index reconciliation completed, possibly with a partial index if
     /// `stopped`. Only [`Vault::resume_indexing`] resumes a paused vault.
     ///
@@ -68,6 +71,7 @@ pub(crate) fn narrow(e: crate::Event) -> Option<Event> {
         crate::Event::Conflict { original, conflict } => Event::Conflict { original, conflict },
         crate::Event::Error(message) => Event::Error { message },
         crate::Event::WalkFailed => Event::WalkFailed,
+        crate::Event::WorkerGone => Event::WorkerGone,
         // Git, the remote connection, language servers and their background jobs, and the watch
         // on unindexed folders: none of them run on a phone, so nothing here ever has to match
         // them.

@@ -419,8 +419,9 @@ impl App {
                 self.connection_refused(&why);
             }
             // No pause: the worker walks again when next asked, and the index stays partial,
-            // `reconciled` with it. Its error, if any is new, is an `Error` of its own.
-            Event::WalkFailed => {
+            // `reconciled` with it. Its error, if any is new, is an `Error` of its own. A worker
+            // gone walks no more, its reason an `Error` too, so the walk on screen ends the same.
+            Event::WalkFailed | Event::WorkerGone => {
                 self.statusbar.set_progress(None);
                 self.statusbar.set_indexing(statusbar::Indexing::Idle);
             }
