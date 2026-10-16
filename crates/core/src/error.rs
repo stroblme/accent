@@ -20,12 +20,12 @@ pub enum Error {
     /// so the window can offer a comparison against it.
     #[error("the file changed on disk since it was read")]
     ChangedOnDisk { current: Etag },
-    /// A branch delete refused because its commits are not merged: the one refusal worth
-    /// offering to force. `kept` says where they would still be.
+    /// A branch delete refused because HEAD lacks its commits: the one refusal worth offering to
+    /// force. `kept` names a remote-tracking branch that still has them.
     #[error("{branch} is not fully merged")]
     NotMerged {
         branch: String,
-        kept: crate::git::Kept,
+        kept: Option<String>,
     },
     /// The caller abandoned the request, such as a superseded search.
     #[error("cancelled")]

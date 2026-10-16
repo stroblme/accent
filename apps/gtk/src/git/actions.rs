@@ -99,7 +99,7 @@ impl Panel {
                     };
                     match (on_err, e) {
                         (Fail::AskToForce, Error::Core(Core::NotMerged { branch, kept })) => {
-                            panel.confirm_delete(branch, &kept)
+                            panel.confirm_delete(branch, kept.as_deref())
                         }
                         _ => panel.failed(&what, &message),
                     }
@@ -401,9 +401,9 @@ impl Panel {
 
     /// Delete a local branch.
     ///
-    /// Unforced first, measured against HEAD and by `git branch -d`, never against a guess of
-    /// ours at a default branch. Its one refusal worth escalating is "not fully merged", which
-    /// asks before running `-D`; every other refusal is reported as it comes.
+    /// Unforced first, measured against HEAD, never against a guess of ours at a default branch.
+    /// Its one refusal worth escalating is "not fully merged", which asks before forcing it;
+    /// every other refusal is reported as it comes.
     pub(super) fn delete_branch(self: &Rc<Self>, name: String, force: bool) {
         let asked = name.clone();
         let on_err = match force {
@@ -424,7 +424,7 @@ impl Panel {
 
     /// The one delete that can lose commits, so it asks first (DESIGN.md, States), saying where
     /// they would still be.
-    fn confirm_delete(self: &Rc<Self>, name: String, kept: &git::Kept) {
+    fn confirm_delete(self: &Rc<Self>, name: String, kept: Option<&str>) {
         let head = {
             let state = self.state.borrow();
             let status = state.statuses.get(state.selected);
@@ -432,13 +432,8 @@ impl Panel {
         }
         .unwrap_or_else(|| "HEAD".to_string());
         let body = match kept {
-            git::Kept::Head => {
-                format!("Its commits are in {head}, but not all of them are on its remote.")
-            }
-            git::Kept::Remote(remote) => {
-                format!("Its commits are not in {head}. They are still on {remote}.")
-            }
-            git::Kept::Nowhere => format!("Its commits are not in {head} and will be lost."),
+            Some(remote) => format!("Its commits are not in {head}. They are still on {remote}."),
+            None => format!("Its commits are not in {head} and will be lost."),
         };
         let panel = self.clone();
         dialogs::confirm(

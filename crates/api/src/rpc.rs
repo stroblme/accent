@@ -753,7 +753,7 @@ mod tests {
             Error::Core(Core::ChangedOnDisk { current: etag }),
             Error::Core(Core::NotMerged {
                 branch: "side".into(),
-                kept: accent_core::git::Kept::Remote("origin/side".into()),
+                kept: Some("origin/side".into()),
             }),
             Error::Core(Core::Cancelled),
             Error::Core(Core::Io("a.md: denied".into())),
