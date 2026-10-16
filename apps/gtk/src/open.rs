@@ -8,7 +8,7 @@ use accent_core::Error as Core;
 /// Opening intent determines whether a tab replaces a preview or stays open.
 ///
 /// Browsing tree, search, Git or wikilink results uses `Preview` to avoid accumulating tabs.
-/// Palette, Open File, drops, renames and command-line opens use `Kept`. Editing,
+/// Open File, drops, renames and command-line opens use `Kept`, the palette `Picked`. Editing,
 /// double-clicking or moving a preview into another pane keeps it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Opened {
@@ -25,6 +25,9 @@ pub enum Opened {
     /// Kept, and split off its pane on that side once it lands: a tree row dropped on a pane's
     /// edge (see [`App::open_beside`]).
     Beside(Side),
+    /// Kept, and given the keyboard once in front: picked in the palette, which gives the keyboard
+    /// back to where it was opened from (the Files tree, say) before the tab lands.
+    Picked,
 }
 
 impl App {
@@ -53,7 +56,8 @@ impl App {
         // demote it, and looking at the preview again does not promote it.
         if let Some(doc) = self.doc_for(&key) {
             self.drop_awaiting(&key, "not a text file");
-            return self.reveal_page(doc.page());
+            self.reveal_page(doc.page());
+            return self.focus_picked(doc.page(), how);
         }
         let kind = doc::kind_of(&key);
         // Only text becomes a `Tab`, so anything else has nothing for a waiting closure to run on.
@@ -97,6 +101,7 @@ impl App {
             self.select_survivor(page);
             return self.split_page(&pane, side, page);
         }
+        self.focus_picked(page, how);
         if how != Opened::Preview {
             return;
         }
@@ -1091,6 +1096,15 @@ impl App {
         }
     }
 
+    /// Give a tab picked in the palette the keyboard, wherever the palette gave it back to.
+    fn focus_picked(&self, page: &adw::TabPage, how: Opened) {
+        if how == Opened::Picked
+            && let Some(pane) = self.pane_of(page)
+        {
+            self.focus_document(&pane);
+        }
+    }
+
     /// Run `f` on key's text tab, opening it first if needed.
     /// Worker opens may call later through [`App::adopt`]. Non-text results discard queued work
     /// with the requested `what` reason, preventing callbacks from reaching a later unrelated open.
@@ -1103,6 +1117,7 @@ impl App {
     ) {
         if let Some(tab) = self.tab_for(key) {
             self.reveal_page(&tab.page);
+            self.focus_picked(&tab.page, how);
             return f(self, &tab);
         }
         let waiting = Waiting {

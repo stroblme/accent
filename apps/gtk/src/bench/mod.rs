@@ -18,6 +18,7 @@ mod find;
 mod folders;
 mod git;
 mod goals;
+mod goto;
 mod ignored;
 mod image;
 mod info;
@@ -115,7 +116,8 @@ use tags::bench_tags;
 /// - `ACCENT_BENCH_SWITCHER=<query>`: palette timing and initial rows; `1`
 ///   only opens it. Modes: `dismiss:<relA>,<relB>` (XTEST outside clicks),
 ///   `prefs` (Preferences timing), `ignored:<rel>` (ignored-note opening),
-///   `early:<query>` (corpus arrival), `symbol:<query>` (Go to Symbol).
+///   `early:<query>` (corpus arrival), `symbol:<query>` (Go to Symbol),
+///   `goto:<relA>,<relB>` (Go to File's keyboard, XTEST).
 /// - `ACCENT_BENCH_GIT=1`: Git pane rows, controls and refreshes. Modes:
 ///   `press:<path>` (hold for XTEST), `init` (discover a new repository),
 ///   `close:<pull|push|fetch>` (close during work), `sync` (sync during fetch),
@@ -802,6 +804,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(rel) = query.strip_prefix("ignored:") {
             return ignored::bench_ignored(&app, rel);
+        }
+        if let Some(rels) = query.strip_prefix("goto:") {
+            return goto::bench_goto(&app, rels);
         }
         if let Some(query) = query.strip_prefix("early:") {
             return corpus::bench_early(&app, query);
