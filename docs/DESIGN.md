@@ -1115,7 +1115,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A remote vault takes its own alone. No preference, the answer being whether it is installed.
 - On a remote vault the adapter runs on the host beside `serve` and ends with it at the latest (Remote lifetime), and at once when the window closes, before `serve` waits on the calls still out: a console's evaluation runs the reader's code, which may never return; the session's news reaches the window as the vault's other events do, and a link that drops ends the session in the window.
 - **Breakpoints** are a source mark per line in a Python tab: a click in the marks column, where the diagnostics' icons are, puts one on its line and a second click takes it off, and Toggle Breakpoint does the same at the caret.
-  They move with the text as it is edited, and a reload from disk keeps them on their lines.
+  They move with the text as it is edited, and a reload from disk keeps them, and the paused line's mark, on their lines.
 - They are kept in the session per file, never in the vault: a file closed and opened again, or the vault reopened, has them back; a file renamed or moved takes them along, and a file deleted takes them with it.
 - A breakpoint is a foreground symbolic glyph, as a diagnostic's icon is, never red: a dot, and a ring for one the program has not bound.
   The dot takes its line's cell from a diagnostic's icon, which GtkSourceView would draw under it rather than hide; the line's message and underline stay.
@@ -1129,6 +1129,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Code outside the vault opens in a kept tab on a local vault, read-only where a package manager put it (Language servers); a remote vault's, and code the adapter holds no file of, open nothing, Call Stack still listing them.
 - Continue and the steps go from the thread that stopped, and the mark, Call Stack and Variables go at once; Pause stops the first thread the adapter lists.
   A breakpoint toggled while the program runs tells it the file's breakpoints, all of them, and the marks move to where it holds them; the program runs the text it started with, so edits since are not its business.
+  One toggled while it starts is told once it runs, the adapter's answer for the lines it was launched with leaving the marks be, and an answer that does not come leaves them as the reader set them.
 - **Restart Debugging** is Stop, then Start with the same program once the session has ended: debugpy has no restart of its own.
   **Stop Debugging** ends the program, then the adapter.
 - The session's end — the program's, Stop's, or the vault's link dropping — takes the strip, its sections and the mark away, the pane staying only for goals; a ring is a dot again, for the next session to bind.
@@ -1551,7 +1552,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
   A dialog keeps them, so the rebind dialog takes `F5` as a chord.
 - A session's chord may equal the one it shadows without a clash; two of the session's own may not share one.
 - Toggle Breakpoint is an editing chord (Editing): it puts a breakpoint on the caret's line of the tab in front, or takes it off, and does nothing in a file no debugger runs.
-  Remove All Breakpoints clears every file's in the window, open or not.
+  Remove All Breakpoints clears every file's in the window, open or not, and a running program's with them.
 
 ### Completion
 

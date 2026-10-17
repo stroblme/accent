@@ -26,8 +26,8 @@ pub struct Debugger {
     last: RefCell<Option<(String, String)>>,
     /// The session, from Start until its end.
     run: RefCell<Option<Rc<Run>>>,
-    /// The paused line's mark, and the tab it is in.
-    execution: RefCell<Option<(std::rc::Weak<Tab>, sourceview5::Mark)>>,
+    /// The tab holding the paused line's mark.
+    execution: RefCell<std::rc::Weak<Tab>>,
     console: console::Console,
 }
 
@@ -98,7 +98,7 @@ impl App {
             breakpoints::toggle(tab, line);
             breakpoints::redraw(tab);
             self.save_session_soon();
-            self.send_breakpoints(tab);
+            self.send_breakpoints(tab.rel(), breakpoints::lines(tab));
             self.refill_breakpoints();
         }
     }
@@ -111,16 +111,17 @@ impl App {
         }
     }
 
-    /// Remove All Breakpoints, in every file of this window.
+    /// Remove All Breakpoints, in every file of this window, and a running program's with them:
+    /// a closed file's went out with its launch.
     pub(crate) fn remove_all_breakpoints(self: &Rc<Self>) {
+        let had = self.debugger.saved(self);
         self.debugger.kept.borrow_mut().clear();
         for tab in self.open_tabs() {
-            let had = !tab.breakpoints.borrow().is_empty();
             breakpoints::place(&tab, &[]);
             breakpoints::redraw(&tab);
-            if had {
-                self.send_breakpoints(&tab);
-            }
+        }
+        for key in had.into_keys() {
+            self.send_breakpoints(key, Vec::new());
         }
         self.save_session_soon();
         self.refill_breakpoints();

@@ -332,6 +332,8 @@ pub struct Tab {
     fold_renderer: fold::Renderer,
     /// The breakpoints' source marks, which move with the text (`debug::breakpoints`).
     pub(crate) breakpoints: RefCell<Vec<sourceview5::Mark>>,
+    /// The paused line's source mark, while the program is paused here (`debug::run`).
+    pub(crate) execution: RefCell<Option<sourceview5::Mark>>,
     font: RefCell<Option<gtk::CssProvider>>,
     /// A watch on the file itself, for a tab no vault watcher covers. `None` for everything
     /// inside a vault, which the worker already reports on.
@@ -535,10 +537,18 @@ impl Tab {
         self.replaced.set(self.replaced.get() + 1);
         // Replacing the text moves every mark to line 0, where the old text was deleted.
         let breakpoints = breakpoints::lines(self);
+        let paused = self.execution.borrow().clone();
+        let paused = paused.map(|mark| (self.buffer.iter_at_mark(&mark).line(), mark));
         self.loading.set(true);
         self.buffer.set_text(text);
         self.loading.set(false);
         breakpoints::place(self, &breakpoints);
+        if let Some((line, mark)) = paused {
+            let at = self.buffer.iter_at_line(line);
+            self.buffer
+                .move_mark(&mark, &at.unwrap_or_else(|| self.buffer.end_iter()));
+            breakpoints::redraw(self);
+        }
         self.analyse();
         lang::changed(self);
     }
