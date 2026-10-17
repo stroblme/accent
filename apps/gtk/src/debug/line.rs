@@ -1,5 +1,6 @@
 //! The Debug Console's prompt line, with no GTK: what VTE commits read as a shell's line editor
-//! reads keys, and the prompt and the line drawn back over their last drawing.
+//! reads keys, and the prompt and the line drawn back over their last drawing. Also the text the
+//! console shows, cleared of what the terminal would act on.
 
 /// The line being typed at the prompt, and the lines submitted before it.
 #[derive(Default)]
@@ -12,8 +13,10 @@ pub struct Line {
     recalled: Option<usize>,
     /// What was being typed as the walk began, which Down past the newest entry brings back.
     draft: String,
-    /// The rows below the prompt's first that the last drawing left the cursor on.
-    rows: u16,
+    /// The columns from the prompt's start to the cursor in the last drawing. The cursor stands
+    /// on a cell, which VTE keeps it on as it rewraps the line on a resize, so its row below the
+    /// prompt's first is this over the width, whatever the width is now.
+    drawn: usize,
 }
 
 /// What a key asks of the console.
@@ -31,13 +34,7 @@ impl Line {
     /// Backspace, `\x1b[D` for Left, …), as a shell's line editor reads them.
     pub fn key(&mut self, typed: &str) -> Vec<Did> {
         let mut did = Vec::new();
-        let mut rest = typed;
-        while let Some(first) = rest.chars().next() {
-            let (key, after) = rest.split_at(match first {
-                '\x1b' => sequence_len(rest),
-                _ => first.len_utf8(),
-            });
-            rest = after;
+        for key in pieces(typed) {
             match self.one(key) {
                 Some(Did::Redraw) if did.last() == Some(&Did::Redraw) => {}
                 Some(next) => did.push(next),
@@ -115,50 +112,84 @@ impl Line {
         Some(())
     }
 
-    /// The prompt and the line over the last drawing, the cursor where it is in the text.
-    /// Columns go by display width: a wide character takes two.
+    /// The prompt and the line over the last drawing, on rows of `columns`, the cursor where it
+    /// is in the text. Columns go by display width: a wide character takes two.
     pub fn draw(&mut self, prompt: &str, columns: u16) -> String {
         use std::fmt::Write as _;
         use unicode_width::UnicodeWidthStr as _;
+        let mut out = self.erase(columns);
         let columns = usize::from(columns.max(1));
         let end = prompt.width() + self.text.width();
         let at = prompt.width() + self.text[..self.cursor].width();
-        let mut out = self.erase();
+        // A space after the text is the cell a cursor at its end stands on, rather than past the
+        // edge of a row the line fills exactly, where a rewrap would not keep it.
         out.push_str(prompt);
         out.push_str(&self.text);
-        // Writing leaves the cursor on the last row written. A line that fills its last row
-        // exactly has not wrapped yet, so a cursor at its end needs the row after made.
-        let (end_row, at_row) = (end.saturating_sub(1) / columns, at / columns);
-        match at_row.cmp(&end_row) {
-            std::cmp::Ordering::Greater => out.push_str("\r\n"),
-            std::cmp::Ordering::Less => _ = write!(out, "\x1b[{}A", end_row - at_row),
-            std::cmp::Ordering::Equal => {}
+        out.push(' ');
+        // Writing leaves the cursor on the space's row.
+        let up = end / columns - at / columns;
+        if up > 0 {
+            _ = write!(out, "\x1b[{up}A");
         }
         out.push('\r');
         let column = at % columns;
         if column > 0 {
             _ = write!(out, "\x1b[{column}C");
         }
-        self.rows = at_row as u16;
+        self.drawn = at;
         out
     }
 
-    /// Back to where the prompt starts, and everything from there on cleared.
-    pub fn erase(&mut self) -> String {
-        match std::mem::take(&mut self.rows) {
+    /// Back to where the prompt starts on rows of `columns`, and everything from there on
+    /// cleared.
+    pub fn erase(&mut self, columns: u16) -> String {
+        match std::mem::take(&mut self.drawn) / usize::from(columns.max(1)) {
             0 => "\r\x1b[J".to_string(),
             rows => format!("\x1b[{rows}A\r\x1b[J"),
         }
     }
 }
 
+/// `text` without what a terminal acts on rather than shows: its escape sequences, and its
+/// control characters but newlines and tabs.
+pub fn clean(text: &str) -> String {
+    let shown = |c: char| !c.is_control() || matches!(c, '\n' | '\t');
+    pieces(text)
+        .filter(|piece| piece.chars().all(shown))
+        .collect()
+}
+
+/// `s` as a terminal reads it: character by character, an escape sequence whole.
+fn pieces(s: &str) -> impl Iterator<Item = &str> {
+    let mut rest = s;
+    std::iter::from_fn(move || {
+        let first = rest.chars().next()?;
+        let (piece, after) = rest.split_at(match first {
+            '\x1b' => sequence_len(rest),
+            _ => first.len_utf8(),
+        });
+        rest = after;
+        Some(piece)
+    })
+}
+
 /// The length of the escape sequence `s` starts with: a CSI one (`ESC [`, parameters, a final
-/// byte), an SS3 one (`ESC O` and a byte), or `ESC` and the character after it (Alt and a key).
+/// byte); an SS3 one (`ESC O` and a byte); a string one (`ESC ]` OSC, `ESC P` DCS, SOS, PM, APC)
+/// up to its BEL, or up to the `ESC` starting its ST (`ESC \`), read as a sequence of its own;
+/// `ESC`, intermediate bytes and a final one (`ESC ( B`); or `ESC` and the character after it
+/// (Alt and a key).
 fn sequence_len(s: &str) -> usize {
     let mut chars = s.char_indices().skip(1);
     let end = match chars.next() {
         Some((_, '[')) => chars.find(|(_, c)| ('\x40'..='\x7e').contains(c)),
         Some((_, 'O')) => chars.next(),
+        Some((_, ']' | 'P' | 'X' | '^' | '_')) => {
+            match chars.find(|(_, c)| "\x07\x1b".contains(*c)) {
+                Some((at, '\x1b')) => return at,
+                bel => bel,
+            }
+        }
+        Some((_, ' '..='/')) => chars.find(|(_, c)| !(' '..='/').contains(c)),
         next => next,
     };
     end.map_or(s.len(), |(at, c)| at + c.len_utf8())
@@ -201,13 +232,58 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_the_terminal_sends_is_not_typed() {
+        let mut line = Line::default();
+        // VTE's answers to a DSR, an OSC 11 asked with BEL, an OSC 10 asked with ST, and XTVERSION.
+        let replies = concat!(
+            "\x1b[2;1R",
+            "\x1b]11;rgb:0000/0000/0000\x07",
+            "\x1b]10;rgb:c000/c000/c000\x1b\\",
+            "\x1bP>|VTE(8401)\x1b\\",
+        );
+        assert_eq!(line.key(replies), []);
+        assert_eq!(line.text, "");
+    }
+
+    #[test]
+    fn text_shown_keeps_nothing_a_terminal_acts_on() {
+        // A title, two queries, a cursor move and a DCS string, C0 and C1 controls, a charset.
+        let program = concat!(
+            "\x1b]0;pwned\x07\x1b[6n\x1b]11;?\x1b\\",
+            "a\tb\x1b[2A\x1bP$qm\x1b\\\x08中\r\n",
+            "\x1b(B\x1b[31mx\x07\u{9b}",
+        );
+        assert_eq!(clean(program), "a\tb中\nx");
+    }
+
+    #[test]
     fn a_wide_character_takes_two_columns() {
         let mut line = Line::default();
         line.key("é中");
-        assert_eq!(line.draw(">>> ", 80), "\r\x1b[J>>> é中\r\x1b[7C");
-        // Seven columns on rows of six: the cursor is on the second row, which the next drawing
-        // goes back up from.
-        assert_eq!(line.draw(">>> ", 6), "\r\x1b[J>>> é中\r\x1b[1C");
-        assert_eq!(line.erase(), "\x1b[1A\r\x1b[J");
+        assert_eq!(line.draw(">>> ", 80), "\r\x1b[J>>> é中 \r\x1b[7C");
+        // Rows of five now: the seven columns of the drawing at 80 rewrapped onto two, the cursor
+        // on the second.
+        assert_eq!(line.draw(">>> ", 5), "\x1b[1A\r\x1b[J>>> é中 \r\x1b[2C");
+        assert_eq!(line.erase(5), "\x1b[1A\r\x1b[J");
+    }
+
+    #[test]
+    fn a_resize_finds_the_prompt_where_vte_rewrapped_it() {
+        let mut line = Line::default();
+        line.key(&"a".repeat(36));
+        // Forty columns fill two rows of twenty: the cursor stands on the space after them.
+        assert_eq!(
+            line.draw(">>> ", 20),
+            format!("\r\x1b[J>>> {} \r", "a".repeat(36))
+        );
+        // Rewrapped onto rows of twelve, that space is on the fourth row; on rows of 41, the first.
+        assert_eq!(line.erase(12), "\x1b[3A\r\x1b[J");
+        line.draw(">>> ", 20);
+        assert_eq!(line.erase(41), "\r\x1b[J");
+        // Home, drawn on rows of twelve: up from the space's row to the prompt's.
+        line.draw(">>> ", 20);
+        line.key("\x01");
+        let home = format!("\x1b[3A\r\x1b[J>>> {} \x1b[3A\r\x1b[4C", "a".repeat(36));
+        assert_eq!(line.draw(">>> ", 12), home);
     }
 }

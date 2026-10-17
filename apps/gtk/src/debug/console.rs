@@ -3,7 +3,7 @@
 //! line sent is evaluated in the paused call (`evaluate`, context `repl`), one at a time, as
 //! Python's REPL waits for each.
 
-use super::line::{Did, Line};
+use super::line::{self, Did, Line};
 use super::*;
 use accent_api::debug::{Category, Context};
 use std::collections::VecDeque;
@@ -108,7 +108,7 @@ impl App {
         term.view.reset(true, true);
         console.shown.set(false);
         // The rows of a drawing on the screen just cleared.
-        console.line.borrow_mut().erase();
+        console.line.borrow_mut().erase(columns(term));
         let program = console.session.borrow().as_ref().map(|(_, p)| p.clone());
         match program {
             Some(program) => {
@@ -249,8 +249,7 @@ impl App {
         if console.session().is_none() || console.busy.get() {
             return;
         }
-        let columns = u16::try_from(term.view.column_count()).unwrap_or(u16::MAX);
-        let drawn = console.line.borrow_mut().draw(PROMPT, columns);
+        let drawn = console.line.borrow_mut().draw(PROMPT, columns(term));
         term.view.feed(drawn.as_bytes());
         console.shown.set(true);
     }
@@ -264,16 +263,23 @@ impl App {
     fn console_erase(&self, term: &Term) {
         let console = &self.debugger.console;
         if console.shown.replace(false) {
-            let erased = console.line.borrow_mut().erase();
+            let erased = console.line.borrow_mut().erase(columns(term));
             term.view.feed(erased.as_bytes());
         }
     }
 }
 
-/// `text` with its newlines as a terminal takes them, styled for `category`: stderr in the
-/// palette's red, what must be seen bold, the adapter's and the console's own words dim.
+/// The terminal's width now, which VTE has rewrapped the prompt to.
+fn columns(term: &Term) -> u16 {
+    u16::try_from(term.view.column_count()).unwrap_or(u16::MAX)
+}
+
+/// `text` as shown, with nothing a terminal would act on (a title, a cursor move, a query it
+/// would answer as if typed at the prompt) and its newlines as a terminal takes them, styled for
+/// `category`: stderr in the palette's red, what must be seen bold, the adapter's and the
+/// console's own words dim.
 fn styled(category: Category, text: &str) -> String {
-    let text = text.replace('\n', "\r\n");
+    let text = line::clean(text).replace('\n', "\r\n");
     let sgr = match category {
         _ if text.is_empty() => return text,
         Category::Stdout => return text,
