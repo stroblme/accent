@@ -6,6 +6,7 @@ use accent_api::debug::{Category, Context, Evaluated, Frame, Launch, News, Step,
 use sourceview5::prelude::BufferExt as _;
 
 /// One session, from Start until its end.
+#[derive(Default)]
 pub(super) struct Run {
     id: u64,
     program: String,
@@ -19,13 +20,19 @@ pub(super) struct Run {
     paused: RefCell<(String, Option<String>)>,
     /// Restart Debugging: start the program again once this session has ended.
     restart: Cell<bool>,
+    /// The files whose breakpoints changed while the program started, which it is told once it
+    /// runs: it was launched with them as they were at Start.
+    changed: RefCell<std::collections::BTreeSet<String>>,
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
 enum State {
+    #[default]
     Starting,
     Running,
-    Paused { thread: i64 },
+    Paused {
+        thread: i64,
+    },
     Stopping,
 }
 
@@ -80,11 +87,7 @@ impl App {
             id,
             program,
             language,
-            state: Cell::new(State::Starting),
-            frame: Cell::new(None),
-            generation: Cell::new(0),
-            paused: RefCell::default(),
-            restart: Cell::new(false),
+            ..Run::default()
         });
         self.debugger.run.replace(Some(run.clone()));
         self.sync_debug();
@@ -108,6 +111,11 @@ impl App {
                 (Ok(()), State::Starting) => {
                     run.state.set(State::Running);
                     app.sync_debug();
+                    let now = app.debugger.saved(&app);
+                    for key in run.changed.take() {
+                        let lines = now.get(&key).cloned().unwrap_or_default();
+                        app.send_breakpoints(key, lines);
+                    }
                 }
                 // A Stop sent before the session was registered reached nothing.
                 (Ok(()), State::Stopping) => app.send_stop(&run),
@@ -286,6 +294,9 @@ impl App {
                 }
                 self.console_output(category, &text);
             }
+            // The adapter answering for the lines it was launched with, which the reader has
+            // changed since: theirs go once the program runs.
+            News::Breakpoints { path, .. } if run.changed.borrow().contains(&path) => {}
             News::Breakpoints { path, placed } => {
                 if let Some(tab) = self.tab_for(&path) {
                     breakpoints::bind(&tab, &placed);
@@ -456,16 +467,15 @@ impl App {
             let mark = tab
                 .buffer
                 .create_source_mark(None, breakpoints::EXECUTION, &start);
-            self.debugger
-                .execution
-                .replace(Some((Rc::downgrade(tab), mark)));
+            tab.execution.replace(Some(mark));
+            self.debugger.execution.replace(Rc::downgrade(tab));
             breakpoints::redraw(tab);
         }
     }
 
     fn clear_execution(&self) {
-        if let Some((tab, mark)) = self.debugger.execution.take()
-            && let Some(tab) = tab.upgrade()
+        if let Some(tab) = self.debugger.execution.take().upgrade()
+            && let Some(mark) = tab.execution.take()
         {
             tab.buffer.delete_mark(&mark);
             breakpoints::redraw(&tab);
@@ -622,22 +632,31 @@ impl App {
         });
     }
 
-    /// Tell a running program `tab`'s breakpoints, all of them, and move the marks to where it
-    /// holds them.
-    pub(super) fn send_breakpoints(self: &Rc<Self>, tab: &Rc<Tab>) {
+    /// Tell a running program file `key`'s breakpoints, all of them, and move its tab's marks to
+    /// where the program holds them. One still starting is told once it runs; an answer that
+    /// does not come leaves the marks as the reader set them.
+    pub(super) fn send_breakpoints(self: &Rc<Self>, key: String, lines: Vec<u32>) {
         let (Some(run), Some(vault)) = (self.debugger.run(), self.vault()) else {
             return;
         };
-        let asked = vault.debug_breakpoints(run.id, tab.rel(), breakpoints::lines(tab));
-        let (weak, tab) = (Rc::downgrade(self), Rc::downgrade(tab));
+        if !run.takes_breakpoints(&key) {
+            return;
+        }
+        let asked = vault.debug_breakpoints(run.id, key.clone(), lines);
+        let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let placed = crate::work::or_empty("setting the breakpoints", asked.await);
-            let (Some(app), Some(tab)) = (weak.upgrade(), tab.upgrade()) else {
+            let placed = match asked.await {
+                Ok(placed) => placed,
+                Err(e) => return tracing::warn!("setting the breakpoints of {key}: {e}"),
+            };
+            let Some(app) = weak.upgrade() else {
                 return;
             };
             if app.debugger.run().is_some_and(|now| Rc::ptr_eq(&now, &run)) {
-                breakpoints::bind(&tab, &placed);
-                breakpoints::redraw(&tab);
+                if let Some(tab) = app.tab_for(&key) {
+                    breakpoints::bind(&tab, &placed);
+                    breakpoints::redraw(&tab);
+                }
                 app.refill_breakpoints();
             }
         });
@@ -671,5 +690,31 @@ impl Run {
     /// Whether the program runs, paused or not: a session past its start and not stopping.
     fn started(&self) -> bool {
         matches!(self.state.get(), State::Running | State::Paused { .. })
+    }
+
+    /// Whether the program takes `key`'s breakpoints now. One still starting is told once it
+    /// runs, so the file is noted; one stopping needs none.
+    fn takes_breakpoints(&self, key: &str) -> bool {
+        if self.state.get() == State::Starting {
+            self.changed.borrow_mut().insert(key.to_string());
+        }
+        self.started()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn breakpoints_changed_while_starting_wait_for_the_program() {
+        let run = Run::default();
+        assert!(!run.takes_breakpoints("lib.py"));
+        assert!(run.changed.borrow().contains("lib.py"));
+        run.state.set(State::Paused { thread: 1 });
+        assert!(run.takes_breakpoints("demo.py"));
+        run.state.set(State::Stopping);
+        assert!(!run.takes_breakpoints("demo.py"));
+        assert_eq!(run.changed.take().len(), 1, "noted only while starting");
     }
 }

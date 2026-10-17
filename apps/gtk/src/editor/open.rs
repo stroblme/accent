@@ -190,6 +190,7 @@ pub fn open(
         folds: RefCell::new(Vec::new()),
         fold_renderer: folds.clone(),
         breakpoints: RefCell::new(Vec::new()),
+        execution: RefCell::new(None),
         font: RefCell::new(None),
         monitor: RefCell::new(None),
         loading: Cell::new(false),
