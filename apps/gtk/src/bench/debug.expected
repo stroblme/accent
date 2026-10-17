@@ -1,0 +1,11 @@
+bench debug breakpoint demo.py:2
+bench debug stopped demo.py:2 breakpoint
+bench debug top double demo.py:2
+bench debug locals x=21
+bench debug repl 42
+bench debug hover x = 21
+bench debug step demo.py:3
+bench debug ended 0
+bench debug output total 42
+bench debug program kept
+bench debug pane hidden

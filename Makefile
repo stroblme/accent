@@ -343,6 +343,10 @@ smoke: gtk-bench vault xvfb
 #
 # `ACCENT_BENCH_SWITCHER=goto:…` exits 1 when a note picked in Go to File, from the Files tree or
 # from a note, has not taken the keyboard; the keys are real, through XTEST.
+#
+# `ACCENT_BENCH_DEBUG` debugs a small Python program with debugpy, held against `debug.expected`,
+# and is skipped where `python3` has no debugpy. Its program runs in a terminal tab, so under a
+# scratch HOME.
 drills: gtk-bench xvfb
 	$(HEADLESS) ACCENT_BENCH_KEYS=1 timeout 60 $(TARGET_DIR)/accent "$$xdg/vault" >"$$xdg/keys" && \
 	grep '^bench ' "$$xdg/keys" | diff -u apps/gtk/src/bench/keys.expected -
@@ -358,6 +362,12 @@ drills: gtk-bench xvfb
 		ACCENT_BENCH_COMPLETE=code:complete.c timeout 60 $(TARGET_DIR)/accent "$$0"' \
 		"$$xdg/vault" >"$$xdg/complete" && \
 	grep '^bench ' "$$xdg/complete" | diff -u apps/gtk/src/bench/complete.expected -
+	$(HEADLESS) sh -c 'export HOME="$$0/home" && mkdir "$$HOME" && \
+		{ python3 -c "import debugpy" 2>/dev/null || { echo "SKIPPED the debugger drill: no debugpy"; exit 0; }; } && \
+		printf "def double(x):\n    y = x * 2\n    return y\n\ntotal = double(21)\nprint(\"total\", total)\n" \
+			>"$$0/vault/demo.py" && \
+		ACCENT_BENCH_DEBUG=demo.py:2 timeout 60 $(TARGET_DIR)/accent "$$0/vault" >"$$0/debug" && \
+		grep "^bench debug " "$$0/debug" | diff -u apps/gtk/src/bench/debug.expected -' "$$xdg"
 
 ## screenshots: regenerate docs/screenshot-1..4.png and data/screenshots (needs magick, htop, Xvfb)
 #
