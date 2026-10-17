@@ -187,7 +187,7 @@ fn main() -> glib::ExitCode {
         windows: RefCell::new(Vec::new()),
         start: glib::WeakRef::new(),
         landing: RefCell::new(None),
-        keys: Cell::new(actions::Keys::Tab),
+        keys: Cell::new((actions::Keys::Tab, false)),
     });
     shell.watch_config();
     // A `[shortcuts]` key naming no action binds nothing, silently — an action that was renamed

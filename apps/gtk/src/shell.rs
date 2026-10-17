@@ -23,8 +23,9 @@ pub struct Shell {
     /// somewhere to put it. See [`Landing`].
     pub landing: RefCell<Option<Landing>>,
     /// Where the keyboard was when the shared accelerator table was last built
-    /// (`Shell::apply_accels`); one for all windows, as the table is.
-    pub keys: Cell<crate::actions::Keys>,
+    /// (`Shell::apply_accels`), and whether its window debugged; one for all windows, as the
+    /// table is.
+    pub keys: Cell<(crate::actions::Keys, bool)>,
 }
 
 /// Window identity: vault key, named `terminal://<name>` session or unkeyed [`Loose`] kind.
@@ -186,7 +187,7 @@ impl Shell {
     }
 
     /// Resolve the active window state for application actions and their usage recording.
-    fn app_at(&self, window: &gtk::Window) -> Option<Rc<App>> {
+    pub(crate) fn app_at(&self, window: &gtk::Window) -> Option<Rc<App>> {
         self.windows
             .borrow()
             .iter()

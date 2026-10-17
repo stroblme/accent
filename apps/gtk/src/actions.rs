@@ -319,14 +319,19 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     // VS Code's F5 is Presentation Mode's outside a session here.
     ("win.debug-start", "Start Debugging", &["<Control>F5"]),
     // Enabled as the session's state allows (`App::sync_debug`), so the Code pane's strip greys
-    // what cannot be done now and the palette's entries do nothing.
-    ("win.debug-continue", "Continue", &[]),
-    ("win.debug-pause", "Pause", &[]),
-    ("win.debug-step-over", "Step Over", &[]),
-    ("win.debug-step-into", "Step Into", &[]),
-    ("win.debug-step-out", "Step Out", &[]),
-    ("win.debug-restart", "Restart Debugging", &[]),
-    ("win.debug-stop", "Stop Debugging", &[]),
+    // what cannot be done now and the palette's entries do nothing. VS Code's keys, heard only
+    // while a session runs ([`SESSION`]).
+    ("win.debug-continue", "Continue", &["F5"]),
+    ("win.debug-pause", "Pause", &["F6"]),
+    ("win.debug-step-over", "Step Over", &["F10"]),
+    ("win.debug-step-into", "Step Into", &["F11"]),
+    ("win.debug-step-out", "Step Out", &["<Shift>F11"]),
+    (
+        "win.debug-restart",
+        "Restart Debugging",
+        &["<Control><Shift>F5"],
+    ),
+    ("win.debug-stop", "Stop Debugging", &["<Shift>F5"]),
     ("win.rename", "Rename", &["F2"]),
     // No chord: Delete over a tree row already trashes, from the tree's own key controller, and
     // a chord that reaches a focused editor is the last thing a delete should have.
@@ -886,6 +891,44 @@ pub fn accels_for(config: &Config, action: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Whether `event` is one of `action`'s chords, as the table has it now.
+pub fn is_chord(config: &Config, action: &str, event: &gdk::Event) -> bool {
+    accels_for(config, action)
+        .iter()
+        .filter_map(|accel| gtk::ShortcutTrigger::parse_string(accel))
+        .any(|trigger| trigger.trigger(event, false) == gdk::KeyMatch::Exact)
+}
+
+/// A debug session's controls, on VS Code's keys (user decision 2026-10-17). They are never
+/// installed: the window hears them itself while it debugs (`wire::wire_window`), ahead of whatever
+/// has the keyboard, GtkPaned's `F6` and a focused shell included.
+const SESSION: &[&str] = &[
+    "win.debug-continue",
+    "win.debug-pause",
+    "win.debug-step-over",
+    "win.debug-step-into",
+    "win.debug-step-out",
+    "win.debug-restart",
+    "win.debug-stop",
+];
+
+/// What gives up a chord it shares with [`SESSION`] while a session runs: `F5`, `F10` and `F11`.
+const SHADOWED: &[&str] = &["win.present", "win.menu", "win.fullscreen"];
+
+/// Whether `a` and `b` may hold one chord: a session control and a command it shadows.
+pub fn may_share(a: &str, b: &str) -> bool {
+    let shadows = |a: &str, b: &str| SESSION.contains(&a) && SHADOWED.contains(&b);
+    shadows(a, b) || shadows(b, a)
+}
+
+/// The session control `event` is the chord of.
+pub fn session_chord(config: &Config, event: &gdk::Event) -> Option<&'static str> {
+    SESSION
+        .iter()
+        .copied()
+        .find(|action| is_chord(config, action, event))
+}
+
 // GtkTextView binds Ctrl+Up/Down to paragraph movement and GtkSourceView binds Shift+Alt+Up/Down
 // to move-viewport. Both are class shortcuts, which run in the bubble phase at the focused view
 // and so get the key before the window's application accelerators ever see it. Claiming these four
@@ -1001,6 +1044,21 @@ fn kept(action: &str, accel: &str, forward: bool) -> bool {
     match forward {
         true => matches!(action, "win.terminal-copy" | "win.terminal-paste"),
         false => reserved(action, accel),
+    }
+}
+
+/// Whether the table holds `accel` for `action` with the keyboard at `keys`. [`SESSION`] is never
+/// installed, and a [`SHADOWED`] command loses a chord in `shadowed`, the session's while the
+/// active window debugs.
+fn installed(action: &str, accel: &str, keys: Keys, forward: bool, shadowed: &[String]) -> bool {
+    let shadows = shadowed.iter().any(|s| s == accel);
+    if SESSION.contains(&action) || (SHADOWED.contains(&action) && shadows) {
+        return false;
+    }
+    match keys {
+        Keys::Shell => kept(action, accel, forward),
+        Keys::Tab => true,
+        Keys::Elsewhere => !EDITING.contains(&action),
     }
 }
 
@@ -1282,32 +1340,46 @@ impl Shell {
     /// Filter through [`kept`] while the active window focuses a shell, allowing other keys to
     /// reach VTE, and leave out the [`EDITING`] chords while its keyboard is in no tab. Filter
     /// effective bindings so rebindings obey the same rule; the table belongs to the application
-    /// even when another window rebuilds it.
+    /// even when another window rebuilds it. While the active window debugs, its session's chords
+    /// are taken from the commands they shadow ([`installed`]).
     pub fn apply_accels(&self, gtk_app: &gtk::Application) {
         let config = self.config.borrow();
-        let keys = Keys::of(gtk_app);
-        self.keys.set(keys);
+        let (keys, debugging) = self.keys_of(gtk_app);
+        self.keys.set((keys, debugging));
+        let shadowed: Vec<String> = match debugging {
+            true => SESSION
+                .iter()
+                .flat_map(|action| accels_for(&config, action))
+                .collect(),
+            false => Vec::new(),
+        };
+        let forward = config.forward_keys_to_terminal;
         for (action, _, _) in ACTIONS {
             let accels = accels_for(&config, action);
             let accels: Vec<&str> = accels
                 .iter()
                 .map(String::as_str)
-                .filter(|accel| match keys {
-                    Keys::Shell => kept(action, accel, config.forward_keys_to_terminal),
-                    Keys::Tab => true,
-                    Keys::Elsewhere => !EDITING.contains(action),
-                })
+                .filter(|accel| installed(action, accel, keys, forward, &shadowed))
                 .collect();
             gtk_app.set_accels_for_action(action, &accels);
         }
     }
 
-    /// Rebuild shortcuts only when the keyboard crosses into or out of a shell or a tab, avoiding
-    /// work on every click.
+    /// Rebuild shortcuts only when the keyboard crosses into or out of a shell or a tab, or a
+    /// session starts or ends in the active window, avoiding work on every click.
     pub fn sync_accels(&self, gtk_app: &gtk::Application) {
-        if Keys::of(gtk_app) != self.keys.get() {
+        if self.keys_of(gtk_app) != self.keys.get() {
             self.apply_accels(gtk_app);
         }
+    }
+
+    /// Where the active window's keyboard is, and whether that window debugs.
+    fn keys_of(&self, gtk_app: &gtk::Application) -> (Keys, bool) {
+        let debugging = gtk_app
+            .active_window()
+            .and_then(|window| self.app_at(&window))
+            .is_some_and(|app| app.debugger.running());
+        (Keys::of(gtk_app), debugging)
     }
 }
 
@@ -1358,11 +1430,11 @@ mod tests {
         }
     }
 
-    /// Every action the capture controller claims has to be in the table it reads its chords from,
-    /// or a rebind would silently drop it.
+    /// Every action the capture controllers claim has to be in the table they read their chords
+    /// from, or a rebind would silently drop it; a session's too, and those it shadows.
     #[test]
     fn captured_actions_are_in_the_action_table() {
-        for action in CAPTURED {
+        for action in CAPTURED.iter().chain(SESSION).chain(SHADOWED) {
             assert!(
                 ACTIONS.iter().any(|(name, _, _)| name == action),
                 "{action} is captured but not in ACTIONS"
@@ -1765,15 +1837,40 @@ mod tests {
         }
     }
 
+    /// A session's chord and the one it shadows meanwhile are the only two a chord may have.
     #[test]
     fn no_two_actions_claim_the_same_accelerator() {
-        let mut seen = std::collections::HashMap::new();
+        let mut seen = std::collections::HashMap::<&str, Vec<&str>>::new();
         for (name, _, accels) in ACTIONS {
             for accel in *accels {
-                if let Some(other) = seen.insert(*accel, *name) {
+                let holders = seen.entry(*accel).or_default();
+                if let Some(other) = holders.iter().find(|other| !may_share(other, name)) {
                     panic!("{accel} is bound to both {other} and {name}");
                 }
+                holders.push(name);
             }
         }
+    }
+
+    /// While a session runs its chords are the window's to hear, never the table's, and
+    /// Presentation, Primary Menu and Fullscreen give up the ones they share; nothing else does.
+    #[test]
+    fn a_running_session_takes_f5_from_presentation_alone() {
+        let f5 = ["F5".to_string()];
+        assert!(!installed("win.present", "F5", Keys::Tab, false, &f5));
+        assert!(installed("win.present", "F5", Keys::Tab, false, &[]));
+        for keys in [Keys::Tab, Keys::Shell, Keys::Elsewhere] {
+            for shadowed in [&f5[..], &[]] {
+                let continues = installed("win.debug-continue", "F5", keys, false, shadowed);
+                assert!(!continues, "{keys:?}");
+            }
+        }
+        assert!(installed(
+            "win.find-next",
+            "F3",
+            Keys::Tab,
+            false,
+            &["F3".to_string()]
+        ));
     }
 }
