@@ -5,6 +5,8 @@
 //! become bold lines, links retain their text, and lists lose bullets.
 
 use crate::editor::Tab;
+use accent_api::Task;
+use accent_api::debug::Evaluated;
 use gtk::subclass::prelude::*;
 use gtk::{glib, graphene, pango};
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
@@ -103,6 +105,31 @@ fn diagnostic_markup(item: &accent_api::Diagnostic) -> String {
     line
 }
 
+/// What the hovered name at `start` holds in the paused program, `self.items` on its `items`,
+/// as it is asked for; `None` unless a program is paused in a file its debugger runs.
+fn value_of(tab: &Rc<Tab>, start: &gtk::TextIter) -> Option<(String, Task<Evaluated>)> {
+    let mut from = *start;
+    from.set_line_offset(0);
+    let mut to = *start;
+    if !to.ends_line() {
+        to.forward_to_line_end();
+    }
+    let expression = crate::debug::expression_at(&from.text(&to), start.line_offset() as usize)?;
+    let asked = (tab.lang.hooks()?.evaluate)(tab, expression.clone())?;
+    Some((expression, asked))
+}
+
+/// `expression = value` in monospace, the value's type dimmed after it.
+fn value_markup(expression: &str, value: &Evaluated) -> String {
+    let said = format!("{expression} = {}", value.result);
+    let mut line = format!("<tt>{}</tt>", glib::markup_escape_text(&said));
+    if let Some(kind) = &value.kind {
+        let kind = glib::markup_escape_text(kind);
+        line.push_str(&format!(" <span alpha=\"60%\">{kind}</span>"));
+    }
+    line
+}
+
 // ------------------------------------------------------------------------------------ provider
 
 mod provider_imp {
@@ -117,7 +144,7 @@ mod provider_imp {
     use sourceview5::subclass::prelude::*;
     use sourceview5::{HoverContext, HoverDisplay};
 
-    use super::{diagnostic_markup, limits, markup_of};
+    use super::{diagnostic_markup, limits, markup_of, value_markup, value_of};
     use crate::editor::Tab;
     use crate::{diagnostics, lang};
 
@@ -156,8 +183,16 @@ mod provider_imp {
                 let Some(vault) = tab.lang.vault() else {
                     return Ok(());
                 };
+                // Asked first, so that it is out while the server is asked.
+                let value = value_of(&tab, &start);
                 lang::flush(tab.clone()).await;
                 let answer = vault.hover(&tab.rel(), pos).await.ok().flatten();
+                let value = match value {
+                    Some((expression, asked)) => {
+                        asked.await.ok().map(|v| value_markup(&expression, &v))
+                    }
+                    None => None,
+                };
                 let items = tab.diagnostics().clone();
                 let here = diagnostics::at(&items, pos);
                 tracing::debug!(
@@ -166,18 +201,15 @@ mod provider_imp {
                     answer.is_some(),
                     here.len()
                 );
-                if answer.is_none() && here.is_empty() {
+                if value.is_none() && answer.is_none() && here.is_empty() {
                     // Nothing appended: an empty display is what stops the assistant showing at
                     // all, which is not the same as showing an empty box.
                     return Ok(());
                 }
-                let mut markup = answer.map(|h| markup_of(&h.text)).unwrap_or_default();
-                for item in here {
-                    if !markup.is_empty() {
-                        markup.push('\n');
-                    }
-                    markup.push_str(&diagnostic_markup(item));
-                }
+                let mut markup: Vec<String> = value.into_iter().collect();
+                markup.extend(answer.map(|h| markup_of(&h.text)));
+                markup.extend(here.into_iter().map(diagnostic_markup));
+                let markup = markup.join("\n");
                 let (chars, height) = limits(&tab.view, &start);
                 let label = gtk::Label::builder()
                     .use_markup(true)

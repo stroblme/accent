@@ -1038,6 +1038,18 @@ impl App {
                         }
                     }
                 )),
+                evaluate: Rc::new(glib::clone!(
+                    #[weak(rename_to = app)]
+                    self,
+                    #[upgrade_or_default]
+                    move |tab: &Rc<Tab>, expression: String| {
+                        use accent_api::debug::{Context, debuggable};
+                        if !debuggable(&lang::language_id(tab)) {
+                            return None;
+                        }
+                        app.debug_evaluate(expression, Context::Hover)
+                    }
+                )),
             },
         );
 

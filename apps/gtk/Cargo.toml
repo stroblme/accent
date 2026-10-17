@@ -46,6 +46,9 @@ serde_json.workspace = true
 pulldown-cmark.workspace = true
 # The Git pane's lists splice only the rows a refresh changed (`git::changed_runs`); core's too.
 similar = { version = "3", default-features = false }
+# Already in the lock through core; where the Debug Console's prompt puts the cursor, a wide
+# character taking two columns (`debug::line`).
+unicode-width = "0.2"
 # The vault's events reach the main loop through a channel it awaits (`events::start_events`).
 # Already built for gio; `recv` is from 0.3.34.
 futures-channel = "0.3.34"

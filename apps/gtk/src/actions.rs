@@ -332,6 +332,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
         &["<Control><Shift>F5"],
     ),
     ("win.debug-stop", "Stop Debugging", &["<Shift>F5"]),
+    ("win.debug-console", "Debug Console", &[]),
     ("win.rename", "Rename", &["F2"]),
     // No chord: Delete over a tree row already trashes, from the tree's own key controller, and
     // a chord that reaches a focused editor is the last thing a delete should have.
@@ -673,6 +674,7 @@ impl App {
             "debug-step-out" => self.debug_step(Step::Out),
             "debug-restart" => self.restart_debugging(),
             "debug-stop" => self.stop_debugging(),
+            "debug-console" => self.show_debug_console(),
             "conflict-current" | "conflict-incoming" | "conflict-both" => {
                 let take = match name {
                     "conflict-current" => Take::Current,

@@ -5,6 +5,7 @@
 //! at the server. Coalescing edits lets the latest win with one round trip per typing burst.
 
 use crate::editor::{Flavour, Tab};
+use accent_api::debug::Evaluated;
 use accent_api::{CodeSymbol, Kind, Pos, Range, Support, Symbol, SymbolKind, Vault};
 use futures_channel::oneshot;
 use gtk::glib;
@@ -28,6 +29,9 @@ const SLOW_START: Duration = Duration::from_secs(1);
 /// A callback the window registered, in the shape `editor.rs` uses for its own.
 pub type Hook = Rc<dyn Fn(&Rc<Tab>)>;
 
+/// The window's evaluation of an expression in its debugged program.
+pub type Evaluate = Rc<dyn Fn(&Rc<Tab>, String) -> Option<accent_api::Task<Evaluated>>>;
+
 /// What the language layer hands back to the window when an answer arrives.
 pub struct Hooks {
     /// New symbols for this tab: the Outline pane and the sticky title are drawn from them.
@@ -38,6 +42,9 @@ pub struct Hooks {
     /// The document has waited [`SLOW_START`] on its server, or no longer waits: see
     /// [`State::starting`].
     pub on_starting: Hook,
+    /// An expression's value in the debugged program, for the hover: `None` unless it is paused
+    /// and this is a file its debugger runs.
+    pub evaluate: Evaluate,
 }
 
 /// Tab-owned language document state.
@@ -89,6 +96,10 @@ impl State {
     /// The vault to ask, for a tab that has one.
     pub fn vault(&self) -> Option<Arc<Vault>> {
         self.vault.borrow().clone()
+    }
+
+    pub fn hooks(&self) -> Option<Rc<Hooks>> {
+        self.hooks.borrow().clone()
     }
 
     /// What the provider can do; `None` while the document is still opening.

@@ -83,6 +83,7 @@ impl Term {
                 Shell::Local(cwd) => cwd.display().to_string(),
                 Shell::Remote { at, .. } => at.host.clone(),
                 Shell::Program(program) => program.cwd.clone(),
+                Shell::Console => String::new(),
             })
     }
 
@@ -101,7 +102,7 @@ impl Term {
                     .map(str::to_string)
             }
             Shell::Remote { at, .. } => Some(at.to_string()),
-            Shell::Program(_) => None,
+            Shell::Program(_) | Shell::Console => None,
         }
     }
 
@@ -123,6 +124,7 @@ impl Term {
                 Some(program.cwd.clone()),
                 program.args.first().cloned(),
             ),
+            Shell::Console => (glib::host_name().to_string(), None, None),
         };
         Facts {
             program: told.program.or(program),
@@ -181,8 +183,9 @@ impl Term {
             Shell::Remote { kill, link, .. } => {
                 run_kill(kill.clone(), Some(ssh::control_path(link)))
             }
-            // Nothing holds it: its pty's hangup ends it as the tab goes.
-            Shell::Program(_) => {}
+            // Nothing holds a program: its pty's hangup ends it as the tab goes. A console runs
+            // nothing.
+            Shell::Program(_) | Shell::Console => {}
         }
     }
 
@@ -191,13 +194,18 @@ impl Term {
         match &self.shell {
             Shell::Remote { link, .. } => Some(link),
             // A program has no reconnect, so it is in no reconnect's way.
-            Shell::Local(_) | Shell::Program(_) => None,
+            Shell::Local(_) | Shell::Program(_) | Shell::Console => None,
         }
     }
 
     /// Whether it runs a debugged program rather than a shell.
     pub fn is_program(&self) -> bool {
         matches!(self.shell, Shell::Program(_))
+    }
+
+    /// Whether it is the Debug Console.
+    pub fn is_console(&self) -> bool {
+        matches!(self.shell, Shell::Console)
     }
 
     /// Whether `other` rides the same master, so that a link that dropped took both.
@@ -262,9 +270,12 @@ pub enum Shell {
         /// remote vault's own, or the host's.
         link: ssh::Url,
     },
-    /// A debugged program, run as its debug adapter asked: the one shell not held, since the
-    /// program is its session's and must not outlive it.
+    /// A debugged program, run as its debug adapter asked: not held, since the program is its
+    /// session's and must not outlive it.
     Program(Rc<Program>),
+    /// The Debug Console, which runs nothing: its transcript and its prompt are fed
+    /// (`debug::console`).
+    Console,
 }
 
 /// What a debug adapter asked to have run in a terminal (`runInTerminal`).
@@ -299,7 +310,7 @@ impl Shell {
     /// Command to list held shells locally or through the host master. `None` without `accent-cli`.
     fn held(&self) -> Option<Vec<String>> {
         match self {
-            Shell::Program(_) => None,
+            Shell::Program(_) | Shell::Console => None,
             Shell::Local(_) => {
                 let mut argv = cli()?;
                 argv.push("held".to_string());
@@ -319,7 +330,7 @@ impl Shell {
     /// Command to fetch shell `id`'s last clipboard copy ([`take_copies`]) locally or through the host master.
     fn clip(&self, id: &str) -> Option<Vec<String>> {
         match self {
-            Shell::Program(_) => None,
+            Shell::Program(_) | Shell::Console => None,
             Shell::Local(_) => {
                 let mut argv = cli()?;
                 argv.extend(["clip".to_string(), id.to_string()]);
@@ -375,10 +386,14 @@ pub fn open(tabs: &adw::TabView, at: Option<i32>, shell: &Shell, key: String) ->
             Shell::Local(_) => "Terminal".to_string(),
             Shell::Remote { at, .. } => at.host.clone(),
             Shell::Program(program) => program.title.clone(),
+            Shell::Console => "Debug Console".to_string(),
         }
         .as_str(),
     );
-    page.set_icon(Some(&gio::ThemedIcon::new("utilities-terminal-symbolic")));
+    page.set_icon(Some(&gio::ThemedIcon::new(match shell {
+        Shell::Console => "dap-console-symbolic",
+        _ => "utilities-terminal-symbolic",
+    })));
     // A tab appended to a visible pane is mapped already, so the signal above has been and gone.
     if view.is_mapped() {
         paint(&view);
@@ -611,6 +626,7 @@ fn spawn(view: &vte4::Terminal, shell: &Shell, id: &str) {
                 (None, argv, Vec::new())
             }
         },
+        (Shell::Console, _) => return,
     };
     let program = match shell {
         Shell::Program(program) => Some(program.clone()),
@@ -997,6 +1013,11 @@ pub fn program_key() -> String {
     )
 }
 
+/// The Debug Console's tab key: one per window, and never a held shell's.
+pub fn console_key() -> String {
+    "debug:console".to_string()
+}
+
 /// Whether a session's key names a shell rather than a file.
 pub fn is_key(key: &str) -> bool {
     key.strip_prefix(KEY)
@@ -1073,7 +1094,7 @@ pub fn end(key: &str, at: &str) {
         let url = ssh::parse(at).map_err(|e| e.to_string());
         match url.and_then(|url| Shell::remote(url.clone(), accent_api::link::host(&url), key)) {
             Ok(Shell::Remote { kill, link, .. }) => run_kill(kill, Some(ssh::control_path(&link))),
-            Ok(Shell::Local(_) | Shell::Program(_)) => {}
+            Ok(Shell::Local(_) | Shell::Program(_) | Shell::Console) => {}
             Err(e) => tracing::warn!("cannot end the shell at {at}: {e}"),
         }
         return;
