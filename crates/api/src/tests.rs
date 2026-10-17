@@ -97,6 +97,44 @@ pub(crate) fn has_debugpy() -> bool {
         .is_ok_and(|s| s.success())
 }
 
+/// A debug adapter that needs no debugpy, for what happens around the protocol: `python3`
+/// answering every request with an empty success but `evaluate`, which it never answers, like a
+/// console running `while True: pass`. In its folder it leaves a file named for each request it
+/// reads, answers nothing while a `hold` file is there, and leaves `ended` once its input closes.
+pub(crate) fn fake_adapter() -> accent_core::config::DebugConfig {
+    const ADAPTER: &str = r#"
+import json, os, sys, time
+seq = 0
+while True:
+    length = 0
+    while line := sys.stdin.buffer.readline():
+        if line == b"\r\n":
+            break
+        name, _, value = line.partition(b":")
+        if name.strip().lower() == b"content-length":
+            length = int(value)
+    if not line:
+        break
+    request = json.loads(sys.stdin.buffer.read(length))
+    open(request["command"], "w").close()
+    while os.path.exists("hold"):
+        time.sleep(0.01)
+    if request["command"] == "evaluate":
+        continue
+    seq += 1
+    answer = json.dumps({"seq": seq, "type": "response", "request_seq": request["seq"],
+                         "command": request["command"], "success": True, "body": {}}).encode()
+    sys.stdout.buffer.write(b"Content-Length: %d\r\n\r\n" % len(answer) + answer)
+    sys.stdout.buffer.flush()
+open("ended", "w").close()
+"#;
+    let argv = ["python3", "-c", ADAPTER].map(String::from).to_vec();
+    accent_core::config::DebugConfig {
+        adapters: [("python3".to_string(), argv)].into(),
+        ..Default::default()
+    }
+}
+
 pub(crate) fn names(rows: &[FileRow]) -> Vec<String> {
     rows.iter().map(|r| r.rel_path.clone()).collect()
 }
