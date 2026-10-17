@@ -6,8 +6,8 @@ use super::*;
 const GOALS: Duration = Duration::from_millis(300);
 
 impl App {
-    /// Show Code for active-tab capabilities and request goals.
-    /// Window-owned visibility allows future debugger sections on any tab.
+    /// Show Code while the tab in front has goals or a debug session runs, and request goals.
+    /// Window-owned visibility keeps the debugger's sections up over any tab.
     pub fn sync_code_pane(self: &Rc<Self>) {
         let Some(sidebar) = self.sidebar.get() else {
             return;
@@ -16,7 +16,7 @@ impl App {
             .active()
             .and_then(|tab| tab.lang.support())
             .is_some_and(|support| support.goals);
-        sidebar.set_code_visible(goals);
+        sidebar.set_code_visible(goals || self.debugger.running());
         self.refresh_goals();
     }
 

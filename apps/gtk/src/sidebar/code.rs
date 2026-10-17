@@ -1,8 +1,9 @@
 //! Show language-layer data at the active caret as independent Code pane sections.
 //!
-//! Proof goals are the first section; the window controls visibility so future debugger
-//! sections can share the pane without depending on a tab kind.
+//! Proof goals are the first sections, a debug session's the rest (`debug.rs`); the window
+//! controls visibility, so the debugger's stay up over any tab while a session runs.
 
+use super::debug::{self, Debug};
 use super::sections::Sections;
 use super::widgets::Section;
 use crate::widgets::{scroller, status_page};
@@ -21,6 +22,10 @@ pub(super) struct Code {
     /// "nothing" while no section has anything to say.
     pub(super) root: gtk::Stack,
     goals: Section,
+    /// The debugger's strip and sections, in a window with a vault to debug in.
+    pub(super) debug: Option<Debug>,
+    /// Whether a session runs, which keeps the sections' page up.
+    debugging: Cell<bool>,
     /// The goals, a label each.
     goal_labels: gtk::Box,
     expected: Section,
@@ -34,7 +39,7 @@ pub(super) struct Code {
 }
 
 impl Code {
-    pub(super) fn new() -> Code {
+    pub(super) fn new(debug: Option<debug::Data>) -> Code {
         let goal_labels = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(12)
@@ -48,9 +53,18 @@ impl Code {
         expected_label.set_margin_end(12);
         expected_label.set_margin_bottom(12);
         let expected = Section::new("Expected Type", &scroller(&expected_label));
-        let sections = Sections::new(&[&goals.root, &expected.root]);
+        let debug = debug.map(Debug::new);
+        let mut stacked = vec![&goals.root, &expected.root];
+        stacked.extend(debug.iter().flat_map(|d| d.sections().map(|s| &s.root)));
+        let sections = Sections::new(&stacked);
+        // The strip stands over the sections, outside their dividers.
+        let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        if let Some(debug) = &debug {
+            page.append(&debug.strip);
+        }
+        page.append(&sections.root);
         let root = gtk::Stack::builder().vexpand(true).build();
-        root.add_named(&sections.root, Some("sections"));
+        root.add_named(&page, Some("sections"));
         root.add_named(
             &status_page(ICON, "No Goals", "Place the caret in a proof"),
             Some("nothing"),
@@ -66,6 +80,8 @@ impl Code {
         let code = Code {
             root,
             goals,
+            debug,
+            debugging: Cell::new(false),
             goal_labels,
             expected,
             expected_label,
@@ -86,7 +102,7 @@ impl Code {
             self.answered.set(false);
             self.show(None, None);
         }
-        if checking && !self.answered.get() {
+        if checking && !self.answered.get() && !self.debugging.get() {
             self.root.set_visible_child_name("checking");
         }
     }
@@ -130,17 +146,34 @@ impl Code {
         self.expected_label.set_text(expected.unwrap_or_default());
         self.expected_label.set_attributes(attrs.as_ref());
         self.expected.root.set_visible(expected.is_some());
+        self.pick_page();
+    }
+
+    /// The sections while any has something to say or a session runs, else the page saying why
+    /// there are none.
+    fn pick_page(&self) {
+        let shown = self.goals.root.is_visible() || self.expected.root.is_visible();
         self.root
-            .set_visible_child_name(match tactic.is_some() || expected.is_some() {
+            .set_visible_child_name(match shown || self.debugging.get() {
                 true => "sections",
                 false => "nothing",
             });
+    }
+
+    /// A session running or not: its sections come and go, and with them the pane's page.
+    pub(super) fn set_debugging(&self, on: bool) {
+        if self.debugging.replace(on) != on {
+            self.pick_page();
+        }
     }
 
     pub(super) fn section(&self, name: &str) -> Option<&Section> {
         match name {
             "goals" => Some(&self.goals),
             "expected" => Some(&self.expected),
+            "stack" => self.debug.as_ref().map(|d| &d.stack),
+            "variables" => self.debug.as_ref().map(|d| &d.variables),
+            "breakpoints" => self.debug.as_ref().map(|d| &d.breakpoints),
             _ => None,
         }
     }
@@ -152,17 +185,31 @@ impl Code {
 
     /// The sections as the session keeps them.
     pub(super) fn saved(&self) -> CodePane {
+        // A window with nothing to debug keeps the debugger's sections open for one that has.
+        let open = |name| self.section(name).is_none_or(|s| s.root.is_expanded());
         CodePane {
-            goals: self.goals.root.is_expanded(),
-            expected: self.expected.root.is_expanded(),
+            goals: open("goals"),
+            expected: open("expected"),
+            stack: open("stack"),
+            variables: open("variables"),
+            breakpoints: open("breakpoints"),
             dividers: self.sections.shares(),
         }
     }
 
     pub(super) fn restore(&self, saved: &CodePane) {
         self.sections.restore(&saved.dividers);
-        self.goals.root.set_expanded(saved.goals);
-        self.expected.root.set_expanded(saved.expected);
+        for (name, open) in [
+            ("goals", saved.goals),
+            ("expected", saved.expected),
+            ("stack", saved.stack),
+            ("variables", saved.variables),
+            ("breakpoints", saved.breakpoints),
+        ] {
+            if let Some(section) = self.section(name) {
+                section.root.set_expanded(open);
+            }
+        }
         self.sections.fit();
     }
 

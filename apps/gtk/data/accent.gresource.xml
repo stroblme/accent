@@ -46,6 +46,9 @@
     <file preprocess="xml-stripblanks">icons/scalable/actions/remote-server-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/dap-breakpoint-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/dap-breakpoint-unverified-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/dap-step-over-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/dap-step-into-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/dap-step-out-symbolic.svg</file>
     <!-- The same tabler folder and file the completion kinds draw, under the file lists' names. -->
     <file alias="icons/scalable/actions/filetype-folder-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/lsp-folder-symbolic.svg</file>
     <file alias="icons/scalable/actions/filetype-file-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/lsp-file-symbolic.svg</file>

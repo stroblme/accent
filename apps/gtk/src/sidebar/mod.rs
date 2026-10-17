@@ -4,6 +4,7 @@
 //! state. Each pane receives only the data and operations it uses.
 
 mod code;
+mod debug;
 mod details;
 mod info;
 mod outline;
@@ -13,6 +14,7 @@ mod sections;
 mod tags;
 mod widgets;
 
+pub use debug::Data as DebugData;
 pub use details::{Fact, Group};
 pub use outline::{Line, above, outline_note};
 pub use ports::Data as PortsData;
@@ -20,6 +22,7 @@ pub use search::{Answer, Data as SearchData, Query};
 pub use tags::Data as TagsData;
 
 use accent_api::Goals;
+use accent_api::debug::{Frame, Scope, Thread};
 use accent_core::config::{CodePane, InfoPane};
 use adw::prelude::*;
 use gtk::{glib, pango};
@@ -60,6 +63,7 @@ pub struct Data {
     pub search: search::Data,
     pub tags: tags::Data,
     pub ports: ports::Data,
+    pub debug: debug::Data,
 }
 
 pub struct Sidebar {
@@ -162,7 +166,9 @@ impl Sidebar {
         // there is nothing for them to show and they are not built at all.
         let details = details::Details::new();
         let mut vault_info = None;
+        let mut debug = None;
         let panes = vault.map(|(files, data, git, git_divider)| {
+            debug = Some(data.debug);
             stack.add_titled_with_icon(&files, Some("files"), "Files", "folder-symbolic");
 
             let search = search::pane(&Rc::new(data.search), &on_open);
@@ -253,7 +259,7 @@ impl Sidebar {
         outline_bin.set_child(Some(&outline::empty()));
         stack.add_titled_with_icon(&outline_bin, Some("outline"), "Outline", outline::ICON);
 
-        let code = code::Code::new();
+        let code = code::Code::new(debug);
         stack.add_titled_with_icon(&code.root, Some("code"), "Code", code::ICON);
         let code_page = stack.page(&code.root);
         code_page.set_visible(false);
@@ -394,6 +400,50 @@ impl Sidebar {
         self.code.set(key, goals, font);
     }
 
+    /// A debug session's state in the Code pane: the strip saying `line`, `why` in its tooltip,
+    /// and whether the program is `paused`. Running, Call Stack and Variables are cleared.
+    pub fn set_debug_state(&self, line: &str, why: Option<&str>, paused: bool) {
+        if let Some(debug) = &self.code.debug {
+            debug.set_state(line, why, paused);
+            self.code.set_debugging(true);
+        }
+    }
+
+    /// The program's threads, and the one it paused on open on its calls.
+    pub fn set_debug_threads(&self, threads: &[Thread], paused: Option<(i64, Vec<Frame>)>) {
+        if let Some(debug) = &self.code.debug {
+            debug.set_threads(threads, paused);
+        }
+    }
+
+    pub fn select_debug_frame(&self, frame: i64) {
+        if let Some(debug) = &self.code.debug {
+            debug.select_frame(frame);
+        }
+    }
+
+    /// The selected frame's scopes, as the roots of Variables.
+    pub fn set_debug_scopes(&self, scopes: &[Scope]) {
+        if let Some(debug) = &self.code.debug {
+            debug.set_scopes(scopes);
+        }
+    }
+
+    /// The Breakpoints section's rows, each `path:line`.
+    pub fn set_breakpoint_rows(&self, rows: &[String]) {
+        if let Some(debug) = &self.code.debug {
+            debug.set_breakpoints(rows);
+        }
+    }
+
+    /// No session: the strip and its sections go.
+    pub fn clear_debug(&self) {
+        if let Some(debug) = &self.code.debug {
+            debug.clear();
+            self.code.set_debugging(false);
+        }
+    }
+
     /// The goals the Code pane shows, for `ACCENT_BENCH_GOALS`.
     #[cfg(feature = "bench")]
     pub fn shown_goals(&self) -> Option<Vec<String>> {
@@ -492,7 +542,16 @@ impl Sidebar {
     /// unfolded.
     pub fn connect_section_toggled(&self, f: impl Fn(&str, bool) + 'static) {
         let f = Rc::new(f);
-        for name in ["references", "tags", "details", "goals", "expected"] {
+        for name in [
+            "references",
+            "tags",
+            "details",
+            "goals",
+            "expected",
+            "stack",
+            "variables",
+            "breakpoints",
+        ] {
             if let Some(section) = self.info.section(name).or_else(|| self.code.section(name)) {
                 let f = f.clone();
                 section

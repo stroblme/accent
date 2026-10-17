@@ -82,6 +82,7 @@ impl Term {
             .unwrap_or_else(|| match &self.shell {
                 Shell::Local(cwd) => cwd.display().to_string(),
                 Shell::Remote { at, .. } => at.host.clone(),
+                Shell::Program(program) => program.cwd.clone(),
             })
     }
 
@@ -100,6 +101,7 @@ impl Term {
                     .map(str::to_string)
             }
             Shell::Remote { at, .. } => Some(at.to_string()),
+            Shell::Program(_) => None,
         }
     }
 
@@ -112,6 +114,14 @@ impl Term {
                 at.host.clone(),
                 Some(at.path.to_string_lossy().into_owned()),
                 None,
+            ),
+            Shell::Program(program) => (
+                program
+                    .link
+                    .as_ref()
+                    .map_or_else(|| glib::host_name().to_string(), |link| link.host.clone()),
+                Some(program.cwd.clone()),
+                program.args.first().cloned(),
             ),
         };
         Facts {
@@ -171,15 +181,23 @@ impl Term {
             Shell::Remote { kill, link, .. } => {
                 run_kill(kill.clone(), Some(ssh::control_path(link)))
             }
+            // Nothing holds it: its pty's hangup ends it as the tab goes.
+            Shell::Program(_) => {}
         }
     }
 
     /// The address whose master a remote shell rides.
     fn link(&self) -> Option<&ssh::Url> {
         match &self.shell {
-            Shell::Local(_) => None,
             Shell::Remote { link, .. } => Some(link),
+            // A program has no reconnect, so it is in no reconnect's way.
+            Shell::Local(_) | Shell::Program(_) => None,
         }
+    }
+
+    /// Whether it runs a debugged program rather than a shell.
+    pub fn is_program(&self) -> bool {
+        matches!(self.shell, Shell::Program(_))
     }
 
     /// Whether `other` rides the same master, so that a link that dropped took both.
@@ -244,6 +262,24 @@ pub enum Shell {
         /// remote vault's own, or the host's.
         link: ssh::Url,
     },
+    /// A debugged program, run as its debug adapter asked: the one shell not held, since the
+    /// program is its session's and must not outlive it.
+    Program(Rc<Program>),
+}
+
+/// What a debug adapter asked to have run in a terminal (`runInTerminal`).
+pub struct Program {
+    pub args: Vec<String>,
+    pub cwd: String,
+    /// Added to the tab's environment.
+    pub env: Vec<(String, String)>,
+    /// The program's file name, which titles the tab.
+    pub title: String,
+    /// The remote vault's address, whose master is up already; `None` on this machine.
+    pub link: Option<ssh::Url>,
+    /// Told the program's process id once it runs, `None` on a host, where ssh's would be this
+    /// machine's; or why it could not be run.
+    pub started: Box<dyn Fn(Result<Option<u32>, String>)>,
 }
 
 impl Shell {
@@ -263,6 +299,7 @@ impl Shell {
     /// Command to list held shells locally or through the host master. `None` without `accent-cli`.
     fn held(&self) -> Option<Vec<String>> {
         match self {
+            Shell::Program(_) => None,
             Shell::Local(_) => {
                 let mut argv = cli()?;
                 argv.push("held".to_string());
@@ -282,6 +319,7 @@ impl Shell {
     /// Command to fetch shell `id`'s last clipboard copy ([`take_copies`]) locally or through the host master.
     fn clip(&self, id: &str) -> Option<Vec<String>> {
         match self {
+            Shell::Program(_) => None,
             Shell::Local(_) => {
                 let mut argv = cli()?;
                 argv.extend(["clip".to_string(), id.to_string()]);
@@ -307,8 +345,8 @@ pub(crate) fn scroller(view: &vte4::Terminal) -> gtk::ScrolledWindow {
         .build()
 }
 
-/// Open a shell as a tab of `tabs`, and start it.
-pub fn open(tabs: &adw::TabView, shell: &Shell, key: String) -> Rc<Term> {
+/// Open a shell as a tab of `tabs`, at the end or at position `at`, and start it.
+pub fn open(tabs: &adw::TabView, at: Option<i32>, shell: &Shell, key: String) -> Rc<Term> {
     let view = vte4::Terminal::new();
     view.set_scrollback_lines(SCROLLBACK);
     view.set_vexpand(true);
@@ -327,11 +365,16 @@ pub fn open(tabs: &adw::TabView, shell: &Shell, key: String) -> Rc<Term> {
     // black while every later one came up in the theme's colours.
     view.connect_map(paint);
 
-    let page = tabs.append(&scroller);
+    let page = match at {
+        // Pinned tabs come first, and nothing else may go among them.
+        Some(at) => tabs.insert(&scroller, at.max(tabs.n_pinned_pages())),
+        None => tabs.append(&scroller),
+    };
     page.set_title(
         match shell {
             Shell::Local(_) => "Terminal".to_string(),
             Shell::Remote { at, .. } => at.host.clone(),
+            Shell::Program(program) => program.title.clone(),
         }
         .as_str(),
     );
@@ -536,7 +579,7 @@ pub fn on_reconnect(term: &Rc<Term>, reconnect: impl Fn(&Rc<Term>) + 'static) {
 /// persists until the program redraws. Restored background tabs attach when first shown;
 /// new tabs wait for two stable frames.
 fn spawn(view: &vte4::Terminal, shell: &Shell, id: &str) {
-    let (cwd, argv) = match (shell, cli()) {
+    let (cwd, argv, env) = match (shell, cli()) {
         (Shell::Local(cwd), Some(mut argv)) => {
             argv.extend([
                 "attach".to_string(),
@@ -546,20 +589,43 @@ fn spawn(view: &vte4::Terminal, shell: &Shell, id: &str) {
                 owner(),
                 id.to_string(),
             ]);
-            (None, argv)
+            (None, argv, Vec::new())
         }
-        (Shell::Local(cwd), None) => (Some(cwd.clone()), vec![user_shell()]),
+        (Shell::Local(cwd), None) => (Some(cwd.clone()), vec![user_shell()], Vec::new()),
         // ssh decides where it lands, and a cwd on this machine means nothing to it.
-        (Shell::Remote { argv, .. }, _) => (None, argv.clone()),
+        (Shell::Remote { argv, .. }, _) => (None, argv.clone(), Vec::new()),
+        (Shell::Program(program), _) => match &program.link {
+            None => (
+                Some(PathBuf::from(&program.cwd)),
+                program.args.clone(),
+                program
+                    .env
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect(),
+            ),
+            // On the host, in its folder with its environment, over the vault's master.
+            Some(link) => {
+                let ctl = ssh::control_path(link);
+                let argv = ssh::program(link, &ctl, &program.cwd, &program.env, &program.args);
+                (None, argv, Vec::new())
+            }
+        },
+    };
+    let program = match shell {
+        Shell::Program(program) => Some(program.clone()),
+        _ => None,
     };
     when_laid_out(view, move |view| {
         let named = argv.join(" ");
         let args: Vec<&str> = argv.iter().map(String::as_str).collect();
+        // VTE adds these to the environment the tab would have anyway.
+        let env: Vec<&str> = env.iter().map(String::as_str).collect();
         view.spawn_async(
             vte4::PtyFlags::DEFAULT,
             cwd.as_deref().and_then(Path::to_str),
             &args,
-            &[],
+            &env,
             // A remote shell's `ssh` from `$PATH`, as the link's own is: without it VTE looks in
             // `/bin:/usr/bin` only, and an ssh installed elsewhere ran the master but not the tab.
             glib::SpawnFlags::SEARCH_PATH,
@@ -567,6 +633,13 @@ fn spawn(view: &vte4::Terminal, shell: &Shell, id: &str) {
             -1,
             gio::Cancellable::NONE,
             move |result| {
+                if let Some(program) = program {
+                    return (program.started)(match result {
+                        Ok(pid) if program.link.is_none() => Ok(Some(pid.0 as u32)),
+                        Ok(_) => Ok(None),
+                        Err(e) => Err(e.to_string()),
+                    });
+                }
                 if let Err(e) = result {
                     tracing::warn!("cannot start {named}: {e}");
                 }
@@ -652,6 +725,17 @@ pub fn on_exit(term: &Rc<Term>, done: impl Fn(&Rc<Term>) + 'static) {
             return;
         };
         match &term.shell {
+            // Kept, saying how it ended: its output is what was being debugged.
+            Shell::Program(program) => {
+                term.ended.set(true);
+                // On a line of its own, after a blank one: a program that ended mid-line gets both.
+                let lead = match view.cursor_position().0 {
+                    0 => "\r\n",
+                    _ => "\r\n\r\n",
+                };
+                let line = exit_line(status, program.link.is_some());
+                view.feed(format!("{lead}{line}\r\n").as_bytes());
+            }
             Shell::Remote { at, .. } if link_lost(status) => {
                 term.lost.set(true);
                 let line = format!(
@@ -678,6 +762,16 @@ const ATTACH_FAILED: i32 = 254;
 /// A remote shell's own exit 255 is indistinguishable and may start a new held shell on reconnect.
 fn link_lost(status: i32) -> bool {
     exited_with(status, 255)
+}
+
+/// How a debugged program ended, from its wait status: on a host ssh's own 255 is the link going,
+/// not the program.
+fn exit_line(status: i32, remote: bool) -> String {
+    match (status & 0x7f, (status >> 8) & 0xff) {
+        (0, 255) if remote => "[Lost the connection to host]".to_string(),
+        (0, code) => format!("[Exited with code {code}]"),
+        (signal, _) => format!("[Ended by signal {signal}]"),
+    }
 }
 
 /// Whether a child exited with `code`. `status` is the wait status VTE passes on, as `waitpid`
@@ -893,6 +987,16 @@ pub fn new_key() -> String {
     format!("{KEY}{:08x}{:08x}", glib::random_int(), glib::random_int())
 }
 
+/// A debugged program's tab key: never a held shell's, so neither the holder nor a session
+/// restore takes it for one.
+pub fn program_key() -> String {
+    format!(
+        "program:{:08x}{:08x}",
+        glib::random_int(),
+        glib::random_int()
+    )
+}
+
 /// Whether a session's key names a shell rather than a file.
 pub fn is_key(key: &str) -> bool {
     key.strip_prefix(KEY)
@@ -969,7 +1073,7 @@ pub fn end(key: &str, at: &str) {
         let url = ssh::parse(at).map_err(|e| e.to_string());
         match url.and_then(|url| Shell::remote(url.clone(), accent_api::link::host(&url), key)) {
             Ok(Shell::Remote { kill, link, .. }) => run_kill(kill, Some(ssh::control_path(&link))),
-            Ok(Shell::Local(_)) => {}
+            Ok(Shell::Local(_) | Shell::Program(_)) => {}
             Err(e) => tracing::warn!("cannot end the shell at {at}: {e}"),
         }
         return;
@@ -1219,6 +1323,17 @@ mod tests {
         assert!(!link_lost(1 << 8));
         // Killed by a signal, whatever the byte above says.
         assert!(!link_lost((255 << 8) | 9));
+    }
+
+    /// A debugged program's tab says how it ended, from the wait status VTE hands over.
+    #[test]
+    fn a_program_says_how_it_ended() {
+        assert_eq!(exit_line(0, false), "[Exited with code 0]");
+        assert_eq!(exit_line(3 << 8, false), "[Exited with code 3]");
+        assert_eq!(exit_line(15, false), "[Ended by signal 15]");
+        // On a host, ssh's own 255 is the link, not the program.
+        assert_eq!(exit_line(255 << 8, true), "[Lost the connection to host]");
+        assert_eq!(exit_line(255 << 8, false), "[Exited with code 255]");
     }
 
     /// The shell's output is untrusted, so this is the one that has to be a list.

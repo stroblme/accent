@@ -336,8 +336,14 @@ impl App {
         let stored = self.stored_session();
         let (sidebar, width) = self.sidebar_saved();
         let session = Session {
-            open: self.docs.borrow().iter().map(|d| d.key()).collect(),
-            active: self.active_key(),
+            open: self
+                .docs
+                .borrow()
+                .iter()
+                .filter(|d| d.is_kept())
+                .map(|d| d.key())
+                .collect(),
+            active: self.active_doc().filter(Doc::is_kept).map(|d| d.key()),
             layout: self.layout(),
             // Neither presentation nor a narrow window is session state, so a sidebar either one
             // hid is saved as it was.
@@ -667,7 +673,10 @@ impl App {
         else {
             return Ok(None);
         };
-        let key = |page: &adw::TabPage| self.doc_for_page(page).map(|d| d.key());
+        let key = |page: &adw::TabPage| {
+            let doc = self.doc_for_page(page).filter(Doc::is_kept);
+            doc.map(|d| d.key())
+        };
         let tabs: Vec<String> = pane.pages().iter().filter_map(key).collect();
         let selected = pane.tabs.selected_page().as_ref().and_then(key);
         Ok((!tabs.is_empty()).then_some(Layout::Pane { tabs, selected }))

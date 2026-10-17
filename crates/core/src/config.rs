@@ -436,6 +436,10 @@ impl Default for InfoPane {
 pub struct CodePane {
     pub goals: bool,
     pub expected: bool,
+    /// The debugger's Call Stack, Variables and Breakpoints.
+    pub stack: bool,
+    pub variables: bool,
+    pub breakpoints: bool,
     pub dividers: Vec<Option<f64>>,
 }
 
@@ -444,6 +448,9 @@ impl Default for CodePane {
         CodePane {
             goals: true,
             expected: true,
+            stack: true,
+            variables: true,
+            breakpoints: true,
             dividers: Vec::new(),
         }
     }
@@ -1548,6 +1555,9 @@ daily_dir = "Daily"
             code: CodePane {
                 goals: false,
                 expected: true,
+                stack: true,
+                variables: false,
+                breakpoints: true,
                 dividers: vec![Some(0.4)],
             },
             view: "preview".to_string(),

@@ -2,6 +2,7 @@
 
 use crate::diff;
 use crate::editor::Tab;
+use accent_api::debug::Placed;
 use gtk::prelude::*;
 use sourceview5::prelude::*;
 
@@ -11,29 +12,35 @@ pub(crate) const BREAKPOINT: &str = "breakpoint";
 pub(crate) const UNBOUND: &str = "breakpoint-unbound";
 /// The line the program is paused on.
 pub(crate) const EXECUTION: &str = "execution";
+/// A breakpoint, bound or not, on the paused line: drawn by no icon while the arrow is there.
+const COVERED: &str = "breakpoint-covered";
+const UNBOUND_COVERED: &str = "breakpoint-unbound-covered";
 
-/// Give `tab`'s view the three categories, above the diagnostics' priority 2. GtkSourceView draws
-/// every icon on a line, the highest last, so a breakpoint's line is given no diagnostic mark
-/// (`diagnostics::render`).
+/// Give `tab`'s view the categories, above the diagnostics' priority 2. GtkSourceView draws every
+/// icon on a line, the highest last, so a line gives its cell to one of them ([`redraw`]).
 pub(crate) fn install(tab: &Tab) {
+    const UNBOUND_SAYS: &str = "The program has not bound this breakpoint";
     for (category, icon, tooltip, priority) in [
-        (BREAKPOINT, "dap-breakpoint-symbolic", "Breakpoint", 3),
+        (BREAKPOINT, Some("dap-breakpoint-symbolic"), "Breakpoint", 3),
         (
             UNBOUND,
-            "dap-breakpoint-unverified-symbolic",
-            "The program has not bound this breakpoint",
+            Some("dap-breakpoint-unverified-symbolic"),
+            UNBOUND_SAYS,
             3,
         ),
+        (COVERED, None, "Breakpoint", 3),
+        (UNBOUND_COVERED, None, UNBOUND_SAYS, 3),
         (
             EXECUTION,
-            "go-next-symbolic",
+            Some("go-next-symbolic"),
             "The program is paused here",
             4,
         ),
     ] {
-        let attributes = sourceview5::MarkAttributes::builder()
-            .icon_name(icon)
-            .build();
+        let attributes = sourceview5::MarkAttributes::new();
+        if let Some(icon) = icon {
+            attributes.set_icon_name(icon);
+        }
         attributes.connect_query_tooltip_text(move |_, _| tooltip.to_string());
         tab.view
             .set_mark_attributes(category, &attributes, priority);
@@ -53,9 +60,10 @@ pub(crate) fn restyle(view: &sourceview5::View) {
     }
 }
 
-/// Whether `line` holds a breakpoint.
+/// Whether `line` holds a breakpoint or the paused line's arrow, which take its cell from a
+/// diagnostic's icon.
 pub(crate) fn on_line(buffer: &sourceview5::Buffer, line: i32) -> bool {
-    [BREAKPOINT, UNBOUND]
+    [BREAKPOINT, UNBOUND, COVERED, UNBOUND_COVERED, EXECUTION]
         .into_iter()
         .any(|category| !buffer.source_marks_at_line(line, Some(category)).is_empty())
 }
@@ -85,6 +93,55 @@ pub(crate) fn place(tab: &Tab, lines: &[u32]) {
             marks.push(tab.buffer.create_source_mark(None, BREAKPOINT, &start));
         }
     }
+}
+
+/// Replace `tab`'s breakpoints with where the adapter holds them: a dot for each it bound, a ring
+/// for each it did not, on the line it moved each to.
+pub(crate) fn bind(tab: &Tab, placed: &[Placed]) {
+    let mut marks = tab.breakpoints.borrow_mut();
+    for mark in marks.drain(..) {
+        tab.buffer.delete_mark(&mark);
+    }
+    let mut lines = Vec::new();
+    for placed in placed {
+        let category = match placed.verified {
+            true => BREAKPOINT,
+            false => UNBOUND,
+        };
+        if lines.contains(&placed.line) {
+            continue;
+        }
+        if let Some(start) = tab.buffer.iter_at_line(placed.line as i32) {
+            lines.push(placed.line);
+            marks.push(tab.buffer.create_source_mark(None, category, &start));
+        }
+    }
+}
+
+/// The gutter after a breakpoint or the paused line came, went or moved: the arrow takes its
+/// line's cell from a breakpoint's dot or ring, which waits under it until the program moves on,
+/// and either from a diagnostic's icon (`diagnostics::render`). One drawn over another reads as
+/// neither.
+pub(crate) fn redraw(tab: &Tab) {
+    let mut marks = tab.breakpoints.borrow_mut();
+    for mark in marks.iter_mut() {
+        let at = tab.buffer.iter_at_mark(mark);
+        let paused = !tab
+            .buffer
+            .source_marks_at_line(at.line(), Some(EXECUTION))
+            .is_empty();
+        let category = match (mark.category().as_str(), paused) {
+            (BREAKPOINT, true) => COVERED,
+            (UNBOUND, true) => UNBOUND_COVERED,
+            (COVERED, false) => BREAKPOINT,
+            (UNBOUND_COVERED, false) => UNBOUND,
+            _ => continue,
+        };
+        tab.buffer.delete_mark(mark);
+        *mark = tab.buffer.create_source_mark(None, category, &at);
+    }
+    drop(marks);
+    tab.remark_diagnostics();
 }
 
 /// A breakpoint on `line`, or none there any more.

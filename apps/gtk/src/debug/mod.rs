@@ -1,16 +1,14 @@
-//! The debugger in the window: the breakpoints a program stops at, kept per file for the session.
+//! The debugger in the window: the breakpoints a program stops at, kept per file for the session,
+//! and the session itself (`run`).
 
 use super::*;
+use accent_api::debug::debuggable;
 use std::collections::BTreeMap;
 
 pub(crate) mod breakpoints;
+mod run;
 
-/// Whether a debugger can run a file of `language_id`.
-///
-/// A stand-in until Part 6 replaces it with the api's adapter table.
-pub(crate) fn debuggable(language_id: &str) -> bool {
-    matches!(language_id, "python" | "python3")
-}
+use run::Run;
 
 /// The window's debugging state.
 #[derive(Default)]
@@ -18,9 +16,28 @@ pub struct Debugger {
     /// The breakpoints of the files no tab has open, by file key; an open tab holds its own as
     /// marks that move with its text.
     kept: RefCell<BTreeMap<String, Vec<u32>>>,
+    /// The number the last session went by: the window picks it, so a session's news can come
+    /// before its start is answered.
+    next: Cell<u64>,
+    /// The program the last session ran, and its language, which Start Debugging runs again from
+    /// a tab it cannot run. The window's alone, never the vault's session.
+    last: RefCell<Option<(String, String)>>,
+    /// The session, from Start until its end.
+    run: RefCell<Option<Rc<Run>>>,
+    /// The paused line's mark, and the tab it is in.
+    execution: RefCell<Option<(std::rc::Weak<Tab>, sourceview5::Mark)>>,
 }
 
 impl Debugger {
+    /// Whether a session runs in this window.
+    pub fn running(&self) -> bool {
+        self.run.borrow().is_some()
+    }
+
+    fn run(&self) -> Option<Rc<Run>> {
+        self.run.borrow().clone()
+    }
+
     /// Every file's breakpoints: those kept, with each open tab's as its marks stand now.
     pub(crate) fn saved(&self, app: &App) -> BTreeMap<String, Vec<u32>> {
         let mut saved = self.kept.borrow().clone();
@@ -71,11 +88,15 @@ fn keep(map: &mut BTreeMap<String, Vec<u32>>, tab: &Tab) {
 
 impl App {
     /// A breakpoint on `line` of `tab`, or none there any more; only where a debugger can run it.
-    pub(crate) fn toggle_breakpoint(self: &Rc<Self>, tab: &Tab, line: u32) {
+    /// A running program is told the file's breakpoints, all of them, and the marks move to where
+    /// it holds them.
+    pub(crate) fn toggle_breakpoint(self: &Rc<Self>, tab: &Rc<Tab>, line: u32) {
         if debuggable(&lang::language_id(tab)) {
             breakpoints::toggle(tab, line);
-            tab.remark_diagnostics();
+            breakpoints::redraw(tab);
             self.save_session_soon();
+            self.send_breakpoints(tab);
+            self.refill_breakpoints();
         }
     }
 
@@ -91,9 +112,14 @@ impl App {
     pub(crate) fn remove_all_breakpoints(self: &Rc<Self>) {
         self.debugger.kept.borrow_mut().clear();
         for tab in self.open_tabs() {
+            let had = !tab.breakpoints.borrow().is_empty();
             breakpoints::place(&tab, &[]);
-            tab.remark_diagnostics();
+            breakpoints::redraw(&tab);
+            if had {
+                self.send_breakpoints(&tab);
+            }
         }
         self.save_session_soon();
+        self.refill_breakpoints();
     }
 }

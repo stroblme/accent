@@ -156,7 +156,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 - An `AdwInlineViewSwitcher` in icon mode over an `AdwViewStack` of eight panes: Files, Search, Info, Git, Ports, Outline, Code, Properties.
   The switcher sits in the sidebar header, level with the sidebar toggle, so the tree's first row lines up with the tabs.
-- Git shows only where there is a repository, Ports only on a remote vault, Code only while the window says so — today while the tab in front has a proof assistant's goals, later while a debug session runs too — Properties only while a diagram is in front: each only where it has something to say, so other vaults keep the switcher they had.
+- Git shows only where there is a repository, Ports only on a remote vault, Code only while the window says so — while the tab in front has a proof assistant's goals or a debug session runs — Properties only while a diagram is in front: each only where it has something to say, so other vaults keep the switcher they had.
 - A vault always opens on Files: a search from another sitting is not where a vault starts.
 - Width is dragged on the `GtkPaned` handle, down to 200 px or the pane switcher's width, whichever is wider: the switcher's icons are never cut.
 - Below 760 sp an `AdwBreakpoint` hides the sidebar: that is the default 280 px sidebar beside the 480 px column floor.
@@ -292,9 +292,19 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - It follows the caret, moves and typing alike, by 300 ms while it is on screen, and asks again as it comes back on screen, the sidebar with it, and when the zoom changes, which its font follows.
   The last answer stays up while the next is asked, so a caret move does not flash the pane; another tab coming to the front clears it.
   An answer that fails while the file is being checked leaves the pane as it is, and the end of the check asks again.
-- Its visibility is a window flag, never a rule about the tab in front, because the debugger moves in here: Variables, Watch, Call Stack and Breakpoints as sections, its controls in a strip over them.
+- Its visibility is a window flag, never a rule about the tab in front, because a debug session keeps it up over any tab: Call Stack, Variables and Breakpoints follow Goals and Expected Type in the one stack of dividers, the session's controls in a strip over them all.
+  While a session runs the pane shows its sections whatever is in front, Goals and Expected Type only with an answer, and neither the No Goals nor the Checking page.
   Hidden while on screen, it gives way to the Outline.
   Which sections are open and where the dividers are are the vault's session: all open at first.
+- **The strip**: Continue or Pause, whichever the program can take, Step Over, Step Into, Step Out, Restart Debugging and Stop Debugging as flat icon buttons on the window's actions, each greyed while the program's state does not allow it, and while starting all but Stop.
+  A press leaves the keyboard where it was, so stepping keeps the reader in the note.
+  A dim caption under them says what the program does: Starting…, Running, Paused, Paused on breakpoint, Paused on exception with the exception's name (its message in the tooltip), Stopping….
+- **Call Stack** lists the threads, counted, the one that stopped open on its calls, innermost first, and the innermost selected; another thread's calls are asked for as it is opened.
+  A call is its function's name with its file and line dimmed beside it, the whole row dimmed for code outside the vault.
+  One click on a call shows it (Debugger), as a result list's row opens; a dim "Running" stands in while the program runs.
+- **Variables** are the selected call's scopes, the first that is cheap to list open; a value is a `name = value` row in the editor's monospace, the value ellipsized and its type in the tooltip, and what it holds is listed as it is opened.
+  "Shown while the program is paused" stands in otherwise.
+- **Breakpoints** lists every file's, `path:line` as References' rows are and opening the same way, counted; "Click a line's gutter to stop there" while there are none.
 
 **Properties**
 
@@ -510,6 +520,10 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - `Ctrl+J` opens one at the vault root, `$HOME` without a vault; `Ctrl+W` closes it like any tab.
 - Every shell is held by `accent-cli hold` (Architecture) and reached through `accent-cli attach <id>` in the tab's pty, `ssh -t` on a host: Close Tab ends the shell, closing the window only lets go of it, and a vault or terminal session opened again attaches to the same shell with its screen replayed.
 - The tab key is `terminal:<16 hex>`, the holder's id; the shell's directory (OSC 7, else where it started) goes into the session, so a shell the holder lost (a reboot) starts again there.
+- **A debugged program's terminal is the one shell not held** (user decision 2026-10-17): the adapter's `runInTerminal` is answered with a tab running its command line in its folder with its environment, under VTE directly, on a host over the vault's master with `ssh -t`, so the program reads its input there; the program is its session's and must not outlive it, where a held shell would.
+  Its key is `program:<16 hex>`, which no holder and no session restore takes for a shell's.
+  It opens in the active pane, in front with the keyboard, as a new shell does, titled with the program's file name.
+  It stays when the program ends, its output kept and a last line saying how — `[Exited with code N]`, `[Ended by signal N]`, on a host `[Lost the connection to host]` — with no reconnect, and the next session's takes its place in its pane and bar.
 - Shells a window left held with no session to come back in (a quit, SIGTERM, a logout) are ended at the next start, before the first window: only this machine's holder is asked, and only shells started for the same state directory, which `attach --owner` hands the holder and `held` lists: the Flatpak cannot read a host shell's environment, which holds the host's `XDG_STATE_HOME` anyway.
   A run on scratch state dirs leaves the user's alone, and a native accent and the Flatpak, sharing the host's holder, leave each other's alone.
   A host's held shells are never swept.
@@ -588,6 +602,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - **Reopening a vault puts its panes back**: the splits and their shares, each pane's tabs in bar order with the one in front, and the tab notes open next to.
   A pane that would come back empty is left out and its sibling takes the room; a tab the layout does not place joins the active pane.
   The window comes back in the pane the reader was in, on the tab that was in front, a comparison with git included (Comparison).
+- A debugged program's terminal is its session's, not the vault's: it is not put back, and as any shell it stays in its window.
 - Tabs land one read at a time; a pane the reader picks a tab in, opens a note into or moves the keyboard to meanwhile is theirs, and what lands there does not change what it shows.
 - A restored window has an empty Back and Forward: a restore's selections are not places.
   A first opening, or a session without a layout, is one pane; a split's share is kept to 10–90 %.
@@ -1101,6 +1116,22 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - They are kept in the session per file, never in the vault: a file closed and opened again, or the vault reopened, has them back; a file renamed or moved takes them along, and a file deleted takes them with it.
 - A breakpoint is a foreground symbolic glyph, as a diagnostic's icon is, never red: a dot, and a ring for one the program has not bound.
   The dot takes its line's cell from a diagnostic's icon, which GtkSourceView would draw under it rather than hide; the line's message and underline stay.
+- **Start Debugging** (`Ctrl+F5`) runs the Python file in front, else the program last debugged in the window, which the window remembers for its life and never in the vault's session.
+  The vault's tabs with edits are written first, as VS Code's `debug.saveBeforeStart` does: the program runs what is on disk.
+  One session at a time: a second Start says "Cannot start debugging: a program is already being debugged".
+  The Code pane comes to the front as it starts while the sidebar is up; a hidden sidebar stays hidden.
+- **A stop brings the paused call's file to the front**, in the preview tab unless a tab has it already (Tabs), the caret on the line the paused line's mark shows: `go-next-symbolic` in the marks column and the warning's amber across the line.
+  The arrow takes the line's cell from a breakpoint's dot or ring, which waits under it until the program moves on, and either from a diagnostic's icon: one drawn over another reads as neither.
+  The keyboard stays where it was.
+  Code outside the vault opens in a kept tab on a local vault, read-only where a package manager put it (Language servers); a remote vault's, and code the adapter holds no file of, open nothing, Call Stack still listing them.
+- Continue and the steps go from the thread that stopped, and the mark, Call Stack and Variables go at once; Pause stops the first thread the adapter lists.
+  A breakpoint toggled while the program runs tells it the file's breakpoints, all of them, and the marks move to where it holds them; the program runs the text it started with, so edits since are not its business.
+- **Restart Debugging** is Stop, then Start with the same program once the session has ended: debugpy has no restart of its own.
+  **Stop Debugging** ends the program, then the adapter.
+- The session's end — the program's, Stop's, or the vault's link dropping — takes the strip, its sections and the mark away, the pane staying only for goals; a ring is a dot again, for the next session to bind.
+- A failure is a toast under one key, so the next takes its place: "Cannot start debugging: <why>", the why being the adapter's own last words where it exited before answering — Python's `No module named debugpy`, once — and "The debug session ended: <why>" for an adapter that died under a running program.
+  What the adapter marks important is a toast as well; the rest of its output goes to the log.
+- **The Flatpak does not debug yet**: the adapter and the program would both have to be the host's, debugpy's launcher calling back to the adapter over a loopback the sandbox does not share, so Start says "Cannot start debugging: the Flatpak cannot run a debugger on this machine yet".
 
 ### Context menus
 
@@ -1210,7 +1241,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Three things depart from the single accent, each where one colour cannot carry the information:
   - the style scheme a code tab is coloured by (Typography);
   - a palette of hues rotated from the accent, for a CSV's columns and the git history's lanes: a sixth of the wheel per column, keeping the accent's saturation and value, column 0 the accent itself — in the standalone form the links take, both being text on the page — a seventh column repeating the first hue rather than inventing a colour — derived at runtime, so it follows the system accent;
-  - a comparison's green and red, a conflict block's green and blue, and a warning's amber: fixed hue weights mixed with the resolved foreground (`diff::tint`), because a diff has to read as green and red, a conflict's two sides as VS Code's green and blue, and libadwaita publishes its success and error colours only as CSS variables Rust cannot read.
+  - a comparison's green and red, a conflict block's green and blue, and a warning's amber, which washes the line a debugged program is paused on too: fixed hue weights mixed with the resolved foreground (`diff::tint`), because a diff has to read as green and red, a conflict's two sides as VS Code's green and blue, and libadwaita publishes its success and error colours only as CSS variables Rust cannot read.
     The editor gutter's change bars take the same two, green for an added line and a red wedge where lines went, and the accent for a rewritten one, which the Files tree's changed names take too, the green mixed in CSS from the same hue (`diff::css_tint`) and the accent in its standalone form, being text; beside them a line Lean has still to check takes the accent at half alpha (user decision 2026-10-10), so where a rewritten line is being checked the two bars read as two.
     On Solarized's light page a conflict's incoming side is Solarized's own blue instead, a little stronger (`theme::incoming_on`): the cream cancels a light wash of the derived blue into grey, and the base00 ink keeps 3:1 on both of its tints.
 - The preview stylesheet derives everything from three values: foreground, background, accent, a conflict block's tints being the editor's from the same foreground.
@@ -1498,7 +1529,8 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 
 ### Debugging
 
-- Toggle Breakpoint `Ctrl+F9`, Remove All Breakpoints (unbound).
+- Start Debugging `Ctrl+F5`, Toggle Breakpoint `Ctrl+F9`, Remove All Breakpoints (unbound).
+- Continue, Pause, Step Over, Step Into, Step Out, Restart Debugging and Stop Debugging are the Code pane's strip and the palette's, each doing nothing while the session cannot take it.
 - Toggle Breakpoint is an editing chord (Editing): it puts a breakpoint on the caret's line of the tab in front, or takes it off, and does nothing in a file no debugger runs.
   Remove All Breakpoints clears every file's in the window, open or not.
 
@@ -1586,6 +1618,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 
 - The HIG reserves `Ctrl+P` for Print and `Ctrl+Shift+P` for Print Preview; accent's users come from VS Code and Obsidian, where both open the palette, so both stay the palette's and Print… has no chord: it is reached from the tab menu and the palette, as the exports are.
 - VS Code's Toggle Breakpoint is `F9`, which is the sidebar's here (Panes), so it takes `Ctrl+F9`.
+- VS Code's Start Debugging is `F5`, which is Presentation Mode's here (Views), so it takes `Ctrl+F5`, VS Code's Run Without Debugging.
 
 ## Iconography
 
@@ -1599,7 +1632,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 - Where nothing fits, ship a glyph in the app `GResource` under the `io.github.stroblme.Accent` prefix, drawn on the 16 px symbolic grid with `fill="currentColor"` so it recolours with the theme.
   Never a coloured icon.
   A GResource rather than hicolor, so a run from the source tree has them too.
-- The shipped sets are [tabler-icons](https://github.com/tabler/tabler-icons) outlines (MIT, `apps/gtk/data/icons/LICENSE.tabler`) with their strokes turned into fills, GTK recolouring a symbolic icon by its `fill`: eighteen completion kinds (`lsp-<kind>-symbolic`), Adwaita having no glyph for a function or a type parameter; the drawing tools (`tool-pen`, `tool-highlighter`, `tool-eraser`, `tool-line`, `tool-rect`, `tool-circle`, `tool-adjust`, and a diagram's `tool-select`), the theme having no pen, marker or eraser, beside Adwaita's `insert-text`, `insert-image` and the Drawing toggle's `document-edit-symbolic`; the file types; `remote-server-symbolic`, tabler's `server`, for a remote vault on the start screen, in Open Recent and on its waiting pages: a rack, where Adwaita's `network-server` is a box on a cable and WhiteSur's a tower; and a breakpoint's dot and ring, `dap-breakpoint-symbolic` and `dap-breakpoint-unverified-symbolic`, tabler's `point-filled` and `point`, the theme having no breakpoint.
+- The shipped sets are [tabler-icons](https://github.com/tabler/tabler-icons) outlines (MIT, `apps/gtk/data/icons/LICENSE.tabler`) with their strokes turned into fills, GTK recolouring a symbolic icon by its `fill`: eighteen completion kinds (`lsp-<kind>-symbolic`), Adwaita having no glyph for a function or a type parameter; the drawing tools (`tool-pen`, `tool-highlighter`, `tool-eraser`, `tool-line`, `tool-rect`, `tool-circle`, `tool-adjust`, and a diagram's `tool-select`), the theme having no pen, marker or eraser, beside Adwaita's `insert-text`, `insert-image` and the Drawing toggle's `document-edit-symbolic`; the file types; `remote-server-symbolic`, tabler's `server`, for a remote vault on the start screen, in Open Recent and on its waiting pages: a rack, where Adwaita's `network-server` is a box on a cable and WhiteSur's a tower; a breakpoint's dot and ring, `dap-breakpoint-symbolic` and `dap-breakpoint-unverified-symbolic`, tabler's `point-filled` and `point`, the theme having no breakpoint; and the debugger's steps, `dap-step-over`, `dap-step-into` and `dap-step-out` (tabler's `arrow-forward-up`, `arrow-bar-to-down` and `arrow-bar-up`), beside Adwaita's `media-playback-start`, `-pause` and `-stop`, `view-refresh` and the paused line's `go-next`, the theme having no step.
 - **Every file list leads its rows with a file-type icon** — the Files tree and its vault row, the palette's file rows, the Git pane's folders and files, search results, a tag's files, References — and the tabs carry none.
   The kind comes from the name (note, PDF, diagram, table, image, code, config, text, anything else) and is drawn by `filetype-<kind>-symbolic`: tabler's `markdown`, `file-type-pdf`, `sitemap`, `file-spreadsheet`, `photo`, `file-code`, `file-settings` and `file-text`, with `filetype-folder-symbolic` and `filetype-file-symbolic`.
   The PDF one letters `PDF` into the page, kept over `file-description`, which would make a PDF and a text file look alike.
