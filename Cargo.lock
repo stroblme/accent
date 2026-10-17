@@ -24,6 +24,7 @@ dependencies = [
  "sourceview5",
  "tracing",
  "tracing-subscriber",
+ "unicode-width",
  "vte4",
  "vte4-sys",
  "webkit6",

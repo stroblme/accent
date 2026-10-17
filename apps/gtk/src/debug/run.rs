@@ -2,7 +2,7 @@
 //! (`on_debug`), the program's terminal, and where the program is paused.
 
 use super::*;
-use accent_api::debug::{Category, Frame, Launch, News, Step, Variable};
+use accent_api::debug::{Category, Context, Evaluated, Frame, Launch, News, Step, Variable};
 use sourceview5::prelude::BufferExt as _;
 
 /// One session, from Start until its end.
@@ -247,7 +247,10 @@ impl App {
                 args,
                 cwd,
                 env,
-            } => self.open_program(&run, seq, args, cwd, env),
+            } => {
+                self.open_program(&run, seq, args, cwd, env);
+                self.open_console(run.id, &run.program);
+            }
             News::Stopped { .. } | News::Continued if stopping => {}
             News::Stopped {
                 thread,
@@ -281,6 +284,7 @@ impl App {
                 if category == Category::Important {
                     self.debug_toast(text.trim());
                 }
+                self.console_output(category, &text);
             }
             News::Breakpoints { path, placed } => {
                 if let Some(tab) = self.tab_for(&path) {
@@ -289,7 +293,8 @@ impl App {
                 }
                 self.refill_breakpoints();
             }
-            News::Ended { error, .. } => {
+            News::Ended { code, error } => {
+                self.console_end(session, code);
                 self.debug_ended(session);
                 if let Some(error) = error {
                     self.debug_toast(&format!("The debug session ended: {error}"));
@@ -359,17 +364,23 @@ impl App {
         };
         if let (Some(path), Some(how)) = (&frame.path, how) {
             let (run, pos) = (run.clone(), frame.pos);
-            self.with_tab(
-                path,
-                how,
-                "show where the program paused",
-                move |app, tab| {
-                    if shown(app, &run) {
-                        tab.goto_pos(pos);
-                        app.mark_execution(tab, pos.line);
+            let show = move |app: &Rc<App>, tab: &Rc<Tab>| {
+                if shown(app, &run) {
+                    tab.show_at(&lang::iter_at(&tab.buffer, pos), 0.25);
+                    app.mark_execution(tab, pos.line);
+                }
+            };
+            match self.tab_for(path) {
+                // In front of its own pane, the keyboard and the active pane staying where they
+                // are, as for a tab brought forward behind the reader's back (Tabs).
+                Some(tab) => {
+                    if let Some(pane) = self.pane_of(&tab.page) {
+                        pane.tabs.set_selected_page(&tab.page);
                     }
-                },
-            );
+                    show(self, &tab);
+                }
+                None => self.with_tab(path, how, "show where the program paused", show),
+            }
         }
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
@@ -399,6 +410,21 @@ impl App {
         self.ask_paused("listing the variables", then, move |vault, id| {
             vault.debug_variables(id, reference)
         });
+    }
+
+    /// `expression` in the call selected, while the program is paused: what the Debug Console
+    /// and a hover ask.
+    pub(crate) fn debug_evaluate(
+        &self,
+        expression: String,
+        context: Context,
+    ) -> Option<accent_api::Task<Evaluated>> {
+        let run = self
+            .debugger
+            .run()
+            .filter(|run| matches!(run.state.get(), State::Paused { .. }))?;
+        let vault = self.vault()?;
+        Some(vault.debug_evaluate(run.id, run.frame.get(), expression, context))
     }
 
     fn ask_paused<T: Default + 'static>(
@@ -453,6 +479,7 @@ impl App {
             return;
         };
         self.debugger.run.replace(None);
+        self.console_end(id, None);
         self.clear_execution();
         for tab in self.open_tabs() {
             if !tab.breakpoints.borrow().is_empty() {
@@ -570,8 +597,15 @@ impl App {
         // closes while it runs, and leaves the new tab undrawn.
         let shell = terminal::Shell::Program(Rc::new(program));
         self.open_shell_at(terminal::program_key(), shell, Opened::Kept, place);
+        // A turn later: closed in the turn the new tab went in beside it, with the console after
+        // it, the new tab was left undrawn all the same (ISSUES.md).
         if let Some(old) = old {
-            self.close_page(old.page());
+            let (weak, page) = (Rc::downgrade(self), old.page().clone());
+            glib::idle_add_local_once(move || {
+                if let Some(app) = weak.upgrade() {
+                    app.close_page(&page);
+                }
+            });
         }
     }
 

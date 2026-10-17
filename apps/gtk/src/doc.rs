@@ -95,10 +95,12 @@ impl Doc {
         matches!(self, Doc::Diff(_) | Doc::Terminal(_))
     }
 
-    /// Whether the session keeps it: a debugged program's terminal is its session's alone, and is
-    /// not put back.
+    /// Whether the session keeps it: a debugged program's terminal and the Debug Console are a
+    /// debug session's alone, and are not put back.
     pub fn is_kept(&self) -> bool {
-        !self.terminal().is_some_and(|term| term.is_program())
+        !self
+            .terminal()
+            .is_some_and(|term| term.is_program() || term.is_console())
     }
 
     pub fn page(&self) -> &adw::TabPage {

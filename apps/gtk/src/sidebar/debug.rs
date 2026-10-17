@@ -487,8 +487,8 @@ impl Debug {
 }
 
 /// The controls, flat icon buttons on the window's actions, which are enabled as the session's
-/// state allows: Continue or Pause, the steps, Restart and Stop; and under them what the program
-/// is doing. A press leaves the keyboard where it was, so stepping keeps the reader's place.
+/// state allows: Continue or Pause, the steps, Restart and Stop, then the Debug Console; and
+/// under them what the program is doing. A press leaves the keyboard where it was, so stepping keeps the reader's place.
 fn strip() -> (gtk::Box, gtk::Label, gtk::Button, gtk::Button) {
     let button = |icon: &str, action: &str| {
         let button = icon_button(icon, crate::actions::label_of(action));
@@ -507,6 +507,7 @@ fn strip() -> (gtk::Box, gtk::Label, gtk::Button, gtk::Button) {
         &button("dap-step-out-symbolic", "win.debug-step-out"),
         &button("view-refresh-symbolic", "win.debug-restart"),
         &button("media-playback-stop-symbolic", "win.debug-stop"),
+        &button("dap-console-symbolic", "win.debug-console"),
     ] {
         buttons.append(widget);
     }

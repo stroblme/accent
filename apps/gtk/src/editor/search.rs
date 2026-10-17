@@ -469,9 +469,15 @@ impl Tab {
     /// Route all jumps here so outline, search and definition targets cannot
     /// remain invisibly inside folded text.
     pub fn jump_to(&self, iter: &gtk::TextIter, align: f64) {
+        self.show_at(iter, align);
+        self.view.grab_focus();
+    }
+
+    /// [`jump_to`](Self::jump_to) leaving the keyboard where it is: where a debugged program
+    /// paused, which the reader may be typing elsewhere than in.
+    pub fn show_at(&self, iter: &gtk::TextIter, align: f64) {
         let opened = self.reveal_select(iter, iter);
         self.scroll_to_caret(align, opened);
-        self.view.grab_focus();
     }
 
     /// Select `start..end` and report whether hidden lines opened. In a

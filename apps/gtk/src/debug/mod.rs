@@ -1,11 +1,13 @@
 //! The debugger in the window: the breakpoints a program stops at, kept per file for the session,
-//! and the session itself (`run`).
+//! the session itself (`run`), and its Debug Console (`console`).
 
 use super::*;
 use accent_api::debug::debuggable;
 use std::collections::BTreeMap;
 
 pub(crate) mod breakpoints;
+mod console;
+mod line;
 mod run;
 
 use run::Run;
@@ -26,6 +28,7 @@ pub struct Debugger {
     run: RefCell<Option<Rc<Run>>>,
     /// The paused line's mark, and the tab it is in.
     execution: RefCell<Option<(std::rc::Weak<Tab>, sourceview5::Mark)>>,
+    console: console::Console,
 }
 
 impl Debugger {
@@ -121,5 +124,48 @@ impl App {
         }
         self.save_session_soon();
         self.refill_breakpoints();
+    }
+}
+
+/// What a hover at char `column` of `line` asks the paused program for: the name there with the
+/// names it is reached through, `self.items` on the `items` of `self.items.append(x)`, as VS
+/// Code's hover takes it. `None` off a name and on a number.
+pub(crate) fn expression_at(line: &str, column: usize) -> Option<String> {
+    let chars: Vec<char> = line.chars().collect();
+    let name = |c: &char| c.is_alphanumeric() || *c == '_';
+    let run_back = |end: usize| chars[..end].iter().rev().take_while(|c| name(c)).count();
+    if !chars.get(column).is_some_and(name) {
+        return None;
+    }
+    let end = column + chars[column..].iter().take_while(|c| name(c)).count();
+    let mut start = column - run_back(column);
+    while start > 1 && chars[start - 1] == '.' && name(&chars[start - 2]) {
+        start -= 1 + run_back(start - 1);
+    }
+    let expression: String = chars[start..end].iter().collect();
+    (!expression.starts_with(|c: char| c.is_ascii_digit())).then_some(expression)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_hovered_name_takes_the_names_it_is_reached_through() {
+        let line = "    self.items.append(x)";
+        let on = |word: &str| expression_at(line, line.find(word).unwrap() + 1);
+        assert_eq!(on("items").as_deref(), Some("self.items"));
+        assert_eq!(on("append").as_deref(), Some("self.items.append"));
+        assert_eq!(on("self").as_deref(), Some("self"));
+        assert_eq!(
+            expression_at("total = double(21)", 9).as_deref(),
+            Some("double")
+        );
+        assert_eq!(
+            expression_at("total = double(21)", 14),
+            None,
+            "on the bracket"
+        );
+        assert_eq!(expression_at("total = double(21)", 15), None, "on a number");
     }
 }
