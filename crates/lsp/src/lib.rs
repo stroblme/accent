@@ -1,10 +1,11 @@
 //! UI-independent LSP client with required response types and stdio transport on [`runtime()`].
+//! DAP frames messages the same way, so [`codec`] serves `accent_dap` too.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 mod client;
-mod codec;
+pub mod codec;
 mod runtime;
 pub mod types;
 
