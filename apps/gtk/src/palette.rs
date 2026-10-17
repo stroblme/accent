@@ -7,6 +7,7 @@
 //! File mode opens immediately with recently opened and modified files, matching the full
 //! list only after typing. Debouncing prevents a full match being queued for every character.
 
+use crate::actions;
 use crate::start;
 use crate::widgets::{Debounce, status_page};
 use accent_api::SymbolName;
@@ -315,17 +316,23 @@ pub(crate) fn accel_label(accel: &str) -> Option<String> {
 }
 
 /// Find shortcut clashes from effective rows, including conflicts introduced by hand-edited config.
+/// A chord is a clash only between holders that may not share it ([`actions::may_share`]).
 fn conflicts(items: &[Rc<Item>]) -> HashSet<String> {
-    let mut seen: HashSet<&str> = HashSet::new();
+    let mut seen: HashMap<&str, Vec<&str>> = HashMap::new();
     let mut twice = HashSet::new();
     for item in items {
-        let Item::Command { accels, .. } = &**item else {
+        let Item::Command { action, accels, .. } = &**item else {
             continue;
         };
         for accel in accels {
-            if !seen.insert(accel) {
+            let holders = seen.entry(accel).or_default();
+            if holders
+                .iter()
+                .any(|other| !actions::may_share(other, action))
+            {
                 twice.insert(accel.clone());
             }
+            holders.push(action);
         }
     }
     twice
@@ -883,7 +890,11 @@ pub fn present(
                 .borrow()
                 .iter()
                 .filter_map(|c| match &**c {
-                    Item::Command { action: a, .. } if a == action => None,
+                    Item::Command { action: a, .. }
+                        if a == action || actions::may_share(a, action) =>
+                    {
+                        None
+                    }
                     Item::Command { label, accels, .. } => {
                         Some(accels.iter().map(|a| (a.clone(), label.clone())))
                     }
@@ -1281,5 +1292,14 @@ mod tests {
         assert!(twice.contains("<Control>s"));
         // A chord only one command claims is not a conflict, and neither is being unbound.
         assert!(!twice.contains("<Control>f"));
+        // Presentation gives up F5 to Continue while a session runs, so the two may share it;
+        // two of the session's controls may not.
+        let mut shared = vec![
+            command("win.present", &["F5"]),
+            command("win.debug-continue", &["F5"]),
+        ];
+        assert!(conflicts(&shared).is_empty());
+        shared.push(command("win.debug-pause", &["F5"]));
+        assert!(conflicts(&shared).contains("F5"));
     }
 }

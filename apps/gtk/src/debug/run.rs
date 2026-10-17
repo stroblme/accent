@@ -477,6 +477,10 @@ impl App {
 
     /// The session's controls as its state allows, and the strip saying what that is.
     pub(crate) fn sync_debug(&self) {
+        // A session's chords are the window's while it runs (`actions::installed`).
+        if let Some((shell, gtk_app)) = self.shell.upgrade().zip(self.window.application()) {
+            shell.sync_accels(&gtk_app);
+        }
         let run = self.debugger.run();
         let state = run.as_ref().map(|run| run.state.get());
         let paused = matches!(state, Some(State::Paused { .. }));

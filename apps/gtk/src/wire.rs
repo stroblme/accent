@@ -784,6 +784,14 @@ pub fn wire_window(app: &Rc<App>) {
             if key == gdk::Key::Escape && (app.cancel_cycle() || escape_first(&app)) {
                 return glib::Propagation::Stop;
             }
+            // A session's chords, ahead of presentation's F5 and of whatever has the keyboard.
+            if let Some(action) = keys
+                .current_event()
+                .and_then(|event| session_chord(&app, &event))
+            {
+                let _ = WidgetExt::activate_action(&app.window, action, None);
+                return glib::Propagation::Stop;
+            }
             // Presentation's own chord leaves it from a presented shell too, which is handed
             // every chord outside its reserved set, F5 included (`actions::reserved`).
             if app.presenting.get().is_some()
@@ -931,10 +939,21 @@ pub fn escape_first(app: &Rc<App>) -> bool {
 
 /// Whether `event` is the chord Presentation Mode is bound to, as the table has it now.
 fn ends_presenting(app: &App, event: &gdk::Event) -> bool {
-    actions::accels_for(&app.config.borrow(), "win.present")
-        .iter()
-        .filter_map(|accel| gtk::ShortcutTrigger::parse_string(accel))
-        .any(|trigger| trigger.trigger(event, false) == gdk::KeyMatch::Exact)
+    actions::is_chord(&app.config.borrow(), "win.present", event)
+}
+
+/// The session control `event` is the chord of while this window debugs. Heard here, the capture
+/// phase at the window, it comes ahead of GtkPaned's `F6` and of a focused shell, the program's
+/// own included, as VS Code's terminal skips its debug commands. Forward All Keys hands a shell
+/// them too, and a dialog keeps them, so the rebind dialog can take `F5`.
+fn session_chord(app: &App, event: &gdk::Event) -> Option<&'static str> {
+    let config = app.config.borrow();
+    let forwarded = config.forward_keys_to_terminal
+        && actions::Keys::at(gtk::prelude::GtkWindowExt::focus(&app.window))
+            == actions::Keys::Shell;
+    (app.debugger.running() && app.window.visible_dialog().is_none() && !forwarded)
+        .then(|| actions::session_chord(&config, event))
+        .flatten()
 }
 
 /// Handle unclaimed Escape: close Find, then the hosted comparison, one per press.

@@ -1451,7 +1451,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
   Over a text tab `Ctrl+Shift+V` is Paste as Plain Text.
   `Ctrl+PageUp` / `Ctrl+PageDown` stay `AdwTabView`'s.
 - **A focused shell wins by default**: while a terminal has the keyboard the window keeps a small reserved set and unbinds the rest of this table, so `Ctrl+A`, `Ctrl+C`, `Ctrl+D`, `Ctrl+K`, `Ctrl+L`, `Ctrl+R`, `Ctrl+U` and the rest of readline behave as in any terminal.
-  Reserved: `Ctrl+W`, `Ctrl+Tab`, `Ctrl+J`, `Ctrl+E` (Go to File), the three zoom chords, `F11`, the Move Tab chords and any Move Divider is given, and every chord spelled with both `Control` and `Shift`.
+  Reserved: `Ctrl+W`, `Ctrl+Tab`, `Ctrl+J`, `Ctrl+E` (Go to File), the three zoom chords, `F11`, the Move Tab chords and any Move Divider is given, and every chord spelled with both `Control` and `Shift`; while a debug session runs, its seven chords as well (Debugging).
   A presented shell gives up `F5` and `Esc` as well, which leave presentation (Views).
 - **A click gives a shell the keyboard, and takes it back** (user decision 2026-10-16): a click on a shell's tab gives the shell the keyboard, from another tab of its pane as from anywhere else, so a tab clicked to is typed into.
   A second click on that tab leaves the keyboard on its label, where the whole table is the window's (Editing), and a click outside the shell's tab on chrome that takes no focus — a header bar, the title, the status bar, a tab bar's empty end — takes it to nothing, the window's chords but the editing ones applying again.
@@ -1530,7 +1530,13 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 ### Debugging
 
 - Start Debugging `Ctrl+F5`, Toggle Breakpoint `Ctrl+F9`, Remove All Breakpoints (unbound).
-- Continue, Pause, Step Over, Step Into, Step Out, Restart Debugging and Stop Debugging are the Code pane's strip and the palette's, each doing nothing while the session cannot take it.
+- While a session runs, VS Code's keys (user decision 2026-10-17): Continue `F5`, Stop Debugging `Shift+F5`, Restart Debugging `Ctrl+Shift+F5`, Pause `F6`, Step Over `F10`, Step Into `F11`, Step Out `Shift+F11`.
+  They are the Code pane's strip and the palette's as well, each doing nothing while the session cannot take it.
+- Outside a session the seven mean nothing, so `F5` presents, `F10` opens the primary menu, `F11` goes fullscreen and `F6` is GtkPaned's (Widget chords).
+  While one runs, Presentation, Primary Menu and Fullscreen give their chords up and keep their palette entries; `F5` continues in presentation too, and `Esc` still leaves it.
+- The window hears them ahead of whatever has the keyboard, so they step from the Files tree, the editor and a focused shell alike: the program's own terminal gives them up, as VS Code's terminal skips its debug commands, and Forward All Keys hands them to the shell with the rest.
+  A dialog keeps them, so the rebind dialog takes `F5` as a chord.
+- A session's chord may equal the one it shadows without a clash; two of the session's own may not share one.
 - Toggle Breakpoint is an editing chord (Editing): it puts a breakpoint on the caret's line of the tab in front, or takes it off, and does nothing in a file no debugger runs.
   Remove All Breakpoints clears every file's in the window, open or not.
 
@@ -1552,7 +1558,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 
 ### Views
 
-- Toggle Preview `Ctrl+M` (Editor and Split), Toggle Minimap (unbound), Presentation `F5`.
+- Toggle Preview `Ctrl+M` (Editor and Split), Toggle Minimap (unbound), Presentation `F5`, which is Continue while a debug session runs (Debugging).
 - Presentation hides the sidebar, the other panes, the tab bars and both header bars, and shows the note rendered.
   The presented pane stays where it is in the pane tree with the branches beside it hidden, so its find bar and its `Ctrl+Tab` card stay its own and every divider is where it was afterwards; the rendered note is the preview laid over the pane's tabs.
   A tab that draws its own document — a PDF, a diagram, an image, a diff, a terminal — is presented as it is; a PDF fits a whole page meanwhile and gets its zoom back afterwards.
@@ -1570,7 +1576,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 
 ### Window
 
-- Fullscreen `F11`, Preferences `Ctrl+comma`, Keyboard Shortcuts `Ctrl+?`, Primary Menu `F10`, About accent (unbound).
+- Fullscreen `F11`, Preferences `Ctrl+comma`, Keyboard Shortcuts `Ctrl+?`, Primary Menu `F10`, About accent (unbound); `F11` and `F10` are Step Into and Step Over while a debug session runs (Debugging).
 - **Keyboard Shortcuts** is libadwaita's shortcuts dialog over this table as it stands (`shortcuts.rs`): every bound command under this chapter's headings, a rebound one with its new chord, an unbound one left out, and the keys a PDF or a diagram's canvas answers itself beside their commands (a presented diagram's paging aside), Duplicate Selection and Group with the chords they borrow.
   The palette's command mode lists every command, bound or not, and is where one is rebound.
 
@@ -1613,6 +1619,8 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 - Five Editing chords are the widget's class shortcuts — GtkTextView's `Ctrl+Up`/`Ctrl+Down` (paragraph movement) and `Ctrl+K` (delete to line end), GtkSourceView's `Shift+Alt+Up`/`Shift+Alt+Down` (`move-viewport`) — which run before the window's accelerators, so a capture-phase controller on the window claims them for our actions, except in a shell, where `Ctrl+K` kills to the end of the line.
   Taking a widget binding needs that deliberation; it is not the default way to add a shortcut.
 - The other way round, a controller on one of our own widgets never sees a chord the table holds while it holds it, so a chord a focused widget must own is left out of the table there: the editing chords are bound only while the keyboard is in a tab (Editing), which is how the commit box keeps `Ctrl+Return`.
+- GtkPaned binds `F6` / `Shift+F6` to the next or previous pane and `F8` / `Shift+F8` to its divider, and the innermost split around the focus takes them; every document sits in one.
+  They stay GtkPaned's but for `F6` while a debug session runs, which the window's capture-phase key controller takes for Pause ahead of the binding (Debugging).
 
 ### Deviations
 
