@@ -107,7 +107,7 @@ fn diagnostic_markup(item: &accent_api::Diagnostic) -> String {
 
 /// What the hovered name at `start` holds in the paused program, `self.items` on its `items`,
 /// as it is asked for; `None` unless a program is paused in a file its debugger runs.
-fn value_of(tab: &Rc<Tab>, start: &gtk::TextIter) -> Option<(String, Task<Evaluated>)> {
+pub(crate) fn value_of(tab: &Rc<Tab>, start: &gtk::TextIter) -> Option<(String, Task<Evaluated>)> {
     let mut from = *start;
     from.set_line_offset(0);
     let mut to = *start;

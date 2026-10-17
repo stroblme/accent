@@ -9,6 +9,7 @@ mod chrome;
 mod compare;
 mod complete;
 mod corpus;
+mod debug;
 mod diagnostics;
 mod diagram;
 mod dismiss;
@@ -248,6 +249,8 @@ use tags::bench_tags;
 /// - `ACCENT_BENCH_GOALS=<rel>:<line>:<col>[:<line>:<col>]`: Lean goals,
 ///   sidebar restoration and checking marks. Requires elan's Lean; excluded
 ///   from `make drills`.
+/// - `ACCENT_BENCH_DEBUG=<rel>:<line>`: a debugpy session from a breakpoint on
+///   `<line>` of the program `make drills` writes (`debug::bench_debug`).
 /// - `ACCENT_BENCH_REPLACE=1`: Search-pane Replace All updates.
 /// - `ACCENT_BENCH_FIND=<rel_note>`: query selection/history; `options`:
 ///   search toggles, invalid patterns and replacement captures in a temporary note.
@@ -324,6 +327,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let replace = std::env::var("ACCENT_BENCH_REPLACE").is_ok();
     let info = std::env::var("ACCENT_BENCH_INFO").ok();
     let goals = std::env::var("ACCENT_BENCH_GOALS").ok();
+    let debug = std::env::var("ACCENT_BENCH_DEBUG").ok();
     let search = std::env::var("ACCENT_BENCH_SEARCH").ok();
     let find = std::env::var("ACCENT_BENCH_FIND").ok();
     let diag = std::env::var("ACCENT_BENCH_DIAG").ok();
@@ -349,6 +353,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && !replace
         && info.is_none()
         && goals.is_none()
+        && debug.is_none()
         && search.is_none()
         && clip.is_none()
         && transfer.is_none()
@@ -582,6 +587,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(arg) = goals {
             return bench_goals(&app, &arg);
+        }
+        if let Some(arg) = debug {
+            return debug::bench_debug(&app, &arg);
         }
         if let Some(rel) = tags {
             return bench_tags(&app, &rel);

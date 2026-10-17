@@ -450,6 +450,13 @@ impl Sidebar {
         self.code.goals()
     }
 
+    /// The strip's line, the calls Call Stack lists and the values Variables has open, for
+    /// `ACCENT_BENCH_DEBUG`.
+    #[cfg(feature = "bench")]
+    pub fn debug_shown(&self) -> Option<(String, Vec<String>, Vec<String>)> {
+        self.code.debug.as_ref().map(|debug| debug.shown())
+    }
+
     /// Put `divider` back to its default if it is one of the sidebar's own, reporting whether it
     /// was. The window's double-click handler asks every divider owner in turn, so the rule for a
     /// pane lives next to the pane rather than in the shell.

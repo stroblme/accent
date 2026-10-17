@@ -481,6 +481,31 @@ impl Debug {
         self.values.set(Vec::new());
     }
 
+    /// The strip's line, the calls listed as `name file:line` and the values as `name=value`.
+    #[cfg(feature = "bench")]
+    pub(super) fn shown(&self) -> (String, Vec<String>, Vec<String>) {
+        let rows = |tree: &Tree, said: &dyn Fn(&Item) -> Option<String>| -> Vec<String> {
+            (0..tree.model.n_items())
+                .filter_map(|i| tree.model.item(i).as_ref().and_then(item_of))
+                .filter_map(|item| said(&item.borrow::<Item>()))
+                .collect()
+        };
+        let calls = rows(&self.calls, &|item| match item {
+            Item::Frame(frame) => Some(format!(
+                "{} {}:{}",
+                frame.name,
+                frame.path.as_deref().map_or("", crate::doc::file_name),
+                frame.pos.line + 1
+            )),
+            _ => None,
+        });
+        let values = rows(&self.values, &|item| match item {
+            Item::Variable(v) if !v.value.is_empty() => Some(format!("{}={}", v.name, v.value)),
+            _ => None,
+        });
+        (self.state.text().to_string(), calls, values)
+    }
+
     pub(super) fn sections(&self) -> [&Section; 3] {
         [&self.stack, &self.variables, &self.breakpoints]
     }
