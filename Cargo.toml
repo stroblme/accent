@@ -1,9 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/lsp", "crates/api", "crates/drawio", "apps/cli", "apps/gtk", "android/ffi"]
+members = ["crates/core", "crates/lsp", "crates/dap", "crates/api", "crates/drawio", "apps/cli", "apps/gtk", "android/ffi"]
 # apps/gtk needs gtk4/libadwaita dev headers; build it explicitly with `cargo build -p accent`.
 # android/ffi is cross-compiled for the phone by `make android`, never by a desktop build.
-default-members = ["crates/core", "crates/lsp", "crates/api", "crates/drawio", "apps/cli"]
+default-members = ["crates/core", "crates/lsp", "crates/dap", "crates/api", "crates/drawio", "apps/cli"]
 
 [workspace.package]
 version = "2.0.0"
@@ -16,6 +16,7 @@ repository = "https://github.com/stroblme/accent"
 [workspace.dependencies]
 accent-core = { path = "crates/core" }
 accent-lsp = { path = "crates/lsp" }
+accent-dap = { path = "crates/dap" }
 accent-api = { path = "crates/api" }
 accent-drawio = { path = "crates/drawio" }
 anyhow = "1"
