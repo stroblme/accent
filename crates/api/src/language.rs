@@ -1156,7 +1156,7 @@ fn home_relative(arg: &str, home: &Path) -> PathBuf {
 
 /// Whether an executable can be started: an absolute name is the file itself, a bare one is
 /// looked for the way a shell would.
-fn in_path(exe: &str) -> bool {
+pub(crate) fn in_path(exe: &str) -> bool {
     let path = Path::new(exe);
     if path.is_absolute() {
         return path.is_file();
@@ -1356,7 +1356,7 @@ fn remote_task<T: DeserializeOwned + Send + 'static>(
 
 /// [`remote_task`], waiting up to `deadline`, with the answer finished by `then` on the same
 /// blocking thread.
-fn remote_task_then<T: DeserializeOwned + Send + 'static>(
+pub(crate) fn remote_task_then<T: DeserializeOwned + Send + 'static>(
     r: Arc<Remote>,
     method: &'static str,
     params: Value,

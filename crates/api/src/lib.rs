@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 pub mod ffi;
 #[cfg(feature = "android")]
 uniffi::setup_scaffolding!();
+pub mod debug;
 mod error;
 pub mod language;
 pub mod link;
@@ -125,6 +126,11 @@ pub enum Event {
     Checking {
         rel: String,
         lines: Vec<std::ops::Range<u32>>,
+    },
+    /// What debug session `session`, the number [`Vault::debug_start`] was given, has to say.
+    Debug {
+        session: u64,
+        news: debug::News,
     },
 }
 
