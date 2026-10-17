@@ -434,6 +434,8 @@ impl App {
                 self.unwatched.set_revealed(true);
             }
             Event::Error(message) => self.toast(&message),
+            // The window starts no debug session yet, so none has news for it.
+            Event::Debug { .. } => {}
             // Every tab of the file holds the check, so a switch to one shows it.
             Event::Checking { rel, lines } => {
                 let line = lines.first().map(|lines| lines.start);

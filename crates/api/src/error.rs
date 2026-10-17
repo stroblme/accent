@@ -57,6 +57,12 @@ impl From<accent_lsp::Error> for Error {
     }
 }
 
+impl From<accent_dap::Error> for Error {
+    fn from(e: accent_dap::Error) -> Error {
+        Error::Language(e.to_string())
+    }
+}
+
 /// Treat cancelled language tasks as cancelled requests and panics as failures.
 impl From<tokio::task::JoinError> for Error {
     fn from(e: tokio::task::JoinError) -> Error {

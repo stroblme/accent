@@ -93,6 +93,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - **Debug client**: our own tokio client in `crates/dap`, over the language client's framing and its one runtime, types transcribed from the DAP JSON schema (MIT) — DAP frames messages as LSP does, and no maintained crate carries its types.
   A request is given 10 s; a `launch` and a REPL `evaluate` wait as long as they take, the first answering once the program runs and the second running the reader's code, and neither is cancelled at the adapter, debugpy having no `cancel`.
 - **Language API**: one `Language` trait over a real server and the index, async `Vault` methods returning a `Task` that cancels at the server when dropped and lets go of the thread waiting on a host at once, positions in characters — every text tab takes one path, and a completion typed past is not answered into the void.
+- **Debug API**: a façade group of its own, `Vault::debug_*`, keyed by a session number the window picks, not the `Language` trait — a session is a program, not a document, and outlives any tab of its files; the number lets its news (`Event::Debug`) arrive before the start is answered.
+  Its adapter runs where the vault is and ends with Stop, with the program, or with the vault and so the window.
 - **Server roots**: a language server is rooted at the nearest folder inside the vault holding `.git` or one of its language's root markers (Lean: `lakefile.toml`, `lakefile.lean`, `lean-toolchain`) — a Lean project is often a folder of a larger repository, and `lake serve` does not look upwards.
   A file under a `.lake` folder is looked up from the folder holding the outermost one: each package there has a lakefile of its own and no build, so a Mathlib file opened by Go to Definition is answered by the project's server rather than one that would start building Mathlib.
   A server command written `~/…` (the table's `~/.elan/bin/lake`, or a vault's own) is looked for in the home of whoever runs the server, the host's for a remote vault: a desktop session's PATH has no `~/.elan/bin`.
@@ -1085,6 +1087,14 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The exception is a Lean abbreviation typed out in full (`\to`), selected as the list opens so `Tab` writes `→` (user decision 2026-10-09): `Completion::preselect`, set only by the abbreviations — a server's own `preselect` is not read, as `Return` would stop meaning a new line in code.
 - **A move asks the servers already running**, never one started for it, what it breaks in the code (`workspace/willRenameFiles`), before anything moves, a server reading the disk to answer.
   The files it names follow the notes in the one Update question; a moved Rust or TypeScript file no running server answered for is said to be unchecked. rust-analyzer answers only for a rename within one folder.
+
+### Debugger
+
+- Python is debugged through debugpy (`python3 -m debugpy.adapter`), whatever interpreter the program runs in: the program loads debugpy from the adapter's install, so an environment without debugpy debugs as well (measured 2026-10-17).
+- The program runs in the nearest `.venv` or `venv` above it inside the vault, else in `python3`.
+- Its working directory, and the adapter's, is the nearest folder inside the vault holding `.git`, else the vault root: VS Code's workspace folder.
+- Which adapter debugs which language is a table in the app, overridden in `config.toml` for every vault on this machine (`[debug.adapters]`) and per vault (`[vaults."<root>".debug.adapters]`), the vault's own winning key by key, as the language servers are; the interpreter likewise under `[debug] python` and `[vaults."<root>".debug] python`, a relative path read from the vault root.
+  A remote vault takes its own alone. No preference, the answer being whether it is installed.
 
 ### Context menus
 

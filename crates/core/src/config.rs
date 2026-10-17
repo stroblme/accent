@@ -57,6 +57,9 @@ arrow = false
 python3 = ["pyright-langserver", "--stdio"]
 rust = ["rust-analyzer"]
 
+[debug.adapters]
+python3 = ["python3", "-m", "debugpy.adapter"]
+
 [vaults."/home/me/Notes"]
 templates_dir = "Templates"
 new_file_dir = "Inbox"
@@ -64,6 +67,9 @@ attachment_folder = "./attachments"
 
 [vaults."/home/me/Notes".lsp.servers]
 python3 = ["pylsp"]
+
+[vaults."/home/me/Notes".debug]
+python = [".venv/bin/python"]
 "#
     };
 }
@@ -152,6 +158,9 @@ pub struct Config {
     /// This machine's servers, under every local vault's own (`Config::local_vault`).
     #[serde(skip_serializing_if = "LspConfig::is_empty")]
     pub lsp: LspConfig,
+    /// This machine's debug adapters and interpreter, under every local vault's own.
+    #[serde(skip_serializing_if = "DebugConfig::is_empty")]
+    pub debug: DebugConfig,
     /// Keyed by canonical vault path.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub vaults: BTreeMap<String, VaultConfig>,
@@ -288,6 +297,7 @@ impl Default for Config {
             drawing: DrawingConfig::default(),
             diagram: DiagramConfig::default(),
             lsp: LspConfig::default(),
+            debug: DebugConfig::default(),
             vaults: BTreeMap::new(),
         }
     }
@@ -306,6 +316,8 @@ pub struct VaultConfig {
     pub attachment_folder: String,
     #[serde(skip_serializing_if = "LspConfig::is_empty")]
     pub lsp: LspConfig,
+    #[serde(skip_serializing_if = "DebugConfig::is_empty")]
+    pub debug: DebugConfig,
 }
 
 /// Which language server answers for a language, where the built-in choice is not the one
@@ -323,6 +335,24 @@ impl LspConfig {
     }
 }
 
+/// Which debug adapter runs a language's programs, and the interpreter they run in, where the
+/// built-in choice is not the one wanted. Adapters are keyed as [`LspConfig::servers`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DebugConfig {
+    pub adapters: BTreeMap<String, Vec<String>>,
+    /// The Python a program runs in, a relative path with a `/` read from the vault root; empty
+    /// is the nearest virtual environment above the program, else `python3`.
+    pub python: Vec<String>,
+}
+
+impl DebugConfig {
+    /// Nothing chosen: written as nothing, as [`LspConfig`] is.
+    fn is_empty(&self) -> bool {
+        self.adapters.is_empty() && self.python.is_empty()
+    }
+}
+
 impl Default for VaultConfig {
     fn default() -> Self {
         VaultConfig {
@@ -330,6 +360,7 @@ impl Default for VaultConfig {
             new_file_dir: String::new(),
             attachment_folder: String::new(),
             lsp: LspConfig::default(),
+            debug: DebugConfig::default(),
         }
     }
 }
@@ -690,9 +721,10 @@ impl Config {
             .unwrap_or_default()
     }
 
-    /// What a vault on this machine opens with: its entry, its own servers over the global
-    /// `[lsp.servers]` key by key. A remote vault takes [`Self::vault`] alone, its host's
-    /// servers being the host's own.
+    /// What a vault on this machine opens with: its entry, its own servers and debug adapters over
+    /// the global `[lsp.servers]` and `[debug.adapters]` key by key, and its interpreter if it
+    /// names one. A remote vault takes [`Self::vault`] alone, its host's servers being the host's
+    /// own.
     pub fn local_vault(&self, root: &Path) -> VaultConfig {
         let mut cfg = self.vault(root);
         for (language, argv) in &self.lsp.servers {
@@ -700,6 +732,15 @@ impl Config {
                 .servers
                 .entry(language.clone())
                 .or_insert_with(|| argv.clone());
+        }
+        for (language, argv) in &self.debug.adapters {
+            cfg.debug
+                .adapters
+                .entry(language.clone())
+                .or_insert_with(|| argv.clone());
+        }
+        if cfg.debug.python.is_empty() {
+            cfg.debug.python = self.debug.python.clone();
         }
         cfg
     }
@@ -799,14 +840,20 @@ fn unknown_keys(table: &toml::Table) -> Vec<String> {
             .unwrap_or_default()
     }
     let one = || BTreeMap::from([(String::new(), Vec::new())]);
+    let debug = || DebugConfig {
+        adapters: one(),
+        ..DebugConfig::default()
+    };
     let vault = VaultConfig {
         lsp: LspConfig { servers: one() },
+        debug: debug(),
         ..VaultConfig::default()
     };
     let top = names(Config {
         editor_font: Some(String::new()),
         shortcuts: one(),
         lsp: LspConfig { servers: one() },
+        debug: debug(),
         vaults: BTreeMap::from([(String::new(), vault.clone())]),
         ..Config::default()
     });
@@ -1401,8 +1448,17 @@ daily_dir = "Daily"
         assert_eq!(local["python3"], argv(&["pylsp"]));
         assert_eq!(local["rust"], argv(&["rust-analyzer"]));
         assert_eq!(c.vault(notes).lsp.servers.len(), 1);
-        let other = c.local_vault(Path::new("/elsewhere")).lsp;
-        assert_eq!(other, c.lsp);
+        let other = c.local_vault(Path::new("/elsewhere"));
+        assert_eq!(other.lsp, c.lsp);
+
+        // The debugger's table merges the same way; the interpreter is the vault's when it says one.
+        let debug = c.local_vault(notes).debug;
+        assert_eq!(
+            debug.adapters["python3"],
+            argv(&["python3", "-m", "debugpy.adapter"])
+        );
+        assert_eq!(debug.python, argv(&[".venv/bin/python"]));
+        assert_eq!(other.debug, c.debug);
     }
 
     #[test]

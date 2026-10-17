@@ -19,6 +19,8 @@ accent-core.workspace = true
 # A Replace All rewrites a diagram's labels through its model, never its XML.
 accent-drawio.workspace = true
 accent-lsp.workspace = true
+# Debug sessions talk to their adapter through it.
+accent-dap.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
