@@ -535,6 +535,7 @@ pub(crate) fn answer<T: serde::Serialize>(r: Result<T, impl Into<Error>>) -> Res
 fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value> {
     if let Some(answer) = crate::vault::dispatch(vault, method, p)
         .or_else(|| crate::language::dispatch(vault, method, p))
+        .or_else(|| crate::debug::dispatch(vault, method, p))
     {
         return answer;
     }
@@ -586,6 +587,12 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value> {
             arg(p, 2)?,
         ))),
         "close_document" => answer(block(vault.close_document(&arg::<String>(p, 0)?))),
+        // A debug session's ends, likewise: starting reads the vault's config, and stopping one
+        // already over is no error.
+        "debug_start" => answer(block(
+            vault.debug_start(arg(p, 0)?, &arg::<crate::debug::Launch>(p, 1)?),
+        )),
+        "debug_stop" => answer(block(vault.debug_stop(arg(p, 0)?))),
 
         _ => Err(Error::UnknownMethod(method.to_string())),
     }
@@ -1266,6 +1273,92 @@ mod tests {
             w.wait(|e| matches!(e, Event::Reconciled(s) if !s.stopped)),
             "the host's walk did not finish after a resume"
         );
+    }
+
+    /// The host runs the adapter beside `serve`: the requests reach its sessions, and the news
+    /// comes back as the vault's events. The window runs the program, here this test.
+    #[test]
+    fn a_debug_session_crosses_the_wire() {
+        use crate::debug::{Context, Frame, Launch, News};
+        let demo = "def double(x):\n    y = x * 2\n    return y\n\ntotal = double(21)\nprint(\"total\", total)\n";
+        let w = Wired::seeded(&|root| std::fs::write(root.join("demo.py"), demo).unwrap());
+        let refused = w.client.call::<()>("debug_threads", json!([9]));
+        assert!(matches!(refused, Err(Error::Language(_))), "{refused:?}");
+        if !crate::tests::has_debugpy() {
+            eprintln!("debugpy is not installed: skipping the session over the wire");
+            return;
+        }
+        let next = |want: fn(&News) -> bool| {
+            let event = crate::tests::wait_for(
+                &w._events,
+                |e| matches!(e, Event::Debug { session: 1, news } if want(news)),
+                Duration::from_secs(30),
+            );
+            match event {
+                Some(Event::Debug { news, .. }) => news,
+                e => panic!("{e:?}"),
+            }
+        };
+        let launch = Launch {
+            program: "demo.py".to_string(),
+            language: "python3".to_string(),
+            breakpoints: vec![("demo.py".to_string(), vec![1])],
+        };
+        std::thread::scope(|s| {
+            let started = s.spawn(|| {
+                let asked = Mutex::new(None);
+                let launch = json!([1, launch]);
+                let deadline = Duration::from_secs(60);
+                w.client
+                    .call_tracked::<()>("debug_start", launch, &asked, deadline)
+            });
+            let News::Terminal {
+                seq,
+                args,
+                cwd,
+                env,
+            } = next(|n| matches!(n, News::Terminal { .. }))
+            else {
+                unreachable!()
+            };
+            let mut program = std::process::Command::new(&args[0])
+                .args(&args[1..])
+                .current_dir(cwd)
+                .envs(env)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let answer = json!([1, seq, program.id()]);
+            w.client.call::<()>("debug_answer", answer).unwrap();
+
+            let News::Stopped { thread, .. } = next(|n| matches!(n, News::Stopped { .. })) else {
+                unreachable!()
+            };
+            started.join().unwrap().unwrap();
+            let frames: Vec<Frame> = w.client.call("debug_stack", json!([1, thread])).unwrap();
+            assert_eq!(
+                (frames[0].name.as_str(), frames[0].path.as_deref()),
+                ("double", Some("demo.py"))
+            );
+            let asked = json!([1, frames[0].id, "x * 2", Context::Repl]);
+            let twice: crate::debug::Evaluated = w.client.call("debug_evaluate", asked).unwrap();
+            assert_eq!(twice.result, "42");
+            w.client
+                .call::<()>("debug_continue", json!([1, thread]))
+                .unwrap();
+            let ended = next(|n| matches!(n, News::Ended { .. }));
+            assert_eq!(
+                ended,
+                News::Ended {
+                    code: Some(0),
+                    error: None
+                }
+            );
+            program.wait().unwrap();
+        });
+        // A session already over is stopped without complaint.
+        w.client.call::<()>("debug_stop", json!([1])).unwrap();
     }
 
     /// The session belongs to the machine the window is on, so it is not on the wire at all.

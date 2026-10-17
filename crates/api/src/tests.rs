@@ -88,6 +88,15 @@ pub(crate) fn poll_until(mut f: impl FnMut() -> bool, budget: Duration) -> bool 
     f()
 }
 
+/// Whether this machine's `python3` has debugpy, which the debugger's end-to-end tests need.
+pub(crate) fn has_debugpy() -> bool {
+    std::process::Command::new("python3")
+        .args(["-c", "import debugpy"])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 pub(crate) fn names(rows: &[FileRow]) -> Vec<String> {
     rows.iter().map(|r| r.rel_path.clone()).collect()
 }

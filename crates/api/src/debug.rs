@@ -301,7 +301,6 @@ macro_rules! sessions {
         )* }
 
         /// Dispatch these requests on host request threads in [`crate::rpc::serve_local`].
-        #[expect(dead_code, reason = "the host serves debug sessions once rpc.rs dispatches here")]
         pub(crate) fn dispatch(vault: &Local, method: &str, p: &Value) -> Option<Result<Value>> {
             $( if method == stringify!($name) {
                 crate::rpc::args!(p; session: u64 $(, $arg: $ty)*);
@@ -421,12 +420,7 @@ mod tests {
 
     #[test]
     fn debugpy_pauses_at_a_breakpoint_and_answers_for_the_frame() {
-        let debugpy = Command::new("python3")
-            .args(["-c", "import debugpy"])
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success());
-        if !debugpy {
+        if !crate::tests::has_debugpy() {
             eprintln!("debugpy is not installed: skipping the end-to-end test");
             return;
         }

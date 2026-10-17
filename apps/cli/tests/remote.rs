@@ -2,16 +2,19 @@
 //!
 //! Opt in with `ACCENT_TEST_REMOTE=ssh://host/path`, where the path may be created and deleted.
 //! The host needs `git`, `ss`, `pgrep` and an unused [`HOST_PORT`]. Without the variable, the test
-//! skips and passes.
+//! skips and passes. The debugger's leg needs debugpy on the host, in its `python3` or in the
+//! interpreter `ACCENT_TEST_REMOTE_DEBUGPY` names, which then runs the adapter; else it is skipped.
 //!
 //!     make server
 //!     ACCENT_TEST_REMOTE=ssh://myhost/tmp/accent-probe cargo test -p accent-cli --test remote
 //!
 //! Keep one test function so concurrent connections cannot race the server upload.
 
+use std::process::Stdio;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
+use accent_api::debug::{Context, Launch, News};
 use accent_api::link;
 use accent_api::ssh::{self, Direction, Forward, Url};
 use accent_api::{Event, Vault, VaultConfig, git, rpc};
@@ -45,8 +48,23 @@ fn a_remote_vault_connects_indexes_and_answers() {
         ),
     );
 
+    // The host's own adapter table, as a remote vault's `[debug.adapters]` is: `hello` takes it.
+    let python = std::env::var("ACCENT_TEST_REMOTE_DEBUGPY").ok();
+    let mut cfg = VaultConfig::default();
+    if let Some(python) = &python {
+        let adapter = [python.as_str(), "-m", "debugpy.adapter"].map(String::from);
+        cfg.debug
+            .adapters
+            .insert("python3".to_string(), adapter.into());
+    }
+    let asked = ssh::quote(python.as_deref().unwrap_or("python3"));
+    let debugpy = on_host(
+        &url,
+        &format!("{asked} -c 'import debugpy' 2>/dev/null && echo yes || true"),
+    );
+
     let t = Instant::now();
-    let (vault, events) = Vault::open_remote(&address, VaultConfig::default()).unwrap();
+    let (vault, events) = Vault::open_remote(&address, cfg).unwrap();
     // Opening must not wait for the connection: that is what lets the window paint at once.
     assert!(
         t.elapsed() < Duration::from_millis(200),
@@ -451,6 +469,74 @@ fn a_remote_vault_connects_indexes_and_answers() {
         Some("[t](../paper.pdf#page=1) [[paper.pdf]]\n")
     );
 
+    // A debug session's adapter runs on the host beside `serve`, and its news comes back as the
+    // vault's events. The program runs over the vault's master, as the program's tab runs it;
+    // with no terminal here, ssh allocates none and runs it all the same.
+    if debugpy.trim() == "yes" {
+        let demo = "def double(x):\n    y = x * 2\n    return y\n\ntotal = double(21)\nprint(\"total\", total)\n";
+        vault.write_file("demo.py", demo.as_bytes()).unwrap();
+        let launch = Launch {
+            program: "demo.py".to_string(),
+            language: "python3".to_string(),
+            breakpoints: vec![("demo.py".to_string(), vec![1])],
+        };
+        let news = |want: fn(&News) -> bool| match wait_for(
+            &events,
+            |e| matches!(e, Event::Debug { session: 1, news } if want(news)),
+        ) {
+            Event::Debug { news, .. } => news,
+            _ => unreachable!(),
+        };
+        let t = Instant::now();
+        let started = vault.debug_start(1, &launch);
+        let News::Terminal {
+            seq,
+            args,
+            cwd,
+            env,
+        } = news(|n| matches!(n, News::Terminal { .. }))
+        else {
+            unreachable!()
+        };
+        let argv = ssh::program(&url, remote.control_path(), &cwd, &env, &args);
+        let program = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        wait(vault.debug_answer(1, seq, None)).unwrap();
+        let News::Stopped { thread, reason, .. } = news(|n| matches!(n, News::Stopped { .. }))
+        else {
+            unreachable!()
+        };
+        assert_eq!(reason, "breakpoint");
+        wait(started).unwrap();
+        eprintln!("debugged demo.py to its breakpoint in {:?}", t.elapsed());
+        let thread = thread.expect("the stop names its thread");
+        let top = wait(vault.debug_stack(1, thread)).unwrap().remove(0);
+        assert_eq!(
+            (top.name.as_str(), top.path.as_deref(), top.pos.line),
+            ("double", Some("demo.py"), 1)
+        );
+        let twice = vault.debug_evaluate(1, Some(top.id), "x * 2".to_string(), Context::Repl);
+        assert_eq!(wait(twice).unwrap().result, "42");
+        wait(vault.debug_continue(1, thread)).unwrap();
+        assert_eq!(
+            news(|n| matches!(n, News::Ended { .. })),
+            News::Ended {
+                code: Some(0),
+                error: None
+            }
+        );
+        let ran = program.wait_with_output().unwrap();
+        let said = String::from_utf8_lossy(&ran.stdout);
+        assert!(said.contains("total 42"), "the program said {said:?}");
+    } else {
+        eprintln!("no debugpy on {}: skipping the debugger", url.host);
+    }
+
     // Closing the vault takes the server and every forward it still has off the host. The master
     // is left its ControlPersist minute on purpose, so it is not what is asserted on.
     remote.forward(back).unwrap();
@@ -652,11 +738,11 @@ fn eventually(probe: impl Fn() -> bool) -> bool {
 }
 
 /// Wait for `wanted`, logging connection steps; fail on any other disconnect.
-fn wait_for(events: &Receiver<Event>, wanted: impl Fn(&Event) -> bool) {
+fn wait_for(events: &Receiver<Event>, wanted: impl Fn(&Event) -> bool) -> Event {
     let deadline = Instant::now() + BUDGET;
     while Instant::now() < deadline {
         match events.recv_timeout(Duration::from_millis(500)) {
-            Ok(event) if wanted(&event) => return,
+            Ok(event) if wanted(&event) => return event,
             Ok(Event::Connecting { what, .. }) => eprintln!("  {what}"),
             Ok(Event::Disconnected(why)) => panic!("disconnected: {why}"),
             Ok(_) | Err(_) => {}

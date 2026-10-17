@@ -394,6 +394,29 @@ pub fn attach(url: &Url, ctl: &Path, server: &str, id: &str) -> Vec<String> {
     argv
 }
 
+/// A debugged program's command line on the host: `args` in `cwd` with `env` added, as the
+/// adapter's `runInTerminal` asks, run by the window in the program's terminal tab. [`attach`]'s
+/// sibling, `-t` and `-e none` alike, but not held: the program ends with its tab.
+pub fn program(
+    url: &Url,
+    ctl: &Path,
+    cwd: &str,
+    env: &[(String, String)],
+    args: &[String],
+) -> Vec<String> {
+    let mut argv = base(url, ctl);
+    argv.extend(["-t", "-e", "none"].map(String::from));
+    argv.push(url.destination());
+    let exec = match env.is_empty() {
+        true => "exec",
+        false => "exec env",
+    };
+    let set = env.iter().map(|(k, v)| quote(&format!("{k}={v}")));
+    let words: Vec<String> = set.chain(args.iter().map(|a| quote(a))).collect();
+    argv.push(format!("cd {} && {exec} {}", quote(cwd), words.join(" ")));
+    argv
+}
+
 // ------------------------------------------------------- server provisioning
 
 /// Supported Linux `uname -m` names, each built as `<arch>-unknown-linux-musl`.
@@ -989,6 +1012,31 @@ mod tests {
             Some(&format!("{server} kill '{id}'"))
         );
         assert_eq!(clip_cmd(&server, id), format!("{server} clip '{id}'"));
+    }
+
+    #[test]
+    fn a_debugged_program_runs_over_the_master_in_its_folder_and_environment() {
+        let env = [("A".to_string(), "b c".to_string())];
+        let args = words(&["python3", "it's.py"]);
+        assert_eq!(
+            program(&ported(), ctl(), "/srv/my vault", &env, &args),
+            words(&[
+                "ssh",
+                "-o",
+                "ControlPath=/run/user/1000/accent/0123456789abcdef",
+                "-p",
+                "2222",
+                "-t",
+                "-e",
+                "none",
+                "me@box",
+                r"cd '/srv/my vault' && exec env 'A=b c' 'python3' 'it'\''s.py'",
+            ])
+        );
+        assert_eq!(
+            program(&plain(), ctl(), "/srv", &[], &args).last(),
+            Some(&r"cd '/srv' && exec 'python3' 'it'\''s.py'".to_string())
+        );
     }
 
     #[test]
