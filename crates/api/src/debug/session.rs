@@ -57,8 +57,12 @@ pub(super) async fn start(
         root: root.clone(),
         placed: Mutex::default(),
     });
-    // Before `launch`: the adapter asks for the program to be run while it is out.
-    locked(&debugs.sessions).insert(id, session.clone());
+    // Before `launch`: the adapter asks for the program to be run while it is out. A vault shut
+    // down meanwhile stopped only the sessions it held, so this one stops its own adapter.
+    if !debugs.register(id, &session) {
+        session.client.shutdown().await;
+        return Err(accent_core::Error::Cancelled.into());
+    }
     accent_lsp::runtime().spawn(forward(
         id,
         incomings,

@@ -476,8 +476,11 @@ pub(crate) fn serve_local(
         workers.retain(|w| !w.is_finished());
     }
 
-    // stdin closed: the window went away. Drop the vault, which stops its worker, and let the
-    // event forwarder end with the channel.
+    // stdin closed: the window went away. Its debug sessions end first: a console's evaluation
+    // runs the reader's code, which may never return, and the thread waiting on it holds the
+    // vault. Then drop the vault, which stops its worker, and let the event forwarder end with
+    // the channel.
+    vault.debug.shutdown();
     drop(vault);
     for worker in workers {
         let _ = worker.join();
@@ -1359,6 +1362,54 @@ mod tests {
         });
         // A session already over is stopped without complaint.
         w.client.call::<()>("debug_stop", json!([1])).unwrap();
+    }
+
+    /// The window went away while the console's code ran on, which may never return: `serve`
+    /// ends the vault's debug sessions rather than wait for it.
+    #[test]
+    fn closing_the_connection_ends_a_debug_session_whatever_it_runs() {
+        use crate::debug::{Context, Launch};
+        let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let config = VaultConfig {
+            debug: crate::tests::fake_adapter(),
+            ..VaultConfig::default()
+        };
+        let (vault, events) =
+            Local::open_at(root.path(), &cache.path().join("index.db"), config).unwrap();
+        // Bare pipes rather than a `Client`, whose shutdown would wait on a `serve` that hangs.
+        let (server_in, mut client_out) = std::io::pipe().unwrap();
+        let (client_in, server_out) = std::io::pipe().unwrap();
+        let server =
+            std::thread::spawn(move || serve_local(vault, events, server_in, server_out, SILENCE));
+        let mut ask = move |id: u64, method: &str, params: Value| {
+            let line = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+            writeln!(client_out, "{line}").unwrap();
+        };
+        let mut heard = BufReader::new(client_in)
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(&line.unwrap()).unwrap());
+
+        let launch = Launch {
+            program: "demo.py".to_string(),
+            language: "python3".to_string(),
+            breakpoints: Vec::new(),
+        };
+        ask(1, "debug_start", json!([1, launch]));
+        let started = heard.find(|m| m["id"] == 1).unwrap();
+        assert!(started.get("result").is_some(), "{started}");
+        let forever = json!([1, null, "while True: pass", Context::Repl]);
+        ask(2, "debug_evaluate", forever);
+        let appears = |name: &str| {
+            crate::tests::poll_until(|| root.path().join(name).exists(), Duration::from_secs(10))
+        };
+        assert!(appears("evaluate"), "the adapter was never asked");
+
+        drop(ask);
+        let ended = crate::tests::poll_until(|| server.is_finished(), Duration::from_secs(10));
+        assert!(ended, "serve waits on the evaluation after EOF");
+        server.join().unwrap();
+        assert!(appears("ended"), "the adapter outlived serve");
     }
 
     /// The session belongs to the machine the window is on, so it is not on the wire at all.

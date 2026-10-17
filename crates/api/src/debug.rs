@@ -10,6 +10,7 @@ mod session;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -209,6 +210,9 @@ pub(crate) struct Debugs {
     root: PathBuf,
     events: Sender<Event>,
     sessions: Mutex<HashMap<u64, Arc<Session>>>,
+    /// Raised by [`Debugs::shutdown`] before it takes the sessions: a start still under way holds
+    /// `Debugs` itself, so it outlives the vault's end and must not register after it.
+    closed: AtomicBool,
 }
 
 impl Debugs {
@@ -217,6 +221,7 @@ impl Debugs {
             root,
             events,
             sessions: Mutex::default(),
+            closed: AtomicBool::new(false),
         }
     }
 
@@ -237,9 +242,12 @@ impl Debugs {
         })
     }
 
-    /// Stop every session, for `Local::drop`, within 2 s; past that the adapters are killed.
+    /// Stop every session within 2 s, past which the adapters are killed; one still starting
+    /// stops itself as it would register. For `Local::drop`, and for `serve` once its window has
+    /// gone.
     /// Blocks on the runtime, as `Languages::shutdown` does, and starts none when nothing runs.
     pub(crate) fn shutdown(&self) {
+        self.closed.store(true, Ordering::SeqCst);
         let sessions: Vec<Arc<Session>> = locked(&self.sessions).drain().map(|(_, s)| s).collect();
         if sessions.is_empty() {
             return;
@@ -252,6 +260,17 @@ impl Debugs {
             };
             let _ = tokio::time::timeout(Duration::from_secs(2), all).await;
         });
+    }
+
+    /// Keep `session` as `id`; false once the vault has shut down, the caller then stopping it.
+    fn register(&self, id: u64, session: &Arc<Session>) -> bool {
+        let mut sessions = locked(&self.sessions);
+        // Read under the lock `shutdown` drains through, so a session is either drained or refused.
+        if self.closed.load(Ordering::SeqCst) {
+            return false;
+        }
+        sessions.insert(id, session.clone());
+        true
     }
 
     fn session(&self, id: u64) -> Result<Arc<Session>> {
@@ -416,6 +435,35 @@ mod tests {
             interpreter(&root, &program, &configured),
             [outer.as_str(), "-X"]
         );
+    }
+
+    /// A vault closed while an adapter is still starting: the start holds `Debugs` itself, so it
+    /// must find it shut down rather than register past the vault's end.
+    #[test]
+    fn a_start_the_vault_closed_under_leaves_no_adapter() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        let (events, _news) = std::sync::mpsc::channel();
+        let debugs = Arc::new(Debugs::new(dir.to_path_buf(), events));
+        std::fs::write(dir.join("hold"), "").unwrap();
+        let launch = Launch {
+            program: "demo.py".to_string(),
+            language: "python3".to_string(),
+            breakpoints: Vec::new(),
+        };
+        let started = debugs.start(1, launch, &crate::tests::fake_adapter());
+        let appears = |name: &str| {
+            crate::tests::poll_until(|| dir.join(name).exists(), Duration::from_secs(10))
+        };
+        assert!(appears("initialize"), "the adapter never started");
+
+        debugs.shutdown();
+        std::fs::remove_file(dir.join("hold")).unwrap();
+        let started = accent_lsp::runtime()
+            .block_on(async { tokio::time::timeout(Duration::from_secs(10), started).await });
+        assert!(matches!(started, Ok(Err(_))), "{started:?}");
+        assert!(locked(&debugs.sessions).is_empty());
+        assert!(appears("ended"), "the adapter outlived its vault");
     }
 
     #[test]
