@@ -59,7 +59,8 @@ pub(crate) const WARNING_HUE: (f32, f32, f32) = (0.85, 0.60, 0.10);
 pub(crate) const INCOMING_HUE: (f32, f32, f32) = (0.20, 0.50, 0.90);
 /// Share of the tint that is the hue; the rest is the foreground.
 const HUE_MIX: f32 = 0.65;
-const CHANGE_ALPHA: f32 = 0.16;
+/// A changed line's wash, and the paused line's (`debug::breakpoints`).
+pub(crate) const CHANGE_ALPHA: f32 = 0.16;
 /// Word emphasis uses colour only: bold would change glyph widths
 /// and misalign comparison columns.
 const EMPH_ALPHA: f32 = 0.35;

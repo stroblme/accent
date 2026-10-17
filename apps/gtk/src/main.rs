@@ -14,6 +14,7 @@ mod comment;
 mod completion;
 mod conflict;
 mod connect;
+mod debug;
 mod details;
 mod diagnostics;
 mod diagram;
@@ -310,6 +311,8 @@ struct App {
     inverted_images: Rc<RefCell<HashSet<String>>>,
     /// Diagram keys with Load permission for web images; persisted in session and shared with embeds.
     web_images: Rc<RefCell<HashSet<String>>>,
+    /// Breakpoints, kept in the session for the files no tab has open.
+    debugger: debug::Debugger,
     /// Whether this window has said that its shells are not held (no `accent-cli` beside it).
     told_unheld: Cell<bool>,
     /// Palette corpus kept warm on a worker so opening it does not wait for a remote round trip.

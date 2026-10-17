@@ -189,6 +189,7 @@ pub fn open(
         relay: RefCell::new(None),
         folds: RefCell::new(Vec::new()),
         fold_renderer: folds.clone(),
+        breakpoints: RefCell::new(Vec::new()),
         font: RefCell::new(None),
         monitor: RefCell::new(None),
         loading: Cell::new(false),
@@ -222,6 +223,7 @@ pub fn open(
     }
 
     mark_tooltips(&tab);
+    crate::debug::breakpoints::install(&tab);
     follow_layout(&tab, &width);
 
     tab.analyse();

@@ -24,6 +24,7 @@ impl App {
             self.watch_folder_of(&moved);
         }
         accent_core::config::rename_in(&mut self.recent_files.borrow_mut(), from, to);
+        self.debugger.renamed(from, to);
         self.relinks_renamed(from, to);
         self.sync_active();
     }
@@ -322,6 +323,8 @@ impl App {
                         None => self.close_page(doc.page()),
                     }
                 }
+                // After the tabs, whose closing kept their breakpoints.
+                self.debugger.forget(&rel);
             }
             Event::FileRenamed { from, to } => {
                 self.reshow_preview_image(&from);

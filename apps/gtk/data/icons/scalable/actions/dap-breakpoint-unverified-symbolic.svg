@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- tabler-icons "point", MIT (see LICENSE.tabler); strokes converted to fills. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24">
+    <path fill-rule="evenodd" d="M 12,6.875 A 5.125,5.125 0 1 1 12,17.125 5.125,5.125 0 1 1 12,6.875 Z M 12,9.125 A 2.875,2.875 0 1 0 12,14.875 2.875,2.875 0 1 0 12,9.125 Z" fill="currentColor"/>
+</svg>

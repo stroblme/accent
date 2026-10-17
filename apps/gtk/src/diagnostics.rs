@@ -10,6 +10,7 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 
+use crate::debug::breakpoints;
 use crate::{highlight, lang};
 use accent_api::{Diagnostic, Pos, Severity};
 use gtk::prelude::*;
@@ -123,7 +124,11 @@ pub fn render(
         };
         let mut line_start = from;
         line_start.set_line_offset(0);
-        buffer.create_source_mark(None, category, &line_start);
+        // A breakpoint's dot takes the line's cell: GtkSourceView draws the icons of all the marks
+        // on a line, one over another, whatever their priorities.
+        if !breakpoints::on_line(buffer, line_start.line()) {
+            buffer.create_source_mark(None, category, &line_start);
+        }
         // A line nothing on screen stands for has no row of its own to write on: every message
         // in a hidden run would be drawn at the one row that does, piling up under it. The
         // gutter icon is left to say there is something in there.

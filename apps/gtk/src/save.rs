@@ -597,6 +597,10 @@ impl App {
         if let Some(Doc::Terminal(term)) = self.doc_for_page(page) {
             term.kill();
         }
+        // A file's breakpoints outlive its tab, for when it is opened again.
+        if let Some(Doc::Text(tab)) = self.doc_for_page(page) {
+            self.debugger.closing(&tab);
+        }
         // Every pane's: a tab moved out of one leaves its places there, and a caret's place
         // holds a mark in its buffer.
         if let Some(doc) = self.doc_for_page(page) {
