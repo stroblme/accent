@@ -1150,6 +1150,18 @@ impl App {
 
     /// Shared shell opener; restored shells use their saved pane without taking focus or replacing its active tab.
     fn open_shell(self: &Rc<Self>, key: String, shell: terminal::Shell, how: Opened) {
+        self.open_shell_at(key, shell, how, None);
+    }
+
+    /// [`open_shell`](Self::open_shell) at a place in a pane's bar rather than at the end of the
+    /// pane the key goes to.
+    fn open_shell_at(
+        self: &Rc<Self>,
+        key: String,
+        shell: terminal::Shell,
+        how: Opened,
+        at: Option<(Rc<Pane>, i32)>,
+    ) {
         use vte4::TerminalExt as _;
         // Said once per window, the first time a shell here could have been held and was not.
         // The Flatpak ships accent-cli, so there it means host commands were revoked.
@@ -1162,7 +1174,11 @@ impl App {
                 false => "accent-cli is not installed; shells will not persist",
             });
         }
-        let term = terminal::open(&self.tabs_for(&key), &shell, key);
+        let (tabs, at) = match at {
+            Some((pane, at)) => (pane.tabs.clone(), Some(at)),
+            None => (self.tabs_for(&key), None),
+        };
+        let term = terminal::open(&tabs, at, &shell, key);
         // A new shell is part of the session, as a new tab is; a restored one is in it already.
         if how != Opened::Restored {
             self.save_session_soon();

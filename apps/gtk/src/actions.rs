@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::export::Export;
+use accent_api::debug::Step;
 use accent_core::conflict::Take;
 
 /// Action names, labels and accelerators shared by menus and palette so commands
@@ -315,6 +316,17 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
         "Remove All Breakpoints",
         &[],
     ),
+    // VS Code's F5 is Presentation Mode's outside a session here.
+    ("win.debug-start", "Start Debugging", &["<Control>F5"]),
+    // Enabled as the session's state allows (`App::sync_debug`), so the Code pane's strip greys
+    // what cannot be done now and the palette's entries do nothing.
+    ("win.debug-continue", "Continue", &[]),
+    ("win.debug-pause", "Pause", &[]),
+    ("win.debug-step-over", "Step Over", &[]),
+    ("win.debug-step-into", "Step Into", &[]),
+    ("win.debug-step-out", "Step Out", &[]),
+    ("win.debug-restart", "Restart Debugging", &[]),
+    ("win.debug-stop", "Stop Debugging", &[]),
     ("win.rename", "Rename", &["F2"]),
     // No chord: Delete over a tree row already trashes, from the tree's own key controller, and
     // a chord that reaches a focused editor is the last thing a delete should have.
@@ -648,6 +660,14 @@ impl App {
             "follow-link" => self.go_to_definition(),
             "debug-toggle-breakpoint" => self.toggle_breakpoint_at_caret(),
             "debug-remove-breakpoints" => self.remove_all_breakpoints(),
+            "debug-start" => self.start_debugging(),
+            "debug-continue" => self.debug_resume(),
+            "debug-pause" => self.debug_pause(),
+            "debug-step-over" => self.debug_step(Step::Over),
+            "debug-step-into" => self.debug_step(Step::Into),
+            "debug-step-out" => self.debug_step(Step::Out),
+            "debug-restart" => self.restart_debugging(),
+            "debug-stop" => self.stop_debugging(),
             "conflict-current" | "conflict-incoming" | "conflict-both" => {
                 let take = match name {
                     "conflict-current" => Take::Current,
@@ -1044,6 +1064,8 @@ pub fn install_actions(app: &Rc<App>) {
             app.window.add_action(&action);
         }
     }
+    // The session's controls wait for a session.
+    app.sync_debug();
 
     app.captured
         .set_propagation_phase(gtk::PropagationPhase::Capture);

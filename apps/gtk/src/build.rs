@@ -503,6 +503,7 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
         search: search_data(app, vault),
         tags: tags_data(vault),
         ports: ports_data(vault),
+        debug: debug_data(app),
     };
     let git = build_git(app, vault);
     adopt_sidebar(
@@ -512,6 +513,37 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
     let _ = app.git.set(git);
     if let Some(git) = app.git.get() {
         git.schedule_refresh(git::Depth::Discover);
+    }
+}
+
+/// What the Code pane's debugger sections ask of the session; the window drops an answer about a
+/// program that has moved on since (`App::debug_frames`).
+fn debug_data(app: &Rc<App>) -> sidebar::DebugData {
+    sidebar::DebugData {
+        frames: Rc::new(glib::clone!(
+            #[weak]
+            app,
+            move |thread, then| app.debug_frames(thread, then)
+        )),
+        children: Rc::new(glib::clone!(
+            #[weak]
+            app,
+            move |reference, then| app.debug_children(reference, then)
+        )),
+        frame: Rc::new(glib::clone!(
+            #[weak]
+            app,
+            move |frame| app.select_frame(frame)
+        )),
+        breakpoint: Rc::new(glib::clone!(
+            #[weak]
+            app,
+            move |row: &str| {
+                if let Some(loc) = reference_target(row) {
+                    app.open_at(&loc);
+                }
+            }
+        )),
     }
 }
 
