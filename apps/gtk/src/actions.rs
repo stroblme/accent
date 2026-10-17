@@ -304,6 +304,17 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
         "Restart File in Language Server",
         &[],
     ),
+    // VS Code's F9 is the sidebar's here.
+    (
+        "win.debug-toggle-breakpoint",
+        "Toggle Breakpoint",
+        &["<Control>F9"],
+    ),
+    (
+        "win.debug-remove-breakpoints",
+        "Remove All Breakpoints",
+        &[],
+    ),
     ("win.rename", "Rename", &["F2"]),
     // No chord: Delete over a tree row already trashes, from the tree's own key controller, and
     // a chord that reaches a focused editor is the last thing a delete should have.
@@ -635,6 +646,8 @@ impl App {
             "pane-properties" => self.show_pane("properties"),
             "view-mode" => self.set_mode(self.mode.get().next()),
             "follow-link" => self.go_to_definition(),
+            "debug-toggle-breakpoint" => self.toggle_breakpoint_at_caret(),
+            "debug-remove-breakpoints" => self.remove_all_breakpoints(),
             "conflict-current" | "conflict-incoming" | "conflict-both" => {
                 let take = match name {
                     "conflict-current" => Take::Current,
@@ -888,6 +901,7 @@ const EDITING: &[&str] = &[
     "win.terminal-paste",
     "win.fold",
     "win.unfold",
+    "win.debug-toggle-breakpoint",
 ];
 
 /// Where the active window's keyboard is, which decides what the shared accelerator table holds.

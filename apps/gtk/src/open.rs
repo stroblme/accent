@@ -983,6 +983,23 @@ impl App {
             move |_| app.on_edit(&tab)
         ));
 
+        // A click in the marks column toggles a breakpoint, where the file is one a debugger runs.
+        sourceview5::prelude::ViewExt::connect_line_mark_activated(
+            &tab.view,
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                #[weak]
+                tab,
+                move |_, at, button, _, presses| {
+                    if button == gdk::BUTTON_PRIMARY && presses == 1 {
+                        app.toggle_breakpoint(&tab, at.line().max(0) as u32);
+                    }
+                }
+            ),
+        );
+        self.debugger.place(&tab);
+
         // A file inside the vault gets a document on the language layer; a loose note outlines
         // itself, and loose code joins the server that named it, if one did.
         lang::attach(

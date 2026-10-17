@@ -4,6 +4,7 @@
 //! Callbacks carry tab events and closures supply vault access, letting tabs move and close
 //! without depending on app state.
 
+use crate::debug::breakpoints;
 use crate::{diagnostics, diff, fold, highlight, lang, multicaret, wrap};
 use accent_api::Error;
 use accent_api::{Diagnostic, Fold, Vault};
@@ -329,6 +330,8 @@ pub struct Tab {
     /// in buffer tags.
     folds: RefCell<Vec<Fold>>,
     fold_renderer: fold::Renderer,
+    /// The breakpoints' source marks, which move with the text (`debug::breakpoints`).
+    pub(crate) breakpoints: RefCell<Vec<sourceview5::Mark>>,
     font: RefCell<Option<gtk::CssProvider>>,
     /// A watch on the file itself, for a tab no vault watcher covers. `None` for everything
     /// inside a vault, which the worker already reports on.
@@ -530,9 +533,12 @@ impl Tab {
     pub fn set_text(self: &Rc<Self>, text: &str) {
         self.save.edits.set(self.save.edits.get() + 1);
         self.replaced.set(self.replaced.get() + 1);
+        // Replacing the text moves every mark to line 0, where the old text was deleted.
+        let breakpoints = breakpoints::lines(self);
         self.loading.set(true);
         self.buffer.set_text(text);
         self.loading.set(false);
+        breakpoints::place(self, &breakpoints);
         self.analyse();
         lang::changed(self);
     }
@@ -652,6 +658,7 @@ impl Tab {
         wrap::measure(&self.view);
         self.marks.restyle(&self.view);
         diagnostics::restyle(&self.buffer, &self.view);
+        breakpoints::restyle(&self.view);
         self.fold_renderer.restyle(&self.view);
         self.conflicts.restyle();
         self.map.restyle();
@@ -702,6 +709,13 @@ impl Tab {
     /// path as provider publishes to keep tags consistent.
     pub(super) fn paint_diagnostics(&self) {
         self.lay_diagnostics(diagnostics::Shown::new());
+    }
+
+    /// The diagnostics' gutter marks again after a breakpoint came or went, which takes its line's
+    /// cell from them (`diagnostics::render`); each message keeps its cut.
+    pub(crate) fn remark_diagnostics(&self) {
+        let kept = self.annotated.take();
+        self.lay_diagnostics(kept);
     }
 
     /// [`Tab::paint_diagnostics`], keeping the cut of each message in `kept` still on its line.

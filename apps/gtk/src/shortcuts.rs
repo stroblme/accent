@@ -9,7 +9,7 @@ use accent_api::Config;
 use adw::prelude::*;
 
 /// DESIGN.md Keyboard's headings that hold commands, in its order.
-const SECTIONS: [&str; 16] = [
+const SECTIONS: [&str; 17] = [
     "Files",
     "Palette and find",
     "Editing",
@@ -22,6 +22,7 @@ const SECTIONS: [&str; 16] = [
     "Git",
     "Notes",
     "Code",
+    "Debugging",
     "Views",
     "Window",
     "Tab menu",
@@ -92,6 +93,7 @@ fn section(action: &str) -> Option<&'static str> {
         "follow-link" | "fold" | "unfold" | "fold-all" | "unfold-all" | "lsp-restart-file" => {
             "Code"
         }
+        _ if starts(&["debug-"]) => "Debugging",
         "view-mode" | "minimap" | "present" => "Views",
         "fullscreen" | "preferences" | "shortcuts" | "menu" | "about" => "Window",
         "copy-name" | "copy-relative-path" | "copy-absolute-path" | "show-in-files"

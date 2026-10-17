@@ -1095,6 +1095,11 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Its working directory, and the adapter's, is the nearest folder inside the vault holding `.git`, else the vault root: VS Code's workspace folder.
 - Which adapter debugs which language is a table in the app, overridden in `config.toml` for every vault on this machine (`[debug.adapters]`) and per vault (`[vaults."<root>".debug.adapters]`), the vault's own winning key by key, as the language servers are; the interpreter likewise under `[debug] python` and `[vaults."<root>".debug] python`, a relative path read from the vault root.
   A remote vault takes its own alone. No preference, the answer being whether it is installed.
+- **Breakpoints** are a source mark per line in a Python tab: a click in the marks column, where the diagnostics' icons are, puts one on its line and a second click takes it off, and Toggle Breakpoint does the same at the caret.
+  They move with the text as it is edited, and a reload from disk keeps them on their lines.
+- They are kept in the session per file, never in the vault: a file closed and opened again, or the vault reopened, has them back; a file renamed or moved takes them along, and a file deleted takes them with it.
+- A breakpoint is a foreground symbolic glyph, as a diagnostic's icon is, never red: a dot, and a ring for one the program has not bound.
+  The dot takes its line's cell from a diagnostic's icon, which GtkSourceView would draw under it rather than hide; the line's message and underline stay.
 
 ### Context menus
 
@@ -1296,7 +1301,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 - Duplicate Line `Ctrl+D`, Delete Line `Ctrl+L`, Insert Line Below `Ctrl+Return`, Toggle Comment `Ctrl+K`, Toggle Word Wrap `Alt+Z`, Scroll Viewport `Ctrl+Up` / `Ctrl+Down`, Add Caret Above / Below `Shift+Alt+Up` / `Shift+Alt+Down`, Add Caret at Next Occurrence `Alt+J`, Select All Occurrences `Ctrl+Shift+L`, Paste as Plain Text (unbound).
 - **The editing chords act only with the keyboard in a tab** (user decision 2026-10-13): in its document or anything over it, a comparison's columns and a diagram's label included, and on its pane's tab bar, where a second click on the tab in front leaves the keyboard (user decision 2026-10-16, which takes the tab bar out of "anywhere else").
   Anywhere else — the sidebar, a find bar, a dialog — they are unbound, so the key is the focused widget's (`Ctrl+Down` moves along the Files tree) and nothing edits the note behind it; the palette still runs them on the tab in front.
-  They are this section's, Fold and Unfold (Code) and `Ctrl+Shift+V` (Paste as Plain Text over a text tab); the find family goes by the active pane instead (Tabs).
+  They are this section's, Fold and Unfold (Code), Toggle Breakpoint (Debugging) and `Ctrl+Shift+V` (Paste as Plain Text over a text tab); the find family goes by the active pane instead (Tabs).
 - Duplicate Line is VS Code's Copy Line Down: every line the selection touches, the caret and selection moving onto the copy.
   Insert Line Below copies the current line's indent.
 - Add Caret Above / Below puts a caret a line past the outermost caret that way.
@@ -1490,6 +1495,12 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
   Both chords carry Control and Shift, so they stay bound while a shell has the keyboard.
 - Restart File in Language Server (palette, no chord) closes the document at its server and opens it again with the buffer's text: Lean's Restart File, which reads the imports afresh after a `lake build`; as the server's last document it restarts the server.
 
+### Debugging
+
+- Toggle Breakpoint `Ctrl+F9`, Remove All Breakpoints (unbound).
+- Toggle Breakpoint is an editing chord (Editing): it puts a breakpoint on the caret's line of the tab in front, or takes it off, and does nothing in a file no debugger runs.
+  Remove All Breakpoints clears every file's in the window, open or not.
+
 ### Completion
 
 - Down selects the first row and walks down, Up walks back to none, Page Down and Page Up go seven rows.
@@ -1573,6 +1584,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 ### Deviations
 
 - The HIG reserves `Ctrl+P` for Print and `Ctrl+Shift+P` for Print Preview; accent's users come from VS Code and Obsidian, where both open the palette, so both stay the palette's and Print… has no chord: it is reached from the tab menu and the palette, as the exports are.
+- VS Code's Toggle Breakpoint is `F9`, which is the sidebar's here (Panes), so it takes `Ctrl+F9`.
 
 ## Iconography
 
@@ -1586,7 +1598,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 - Where nothing fits, ship a glyph in the app `GResource` under the `io.github.stroblme.Accent` prefix, drawn on the 16 px symbolic grid with `fill="currentColor"` so it recolours with the theme.
   Never a coloured icon.
   A GResource rather than hicolor, so a run from the source tree has them too.
-- The shipped sets are [tabler-icons](https://github.com/tabler/tabler-icons) outlines (MIT, `apps/gtk/data/icons/LICENSE.tabler`) with their strokes turned into fills, GTK recolouring a symbolic icon by its `fill`: eighteen completion kinds (`lsp-<kind>-symbolic`), Adwaita having no glyph for a function or a type parameter; the drawing tools (`tool-pen`, `tool-highlighter`, `tool-eraser`, `tool-line`, `tool-rect`, `tool-circle`, `tool-adjust`, and a diagram's `tool-select`), the theme having no pen, marker or eraser, beside Adwaita's `insert-text`, `insert-image` and the Drawing toggle's `document-edit-symbolic`; the file types; and `remote-server-symbolic`, tabler's `server`, for a remote vault on the start screen, in Open Recent and on its waiting pages: a rack, where Adwaita's `network-server` is a box on a cable and WhiteSur's a tower.
+- The shipped sets are [tabler-icons](https://github.com/tabler/tabler-icons) outlines (MIT, `apps/gtk/data/icons/LICENSE.tabler`) with their strokes turned into fills, GTK recolouring a symbolic icon by its `fill`: eighteen completion kinds (`lsp-<kind>-symbolic`), Adwaita having no glyph for a function or a type parameter; the drawing tools (`tool-pen`, `tool-highlighter`, `tool-eraser`, `tool-line`, `tool-rect`, `tool-circle`, `tool-adjust`, and a diagram's `tool-select`), the theme having no pen, marker or eraser, beside Adwaita's `insert-text`, `insert-image` and the Drawing toggle's `document-edit-symbolic`; the file types; `remote-server-symbolic`, tabler's `server`, for a remote vault on the start screen, in Open Recent and on its waiting pages: a rack, where Adwaita's `network-server` is a box on a cable and WhiteSur's a tower; and a breakpoint's dot and ring, `dap-breakpoint-symbolic` and `dap-breakpoint-unverified-symbolic`, tabler's `point-filled` and `point`, the theme having no breakpoint.
 - **Every file list leads its rows with a file-type icon** — the Files tree and its vault row, the palette's file rows, the Git pane's folders and files, search results, a tag's files, References — and the tabs carry none.
   The kind comes from the name (note, PDF, diagram, table, image, code, config, text, anything else) and is drawn by `filetype-<kind>-symbolic`: tabler's `markdown`, `file-type-pdf`, `sitemap`, `file-spreadsheet`, `photo`, `file-code`, `file-settings` and `file-text`, with `filetype-folder-symbolic` and `filetype-file-symbolic`.
   The PDF one letters `PDF` into the page, kept over `file-description`, which would make a PDF and a text file look alike.

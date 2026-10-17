@@ -396,6 +396,7 @@ impl App {
                 .get()
                 .map(|git| git.kept().into_iter().collect())
                 .unwrap_or_default(),
+            breakpoints: self.debugger.saved(self),
         };
         match self.restored.get() {
             true => session,
@@ -702,6 +703,8 @@ impl App {
         // Before the tabs too: a diagram opening draws its pictures on the web, or asks.
         let allowed = session.web_images.iter().cloned();
         self.web_images.borrow_mut().extend(allowed);
+        // And the breakpoints, which a tab is opened with.
+        self.debugger.restore(&session.breakpoints);
         if let Some(layout) = session.panes() {
             self.restore_panes(layout, session);
         }
@@ -1137,6 +1140,7 @@ fn unrestored(mut stored: Session, now: Session) -> Session {
     stored.diagram.extend(now.diagram);
     stored.terminals.extend(now.terminals);
     stored.compared.extend(now.compared);
+    stored.breakpoints.extend(now.breakpoints);
     for key in now.web_images {
         if !stored.web_images.contains(&key) {
             stored.web_images.push(key);

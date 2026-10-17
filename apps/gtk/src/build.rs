@@ -307,6 +307,7 @@ pub fn build_window(
         preview: RefCell::new(None),
         inverted_images: Rc::default(),
         web_images: Rc::default(),
+        debugger: Default::default(),
         told_unheld: Cell::new(false),
         split,
         sidebar_column,

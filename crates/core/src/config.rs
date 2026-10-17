@@ -488,6 +488,9 @@ pub struct Session {
     /// its own tab under the note's, and a staged change or a commit's file, a tab of its own,
     /// under that tab's. A comparison with anything else is not kept.
     pub compared: BTreeMap<String, Comparison>,
+    /// By file key (vault-relative, absolute outside the vault), the 0-based lines a program
+    /// stops at; kept here and never in the vault.
+    pub breakpoints: BTreeMap<String, Vec<u32>>,
 }
 
 impl Default for Session {
@@ -510,6 +513,7 @@ impl Default for Session {
             pinned: Vec::new(),
             web_images: Vec::new(),
             compared: BTreeMap::new(),
+            breakpoints: BTreeMap::new(),
         }
     }
 }
@@ -825,6 +829,17 @@ pub fn rename_in(list: &mut [String], from: &str, to: &str) {
             *rel = format!("{to}/{rest}");
         }
     }
+}
+
+/// [`rename_in`] for the keys of a map: an entry under `from`, a file or a folder, moves with it.
+pub fn rename_keys<T>(map: &mut BTreeMap<String, T>, from: &str, to: &str) {
+    *map = std::mem::take(map)
+        .into_iter()
+        .map(|(mut key, value)| {
+            rename_in(std::slice::from_mut(&mut key), from, to);
+            (key, value)
+        })
+        .collect();
 }
 
 /// Unknown or retired `config.toml` keys. Compare the raw top-level and vault tables with known
@@ -1226,6 +1241,28 @@ daily_template = "DailyNote.md"
     }
 
     #[test]
+    fn rename_keys_moves_a_file_and_a_folder() {
+        let mut map = BTreeMap::from([
+            ("run.py".to_string(), vec![1]),
+            ("pkg/a.py".to_string(), vec![2]),
+            ("pkg/sub/b.py".to_string(), vec![3]),
+            ("pkgs.py".to_string(), vec![4]),
+        ]);
+        rename_keys(&mut map, "run.py", "main.py");
+        rename_keys(&mut map, "pkg", "lib");
+        assert_eq!(
+            map,
+            BTreeMap::from([
+                ("main.py".to_string(), vec![1]),
+                ("lib/a.py".to_string(), vec![2]),
+                ("lib/sub/b.py".to_string(), vec![3]),
+                // A sibling that merely starts with the old name is not part of the folder.
+                ("pkgs.py".to_string(), vec![4]),
+            ])
+        );
+    }
+
+    #[test]
     fn missing_config_file_is_default() {
         let tmp = tempfile::tempdir().unwrap();
         let c = with_xdg(tmp.path(), Config::load);
@@ -1558,6 +1595,7 @@ daily_dir = "Daily"
                     },
                 },
             )]),
+            breakpoints: BTreeMap::from([("run.py".to_string(), vec![0, 7])]),
         };
         with_xdg(&state, || {
             assert_eq!(Session::load(&vault).open, Vec::<String>::new());
@@ -1584,6 +1622,7 @@ daily_dir = "Daily"
             assert_eq!(back.pinned, s.pinned);
             assert_eq!(back.web_images, s.web_images);
             assert_eq!(back.compared, s.compared);
+            assert_eq!(back.breakpoints, s.breakpoints);
 
             // A terminal session's key is no path: it hashes as given, as an `ssh://` one does.
             let named = Path::new("terminal://dev");
