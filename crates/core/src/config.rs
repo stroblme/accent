@@ -398,6 +398,26 @@ impl Default for InfoPane {
     }
 }
 
+/// The Code pane's sections as the reader left them: which are open, and where each divider
+/// between them sits, as the share of its split above it (`None` for an even split), top first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CodePane {
+    pub goals: bool,
+    pub expected: bool,
+    pub dividers: Vec<Option<f64>>,
+}
+
+impl Default for CodePane {
+    fn default() -> Self {
+        CodePane {
+            goals: true,
+            expected: true,
+            dividers: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Session {
@@ -411,6 +431,7 @@ pub struct Session {
     pub sidebar: bool,
     pub sidebar_width: i32,
     pub info: InfoPane,
+    pub code: CodePane,
     pub view: String,
     /// Document zoom, 1.0 being the font as GNOME sets it.
     pub zoom: f64,
@@ -447,6 +468,7 @@ impl Default for Session {
             sidebar: true,
             sidebar_width: 280,
             info: InfoPane::default(),
+            code: CodePane::default(),
             view: "editor".to_string(),
             zoom: 1.0,
             recent_files: Vec::new(),
@@ -1430,6 +1452,11 @@ daily_dir = "Daily"
                 details: true,
                 dividers: [Some(0.25), None],
             },
+            code: CodePane {
+                goals: false,
+                expected: true,
+                dividers: vec![Some(0.4)],
+            },
             view: "preview".to_string(),
             zoom: 1.2,
             recent_files: vec!["Daily/2026-09-03.md".to_string()],
@@ -1492,6 +1519,7 @@ daily_dir = "Daily"
             assert!(!back.sidebar);
             assert_eq!(back.sidebar_width, 320);
             assert_eq!(back.info, s.info);
+            assert_eq!(back.code, s.code);
             assert_eq!(back.view, "preview");
             assert_eq!(back.zoom, 1.2);
             assert_eq!(back.recent_files, s.recent_files);

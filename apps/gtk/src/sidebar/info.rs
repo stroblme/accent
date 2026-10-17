@@ -3,6 +3,7 @@
 //! A fixed tree of vertical `GtkPaned`s lets readers divide space between open sections.
 //! Inapplicable sections are hidden without reparenting; collapsed sections retain headers.
 
+use super::sections::Sections;
 use super::widgets::Section;
 use crate::widgets::status_page;
 use accent_core::config::InfoPane;
@@ -13,121 +14,6 @@ use std::rc::Rc;
 /// The pane's icon, and the one its empty state is drawn with.
 pub(super) const ICON: &str = "dialog-information-symbolic";
 
-/// A share of a divider's height, where the paned's own handlers can reach it.
-type Share = Rc<Cell<Option<f64>>>;
-
-/// A divider between two parts of the pane. While both sides are open it is held at an even
-/// split of what is open, or at the share of its height the reader dragged it to, which it keeps
-/// through the side beside it being shut and opened again.
-struct Divider {
-    paned: gtk::Paned,
-    /// The start side's share where the reader last dragged the divider; `None` until they do,
-    /// which keeps it at an even split however many sections come and go.
-    share: Share,
-    /// The share the divider is held at while both sides are open; `None` while one is shut.
-    held: Share,
-    /// Whether a placing is waiting for the frame's layout.
-    placing: Rc<Cell<bool>>,
-}
-
-impl Divider {
-    fn new(start: &impl IsA<gtk::Widget>, end: &impl IsA<gtk::Widget>) -> Divider {
-        let paned = gtk::Paned::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .start_child(start)
-            .end_child(end)
-            .shrink_start_child(false)
-            .shrink_end_child(false)
-            .vexpand(true)
-            .build();
-        let (share, held): (Share, Share) = Default::default();
-        // A drag is told from every other move by the class `paned::watch` puts on a handle
-        // while it is held: the pane placing the divider, and GTK handing a resize out, are not
-        // the reader's.
-        paned.connect_position_notify({
-            let (share, held) = (share.clone(), held.clone());
-            move |paned| {
-                let height = paned.height();
-                if paned.has_css_class(crate::paned::DRAGGING) && held.get().is_some() && height > 0
-                {
-                    let dragged = f64::from(paned.position()) / f64::from(height);
-                    share.set(Some(dragged));
-                    held.set(Some(dragged));
-                }
-            }
-        });
-        Divider {
-            paned,
-            share,
-            held,
-            placing: Rc::default(),
-        }
-    }
-
-    /// Lay the divider out for which of its sides are open: while both are, at the reader's
-    /// share or else at `even`, which moves with the sections open; else against the shut side,
-    /// `GtkPaned` sizing that side to its header when no position is set and only the other side
-    /// takes the space.
-    fn fit(&self, start: bool, end: bool, even: f64) {
-        self.paned.set_resize_start_child(start);
-        self.paned.set_resize_end_child(end || !start);
-        let held = (start && end).then(|| self.share.get().unwrap_or(even));
-        self.held.set(held);
-        match held {
-            Some(_) => self.place(),
-            None => self.paned.set_position(-1),
-        }
-    }
-
-    /// Place the divider during frame layout after the window allocates its new height. Section
-    /// visibility may change that height in the same frame, so using the old allocation would
-    /// preserve the wrong split. Un-realised panes are placed on map.
-    fn place(&self) {
-        let Some(clock) = self.paned.frame_clock() else {
-            return;
-        };
-        if self.placing.replace(true) {
-            return;
-        }
-        let handler = Rc::new(RefCell::new(None));
-        let id = clock.connect_layout({
-            let (paned, held, placing) = (
-                self.paned.downgrade(),
-                self.held.clone(),
-                self.placing.clone(),
-            );
-            let handler = handler.clone();
-            move |clock| {
-                if let Some(id) = handler.take() {
-                    clock.disconnect(id);
-                }
-                placing.set(false);
-                if let (Some(paned), Some(share)) = (paned.upgrade(), held.get())
-                    && paned.height() > 0
-                {
-                    paned.set_position(at(&paned, share));
-                }
-            }
-        });
-        *handler.borrow_mut() = Some(id);
-        clock.request_phase(gtk::gdk::FrameClockPhase::LAYOUT);
-    }
-
-    /// Back to an even split: a double-click on the handle.
-    fn reset(&self, even: f64) {
-        self.share.set(None);
-        if self.held.get().is_some() {
-            self.held.set(Some(even));
-            self.place();
-        }
-    }
-}
-
-/// `share` of the paned's height, in pixels.
-fn at(paned: &gtk::Paned, share: f64) -> i32 {
-    (share * f64::from(paned.height())).round() as i32
-}
-
 pub(super) struct Info {
     /// "sections", or "nothing" while no file is in front.
     pub(super) root: gtk::Stack,
@@ -135,7 +21,7 @@ pub(super) struct Info {
     pub(super) tags: Section,
     pub(super) details: Section,
     /// References over the two sections below it, and Tags over Details.
-    dividers: [Divider; 2],
+    sections: Rc<Sections>,
     /// Whether the window has a vault: without an index, References and Tags have nothing to
     /// say, and stay hidden.
     vault: bool,
@@ -164,10 +50,9 @@ impl Info {
         let tags = Section::new("Tags", &tags);
         let details = Section::new("Details", details);
         details.root.set_expanded(false);
-        let lower = Divider::new(&tags.root, &details.root);
-        let upper = Divider::new(&references.root, &lower.paned);
+        let sections = Sections::new(&[&references.root, &tags.root, &details.root]);
         let root = gtk::Stack::builder().vexpand(true).build();
-        root.add_named(&upper.paned, Some("sections"));
+        root.add_named(&sections.root, Some("sections"));
         let open_one = match vault {
             Some(_) => "Open a file to see its references, tags and details.",
             None => "Open a file to see its details.",
@@ -178,30 +63,12 @@ impl Info {
             references,
             tags,
             details,
-            dividers: [upper, lower],
+            sections,
             vault: vault.is_some(),
             shown_for: RefCell::default(),
             tags_forced: Cell::new(false),
             details_kept: Cell::new(None),
         });
-        // A paned has its height once the pane is on screen, which is where the dividers placed
-        // before then go.
-        info.root.connect_map({
-            let weak = Rc::downgrade(&info);
-            move |_| {
-                if let Some(info) = weak.upgrade() {
-                    info.fit();
-                }
-            }
-        });
-        for section in [&info.references, &info.tags, &info.details] {
-            let weak = Rc::downgrade(&info);
-            section.root.connect_expanded_notify(move |_| {
-                if let Some(info) = weak.upgrade() {
-                    info.fit();
-                }
-            });
-        }
         info.sync("", false, false, false);
         info
     }
@@ -215,25 +82,9 @@ impl Info {
         }
     }
 
-    /// Each divider's even split: a third for References over two open sections, else half.
-    fn evens(&self) -> [f64; 2] {
-        match self.tags.is_open() && self.details.is_open() {
-            true => [1.0 / 3.0, 0.5],
-            false => [0.5, 0.5],
-        }
-    }
-
-    /// Lay the dividers out for the sections now open. Called whenever one opens, shuts, shows
-    /// or hides.
+    /// Lay the dividers out for the sections now open.
     pub(super) fn fit(&self) {
-        let (references, tags, details) = (
-            self.references.is_open(),
-            self.tags.is_open(),
-            self.details.is_open(),
-        );
-        let [upper, lower] = self.evens();
-        self.dividers[1].fit(tags, details, lower);
-        self.dividers[0].fit(references, tags || details, upper);
+        self.sections.fit();
     }
 
     /// Show what applies to the tab `key` (empty for none): the sections for a file, the Tags
@@ -287,16 +138,12 @@ impl Info {
 
     /// Whether `paned` is one of the pane's dividers, putting it back to an even split if so.
     pub(super) fn reset_divider(&self, paned: &gtk::Paned) -> bool {
-        let evens = self.evens();
-        let found = self.dividers.iter().position(|d| &d.paned == paned);
-        if let Some(i) = found {
-            self.dividers[i].reset(evens[i]);
-        }
-        found.is_some()
+        self.sections.reset(paned)
     }
 
     /// The sections as the session keeps them.
     pub(super) fn saved(&self) -> InfoPane {
+        let shares = self.sections.shares();
         InfoPane {
             references: self.references.root.is_expanded(),
             tags: self.tags.root.is_expanded(),
@@ -304,7 +151,7 @@ impl Info {
                 .details_kept
                 .get()
                 .unwrap_or_else(|| self.details.root.is_expanded()),
-            dividers: self.dividers.each_ref().map(|divider| divider.share.get()),
+            dividers: [shares[0], shares[1]],
         }
     }
 
@@ -328,23 +175,16 @@ impl Info {
                 format!("{}:{how}{count}", section.title.text())
             })
             .collect();
-        let dividers: Vec<String> = self
-            .dividers
-            .iter()
-            .map(|d| format!("{}/{}", d.paned.position(), d.paned.height()))
-            .collect();
         format!(
             "page={} {} dividers={}",
             self.root.visible_child_name().unwrap_or_default(),
             sections.join(" "),
-            dividers.join(",")
+            self.sections.positions().join(",")
         )
     }
 
     pub(super) fn restore(&self, saved: &InfoPane) {
-        for (divider, share) in self.dividers.iter().zip(saved.dividers) {
-            divider.share.set(share);
-        }
+        self.sections.restore(&saved.dividers);
         self.references.root.set_expanded(saved.references);
         self.tags.root.set_expanded(saved.tags);
         // A shell restored in front keeps Details open; the stored fold waits for a file.

@@ -234,9 +234,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - What links to the file in front, the vault's tags and what the file is, as sections one above the other: References, Tags, then Details (user decision 2026-10-08: one pane where there would have been three, each with its icon in a switcher that sets the sidebar's floor).
   Each section folds to its header, a `GtkExpander` whose header is a tab stop that Enter and Space fold; its chevron is the `go-*` one the tree's is.
   The pane's icon is `dialog-information-symbolic`.
-- The open sections share the pane across dividers the reader drags, as VS Code's views do: a vertical `GtkPaned` per divider, References over the other two and Tags over Details, built once and never reparented.
+- The open sections share the pane across dividers the reader drags, as VS Code's views do: a vertical `GtkPaned` per divider, each section over those below it (References over the other two, Tags over Details), built once and never reparented.
   With a section shut beside it, a divider lies against that section, which shows its header alone.
-  A divider the reader has not dragged sits at an even split of the sections open, a third each for three, and follows them as they show, hide, open and shut; one dragged keeps its share of the height through all of that (a drag being told by the class `paned::watch` puts on a held handle), and a double-click puts it back to even.
+  A divider the reader has not dragged sits at an even split of the sections open, 1/n each for n of them, and follows them as they show, hide, open and shut; one dragged keeps its share of the height through all of that (a drag being told by the class `paned::watch` puts on a held handle), and a double-click puts it back to even.
   Which sections are open and where the dividers are are the vault's session: References and Tags open at first, Details shut.
 - A section that does not apply to the tab in front is hidden, not emptied; a shell shows Details alone, and a comparison or no tab at all one `.compact` status page instead of the sections.
 - **References** is titled by what it lists.
@@ -281,7 +281,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 **Code**
 
-- What holds at the caret beyond the text, as sections in one scroll: Goals, counted, and Expected Type, both open — a proof assistant's answer (Language servers, Goals).
+- What holds at the caret beyond the text, as sections each with its own scroll, sharing the pane across dividers as Info's do: Goals, counted, and Expected Type — a proof assistant's answer (Language servers, Goals).
   Each goal is a selectable, wrapping label in the editor's font at the tab's zoom, as the hover is.
   Its icon is `filetype-code-symbolic`.
 - A finished proof's Goals section says "No goals" in one dim line.
@@ -292,7 +292,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   An answer that fails while the file is being checked leaves the pane as it is, and the end of the check asks again.
 - Its visibility is a window flag, never a rule about the tab in front, because the debugger moves in here: Variables, Watch, Call Stack and Breakpoints as sections, its controls in a strip over them.
   Hidden while on screen, it gives way to the Outline.
-  Which sections are folded is not saved yet.
+  Which sections are open and where the dividers are are the vault's session: all open at first.
 
 **Properties**
 

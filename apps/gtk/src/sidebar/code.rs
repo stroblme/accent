@@ -3,12 +3,15 @@
 //! Proof goals are the first section; the window controls visibility so future debugger
 //! sections can share the pane without depending on a tab kind.
 
+use super::sections::Sections;
 use super::widgets::Section;
 use crate::widgets::{scroller, status_page};
 use accent_api::Goals;
+use accent_core::config::CodePane;
 use gtk::pango;
 use gtk::prelude::*;
 use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 
 /// The pane's icon, and the one its empty state is drawn with.
 pub(super) const ICON: &str = "filetype-code-symbolic";
@@ -22,6 +25,8 @@ pub(super) struct Code {
     goal_labels: gtk::Box,
     expected: Section,
     expected_label: gtk::Label,
+    /// Goals over Expected Type.
+    sections: Rc<Sections>,
     /// The tab the pane is about, so another one coming to the front clears it, and whether it
     /// has had an answer for it yet.
     shown_for: RefCell<String>,
@@ -37,18 +42,15 @@ impl Code {
             .margin_end(12)
             .margin_bottom(12)
             .build();
-        let goals = Section::new("Goals", &goal_labels);
+        let goals = Section::new("Goals", &scroller(&goal_labels));
         let expected_label = text("");
         expected_label.set_margin_start(12);
         expected_label.set_margin_end(12);
         expected_label.set_margin_bottom(12);
-        let expected = Section::new("Expected Type", &expected_label);
-        // Two text sections share one scroll: neither is a list that wants its own.
-        let sections = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        sections.append(&goals.root);
-        sections.append(&expected.root);
+        let expected = Section::new("Expected Type", &scroller(&expected_label));
+        let sections = Sections::new(&[&goals.root, &expected.root]);
         let root = gtk::Stack::builder().vexpand(true).build();
-        root.add_named(&scroller(&sections), Some("sections"));
+        root.add_named(&sections.root, Some("sections"));
         root.add_named(
             &status_page(ICON, "No Goals", "Place the caret in a proof"),
             Some("nothing"),
@@ -67,6 +69,7 @@ impl Code {
             goal_labels,
             expected,
             expected_label,
+            sections,
             shown_for: RefCell::default(),
             answered: Cell::new(false),
         };
@@ -132,6 +135,35 @@ impl Code {
                 true => "sections",
                 false => "nothing",
             });
+    }
+
+    pub(super) fn section(&self, name: &str) -> Option<&Section> {
+        match name {
+            "goals" => Some(&self.goals),
+            "expected" => Some(&self.expected),
+            _ => None,
+        }
+    }
+
+    /// Whether `paned` is one of the pane's dividers, putting it back to an even split if so.
+    pub(super) fn reset_divider(&self, paned: &gtk::Paned) -> bool {
+        self.sections.reset(paned)
+    }
+
+    /// The sections as the session keeps them.
+    pub(super) fn saved(&self) -> CodePane {
+        CodePane {
+            goals: self.goals.root.is_expanded(),
+            expected: self.expected.root.is_expanded(),
+            dividers: self.sections.shares(),
+        }
+    }
+
+    pub(super) fn restore(&self, saved: &CodePane) {
+        self.sections.restore(&saved.dividers);
+        self.goals.root.set_expanded(saved.goals);
+        self.expected.root.set_expanded(saved.expected);
+        self.sections.fit();
     }
 
     /// The goals on screen as their labels read, for `ACCENT_BENCH_GOALS`; `None` while the

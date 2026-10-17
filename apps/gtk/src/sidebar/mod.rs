@@ -9,6 +9,7 @@ mod info;
 mod outline;
 mod ports;
 mod search;
+mod sections;
 mod tags;
 mod widgets;
 
@@ -19,7 +20,7 @@ pub use search::{Answer, Data as SearchData, Query};
 pub use tags::Data as TagsData;
 
 use accent_api::Goals;
-use accent_core::config::InfoPane;
+use accent_core::config::{CodePane, InfoPane};
 use adw::prelude::*;
 use gtk::{glib, pango};
 use std::cell::{Cell, RefCell};
@@ -403,7 +404,7 @@ impl Sidebar {
     /// was. The window's double-click handler asks every divider owner in turn, so the rule for a
     /// pane lives next to the pane rather than in the shell.
     pub fn reset_divider(&self, divider: &gtk::Paned) -> bool {
-        if self.info.reset_divider(divider) {
+        if self.info.reset_divider(divider) || self.code.reset_divider(divider) {
             return true;
         }
         let Some(panes) = self.panes.as_ref() else {
@@ -491,8 +492,8 @@ impl Sidebar {
     /// unfolded.
     pub fn connect_section_toggled(&self, f: impl Fn(&str, bool) + 'static) {
         let f = Rc::new(f);
-        for name in ["references", "tags", "details"] {
-            if let Some(section) = self.info.section(name) {
+        for name in ["references", "tags", "details", "goals", "expected"] {
+            if let Some(section) = self.info.section(name).or_else(|| self.code.section(name)) {
                 let f = f.clone();
                 section
                     .root
@@ -513,6 +514,15 @@ impl Sidebar {
 
     pub fn restore_info(&self, saved: &InfoPane) {
         self.info.restore(saved);
+    }
+
+    /// The Code pane's sections, for the session.
+    pub fn code_saved(&self) -> CodePane {
+        self.code.saved()
+    }
+
+    pub fn restore_code(&self, saved: &CodePane) {
+        self.code.restore(saved);
     }
 
     /// Which pane is on screen, for the callers that only refresh what is being looked at.
