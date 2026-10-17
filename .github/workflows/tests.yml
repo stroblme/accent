@@ -29,6 +29,9 @@ jobs:
       # apps/gtk links gtk4, libadwaita, gtksourceview5, webkit6 and libspelling, whose -devel
       # packages ubuntu-latest does not carry. The gtk job below lints and tests it instead.
       - run: cargo clippy --workspace --exclude accent --all-targets --locked --features accent-core/pdf -- -D warnings
+      # debugpy is for accent-api's end-to-end debugger tests, which skip themselves without it:
+      # the distribution's, universe carrying python3-debugpy on 24.04 and 26.04 alike.
+      - run: sudo apt-get update && sudo apt-get install -y python3-debugpy
       # Without --no-fail-fast the first failing test binary hides every crate after it.
       - run: cargo test --locked --no-fail-fast
       # The PDF tests skip themselves when libpdfium is missing, so without this the job would
@@ -70,6 +73,11 @@ jobs:
       # and the scratch XDG dirs. It reuses the vault above, which is newer than its generator.
       - name: Headless smoke run
         run: make smoke
+      # debugpy for the debugger drill, which `make drills` skips without it. Fedora packages
+      # none, so pip, as root, into /usr/local: the drill runs its program under a scratch HOME,
+      # where a `--user` install would not be found. Pinned to the debugpy the debugger was
+      # measured with.
+      - run: dnf install -y python3-pip && python3 -m pip install debugpy==1.8.22
       # Multi-caret's regression cover, on the Xvfb and the build the smoke run left behind.
       - name: Asserting drills
         run: make drills
