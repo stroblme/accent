@@ -410,6 +410,7 @@ impl Debug {
         }
         self.state.set_text(line);
         self.state.set_tooltip_text(why);
+        self.set_play("win.debug-continue");
         self.resume.set_visible(paused);
         self.pause.set_visible(!paused);
         if !paused {
@@ -471,14 +472,29 @@ impl Debug {
             });
     }
 
-    /// The session is over: nothing of it is left on screen.
-    pub(super) fn clear(&self) {
-        self.strip.set_visible(false);
-        for section in [&self.stack, &self.variables, &self.breakpoints] {
-            section.root.set_visible(false);
-        }
+    /// No session: nothing of one is left on screen, and while the tab in front can be debugged
+    /// (`debuggable`) the strip offers Start Debugging over the breakpoints.
+    pub(super) fn set_idle(&self, debuggable: bool) {
+        self.strip.set_visible(debuggable);
+        self.state.set_text("Not running");
+        self.state.set_tooltip_text(None);
+        self.set_play("win.debug-start");
+        self.resume.set_visible(true);
+        self.pause.set_visible(false);
+        self.stack.root.set_visible(false);
+        self.variables.root.set_visible(false);
+        self.breakpoints.root.set_visible(debuggable);
         self.calls.set(Vec::new());
         self.values.set(Vec::new());
+    }
+
+    /// Point the play button at `action`, named by its label as the strip's other buttons are.
+    fn set_play(&self, action: &str) {
+        let label = crate::actions::label_of(action);
+        self.resume.set_action_name(Some(action));
+        self.resume.set_tooltip_text(Some(label));
+        self.resume
+            .update_property(&[gtk::accessible::Property::Label(label)]);
     }
 
     /// The strip's line, the calls listed as `name file:line` and the values as `name=value`.
@@ -512,8 +528,9 @@ impl Debug {
 }
 
 /// The controls, flat icon buttons on the window's actions, which are enabled as the session's
-/// state allows: Continue or Pause, the steps, Restart and Stop, then the Debug Console; and
-/// under them what the program is doing. A press leaves the keyboard where it was, so stepping keeps the reader's place.
+/// state allows: Continue or Pause (Start Debugging while no session runs), the steps, Restart
+/// and Stop, then the Debug Console; and under them what the program is doing. A press leaves
+/// the keyboard where it was, so stepping keeps the reader's place.
 fn strip() -> (gtk::Box, gtk::Label, gtk::Button, gtk::Button) {
     let button = |icon: &str, action: &str| {
         let button = icon_button(icon, crate::actions::label_of(action));
@@ -523,7 +540,8 @@ fn strip() -> (gtk::Box, gtk::Label, gtk::Button, gtk::Button) {
     };
     let resume = button("media-playback-start-symbolic", "win.debug-continue");
     let pause = button("media-playback-pause-symbolic", "win.debug-pause");
-    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    // Centred, as the pane switcher's icons are in the header above, and the line under them too.
+    let buttons = gtk::Box::builder().halign(gtk::Align::Center).build();
     for widget in [
         &resume,
         &pause,
@@ -537,9 +555,7 @@ fn strip() -> (gtk::Box, gtk::Label, gtk::Button, gtk::Button) {
         buttons.append(widget);
     }
     let state = gtk::Label::builder()
-        .xalign(0.0)
         .ellipsize(pango::EllipsizeMode::End)
-        .margin_start(6)
         .build();
     state.add_css_class("caption");
     state.add_css_class("dim-label");

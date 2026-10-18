@@ -8,4 +8,5 @@ bench debug step demo.py:3
 bench debug ended 0
 bench debug output total 42
 bench debug program kept
-bench debug pane hidden
+bench debug pane shown Not running
+bench debug pane hidden behind the program

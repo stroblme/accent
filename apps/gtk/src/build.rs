@@ -1078,9 +1078,10 @@ thread_local! {
 /// Focus mode uses opacity to preserve layout, focus and accessibility. Hidden bars remove
 /// scroller undershoots; High also dims dividers. `.accent-flat` matches document backgrounds.
 ///
-/// Use `go-*` disclosure icons because some themes supply `pan-*` SVGs GTK cannot recolour.
-/// Other rules align section headers, compact status buttons, outline inactive tabs and keep
-/// presentation backgrounds complete.
+/// Use `go-*` disclosure icons because some themes supply `pan-*` SVGs GTK cannot recolour; a
+/// section header's gets a gap before its title, the `go-*` glyph filling the box `pan-*` left
+/// room in. Other rules align section headers, compact status buttons, outline inactive tabs and
+/// keep presentation backgrounds complete.
 ///
 /// Application-priority CSS overrides GtkSourceView per property. Keep its search highlight,
 /// style foreground on `text` and background on `textview`, and match the gutter to the page.
@@ -1204,6 +1205,8 @@ fn install_chrome_css() {
                0 1px 4px var(--shade-color); }} \
              .accent-current-layer {{ box-shadow: inset 3px 0 var(--accent-bg-color); }} \
              .accent-section > box > title {{ padding: 6px 12px; }} \
+             .accent-section > box > title > expander:dir(ltr) {{ margin-right: 6px; }} \
+             .accent-section > box > title > expander:dir(rtl) {{ margin-left: 6px; }} \
              .accent-lone-header > windowhandle > box {{ padding-bottom: 0; }} \
              textview.accent-doc {{ color: var(--view-fg-color); \
                background-color: var(--view-bg-color); }} \

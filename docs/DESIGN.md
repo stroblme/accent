@@ -156,7 +156,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 - An `AdwInlineViewSwitcher` in icon mode over an `AdwViewStack` of eight panes: Files, Search, Info, Git, Ports, Outline, Code, Properties.
   The switcher sits in the sidebar header, level with the sidebar toggle, so the tree's first row lines up with the tabs.
-- Git shows only where there is a repository, Ports only on a remote vault, Code only while the window says so — while the tab in front has a proof assistant's goals or a debug session runs — Properties only while a diagram is in front: each only where it has something to say, so other vaults keep the switcher they had.
+- Git shows only where there is a repository, Ports only on a remote vault, Code only while the window says so — while the tab in front has a proof assistant's goals or can be debugged, or a debug session runs — Properties only while a diagram is in front: each only where it has something to say, so other vaults keep the switcher they had.
 - A vault always opens on Files: a search from another sitting is not where a vault starts.
 - Width is dragged on the `GtkPaned` handle, down to 200 px or the pane switcher's width, whichever is wider: the switcher's icons are never cut.
 - Below 760 sp an `AdwBreakpoint` hides the sidebar: that is the default 280 px sidebar beside the 480 px column floor.
@@ -294,11 +294,15 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   An answer that fails while the file is being checked leaves the pane as it is, and the end of the check asks again.
 - Its visibility is a window flag, never a rule about the tab in front, because a debug session keeps it up over any tab: Call Stack, Variables and Breakpoints follow Goals and Expected Type in the one stack of dividers, the session's controls in a strip over them all.
   While a session runs the pane shows its sections whatever is in front, Goals and Expected Type only with an answer, and neither the No Goals nor the Checking page.
+  With no session, a tab in front that can be debugged (Debugger) has the pane too, as the strip over Breakpoints, ready to start: Call Stack and Variables have nothing to say until a program runs.
+  The pane joins the switcher then without coming to the front; a tab with neither goals nor a debugger takes it away again.
   Hidden while on screen, it gives way to the Outline.
   Which sections are open and where the dividers are are the vault's session: all open at first.
 - **The strip**: Continue or Pause, whichever the program can take, Step Over, Step Into, Step Out, Restart Debugging and Stop Debugging as flat icon buttons on the window's actions, each greyed while the program's state does not allow it, and while starting all but Stop; then Debug Console, always live.
+  With no session the first is Start Debugging and the rest but Debug Console are greyed.
+  The row is centred in the pane, as the switcher's icons are in the header above it, and so is the caption under it.
   A press leaves the keyboard where it was, so stepping keeps the reader in the note.
-  A dim caption under them says what the program does: Starting…, Running, Paused, Paused on breakpoint, Paused on exception with the exception's name (its message in the tooltip), Stopping….
+  A dim caption under them says what the program does: Not running, Starting…, Running, Paused, Paused on breakpoint, Paused on exception with the exception's name (its message in the tooltip), Stopping….
 - **Call Stack** lists the threads, counted, the one that stopped open on its calls, innermost first, and the innermost selected; another thread's calls are asked for as it is opened.
   A call is its function's name with its file and line dimmed beside it, the whole row dimmed for code outside the vault.
   One click on a call shows it (Debugger), as a result list's row opens; a dim "Running" stands in while the program runs.
@@ -1132,7 +1136,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   One toggled while it starts is told once it runs, the adapter's answer for the lines it was launched with leaving the marks be, and an answer that does not come leaves them as the reader set them.
 - **Restart Debugging** is Stop, then Start with the same program once the session has ended: debugpy has no restart of its own.
   **Stop Debugging** ends the program, then the adapter.
-- The session's end — the program's, Stop's, or the vault's link dropping — takes the strip, its sections and the mark away, the pane staying only for goals; a ring is a dot again, for the next session to bind.
+- The session's end — the program's, Stop's, or the vault's link dropping — takes Call Stack, Variables and the mark away, the strip reading Not running over Breakpoints while the tab in front can be debugged and the pane otherwise staying only for goals; a ring is a dot again, for the next session to bind.
 - A failure is a toast under one key, so the next takes its place: "Cannot start debugging: <why>", the why being the adapter's own last words where it exited before answering — Python's `No module named debugpy`, once — and "The debug session ended: <why>" for an adapter that died under a running program.
   What the adapter marks important is a toast as well, and all its output goes to the Debug Console.
 - **The Debug Console** is a terminal tab (user decision 2026-10-17), not an editor: it has no file, and as a terminal it has the shells' palette, font, zoom, scrollback, menu and links.
@@ -1221,6 +1225,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - GNOME's monospace font appears in a note only inside the `code`, `codeblock`, `math`, `html` and `frontmatter` tags.
 - Heading scale, relative to the document font: h1 1.6, h2 1.4, h3 1.2, h4 1.1, h5 and h6 bold at 1.0.
   `strong` and list markers are weight 700, `em` italic.
+- A section's or a group's title in a sidebar pane is libadwaita's `heading`, bold at the size of the rows under it, its count beside it dim at that size: a title smaller than what it heads reads as a footnote to it.
+  A group's title set among the rows themselves, which opens nothing, is dimmed as well (Search's Not Indexed and Inside Words, the Outline's Comments, the branch list's Remote, Details' groups).
 - Line numbers are optional and off by default (`Config::line_numbers`, a switch in Preferences), and the switch decides for every text tab, code as well as prose.
 - A comparison's second pane is the exception and always numbers its lines.
 - Line numbers sit outside the 48 px page gutter, so turning them on shifts the page rather than crowding it.

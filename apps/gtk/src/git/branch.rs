@@ -107,7 +107,7 @@ impl Panel {
 }
 
 /// Non-activatable heading for remote branches. Match the text buttons' 17 px inset so it aligns
-/// with names, using small dim type to distinguish it from branch rows.
+/// with names, using dim bold type to distinguish it from branch rows.
 fn remote_heading() -> gtk::ListBoxRow {
     let label = gtk::Label::builder()
         .label("Remote")
@@ -115,7 +115,7 @@ fn remote_heading() -> gtk::ListBoxRow {
         .margin_start(17)
         .margin_top(6)
         .build();
-    for class in ["caption-heading", "dim-label"] {
+    for class in ["heading", "dim-label"] {
         label.add_css_class(class);
     }
     gtk::ListBoxRow::builder()

@@ -13,10 +13,10 @@ pub(super) struct Section {
 
 impl Section {
     pub(super) fn new(title: &str, body: &impl IsA<gtk::Widget>) -> Section {
+        // At the rows' size, as every section's and group's title is (DESIGN.md, Typography).
         let title = gtk::Label::builder().label(title).xalign(0.0).build();
-        title.add_css_class("caption-heading");
+        title.add_css_class("heading");
         let count = gtk::Label::builder().visible(false).build();
-        count.add_css_class("caption");
         count.add_css_class("dim-label");
         let header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         header.append(&title);

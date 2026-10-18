@@ -77,8 +77,8 @@ fn spliced(row: u32, at: usize, removed: usize, added: usize) -> u32 {
 }
 
 /// What a row shows: how far in it is, its text, and a dim word before the text, a comment's
-/// author. Level 0 is a heading over the rows after it, small and dim as the Search pane's, which
-/// opens nothing.
+/// author. Level 0 is a heading over the rows after it, dim as the Search pane's, which opens
+/// nothing.
 #[derive(Clone, Default, PartialEq)]
 pub struct Line {
     pub level: u8,
@@ -179,7 +179,7 @@ impl List {
                     item.set_selectable(!heading);
                     row.set_margin_top(if heading { 12 } else { 0 });
                     text.set_css_classes(match heading {
-                        true => &["caption-heading", "dim-label"],
+                        true => &["heading", "dim-label"],
                         false => &[],
                     });
                 }
