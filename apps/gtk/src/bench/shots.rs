@@ -1,4 +1,4 @@
-//! The README's four screenshots, each taken light and dark (`make screenshots`).
+//! The README's five screenshots, each taken light and dark (`make screenshots`).
 
 use super::*;
 use accent_core::config::Theme;
@@ -44,8 +44,9 @@ pub(super) fn bench_shot(app: &Rc<App>, arg: &str) {
             "2" => scene_git(&app, &shot).await,
             "3" => scene_terminals(&app, &shot).await,
             "4" => scene_focus(&app, &shot).await,
+            "5" => scene_debug(&app, &shot).await,
             n => {
-                eprintln!("ACCENT_BENCH_SHOT has scenes 1 to 4, not {n}");
+                eprintln!("ACCENT_BENCH_SHOT has scenes 1 to 5, not {n}");
                 std::process::exit(2);
             }
         }
@@ -171,6 +172,11 @@ async fn scene_files(app: &Rc<App>, shot: &Shot) {
 async fn scene_git(app: &Rc<App>, shot: &Shot) {
     // Two columns of code beside the pane, in a 1000 px window.
     app.set_zoom(0.8);
+    // The pane is there once its first refresh has found the repository.
+    until("git_pane", 60_000, || {
+        app.sidebar.get().is_some_and(|s| s.has_pane("git"))
+    })
+    .await;
     app.show_pane("git");
     let Some(git) = app.git.get().cloned() else {
         return println!("bench shot no_git");
@@ -318,6 +324,98 @@ async fn scene_focus(app: &Rc<App>, shot: &Shot) {
     if let Err(e) = app.write_tab(&tab, None) {
         println!("bench shot note_not_restored {e}");
     }
+}
+
+/// Scene 5's program, `build-aux/screenshots/readout.py`, and its breakpoints by 1-based line:
+/// `fidelity`'s return, a weak qubit noted, and the summary.
+const PROGRAM: &str = "Code/readout.py";
+const BREAKPOINTS: [u32; 3] = [17, 27, 28];
+/// What the Debug Console is asked at the stop.
+const ASKED: [&str; 3] = ["p0, p1", "(p0 + p1) / 2", "one[0] / sum(one)"];
+
+/// Scene 5: Solarized, a Python program paused in its third call to `fidelity`, the Code pane
+/// open on the calls and the locals, the Debug Console over the program's own terminal to its
+/// right.
+async fn scene_debug(app: &Rc<App>, shot: &Shot) {
+    crate::theme::apply(Theme::Solarized);
+    app.restyle_all();
+    // Code beside two terminals, in a 1000 px window.
+    app.set_zoom(0.8);
+    open_all(app, &[PROGRAM]).await;
+    let tab = tab(app, PROGRAM);
+    for line in BREAKPOINTS {
+        app.toggle_breakpoint(&tab, line - 1);
+    }
+    // Opened as a click on its switcher does: Start Debugging leaves the sidebar as it is.
+    until("code", 5_000, || {
+        app.sidebar.get().is_some_and(|s| s.has_pane("code"))
+    })
+    .await;
+    app.show_pane("code");
+    // Variables given the room of all four locals, as a reader drags the divider above
+    // Breakpoints: the session keeps it so.
+    if let Some(sidebar) = app.sidebar.get() {
+        let mut saved = sidebar.code_saved();
+        saved.dividers = vec![None, None, None, Some(0.6)];
+        sidebar.restore_code(&saved);
+    }
+    let _ = WidgetExt::activate_action(&app.window, "win.debug-start", None);
+    // On q2, past the stops on q0 and q1, whose lines the program has printed by then.
+    loop {
+        until("stopped", 30_000, || {
+            super::debug::paused_line(&tab).is_some()
+        })
+        .await;
+        let locals = || super::debug::shown(app).2;
+        until("locals", 10_000, || !locals().is_empty()).await;
+        let on_q2 = locals().iter().any(|value| value == "zero=(978, 22)");
+        if super::debug::paused_line(&tab) == Some(BREAKPOINTS[0] - 1) && on_q2 {
+            break;
+        }
+        let _ = WidgetExt::activate_action(&app.window, "win.debug-continue", None);
+    }
+    let (Some(console), Some(program)) = (app.console(), super::debug::program_tab(app)) else {
+        println!("bench shot no_debug_terminals");
+        std::process::exit(1);
+    };
+    until("output", 10_000, || {
+        super::debug::text(&program).contains("q1  0.9270")
+    })
+    .await;
+
+    // The code keeps its pane, the console goes to its right and the program's tab below that.
+    let code = pane_of(app, PROGRAM);
+    app.split_page(&code, Side::Right, &console.page);
+    let Some(right) = app.pane_of(&console.page) else {
+        return println!("bench shot no_console_pane");
+    };
+    app.split_page(&right, Side::Down, &program.page);
+    glib::timeout_future(Duration::from_millis(300)).await;
+    divide(&code, 0.55);
+    divide(&right, 0.5);
+
+    // Typed at the console in front with the keyboard, as a reader brings it forward.
+    let _ = WidgetExt::activate_action(&app.window, "win.debug-console", None);
+    for asked in ASKED {
+        app.console_typed(&format!("{asked}\r"));
+        until("repl", 10_000, || {
+            super::debug::answer(&super::debug::text(&console), asked).is_some()
+        })
+        .await;
+    }
+    // From `LIMIT` down: the function paused in, the loop calling it and every breakpoint.
+    if let Some(top) = tab.buffer.iter_at_line(9) {
+        let mark = tab.buffer.create_mark(None, &top, true);
+        tab.view.scroll_to_mark(&mark, 0.0, true, 0.0, 0.0);
+        tab.buffer.delete_mark(&mark);
+    }
+    for dark in [false, true] {
+        set_dark(app, dark).await;
+        app.show_chrome();
+        capture(app, shot, dark).await;
+    }
+    let _ = WidgetExt::activate_action(&app.window, "win.debug-stop", None);
+    until("ended", 30_000, || !app.debugger.running()).await;
 }
 
 /// Write the strokes [`INK`] lists into the PDF at `path`.

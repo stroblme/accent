@@ -45,6 +45,10 @@
       <image>https://raw.githubusercontent.com/stroblme/accent/9c37f808b39d48c952551727fc94219002df6196/data/screenshots/focus.png</image>
       <caption>Focus mode in the Solarized theme while another note is linked</caption>
     </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/stroblme/accent/9c37f808b39d48c952551727fc94219002df6196/data/screenshots/debug.png</image>
+      <caption>A Python program paused at a breakpoint in the Solarized theme, beside its Debug Console and output</caption>
+    </screenshot>
   </screenshots>
 
   <content_rating type="oars-1.1"/>

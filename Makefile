@@ -369,7 +369,7 @@ drills: gtk-bench xvfb
 		ACCENT_BENCH_DEBUG=demo.py:2 timeout 60 $(TARGET_DIR)/accent "$$0/vault" >"$$0/debug" && \
 		grep "^bench debug " "$$0/debug" | diff -u apps/gtk/src/bench/debug.expected -' "$$xdg"
 
-## screenshots: regenerate docs/screenshot-1..4.png and data/screenshots (needs magick, htop, Xvfb)
+## screenshots: regenerate docs/screenshot-1..5.png and data/screenshots (needs magick, htop, Xvfb, debugpy)
 #
 # On a vault and repository of their own, made afresh each run; build-aux/screenshots.sh says how.
 screenshots: core gtk-bench pdfium
