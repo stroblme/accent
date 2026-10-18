@@ -1080,8 +1080,9 @@ thread_local! {
 ///
 /// Use `go-*` disclosure icons because some themes supply `pan-*` SVGs GTK cannot recolour; a
 /// section header's gets a gap before its title, the `go-*` glyph filling the box `pan-*` left
-/// room in. Other rules align section headers, compact status buttons, outline inactive tabs and
-/// keep presentation backgrounds complete.
+/// room in. A section header is drawn as a `navigation-sidebar` row, with libadwaita's row
+/// geometry and hover and press tints, so it reads as one of the rows it heads. Other rules
+/// compact status buttons, outline inactive tabs and keep presentation backgrounds complete.
 ///
 /// Application-priority CSS overrides GtkSourceView per property. Keep its search highlight,
 /// style foreground on `text` and background on `textview`, and match the gutter to the page.
@@ -1204,7 +1205,15 @@ fn install_chrome_css() {
              .accent-label-editor {{ box-shadow: 0 0 0 1px var(--accent-bg-color), \
                0 1px 4px var(--shade-color); }} \
              .accent-current-layer {{ box-shadow: inset 3px 0 var(--accent-bg-color); }} \
-             .accent-section > box > title {{ padding: 6px 12px; }} \
+             .accent-section > box > title {{ min-height: 36px; padding: 0 6px; margin: 2px 6px; \
+               border-radius: 9px; }} \
+             .accent-section > box > title:hover {{ \
+               background-color: color-mix(in srgb, currentColor 7%, transparent); }} \
+             .accent-section > box > title:active {{ \
+               background-color: color-mix(in srgb, currentColor 16%, transparent); }} \
+             @media (prefers-contrast: more) {{ .accent-section > box > title:hover, \
+               .accent-section > box > title:active {{ box-shadow: inset 0 0 0 1px \
+               color-mix(in srgb, currentColor var(--border-opacity), transparent); }} }} \
              .accent-section > box > title > expander:dir(ltr) {{ margin-right: 6px; }} \
              .accent-section > box > title > expander:dir(rtl) {{ margin-left: 6px; }} \
              .accent-lone-header > windowhandle > box {{ padding-bottom: 0; }} \

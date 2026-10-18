@@ -295,7 +295,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Its visibility is a window flag, never a rule about the tab in front, because a debug session keeps it up over any tab: Call Stack, Variables and Breakpoints follow Goals and Expected Type in the one stack of dividers, the session's controls in a strip over them all.
   While a session runs the pane shows its sections whatever is in front, Goals and Expected Type only with an answer, and neither the No Goals nor the Checking page.
   With no session, a tab in front that can be debugged (Debugger) has the pane too, as the strip over Breakpoints, ready to start: Call Stack and Variables have nothing to say until a program runs.
-  The pane joins the switcher then without coming to the front; a tab with neither goals nor a debugger takes it away again.
+  The pane joins the switcher then without coming to the front, and nothing but its button brings it there, a session starting, stopping or ending included (user decision 2026-10-18); a tab with neither goals nor a debugger takes it away again.
   Hidden while on screen, it gives way to the Outline.
   Which sections are open and where the dividers are are the vault's session: all open at first.
 - **The strip**: Continue or Pause, whichever the program can take, Step Over, Step Into, Step Out, Restart Debugging and Stop Debugging as flat icon buttons on the window's actions, each greyed while the program's state does not allow it, and while starting all but Stop; then Debug Console, always live.
@@ -1126,7 +1126,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - **Start Debugging** (`Ctrl+F5`) runs the Python file in front, else the program last debugged in the window, which the window remembers for its life and never in the vault's session.
   The vault's tabs with edits are written first, as VS Code's `debug.saveBeforeStart` does: the program runs what is on disk.
   One session at a time: a second Start says "Cannot start debugging: a program is already being debugged".
-  The Code pane comes to the front as it starts while the sidebar is up; a hidden sidebar stays hidden.
+  The sidebar stays on the pane it shows, and hidden if it was: the session is in the Code pane, which its button in the switcher brings up (user decision 2026-10-18).
 - **A stop brings the paused call's file to the front**, in the preview tab unless a tab has it already (Tabs), the caret on the line the paused line's mark shows: `go-next-symbolic` in the marks column and the warning's amber across the line.
   The arrow takes the line's cell from a breakpoint's dot or ring, which waits under it until the program moves on, and either from a diagnostic's icon: one drawn over another reads as neither.
   The keyboard stays where it was, and the active pane with it: an open tab comes to the front of its own pane.
@@ -1226,7 +1226,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Heading scale, relative to the document font: h1 1.6, h2 1.4, h3 1.2, h4 1.1, h5 and h6 bold at 1.0.
   `strong` and list markers are weight 700, `em` italic.
 - A section's or a group's title in a sidebar pane is libadwaita's `heading`, bold at the size of the rows under it, its count beside it dim at that size: a title smaller than what it heads reads as a footnote to it.
-  A group's title set among the rows themselves, which opens nothing, is dimmed as well (Search's Not Indexed and Inside Words, the Outline's Comments, the branch list's Remote, Details' groups).
+  A section's header is one of its pane's rows in shape and state (user decision 2026-10-18): a `navigation-sidebar` row's 36 px pill, 6 px in from the pane's sides with 9 px corners, tinted as libadwaita tints the rows — `currentColor` at 7 % under the pointer, 16 % pressed — and ringed as they are on the keyboard, so every theme carries it and the header no longer reads as a label over the list.
+  A group's title set among the rows themselves, which opens nothing, is dimmed as well and takes no hover (Search's Not Indexed and Inside Words, the Outline's Comments, the branch list's Remote, Details' groups).
 - Line numbers are optional and off by default (`Config::line_numbers`, a switch in Preferences), and the switch decides for every text tab, code as well as prose.
 - A comparison's second pane is the exception and always numbers its lines.
 - Line numbers sit outside the 48 px page gutter, so turning them on shifts the page rather than crowding it.

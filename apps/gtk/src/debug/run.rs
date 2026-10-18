@@ -96,13 +96,6 @@ impl App {
         self.debugger.run.replace(Some(run.clone()));
         self.sync_debug();
         self.sync_code_pane();
-        if let Some(sidebar) = self
-            .sidebar
-            .get()
-            .filter(|_| self.sidebar_column.is_visible())
-        {
-            sidebar.show_pane("code");
-        }
         let started = vault.debug_start(id, &launch);
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
