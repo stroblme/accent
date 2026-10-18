@@ -182,7 +182,7 @@ async fn until<T>(app: &Rc<App>, what: &str, ready: impl Fn() -> Option<T>) -> O
 }
 
 /// The line the paused program's mark is on.
-fn paused_line(tab: &Tab) -> Option<u32> {
+pub(super) fn paused_line(tab: &Tab) -> Option<u32> {
     (0..tab.buffer.line_count())
         .find(|&line| {
             !tab.buffer
@@ -193,7 +193,7 @@ fn paused_line(tab: &Tab) -> Option<u32> {
 }
 
 /// The strip's line, the calls and the values the Code pane shows.
-fn shown(app: &App) -> (String, Vec<String>, Vec<String>) {
+pub(super) fn shown(app: &App) -> (String, Vec<String>, Vec<String>) {
     app.sidebar
         .get()
         .and_then(|sidebar| sidebar.debug_shown())
@@ -209,7 +209,7 @@ fn line_text(tab: &Tab, line: u32) -> String {
     start.text(&end).to_string()
 }
 
-fn text(term: &terminal::Term) -> String {
+pub(super) fn text(term: &terminal::Term) -> String {
     term.view
         .text_format(vte4::Format::Text)
         .map(String::from)
@@ -217,14 +217,14 @@ fn text(term: &terminal::Term) -> String {
 }
 
 /// The debugged program's tab.
-fn program_tab(app: &App) -> Option<Rc<terminal::Term>> {
+pub(super) fn program_tab(app: &App) -> Option<Rc<terminal::Term>> {
     app.docs()
         .into_iter()
         .find_map(|doc| doc.terminal().filter(|term| term.is_program()).cloned())
 }
 
 /// The line the console printed under `asked`, once it has.
-fn answer(transcript: &str, asked: &str) -> Option<String> {
+pub(super) fn answer(transcript: &str, asked: &str) -> Option<String> {
     let echo = format!(">>> {asked}");
     let mut lines = transcript.lines().map(str::trim_end);
     lines.find(|line| *line == echo)?;

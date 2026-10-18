@@ -12,6 +12,7 @@ set -eu
 for tool in magick htop Xvfb dbus-run-session fuser git python3; do
 	command -v "$tool" >/dev/null || { echo "$0 needs $tool" >&2; exit 1; }
 done
+python3 -c 'import debugpy' 2>/dev/null || { echo "$0 needs debugpy for scene 5" >&2; exit 1; }
 bin=$(cd "$1" && pwd)
 test -x "$bin/accent" && test -x "$bin/accent-cli" ||
 	{ echo "no accent and accent-cli in $bin: run make all" >&2; exit 1; }
@@ -41,7 +42,7 @@ printf '[Settings]\ngtk-font-name=Adwaita Sans 11\ngtk-cursor-blink=false\n%s\n%
 # The vault is its own repository: a history of a few days in real chunks, a branch merged back
 # in, an upstream four commits behind, and Code/analyze.py staged and changed again since.
 echo "(Persistent) Split Terminals" >"$vault/whatelse"
-cp "$here/analyze.py" "$vault/Code/analyze.py"
+cp "$here/analyze.py" "$here/readout.py" "$vault/Code/"
 git -C "$vault" init -q -b main
 export GIT_AUTHOR_NAME="Alex Example" GIT_AUTHOR_EMAIL=alex@example.org \
 	GIT_COMMITTER_NAME="Alex Example" GIT_COMMITTER_EMAIL=alex@example.org
@@ -61,7 +62,7 @@ commit 5800 "submissions: earlier projects" Submissions ':!Submissions/grant-202
 commit 4400 "submissions: grant 2026" Submissions/grant-2026
 commit 1560 "code: sweep driver" Code/build.sh Code/Makefile
 commit 1500 "code: project metadata" Code/pyproject.toml Code/tasks.json
-commit 290 "code: sweep statistics" Code/analyze.py
+commit 290 "code: sweep statistics" Code/analyze.py Code/readout.py
 # The plots on a branch of their own while the readme went in, then merged.
 git -C "$vault" switch -q -c plots
 commit 47 "code: plots" Code/plot.py
@@ -97,7 +98,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do test -S "$socket" && break; sleep 0.5; done
 # is not.
 mkdir -p "$repo/data/screenshots"
 n=0
-for name in files git terminals focus; do
+for name in files git terminals focus debug; do
 	n=$((n + 1))
 	tmp=$(mktemp -d /tmp/accent-shot-XXXXXX)
 	rm -rf "$root/xdg/state"

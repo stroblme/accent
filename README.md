@@ -40,6 +40,8 @@ Accent is open source under GPL-3.0-or-later and still evolving.
 
 ![Screenshot 3](docs/screenshot-4.png)
 
+![Screenshot 5](docs/screenshot-5.png)
+
 ## Get started
 
 ### Desktop
