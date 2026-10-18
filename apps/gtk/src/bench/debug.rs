@@ -16,8 +16,9 @@ const REPL: &str = "x * 2";
 /// window shows at each step, `bench debug …`: the breakpoint, the stop, the top call, its
 /// locals, the Debug Console's answer to [`REPL`], the hover's value of the first name after the
 /// line's `=`, the line a step over lands on, the session's exit code, the program's output in
-/// its tab, that tab kept and the Code pane hidden. Timings go on `bench debug_ms …` lines; a
-/// step that never comes prints `bench debug timeout <what>` and quits.
+/// its tab, that tab kept, and the Code pane shown with the program's file in front and hidden
+/// behind its tab. Timings go on `bench debug_ms …` lines; a step that never comes prints
+/// `bench debug timeout <what>` and quits.
 pub(super) fn bench_debug(app: &Rc<App>, arg: &str) {
     let place = arg
         .rsplit_once(':')
@@ -65,8 +66,8 @@ pub(super) fn bench_debug(app: &Rc<App>, arg: &str) {
         };
         println!("bench debug locals {}", locals.join(" "));
 
-        // In front with the keyboard, as the reader types at it: the console opened behind the
-        // program's tab, and VTE takes in nothing fed to a terminal not yet on screen.
+        // In front with the keyboard, as a reader brings it forward to type at it: the console
+        // opened behind the program's tab. VTE takes in what is fed to it unrealised as well.
         let t = Instant::now();
         let _ = WidgetExt::activate_action(&app.window, "win.debug-console", None);
         app.console_typed(&format!("{REPL}\r"));
@@ -144,8 +145,21 @@ pub(super) fn bench_debug(app: &Rc<App>, arg: &str) {
             "bench debug program {}",
             if kept { "kept" } else { "closed" }
         );
-        let pane = app.sidebar.get().is_some_and(|s| s.has_pane("code"));
-        println!("bench debug pane {}", if pane { "shown" } else { "hidden" });
+        // The end leaves the strip over the program's file, which can be debugged again; a tab
+        // that cannot takes the pane away.
+        let code = || match app.sidebar.get().is_some_and(|s| s.has_pane("code")) {
+            true => "shown",
+            false => "hidden",
+        };
+        let front = |page: &adw::TabPage| {
+            if let Some(pane) = app.pane_of(page) {
+                pane.tabs.set_selected_page(page);
+            }
+        };
+        front(&tab.page);
+        println!("bench debug pane {} {}", code(), shown(&app).0);
+        front(&program.page);
+        println!("bench debug pane {} behind the program", code());
         bench_quit(&app);
     });
 }

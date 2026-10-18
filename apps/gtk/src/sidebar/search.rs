@@ -1191,13 +1191,13 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
                     return;
                 };
                 let hit: Ref<Row> = boxed.borrow();
-                // A heading is small and dim, like the branch popover's Remote, and nothing to open.
+                // A heading is dim, like the branch popover's Remote, and nothing to open.
                 // A recycled row may have been one, which is why every other row sets it back.
                 let heading = hit.rel_path.is_empty();
                 item.set_activatable(!heading);
                 item.set_selectable(!heading);
                 name.set_css_classes(match heading {
-                    true => &["caption-heading", "dim-label"],
+                    true => &["heading", "dim-label"],
                     false => &["heading"],
                 });
                 // A tail row has no name, and no icon either: it continues the file above it.

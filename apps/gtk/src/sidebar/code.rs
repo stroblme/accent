@@ -1,6 +1,6 @@
 //! Show language-layer data at the active caret as independent Code pane sections.
 //!
-//! Proof goals are the first sections, a debug session's the rest (`debug.rs`); the window
+//! Proof goals are the first sections, the debugger's the rest (`debug.rs`); the window
 //! controls visibility, so the debugger's stay up over any tab while a session runs.
 
 use super::debug::{self, Debug};
@@ -24,7 +24,8 @@ pub(super) struct Code {
     goals: Section,
     /// The debugger's strip and sections, in a window with a vault to debug in.
     pub(super) debug: Option<Debug>,
-    /// Whether a session runs, which keeps the sections' page up.
+    /// Whether the debugger's strip is up — a session runs, or the tab in front can be debugged —
+    /// which keeps the sections' page up.
     debugging: Cell<bool>,
     /// The goals, a label each.
     goal_labels: gtk::Box,
@@ -149,8 +150,8 @@ impl Code {
         self.pick_page();
     }
 
-    /// The sections while any has something to say or a session runs, else the page saying why
-    /// there are none.
+    /// The sections while any has something to say or the debugger's strip is up, else the page
+    /// saying why there are none.
     fn pick_page(&self) {
         let shown = self.goals.root.is_visible() || self.expected.root.is_visible();
         self.root
@@ -160,7 +161,7 @@ impl Code {
             });
     }
 
-    /// A session running or not: its sections come and go, and with them the pane's page.
+    /// The debugger's strip up or not: its sections come and go, and with them the pane's page.
     pub(super) fn set_debugging(&self, on: bool) {
         if self.debugging.replace(on) != on {
             self.pick_page();

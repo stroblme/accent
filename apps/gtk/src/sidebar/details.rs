@@ -57,7 +57,7 @@ impl Details {
                 .xalign(0.0)
                 .margin_top(if i == 0 { 0 } else { 12 })
                 .build();
-            heading.add_css_class("caption-heading");
+            heading.add_css_class("heading");
             heading.add_css_class("dim-label");
             self.grid.attach(&heading, 0, row, 2, 1);
             row += 1;

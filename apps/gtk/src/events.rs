@@ -325,6 +325,7 @@ impl App {
                 }
                 // After the tabs, whose closing kept their breakpoints.
                 self.debugger.forget(&rel);
+                self.refill_breakpoints();
             }
             Event::FileRenamed { from, to } => {
                 self.reshow_preview_image(&from);

@@ -50,16 +50,20 @@ impl App {
         if self.debugger.running() {
             return self.debug_cannot("start debugging", "a program is already being debugged");
         }
-        let in_front = self
-            .active()
-            .filter(|tab| self.vault().is_some() && !doc::is_loose_key(&tab.rel()))
-            .map(|tab| (tab.rel(), lang::language_id(&tab)))
-            .filter(|(_, language)| debuggable(language));
         let last = self.debugger.last.borrow().clone();
-        match in_front.or(last) {
+        match self.debuggable_in_front().or(last) {
             Some((program, language)) => self.launch_program(program, language),
             None => self.debug_cannot("start debugging", "no Python file is in front"),
         }
+    }
+
+    /// The file in front and its language, where Start Debugging can run it: a vault's file a
+    /// debugger runs.
+    pub(crate) fn debuggable_in_front(&self) -> Option<(String, String)> {
+        self.active()
+            .filter(|tab| self.vault().is_some() && !doc::is_loose_key(&tab.rel()))
+            .map(|tab| (tab.rel(), lang::language_id(&tab)))
+            .filter(|(_, language)| debuggable(language))
     }
 
     /// Debug `program`, its edits written first as VS Code's `debug.saveBeforeStart` does: the
@@ -99,7 +103,6 @@ impl App {
         {
             sidebar.show_pane("code");
         }
-        self.refill_breakpoints();
         let started = vault.debug_start(id, &launch);
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
@@ -547,7 +550,7 @@ impl App {
             return;
         };
         let (Some(run), Some(state)) = (run, state) else {
-            return sidebar.clear_debug();
+            return sidebar.clear_debug(self.debuggable_in_front().is_some());
         };
         let said = run.paused.borrow();
         let (line, why) = match state {
@@ -662,9 +665,9 @@ impl App {
         });
     }
 
-    /// The Breakpoints section's rows, `path:line` as References' are, while a session runs.
-    pub(super) fn refill_breakpoints(&self) {
-        let Some(sidebar) = self.sidebar.get().filter(|_| self.debugger.running()) else {
+    /// The Breakpoints section's rows, `path:line` as References' are.
+    pub(crate) fn refill_breakpoints(&self) {
+        let Some(sidebar) = self.sidebar.get() else {
             return;
         };
         let rows: Vec<String> = self

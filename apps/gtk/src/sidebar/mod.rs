@@ -436,11 +436,12 @@ impl Sidebar {
         }
     }
 
-    /// No session: the strip and its sections go.
-    pub fn clear_debug(&self) {
+    /// No session: Call Stack and Variables go, and the strip, offering Start Debugging, and
+    /// Breakpoints stay only while the tab in front can be debugged (`debuggable`).
+    pub fn clear_debug(&self, debuggable: bool) {
         if let Some(debug) = &self.code.debug {
-            debug.clear();
-            self.code.set_debugging(false);
+            debug.set_idle(debuggable);
+            self.code.set_debugging(debuggable);
         }
     }
 
