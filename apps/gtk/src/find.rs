@@ -122,6 +122,23 @@ pub fn goto_target(text: &str) -> Option<(i32, i32)> {
     Some((line.trim().parse().ok()?, column))
 }
 
+/// Hide `bar` once it has slid shut. Its revealer, its one child, slides vertically and so keeps
+/// claiming the row's full width while closed, which would hold the pane at that width.
+fn hide_once_closed(bar: &gtk::SearchBar) {
+    let Some(revealer) = bar.first_child().and_downcast::<gtk::Revealer>() else {
+        return;
+    };
+    revealer.connect_child_revealed_notify(glib::clone!(
+        #[weak]
+        bar,
+        move |revealer| {
+            if !revealer.is_child_revealed() && !bar.is_search_mode() {
+                bar.set_visible(false);
+            }
+        }
+    ));
+}
+
 impl Bar {
     pub fn new() -> Rc<Bar> {
         let query = gtk::SearchEntry::builder()
@@ -192,8 +209,13 @@ impl Bar {
 
         // No `connect_entry`: it would hand the reveal's focus to the find entry even when the
         // bar came up in go-to-line mode. Focus is taken explicitly in `open` instead.
-        let bar = gtk::SearchBar::builder().show_close_button(true).build();
+        // Hidden while closed (`reveal`, `hide_once_closed`).
+        let bar = gtk::SearchBar::builder()
+            .show_close_button(true)
+            .visible(false)
+            .build();
         bar.set_child(Some(&rows));
+        hide_once_closed(&bar);
         // On the note's own background, as the header above it is: Adwaita paints a search bar in
         // the header bar colour, which is the note's in light but a lighter band in dark.
         bar.add_css_class("accent-flat");
@@ -442,7 +464,7 @@ impl Bar {
         match mode {
             Mode::Goto => {
                 self.rows.set_visible_child_name("goto");
-                self.bar.set_search_mode(true);
+                self.reveal();
                 self.refresh_count();
                 self.line.grab_focus();
                 self.line.select_region(0, -1);
@@ -458,7 +480,7 @@ impl Bar {
                 self.replace_row.set_visible(replacing);
                 self.sync_toggles();
                 self.rows.set_visible_child_name("find");
-                self.bar.set_search_mode(true);
+                self.reveal();
                 self.search(&self.query.text());
                 let entry: &gtk::Editable = match replacing && selected.is_some() {
                     true => self.replace.upcast_ref(),
@@ -502,6 +524,12 @@ impl Bar {
     /// their own matches and say "3 of 12", which the bar has no way to work out for them.
     pub fn set_matches_text(&self, text: &str) {
         self.matches.set_text(text);
+    }
+
+    /// Shown first, so the bar is in the window and slides down rather than appearing at once.
+    fn reveal(&self) {
+        self.bar.set_visible(true);
+        self.bar.set_search_mode(true);
     }
 
     /// Put the bar away and give the document the keyboard back. Public because Escape reaches it
