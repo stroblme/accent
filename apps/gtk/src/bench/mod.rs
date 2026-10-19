@@ -21,20 +21,16 @@ mod git;
 mod goals;
 mod goto;
 mod ignored;
-#[cfg(feature = "webkit")]
 mod image;
 mod info;
 mod keys;
 mod loose;
-#[cfg(feature = "webkit")]
 mod memory;
 mod minimap;
 mod outline;
 mod panes;
 mod pdf;
-#[cfg(feature = "webkit")]
 mod present;
-#[cfg(feature = "webkit")]
 mod preview;
 mod replace;
 mod scroll;
@@ -45,7 +41,6 @@ mod style;
 mod suggest;
 mod symbols;
 mod synctex;
-#[cfg(feature = "webkit")]
 mod tags;
 mod toasts;
 
@@ -77,7 +72,6 @@ use git::{
     bench_git_switch, bench_git_sync_all, bench_git_sync_over_fetch,
 };
 use goals::bench_goals;
-#[cfg(feature = "webkit")]
 use image::{bench_image, bench_image_look, bench_preview_look};
 use info::bench_info;
 use keys::{
@@ -97,7 +91,6 @@ use pdf::{
     bench_pdf_insert, bench_pdf_pages, bench_pdf_renaming, bench_pdf_render, bench_pdf_stale,
     bench_pdf_strip, bench_sketch,
 };
-#[cfg(feature = "webkit")]
 use preview::bench_preview_type;
 use replace::bench_replace;
 use scroll::bench_scroll;
@@ -107,7 +100,6 @@ use style::{
     bench_drag_fold, bench_follow, bench_listing, bench_numbers, bench_occurrences, bench_reveal,
     bench_seam, bench_style, bench_theme, bench_typing, bench_wrap,
 };
-#[cfg(feature = "webkit")]
 use tags::bench_tags;
 
 /// Install opt-in headless drills that print timings or state, then quit.
@@ -428,11 +420,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         if let Some(arg) = minimap {
             return bench_minimap(&app, &arg);
         }
-        #[cfg(feature = "webkit")]
         if let Some(arg) = memory {
             return memory::bench_memory(&app, &arg);
         }
-        #[cfg(feature = "webkit")]
         if let Some(note) = webidle {
             return memory::bench_webidle(&app, &note);
         }
@@ -601,7 +591,6 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         if let Some(arg) = debug {
             return debug::bench_debug(&app, &arg);
         }
-        #[cfg(feature = "webkit")]
         if let Some(rel) = tags {
             return bench_tags(&app, &rel);
         }
@@ -720,15 +709,12 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         if let Some(step) = hold {
             return bench_hold(&app, &step);
         }
-        #[cfg(feature = "webkit")]
         if let Some(arg) = picture {
             return bench_image(&app, &arg);
         }
-        #[cfg(feature = "webkit")]
         if let Some(rels) = image_look {
             return bench_image_look(&app, &rels);
         }
-        #[cfg(feature = "webkit")]
         if let Some(rel) = preview_look {
             return bench_preview_look(&app, &rel);
         }
@@ -751,7 +737,6 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             if let Some(rels) = notes.strip_prefix("find:") {
                 return bench_chrome_find(&app, rels);
             }
-            #[cfg(feature = "webkit")]
             if let Some(rels) = notes.strip_prefix("present:") {
                 return present::bench_present(&app, rels);
             }
