@@ -797,7 +797,7 @@ impl Worker {
                 // A path this batch removed and is seeing again was rewritten, not created:
                 // whoever has it open has to reload it.
                 if kind != FileKind::Dir && !own && b.removed.remove(rel) && !self.mine(rel) {
-                    self.emit(Event::FileChanged(rel.to_string()));
+                    self.changed(rel);
                 }
             }
             Ok(Change::Removed) => {
@@ -808,7 +808,7 @@ impl Worker {
                 // Every kind but a directory reports: a PDF rebuilt by a tool or a source file
                 // edited in another editor has to refresh in the UI just like a note does.
                 if kind != FileKind::Dir && !own && !self.mine(rel) {
-                    self.emit(Event::FileChanged(rel.to_string()));
+                    self.changed(rel);
                 }
             }
             Ok(Change::Unchanged) if !own => self.unchanged(rel, b),
@@ -835,7 +835,21 @@ impl Worker {
         match path.is_dir() {
             // Watched from now on, as a directory this vault added would be.
             true => b.rewatch = true,
-            false => self.emit(Event::FileChanged(rel.to_string())),
+            false => self.changed(rel),
+        }
+    }
+
+    /// Tell the window `rel` changed, and each alias of it: the watcher's news names the row
+    /// alone. An alias is told rather than updated, which would add it as a second row.
+    fn changed(&mut self, rel: &str) {
+        self.emit(Event::FileChanged(rel.to_string()));
+        match self.index.aliases_of(rel) {
+            Ok(aliases) => {
+                for alias in aliases {
+                    self.emit(Event::FileChanged(alias));
+                }
+            }
+            Err(e) => self.fail(&format!("listing the aliases of {rel}"), e),
         }
     }
 
