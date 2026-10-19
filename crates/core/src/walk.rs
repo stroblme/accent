@@ -320,6 +320,11 @@ pub fn stat_opened(root: &Path, rel: &str) -> crate::Result<Option<FileMeta>> {
         .then(|| file_meta(rel.to_string(), &path, &meta)))
 }
 
+/// Why the walk leaves `rel` out, if it does: the file tree's word for a folder it lists.
+pub fn unindexed(root: &Path, rel: &str) -> Option<Unindexed> {
+    is_unindexed(root, rel, &mut dir_ignores(root))
+}
+
 /// Why a directory is absent from the index.
 ///
 /// [`Unindexed::Dependency`] identifies generated dependency trees such as `node_modules`;
@@ -433,13 +438,27 @@ pub fn unindexed_children(
 /// not followed: one in build output can lead anywhere (flatpak-builder's `var/run -> /run` reached
 /// a FUSE mount whose links read as folders, a walk without end).
 ///
-/// One walk of the whole vault, since nothing short of one says where the ignored folders are.
-pub fn ignored_files(root: &Path) -> Vec<String> {
+/// `dirs` are the ignored folders the index's walk found ([`SkipReason::GitIgnored`]), and only
+/// they are walked; without them the vault is walked whole to find them.
+pub fn ignored_files(root: &Path, dirs: Option<&[String]>) -> Vec<String> {
     let opts = ScanOptions {
         enter_ignored_dirs: true,
         follow_links: false,
         ..ScanOptions::default()
     };
+    if let Some(dirs) = dirs {
+        let mut out: Vec<String> = dirs
+            .iter()
+            .flat_map(|dir| {
+                scan_until(root, dir, &[], &opts, &|| false, &AtomicUsize::new(0)).files
+            })
+            .filter(|f| !matches!(f.kind, FileKind::Dir | FileKind::Conflict))
+            .map(|f| f.rel_path)
+            .collect();
+        out.sort_unstable();
+        out.dedup();
+        return out;
+    }
     let r = scan(root, &opts);
     let dirs: HashSet<String> = r
         .skipped
@@ -1503,10 +1522,23 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
         fs::write(outside.path().join("ext.md"), "ext").unwrap();
         symlink(outside.path(), vault.path().join("ignored/run")).unwrap();
-        assert_eq!(
-            ignored_files(vault.path()),
-            ["ignored/Deep Note.md", "ignored/sub/paper.pdf"]
-        );
+        let want = ["ignored/Deep Note.md", "ignored/sub/paper.pdf"];
+        assert_eq!(ignored_files(vault.path(), None), want);
+        // The folders the index's walk found, walked alone, hold the same.
+        let found: Vec<String> = scan(vault.path(), &ScanOptions::default())
+            .skipped
+            .iter()
+            .filter(|s| s.reason == SkipReason::GitIgnored)
+            .map(|s| {
+                s.path
+                    .strip_prefix(vault.path())
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(found, ["ignored"]);
+        assert_eq!(ignored_files(vault.path(), Some(&found)), want);
     }
 
     /// The visitor sees what `scan` lists, symlinked target and all, and stops when it says so.

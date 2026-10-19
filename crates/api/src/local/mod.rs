@@ -116,6 +116,7 @@ impl Local {
             events,
             watch,
             stop.clone(),
+            lang.ignored.clone(),
         )?;
 
         Ok((
