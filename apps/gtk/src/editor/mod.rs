@@ -25,6 +25,7 @@ mod banner;
 mod compare;
 mod drag;
 mod follow;
+mod indent;
 mod keys;
 mod lines;
 mod open;
@@ -41,6 +42,8 @@ pub(crate) use drag::ENDED as DRAG_ENDED;
 #[cfg(feature = "bench")]
 pub(crate) use drag::content as drag_content;
 use follow::Follow;
+#[cfg(feature = "bench")]
+pub(crate) use indent::on_key as indent_key;
 #[cfg(feature = "bench")]
 pub(crate) use keys::press;
 use lines::primary_paste;

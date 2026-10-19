@@ -475,6 +475,11 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 - The same view, told what it is by an `editor::Flavour` of `Note`, `Code` or `Csv`: one tab type, not two, and a code tab gets none of the markdown tags.
 - Code takes a GtkSourceView language guessed from the path and the content type, so `LICENSE` and `Makefile` open as what they are; bracket matching, auto-indent, and a four-space tab that stays a real tab where a makefile needs one.
+- **Indentation follows the code as it is typed**, one rule in every language and no server (user decision 2026-10-19): Return after a line whose code ends in `{`, `(`, `[` or `:` indents one level deeper, by the Indent Width, and between such an opener and its closer puts the closer on a line of its own at the outer level; a closer typed on a blank line goes back out to the level of the block it closes.
+  A comment after the opener does not hide it and one inside a string is not one, as the language's highlighting tells them apart; a file with no language only copies the line's indent, as every other Return does.
+  Each is one undo step.
+  Language servers were asked first: of those accent starts, only clangd indents on a typed newline (`textDocument/onTypeFormatting`), and VS Code itself indents by per-language rules with format-on-type off.
+  Python's `else:` and the like are not dedented, and brackets do not close themselves in code.
 - A LaTeX listing is coloured as the language it names, `\begin{lstlisting}[language=Python]` and `\begin{minted}{python}` alike, by accent's own `latex.lang` (`apps/gtk/data/language-specs/`, GtkSourceView 5.20's with its listing context changed), which the language manager reads ahead of GtkSourceView's: the stock one greys every listing as verbatim, so it reads as a comment.
   A listing in a language its table does not name, or in none, is plain text.
   A default set by `\lstset{language=…}` is not followed, a language spec having no way to carry it from the preamble to the listing.

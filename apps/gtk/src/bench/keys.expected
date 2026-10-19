@@ -108,6 +108,15 @@ bench table_back_tab "| a   |  bb |\n| :-- | --: |\n| ccc |   d |\n|     |     |
 bench table_enter_leaves "| a   |  bb |\n| :-- | --: |\n| ccc |   d |\n" (3, 0) Stop
 bench table_undo "| a   |  bb |\n| :-- | --: |\n| ccc |   d |\n|     |     |"
 bench table_not_a_table "a | b\nc | d" (0, 1) Proceed
+bench indent_colon "def f():  # x\n    " (1, 4) Stop
+bench indent_string "    x = \"(\"" (0, 11) Proceed
+bench indent_no_language "Notes:" (0, 6) Proceed
+bench indent_pair "fn f() {\n    \n}" (1, 4) Stop
+bench indent_pair_undo "fn f() {}"
+bench indent_closer "fn f() {\n    a();\n}" (2, 1) Stop
+bench indent_closer_empty_block "    if x {\n    }" (1, 5) Stop
+bench indent_closer_already_out "fn f() {\n" (1, 0) Proceed
+bench indent_tabs "\tg(\n\t\t" (1, 2) Stop
 bench occur_next_by_hand [(2, 5), (6, 9)]
 bench occur_all_by_hand [(2, 5), (6, 9), (15, 18), (19, 22)]
 bench occur_next_word [(2, 5), (19, 22)]
