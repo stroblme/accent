@@ -148,7 +148,7 @@ pub fn install_tags(buffer: &sourceview5::Buffer) {
     tag("strong").set_weight(700);
     tag("em").set_style(pango::Style::Italic);
     tag("strike").set_strikethrough(true);
-    let mono = monospace_family();
+    let mono = crate::platform::monospace_family();
     for name in ["code", "codeblock", "math", "html", "frontmatter"] {
         tag(name).set_family(Some(&mono));
     }
@@ -164,17 +164,6 @@ pub fn install_tags(buffer: &sourceview5::Buffer) {
     tag("task");
     tag("taskdone").set_strikethrough(true);
     tag("marker");
-}
-
-/// Resolve the platform monospace family for code tabs, inline code and formulas.
-///
-/// A named family matches the default document face; generic CSS `monospace` can choose
-/// another face whose metrics rasterise inline formulas poorly at the prose font's size.
-fn monospace_family() -> String {
-    pango::FontDescription::from_string(&adw::StyleManager::default().monospace_font_name())
-        .family()
-        .map(|family| family.to_string())
-        .unwrap_or_else(|| "monospace".to_string())
 }
 
 /// Minimum contrast for dim markup against the page.

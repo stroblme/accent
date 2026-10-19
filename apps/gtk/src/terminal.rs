@@ -995,7 +995,7 @@ fn paint(view: &vte4::Terminal) {
 }
 
 fn monospace() -> pango::FontDescription {
-    pango::FontDescription::from_string(&adw::StyleManager::default().monospace_font_name())
+    pango::FontDescription::from_string(&crate::platform::monospace_font())
 }
 
 /// Use `$SHELL` or `/bin/sh`; vte4 0.10 does not bind password-database `vte_get_user_shell`.

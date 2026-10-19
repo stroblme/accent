@@ -1037,7 +1037,7 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
     })
 }
 
-/// Install Adwaita Mono at the GNOME document-font size for all editors.
+/// Install the platform monospace at the document-font size for all editors.
 ///
 /// Monospace aligns fences, tables and wikilinks while the size follows the system.
 /// [`editor::font_css`] also generates tab zoom rules, keeping family and size consistent.
