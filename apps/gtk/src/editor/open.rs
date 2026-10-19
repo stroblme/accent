@@ -321,7 +321,13 @@ fn frame(view: &sourceview5::View) -> Frame {
     // caret following included — writes to a dead adjustment while the viewport scrolls to the
     // focused widget instead (`GtkViewport:scroll-to-focus`, on by default), which is what put a
     // scrolled note back at the top on any focus change.
-    let clamp = adw::ClampScrollable::builder().child(view).build();
+    //
+    // In pixels, the unit `set_clamp` measures the editor in: libadwaita's default, sp, scales by
+    // the text scale (`gtk-xft-dpi` over 96), which on macOS's 72 dpi took a quarter off the cap.
+    let clamp = adw::ClampScrollable::builder()
+        .child(view)
+        .unit(adw::LengthUnit::Px)
+        .build();
 
     let scroller = gtk::ScrolledWindow::builder()
         .hexpand(true)

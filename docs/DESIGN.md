@@ -552,7 +552,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - A focused shell keeps every chord the Keyboard section does not reserve, and with Forward All Keys on nearly all of those too: a terminal that answers only half of readline is not a terminal.
 - Foreground, background and all sixteen ANSI colours come from `theme.rs`, one palette per theme: VTE's own is arithmetic (its blue is 1.41:1 on our dark background), and a colour read off the widget does not follow Solarized.
   `vte_terminal_set_colors` takes all sixteen or none.
-- GNOME's monospace font, scaled by the terminal's own zoom; an underline cursor, so the character under it stays readable.
+- The monospace font, scaled by the terminal's own zoom; an underline cursor, so the character under it stays readable.
 - Inset 12 px either side, not by the 48 px page gutter: that measure is for prose, and a terminal is a grid.
 - Opening one focuses the shell, so it can be typed into without a click.
 - A secondary click: Copy and Paste; New Terminal and Close Tab; Open Link and Copy Link Address, the last pair only over a URL.
@@ -1218,16 +1218,17 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 <https://developer.gnome.org/hig/guidelines/typography.html> · <https://developer.gnome.org/hig/guidelines/writing-style.html>
 
-- Prose is **Adwaita Mono at the GNOME document font's size** until the document font preference overrides it: a vault is prose with code fences, tables and wikilinks in it, none of which line up in a proportional face, so the family is ours and the size the system's.
+- Prose is **the monospace family at the document font's size** until the document font preference overrides it: a vault is prose with code fences, tables and wikilinks in it, none of which line up in a proportional face, so the family is the monospace's and the size the document font's.
   One function (`editor::font_css`) writes the display-wide rule and each zoomed tab's, so a zoomed note cannot come out in another face. libadwaita's `--document-font-family` / `--document-font-size` are the upgrade from the hand-built provider.
-- Code uses GNOME's **monospace** font, through a class and provider of its own (`accent-code`): one display-wide selector cannot answer for both faces.
+- Code uses the **monospace** font, through a class and provider of its own (`accent-code`): one display-wide selector cannot answer for both faces.
+- The document and monospace fonts are the platform's, named in one place (`platform.rs`): GNOME's settings through libadwaita, and on macOS, which has no such settings (libadwaita falls back to GSettings' Adwaita Sans and Mono, which macOS lacks), AppKit's default for each role — Helvetica 12 for documents, Menlo 11 for code and terminals (SF Mono is Terminal's and Xcode's own), and the system font at 13 pt for the interface, where GDK sets 12.
 - Code sits in the same clamped, centred column as prose, with the same page gutters: a file is a document whatever its language, and a column changing width from tab to tab is what the eye notices.
 - Code wraps as prose does: the far end of a long line off screen is worse than a folded line.
   The scroller's horizontal policy stays `Automatic`, so a line unwrapped with `Alt+Z` stays reachable.
 - A code tab's colours come from the GtkSourceView style scheme (`Adwaita` / `Adwaita-dark`, or `solarized-light` / `solarized-dark` under Solarized), never from our tags.
 - **The syntax scheme is the one place the single-accent rule gives way**, deliberately: one derived colour can say *link*, not *keyword*, *string*, *comment* and *number* at once, and the platform's scheme answers light, dark and the user's theme with no palette of ours to keep in step.
   A note is still styled from the accent and the foreground alone.
-- GNOME's monospace font appears in a note only inside the `code`, `codeblock`, `math`, `html` and `frontmatter` tags.
+- The `code`, `codeblock`, `math`, `html` and `frontmatter` tags name the monospace family themselves, so they keep it under a document font of the user's choosing.
 - Heading scale, relative to the document font: h1 1.6, h2 1.4, h3 1.2, h4 1.1, h5 and h6 bold at 1.0.
   `strong` and list markers are weight 700, `em` italic.
 - A section's or a group's title in a sidebar pane is libadwaita's `heading`, bold at the size of the rows under it, its count beside it dim at that size: a title smaller than what it heads reads as a footnote to it.

@@ -1384,14 +1384,14 @@ fn column(config: &Config) -> Option<u32> {
 /// [`theme_css`] for `fg` on `bg`, in the editor's font and the system accent.
 fn stylesheet(fg: gdk::RGBA, bg: &str, share: Option<f64>) -> String {
     // The editor's own font, not the GNOME document font: DESIGN.md's Typography section gives
-    // prose Adwaita Mono at the *size* of the document font, and the two panes are meant to agree
+    // prose the monospace at the *size* of the document font, and the two panes are meant to agree
     // by construction. Asked of `editor::default_font`, which is where that decision is made, so a
     // change there reaches the preview without a second edit.
     let font = pango::FontDescription::from_string(&crate::editor::default_font());
     let family = font
         .family()
         .map(|f| f.to_string())
-        .unwrap_or_else(|| "Adwaita Mono".to_string());
+        .unwrap_or_else(crate::platform::monospace_family);
     let size = match font.size() as f64 / pango::SCALE as f64 {
         pt if pt > 0.0 => pt,
         _ => 11.0,

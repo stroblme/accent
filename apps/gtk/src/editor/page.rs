@@ -2,16 +2,13 @@
 //! and sticky block title.
 
 use super::{Flavour, Tab, line_end};
-use crate::{highlight, lang, wrap};
+use crate::{highlight, lang, platform, wrap};
 use adw::prelude::*;
 use gtk::{gdk, glib, graphene, pango};
 use sourceview5::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-/// Default monospace font for aligned fences, tables and wikilinks.
-/// GNOME ships it; Preferences Reset restores it.
-const DEFAULT_FAMILY: &str = "Adwaita Mono";
 /// Page gutters and vertical margins at 100% zoom. [`Tab::set_page`] scales
 /// them with text and column width to retain page proportions.
 pub(super) const GUTTER: i32 = 48;
@@ -306,11 +303,7 @@ pub(crate) fn install_font(
             None if zoom != 1.0 => Some(default_font()),
             None => None,
         },
-        _ => Some(
-            adw::StyleManager::default()
-                .monospace_font_name()
-                .to_string(),
-        ),
+        _ => Some(platform::monospace_font()),
     };
     if let Some(family) = family {
         let provider = gtk::CssProvider::new();
@@ -359,14 +352,13 @@ pub(crate) fn next_view_name() -> String {
     })
 }
 
-/// Default to Adwaita Mono at the GNOME document-font size.
+/// Default to the platform monospace at the document-font size; Preferences' Reset restores it.
 ///
 /// Monospace keeps fences, tables and wikilinks aligned while the size follows the system;
 /// preferences can override it.
 pub fn default_font() -> String {
-    let mut desc =
-        pango::FontDescription::from_string(&adw::StyleManager::default().document_font_name());
-    desc.set_family(DEFAULT_FAMILY);
+    let mut desc = pango::FontDescription::from_string(&platform::document_font());
+    desc.set_family(&platform::monospace_family());
     desc.to_str().to_string()
 }
 
@@ -405,7 +397,7 @@ pub(crate) fn font_css(name: &str, selector: &str, zoom: f64) -> String {
     let family = desc
         .family()
         .map(|f| f.to_string())
-        .unwrap_or_else(|| DEFAULT_FAMILY.to_string());
+        .unwrap_or_else(platform::monospace_family);
     let size = match desc.size() as f64 / pango::SCALE as f64 {
         pt if pt > 0.0 => pt,
         _ => 11.0,
@@ -690,14 +682,12 @@ mod tests {
         );
     }
 
-    /// Verify missing font sizes fall back to GNOME's 11 pt, scaled by zoom,
-    /// and missing families use the editor default. Shared CSS formatting
-    /// keeps display-wide and per-tab fallbacks consistent.
+    /// Verify missing font sizes fall back to GNOME's 11 pt, scaled by zoom. Shared CSS
+    /// formatting keeps display-wide and per-tab fallbacks consistent. A missing family is the
+    /// platform's monospace, which only a running libadwaita can name.
     #[test]
     fn font_css_fills_in_a_missing_size() {
         assert!(font_css("Cantarell", "#doc", 2.0).contains("font-size: 22pt"));
-        let css = font_css("11", "#doc", 1.0);
-        assert!(css.contains("font-family: \"Adwaita Mono\""), "{css}");
     }
 
     /// The gutter is as wide as the longest number it will ever print, and never zero wide.
