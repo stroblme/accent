@@ -388,8 +388,15 @@ struct Anchor {
 /// This supports named extensionless files (Makefile/Dockerfile) and
 /// content-sniffed scripts such as `#!/bin/sh`.
 fn guess_language(path: &Path, text: &str) -> Option<sourceview5::Language> {
+    let manager = sourceview5::LanguageManager::default();
+    // TypeScript's module files, which GtkSourceView has no glob for, and whose `.mts` GIO reads
+    // as an MPEG transport stream by its name (ISSUES.md).
+    let ext = path.extension().and_then(|ext| ext.to_str());
+    if ext.is_some_and(|ext| ext.eq_ignore_ascii_case("mts") || ext.eq_ignore_ascii_case("cts")) {
+        return manager.language("typescript");
+    }
     let (content_type, _) = gio::content_type_guess(Some(path), text.as_bytes());
-    sourceview5::LanguageManager::default().guess_language(Some(path), Some(&content_type))
+    manager.guess_language(Some(path), Some(&content_type))
 }
 
 // ------------------------------------------------------------------------------------- helpers
