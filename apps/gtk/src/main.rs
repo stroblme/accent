@@ -624,6 +624,7 @@ impl App {
 
     /// Keep the window subtitle, the Info pane and the preview in step with the active tab.
     fn sync_active(self: &Rc<Self>) {
+        self.sync_window_title();
         self.retarget_find(&self.pane());
         // F5 presents whatever comes to the front as it presented the tab it began on: a held
         // `Ctrl+Tab` steps through the presented pane's tabs.
@@ -708,6 +709,24 @@ impl App {
             // it happened to be given.
             None => self.clear_preview(),
         }
+    }
+
+    /// A window of documents with no vault is told apart in the switcher by the file in front, as a
+    /// vault's window is by its vault: several of them would otherwise all read "Accent".
+    fn sync_window_title(&self) {
+        use shell::{Loose, WindowKey};
+        if !matches!(
+            *self.key.borrow(),
+            WindowKey::Loose(Loose::Documents | Loose::Apart)
+        ) {
+            return;
+        }
+        let file = self.active_doc().filter(|doc| !doc.is_transient());
+        let name = file
+            .as_ref()
+            .map(|doc| doc::file_name(&doc.key()).to_owned());
+        self.window
+            .set_title(Some(name.as_deref().unwrap_or("Accent")));
     }
 
     /// Select Info sections by active document: file details, note tags, shell details or an empty state.

@@ -155,7 +155,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Undo and Redo sit left of the Drawing toggle while the PDF or the diagram in front has something for either to walk, tool in hand or not, as a pair with the empty one insensitive, so neither moves under the pointer.
 - Toggle Preview has no button, only its action, chord and palette entry: a window has only so many places for one.
 - A header carries the document's name, not its facts; those, and what the window is busy with, are the status bar's.
-- The window's own title is the vault name alone — `Notes (host)` on a remote vault, `Accent` without one — and does not follow the tab: it is what tells windows apart in the switcher and the task manager.
+- The window's own title is the vault name alone — `Notes (host)` on a remote vault — and does not follow the tab: it is what tells windows apart in the switcher and the task manager.
+  A window of documents with no vault has only its files to tell it apart, so it takes the name of the file in front, `Accent` while none is.
 
 ### Sidebar
 

@@ -70,7 +70,9 @@ pub fn build_window(
     let title = adw::WindowTitle::new(&vault_name, &host);
     // What the task manager and the window switcher show, which is the one place a window has to
     // be told apart from the others: the vault, and the machine it is on when that is not this
-    // one. Fixed for the life of the window — the header bar is where the open file is named.
+    // one. Fixed for the life of the window — the header bar is where the open file is named —
+    // except a window of documents, which has no vault and takes the file in front's name
+    // (`App::sync_window_title`).
     let window_title = match host.is_empty() {
         true => vault_name.clone(),
         false => format!("{vault_name} ({host})"),
