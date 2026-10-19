@@ -11,14 +11,19 @@ const WAIT: Duration = Duration::from_secs(30);
 /// What the Debug Console is asked while the program is paused.
 const REPL: &str = "x * 2";
 
+/// A block typed at the console, its lines under `... ` and the blank one ending it, then a call
+/// of what it defined.
+const BLOCK: &str = "def triple(n):\r    return n * 3\r\r";
+const CALL: &str = "triple(x)";
+
 /// `ACCENT_BENCH_DEBUG=<rel>:<line>` debugs the program `make drills` writes, whose `double(x)`
 /// is called with 21, from a breakpoint on 1-based `<line>`, `y = x * 2`. It prints what the
 /// window shows at each step, `bench debug …`: the breakpoint, the stop, the top call, its
-/// locals, the Debug Console's answer to [`REPL`], the hover's value of the first name after the
-/// line's `=`, the line a step over lands on, the session's exit code, the program's output in
-/// its tab, that tab kept, and the Code pane shown with the program's file in front and hidden
-/// behind its tab. Timings go on `bench debug_ms …` lines; a step that never comes prints
-/// `bench debug timeout <what>` and quits.
+/// locals, the Debug Console's answers to [`REPL`] and to [`CALL`] after [`BLOCK`], the hover's
+/// value of the first name after the line's `=`, the line a step over lands on, the session's
+/// exit code, the program's output in its tab, that tab kept, and the Code pane shown with the
+/// program's file in front and hidden behind its tab. Timings go on `bench debug_ms …` lines; a
+/// step that never comes prints `bench debug timeout <what>` and quits.
 pub(super) fn bench_debug(app: &Rc<App>, arg: &str) {
     let place = arg
         .rsplit_once(':')
@@ -72,11 +77,17 @@ pub(super) fn bench_debug(app: &Rc<App>, arg: &str) {
         let _ = WidgetExt::activate_action(&app.window, "win.debug-console", None);
         app.console_typed(&format!("{REPL}\r"));
         let answered = || app.console().and_then(|term| answer(&text(&term), REPL));
-        let Some(answer) = until(&app, "repl", answered).await else {
+        let Some(said) = until(&app, "repl", answered).await else {
             return;
         };
-        println!("bench debug repl {answer}");
+        println!("bench debug repl {said}");
         println!("bench debug_ms repl {:.0}", ms_since(t));
+        app.console_typed(&format!("{BLOCK}{CALL}\r"));
+        let answered = || app.console().and_then(|term| answer(&text(&term), CALL));
+        let Some(called) = until(&app, "block", answered).await else {
+            return;
+        };
+        println!("bench debug block {called}");
 
         let t = Instant::now();
         let hovered = line_text(&tab, line)
