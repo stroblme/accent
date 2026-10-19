@@ -1129,7 +1129,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Python is debugged through debugpy (`python3 -m debugpy.adapter`), whatever interpreter the program runs in: the program loads debugpy from the adapter's install, so an environment without debugpy debugs as well (measured 2026-10-17).
 - The program runs in the nearest `.venv` or `venv` above it inside the vault, else in `python3`.
 - Its working directory, and the adapter's, is the nearest folder inside the vault holding `.git`, else the vault root: VS Code's workspace folder.
-- Which adapter debugs which language is a table in the app, overridden in `config.toml` for every vault on this machine (`[debug.adapters]`) and per vault (`[vaults."<root>".debug.adapters]`), the vault's own winning key by key, as the language servers are; the interpreter likewise under `[debug] python` and `[vaults."<root>".debug] python`, a relative path read from the vault root.
+- Which adapter debugs which language is a table in the app, overridden in `config.toml` for every vault on this machine (`[debug.adapters]`) and per vault (`[vaults."<root>".debug.adapters]`), the vault's own winning key by key, as the language servers are; the interpreter likewise under `[debug] python` and `[vaults."<root>".debug] python`, a relative path holding a `/` read from the vault root and a bare name from `PATH`.
   A remote vault takes its own alone. No preference, the answer being whether it is installed.
 - On a remote vault the adapter runs on the host beside `serve` and ends with it at the latest (Remote lifetime), and at once when the window closes, before `serve` waits on the calls still out: a console's evaluation runs the reader's code, which may never return; the session's news reaches the window as the vault's other events do, and a link that drops ends the session in the window.
 - **Breakpoints** are a source mark per line in a Python tab: a click in the marks column, where the diagnostics' icons are, puts one on its line and a second click takes it off, and Toggle Breakpoint does the same at the caret.
@@ -1143,7 +1143,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The sidebar stays on the pane it shows, and hidden if it was: the session is in the Code pane, which its button in the switcher brings up (user decision 2026-10-18).
 - **A stop brings the paused call's file to the front**, in the preview tab unless a tab has it already (Tabs), the caret on the line the paused line's mark shows: `go-next-symbolic` in the marks column and the warning's amber across the line.
   The arrow takes the line's cell from a breakpoint's dot or ring, which waits under it until the program moves on, and either from a diagnostic's icon: one drawn over another reads as neither.
-  The keyboard stays where it was, and the active pane with it: an open tab comes to the front of its own pane.
+  An open tab comes to the front of its own pane and the active pane stays; where the tab it covers had the keyboard, it takes it, as AdwTabView hands the keyboard to the page it selects (user decision 2026-10-17).
   Code outside the vault opens in a kept tab on a local vault, read-only where a package manager put it (Language servers); a remote vault's, and code the adapter holds no file of, open nothing, Call Stack still listing them.
 - Continue and the steps go from the thread that stopped, and the mark, Call Stack and Variables go at once; Pause stops the first thread the adapter lists.
   A breakpoint toggled while the program runs tells it the file's breakpoints, all of them, and the marks move to where it holds them; the program runs the text it started with, so edits since are not its business.
@@ -1155,7 +1155,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   What the adapter marks important is a toast as well, and all its output goes to the Debug Console.
 - **The Debug Console** is a terminal tab (user decision 2026-10-17), not an editor: it has no file, and as a terminal it has the shells' palette, font, zoom, scrollback, menu and links.
   It opens with the program's tab, the program keeping the keyboard for its input; a new session clears it, and Debug Console, the strip's last button, brings it to the front with the keyboard, or opens it in the active pane once closed.
-- It says what is debugged ("Debugging demo.py"), prints the adapter's output — the program's own is its terminal's — and at the end says how the session ended ("Session ended (exit code 0)"), leaving no prompt.
+- It says what is debugged ("Debugging demo.py"), prints the adapter's output and what the console's evaluations print — the program's own is its terminal's — and at the end says how the session ended ("Session ended (exit code 0)"), leaving no prompt.
   Its own words and the adapter's are the terminal's ink at 0.6 over its page, as a quote's are (SGR's dim is VTE's darker ink on a light page), stderr is the palette's red and what the adapter marks important bold.
   What it prints is text alone: escape sequences and control characters but newlines and tabs are dropped from output, answers and tracebacks, so nothing a program prints retitles the tab, moves the cursor out from under the prompt, or asks the terminal a question whose answer VTE would type at the prompt.
 - Its `>>> ` prompt is Python's REPL in look, drawn by a line editor of the window's own: Left, Right, Home, End, Backspace, Delete, `Ctrl+A`, `Ctrl+U`, Up and Down through the lines sent before — kept for the window's life, a closed console's included — and `Ctrl+C` giving the line up; a paste sends each of its lines in turn, and a wide character takes two columns.
@@ -1165,7 +1165,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Output that arrives while a line is typed goes above the prompt, a part of a line waiting for the rest of it, so it never breaks into the line.
 - **Values on hover**: while the program is paused, a hover over a name in a file its debugger runs leads with `name = value` in monospace, its type dimmed, from the call selected (`evaluate`, context `hover`), asked at once beside the language server.
   The name is taken with the names it is reached through, `self.items` over the `items` of `self.items.append(x)`, as VS Code's hover takes it; a number or a bracket asks nothing.
-- **The Flatpak does not debug yet**: the adapter and the program would both have to be the host's, debugpy's launcher calling back to the adapter over a loopback the sandbox does not share, so Start says "Cannot start debugging: the Flatpak cannot run a debugger on this machine yet".
+- **The Flatpak does not debug yet**, and Start says so: "Cannot start debugging: the Flatpak does not debug yet". On a local vault the adapter and the program would both have to be the host's, debugpy's launcher calling back to the adapter over a loopback the sandbox does not share.
 
 ### Context menus
 

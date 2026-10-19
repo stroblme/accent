@@ -39,13 +39,10 @@ enum State {
 impl App {
     /// Start Debugging: the Python file in front, else the program last debugged here.
     pub(crate) fn start_debugging(self: &Rc<Self>) {
-        // The adapter and the program would both have to be the host's: debugpy's launcher calls
-        // back over a loopback the sandbox does not share.
+        // On a local vault the adapter and the program would both have to be the host's:
+        // debugpy's launcher calls back over a loopback the sandbox does not share.
         if Path::new("/.flatpak-info").exists() {
-            return self.debug_cannot(
-                "start debugging",
-                "the Flatpak cannot run a debugger on this machine yet",
-            );
+            return self.debug_cannot("start debugging", "the Flatpak does not debug yet");
         }
         if self.debugger.running() {
             return self.debug_cannot("start debugging", "a program is already being debugged");
@@ -378,8 +375,8 @@ impl App {
                 }
             };
             match self.tab_for(path) {
-                // In front of its own pane, the keyboard and the active pane staying where they
-                // are, as for a tab brought forward behind the reader's back (Tabs).
+                // In front of its own pane, the active pane staying; AdwTabView hands the keyboard
+                // on where the tab it covers had it (user decision 2026-10-17).
                 Some(tab) => {
                     if let Some(pane) = self.pane_of(&tab.page) {
                         pane.tabs.set_selected_page(&tab.page);
