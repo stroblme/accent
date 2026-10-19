@@ -1,7 +1,7 @@
 //! The tables, and the knobs that shape how they are filled.
 
 /// Bump on any schema change: `open` then drops and recreates the cache.
-pub(super) const SCHEMA_VERSION: i64 = 13;
+pub(super) const SCHEMA_VERSION: i64 = 14;
 
 /// Maximum indexed body size for non-markdown files. Stricter than [`crate::fs::MAX_TEXT`]
 /// because indexing repeatedly consumes database space and FTS query work, whereas opening a
@@ -11,6 +11,10 @@ pub(super) const MAX_INDEXED_BODY: u64 = 1024 * 1024;
 /// Files per write transaction. Big enough to amortise the WAL commit, small enough that a
 /// killed process loses little work and progress reporting stays lively.
 pub(super) const BATCH: usize = 500;
+
+/// Opened files the walk leaves out that the index keeps (`Index::keep_opened`), oldest out.
+// ponytail: fixed, a `config.toml` key if anyone needs another number.
+pub(super) const OPENED_CAP: usize = 100;
 
 pub(super) const SCHEMA: &str = r#"
 CREATE TABLE files(
@@ -31,6 +35,9 @@ CREATE TABLE files(
     git_ignored  INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE aliases(rel_path TEXT PRIMARY KEY, file_id INTEGER NOT NULL);
+-- The files the walk leaves out (a gitignored folder's, a dependency tree's) or search excludes
+-- that were opened, kept in the index anyway: the last `OPENED_CAP`, `seq` counting up.
+CREATE TABLE opened(rel_path TEXT PRIMARY KEY, seq INTEGER NOT NULL);
 -- Every name a file answers a link by (`markdown::path_keys`, lower-cased), one row each, so
 -- resolving a link is an index lookup rather than a pass over every path. Directories have none.
 CREATE TABLE file_keys(file_id INTEGER NOT NULL, key TEXT NOT NULL);
@@ -192,5 +199,6 @@ DROP TABLE IF EXISTS tags;
 DROP TABLE IF EXISTS links;
 DROP TABLE IF EXISTS file_keys;
 DROP TABLE IF EXISTS aliases;
+DROP TABLE IF EXISTS opened;
 DROP TABLE IF EXISTS files;
 "#;

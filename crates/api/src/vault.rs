@@ -369,6 +369,10 @@ methods! {
     /// emit [`Event::UnindexedChanged`]; subtrees are not watched.
     watch_unindexed(dirs: ref [String]) -> ();
     unwatch_unindexed(dirs: ref [String]) -> ();
+    /// Keep `rel`, a file a tab opened, in the index although the walk leaves it out (a gitignored
+    /// folder's, a dependency tree's) or search excludes it: the last 100 opened, kept across
+    /// restarts (`Index::keep_opened`).
+    keep_opened(rel: ref str) -> ();
     /// Rescan one folder for missed watcher events (Reload);
     /// [`rescan`](Vault::rescan) scans the whole vault.
     rescan_dir(dir: ref str) -> ();

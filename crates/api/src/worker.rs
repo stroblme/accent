@@ -14,7 +14,7 @@ use crate::Result;
 
 use accent_core::index::{Change, Index};
 use accent_core::path::parent_dir;
-use accent_core::walk::{self, FileKind, ScanOptions};
+use accent_core::walk::{FileKind, ScanOptions};
 use accent_core::watch::{VaultEvent, Watcher};
 
 use crate::paths::{conflict_original_rel, conflict_pairs};
@@ -107,6 +107,9 @@ pub(crate) enum Msg {
     /// Folders the index does not walk to start (`true`) or stop watching. See
     /// [`Local::watch_unindexed`](crate::local::Local::watch_unindexed).
     WatchUnindexed(Vec<String>, bool),
+    /// A file a tab opened, for the index to keep. See
+    /// [`Local::keep_opened`](crate::local::Local::keep_opened).
+    KeepOpened(String),
     /// What search leaves out, and where to say it has been written. See
     /// [`crate::local::Local::set_excluded`]: the worker holds the only writing connection.
     SetExcluded(Vec<String>, Sender<accent_core::Result<()>>),
@@ -284,6 +287,14 @@ impl Worker {
                 }
             }
         }
+        // Before the watcher's news below, an opened file's going to the index (`unindexed_news`).
+        for msg in &batch {
+            if let Msg::KeepOpened(rel) = msg
+                && let Err(e) = self.index.keep_opened(&self.root, rel)
+            {
+                self.fail(&format!("keeping {rel} in the index"), e);
+            }
+        }
         // A removed directory took its watch with it, so the set must stop naming it: then the
         // rebuild that brings it back — a new directory, a walk — watches it again.
         for msg in &batch {
@@ -362,6 +373,7 @@ impl Worker {
                 | Msg::Shutdown
                 | Msg::WatchGit(_)
                 | Msg::WatchUnindexed(..)
+                | Msg::KeepOpened(_)
                 | Msg::SetExcluded(..)
                 | Msg::Settled(_) => {}
                 Msg::Update { rel, own } => {
@@ -437,7 +449,7 @@ impl Worker {
     }
 
     /// Find the folder affected by a `.gitignore` event. Ignore rules change which
-    /// directories [`walk::stat_one`] enters, so rescan that folder to add or remove
+    /// directories [`accent_core::walk::stat_one`] enters, so rescan that folder to add or remove
     /// indexed subtrees. [`WALK_FLOOR`] limits rescans during autosaves.
     fn gitignore_dir(&self, msg: &Msg) -> Option<String> {
         let dir = |rel: &str| {
@@ -659,6 +671,8 @@ impl Worker {
             let parent = parent_dir(&rel);
             if self.unindexed.contains(parent) && matches!(self.index.get_file(parent), Ok(None)) {
                 listed.insert(parent.to_string());
+                // An opened file's news is the index's too (`Index::keep_opened`).
+                inside &= !matches!(self.index.is_opened(&rel), Ok(true));
             } else {
                 inside = false;
             }
@@ -714,7 +728,7 @@ impl Worker {
                     // debouncer has that inode cached, which is what an external `sed -i` or a
                     // second accent looks like. Believe a removal only when the path is really
                     // gone, or the tab the user is typing in closes under them.
-                    if let Ok(Some(meta)) = walk::stat_one(&self.root, &rel) {
+                    if let Ok(Some(meta)) = self.index.stat(&self.root, &rel) {
                         // A directory there again is a new one, made inside this batch, and the
                         // debouncer says nothing of what the old one held: that goes as for a
                         // removal across two batches, and the new one comes back as a directory
