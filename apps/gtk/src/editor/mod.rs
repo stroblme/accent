@@ -331,7 +331,7 @@ pub struct Tab {
     folds: RefCell<Vec<Fold>>,
     fold_renderer: fold::Renderer,
     /// The breakpoints' source marks, which move with the text (`debug::breakpoints`).
-    pub(crate) breakpoints: RefCell<Vec<sourceview5::Mark>>,
+    pub(crate) breakpoints: RefCell<Vec<breakpoints::Breakpoint>>,
     /// The paused line's source mark, while the program is paused here (`debug::run`).
     pub(crate) execution: RefCell<Option<sourceview5::Mark>>,
     font: RefCell<Option<gtk::CssProvider>>,

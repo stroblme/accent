@@ -1135,7 +1135,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - **Breakpoints** are a source mark per line in a Python tab: a click in the marks column, where the diagnostics' icons are, puts one on its line and a second click takes it off, and Toggle Breakpoint does the same at the caret.
   They move with the text as it is edited, and a reload from disk keeps them, and the paused line's mark, on their lines.
 - They are kept in the session per file, never in the vault: a file closed and opened again, or the vault reopened, has them back; a file renamed or moved takes them along, and a file deleted takes them with it.
-- A breakpoint is a foreground symbolic glyph, as a diagnostic's icon is, never red: a dot, and a ring for one the program has not bound.
+- A breakpoint is a foreground symbolic glyph, as a diagnostic's icon is, never red: a dot, and a ring for one the program has not bound, its tooltip saying why where the program said.
   The dot takes its line's cell from a diagnostic's icon, which GtkSourceView would draw under it rather than hide; the line's message and underline stay.
 - **Start Debugging** (`Ctrl+F5`) runs the Python file in front, else the program last debugged in the window, which the window remembers for its life and never in the vault's session.
   The vault's tabs with edits are written first, as VS Code's `debug.saveBeforeStart` does: the program runs what is on disk.
