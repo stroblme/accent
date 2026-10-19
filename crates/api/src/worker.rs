@@ -2,6 +2,7 @@
 //! into one [`Event`].
 
 use std::collections::{BTreeSet, HashMap};
+use std::os::unix::fs::MetadataExt;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -559,8 +560,12 @@ impl Worker {
                 // What the walk took in before the watcher's news of it could arrive, which then
                 // reads as no change (`Worker::unchanged`): in an unwatched vault, an open tab
                 // hears of it here or never.
+                let aliases = match stats.changed.is_empty() {
+                    true => Vec::new(),
+                    false => self.aliases(),
+                };
                 for rel in std::mem::take(&mut stats.changed) {
-                    self.emit(Event::FileChanged(rel));
+                    self.emit_changed(rel, &aliases);
                 }
                 // Emitted for a stopped walk too, carrying `stopped`: it is what tells the window
                 // it is looking at a partial index rather than a finished one.
@@ -785,6 +790,13 @@ impl Worker {
         if rel.is_empty() {
             return;
         }
+        // News naming an alias is its row's: `update_file` would add the alias as a second row.
+        if let Some(row) = self.row_of(rel) {
+            if let Some(etag) = self.own.get(rel).copied() {
+                self.own.insert(row.clone(), etag);
+            }
+            return self.update(&row, own, b);
+        }
         // The links the file holds and the ones its names answer to are resolved as it goes, in a
         // few index lookups: a pass over every link is 0.1–0.35 s a batch at `make vault`.
         match self.index.update_file(&self.root, rel) {
@@ -842,15 +854,36 @@ impl Worker {
     /// Tell the window `rel` changed, and each alias of it: the watcher's news names the row
     /// alone. An alias is told rather than updated, which would add it as a second row.
     fn changed(&mut self, rel: &str) {
-        self.emit(Event::FileChanged(rel.to_string()));
-        match self.index.aliases_of(rel) {
-            Ok(aliases) => {
-                for alias in aliases {
-                    self.emit(Event::FileChanged(alias));
-                }
-            }
-            Err(e) => self.fail(&format!("listing the aliases of {rel}"), e),
+        let aliases = self.aliases();
+        self.emit_changed(rel.to_string(), &aliases);
+    }
+
+    /// [`changed`](Self::changed) with the vault's aliases in hand, for a walk's many rows.
+    fn emit_changed(&self, rel: String, aliases: &[(String, String)]) {
+        for (_, alias) in aliases.iter().filter(|(row, _)| *row == rel) {
+            self.emit(Event::FileChanged(alias.clone()));
         }
+        self.emit(Event::FileChanged(rel));
+    }
+
+    /// The vault's aliases as `(row, alias)`.
+    fn aliases(&mut self) -> Vec<(String, String)> {
+        self.index.aliases().unwrap_or_else(|e| {
+            self.fail("listing the aliases", e);
+            Vec::new()
+        })
+    }
+
+    /// The row `rel` is a second path to, while it still reaches that row's file: a hard link
+    /// replaced since is a file of its own.
+    fn row_of(&mut self, rel: &str) -> Option<String> {
+        let (row, _) = self.aliases().into_iter().find(|(_, alias)| alias == rel)?;
+        let id = |rel: &str| {
+            std::fs::metadata(self.root.join(rel))
+                .ok()
+                .map(|m| (m.dev(), m.ino()))
+        };
+        (id(rel).is_some() && id(rel) == id(&row)).then_some(row)
     }
 
     /// Check whether `rel` still has this vault's last saved etag. Suppress its
