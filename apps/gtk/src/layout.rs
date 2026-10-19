@@ -182,13 +182,14 @@ impl App {
     /// Apply editor, split or presentation layout.
     ///
     /// Split places preview beside the pane tree. Presentation keeps only the active pane,
-    /// without its tab bar. Text uses a preview overlay (`Pane::cover`) so find and Ctrl+Tab stay
-    /// pane-local; other documents present themselves, fitting PDFs and diagrams to a page.
+    /// without its tab bar. A note uses a preview overlay (`Pane::cover`) so find and Ctrl+Tab
+    /// stay pane-local; other documents, code among them, present themselves, fitting PDFs and
+    /// diagrams to a page.
     /// [`App::sync_active`] reapplies layout when the active tab changes during presentation.
     pub(crate) fn lay_out(self: &Rc<Self>) {
         let presenting = self.presenting.get().is_some();
         let active = self.pane();
-        let rendered = presenting && self.active().is_some();
+        let rendered = self.presents_rendered(&active);
         if rendered || self.mode.get() == Mode::Split && !presenting {
             self.ensure_preview();
         }
@@ -267,6 +268,13 @@ impl App {
     /// Whether the rendered note is visible at all; nothing is rendered into a hidden preview.
     fn shows_preview(&self) -> bool {
         self.mode.get() == Mode::Split || self.presenting.get().is_some()
+    }
+
+    /// Whether F5 shows `pane`'s tab as the rendered preview: a note's is, where a code tab is
+    /// presented as it is, having nothing to render.
+    pub(crate) fn presents_rendered(&self, pane: &Pane) -> bool {
+        self.presenting.get().is_some()
+            && self.tab_of(pane).is_some_and(|tab| tab.flavour().is_note())
     }
 
     /// Present only the active document with F5.
@@ -405,10 +413,13 @@ impl App {
     /// Window handlers still intercept F5 and Escape to leave presentation.
     pub(crate) fn focus_presented(&self) {
         let widget: gtk::Widget = match self.active_doc() {
-            Some(Doc::Text(_)) => match self.preview.borrow().as_ref() {
-                Some(preview) => preview.widget().clone(),
-                None => return,
-            },
+            // A note is presented rendered, code in its own view.
+            Some(Doc::Text(_)) if self.presents_rendered(&self.pane()) => {
+                match self.preview.borrow().as_ref() {
+                    Some(preview) => preview.widget().clone(),
+                    None => return,
+                }
+            }
             // An image's scroller pages it with the keys a document scrolls by.
             Some(Doc::Image(image)) => image.page.child(),
             _ => return self.focus_document(&self.pane()),
@@ -549,7 +560,8 @@ impl App {
     }
 
     pub fn render(self: &Rc<Self>, tab: &Rc<Tab>) {
-        if !self.shows_preview() {
+        // A source file is no markdown, in Split as under F5.
+        if !self.shows_preview() || !tab.flavour().is_note() {
             return;
         }
         self.ensure_preview();
