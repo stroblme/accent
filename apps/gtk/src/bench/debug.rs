@@ -19,15 +19,18 @@ const CALL: &str = "triple(x)";
 /// Typed at the console and completed with Tab, the program's only name it starts.
 const TYPED: &str = "doub";
 
+/// Watched from before the start.
+const WATCH: &str = "x + 1";
+
 /// `ACCENT_BENCH_DEBUG=<rel>:<line>` debugs the program `make drills` writes, whose `double(x)`
 /// is called with 21, from a breakpoint on 1-based `<line>`, `y = x * 2`. It prints what the
 /// window shows at each step, `bench debug …`: the breakpoint, the stop, the top call, its
-/// locals, the Debug Console's answers to [`REPL`], to [`CALL`] after [`BLOCK`] and to [`TYPED`]
-/// completed with Tab and called, the hover's value of the first name after the line's `=`, the
-/// line a step over lands on, the session's exit code, the program's output in its tab, that tab
-/// kept, and the Code pane shown with the program's file in front and hidden behind its tab.
-/// Timings go on `bench debug_ms …` lines; a step that never comes prints
-/// `bench debug timeout <what>` and quits.
+/// locals, [`WATCH`]'s value, the Debug Console's answers to [`REPL`], to [`CALL`] after
+/// [`BLOCK`] and to [`TYPED`] completed with Tab and called, the hover's value of the first name
+/// after the line's `=`, the line a step over lands on, the session's exit code, the program's
+/// output in its tab, that tab kept, and the Code pane shown with the program's file in front
+/// and hidden behind its tab. Timings go on `bench debug_ms …` lines; a step that never comes
+/// prints `bench debug timeout <what>` and quits.
 pub(super) fn bench_debug(app: &Rc<App>, arg: &str) {
     let place = arg
         .rsplit_once(':')
@@ -52,6 +55,7 @@ pub(super) fn bench_debug(app: &Rc<App>, arg: &str) {
             return;
         };
         app.toggle_breakpoint(&tab, line);
+        app.add_watch(WATCH);
         for at in breakpoints::lines(&tab) {
             println!("bench debug breakpoint {rel}:{}", at + 1);
         }
@@ -74,6 +78,11 @@ pub(super) fn bench_debug(app: &Rc<App>, arg: &str) {
             return;
         };
         println!("bench debug locals {}", locals.join(" "));
+        let watched = || shown(&app).3.into_iter().find(|row| row.contains(" = "));
+        let Some(watched) = until(&app, "watch", watched).await else {
+            return;
+        };
+        println!("bench debug watch {watched}");
 
         // In front with the keyboard, as a reader brings it forward to type at it: the console
         // opened behind the program's tab. VTE takes in what is fed to it unrealised as well.
@@ -226,7 +235,7 @@ pub(super) fn paused_line(tab: &Tab) -> Option<u32> {
 }
 
 /// The strip's line, the calls and the values the Code pane shows.
-pub(super) fn shown(app: &App) -> (String, Vec<String>, Vec<String>) {
+pub(super) fn shown(app: &App) -> sidebar::DebugShown {
     app.sidebar
         .get()
         .and_then(|sidebar| sidebar.debug_shown())

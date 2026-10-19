@@ -14,7 +14,9 @@ mod sections;
 mod tags;
 mod widgets;
 
-pub use debug::Data as DebugData;
+#[cfg(feature = "bench")]
+pub use debug::Shown as DebugShown;
+pub use debug::{Data as DebugData, Watched};
 pub use details::{Fact, Group};
 pub use outline::{Line, above, outline_note};
 pub use ports::Data as PortsData;
@@ -429,6 +431,13 @@ impl Sidebar {
         }
     }
 
+    /// The Watch section's rows: each expression, with its value while the program is paused.
+    pub fn set_debug_watches(&self, rows: &[Watched]) {
+        if let Some(debug) = &self.code.debug {
+            debug.set_watches(rows);
+        }
+    }
+
     /// The Breakpoints section's rows, each `path:line`.
     pub fn set_breakpoint_rows(&self, rows: &[String]) {
         if let Some(debug) = &self.code.debug {
@@ -451,10 +460,10 @@ impl Sidebar {
         self.code.goals()
     }
 
-    /// The strip's line, the calls Call Stack lists and the values Variables has open, for
-    /// `ACCENT_BENCH_DEBUG`.
+    /// The strip's line, the calls Call Stack lists, the values Variables has open and Watch's
+    /// rows, for `ACCENT_BENCH_DEBUG`.
     #[cfg(feature = "bench")]
-    pub fn debug_shown(&self) -> Option<(String, Vec<String>, Vec<String>)> {
+    pub fn debug_shown(&self) -> Option<DebugShown> {
         self.code.debug.as_ref().map(|debug| debug.shown())
     }
 

@@ -174,6 +174,7 @@ impl Code {
             "expected" => Some(&self.expected),
             "stack" => self.debug.as_ref().map(|d| &d.stack),
             "variables" => self.debug.as_ref().map(|d| &d.variables),
+            "watch" => self.debug.as_ref().map(|d| &d.watch),
             "breakpoints" => self.debug.as_ref().map(|d| &d.breakpoints),
             _ => None,
         }
@@ -193,6 +194,7 @@ impl Code {
             expected: open("expected"),
             stack: open("stack"),
             variables: open("variables"),
+            watch: open("watch"),
             breakpoints: open("breakpoints"),
             dividers: self.sections.shares(),
         }
@@ -205,6 +207,7 @@ impl Code {
             ("expected", saved.expected),
             ("stack", saved.stack),
             ("variables", saved.variables),
+            ("watch", saved.watch),
             ("breakpoints", saved.breakpoints),
         ] {
             if let Some(section) = self.section(name) {

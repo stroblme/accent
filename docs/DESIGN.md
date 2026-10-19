@@ -303,9 +303,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - It follows the caret, moves and typing alike, by 300 ms while it is on screen, and asks again as it comes back on screen, the sidebar with it, and when the zoom changes, which its font follows.
   The last answer stays up while the next is asked, so a caret move does not flash the pane; another tab coming to the front clears it.
   An answer that fails while the file is being checked leaves the pane as it is, and the end of the check asks again.
-- Its visibility is a window flag, never a rule about the tab in front, because a debug session keeps it up over any tab: Call Stack, Variables and Breakpoints follow Goals and Expected Type in the one stack of dividers, the session's controls in a strip over them all.
+- Its visibility is a window flag, never a rule about the tab in front, because a debug session keeps it up over any tab: Call Stack, Variables, Watch and Breakpoints follow Goals and Expected Type in the one stack of dividers, the session's controls in a strip over them all.
   While a session runs the pane shows its sections whatever is in front, Goals and Expected Type only with an answer, and neither the No Goals nor the Checking page.
-  With no session, a tab in front that can be debugged (Debugger) has the pane too, as the strip over Breakpoints, ready to start: Call Stack and Variables have nothing to say until a program runs.
+  With no session, a tab in front that can be debugged (Debugger) has the pane too, as the strip over Watch and Breakpoints, ready to start: Call Stack and Variables have nothing to say until a program runs.
   The pane joins the switcher then without coming to the front, and nothing but its button brings it there, a session starting, stopping or ending included (user decision 2026-10-18); a tab with neither goals nor a debugger takes it away again.
   Hidden while on screen, it gives way to the Outline.
   Which sections are open and where the dividers are are the vault's session: all open at first.
@@ -319,6 +319,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   One click on a call shows it (Debugger), as a result list's row opens; a dim "Running" stands in while the program runs.
 - **Variables** are the selected call's scopes, the first that is cheap to list open; a value is a `name = value` row in the editor's monospace, the value ellipsized and its type in the tooltip, and what it holds is listed as it is opened.
   "Shown while the program is paused" stands in otherwise.
+- **Watch** lists expressions, counted, each evaluated in the selected call at every stop and whenever another call is picked (`evaluate`, context `watch`), its value shown and opened as Variables' are; an error shows the adapter's message in the error colour, and while the program runs the expressions stand alone.
+  An entry under them adds one, Add to Watch adds the selection in the tab in front or the name at its caret as a hover takes it, and a row's close button takes it out; they are the vault's session, beside the breakpoints.
 - **Breakpoints** lists every file's, `path:line` as References' rows are and opening the same way, counted; "Click a line's gutter to stop there" while there are none.
 
 **Properties**
@@ -1579,7 +1581,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 
 ### Debugging
 
-- Start Debugging `Ctrl+F5`, Toggle Breakpoint `Ctrl+F9`, Remove All Breakpoints (unbound).
+- Start Debugging `Ctrl+F5`, Toggle Breakpoint `Ctrl+F9`, Remove All Breakpoints and Add to Watch (unbound).
 - While a session runs, VS Code's keys (user decision 2026-10-17): Continue `F5`, Stop Debugging `Shift+F5`, Restart Debugging `Ctrl+Shift+F5`, Pause `F6`, Step Over `F10`, Step Into `F11`, Step Out `Shift+F11`.
   They are the Code pane's strip and the palette's as well, each doing nothing while the session cannot take it.
 - Outside a session the seven mean nothing, so `F5` presents, `F10` opens the primary menu, `F11` goes fullscreen and `F6` is GtkPaned's (Widget chords).

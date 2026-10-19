@@ -317,6 +317,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
         "Remove All Breakpoints",
         &[],
     ),
+    ("win.debug-watch", "Add to Watch", &[]),
     // VS Code's F5 is Presentation Mode's outside a session here.
     ("win.debug-start", "Start Debugging", &["<Control>F5"]),
     // Enabled as the session's state allows (`App::sync_debug`), so the Code pane's strip greys
@@ -667,6 +668,7 @@ impl App {
             "follow-link" => self.go_to_definition(),
             "debug-toggle-breakpoint" => self.toggle_breakpoint_at_caret(),
             "debug-remove-breakpoints" => self.remove_all_breakpoints(),
+            "debug-watch" => self.watch_at_caret(),
             "debug-start" => self.start_debugging(),
             "debug-continue" => self.debug_resume(),
             "debug-pause" => self.debug_pause(),

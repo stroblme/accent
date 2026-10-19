@@ -21,6 +21,7 @@ impl App {
         sidebar.set_code_visible(goals || running || debuggable);
         if !running {
             sidebar.clear_debug(debuggable);
+            self.refill_watches();
         }
         if running || debuggable {
             self.refill_breakpoints();

@@ -1,9 +1,9 @@
-//! The debugger's half of the Code pane: its controls in a strip, and Call Stack, Variables and
-//! Breakpoints as sections, filled as the window asks the paused program.
+//! The debugger's half of the Code pane: its controls in a strip, and Call Stack, Variables,
+//! Watch and Breakpoints as sections, filled as the window asks the paused program.
 
 use super::widgets::{Section, path_list};
 use crate::widgets::{icon_button, scroller};
-use accent_api::debug::{Frame, Scope, Thread, Variable};
+use accent_api::debug::{Evaluated, Frame, Scope, Thread, Variable};
 use gtk::prelude::*;
 use gtk::{gio, glib, pango};
 use std::cell::{Cell, RefCell};
@@ -22,14 +22,29 @@ pub struct Data {
     pub frame: Rc<dyn Fn(&Frame)>,
     /// A Breakpoints row activated, as its `path:line`.
     pub breakpoint: Rc<dyn Fn(&str)>,
+    /// An expression typed into Watch's entry, to watch.
+    pub watch: Rc<dyn Fn(&str)>,
+    /// A watched expression's remove button pressed.
+    pub unwatch: Rc<dyn Fn(&str)>,
 }
 
-/// A row of Call Stack or Variables.
+/// A watched expression and, while the program is paused, its value or why it has none.
+pub type Watched = (String, Option<Result<Evaluated, String>>);
+
+/// What takes a watched expression out, for the trees whose rows can be watched expressions.
+type Unwatch = Option<Rc<dyn Fn(&str)>>;
+
+/// The strip's line, then the rows of Call Stack, Variables and Watch as a drill reads them.
+#[cfg(feature = "bench")]
+pub type Shown = (String, Vec<String>, Vec<String>, Vec<String>);
+
+/// A row of Call Stack, Variables or Watch.
 enum Item {
     Thread(Thread),
     Frame(Frame),
     Scope(Scope),
     Variable(Variable),
+    Watch(Watched),
 }
 
 impl Item {
@@ -38,9 +53,12 @@ impl Item {
         match self {
             Item::Thread(thread) => Some(thread.id),
             Item::Frame(_) => None,
-            Item::Scope(Scope { reference, .. }) | Item::Variable(Variable { reference, .. }) => {
+            Item::Scope(Scope { reference, .. })
+            | Item::Variable(Variable { reference, .. })
+            | Item::Watch((_, Some(Ok(Evaluated { reference, .. })))) => {
                 (*reference > 0).then_some(*reference)
             }
+            Item::Watch(_) => None,
         }
     }
 }
@@ -169,8 +187,9 @@ fn fill(list: &gio::ListStore, items: Vec<Item>) {
     list.splice(0, list.n_items(), &objects);
 }
 
-/// A tree row: the expander, the name, and what is said beside it, dimmed.
-fn row_factory(tree: &Tree) -> gtk::SignalListItemFactory {
+/// A tree row: the expander, the name, and what is said beside it, dimmed; a watched expression
+/// has a button at the end that takes it out, `unwatch`.
+fn row_factory(tree: &Tree, unwatch: Unwatch) -> gtk::SignalListItemFactory {
     let (lists, asked, fetch) = (tree.lists.clone(), tree.asked.clone(), tree.fetch.clone());
     crate::widgets::factory(
         move |_| {
@@ -184,11 +203,30 @@ fn row_factory(tree: &Tree) -> gtk::SignalListItemFactory {
                 .ellipsize(pango::EllipsizeMode::Start)
                 .build();
             detail.add_css_class("dim-label");
+            let remove = icon_button("window-close-symbolic", "Remove Expression");
+            remove.set_hexpand(true);
+            remove.set_halign(gtk::Align::End);
+            remove.set_visible(false);
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
             row.append(&name);
             row.append(&detail);
+            row.append(&remove);
             let expander = gtk::TreeExpander::new();
             expander.set_child(Some(&row));
+            if let Some(unwatch) = unwatch.clone() {
+                remove.connect_clicked(glib::clone!(
+                    #[weak]
+                    expander,
+                    move |_| {
+                        let item = expander.item().and_downcast::<glib::BoxedAnyObject>();
+                        if let Some(Item::Watch((expression, _))) =
+                            item.as_ref().map(|i| i.borrow::<Item>()).as_deref()
+                        {
+                            unwatch(expression);
+                        }
+                    }
+                ));
+            }
             // Rows are recycled, so the handler moves with the row the widget is bound to.
             let opened: RefCell<Option<(gtk::TreeListRow, glib::SignalHandlerId)>> =
                 RefCell::default();
@@ -224,20 +262,24 @@ fn row_factory(tree: &Tree) -> gtk::SignalListItemFactory {
             ) else {
                 return;
             };
-            let (Some(name), Some(detail)) = (
-                line.first_child().and_downcast::<gtk::Label>(),
-                line.last_child().and_downcast::<gtk::Label>(),
-            ) else {
+            let name = line.first_child().and_downcast::<gtk::Label>();
+            let detail = name.as_ref().and_then(|name| name.next_sibling());
+            let (Some(name), Some(detail), Some(remove)) =
+                (name, detail.and_downcast::<gtk::Label>(), line.last_child())
+            else {
                 return;
             };
-            draw(&item.borrow::<Item>(), &line, &name, &detail);
+            let item = item.borrow::<Item>();
+            remove.set_visible(matches!(*item, Item::Watch(_)));
+            draw(&item, &line, &name, &detail);
         },
     )
 }
 
 /// A thread or a scope by its name; a call by its name, its file and line dimmed beside it and the
-/// whole row dimmed outside the vault; a value as `name = value` in the editor's monospace, its
-/// type in the tooltip.
+/// whole row dimmed outside the vault; a value, and a watched expression's, as `name = value` in
+/// the editor's monospace, its type in the tooltip; an expression's error in the error colour,
+/// whole in the tooltip.
 fn draw(item: &Item, line: &gtk::Box, name: &gtk::Label, detail: &gtk::Label) {
     let (text, said, outside, tooltip) = match item {
         Item::Thread(thread) => (thread.name.clone(), None, false, None),
@@ -265,10 +307,31 @@ fn draw(item: &Item, line: &gtk::Box, name: &gtk::Label, detail: &gtk::Label) {
             false,
             variable.kind.clone(),
         ),
+        Item::Watch((expression, value)) => match value {
+            None => (expression.clone(), None, false, None),
+            Some(Ok(value)) => (
+                format!("{expression} = {}", value.result),
+                None,
+                false,
+                value.kind.clone(),
+            ),
+            Some(Err(why)) => (
+                format!("{expression}: {why}"),
+                None,
+                false,
+                Some(why.clone()),
+            ),
+        },
     };
     name.set_text(&text);
-    let value = matches!(item, Item::Variable(v) if !v.value.is_empty());
+    let value =
+        matches!(item, Item::Variable(v) if !v.value.is_empty()) || matches!(item, Item::Watch(_));
     crate::widgets::set_class(name, "monospace", value);
+    crate::widgets::set_class(
+        name,
+        "error",
+        matches!(item, Item::Watch((_, Some(Err(_))))),
+    );
     detail.set_visible(said.is_some());
     detail.set_text(said.as_deref().unwrap_or_default());
     crate::widgets::set_class(line, "dim-label", outside);
@@ -294,8 +357,9 @@ fn body(list: &impl IsA<gtk::Widget>, empty: &str) -> (gtk::Stack, gtk::Label) {
     (stack, line)
 }
 
-fn tree_view(tree: &Tree) -> gtk::ListView {
-    let view = gtk::ListView::new(Some(tree.selection.clone()), Some(row_factory(tree)));
+fn tree_view(tree: &Tree, unwatch: Unwatch) -> gtk::ListView {
+    let factory = row_factory(tree, unwatch);
+    let view = gtk::ListView::new(Some(tree.selection.clone()), Some(factory));
     view.add_css_class("navigation-sidebar");
     view
 }
@@ -313,6 +377,8 @@ pub(super) struct Debug {
     pub(super) variables: Section,
     variables_body: gtk::Stack,
     values: Tree,
+    pub(super) watch: Section,
+    watched: Tree,
     pub(super) breakpoints: Section,
     breakpoints_body: gtk::Stack,
     breakpoint_rows: gtk::StringList,
@@ -351,7 +417,7 @@ impl Debug {
                 }
             }
         });
-        let (stack_body, stack_line) = body(&tree_view(&calls), "");
+        let (stack_body, stack_line) = body(&tree_view(&calls, None), "");
         let stack = Section::new("Call Stack", &stack_body);
 
         let children = data.children.clone();
@@ -366,8 +432,25 @@ impl Debug {
                 }),
             );
         }));
-        let (variables_body, _) = body(&tree_view(&values), "Shown while the program is paused");
+        let (variables_body, _) = body(
+            &tree_view(&values, None),
+            "Shown while the program is paused",
+        );
         let variables = Section::new("Variables", &variables_body);
+
+        let children = data.children.clone();
+        let watched = Tree::new(Rc::new(move |reference, list| {
+            let list = list.downgrade();
+            children(
+                reference,
+                Box::new(move |variables| {
+                    if let Some(list) = list.upgrade() {
+                        fill(&list, variables.into_iter().map(Item::Variable).collect());
+                    }
+                }),
+            );
+        }));
+        let watch = Section::new("Watch", &watch_body(&watched, &data));
 
         let breakpoint_rows = gtk::StringList::new(&[]);
         let pick = data.breakpoint.clone();
@@ -379,7 +462,7 @@ impl Debug {
         let (breakpoints_body, _) = body(&list, "Click a line's gutter to stop there");
         let breakpoints = Section::new("Breakpoints", &breakpoints_body);
 
-        for section in [&stack, &variables, &breakpoints] {
+        for section in [&stack, &variables, &watch, &breakpoints] {
             section.root.set_visible(false);
         }
         Debug {
@@ -394,6 +477,8 @@ impl Debug {
             variables,
             variables_body,
             values,
+            watch,
+            watched,
             breakpoints,
             breakpoints_body,
             breakpoint_rows,
@@ -405,7 +490,7 @@ impl Debug {
     /// program is `paused` or not. Running, the program has nowhere to show.
     pub(super) fn set_state(&self, line: &str, why: Option<&str>, paused: bool) {
         self.strip.set_visible(true);
-        for section in [&self.stack, &self.variables, &self.breakpoints] {
+        for section in self.sections() {
             section.root.set_visible(true);
         }
         self.state.set_text(line);
@@ -460,6 +545,13 @@ impl Debug {
         }
     }
 
+    /// The watched expressions, with their values while the program is paused.
+    pub(super) fn set_watches(&self, rows: &[Watched]) {
+        self.watched
+            .set(rows.iter().cloned().map(Item::Watch).collect());
+        self.watch.set_count(Some(rows.len()));
+    }
+
     pub(super) fn set_breakpoints(&self, rows: &[String]) {
         let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
         self.breakpoint_rows
@@ -483,6 +575,7 @@ impl Debug {
         self.pause.set_visible(false);
         self.stack.root.set_visible(false);
         self.variables.root.set_visible(false);
+        self.watch.root.set_visible(debuggable);
         self.breakpoints.root.set_visible(debuggable);
         self.calls.set(Vec::new());
         self.values.set(Vec::new());
@@ -497,9 +590,10 @@ impl Debug {
             .update_property(&[gtk::accessible::Property::Label(label)]);
     }
 
-    /// The strip's line, the calls listed as `name file:line` and the values as `name=value`.
+    /// The strip's line, the calls listed as `name file:line`, the values as `name=value` and the
+    /// watched expressions as their rows read.
     #[cfg(feature = "bench")]
-    pub(super) fn shown(&self) -> (String, Vec<String>, Vec<String>) {
+    pub(super) fn shown(&self) -> Shown {
         let rows = |tree: &Tree, said: &dyn Fn(&Item) -> Option<String>| -> Vec<String> {
             (0..tree.model.n_items())
                 .filter_map(|i| tree.model.item(i).as_ref().and_then(item_of))
@@ -519,12 +613,43 @@ impl Debug {
             Item::Variable(v) if !v.value.is_empty() => Some(format!("{}={}", v.name, v.value)),
             _ => None,
         });
-        (self.state.text().to_string(), calls, values)
+        let watched = rows(&self.watched, &|item| match item {
+            Item::Watch((expression, Some(Ok(value)))) => {
+                Some(format!("{expression} = {}", value.result))
+            }
+            Item::Watch((expression, _)) => Some(expression.clone()),
+            _ => None,
+        });
+        (self.state.text().to_string(), calls, values, watched)
     }
 
-    pub(super) fn sections(&self) -> [&Section; 3] {
-        [&self.stack, &self.variables, &self.breakpoints]
+    pub(super) fn sections(&self) -> [&Section; 4] {
+        [&self.stack, &self.variables, &self.watch, &self.breakpoints]
     }
+}
+
+/// Watch's body: its rows, and under them the entry an expression is added from.
+fn watch_body(watched: &Tree, data: &Data) -> gtk::Box {
+    let entry = gtk::Entry::builder()
+        .placeholder_text("Add Expression")
+        .margin_start(6)
+        .margin_end(6)
+        .margin_top(3)
+        .margin_bottom(6)
+        .build();
+    let watch = data.watch.clone();
+    entry.connect_activate(move |entry| {
+        let expression = entry.text().trim().to_string();
+        if !expression.is_empty() {
+            entry.set_text("");
+            watch(&expression);
+        }
+    });
+    let list = scroller(&tree_view(watched, Some(data.unwatch.clone())));
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    body.append(&list);
+    body.append(&entry);
+    body
 }
 
 /// The controls, flat icon buttons on the window's actions, which are enabled as the session's

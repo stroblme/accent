@@ -226,6 +226,7 @@ impl App {
         run.generation.set(run.generation.get() + 1);
         run.frame.set(None);
         self.clear_execution();
+        self.show_watches(None);
     }
 
     /// Whether `run` is still the session, at `generation`.
@@ -398,6 +399,52 @@ impl App {
                 sidebar.set_debug_scopes(&scopes);
             }
         });
+        self.refill_watches();
+    }
+
+    /// The Watch section: each expression evaluated in the call selected while the program is
+    /// paused (`evaluate`, context `watch`), alone otherwise. Values that come once the program
+    /// has moved on, or the watches have changed, are dropped.
+    pub(crate) fn refill_watches(self: &Rc<Self>) {
+        let watches = self.debugger.watches();
+        let paused = self
+            .debugger
+            .run()
+            .filter(|run| matches!(run.state.get(), State::Paused { .. }));
+        let (Some(run), Some(vault)) = (paused, self.vault().cloned()) else {
+            return self.show_watches(None);
+        };
+        let (weak, generation, frame) =
+            (Rc::downgrade(self), run.generation.get(), run.frame.get());
+        glib::spawn_future_local(async move {
+            let mut values = Vec::new();
+            for expression in &watches {
+                let asked = vault.debug_evaluate(run.id, frame, expression.clone(), Context::Watch);
+                values.push(asked.await.map_err(|e| e.to_string()));
+            }
+            if let Some(app) = weak.upgrade()
+                && app.current(&run, generation)
+                && run.frame.get() == frame
+                && app.debugger.watches() == watches
+            {
+                app.show_watches(Some(values));
+            }
+        });
+    }
+
+    /// Watch's rows: the expressions, with `values` where they were evaluated.
+    fn show_watches(&self, values: Option<Vec<Result<Evaluated, String>>>) {
+        let Some(sidebar) = self.sidebar.get() else {
+            return;
+        };
+        let mut values = values.map(Vec::into_iter);
+        let rows: Vec<_> = self
+            .debugger
+            .watches()
+            .into_iter()
+            .map(|expression| (expression, values.as_mut().and_then(Iterator::next)))
+            .collect();
+        sidebar.set_debug_watches(&rows);
     }
 
     /// A thread's calls, for Call Stack opening one; dropped once the program has moved on.
@@ -501,6 +548,7 @@ impl App {
         self.debugger.run.replace(None);
         self.console_end(id, None);
         self.clear_execution();
+        self.show_watches(None);
         for tab in self.open_tabs() {
             if !tab.breakpoints.borrow().is_empty() {
                 breakpoints::place(&tab, &breakpoints::lines(&tab));
