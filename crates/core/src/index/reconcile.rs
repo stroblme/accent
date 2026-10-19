@@ -1,13 +1,13 @@
 //! Disk to rows: the full walk and the watcher's single-file path share one `upsert`.
 
 use super::links::{BEST_FILE, resolve_links_of};
-use super::schema::{BATCH, MAX_INDEXED_BODY};
+use super::schema::{BATCH, MAX_INDEXED_BODY, OPENED_CAP};
 use super::{Change, Index, Phase, Progress, ReconcileStats};
 use crate::walk::{self, FileKind, ScanOptions};
 use crate::{Error, Result};
 use crate::{markdown, path};
 use rusqlite::{OptionalExtension, params};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -107,6 +107,7 @@ impl Index {
             self.alias_held_outside(dir, &mut scan)?;
             scan.files.insert(0, top);
         }
+        self.add_opened(root, dir, &mut scan)?;
         let mut stats = ReconcileStats {
             dir: dir.to_string(),
             scanned: scan.files.len(),
@@ -361,6 +362,28 @@ impl Index {
         Ok(linked)
     }
 
+    /// Add to `scan` the opened files under `dir` it did not walk to
+    /// ([`keep_opened`](Self::keep_opened)), so the diff keeps them; one gone or unreadable stays out,
+    /// and the diff takes its row and its place.
+    fn add_opened(&self, root: &Path, dir: &str, scan: &mut walk::ScanResult) -> Result<()> {
+        let opened: Vec<String> = {
+            let mut st = self.conn.prepare("SELECT rel_path FROM opened")?;
+            let rows = st.query_map([], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let walked: HashSet<String> = scan.files.iter().map(|f| f.rel_path.clone()).collect();
+        let (under, _) = path::subtree_range(dir);
+        for rel in opened {
+            if !(dir.is_empty() || rel.starts_with(&under)) || walked.contains(&rel) {
+                continue;
+            }
+            if let Ok(Some(meta)) = walk::stat_opened(root, &rel) {
+                scan.files.push(meta);
+            }
+        }
+        Ok(())
+    }
+
     /// Turn what a folder's `scan` found that the index holds by a path outside the folder into an
     /// alias of that path: the vault-wide `(dev, ino)` dedup, which a walk of the folder alone
     /// cannot make.
@@ -408,7 +431,7 @@ impl Index {
     }
 
     fn update_one(&mut self, root: &Path, rel: &str, resolve: bool) -> Result<Change> {
-        let meta = match walk::stat_one(root, rel) {
+        let meta = match self.stat(root, rel) {
             Ok(Some(meta)) => meta,
             Ok(None) => return Ok(Change::Ignored),
             Err(Error::NotFound(_)) => {
@@ -417,7 +440,80 @@ impl Index {
             }
             Err(e) => return Err(e),
         };
+        self.write_one(&meta, resolve)
+    }
 
+    /// Keep `rel`, an opened file, in the index although the walk leaves it out or search
+    /// excludes it: the last [`OPENED_CAP`] opened are kept, and a walk, an edit and a git refresh
+    /// keep them. A file the index holds and searches already takes no place.
+    pub fn keep_opened(&mut self, root: &Path, rel: &str) -> Result<()> {
+        let walked = match walk::stat_one(root, rel) {
+            Err(Error::NotFound(_)) => return Ok(()),
+            walked => walked?,
+        };
+        if walked.is_some() && !self.excluded(rel)? && !self.is_opened(rel)? {
+            return Ok(());
+        }
+        let Some(meta) = walk::stat_opened(root, rel)? else {
+            return Ok(());
+        };
+        self.write_one(&meta, true)?;
+        let tx = self.write_tx()?;
+        tx.execute(
+            "UPDATE files SET git_ignored = 0 WHERE rel_path = ?1",
+            [rel],
+        )?;
+        tx.execute(
+            "INSERT INTO opened(rel_path, seq) VALUES (?1, (SELECT COALESCE(MAX(seq), 0) + 1 FROM opened))
+             ON CONFLICT(rel_path) DO UPDATE SET seq = excluded.seq",
+            [rel],
+        )?;
+        let dropped: Vec<String> = {
+            let mut st =
+                tx.prepare("SELECT rel_path FROM opened ORDER BY seq DESC LIMIT -1 OFFSET ?1")?;
+            let rows = st.query_map([OPENED_CAP as i64], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        for gone in &dropped {
+            tx.execute("DELETE FROM opened WHERE rel_path = ?1", [gone])?;
+        }
+        tx.commit()?;
+        // A gitignored file the walk holds keeps its row, which the next git refresh excludes.
+        for gone in &dropped {
+            if matches!(walk::stat_one(root, gone), Ok(None)) {
+                self.remove_file_batched(gone)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn is_opened(&self, rel: &str) -> Result<bool> {
+        let mut st = self
+            .conn
+            .prepare_cached("SELECT 1 FROM opened WHERE rel_path = ?1")?;
+        Ok(st.exists([rel])?)
+    }
+
+    /// Whether search leaves `rel`'s row out (`set_excluded`).
+    fn excluded(&self, rel: &str) -> Result<bool> {
+        let mut st = self
+            .conn
+            .prepare_cached("SELECT 1 FROM files WHERE rel_path = ?1 AND git_ignored <> 0")?;
+        Ok(st.exists([rel])?)
+    }
+
+    /// [`walk::stat_one`], and for an opened file the stat it refuses
+    /// ([`keep_opened`](Self::keep_opened)): whether the index holds `rel`, and what its row reads.
+    pub fn stat(&self, root: &Path, rel: &str) -> Result<Option<walk::FileMeta>> {
+        match walk::stat_one(root, rel)? {
+            None if self.is_opened(rel)? => walk::stat_opened(root, rel),
+            meta => Ok(meta),
+        }
+    }
+
+    /// Write one stat'd file's rows, unless its stat is the row's already.
+    fn write_one(&mut self, meta: &walk::FileMeta, resolve: bool) -> Result<Change> {
+        let rel = meta.rel_path.as_str();
         let existing: Option<(i64, i64, i64, i64)> = self
             .conn
             .prepare_cached("SELECT id, mtime_ns, size, ino FROM files WHERE rel_path = ?1")?
@@ -432,9 +528,9 @@ impl Index {
         }
 
         let existing_id = existing.map(|(id, ..)| id);
-        let content = read_content(&meta);
+        let content = read_content(meta);
         let tx = self.write_tx()?;
-        upsert(&tx, &meta, content, &mut ReconcileStats::default())?;
+        upsert(&tx, meta, content, &mut ReconcileStats::default())?;
         write_bodies(&tx)?;
         // The file's own links were just written unresolved, and a new note can be what a link
         // written long before it existed was waiting for — or a shorter path for one that
@@ -846,6 +942,10 @@ pub(super) fn delete_file_rows(tx: &rusqlite::Transaction<'_>, id: i64) -> Resul
     tx.prepare_cached(&format!(
         "UPDATE links SET resolved_file = {BEST_FILE} WHERE resolved_file = ?1"
     ))?
+    .execute([id])?;
+    tx.prepare_cached(
+        "DELETE FROM opened WHERE rel_path = (SELECT rel_path FROM files WHERE id = ?1)",
+    )?
     .execute([id])?;
     tx.prepare_cached("DELETE FROM files WHERE id = ?1")?
         .execute([id])?;
@@ -1696,6 +1796,50 @@ mod tests {
         ix.reconcile(vault.path(), |_| {}).unwrap();
         let re = crate::search::pattern("zorblat", crate::search::Options::default()).unwrap();
         assert_eq!(ix.grep(&re, 10, false).unwrap().1, 1, "other XML is text");
+    }
+
+    /// A file the walk leaves out joins the index once opened, stays through a walk and an edit,
+    /// leaves with its file, and only the last [`OPENED_CAP`] stay.
+    #[test]
+    fn an_opened_file_the_walk_leaves_out_is_indexed_until_the_queue_drops_it() {
+        let vault = tempfile::tempdir().unwrap();
+        let at = |rel: &str| vault.path().join(rel);
+        fs::write(at(".gitignore"), "build/\n").unwrap();
+        fs::create_dir(at("build")).unwrap();
+        fs::write(at("build/out.md"), "zorblat\n").unwrap();
+        let db = tempfile::tempdir().unwrap();
+        let mut ix = open(&db);
+        let found = |ix: &Index, query: &str| -> Vec<String> {
+            let hits = ix.search(query, 10, false).unwrap();
+            hits.into_iter().map(|h| h.rel_path).collect()
+        };
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+        assert!(found(&ix, "zorblat").is_empty());
+
+        ix.keep_opened(vault.path(), "build/out.md").unwrap();
+        assert_eq!(found(&ix, "zorblat"), ["build/out.md"]);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+        assert_eq!(found(&ix, "zorblat"), ["build/out.md"], "a walk keeps it");
+
+        fs::write(at("build/out.md"), "quux\n").unwrap();
+        ix.update_file(vault.path(), "build/out.md").unwrap();
+        assert_eq!(found(&ix, "quux"), ["build/out.md"], "an edit reaches it");
+
+        fs::remove_file(at("build/out.md")).unwrap();
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+        assert!(found(&ix, "quux").is_empty());
+        assert!(!ix.is_opened("build/out.md").unwrap(), "its slot is free");
+
+        for i in 0..=OPENED_CAP {
+            fs::write(at(&format!("build/n{i}.md")), "n").unwrap();
+            ix.keep_opened(vault.path(), &format!("build/n{i}.md"))
+                .unwrap();
+        }
+        assert!(
+            ix.get_file("build/n0.md").unwrap().is_none(),
+            "the oldest went"
+        );
+        assert!(ix.get_file("build/n1.md").unwrap().is_some());
     }
 
     fn diagram_indexed_as_labels(name: &str) {

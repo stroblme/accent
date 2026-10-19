@@ -21,9 +21,11 @@ impl Index {
             [],
         )?;
         {
+            // An opened file is searched whatever ignores it (`Index::keep_opened`).
             let mut st = tx.prepare_cached(
                 "UPDATE files SET git_ignored = 1
-                  WHERE rel_path = ?1 OR (rel_path >= ?2 AND rel_path < ?3)",
+                  WHERE (rel_path = ?1 OR (rel_path >= ?2 AND rel_path < ?3))
+                    AND rel_path NOT IN (SELECT rel_path FROM opened)",
             )?;
             for entry in entries {
                 let base = entry.trim_end_matches('/');
@@ -588,6 +590,23 @@ mod tests {
             ["notes/a.md", "paper/main.tex"]
         );
         assert_eq!(ix.file_paths(true).unwrap().len(), 3);
+    }
+
+    /// An opened file is searched whatever git ignores, the next refresh too.
+    #[test]
+    fn an_opened_file_is_never_excluded() {
+        let (vault, db) = ignore_fixture();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+        let excluded = ["paper/main.aux".to_string()];
+        ix.set_excluded(&excluded).unwrap();
+        ix.keep_opened(vault.path(), "paper/main.aux").unwrap();
+        assert_eq!(
+            hits(&ix, false),
+            ["notes/a.md", "paper/main.aux", "paper/main.tex"]
+        );
+        ix.set_excluded(&excluded).unwrap();
+        assert_eq!(hits(&ix, false).len(), 3);
     }
 
     /// Git reports a wholly ignored tree as one trailing-slash entry, and the note under it must

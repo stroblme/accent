@@ -301,6 +301,17 @@ pub fn stat_one(root: &Path, rel: &str) -> crate::Result<Option<FileMeta>> {
     Ok(Some(file_meta(rel.to_string(), &path, &meta)))
 }
 
+/// [`stat_one`] for a file that was opened (`Index::keep_opened`): the ignore rules and the
+/// dependency trees do not hold, [`out_of_reach`] and directories still do.
+pub fn stat_opened(root: &Path, rel: &str) -> crate::Result<Option<FileMeta>> {
+    if rel.split('/').any(out_of_reach) {
+        return Ok(None);
+    }
+    let path = root.join(rel);
+    let meta = std::fs::metadata(&path).map_err(|e| crate::Error::io(rel, e))?;
+    Ok((!meta.is_dir()).then(|| file_meta(rel.to_string(), &path, &meta)))
+}
+
 /// Why a directory is absent from the index.
 ///
 /// [`Unindexed::Dependency`] identifies generated dependency trees such as `node_modules`;

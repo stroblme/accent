@@ -29,23 +29,28 @@ impl App {
         self.sync_active();
     }
 
-    /// Watch `key`'s parent folder for changes the index does not walk.
+    /// Watch `key`'s parent folder for changes the index does not walk, and have the index keep
+    /// `key` although it may not walk there ([`Vault::keep_opened`](accent_api::Vault::keep_opened)).
     ///
     /// Gitignored and dependency files need [`Event::UnindexedChanged`] to follow external edits.
     /// Indexed folders stay with the worker; one-level watches last for the window's lifetime.
     pub(crate) fn watch_folder_of(&self, key: &str) {
-        let dir = parent_dir(key);
         let Some(vault) = self.vault().cloned() else {
             return;
         };
-        if dir.is_empty() || doc::is_loose_key(key) {
+        if doc::is_loose_key(key) {
             return;
         }
-        let dirs = vec![dir.to_string()];
-        // A round trip on a remote vault, and one that cannot be sent yet is kept and asked of
+        let (key, dir) = (key.to_string(), parent_dir(key).to_string());
+        // A round trip on a remote vault, and a watch that cannot be sent yet is kept and asked of
         // the host once it answers (`tree::watch_unindexed`).
         gio::spawn_blocking(move || {
-            if let Err(e) = vault.watch_unindexed(&dirs) {
+            if let Err(e) = vault.keep_opened(&key) {
+                tracing::debug!("keeping an opened file in the index: {e:#}");
+            }
+            if !dir.is_empty()
+                && let Err(e) = vault.watch_unindexed(&[dir])
+            {
                 tracing::debug!("watching a document's folder: {e:#}");
             }
         });

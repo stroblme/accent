@@ -199,6 +199,12 @@ impl Local {
         Ok(())
     }
 
+    /// See [`Vault::keep_opened`](crate::Vault::keep_opened).
+    pub fn keep_opened(&self, rel: &str) -> Result<()> {
+        self.post(Msg::KeepOpened(rel.to_string()));
+        Ok(())
+    }
+
     pub fn unwatch_unindexed(&self, dirs: &[String]) -> Result<()> {
         self.post(Msg::WatchUnindexed(dirs.to_vec(), false));
         Ok(())

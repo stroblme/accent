@@ -366,6 +366,28 @@ mod tests {
     use crate::tests::*;
     use crate::{Event, Options, VaultConfig};
 
+    /// An opened file in a gitignored folder is searched, and an edit made outside accent while
+    /// its folder is watched reaches search as a note's does.
+    #[test]
+    fn an_opened_ignored_file_follows_its_edits() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(".gitignore"), "build/\n").unwrap();
+        std::fs::create_dir(root.path().join("build")).unwrap();
+        std::fs::write(root.path().join("build/out.md"), "zorblat\n").unwrap();
+        let f = Fixture::open_dir(root, VaultConfig::default());
+        let found = |query: &str| f.vault.search(query, 10, false).unwrap().len();
+        assert_eq!(found("zorblat"), 0);
+
+        f.vault.keep_opened("build/out.md").unwrap();
+        f.vault.watch_unindexed(&["build".to_string()]).unwrap();
+        assert!(poll_until(|| found("zorblat") == 1, BUDGET));
+        f.write("build/out.md", "quux\n");
+        assert!(
+            poll_until(|| found("quux") == 1, BUDGET),
+            "the edit missed the index"
+        );
+    }
+
     /// Of three queries asked while the first still holds the search connection, the newest runs
     /// once it lets go and the one in between never does: the pane has already moved past it.
     #[test]
