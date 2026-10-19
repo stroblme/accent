@@ -393,7 +393,7 @@ impl Editor {
             let mut added = from.clone();
             added.set_id(&guid());
             if added.name().is_empty() {
-                added.set_name(&format!("Page-{}", pages.len() + 1));
+                added.set_name(&page_name(&pages));
             }
             pages.push(added);
         }

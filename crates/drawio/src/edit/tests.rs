@@ -401,12 +401,13 @@ fn a_paste_takes_fresh_ids_on_the_current_layer_and_a_cut_lets_edges_go() {
         "<mxfile><diagram name=\"One\" id=\"x\">{xml}</diagram><diagram id=\"y\">{xml}</diagram></mxfile>"
     );
     let before = e.file().pages.len();
+    e.rename_page(0, "Page-2").unwrap();
     let pasted = e
         .paste(0, &crate::clipboard::pages_in(&file), 0.0, 0.0)
         .unwrap();
     assert_eq!((pasted.len(), e.file().pages.len()), (2, before + 1));
     let added = &e.file().pages[before];
-    assert_eq!(added.name(), "Page-2");
+    assert_eq!(added.name(), "Page-3", "Page-2 is taken");
     assert_ne!(crate::model::attr(&added.attrs, "id"), Some("y"));
     assert!(e.undo());
     assert_eq!(e.file().pages.len(), before);
