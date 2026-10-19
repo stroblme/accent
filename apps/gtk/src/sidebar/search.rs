@@ -1218,10 +1218,14 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
         },
     );
 
-    let view = gtk::ListView::new(
-        Some(gtk::SingleSelection::new(Some(results.clone()))),
-        Some(factory),
-    );
+    // Nothing is selected until a row is pointed at or reached with the keys: an answer opening
+    // with a heading would otherwise draw the heading selected, `set_selectable` stopping a click
+    // and not autoselect.
+    let selection = gtk::SingleSelection::builder()
+        .model(&results)
+        .autoselect(false)
+        .build();
+    let view = gtk::ListView::new(Some(selection), Some(factory));
     view.add_css_class("navigation-sidebar");
     // One click opens, the rule `tree.rs` and the Git pane already follow: a result is a place to
     // go, and the tab it opens is this pane's preview, so walking the list replaces one tab
