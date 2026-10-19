@@ -639,7 +639,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Ten rows at most, fewer where the pane is shorter, scrolled to keep the highlighted one on the card.
   The card takes no keyboard, so the chord's keys stay the window's over a shell too: a click on a row ends the chord there, and Escape ends it back on the tab it started from.
   Over its pane, not the window, so a split's other panes stay clear; a `.navigation-sidebar` list, the palette's rows, on the popover's surface (`switcher.rs`).
-- **Under F5 the chord steps through the presented pane's tabs**, each presented as F5 presents it — a note rendered, a PDF or a diagram fitted to a page, an image or a shell as it is — with the card over the presented document; Escape takes the chord back and leaves presentation on (Dismiss).
+- **Under F5 the chord steps through the presented pane's tabs**, each presented as F5 presents it — a note rendered, a PDF or a diagram fitted to a page, a source file, an image or a shell as it is — with the card over the presented document; Escape takes the chord back and leaves presentation on (Dismiss).
 - **A tab opened by browsing is a preview** (VS Code's idiom): a click on a tree row, a search hit, a tag, a backlink, an outline heading or a Git changed file, and a wikilink followed.
   A pane holds at most one and the next such open replaces it, so clicking down a list leaves one tab, not twenty.
   What the reader named is kept: the palette, Open File…, a drop, a rename, the command line, the session.
@@ -1601,11 +1601,11 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 - Toggle Preview `Ctrl+M` (Editor and Split), Toggle Minimap (unbound), Presentation `F5`, which is Continue while a debug session runs (Debugging).
 - Presentation hides the sidebar, the other panes, the tab bars and both header bars, and shows the note rendered.
   The presented pane stays where it is in the pane tree with the branches beside it hidden, so its find bar and its `Ctrl+Tab` card stay its own and every divider is where it was afterwards; the rendered note is the preview laid over the pane's tabs.
-  A tab that draws its own document — a PDF, a diagram, an image, a diff, a terminal — is presented as it is; a PDF fits a whole page meanwhile and gets its zoom back afterwards.
+  A tab that draws its own document — a source file, a PDF, a diagram, an image, a diff, a terminal — is presented as it is; a PDF fits a whole page meanwhile and gets its zoom back afterwards.
   A diagram is a slide deck: each page is fitted as it is shown, Space, Page Down, Right and a wheel notch down go to the next and Shift+Space, Page Up, Left and a notch up to the one before, and leaving gives back its zoom, and its scroll if the page is the one it began on.
   The drawing ring goes away meanwhile, a PDF's and a diagram's alike, and the tool in hand is put down (a PDF back to reading, a diagram to select), a diagram's label being edited finished and its selection let go, so a click never draws on what is presented; leaving brings the ring back as it was, with no tool in hand.
   A presented diagram is read only: a click selects nothing, a drag moves the page rather than what is on it, its menu stays shut and its keys do nothing but page, so only paging, zoom and panning are left.
-  What is presented has the keyboard, from F5 and from each tab a held `Ctrl+Tab` steps to — the rendered note, a PDF, a diagram, an image, a shell — so Space, Page Down, the arrows, Home and End read it as they do outside presentation and a shell takes typing; F5 and `Esc` still leave it, ahead of a presented shell too, which gets neither.
+  What is presented has the keyboard, from F5 and from each tab a held `Ctrl+Tab` steps to — the rendered note, a source file, a PDF, a diagram, an image, a shell — so Space, Page Down, the arrows, Home and End read it as they do outside presentation and a shell takes typing; F5 and `Esc` still leave it, ahead of a presented shell too, which gets neither.
   Leaving gives the keyboard back to the document in front.
 - It does not resize the window: fullscreen stays `F11`'s, so the two compose.
 - The bars go through `AdwToolbarView::set_reveal_top_bars(false)`, not the opacity fade, which would leave an empty band; the pointer-motion reveal is off meanwhile.

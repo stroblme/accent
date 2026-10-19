@@ -6,10 +6,10 @@ use super::*;
 /// Everything one pane's tab view has to answer for. Called for the pane the window is built with
 /// and for every pane a split adds, so a new pane behaves exactly like the first one.
 pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
-    // While presenting there is no editor on screen, so find and go to line address the rendered
-    // preview instead. Three closures rather than a back-reference, so `find.rs` never sees `App`,
-    // and each of them answers for *this* pane: the other pane's PDF must not decide whether this
-    // bar counts in pages.
+    // While a note is presented there is no editor on screen, so find and go to line address the
+    // rendered preview instead. Three closures rather than a back-reference, so `find.rs` never
+    // sees `App`, and each of them answers for *this* pane: the other pane's PDF must not decide
+    // whether this bar counts in pages.
     pane.find.wire(find::Wiring {
         presenting: Box::new(glib::clone!(
             #[weak]
@@ -19,7 +19,7 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
             #[upgrade_or]
             false,
             // A PDF answers find and go-to itself, whether or not anything is being presented.
-            move || app.presenting.get().is_some() || app.pdf_of(&pane).is_some()
+            move || app.presents_rendered(&pane) || app.pdf_of(&pane).is_some()
         )),
         preview: Box::new(glib::clone!(
             #[weak]
