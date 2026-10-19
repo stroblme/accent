@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 // Library location + global binding
 // ---------------------------------------------------------------------------------------------
 
-/// Directory that contains `libpdfium.so`.
+/// Directory that contains libpdfium (`libpdfium.so`, `libpdfium.dylib` on macOS).
 ///
 /// `ACCENT_PDFIUM_DIR` overrides it, then `../lib/accent` next to the executable, which is where
 /// `make install` and the Flatpak manifest put the library; otherwise `<workspace>/vendor/pdfium`.
@@ -45,13 +45,10 @@ pub fn library_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("ACCENT_PDFIUM_DIR") {
         return PathBuf::from(dir);
     }
-    // The probe spells the file name out while the binding below derives it from the platform.
-    // They agree on every target that reaches this branch (Linux, and the exe-relative layout is
-    // a desktop install), and keeping the probe a plain `exists()` keeps it readable.
     std::env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(|bin| bin.join("../lib/accent")))
-        .filter(|dir| dir.join("libpdfium.so").exists())
+        .filter(|dir| Pdfium::pdfium_platform_library_name_at_path(dir).exists())
         .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../vendor/pdfium"))
 }
 
