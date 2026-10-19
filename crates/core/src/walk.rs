@@ -410,12 +410,15 @@ pub fn unindexed_children(
 /// the index never walks, listed whole for Go to File, `[[` completion and a link naming a file in
 /// one. A dependency tree stays out, inside an ignored folder too: it is somebody else's, as the
 /// file tree says ([`Unindexed::Dependency`]), and a `node_modules` is the 40 000 files a listing
-/// must not hold. So does a conflict copy, which is never opened as a file.
+/// must not hold. So does a conflict copy, which is never opened as a file. A directory symlink is
+/// not followed: one in build output can lead anywhere (flatpak-builder's `var/run -> /run` reached
+/// a FUSE mount whose links read as folders, a walk without end).
 ///
 /// One walk of the whole vault, since nothing short of one says where the ignored folders are.
 pub fn ignored_files(root: &Path) -> Vec<String> {
     let opts = ScanOptions {
         enter_ignored_dirs: true,
+        follow_links: false,
         ..ScanOptions::default()
     };
     let r = scan(root, &opts);
@@ -1407,6 +1410,10 @@ mod tests {
         ] {
             write(rel);
         }
+        // A build output's `var/run -> /run`: followed, it walked a FUSE mount without end.
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("ext.md"), "ext").unwrap();
+        symlink(outside.path(), vault.path().join("ignored/run")).unwrap();
         assert_eq!(
             ignored_files(vault.path()),
             ["ignored/Deep Note.md", "ignored/sub/paper.pdf"]
