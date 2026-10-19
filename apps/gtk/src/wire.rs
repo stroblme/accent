@@ -120,6 +120,9 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
         app,
         move |tabs, page| {
             *app.menu_page.borrow_mut() = page.cloned();
+            // The tab menu's Print and exports act on this page, and the hide gives them back to
+            // the tab in front.
+            app.sync_prints();
             // Filled for the page that is about to show it: a `GtkPopoverMenu` follows the model
             // it was built from, so this is what puts Rename and Move to Trash on a vault file's
             // tab and on no other. One model per pane, which is the one asked for here.

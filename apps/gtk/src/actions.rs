@@ -1124,8 +1124,9 @@ pub fn install_actions(app: &Rc<App>) {
             app.window.add_action(&action);
         }
     }
-    // The session's controls wait for a session.
+    // The session's controls wait for a session, and Print and the exports for a document.
     app.sync_debug();
+    app.sync_prints();
 
     app.captured
         .set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -1168,7 +1169,8 @@ pub fn label_of(action: &str) -> &str {
 ///
 /// Omit unavailable vault operations. Shell windows offer Save Session and named sessions
 /// Close Session; local shell creation is separate when New Terminal targets a host.
-/// Document commands stay in shortcuts and the palette rather than this window-level menu.
+/// Document commands stay in shortcuts and the palette rather than this window-level menu, but
+/// for Print… and Export As, which [`primary_menu`] adds after the files.
 fn primary_actions(key: &crate::shell::WindowKey) -> [Vec<&'static str>; 4] {
     let vault = key.vault().is_some();
     let mut shows = vec!["win.terminal", "win.terminal-remote"];
@@ -1217,16 +1219,63 @@ pub fn menu_button(key: &crate::shell::WindowKey) -> gtk::MenuButton {
 
 /// The primary menu's model for a window opened on `key`, and again whenever the window takes
 /// another key: a window of shells saved under a name gains Close Session there and then.
+///
+/// Print… and Export As follow the files, every format listed and greyed where the tab in front
+/// cannot do it (`App::sync_prints`); not in a window of shells, where a document is the exception.
 pub fn primary_menu(key: &crate::shell::WindowKey) -> gio::Menu {
     let menu = gio::Menu::new();
-    for group in primary_actions(key) {
+    let section = |actions: Vec<&str>| {
         let section = gio::Menu::new();
-        for action in group {
+        for action in actions {
             section.append(Some(label_of(action)), Some(action));
         }
-        menu.append_section(None, &section);
+        section
+    };
+    let [files, vaults, shows, application] = primary_actions(key);
+    menu.append_section(None, &section(files));
+    if !key.is_terminal() {
+        let exports = gio::Menu::new();
+        // The submenu says "Export as" already, so an item names only its format.
+        for action in &PRINTS[1..] {
+            let label = label_of(action);
+            exports.append(
+                Some(label.strip_prefix("Export as ").unwrap_or(label)),
+                Some(action),
+            );
+        }
+        let prints = section(vec![PRINTS[0]]);
+        prints.append_submenu(Some("Export As"), &exports);
+        menu.append_section(None, &prints);
+    }
+    for group in [vaults, shows, application] {
+        menu.append_section(None, &section(group));
     }
     menu
+}
+
+/// Print… and every Export as…, in menu order.
+pub const PRINTS: [&str; 5] = [
+    "win.print",
+    "win.export-pdf",
+    "win.export-html",
+    "win.export-png",
+    "win.export-svg",
+];
+
+/// Which of [`PRINTS`] a document of `kind` can do: what the tab menu lists, and what the primary
+/// menu leaves sensitive.
+pub fn print_actions(kind: Option<Kind>) -> &'static [&'static str] {
+    match kind {
+        Some(Kind::Note) => &["win.print", "win.export-pdf", "win.export-html"],
+        Some(Kind::Pdf) => &["win.print", "win.export-pdf"],
+        Some(Kind::Diagram) => &[
+            "win.print",
+            "win.export-pdf",
+            "win.export-png",
+            "win.export-svg",
+        ],
+        _ => &[],
+    }
 }
 
 /// Initial tab menu with Pin and no page-specific file, transfer or print commands.
@@ -1288,17 +1337,7 @@ pub fn fill_tab_menu(
         Some("win.reveal-in-sidebar"),
     );
     menu.append_section(None, &reveal);
-    let prints: &[&str] = match prints {
-        Some(Kind::Note) => &["win.print", "win.export-pdf", "win.export-html"],
-        Some(Kind::Pdf) => &["win.print", "win.export-pdf"],
-        Some(Kind::Diagram) => &[
-            "win.print",
-            "win.export-pdf",
-            "win.export-png",
-            "win.export-svg",
-        ],
-        _ => &[],
-    };
+    let prints = print_actions(prints);
     if !prints.is_empty() {
         let section = gio::Menu::new();
         for action in prints {
@@ -1611,18 +1650,46 @@ mod tests {
         assert_eq!(last_move(true).as_deref(), Some("win.unpin-tab"));
     }
 
-    /// Every action a menu names, its sections' included, in the order it shows them.
+    /// Every action a menu names, its sections' and submenus' included, in the order it shows
+    /// them.
     fn menu_actions(menu: &gio::MenuModel) -> Vec<String> {
         (0..menu.n_items())
-            .flat_map(|i| match menu.item_link(i, "section") {
-                Some(section) => menu_actions(&section),
-                None => menu
-                    .item_attribute_value(i, "action", None)
-                    .and_then(|action| action.get::<String>())
-                    .into_iter()
-                    .collect(),
-            })
+            .flat_map(
+                |i| match (menu.item_link(i, "section")).or(menu.item_link(i, "submenu")) {
+                    Some(section) => menu_actions(&section),
+                    None => menu
+                        .item_attribute_value(i, "action", None)
+                        .and_then(|action| action.get::<String>())
+                        .into_iter()
+                        .collect(),
+                },
+            )
             .collect()
+    }
+
+    /// Print… and every export follow the files wherever a document can be in front; a window of
+    /// shells has none of them.
+    #[test]
+    fn the_primary_menu_prints_where_a_document_can_be() {
+        use crate::shell::{Loose, WindowKey};
+        let actions = |key| menu_actions(primary_menu(&key).upcast_ref());
+        for key in [
+            WindowKey::Vault("/home/me/Notes".into()),
+            WindowKey::Loose(Loose::Documents),
+        ] {
+            let menu = actions(key);
+            let at = menu
+                .iter()
+                .position(|a| a == "win.open-file")
+                .expect("Open File…");
+            assert_eq!(menu[at + 1..at + 6], PRINTS);
+        }
+        for key in [
+            WindowKey::Loose(Loose::Terminal),
+            WindowKey::Terminal("terminal://dev".into()),
+        ] {
+            assert!(!actions(key).iter().any(|a| PRINTS.contains(&a.as_str())));
+        }
     }
 
     /// A note is printed and exported three ways, a PDF two and a diagram four, right after Reveal
