@@ -108,14 +108,14 @@ impl Index {
         Ok(out)
     }
 
-    /// The vault's other paths to `rel`'s file, a symlink or a hard link the walk kept as an
-    /// alias rather than a row.
-    pub fn aliases_of(&self, rel: &str) -> Result<Vec<String>> {
+    /// Every alias as `(row, alias)`: a second vault path to a row's file, a symlink or a hard
+    /// link the walk kept out of the rows. A handful in a vault.
+    pub fn aliases(&self) -> Result<Vec<(String, String)>> {
         let mut st = self.conn.prepare_cached(
-            "SELECT a.rel_path FROM aliases a JOIN files f ON f.id = a.file_id
-              WHERE f.rel_path = ?1 ORDER BY a.rel_path",
+            "SELECT f.rel_path, a.rel_path FROM aliases a JOIN files f ON f.id = a.file_id
+              ORDER BY a.rel_path",
         )?;
-        let rows = st.query_map([rel], |r| r.get(0))?;
+        let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 

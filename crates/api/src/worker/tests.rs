@@ -204,6 +204,39 @@ fn an_alias_hears_of_its_file() {
     );
 }
 
+/// News naming an alias is its row's: a hard link written through its own name and a save
+/// through a symlinked alias update the row, which hears of it, and neither alias becomes a row.
+/// Depends on real inotify events.
+#[test]
+fn news_naming_an_alias_is_its_rows() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("note.md"), "old\n").unwrap();
+    std::fs::create_dir(root.path().join("d")).unwrap();
+    std::fs::hard_link(root.path().join("note.md"), root.path().join("d/hard.md")).unwrap();
+    std::os::unix::fs::symlink("../note.md", root.path().join("d/link.md")).unwrap();
+    let f = Fixture::open_dir(root, VaultConfig::default());
+
+    f.write("d/hard.md", "quokka census\n");
+    assert!(
+        f.wait(|e| matches!(e, Event::FileChanged(p) if p == "note.md"))
+            .is_some(),
+        "the row heard nothing"
+    );
+    let (_, etag) = f.vault.read("d/link.md").unwrap();
+    f.vault
+        .save("d/link.md", "wombat census\n", Some(etag))
+        .unwrap();
+    assert!(poll_until(
+        || !f.vault.search("wombat", 10, false).unwrap().is_empty(),
+        BUDGET
+    ));
+    let rows = f.vault.file_paths(false).unwrap();
+    assert!(
+        !rows.iter().any(|p| p.starts_with("d/")),
+        "an alias became a row: {rows:?}"
+    );
+}
+
 /// Verify watches include subdirectories already present at vault open,
 /// so external note edits reach the UI.
 #[test]
