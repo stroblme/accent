@@ -4,6 +4,10 @@
 //! the last vault or start screen opens. [`accent_api::Vault`] supplies the indexed tree
 //! immediately; background reconciliation and watching report changes as [`Event`]s.
 
+// Without WebKit, what only the preview reads (the images it is served, a note's diagram
+// embeds, the paper colours) is left in rather than gated item by item: the default build lints it.
+#![cfg_attr(not(feature = "webkit"), allow(dead_code, unused_imports))]
+
 mod actions;
 mod askpass;
 mod attach;
@@ -49,6 +53,10 @@ mod paned;
 mod panes;
 mod pathfield;
 mod pdf;
+#[cfg(feature = "webkit")]
+mod preview;
+#[cfg(not(feature = "webkit"))]
+#[path = "preview_stub.rs"]
 mod preview;
 mod recall;
 mod reconnect;
