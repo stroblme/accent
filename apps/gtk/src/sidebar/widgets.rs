@@ -81,8 +81,13 @@ pub(super) fn path_list(
         },
     );
 
+    // Nothing is drawn selected that nobody picked.
+    let selection = gtk::SingleSelection::builder()
+        .model(model)
+        .autoselect(false)
+        .build();
     let view = gtk::ListView::new(None::<gtk::SingleSelection>, Some(factory));
-    crate::widgets::set_model(&view, &gtk::SingleSelection::new(Some(model.clone())));
+    crate::widgets::set_model(&view, &selection);
     view.add_css_class("navigation-sidebar");
     // Backlinks and the files under a tag are result lists too, and open on one click like the
     // rest of them.
