@@ -8,17 +8,17 @@ use std::sync::{Arc, Mutex, Weak};
 
 use accent_core::config::DebugConfig;
 use accent_dap::types::{
-    Breakpoint, BreakpointEventBody, EvaluateResponse, ExitedEventBody, OutputEventBody,
-    RunInTerminalRequestArguments, ScopesResponse, SetBreakpointsResponse, StackTraceResponse,
-    StoppedEventBody, ThreadsResponse, VariablesResponse,
+    Breakpoint, BreakpointEventBody, CompletionsResponse, EvaluateResponse, ExitedEventBody,
+    OutputEventBody, RunInTerminalRequestArguments, ScopesResponse, SetBreakpointsResponse,
+    StackTraceResponse, StoppedEventBody, ThreadsResponse, VariablesResponse,
 };
 use accent_dap::{Client, Incoming, Incomings};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use super::{
-    Category, Context, Debugs, Evaluated, Frame, Launch, News, Placed, Scope, Step, Thread,
-    Variable,
+    Candidate, Category, Context, Debugs, Evaluated, Frame, Launch, News, Placed, Scope, Step,
+    Thread, Variable,
 };
 use crate::language::{Pos, session_root};
 use crate::{Error, Event, Result, locked};
@@ -377,6 +377,41 @@ impl Session {
             kind: answer.kind,
             reference: answer.variables_reference,
         })
+    }
+
+    /// The `column` is in characters here and in UTF-16 code units on the wire. Each candidate
+    /// replaces the `length` units before it: debugpy's `start` counts from 0 whatever
+    /// `columnsStartAt1` says (1.8.22).
+    pub(super) async fn completions(
+        &self,
+        frame: Option<i64>,
+        text: String,
+        column: u32,
+    ) -> Result<Vec<Candidate>> {
+        let before: Vec<char> = text.chars().take(column as usize).collect();
+        let units: usize = before.iter().map(|c| c.len_utf16()).sum();
+        let mut arguments = json!({"text": text, "column": units + 1});
+        if let Some(frame) = frame {
+            arguments["frameId"] = frame.into();
+        }
+        let answer: CompletionsResponse = self.client.request("completions", arguments).await?;
+        // The characters before the column that make up `length` units.
+        let replaces = |length: u32| {
+            let (mut units, mut chars) = (0, 0);
+            for c in before.iter().rev() {
+                if units >= length as usize {
+                    break;
+                }
+                (units, chars) = (units + c.len_utf16(), chars + 1);
+            }
+            chars
+        };
+        let candidates = answer.targets.into_iter().map(|t| Candidate {
+            replaces: replaces(t.length),
+            text: t.text.unwrap_or_else(|| t.label.clone()),
+            label: t.label,
+        });
+        Ok(candidates.collect())
     }
 
     /// debugpy never reads the answer, but the protocol asks for one.

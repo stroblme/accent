@@ -76,6 +76,15 @@ pub struct Variable {
     pub reference: i64,
 }
 
+/// What completes the text before a column: `text` written over the `replaces` characters
+/// before it, `label` when it is listed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Candidate {
+    pub label: String,
+    pub text: String,
+    pub replaces: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Evaluated {
     pub result: String,
@@ -349,6 +358,9 @@ sessions! {
     /// runs.
     debug_evaluate => evaluate(frame: Option<i64>, expression: String, context: Context)
         -> Evaluated, within UNBOUNDED;
+    /// What completes `text` before char `column` in `frame`, or globally.
+    debug_completions => completions(frame: Option<i64>, text: String, column: u32)
+        -> Vec<Candidate>;
     /// Answer [`News::Terminal`] `seq`: the program's process id where the window runs it.
     debug_answer => answer(seq: i64, pid: Option<u32>) -> ();
 }
@@ -558,6 +570,17 @@ mod tests {
             );
             let twice = vault.debug_evaluate(1, Some(top.id), "x * 2".to_string(), Context::Repl);
             assert_eq!(twice.await.unwrap().result, "42");
+            // Columns in characters: the `é` before is one, whatever it is on the wire.
+            let text = "é + x.bi".to_string();
+            let offered = vault
+                .debug_completions(1, Some(top.id), text, 8)
+                .await
+                .unwrap();
+            let offered: Vec<_> = offered
+                .iter()
+                .map(|c| (c.text.as_str(), c.replaces))
+                .collect();
+            assert_eq!(offered, [("bit_count", 2), ("bit_length", 2)]);
             vault.debug_continue(1, thread).await.unwrap();
         });
 

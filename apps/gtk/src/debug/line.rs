@@ -3,6 +3,8 @@
 //! typed make a whole statement, and the text the console shows, cleared of what the terminal
 //! would act on.
 
+use accent_api::debug::Candidate;
+
 /// The line being typed at the prompt, and the lines submitted before it.
 #[derive(Default)]
 pub struct Line {
@@ -28,12 +30,27 @@ pub enum Did {
     Submit(String),
     /// The line, given up with Ctrl+C.
     Abandon(String),
+    /// Tab: what completes the text before the cursor is asked for.
+    Complete,
+}
+
+/// What Tab makes of the candidates offered.
+#[derive(Debug, PartialEq)]
+pub enum Completion {
+    /// Written over so many characters before the cursor.
+    Write(u32, String),
+    /// Listed under the prompt.
+    List(Vec<String>),
 }
 
 impl Line {
     /// Read what VTE committed: typed text, a paste, or the bytes a key sends (`\x7f` for
     /// Backspace, `\x1b[D` for Left, …), as a shell's line editor reads them.
     pub fn key(&mut self, typed: &str) -> Vec<Did> {
+        // Typed alone: a tab in a paste is no key.
+        if typed == "\t" {
+            return vec![Did::Complete];
+        }
         let mut did = Vec::new();
         for key in pieces(typed) {
             match self.one(key) {
@@ -83,6 +100,23 @@ impl Line {
             _ => return None,
         }
         Some(Did::Redraw)
+    }
+
+    /// The text, and the cursor in characters.
+    pub fn at(&self) -> (String, usize) {
+        let column = self.text[..self.cursor].chars().count();
+        (self.text.clone(), column)
+    }
+
+    /// `with` written over the `replaces` characters before the cursor.
+    pub fn complete(&mut self, replaces: u32, with: &str) {
+        let before = self.text[..self.cursor].char_indices().rev();
+        let start = before
+            .take(replaces as usize)
+            .last()
+            .map_or(self.cursor, |(at, _)| at);
+        self.text.replace_range(start..self.cursor, with);
+        self.cursor = start + with.len();
     }
 
     /// The line, leaving the prompt empty and the history walk over.
@@ -166,6 +200,47 @@ fn cell(s: &str, columns: usize) -> (usize, usize) {
         column += width;
     }
     last
+}
+
+/// What Tab does with `candidates`, as a shell's completion does: one is written in, and so is
+/// the start they all share where it adds to what they replace; otherwise they are listed.
+pub fn completion(candidates: &[Candidate]) -> Option<Completion> {
+    let first = candidates.first()?;
+    let shared = candidates
+        .iter()
+        .fold(first.text.as_str(), |shared, candidate| {
+            let same = shared.chars().zip(candidate.text.chars());
+            let len = same
+                .take_while(|(a, b)| a == b)
+                .map(|(a, _)| a.len_utf8())
+                .sum();
+            &shared[..len]
+        });
+    let alike = candidates.iter().all(|c| c.replaces == first.replaces);
+    match alike && shared.chars().count() > first.replaces as usize {
+        true => Some(Completion::Write(first.replaces, shared.to_string())),
+        false => Some(Completion::List(
+            candidates.iter().map(|c| c.label.clone()).collect(),
+        )),
+    }
+}
+
+/// `labels` in columns across rows of `columns`, as a shell lists completions.
+pub fn listed(labels: &[String], columns: u16) -> String {
+    use unicode_width::UnicodeWidthStr as _;
+    let width = labels.iter().map(|label| label.width()).max().unwrap_or(0) + 2;
+    let across = (usize::from(columns) / width).max(1);
+    let row = |labels: &[String]| {
+        let cells = labels
+            .iter()
+            .map(|l| format!("{l}{}", " ".repeat(width - l.width())));
+        cells.collect::<String>().trim_end().to_string()
+    };
+    labels
+        .chunks(across)
+        .map(row)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Whether `block`, the lines typed so far, wants another before it is sent, as Python's REPL
@@ -378,5 +453,39 @@ mod tests {
         assert!(!unfinished("d = {'a': 1}"));
         assert!(unfinished("s = '''one"));
         assert!(!unfinished("s = '''one\ntwo'''"));
+    }
+
+    #[test]
+    fn tab_writes_in_what_the_candidates_share_or_lists_them() {
+        let mut line = Line::default();
+        line.key("x.bi + 1\x1b[D\x1b[D\x1b[D\x1b[D");
+        // Tab typed alone asks; a tab in a paste does not.
+        assert_eq!(line.key("\t"), [Did::Complete]);
+        assert_eq!(line.key("\t\t"), []);
+        assert_eq!(line.at(), ("x.bi + 1".to_string(), 4));
+        let offer = |texts: &[&str], replaces| -> Vec<Candidate> {
+            let candidate = |text: &&str| Candidate {
+                label: text.to_string(),
+                text: text.to_string(),
+                replaces,
+            };
+            texts.iter().map(candidate).collect()
+        };
+        let both = offer(&["bit_count", "bit_length"], 2);
+        assert_eq!(completion(&both), Some(Completion::Write(2, "bit_".into())));
+        line.complete(2, "bit_");
+        assert_eq!(line.at(), ("x.bit_ + 1".to_string(), 6));
+        // Nothing more is shared: listed, in columns across the rows.
+        let both = offer(&["bit_count", "bit_length"], 4);
+        let labels = vec!["bit_count".to_string(), "bit_length".to_string()];
+        assert_eq!(completion(&both), Some(Completion::List(labels.clone())));
+        assert_eq!(listed(&labels, 24), "bit_count   bit_length");
+        assert_eq!(listed(&labels, 20), "bit_count\nbit_length");
+        let one = offer(&["bit_length"], 4);
+        assert_eq!(
+            completion(&one),
+            Some(Completion::Write(4, "bit_length".into()))
+        );
+        assert_eq!(completion(&[]), None);
     }
 }

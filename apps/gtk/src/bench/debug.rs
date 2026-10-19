@@ -16,14 +16,18 @@ const REPL: &str = "x * 2";
 const BLOCK: &str = "def triple(n):\r    return n * 3\r\r";
 const CALL: &str = "triple(x)";
 
+/// Typed at the console and completed with Tab, the program's only name it starts.
+const TYPED: &str = "doub";
+
 /// `ACCENT_BENCH_DEBUG=<rel>:<line>` debugs the program `make drills` writes, whose `double(x)`
 /// is called with 21, from a breakpoint on 1-based `<line>`, `y = x * 2`. It prints what the
 /// window shows at each step, `bench debug …`: the breakpoint, the stop, the top call, its
-/// locals, the Debug Console's answers to [`REPL`] and to [`CALL`] after [`BLOCK`], the hover's
-/// value of the first name after the line's `=`, the line a step over lands on, the session's
-/// exit code, the program's output in its tab, that tab kept, and the Code pane shown with the
-/// program's file in front and hidden behind its tab. Timings go on `bench debug_ms …` lines; a
-/// step that never comes prints `bench debug timeout <what>` and quits.
+/// locals, the Debug Console's answers to [`REPL`], to [`CALL`] after [`BLOCK`] and to [`TYPED`]
+/// completed with Tab and called, the hover's value of the first name after the line's `=`, the
+/// line a step over lands on, the session's exit code, the program's output in its tab, that tab
+/// kept, and the Code pane shown with the program's file in front and hidden behind its tab.
+/// Timings go on `bench debug_ms …` lines; a step that never comes prints
+/// `bench debug timeout <what>` and quits.
 pub(super) fn bench_debug(app: &Rc<App>, arg: &str) {
     let place = arg
         .rsplit_once(':')
@@ -88,6 +92,24 @@ pub(super) fn bench_debug(app: &Rc<App>, arg: &str) {
             return;
         };
         println!("bench debug block {called}");
+        app.console_typed(TYPED);
+        app.console_typed("\t");
+        let completed = || {
+            let term = app.console()?;
+            text(&term).contains(">>> double").then_some(())
+        };
+        if until(&app, "complete", completed).await.is_none() {
+            return;
+        }
+        app.console_typed("(x)\r");
+        let answered = || {
+            app.console()
+                .and_then(|term| answer(&text(&term), "double(x)"))
+        };
+        let Some(called) = until(&app, "completed", answered).await else {
+            return;
+        };
+        println!("bench debug complete double(x) {called}");
 
         let t = Instant::now();
         let hovered = line_text(&tab, line)
