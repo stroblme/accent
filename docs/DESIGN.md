@@ -132,6 +132,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Exporting never changes the open PDF.
 - **Diagrams**: `crates/drawio` ports mxGraph's model, routing, shapes and label placement faithfully (the Apache-2.0 parts attributed file by file, with `LICENSE-APACHE` and `NOTICE`), keeps every attribute it does not interpret, and hands the app a UI-neutral display list — a file saved here opens in draw.io as it was, the port can be diffed against later draw.io releases, and Android can paint the same list.
   A formula label is typeset by WebKit, as draw.io's MathJax does.
+- **Notebooks**: a Jupyter notebook (`.ipynb`, nbformat 4) and a marimo notebook (a `.py` holding `import marimo` and `app = marimo.App(`) are one model in core, `accent_core::notebook`: cells of a kind with a source and the outputs stored with them, read and written by a backend per format (user decision 2026-10-19).
+  Nothing is run. A save writes back only what changed: a cell left alone keeps its bytes, an edited `.ipynb` cell has its `source` replaced in nbformat's style, and an edited marimo cell keeps its decorator, `def` line and `return` as written.
+  Every change is an edit that answers the edit undoing it, so one history per notebook holds the typing in its cells and the cell operations alike.
 - **MCP**: `accent-cli mcp` serves the shared core and index over stdio while the app is closed; writes reach an open window through the shared index.
   Its 14 tools include `explore`, reads, `render_diagram` and etag-checked writes; `--read-only` omits the three write tools.
   `explore` ranks files and passages from the index, shows relevant source with line numbers, links, outlines and call paths, and can ask a language server for a `precise` call hierarchy.
