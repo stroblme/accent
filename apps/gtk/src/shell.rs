@@ -22,6 +22,9 @@ pub struct Shell {
     /// Where a dragged tab was let go, between our drop zone seeing it and libadwaita asking for
     /// somewhere to put it. See [`Landing`].
     pub landing: RefCell<Option<Landing>>,
+    /// The window a row is being dragged out of, while a drag from a tree is in flight: what tells
+    /// every other window the row names a file in that window's vault (`App::dragged_from`).
+    pub tree_drag: RefCell<Option<std::rc::Weak<App>>>,
     /// Where the keyboard was when the shared accelerator table was last built
     /// (`Shell::apply_accels`), and whether its window debugged; one for all windows, as the
     /// table is.
@@ -670,6 +673,16 @@ impl Shell {
                 shell.adopt_page(&into, &page);
             }
         });
+    }
+
+    /// A drag out of `from`'s tree starting (`on`) or over. Every window's drop sheets go up with
+    /// it, as a tab drag's do: over another window's panes the row is refused, which leaves no
+    /// note view there to take its path as text.
+    pub fn tree_drag(&self, from: &Rc<App>, on: bool) {
+        *self.tree_drag.borrow_mut() = on.then(|| Rc::downgrade(from));
+        for app in self.windows.borrow().iter() {
+            app.set_drop_active(on);
+        }
     }
 
     /// A dragged tab was let go over `pane`. Recorded rather than moved: see [`Landing`].

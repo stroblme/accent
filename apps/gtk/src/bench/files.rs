@@ -716,6 +716,246 @@ pub(super) fn bench_transfer(app: &Rc<App>, rel: &str) {
     });
 }
 
+/// `ACCENT_BENCH_CARRY=<local vault>`, launched on a remote vault: rows carried between this window
+/// and one opened on the local vault (`fileops::carry_in`), as a drop from the other window's tree
+/// hands them over — down and up, a second time onto the names now taken (Cancel, then Replace),
+/// and with Shift, the source going to the trash here and on the host behind Delete Permanently?.
+/// Writes `carry/`, `back/` and `two.md` on the host and `carry/`, `one.bin` in the local vault.
+/// A real pointer drag between two windows needs a window manager: what the drag source and the
+/// drop targets answer is a real-session check.
+pub(super) fn bench_carry(app: &Rc<App>, local: &str) {
+    let (Some(vault), Some(ops)) = (app.vault().cloned(), app.ops().cloned()) else {
+        return bench_quit(app);
+    };
+    // Driven from the remote window: the local one it opens runs these hooks too, and waits.
+    if !vault.is_remote() {
+        return;
+    }
+    let shell = app.shell.upgrade().expect("a shell");
+    let gtk_app = app.window.application().and_downcast::<adw::Application>();
+    let (app, root) = (app.clone(), PathBuf::from(local));
+    glib::spawn_future_local(async move {
+        until(|| app.reconciled.get() && vault.list_dir("").is_ok()).await;
+        shell.open_vault(
+            gtk_app.as_ref().expect("an application"),
+            root.clone(),
+            None,
+        );
+        until(|| {
+            shell
+                .app_for(&root)
+                .is_some_and(|here| here.reconciled.get())
+        })
+        .await;
+        let here = shell.app_for(&root).expect("the local window");
+        let (here_ops, here_vault) = (here.ops().cloned().unwrap(), here.vault().cloned().unwrap());
+
+        for rel in ["carry", "back", "two.md"] {
+            let _ = vault.delete(rel);
+        }
+        let big: Vec<u8> = (0..4 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        vault.create_dir("carry/sub", true).unwrap();
+        vault.write_file("carry/one.bin", &big).unwrap();
+        vault.write_file("carry/sub/two.md", b"two\n").unwrap();
+        let here_size =
+            |rel: &str| std::fs::metadata(here_vault.root().join(rel)).map_or(0, |m| m.len());
+        let host_size = |rel: &str| vault.stat(rel).ok().flatten().map_or(0, |e| e.size);
+
+        // A drag out of this window's tree: every window's sheets go up, the other window's
+        // panes refuse the row, and its tree's vault label copies it in, down from the host.
+        let up = |a: &Rc<App>| {
+            a.panes
+                .borrow()
+                .iter()
+                .all(|p| p.drop.widget().is_some_and(|w| w.can_target()))
+        };
+        // A tab in the local window, for its bar to refuse the row over.
+        let note = here_vault.file_paths(false).unwrap_or_default();
+        let note = note
+            .iter()
+            .find(|rel| rel.ends_with(".md"))
+            .expect("a note");
+        here.open_path(note);
+        let pane = here.pane();
+        until(|| pane.tabs.selected_page().is_some()).await;
+        let page = pane.tabs.selected_page().expect("the note's tab");
+        let path = || boxed(&"carry".to_value());
+        shell.tree_drag(&app, true);
+        let refused = (
+            pane.drop
+                .emit_by_name::<gdk::DragAction>("motion", &[&10.0f64, &10.0f64]),
+            pane.drop
+                .emit_by_name::<bool>("drop", &[&path(), &10.0f64, &10.0f64]),
+            pane.bar
+                .emit_by_name::<gdk::DragAction>("extra-drag-value", &[&page, &path()]),
+            pane.bar
+                .emit_by_name::<bool>("extra-drag-drop", &[&page, &path()]),
+        );
+        println!(
+            "bench carry_sheets up remote={} local={} foreign_local={} foreign_remote={} \
+             refused={refused:?} tabs={}",
+            up(&app),
+            up(&here),
+            here.dragged_from().is_some(),
+            app.dragged_from().is_some(),
+            pane.tabs.n_pages(),
+        );
+        let said = here.toasted.get();
+        let label = root_move_target(&here).expect("the vault label's drop target");
+        let row = boxed(&gtk::StringObject::new("carry").to_value());
+        let took = label.emit_by_name::<bool>("drop", &[&row, &1.0f64, &1.0f64]);
+        shell.tree_drag(&app, false);
+        println!(
+            "bench carry_sheets down remote={} local={} foreign_local={} label_took={took}",
+            up(&app),
+            up(&here),
+            here.dragged_from().is_some()
+        );
+        let lines = lines_until(&here, || here.toasted.get() > said).await;
+        say_lines("carry_down", &lines);
+        println!(
+            "bench carry_down toast={:?} one={} two={}",
+            here.toasts.shown().first(),
+            here_size("carry/one.bin"),
+            here_size("carry/sub/two.md")
+        );
+
+        // Again onto the names now taken, as the drop hands them over: one question for the
+        // batch, Cancel copying nothing.
+        let carry =
+            |to: &Rc<fileops::Ops>, from: &Rc<fileops::Ops>, rel: &str, dir: &str, moving| {
+                fileops::carry_in(to, from, vec![rel.to_string()], dir, moving)
+            };
+        for answer in ["cancel", crate::dialogs::CONFIRM] {
+            let said = here.toasted.get();
+            let _ = std::fs::write(here_vault.root().join("carry/sub/two.md"), "edited\n");
+            carry(&here_ops, &ops, "carry", "", false);
+            let Some(dialog) = alert_on(&here).await else {
+                println!("bench carry_taken {answer} no question");
+                return bench_quit(&app);
+            };
+            println!(
+                "bench carry_taken {answer} {:?} {:?}",
+                dialog.heading().unwrap_or_default(),
+                dialog.body()
+            );
+            dialog.emit_by_name::<()>("response", &[&answer]);
+            dialog.close();
+            let lines =
+                lines_until(&here, || answer == "cancel" || here.toasted.get() > said).await;
+            glib::timeout_future(Duration::from_millis(500)).await;
+            println!(
+                "bench carry_taken {answer} toasts={} lines={} two={:?}",
+                here.toasted.get() - said,
+                lines.len(),
+                std::fs::read_to_string(here_vault.root().join("carry/sub/two.md")).ok()
+            );
+        }
+
+        // Up, from the local vault into a folder on the host.
+        vault.create_dir("back", true).unwrap();
+        let said = app.toasted.get();
+        carry(&ops, &here_ops, "carry", "back", false);
+        let lines = lines_until(&app, || app.toasted.get() > said).await;
+        say_lines("carry_up", &lines);
+        println!(
+            "bench carry_up toast={:?} one={} two={}",
+            app.toasts.shown().first(),
+            host_size("back/carry/one.bin"),
+            host_size("back/carry/sub/two.md")
+        );
+
+        // Shift from here: the local file goes to the trash once it is on the host.
+        let said = app.toasted.get();
+        carry(&ops, &here_ops, "carry/sub/two.md", "", true);
+        until(|| app.toasted.get() > said && !here_vault.root().join("carry/sub/two.md").exists())
+            .await;
+        println!(
+            "bench carry_move_up toast={:?} host={} here_left={} here_toast={:?}",
+            app.toasts.shown().first(),
+            host_size("two.md"),
+            here_vault.root().join("carry/sub/two.md").exists(),
+            here.toasts.shown().first()
+        );
+
+        // Shift from the host: its file goes for good, behind the question the host's Delete asks.
+        let said = here.toasted.get();
+        carry(&here_ops, &ops, "carry/one.bin", "", true);
+        let Some(dialog) = alert_on(&app).await else {
+            println!("bench carry_move_down no question");
+            return bench_quit(&app);
+        };
+        println!(
+            "bench carry_move_down here_toast={} {:?} {:?}",
+            here.toasted.get() > said,
+            dialog.heading().unwrap_or_default(),
+            dialog.body()
+        );
+        dialog.emit_by_name::<()>("response", &[&crate::dialogs::CONFIRM]);
+        dialog.close();
+        until(|| !vault.exists("carry/one.bin")).await;
+        println!(
+            "bench carry_move_down here={} host_left={}",
+            here_size("one.bin"),
+            vault.exists("carry/one.bin")
+        );
+
+        for rel in ["carry", "back", "two.md"] {
+            let _ = vault.delete(rel);
+        }
+        let _ = std::fs::remove_dir_all(here_vault.root().join("carry"));
+        let _ = std::fs::remove_file(here_vault.root().join("one.bin"));
+        bench_quit(&app);
+    });
+}
+
+/// `inner` as a drop target's `drop` signal takes a dropped value: boxed in a `GValue` of its own.
+fn boxed(inner: &glib::Value) -> glib::Value {
+    use glib::translate::{FromGlib, ToGlibPtr, ToGlibPtrMut};
+    // SAFETY: `outer` is made of the boxed type `G_TYPE_VALUE`, which copies `inner` in.
+    unsafe {
+        let mut outer =
+            glib::Value::from_type(glib::Type::from_glib(glib::gobject_ffi::g_value_get_type()));
+        let from: *const glib::gobject_ffi::GValue = inner.to_glib_none().0;
+        glib::gobject_ffi::g_value_set_boxed(
+            outer.to_glib_none_mut().0,
+            from as glib::ffi::gconstpointer,
+        );
+        outer
+    }
+}
+
+/// The drop target on the vault label of `app`'s tree that takes rows rather than files from
+/// another application.
+fn root_move_target(app: &Rc<App>) -> Option<gtk::DropTarget> {
+    let label = app.tree.get()?.widget().first_child()?;
+    label
+        .observe_controllers()
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c.downcast::<gtk::DropTarget>().ok())
+        .find(|t| {
+            t.formats()
+                .is_some_and(|f| f.contains_type(gtk::StringObject::static_type()))
+        })
+}
+
+/// The alert `app`'s window puts up within a minute.
+async fn alert_on(app: &Rc<App>) -> Option<adw::AlertDialog> {
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_secs(60) {
+        let dialog = app
+            .window
+            .visible_dialog()
+            .and_downcast::<adw::AlertDialog>();
+        if dialog.is_some() {
+            return dialog;
+        }
+        glib::timeout_future(Duration::from_millis(100)).await;
+    }
+    None
+}
+
 /// Every line the status bar's busy slot showed until `done`, four minutes at most, with
 /// when each came in ms.
 async fn lines_until(app: &Rc<App>, done: impl Fn() -> bool) -> Vec<(u128, String)> {
