@@ -3,7 +3,7 @@
 //! its closer puts the closer on a line of its own; a closer typed on a blank line goes back out to
 //! the level its block opened from. Comments and strings are the language spec's own context
 //! classes, so `def f():  # x` opens a block and `x = "("` does not. Any other Return is
-//! GtkSourceView's, the line's indent copied.
+//! GtkSourceView's, the line's indent copied. Insert Line Below follows the same rule.
 //!
 //! A key handler rather than a `GtkSourceIndenter`: sourceview5-rs frees the iter GtkSourceView
 //! hands its `indent` (ISSUES.md).
@@ -53,6 +53,21 @@ pub(crate) fn on_key(
     }
     view.scroll_mark_onscreen(&buffer.get_insert());
     glib::Propagation::Stop
+}
+
+/// The indent of a line opened below the one `end` ends (Insert Line Below): that line's own, one
+/// level deeper where its code ends in an opener and the view has a language.
+pub(super) fn below(view: &sourceview5::View, end: &gtk::TextIter) -> String {
+    let buffer = end.buffer();
+    let indent = leading_indent(&line_prefix(&buffer, end)).to_string();
+    let opens = buffer
+        .downcast_ref::<sourceview5::Buffer>()
+        .filter(|source| source.language().is_some())
+        .is_some_and(|source| opened(source, end).is_some());
+    match opens {
+        true => indent + &unit(view),
+        false => indent,
+    }
 }
 
 /// One level deeper after an opener, the closer right after the caret going to a line of its own.

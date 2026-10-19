@@ -2,7 +2,7 @@
 //! Line commands apply at every caret; plain-text middle-click paste avoids
 //! carrying buffer tags. Templates use snippet Tab stops.
 
-use super::{Tab, caret, line_end};
+use super::{Tab, caret, indent, line_end};
 use crate::{comment, multicaret};
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
@@ -156,12 +156,10 @@ fn copy_down(buffer: &gtk::TextBuffer, first: i32, last: i32) {
 }
 
 /// Open a line under `line` with its indent, and answer where the caret goes: at the end of it.
-fn open_below(buffer: &gtk::TextBuffer, line: i32) -> gtk::TextIter {
+fn open_below(view: &sourceview5::View, buffer: &gtk::TextBuffer, line: i32) -> gtk::TextIter {
     // Before the line's own newline, or at the end of the buffer on a last line that has none.
     let mut at = line_end(buffer, line);
-    let mut start = at;
-    start.set_line_offset(0);
-    let indent = leading_indent(&buffer.text(&start, &at, true)).to_string();
+    let indent = indent::below(view, &at);
     buffer.insert(&mut at, &format!("\n{indent}"));
     at
 }
@@ -206,22 +204,23 @@ pub(crate) fn delete_line(view: &sourceview5::View) {
     buffer.end_user_action();
 }
 
-/// Insert an equally indented line below, moving the caret there without
-/// continuing list markers; this also lets users leave a list. At a column,
-/// insert below each covered run and move its carets onto the new line.
+/// Insert a line below as indented as this one, or one level deeper after an opener in code
+/// ([`indent::below`]), moving the caret there without continuing list markers; this also lets
+/// users leave a list. At a column, insert below each covered run and move its carets onto the
+/// new line.
 pub(crate) fn newline_below(view: &sourceview5::View) {
     if !view.is_editable() {
         return;
     }
     if let Some(column) = column(view) {
         return column.each_block(&covered(column), |buffer, _, last| {
-            Some(open_below(buffer, last))
+            Some(open_below(view, buffer, last))
         });
     }
     let buffer = view.buffer();
     // One user action, so one Ctrl+Z takes the whole line back.
     buffer.begin_user_action();
-    let at = open_below(&buffer, caret(&buffer).line());
+    let at = open_below(view, &buffer, caret(&buffer).line());
     buffer.end_user_action();
     buffer.place_cursor(&at);
     view.scroll_mark_onscreen(&buffer.get_insert());

@@ -117,6 +117,16 @@ bench indent_closer "fn f() {\n    a();\n}" (2, 1) Stop
 bench indent_closer_empty_block "    if x {\n    }" (1, 5) Stop
 bench indent_closer_already_out "fn f() {\n" (1, 0) Proceed
 bench indent_tabs "\tg(\n\t\t" (1, 2) Stop
+bench indent_line_below "def f():  # x\n    " (1, 4)
+bench pair_open "f()" (0, 2) Stop
+bench pair_step_over "f()" (0, 3) Stop
+bench pair_backspace "g" (0, 1) Stop
+bench pair_before_word "x" (0, 0) Proceed
+bench pair_comment "// a" (0, 4) Proceed
+bench pair_string "let s = \"a" (0, 10) Proceed
+bench pair_step_over_after_string "f(\"a\")" (0, 6) Stop
+bench pair_wrap "[a]" (0, 2) Stop
+bench pair_quote "x" (0, 1) Proceed
 bench occur_next_by_hand [(2, 5), (6, 9)]
 bench occur_all_by_hand [(2, 5), (6, 9), (15, 18), (19, 22)]
 bench occur_next_word [(2, 5), (19, 22)]
