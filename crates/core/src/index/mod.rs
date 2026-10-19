@@ -97,6 +97,10 @@ pub struct ReconcileStats {
     /// worker reports each as a `FileChanged` event of its own.
     #[serde(skip)]
     pub changed: Vec<String>,
+    /// The folders git ignores that the walk found and did not enter, vault-relative: where the
+    /// files it leaves out are ([`crate::walk::ignored_files`]). Not serialized, as `changed`.
+    #[serde(skip)]
+    pub ignored_dirs: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

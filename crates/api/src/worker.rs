@@ -15,9 +15,10 @@ use crate::Result;
 
 use accent_core::index::{Change, Index};
 use accent_core::path::parent_dir;
-use accent_core::walk::{FileKind, ScanOptions};
+use accent_core::walk::{self, FileKind, ScanOptions};
 use accent_core::watch::{VaultEvent, Watcher};
 
+use crate::local::Ignored;
 use crate::paths::{conflict_original_rel, conflict_pairs};
 use crate::{Etag, Event};
 
@@ -28,6 +29,7 @@ use crate::{Etag, Event};
 /// [`Msg::Rescan`] on foregrounding instead. `stop` holds [`RUN`], [`PAUSE`] or
 /// [`CLOSE`] and interrupts scans while the inbox waits between batches.
 /// See [`Worker::reconcile`].
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn(
     root: PathBuf,
     index: Index,
@@ -36,6 +38,7 @@ pub(crate) fn spawn(
     events: Sender<Event>,
     watch: bool,
     stop: Arc<AtomicU8>,
+    ignored: Arc<Ignored>,
 ) -> Result<JoinHandle<()>> {
     let worker = Worker {
         root,
@@ -56,6 +59,7 @@ pub(crate) fn spawn(
         paused: false,
         next_walk: Instant::now(),
         due: None,
+        ignored,
     };
     std::thread::Builder::new()
         .name("accent-vault".to_string())
@@ -170,6 +174,8 @@ struct Worker {
     /// Common ancestor of pending scan requests, queued as [`Msg::Rescan`]
     /// at [`Worker::next_walk`].
     due: Option<String>,
+    /// Told the ignored folders each walk finds, which are all Go to File's ignored notes walk.
+    ignored: Arc<Ignored>,
 }
 
 /// What one batch has accumulated: the directories whose children changed, and the paths it took
@@ -557,6 +563,10 @@ impl Worker {
         self.rebuild_watcher();
         match stats {
             Ok(mut stats) => {
+                if !stats.stopped {
+                    let found = std::mem::take(&mut stats.ignored_dirs);
+                    self.ignored.found(&stats.dir, found);
+                }
                 // What the walk took in before the watcher's news of it could arrive, which then
                 // reads as no change (`Worker::unchanged`): in an unwatched vault, an open tab
                 // hears of it here or never.
@@ -829,6 +839,11 @@ impl Worker {
             // `node_modules` beside the notes: its folder's listing changed all the same.
             Ok(Change::Ignored) => {
                 b.dirs.insert(parent_dir(rel).to_string());
+                if self.root.join(rel).is_dir()
+                    && walk::unindexed(&self.root, rel) == Some(walk::Unindexed::Ignored)
+                {
+                    self.ignored.add(rel);
+                }
             }
             Err(e) => self.fail(&format!("indexing {rel}"), e),
         }

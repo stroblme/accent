@@ -1,10 +1,12 @@
 //! The `worker` module's tests.
 
 use super::{Msg, RUN, spawn};
+use crate::local::Ignored;
 use crate::tests::*;
 use crate::{Etag, Event, VaultConfig, fs};
 use accent_core::index::Index;
 use accent_core::watch::VaultEvent;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU8;
 use std::sync::mpsc::{RecvTimeoutError, channel};
@@ -235,6 +237,24 @@ fn news_naming_an_alias_is_its_rows() {
         !rows.iter().any(|p| p.starts_with("d/")),
         "an alias became a row: {rows:?}"
     );
+}
+
+/// Go to File's ignored notes are walked for in the folders the walk found, and a folder git
+/// ignores made since joins them. Depends on real inotify events.
+#[test]
+fn an_ignored_folder_made_since_the_walk_is_listed() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join(".gitignore"), "build/\nout/\n").unwrap();
+    std::fs::create_dir(root.path().join("build")).unwrap();
+    std::fs::write(root.path().join("build/a.md"), "a\n").unwrap();
+    let f = Fixture::open_dir(root, VaultConfig::default());
+    assert_eq!(f.vault.ignored_notes(true).unwrap(), ["build/a.md"]);
+
+    f.write("out/b.md", "b\n");
+    assert!(poll_until(
+        || f.vault.ignored_notes(true).unwrap() == ["build/a.md", "out/b.md"],
+        BUDGET
+    ));
 }
 
 /// Verify watches include subdirectories already present at vault open,
@@ -508,6 +528,7 @@ fn a_worker_that_panics_says_it_is_gone() {
         events,
         false,
         Arc::new(AtomicU8::new(RUN)),
+        Arc::new(Ignored::new(PathBuf::new())),
     )
     .unwrap();
     assert!(wait_for(&event_rx, |e| matches!(e, Event::Reconciled(_)), BUDGET).is_some());
@@ -546,6 +567,7 @@ fn an_own_save_stays_quiet_behind_a_late_echo_of_another_change() {
         events,
         false,
         Arc::new(AtomicU8::new(RUN)),
+        Arc::new(Ignored::new(PathBuf::new())),
     )
     .unwrap();
     assert!(wait_for(&event_rx, |e| matches!(e, Event::Reconciled(_)), BUDGET).is_some());
@@ -1008,6 +1030,7 @@ fn saves_of_a_gitignore_inside_the_floor_are_one_walk() {
         events,
         false,
         Arc::new(AtomicU8::new(RUN)),
+        Arc::new(Ignored::new(PathBuf::new())),
     )
     .unwrap();
     assert!(wait_for(&event_rx, |e| matches!(e, Event::Reconciled(_)), BUDGET).is_some());
@@ -1070,6 +1093,7 @@ fn a_write_just_before_the_watch_set_changes_is_still_indexed() {
         events,
         true,
         Arc::new(AtomicU8::new(RUN)),
+        Arc::new(Ignored::new(PathBuf::new())),
     )
     .unwrap();
     assert!(wait_for(&event_rx, |e| matches!(e, Event::Reconciled(_)), BUDGET).is_some());
@@ -1110,6 +1134,7 @@ fn a_watched_unindexed_folder_is_relisted_and_never_indexed() {
         events,
         true,
         Arc::new(AtomicU8::new(RUN)),
+        Arc::new(Ignored::new(PathBuf::new())),
     )
     .unwrap();
     assert!(wait_for(&event_rx, |e| matches!(e, Event::Reconciled(_)), BUDGET).is_some());
@@ -1191,6 +1216,7 @@ fn the_inbox_is_read_between_the_batches_of_a_walk() {
         events,
         true,
         Arc::new(AtomicU8::new(RUN)),
+        Arc::new(Ignored::new(PathBuf::new())),
     )
     .unwrap();
 

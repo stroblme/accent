@@ -2,7 +2,7 @@
 //! notes in Go to File and link completion, and resolve targets outside the
 //! index before declaring them missing.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -57,6 +57,9 @@ impl Listing {
 pub(crate) struct Ignored {
     root: PathBuf,
     listing: Mutex<Option<Arc<Listing>>>,
+    /// The ignored folders the vault's walks found, the only ones a listing walks; `None` until
+    /// the first walk ends, when a listing walks the vault to find them.
+    dirs: Mutex<Option<BTreeSet<String>>>,
 }
 
 impl Ignored {
@@ -64,6 +67,23 @@ impl Ignored {
         Ignored {
             root,
             listing: Mutex::new(None),
+            dirs: Mutex::new(None),
+        }
+    }
+
+    /// What a walk of folder `dir` (`""` for the vault) found: the ignored folders below it. The
+    /// folder itself is not the walk's to report.
+    pub(crate) fn found(&self, dir: &str, found: Vec<String>) {
+        let mut dirs = locked(&self.dirs);
+        let dirs = dirs.get_or_insert_with(BTreeSet::new);
+        dirs.retain(|d| !(dir.is_empty() || d.starts_with(&format!("{dir}/"))));
+        dirs.extend(found);
+    }
+
+    /// An ignored folder made since the last walk.
+    pub(crate) fn add(&self, dir: &str) {
+        if let Some(dirs) = locked(&self.dirs).as_mut() {
+            dirs.insert(dir.to_string());
         }
     }
 
@@ -73,7 +93,11 @@ impl Ignored {
         if !fresh && let Some(listing) = locked(&self.listing).as_ref() {
             return listing.clone();
         }
-        let listing = Arc::new(Listing::new(walk::ignored_files(&self.root)));
+        let dirs: Option<Vec<String>> = locked(&self.dirs)
+            .as_ref()
+            .map(|dirs| dirs.iter().cloned().collect());
+        let files = walk::ignored_files(&self.root, dirs.as_deref());
+        let listing = Arc::new(Listing::new(files));
         *locked(&self.listing) = Some(listing.clone());
         listing
     }

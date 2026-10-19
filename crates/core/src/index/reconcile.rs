@@ -138,6 +138,15 @@ impl Index {
             stats.stopped = true;
             return Ok(stats);
         }
+        stats.ignored_dirs = scan
+            .skipped
+            .iter()
+            .filter(|s| s.reason == walk::SkipReason::GitIgnored)
+            .filter_map(|s| {
+                let rel = s.path.strip_prefix(root).ok()?;
+                Some(rel.to_string_lossy().into_owned())
+            })
+            .collect();
         on_progress(
             self,
             Progress {
