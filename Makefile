@@ -16,6 +16,8 @@ PREFIX    ?= $(HOME)/.local
 BINDIR    ?= $(PREFIX)/bin
 LIBDIR    ?= $(PREFIX)/lib
 DATADIR   ?= $(PREFIX)/share
+# Not empty on macOS, which builds and installs a little differently (`gtk`, `install`).
+DARWIN    := $(filter Darwin,$(shell uname -s))
 
 # libpdfium is a 7 MB binary, so it is not in git: `make pdfium` fetches the matching build from
 # bblanchon/pdfium-binaries. Bump PDFIUM_BUILD and every checksum below it together; the release
@@ -24,7 +26,7 @@ PDFIUM_BUILD  := 8076
 PDFIUM_RELEASE := https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F$(PDFIUM_BUILD)
 # The desktop build follows the machine rather than assuming x86-64 Linux.
 PDFIUM_ARCH   := $(if $(filter aarch64 arm64,$(shell uname -m)),arm64,x64)
-PDFIUM_OS     := $(if $(filter Darwin,$(shell uname -s)),mac,linux)
+PDFIUM_OS     := $(if $(DARWIN),mac,linux)
 PDFIUM_URL    := $(PDFIUM_RELEASE)/pdfium-$(PDFIUM_OS)-$(PDFIUM_ARCH).tgz
 PDFIUM_SHA256_linux-x64   := d9d67bc40af03aef4fe28a60b19b1086f28ace019c8c9caf19cb7fe3d14ceca3
 PDFIUM_SHA256_linux-arm64 := d7247b33ae5545615a5e877235dd97afc879e3a8805689684f528cae3339d352
@@ -98,9 +100,15 @@ all: core gtk
 core:
 	$(CARGO) build $(CARGO_PROFILE_FLAG)
 
+# macOS packages no WebKitGTK 6.0, and MacPorts on macOS 12 only VTE 0.76: there the app takes
+# the default features whose library pkg-config finds (apps/gtk/Cargo.toml).
+GTK_FEATURES = $(if $(DARWIN),--no-default-features \
+	$(if $(shell pkg-config --exists webkitgtk-6.0 && echo y),--features webkit) \
+	$(if $(shell pkg-config --atleast-version=0.78 vte-2.91-gtk4 && echo y),--features termprops))
+
 ## gtk: build the desktop app (needs gtk4, libadwaita, gtksourceview5, webkitgtk-6.0, libspelling, vte-2.91-gtk4 dev packages)
 gtk:
-	$(CARGO) build $(CARGO_PROFILE_FLAG) -p accent
+	$(CARGO) build $(CARGO_PROFILE_FLAG) -p accent $(GTK_FEATURES)
 
 ## gtk-bench: build the desktop app with the ACCENT_BENCH_* drills in, which a shipped build leaves out
 #
@@ -115,9 +123,10 @@ gtk-bench:
 # gtk4 >= 4.18), and Rust's is the workspace's `rust-version` in Cargo.toml.
 # An optional item only warns: the app runs without it and lacks the feature it names.
 RUST_MIN := 1.95
-# vte 0.76 builds without the default `termprops` feature (apps/gtk/Cargo.toml).
-GTK_LIBS := gtk4:4.18 libadwaita-1:1.8 gtksourceview-5:5.18 webkitgtk-6.0:2.40 \
-            vte-2.91-gtk4:0.78 libspelling-1:0.1
+# On macOS WebKitGTK and VTE 0.78 are optional, as `gtk` builds without what they are for there.
+GTK_LIBS := gtk4:4.18 libadwaita-1:1.8 gtksourceview-5:5.18 \
+            $(if $(DARWIN),vte-2.91-gtk4:0.76,webkitgtk-6.0:2.40 vte-2.91-gtk4:0.78) libspelling-1:0.1
+OPTIONAL_LIBS := $(if $(DARWIN),webkitgtk-6.0:2.40:webkit vte-2.91-gtk4:0.78:termprops)
 requirements:
 	@missing=0; \
 	for tool in cargo cc pkg-config glib-compile-resources; do \
@@ -130,6 +139,11 @@ requirements:
 		name=$${lib%:*} min=$${lib#*:}; \
 		pkg-config --atleast-version=$$min $$name 2>/dev/null || { missing=1; \
 			echo "missing: $$name >= $$min, found $$(pkg-config --modversion $$name 2>/dev/null || echo none)"; }; \
+	done; \
+	for lib in $(OPTIONAL_LIBS); do \
+		name=$${lib%%:*} min=$${lib#*:}; min=$${min%:*}; \
+		pkg-config --atleast-version=$$min $$name 2>/dev/null || \
+			echo "optional: $$name >= $$min, for the $${lib##*:} feature (apps/gtk/Cargo.toml)"; \
 	done; \
 	test -f $(PDFIUM_LIB) || echo "optional: libpdfium, for the PDF tab: run make pdfium"; \
 	command -v git >/dev/null || echo "optional: git, for the Git pane"; \
@@ -406,29 +420,39 @@ server:
 
 ## install: install into ~/.local (no sudo); override PREFIX for a system-wide install
 install: all
-	install -Dm755 $(TARGET_DIR)/accent      $(DESTDIR)$(BINDIR)/accent
-	install -Dm755 $(TARGET_DIR)/accent-cli  $(DESTDIR)$(BINDIR)/accent-cli
-	install -Dm644 data/$(APP_ID).desktop \
+	@# Each folder made first: macOS's BSD install has no -D.
+	mkdir -p $(DESTDIR)$(BINDIR) $(DESTDIR)$(DATADIR)/icons/hicolor/scalable/apps \
+		$(DESTDIR)$(DATADIR)/icons/hicolor/symbolic/apps
+	install -m755 $(TARGET_DIR)/accent      $(DESTDIR)$(BINDIR)/accent
+	install -m755 $(TARGET_DIR)/accent-cli  $(DESTDIR)$(BINDIR)/accent-cli
+ifndef DARWIN
+	@# A desktop entry and AppStream data, which nothing on macOS reads.
+	mkdir -p $(DESTDIR)$(DATADIR)/applications $(DESTDIR)$(DATADIR)/metainfo
+	install -m644 data/$(APP_ID).desktop \
 		$(DESTDIR)$(DATADIR)/applications/$(APP_ID).desktop
-	install -Dm644 data/$(APP_ID).metainfo.xml \
+	install -m644 data/$(APP_ID).metainfo.xml \
 		$(DESTDIR)$(DATADIR)/metainfo/$(APP_ID).metainfo.xml
-	install -Dm644 data/icons/hicolor/scalable/apps/$(APP_ID).svg \
+endif
+	install -m644 data/icons/hicolor/scalable/apps/$(APP_ID).svg \
 		$(DESTDIR)$(DATADIR)/icons/hicolor/scalable/apps/$(APP_ID).svg
-	install -Dm644 data/icons/hicolor/symbolic/apps/$(APP_ID)-symbolic.svg \
+	install -m644 data/icons/hicolor/symbolic/apps/$(APP_ID)-symbolic.svg \
 		$(DESTDIR)$(DATADIR)/icons/hicolor/symbolic/apps/$(APP_ID)-symbolic.svg
 	@# Best effort: `make pdfium` may never have run, and the PDF tab degrades to a status page
 	@# without the library. $(LIBDIR)/accent is `../lib/accent` seen from the binary in $(BINDIR),
 	@# which is the second place crates/core/src/pdf.rs looks.
-	-@test -f $(PDFIUM_LIB) && install -Dm755 $(PDFIUM_LIB) $(DESTDIR)$(LIBDIR)/accent/libpdfium.so
+	-@test -f $(PDFIUM_LIB) && mkdir -p $(DESTDIR)$(LIBDIR)/accent && \
+		install -m755 $(PDFIUM_LIB) $(DESTDIR)$(LIBDIR)/accent/$(notdir $(PDFIUM_LIB))
 	@# Also best effort: `make server` needs a musl toolchain, and everything but opening a vault
 	@# on another machine works without it. Same `../lib/accent` the app looks in for libpdfium.
 	-@for arch in $(SERVER_ARCHES); do \
-		test -f $(call SERVER_BIN,$$arch) && \
-			install -Dm755 $(call SERVER_BIN,$$arch) $(DESTDIR)$(LIBDIR)/accent/accent-cli-$$arch; \
+		test -f $(call SERVER_BIN,$$arch) && mkdir -p $(DESTDIR)$(LIBDIR)/accent && \
+			install -m755 $(call SERVER_BIN,$$arch) $(DESTDIR)$(LIBDIR)/accent/accent-cli-$$arch; \
 	done; true
+ifndef DARWIN
 	@# Best effort: without these the launcher and icon can take a re-login to appear.
 	-@update-desktop-database $(DESTDIR)$(DATADIR)/applications 2>/dev/null
 	-@gtk-update-icon-cache -qtf $(DESTDIR)$(DATADIR)/icons/hicolor 2>/dev/null
+endif
 	@echo "Installed to $(DESTDIR)$(PREFIX)"
 	@case ":$$PATH:" in *":$(BINDIR):"*) ;; \
 		*) echo "Note: $(BINDIR) is not in your PATH." ;; esac
@@ -440,7 +464,7 @@ uninstall:
 	rm -f $(DESTDIR)$(DATADIR)/metainfo/$(APP_ID).metainfo.xml
 	rm -f $(DESTDIR)$(DATADIR)/icons/hicolor/scalable/apps/$(APP_ID).svg
 	rm -f $(DESTDIR)$(DATADIR)/icons/hicolor/symbolic/apps/$(APP_ID)-symbolic.svg
-	rm -f $(DESTDIR)$(LIBDIR)/accent/libpdfium.so
+	rm -f $(DESTDIR)$(LIBDIR)/accent/$(notdir $(PDFIUM_LIB))
 	rm -f $(foreach arch,$(SERVER_ARCHES),$(DESTDIR)$(LIBDIR)/accent/accent-cli-$(arch))
 	-@rmdir $(DESTDIR)$(LIBDIR)/accent 2>/dev/null
 	-@update-desktop-database $(DESTDIR)$(DATADIR)/applications 2>/dev/null
