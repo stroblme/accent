@@ -95,6 +95,12 @@ impl Cache {
             .map(|(_, prim)| prim.cell())
     }
 
+    /// Where label `index` was painted, in page units: the upright box round its turned block.
+    pub fn label_box(&self, index: usize) -> Option<Rect> {
+        let b = *self.boxes.borrow().get(&index)?;
+        accent_drawio::geom::bounds_of(accent_drawio::geom::corners(&b.block, b.anchor, b.rotation))
+    }
+
     /// Keep where label `index` was painted: `block` in content coordinates, turned about the
     /// label's `anchor` (page units).
     fn painted(&self, index: usize, frame: &Frame, block: Rect, anchor: Point, rotation: f64) {
