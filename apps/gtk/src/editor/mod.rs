@@ -543,13 +543,13 @@ impl Tab {
         self.save.edits.set(self.save.edits.get() + 1);
         self.replaced.set(self.replaced.get() + 1);
         // Replacing the text moves every mark to line 0, where the old text was deleted.
-        let breakpoints = breakpoints::lines(self);
+        let breakpoints = breakpoints::each_line(self);
         let paused = self.execution.borrow().clone();
         let paused = paused.map(|mark| (self.buffer.iter_at_mark(&mark).line(), mark));
         self.loading.set(true);
         self.buffer.set_text(text);
         self.loading.set(false);
-        breakpoints::place(self, &breakpoints);
+        breakpoints::put_back(self, &breakpoints);
         if let Some((line, mark)) = paused {
             let at = self.buffer.iter_at_line(line);
             self.buffer
