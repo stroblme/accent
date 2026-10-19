@@ -1614,6 +1614,9 @@ impl App {
         if let Some(action) = self.window.lookup_action("show-hidden-files") {
             action.change_state(&config.show_hidden.to_variant());
         }
+        if let Some(action) = self.window.lookup_action("diagram-grid") {
+            action.change_state(&config.diagram.grid.to_variant());
+        }
         // Switching to or away from Solarized does not change the system's dark state, so the
         // notify handler that usually restyles never fires here.
         if changed.theme {

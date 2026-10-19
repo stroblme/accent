@@ -274,6 +274,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.diagram-to-front", "Bring to Front", &[]),
     ("win.diagram-to-back", "Send to Back", &[]),
     ("win.diagram-invert", "Invert Diagram Colours", &[]),
+    ("win.diagram-grid", "Show Grid", &[]),
     ("win.diagram-select", "Select and Move", &[]),
     ("win.diagram-rect", "Add Rectangle", &[]),
     ("win.diagram-ellipse", "Add Ellipse", &[]),
@@ -1102,14 +1103,19 @@ fn fill_captured(controller: &gtk::ShortcutController, bindings: &[(&str, String
 pub fn install_actions(app: &Rc<App>) {
     for (full, _, _) in ACTIONS {
         if let Some(name) = full.strip_prefix("win.") {
-            // Show Hidden Files carries its value, so a menu draws it as a check item. Activating
-            // it runs the handler below like any other; the value follows the preference in
-            // `App::apply_config`.
+            // Show Hidden Files and Show Grid carry their values, so a menu draws them as check
+            // items. Activating one runs the handler below like any other; the value follows the
+            // preference in `App::apply_config`.
             let action = match name {
                 "show-hidden-files" => gio::SimpleAction::new_stateful(
                     name,
                     None,
                     &app.config.borrow().show_hidden.to_variant(),
+                ),
+                "diagram-grid" => gio::SimpleAction::new_stateful(
+                    name,
+                    None,
+                    &app.config.borrow().diagram.grid.to_variant(),
                 ),
                 _ => gio::SimpleAction::new(name, None),
             };
@@ -1288,7 +1294,8 @@ pub fn tab_menu() -> gio::Menu {
 /// Fill the shared tab context menu for the page about to show it.
 ///
 /// `file` enables vault-only Rename and Trash; `movable` enables opening in another window.
-/// `pinned` selects Pin or Unpin, and `prints` supplies supported print/export formats.
+/// `pinned` selects Pin or Unpin, and `prints`, the page's kind, supplies supported
+/// print/export formats and a diagram's Show Grid.
 /// Split leads; Reveal and exports have separate sections because their effects differ.
 ///
 /// Update the existing model because AdwTabView and its popover retain it across pages
@@ -1337,6 +1344,7 @@ pub fn fill_tab_menu(
         Some("win.reveal-in-sidebar"),
     );
     menu.append_section(None, &reveal);
+    let diagram = prints == Some(Kind::Diagram);
     let prints = print_actions(prints);
     if !prints.is_empty() {
         let section = gio::Menu::new();
@@ -1344,6 +1352,11 @@ pub fn fill_tab_menu(
             section.append(Some(label_of(action)), Some(action));
         }
         menu.append_section(None, &section);
+    }
+    if diagram {
+        let view = gio::Menu::new();
+        view.append(Some(label_of("win.diagram-grid")), Some("win.diagram-grid"));
+        menu.append_section(None, &view);
     }
     if file {
         // The tree's own arrangement, which is what "tree rows and tabs share the shape" means:
@@ -1507,6 +1520,7 @@ mod tests {
             "win.export-html",
             "win.export-png",
             "win.export-svg",
+            "win.diagram-grid",
         ] {
             assert!(
                 ACTIONS.iter().any(|(name, _, _)| *name == action),
@@ -1693,7 +1707,8 @@ mod tests {
     }
 
     /// A note is printed and exported three ways, a PDF two and a diagram four, right after Reveal
-    /// in Sidebar; a shell, a comparison or any other tab is offered none.
+    /// in Sidebar, a diagram's Show Grid after them; a shell, a comparison or any other tab is
+    /// offered none.
     #[test]
     fn the_tab_menu_prints_what_can_be_printed() {
         let after_reveal = |prints| {
@@ -1718,10 +1733,10 @@ mod tests {
             [print, pdf, html, rename, trash]
         );
         assert_eq!(after_reveal(Some(Kind::Pdf)), [print, pdf, rename, trash]);
-        let (png, svg) = ("win.export-png", "win.export-svg");
+        let (png, svg, grid) = ("win.export-png", "win.export-svg", "win.diagram-grid");
         assert_eq!(
             after_reveal(Some(Kind::Diagram)),
-            [print, pdf, png, svg, rename, trash]
+            [print, pdf, png, svg, grid, rename, trash]
         );
         assert_eq!(after_reveal(None), [rename, trash]);
     }

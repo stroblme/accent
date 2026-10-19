@@ -263,6 +263,14 @@ impl App {
             "diagram-to-front" => tab.reorder(accent_drawio::ZOrder::ToFront),
             "diagram-to-back" => tab.reorder(accent_drawio::ZOrder::ToBack),
             "diagram-invert" => tab.toggle_invert(),
+            // A preference, as Show Hidden Files is: every diagram and every window follow it.
+            "diagram-grid" => {
+                {
+                    let mut config = self.config.borrow_mut();
+                    config.diagram.grid = !config.diagram.grid;
+                }
+                self.config_changed();
+            }
             "diagram-select" => self.diagram_tool(Tool::Select),
             "diagram-rect" => self.diagram_tool(Tool::Rect),
             "diagram-ellipse" => self.diagram_tool(Tool::Ellipse),
