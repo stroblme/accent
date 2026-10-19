@@ -404,6 +404,7 @@ impl App {
                 .unwrap_or_default(),
             breakpoints: self.debugger.saved(self),
             watches: self.debugger.watches(),
+            exceptions: self.debugger.exceptions(),
         };
         match self.restored.get() {
             true => session,
@@ -714,8 +715,7 @@ impl App {
         let allowed = session.web_images.iter().cloned();
         self.web_images.borrow_mut().extend(allowed);
         // And the breakpoints, which a tab is opened with.
-        self.debugger
-            .restore(&session.breakpoints, &session.watches);
+        self.debugger.restore(session);
         if let Some(layout) = session.panes() {
             self.restore_panes(layout, session);
         }
@@ -1156,6 +1156,9 @@ fn unrestored(mut stored: Session, now: Session) -> Session {
         if !stored.watches.contains(&expression) {
             stored.watches.push(expression);
         }
+    }
+    if !now.exceptions.is_empty() {
+        stored.exceptions = now.exceptions;
     }
     for key in now.web_images {
         if !stored.web_images.contains(&key) {

@@ -507,6 +507,19 @@ pub struct Session {
     pub breakpoints: BTreeMap<String, Vec<u32>>,
     /// The expressions the debugger's Watch section evaluates at each stop, in its order.
     pub watches: Vec<String>,
+    /// The exceptions the debug adapter last offered to stop at, as the reader set them.
+    pub exceptions: Vec<ExceptionFilter>,
+}
+
+/// A kind of exception a debugged program can stop at, as its adapter names it, and whether it
+/// does.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExceptionFilter {
+    /// The adapter's id for it.
+    pub filter: String,
+    pub label: String,
+    pub description: Option<String>,
+    pub on: bool,
 }
 
 impl Default for Session {
@@ -531,6 +544,7 @@ impl Default for Session {
             compared: BTreeMap::new(),
             breakpoints: BTreeMap::new(),
             watches: Vec::new(),
+            exceptions: Vec::new(),
         }
     }
 }
@@ -1619,6 +1633,12 @@ daily_dir = "Daily"
             )]),
             breakpoints: BTreeMap::from([("run.py".to_string(), vec![0, 7])]),
             watches: vec!["len(items)".to_string()],
+            exceptions: vec![ExceptionFilter {
+                filter: "raised".to_string(),
+                label: "Raised Exceptions".to_string(),
+                description: None,
+                on: true,
+            }],
         };
         with_xdg(&state, || {
             assert_eq!(Session::load(&vault).open, Vec::<String>::new());
@@ -1647,6 +1667,7 @@ daily_dir = "Daily"
             assert_eq!(back.compared, s.compared);
             assert_eq!(back.breakpoints, s.breakpoints);
             assert_eq!(back.watches, s.watches);
+            assert_eq!(back.exceptions, s.exceptions);
 
             // A terminal session's key is no path: it hashes as given, as an `ssh://` one does.
             let named = Path::new("terminal://dev");

@@ -438,6 +438,13 @@ impl Sidebar {
         }
     }
 
+    /// The switches atop Breakpoints: the exceptions the program can stop at.
+    pub fn set_debug_exceptions(&self, filters: &[accent_api::debug::ExceptionFilter]) {
+        if let Some(debug) = &self.code.debug {
+            debug.set_exceptions(filters);
+        }
+    }
+
     /// The Breakpoints section's rows, each `path:line`.
     pub fn set_breakpoint_rows(&self, rows: &[String]) {
         if let Some(debug) = &self.code.debug {

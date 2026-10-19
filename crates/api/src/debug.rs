@@ -15,6 +15,8 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+pub use accent_core::config::ExceptionFilter;
+
 use accent_core::config::DebugConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -27,12 +29,14 @@ use session::Session;
 // ---------------------------------------------------------------- the façade's types
 
 /// What to debug: `program` in `language` (a GtkSourceView id), stopping at `breakpoints`, each
-/// a file and its lines.
+/// a file and its lines, and at the `exceptions` switched on, as the window last had them; one
+/// the window has not seen is as the adapter defaults it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Launch {
     pub program: String,
     pub language: String,
     pub breakpoints: Vec<(String, Vec<u32>)>,
+    pub exceptions: Vec<ExceptionFilter>,
 }
 
 /// A breakpoint as the adapter holds it: maybe on another line than asked, and maybe not bound.
@@ -140,6 +144,8 @@ pub enum News {
         category: Category,
         text: String,
     },
+    /// The exceptions the adapter can stop at, each on or off as the program is launched with.
+    Exceptions(Vec<ExceptionFilter>),
     /// What the adapter holds of `path`'s breakpoints now: a configuration answer or a
     /// `breakpoint` event.
     Breakpoints {
@@ -359,6 +365,8 @@ sessions! {
     /// runs.
     debug_evaluate => evaluate(frame: Option<i64>, expression: String, context: Context)
         -> Evaluated, within UNBOUNDED;
+    /// Stop at the exceptions `filters` name, and at no others.
+    debug_exceptions => exceptions(filters: Vec<String>) -> ();
     /// What completes `text` before char `column` in `frame`, or globally.
     debug_completions => completions(frame: Option<i64>, text: String, column: u32)
         -> Vec<Candidate>;
@@ -463,6 +471,7 @@ mod tests {
             program: "demo.py".to_string(),
             language: "python3".to_string(),
             breakpoints: Vec::new(),
+            exceptions: Vec::new(),
         };
         let started = debugs.start(1, launch, &crate::tests::fake_adapter());
         let appears = |name: &str| {
@@ -512,8 +521,19 @@ mod tests {
             program: "demo.py".to_string(),
             language: "python3".to_string(),
             breakpoints: vec![("demo.py".to_string(), vec![1])],
+            exceptions: Vec::new(),
         };
         let started = vault.debug_start(1, &launch);
+
+        let News::Exceptions(filters) = next(|n| matches!(n, News::Exceptions(_))) else {
+            unreachable!()
+        };
+        let on: Vec<_> = filters
+            .iter()
+            .filter(|f| f.on)
+            .map(|f| f.filter.as_str())
+            .collect();
+        assert_eq!(on, ["uncaught"], "debugpy's defaults");
 
         let News::Terminal {
             seq,
@@ -582,6 +602,8 @@ mod tests {
                 .map(|c| (c.text.as_str(), c.replaces))
                 .collect();
             assert_eq!(offered, [("bit_count", 2), ("bit_length", 2)]);
+            let raised = vault.debug_exceptions(1, vec!["raised".to_string()]);
+            raised.await.unwrap();
             vault.debug_continue(1, thread).await.unwrap();
         });
 

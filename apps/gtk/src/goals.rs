@@ -25,6 +25,7 @@ impl App {
         }
         if running || debuggable {
             self.refill_breakpoints();
+            self.refill_exceptions();
         }
         self.refresh_goals();
     }

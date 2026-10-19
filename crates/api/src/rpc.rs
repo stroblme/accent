@@ -1308,6 +1308,7 @@ mod tests {
             program: "demo.py".to_string(),
             language: "python3".to_string(),
             breakpoints: vec![("demo.py".to_string(), vec![1])],
+            exceptions: Vec::new(),
         };
         std::thread::scope(|s| {
             let started = s.spawn(|| {
@@ -1409,6 +1410,7 @@ mod tests {
             program: "demo.py".to_string(),
             language: "python3".to_string(),
             breakpoints: Vec::new(),
+            exceptions: Vec::new(),
         };
         ask(1, "debug_start", json!([1, launch]));
         let started = heard.find(|m| m["id"] == 1).unwrap();

@@ -2,7 +2,7 @@
 //! the expressions it watches, the session itself (`run`), and its Debug Console (`console`).
 
 use super::*;
-use accent_api::debug::debuggable;
+use accent_api::debug::{ExceptionFilter, debuggable};
 use std::collections::BTreeMap;
 
 pub(crate) mod breakpoints;
@@ -20,6 +20,9 @@ pub struct Debugger {
     kept: RefCell<BTreeMap<String, Vec<u32>>>,
     /// The Watch section's expressions, in its order; the vault's session keeps them.
     watches: RefCell<Vec<String>>,
+    /// The exceptions the adapter last offered to stop at, as the reader set them; the vault's
+    /// session keeps them.
+    exceptions: RefCell<Vec<ExceptionFilter>>,
     /// The number the last session went by: the window picks it, so a session's news can come
     /// before its start is answered.
     next: Cell<u64>,
@@ -57,14 +60,20 @@ impl Debugger {
         keep(&mut self.kept.borrow_mut(), tab);
     }
 
-    /// Put back the breakpoints a session kept, before any of its tabs opens, and its watches.
-    pub(crate) fn restore(&self, kept: &BTreeMap<String, Vec<u32>>, watches: &[String]) {
-        self.kept.borrow_mut().extend(kept.clone());
-        self.watches.replace(watches.to_vec());
+    /// Put back the breakpoints a session kept, before any of its tabs opens, its watches and
+    /// its exceptions.
+    pub(crate) fn restore(&self, session: &accent_core::config::Session) {
+        self.kept.borrow_mut().extend(session.breakpoints.clone());
+        self.watches.replace(session.watches.clone());
+        self.exceptions.replace(session.exceptions.clone());
     }
 
     pub(crate) fn watches(&self) -> Vec<String> {
         self.watches.borrow().clone()
+    }
+
+    pub(crate) fn exceptions(&self) -> Vec<ExceptionFilter> {
+        self.exceptions.borrow().clone()
     }
 
     /// Put a file's kept breakpoints on its newly opened tab.
@@ -155,6 +164,17 @@ impl App {
         if !expression.is_empty() {
             self.add_watch(&expression);
         }
+    }
+
+    /// Stop at the exceptions `filter` names, or no longer; a running program is told at once.
+    pub(crate) fn set_exception(self: &Rc<Self>, filter: &str, on: bool) {
+        let mut exceptions = self.debugger.exceptions.borrow_mut();
+        if let Some(exception) = exceptions.iter_mut().find(|e| e.filter == filter) {
+            exception.on = on;
+        }
+        drop(exceptions);
+        self.save_session_soon();
+        self.send_exceptions();
     }
 
     /// Toggle Breakpoint, on the caret's line of the tab in front.

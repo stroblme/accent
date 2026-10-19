@@ -3,7 +3,7 @@
 
 use super::widgets::{Section, path_list};
 use crate::widgets::{icon_button, scroller};
-use accent_api::debug::{Evaluated, Frame, Scope, Thread, Variable};
+use accent_api::debug::{Evaluated, ExceptionFilter, Frame, Scope, Thread, Variable};
 use gtk::prelude::*;
 use gtk::{gio, glib, pango};
 use std::cell::{Cell, RefCell};
@@ -26,7 +26,12 @@ pub struct Data {
     pub watch: Rc<dyn Fn(&str)>,
     /// A watched expression's remove button pressed.
     pub unwatch: Rc<dyn Fn(&str)>,
+    /// An exception's switch flipped.
+    pub exception: Flipped,
 }
+
+/// An exception's filter, and whether the program stops at it now.
+pub type Flipped = Rc<dyn Fn(&str, bool)>;
 
 /// A watched expression and, while the program is paused, its value or why it has none.
 pub type Watched = (String, Option<Result<Evaluated, String>>);
@@ -382,6 +387,10 @@ pub(super) struct Debug {
     pub(super) breakpoints: Section,
     breakpoints_body: gtk::Stack,
     breakpoint_rows: gtk::StringList,
+    /// The exception switches atop Breakpoints, and the filters they show.
+    exception_rows: gtk::Box,
+    exceptions: RefCell<Vec<ExceptionFilter>>,
+    exception: Flipped,
     /// Set while the window selects a frame, so the selection is not taken for the reader's.
     selecting: Rc<Cell<bool>>,
 }
@@ -460,7 +469,11 @@ impl Debug {
             move |row| pick(row),
         );
         let (breakpoints_body, _) = body(&list, "Click a line's gutter to stop there");
-        let breakpoints = Section::new("Breakpoints", &breakpoints_body);
+        let exception_rows = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let breakpoints_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        breakpoints_page.append(&exception_rows);
+        breakpoints_page.append(&breakpoints_body);
+        let breakpoints = Section::new("Breakpoints", &breakpoints_page);
 
         for section in [&stack, &variables, &watch, &breakpoints] {
             section.root.set_visible(false);
@@ -482,6 +495,9 @@ impl Debug {
             breakpoints,
             breakpoints_body,
             breakpoint_rows,
+            exception_rows,
+            exceptions: RefCell::default(),
+            exception: data.exception.clone(),
             selecting,
         }
     }
@@ -550,6 +566,30 @@ impl Debug {
         self.watched
             .set(rows.iter().cloned().map(Item::Watch).collect());
         self.watch.set_count(Some(rows.len()));
+    }
+
+    /// A switch for each exception the program can stop at, atop the breakpoints, made again only
+    /// when the filters have changed.
+    pub(super) fn set_exceptions(&self, filters: &[ExceptionFilter]) {
+        if *self.exceptions.borrow() == filters {
+            return;
+        }
+        self.exceptions.replace(filters.to_vec());
+        while let Some(row) = self.exception_rows.first_child() {
+            self.exception_rows.remove(&row);
+        }
+        for filter in filters {
+            let switch = gtk::CheckButton::builder()
+                .label(&filter.label)
+                .active(filter.on)
+                .margin_start(10)
+                .margin_end(6)
+                .build();
+            switch.set_tooltip_text(filter.description.as_deref());
+            let (exception, id) = (self.exception.clone(), filter.filter.clone());
+            switch.connect_toggled(move |switch| exception(&id, switch.is_active()));
+            self.exception_rows.append(&switch);
+        }
     }
 
     pub(super) fn set_breakpoints(&self, rows: &[String]) {
