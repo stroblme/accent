@@ -42,9 +42,7 @@ impl Console {
 impl App {
     /// The Debug Console's tab, while it is open.
     pub(crate) fn console(&self) -> Option<Rc<Term>> {
-        self.docs()
-            .into_iter()
-            .find_map(|doc| doc.terminal().filter(|term| term.is_console()).cloned())
+        self.terminals().into_iter().find(|term| term.is_console())
     }
 
     /// The console of `session`, debugging `program`: the last session's where it is, else a new
@@ -61,15 +59,11 @@ impl App {
         match self.console() {
             Some(term) => self.begin_console(&term),
             None => {
-                let place = self
-                    .docs()
-                    .into_iter()
-                    .find_map(|doc| doc.terminal().filter(|term| term.is_program()).cloned())
-                    .and_then(|program| {
-                        let pane = self.pane_of(&program.page)?;
-                        let at = pane.tabs.page_position(&program.page) + 1;
-                        Some((pane, at))
-                    });
+                let place = self.program_tab().and_then(|program| {
+                    let pane = self.pane_of(&program.page)?;
+                    let at = pane.tabs.page_position(&program.page) + 1;
+                    Some((pane, at))
+                });
                 // Behind its pane's tab in front, as a restored tab lands.
                 self.new_console(Opened::Restored, place);
             }

@@ -555,6 +555,11 @@ impl App {
         sidebar.set_debug_state(line, why, paused);
     }
 
+    /// The debugged program's tab, while it is open.
+    pub(crate) fn program_tab(&self) -> Option<Rc<terminal::Term>> {
+        self.terminals().into_iter().find(|term| term.is_program())
+    }
+
     /// The program's terminal, as the adapter asked: in the active pane, in front with the
     /// keyboard, as a new shell is; or where the last session's was, in its place.
     fn open_program(
@@ -590,13 +595,10 @@ impl App {
                 }
             }),
         };
-        let old = self
-            .docs()
-            .into_iter()
-            .find(|doc| doc.terminal().is_some_and(|term| term.is_program()));
+        let old = self.program_tab();
         let place = old.as_ref().and_then(|old| {
-            let pane = self.pane_of(old.page())?;
-            let at = pane.tabs.page_position(old.page());
+            let pane = self.pane_of(&old.page)?;
+            let at = pane.tabs.page_position(&old.page);
             Some((pane, at))
         });
         // Put in its place, not moved there: AdwTabBar's reorder animation stalls on a tab that
@@ -606,7 +608,7 @@ impl App {
         // A turn later: closed in the turn the new tab went in beside it, with the console after
         // it, the new tab was left undrawn all the same (ISSUES.md).
         if let Some(old) = old {
-            let (weak, page) = (Rc::downgrade(self), old.page().clone());
+            let (weak, page) = (Rc::downgrade(self), old.page.clone());
             glib::idle_add_local_once(move || {
                 if let Some(app) = weak.upgrade() {
                     app.close_page(&page);
