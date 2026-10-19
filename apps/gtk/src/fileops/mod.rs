@@ -1082,6 +1082,7 @@ pub fn show_in_files(ops: &Rc<Ops>, rel: &str) {
 ///
 /// Takes a path rather than a vault-relative one, and its own way of complaining, so a window
 /// with no vault can still show where a loose file lives.
+#[cfg(not(target_os = "macos"))]
 pub fn reveal(window: &adw::ApplicationWindow, path: &Path, toast: impl Fn(&str) + 'static) {
     let launcher = gtk::FileLauncher::new(Some(&gio::File::for_path(path)));
     let name = path
@@ -1095,6 +1096,29 @@ pub fn reveal(window: &adw::ApplicationWindow, path: &Path, toast: impl Fn(&str)
             && !declined(&e)
         {
             toast(&format!("Cannot show {name}: {e}"));
+        }
+    });
+}
+
+/// [`reveal`] in Finder: GTK asks a portal or `FileManager1`, both over D-Bus, which macOS has
+/// neither of.
+#[cfg(target_os = "macos")]
+pub fn reveal(_window: &adw::ApplicationWindow, path: &Path, toast: impl Fn(&str) + 'static) {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let what = format!("show {name}");
+    let mut open = std::process::Command::new("open");
+    open.arg("-R").arg(path);
+    glib::spawn_future_local(async move {
+        let shown = crate::work::attempt(&what, move || {
+            let out = open.output()?;
+            let why = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            match out.status.success() {
+                true => Ok(()),
+                false => Err(std::io::Error::other(why)),
+            }
+        });
+        if let Err(why) = shown.await {
+            toast(&why);
         }
     });
 }
