@@ -1108,6 +1108,8 @@ thread_local! {
 // The Files tree's rows hand their padding to the expander inside, as libadwaita's own `sidebar`
 // rows do to their box, so the mark a Ctrl+click or a Shift+click puts on the expander has the
 // row's shape: it used to sit inside the grey of the open file's row, a pill within a pill.
+// Its arrow is drawn at Adwaita's `dim-label` opacity: the folder's icon and name say what the
+// row is, the arrow only that it opens (user decision 2026-10-19).
 //
 // A GtkSourceView assistant is never narrower than 1 px: GtkSourceView empties a hover that is up
 // before asking the providers again, and the view's allocations present it meanwhile at what it
@@ -1164,6 +1166,7 @@ fn install_chrome_css() {
              .accent-page-strip:drop(active) {{ box-shadow: none; }} \
              .file-tree > row {{ padding: 0; }} \
              .file-tree > row > treeexpander {{ padding: 0 8px; border-radius: 9px; }} \
+             .file-tree > row > treeexpander > expander {{ opacity: var(--dim-opacity); }} \
              .file-tree > row > treeexpander.accent-marked {{ \
                background-color: color-mix(in srgb, var(--accent-bg-color) 25%, transparent); }} \
              .file-tree label.git-modified {{ color: var(--accent-color); }} \
