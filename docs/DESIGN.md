@@ -1180,7 +1180,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Output that arrives while a line is typed goes above the prompt, a part of a line waiting for the rest of it, so it never breaks into the line.
 - **Values on hover**: while the program is paused, a hover over a name in a file its debugger runs leads with `name = value` in monospace, its type dimmed, from the call selected (`evaluate`, context `hover`), asked at once beside the language server.
   The name is taken with the names it is reached through, `self.items` over the `items` of `self.items.append(x)`, as VS Code's hover takes it; a number or a bracket asks nothing.
-- **The Flatpak does not debug yet**, and Start says so: "Cannot start debugging: the Flatpak does not debug yet". On a local vault the adapter and the program would both have to be the host's, debugpy's launcher calling back to the adapter over a loopback the sandbox does not share.
+- **The Flatpak debugs a remote vault only**, whose adapter and program are its host's already, the program's tab running `ssh -t` from the sandbox. On a local vault both would have to be this machine's, debugpy's launcher calling back to the adapter over a loopback the sandbox does not share, so Start says "Cannot start debugging: the Flatpak cannot debug a local vault yet".
 
 ### Context menus
 

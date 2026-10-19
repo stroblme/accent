@@ -43,10 +43,15 @@ enum State {
 impl App {
     /// Start Debugging: the Python file in front, else the program last debugged here.
     pub(crate) fn start_debugging(self: &Rc<Self>) {
-        // On a local vault the adapter and the program would both have to be the host's:
-        // debugpy's launcher calls back over a loopback the sandbox does not share.
-        if Path::new("/.flatpak-info").exists() {
-            return self.debug_cannot("start debugging", "the Flatpak does not debug yet");
+        // A remote vault's adapter and program are its host's. On a local vault both would have
+        // to be this machine's: debugpy's launcher calls back over a loopback the sandbox does
+        // not share.
+        let remote = self.vault().is_some_and(|v| v.is_remote());
+        if !remote && Path::new("/.flatpak-info").exists() {
+            return self.debug_cannot(
+                "start debugging",
+                "the Flatpak cannot debug a local vault yet",
+            );
         }
         if self.debugger.running() {
             return self.debug_cannot("start debugging", "a program is already being debugged");
