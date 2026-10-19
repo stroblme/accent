@@ -33,6 +33,9 @@ impl App {
     pub fn reveal_page(self: &Rc<Self>, page: &adw::TabPage) {
         if let Some(pane) = self.pane_of(page) {
             pane.tabs.set_selected_page(page);
+            // The reader's pane now, which a restore still landing leaves alone: a tab already in
+            // front notifies nothing that would say so.
+            self.reader_in(&pane);
             // A tab already in front notifies nothing, and with the keyboard in another pane the
             // `selected-page` handler syncs that one; the focus moved below then finds this pane
             // active already.

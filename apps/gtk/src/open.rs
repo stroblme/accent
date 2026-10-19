@@ -181,8 +181,14 @@ impl App {
             })
             .await;
             let Some(app) = weak.upgrade() else { return };
-            // Two clicks on the same row while the first read was in flight: the tab exists now.
-            if app.doc_for(&key).is_some() {
+            // A second open while the first read was in flight — two clicks on the same row, or
+            // the command line naming a note the session restores: the tab exists now, and comes
+            // to the front as an open file does.
+            if let Some(doc) = app.doc_for(&key) {
+                if how != Opened::Restored {
+                    app.reveal_page(doc.page());
+                    app.focus_picked(doc.page(), how);
+                }
                 return;
             }
             // A worker that panicked is one more way for the read to fail, and is said as the others
