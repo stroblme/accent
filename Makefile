@@ -22,13 +22,18 @@ DATADIR   ?= $(PREFIX)/share
 # publishes one per asset.
 PDFIUM_BUILD  := 8076
 PDFIUM_RELEASE := https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F$(PDFIUM_BUILD)
-# The desktop build follows the machine rather than assuming x86-64.
-PDFIUM_ARCH   := $(if $(filter aarch64,$(shell uname -m)),arm64,x64)
-PDFIUM_URL    := $(PDFIUM_RELEASE)/pdfium-linux-$(PDFIUM_ARCH).tgz
-PDFIUM_SHA256_x64   := d9d67bc40af03aef4fe28a60b19b1086f28ace019c8c9caf19cb7fe3d14ceca3
-PDFIUM_SHA256_arm64 := d7247b33ae5545615a5e877235dd97afc879e3a8805689684f528cae3339d352
-PDFIUM_SHA256 := $(PDFIUM_SHA256_$(PDFIUM_ARCH))
-PDFIUM_LIB    := vendor/pdfium/libpdfium.so
+# The desktop build follows the machine rather than assuming x86-64 Linux.
+PDFIUM_ARCH   := $(if $(filter aarch64 arm64,$(shell uname -m)),arm64,x64)
+PDFIUM_OS     := $(if $(filter Darwin,$(shell uname -s)),mac,linux)
+PDFIUM_URL    := $(PDFIUM_RELEASE)/pdfium-$(PDFIUM_OS)-$(PDFIUM_ARCH).tgz
+PDFIUM_SHA256_linux-x64   := d9d67bc40af03aef4fe28a60b19b1086f28ace019c8c9caf19cb7fe3d14ceca3
+PDFIUM_SHA256_linux-arm64 := d7247b33ae5545615a5e877235dd97afc879e3a8805689684f528cae3339d352
+PDFIUM_SHA256_mac-x64     := 40865f34642c34d82cc336132df9e0347133f4692cd46776647af160f9a5cca9
+PDFIUM_SHA256_mac-arm64   := 0d6781fe08906baff3d82c90953e519fbc4eb253fe76431e5ed53b157763b97c
+PDFIUM_SHA256 := $(PDFIUM_SHA256_$(PDFIUM_OS)-$(PDFIUM_ARCH))
+PDFIUM_LIB    := vendor/pdfium/libpdfium.$(if $(filter mac,$(PDFIUM_OS)),dylib,so)
+# macOS has `shasum`, not `sha256sum`.
+SHA256_CHECK  := $(if $(filter mac,$(PDFIUM_OS)),shasum -a 256 -c -,sha256sum -c -)
 
 # Android. The two ABIs the APK ships: the phone, and the emulator this machine can run.
 # `jniLibs/<abi>` is where Gradle packs a bare `.so` into the APK, and where Android's linker
@@ -175,10 +180,10 @@ $(PDFIUM_LIB):
 		{ echo "PDFIUM_SHA256 is empty: refusing to install an unverified libpdfium"; exit 1; }
 	@mkdir -p $(dir $(PDFIUM_LIB))
 	curl -fL --retry 3 -o $(PDFIUM_LIB).tgz "$(PDFIUM_URL)"
-	echo "$(PDFIUM_SHA256)  $(PDFIUM_LIB).tgz" | sha256sum -c -
+	echo "$(PDFIUM_SHA256)  $(PDFIUM_LIB).tgz" | $(SHA256_CHECK)
 	@# The release keeps the library under lib/ and its metadata at the top level; we want the
 	@# three files side by side, and none of the headers.
-	tar -xzf $(PDFIUM_LIB).tgz -C $(dir $(PDFIUM_LIB)) --strip-components=1 lib/libpdfium.so
+	tar -xzf $(PDFIUM_LIB).tgz -C $(dir $(PDFIUM_LIB)) --strip-components=1 lib/$(notdir $(PDFIUM_LIB))
 	tar -xzf $(PDFIUM_LIB).tgz -C $(dir $(PDFIUM_LIB)) LICENSE VERSION
 	rm -f $(PDFIUM_LIB).tgz
 
