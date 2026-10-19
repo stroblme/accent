@@ -173,6 +173,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 **Files**
 
 - The vault's name sits above the tree as a plain label with a folder icon: it is what the listing is of, and a root drop zone that stays on screen however deep the tree is scrolled.
+- A folder's expander arrow is drawn at Adwaita's `dim-label` opacity (`--dim-opacity`), whatever the row's own dim (user decision 2026-10-19): the folder's icon and name say what the row is, the arrow only that it opens.
 - Every folder is listed, the ones the index does not walk included (`node_modules`, a `.venv`, a cargo `target/`): a listing that silently leaves a folder out cannot be trusted.
   Those rows are read off the disk one level per expansion, stay out of the index and every query, and are dimmed, search not reaching them.
 - A dependency tree (`node_modules`, a `.venv`, a marked `target/`, Lean's `.lake`, gigabytes with Mathlib and no marker file) lists and opens but is never changed — no menu, marking, drag or drop: it is somebody else's.
