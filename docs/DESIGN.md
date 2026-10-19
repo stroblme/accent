@@ -17,6 +17,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 - **Stack**: GTK4 + libadwaita in Rust on Linux and Kotlin + Compose on Android share one Rust core.
   The desktop links it directly; Android uses UniFFI.
+- **Two optional parts**: the `webkit` and `termprops` cargo features, on by default, hold what WebKitGTK 6.0 and VTE 0.78 bring (the preview, a note's print and export, diagram formulas; a program's OSC 52 copy, the shell's commands and prompts), so accent builds where neither is packaged, as on macOS 12.
+  Without them the preview is a status page and a formula shows its source.
 - **Crates**: `crates/core` has no UI types; `crates/api` exposes `Vault` for local and remote backends, JSON-RPC for `accent-cli`, and UniFFI behind the `android` feature.
   `crates/drawio` is independent; core reads diagram labels through it for indexing.
   Keep client bindings in the API façade.
