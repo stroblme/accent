@@ -322,6 +322,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - **Watch** lists expressions, counted, each evaluated in the selected call at every stop and whenever another call is picked (`evaluate`, context `watch`), its value shown and opened as Variables' are; an error shows the adapter's message in the error colour, and while the program runs the expressions stand alone.
   An entry under them adds one, Add to Watch adds the selection in the tab in front or the name at its caret as a hover takes it, and a row's close button takes it out; they are the vault's session, beside the breakpoints.
 - **Breakpoints** lists every file's, `path:line` as References' rows are and opening the same way, counted; "Click a line's gutter to stop there" while there are none.
+  Above them is a checkbox for each exception the adapter offers to stop at (debugpy's Raised, Uncaught and User Uncaught Exceptions), its description in the tooltip: set as the adapter defaults it until the reader changes it, kept in the vault's session, and told to a running program at once.
 
 **Properties**
 

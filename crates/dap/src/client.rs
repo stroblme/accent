@@ -19,6 +19,8 @@ use tokio::process::ChildStderr;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+use crate::types::Capabilities;
+
 /// Request timeout, long enough for normal replies while bounding a stalled adapter.
 pub const DEADLINE: Duration = Duration::from_secs(10);
 
@@ -198,9 +200,9 @@ impl Client {
         self.inner.send(&message)
     }
 
-    /// The handshake, and the only place accent says what it can do. The adapter's capabilities go
-    /// unread: debugpy, the only adapter yet, has all accent asks for.
-    pub async fn initialize(&self, adapter_id: &str) -> Result<(), Error> {
+    /// The handshake, and the only place accent says what it can do; the answer is what the
+    /// adapter can, of which accent reads the exception filters.
+    pub async fn initialize(&self, adapter_id: &str) -> Result<Capabilities, Error> {
         let arguments = json!({
             "clientID": "accent",
             "clientName": "accent",
@@ -211,8 +213,7 @@ impl Client {
             "supportsRunInTerminalRequest": true,
             "supportsVariableType": true,
         });
-        self.request::<Value>("initialize", arguments).await?;
-        Ok(())
+        self.request("initialize", arguments).await
     }
 
     /// The adapter's last line on stderr: why one that exited before answering did, such as

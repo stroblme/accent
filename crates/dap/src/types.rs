@@ -28,6 +28,26 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+// ------------------------------------------------------------------- initialize
+
+/// The `initialize` answer: what the adapter can do beyond the protocol's core.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Capabilities {
+    pub exception_breakpoint_filters: Vec<ExceptionBreakpointsFilter>,
+}
+
+/// A kind of exception the program can stop at, which the reader switches on and off.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ExceptionBreakpointsFilter {
+    /// The id `setExceptionBreakpoints` takes.
+    pub filter: String,
+    pub label: String,
+    pub description: Option<String>,
+    pub default: bool,
+}
+
 // ------------------------------------------------------------------- the small shapes
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

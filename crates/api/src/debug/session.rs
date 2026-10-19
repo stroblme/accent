@@ -17,8 +17,8 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use super::{
-    Candidate, Category, Context, Debugs, Evaluated, Frame, Launch, News, Placed, Scope, Step,
-    Thread, Variable,
+    Candidate, Category, Context, Debugs, Evaluated, ExceptionFilter, Frame, Launch, News, Placed,
+    Scope, Step, Thread, Variable,
 };
 use crate::language::{Pos, session_root};
 use crate::{Error, Event, Result, locked};
@@ -49,9 +49,32 @@ pub(super) async fn start(
     let cwd = session_root(root, &program, &[]);
     let (client, incomings) = Client::spawn(&argv, &cwd)
         .map_err(|e| Error::Language(format!("cannot start {}: {e}", argv[0])))?;
-    if let Err(e) = client.initialize(adapter_id).await {
-        return Err(failed(&argv[0], &client, e));
-    }
+    let capabilities = match client.initialize(adapter_id).await {
+        Ok(capabilities) => capabilities,
+        Err(e) => return Err(failed(&argv[0], &client, e)),
+    };
+    // Each as the window had it, else as the adapter defaults it.
+    let exceptions: Vec<ExceptionFilter> = capabilities
+        .exception_breakpoint_filters
+        .into_iter()
+        .map(|offered| {
+            let had = launch
+                .exceptions
+                .iter()
+                .find(|f| f.filter == offered.filter);
+            ExceptionFilter {
+                on: had.map_or(offered.default, |had| had.on),
+                filter: offered.filter,
+                label: offered.label,
+                description: offered.description,
+            }
+        })
+        .collect();
+    let _ = debugs.events.send(Event::Debug {
+        session: id,
+        news: News::Exceptions(exceptions.clone()),
+    });
+    let stop_at = exceptions.into_iter().filter(|f| f.on).map(|f| f.filter);
     let session = Arc::new(Session {
         client,
         root: root.clone(),
@@ -70,6 +93,7 @@ pub(super) async fn start(
         Arc::downgrade(&debugs),
         debugs.events.clone(),
         launch.breakpoints,
+        stop_at.collect(),
     ));
     let arguments = json!({
         "name": "accent",
@@ -112,11 +136,12 @@ async fn forward(
     debugs: Weak<Debugs>,
     events: Sender<Event>,
     breakpoints: Vec<(String, Vec<u32>)>,
+    exceptions: Vec<String>,
 ) {
     let emit = |news| {
         let _ = events.send(Event::Debug { session: id, news });
     };
-    let mut breakpoints = Some(breakpoints);
+    let mut configuration = Some((breakpoints, exceptions));
     let (mut code, mut terminated) = (None, false);
     while let Some(incoming) = incomings.recv().await {
         let (event, body) = match incoming {
@@ -143,8 +168,10 @@ async fn forward(
         };
         match event.as_str() {
             "initialized" => {
-                if let (Some(session), Some(files)) = (session.upgrade(), breakpoints.take()) {
-                    session.configure(files, &emit).await;
+                if let (Some(session), Some((files, exceptions))) =
+                    (session.upgrade(), configuration.take())
+                {
+                    session.configure(files, exceptions, &emit).await;
                 }
             }
             "stopped" => {
@@ -233,23 +260,38 @@ fn read<T: DeserializeOwned>(body: Value) -> Option<T> {
 
 impl Session {
     /// What the adapter waits for after `initialized`: the breakpoints, each file's answer told
-    /// as it comes, the exception filters, then `configurationDone`, which lets the program run.
-    async fn configure(&self, files: Vec<(String, Vec<u32>)>, emit: &impl Fn(News)) {
+    /// as it comes, the exceptions to stop at, then `configurationDone`, which lets the program
+    /// run.
+    async fn configure(
+        &self,
+        files: Vec<(String, Vec<u32>)>,
+        exceptions: Vec<String>,
+        emit: &impl Fn(News),
+    ) {
         for (path, lines) in files {
             match self.breakpoints(path.clone(), lines).await {
                 Ok(placed) => emit(News::Breakpoints { path, placed }),
                 Err(e) => tracing::warn!("cannot set the breakpoints of {path}: {e}"),
             }
         }
-        let filters = json!({"filters": ["uncaught", "userUnhandled"]});
-        for (command, arguments) in [
-            ("setExceptionBreakpoints", filters),
-            ("configurationDone", json!({})),
-        ] {
-            if let Err(e) = self.client.request::<Value>(command, arguments).await {
-                tracing::warn!("the debug adapter refused {command}: {e}");
-            }
+        if let Err(e) = self.exceptions(exceptions).await {
+            tracing::warn!("the debug adapter refused the exceptions to stop at: {e}");
         }
+        if let Err(e) = self
+            .client
+            .request::<Value>("configurationDone", json!({}))
+            .await
+        {
+            tracing::warn!("the debug adapter refused configurationDone: {e}");
+        }
+    }
+
+    pub(super) async fn exceptions(&self, filters: Vec<String>) -> Result<()> {
+        let arguments = json!({"filters": filters});
+        self.client
+            .request::<Value>("setExceptionBreakpoints", arguments)
+            .await?;
+        Ok(())
     }
 
     pub(super) async fn breakpoints(&self, path: String, lines: Vec<u32>) -> Result<Vec<Placed>> {

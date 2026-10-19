@@ -25,6 +25,8 @@ pub(super) struct Run {
     /// The files whose breakpoints changed while the program started, which it is told once it
     /// runs: it was launched with them as they were at Start.
     changed: RefCell<std::collections::BTreeSet<String>>,
+    /// Whether the exceptions to stop at changed while it started, likewise.
+    exceptions_changed: Cell<bool>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
@@ -82,6 +84,7 @@ impl App {
             program: program.clone(),
             language: language.clone(),
             breakpoints: self.debugger.saved(self).into_iter().collect(),
+            exceptions: self.debugger.exceptions(),
         };
         self.debugger
             .last
@@ -110,6 +113,9 @@ impl App {
                     for key in run.changed.take() {
                         let lines = now.get(&key).cloned().unwrap_or_default();
                         app.send_breakpoints(key, lines);
+                    }
+                    if run.exceptions_changed.take() {
+                        app.send_exceptions();
                     }
                 }
                 // A Stop sent before the session was registered reached nothing.
@@ -293,6 +299,11 @@ impl App {
             // The adapter answering for the lines it was launched with, which the reader has
             // changed since: theirs go once the program runs.
             News::Breakpoints { path, .. } if run.changed.borrow().contains(&path) => {}
+            News::Exceptions(offered) => {
+                self.debugger.exceptions.replace(offered);
+                self.save_session_soon();
+                self.refill_exceptions();
+            }
             News::Breakpoints { path, placed } => {
                 if let Some(tab) = self.tab_for(&path) {
                     breakpoints::bind(&tab, &placed);
@@ -690,6 +701,34 @@ impl App {
                 tracing::warn!("answering the debug adapter: {e}");
             }
         });
+    }
+
+    /// Tell a running program the exceptions to stop at; one still starting is told once it runs.
+    pub(super) fn send_exceptions(&self) {
+        let (Some(run), Some(vault)) = (self.debugger.run(), self.vault()) else {
+            return;
+        };
+        if run.state.get() == State::Starting {
+            return run.exceptions_changed.set(true);
+        }
+        if !run.started() {
+            return;
+        }
+        let exceptions = self.debugger.exceptions();
+        let on = exceptions.into_iter().filter(|e| e.on).map(|e| e.filter);
+        let asked = vault.debug_exceptions(run.id, on.collect());
+        glib::spawn_future_local(async move {
+            if let Err(e) = asked.await {
+                tracing::warn!("setting the exceptions to stop at: {e}");
+            }
+        });
+    }
+
+    /// The Breakpoints section's switches, one per exception the adapter offered.
+    pub(crate) fn refill_exceptions(&self) {
+        if let Some(sidebar) = self.sidebar.get() {
+            sidebar.set_debug_exceptions(&self.debugger.exceptions());
+        }
     }
 
     /// Tell a running program file `key`'s breakpoints, all of them, and move its tab's marks to

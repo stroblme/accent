@@ -556,6 +556,11 @@ fn debug_data(app: &Rc<App>) -> sidebar::DebugData {
             app,
             move |expression: &str| app.remove_watch(expression)
         )),
+        exception: Rc::new(glib::clone!(
+            #[weak]
+            app,
+            move |filter: &str, on| app.set_exception(filter, on)
+        )),
     }
 }
 
