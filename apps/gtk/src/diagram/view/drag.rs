@@ -94,8 +94,9 @@ pub(super) enum Drag {
 }
 
 impl DiagramView {
-    /// Where a press at widget `(x, y)` starts a drag, if it starts one.
-    pub(super) fn start_drag(&self, x: f64, y: f64, shift: bool) -> Option<Drag> {
+    /// Where a press at widget `(x, y)` starts a drag, if it starts one. With `add` (Ctrl held)
+    /// a click toggles the cell in the selection and a band adds to it.
+    pub(super) fn start_drag(&self, x: f64, y: f64, add: bool) -> Option<Drag> {
         let imp = self.imp();
         let sheet = self.sheet()?;
         let frame = imp.frame.get();
@@ -155,15 +156,12 @@ impl DiagramView {
                     });
                 }
                 let Some(pick) = sheet.pick(p, tolerance, &selection) else {
-                    if !shift {
+                    if !add {
                         self.emit(Edit::Select(Vec::new()));
                     }
-                    return Some(Drag::Band {
-                        from: p,
-                        add: shift,
-                    });
+                    return Some(Drag::Band { from: p, add });
                 };
-                if shift {
+                if add {
                     let toggled = pick.held.clone().unwrap_or(pick.cell.clone());
                     let mut next = selection.clone();
                     match next.iter().position(|s| *s == toggled) {
