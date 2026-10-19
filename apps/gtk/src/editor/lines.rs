@@ -9,7 +9,7 @@ use gtk::{gdk, gio, glib};
 use sourceview5::prelude::*;
 
 /// Return the leading spaces and tabs copied to a new line below.
-fn leading_indent(line: &str) -> &str {
+pub(super) fn leading_indent(line: &str) -> &str {
     let end = line
         .find(|c: char| c != ' ' && c != '\t')
         .unwrap_or(line.len());

@@ -135,6 +135,7 @@ pub(super) fn bench_keys(app: &Rc<App>) {
             bench_grow(&view);
             bench_folds(&view).await;
             bench_table(&view);
+            bench_indent(&view);
             bench_whole_words(&view);
             bench_popup_keys(&view).await;
             bench_tab_focus().await;
@@ -520,6 +521,60 @@ fn bench_table(view: &multicaret::View) {
     buffer.set_text("a | b\nc | d");
     buffer.place_cursor(&at(&buffer, 0, 1));
     press("not_a_table", gdk::Key::Tab);
+}
+
+/// A code tab's Return and closers through [`editor::indent_key`], as a press in a code tab
+/// reaches it: one level deeper after an opener, a comment after it or not, none after one in a
+/// string or with no language; a pair split onto three lines, taken back by one Undo; a closer on
+/// a blank line back out to its block's level; tabs where the view wants tabs.
+fn bench_indent(view: &multicaret::View) {
+    use sourceview5::prelude::BufferExt as _;
+    let buffer = view.buffer();
+    let Some(source) = buffer.downcast_ref::<sourceview5::Buffer>() else {
+        return;
+    };
+    let text = || buffer.text(&buffer.start_iter(), &buffer.end_iter(), true);
+    let press = |step: &str, key| {
+        let answer = editor::indent_key(view.upcast_ref(), key, gdk::ModifierType::empty());
+        let at = editor::caret(&buffer);
+        println!(
+            "bench indent_{step} {:?} ({}, {}) {answer:?}",
+            text(),
+            at.line(),
+            at.line_offset()
+        );
+    };
+    let set = |language: Option<&str>, code: &str| {
+        let language = language.and_then(|id| sourceview5::LanguageManager::default().language(id));
+        source.set_language(language.as_ref());
+        buffer.set_text(code);
+        buffer.place_cursor(&buffer.end_iter());
+    };
+    view.clear_carets();
+    view.set_tab_width(4);
+    view.set_insert_spaces_instead_of_tabs(true);
+    set(Some("python3"), "def f():  # x");
+    press("colon", gdk::Key::Return);
+    set(Some("python3"), "    x = \"(\"");
+    press("string", gdk::Key::Return);
+    set(None, "Notes:");
+    press("no_language", gdk::Key::Return);
+    set(Some("rust"), "fn f() {}");
+    buffer.place_cursor(&at(&buffer, 0, 8));
+    press("pair", gdk::Key::Return);
+    buffer.undo();
+    println!("bench indent_pair_undo {:?}", text());
+    set(Some("rust"), "fn f() {\n    a();\n    ");
+    press("closer", gdk::Key::braceright);
+    set(Some("rust"), "    if x {\n        ");
+    press("closer_empty_block", gdk::Key::braceright);
+    set(Some("rust"), "fn f() {\n");
+    press("closer_already_out", gdk::Key::braceright);
+    view.set_insert_spaces_instead_of_tabs(false);
+    set(Some("rust"), "\tg(");
+    press("tabs", gdk::Key::Return);
+    view.set_insert_spaces_instead_of_tabs(true);
+    source.set_language(None);
 }
 
 /// Add Caret at Next Occurrence and Select All Occurrences of a word the tab took from under the
