@@ -12,8 +12,8 @@ path = "src/main.rs"
 [features]
 default = ["webkit", "termprops"]
 # The `ACCENT_BENCH_*` drills (`src/bench/`) and what only they call. Off in a shipped build;
-# `make smoke`, `make check` and CI turn it on.
-bench = []
+# `make smoke`, `make check` and CI turn it on. Several load a page, so they need WebKit.
+bench = ["webkit"]
 # WebKitGTK 6.0, which nothing packages for macOS: the rendered preview, a note's print and
 # export, and diagram formulas. Without it the preview is a status page and a formula its source.
 webkit = ["dep:webkit6"]

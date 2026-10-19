@@ -276,13 +276,12 @@ fmt-check:
 
 ## clippy: lint everything, warnings are errors
 #
-# The desktop app twice: without its drills, as it ships, and with them; and both again without
-# its default features (WebKit, VTE's termprops), as it builds on macOS 12.
+# The desktop app three times: without its drills, as it ships, with them, and without its
+# default features (WebKit, VTE's termprops), as it builds on macOS 12.
 clippy:
 	$(CARGO) clippy --workspace --all-targets --locked --features accent-core/pdf -- -D warnings
 	$(CARGO) clippy -p accent --all-targets --locked --features bench -- -D warnings
 	$(CARGO) clippy -p accent --no-default-features --all-targets --locked -- -D warnings
-	$(CARGO) clippy -p accent --no-default-features --features bench --all-targets --locked -- -D warnings
 
 ## check: the pre-flight gate, what CI runs
 #

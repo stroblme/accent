@@ -8,7 +8,6 @@ use std::path::Path;
 pub(super) fn bench_export(app: &Rc<App>, arg: &str) {
     match arg.split_once(':') {
         Some(("pdf", rel)) => bench_export_pdf(app, rel),
-        #[cfg(feature = "webkit")]
         Some(("note", rel)) => bench_export_note(app, rel),
         _ => {
             println!("bench export unknown {arg:?}");
@@ -141,7 +140,6 @@ async fn bench_print_dialog(app: &Rc<App>, pdf: &Rc<pdftab::PdfTab>, file: &Path
 /// header/pages/first heading and write `<stem>.png` for review; inspect HTML images,
 /// diagrams, formulas, scripts and app-specific remnants. Cancel Print and check the
 /// busy indicator clears.
-#[cfg(feature = "webkit")]
 fn bench_export_note(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
