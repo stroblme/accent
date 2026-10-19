@@ -478,6 +478,7 @@ const CLEAR_LINE: &[u8] = b"\r\x1b[2K";
 const CLIPBOARD: &str = "vte.ext.accent.clipboard";
 
 /// Make [`CLIPBOARD`] known to VTE, which takes a termprop only before the first terminal exists.
+#[cfg(feature = "termprops")]
 pub fn install_termprops() {
     let name = std::ffi::CString::new(CLIPBOARD).unwrap_or_default();
     // SAFETY: a NUL-terminated name under VTE's `vte.ext.` prefix, a type and no flags, from
@@ -494,6 +495,10 @@ pub fn install_termprops() {
 /// Fetch OSC 52 clipboard content through `accent-cli clip` off-thread, locally or remotely.
 /// [`CLIPBOARD`] signals availability; weak ownership follows [`on_exit`]. Without attach there is no signal.
 fn take_copies(term: &Rc<Term>) {
+    // Termprops are VTE 0.78's: before it the signal does not exist, and connecting to it panics.
+    if !cfg!(feature = "termprops") {
+        return;
+    }
     let weak = Rc::downgrade(term);
     let signal = format!("termprop-changed::{CLIPBOARD}");
     term.view.connect_local(&signal, false, move |_| {
@@ -721,6 +726,10 @@ pub fn on_report(term: &Rc<Term>, changed: impl Fn(&Rc<Term>) + 'static) {
         report,
         move |_| report()
     ));
+    // As in `take_copies`: the command and prompt turns come as termprops.
+    if !cfg!(feature = "termprops") {
+        return;
+    }
     for name in SHELL_TURNS {
         let report = report.clone();
         view.connect_local(&format!("termprop-changed::{name}"), false, move |_| {

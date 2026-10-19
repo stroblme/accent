@@ -174,6 +174,7 @@ fn main() -> glib::ExitCode {
     if let Some(code) = shell::local_command_line(std::env::args_os()) {
         return code;
     }
+    #[cfg(feature = "termprops")]
     terminal::install_termprops();
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
