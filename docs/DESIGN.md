@@ -621,6 +621,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - A debugged program's terminal and the Debug Console are a debug session's, not the vault's: neither is put back, and as any shell each stays in its window.
   The console opens right after the program's tab in its pane, behind it, and the next session reuses it where it is.
 - Tabs land one read at a time; a pane the reader picks a tab in, opens a note into or moves the keyboard to meanwhile is theirs, and what lands there does not change what it shows.
+  A file named on the command line is such an opening, whether or not the session holds it: it comes to the front.
 - A restored window has an empty Back and Forward: a restore's selections are not places.
   A first opening, or a session without a layout, is one pane; a split's share is kept to 10–90 %.
 - A tab on a file outside the window's vault carries `document-open-symbolic` in its indicator slot, tooltipped Outside this vault, so saving it is never a surprise and it is plain why it has no backlinks.
