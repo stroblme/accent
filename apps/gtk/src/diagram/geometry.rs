@@ -140,6 +140,22 @@ pub fn snap(v: f64, grid: f64) -> f64 {
     (v / grid).round() * grid
 }
 
+/// The grid a drag snaps to and the canvas draws at `scale` pixels a unit: the page's `size`
+/// halved while the half is still 8 px on screen, so snapping gets finer as the page is zoomed
+/// in, and doubled while it is under 4 px, as draw.io spaces its lines (`minGridSize`).
+pub fn grid_step(size: f64, scale: f64) -> f64 {
+    const FINE_PX: f64 = 8.0;
+    const COARSE_PX: f64 = 4.0;
+    let mut step = size;
+    while step / 2.0 * scale >= FINE_PX {
+        step /= 2.0;
+    }
+    while step * scale < COARSE_PX {
+        step *= 2.0;
+    }
+    step
+}
+
 /// A move of `delta` corrected so that `origin` lands on the grid, as draw.io snaps a drag.
 pub fn snap_move(origin: Point, delta: Point, grid: f64) -> Point {
     Point::new(
@@ -953,6 +969,16 @@ mod tests {
         assert_eq!(o.scroll(300.0, false, true), None);
         o = Overshoot::default();
         assert_eq!(o.scroll(-SWIPE_TURN, false, true), Some(false));
+    }
+
+    #[test]
+    fn the_grid_is_halved_zoomed_in_and_doubled_zoomed_far_out() {
+        assert_eq!(grid_step(10.0, 1.0), 10.0);
+        assert_eq!(grid_step(10.0, 1.6), 5.0);
+        assert_eq!(grid_step(10.0, 4.0), 2.5);
+        assert_eq!(grid_step(10.0, 0.5), 10.0);
+        assert_eq!(grid_step(10.0, 0.25), 20.0);
+        assert_eq!(grid_step(10.0, 0.1), 40.0);
     }
 
     #[test]

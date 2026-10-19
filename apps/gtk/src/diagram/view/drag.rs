@@ -292,7 +292,9 @@ impl DiagramView {
         };
         if !sheet.guides {
             let origin = Point::new(bounds.x, bounds.y);
-            let snapped = sheet.grid.map(|g| geometry::snap_move(origin, raw, g));
+            let snapped = self
+                .grid(false)
+                .map(|g| geometry::snap_move(origin, raw, g));
             return (snapped.unwrap_or(raw), Vec::new());
         }
         let targets = guide::Targets {
@@ -300,7 +302,7 @@ impl DiagramView {
             page: sheet.page_rect,
         };
         let px = 1.0 / self.scale();
-        guide::snap(bounds, raw, &targets, sheet.grid, px)
+        guide::snap(bounds, raw, &targets, self.grid(false), px)
     }
 
     /// `rect`, turned `rotation`, resized by dragging `handle` by `delta`, and the lines that
@@ -350,8 +352,10 @@ impl DiagramView {
         Rect::new(near.x - w / 2.0, near.y - h / 2.0, 2.0 * w, 2.0 * h)
     }
 
+    /// The grid a drag snaps to at the present zoom, unless `free` or the page has it off.
     pub(super) fn grid(&self, free: bool) -> Option<f64> {
-        self.sheet().filter(|_| !free).and_then(|s| s.grid)
+        let grid = self.sheet().filter(|_| !free).and_then(|s| s.grid)?;
+        Some(geometry::grid_step(grid, self.scale()))
     }
 
     /// What a move, a resize or a turn asks for with the pointer at `p`: the edit its release

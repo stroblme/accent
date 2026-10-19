@@ -436,16 +436,11 @@ pub fn prim(
     }
 }
 
-/// Draw a grid over `area` in page units (`mxGraphView.createSvgGrid`). Double
-/// `step` until spacing reaches 4 screen pixels; emphasize every fourth line,
-/// others at a fifth opacity, black on light paper and white on dark.
+/// Draw a grid of `step` (`geometry::grid_step`) over `area` in page units
+/// (`mxGraphView.createSvgGrid`); emphasize every fourth line, others at a fifth
+/// opacity, black on light paper and white on dark.
 pub fn grid(snapshot: &gtk::Snapshot, frame: &Frame, area: Rect, step: f64, paper: Color) {
-    const MIN_PX: f64 = 4.0;
     const STRONG_EVERY: i64 = 4;
-    let mut step = step;
-    while step * frame.scale < MIN_PX {
-        step *= 2.0;
-    }
     let light =
         0.299 * f64::from(paper.r) + 0.587 * f64::from(paper.g) + 0.114 * f64::from(paper.b);
     let ink = if light > 127.0 {
