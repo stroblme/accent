@@ -1167,6 +1167,7 @@ fn install_chrome_css() {
              .file-tree label.git-modified {{ color: var(--accent-color); }} \
              .file-tree label.git-added {{ color: {added}; }} \
              .git-actions {{ opacity: 0; }} \
+             popover.git-branches button {{ font-weight: normal; }} \
              row:hover .git-actions, row:focus-within .git-actions {{ opacity: 1; }} \
              .git-log > row {{ margin-top: 0; margin-bottom: 0; }} \
              .git-ref {{ padding: 0 4px; border-radius: 4px; \
