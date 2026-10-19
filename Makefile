@@ -153,19 +153,22 @@ requirements:
 	{ command -v cargo-zigbuild && command -v zig; } >/dev/null || \
 		echo "optional: cargo-zigbuild and zig, for make server, which remote vaults need"; \
 	command -v merl-rt >/dev/null || echo "optional: merl-rt, for ghost text"; \
+	fc-list -q "DejaVu Sans Mono" 2>/dev/null || echo "optional: DejaVu Sans Mono, which make drills is written against"; \
 	if test $$missing = 0; then echo "All requirements met."; \
 	else echo "make install-requirements installs them on openSUSE, Fedora, Debian, Ubuntu and Arch."; exit 1; fi
 
 # What `requirements` checks for, as each distribution packages it, plus git, ssh and curl. The one
 # list README.md, install.sh and CI rely on. GNOME 49 or newer is what has the versions above.
 PKGS_suse   := gcc make pkgconf-pkg-config glib2-devel gtk4-devel libadwaita-devel gtksourceview5-devel \
-               webkitgtk4-devel vte-devel libspelling-devel git-core openssh-clients curl
+               webkitgtk4-devel vte-devel libspelling-devel dejavu-fonts git-core openssh-clients curl
 PKGS_fedora := gcc make pkgconf-pkg-config glib2-devel gtk4-devel libadwaita-devel gtksourceview5-devel \
-               webkitgtk6.0-devel vte291-gtk4-devel libspelling-devel git openssh-clients curl
+               webkitgtk6.0-devel vte291-gtk4-devel libspelling-devel dejavu-sans-mono-fonts git \
+               openssh-clients curl
 PKGS_debian := build-essential pkgconf libgio-2.0-dev-bin libgtk-4-dev libadwaita-1-dev \
                libgtksourceview-5-dev libwebkitgtk-6.0-dev libvte-2.91-gtk4-dev libspelling-1-dev \
-               git openssh-client curl
-PKGS_arch   := base-devel gtk4 libadwaita gtksourceview5 webkitgtk-6.0 vte4 libspelling git openssh curl
+               fonts-dejavu-mono git openssh-client curl
+PKGS_arch   := base-devel gtk4 libadwaita gtksourceview5 webkitgtk-6.0 vte4 libspelling ttf-dejavu \
+               git openssh curl
 # Root (a CI container) installs directly; anyone else through sudo.
 SUDO := $(if $(filter 0,$(shell id -u)),,sudo)
 
@@ -335,10 +338,17 @@ $(VAULT): $(GEN_VAULT)
 # write a session and an index.
 # TMPDIR as well, where the terminal holder listens and every start sweeps for orphaned shells;
 # under /tmp whatever the caller's is, because a unix socket path is at most 108 bytes.
+# A keyfile there sets the accent colour and the monospace font, which the drills print and a
+# distribution may change (Ubuntu: orange, Ubuntu Sans Mono); libadwaita reads the accent from
+# GSettings only with ADW_DISABLE_PORTAL. DejaVu Sans Mono is as wide as GNOME's Adwaita Mono,
+# which Debian and Ubuntu do not package.
 HEADLESS = xdg=$$(mktemp -d /tmp/accent-headless-XXXXXX) && trap 'rm -rf "$$xdg"' EXIT && \
-	mkdir "$$xdg/tmp" "$$xdg/vault" && \
+	mkdir -p "$$xdg/tmp" "$$xdg/vault" "$$xdg/config/glib-2.0/settings" && \
+	printf "[org/gnome/desktop/interface]\naccent-color='blue'\nmonospace-font-name='DejaVu Sans Mono 11'\n" \
+		>"$$xdg/config/glib-2.0/settings/keyfile" && \
 	env XDG_CONFIG_HOME="$$xdg/config" XDG_CACHE_HOME="$$xdg/cache" \
 		XDG_STATE_HOME="$$xdg/state" XDG_DATA_HOME="$$xdg/data" TMPDIR="$$xdg/tmp" \
+		GSETTINGS_BACKEND=keyfile ADW_DISABLE_PORTAL=1 \
 	dbus-run-session --config-file=$(CURDIR)/build-aux/headless-bus.conf -- env $(XVFB_ENV)
 
 ## xvfb: start the X server the headless checks draw on, unless it is already up
