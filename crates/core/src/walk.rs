@@ -150,6 +150,8 @@ pub enum SkipReason {
     TargetOverlapsSymlink,
     /// `ignore` detected the target is an ancestor of the link: following it would loop.
     SymlinkLoop,
+    /// Symlink target is a system tree or a FUSE mount ([`system_tree`]).
+    SystemTree,
     /// A dependency or build tree: the directory carries one of [`DEPENDENCY_MARKERS`].
     DependencyTree,
     /// A directory git ignores. Not walked, and opened by hand in the file tree instead.
@@ -164,6 +166,7 @@ impl std::fmt::Display for SkipReason {
             SkipReason::TargetInsideVault => "symlink target is inside the vault",
             SkipReason::TargetOverlapsSymlink => "symlink target overlaps another symlink",
             SkipReason::SymlinkLoop => "symlink loop",
+            SkipReason::SystemTree => "symlink target is a system tree or a FUSE mount",
             SkipReason::DependencyTree => "dependency or build tree",
             SkipReason::GitIgnored => "git ignores this directory",
             SkipReason::Io => "io error",
@@ -293,6 +296,9 @@ pub fn stat_one(root: &Path, rel: &str) -> crate::Result<Option<FileMeta>> {
     }
     let path = root.join(rel);
     let meta = std::fs::metadata(&path).map_err(|e| crate::Error::io(rel, e))?;
+    if !meta.is_file() && !meta.is_dir() {
+        return Ok(None); // a pipe, a socket or a device, as the walk leaves them out
+    }
     // Last, because it is the only test that needs to know whether the path is a directory: a
     // gitignored *file* is indexed, a gitignored *directory* is not entered.
     if in_ignored_dir(&mut dir_ignores(root), rel, meta.is_dir()) {
@@ -309,7 +315,9 @@ pub fn stat_opened(root: &Path, rel: &str) -> crate::Result<Option<FileMeta>> {
     }
     let path = root.join(rel);
     let meta = std::fs::metadata(&path).map_err(|e| crate::Error::io(rel, e))?;
-    Ok((!meta.is_dir()).then(|| file_meta(rel.to_string(), &path, &meta)))
+    Ok(meta
+        .is_file()
+        .then(|| file_meta(rel.to_string(), &path, &meta)))
 }
 
 /// Why a directory is absent from the index.
@@ -586,6 +594,7 @@ fn walk_passes(
         gitignore: opts.vault_gitignore,
         // The All toggle exists to reach exactly these trees, so it turns the rule off.
         dir_gitignore: !opts.vault_gitignore && !opts.include_skipped,
+        linked: false,
     });
 
     // Breadth-first over passes: the vault, then one pass per accepted symlink target, then
@@ -603,6 +612,7 @@ fn walk_passes(
                 prefix,
                 gitignore: opts.target_gitignore,
                 dir_gitignore: false,
+                linked: true,
             });
         }
     }
@@ -619,6 +629,9 @@ struct Pass {
     /// Apply ignores to directories only so vault notes remain indexed. Symlink targets instead
     /// honour all ignore rules or none.
     dir_gitignore: bool,
+    /// A symlink target, walked on its own filesystem only: a mount below it is not entered,
+    /// as `/run/user/<uid>/gvfs` is not below a link to `/run`.
+    linked: bool,
 }
 
 #[derive(Default)]
@@ -649,6 +662,7 @@ fn walk_pass(
         .git_exclude(pass.gitignore)
         .ignore(pass.gitignore)
         .require_git(false) // targets are repos, but the vault usually is not
+        .same_file_system(pass.linked)
         .max_depth(opts.max_depth)
         .threads(if opts.threads == 0 {
             std::thread::available_parallelism().map_or(4, |n| n.get())
@@ -767,6 +781,9 @@ fn walk_pass(
                 }
             };
 
+            if !meta.is_file() && !meta.is_dir() {
+                return WalkState::Continue; // a pipe, a socket or a device
+            }
             on_file(file_meta(rel_path, path, &meta))
         })
     });
@@ -801,6 +818,9 @@ fn admit_symlink(
     if target.starts_with(canonical_root) {
         return Err(SkipReason::TargetInsideVault);
     }
+    if system_tree(&target) {
+        return Err(SkipReason::SystemTree);
+    }
     let mut followed = followed
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -809,6 +829,35 @@ fn admit_symlink(
     }
     followed.push(target.clone());
     Ok(target)
+}
+
+/// Whether `path` is on a kernel pseudo filesystem (`/proc`, `/sys`) or a FUSE one (gvfs, the
+/// document portal, sshfs). Neither holds documents, and gvfs shows a remote host's links as
+/// folders, which no loop check can tell from folders: flatpak-builder's `var/run -> /run` once
+/// led a walk through one into the host's `/sys` without end.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn system_tree(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    const PROC: i64 = 0x9fa0;
+    const SYSFS: i64 = 0x6265_6572;
+    const FUSE: i64 = 0x6573_5546;
+    let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    let mut fs = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: a NUL-terminated path, and a buffer `statfs` fills whenever it returns 0.
+    if unsafe { libc::statfs(path.as_ptr(), fs.as_mut_ptr()) } != 0 {
+        return false;
+    }
+    // Its width differs between platforms.
+    #[allow(clippy::unnecessary_cast)]
+    let kind = unsafe { fs.assume_init() }.f_type as i64;
+    matches!(kind, PROC | SYSFS | FUSE)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn system_tree(_: &Path) -> bool {
+    false
 }
 
 /// `ignore::Error` nests the interesting variant inside `WithPath`/`WithDepth` wrappers.
@@ -910,6 +959,35 @@ mod tests {
         let r = scan(vault.path(), &ScanOptions::default()); // must not hang
         assert_eq!(rels(&r), vec!["d", "d/n.md"]);
         assert_eq!(r.skipped.len(), 1, "{:?}", r.skipped);
+    }
+
+    /// `/proc/self` stands in for a gvfs mount: a tree whose links can read as folders, so no
+    /// loop check bounds it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_link_into_a_system_tree_is_not_followed() {
+        let vault = tempfile::tempdir().unwrap();
+        fs::write(vault.path().join("a.md"), "a").unwrap();
+        symlink("/proc/self", vault.path().join("proc")).unwrap();
+
+        let r = scan(vault.path(), &ScanOptions::default());
+        assert_eq!(rels(&r), vec!["a.md"]);
+        assert_eq!(r.skipped.len(), 1, "{:?}", r.skipped);
+        assert_eq!(r.skipped[0].reason, SkipReason::SystemTree);
+    }
+
+    /// Reading a pipe waits for a writer, and a device can be anything: neither is a file.
+    #[test]
+    fn a_pipe_is_not_listed() {
+        let vault = tempfile::tempdir().unwrap();
+        fs::write(vault.path().join("a.md"), "a").unwrap();
+        use std::os::unix::ffi::OsStrExt;
+        let pipe = std::ffi::CString::new(vault.path().join("pipe").as_os_str().as_bytes());
+        assert_eq!(unsafe { libc::mkfifo(pipe.unwrap().as_ptr(), 0o600) }, 0);
+
+        let r = scan(vault.path(), &ScanOptions::default());
+        assert_eq!(rels(&r), vec!["a.md"]);
+        assert!(stat_one(vault.path(), "pipe").unwrap().is_none());
     }
 
     #[test]
