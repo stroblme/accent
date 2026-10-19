@@ -332,6 +332,8 @@ methods! {
     /// Nothing is replaced: a taken `to` fails with `AlreadyExists`, and the caller tries its
     /// next free name.
     copy(from: ref str, to: ref str) -> ();
+    /// What copying `rel` into another vault carries ([`fs::walk_copy`]), walked where it is.
+    list_tree(rel: ref str) -> fs::Walked;
     plan_moves(moves: ref [(String, String)]) -> RenamePlan, bounded by MOVE_BOUND;
     rename(plan: ref RenamePlan, update: val bool) -> RenameReport, bounded by MOVE_BOUND;
     /// A note's text as Save As writes it at another path, its relative links pointed back at
@@ -558,7 +560,30 @@ impl Vault {
                 Ok(_) => Ok(()),
                 Err(e) => Err(accent_core::Error::io(rel, e).into()),
             },
-            Backend::Remote(r) => r.download_with(rel, dest, progress),
+            Backend::Remote(r) => r.download_with(rel, dest, true, progress),
+        }
+    }
+
+    /// Copy the file `rel` into the vault `to` at `to_rel`, its bytes going straight from one
+    /// machine to the other: read here and written there, downloaded, uploaded, or piped from host
+    /// to host through this machine. Over the file there when `replace`; otherwise only to a name
+    /// nothing holds, a taken one failing with `AlreadyExists`.
+    pub fn copy_to(
+        &self,
+        rel: &str,
+        to: &Vault,
+        to_rel: &str,
+        replace: bool,
+        progress: &dyn Fn(u64, u64),
+    ) -> Result<()> {
+        match (&self.backend, &to.backend) {
+            (Backend::Local(v), _) => to.upload_with(&v.resolve(rel)?, to_rel, replace, progress),
+            (Backend::Remote(r), Backend::Local(d)) => {
+                r.download_with(rel, &d.resolve(to_rel)?, replace, progress)
+            }
+            (Backend::Remote(r), Backend::Remote(t)) => {
+                r.send_to(rel, t, to_rel, replace, progress)
+            }
         }
     }
 
@@ -840,6 +865,38 @@ mod tests {
             (f.read("y.png"), f.read("z.png")),
             ("new\n".into(), "mine\n".into())
         );
+    }
+
+    /// A row dropped into another window's vault: its walk names what to carry, and each file is
+    /// copied over only when the caller asked to replace it.
+    #[test]
+    fn copy_to_copies_between_vaults_and_never_replaces() {
+        let (a, b) = (
+            Fixture::open(VaultConfig::default()),
+            Fixture::open(VaultConfig::default()),
+        );
+        a.write("F/x.md", "mine\n");
+        a.write("F/sub/y.md", "y\n");
+        b.write("x.md", "theirs\n");
+        let walked = a.vault.list_tree("F").unwrap();
+        assert_eq!(walked.dirs, ["", "sub"]);
+        assert_eq!(walked.files, ["sub/y.md", "x.md"]);
+
+        let none = &|_, _| ();
+        a.vault
+            .copy_to("F/x.md", &b.vault, "y.md", false, none)
+            .unwrap();
+        assert_eq!(b.read("y.md"), "mine\n");
+        assert!(matches!(
+            a.vault.copy_to("F/x.md", &b.vault, "x.md", false, none),
+            Err(crate::Error::Core(accent_core::Error::AlreadyExists(_)))
+        ));
+        assert_eq!(b.read("x.md"), "theirs\n");
+        a.vault
+            .copy_to("F/x.md", &b.vault, "x.md", true, none)
+            .unwrap();
+        assert_eq!(b.read("x.md"), "mine\n");
+        assert_eq!(a.read("F/x.md"), "mine\n", "the original stays");
     }
 
     /// A copied folder is what Paste carries in from this machine: a link to a file inside it

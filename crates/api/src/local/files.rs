@@ -218,6 +218,12 @@ impl Local {
         Ok(())
     }
 
+    /// [`fs::walk_copy`] of `rel`: what copying it into another vault carries, walked where the
+    /// files are.
+    pub fn list_tree(&self, rel: &str) -> Result<fs::Walked> {
+        Ok(fs::walk_copy(&self.resolve(rel)?))
+    }
+
     /// Plan link and import rewrites before moving files, for UI confirmation.
     /// Dry-run candidate notes to omit unchanged bare links; include links to
     /// moved files and relative links in moved notes. Ask running language
