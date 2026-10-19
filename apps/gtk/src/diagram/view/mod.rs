@@ -725,7 +725,7 @@ mod imp {
                 self.drag.borrow().as_ref(),
                 Some(Drag::Move { .. } | Drag::Resize { .. } | Drag::Draw { .. })
             );
-            if let Some(step) = sheet.grid.filter(|_| placing && self.moved.get())
+            if let Some(step) = obj.grid(false).filter(|_| placing && self.moved.get())
                 && let Some(area) = intersection(&visible, &sheet.page_rect.unwrap_or(visible))
             {
                 paint::grid(snapshot, &frame, area, step, paper);
