@@ -18,6 +18,15 @@ pub(super) type Move = Rc<dyn Fn(Vec<(String, String)>)>;
 /// and target row path.
 pub(super) type Append = Rc<dyn Fn(String, String)>;
 
+/// Rows dragged in from another window's tree, which name files in that window's vault: whether
+/// the drag in flight is such a one, and what its drop is handed — the paths, the folder they go
+/// into, and whether Shift asked for a move.
+#[derive(Clone)]
+pub(super) struct Carry {
+    pub foreign: Rc<dyn Fn() -> bool>,
+    pub drop: Rc<dyn Fn(Vec<String>, String, bool)>,
+}
+
 /// Find one carried PDF and a target PDF row for page append. Reject
 /// self-drops as ordinary no-op moves.
 fn appending(target: &gtk::DropTarget, carried: &[String]) -> Option<(String, String)> {
@@ -87,13 +96,20 @@ fn target_row(target: &gtk::DropTarget) -> Option<gtk::TreeListRow> {
 /// Accept moves to `dir` at the pointer, where `Some("")` is root and `None` refuses.
 ///
 /// Validate while hovering so self, descendant and no-op drops never highlight as targets.
-/// GTK's active-drop outline provides all feedback.
+/// GTK's active-drop outline provides all feedback. Rows from another window's tree are copied
+/// into any folder instead, or moved with Shift ([`Carry`]).
 pub(super) fn move_target(
     on_move: &Move,
     on_append: &Append,
+    carry: &Carry,
     dir: impl Fn(&gtk::DropTarget, f64, f64) -> Option<String> + 'static,
 ) -> gtk::DropTarget {
-    let target = gtk::DropTarget::new(glib::Type::INVALID, gdk::DragAction::MOVE);
+    // Copy too, or a drag from another window offering copy alone (Ctrl) would never enter; each
+    // answer narrows it again to what that drag may do.
+    let target = gtk::DropTarget::new(
+        glib::Type::INVALID,
+        gdk::DragAction::COPY | gdk::DragAction::MOVE,
+    );
     target.set_types(&[
         gtk::StringObject::static_type(),
         gtk::StringList::static_type(),
@@ -119,16 +135,30 @@ pub(super) fn move_target(
     // Both, because `enter` is what decides whether the row highlights at all and `motion` is
     // what corrects it once the preloaded value has arrived.
     let answer = {
-        let (planned, spring) = (planned.clone(), spring.clone());
-        move |target: &gtk::DropTarget, x, y| match planned(target, x, y) {
-            Some(()) => {
-                spring_open(&spring, target_row(target));
-                gdk::DragAction::MOVE
-            }
-            // A folder that cannot take what is over it has no reason to open either.
-            None => {
-                spring_open(&spring, None);
-                gdk::DragAction::empty()
+        let (planned, spring, dir, carry) =
+            (planned.clone(), spring.clone(), dir.clone(), carry.clone());
+        move |target: &gtk::DropTarget, x, y| {
+            // Another vault's rows can be neither the folder they land in nor inside it, so any
+            // folder takes them. Only they may be copied: a row of this tree only ever moves.
+            let foreign = (carry.foreign)();
+            let action = match foreign {
+                true => dir(target, x, y).map(|_| wanted(target)),
+                false => planned(target, x, y).map(|()| gdk::DragAction::MOVE),
+            };
+            target.set_actions(match foreign {
+                true => gdk::DragAction::COPY | gdk::DragAction::MOVE,
+                false => gdk::DragAction::MOVE,
+            });
+            match action {
+                Some(action) => {
+                    spring_open(&spring, target_row(target));
+                    action
+                }
+                // A folder that cannot take what is over it has no reason to open either.
+                None => {
+                    spring_open(&spring, None);
+                    gdk::DragAction::empty()
+                }
             }
         }
     };
@@ -141,12 +171,19 @@ pub(super) fn move_target(
         let spring = spring.clone();
         move |_| spring_open(&spring, None)
     });
-    let (on_move, on_append) = (on_move.clone(), on_append.clone());
+    let (on_move, on_append, carry) = (on_move.clone(), on_append.clone(), carry.clone());
     target.connect_drop(move |target, value, x, y| {
         spring_open(&spring, None);
         // The value is handed over here rather than read back off the target, which is the one
         // place it is certain to have arrived.
         let carried = dragged(value);
+        if (carry.foreign)() {
+            let Some(dir) = dir(target, x, y).filter(|_| !carried.is_empty()) else {
+                return false;
+            };
+            (carry.drop)(carried, dir, wanted(target) == gdk::DragAction::MOVE);
+            return true;
+        }
         if let Some((one, onto)) = appending(target, &carried) {
             on_append(one, onto);
             return true;
@@ -239,8 +276,8 @@ pub fn dropped_paths(value: &glib::Value) -> Option<Vec<PathBuf>> {
     (!files.is_empty()).then_some(files)
 }
 
-/// Choose move only for move-only external offers, as file managers
-/// report Shift drags; otherwise copy.
+/// Choose move only for move-only offers, which is what Shift narrows a drag from a file manager
+/// or another window's tree to; otherwise copy.
 fn wanted(target: &gtk::DropTarget) -> gdk::DragAction {
     let offered = target
         .current_drop()

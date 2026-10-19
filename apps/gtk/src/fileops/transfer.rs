@@ -1,11 +1,11 @@
 //! Transfer files to or from a remote vault over SSH. Workers keep transfers off the UI thread;
 //! the status bar shows progress and reports the result once.
 
-use super::paths::{at_free_name, child_path, free_path};
-use super::{Ops, batch_to};
+use super::paths::{at_free_name, child_path, free_path, topmost};
+use super::{Ops, batch_to, trash_all};
 use crate::dialogs::confirm;
 use crate::statusbar::Bytes;
-use accent_core::fs::links_inside;
+use accent_core::fs::{Walked, walk_copy};
 use accent_core::path::basename;
 use adw::prelude::*;
 use gtk::{gio, glib};
@@ -94,7 +94,10 @@ pub fn upload(ops: &Rc<Ops>, dir: &str) {
             };
             match existing.is_empty() {
                 true => send(&ops, &dir, chosen, Vec::new()),
-                false => confirm_replace(&ops, &dir, chosen, existing),
+                false => confirm_replace(&ops, existing, {
+                    let ops = ops.clone();
+                    move |existing| send(&ops, &dir, chosen, existing)
+                }),
             }
         });
     });
@@ -118,21 +121,17 @@ fn local_name(path: &Path) -> Option<String> {
 
 /// Overwriting is the one thing an upload does that can lose data, so it is asked about
 /// (DESIGN.md, States). Once for the batch rather than once per file: a chooser can return a
-/// dozen paths, and a dozen dialogs is an obstacle rather than a question.
-fn confirm_replace(ops: &Rc<Ops>, dir: &str, chosen: Vec<PathBuf>, existing: Vec<String>) {
+/// dozen paths, and a dozen dialogs is an obstacle rather than a question. `then` is handed the
+/// names to write over on Replace; Cancel sends nothing.
+fn confirm_replace(ops: &Rc<Ops>, existing: Vec<String>, then: impl FnOnce(Vec<String>) + 'static) {
     let heading = match existing.len() {
         1 => "Replace File?",
         _ => "Replace Files?",
     };
-    let (ops, dir, window) = (ops.clone(), dir.to_string(), ops.window.clone());
-    confirm(
-        &window,
-        heading,
-        &replace_body(&existing),
-        "Replace",
-        true,
-        move || send(&ops, &dir, chosen, existing),
-    );
+    let body = replace_body(&existing);
+    confirm(&ops.window, heading, &body, "Replace", true, move || {
+        then(existing)
+    });
 }
 
 /// Body of the "Replace Files?" dialog: what is already there, named, and that it cannot be got
@@ -241,7 +240,6 @@ pub fn import(ops: &Rc<Ops>, dir: &str, files: Vec<PathBuf>, cut: bool) {
                     // was taken since. What a folder holds goes into the folder made for it.
                     let landed = RefCell::new(to.clone());
                     let (sent, failed) = carry.send(
-                        cut,
                         |rel| vault.create_dir(rel, true),
                         |from, rel| {
                             let progress = |done, total| count.bytes.set(done, total);
@@ -256,20 +254,28 @@ pub fn import(ops: &Rc<Ops>, dir: &str, files: Vec<PathBuf>, cut: bool) {
                                 .map(|at| *landed.borrow_mut() = at),
                             };
                             count.done.fetch_add(1, Ordering::Relaxed);
+                            // A Cut takes each file away once it is in the vault. A source that
+                            // will not go is logged rather than toasted: the paste did land.
+                            if cut
+                                && sent.is_ok()
+                                && let Err(e) = std::fs::remove_file(from)
+                            {
+                                tracing::warn!("{} stayed where it was: {e}", from.display());
+                            }
                             sent
                         },
                     );
+                    if cut {
+                        carry.take_emptied();
+                    }
                     if !failed.contains(&to) {
                         report.landed.push(landed.into_inner());
                         report.folders |= is_dir;
                     }
                     report.files += sent;
-                    // Named from the folder pasted into, which the toast has already said.
-                    let inside = |rel: String| match rel.strip_prefix(&format!("{dir}/")) {
-                        Some(rest) => rest.to_string(),
-                        None => rel,
-                    };
-                    report.failed.extend(failed.into_iter().map(inside));
+                    report
+                        .failed
+                        .extend(failed.iter().map(|rel| inside(&dir, rel)));
                 }
                 report
             }
@@ -280,6 +286,145 @@ pub fn import(ops: &Rc<Ops>, dir: &str, files: Vec<PathBuf>, cut: bool) {
             None => "Cannot paste".to_string(),
         });
     });
+}
+
+/// One path carried in from another vault: where it is there, where it lands here, whether it is
+/// a folder, and what it takes.
+type Carried = (String, String, bool, Carry<String>);
+
+/// Rows dragged in from another window's tree: `rels` of `from`'s vault copied into `dir` of this
+/// one, each under its own name, folders file by file, the bytes going straight from one machine to
+/// the other ([`accent_api::Vault::copy_to`]). Names already taken here are asked about once for
+/// the batch, as Upload Files… asks, and Cancel copies nothing; a folder already here takes what is
+/// carried into it. `moving` (Shift) then takes the originals out of `from`'s vault as its Delete
+/// does — to the trash, or on a host for good behind its question — the ones that all landed.
+pub fn carry_in(ops: &Rc<Ops>, from: &Rc<Ops>, rels: Vec<String>, dir: &str, moving: bool) {
+    // What lands should be what the reader last saw there.
+    (from.flush)(&rels);
+    let marked: Vec<(String, bool)> = rels.into_iter().map(|rel| (rel, false)).collect();
+    let rels: Vec<String> = topmost(&marked).into_iter().map(|(rel, _)| rel).collect();
+    let (source, vault, dir) = (from.vault.clone(), ops.vault.clone(), dir.to_string());
+    let (ops, from) = (ops.clone(), from.clone());
+    glib::spawn_future_local(async move {
+        // Every walk and every taken name first, on the worker: each is a round trip on a host.
+        let walked = crate::work::off_thread("copy", move || {
+            let mut carried: Vec<Carried> = Vec::new();
+            let mut existing = Vec::new();
+            for rel in rels {
+                let to = child_path(&dir, basename(&rel));
+                let walked = source.list_tree(&rel).unwrap_or_else(|_| Walked {
+                    unread: vec![String::new()],
+                    ..Walked::default()
+                });
+                let is_dir = !walked.dirs.is_empty() || !walked.unread.is_empty();
+                // A name nothing holds here has nothing under it to take.
+                if vault.exists(&to) {
+                    let here = match is_dir {
+                        true => vault.list_tree(&to).map(|w| w.files).unwrap_or_default(),
+                        false => vec![String::new()],
+                    };
+                    existing.extend(walked.files.iter().filter(|file| here.contains(file)).map(
+                        |file| match file.as_str() {
+                            "" => to.clone(),
+                            file => child_path(&to, file),
+                        },
+                    ));
+                }
+                let at = |file: &str| match file {
+                    "" => rel.clone(),
+                    file => child_path(&rel, file),
+                };
+                let carry = Carry::landing(walked, &to, at);
+                carried.push((rel, to, is_dir, carry));
+            }
+            (carried, existing, dir)
+        })
+        .await;
+        let Some((carried, existing, dir)) = walked else {
+            return (ops.toast)("Cannot copy");
+        };
+        if existing.is_empty() {
+            return carry(&ops, &from, &dir, carried, Vec::new(), moving);
+        }
+        let shown = existing.iter().map(|rel| inside(&dir, rel)).collect();
+        let asking = ops.clone();
+        confirm_replace(&asking, shown, move |_| {
+            carry(&ops, &from, &dir, carried, existing, moving)
+        });
+    });
+}
+
+/// [`carry_in`] once the names are settled: the copies on a worker, counted on the status bar in
+/// the words of the side that is remote, one toast, and with `moving` the originals that all
+/// landed taken out of `from`'s vault.
+fn carry(
+    ops: &Rc<Ops>,
+    from: &Rc<Ops>,
+    dir: &str,
+    carried: Vec<Carried>,
+    replace: Vec<String>,
+    moving: bool,
+) {
+    let (source, vault) = (from.vault.clone(), ops.vault.clone());
+    let verb = match (source.is_remote(), vault.is_remote()) {
+        (true, false) => "Downloading",
+        (false, true) => "Uploading",
+        _ => "Copying",
+    };
+    let count = Arc::new(Count::default());
+    let total = carried.iter().map(|(.., carry)| carry.files.len()).sum();
+    count.total.store(total, Ordering::Relaxed);
+    let names: Vec<PathBuf> = carried.iter().map(|(rel, ..)| rel.into()).collect();
+    let line = batch_line(verb, &names, &count);
+    let (ops, from, dir) = (ops.clone(), from.clone(), dir.to_string());
+    glib::spawn_future_local(async move {
+        let work = crate::work::off_thread("copy", {
+            let count = count.clone();
+            move || {
+                let (mut report, mut whole) = (Imported::default(), Vec::new());
+                for (rel, to, is_dir, carry) in carried {
+                    let (sent, failed) = carry.send(
+                        |rel| vault.create_dir(rel, true),
+                        |from, rel| {
+                            let progress = |done, total| count.bytes.set(done, total);
+                            let over = replace.iter().any(|r| r == rel);
+                            let sent = source.copy_to(from, &vault, rel, over, &progress);
+                            count.done.fetch_add(1, Ordering::Relaxed);
+                            sent
+                        },
+                    );
+                    if !failed.contains(&to) {
+                        report.landed.push(to);
+                        report.folders |= is_dir;
+                    }
+                    if failed.is_empty() {
+                        whole.push(rel);
+                    }
+                    report.files += sent;
+                    report
+                        .failed
+                        .extend(failed.iter().map(|rel| inside(&dir, rel)));
+                }
+                (report, whole)
+            }
+        });
+        let done = counting_on(&ops, line, work).await;
+        let Some((report, whole)) = done else {
+            return (ops.toast)("Cannot copy");
+        };
+        (ops.toast)(&report.message(false));
+        if moving && !whole.is_empty() {
+            trash_all(&from, whole);
+        }
+    });
+}
+
+/// `rel` named from the folder `dir` a batch went into, which its toast has already said.
+fn inside(dir: &str, rel: &str) -> String {
+    match rel.strip_prefix(&format!("{dir}/")) {
+        Some(rest) => rest.to_string(),
+        None => rel.to_string(),
+    }
 }
 
 /// How far a batch has got, counted on the worker and read on the main loop: the files tried so
@@ -340,67 +485,39 @@ async fn counting_on<T>(
     .await
 }
 
-/// What carrying one path from this machine into the vault takes: the folders to make, parents
-/// first, and the files to send, each with the path it lands at. A file is the carry of one.
+/// What carrying one path into the vault takes: the folders to make, parents first, and the files
+/// to send, each from where `S` names it on the source side to the path it lands at. A file is the
+/// carry of one.
 #[derive(Debug, Default, PartialEq)]
-struct Carry {
-    dirs: Vec<(PathBuf, String)>,
-    files: Vec<(PathBuf, String)>,
+struct Carry<S> {
+    dirs: Vec<(S, String)>,
+    files: Vec<(S, String)>,
     /// Folders the walk could not read, by where they would have landed.
     unread: Vec<String>,
 }
 
-impl Carry {
-    /// Walk `src` into `to`, a path nothing in the vault holds yet, so nothing under it can clash.
-    ///
-    /// Everything that is there is carried, dot-named files included, as GNOME Files copies a
-    /// folder. A symbolic link is carried only as the file it names inside `src`: one leading out
-    /// of it would copy what nobody selected, and one to a folder may be a loop, its folder being
-    /// walked where it really is.
-    fn of(src: &Path, to: &str) -> Carry {
-        let mut carry = Carry::default();
-        match src.is_dir() {
-            true => {
-                let root = src.canonicalize().unwrap_or_else(|_| src.to_path_buf());
-                carry.walk(&root, src, to);
-            }
-            false => carry.files.push((src.to_path_buf(), to.to_string())),
-        }
-        carry
-    }
-
-    fn walk(&mut self, root: &Path, dir: &Path, to: &str) {
-        let mut entries: Vec<PathBuf> = match std::fs::read_dir(dir) {
-            Ok(entries) => entries.flatten().map(|e| e.path()).collect(),
-            Err(_) => return self.unread.push(to.to_string()),
+impl<S> Carry<S> {
+    /// `walked` landing at `to`, each of its paths named on the source side by `at`.
+    fn landing(walked: Walked, to: &str, at: impl Fn(&str) -> S) -> Carry<S> {
+        let land = |rel: &str| match rel {
+            "" => to.to_string(),
+            rel => child_path(to, rel),
         };
-        entries.sort();
-        self.dirs.push((dir.to_path_buf(), to.to_string()));
-        for path in entries {
-            let (Some(name), Ok(meta)) = (local_name(&path), std::fs::symlink_metadata(&path))
-            else {
-                continue;
-            };
-            let rel = child_path(to, &name);
-            if meta.is_dir() {
-                self.walk(root, &path, &rel);
-            } else if meta.is_file() || (meta.is_symlink() && links_inside(&path, root)) {
-                self.files.push((path, rel));
-            }
+        let pair = |rel: String| (at(&rel), land(&rel));
+        Carry {
+            dirs: walked.dirs.into_iter().map(pair).collect(),
+            files: walked.files.into_iter().map(pair).collect(),
+            unread: walked.unread.iter().map(|rel| land(rel)).collect(),
         }
     }
 
     /// Make the folders, then send the files, keeping whatever lands when a later step fails, as a
     /// file manager does. Answers how many files landed and what did not, by where it would have
     /// landed: a folder that could not be made is named once, and nothing under it is tried.
-    ///
-    /// A Cut takes each file away once it is in the vault, then every folder left empty; what
-    /// stays behind is what did not go.
     fn send(
         &self,
-        cut: bool,
         make_dir: impl Fn(&str) -> accent_api::Result<()>,
-        send: impl Fn(&Path, &str) -> accent_api::Result<()>,
+        send: impl Fn(&S, &str) -> accent_api::Result<()>,
     ) -> (usize, Vec<String>) {
         let mut failed = self.unread.clone();
         let under = |rel: &str, failed: &[String]| {
@@ -420,22 +537,30 @@ impl Carry {
                 continue;
             }
             match send(from, rel) {
-                // A source that will not go is logged rather than toasted: the paste did land.
-                Ok(()) => {
-                    sent += 1;
-                    if cut && let Err(e) = std::fs::remove_file(from) {
-                        tracing::warn!("{} stayed where it was: {e}", from.display());
-                    }
-                }
+                Ok(()) => sent += 1,
                 Err(_) => failed.push(rel.clone()),
             }
         }
-        if cut {
-            for (dir, _) in self.dirs.iter().rev() {
-                let _ = std::fs::remove_dir(dir);
-            }
-        }
         (sent, failed)
+    }
+}
+
+impl Carry<PathBuf> {
+    /// Walk `src` on this machine into `to`, a path nothing in the vault holds yet, so nothing
+    /// under it can clash ([`walk_copy`]).
+    fn of(src: &Path, to: &str) -> Carry<PathBuf> {
+        Carry::landing(walk_copy(src), to, |rel| match rel {
+            "" => src.to_path_buf(),
+            rel => src.join(rel),
+        })
+    }
+
+    /// A Cut's end, its files taken away: every folder left empty goes too, deepest first; what
+    /// stays behind is what did not go.
+    fn take_emptied(&self) {
+        for (dir, _) in self.dirs.iter().rev() {
+            let _ = std::fs::remove_dir(dir);
+        }
     }
 }
 
@@ -581,52 +706,34 @@ mod tests {
         assert_eq!(busy_what("Copying", &two), "Copying 2 files");
     }
 
-    /// A folder from this disk is walked into folders to make and files to send, each landing
-    /// under the path the paste chose for the folder. A link is carried only as the file it names
-    /// inside the folder: one out of it, or to a folder, which may be a loop, is left out.
+    /// A walk lands under the path chosen for it, each path named on the source side as the
+    /// caller names it: a file of this disk, or a path in another vault.
     #[test]
-    fn a_folder_is_carried_as_its_folders_and_files() {
-        // `std::env::temp_dir`, as `start.rs`'s test does: apps/gtk has no `tempfile`.
-        let tmp = std::env::temp_dir().join(format!("accent-carry-{}", std::process::id()));
-        let src = tmp.join("Photos");
-        std::fs::create_dir_all(src.join("sub")).unwrap();
-        std::fs::create_dir(src.join("empty")).unwrap();
-        std::fs::write(src.join("a.png"), "a").unwrap();
-        std::fs::write(src.join("sub/b.png"), "b").unwrap();
-        std::fs::write(tmp.join("outside.png"), "o").unwrap();
-        std::os::unix::fs::symlink("a.png", src.join("inside.png")).unwrap();
-        std::os::unix::fs::symlink("../outside.png", src.join("out.png")).unwrap();
-        std::os::unix::fs::symlink(".", src.join("loop")).unwrap();
-
-        let carry = Carry::of(&src, "Media/Photos (copy)");
-        let dirs: Vec<&str> = carry.dirs.iter().map(|(_, rel)| rel.as_str()).collect();
+    fn a_walk_lands_under_the_path_chosen_for_it() {
+        let walked = || Walked {
+            dirs: vec!["".into(), "sub".into()],
+            files: vec!["a.png".into(), "sub/b.png".into()],
+            unread: vec!["locked".into()],
+        };
+        let carry = Carry::landing(walked(), "Media/Photos (copy)", |rel| rel.to_string());
         assert_eq!(
-            dirs,
+            carry.dirs,
             [
-                "Media/Photos (copy)",
-                "Media/Photos (copy)/empty",
-                "Media/Photos (copy)/sub"
+                ("".to_string(), "Media/Photos (copy)".to_string()),
+                ("sub".into(), "Media/Photos (copy)/sub".into())
             ]
         );
-        let files: Vec<(&Path, &str)> = carry
-            .files
-            .iter()
-            .map(|(from, to)| (from.strip_prefix(&src).unwrap(), to.as_str()))
-            .collect();
         assert_eq!(
-            files,
-            [
-                (Path::new("a.png"), "Media/Photos (copy)/a.png"),
-                (Path::new("inside.png"), "Media/Photos (copy)/inside.png"),
-                (Path::new("sub/b.png"), "Media/Photos (copy)/sub/b.png"),
-            ]
+            carry.files[1],
+            ("sub/b.png".into(), "Media/Photos (copy)/sub/b.png".into())
         );
+        assert_eq!(carry.unread, ["Media/Photos (copy)/locked"]);
 
         // A file is the carry of one.
+        let src = Path::new("/x/Photos");
         let one = Carry::of(&src.join("a.png"), "a.png");
         assert!(one.dirs.is_empty());
         assert_eq!(one.files, [(src.join("a.png"), "a.png".to_string())]);
-        std::fs::remove_dir_all(&tmp).unwrap();
     }
 
     /// What lands stays when something after it fails, as in a file manager, and what did not is
@@ -647,7 +754,6 @@ mod tests {
         };
         let made = std::cell::RefCell::new(Vec::new());
         let (sent, failed) = carry.send(
-            false,
             |rel| {
                 made.borrow_mut().push(rel.to_string());
                 match rel {
@@ -665,26 +771,17 @@ mod tests {
         assert_eq!(failed, ["P/locked", "P/bad", "P/c"]);
     }
 
-    /// A Cut takes away what went, and what did not stays where it was, with the folders it is in.
+    /// A Cut takes away the folders its files left empty, and what did not go stays where it was,
+    /// with the folders it is in.
     #[test]
     fn a_cut_folder_leaves_only_what_did_not_go() {
         let tmp = std::env::temp_dir().join(format!("accent-cut-{}", std::process::id()));
         let src = tmp.join("P");
         std::fs::create_dir_all(src.join("gone")).unwrap();
         std::fs::create_dir_all(src.join("kept")).unwrap();
-        std::fs::write(src.join("gone/a"), "a").unwrap();
         std::fs::write(src.join("kept/b"), "b").unwrap();
 
-        let carry = Carry::of(&src, "P");
-        let (sent, failed) = carry.send(
-            true,
-            |_| Ok(()),
-            |_, rel| match rel {
-                "P/kept/b" => Err(accent_core::Error::Io("no".into()).into()),
-                _ => Ok(()),
-            },
-        );
-        assert_eq!((sent, failed), (1, vec!["P/kept/b".to_string()]));
+        Carry::of(&src, "P").take_emptied();
         assert!(!src.join("gone").exists(), "emptied, so taken away");
         assert!(src.join("kept/b").exists());
         std::fs::remove_dir_all(&tmp).unwrap();

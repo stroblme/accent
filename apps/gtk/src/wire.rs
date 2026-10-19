@@ -334,6 +334,12 @@ fn wire_pane_drops(app: &Rc<App>, pane: &Rc<Pane>) {
         #[upgrade_or]
         gdk::DragAction::empty(),
         move |target, x, y| {
+            // A row from another window's tree names a file in that window's vault: no pane here
+            // opens it.
+            if app.dragged_from().is_some() {
+                pane.show_zone(None);
+                return gdk::DragAction::empty();
+            }
             let (w, h) = pane.size();
             let zone = panes::zone(x, y, w, h);
             // A PDF from the tree over the middle of another PDF goes in between its pages: a
@@ -369,6 +375,18 @@ fn wire_pane_drops(app: &Rc<App>, pane: &Rc<Pane>) {
     // "over there" and the one libadwaita already draws an insertion point for.
     pane.bar
         .setup_extra_drop_target(gdk::DragAction::COPY, &[String::static_type()]);
+    // Preloaded only for the answer below, which refuses another window's row while it hovers.
+    pane.bar.set_extra_drag_preload(true);
+    pane.bar.connect_extra_drag_value(glib::clone!(
+        #[weak]
+        app,
+        #[upgrade_or]
+        gdk::DragAction::empty(),
+        move |_, _, _| match app.dragged_from() {
+            Some(_) => gdk::DragAction::empty(),
+            None => gdk::DragAction::COPY,
+        }
+    ));
     pane.bar.connect_extra_drag_drop(glib::clone!(
         #[weak]
         app,
@@ -377,7 +395,8 @@ fn wire_pane_drops(app: &Rc<App>, pane: &Rc<Pane>) {
         #[upgrade_or]
         false,
         move |_, _, value| {
-            let Ok(rel) = value.get::<String>() else {
+            let rel = value.get::<String>().ok();
+            let Some(rel) = rel.filter(|_| app.dragged_from().is_none()) else {
                 return false;
             };
             // As a drop on the pane's middle does (`App::dropped`).
@@ -396,6 +415,9 @@ fn wire_pane_drops(app: &Rc<App>, pane: &Rc<Pane>) {
         #[upgrade_or]
         false,
         move |target, value, x, y| {
+            if app.dragged_from().is_some() {
+                return false;
+            }
             let (w, h) = pane.size();
             let zone = panes::zone(x, y, w, h);
             // Belt and braces: the drag is over whatever the source has to say about it, and a

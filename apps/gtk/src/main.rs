@@ -197,6 +197,7 @@ fn main() -> glib::ExitCode {
         windows: RefCell::new(Vec::new()),
         start: glib::WeakRef::new(),
         landing: RefCell::new(None),
+        tree_drag: RefCell::new(None),
         keys: Cell::new((actions::Keys::Tab, false)),
     });
     shell.watch_config();

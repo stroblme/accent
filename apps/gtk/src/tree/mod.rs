@@ -20,7 +20,7 @@ mod drag;
 mod listing;
 
 pub use drag::dropped_paths;
-use drag::{Append, Import, Move, import_target, move_content, move_target};
+use drag::{Append, Carry, Import, Move, import_target, move_content, move_target};
 use listing::{Asked, ShowHidden, Watches, children_model, fill, watch_unindexed};
 pub use listing::{decode, dot_named};
 
@@ -666,7 +666,9 @@ fn root_row(label: &str) -> gtk::Box {
 ///
 /// `on_activate` receives the file key and double-click flag. `on_drag` tracks outgoing drags;
 /// `on_move` receives paths and destination; `on_import` receives local files, folder and
-/// move flag; `on_append` receives the dropped PDF and target PDF key.
+/// move flag; `on_append` receives the dropped PDF and target PDF key. `foreign` says whether the
+/// drag in flight came out of another window's tree, whose drop `on_carry` receives: its paths,
+/// the folder and the move flag.
 #[allow(clippy::too_many_arguments)]
 pub fn build(
     vault: Arc<Vault>,
@@ -677,6 +679,8 @@ pub fn build(
     on_move: impl Fn(Vec<(String, String)>) + 'static,
     on_import: impl Fn(Vec<PathBuf>, String, bool) + 'static,
     on_append: impl Fn(String, String) + 'static,
+    foreign: impl Fn() -> bool + 'static,
+    on_carry: impl Fn(Vec<String>, String, bool) + 'static,
 ) -> Tree {
     let cache: Rc<RefCell<HashMap<String, gio::ListStore>>> = Rc::new(RefCell::new(HashMap::new()));
     let asked = Asked::default();
@@ -698,8 +702,14 @@ pub fn build(
     let moves: Move = Rc::new(on_move);
     let imports: Import = Rc::new(on_import);
     let appends: Append = Rc::new(on_append);
+    let carries = Carry {
+        foreign: Rc::new(foreign),
+        drop: Rc::new(on_carry),
+    };
     let vault_row = root_row(&root_label);
-    vault_row.add_controller(move_target(&moves, &appends, |_, _, _| Some(String::new())));
+    vault_row.add_controller(move_target(&moves, &appends, &carries, |_, _, _| {
+        Some(String::new())
+    }));
     vault_row.add_controller(import_target(&imports, &appends, |_, _, _| {
         Some(String::new())
     }));
@@ -711,6 +721,7 @@ pub fn build(
     let row_moves = moves.clone();
     let row_imports = imports.clone();
     let row_appends = appends.clone();
+    let row_carries = carries.clone();
     // A folder's listing is kept for as long as the window is open, which is what makes binding
     // its row free, and it moves only when the vault says the folder changed. So each opening of
     // a folder lists it again: a dependency tree is watched by nothing, and a folder whose news
@@ -740,6 +751,7 @@ pub fn build(
                 &row_moves,
                 &row_imports,
                 &row_appends,
+                &row_carries,
             )
         },
         move |expander: &gtk::TreeExpander, item| {
@@ -789,7 +801,7 @@ pub fn build(
         let view = target.widget()?.downcast::<gtk::ListView>().ok()?;
         row_at(&view, x, y).is_none().then(String::new)
     };
-    view.add_controller(move_target(&moves, &appends, blank));
+    view.add_controller(move_target(&moves, &appends, &carries, blank));
     view.add_controller(import_target(&imports, &appends, blank));
 
     let (body, landed) = body_stack(&view, &vault, root);
@@ -855,6 +867,7 @@ fn tree_model(
 
 /// Reusable icon/name expander row: relist folders on opening, show
 /// full-path tooltips and support outgoing drags and folder drops.
+#[allow(clippy::too_many_arguments)]
 fn setup_row(
     relist: &Rc<dyn Fn(&str)>,
     root_label: &str,
@@ -863,6 +876,7 @@ fn setup_row(
     moves: &Move,
     imports: &Import,
     appends: &Append,
+    carries: &Carry,
 ) -> gtk::TreeExpander {
     let icon = gtk::Image::new();
     let label = gtk::Label::builder()
@@ -919,7 +933,7 @@ fn setup_row(
         (!row.dependency)
             .then(|| crate::fileops::row_dir(Some((&row.rel, row.is_dir()))).to_string())
     };
-    expander.add_controller(move_target(moves, appends, row_dir));
+    expander.add_controller(move_target(moves, appends, carries, row_dir));
     // The same row takes files from another application, into the same folder.
     expander.add_controller(import_target(imports, appends, row_dir));
     expander

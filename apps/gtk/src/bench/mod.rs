@@ -59,8 +59,8 @@ use diagnostics::bench_diagnostics;
 use diagram::bench_diagram;
 use export::bench_export;
 use files::{
-    bench_clip, bench_clip_outside, bench_close, bench_hidden, bench_paths, bench_save_as,
-    bench_templates, bench_transfer,
+    bench_carry, bench_clip, bench_clip_outside, bench_close, bench_hidden, bench_paths,
+    bench_save_as, bench_templates, bench_transfer,
 };
 use find::bench_find;
 use folders::{
@@ -235,6 +235,8 @@ use tags::bench_tags;
 ///   waits up to a minute per paste. `outside:<dir>`: external folder/file
 ///   paste, with empty `<dir>` meaning root.
 /// - `ACCENT_BENCH_TRANSFER=<rel_pdf>`: remote open/download/upload byte counts.
+/// - `ACCENT_BENCH_CARRY=<local vault>`: on a remote vault, rows carried to and from a second
+///   window on the local vault, as another window's tree drop hands them over.
 /// - `ACCENT_BENCH_ATTACH=<rel_note>,<rel_vault_png>,<rel_code>`: image paste/drop.
 /// - `ACCENT_BENCH_ANSWER=<rel_note>`: conflict responses and main-loop timing;
 ///   `same:<rel_note>`: etag-only change during typing.
@@ -321,6 +323,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let diagram = std::env::var("ACCENT_BENCH_DIAGRAM").ok();
     let clip = std::env::var("ACCENT_BENCH_CLIP").ok();
     let transfer = std::env::var("ACCENT_BENCH_TRANSFER").ok();
+    let carry = std::env::var("ACCENT_BENCH_CARRY").ok();
     let menu = std::env::var("ACCENT_BENCH_MENU").ok();
     let drop = std::env::var("ACCENT_BENCH_DROP").ok();
     let watch = std::env::var("ACCENT_BENCH_WATCH").ok();
@@ -358,6 +361,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && search.is_none()
         && clip.is_none()
         && transfer.is_none()
+        && carry.is_none()
         && menu.is_none()
         && drop.is_none()
         && watch.is_none()
@@ -561,6 +565,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(rel) = transfer {
             return bench_transfer(&app, &rel);
+        }
+        if let Some(local) = carry {
+            return bench_carry(&app, &local);
         }
         if let Some(rel) = clip {
             if let Some(dir) = rel.strip_prefix("outside:") {

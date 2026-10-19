@@ -460,11 +460,16 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
             }
         ),
         // A drag out of the tree is the only notice the panes get that their drop zones should
-        // go up; a tab drag announces itself through `AdwTabView:is-transferring-page`.
+        // go up, every window's; a tab drag announces itself through
+        // `AdwTabView:is-transferring-page`.
         glib::clone!(
             #[weak]
             app,
-            move |on| app.set_drop_active(on)
+            move |on| {
+                if let Some(shell) = app.shell.upgrade() {
+                    shell.tree_drag(&app, on);
+                }
+            }
         ),
         // A row dropped back into the tree moves the file, and a marked row the whole set. Where
         // they may land at all is decided before the drop; what is left is the same
@@ -495,6 +500,25 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
             #[weak]
             app,
             move |from: String, onto: String| app.append_pdf(&from, &onto)
+        ),
+        glib::clone!(
+            #[weak]
+            app,
+            #[upgrade_or]
+            false,
+            move || app.dragged_from().is_some()
+        ),
+        // Rows from another window's tree are copied from that window's vault into this one.
+        glib::clone!(
+            #[weak]
+            app,
+            move |rels: Vec<String>, dir: String, moving: bool| {
+                if let (Some(from), Some(ops)) = (app.dragged_from(), app.ops())
+                    && let Some(source) = from.ops()
+                {
+                    fileops::carry_in(ops, source, rels, &dir, moving);
+                }
+            }
         ),
     );
     // The tree owns its scroller now, wrapped in a box the context menu can parent itself to.

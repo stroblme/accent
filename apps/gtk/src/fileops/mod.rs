@@ -19,7 +19,7 @@ pub(crate) use paths::at_free_name;
 pub use paths::{move_dest, topmost};
 #[cfg(feature = "bench")]
 pub use transfer::download_to;
-pub use transfer::{download, import, upload};
+pub use transfer::{carry_in, download, import, upload};
 
 use self::paths::{
     levels, moved_path, moves_to, renamed_part, renamed_path, split_typed, typed_dir, typed_path,
