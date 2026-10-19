@@ -1032,7 +1032,9 @@ const SERVERS: &[(&str, &str, &[&[&str]])] = &[
     ("python", "python", PYTHON),
     ("python3", "python", PYTHON),
     ("js", "javascript", TYPESCRIPT),
+    ("jsx", "javascriptreact", TYPESCRIPT),
     ("typescript", "typescript", TYPESCRIPT),
+    ("typescript-jsx", "typescriptreact", TYPESCRIPT),
     ("latex", "latex", &[&["texlab"]]),
     ("toml", "toml", &[&["taplo", "lsp", "stdio"]]),
     ("go", "go", &[&["gopls"]]),
@@ -1134,7 +1136,9 @@ fn language_of(rel: &str) -> Option<&'static str> {
         "rs" => "rust",
         "py" | "pyi" => "python3",
         "js" | "mjs" | "cjs" => "js",
-        "ts" => "typescript",
+        "jsx" => "jsx",
+        "ts" | "mts" | "cts" => "typescript",
+        "tsx" => "typescript-jsx",
         "go" => "go",
         "c" => "c",
         "h" => "chdr",
@@ -1556,6 +1560,21 @@ mod tests {
                 panic!("{header} has a server")
             };
             assert_eq!(language_id, id, "a header is its language's");
+        }
+        // JSX is its own language to the protocol, and typescript-language-server's to answer.
+        for (jsx, id) in [
+            ("typescript-jsx", "typescriptreact"),
+            ("jsx", "javascriptreact"),
+        ] {
+            let Some(Server::External { language_id, .. }) = server(&configured(jsx, &[me]), jsx)
+            else {
+                panic!("{jsx} has a server")
+            };
+            assert_eq!(language_id, id);
+            assert_eq!(
+                server_name(&LspConfig::default(), jsx).as_deref(),
+                Some("typescript-language-server")
+            );
         }
 
         assert!(
