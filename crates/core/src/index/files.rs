@@ -108,6 +108,17 @@ impl Index {
         Ok(out)
     }
 
+    /// The vault's other paths to `rel`'s file, a symlink or a hard link the walk kept as an
+    /// alias rather than a row.
+    pub fn aliases_of(&self, rel: &str) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT a.rel_path FROM aliases a JOIN files f ON f.id = a.file_id
+              WHERE f.rel_path = ?1 ORDER BY a.rel_path",
+        )?;
+        let rows = st.query_map([rel], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Direct children of `prefix` (`""` for vault root), one lazy-tree level per call. The
     /// indexed `parent_dir` lookup keeps cost proportional to returned children.
     pub fn list_files(&self, prefix: &str) -> Result<Vec<FileRow>> {

@@ -178,6 +178,32 @@ fn a_symlinked_note_hears_of_its_target() {
     );
 }
 
+/// A second path to a note, an alias the walk keeps rather than a row, hears of the note being
+/// written: the watcher's news names the row alone. Depends on real inotify events.
+#[test]
+fn an_alias_hears_of_its_file() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("note.md"), "old\n").unwrap();
+    std::fs::create_dir(root.path().join("d")).unwrap();
+    std::os::unix::fs::symlink("../note.md", root.path().join("d/link.md")).unwrap();
+    let f = Fixture::open_dir(root, VaultConfig::default());
+
+    f.write("note.md", "new\n");
+    assert!(
+        f.wait(|e| matches!(e, Event::FileChanged(p) if p == "d/link.md"))
+            .is_some(),
+        "the alias heard nothing"
+    );
+    assert!(
+        f.vault
+            .file_paths(false)
+            .unwrap()
+            .iter()
+            .all(|p| p != "d/link.md"),
+        "the alias became a row"
+    );
+}
+
 /// Verify watches include subdirectories already present at vault open,
 /// so external note edits reach the UI.
 #[test]
