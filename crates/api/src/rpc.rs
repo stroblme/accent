@@ -417,7 +417,9 @@ pub(crate) fn serve_local(
                 // write, so joining them could wait on a full pipe for good. A commit or a sync
                 // still running is the user's, though, so they are given until the longest git
                 // bound to finish; then the vault goes, and the process exits around the rest.
+                // The debug sessions are nobody's any more and end first, as after EOF below.
                 tracing::info!("nothing from the client in {silence:?}; stopping");
+                vault.debug.shutdown();
                 let until = Instant::now() + LINGER;
                 while workers.iter().any(|w| !w.is_finished()) && Instant::now() < until {
                     std::thread::sleep(Duration::from_millis(50));
@@ -1368,6 +1370,18 @@ mod tests {
     /// ends the vault's debug sessions rather than wait for it.
     #[test]
     fn closing_the_connection_ends_a_debug_session_whatever_it_runs() {
+        the_window_gone_ends_a_debug_session(false);
+    }
+
+    /// A link gone silent is a window gone as well, and `serve` does not linger on the evaluation.
+    #[test]
+    fn a_silent_connection_ends_a_debug_session_whatever_it_runs() {
+        the_window_gone_ends_a_debug_session(true);
+    }
+
+    /// The window closing its link, or with `quiet` going silent after a ping, while the console
+    /// evaluates code that never returns.
+    fn the_window_gone_ends_a_debug_session(quiet: bool) {
         use crate::debug::{Context, Launch};
         let root = tempfile::tempdir().unwrap();
         let cache = tempfile::tempdir().unwrap();
@@ -1380,8 +1394,9 @@ mod tests {
         // Bare pipes rather than a `Client`, whose shutdown would wait on a `serve` that hangs.
         let (server_in, mut client_out) = std::io::pipe().unwrap();
         let (client_in, server_out) = std::io::pipe().unwrap();
+        let silence = Duration::from_millis(200);
         let server =
-            std::thread::spawn(move || serve_local(vault, events, server_in, server_out, SILENCE));
+            std::thread::spawn(move || serve_local(vault, events, server_in, server_out, silence));
         let mut ask = move |id: u64, method: &str, params: Value| {
             let line = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
             writeln!(client_out, "{line}").unwrap();
@@ -1405,9 +1420,13 @@ mod tests {
         };
         assert!(appears("evaluate"), "the adapter was never asked");
 
-        drop(ask);
+        // Pinged once, the server takes the silence that follows for the window gone.
+        match quiet {
+            true => ask(3, "ping", json!([])),
+            false => drop(ask),
+        }
         let ended = crate::tests::poll_until(|| server.is_finished(), Duration::from_secs(10));
-        assert!(ended, "serve waits on the evaluation after EOF");
+        assert!(ended, "serve waits on the evaluation (quiet: {quiet})");
         server.join().unwrap();
         assert!(appears("ended"), "the adapter outlived serve");
     }
