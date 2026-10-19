@@ -93,6 +93,17 @@ fn cached(path: &Path, e: std::io::Error) -> Error {
     accent_core::Error::io(path.display(), e).into()
 }
 
+/// Put a finished `.part` at `dest`: renamed over whatever is there when `replace`, else linked
+/// to the name, which fails on any name taken, and let go of, so nothing there is written over.
+fn land(part: &Path, dest: &Path, replace: bool) -> Result<()> {
+    if replace {
+        return std::fs::rename(part, dest).map_err(|e| cached(dest, e));
+    }
+    let linked = std::fs::hard_link(part, dest).map_err(|e| cached(dest, e));
+    let _ = std::fs::remove_file(part);
+    linked
+}
+
 /// Move a cached file or folder with its host original, creating destination
 /// folders. Missing caches are ignored; failure requires a later download.
 fn carry(from: &Path, to: &Path) {
@@ -533,7 +544,7 @@ impl Remote {
         if let Some(dir) = dest.parent() {
             std::fs::create_dir_all(dir).map_err(|e| cached(dir, e))?;
         }
-        self.receive(rel, &dest, current.size, progress)?;
+        self.receive(rel, &dest, current.size, true, progress)?;
         // A copy fetched afresh holds no page edit made here, so none waits on it for the notes.
         if let Some(edits) = ssh::relink_path(&self.url, rel) {
             let _ = std::fs::remove_file(edits);
@@ -719,38 +730,79 @@ impl Remote {
 
     /// Copy a file out of the vault to somewhere on this machine.
     pub fn download(&self, rel: &str, dest: &Path) -> Result<()> {
-        self.download_with(rel, dest, &|_, _| ())
+        self.download_with(rel, dest, true, &|_, _| ())
     }
 
     /// [`download`](Self::download), telling `progress` the bytes received so far and how many
-    /// there are, as they arrive.
-    pub fn download_with(&self, rel: &str, dest: &Path, progress: &dyn Fn(u64, u64)) -> Result<()> {
+    /// there are, as they arrive. Over whatever is at `dest` when `replace`; otherwise only where
+    /// nothing is, a taken name failing with `AlreadyExists`.
+    pub fn download_with(
+        &self,
+        rel: &str,
+        dest: &Path,
+        replace: bool,
+        progress: &dyn Fn(u64, u64),
+    ) -> Result<()> {
         let size: Option<crate::Etag> = self.call("stat", json!([rel]))?;
         let size = size.map_or(0, |etag| etag.size);
-        self.receive(rel, dest, size, progress)
+        self.receive(rel, dest, size, replace, progress)
+    }
+
+    /// Copy host `rel` to `to_rel` on `to`'s host, piped through this machine: this host's `cat`
+    /// into the other's upload ([`ssh::put_cmd`]), so neither host has to reach the other.
+    pub fn send_to(
+        &self,
+        rel: &str,
+        to: &Remote,
+        to_rel: &str,
+        replace: bool,
+        progress: &dyn Fn(u64, u64),
+    ) -> Result<()> {
+        let size: Option<crate::Etag> = self.call("stat", json!([rel]))?;
+        let size = size
+            .ok_or_else(|| accent_core::Error::NotFound(rel.to_string()))?
+            .size;
+        let mut child = self.cat(rel)?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| Error::Remote("ssh has no stdout".to_string()))?;
+        let sent = link::send(&to.put_into(to_rel, size, replace), stdout, size, progress);
+        let out = child.wait_with_output().map_err(link::no_ssh)?;
+        // A read that failed here cuts the upload short there, and says why it did.
+        let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        match out.status.success() || said.is_empty() {
+            true => sent,
+            false => Err(Error::Remote(said)),
+        }
+    }
+
+    /// `cat` of host `rel` over the master, its bytes on the child's stdout.
+    fn cat(&self, rel: &str) -> Result<Child> {
+        self.ssh(&ssh::run(
+            &self.url,
+            &self.ctl,
+            &format!("cat {}", ssh::quote(&self.remote_path(rel))),
+        ))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(link::no_ssh)
     }
 
     /// Stream host `rel` into `dest` in chunks, reporting bytes of `total`.
-    /// Write a neighboring `.part` file and rename only when complete, preserving
+    /// Write a neighboring `.part` file and [`land`] it only when complete, preserving
     /// the last good copy on interruption and existing readers' open files.
     fn receive(
         &self,
         rel: &str,
         dest: &Path,
         total: u64,
+        replace: bool,
         progress: &dyn Fn(u64, u64),
     ) -> Result<()> {
-        let mut child = self
-            .ssh(&ssh::run(
-                &self.url,
-                &self.ctl,
-                &format!("cat {}", ssh::quote(&self.remote_path(rel))),
-            ))
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(link::no_ssh)?;
+        let mut child = self.cat(rel)?;
         let mut part = dest.as_os_str().to_owned();
         part.push(".part");
         let part = PathBuf::from(part);
@@ -776,7 +828,7 @@ impl Remote {
             received
                 .map_err(|e| cached(&part, e))
                 .and_then(|()| match out.status.success() {
-                    true => std::fs::rename(&part, dest).map_err(|e| cached(dest, e)),
+                    true => land(&part, dest, replace),
                     false => Err(Error::Remote(
                         String::from_utf8_lossy(&out.stderr).trim().to_string(),
                     )),
@@ -1100,7 +1152,7 @@ fn drain(stream: impl Read + Send + 'static) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Stamp, Stamped, carry, edited_name, kept_path, uncache, unsent};
+    use super::{Stamp, Stamped, carry, edited_name, kept_path, land, uncache, unsent};
     use std::path::Path;
     use std::time::Duration;
 
@@ -1307,5 +1359,39 @@ mod tests {
         assert_eq!(edited_name("doc", 1), "doc (edited)");
         // A dot in a folder's name is not the file's extension.
         assert_eq!(edited_name("a.d/doc", 1), "a.d/doc (edited)");
+    }
+
+    /// A copy landed without Replace keeps what holds the name, a dangling link included, and
+    /// takes its `.part` away either way.
+    #[test]
+    fn a_download_without_replace_never_lands_on_a_taken_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let (part, dest) = (dir.path().join("a.pdf.part"), dir.path().join("a.pdf"));
+        let write_part = || std::fs::write(&part, "mine").unwrap();
+        std::fs::write(&dest, "theirs").unwrap();
+        write_part();
+        assert!(matches!(
+            land(&part, &dest, false),
+            Err(crate::Error::Core(accent_core::Error::AlreadyExists(_)))
+        ));
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "theirs");
+        assert!(!part.exists());
+
+        let dangling = dir.path().join("b.pdf");
+        std::os::unix::fs::symlink("gone", &dangling).unwrap();
+        write_part();
+        assert!(land(&part, &dangling, false).is_err());
+        assert!(dangling.is_symlink());
+
+        write_part();
+        land(&part, &dir.path().join("c.pdf"), false).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("c.pdf")).unwrap(),
+            "mine"
+        );
+        write_part();
+        land(&part, &dest, true).unwrap();
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "mine");
+        assert!(!part.exists());
     }
 }

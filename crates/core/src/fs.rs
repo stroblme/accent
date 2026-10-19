@@ -309,6 +309,56 @@ pub fn links_inside(link: &Path, root: &Path) -> bool {
         .is_ok_and(|target| target.starts_with(root) && target.is_file())
 }
 
+/// What copying a file or a folder carries, by path below it with `/` between names, `""` being
+/// the path itself: the folders to make, parents first, and the files to copy. A file is the
+/// walk of one, `""`.
+#[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Walked {
+    pub dirs: Vec<String>,
+    pub files: Vec<String>,
+    /// Folders that could not be read.
+    pub unread: Vec<String>,
+}
+
+/// Walk `src` for a copy of it. Everything there is carried, dot-named files included, as GNOME
+/// Files copies a folder; a symbolic link only as the file it names inside `src`
+/// ([`links_inside`]), so no link leads the walk out of it or round a loop.
+pub fn walk_copy(src: &Path) -> Walked {
+    let mut walked = Walked::default();
+    match src.is_dir() {
+        true => {
+            let root = src.canonicalize().unwrap_or_else(|_| src.to_path_buf());
+            walk_into(&mut walked, &root, src, "");
+        }
+        false => walked.files.push(String::new()),
+    }
+    walked
+}
+
+fn walk_into(walked: &mut Walked, root: &Path, dir: &Path, rel: &str) {
+    let mut entries: Vec<PathBuf> = match std::fs::read_dir(dir) {
+        Ok(entries) => entries.flatten().map(|e| e.path()).collect(),
+        Err(_) => return walked.unread.push(rel.to_string()),
+    };
+    entries.sort();
+    walked.dirs.push(rel.to_string());
+    for path in entries {
+        let (Some(name), Ok(meta)) = (path.file_name(), std::fs::symlink_metadata(&path)) else {
+            continue;
+        };
+        let name = name.to_string_lossy();
+        let below = match rel {
+            "" => name.into_owned(),
+            rel => format!("{rel}/{name}"),
+        };
+        if meta.is_dir() {
+            walk_into(walked, root, &path, &below);
+        } else if meta.is_file() || (meta.is_symlink() && links_inside(&path, root)) {
+            walked.files.push(below);
+        }
+    }
+}
+
 /// `canonicalize()`, but tolerating a file that does not exist yet by resolving its parent.
 fn canonical_target(path: &Path) -> io::Result<PathBuf> {
     match path.canonicalize() {
@@ -657,5 +707,30 @@ mod tests {
             Some("README")
         );
         assert_eq!(conflict_original("Note.md"), None);
+    }
+
+    /// A folder is walked into folders to make and files to copy, below it. A link is carried only
+    /// as the file it names inside the folder: one out of it, or to a folder, which may be a loop,
+    /// is left out.
+    #[test]
+    fn a_folder_is_walked_as_its_folders_and_files() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("Photos");
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::fs::create_dir(src.join("empty")).unwrap();
+        std::fs::write(src.join("a.png"), "a").unwrap();
+        std::fs::write(src.join("sub/b.png"), "b").unwrap();
+        std::fs::write(tmp.path().join("outside.png"), "o").unwrap();
+        symlink("a.png", src.join("inside.png")).unwrap();
+        symlink("../outside.png", src.join("out.png")).unwrap();
+        symlink(".", src.join("loop")).unwrap();
+
+        let walked = walk_copy(&src);
+        assert_eq!(walked.dirs, ["", "empty", "sub"]);
+        assert_eq!(walked.files, ["a.png", "inside.png", "sub/b.png"]);
+        assert!(walked.unread.is_empty());
+        // A file is the walk of one.
+        assert_eq!(walk_copy(&src.join("a.png")).files, [""]);
     }
 }
