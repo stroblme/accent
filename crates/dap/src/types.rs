@@ -99,6 +99,16 @@ pub struct EvaluateResponse {
     pub variables_reference: i64,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CompletionItem {
+    pub label: String,
+    /// Written in instead of the label, where it differs.
+    pub text: Option<String>,
+    /// The UTF-16 code units before the request's column it overwrites.
+    pub length: u32,
+}
+
 // ------------------------------------------------------------------- the wrappers
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -131,6 +141,12 @@ pub struct VariablesResponse {
 pub struct SetBreakpointsResponse {
     /// In the order the request listed them.
     pub breakpoints: Vec<Breakpoint>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CompletionsResponse {
+    pub targets: Vec<CompletionItem>,
 }
 
 // ------------------------------------------------------------------- events

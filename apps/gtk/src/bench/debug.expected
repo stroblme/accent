@@ -4,6 +4,7 @@ bench debug top double demo.py:2
 bench debug locals x=21
 bench debug repl 42
 bench debug block 63
+bench debug complete double(x) 42
 bench debug hover x = 21
 bench debug step demo.py:3
 bench debug ended 0

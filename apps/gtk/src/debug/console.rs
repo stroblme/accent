@@ -3,7 +3,7 @@
 //! statement sent, a block's lines together, is evaluated in the paused call (`evaluate`, context
 //! `repl`), one at a time, as Python's REPL waits for each.
 
-use super::line::{self, Did, Line};
+use super::line::{self, Completion, Did, Line};
 use super::*;
 use accent_api::debug::{Category, Context};
 use std::collections::VecDeque;
@@ -146,8 +146,48 @@ impl App {
                     console.block.borrow_mut().clear();
                     self.console_prompt(&term);
                 }
+                Did::Complete => self.console_complete(),
             }
         }
+    }
+
+    /// Tab: what the call selected offers for the text before the cursor, written in or listed
+    /// under the prompt; dropped if the line has changed by the time it comes.
+    fn console_complete(self: &Rc<Self>) {
+        let console = &self.debugger.console;
+        if console.busy.get() {
+            return;
+        }
+        let (text, column) = console.line.borrow().at();
+        let Some(asked) = self.debug_completions(text.clone(), column) else {
+            return;
+        };
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let candidates = crate::work::or_empty("completing", asked.await);
+            let Some(app) = weak.upgrade() else {
+                return;
+            };
+            let console = &app.debugger.console;
+            let Some(term) = app.console() else {
+                return;
+            };
+            if console.busy.get() || console.line.borrow().at() != (text.clone(), column) {
+                return;
+            }
+            match line::completion(&candidates) {
+                Some(Completion::Write(replaces, with)) => {
+                    console.line.borrow_mut().complete(replaces, &with);
+                    app.console_prompt(&term);
+                }
+                Some(Completion::List(labels)) => {
+                    app.console_echo(&term, &text);
+                    let listed = line::listed(&labels, columns(&term));
+                    app.console_line(&term, Category::Stdout, &listed);
+                }
+                None => {}
+            }
+        });
     }
 
     /// The line as sent, under the prompt it was typed at, and once it ends a statement the

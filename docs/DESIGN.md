@@ -1171,6 +1171,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - A line sent is evaluated in the call selected in Call Stack while the program is paused (`evaluate`, context `repl`), one at a time as Python's REPL waits: its answer comes under it, an error in the red, and what is typed meanwhile shows when the prompt is back.
   While the program runs a line gets "Evaluates while the program is paused".
   A line that leaves its statement open — ending in `:` or a backslash, inside a bracket or a triple-quoted string — gets Python's `... ` for the next, a block opened by `:` running to a blank line, and the statement is sent whole.
+  `Tab` asks what completes the text before the cursor in the call selected (`completions`): one candidate, or the start all of them share, is written in, and otherwise they are listed under the prompt, as a shell does.
   Output that arrives while a line is typed goes above the prompt, a part of a line waiting for the rest of it, so it never breaks into the line.
 - **Values on hover**: while the program is paused, a hover over a name in a file its debugger runs leads with `name = value` in monospace, its type dimmed, from the call selected (`evaluate`, context `hover`), asked at once beside the language server.
   The name is taken with the names it is reached through, `self.items` over the `items` of `self.items.append(x)`, as VS Code's hover takes it; a number or a bracket asks nothing.

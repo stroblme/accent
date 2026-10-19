@@ -2,7 +2,9 @@
 //! (`on_debug`), the program's terminal, and where the program is paused.
 
 use super::*;
-use accent_api::debug::{Category, Context, Evaluated, Frame, Launch, News, Step, Variable};
+use accent_api::debug::{
+    Candidate, Category, Context, Evaluated, Frame, Launch, News, Step, Variable,
+};
 use sourceview5::prelude::BufferExt as _;
 
 /// One session, from Start until its end.
@@ -429,6 +431,21 @@ impl App {
             .filter(|run| matches!(run.state.get(), State::Paused { .. }))?;
         let vault = self.vault()?;
         Some(vault.debug_evaluate(run.id, run.frame.get(), expression, context))
+    }
+
+    /// What completes `text` before char `column` in the call selected, while the program is
+    /// paused: what the Debug Console's Tab asks.
+    pub(super) fn debug_completions(
+        &self,
+        text: String,
+        column: usize,
+    ) -> Option<accent_api::Task<Vec<Candidate>>> {
+        let run = self
+            .debugger
+            .run()
+            .filter(|run| matches!(run.state.get(), State::Paused { .. }))?;
+        let vault = self.vault()?;
+        Some(vault.debug_completions(run.id, run.frame.get(), text, column as u32))
     }
 
     fn ask_paused<T: Default + 'static>(
