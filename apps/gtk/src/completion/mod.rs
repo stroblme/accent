@@ -297,10 +297,11 @@ impl Session {
         }
     }
 
-    fn land(&self, generation: u64, anchor: Anchor, answer: Completions) {
+    fn land(self: &Rc<Self>, generation: u64, anchor: Anchor, answer: Completions) {
         if generation != self.generation.get() {
             return;
         }
+        let incomplete = answer.incomplete;
         // Done, so let go of it rather than abort it: this is its own last step.
         drop(self.fetch.take());
         // The row selected stays selected, if the new answer has it.
@@ -320,6 +321,12 @@ impl Session {
             rows: Vec::new(),
         });
         self.refresh(selected);
+        // Typed past while it was on its way: a capped answer narrowed to the text now misses
+        // what the provider ranks first for it, so ask again, the narrowed rows up meanwhile.
+        let here = lang::pos_of(&caret(&self.view.buffer()));
+        if incomplete && self.shown.borrow().is_some() && self.asked_at.get() != Some(here) {
+            self.ask(None);
+        }
     }
 
     fn selected_label(&self) -> Option<String> {
