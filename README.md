@@ -32,15 +32,15 @@ Accent is open source under GPL-3.0-or-later and still evolving.
 
 ## Screenshots
 
-![Screenshot 1](docs/screenshot-1.png)
+![A note with an inline suggestion beside the vault's files](docs/screenshot-1.png)
 
-![Screenshot 1](docs/screenshot-2.png)
+![The Git pane beside a file's changes since it was staged](docs/screenshot-2.png)
 
-![Screenshot 3](docs/screenshot-3.png)
+![Two terminals beside a PDF annotated by hand](docs/screenshot-3.png)
 
-![Screenshot 3](docs/screenshot-4.png)
+![Focus mode in the Solarized theme while another note is linked](docs/screenshot-4.png)
 
-![Screenshot 5](docs/screenshot-5.png)
+![A Python program paused at a breakpoint in the Solarized theme, beside its Debug Console and output](docs/screenshot-5.png)
 
 ## Get started
 
