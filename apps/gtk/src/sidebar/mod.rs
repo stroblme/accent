@@ -431,6 +431,13 @@ impl Sidebar {
         }
     }
 
+    /// A Debug Console answer that holds more, atop Variables until the program moves on.
+    pub fn set_debug_answer(&self, answer: accent_api::debug::Variable) {
+        if let Some(debug) = &self.code.debug {
+            debug.set_answer(answer);
+        }
+    }
+
     /// The Watch section's rows: each expression, with its value while the program is paused.
     pub fn set_debug_watches(&self, rows: &[Watched]) {
         if let Some(debug) = &self.code.debug {
@@ -465,6 +472,14 @@ impl Sidebar {
     #[cfg(feature = "bench")]
     pub fn shown_goals(&self) -> Option<Vec<String>> {
         self.code.goals()
+    }
+
+    /// Open the Debug Console's answer atop Variables, for `ACCENT_BENCH_DEBUG`.
+    #[cfg(feature = "bench")]
+    pub fn open_debug_answer(&self) {
+        if let Some(debug) = &self.code.debug {
+            debug.open_answer();
+        }
     }
 
     /// The strip's line, the calls Call Stack lists, the values Variables has open and Watch's
