@@ -1,5 +1,6 @@
-//! Response and event bodies accent reads. Requests use JSON literals, as the language client's
-//! do; unknown fields are accepted and ignored.
+//! The bodies accent reads: answers, events and the adapter's `runInTerminal`. Accent's own
+//! requests use JSON literals, as the language client's do; unknown fields are accepted and
+//! ignored.
 //!
 //! Transcribed from the Debug Adapter Protocol's JSON schema,
 //! <https://github.com/microsoft/debug-adapter-protocol> `debugAdapterProtocol.json`, which is
@@ -27,37 +28,12 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-// ------------------------------------------------------------------- initialize
-
-/// The `initialize` answer: what the adapter can do beyond the protocol's core.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct Capabilities {
-    pub supports_configuration_done_request: bool,
-    pub supports_terminate_request: bool,
-    /// A side-effect-free `evaluate` for values on hover.
-    pub supports_evaluate_for_hovers: bool,
-    pub exception_breakpoint_filters: Vec<ExceptionBreakpointsFilter>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct ExceptionBreakpointsFilter {
-    /// The id `setExceptionBreakpoints` takes.
-    pub filter: String,
-    pub label: String,
-    pub default: bool,
-}
-
 // ------------------------------------------------------------------- the small shapes
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Source {
-    pub name: Option<String>,
     pub path: Option<String>,
-    /// Above 0, the text is the adapter's to give (the `source` request), path or not.
-    pub source_reference: i64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -83,8 +59,6 @@ pub struct StackFrame {
     pub line: u32,
     /// In UTF-16 code units.
     pub column: u32,
-    /// `normal`, `label` (an artificial frame) or `subtle`.
-    pub presentation_hint: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -171,15 +145,6 @@ pub struct StoppedEventBody {
     pub thread_id: Option<i64>,
     /// For an exception, its name.
     pub text: Option<String>,
-    pub all_threads_stopped: bool,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct ContinuedEventBody {
-    pub thread_id: i64,
-    /// Absent means every thread runs again.
-    pub all_threads_continued: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -210,9 +175,6 @@ pub struct BreakpointEventBody {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RunInTerminalRequestArguments {
-    /// `integrated` (the default) or `external`.
-    pub kind: Option<String>,
-    pub title: Option<String>,
     pub cwd: String,
     /// The command first.
     pub args: Vec<String>,
