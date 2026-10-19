@@ -30,8 +30,8 @@ const PATIENCE: Duration = Duration::from_secs(30);
 /// What of a page goes out, as draw.io's export takes it by default.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Area {
-    /// The page's sheet, grown to hold whatever is drawn past it, as Export as PDF… and Print…
-    /// take it; a page with no sheet (`page="0"`) is its drawing alone.
+    /// The page's sheet, what is drawn past it cut off, as Export as PDF… and Print… take it; a
+    /// page with no sheet (`page="0"`) is its drawing alone.
     Sheet,
     /// The drawing alone, as Export as PNG…, Export as SVG… and an embed take it.
     Drawing,
@@ -46,7 +46,8 @@ pub struct Drawn {
 }
 
 impl Drawn {
-    /// The area onto `cr` at `scale` per page unit, its top-left at the origin, on its paper.
+    /// The area onto `cr` at `scale` per page unit, its top-left at the origin, on its paper,
+    /// with nothing of the picture past it.
     pub fn paint(&self, cr: &cairo::Context, scale: f64) -> Result<(), cairo::Error> {
         let (a, p) = (self.area, self.paper);
         cr.save()?;
@@ -55,7 +56,8 @@ impl Drawn {
         let unit = |v: u8| f64::from(v) / 255.0;
         cr.set_source_rgba(unit(p.r), unit(p.g), unit(p.b), unit(p.a));
         cr.rectangle(a.x, a.y, a.w, a.h);
-        cr.fill()?;
+        cr.fill_preserve()?;
+        cr.clip();
         if let Some(node) = &self.node {
             cr.scale(1.0 / DETAIL, 1.0 / DETAIL);
             node.draw(cr);
@@ -110,17 +112,16 @@ pub async fn draw(
     }
     let (w, h) = page.size();
     let sheet = page.page_view().then(|| Rect::new(0.0, 0.0, w, h));
-    let drawing = painted(&scene.prims, &cache);
-    // Whole units: out to them for the drawing alone, in to them past a sheet, so a line on its
-    // edge does not grow it by its half width (draw.io's `getPageLayout` rounds so too).
-    let whole = |r: Rect, near: fn(f64) -> f64, far: fn(f64) -> f64| {
-        let (x, y) = (near(r.x), near(r.y));
-        Rect::new(x, y, far(r.right()) - x, far(r.bottom()) - y)
-    };
+    // Out to whole units, so nothing drawn is cut.
+    let drawing = painted(&scene.prims, &cache).map(|d| {
+        let (x, y) = (d.x.floor(), d.y.floor());
+        Rect::new(x, y, d.right().ceil() - x, d.bottom().ceil() - y)
+    });
     let area = match (area, sheet, drawing) {
-        (Area::Sheet, Some(s), Some(d)) => s.union(&whole(d, f64::ceil, f64::floor)),
-        (Area::Sheet, Some(s), None) => s,
-        (_, _, Some(d)) => whole(d, f64::floor, f64::ceil),
+        // The sheet alone, so every page of a PDF is its sheet in the same place (user decision
+        // 2026-10-19).
+        (Area::Sheet, Some(s), _) => s,
+        (_, _, Some(d)) => d,
         (_, _, None) => Rect::new(0.0, 0.0, w, h),
     };
     Some(Drawn {
@@ -132,8 +133,7 @@ pub async fn draw(
 
 /// What `prims` painted, in page units: each outline with half its line and its shadow, each
 /// picture, and each label where `cache` says it was laid out. Not the render node's bounds,
-/// which pad every line by its miter limit (ten widths in draw.io's files), so that a shape
-/// near the sheet's edge grew its PDF page and moved the page on it.
+/// which pad every line by its miter limit, ten widths in draw.io's files.
 fn painted(prims: &[Prim], cache: &Cache) -> Option<Rect> {
     let shadow = accent_drawio::scene::SHADOW_OFFSET;
     let boxes = prims.iter().enumerate().flat_map(|(i, prim)| match prim {
