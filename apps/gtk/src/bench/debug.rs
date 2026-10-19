@@ -218,9 +218,7 @@ pub(super) fn text(term: &terminal::Term) -> String {
 
 /// The debugged program's tab.
 pub(super) fn program_tab(app: &App) -> Option<Rc<terminal::Term>> {
-    app.docs()
-        .into_iter()
-        .find_map(|doc| doc.terminal().filter(|term| term.is_program()).cloned())
+    app.program_tab()
 }
 
 /// The line the console printed under `asked`, once it has.
