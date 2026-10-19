@@ -66,6 +66,8 @@ pub struct Facts {
     pub running: Option<String>,
     /// When it started, in seconds since the epoch.
     pub started: Option<i64>,
+    /// The title the shell last set (OSC 0 or 2), which the attach's replay hands VTE.
+    pub title: Option<String>,
 }
 
 impl Term {
@@ -433,6 +435,7 @@ pub fn open(tabs: &adw::TabView, at: Option<i32>, shell: &Shell, key: String) ->
 /// Shell-only windows show preparation progress in-place in the tab because they have no connect bar.
 fn start(term: &Rc<Term>) {
     let Shell::Remote { link, .. } = &term.shell else {
+        name_unshown(term);
         return spawn(&term.view, &term.shell, id(&term.key));
     };
     term.view
@@ -460,13 +463,51 @@ fn start(term: &Rc<Term>) {
         };
         term.view.feed(CLEAR_LINE);
         match ready {
-            Ok(()) => spawn(&term.view, &term.shell, id(&term.key)),
+            Ok(()) => {
+                name_unshown(&term);
+                spawn(&term.view, &term.shell, id(&term.key))
+            }
             Err(why) => {
                 term.lost.set(true);
                 let line = format!("[{why}. Press a key to try again.]");
                 term.view.feed(line.replace('\n', "\r\n").as_bytes());
             }
         }
+    });
+}
+
+/// Title a tab whose attach waits until it is first shown (a restored one behind another) with
+/// the title its shell last set, which the holder keeps: one `held` listing, where attaching would
+/// replay a screen at a size the tab does not have yet ([`when_laid_out`]).
+///
+/// Checked from an idle: a new tab is put in front right after it opens, so it is mapped by then
+/// and asks nothing. Not through [`Term::ask`], whose coalescing would drop the Details pane's own
+/// callback.
+fn name_unshown(term: &Rc<Term>) {
+    let weak = Rc::downgrade(term);
+    glib::idle_add_local_once(move || {
+        let Some(term) = weak.upgrade().filter(|term| !term.view.is_mapped()) else {
+            return;
+        };
+        let Some(argv) = term.shell.held() else {
+            return;
+        };
+        let (weak, id) = (Rc::downgrade(&term), id(&term.key).to_string());
+        glib::spawn_future_local(async move {
+            let listing = crate::work::attempt("list the held shells", move || output(&argv)).await;
+            let Some(term) = weak.upgrade() else {
+                return;
+            };
+            let title = listing
+                .ok()
+                .and_then(|listing| told(&String::from_utf8_lossy(&listing), &id).title);
+            // VTE's own wins: the tab may have been shown, and its replay have landed, meanwhile.
+            if let Some(title) =
+                title.filter(|_| term.view.window_title().is_none_or(|t| t.is_empty()))
+            {
+                term.page.set_title(&title);
+            }
+        });
     });
 }
 
@@ -550,6 +591,7 @@ fn told(listing: &str, id: &str) -> Facts {
         dir: text("cwd"),
         running: text("running"),
         started: shell["started"].as_i64(),
+        title: text("title").filter(|title| !title.is_empty()),
         ..Facts::default()
     }
 }
@@ -1326,7 +1368,7 @@ mod tests {
     fn a_shell_reads_its_own_line_of_the_listing() {
         let listing = [
             r#"{"attached":true,"cwd":"/srv","id":"00000000000000b1","pid":7,"title":""}"#,
-            r#"{"attached":true,"cwd":"/home/me/src","id":"00000000000000b2","pid":42,"title":"","shell":"/bin/zsh","started":1760000000,"running":"cargo build"}"#,
+            r#"{"attached":true,"cwd":"/home/me/src","id":"00000000000000b2","pid":42,"title":"cargo build","shell":"/bin/zsh","started":1760000000,"running":"cargo build"}"#,
         ]
         .join("\n");
         assert_eq!(
@@ -1337,10 +1379,13 @@ mod tests {
                 dir: Some("/home/me/src".into()),
                 running: Some("cargo build".into()),
                 started: Some(1_760_000_000),
+                title: Some("cargo build".into()),
                 ..Facts::default()
             }
         );
         assert_eq!(told(&listing, "00000000000000b1").running, None);
+        // A shell that set no title has none to name its tab with.
+        assert_eq!(told(&listing, "00000000000000b1").title, None);
         assert_eq!(told(&listing, "00000000000000ff"), Facts::default());
     }
 

@@ -180,7 +180,8 @@ use tags::bench_tags;
 ///   Use scratch `TMPDIR` so it cannot join the user's running holder.
 /// - `ACCENT_BENCH_SHELL_KEYS=1`: `Ctrl+S` in a shell without window focus.
 /// - `ACCENT_BENCH_HOLD=open` then `back`: shell persistence and close, using
-///   one scratch state; `early`: shells closed before startup.
+///   one scratch state; `early`: shells closed before startup; `behind` then
+///   `named`: a restored shell's tab behind another titled before it is shown.
 /// - `ACCENT_BENCH_PDF=<rel_path>`: fit, save, rename and external reload.
 ///   Writes and moves the file; use a scratch multipage PDF. Modes:
 ///   `stale:<rel_path>` (remote conflicts), `failed:<rel_path>` (read-only

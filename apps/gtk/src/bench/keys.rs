@@ -1248,9 +1248,17 @@ fn bench_term_save(app: &Rc<App>) {
 ///
 /// `=early` closes shells in the same tick and shortly after attach starts; expected `held=0`.
 /// Use a vault window and no existing holder so the race includes holder startup.
+///
+/// `=behind` then `=named`, on one scratch state likewise: the first shell sets its title and a
+/// second is opened in front of it before the quit; the restored tab behind prints the title it
+/// has before it is ever shown, and how long after the drill's start. Expected
+/// `title=held-title mapped=false`, then `held=0`.
 pub(super) fn bench_hold(app: &Rc<App>, step: &str) {
-    if step == "early" {
-        return bench_hold_early(app);
+    match step {
+        "early" => return bench_hold_early(app),
+        "behind" => return bench_hold_behind(app),
+        "named" => return bench_hold_named(app),
+        _ => {}
     }
     if app.terminals().is_empty() {
         app.open_terminal();
@@ -1321,6 +1329,58 @@ fn bench_hold_early(app: &Rc<App>) {
             glib::timeout_future(Duration::from_millis(2500)).await;
             println!("bench hold early wait={wait} held={}", bench_held());
         }
+        bench_quit(&app);
+    });
+}
+
+/// The `=behind` half of [`bench_hold`].
+fn bench_hold_behind(app: &Rc<App>) {
+    app.open_terminal();
+    let app = app.clone();
+    glib::timeout_add_local_once(Duration::from_millis(1000), move || {
+        if let Some(term) = app.terminals().first() {
+            term.view
+                .feed_child(b"PS1='$ '; unset PROMPT_COMMAND; printf '\\033]0;held-title\\007'\n");
+        }
+        glib::timeout_add_local_once(Duration::from_millis(500), move || {
+            app.open_terminal();
+            glib::timeout_add_local_once(Duration::from_millis(1500), move || {
+                println!("bench hold behind terminals={}", app.terminals().len());
+                if let Some(gtk_app) = app.window.application() {
+                    gtk_app.activate_action("quit", None);
+                }
+            });
+        });
+    });
+}
+
+/// The `=named` half of [`bench_hold`].
+fn bench_hold_named(app: &Rc<App>) {
+    let (app, start) = (app.clone(), Instant::now());
+    glib::spawn_future_local(async move {
+        let behind = || {
+            app.terminals()
+                .into_iter()
+                .find(|term| !term.view.is_mapped())
+        };
+        while start.elapsed() < Duration::from_secs(5)
+            && behind().is_none_or(|term| term.page.title() != "held-title")
+        {
+            glib::timeout_future(Duration::from_millis(5)).await;
+        }
+        let Some(term) = behind() else {
+            println!("bench hold named no_tab_behind");
+            return bench_quit(&app);
+        };
+        println!(
+            "bench hold named title={} mapped={} ms={:.0}",
+            term.page.title(),
+            term.view.is_mapped(),
+            ms_since(start)
+        );
+        let _ = WidgetExt::activate_action(&app.window, "win.close-pane-tabs", None);
+        glib::timeout_future(Duration::from_millis(500)).await;
+        println!("bench hold held={}", bench_held());
         bench_quit(&app);
     });
 }
