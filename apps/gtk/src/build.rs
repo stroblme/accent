@@ -1125,7 +1125,7 @@ pub(crate) fn install_icons() {
             tracing::warn!("icons: {e}");
             return;
         }
-        // Ahead of GtkSourceView's own, so our `latex.lang` and `lean.lang` are the ones read (the
+        // Ahead of GtkSourceView's own, so our copies of its specs are the ones read (the
         // first file of an id wins), and before any tab asks for a language: the path cannot change
         // once read.
         sourceview5::LanguageManager::default()

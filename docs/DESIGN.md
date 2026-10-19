@@ -479,6 +479,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A default set by `\lstset{language=…}` is not followed, a language spec having no way to carry it from the preamble to the listing.
 - Lean is coloured by accent's own `lean.lang` beside `latex.lang`: GtkSourceView 5.20's with Lean 4's keywords and Mathlib's `lemma` (from vscode-lean4's `lean4.json`), the declaration modifiers and `Prop`, `Type`, `Sort` as types, and `sorry`, `admit` as errors; the stock one misses most of them (ISSUES.md).
   A keyword after a `.` (`Nat.rec`) is a name.
+- TSX is coloured by accent's own `typescript-jsx.lang` beside them: GtkSourceView 5.20's, with an arrow function's type parameter list that starts on the line after its `<`, as Prettier wraps a long one, read as one; the stock one takes it for a JSX element that never closes and leaves the rest of the file one colour.
+  A `.mts` or `.cts` file is TypeScript, which GtkSourceView has no glob for.
 - It wraps as prose does: nothing in a document scrolls sideways.
   A wrapped row starts one indent level deeper than its line (VS Code's `wrappingIndent: "indent"`), so it cannot pass for the next line; a note does the same, hanging a list item's rows under its text (its marker measured in the note's font as drawn, so a proportional face's `-` is not taken for a space), except in a fenced block, whose lines wrap as code's do whatever they open with.
   `Alt+Z` unwraps one tab for as long as it is open, for a generated file whose columns are the point.
