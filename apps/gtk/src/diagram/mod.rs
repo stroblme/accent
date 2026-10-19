@@ -17,6 +17,8 @@ mod props;
 mod render;
 mod strip;
 mod tools;
+#[cfg(feature = "webkit")]
+mod typeset;
 mod view;
 mod web;
 mod window;
@@ -216,8 +218,7 @@ pub fn open(
         on_web: Hook::default(),
         on_toast: Hook::default(),
     });
-    if has_math {
-        let typesetter = math::shared();
+    if has_math && let Some(typesetter) = math::shared() {
         tab.view.set_typesetter(typesetter.clone());
         tab.strip.set_typesetter(typesetter);
     }

@@ -48,7 +48,7 @@ pub async fn svg(path: &Path, page: Option<&str>, web: bool) -> Option<Rc<str>> 
         None => 0,
     };
     let math = file.pages.get(i)?.model_attr("math") == Some("1");
-    let typesetter = math.then(super::math::shared);
+    let typesetter = math.then(super::math::shared).flatten();
     if web {
         super::web::fetch(&super::web::urls(&file)).await;
     }
