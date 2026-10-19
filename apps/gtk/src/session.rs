@@ -403,6 +403,7 @@ impl App {
                 .map(|git| git.kept().into_iter().collect())
                 .unwrap_or_default(),
             breakpoints: self.debugger.saved(self),
+            watches: self.debugger.watches(),
         };
         match self.restored.get() {
             true => session,
@@ -713,7 +714,8 @@ impl App {
         let allowed = session.web_images.iter().cloned();
         self.web_images.borrow_mut().extend(allowed);
         // And the breakpoints, which a tab is opened with.
-        self.debugger.restore(&session.breakpoints);
+        self.debugger
+            .restore(&session.breakpoints, &session.watches);
         if let Some(layout) = session.panes() {
             self.restore_panes(layout, session);
         }
@@ -1150,6 +1152,11 @@ fn unrestored(mut stored: Session, now: Session) -> Session {
     stored.terminals.extend(now.terminals);
     stored.compared.extend(now.compared);
     stored.breakpoints.extend(now.breakpoints);
+    for expression in now.watches {
+        if !stored.watches.contains(&expression) {
+            stored.watches.push(expression);
+        }
+    }
     for key in now.web_images {
         if !stored.web_images.contains(&key) {
             stored.web_images.push(key);

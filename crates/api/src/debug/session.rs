@@ -353,7 +353,8 @@ impl Session {
         Ok(variables.collect())
     }
 
-    /// The REPL waits as long as the reader's code runs; a hover is a request like any other.
+    /// The REPL waits as long as the reader's code runs; a hover or a watch is a request like
+    /// any other.
     pub(super) async fn evaluate(
         &self,
         frame: Option<i64>,
@@ -363,6 +364,7 @@ impl Session {
         let context_name = match context {
             Context::Repl => "repl",
             Context::Hover => "hover",
+            Context::Watch => "watch",
         };
         let mut arguments = json!({"expression": expression, "context": context_name});
         if let Some(frame) = frame {
@@ -370,7 +372,7 @@ impl Session {
         }
         let answer: EvaluateResponse = match context {
             Context::Repl => self.client.request_unbounded("evaluate", arguments).await?,
-            Context::Hover => self.client.request("evaluate", arguments).await?,
+            Context::Hover | Context::Watch => self.client.request("evaluate", arguments).await?,
         };
         Ok(Evaluated {
             result: answer.result,

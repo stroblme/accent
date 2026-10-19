@@ -99,12 +99,13 @@ pub enum Step {
     Out,
 }
 
-/// Who asks for an expression: the console's prompt runs whatever it is given, a hover must
-/// change nothing.
+/// Who asks for an expression: the console's prompt runs whatever it is given, a hover and a
+/// watch must change nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Context {
     Repl,
     Hover,
+    Watch,
 }
 
 /// Whose output it is: the adapter's (`Console`, `Important` for what must be seen) or the

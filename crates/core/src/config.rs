@@ -441,9 +441,10 @@ impl Default for InfoPane {
 pub struct CodePane {
     pub goals: bool,
     pub expected: bool,
-    /// The debugger's Call Stack, Variables and Breakpoints.
+    /// The debugger's Call Stack, Variables, Watch and Breakpoints.
     pub stack: bool,
     pub variables: bool,
+    pub watch: bool,
     pub breakpoints: bool,
     pub dividers: Vec<Option<f64>>,
 }
@@ -455,6 +456,7 @@ impl Default for CodePane {
             expected: true,
             stack: true,
             variables: true,
+            watch: true,
             breakpoints: true,
             dividers: Vec::new(),
         }
@@ -503,6 +505,8 @@ pub struct Session {
     /// By file key (vault-relative, absolute outside the vault), the 0-based lines a program
     /// stops at; kept here and never in the vault.
     pub breakpoints: BTreeMap<String, Vec<u32>>,
+    /// The expressions the debugger's Watch section evaluates at each stop, in its order.
+    pub watches: Vec<String>,
 }
 
 impl Default for Session {
@@ -526,6 +530,7 @@ impl Default for Session {
             web_images: Vec::new(),
             compared: BTreeMap::new(),
             breakpoints: BTreeMap::new(),
+            watches: Vec::new(),
         }
     }
 }
@@ -1563,6 +1568,7 @@ daily_dir = "Daily"
                 expected: true,
                 stack: true,
                 variables: false,
+                watch: true,
                 breakpoints: true,
                 dividers: vec![Some(0.4)],
             },
@@ -1612,6 +1618,7 @@ daily_dir = "Daily"
                 },
             )]),
             breakpoints: BTreeMap::from([("run.py".to_string(), vec![0, 7])]),
+            watches: vec!["len(items)".to_string()],
         };
         with_xdg(&state, || {
             assert_eq!(Session::load(&vault).open, Vec::<String>::new());
@@ -1639,6 +1646,7 @@ daily_dir = "Daily"
             assert_eq!(back.web_images, s.web_images);
             assert_eq!(back.compared, s.compared);
             assert_eq!(back.breakpoints, s.breakpoints);
+            assert_eq!(back.watches, s.watches);
 
             // A terminal session's key is no path: it hashes as given, as an `ssh://` one does.
             let named = Path::new("terminal://dev");

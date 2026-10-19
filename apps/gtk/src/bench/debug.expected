@@ -2,6 +2,7 @@ bench debug breakpoint demo.py:2
 bench debug stopped demo.py:2 breakpoint
 bench debug top double demo.py:2
 bench debug locals x=21
+bench debug watch x + 1 = 22
 bench debug repl 42
 bench debug block 63
 bench debug complete double(x) 42

@@ -546,6 +546,16 @@ fn debug_data(app: &Rc<App>) -> sidebar::DebugData {
                 }
             }
         )),
+        watch: Rc::new(glib::clone!(
+            #[weak]
+            app,
+            move |expression: &str| app.add_watch(expression)
+        )),
+        unwatch: Rc::new(glib::clone!(
+            #[weak]
+            app,
+            move |expression: &str| app.remove_watch(expression)
+        )),
     }
 }
 
