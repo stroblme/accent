@@ -952,8 +952,9 @@ fn build_branch_row() -> BranchRow {
     // branches, each row switching to that branch and carrying a trash button, then the
     // remote-only ones under a Remote heading, with Create Branch… underneath. A
     // `GtkDropDown` can only ever pick one of the rows it already has.
-    // Flat and `heading`, because it stands where the branch label stood and reads as the
-    // branch first and as a control second; the label ellipsizes so that a long branch name
+    // Flat, with its face `heading`, because it stands where the branch label stood and reads as
+    // the branch first and as a control second; on the button, the popover under it would take
+    // the weight too. The label ellipsizes so that a long branch name
     // is not what decides how narrow the sidebar can be dragged. It claims the row's spare
     // width without taking it, so Sync and Commit stay at the trailing edge.
     let branch_label = gtk::Label::builder()
@@ -961,6 +962,7 @@ fn build_branch_row() -> BranchRow {
         .ellipsize(pango::EllipsizeMode::End)
         .build();
     let face = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    face.add_css_class("heading");
     face.append(&branch_label);
     // `go-down-symbolic` rather than `pan-down-symbolic`: WhiteSur writes the latter with
     // single-quoted attributes, which GTK 4's symbolic recolouring does not parse, and the
@@ -990,15 +992,16 @@ fn build_branch_row() -> BranchRow {
     branch_box.append(&create);
     branch_box.append(&merge);
     let branch_menu = gtk::Popover::builder().child(&branch_box).build();
+    // Its rows are flat buttons, which libadwaita sets in bold: in regular weight they read as a
+    // menu's items, and the Remote heading among them as a heading.
+    branch_menu.add_css_class("git-branches");
     let branch = gtk::MenuButton::builder()
         .hexpand(true)
         .halign(gtk::Align::Start)
         .child(&face)
         .popover(&branch_menu)
         .build();
-    for class in ["flat", "heading"] {
-        branch.add_css_class(class);
-    }
+    branch.add_css_class("flat");
     let counts = gtk::Label::new(None);
     counts.add_css_class("dim-label");
     counts.add_css_class("numeric");
