@@ -1,6 +1,7 @@
 //! The Debug Console's prompt line, with no GTK: what VTE commits read as a shell's line editor
-//! reads keys, and the prompt and the line drawn back over their last drawing. Also the text the
-//! console shows, cleared of what the terminal would act on.
+//! reads keys, and the prompt and the line drawn back over their last drawing. Also when the lines
+//! typed make a whole statement, and the text the console shows, cleared of what the terminal
+//! would act on.
 
 /// The line being typed at the prompt, and the lines submitted before it.
 #[derive(Default)]
@@ -167,6 +168,53 @@ fn cell(s: &str, columns: usize) -> (usize, usize) {
     last
 }
 
+/// Whether `block`, the lines typed so far, wants another before it is sent, as Python's REPL
+/// reads them: an open bracket or a line ending in a backslash wants the rest of the statement, a
+/// triple-quoted string its end, and a line ending in `:` starts a block that a blank line ends.
+/// Brackets, quotes and colons in a string or a comment count for nothing.
+pub fn unfinished(block: &str) -> bool {
+    let (mut depth, mut compound, mut quote) = (0i32, false, None::<&str>);
+    // The last character on the last line that counts.
+    let mut last = None;
+    for line in block.split('\n') {
+        last = None;
+        let mut rest = line;
+        while let Some(c) = rest.chars().next() {
+            let mut step = c.len_utf8();
+            if quote.is_none() && c == '#' {
+                break;
+            }
+            if quote.is_none() && !c.is_whitespace() {
+                last = Some(c);
+            }
+            match quote {
+                Some(_) if c == '\\' => step += rest[1..].chars().next().map_or(0, char::len_utf8),
+                Some(q) if rest.starts_with(q) => (step, quote) = (q.len(), None),
+                Some(_) => {}
+                None if c == '"' || c == '\'' => {
+                    let quotes = ["\"\"\"", "'''", "\"", "'"];
+                    let q = quotes.into_iter().find(|q| rest.starts_with(q));
+                    (step, quote) = (q.map_or(step, str::len), q);
+                }
+                None => match c {
+                    '(' | '[' | '{' => depth += 1,
+                    ')' | ']' | '}' => depth -= 1,
+                    _ => {}
+                },
+            }
+            rest = &rest[step..];
+        }
+        // A string in one quote ends with its line, closed or not.
+        quote = quote.filter(|q| q.len() == 3);
+        compound |= depth <= 0 && last == Some(':');
+    }
+    let blank = block
+        .rsplit('\n')
+        .next()
+        .is_some_and(|l| l.trim().is_empty());
+    quote.is_some() || depth > 0 || last == Some('\\') || (compound && !blank)
+}
+
 /// `text` without what a terminal acts on rather than shows: its escape sequences, and its
 /// control characters but newlines and tabs.
 pub fn clean(text: &str) -> String {
@@ -313,5 +361,22 @@ mod tests {
         line.key("\x01");
         let home = format!("\x1b[3A\r\x1b[J>>> {} \x1b[3A\r\x1b[4C", "a".repeat(36));
         assert_eq!(line.draw(">>> ", 12), home);
+    }
+
+    #[test]
+    fn a_block_waits_for_its_end_as_pythons_repl_does() {
+        // A compound statement, until a blank line.
+        assert!(unfinished("for i in range(2):"));
+        assert!(unfinished("for i in range(2):  # loop\n    print(i)"));
+        assert!(!unfinished("for i in range(2):\n    print(i)\n"));
+        // An open bracket, until it closes; a backslash, for the next line.
+        assert!(unfinished("total = double(21,"));
+        assert!(!unfinished("total = double(21,\n  1)"));
+        assert!(unfinished("x = 1 + \\"));
+        // Brackets and colons in a string or a comment open nothing; a triple quote spans lines.
+        assert!(!unfinished("print('(:', \"[\")  # {"));
+        assert!(!unfinished("d = {'a': 1}"));
+        assert!(unfinished("s = '''one"));
+        assert!(!unfinished("s = '''one\ntwo'''"));
     }
 }

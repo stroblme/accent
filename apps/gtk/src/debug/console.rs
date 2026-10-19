@@ -1,7 +1,7 @@
 //! The Debug Console: a terminal tab running nothing, whose transcript is fed and whose `>>> `
 //! prompt is drawn by the line editor (`line`) from what VTE commits, Python's REPL in look. A
-//! line sent is evaluated in the paused call (`evaluate`, context `repl`), one at a time, as
-//! Python's REPL waits for each.
+//! statement sent, a block's lines together, is evaluated in the paused call (`evaluate`, context
+//! `repl`), one at a time, as Python's REPL waits for each.
 
 use super::line::{self, Did, Line};
 use super::*;
@@ -11,6 +11,8 @@ use terminal::Term;
 use vte4::TerminalExt as _;
 
 const PROMPT: &str = ">>> ";
+/// The prompt for the next line of a statement.
+const MORE: &str = "... ";
 /// DECTCEM off: with no prompt there is nothing to type at. The reset a session starts with shows
 /// it again.
 const HIDE_CURSOR: &[u8] = b"\x1b[?25l";
@@ -28,6 +30,9 @@ pub(super) struct Console {
     /// sent meanwhile wait their turn.
     busy: Cell<bool>,
     queue: RefCell<VecDeque<String>>,
+    /// The lines of a statement sent so far, which the `... ` prompt goes on with until it is
+    /// whole.
+    block: RefCell<Vec<String>>,
     /// Output after its last newline, printed once its line is whole: a program's `print`
     /// arrives as its text and then its newline.
     tail: RefCell<Option<(Category, String)>>,
@@ -36,6 +41,13 @@ pub(super) struct Console {
 impl Console {
     fn session(&self) -> Option<u64> {
         self.session.borrow().as_ref().map(|(id, _)| *id)
+    }
+
+    fn prompt(&self) -> &'static str {
+        match self.block.borrow().is_empty() {
+            true => PROMPT,
+            false => MORE,
+        }
     }
 }
 
@@ -55,6 +67,7 @@ impl App {
             .replace(Some((session, doc::file_name(program).to_string())));
         console.busy.set(false);
         console.queue.borrow_mut().clear();
+        console.block.borrow_mut().clear();
         console.tail.replace(None);
         match self.console() {
             Some(term) => self.begin_console(&term),
@@ -130,22 +143,32 @@ impl App {
                 Did::Abandon(_) if console.busy.get() => console.queue.borrow_mut().clear(),
                 Did::Abandon(line) => {
                     self.console_echo(&term, &format!("{line}^C"));
+                    console.block.borrow_mut().clear();
                     self.console_prompt(&term);
                 }
             }
         }
     }
 
-    /// The line as sent, under the prompt it was typed at, and its answer asked for: only while
-    /// the program is paused, in the call selected.
+    /// The line as sent, under the prompt it was typed at, and once it ends a statement the
+    /// statement's answer asked for: only while the program is paused, in the call selected.
     fn console_submit(self: &Rc<Self>, term: &Rc<Term>, line: String) {
         self.console_echo(term, &line);
         let console = &self.debugger.console;
-        if line.trim().is_empty() {
+        let code = {
+            let mut block = console.block.borrow_mut();
+            block.push(line);
+            block.join("\n")
+        };
+        if line::unfinished(&code) {
+            return self.console_prompt(term);
+        }
+        console.block.borrow_mut().clear();
+        if code.trim().is_empty() {
             return self.console_prompt(term);
         }
         let (Some(session), Some(asked)) =
-            (console.session(), self.debug_evaluate(line, Context::Repl))
+            (console.session(), self.debug_evaluate(code, Context::Repl))
         else {
             let paused = "Evaluates while the program is paused";
             return self.console_line(term, Category::Console, paused);
@@ -243,7 +266,10 @@ impl App {
         if console.session().is_none() || console.busy.get() {
             return;
         }
-        let drawn = console.line.borrow_mut().draw(PROMPT, columns(term));
+        let drawn = console
+            .line
+            .borrow_mut()
+            .draw(console.prompt(), columns(term));
         term.view.feed(drawn.as_bytes());
         console.shown.set(true);
     }
@@ -251,7 +277,8 @@ impl App {
     /// The prompt line as it was given up or sent, the cursor on the next line.
     fn console_echo(&self, term: &Term, line: &str) {
         self.console_erase(term);
-        term.view.feed(format!("{PROMPT}{line}\r\n").as_bytes());
+        let prompt = self.debugger.console.prompt();
+        term.view.feed(format!("{prompt}{line}\r\n").as_bytes());
     }
 
     fn console_erase(&self, term: &Term) {
