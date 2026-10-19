@@ -169,6 +169,12 @@ impl DiagramView {
         self.set_cursor_from_name(None);
     }
 
+    /// Show the page's grid at all times, not only while something is placed (Show Grid).
+    pub fn set_show_grid(&self, on: bool) {
+        self.imp().show_grid.set(on);
+        self.queue_draw();
+    }
+
     pub fn zoom(&self) -> Zoom {
         self.imp().zoom.get()
     }
@@ -426,6 +432,7 @@ mod imp {
         pub tool: Cell<Tool>,
         pub panning: Cell<bool>,
         pub read_only: Cell<bool>,
+        pub show_grid: Cell<bool>,
         pub(super) drag: RefCell<Option<Drag>>,
         pub(super) preview: RefCell<Option<Preview>>,
         /// Whether the drag under way has gone past [`DRAG_SLOP`].
@@ -461,6 +468,7 @@ mod imp {
                 tool: Cell::new(Tool::Select),
                 panning: Cell::new(false),
                 read_only: Cell::new(false),
+                show_grid: Cell::new(false),
                 drag: RefCell::new(None),
                 preview: RefCell::new(None),
                 moved: Cell::new(false),
@@ -720,12 +728,15 @@ mod imp {
             // Only what is on screen, a prim's box being known from when the page was shown.
             let near = frame.to_page(Point::new(sx, sy));
             let visible = Rect::new(near.x, near.y, w / frame.scale, h / frame.scale);
-            // The grid, while a move, a resize or a drawing is under way.
-            let placing = matches!(
-                self.drag.borrow().as_ref(),
-                Some(Drag::Move { .. } | Drag::Resize { .. } | Drag::Draw { .. })
-            );
-            if let Some(step) = obj.grid(false).filter(|_| placing && self.moved.get())
+            // The grid, while a move, a resize or a drawing is under way, or always with Show
+            // Grid on, except on a page presented.
+            let placing = self.moved.get()
+                && matches!(
+                    self.drag.borrow().as_ref(),
+                    Some(Drag::Move { .. } | Drag::Resize { .. } | Drag::Draw { .. })
+                );
+            let shown = placing || (self.show_grid.get() && !self.read_only.get());
+            if let Some(step) = obj.grid(false).filter(|_| shown)
                 && let Some(area) = intersection(&visible, &sheet.page_rect.unwrap_or(visible))
             {
                 paint::grid(snapshot, &frame, area, step, paper);

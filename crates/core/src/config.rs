@@ -52,6 +52,7 @@ eraser_partial = true
 rounded = true
 route = "curved"
 arrow = false
+grid = true
 
 [lsp.servers]
 python3 = ["pyright-langserver", "--stdio"]
@@ -240,8 +241,8 @@ impl Default for DrawingConfig {
     }
 }
 
-/// How a diagram's tools draw, as the ring's outer orbit last set them: global, as the PDF's
-/// picks are, so every diagram starts where the last one left off.
+/// How a diagram's tools draw, as the ring's outer orbit last set them, and whether its grid
+/// shows: global, as the PDF's picks are, so every diagram starts where the last one left off.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DiagramConfig {
@@ -250,6 +251,9 @@ pub struct DiagramConfig {
     pub route: Route,
     /// A connector ends in an arrow.
     pub arrow: bool,
+    /// The canvas shows the page's grid at all times, not only while something is placed
+    /// (Show Grid).
+    pub grid: bool,
 }
 
 impl Default for DiagramConfig {
@@ -258,6 +262,7 @@ impl Default for DiagramConfig {
             rounded: false,
             route: Route::Orthogonal,
             arrow: true,
+            grid: false,
         }
     }
 }
@@ -1175,6 +1180,7 @@ daily_template = "DailyNote.md"
             rounded: true,
             route: Route::Curved,
             arrow: false,
+            grid: true,
         };
         assert_eq!(c.diagram, diagram);
 

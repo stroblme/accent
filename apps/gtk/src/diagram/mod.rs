@@ -443,6 +443,7 @@ impl DiagramTab {
     pub fn set_options(&self, options: DiagramConfig) {
         self.options.set(options);
         self.ring.set_options(options);
+        self.view.set_show_grid(options.grid);
     }
 
     pub fn ring_shown(&self) -> bool {
