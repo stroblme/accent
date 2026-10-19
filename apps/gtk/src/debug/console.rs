@@ -5,7 +5,7 @@
 
 use super::line::{self, Completion, Did, Line};
 use super::*;
-use accent_api::debug::{Category, Context};
+use accent_api::debug::{Category, Context, Variable};
 use std::collections::VecDeque;
 use terminal::Term;
 use vte4::TerminalExt as _;
@@ -207,9 +207,11 @@ impl App {
         if code.trim().is_empty() {
             return self.console_prompt(term);
         }
-        let (Some(session), Some(asked)) =
-            (console.session(), self.debug_evaluate(code, Context::Repl))
-        else {
+        let paused = self.paused_at();
+        let (Some(session), Some(asked)) = (
+            console.session(),
+            self.debug_evaluate(code.clone(), Context::Repl),
+        ) else {
             let paused = "Evaluates while the program is paused";
             return self.console_line(term, Category::Console, paused);
         };
@@ -228,6 +230,19 @@ impl App {
             let Some(term) = app.console() else {
                 return console.queue.borrow_mut().clear();
             };
+            // One that holds more is opened atop Variables, while the program stays where it was.
+            if let Ok(value) = &answer
+                && value.reference > 0
+                && app.paused_at() == paused
+                && let Some(sidebar) = app.sidebar.get()
+            {
+                sidebar.set_debug_answer(Variable {
+                    name: code.split_whitespace().collect::<Vec<_>>().join(" "),
+                    value: value.result.clone(),
+                    kind: value.kind.clone(),
+                    reference: value.reference,
+                });
+            }
             match answer {
                 Ok(value) if value.result.is_empty() => app.console_prompt(&term),
                 Ok(value) => app.console_line(&term, Category::Stdout, value.result.trim_end()),

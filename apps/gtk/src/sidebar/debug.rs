@@ -382,6 +382,9 @@ pub(super) struct Debug {
     pub(super) variables: Section,
     variables_body: gtk::Stack,
     values: Tree,
+    /// The Debug Console's last answer that holds more, atop Variables while the program stays
+    /// paused.
+    answer: RefCell<Option<Variable>>,
     pub(super) watch: Section,
     watched: Tree,
     pub(super) breakpoints: Section,
@@ -490,6 +493,7 @@ impl Debug {
             variables,
             variables_body,
             values,
+            answer: RefCell::default(),
             watch,
             watched,
             breakpoints,
@@ -520,6 +524,7 @@ impl Debug {
             self.stack_line.set_text(line);
             self.stack_body.set_visible_child_name("empty");
             self.values.set(Vec::new());
+            self.answer.replace(None);
             self.variables_body.set_visible_child_name("empty");
         }
     }
@@ -551,14 +556,38 @@ impl Debug {
 
     /// The selected frame's scopes, the first that is cheap to list open.
     pub(super) fn set_scopes(&self, scopes: &[Scope]) {
-        self.values
-            .set(scopes.iter().cloned().map(Item::Scope).collect());
+        let answer = self.answer.borrow().clone().map(Item::Variable);
+        let rows = answer
+            .into_iter()
+            .chain(scopes.iter().cloned().map(Item::Scope));
+        self.values.set(rows.collect());
         self.variables_body.set_visible_child_name("list");
         if let Some(first) = scopes.iter().find(|scope| !scope.expensive) {
             let reference = first.reference;
             self.values
                 .expand(|item| matches!(item, Item::Scope(s) if s.reference == reference));
         }
+    }
+
+    /// The Debug Console's last answer that holds more, first in Variables to be opened as a value
+    /// is, in place of the one before; the rows below keep what they had open.
+    pub(super) fn set_answer(&self, answer: Variable) {
+        if self.answer.replace(Some(answer.clone())).is_some() {
+            self.values.roots.remove(0);
+        }
+        let row = glib::BoxedAnyObject::new(Item::Variable(answer));
+        self.values.roots.insert(0, &row);
+        self.variables_body.set_visible_child_name("list");
+    }
+
+    /// Open the console's answer atop Variables, as a reader would.
+    #[cfg(feature = "bench")]
+    pub(super) fn open_answer(&self) {
+        let answer = self.answer.borrow().clone();
+        self.values.expand(|item| match (item, &answer) {
+            (Item::Variable(v), Some(answer)) => v.reference == answer.reference,
+            _ => false,
+        });
     }
 
     /// The watched expressions, with their values while the program is paused.
@@ -619,6 +648,7 @@ impl Debug {
         self.breakpoints.root.set_visible(debuggable);
         self.calls.set(Vec::new());
         self.values.set(Vec::new());
+        self.answer.replace(None);
     }
 
     /// Point the play button at `action`, named by its label as the strip's other buttons are.

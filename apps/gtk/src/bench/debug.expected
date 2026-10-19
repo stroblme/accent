@@ -6,6 +6,7 @@ bench debug watch x + 1 = 22
 bench debug repl 42
 bench debug block 63
 bench debug complete double(x) 42
+bench debug answer [x, {'a': 1}]=[21, {'a': 1}] 0=21 1={'a': 1} len()=2 x=21
 bench debug hover x = 21
 bench debug step demo.py:3
 bench debug ended 0

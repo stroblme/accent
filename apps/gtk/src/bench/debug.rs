@@ -22,15 +22,18 @@ const TYPED: &str = "doub";
 /// Watched from before the start.
 const WATCH: &str = "x + 1";
 
+/// Asked at the console for an answer that holds more, which Variables then lists first.
+const HOLDS: &str = "[x, {'a': 1}]";
+
 /// `ACCENT_BENCH_DEBUG=<rel>:<line>` debugs the program `make drills` writes, whose `double(x)`
 /// is called with 21, from a breakpoint on 1-based `<line>`, `y = x * 2`. It prints what the
 /// window shows at each step, `bench debug …`: the breakpoint, the stop, the top call, its
 /// locals, [`WATCH`]'s value, the Debug Console's answers to [`REPL`], to [`CALL`] after
-/// [`BLOCK`] and to [`TYPED`] completed with Tab and called, the hover's value of the first name
-/// after the line's `=`, the line a step over lands on, the session's exit code, the program's
-/// output in its tab, that tab kept, and the Code pane shown with the program's file in front
-/// and hidden behind its tab. Timings go on `bench debug_ms …` lines; a step that never comes
-/// prints `bench debug timeout <what>` and quits.
+/// [`BLOCK`] and to [`TYPED`] completed with Tab and called, [`HOLDS`] atop Variables and opened,
+/// the hover's value of the first name after the line's `=`, the line a step over lands on, the
+/// session's exit code, the program's output in its tab, that tab kept, and the Code pane shown
+/// with the program's file in front and hidden behind its tab. Timings go on `bench debug_ms …`
+/// lines; a step that never comes prints `bench debug timeout <what>` and quits.
 pub(super) fn bench_debug(app: &Rc<App>, arg: &str) {
     let place = arg
         .rsplit_once(':')
@@ -119,6 +122,22 @@ pub(super) fn bench_debug(app: &Rc<App>, arg: &str) {
             return;
         };
         println!("bench debug complete double(x) {called}");
+        app.console_typed(&format!("{HOLDS}\r"));
+        let listed = || {
+            let first = shown(&app).2.into_iter().next()?;
+            first.starts_with(HOLDS).then_some(())
+        };
+        if until(&app, "answer", listed).await.is_none() {
+            return;
+        }
+        if let Some(sidebar) = app.sidebar.get() {
+            sidebar.open_debug_answer();
+        }
+        let opened = || Some(shown(&app).2).filter(|rows| rows.len() > 2);
+        let Some(rows) = until(&app, "answer opened", opened).await else {
+            return;
+        };
+        println!("bench debug answer {}", rows.join(" "));
 
         let t = Instant::now();
         let hovered = line_text(&tab, line)

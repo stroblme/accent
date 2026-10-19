@@ -496,6 +496,13 @@ impl App {
         Some(vault.debug_evaluate(run.id, run.frame.get(), expression, context))
     }
 
+    /// Where the program is paused, as a count of its moves: an answer about it holds only while
+    /// this stays the same.
+    pub(super) fn paused_at(&self) -> Option<u32> {
+        let run = self.debugger.run()?;
+        matches!(run.state.get(), State::Paused { .. }).then(|| run.generation.get())
+    }
+
     /// What completes `text` before char `column` in the call selected, while the program is
     /// paused: what the Debug Console's Tab asks.
     pub(super) fn debug_completions(
