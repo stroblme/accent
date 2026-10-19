@@ -409,12 +409,14 @@ fn explore_asks_the_language_server_when_precise() {
     let fake = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build-aux/fake-lsp.py");
     let calls = scratch.dir.join("calls.json");
     std::fs::create_dir_all(scratch.dir.join("config/accent")).unwrap();
+    // Keyed by the canonical root, as `config::vault_key` keys it: macOS's temp dir is under the
+    // `/var -> /private/var` link.
     write(
         "config/accent/config.toml",
         &format!(
             "[vaults.{:?}.lsp.servers]\nrust = [\"python3\", {fake:?}, \"--calls\", {:?}, \
              \"--loading\", \"2\"]\npython3 = [\"accent-no-such-server\"]\n",
-            scratch.dir.join("vault"),
+            scratch.dir.join("vault").canonicalize().unwrap(),
             calls,
         ),
     );
