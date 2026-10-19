@@ -483,13 +483,15 @@ pub const TAKEN: i32 = 17;
 /// free, a final symlink included: once every byte is there it is claimed empty with `set -C`,
 /// which every POSIX shell (dash, bash, zsh, BusyBox and BSD `sh`) opens with `O_EXCL` on any
 /// filesystem, and the rename then lands on that claim; a taken one exits [`TAKEN`]. The test
-/// before the claim keeps it off a FIFO, which `set -C` would open and wait on.
+/// before the claim keeps it off a FIFO, which `set -C` would open and wait on. The mode is GNU
+/// `stat -c`'s, else BSD `stat -f`'s, as macOS has.
 pub fn put_cmd(path: &str, size: u64, replace: bool) -> String {
     let path = quote(path);
     let (resolve, land) = match replace {
         true => (
             format!("p=$(readlink -f -- {path}) || p={path}"),
-            "m=$(stat -c %a \"$p\" 2>/dev/null) && chmod \"$m\" \"$t\"; \
+            "m=$(stat -c %a \"$p\" 2>/dev/null || stat -f %Lp \"$p\" 2>/dev/null) \
+             && chmod \"$m\" \"$t\"; \
              [ -e \"$p\" ] || { echo \"${p##*/} was moved or deleted\" >&2; exit 1; }; "
                 .to_string(),
         ),

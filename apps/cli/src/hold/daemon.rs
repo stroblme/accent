@@ -297,7 +297,7 @@ impl Daemon {
             .collect();
         let mut out = Vec::new();
         for (id, shell) in shells {
-            let cwd = std::fs::read_link(format!("/proc/{}/cwd", shell.pid)).ok();
+            let cwd = cwd_of(shell.pid);
             let (title, attached) = {
                 let term = lock(&shell.screen);
                 let title = String::from_utf8_lossy(&term.parser.callbacks().0).into_owned();
@@ -402,7 +402,7 @@ impl Shell {
         if group <= 0 || group as u32 == self.pid {
             return None;
         }
-        command_line(&std::fs::read(format!("/proc/{group}/cmdline")).ok()?)
+        command_line(&args_of(group as u32)?)
     }
 
     /// Request a redraw from full-screen programs whose state replay cannot restore.
@@ -428,19 +428,26 @@ fn open_pty() -> io::Result<(File, File)> {
     };
     let master = open(Path::new("/dev/ptmx"))?;
     let fd = master.as_raw_fd();
-    let mut name: [libc::c_char; 64] = [0; 64];
+    // 128 bytes, as macOS's `TIOCPTYGNAME` writes.
+    let mut name: [libc::c_char; 128] = [0; 128];
     // SAFETY: `fd` is an open pty master, and `name` is a buffer of the length given.
     unsafe {
         if libc::grantpt(fd) != 0 || libc::unlockpt(fd) != 0 {
             return Err(io::Error::last_os_error());
         }
         // The error comes back as the return value, not through errno (musl sets none).
+        #[cfg(not(target_os = "macos"))]
         match libc::ptsname_r(fd, name.as_mut_ptr(), name.len()) {
             0 => {}
             e => return Err(io::Error::from_raw_os_error(e)),
         }
+        // The libc crate has no `ptsname_r` for Apple, whose own asks this ioctl.
+        #[cfg(target_os = "macos")]
+        if libc::ioctl(fd, libc::TIOCPTYGNAME as _, name.as_mut_ptr()) == -1 {
+            return Err(io::Error::last_os_error());
+        }
     }
-    // SAFETY: on success `ptsname_r` left a NUL-terminated path in `name`.
+    // SAFETY: on success the call left a NUL-terminated path in `name`.
     let slave = unsafe { CStr::from_ptr(name.as_ptr()) };
     let slave = open(Path::new(OsStr::from_bytes(slave.to_bytes())))?;
     Ok((master, slave))
@@ -487,7 +494,8 @@ fn spawn(hello: &Hello, slave: File) -> io::Result<Child> {
             libc::sigemptyset(none.as_mut_ptr());
             if libc::sigprocmask(libc::SIG_SETMASK, none.as_ptr(), std::ptr::null_mut()) == -1
                 || libc::setsid() == -1
-                || libc::ioctl(0, libc::TIOCSCTTY, 0) == -1
+                // Apple declares the request a `u32`, where its `ioctl` takes a `c_ulong`.
+                || libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1
             {
                 return Err(io::Error::last_os_error());
             }
@@ -527,6 +535,80 @@ fn command_line(raw: &[u8]) -> Option<String> {
         Some(_) => line.chars().take(LONGEST - 1).chain(['…']).collect(),
         None => line,
     })
+}
+
+/// The working directory of process `pid`.
+#[cfg(not(target_os = "macos"))]
+fn cwd_of(pid: u32) -> Option<PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+}
+
+/// macOS has no `/proc`: the kernel names a process's directory through `proc_pidinfo`.
+#[cfg(target_os = "macos")]
+fn cwd_of(pid: u32) -> Option<PathBuf> {
+    let mut info = MaybeUninit::<libc::proc_vnodepathinfo>::zeroed();
+    let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
+    // SAFETY: `info` is the `size` bytes the call writes at most.
+    let wrote = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if wrote != size {
+        return None;
+    }
+    // SAFETY: written whole, as `wrote` says.
+    let path = unsafe { info.assume_init() }.pvi_cdir.vip_path;
+    let bytes: Vec<u8> = path.as_flattened().iter().map(|&c| c as u8).collect();
+    let path = CStr::from_bytes_until_nul(&bytes).ok()?;
+    Some(PathBuf::from(OsStr::from_bytes(path.to_bytes())))
+}
+
+/// The arguments process `pid` was started with, each ended by a NUL.
+#[cfg(not(target_os = "macos"))]
+fn args_of(pid: u32) -> Option<Vec<u8>> {
+    std::fs::read(format!("/proc/{pid}/cmdline")).ok()
+}
+
+/// macOS has no `/proc`: `KERN_PROCARGS2` hands over the argument count, the executable's path
+/// padded with NULs, then the arguments and the environment, each ended by a NUL.
+#[cfg(target_os = "macos")]
+fn args_of(pid: u32) -> Option<Vec<u8>> {
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
+    let mut size = 0;
+    let mut buf = Vec::new();
+    // SAFETY: the first call only says how large a buffer the second needs; the second writes at
+    // most `size` bytes into one that long.
+    unsafe {
+        let mut ask = |buf: *mut u8, size: &mut libc::size_t| {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                3,
+                buf.cast(),
+                size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if ask(std::ptr::null_mut(), &mut size) != 0 {
+            return None;
+        }
+        buf.resize(size, 0);
+        if ask(buf.as_mut_ptr(), &mut size) != 0 {
+            return None;
+        }
+    }
+    let (argc, rest) = buf[..size].split_first_chunk::<4>()?;
+    let args = rest
+        .split(|&b| b == 0)
+        .skip(1)
+        .skip_while(|f| f.is_empty())
+        .take(i32::from_ne_bytes(*argc) as usize);
+    Some(args.flat_map(|arg| [arg, b"\0"].concat()).collect())
 }
 
 /// Remaining [`WAIT`] time since the last terminal connected.
@@ -571,5 +653,16 @@ mod tests {
         let long = command_line("x\0".repeat(1000).as_bytes()).unwrap();
         assert_eq!(long.chars().count(), LONGEST);
         assert!(long.ends_with('…'));
+    }
+
+    /// What `held` says of a shell, read off this process: where it runs and how it was started.
+    #[test]
+    fn a_process_is_read_where_it_runs_and_as_it_was_started() {
+        let me = std::process::id();
+        assert_eq!(cwd_of(me), std::env::current_dir().ok());
+        let typed: Vec<u8> = std::env::args_os()
+            .flat_map(|arg| [arg.as_bytes(), b"\0"].concat())
+            .collect();
+        assert_eq!(args_of(me), Some(typed));
     }
 }
