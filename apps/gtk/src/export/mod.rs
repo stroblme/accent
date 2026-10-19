@@ -102,6 +102,18 @@ impl App {
         });
     }
 
+    /// Grey Print… and each Export as… the document they would act on cannot do, the tab
+    /// right-clicked while its menu is up, else the one in front: the primary menu lists them all.
+    pub(crate) fn sync_prints(&self) {
+        let can = actions::print_actions(self.menu_doc().as_ref().and_then(printable));
+        for full in actions::PRINTS {
+            let action = self.window.lookup_action(&full["win.".len()..]);
+            if let Some(action) = action.and_downcast::<gio::SimpleAction>() {
+                action.set_enabled(can.contains(&full));
+            }
+        }
+    }
+
     /// The document the tab menu's items act on: the tab right-clicked, else the one in front.
     fn menu_doc(&self) -> Option<Doc> {
         match self.menu_page.borrow().clone() {

@@ -726,10 +726,12 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 ### Primary menu
 
-- Four sections, by what an item changes: the files in this vault (New File, New Folder, Open File…); which vault the window is on (Open Local…, Open Remote…, Open Recent…, Reload Window, then Close Vault); what the window shows (New Terminal, Presentation Mode); the application (Preferences, Keyboard Shortcuts, About accent, Quit).
-- It holds what the window does whichever tab is in front: a command acting on the document (Save, Save As…, Find, Toggle Preview, Print…) keeps its chord, its palette entry and its tab-menu item where it has them, and has no item here.
-- Labels come from the action table, so the menu and the palette cannot disagree.
+- Five sections, by what an item changes: the files in this vault (New File, New Folder, Open File…); what the tab in front can be put out as (Print…, Export As); which vault the window is on (Open Local…, Open Remote…, Open Recent…, Reload Window, then Close Vault); what the window shows (New Terminal, Presentation Mode); the application (Preferences, Keyboard Shortcuts, About accent, Quit).
+- It holds what the window does whichever tab is in front: a command acting on the document (Save, Save As…, Find, Toggle Preview) keeps its chord, its palette entry and its tab-menu item where it has them, and has no item here.
+- Print… and Export As are the exception (user decision 2026-10-19), the commands people look for in a main menu: the submenu lists every format (PDF…, HTML…, PNG…, SVG…), and what the tab in front cannot do is greyed, following it from tab to tab by the rule the tab menu lists them by (Context menus).
+- Labels come from the action table, so the menu and the palette cannot disagree; an Export As item drops the "Export as" its submenu already says.
 - The sections are cut to what the window can do: without a vault, no New File, New Folder or Close Vault, which could only toast.
+  A window of shells has no Print… or Export As: a document is the exception there, and its tab menu still has them.
   A window of shells adds Save Session after Reload Window (a focused shell keeps `Ctrl+S`) and, once named, Close Session after it.
   A remote vault's window has New Local Terminal beside New Remote Terminal….
 
@@ -1186,7 +1188,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   On the tab menu it is **Move to New Window**, ending the moves before Pin Tab, since the tab leaves (Tabs).
 - **Reload** ends a folder row's first section, after Leave Out of Search (Sidebar, Files).
 - **Print… and the exports are a section of the tab menu's own**, after Reveal in Sidebar, as they make something of the file rather than name it: a note has Print…, Export as PDF… and Export as HTML…, a PDF the first two, a diagram Print…, Export as PDF…, Export as PNG… and Export as SVG…, any other tab none, and a loose file as much as a vault's.
-  They are on no tree menu, and on no primary menu, which holds no document command.
+  They are on no tree menu; the primary menu lists them all, greyed where the tab in front cannot (Primary menu).
 - **Move to…** sits with Cut and Copy, on a row's menu and a marked set's: the dialog is a folder path in the vault's path field, from the vault root, opening on the folder the first path is in.
   It is a drop onto a folder by another way, for a folder that is not on screen — one plan, a taken name refusing the whole batch — and a folder not there yet is made once any Update Links? question is answered, as Rename makes the folders a typed path names.
   A folder moved into itself is refused, and what is already there stays; Rename is still the one path's move from the keyboard.
@@ -1339,6 +1341,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 
 - Save `Ctrl+S`, Save As… `Ctrl+Shift+S`, Print…, Export as PDF…, Export as HTML…, Export as PNG… and Export as SVG… (unbound), New File `Ctrl+N`, New Folder `Ctrl+Shift+N`, Upload Files (unbound), Close Tab `Ctrl+W`, Open File `Ctrl+O`, Open Local `Ctrl+Shift+O`, Open Remote (unbound), Open Recent `Ctrl+R`, New Window (unbound), Reload Window (unbound), Close Vault (unbound), Quit `Ctrl+Q`.
 - Print… and the exports act on the tab the menu was opened on, else the tab in front (Preview, PDF, Diagram); over any tab but a note, a PDF or a diagram they do nothing, as Save As… does, and one a tab has no such file for (HTML for a PDF or a diagram, PNG and SVG for a note or a PDF) does nothing over it.
+  Each is disabled where it would do nothing, so the primary menu greys it.
 - Open Local…, Open Remote…, Close Vault and Quit are `app.` actions, since each outlives the window that fired it; they still enter the palette's recently-run list.
 - **Reload Window** closes the window the way closing it does — every edit written or asked about, the session saved — and opens what it showed again: the same vault (a remote one connecting afresh), the same files from outside a vault, the same terminal session, with its tabs, panes and shells, at its size and maximized or fullscreen as it was.
   The shells are detached rather than ended, an unnamed window's too, and taken up again.
@@ -1655,7 +1658,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 
 ### Deviations
 
-- The HIG reserves `Ctrl+P` for Print and `Ctrl+Shift+P` for Print Preview; accent's users come from VS Code and Obsidian, where both open the palette, so both stay the palette's and Print… has no chord: it is reached from the tab menu and the palette, as the exports are.
+- The HIG reserves `Ctrl+P` for Print and `Ctrl+Shift+P` for Print Preview; accent's users come from VS Code and Obsidian, where both open the palette, so both stay the palette's and Print… has no chord: it is reached from the primary menu, the tab menu and the palette, as the exports are.
 - VS Code's Toggle Breakpoint is `F9`, which is the sidebar's here (Panes), so it takes `Ctrl+F9`.
 - VS Code's Start Debugging is `F5`, which is Presentation Mode's here (Views), so it takes `Ctrl+F5`, VS Code's Run Without Debugging.
 
