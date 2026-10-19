@@ -13,10 +13,10 @@ pub struct Line {
     recalled: Option<usize>,
     /// What was being typed as the walk began, which Down past the newest entry brings back.
     draft: String,
-    /// The columns from the prompt's start to the cursor in the last drawing. The cursor stands
-    /// on a cell, which VTE keeps it on as it rewraps the line on a resize, so its row below the
-    /// prompt's first is this over the width, whatever the width is now.
-    drawn: usize,
+    /// The last drawing up to the cell the cursor stands on, prompt included. VTE keeps the
+    /// cursor on that cell as it rewraps the line on a resize, so its row below the prompt's first
+    /// is where this lays out ([`cell`]), whatever the width is now.
+    drawn: String,
 }
 
 /// What a key asks of the console.
@@ -116,38 +116,55 @@ impl Line {
     /// is in the text. Columns go by display width: a wide character takes two.
     pub fn draw(&mut self, prompt: &str, columns: u16) -> String {
         use std::fmt::Write as _;
-        use unicode_width::UnicodeWidthStr as _;
         let mut out = self.erase(columns);
         let columns = usize::from(columns.max(1));
-        let end = prompt.width() + self.text.width();
-        let at = prompt.width() + self.text[..self.cursor].width();
         // A space after the text is the cell a cursor at its end stands on, rather than past the
         // edge of a row the line fills exactly, where a rewrap would not keep it.
+        let under = self.text[self.cursor..].chars().next().unwrap_or(' ');
+        let drawn = format!("{prompt}{}{under}", &self.text[..self.cursor]);
+        let (row, column) = cell(&drawn, columns);
+        let (end, _) = cell(&format!("{prompt}{} ", self.text), columns);
         out.push_str(prompt);
         out.push_str(&self.text);
         out.push(' ');
         // Writing leaves the cursor on the space's row.
-        let up = end / columns - at / columns;
-        if up > 0 {
-            _ = write!(out, "\x1b[{up}A");
+        if end > row {
+            _ = write!(out, "\x1b[{}A", end - row);
         }
         out.push('\r');
-        let column = at % columns;
         if column > 0 {
             _ = write!(out, "\x1b[{column}C");
         }
-        self.drawn = at;
+        self.drawn = drawn;
         out
     }
 
     /// Back to where the prompt starts on rows of `columns`, and everything from there on
     /// cleared.
     pub fn erase(&mut self, columns: u16) -> String {
-        match std::mem::take(&mut self.drawn) / usize::from(columns.max(1)) {
+        let drawn = std::mem::take(&mut self.drawn);
+        match cell(&drawn, usize::from(columns.max(1))).0 {
             0 => "\r\x1b[J".to_string(),
             rows => format!("\x1b[{rows}A\r\x1b[J"),
         }
     }
+}
+
+/// The row and column the last character of `s` starts on, laid out on rows of `columns` as VTE
+/// lays out a line and rewraps it: a wide character that would start in a row's last column
+/// starts the next row instead, leaving that column empty.
+fn cell(s: &str, columns: usize) -> (usize, usize) {
+    use unicode_width::UnicodeWidthChar as _;
+    let (mut row, mut column, mut last) = (0, 0, (0, 0));
+    for c in s.chars() {
+        let width = c.width().unwrap_or(0);
+        if column + width > columns {
+            (row, column) = (row + 1, 0);
+        }
+        last = (row, column);
+        column += width;
+    }
+    last
 }
 
 /// `text` without what a terminal acts on rather than shows: its escape sequences, and its
@@ -265,6 +282,17 @@ mod tests {
         // on the second.
         assert_eq!(line.draw(">>> ", 5), "\x1b[1A\r\x1b[J>>> é中 \r\x1b[2C");
         assert_eq!(line.erase(5), "\x1b[1A\r\x1b[J");
+        // On rows of six `中` would start in the last column, so VTE starts the next row with it
+        // and leaves that column empty (measured with VTE 0.84, as its rewrap does too).
+        assert_eq!(line.draw(">>> ", 6), "\r\x1b[J>>> é中 \r\x1b[2C");
+        // The cursor on the last `中` of `>>> a中中中`, on the second row of six, the space after
+        // the text on the third.
+        let mut line = Line::default();
+        line.key("a中中中\x1b[D");
+        let drawn = "\r\x1b[J>>> a中中中 \x1b[1A\r\x1b[4C";
+        assert_eq!(line.draw(">>> ", 6), drawn);
+        // Rewrapped onto rows of five, that `中` would start in the second row's last column.
+        assert_eq!(line.erase(5), "\x1b[2A\r\x1b[J");
     }
 
     #[test]
