@@ -95,6 +95,29 @@ pub(crate) fn place(tab: &Tab, lines: &[u32]) {
     }
 }
 
+/// The line each of `tab`'s breakpoints is on, in their order, for [`put_back`] once its text is
+/// replaced, which moves every mark to line 0.
+pub(crate) fn each_line(tab: &Tab) -> Vec<i32> {
+    let marks = tab.breakpoints.borrow();
+    marks
+        .iter()
+        .map(|mark| tab.buffer.iter_at_mark(mark).line())
+        .collect()
+}
+
+/// Move each of `tab`'s breakpoints back to its line from [`each_line`], the dot or ring it was;
+/// one now past the end is dropped: the file may have lost it.
+pub(crate) fn put_back(tab: &Tab, lines: &[i32]) {
+    let mut lines = lines.iter();
+    tab.breakpoints.borrow_mut().retain(|mark| {
+        match lines.next().and_then(|&line| tab.buffer.iter_at_line(line)) {
+            Some(start) => tab.buffer.move_mark(mark, &start),
+            None => tab.buffer.delete_mark(mark),
+        }
+        !mark.is_deleted()
+    });
+}
+
 /// Replace `tab`'s breakpoints with where the adapter holds them: a dot for each it bound, a ring
 /// for each it did not, on the line it moved each to.
 pub(crate) fn bind(tab: &Tab, placed: &[Placed]) {
