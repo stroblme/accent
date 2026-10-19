@@ -192,6 +192,14 @@ pub fn offset_of(layout: &Layout, anchor: Anchor) -> Option<(f64, f64)> {
     ))
 }
 
+/// Where content coordinate `at` lands in a view scrolled to `offset`, on the nearest whole
+/// device pixel at `sf` device pixels to one. In f64 until the result is small: a long
+/// document's last pages are millions of pixels down, where f32s are a quarter pixel apart.
+pub fn on_grid(at: f32, offset: f64, sf: i32) -> f32 {
+    let sf = f64::from(sf);
+    (((f64::from(at) - offset) * sf).round() / sf) as f32
+}
+
 /// Find the page containing a content coordinate, or the nearest page above it. Binary search
 /// keeps per-scroll, per-drag and per-frame lookups cheap in long documents.
 pub(crate) fn page_at(layout: &Layout, y: f64) -> usize {
@@ -393,5 +401,13 @@ mod tests {
         };
         assert_eq!(anchor.clamped(4).page, 3);
         assert_eq!(anchor.clamped(4).v, 0.25);
+    }
+
+    /// A page centred half a pixel off the grid, at 2x, and millions of pixels down.
+    #[test]
+    fn a_page_corner_lands_on_a_whole_device_pixel() {
+        assert_eq!(on_grid(219.5, 0.0, 1), 220.0);
+        assert_eq!(on_grid(143.45, 0.0, 2), 143.5);
+        assert_eq!(on_grid(2e6 + 0.25, 1_999_500.0, 2), 500.5);
     }
 }

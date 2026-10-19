@@ -789,6 +789,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 - A `GtkScrollable` widget painting cached tiles, sharp at any zoom, with a low-resolution stand-in under the tiles on screen that have not arrived; one render thread per document, which also opens it, so a large file costs nothing at startup.
   The reading view, the thumbnail strip and the link preview each ask it for what they lack, a newer list replacing only its own asker's: each asks again only when its list changes, so one dropping another's left pages blank.
+- Each page is painted from a corner on the device's pixel grid (`geometry::on_grid`): a tile edge between two pixels is antialiased by the tiles on both sides, cairo and GL alike, and the paper under them shows through as a thin line on a coloured page, which a centred page's half-pixel offset drew down every tile column.
 - The reading view asks for the tiles on screen first, then those a viewport above and below and a tile either side (`cache::reach`), and no others: every tile of the pages near the screen outgrew the 256 MB cache at 800 % (an A4 page is 228 MB of tiles there), which then dropped what it had just rendered to make room for the rest and never went idle.
   That reach at 3840 x 2160 device pixels fits in the three quarters of the budget that eviction leaves.
 - pdfium reads a document from its file as it needs it, so a file written into in place under an open tab, which is how pdflatex writes, is no longer the document that was opened: every page not read yet would render blank.

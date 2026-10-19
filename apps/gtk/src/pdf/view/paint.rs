@@ -8,7 +8,7 @@ use gtk::{gdk, graphene, gsk};
 
 use super::imp;
 use crate::pdf::cache::{TILE, TileKey, Want, reach, tiles_across, tiles_within};
-use crate::pdf::geometry::{gap_middle, page_at};
+use crate::pdf::geometry::{PageRect, gap_middle, on_grid, page_at};
 use crate::pdf::tools::{HANDLE, Mode, mapped};
 use crate::theme;
 
@@ -34,7 +34,6 @@ impl imp::PdfView {
         let thumbnails = self.thumbnails.get();
 
         snapshot.save();
-        snapshot.translate(&graphene::Point::new(-ox as f32, -oy as f32));
 
         let frame = obj.color();
         let accent = theme::accent();
@@ -55,7 +54,20 @@ impl imp::PdfView {
         // at at all, which at 1 554 pages is the difference between a frame and a scan.
         let first = page_at(&layout, near.1.0);
         let last = page_at(&layout, near.1.1);
-        for (index, rect) in layout.pages.iter().enumerate().take(last + 1).skip(first) {
+        for (index, at) in layout.pages.iter().enumerate().take(last + 1).skip(first) {
+            // Each page is drawn from its own corner, put on the device's pixel grid: a tile
+            // edge between two pixels is antialiased by the tiles either side of it, which lets
+            // the paper show through as a thin line, and a tile off the grid is resampled soft.
+            snapshot.save();
+            snapshot.translate(&graphene::Point::new(
+                on_grid(at.x, ox, sf),
+                on_grid(at.y, oy, sf),
+            ));
+            let rect = &PageRect {
+                x: 0.0,
+                y: 0.0,
+                ..*at
+            };
             let bounds = graphene::Rect::new(rect.x, rect.y, rect.w, rect.h);
             // The page's own paper, so a tile that has not arrived is not a hole.
             snapshot.append_color(&self.paper(), &bounds);
@@ -92,10 +104,10 @@ impl imp::PdfView {
                         }
                     }
                 }
-                let on_x = tiles_within(rect.x, shown.0, sf, across);
-                let on_y = tiles_within(rect.y, shown.1, sf, down);
-                for ty in tiles_within(rect.y, near.1, sf, down) {
-                    for tx in tiles_within(rect.x, near.0, sf, across) {
+                let on_x = tiles_within(at.x, shown.0, sf, across);
+                let on_y = tiles_within(at.y, shown.1, sf, down);
+                for ty in tiles_within(at.y, near.1, sf, down) {
+                    for tx in tiles_within(at.x, near.0, sf, across) {
                         let key = key(tx, ty);
                         let on = on_x.contains(&tx) && on_y.contains(&ty);
                         let list = if on { &mut wanted } else { &mut ahead };
@@ -286,8 +298,10 @@ impl imp::PdfView {
                     snapshot.append_color(&colour, &layout.rect_of(rect, mark));
                 }
             }
+            snapshot.restore();
         }
         // A PDF dragged over the pages: the line across the gap its pages would go into.
+        snapshot.translate(&graphene::Point::new(-ox as f32, -oy as f32));
         if let Some(gap) = self.drop_gap.get()
             && let Some(beside) = layout
                 .pages
