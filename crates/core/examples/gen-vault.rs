@@ -13,6 +13,8 @@
 //! Generated PNGs, JPEGs, and PDFs are valid for preview and PDF tests.
 
 use anyhow::{Context, Result, bail};
+use serde::Serialize;
+use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::fs;
 use std::os::unix::fs::symlink;
@@ -746,6 +748,16 @@ A link into the vault, [[Figures]], one out of it, [GNOME](https://www.gnome.org
 <script>document.body.textContent = 'scripted';</script>
 "#;
 
+/// The notebook drill's `.ipynb`, as nbformat 5.10.4 wrote it: a white-background PNG, an SVG, a
+/// pandas MultiIndex table, scripted HTML beside its text, LaTeX, JSON, a progress bar's `\r`
+/// stream, an ANSI traceback, an attachment and a raw cell.
+const ANALYSIS_IPYNB: &str = include_str!("../tests/fixtures/notebook/analysis.ipynb");
+
+/// The notebook drill's marimo notebook, written by hand as marimo's `codegen.py` writes one
+/// (marimo is not installed here): a setup block, a hidden markdown cell, `@app.function`, a
+/// `def` line and a `return` over several lines, and an unparsable cell.
+const EXPLORE_PY: &str = include_str!("../tests/fixtures/notebook/explore.py");
+
 /// SVG fixture with black strokes and a label on a transparent canvas.
 const FIGURE_SVG: &str = r##"<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="320" height="200" viewBox="0 0 320 200">
@@ -1052,6 +1064,46 @@ impl Gen {
         }
         s.push_str("\t\t{\"id\":\"end\",\"type\":\"text\",\"x\":0,\"y\":0}\n\t]\n}\n```\n%%\n");
         s.into_bytes()
+    }
+
+    /// A long notebook for the notebook drill's open time and memory, as nbformat writes one:
+    /// `n` cells, every third markdown, each code cell with a line of output and every tenth
+    /// `analysis.ipynb`'s plot.
+    fn big_ipynb(&mut self, n: usize) -> Vec<u8> {
+        let analysis: Value = serde_json::from_str(ANALYSIS_IPYNB).expect("the fixture is JSON");
+        let plot = analysis["cells"][4]["outputs"][0].clone();
+        let lines = |text: String| -> Vec<String> {
+            text.split_inclusive('\n').map(String::from).collect()
+        };
+        let cells: Vec<Value> = (0..n)
+            .map(|i| {
+                let id = format!("{i:08x}");
+                if i % 3 == 0 {
+                    let text = format!("## {}\n\n{}", self.title_case(3), self.words(30));
+                    return json!({"cell_type": "markdown", "id": id, "metadata": {}, "source": lines(text)});
+                }
+                let mut outputs = vec![json!({
+                    "name": "stdout", "output_type": "stream", "text": [format!("{}\n", self.words(6))]
+                })];
+                if i % 10 == 1 {
+                    outputs.push(plot.clone());
+                }
+                let source = format!("x{i} = {i}\nprint(\"{}\")", self.words(6));
+                json!({
+                    "cell_type": "code", "execution_count": i, "id": id, "metadata": {},
+                    "outputs": outputs, "source": lines(source)
+                })
+            })
+            .collect();
+        let notebook = json!({
+            "cells": cells, "metadata": analysis["metadata"], "nbformat": 4, "nbformat_minor": 5
+        });
+        let mut out = Vec::new();
+        let indent = serde_json::ser::PrettyFormatter::with_indent(b" ");
+        let mut ser = serde_json::Serializer::with_formatter(&mut out, indent);
+        notebook.serialize(&mut ser).expect("JSON serialises");
+        out.push(b'\n');
+        out
     }
 
     fn py_module(&mut self, name: &str) -> Vec<u8> {
@@ -1481,6 +1533,12 @@ fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Result
     )?;
     // Print and export's drill input: one of everything a page has to carry off the screen.
     g.write("Notes-QC/Export.md", EXPORT_NOTE.as_bytes())?;
+    // The notebook drill's inputs.
+    g.mkdir("Notebooks")?;
+    g.write("Notebooks/analysis.ipynb", ANALYSIS_IPYNB.as_bytes())?;
+    g.write("Notebooks/explore.py", EXPLORE_PY.as_bytes())?;
+    let big = g.big_ipynb(300);
+    g.write("Notebooks/big.ipynb", &big)?;
     g.mkdir("Attachments/Excalidraw")?;
     for i in 0..excal {
         let n = g.rng.range(8 * 1024, 40 * 1024);
@@ -1729,6 +1787,18 @@ mod tests {
                 figures.contains(&format!("![[Attachments/{f}]]")),
                 "{figures}"
             );
+        }
+
+        // The notebook drill's inputs read as notebooks and are written back as they were.
+        for (rel, cells) in [
+            ("Notebooks/analysis.ipynb", 14),
+            ("Notebooks/explore.py", 11),
+            ("Notebooks/big.ipynb", 300),
+        ] {
+            let text = fs::read_to_string(vault.join(rel)).unwrap();
+            let nb = accent_core::notebook::read(rel, &text).unwrap();
+            assert_eq!(nb.cells().len(), cells, "{rel}");
+            assert_eq!(nb.to_text(), text, "{rel}");
         }
 
         // The files that are not notes.

@@ -14,6 +14,7 @@ pub mod fuzzy;
 pub mod git;
 pub mod index;
 pub mod markdown;
+pub mod notebook;
 pub mod orientation;
 pub mod page_edit;
 pub mod path;

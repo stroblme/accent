@@ -4,7 +4,7 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use crate::markdown;
+use crate::{markdown, notebook};
 
 /// `"a/b/c.md"` -> `("a/b", "c.md")`; a name at the root gives `("", name)`.
 fn split(rel: &str) -> (&str, &str) {
@@ -132,6 +132,25 @@ pub fn may_be_diagram(rel: &str) -> bool {
 /// diagram is one to each of them.
 pub fn holds_diagram(rel: &str, text: &str) -> bool {
     is_diagram(rel) || (may_be_diagram(rel) && accent_drawio::text::sniff(text))
+}
+
+/// Whether `rel` is a Jupyter notebook by its name: `.ipynb`, in any case.
+pub fn is_notebook(rel: &str) -> bool {
+    let name = basename(rel).to_ascii_lowercase();
+    name.len() > ".ipynb".len() && name.ends_with(".ipynb")
+}
+
+/// Whether `rel` may be a notebook: named as one, or a `.py`, which only its bytes can say is a
+/// marimo notebook ([`holds_notebook`]).
+pub fn may_be_notebook(rel: &str) -> bool {
+    let name = basename(rel).to_ascii_lowercase();
+    is_notebook(rel) || (name.len() > ".py".len() && name.ends_with(".py"))
+}
+
+/// Whether the file `rel`, holding `text`, is a notebook: an `.ipynb`, or a `.py` that imports
+/// marimo and makes its `app`.
+pub fn holds_notebook(rel: &str, text: &str) -> bool {
+    is_notebook(rel) || (may_be_notebook(rel) && notebook::is_marimo(text))
 }
 
 /// Where a link written inside the note at `dir` points, as a vault-relative path: `../a.md`
@@ -327,6 +346,16 @@ mod tests {
         ] {
             assert_eq!(file_type(rel), want, "{rel}");
         }
+    }
+
+    #[test]
+    fn a_notebook_is_an_ipynb_or_a_py_marimo_wrote() {
+        let marimo = "import marimo\n\napp = marimo.App()\n";
+        assert!(holds_notebook("a/B.IPYNB", ""));
+        assert!(holds_notebook("explore.py", marimo));
+        assert!(!holds_notebook("plain.py", "import numpy\n"));
+        assert!(!holds_notebook("notes.md", marimo));
+        assert!(!may_be_notebook(".py") && !is_notebook(".ipynb"));
     }
 
     #[test]
