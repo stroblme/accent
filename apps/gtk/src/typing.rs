@@ -1,4 +1,4 @@
-//! Markdown typing helpers for lists, fences, pairs and tables.
+//! Markdown typing helpers for lists, fences, pairs and tables, and a code tab's brackets.
 //!
 //! Pure functions inspect the current line so decisions can be tested without a display;
 //! `install` supplies widget integration. Re-parsing the whole note per key is unnecessary:
@@ -393,8 +393,59 @@ fn on_char(view: &sourceview5::View, ch: char) -> glib::Propagation {
     if selection.is_none() && verbatim(&buffer, &at) {
         return glib::Propagation::Proceed;
     }
+    apply(view, pair(ch, char_at(&at), selection.is_some()))
+}
 
-    match pair(ch, char_at(&at), selection.is_some()) {
+/// A bracket or Backspace in a code tab with a language: paired, stepped over, put around the
+/// selection and taken back as a pair as in a note, but not in a comment or a string. Brackets
+/// only: a quote cannot tell an opening one from a closing one, nor an apostrophe from either.
+pub fn on_code_key(
+    view: &sourceview5::View,
+    key: gdk::Key,
+    state: gdk::ModifierType,
+) -> glib::Propagation {
+    use sourceview5::prelude::BufferExt as _;
+    let language = view
+        .buffer()
+        .downcast_ref::<sourceview5::Buffer>()
+        .and_then(|source| source.language());
+    if state.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK)
+        || !view.is_editable()
+        || language.is_none()
+    {
+        return glib::Propagation::Proceed;
+    }
+    if key == gdk::Key::BackSpace {
+        return on_backspace(view);
+    }
+    let Some(ch) = key
+        .to_unicode()
+        .filter(|ch| PAIRS.iter().any(|(open, close)| open == ch || close == ch))
+    else {
+        return glib::Propagation::Proceed;
+    };
+    let buffer = view.buffer();
+    let at = caret(&buffer);
+    let pair = pair(ch, char_at(&at), buffer.has_selection());
+    // The closer stepped over is the code's own, and nothing pairs with the caret in a comment or
+    // a string.
+    let skip = match pair {
+        Pair::StepOver => quoted(&buffer, &at),
+        Pair::Insert(..) => inside(&buffer, &at),
+        _ => false,
+    };
+    if skip {
+        return glib::Propagation::Proceed;
+    }
+    apply(view, pair)
+}
+
+/// Carry out what a typed delimiter does, as one user action.
+fn apply(view: &sourceview5::View, pair: Pair) -> glib::Propagation {
+    let buffer = view.buffer();
+    let selection = buffer.selection_bounds();
+    let at = caret(&buffer);
+    match pair {
         Pair::Wrap(open, close) => {
             let Some((s, e)) = selection else {
                 return glib::Propagation::Proceed;
@@ -488,6 +539,31 @@ fn in_table(view: &sourceview5::View, key: TableKey) -> bool {
 /// The character the iter sits in front of, or `None` at the end of the buffer.
 fn char_at(iter: &gtk::TextIter) -> Option<char> {
     (!iter.is_end()).then(|| iter.char())
+}
+
+/// Whether the character at `iter` is in a comment or a string, by the language's highlighting.
+fn quoted(buffer: &gtk::TextBuffer, iter: &gtk::TextIter) -> bool {
+    use sourceview5::prelude::BufferExt as _;
+    let Some(source) = buffer.downcast_ref::<sourceview5::Buffer>() else {
+        return false;
+    };
+    let mut start = *iter;
+    start.set_line_offset(0);
+    // Highlighting runs in idle time, and the line was typed a moment ago.
+    source.ensure_highlight(&start, &line_end(buffer, iter.line()));
+    ["comment", "string"]
+        .iter()
+        .any(|class| source.iter_has_context_class(iter, class))
+}
+
+/// Whether a caret at `at` is inside a comment or a string: the character before it is, and so
+/// is the one after it unless the line ends there.
+fn inside(buffer: &gtk::TextBuffer, at: &gtk::TextIter) -> bool {
+    let mut before = *at;
+    !at.starts_line()
+        && before.backward_char()
+        && quoted(buffer, &before)
+        && (at.ends_line() || quoted(buffer, at))
 }
 
 /// Whether `iter` is inside a code block or the frontmatter, where none of this applies but

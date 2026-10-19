@@ -136,6 +136,7 @@ pub(super) fn bench_keys(app: &Rc<App>) {
             bench_folds(&view).await;
             bench_table(&view);
             bench_indent(&view);
+            bench_code_pairs(&view);
             bench_whole_words(&view);
             bench_popup_keys(&view).await;
             bench_tab_focus().await;
@@ -574,6 +575,64 @@ fn bench_indent(view: &multicaret::View) {
     set(Some("rust"), "\tg(");
     press("tabs", gdk::Key::Return);
     view.set_insert_spaces_instead_of_tabs(true);
+    // Insert Line Below from the start of the line takes the same rule.
+    set(Some("python3"), "def f():  # x");
+    buffer.place_cursor(&buffer.start_iter());
+    editor::newline_below(view.upcast_ref());
+    let at = editor::caret(&buffer);
+    println!(
+        "bench indent_line_below {:?} ({}, {})",
+        text(),
+        at.line(),
+        at.line_offset()
+    );
+    source.set_language(None);
+}
+
+/// A code tab's brackets through [`typing::on_code_key`]: paired before the line's end, stepped
+/// over (after a string too), taken back by Backspace and put around a selection; left alone
+/// before a word, in a comment, in a string and for a quote.
+fn bench_code_pairs(view: &multicaret::View) {
+    use sourceview5::prelude::BufferExt as _;
+    let buffer = view.buffer();
+    let Some(source) = buffer.downcast_ref::<sourceview5::Buffer>() else {
+        return;
+    };
+    let press = |step: &str, key| {
+        let answer = typing::on_code_key(view.upcast_ref(), key, gdk::ModifierType::empty());
+        let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), true);
+        let at = editor::caret(&buffer);
+        println!(
+            "bench pair_{step} {text:?} ({}, {}) {answer:?}",
+            at.line(),
+            at.line_offset()
+        );
+    };
+    let set = |code: &str, caret: i32| {
+        buffer.set_text(code);
+        buffer.place_cursor(&buffer.iter_at_offset(caret));
+    };
+    view.clear_carets();
+    let language = sourceview5::LanguageManager::default().language("rust");
+    source.set_language(language.as_ref());
+    set("f", 1);
+    press("open", gdk::Key::parenleft);
+    press("step_over", gdk::Key::parenright);
+    set("g()", 2);
+    press("backspace", gdk::Key::BackSpace);
+    set("x", 0);
+    press("before_word", gdk::Key::bracketleft);
+    set("// a", 4);
+    press("comment", gdk::Key::parenleft);
+    set("let s = \"a", 10);
+    press("string", gdk::Key::parenleft);
+    set("f(\"a\")", 5);
+    press("step_over_after_string", gdk::Key::parenright);
+    set("a", 0);
+    buffer.select_range(&buffer.start_iter(), &buffer.end_iter());
+    press("wrap", gdk::Key::bracketleft);
+    set("x", 1);
+    press("quote", gdk::Key::quotedbl);
     source.set_language(None);
 }
 

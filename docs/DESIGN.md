@@ -484,7 +484,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A comment after the opener does not hide it and one inside a string is not one, as the language's highlighting tells them apart; a file with no language only copies the line's indent, as every other Return does.
   Each is one undo step.
   Language servers were asked first: of those accent starts, only clangd indents on a typed newline (`textDocument/onTypeFormatting`), and VS Code itself indents by per-language rules with format-on-type off.
-  Python's `else:` and the like are not dedented, and brackets do not close themselves in code.
+- Brackets close themselves in code, as in a note, except in a comment or a string: the closer typed before its partner steps over it, and Backspace between an empty pair takes both.
+  Quotes do not, one character being both the opener and the closer.
 - A LaTeX listing is coloured as the language it names, `\begin{lstlisting}[language=Python]` and `\begin{minted}{python}` alike, by accent's own `latex.lang` (`apps/gtk/data/language-specs/`, GtkSourceView 5.20's with its listing context changed), which the language manager reads ahead of GtkSourceView's: the stock one greys every listing as verbatim, so it reads as a comment.
   A listing in a language its table does not name, or in none, is plain text.
   A default set by `\lstset{language=…}` is not followed, a language spec having no way to carry it from the preamble to the listing.
@@ -1387,7 +1388,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
   Anywhere else — the sidebar, a find bar, a dialog — they are unbound, so the key is the focused widget's (`Ctrl+Down` moves along the Files tree) and nothing edits the note behind it; the palette still runs them on the tab in front.
   They are this section's, Fold and Unfold (Code), Toggle Breakpoint (Debugging) and `Ctrl+Shift+V` (Paste as Plain Text over a text tab); the find family goes by the active pane instead (Tabs).
 - Duplicate Line is VS Code's Copy Line Down: every line the selection touches, the caret and selection moving onto the copy.
-  Insert Line Below copies the current line's indent.
+  Insert Line Below copies the current line's indent, one level deeper after an opener in code (Code editor).
 - Add Caret Above / Below puts a caret a line past the outermost caret that way.
   Pressed the other way it takes back the caret it added last, as JetBrains' Clone Caret does, so a caret too many is one key away; with only the primary left it adds again.
   It goes by the lines of the text, hidden ones included: a caret added on a line a shut block hides opens the block.

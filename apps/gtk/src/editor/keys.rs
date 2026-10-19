@@ -8,7 +8,7 @@
 //! 3. Template Tab stops: Tab and Escape.
 //! 4. Ghost text: Tab, Escape and Ctrl+Right while painted.
 //! 5. Secondary carets: supported edits and motions at every caret.
-//! 6. Markdown typing helpers in a note, indentation in code.
+//! 6. Markdown typing helpers in a note, brackets and indentation in code.
 //! 7. The view's own snippets, indentation and bindings.
 //!
 //! Unclaimed keys continue through the chain, allowing normal typing to narrow completion.
@@ -100,7 +100,10 @@ fn dispatch(tab: &Rc<Tab>, key: gdk::Key, state: gdk::ModifierType) -> glib::Pro
         return typing::on_key(&tab.view, key, state);
     }
     if tab.flavour() == Flavour::Code && !stepping_a_template {
-        return indent::on_key(&tab.view, key, state);
+        return match typing::on_code_key(&tab.view, key, state) {
+            glib::Propagation::Proceed => indent::on_key(&tab.view, key, state),
+            stop => stop,
+        };
     }
     glib::Propagation::Proceed
 }
