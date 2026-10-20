@@ -341,13 +341,54 @@ fn recoloured(
         true => classified(path, || decoded().map(|t| measure(&t))).is_some_and(|v| v.document),
         false => false,
     };
-    let (paper, ink) = look.palette(document, inverted)?;
-    let mut pixels = pixels(&decoded()?)?;
+    paint(&decoded()?, look, look.palette(document, inverted)?)
+}
+
+/// `texture` recoloured onto `page`, its transparent parts filled where [`Look::fills`] says.
+fn paint(texture: &gdk::Texture, look: Look, (paper, ink): Page) -> Option<gdk::MemoryTexture> {
+    let mut pixels = pixels(texture)?;
     if look.fills((paper, ink)) {
         recolour::onto_white(&mut pixels.data);
     }
     recolour::recolour(&mut pixels.data, paper, ink);
     Some(pixels.texture())
+}
+
+/// A picture with no file behind it, a notebook's output: `bytes` decoded, or an SVG's text drawn
+/// at `scale`, recoloured as [`show`] recolours an image file (the image rule), and whether the
+/// look changed it. Nothing is cached, there being no file to keep a verdict for. On a worker.
+pub fn show_bytes(
+    bytes: &[u8],
+    svg: bool,
+    look: Look,
+    scale: i32,
+) -> Result<(Shown, bool), glib::Error> {
+    if svg {
+        let filtered = look
+            .palette(true, false)
+            .and_then(|page| filtered(&String::from_utf8_lossy(bytes), page, look.fills(page)));
+        let drawn = filtered.as_deref().map_or(bytes, str::as_bytes);
+        let (texture, size) = rasterise(drawn, scale, 1.0)?;
+        let shown = Shown {
+            original: None,
+            texture,
+            size: Some(size),
+            animated: false,
+        };
+        return Ok((shown, filtered.is_some()));
+    }
+    let original = gdk::Texture::from_bytes(&glib::Bytes::from(bytes))?;
+    let document = look.asks(false) && measure(&original).document;
+    let recoloured = look
+        .palette(document, false)
+        .and_then(|page| paint(&original, look, page));
+    let shown = Shown {
+        original: Some(original.clone()),
+        texture: recoloured.clone().map_or(original, |t| t.upcast()),
+        size: None,
+        animated: false,
+    };
+    Ok((shown, recoloured.is_some()))
 }
 
 /// The classifier's verdict on `texture`. One too large to look at is not a document, unmeasured.

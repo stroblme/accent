@@ -69,7 +69,8 @@ impl App {
             Kind::Image => self.open_image(&key, &path, how),
             Kind::Pdf => self.open_pdf(&key, &path, how),
             Kind::Diagram => self.open_diagram(&key, &path, how),
-            Kind::Text => self.open_text(&key, &path, flavour_of(&key), how),
+            // Read as text first, whose bytes say whether it reads as a notebook.
+            Kind::Notebook | Kind::Text => self.open_text(&key, &path, flavour_of(&key), how),
         }
     }
 
@@ -245,6 +246,23 @@ impl App {
             }
             return self.open_diagram_text(key, text, how);
         }
+        // So is an `.ipynb`, and a `.py` marimo wrote, unless the reader asked for its text.
+        let as_text = self.as_text.borrow_mut().remove(key);
+        if !as_text && accent_core::path::holds_notebook(key, &text.text) {
+            self.drop_awaiting(key, "a notebook, not a text file");
+            return self.open_notebook_text(key, text, flavour, how);
+        }
+        self.adopt_text_tab(key, text, flavour, how);
+    }
+
+    /// A text tab of `text`, opened and wired into the window.
+    pub(crate) fn adopt_text_tab(
+        self: &Rc<Self>,
+        key: &str,
+        text: accent_core::fs::Text,
+        flavour: Flavour,
+        how: Opened,
+    ) -> Rc<Tab> {
         let prefs = self.prefs();
         let tab = editor::open(
             &self.root(),
@@ -254,8 +272,9 @@ impl App {
             &self.tabs_for(key),
             &prefs,
         );
-        self.adopt(tab, how);
+        self.adopt(tab.clone(), how);
         self.sync_conflict_banner(key, None);
+        tab
     }
 
     /// Insert Template…: a template's text at the caret of the active note, whose stem is what

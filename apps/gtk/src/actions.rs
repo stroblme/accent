@@ -281,6 +281,27 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.diagram-text", "Add Text", &[]),
     ("win.diagram-connector", "Add Connector", &[]),
     ("win.diagram-image", "Add Image…", &[]),
+    // The notebook tab. Undo and Redo are its own keys, as a diagram's canvas's are, and carry no
+    // chord for the same reason; the cell commands act on the selected cell, and its buttons and
+    // its More menu are the pointer's way to them.
+    ("win.notebook-undo", "Undo Notebook Edit", &[]),
+    ("win.notebook-redo", "Redo Notebook Edit", &[]),
+    ("win.notebook-insert-above", "Insert Cell Above", &[]),
+    ("win.notebook-insert-below", "Insert Cell Below", &[]),
+    (
+        "win.notebook-insert-markdown",
+        "Insert Markdown Cell Below",
+        &[],
+    ),
+    ("win.notebook-delete-cell", "Delete Cell", &[]),
+    ("win.notebook-move-up", "Move Cell Up", &[]),
+    ("win.notebook-move-down", "Move Cell Down", &[]),
+    ("win.notebook-to-code", "Change Cell to Code", &[]),
+    ("win.notebook-to-markdown", "Change Cell to Markdown", &[]),
+    ("win.notebook-to-raw", "Change Cell to Raw", &[]),
+    ("win.notebook-split", "Split Cell", &[]),
+    ("win.notebook-join", "Join with Next Cell", &[]),
+    ("win.notebook-open-text", "Open as Text", &[]),
     ("win.view-mode", "Toggle Preview", &["<Control>m"]),
     ("win.minimap", "Toggle Minimap", &[]),
     // No chord: `Ctrl+H`, the file managers' own, is Replace here.
@@ -362,6 +383,10 @@ impl App {
     fn run_action(self: &Rc<Self>, name: &str) {
         if name.starts_with("diagram-") {
             self.diagram_action(name);
+            return;
+        }
+        if name.starts_with("notebook-") {
+            self.notebook_action(name);
             return;
         }
         match name {
@@ -833,7 +858,9 @@ impl App {
                 term.set_zoom(stepped(term.zoom()));
                 self.refresh_zoom();
             }
-            Some(Doc::Text(_)) | Some(Doc::Diff(_)) => self.set_zoom(stepped(self.zoom.get())),
+            Some(Doc::Text(_)) | Some(Doc::Diff(_)) | Some(Doc::Notebook(_)) => {
+                self.set_zoom(stepped(self.zoom.get()))
+            }
             Some(Doc::Image(image)) => self.zoom_image(
                 &image,
                 match name {
@@ -1347,6 +1374,7 @@ pub fn fill_tab_menu(
     );
     menu.append_section(None, &reveal);
     let diagram = prints == Some(Kind::Diagram);
+    let notebook = prints == Some(Kind::Notebook);
     let prints = print_actions(prints);
     if !prints.is_empty() {
         let section = gio::Menu::new();
@@ -1358,6 +1386,12 @@ pub fn fill_tab_menu(
     if diagram {
         let view = gio::Menu::new();
         view.append(Some(label_of("win.diagram-grid")), Some("win.diagram-grid"));
+        menu.append_section(None, &view);
+    }
+    if notebook {
+        let view = gio::Menu::new();
+        let action = "win.notebook-open-text";
+        view.append(Some(label_of(action)), Some(action));
         menu.append_section(None, &view);
     }
     if file {
@@ -1523,6 +1557,7 @@ mod tests {
             "win.export-png",
             "win.export-svg",
             "win.diagram-grid",
+            "win.notebook-open-text",
         ] {
             assert!(
                 ACTIONS.iter().any(|(name, _, _)| *name == action),
@@ -1913,6 +1948,8 @@ mod tests {
             "win.diagram-edit-label",
             "win.diagram-next-page",
             "win.diagram-previous-page",
+            "win.notebook-undo",
+            "win.notebook-redo",
         ] {
             let row = ACTIONS.iter().find(|(name, _, _)| *name == action);
             let (_, _, accels) = row.unwrap_or_else(|| panic!("{action} is not in ACTIONS"));

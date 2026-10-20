@@ -315,6 +315,7 @@ fn watch(doc: &Doc) -> Watch {
         Doc::Diff(diff) => rc("tab", diff),
         Doc::Terminal(term) => rc("tab", term),
         Doc::Diagram(diagram) => rc("tab", diagram),
+        Doc::Notebook(notebook) => rc("tab", notebook),
     });
     // A diagram's formulas are typeset by a WebKit view of its own.
     if let Some(web) = find_widget(&page.child(), &|w| w.is::<webkit6::WebView>()) {

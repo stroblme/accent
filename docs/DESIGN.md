@@ -605,8 +605,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A print or an export being made takes the same place, from the command to its toast ("Printing Note.md…", "Exporting Note.pdf…"); then "Indexing suggestions… 1200 files, sorting" (the ghost-text index, in `merl-rt`'s own words on how far it has got, shown as it sends them), a convenience that waits its turn: on a cold vault, whose own walk outlasts it, it shows only if merl is still at it once the walk is done.
   No language server's progress is shown but Lean's check of the tab in front ("Checking… line 12", the first line it has still to check, the gutter's bar marking the rest (Language servers), from `$/lean/fileProgress`, a new state at most every 100 ms: Lean says where it is a dozen times a line, and over an ssh link each is a message), which is what its goals wait on, and before it a server the tab in front has waited on for a second to open its document, named by the program the vault's config or the built-in table gives ("Starting lake…"), until it answers or fails (user decision 2026-10-10): a cold `lake serve` can take a minute, and a fast handshake does not flash the line.
   Both come after the vault's work and the copies, before the suggestion index. rust-analyzer reports every `cargo check`, and that line would never settle.
-- The facts: what the file is (`Markdown`, `PDF`, `Image`, or `<language> · UTF-8 · LF` for code), whether it has unsaved edits, one count of its own, and its zoom; last, at the corner, while a text tab has a selection (a comparison's editor side included), how many characters it holds ("42 characters"): Unicode characters, the unit GTK's offsets count, whitespace and line breaks included, every caret's selection summed, so it reads no text and costs the same at any size.
-- The count is what the tab counts: a note's words (300 ms after the last keystroke), a code tab's errors and warnings, a PDF's `Page 4 of 12` (the page under the middle of the viewport).
+- The facts: what the file is (`Markdown`, `PDF`, `Image`, `Notebook · <language>`, or `<language> · UTF-8 · LF` for code), whether it has unsaved edits, one count of its own, and its zoom; last, at the corner, while a text tab has a selection (a comparison's editor side included), how many characters it holds ("42 characters"): Unicode characters, the unit GTK's offsets count, whitespace and line breaks included, every caret's selection summed, so it reads no text and costs the same at any size.
+- The count is what the tab counts: a note's words (300 ms after the last keystroke), a code tab's errors and warnings, a PDF's `Page 4 of 12` (the page under the middle of the viewport), a notebook's cells.
   A PDF's count is a button opening Add Page Before, Add Page After and Delete Page for that page, as the page's own menu offers them.
 - The unsaved mark is the `•` a dirty tab wears: one symbol, one meaning.
   A saved file shows nothing.
@@ -1009,6 +1009,19 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   It offers Cut, Copy, Paste, Duplicate and Delete; Group for more than one cell and Ungroup for a group; Bring to Front and Send to Back; and Edit Label for one cell — with nothing selected, Paste alone.
 - Every change is one undo step, saved a second after the last through the etag-gated save.
   A change on disk under unsaved edits raises a banner whose Resolve… asks Reload or Overwrite: there is no comparison of two diagrams to offer.
+
+### Notebook
+
+- A Jupyter (`.ipynb`) or marimo notebook in a tab of cells, VS Code's notebook editor without its kernel (user decision 2026-10-19): a code cell is a code tab's view in the notebook's language, with its execution count beside it and its stored outputs under it; a markdown cell is a note's styled text, always editable, its attachments under it.
+  The cells are one column in one scroller, laid out whole.
+- An output shows in the first form a widget draws: a PNG, JPEG or SVG picture at its own size up to a column's width, recoloured as an image is (Image); a plain HTML table, a pandas or polars frame's, as a grid; markdown as a note's text; LaTeX typeset as a diagram's formula is, its source until then and without WebKit; JSON and text in monospace, ANSI colours from the terminal's palette and a progress bar's carriage returns played out, stderr and a traceback tinted.
+  What only a script draws — an interactive plot, a widget — says what it was.
+- A click or the keyboard in a cell selects it, outlined in the accent; its buttons float over its top right corner, Move Cell Up, Move Cell Down, Delete Cell and a More menu with the rest, and the strip under each cell, and over the first, adds a code or a markdown cell there.
+  Down past a cell's last line goes on into the next cell, and Up past its first back.
+- One history per notebook holds both what is typed in its cells and what is done to the cells — added, deleted, moved, converted, split, joined — so Undo walks back through both in the order they happened, typing a word at a time (user decision 2026-10-19).
+- Changing a marimo cell between markdown and code wraps its text in `mo.md(r"""…""")` or takes it out, as marimo does (user decision 2026-10-20); an `.ipynb` cell keeps its text.
+- A notebook saves as a diagram does: a second after the last change, through the etag-gated save, a change on disk under unsaved edits asking Reload or Overwrite.
+- A file that does not read as a notebook opens as text, its banner saying why; Open as Text on a notebook's tab menu shows its file as text.
 
 ### Comparison
 
@@ -1477,6 +1490,11 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
   The page commands act on the page shown, Add putting a page after the last: the thumbnail strip is where pages are organised by pointer.
   Invert Diagram Colours is unbound and in the palette alone.
 
+### Notebook
+
+- Undo Notebook Edit `Ctrl+Z` and Redo `Ctrl+Shift+Z` / `Ctrl+Y` are the notebook's own keys, as a diagram's canvas's are, the header's two buttons too.
+- Insert Cell Above, Insert Cell Below, Insert Markdown Cell Below, Delete Cell, Move Cell Up, Move Cell Down, Change Cell to Code, to Markdown and to Raw (an `.ipynb`'s), Split Cell (at the caret) and Join with Next Cell act on the selected cell: unbound, in the palette and on the cell's buttons and More menu.
+
 ### History
 
 - Back / Forward `Alt+Left` / `Alt+Right`, and the mouse's side buttons (8 and 9) through the same actions.
@@ -1626,7 +1644,8 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 - Toggle Preview `Ctrl+M` (Editor and Split), Toggle Minimap (unbound), Presentation `F5`, which is Continue while a debug session runs (Debugging).
 - Presentation hides the sidebar, the other panes, the tab bars and both header bars, and shows the note rendered.
   The presented pane stays where it is in the pane tree with the branches beside it hidden, so its find bar and its `Ctrl+Tab` card stay its own and every divider is where it was afterwards; the rendered note is the preview laid over the pane's tabs.
-  A tab that draws its own document — a source file, a PDF, a diagram, an image, a diff, a terminal — is presented as it is; a PDF fits a whole page meanwhile and gets its zoom back afterwards.
+  A tab that draws its own document — a source file, a PDF, a diagram, a notebook, an image, a diff, a terminal — is presented as it is; a PDF fits a whole page meanwhile and gets its zoom back afterwards.
+  A presented notebook is read only, its cell buttons and the strips that add cells put away.
   A diagram is a slide deck: each page is fitted as it is shown, Space, Page Down, Right and a wheel notch down go to the next and Shift+Space, Page Up, Left and a notch up to the one before, and leaving gives back its zoom, and its scroll if the page is the one it began on.
   The drawing ring goes away meanwhile, a PDF's and a diagram's alike, and the tool in hand is put down (a PDF back to reading, a diagram to select), a diagram's label being edited finished and its selection let go, so a click never draws on what is presented; leaving brings the ring back as it was, with no tool in hand.
   A presented diagram is read only: a click selects nothing, a drag moves the page rather than what is on it, its menu stays shut and its keys do nothing but page, so only paging, zoom and panning are left.
@@ -1647,7 +1666,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 
 ### Tab menu
 
-- Copy Name, Copy Relative Path, Copy Absolute Path, Show in Files, Reveal in Sidebar, Move to New Window, Pin Tab and Unpin Tab, all unbound: the tab menu's items, acting on the tab it was opened on, or from the palette on the active tab.
+- Copy Name, Copy Relative Path, Copy Absolute Path, Show in Files, Reveal in Sidebar, Move to New Window, Pin Tab and Unpin Tab, and a notebook's Open as Text, all unbound: the tab menu's items, acting on the tab it was opened on, or from the palette on the active tab.
 
 ### Tabs and panes
 

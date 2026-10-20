@@ -4,7 +4,7 @@ use super::*;
 
 /// Build a buffer/view over `text` for `flavour`, sharing rendering
 /// with read-only diff companions so both columns match.
-pub(super) fn build(
+pub(crate) fn build(
     flavour: Flavour,
     language: Option<sourceview5::Language>,
     text: &str,
@@ -170,6 +170,7 @@ pub fn open(
         banner: banner.clone(),
         save: SaveState::at(text.etag, text.digest()),
         alerts: RefCell::new(Vec::new()),
+        unread: RefCell::default(),
         find: RefCell::default(),
         find_tag,
         on_found: Default::default(),

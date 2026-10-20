@@ -28,6 +28,8 @@ pub fn printable(doc: &Doc) -> Option<Kind> {
         Doc::Text(tab) if cfg!(feature = "webkit") && tab.flavour().is_note() => Some(Kind::Note),
         Doc::Pdf(_) => Some(Kind::Pdf),
         Doc::Diagram(_) => Some(Kind::Diagram),
+        // Not printed yet; its kind is what puts Open as Text on its tab menu.
+        Doc::Notebook(_) => Some(Kind::Notebook),
         _ => None,
     }
 }

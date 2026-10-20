@@ -9,12 +9,13 @@ use accent_api::Config;
 use adw::prelude::*;
 
 /// DESIGN.md Keyboard's headings that hold commands, in its order.
-const SECTIONS: [&str; 17] = [
+const SECTIONS: [&str; 18] = [
     "Files",
     "Palette and find",
     "Editing",
     "PDF",
     "Diagram",
+    "Notebook",
     "History",
     "Zoom",
     "Terminal",
@@ -29,11 +30,11 @@ const SECTIONS: [&str; 17] = [
     "Tabs and panes",
 ];
 
-/// The keys a PDF tab or a diagram's canvas answers itself (`PdfTab::wire_keys`,
-/// `DiagramTab::wire_keys`) with these commands, which carry none in the table: a bare `space` or
-/// `Delete` there would be taken from every entry (DESIGN.md, PDF and Diagram). A presented
-/// diagram's paging keys are left out, being its only keys then.
-const TAB_KEYS: [(&str, &[&str]); 16] = [
+/// The keys a PDF tab, a diagram's canvas or a notebook answers itself (`PdfTab::wire_keys`,
+/// `DiagramTab::wire_keys`, `NotebookTab::wire_keys`) with these commands, which carry none in the
+/// table: a bare `space` or `Delete` there would be taken from every entry (DESIGN.md, PDF and
+/// Diagram). A presented diagram's paging keys are left out, being its only keys then.
+const TAB_KEYS: [(&str, &[&str]); 18] = [
     ("win.pdf-next-page", &["space", "n", "Right"]),
     ("win.pdf-previous-page", &["<Shift>space", "p", "Left"]),
     ("win.pdf-copy", &["<Control>c"]),
@@ -53,6 +54,8 @@ const TAB_KEYS: [(&str, &[&str]); 16] = [
     ("win.diagram-edit-label", &["Return"]),
     ("win.diagram-next-page", &["Page_Down"]),
     ("win.diagram-previous-page", &["Page_Up"]),
+    ("win.notebook-undo", &["<Control>z"]),
+    ("win.notebook-redo", &["<Control><Shift>z", "<Control>y"]),
 ];
 
 /// Commands a diagram in front runs on another command's chord (`App::run_action`), so they
@@ -81,6 +84,7 @@ fn section(action: &str) -> Option<&'static str> {
         _ if starts(&["pdf-"]) => "PDF",
         "new-drawing" => "Diagram",
         _ if starts(&["diagram-"]) => "Diagram",
+        _ if starts(&["notebook-"]) => "Notebook",
         "back" | "forward" => "History",
         _ if starts(&["zoom-"]) => "Zoom",
         "save-session" | "close-session" => "Terminal",

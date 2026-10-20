@@ -100,6 +100,7 @@ impl App {
                 });
             }
             Doc::Diagram(d) => self.diagram_changed(d),
+            Doc::Notebook(n) => self.notebook_changed(n),
             // Neither a diff nor a shell is keyed by a path, so a file changing under one
             // reaches none of these.
             Doc::Status(_) | Doc::Diff(_) | Doc::Terminal(_) => {}

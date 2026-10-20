@@ -237,6 +237,9 @@ impl App {
             if let Some(diagram) = self.active_diagram() {
                 diagram.set_presenting(true, self.ring_at.get());
             }
+            if let Some(notebook) = self.active_notebook() {
+                notebook.set_presenting(true);
+            }
         }
     }
 
@@ -311,6 +314,9 @@ impl App {
                 }
                 for diagram in self.diagrams() {
                     diagram.set_presenting(false, self.ring_at.get());
+                }
+                for notebook in self.notebooks() {
+                    notebook.set_presenting(false);
                 }
                 // A PDF's ring comes back as it was too, but not the tool `sync_drawing` would
                 // pick up again: that stays down until it is picked up from the ring.

@@ -11,7 +11,7 @@ mod geometry;
 mod input;
 mod label;
 mod layers;
-mod math;
+pub(crate) mod math;
 mod paint;
 mod props;
 mod render;

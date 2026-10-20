@@ -420,7 +420,10 @@ impl App {
 
     /// Save the active note/diagram, or save a shell-only window's session, prompting for its first name.
     pub(crate) fn save(self: &Rc<Self>) {
-        if self.active().is_some() || self.active_diagram().is_some() {
+        if self.active().is_some()
+            || self.active_diagram().is_some()
+            || self.active_notebook().is_some()
+        {
             return self.save_active();
         }
         self.save_shells();
