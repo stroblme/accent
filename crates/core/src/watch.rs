@@ -3,6 +3,7 @@
 //!
 //! Watch each indexed directory non-recursively. This keeps skipped dependency trees out of
 //! inotify and prevents directory-open events from overflowing the queue and causing scan loops.
+//! macOS has one FSEvents stream over the root that reports the same ([`fsevents`]).
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -12,10 +13,19 @@ use std::time::Duration;
 use notify::RecursiveMode;
 use notify::event::{EventKind, ModifyKind, RenameMode};
 use notify_debouncer_full::{
-    DebounceEventResult, Debouncer, FileIdCache, RecommendedCache, new_debouncer, new_debouncer_opt,
+    DebounceEventResult, Debouncer, FileIdCache, RecommendedCache, new_debouncer_opt,
 };
 
 use crate::fs::{is_sync_conflict, is_syncthing_temp};
+
+#[cfg(target_os = "macos")]
+mod fsevents;
+
+/// The kernel's own watcher: inotify on Linux, and on macOS FSEvents behind [`fsevents::Native`].
+#[cfg(not(target_os = "macos"))]
+type Native = notify::RecommendedWatcher;
+#[cfg(target_os = "macos")]
+type Native = fsevents::Native;
 
 /// What the vault did, with absolute paths.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -82,7 +92,7 @@ impl Polled {
 
 /// Stopping happens in `Debouncer::drop`.
 enum Backend {
-    Native(Debouncer<notify::RecommendedWatcher, RecommendedCache>),
+    Native(Debouncer<Native, RecommendedCache>),
     Poll(Debouncer<notify::PollWatcher, RecommendedCache>),
 }
 
@@ -135,7 +145,14 @@ impl Watcher {
         let polled = match over_budget(dirs.len() + 1) {
             true => Polled::OverBudget,
             false => {
-                let mut d = new_debouncer(debounce, tick, handler()).map_err(refused)?;
+                let mut d = new_debouncer_opt::<_, Native, RecommendedCache>(
+                    debounce,
+                    tick,
+                    handler(),
+                    RecommendedCache::new(),
+                    notify::Config::default(),
+                )
+                .map_err(refused)?;
                 if !watch_all(&mut d, root, dirs).map_err(refused)? {
                     return Ok(Watcher {
                         backend: Backend::Native(d),
