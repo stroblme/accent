@@ -32,6 +32,8 @@ chrono.workspace = true
 blake3.workspace = true
 # Already built for `ignore`: a language server's `willRename` filters are globs.
 globset = "0.4"
+# Already in core; `renameat2` lands a download where the vault's filesystem has no links.
+libc = "0.2"
 
 # The Android bindings. `crates/api` is the façade Android calls, so the annotations live here;
 # the cdylib that carries them is `android/ffi`, which a desktop build never touches.

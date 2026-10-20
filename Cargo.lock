@@ -49,6 +49,7 @@ dependencies = [
  "blake3",
  "chrono",
  "globset",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",
