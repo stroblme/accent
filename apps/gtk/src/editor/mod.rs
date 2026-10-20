@@ -50,7 +50,7 @@ use lines::primary_paste;
 pub(crate) use lines::{caret_to_click, line_clipboard, pressed_at};
 #[cfg(feature = "bench")]
 pub(crate) use lines::{delete_line, duplicate_line, newline_below, paste_primary, toggle_comment};
-use open::build;
+pub(crate) use open::build;
 pub use open::open;
 pub use page::default_font;
 pub(crate) use page::{COLUMN_FLOOR, font_css, install_font, next_view_name, refont, set_margins};
@@ -287,6 +287,8 @@ pub struct Tab {
     pub save: SaveState,
     /// Pending file questions; show one via `banner::banner_alert` while others wait.
     alerts: RefCell<Vec<Alert>>,
+    /// Why the notebook this tab holds did not read as one ([`Alert::Unread`]).
+    unread: RefCell<Option<String>>,
     /// The find bar's query over this tab, and where it matches ([`search::Find`]).
     find: RefCell<search::Find>,
     /// What the find bar's matches are painted with, raised to the top of the table as it paints.

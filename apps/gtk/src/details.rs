@@ -26,6 +26,7 @@ impl App {
         let etag = match &doc {
             Doc::Text(tab) => tab.save.etag.get(),
             Doc::Diagram(d) => d.save.etag.get(),
+            Doc::Notebook(n) => n.save.etag.get(),
             _ => self
                 .details_stat
                 .borrow()
@@ -205,6 +206,7 @@ fn kind_group(doc: &Doc) -> Option<Group> {
             ("Image", facts)
         }
         Doc::Diagram(d) => ("Diagram", vec![fact("Pages", d.page_count())]),
+        Doc::Notebook(n) => ("Notebook", vec![fact("Cells", n.cell_count())]),
         _ => return None,
     };
     Some(Group { title, facts })

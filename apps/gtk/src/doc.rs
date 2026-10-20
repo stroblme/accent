@@ -75,6 +75,8 @@ pub enum Doc {
     Terminal(Rc<Term>),
     /// A draw.io diagram.
     Diagram(Rc<crate::diagram::DiagramTab>),
+    /// A Jupyter or marimo notebook.
+    Notebook(Rc<crate::notebook::NotebookTab>),
 }
 
 impl Doc {
@@ -87,6 +89,7 @@ impl Doc {
             Doc::Diff(d) => d.key(),
             Doc::Terminal(t) => t.key(),
             Doc::Diagram(d) => d.key(),
+            Doc::Notebook(n) => n.key(),
         }
     }
 
@@ -111,6 +114,7 @@ impl Doc {
             Doc::Diff(d) => &d.page,
             Doc::Terminal(t) => &t.page,
             Doc::Diagram(d) => &d.page,
+            Doc::Notebook(n) => &n.page,
         }
     }
 
@@ -149,6 +153,13 @@ impl Doc {
         }
     }
 
+    pub fn notebook(&self) -> Option<&Rc<crate::notebook::NotebookTab>> {
+        match self {
+            Doc::Notebook(n) => Some(n),
+            _ => None,
+        }
+    }
+
     /// A file from outside the vault, opened by its absolute path. There is no index behind it,
     /// so it has no backlinks, never appears in search, and reloads from a file monitor of its
     /// own rather than from the vault's watcher.
@@ -162,6 +173,7 @@ impl Doc {
             Doc::Text(tab) => tab.retarget(root, key),
             Doc::Pdf(pdf) => pdf.retarget(root, key),
             Doc::Diagram(d) => d.retarget(root, key),
+            Doc::Notebook(n) => n.retarget(root, key),
             // Neither a diff nor a shell is a file, so a rename has nothing to point them at.
             Doc::Diff(_) | Doc::Terminal(_) => {}
             Doc::Image(v) | Doc::Status(v) => {
@@ -189,6 +201,8 @@ pub enum Kind {
     Image,
     Pdf,
     Diagram,
+    /// An `.ipynb`; a marimo notebook is a `.py`, known as one by its bytes.
+    Notebook,
     Text,
 }
 
@@ -198,6 +212,7 @@ pub fn kind_of(key: &str) -> Kind {
         FileType::Pdf => Kind::Pdf,
         FileType::Image => Kind::Image,
         FileType::Diagram => Kind::Diagram,
+        _ if accent_core::path::is_notebook(key) => Kind::Notebook,
         // A table, a source file, LICENSE and anything unknown open as text, if the bytes agree.
         _ => Kind::Text,
     }
@@ -239,6 +254,7 @@ mod tests {
         assert_eq!(kind_of("Attachments/paper.pdf"), Kind::Pdf);
         assert_eq!(kind_of("Figures/flow.drawio"), Kind::Diagram);
         assert_eq!(kind_of("logo.svg"), Kind::Image);
+        assert_eq!(kind_of("Notebooks/a.IPYNB"), Kind::Notebook);
         assert_eq!(kind_of("shot.JPG"), Kind::Image);
         assert_eq!(kind_of("src/main.rs"), Kind::Text);
         assert_eq!(kind_of("LICENSE"), Kind::Text);

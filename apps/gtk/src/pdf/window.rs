@@ -662,12 +662,14 @@ impl App {
         let (undo, redo) = match self.active_doc() {
             Some(Doc::Pdf(pdf)) => pdf.history(),
             Some(Doc::Diagram(d)) => d.history(),
+            Some(Doc::Notebook(n)) => n.history(),
             _ => (false, false),
         };
         // The same two buttons, named for what they walk.
-        let names = match self.active_diagram() {
-            Some(_) => ["win.diagram-undo", "win.diagram-redo"],
-            None => ["win.pdf-undo", "win.pdf-redo"],
+        let names = match self.active_doc() {
+            Some(Doc::Diagram(_)) => ["win.diagram-undo", "win.diagram-redo"],
+            Some(Doc::Notebook(_)) => ["win.notebook-undo", "win.notebook-redo"],
+            _ => ["win.pdf-undo", "win.pdf-redo"],
         };
         for (button, action) in [(&self.undo_button, names[0]), (&self.redo_button, names[1])] {
             button.set_tooltip_text(Some(crate::actions::label_of(action)));

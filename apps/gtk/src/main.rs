@@ -46,6 +46,7 @@ mod marks;
 mod minimap;
 mod multicaret;
 mod nav;
+mod notebook;
 mod open;
 mod organize;
 mod palette;
@@ -289,6 +290,8 @@ struct App {
     revealing: RefCell<HashMap<String, open::Reveal>>,
     /// Double-click pin requests held until a slow open lands ([`App::mark_opened`]); discard on failure.
     keep_on_landing: RefCell<HashSet<String>>,
+    /// Notebooks the reader asked to open as text (Open as Text), until their text tab lands.
+    as_text: RefCell<HashSet<String>>,
     /// The pane a restored tab goes into, by key, until it has one: see [`App::tabs_for`].
     placing: RefCell<HashMap<String, std::rc::Weak<Pane>>>,
     /// The tabs the files of the last launch naming several have landed in so far, each with its
@@ -948,6 +951,7 @@ impl App {
                 (Some("PDF".to_string()), facts)
             }
             Some(Doc::Diagram(d)) => (Some("Diagram".to_string()), d.facts()),
+            Some(Doc::Notebook(n)) => (Some(n.kind_label()), Some(n.facts())),
             Some(Doc::Image(_)) => (Some("Image".to_string()), None),
             Some(Doc::Terminal(_)) => (Some("Terminal".to_string()), None),
             Some(Doc::Status(_)) | Some(Doc::Diff(_)) | None => (None, None),
@@ -978,6 +982,7 @@ impl App {
         self.statusbar.set_unsaved(match &doc {
             Some(Doc::Text(t)) => t.save.modified.get(),
             Some(Doc::Diagram(d)) => d.save.modified.get(),
+            Some(Doc::Notebook(n)) => n.save.modified.get(),
             _ => false,
         });
         self.sync_selection();
@@ -1053,6 +1058,10 @@ impl App {
         // A diagram is painted through the theme's colours, so this is a repaint.
         for diagram in self.diagrams() {
             diagram.restyle();
+        }
+        // A notebook's editors take the new scheme, and its pictures are recoloured again.
+        for notebook in self.notebooks() {
+            notebook.restyle();
         }
         // An image is recoloured again from the texture it was read to.
         for image in self.images() {
@@ -1569,6 +1578,9 @@ impl App {
         if changed.font {
             for diff in self.diffs() {
                 diff.set_font(config.editor_font.as_deref(), self.zoom.get());
+            }
+            for notebook in self.notebooks() {
+                notebook.set_font(config.editor_font.as_deref(), self.zoom.get());
             }
             // The goals are set in the editor's font when they land.
             self.refresh_goals();

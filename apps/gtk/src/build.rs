@@ -294,6 +294,7 @@ pub fn build_window(
         awaiting: RefCell::new(HashMap::new()),
         revealing: RefCell::new(HashMap::new()),
         keep_on_landing: RefCell::new(HashSet::new()),
+        as_text: RefCell::new(HashSet::new()),
         placing: RefCell::new(HashMap::new()),
         launched: RefCell::new(Vec::new()),
         restore: RefCell::new(std::rc::Weak::new()),

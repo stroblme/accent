@@ -551,6 +551,7 @@ impl App {
             Doc::Terminal(term) => term.view.clone().upcast(),
             Doc::Pdf(pdf) => pdf.key_target(),
             Doc::Diagram(d) => d.key_target(),
+            Doc::Notebook(n) => n.key_target(),
             Doc::Diff(d) => d.key_target(),
             doc @ (Doc::Image(_) | Doc::Status(_)) => doc.page().child(),
         })

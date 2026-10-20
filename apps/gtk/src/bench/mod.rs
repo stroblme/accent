@@ -27,6 +27,7 @@ mod keys;
 mod loose;
 mod memory;
 mod minimap;
+mod notebook;
 mod outline;
 mod panes;
 mod pdf;
@@ -79,6 +80,7 @@ use keys::{
     bench_shell_keys, bench_term,
 };
 use minimap::bench_minimap;
+use notebook::bench_notebook;
 use outline::bench_outline;
 use panes::{
     bench_apart, bench_back, bench_collapse, bench_cycle, bench_layout, bench_layout_pick,
@@ -277,6 +279,9 @@ use tags::bench_tags;
 ///   absent; `shot:<rel>:<dir>`: render pages; `export:<rel>:<dir>`: dark-theme
 ///   PDF/PNG/SVG export and print output. `ACCENT_BENCH_DIAGRAM_SHOT=<png>` adds a picture
 ///   of the window (`diagram::bench_diagram`).
+/// - `ACCENT_BENCH_NOTEBOOK=<ipynb>,<marimo .py>,<long ipynb>`: outputs, cell edits with undo
+///   and save, marimo kept as written, a long notebook's open time and memory, presentation
+///   (`notebook::bench_notebook`). Saves: a scratch vault under `/tmp`.
 /// - `ACCENT_BENCH_COLLAPSE=1`: responsive sidebar width and saved state.
 /// - `ACCENT_BENCH_LAYOUT=<a>,<b>,<c>,<d>[,shell]`: save split layout and
 ///   active tab; `1`: inspect restored layout without saving; `pick:<rel>`,
@@ -321,6 +326,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let layout = std::env::var("ACCENT_BENCH_LAYOUT").ok();
     let collapse = std::env::var("ACCENT_BENCH_COLLAPSE").is_ok();
     let diagram = std::env::var("ACCENT_BENCH_DIAGRAM").ok();
+    let notebook = std::env::var("ACCENT_BENCH_NOTEBOOK").ok();
     let clip = std::env::var("ACCENT_BENCH_CLIP").ok();
     let transfer = std::env::var("ACCENT_BENCH_TRANSFER").ok();
     let carry = std::env::var("ACCENT_BENCH_CARRY").ok();
@@ -366,6 +372,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && drop.is_none()
         && watch.is_none()
         && diagram.is_none()
+        && notebook.is_none()
         && switcher.is_none()
         && style.is_none()
         && panes.is_none()
@@ -628,6 +635,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(arg) = diagram {
             return bench_diagram(&app, &arg);
+        }
+        if let Some(arg) = notebook {
+            return bench_notebook(&app, &arg);
         }
         if let Some(dir) = scroll {
             own_repository_only(&app, "ACCENT_BENCH_SCROLL");

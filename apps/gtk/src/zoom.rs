@@ -77,6 +77,9 @@ impl App {
         for diff in self.diffs() {
             diff.set_font(font.as_deref(), zoom);
         }
+        for notebook in self.notebooks() {
+            notebook.set_font(font.as_deref(), zoom);
+        }
         if let Some(preview) = self.preview.borrow().as_ref() {
             preview.set_zoom(zoom);
         }
@@ -95,7 +98,7 @@ impl App {
             Some(Doc::Pdf(pdf)) => pdf.zoom_label(),
             Some(Doc::Diagram(d)) => Some(d.zoom_label()),
             Some(Doc::Terminal(term)) => term.zoom_label(),
-            Some(Doc::Text(_)) | Some(Doc::Diff(_)) => {
+            Some(Doc::Text(_)) | Some(Doc::Diff(_)) | Some(Doc::Notebook(_)) => {
                 let zoom = self.zoom.get();
                 (zoom != 1.0).then(|| format!("{} %", (zoom * 100.0).round() as i32))
             }

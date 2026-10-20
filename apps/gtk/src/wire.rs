@@ -103,6 +103,24 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
                 });
                 return glib::Propagation::Stop;
             }
+            // A notebook too, through its own save.
+            let dirty = app
+                .notebooks()
+                .into_iter()
+                .find(|n| &n.page == page && n.save.modified.get());
+            if let Some(notebook) = dirty
+                && let Err(e) = app.flush_notebook(&notebook)
+            {
+                let (tabs, page) = (tabs.clone(), page.clone());
+                app.ask_unsaved_notebook(&notebook, &e, move |app, close| {
+                    if close {
+                        app.select_survivor(&page);
+                        app.forget_page(&page);
+                    }
+                    tabs.close_page_finish(&page, close);
+                });
+                return glib::Propagation::Stop;
+            }
             app.select_survivor(page);
             app.forget_page(page);
             // The pane goes with its last tab.
@@ -730,6 +748,16 @@ pub fn wire_window(app: &Rc<App>) {
                     continue;
                 };
                 app.ask_unsaved_diagram(diagram, &e, |app, close| match close {
+                    true => app.window.close(),
+                    false => app.keep_open(),
+                });
+                return glib::Propagation::Stop;
+            }
+            for notebook in app.notebooks().iter().filter(|n| n.save.modified.get()) {
+                let Err(e) = app.flush_notebook(notebook) else {
+                    continue;
+                };
+                app.ask_unsaved_notebook(notebook, &e, |app, close| match close {
                     true => app.window.close(),
                     false => app.keep_open(),
                 });

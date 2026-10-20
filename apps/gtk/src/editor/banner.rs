@@ -21,6 +21,8 @@ pub enum Alert {
     /// A file a package manager or a toolchain installed, outside the vault, read-only with no
     /// action button: it is theirs, not the vault's to edit.
     Installed,
+    /// A notebook that does not read as one, open as text; the title says why ([`Tab::unread`]).
+    Unread,
 }
 
 impl Alert {
@@ -31,6 +33,7 @@ impl Alert {
             Alert::Conflict => "A sync conflict copy of this file exists",
             Alert::ReadOnly => "This file is not valid UTF-8 and is shown read-only",
             Alert::Installed => "This file belongs to an installed package and is shown read-only",
+            Alert::Unread => "This notebook opens as text",
         }
     }
 
@@ -44,7 +47,7 @@ impl Alert {
             Alert::Compare => Some("Compare"),
             Alert::Restore => Some("Save"),
             Alert::Conflict => Some("Resolve"),
-            Alert::ReadOnly | Alert::Installed => None,
+            Alert::ReadOnly | Alert::Installed | Alert::Unread => None,
         }
     }
 }
@@ -61,6 +64,7 @@ fn banner_alert(standing: &[Alert]) -> Option<Alert> {
         Alert::Conflict,
         Alert::ReadOnly,
         Alert::Installed,
+        Alert::Unread,
     ]
     .into_iter()
     .find(|a| standing.contains(a))
@@ -83,6 +87,12 @@ impl Tab {
         self.render_banner();
     }
 
+    /// The notebook in this tab did not read as one, for the reason `why`.
+    pub fn show_unread(&self, why: &str) {
+        *self.unread.borrow_mut() = Some(why.to_string());
+        self.show_alert(Alert::Unread);
+    }
+
     /// What the visible banner is asking for, for the handler of its button.
     pub fn alert(&self) -> Option<Alert> {
         banner_alert(&self.alerts.borrow())
@@ -97,7 +107,12 @@ impl Tab {
         match self.alert() {
             Some(alert) => {
                 let shown = self.comparing.borrow().as_ref().and_then(|c| c.answers);
-                self.banner.set_title(alert.title());
+                match (alert, self.unread.borrow().as_deref()) {
+                    (Alert::Unread, Some(why)) => {
+                        self.banner.set_title(&format!("{}: {why}", alert.title()))
+                    }
+                    _ => self.banner.set_title(alert.title()),
+                }
                 self.banner.set_button_label(alert.button(shown));
                 self.banner.set_revealed(true);
             }

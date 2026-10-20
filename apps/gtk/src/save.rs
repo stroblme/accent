@@ -12,6 +12,8 @@ impl App {
             self.save_tab(&tab, true);
         } else if let Some(diagram) = self.active_diagram() {
             self.save_diagram(&diagram, true);
+        } else if let Some(notebook) = self.active_notebook() {
+            self.save_notebook(&notebook, true);
         }
     }
 
@@ -522,6 +524,23 @@ impl App {
         );
     }
 
+    /// The same question for a notebook on its way out.
+    pub(crate) fn ask_unsaved_notebook(
+        self: &Rc<Self>,
+        tab: &Rc<crate::notebook::NotebookTab>,
+        error: &Error,
+        after: impl Fn(&Rc<Self>, bool) + 'static,
+    ) {
+        let (discarded, written) = (tab.clone(), tab.clone());
+        self.ask_unsaved_about(
+            &tab.key(),
+            error,
+            move || discarded.discard(),
+            move |app| app.write_notebook(&written, None),
+            after,
+        );
+    }
+
     /// The question itself, whatever kind of document holds the edits: `discard` throws them
     /// away, `overwrite` writes them over whatever is on disk.
     fn ask_unsaved_about(
@@ -591,6 +610,12 @@ impl App {
                 tracing::debug!("a closing diagram was not written: {e}");
             }
         }
+        // A notebook closing was asked about already (`wire.rs`), as a diagram was.
+        if let Some(Doc::Notebook(n)) = self.doc_for_page(page)
+            && let Err(e) = self.flush_notebook(&n)
+        {
+            tracing::debug!("a closing notebook was not written: {e}");
+        }
         // Closing a shell's tab is ending it; closing its window only lets go of it, and a window
         // being destroyed closes no page through here. A shell is refused a move to another
         // window before it would reach here too.
@@ -619,7 +644,7 @@ impl App {
     pub fn answer_banner(self: &Rc<Self>, tab: &Rc<Tab>) {
         match tab.alert() {
             // Reports rather than asks, so it has no button and this cannot be reached from one.
-            Some(Alert::ReadOnly | Alert::Installed) => {}
+            Some(Alert::ReadOnly | Alert::Installed | Alert::Unread) => {}
             // Both sides hold work, so neither is thrown away on one click: the diff shows what
             // differs and the user picks (DESIGN.md: a choice that can lose data is a dialog).
             Some(Alert::Compare) => self.compare_with_disk(tab),
@@ -886,7 +911,7 @@ impl App {
         let Some(doc) = self.active_doc().filter(|doc| {
             matches!(
                 doc,
-                Doc::Text(_) | Doc::Diagram(_) | Doc::Pdf(_) | Doc::Image(_)
+                Doc::Text(_) | Doc::Diagram(_) | Doc::Notebook(_) | Doc::Pdf(_) | Doc::Image(_)
             ) && !doc.is_loose()
         }) else {
             return;
@@ -973,6 +998,13 @@ impl App {
                 (
                     Contents::Text(diagram.for_disk(), false),
                     diagram.save.edits.get(),
+                )
+            }
+            Doc::Notebook(notebook) => {
+                self.land_notebook(notebook, false);
+                (
+                    Contents::Text(notebook.for_disk(), false),
+                    notebook.save.edits.get(),
                 )
             }
             // No edit count: the strokes are all in the file once it is flushed.
@@ -1064,6 +1096,14 @@ impl App {
                     false => diagram.save.etag.set(Some(etag)),
                 }
             }
+            (Doc::Notebook(notebook), Some((etag, digest, _))) => {
+                notebook.clear_changed();
+                notebook.save.digest.set(Some(digest));
+                match notebook.save.edits.get() == edits {
+                    true => notebook.mark_clean(etag),
+                    false => notebook.save.etag.set(Some(etag)),
+                }
+            }
             // A refused upload of the old file left its copy's name for the next one to reuse.
             (Doc::Pdf(pdf), _) => pdf.clear_conflict(),
             _ => {}
@@ -1078,6 +1118,7 @@ impl App {
         match doc {
             Doc::Text(tab) => tab.discard(),
             Doc::Diagram(diagram) => diagram.discard(),
+            Doc::Notebook(notebook) => notebook.discard(),
             _ => {}
         }
         self.close_page(doc.page());

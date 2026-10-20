@@ -179,7 +179,7 @@ fn shoot_pages(tab: &Rc<crate::diagram::DiagramTab>, dir: &Path) {
 }
 
 /// Paint `widget` as it is on screen into a PNG at `path`.
-fn shoot(widget: &gtk::Widget, path: &Path) -> bool {
+pub(super) fn shoot(widget: &gtk::Widget, path: &Path) -> bool {
     picture(widget).is_some_and(|t| t.save_to_png(path).is_ok())
 }
 

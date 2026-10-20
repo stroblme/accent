@@ -1249,6 +1249,7 @@ fn apart_windows(what: &str, shell: &Rc<crate::shell::Shell>, here: &Rc<App>) {
                     Doc::Pdf(_) => "pdf",
                     Doc::Image(_) => "image",
                     Doc::Diagram(_) => "diagram",
+                    Doc::Notebook(_) => "notebook",
                     Doc::Status(_) => "status",
                     Doc::Diff(_) | Doc::Terminal(_) => "other",
                 };

@@ -971,6 +971,12 @@ fn written_out(from: &Rc<App>, doc: &Doc) -> Result<PathBuf, String> {
     {
         return Err(format!("Save failed: {e}"));
     }
+    // A notebook the same way.
+    if let Doc::Notebook(n) = doc
+        && let Err(e) = from.flush_notebook(n)
+    {
+        return Err(format!("Save failed: {e}"));
+    }
     // A diagram the same way, a label still being typed going into its cell first.
     if let Doc::Diagram(d) = doc {
         d.finish_label();
