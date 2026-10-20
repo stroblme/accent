@@ -1402,29 +1402,13 @@ impl App {
         });
     }
 
-    /// Show the header's progress bar while the active tab is a PDF still being opened.
-    ///
-    /// The same thin bar indexing uses, for the same reason: something is being read and the
-    /// window is usable meanwhile. GTK4 has no indeterminate mode, so it is stepped by a timer
-    /// that exists only while an open is in flight.
+    /// Tell the status bar whether the active tab is a PDF still being opened.
     fn sync_opening(self: &Rc<Self>) {
         let opening = self
             .active_doc()
             .and_then(|doc| doc.pdf().cloned())
             .is_some_and(|pdf| pdf.opening() && !self.fetching.borrow().contains(&pdf.key()));
-        if opening {
-            self.statusbar.set_progress(Some("Opening the document…"));
-            return;
-        }
-        // Indexing owns the same slot and is the slower of the two: leave its text alone if it is
-        // still going, and let `Reconciled` clear it.
-        if self.vault.is_none() || self.reconciled.get() {
-            self.statusbar.set_progress(None);
-        } else if self.statusbar.indexing() == statusbar::Indexing::Paused {
-            // A paused vault is the one case where nothing will put the line back on its own:
-            // there is no walk left to report progress. Say again what the slot was saying.
-            self.statusbar.set_progress(Some(statusbar::PAUSED));
-        }
+        self.statusbar.set_opening(opening);
     }
 
     /// Toggle the shared Minimap preference in every window, as Preferences does.

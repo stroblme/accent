@@ -11,8 +11,10 @@ use std::time::Duration;
 use gtk::glib;
 use gtk::prelude::*;
 
-/// Paused-indexing text restored after PDF opening borrows the progress slot, since no new progress will arrive.
+/// The vault's line while a stopped walk leaves the index partial.
 pub const PAUSED: &str = "Indexing paused";
+/// The line while the tab in front is a PDF still being opened.
+const OPENING: &str = "Opening the document…";
 
 /// Vault indexing state and the action offered beside its progress.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +35,10 @@ pub struct Bar {
     /// Independent vault, transfer and language-provider progress sources.
     /// Retain overlapping transfers separately so one completion cannot clear another.
     vault_busy: RefCell<Option<String>>,
+    /// A PDF still being opened. A source of its own, beneath the vault's: an open that ends while
+    /// the vault indexes leaves the indexing line, where one shared slot kept "Opening the
+    /// document…" until the walk next reported, 22 s on the Mac.
+    opening: Cell<bool>,
     transfers: RefCell<Vec<String>>,
     /// Delayed language-server startup and subsequent checking progress for the active tab.
     starting: RefCell<Option<String>>,
@@ -109,6 +115,7 @@ impl Bar {
             row,
             progress,
             vault_busy: RefCell::new(None),
+            opening: Cell::new(false),
             transfers: RefCell::new(Vec::new()),
             starting: RefCell::new(None),
             checking: RefCell::new(None),
@@ -132,9 +139,16 @@ impl Bar {
         self.row.upcast_ref()
     }
 
-    /// What the window is busy with: "Indexing… 1200/42700 files", "Opening the document…".
+    /// What the vault is busy with: "Indexing… 1200/42700 files", "Connecting…".
     pub fn set_progress(&self, text: Option<&str>) {
         *self.vault_busy.borrow_mut() = text.map(str::to_string);
+        self.show_busy();
+    }
+
+    /// Whether the tab in front is a PDF still being opened, which the line says unless the
+    /// vault's own work is under way: that is the slower of the two, and its Stop sits beside it.
+    pub fn set_opening(&self, opening: bool) {
+        self.opening.set(opening);
         self.show_busy();
     }
 
@@ -223,7 +237,7 @@ impl Bar {
         }
     }
 
-    /// Choose progress text by priority: vault work, newest transfer, active server startup/checking, then suggestions.
+    /// Choose progress text by priority: vault work, an open, newest transfer, active server startup/checking, then suggestions.
     /// Keep user-requested work ahead of background conveniences.
     fn show_busy(&self) {
         let vault = self.vault_busy.borrow();
@@ -236,6 +250,7 @@ impl Bar {
             &self.progress,
             vault
                 .as_deref()
+                .or(self.opening.get().then_some(OPENING))
                 .or(transfer)
                 .or(starting.as_deref())
                 .or(checking.as_deref())
