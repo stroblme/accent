@@ -1,0 +1,160 @@
+/* The guide dressed as the app (docs/DESIGN.md: Typography, Colour, Spacing), laid over
+   mdBook's light and coal themes. */
+
+/* The palette: libadwaita's view colours and its default blue accent. The only literals in this
+   file, as theme.rs holds the app's; everything below is derived from them. */
+.light, .coal { --accent-bg: #3584e4; }
+.light {
+    --view-bg: #ffffff;
+    --view-fg: rgb(0 0 6 / 80%);
+    --accent: oklab(from var(--accent-bg) min(l, 0.5) a b);
+}
+.coal {
+    --view-bg: #1d1d20;
+    --view-fg: #ffffff;
+    --accent: oklab(from var(--accent-bg) max(l, 0.85) a b);
+}
+
+:root {
+    --mono-font: "Adwaita Mono", "Iosevka", ui-monospace, "SF Mono", Menlo, "Cascadia Mono", "DejaVu Sans Mono", monospace;
+    --ui-font: "Adwaita Sans", "Inter", system-ui, sans-serif;
+    /* Prose is set in the monospace family, as the app sets a note. */
+    --prose-font: var(--mono-font);
+    --code-font-size: 0.92em;
+    /* Wider than the app's prose column: a guide carries code blocks, tables and screenshots. */
+    --content-max-width: 100ch;
+    --menu-bar-height: 46px;
+    --page-padding: 24px;
+}
+@media (max-width: 620px) {
+    :root { --page-padding: 16px; }
+}
+
+/* mdBook's variables, mapped so the sidebar, menu bar, popups and quotes all paint the page. */
+.light, .coal {
+    --bg: var(--view-bg);
+    --fg: var(--view-fg);
+    --dim: rgb(from var(--fg) r g b / 0.55);
+    --quote: rgb(from var(--fg) r g b / 0.6);
+    --marker: rgb(from var(--fg) r g b / 0.4);
+    --border: rgb(from var(--fg) r g b / 0.15);
+    --tint: rgb(from var(--fg) r g b / 0.07);
+    --hover: color-mix(in srgb, currentColor 7%, transparent);
+    --pressed: color-mix(in srgb, currentColor 16%, transparent);
+
+    --sidebar-bg: var(--bg);
+    --sidebar-fg: var(--fg);
+    --sidebar-non-existant: var(--dim);
+    --sidebar-active: var(--accent);
+    --sidebar-spacer: var(--border);
+    --sidebar-header-border-color: var(--border);
+    --scrollbar: var(--marker);
+    --icons: var(--fg);
+    --icons-hover: var(--fg);
+    --links: var(--accent);
+    --inline-code-color: var(--fg);
+    --theme-popup-bg: var(--bg);
+    --theme-popup-border: var(--border);
+    --theme-hover: var(--hover);
+    --table-border-color: var(--border);
+    --table-header-bg: transparent;
+    --table-alternate-bg: transparent;
+    --searchbar-border-color: transparent;
+    --searchbar-bg: var(--tint);
+    --searchbar-fg: var(--fg);
+    --searchbar-shadow-color: transparent;
+    --searchresults-header-fg: var(--dim);
+    --searchresults-border-color: var(--border);
+    --searchresults-li-bg: var(--hover);
+    --search-mark-bg: rgb(from var(--accent-bg) r g b / 0.3);
+    --footnote-highlight: var(--accent);
+    --blockquote-note-color: var(--accent);
+}
+
+html { font-family: var(--ui-font); }
+.content, .searchresults-outer { font-family: var(--prose-font); }
+
+/* Theme picker: libadwaita's own pair and Auto, which follows the system as the app does. */
+#mdbook-theme-rust, #mdbook-theme-navy, #mdbook-theme-ayu { display: none; }
+
+/* Menu bar: a header bar on the page's background, with no line under it when scrolled. */
+#mdbook-menu-bar.bordered { border-block-end-color: var(--bg); }
+.menu-title { font-size: 1.4rem; font-weight: 700; }
+.left-buttons, .right-buttons { display: flex; align-items: center; gap: 6px; margin: 0 6px; }
+#mdbook-menu-bar :is(.icon-button, .right-buttons a) {
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    border-radius: 9px;
+}
+#mdbook-menu-bar .fa-svg { padding: 0; line-height: 1; }
+
+.theme-popup { padding: 6px; border-radius: 12px; font-size: 1.4rem; }
+.theme-popup .theme { padding: 0 12px 0 24px; line-height: 34px; border-radius: 9px; }
+
+/* One hover and press tint for everything clickable, libadwaita's. */
+:is(#mdbook-menu-bar .icon-button, .right-buttons a, .chapter-link-wrapper > a:first-child, .theme-popup .theme):hover {
+    background-color: var(--hover);
+}
+:is(#mdbook-menu-bar .icon-button, .right-buttons a, .chapter-link-wrapper > a:first-child, .theme-popup .theme):active {
+    background-color: var(--pressed);
+}
+
+/* Sidebar: a navigation-sidebar, its 1px edge the only division on the page, taking the
+   accent under the pointer as the app's paned separator does. */
+.sidebar { border-inline-end: 1px solid var(--border); }
+.sidebar:has(.sidebar-resize-handle:hover) { border-inline-end-color: var(--accent); }
+.sidebar-resize-handle .sidebar-resize-indicator { display: none; }
+.sidebar .sidebar-scrollbox { padding: 6px 0; }
+.chapter, .section, .chapter li.chapter-item, .chapter li.header-item { margin: 0; line-height: 18px; }
+.section, .on-this-page { padding-inline-start: 12px; }
+.on-this-page { margin: 0; border: 0; }
+/* A row is libadwaita's: 36px high, 6px in from the pane's sides, 2px apart. */
+.chapter-link-wrapper > a:first-child {
+    flex: 1;
+    padding: 9px 12px;
+    margin: 0 6px 2px;
+    border-radius: 9px;
+}
+.chapter li a:hover:not(.active, .current-header) { color: var(--sidebar-fg); }
+.chapter li.part-title { margin: 18px 0 6px; padding: 0 18px; color: var(--dim); }
+
+/* Page and prose, after the app's preview stylesheet. */
+.content { padding-inline: 0; }
+.content main, .content :is(p, ol, ul) { line-height: 1.6; }
+main :is(p, ul, ol, pre, blockquote, .table-wrapper) { margin-block: 12px; }
+main li > :is(ul, ol) { margin-block: 0; }
+main :is(h1, h2, h3, h4, h5, h6) { margin: 24px 0 12px; line-height: 1.25; font-weight: 700; }
+main h1 { font-size: 1.6em; }
+main h2 { font-size: 1.4em; }
+main h3 { font-size: 1.2em; }
+main h4 { font-size: 1.1em; }
+main :is(h5, h6) { font-size: 1em; }
+strong, b { font-weight: 700; }
+main li::marker { color: var(--marker); font-weight: 700; }
+.content a { text-decoration: underline; }
+
+.hljs { background: var(--tint); }
+:not(pre) > .hljs { border-radius: 4px; }
+pre > .hljs { padding: 12px; border-radius: 6px; }
+pre > .buttons button { border: 0; background: none; }
+
+blockquote {
+    padding: 0 0 0 12px;
+    border: 0;
+    border-inline-start: 3px solid var(--accent);
+    background: none;
+}
+blockquote:not(.blockquote-tag) { color: var(--quote); font-style: italic; }
+
+table { margin: 0; }
+.content :is(th, td) { padding: 6px 12px; border: 1px solid var(--border); }
+main hr { margin: 24px 0; border: 0; border-top: 1px solid var(--border); }
+kbd { background: var(--tint); border: 0; box-shadow: none; }
+
+#mdbook-searchbar { box-sizing: border-box; padding: 6px 12px; border-radius: 9px; }
+/* libadwaita's focus ring. */
+:focus-visible { outline: 2px solid rgb(from var(--accent) r g b / 0.5); }
+#mdbook-help-popup { box-shadow: none; }

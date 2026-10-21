@@ -29,6 +29,7 @@ Some other cool features involve (but are not limited to):
 - LaTeX (SyncTeX) PDF <-> Code sync: navigate from text to pdf and vice-versa
 
 Accent is open source under GPL-3.0-or-later and still evolving.
+Read the [user guide](https://stroblme.github.io/accent/) for setup and everyday tasks.
 
 ## Screenshots
 
