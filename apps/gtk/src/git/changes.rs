@@ -308,6 +308,7 @@ fn header_layout(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Box {
 /// this row adds to the one above it.
 fn folder_layout(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Box {
     let chevron = gtk::Image::new();
+    chevron.add_css_class("dim-label");
     let folder_name = gtk::Label::builder()
         .xalign(0.0)
         .hexpand(true)

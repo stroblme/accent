@@ -362,6 +362,7 @@ impl App {
         if Rc::ptr_eq(&from, at) && at.tabs.n_pages() <= 1 {
             return self.toast("This pane has only one note.");
         }
+        self.select_survivor(page);
         let pane = self.split_beside(at, side);
         from.tabs.transfer_page(page, &pane.tabs, 0);
         // The page is the new pane's only one, so it is selected already; what it has not got is

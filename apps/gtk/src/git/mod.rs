@@ -620,7 +620,7 @@ impl Panel {
         let weak = Rc::downgrade(self);
         keys.connect_key_pressed(move |_, key, _, state| {
             let commit = matches!(key, gdk::Key::Return | gdk::Key::KP_Enter)
-                && state.contains(gdk::ModifierType::CONTROL_MASK);
+                && state.contains(crate::platform::PRIMARY_MODIFIER);
             match (commit, weak.upgrade()) {
                 (true, Some(panel)) => {
                     panel.do_commit();

@@ -84,6 +84,18 @@ jobs:
       - name: Asserting drills
         run: make drills
 
+  macos:
+    name: macOS desktop app
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      # WebKitGTK is unavailable on macOS; this builds the native desktop dependencies.
+      - run: brew install pkgconf gtk4 libadwaita gtksourceview5 vte3 libspelling libsoup
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p accent --no-default-features --locked
+      - run: cargo test -p accent-core --locked --no-fail-fast
+
   android:
     name: android app
     runs-on: ubuntu-latest

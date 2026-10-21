@@ -594,7 +594,7 @@ impl imp::Minimap {
         // With Control the wheel zooms, further up (`zoom::zoom_on_wheel`).
         if wheel
             .current_event_state()
-            .contains(gdk::ModifierType::CONTROL_MASK)
+            .contains(crate::platform::PRIMARY_MODIFIER)
         {
             return glib::Propagation::Proceed;
         }

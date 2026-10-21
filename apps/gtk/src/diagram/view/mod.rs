@@ -562,7 +562,7 @@ mod imp {
                     obj.grab_focus();
                     let state = gesture.current_event_state();
                     let started =
-                        obj.start_drag(x, y, state.contains(gdk::ModifierType::CONTROL_MASK));
+                        obj.start_drag(x, y, state.contains(crate::platform::PRIMARY_MODIFIER));
                     let imp = obj.imp();
                     imp.moved.set(false);
                     imp.pointer.set(obj.page_at(x, y));

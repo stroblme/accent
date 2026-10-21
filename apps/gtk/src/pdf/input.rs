@@ -227,7 +227,7 @@ impl PdfTab {
                 // Through the window's actions, not past them: the key is on the tab because
                 // `Ctrl+C` and `Ctrl+Z` belong to whatever has the keyboard, but what they do is
                 // the command the palette and the menus name.
-                if key == gtk::gdk::Key::c && state.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
+                if key == gtk::gdk::Key::c && state.contains(crate::platform::PRIMARY_MODIFIER) {
                     tab.run("win.pdf-copy");
                     return glib::Propagation::Stop;
                 }
@@ -235,7 +235,7 @@ impl PdfTab {
                 // belongs to whatever has the keyboard, and here that is the page, whose strokes
                 // and page edits are one history. Redo is `Ctrl+Shift+Z` or `Ctrl+Y`, the two a
                 // note's own undo answers to.
-                if state.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
+                if state.contains(crate::platform::PRIMARY_MODIFIER) {
                     let history = match (key.to_lower(), shift) {
                         (gtk::gdk::Key::z, false) => Some("win.pdf-undo"),
                         (gtk::gdk::Key::z, true) | (gtk::gdk::Key::y, false) => {
@@ -261,9 +261,11 @@ impl PdfTab {
                 // Alt+Left and Alt+Right are Back and Forward, and Ctrl with an arrow is the
                 // scroller's own step: only the bare key reads the document.
                 let bare = !state.intersects(
-                    gtk::gdk::ModifierType::CONTROL_MASK
+                    crate::platform::PRIMARY_MODIFIER
+                        | gtk::gdk::ModifierType::CONTROL_MASK
                         | gtk::gdk::ModifierType::ALT_MASK
-                        | gtk::gdk::ModifierType::SUPER_MASK,
+                        | gtk::gdk::ModifierType::SUPER_MASK
+                        | gtk::gdk::ModifierType::META_MASK,
                 );
                 match key {
                     gtk::gdk::Key::space if shift => tab.page(false),

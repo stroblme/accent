@@ -14,6 +14,7 @@ use accent_core::notebook::{self, Edit, Kind};
 
 /// Code cells after the first three, enough that the last is far below the view.
 const FILLER: usize = 60;
+const DRIVER: &str = "lsp_driver.py";
 
 pub(super) fn bench_notebook_lsp(app: &Rc<App>, arg: &str) {
     scratch_only(app, "ACCENT_BENCH_NOTEBOOK_LSP");
@@ -67,7 +68,11 @@ fn write(app: &Rc<App>, ipynb: &str, marimo: &str) -> bool {
     let marimo_text = "import marimo\n\napp = marimo.App()\n\n\n@app.cell\ndef _():\n    x = 1\n    \
                        return (x,)\n\n\n@app.cell\ndef _(x):\n    y = x + 1\n    return\n\n\n\
                        if __name__ == \"__main__\":\n    app.run()\n";
-    for (rel, text) in [(ipynb, nb.to_text()), (marimo, marimo_text.to_string())] {
+    for (rel, text) in [
+        (ipynb, nb.to_text()),
+        (marimo, marimo_text.to_string()),
+        (DRIVER, "print('driver')\n".to_string()),
+    ] {
         if let Err(e) = vault.save(rel, &text, None) {
             println!("bench notebook_lsp write_failed {rel} {e:?}");
             return false;
@@ -286,4 +291,42 @@ async fn marimo_drill(app: &Rc<App>, rel: &str) {
         "bench notebook_lsp marimo key={} definition {landed}",
         tab.document_key().unwrap_or_default()
     );
+    app.close_page(&tab.page);
+    app.open_path(DRIVER);
+    for _ in 0..100 {
+        if app
+            .doc_for(DRIVER)
+            .and_then(|doc| doc.tab().cloned())
+            .is_some()
+        {
+            break;
+        }
+        glib::timeout_future(Duration::from_millis(20)).await;
+    }
+    app.open_at(&accent_api::Location {
+        path: rel.to_string(),
+        range: accent_api::Range {
+            start: Pos {
+                line: 13,
+                character: 4,
+            },
+            end: Pos {
+                line: 13,
+                character: 5,
+            },
+        },
+        ..Default::default()
+    });
+    let mut landed = None;
+    for _ in 0..100 {
+        landed = app
+            .doc_for(rel)
+            .and_then(|doc| doc.notebook().cloned())
+            .and_then(|tab| tab.bench_caret());
+        if landed == Some((1, 0, 0)) {
+            break;
+        }
+        glib::timeout_future(Duration::from_millis(20)).await;
+    }
+    println!("bench notebook_lsp marimo closed={landed:?}");
 }

@@ -59,6 +59,8 @@ pub struct Cell {
 pub struct Run {
     count: Option<u32>,
     outputs: Vec<Value>,
+    /// Kernel-only IDs, one per output; nbformat does not store `transient`.
+    display_ids: Vec<Option<String>>,
     /// `outputs` read, each one that reads.
     shown: Vec<Output>,
 }
@@ -68,6 +70,7 @@ impl Run {
         let shown = outputs.iter().filter_map(output::read).collect();
         Run {
             count,
+            display_ids: vec![None; outputs.len()],
             outputs,
             shown,
         }
@@ -75,7 +78,7 @@ impl Run {
 
     /// Add `output`, a stream running on into the last output when that is a stream of the same
     /// name, as Jupyter's output area joins them: `true` when the last output grew.
-    fn push(&mut self, output: Value) -> bool {
+    fn push(&mut self, output: Value, display_id: Option<String>) -> bool {
         let stream = |o: &Value| match o["output_type"] == "stream" {
             true => o["name"].as_str().map(String::from),
             false => None,
@@ -94,7 +97,23 @@ impl Run {
         }
         self.shown.extend(output::read(&output));
         self.outputs.push(output);
+        self.display_ids.push(display_id);
         false
+    }
+
+    /// Replace every output the kernel named `display_id`; return the first slot changed.
+    fn update_display(&mut self, display_id: &str, output: &Value) -> Option<usize> {
+        let mut first = None;
+        for (at, (stored, id)) in self.outputs.iter_mut().zip(&self.display_ids).enumerate() {
+            if id.as_deref() == Some(display_id) {
+                *stored = output.clone();
+                first.get_or_insert(at);
+            }
+        }
+        if first.is_some() {
+            self.shown = self.outputs.iter().filter_map(output::read).collect();
+        }
+        first
     }
 }
 
@@ -341,9 +360,25 @@ impl Notebook {
     /// before it of the same name: `Some(true)` when the last output grew, `Some(false)` when
     /// one was added, `None` for a cell without a run. Outside the history: a run is the
     /// kernel's, not an edit; only [`Edit::Outputs`] answers its undo.
-    pub fn push_output(&mut self, id: CellId, output: Value) -> Option<bool> {
+    pub fn push_output(
+        &mut self,
+        id: CellId,
+        output: Value,
+        display_id: Option<String>,
+    ) -> Option<bool> {
         let at = self.position(id)?;
-        Some(self.cells[at].run.as_mut()?.push(output))
+        Some(self.cells[at].run.as_mut()?.push(output, display_id))
+    }
+
+    /// Replace every live display with this ID, returning each cell's first changed slot.
+    pub fn update_display(&mut self, display_id: &str, output: Value) -> Vec<(CellId, usize)> {
+        self.cells
+            .iter_mut()
+            .filter_map(|cell| {
+                let at = cell.run.as_mut()?.update_display(display_id, &output)?;
+                Some((cell.id, at))
+            })
+            .collect()
     }
 
     /// Set cell `id`'s run's count; `None` for a cell without a run. Outside the history: a run
@@ -445,6 +480,19 @@ impl Notebook {
             Frame::Ipynb(_) => self.locate(at),
             Frame::Marimo(frame) => frame.place(&self.cells, at),
         }
+    }
+
+    /// The JSON bytes spelling an indexed `.ipynb` source hit, for Open as Text.
+    pub fn json_hit(&self, hit: std::ops::Range<usize>) -> Option<std::ops::Range<usize>> {
+        let Frame::Ipynb(_) = &self.frame else {
+            return None;
+        };
+        let (cell, from) = self.locate(hit.start)?;
+        let (last, to) = self.locate(hit.end)?;
+        if cell != last || from > to {
+            return None;
+        }
+        ipynb::json_hit(&self.cells[cell], from..to)
     }
 }
 
@@ -558,6 +606,28 @@ mod tests {
     }
 
     #[test]
+    fn an_indexed_hit_locates_its_json_source_when_opened_as_text() {
+        let text = r#"{"nbformat":4,"cells":[{"cell_type":"code","source":["first\n","h\u00e9llo \"world\""]},{"cell_type":"code","source":"later"},  {"cell_type":"code","source":"final"}]}"#;
+        let nb = read("sample.ipynb", text).unwrap();
+        for (source, encoded) in [
+            ("héllo", r"h\u00e9llo"),
+            ("world", "world"),
+            ("later", "later"),
+            ("final", "final"),
+        ] {
+            let start = nb.sources().find(source).unwrap();
+            let hit = nb.json_hit(start..start + source.len()).unwrap();
+            assert_eq!(&text[hit], encoded);
+        }
+        let source = nb.sources();
+        for (needle, encoded) in [("first\n", r"first\n"), ("\"world\"", r#"\"world\""#)] {
+            let start = source.find(needle).unwrap();
+            let hit = nb.json_hit(start..start + needle.len()).unwrap();
+            assert_eq!(&text[hit], encoded);
+        }
+    }
+
+    #[test]
     fn streams_run_on_as_jupyter_joins_them() {
         let mut nb = read("analysis.ipynb", ANALYSIS).unwrap();
         let id = nb.cells()[2].id();
@@ -572,7 +642,7 @@ mod tests {
             ("stdout", "c"),
         ]
         .into_iter()
-        .map(|(name, text)| nb.push_output(id, stream(name, text)))
+        .map(|(name, text)| nb.push_output(id, stream(name, text), None))
         .collect();
         assert_eq!(pushed, [Some(false), Some(true), Some(false), Some(false)]);
         let out = |stderr, text: &str| Output::Stream {
@@ -583,6 +653,51 @@ mod tests {
         assert_eq!(nb.cells()[2].outputs(), outputs);
         nb.set_count(id, Some(4));
         assert_eq!(nb.cells()[2].count(), Some(4));
+    }
+
+    #[test]
+    fn a_display_update_replaces_every_copy_without_saving_its_id() {
+        let mut nb = read("empty.ipynb", EMPTY_IPYNB).unwrap();
+        let ids: Vec<CellId> = (0..2)
+            .map(|at| {
+                let cell = nb.new_cell(Kind::Code, "display(value)").unwrap();
+                let id = cell.id();
+                nb.apply(Edit::Insert { at, cell });
+                nb.apply(Edit::Outputs {
+                    id,
+                    run: Some(Run::new(None, Vec::new())),
+                });
+                id
+            })
+            .collect();
+        let display = |text| {
+            serde_json::json!({
+                "output_type": "display_data", "data": {"text/plain": text}, "metadata": {}
+            })
+        };
+        for &id in &ids {
+            nb.push_output(id, display("before"), Some("shared".into()));
+        }
+        nb.push_output(ids[0], display("before"), Some("shared".into()));
+        let changed = nb.update_display("shared", display("after"));
+        assert_eq!(changed, [(ids[0], 0), (ids[1], 0)]);
+        let expected = Output::Data {
+            count: None,
+            items: vec![Item {
+                mime: "text/plain".into(),
+                data: Data::Text("after".into()),
+            }],
+        };
+        assert_eq!(
+            nb.cells()[0].outputs(),
+            [expected.clone(), expected.clone()]
+        );
+        assert_eq!(nb.cells()[1].outputs(), [expected]);
+        let saved = nb.to_text();
+        assert!(saved.contains("after"));
+        assert!(!saved.contains("before"));
+        assert!(!saved.contains("transient"));
+        assert!(!saved.contains("display_id"));
     }
 
     #[test]

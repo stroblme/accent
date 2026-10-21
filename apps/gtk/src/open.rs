@@ -85,7 +85,21 @@ impl App {
             let reveal = self.revealing.borrow_mut().remove(&doc.key());
             match (reveal, &doc) {
                 (Some(Reveal::Diagram(reveal)), Doc::Diagram(tab)) => reveal(self, tab),
-                (Some(Reveal::Notebook(reveal)), Doc::Notebook(tab)) => reveal(self, tab),
+                (Some(Reveal::NotebookHit(bytes)), Doc::Notebook(tab)) => tab.reveal_hit(bytes),
+                (Some(Reveal::NotebookHit(bytes)), Doc::Text(tab)) => {
+                    select_text_range(tab, bytes);
+                }
+                (Some(Reveal::NotebookFilePos(at)), Doc::Notebook(tab)) => {
+                    tab.go_to_file(at);
+                }
+                (Some(Reveal::NotebookFilePos(at)), Doc::Text(tab)) => {
+                    if doc::is_loose_key(&tab.rel())
+                        && let Some(vault) = self.language_vault(tab)
+                    {
+                        lang::join(tab, vault);
+                    }
+                    tab.goto_pos(at);
+                }
                 _ => {}
             }
         }
@@ -709,9 +723,9 @@ impl App {
             }
             Some(_) => self.select_when_open(rel, sidebar::Target::Range(bytes)),
             None => {
-                let hit = bytes.clone();
-                let reveal = Reveal::Notebook(Box::new(move |_, tab| tab.reveal_hit(hit)));
-                self.revealing.borrow_mut().insert(rel.to_string(), reveal);
+                self.revealing
+                    .borrow_mut()
+                    .insert(rel.to_string(), Reveal::NotebookHit(bytes.clone()));
                 // Only text has a tab to wait on, and only its bytes say what a `.py` is.
                 match accent_core::path::is_notebook(rel) {
                     true => self.open_preview(rel),
@@ -755,11 +769,7 @@ impl App {
     /// it writes it.
     fn select_when_open(self: &Rc<Self>, rel: &str, at: sidebar::Target) {
         self.with_tab(rel, Opened::Preview, "open", move |_, tab| match &at {
-            sidebar::Target::Range(bytes) => {
-                if let Some(chars) = char_range(&tab.text(), bytes.clone()) {
-                    tab.goto_range(chars);
-                }
-            }
+            sidebar::Target::Range(bytes) => select_text_range(tab, bytes.clone()),
             sidebar::Target::Tag(name) => tab.goto_tag(name),
         });
     }
@@ -1231,7 +1241,24 @@ impl App {
 /// [`App::open_cell`].
 pub enum Reveal {
     Diagram(Shows<crate::diagram::DiagramTab>),
-    Notebook(Shows<crate::notebook::NotebookTab>),
+    NotebookHit(std::ops::Range<usize>),
+    NotebookFilePos(accent_api::Pos),
+}
+
+/// A notebook opened as JSON needs its indexed source offset translated to the JSON spelling.
+fn select_text_range(tab: &Tab, bytes: std::ops::Range<usize>) {
+    let text = tab.text();
+    let bytes = if accent_core::path::is_notebook(&tab.rel()) {
+        accent_core::notebook::read(&tab.rel(), &text)
+            .ok()
+            .and_then(|notebook| notebook.json_hit(bytes.clone()))
+            .unwrap_or(bytes)
+    } else {
+        bytes
+    };
+    if let Some(chars) = char_range(&text, bytes) {
+        tab.goto_range(chars);
+    }
 }
 
 /// What a [`Reveal`] does to the tab it waited for.

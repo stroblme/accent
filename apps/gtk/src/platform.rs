@@ -8,6 +8,13 @@
 
 use gtk::{gdk, pango};
 
+/// The modifier GTK spells `<Primary>` in accelerator strings.
+pub const PRIMARY_MODIFIER: gdk::ModifierType = if cfg!(target_os = "macos") {
+    gdk::ModifierType::META_MASK
+} else {
+    gdk::ModifierType::CONTROL_MASK
+};
+
 /// AppKit's default font for each role (`NSFont`, macOS 12) as Pango's CoreText backend names
 /// them: the user font for documents, the fixed-pitch user font, and the system font, menus' and
 /// title bars' 13 pt, for the interface, which GDK sets at the user font's 12 pt. SF Mono is not

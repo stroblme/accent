@@ -81,14 +81,19 @@ pub fn on_key(tab: &Rc<Tab>, key: gdk::Key, state: gdk::ModifierType) -> Option<
         // insert goes through the buffer like a keystroke. Shift means a selection and Alt
         // belongs to the compositor, so both are left alone.
         gdk::Key::Right | gdk::Key::KP_Right
-            if state.contains(gdk::ModifierType::CONTROL_MASK)
+            if state.contains(crate::platform::PRIMARY_MODIFIER)
                 && !state
                     .intersects(gdk::ModifierType::ALT_MASK | gdk::ModifierType::SHIFT_MASK) =>
         {
             accept(tab, word_of(&text));
             glib::Propagation::Stop
         }
-        _ if state.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK) => {
+        _ if state.intersects(
+            gdk::ModifierType::CONTROL_MASK
+                | gdk::ModifierType::ALT_MASK
+                | gdk::ModifierType::META_MASK,
+        ) =>
+        {
             return None;
         }
         gdk::Key::Tab | gdk::Key::KP_Tab => {

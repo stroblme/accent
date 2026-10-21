@@ -28,7 +28,7 @@ const PYTHON_BODIES: [&str; 3] = ["time", "timeit", "capture"];
 
 impl Notebook {
     /// The code cells as one [`Program`]; an `.ipynb`'s Python with IPython's own syntax made
-    /// Python, line for line and column for column ([`as_python`]).
+    /// Python, line for line with ordinary Python columns unchanged ([`as_python`]).
     pub fn program(&self) -> Program {
         let ipython = self.format() == Format::Ipynb && self.language == "python";
         let mut program = Program::default();
@@ -84,9 +84,8 @@ impl Program {
     }
 }
 
-/// `source` with IPython's own lines commented out, one `#` over their first character: a line
-/// magic and a shell line (`%`, `!`), and a cell magic's first line. A cell under any other cell
-/// magic is blank lines, its body being another language's.
+/// `source` with IPython commands made Python, keeping names and positions where possible.
+/// A cell under any other cell magic is blank lines, its body being another language's.
 fn as_python(source: &str) -> String {
     let magic = source
         .strip_prefix("%%")
@@ -98,13 +97,37 @@ fn as_python(source: &str) -> String {
         .split('\n')
         .map(|line| {
             let code = line.trim_start();
-            match code.starts_with(['%', '!']) {
-                true => format!("{}#{}", &line[..line.len() - code.len()], &code[1..]).into(),
-                false => line.into(),
+            if code.starts_with(['%', '!']) {
+                let indent = &line[..line.len() - code.len()];
+                let marker = if indent.is_empty() { "#" } else { "pass #" };
+                return format!("{indent}{marker}{}", &code[1..]).into();
             }
+            if let Some((lhs, rhs)) = line.split_once('=') {
+                let command = rhs.trim_start();
+                if is_python_name(lhs.trim()) && command.starts_with('!') {
+                    let prefix = &line[..line.len() - command.len()];
+                    return format!("{prefix}[]{}", " ".repeat(command.len().saturating_sub(2)))
+                        .into();
+                }
+            }
+            let trimmed = line.trim_end();
+            if let Some(name) = trimmed.strip_suffix('?')
+                && name.trim_start().split('.').all(is_python_name)
+            {
+                return format!("{name} {}", &line[trimmed.len()..]).into();
+            }
+            line.into()
         })
         .collect();
     lines.join("\n")
+}
+
+fn is_python_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 #[cfg(test)]
@@ -157,6 +180,28 @@ mod tests {
             "#matplotlib inline\n#pip install numpy\nimport os\n\n\n\n#%timeit -n 3\nsum(range(9))\n"
         );
         assert_eq!(program.lines(nb.cells()[2].id()), Some(6..8));
+    }
+
+    #[test]
+    fn indented_ipython_lines_keep_their_python_blocks_nonempty() {
+        assert_eq!(
+            as_python("if ready:\n    %timeit work()\nelse:\n    !date\n"),
+            "if ready:\n    pass #timeit work()\nelse:\n    pass #date\n"
+        );
+        assert_eq!(as_python("!date\n%timeit work()"), "#date\n#timeit work()");
+    }
+
+    #[test]
+    fn shell_capture_and_inspection_keep_their_names_in_the_program() {
+        let source = "x = !echo hi\nif x:\n    obj?\ntext = 'obj?'\nprint('x = !stay')";
+        let python = as_python(source);
+        assert_eq!(
+            python,
+            "x = []      \nif x:\n    obj \ntext = 'obj?'\nprint('x = !stay')"
+        );
+        for (before, after) in source.lines().zip(python.lines()) {
+            assert_eq!(before.len(), after.len(), "{before:?}");
+        }
     }
 
     #[test]

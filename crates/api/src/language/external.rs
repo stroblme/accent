@@ -72,7 +72,7 @@ pub(crate) struct External {
 }
 
 /// Start `argv` as a provider rooted at `root`; paths remain relative to
-/// `vault_root`, which differs in multi-project vaults. `busy_as` labels
+/// `vault_root`, which differs in multi-project vaults. `busy` labels
 /// background progress, or `None` to suppress it. Only ghost indexing
 /// reports this progress; routine server checks would keep status constantly busy.
 pub(crate) async fn start(
@@ -80,7 +80,7 @@ pub(crate) async fn start(
     root: PathBuf,
     vault_root: PathBuf,
     events: Sender<Event>,
-    busy_as: Option<&'static str>,
+    busy: Option<Busy>,
 ) -> Result<Arc<dyn Language>> {
     let name = argv.first().cloned().unwrap_or_default();
     let (client, notifications) = Client::spawn(&argv, &root)
@@ -97,7 +97,7 @@ pub(crate) async fn start(
         docs.clone(),
         vault_root.clone(),
         encoding,
-        busy_as,
+        busy,
         events,
     ));
 
@@ -120,15 +120,39 @@ pub(crate) async fn start(
     }))
 }
 
+/// A progress source; its generation prevents an exiting ghost server from
+/// changing the status of the session that replaced it.
+pub(crate) struct Busy {
+    pub(super) what: &'static str,
+    pub(super) generation: u64,
+    pub(super) current: Arc<Mutex<u64>>,
+}
+
+impl Busy {
+    fn send(&self, events: &Sender<Event>, busy: bool, message: Option<String>) -> bool {
+        let current = locked(&self.current);
+        if *current != self.generation {
+            return true;
+        }
+        events
+            .send(Event::Busy {
+                what: self.what.to_string(),
+                busy,
+                message,
+            })
+            .is_ok()
+    }
+}
+
 /// Map published diagnostics to open tabs and progress to [`Event`]s for
-/// servers with `busy_as`. Drop diagnostics for unopened files, since
+/// servers with `busy`. Drop diagnostics for unopened files, since
 /// servers may publish for an entire project and no tab can display them.
 async fn forward_notifications(
     mut notifications: Notifications,
     docs: Docs,
     vault_root: PathBuf,
     encoding: Encoding,
-    busy_as: Option<&'static str>,
+    busy: Option<Busy>,
     events: Sender<Event>,
 ) {
     // What this server has marks on screen for, so a crash can take exactly those away again.
@@ -181,21 +205,13 @@ async fn forward_notifications(
                 }
             }
             "$/progress" => {
-                let Some(what) = busy_as else { continue };
+                let Some(source) = &busy else { continue };
                 let Some((busy, message)) = progress_of(&n.params) else {
                     continue;
                 };
                 working = busy;
-                let what = what.to_string();
-                tracing::debug!("{what}: busy={busy} {message:?}");
-                if events
-                    .send(Event::Busy {
-                        what,
-                        busy,
-                        message,
-                    })
-                    .is_err()
-                {
+                tracing::debug!("{}: busy={busy} {message:?}", source.what);
+                if !source.send(&events, busy, message) {
                     break;
                 }
             }
@@ -235,12 +251,8 @@ async fn forward_notifications(
     // mid-index would leave the status bar saying so for the life of the vault. Only then: one
     // that exits idle has nothing to take back, and could take back a line its successor, started
     // in the meantime, has just put up.
-    if let Some(what) = busy_as.filter(|_| working) {
-        let _ = events.send(Event::Busy {
-            what: what.to_string(),
-            busy: false,
-            message: None,
-        });
+    if let Some(source) = busy.filter(|_| working) {
+        let _ = source.send(&events, false, None);
     }
     // And nothing will ever correct what it painted: a crash leaves errors frozen in the gutter
     // of every document it had marked, which read as current until the tab is reopened. An empty
@@ -917,6 +929,62 @@ mod tests {
     use crate::language::Severity;
     use serde_json::json;
 
+    #[test]
+    fn an_old_ghost_session_cannot_clear_its_successor() {
+        let current = Arc::new(Mutex::new(1));
+        let docs: Docs = Arc::new(Mutex::new(HashMap::new()));
+        let (events, seen) = std::sync::mpsc::channel();
+        let progress = || accent_lsp::Notification {
+            method: "$/progress".to_string(),
+            params: json!({"value": {"kind": "begin", "title": "Indexing"}}),
+        };
+        let start = |generation, events| {
+            let (sender, notifications) = tokio::sync::mpsc::unbounded_channel();
+            let busy = Busy {
+                what: "suggestions",
+                generation,
+                current: current.clone(),
+            };
+            let docs = docs.clone();
+            let task = accent_lsp::runtime().spawn(forward_notifications(
+                notifications,
+                docs,
+                PathBuf::from("/vault"),
+                Encoding::Utf16,
+                Some(busy),
+                events,
+            ));
+            (sender, task)
+        };
+
+        let (old, old_task) = start(1, events.clone());
+        old.send(progress()).unwrap();
+        assert!(matches!(
+            seen.recv().unwrap(),
+            Event::Busy { busy: true, .. }
+        ));
+        *locked(&current) = 2;
+        let (new, new_task) = start(2, events);
+        new.send(progress()).unwrap();
+        assert!(matches!(
+            seen.recv().unwrap(),
+            Event::Busy { busy: true, .. }
+        ));
+
+        drop(old);
+        accent_lsp::runtime().block_on(old_task).unwrap();
+        assert!(
+            seen.try_recv().is_err(),
+            "old exit must not clear new indexing"
+        );
+        drop(new);
+        accent_lsp::runtime().block_on(new_task).unwrap();
+        assert!(matches!(
+            seen.recv().unwrap(),
+            Event::Busy { busy: false, .. }
+        ));
+    }
+
     /// merl's `$/progress`, as `merl.c` sends it: busy from `begin` through every `report`, with
     /// the report's own words, and done at `end`.
     #[test]
@@ -1276,11 +1344,15 @@ mod tests {
                 line: 0,
                 character: typed.chars().count() as u32,
             };
-            assert_eq!(
-                vault.inline_completion("b.md", at).await.unwrap(),
-                Some(" already boiling.".to_string()),
-                "the rest of the line the vault already wrote"
-            );
+            let mut first = None;
+            for _ in 0..100 {
+                first = vault.inline_completion("b.md", at).await.unwrap();
+                if first.is_some() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            assert_eq!(first, Some(" already boiling.".to_string()));
 
             // A note written after the session started is not in the index until the document
             // it was typed in settles.

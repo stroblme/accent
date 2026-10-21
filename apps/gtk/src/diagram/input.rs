@@ -103,7 +103,16 @@ impl DiagramTab {
             #[upgrade_or]
             glib::Propagation::Proceed,
             move |_, key, _, state| {
-                let ctrl = state.contains(gdk::ModifierType::CONTROL_MASK);
+                let ctrl = state.contains(crate::platform::PRIMARY_MODIFIER);
+                if !ctrl
+                    && state.intersects(
+                        gdk::ModifierType::CONTROL_MASK
+                            | gdk::ModifierType::META_MASK
+                            | gdk::ModifierType::SUPER_MASK,
+                    )
+                {
+                    return glib::Propagation::Proceed;
+                }
                 let alt = state.contains(gdk::ModifierType::ALT_MASK);
                 let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
                 let step = if shift { 10.0 } else { 1.0 };
@@ -189,7 +198,7 @@ impl DiagramTab {
             glib::Propagation::Proceed,
             move |wheel, dx, dy| {
                 // Ctrl zooms (`zoom::zoom_on_wheel`), and Shift and a sideways swipe scroll across.
-                let held = gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::SHIFT_MASK;
+                let held = crate::platform::PRIMARY_MODIFIER | gdk::ModifierType::SHIFT_MASK;
                 if wheel.current_event_state().intersects(held) || dx.abs() >= dy.abs() {
                     return glib::Propagation::Proceed;
                 }

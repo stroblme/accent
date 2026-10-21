@@ -158,7 +158,10 @@ fn new_file_with(ops: &Rc<Ops>, dir: &str, name: &str, templates: Vec<String>) {
 
     let picker = template_picker(&templates);
     if let Some(picker) = &picker {
-        let row = labelled("Template", picker);
+        picker.set_tooltip_text(Some(
+            "Fills the file's content. New from Template uses the template's target.",
+        ));
+        let row = labelled("Template content", picker);
         // A prefilled name may already say the file will be markdown, and nothing has changed yet.
         row.set_visible(is_note(name.trim()));
         entry.connect_changed({

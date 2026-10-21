@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use accent_api::{Completion, Completions, Diagnostic, Pos, Vault};
 use accent_core::notebook::{CellId, Format, Kind, Program};
+use gtk::glib;
 use gtk::prelude::*;
-use gtk::{gdk, glib};
 use sourceview5::prelude::*;
 
 use super::cell::{CellView, Editor};
@@ -59,6 +59,8 @@ struct CellEditor {
     view: sourceview5::View,
     buffer: sourceview5::Buffer,
     painted: diagnostics::Painted,
+    /// Width used to cut the line-end messages on the last layout.
+    width: Cell<i32>,
     signature: signature::Help,
     /// The completion popup, made once the cell is selected ([`NotebookTab::complete_in`]).
     completion: RefCell<Option<Rc<Session>>>,
@@ -433,6 +435,18 @@ impl NotebookTab {
         *self.lang.waiting.borrow_mut() = cells;
     }
 
+    /// Recut each built cell's full diagnostic messages after its width or font changes.
+    pub(super) fn refit_diagnostics(&self, font_changed: bool) {
+        for cell in self.lang.editors.borrow().values() {
+            let width = cell.view.visible_rect().width();
+            if (cell.width.replace(width) != width || font_changed)
+                && !cell.painted.messages().is_empty()
+            {
+                cell.painted.paint();
+            }
+        }
+    }
+
     /// The status bar's errors and warnings over every cell, as a code tab counts its own.
     pub fn diagnostics_counts(&self) -> Option<String> {
         let mut all: Vec<Diagnostic> = self
@@ -465,6 +479,21 @@ impl NotebookTab {
     /// Give code cell `view`'s editor, just built, the code tab's keys and the language features
     /// over the notebook's document, and the diagnostics that waited for it.
     pub(super) fn attach_cell(self: &Rc<Self>, view: &CellView, editor: &Editor) {
+        if view.kind == Kind::Markdown {
+            let keys = gtk::EventControllerKey::new();
+            keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+            keys.connect_key_pressed(|keys, key, _, state| {
+                let Some(view) = keys.widget().and_downcast::<sourceview5::View>() else {
+                    return glib::Propagation::Proceed;
+                };
+                if !view.is_editable() {
+                    return glib::Propagation::Proceed;
+                }
+                crate::typing::on_key(&view, key, state)
+            });
+            editor.view.add_controller(keys);
+            return;
+        }
         if view.kind != Kind::Code {
             return;
         }
@@ -484,6 +513,7 @@ impl NotebookTab {
             view: editor.view.clone(),
             buffer: editor.buffer.clone(),
             painted,
+            width: Cell::new(0),
             signature: signature::Help::default(),
             completion: RefCell::default(),
             snippet: RefCell::default(),
@@ -499,7 +529,7 @@ impl NotebookTab {
         click.connect_pressed(move |gesture, _, x, y| {
             let ctrl = gesture
                 .current_event_state()
-                .contains(gdk::ModifierType::CONTROL_MASK);
+                .contains(crate::platform::PRIMARY_MODIFIER);
             let view = gesture.widget().and_downcast::<sourceview5::View>();
             let (true, Some(tab), Some(view)) = (ctrl, weak.upgrade(), view) else {
                 return;
@@ -587,6 +617,25 @@ impl NotebookTab {
         };
         let iter = lang::iter_at(&editor.buffer, Pos { line, ..at });
         self.goto(id, iter.offset());
+        true
+    }
+
+    /// Go to a position in a marimo file, whose wrapper lines are outside the cell program.
+    pub fn go_to_file(self: &Rc<Self>, at: Pos) -> bool {
+        let found = (|| {
+            let model = self.model.borrow();
+            (model.format() == Format::Marimo).then_some(())?;
+            let text = model.to_text().replace("\r\n", "\n");
+            let byte = accent_api::language::byte_of(&text, at)?;
+            let (cell, offset) = model.place(byte)?;
+            let cell = &model.cells()[cell];
+            let chars = cell.source()[..offset].chars().count() as i32;
+            Some((cell.id(), chars))
+        })();
+        let Some((id, chars)) = found else {
+            return false;
+        };
+        self.goto(id, chars);
         true
     }
 

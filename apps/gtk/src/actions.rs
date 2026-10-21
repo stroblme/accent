@@ -9,11 +9,11 @@ use accent_core::conflict::Take;
 /// remain discoverable. AdwTabView owns positional tab navigation; MRU cycling is
 /// implemented here because libadwaita does not track usage order.
 pub const ACTIONS: &[(&str, &str, &[&str])] = &[
-    ("win.save", "Save", &["<Control>s"]),
-    ("win.save-as", "Save As…", &["<Control><Shift>s"]),
-    ("win.open-file", "Open File…", &["<Control>o"]),
-    ("win.new-file", "New File", &["<Control>n"]),
-    ("win.new-folder", "New Folder", &["<Control><Shift>n"]),
+    ("win.save", "Save", &["<Primary>s"]),
+    ("win.save-as", "Save As…", &["<Primary><Shift>s"]),
+    ("win.open-file", "Open File…", &["<Primary>o"]),
+    ("win.new-file", "New File", &["<Primary>n"]),
+    ("win.new-folder", "New Folder", &["<Primary><Shift>n"]),
     ("win.new-drawing", "New Drawing", &[]),
     ("win.upload", "Upload Files…", &[]),
     // No chords: `Ctrl+P`, the HIG's Print, is the palette (DESIGN.md, Deviations).
@@ -22,18 +22,18 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.export-html", "Export as HTML…", &[]),
     ("win.export-png", "Export as PNG…", &[]),
     ("win.export-svg", "Export as SVG…", &[]),
-    ("win.close-tab", "Close Tab", &["<Control>w"]),
+    ("win.close-tab", "Close Tab", &["<Primary>w"]),
     ("win.close-pane-tabs", "Close Tabs in Pane", &[]),
     // Most-recently-used order, so one press is the note before this one. Both spellings of the
     // backwards chord, because X11 delivers Shift+Tab as `ISO_Left_Tab` and which of the two a
     // GTK trigger matches is a question of the keymap rather than of the table.
-    ("win.next-tab", "Next Tab", &["<Control>Tab"]),
+    ("win.next-tab", "Next Tab", &["<Primary>Tab"]),
     (
         "win.previous-tab",
         "Previous Tab",
-        &["<Control><Shift>Tab", "<Control><Shift>ISO_Left_Tab"],
+        &["<Primary><Shift>Tab", "<Primary><Shift>ISO_Left_Tab"],
     ),
-    ("win.terminal", "New Terminal", &["<Control>j"]),
+    ("win.terminal", "New Terminal", &["<Primary>j"]),
     ("win.terminal-remote", "New Remote Terminal…", &[]),
     // A shell here from a remote vault's window, where New Terminal opens one on the host.
     ("win.terminal-local", "New Local Terminal", &[]),
@@ -55,7 +55,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.paste-plain", "Paste as Plain Text", &[]),
     // Split Right takes VS Code's chord; the other three are menu and palette only, because
     // three more accelerators for the same idea is three more chords nobody has to spare.
-    ("win.split-right", "Split Right", &["<Control>backslash"]),
+    ("win.split-right", "Split Right", &["<Primary>backslash"]),
     ("win.split-left", "Split Left", &[]),
     ("win.split-up", "Split Up", &[]),
     ("win.split-down", "Split Down", &[]),
@@ -87,46 +87,46 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.divider-up", "Move Divider Up", &[]),
     ("win.divider-down", "Move Divider Down", &[]),
     ("app.new-window", "New Window", &[]),
-    ("app.open-local", "Open Local…", &["<Control><Shift>o"]),
+    ("app.open-local", "Open Local…", &["<Primary><Shift>o"]),
     ("app.open-remote", "Open Remote…", &[]),
-    ("win.open-recent", "Open Recent…", &["<Control>r"]),
+    ("win.open-recent", "Open Recent…", &["<Primary>r"]),
     ("app.close-vault", "Close Vault", &[]),
     ("win.reload-window", "Reload Window", &[]),
     // Save's session half, for the primary menu of a window of shells: a focused shell keeps
     // `Ctrl+S`, and Save over a note in front saves the note.
     ("win.save-session", "Save Session", &[]),
     ("win.close-session", "Close Session", &[]),
-    ("app.quit", "Quit", &["<Control>q"]),
-    ("win.palette-files", "Go to File…", &["<Control>e"]),
+    ("app.quit", "Quit", &["<Primary>q"]),
+    ("win.palette-files", "Go to File…", &["<Primary>e"]),
     (
         "win.palette-commands",
         "Run a Command…",
-        &["<Control>p", "<Control><Shift>p"],
+        &["<Primary>p", "<Primary><Shift>p"],
     ),
     // The palette's `@` and `#` modes, for a reader who would rather bind them than type them.
     ("win.palette-symbols", "Go to Symbol…", &[]),
     ("win.palette-tags", "Filter by Tag…", &[]),
-    ("win.find", "Find", &["<Control>f"]),
-    ("win.replace", "Replace", &["<Control>h"]),
+    ("win.find", "Find", &["<Primary>f"]),
+    ("win.replace", "Replace", &["<Primary>h"]),
     (
         "win.replace-in-files",
         "Replace in Files",
-        &["<Control><Shift>h"],
+        &["<Primary><Shift>h"],
     ),
     ("win.find-next", "Find Next", &["F3"]),
     ("win.find-previous", "Find Previous", &["<Shift>F3"]),
-    ("win.goto-line", "Go to Line", &["<Control>g"]),
-    ("win.duplicate-line", "Duplicate Line", &["<Control>d"]),
-    ("win.delete-line", "Delete Line", &["<Control>l"]),
+    ("win.goto-line", "Go to Line", &["<Primary>g"]),
+    ("win.duplicate-line", "Duplicate Line", &["<Primary>d"]),
+    ("win.delete-line", "Delete Line", &["<Primary>l"]),
     (
         "win.newline-below",
         "Insert Line Below",
-        &["<Control>Return"],
+        &["<Primary>Return"],
     ),
-    ("win.toggle-comment", "Toggle Comment", &["<Control>k"]),
+    ("win.toggle-comment", "Toggle Comment", &["<Primary>k"]),
     ("win.toggle-wrap", "Toggle Word Wrap", &["<Alt>z"]),
-    ("win.scroll-up", "Scroll Up", &["<Control>Up"]),
-    ("win.scroll-down", "Scroll Down", &["<Control>Down"]),
+    ("win.scroll-up", "Scroll Up", &["<Primary>Up"]),
+    ("win.scroll-down", "Scroll Down", &["<Primary>Down"]),
     ("win.caret-above", "Add Caret Above", &["<Shift><Alt>Up"]),
     ("win.caret-below", "Add Caret Below", &["<Shift><Alt>Down"]),
     // JetBrains' chord: `Ctrl+D`, VS Code's, is Duplicate Line here.
@@ -139,33 +139,33 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     (
         "win.all-occurrences",
         "Select All Occurrences",
-        &["<Control><Shift>l"],
+        &["<Primary><Shift>l"],
     ),
     (
         "win.zoom-in",
         "Zoom In",
-        &["<Control>plus", "<Control>equal", "<Control>KP_Add"],
+        &["<Primary>plus", "<Primary>equal", "<Primary>KP_Add"],
     ),
     (
         "win.zoom-out",
         "Zoom Out",
-        &["<Control>minus", "<Control>KP_Subtract"],
+        &["<Primary>minus", "<Primary>KP_Subtract"],
     ),
     (
         "win.zoom-reset",
         "Reset Zoom",
-        &["<Control>0", "<Control>KP_0"],
+        &["<Primary>0", "<Primary>KP_0"],
     ),
     ("win.sidebar", "Toggle Sidebar", &["F9"]),
-    ("win.pane-files", "Files Pane", &["<Control><Shift>e"]),
-    ("win.pane-search", "Search Pane", &["<Control><Shift>f"]),
+    ("win.pane-files", "Files Pane", &["<Primary><Shift>e"]),
+    ("win.pane-search", "Search Pane", &["<Primary><Shift>f"]),
     // No chord: it is the Search pane's own All button, and the palette is how a command with
     // no chord is found.
     ("win.search-all", "Search Ignored Files", &[]),
-    ("win.pane-info", "Info Pane", &["<Control><Shift>b"]),
+    ("win.pane-info", "Info Pane", &["<Primary><Shift>b"]),
     // No chord: the Info pane's own section, found by name.
     ("win.file-details", "Show File Details", &[]),
-    ("win.pane-git", "Git Pane", &["<Control><Shift>g"]),
+    ("win.pane-git", "Git Pane", &["<Primary><Shift>g"]),
     ("win.git-sync", "Sync", &[]),
     ("win.git-sync-all", "Sync All Repositories", &[]),
     ("win.git-merge", "Merge Branch…", &[]),
@@ -195,11 +195,11 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.hunk-both", "Keep Both Versions", &[]),
     ("win.conflict-next", "Next Conflict", &[]),
     ("win.conflict-previous", "Previous Conflict", &[]),
-    ("win.pane-outline", "Outline Pane", &["<Control><Shift>w"]),
+    ("win.pane-outline", "Outline Pane", &["<Primary><Shift>w"]),
     (
         "win.pane-properties",
         "Properties Pane",
-        &["<Control><Shift>a"],
+        &["<Primary><Shift>a"],
     ),
     // Back and forward walk the active pane's history, over every kind of document. They take
     // the chords a browser uses for the same idea, and the mouse's side buttons with them.
@@ -231,7 +231,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     // on a page is Go to Source too, as in every LaTeX viewer.
     ("win.pdf-go-to-source", "Go to Source", &[]),
     ("win.show-in-pdf", "Show in PDF", &[]),
-    ("win.pdf-draw", "Drawing", &["<Control><Shift>i"]),
+    ("win.pdf-draw", "Drawing", &["<Primary><Shift>i"]),
     ("win.pdf-pen", "Pen", &[]),
     ("win.pdf-highlighter", "Highlighter", &[]),
     ("win.pdf-eraser", "Eraser", &[]),
@@ -313,7 +313,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.notebook-clear-outputs", "Clear Outputs", &[]),
     ("win.notebook-clear-all-outputs", "Clear All Outputs", &[]),
     ("win.notebook-open-text", "Open as Text", &[]),
-    ("win.view-mode", "Toggle Preview", &["<Control>m"]),
+    ("win.view-mode", "Toggle Preview", &["<Primary>m"]),
     ("win.minimap", "Toggle Minimap", &[]),
     // No chord: `Ctrl+H`, the file managers' own, is Replace here.
     ("win.show-hidden-files", "Show Hidden Files", &[]),
@@ -325,12 +325,11 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     (
         "win.follow-link",
         "Go to Definition",
-        &["<Control><Shift>Return", "F12"],
+        &["<Primary><Shift>Return", "F12"],
     ),
-    // Control+Shift chords, which the terminal's reserved set already lets through, and which no
-    // GtkSourceView built-in claims.
-    ("win.fold", "Fold", &["<Control><Shift>bracketleft"]),
-    ("win.unfold", "Unfold", &["<Control><Shift>bracketright"]),
+    // GTK reports Shift+[ and Shift+] as brace keysyms on a US keyboard.
+    ("win.fold", "Fold", &["<Primary>braceleft"]),
+    ("win.unfold", "Unfold", &["<Primary>braceright"]),
     ("win.fold-all", "Fold All", &[]),
     ("win.unfold-all", "Unfold All", &[]),
     (
@@ -342,7 +341,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     (
         "win.debug-toggle-breakpoint",
         "Toggle Breakpoint",
-        &["<Control>F9"],
+        &["<Primary>F9"],
     ),
     (
         "win.debug-remove-breakpoints",
@@ -351,7 +350,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ),
     ("win.debug-watch", "Add to Watch", &[]),
     // VS Code's F5 is Presentation Mode's outside a session here.
-    ("win.debug-start", "Start Debugging", &["<Control>F5"]),
+    ("win.debug-start", "Start Debugging", &["<Primary>F5"]),
     // Enabled as the session's state allows (`App::sync_debug`), so the Code pane's strip greys
     // what cannot be done now and the palette's entries do nothing. VS Code's keys, heard only
     // while a session runs ([`SESSION`]).
@@ -363,7 +362,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     (
         "win.debug-restart",
         "Restart Debugging",
-        &["<Control><Shift>F5"],
+        &["<Primary><Shift>F5"],
     ),
     ("win.debug-stop", "Stop Debugging", &["<Shift>F5"]),
     ("win.debug-console", "Debug Console", &[]),
@@ -374,17 +373,17 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     (
         "win.new-from-template",
         "New from Template…",
-        &["<Control><Shift>d"],
+        &["<Primary><Shift>d"],
     ),
     ("win.insert-template", "Insert Template…", &[]),
     ("win.present", "Presentation Mode", &["F5"]),
     ("win.fullscreen", "Fullscreen", &["F11"]),
-    ("win.preferences", "Preferences", &["<Control>comma"]),
+    ("win.preferences", "Preferences", &["<Primary>comma"]),
     // GNOME's chord for it (`Ctrl+?`); `F1`, help, is on the never-bind list.
     (
         "win.shortcuts",
         "Keyboard Shortcuts",
-        &["<Control>question"],
+        &["<Primary>question"],
     ),
     ("win.menu", "Primary Menu", &["F10"]),
     ("win.about", "About accent", &[]),
@@ -1057,11 +1056,11 @@ impl Keys {
 ///
 /// Application accelerators precede VTE, so `Shell::apply_accels` must unbind all others.
 /// Keep Close Tab, MRU tab cycling, pane and divider moves, New Terminal, zoom, Fullscreen,
-/// Go to File and Control+Shift chords. These preserve navigation and window control;
+/// Go to File and Primary+Shift or Control+Shift chords. These preserve navigation and window control;
 /// readline alternatives remain for Ctrl+W's delete-word and Ctrl+E's end-of-line.
 ///
-/// Matching uses accelerator spelling. Hand-written `<Primary>` or `<Ctrl>` aliases are not
-/// recognised; parsing would require GTK initialisation unavailable to these tests.
+/// Matching uses accelerator spelling. Hand-written `<Ctrl>` aliases are not recognised;
+/// parsing would require GTK initialisation unavailable to these tests.
 fn reserved(action: &str, accel: &str) -> bool {
     matches!(
         action,
@@ -1082,7 +1081,9 @@ fn reserved(action: &str, accel: &str) -> bool {
             | "win.zoom-reset"
             | "win.fullscreen"
             | "win.palette-files"
-    ) || (accel.contains("<Control>") && accel.contains("<Shift>"))
+            | "win.fold"
+            | "win.unfold"
+    ) || ((accel.contains("<Primary>") || accel.contains("<Control>")) && accel.contains("<Shift>"))
 }
 
 /// Keep [`reserved`] shortcuts, or only terminal Copy and Paste when forwarding all keys.
@@ -1497,7 +1498,7 @@ mod tests {
     #[test]
     fn accels_for_prefers_the_override() {
         let mut config = Config::default();
-        assert_eq!(accels_for(&config, "win.save"), ["<Control>s"]);
+        assert_eq!(accels_for(&config, "win.save"), ["<Primary>s"]);
         assert!(accels_for(&config, "win.about").is_empty());
         assert!(accels_for(&config, "win.nonexistent").is_empty());
 
@@ -1819,10 +1820,10 @@ mod tests {
     fn a_focused_shell_keeps_everything_but_the_reserved_set() {
         // Kept: closing a tab, opening a shell, scaling one, leaving fullscreen, and every
         // Ctrl+Shift chord in the table — Copy and Paste in Terminal among them.
-        assert!(reserved("win.close-tab", "<Control>w"));
-        assert!(reserved("win.terminal", "<Control>j"));
+        assert!(reserved("win.close-tab", "<Primary>w"));
+        assert!(reserved("win.terminal", "<Primary>j"));
         assert!(reserved("win.fullscreen", "F11"));
-        assert!(reserved("win.new-folder", "<Control><Shift>n"));
+        assert!(reserved("win.new-folder", "<Primary><Shift>n"));
         assert!(reserved("win.terminal-copy", "<Control><Shift>c"));
         assert!(reserved("win.terminal-paste", "<Control><Shift>v"));
         // Moving a tab has to mean the same thing over every tab, terminals included, and
@@ -1830,25 +1831,27 @@ mod tests {
         assert!(reserved("win.move-tab-left", "<Shift><Alt>Left"));
         assert!(reserved("win.move-tab-right", "<Shift><Alt>Right"));
         // So does moving a divider, which is the pane's and not the tab's.
-        assert!(reserved("win.divider-left", "<Control><Alt>Left"));
-        assert!(reserved("win.divider-down", "<Control><Alt>Down"));
+        assert!(reserved("win.divider-left", "<Primary><Alt>Left"));
+        assert!(reserved("win.divider-down", "<Primary><Alt>Down"));
         // Every spelling of the zoom chords, or Ctrl+= would zoom the shell while Ctrl+plus went
         // to readline.
-        for accel in ["<Control>plus", "<Control>equal", "<Control>KP_Add"] {
+        for accel in ["<Primary>plus", "<Primary>equal", "<Primary>KP_Add"] {
             assert!(reserved("win.zoom-in", accel));
         }
-        assert!(reserved("win.zoom-out", "<Control>minus"));
-        assert!(reserved("win.zoom-reset", "<Control>0"));
+        assert!(reserved("win.zoom-out", "<Primary>minus"));
+        assert!(reserved("win.zoom-reset", "<Primary>0"));
         // Go to File, so a file is one chord away from a shell as it is from a note.
-        assert!(reserved("win.palette-files", "<Control>e"));
+        assert!(reserved("win.palette-files", "<Primary>e"));
+        assert!(reserved("win.fold", "<Primary>braceleft"));
+        assert!(reserved("win.unfold", "<Primary>braceright"));
         // The shell's: plain Ctrl, function keys, and the chords readline reaches for most.
         for (action, accel) in [
-            ("win.save", "<Control>s"),
-            ("win.duplicate-line", "<Control>d"),
+            ("win.save", "<Primary>s"),
+            ("win.duplicate-line", "<Primary>d"),
             ("win.next-occurrence", "<Alt>j"),
-            ("win.toggle-comment", "<Control>k"),
-            ("win.delete-line", "<Control>l"),
-            ("win.palette-commands", "<Control>p"),
+            ("win.toggle-comment", "<Primary>k"),
+            ("win.delete-line", "<Primary>l"),
+            ("win.palette-commands", "<Primary>p"),
             ("win.find-previous", "<Shift>F3"),
             ("win.menu", "F10"),
         ] {
@@ -1863,10 +1866,10 @@ mod tests {
         assert!(kept("win.terminal-copy", "<Control><Shift>c", true));
         assert!(kept("win.terminal-paste", "<Control><Shift>v", true));
         for (action, accel) in [
-            ("win.close-tab", "<Control>w"),
-            ("win.next-tab", "<Control>Tab"),
-            ("win.palette-files", "<Control>e"),
-            ("win.palette-commands", "<Control><Shift>p"),
+            ("win.close-tab", "<Primary>w"),
+            ("win.next-tab", "<Primary>Tab"),
+            ("win.palette-files", "<Primary>e"),
+            ("win.palette-commands", "<Primary><Shift>p"),
             ("win.fullscreen", "F11"),
         ] {
             assert!(!kept(action, accel, true), "{action} eats {accel}");

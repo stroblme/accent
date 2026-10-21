@@ -588,7 +588,7 @@ fn connect_view(tab: &Rc<Tab>) {
         move |gesture, _, x, y| {
             if !gesture
                 .current_event_state()
-                .contains(gdk::ModifierType::CONTROL_MASK)
+                .contains(crate::platform::PRIMARY_MODIFIER)
             {
                 return;
             }
@@ -617,7 +617,7 @@ fn connect_view(tab: &Rc<Tab>) {
         move |controller, x, y| {
             let ctrl = controller
                 .current_event_state()
-                .contains(gdk::ModifierType::CONTROL_MASK);
+                .contains(crate::platform::PRIMARY_MODIFIER);
             tab.follow_hint(x, y, ctrl);
         }
     ));

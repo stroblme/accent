@@ -2,6 +2,7 @@
 //! into a note or a PDF at a location the index or a language server named.
 
 use super::*;
+use crate::open::Reveal;
 use accent_core::markdown;
 
 /// DESIGN.md, Motion: the References section follows the caret by 300 ms.
@@ -249,6 +250,16 @@ impl App {
         }
         // Any other anchor is a heading the note does not have.
         let missed = loc.anchor.clone();
+        if missed.is_none()
+            && accent_core::path::may_be_notebook(&key)
+            && self.doc_for(&key).is_none()
+        {
+            self.revealing
+                .borrow_mut()
+                .insert(key.clone(), Reveal::NotebookFilePos(at));
+            self.open_as(&key, how);
+            return;
+        }
         self.with_tab(&key, how, "go to", move |app, tab| {
             // A loose tab opened before a server named its file, a restored one say, joins it now.
             if doc::is_loose_key(&tab.rel())

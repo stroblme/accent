@@ -27,6 +27,12 @@ const DRAIN: Duration = Duration::from_secs(30);
 /// reports `all_off` afterward. `RUST_LOG=accent=debug` shows per-query timing and one `sidebar
 /// pass` per full-query pass.
 pub(super) fn bench_search(app: &Rc<App>, arg: &str) {
+    if arg == "hit" {
+        return bench_first_hit(app.clone());
+    }
+    if arg == "stale" {
+        return bench_stale_rows(app.clone());
+    }
     if let Some(rel) = arg.strip_prefix("seed:") {
         return bench_seed(app, rel);
     }
@@ -83,6 +89,139 @@ pub(super) fn bench_search(app: &Rc<App>, arg: &str) {
     };
     bench_search_indexed(app.clone(), Instant::now(), move |app| {
         bench_search_run(app, query, count)
+    });
+}
+
+/// Activate a Search row into a new, long note and inspect the first and second landing.
+fn bench_first_hit(app: Rc<App>) {
+    scratch_only(&app, "ACCENT_BENCH_SEARCH");
+    const REL: &str = "accent-bench-first-hit.md";
+    const QUERY: &str = "accentjumpneedle";
+    bench_search_indexed(app.clone(), Instant::now(), move |app| {
+        let Some(sidebar) = app.sidebar.get() else {
+            return bench_quit(&app);
+        };
+        let path = app.root().join(REL);
+        let mut body = "filler line for the first search hit\n".repeat(12_000);
+        body.push_str(QUERY);
+        body.push('\n');
+        if std::fs::write(&path, body).is_err() {
+            return bench_quit(&app);
+        }
+        sidebar.show_pane("search");
+        sidebar.set_search_text(QUERY);
+        glib::spawn_future_local(async move {
+            let mut row = None;
+            for _ in 0..200 {
+                row = app.sidebar.get().and_then(|sidebar| {
+                    sidebar.search_state().1.iter().position(|name| name == REL)
+                });
+                if row.is_some() {
+                    break;
+                }
+                glib::timeout_future(Duration::from_millis(25)).await;
+            }
+            let Some((view, row)) = app
+                .sidebar
+                .get()
+                .and_then(|sidebar| sidebar.search_view())
+                .zip(row)
+            else {
+                println!("bench search hit row=none");
+                let _ = std::fs::remove_file(path);
+                return bench_quit(&app);
+            };
+            for attempt in 1..=2 {
+                view.emit_by_name::<()>("activate", &[&(row as u32)]);
+                for _ in 0..100 {
+                    if app
+                        .doc_for(REL)
+                        .and_then(|doc| doc.tab().cloned())
+                        .is_some()
+                    {
+                        break;
+                    }
+                    glib::timeout_future(Duration::from_millis(20)).await;
+                }
+                glib::timeout_future(Duration::from_millis(500)).await;
+                let Some(tab) = app.doc_for(REL).and_then(|doc| doc.tab().cloned()) else {
+                    println!("bench search hit attempt={attempt} tab=none");
+                    continue;
+                };
+                let selected = tab
+                    .buffer
+                    .selection_bounds()
+                    .is_some_and(|(start, end)| tab.buffer.text(&start, &end, false) == QUERY);
+                let line = tab.buffer.iter_at_mark(&tab.buffer.get_insert()).line();
+                let scroll = tab.view.vadjustment().map_or(0.0, |a| a.value());
+                println!(
+                    "bench search hit attempt={attempt} selected={} line={line} scrolled={}",
+                    u8::from(selected),
+                    u8::from(scroll > 100.0)
+                );
+            }
+            let _ = std::fs::remove_file(path);
+            bench_quit(&app);
+        });
+    });
+}
+
+/// A changed query removes the old row before its debounced replacement can arrive.
+fn bench_stale_rows(app: Rc<App>) {
+    scratch_only(&app, "ACCENT_BENCH_SEARCH");
+    const REL: &str = "accent-bench-stale.md";
+    bench_search_indexed(app.clone(), Instant::now(), move |app| {
+        let Some(sidebar) = app.sidebar.get() else {
+            return bench_quit(&app);
+        };
+        let path = app.root().join(REL);
+        if std::fs::write(&path, "accentstaleneedle\n").is_err() {
+            return bench_quit(&app);
+        }
+        sidebar.show_pane("search");
+        sidebar.set_search_text("accentstaleneedle");
+        glib::spawn_future_local(async move {
+            let mut row = None;
+            for _ in 0..200 {
+                row = app.sidebar.get().and_then(|sidebar| {
+                    sidebar.search_state().1.iter().position(|name| name == REL)
+                });
+                if row.is_some() {
+                    break;
+                }
+                glib::timeout_future(Duration::from_millis(25)).await;
+            }
+            let Some((view, row)) = app
+                .sidebar
+                .get()
+                .and_then(|sidebar| sidebar.search_view())
+                .zip(row)
+            else {
+                println!("bench search stale row=none");
+                let _ = std::fs::remove_file(path);
+                return bench_quit(&app);
+            };
+            let sidebar = app.sidebar.get().unwrap();
+            let before = sidebar.search_state();
+            let entry = sidebar.search_boxes().unwrap()[0].clone();
+            let mut at = entry.text().chars().count() as i32;
+            entry.insert_text("x", &mut at);
+            let after = sidebar.search_state();
+            let cleared = after.1.is_empty();
+            view.emit_by_name::<()>("activate", &[&(row as u32)]);
+            glib::timeout_future(Duration::from_millis(500)).await;
+            let opened = app.doc_for(REL).is_some();
+            println!(
+                "bench search stale before={:?} after={:?} cleared={} opened={}",
+                before.1,
+                after.1,
+                u8::from(cleared),
+                u8::from(opened)
+            );
+            let _ = std::fs::remove_file(path);
+            assert!(cleared && !opened, "old Search row remained activatable");
+            bench_quit(&app);
+        });
     });
 }
 

@@ -458,6 +458,8 @@ pub(crate) struct Languages {
     pub(crate) events: Sender<Event>,
     /// One session per (server, root): the cell makes concurrent openers await one start.
     pub(crate) sessions: Mutex<HashMap<Key, Session>>,
+    /// Refuse a new session after window close, including one whose start is still in flight.
+    closed: AtomicBool,
     /// Each open document's provider, session and prose flag. Closing the last
     /// document stops its session. A `None` key denotes prose with word
     /// suggestions but no session.
@@ -465,6 +467,8 @@ pub(crate) struct Languages {
     /// Whether the vault runs a ghost-text session; the preference behind it is global, so a
     /// vault is told it once and every document follows.
     pub(crate) ghost: AtomicBool,
+    /// Serializes ghost progress with toggles and replacement sessions.
+    ghost_busy: Arc<Mutex<u64>>,
     /// When the ghost session was started within the last [`GHOST_WINDOW`]; `None` once the
     /// vault has given up on it.
     ghost_starts: Mutex<Option<Vec<Instant>>>,
@@ -511,8 +515,10 @@ impl Languages {
             db,
             events,
             sessions: Mutex::new(HashMap::new()),
+            closed: AtomicBool::new(false),
             docs: Mutex::new(HashMap::new()),
             ghost: AtomicBool::new(true),
+            ghost_busy: Arc::new(Mutex::new(0)),
             ghost_starts: Mutex::new(Some(Vec::new())),
             words: Arc::new(AtomicBool::new(true)),
             listing,
@@ -535,6 +541,15 @@ impl Languages {
                 accent_lsp::runtime().spawn(async move { me.ghost_session().await });
             }
             return;
+        }
+        {
+            let mut generation = locked(&self.ghost_busy);
+            *generation += 1;
+            let _ = self.events.send(Event::Busy {
+                what: "suggestions".to_string(),
+                busy: false,
+                message: None,
+            });
         }
         let key = (GHOST.to_string(), self.root.clone());
         let running = locked(&self.sessions).remove(&key);
@@ -561,6 +576,9 @@ impl Languages {
     ) -> Result<Arc<dyn Language>> {
         let cell = {
             let mut sessions = locked(&self.sessions);
+            if self.closed.load(Ordering::SeqCst) {
+                return Err(accent_core::Error::Cancelled.into());
+            }
             // A server that has exited answers nothing; the next open gets a fresh one.
             if sessions
                 .get(&key)
@@ -571,7 +589,20 @@ impl Languages {
             }
             sessions.entry(key).or_default().clone()
         };
-        cell.get_or_try_init(|| start).await.cloned()
+        let provider = cell
+            .get_or_try_init(|| async {
+                if self.closed.load(Ordering::SeqCst) {
+                    return Err(accent_core::Error::Cancelled.into());
+                }
+                start.await
+            })
+            .await?
+            .clone();
+        if self.closed.load(Ordering::SeqCst) {
+            let _ = provider.shutdown().await;
+            return Err(accent_core::Error::Cancelled.into());
+        }
+        Ok(provider)
     }
 
     /// Start one ghost-text session on the first prose document that needs it.
@@ -592,14 +623,21 @@ impl Languages {
             if !self.ghost_may_start(Instant::now()) {
                 return Err(Error::Language(format!("{GHOST} keeps exiting")));
             }
-            external::start(
-                argv,
-                root.clone(),
-                root,
-                self.events.clone(),
-                Some("suggestions"),
-            )
-            .await
+            let busy = {
+                let mut generation = locked(&self.ghost_busy);
+                *generation += 1;
+                let _ = self.events.send(Event::Busy {
+                    what: "suggestions".to_string(),
+                    busy: false,
+                    message: None,
+                });
+                external::Busy {
+                    what: "suggestions",
+                    generation: *generation,
+                    current: self.ghost_busy.clone(),
+                }
+            };
+            external::start(argv, root.clone(), root, self.events.clone(), Some(busy)).await
         };
         match self.session(key, start).await {
             // Switched off while it started, before `set_ghost` had a session to shut down.
@@ -659,8 +697,9 @@ impl Languages {
     }
 
     /// Stop all providers and clear documents. Blocks on the runtime; never call
-    /// from a runtime worker. `Local::drop` calls this on the closing thread.
+    /// from a runtime worker. Window close and `Local::drop` call this on the closing thread.
     pub(crate) fn shutdown(&self) {
+        self.closed.store(true, Ordering::SeqCst);
         let sessions: Vec<Session> = locked(&self.sessions)
             .drain()
             .map(|(_, cell)| cell)
@@ -1696,7 +1735,7 @@ mod tests {
 
     /// A server whose definition answer named `/dep/lib.rs`, as rust-analyzer's names a crate
     /// in `~/.cargo/registry`, and answers nothing else.
-    struct Naming;
+    struct Naming(Option<Arc<AtomicBool>>);
 
     impl Language for Naming {
         fn open(&self, _: &str, _: &str, _: String) -> Result<Support> {
@@ -1733,6 +1772,43 @@ mod tests {
         fn named(&self, path: &str) -> bool {
             path == "/dep/lib.rs"
         }
+        fn shutdown(&self) -> Fut<'_, ()> {
+            Box::pin(async move {
+                if let Some(stopped) = &self.0 {
+                    stopped.store(true, Ordering::SeqCst);
+                }
+                Ok(())
+            })
+        }
+    }
+
+    #[test]
+    fn a_session_starting_during_shutdown_is_stopped() {
+        let (events, _said) = std::sync::mpsc::channel();
+        let langs = Languages::new("/vault".into(), "/index.db".into(), events);
+        let stopped = Arc::new(AtomicBool::new(false));
+        let (began, seen) = std::sync::mpsc::channel();
+        let (resume, waiting) = tokio::sync::oneshot::channel::<()>();
+        let starting = accent_lsp::runtime().spawn({
+            let (langs, stopped) = (langs.clone(), stopped.clone());
+            async move {
+                langs
+                    .session(("server".to_string(), "/vault".into()), async move {
+                        began.send(()).unwrap();
+                        waiting.await.unwrap();
+                        Ok(Arc::new(Naming(Some(stopped))) as Arc<dyn Language>)
+                    })
+                    .await
+            }
+        });
+        seen.recv_timeout(crate::tests::BUDGET).unwrap();
+        langs.shutdown();
+        resume.send(()).unwrap();
+        let started = accent_lsp::runtime().block_on(async { starting.await.unwrap() });
+
+        assert!(started.is_err(), "a closed vault accepted a new provider");
+        assert!(stopped.load(Ordering::SeqCst));
+        assert!(locked(&langs.sessions).is_empty());
     }
 
     /// A file outside the vault joins the session that named it, holds it while open and starts
@@ -1742,7 +1818,8 @@ mod tests {
         let (events, _said) = std::sync::mpsc::channel();
         let langs = Languages::new("/vault".into(), "/index.db".into(), events);
         let key = ("rust-analyzer".to_string(), PathBuf::from("/vault"));
-        let running = tokio::sync::OnceCell::new_with(Some(Arc::new(Naming) as Arc<dyn Language>));
+        let running =
+            tokio::sync::OnceCell::new_with(Some(Arc::new(Naming(None)) as Arc<dyn Language>));
         locked(&langs.sessions).insert(key.clone(), Arc::new(running));
         let open = |rel: &str| {
             let cfg = LspConfig::default();
@@ -1906,7 +1983,15 @@ mod tests {
                 .unwrap();
             assert!(support.inline);
             let suggest = || async { vault.inline_completion("b.md", at).await.unwrap() };
-            assert_eq!(suggest().await, Some(" already boiling.".to_string()));
+            let mut first = None;
+            for _ in 0..100 {
+                first = suggest().await;
+                if first.is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            assert_eq!(first, Some(" already boiling.".to_string()));
             let merl = running().expect("merl runs");
 
             vault.set_ghost(false);

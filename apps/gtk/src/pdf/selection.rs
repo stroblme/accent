@@ -154,7 +154,7 @@ impl PdfTab {
         if view.mode() != super::Mode::Select || self.link_at(view, x, y).is_some() {
             return;
         }
-        if state.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
+        if state.contains(crate::platform::PRIMARY_MODIFIER) {
             self.pointed.set(view.page_point(x, y));
             let _ = view.activate_action("win.pdf-go-to-source", None);
             return;

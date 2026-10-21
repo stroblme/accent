@@ -73,6 +73,29 @@ pub(super) fn bench_kernel(app: &Rc<App>, rel: &str) {
         }
         println!("bench kernel_ms start {:.0}", ms_since(t));
         print_cell(&tab, 0, "");
+        let succeeded = tab.bench_execution(0).as_deref() == Some("Succeeded");
+        tab.bench_type(0, " ");
+        let edited = tab.bench_execution(0).as_deref() == Some("StaleSucceeded");
+        tab.undo();
+        let undone = tab.bench_execution(0).as_deref() == Some("StaleSucceeded");
+        println!(
+            "bench kernel status succeeded={} edited={} undone={}",
+            u8::from(succeeded),
+            u8::from(edited),
+            u8::from(undone)
+        );
+        act("win.notebook-run-cell");
+        tab.bench_type(0, " ");
+        let stale_running = tab.bench_execution(0).as_deref() == Some("StaleSucceeded");
+        if !done(&app, &tab, "old source").await {
+            return;
+        }
+        let stale_done = tab.bench_execution(0).as_deref() == Some("StaleSucceeded");
+        println!(
+            "bench kernel status stale_running={} stale_done={}",
+            u8::from(stale_running),
+            u8::from(stale_done)
+        );
         let code = app.sidebar.get().is_some_and(|s| s.has_pane("code"));
         let line = app.sidebar.get().and_then(|s| s.kernel_line());
         println!(
@@ -97,12 +120,21 @@ pub(super) fn bench_kernel(app: &Rc<App>, rel: &str) {
 
         tab.bench_select(3);
         act("win.notebook-run-cell");
+        tab.bench_type(3, " ");
+        let edited_running = tab.bench_execution(3).as_deref() == Some("Unrun");
         let t = Instant::now();
         if !interrupt(&app, &tab, 3).await {
             return;
         }
         println!("bench kernel_ms interrupt {:.0}", ms_since(t));
         print_cell(&tab, 3, "interrupted ");
+        let late_done = tab.bench_execution(3).as_deref() == Some("Unrun");
+        println!(
+            "bench kernel status edited_running={} late_done={}",
+            u8::from(edited_running),
+            u8::from(late_done)
+        );
+        tab.undo();
 
         act("win.notebook-run-all");
         if !answer(&app, &tab, "ada", false).await || !interrupt(&app, &tab, 3).await {
@@ -112,6 +144,10 @@ pub(super) fn bench_kernel(app: &Rc<App>, rel: &str) {
 
         let t = Instant::now();
         act("win.notebook-restart");
+        let reset = tab.bench_execution(1).as_deref() == Some("StaleSucceeded")
+            && tab.bench_execution(3).as_deref() == Some("StaleFailed")
+            && tab.bench_execution(4).as_deref() == Some("Unrun");
+        println!("bench kernel status restart={}", u8::from(reset));
         tab.bench_select(0);
         act("win.notebook-run-cell");
         if !done(&app, &tab, "restart").await {

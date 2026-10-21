@@ -6,7 +6,7 @@
 
 use std::cell::{OnceCell, RefCell};
 
-use accent_core::notebook::{Cell, CellId, Format, Kind};
+use accent_core::notebook::{Cell, CellId, Format, Kind, Output};
 use adw::prelude::*;
 use gtk::gio;
 
@@ -26,6 +26,10 @@ pub struct CellView {
     pub gap: gtk::Overlay,
     /// `[n]`, the count of the run that left the outputs; `[*]` while a run waits or runs.
     count: gtk::Label,
+    /// Execution state shown beside Run Cell.
+    pub execution: std::cell::Cell<Execution>,
+    /// Last settled result while another request may still show Running.
+    pub last_result: std::cell::Cell<Execution>,
     body: gtk::Box,
     /// The source as plain text in the editor's font, holding the editor's place until it is built.
     placeholder: gtk::Label,
@@ -33,6 +37,62 @@ pub struct CellView {
     pub outputs: Outputs,
     /// What `input()` asks under the outputs, while it asks.
     asking: RefCell<Option<gtk::Box>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Execution {
+    Unrun,
+    Running,
+    Succeeded,
+    Failed,
+    StaleSucceeded,
+    StaleFailed,
+}
+
+impl Execution {
+    pub(super) fn stale(self) -> Execution {
+        match self {
+            Execution::Succeeded | Execution::StaleSucceeded => Execution::StaleSucceeded,
+            Execution::Failed | Execution::StaleFailed => Execution::StaleFailed,
+            Execution::Unrun | Execution::Running => Execution::Unrun,
+        }
+    }
+
+    fn for_cell(cell: &Cell) -> Execution {
+        if cell
+            .outputs()
+            .iter()
+            .any(|o| matches!(o, Output::Error { .. }))
+        {
+            Execution::Failed
+        } else if cell.count().is_some() {
+            Execution::Succeeded
+        } else {
+            Execution::Unrun
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Execution::Unrun => "Not run",
+            Execution::Running => "Running",
+            Execution::Succeeded => "Succeeded",
+            Execution::Failed => "Failed",
+            Execution::StaleSucceeded => "Previous run succeeded; result may be stale",
+            Execution::StaleFailed => "Previous run failed; result may be stale",
+        }
+    }
+
+    fn class(self) -> &'static str {
+        match self {
+            Execution::Unrun => "unrun",
+            Execution::Running => "running",
+            Execution::Succeeded => "succeeded",
+            Execution::Failed => "failed",
+            Execution::StaleSucceeded => "stale-succeeded",
+            Execution::StaleFailed => "stale-failed",
+        }
+    }
 }
 
 /// A cell's editor, built once the cell nears the view.
@@ -108,6 +168,8 @@ impl CellView {
             over,
             gap,
             count,
+            execution: std::cell::Cell::new(Execution::for_cell(cell)),
+            last_result: std::cell::Cell::new(Execution::for_cell(cell)),
             body,
             placeholder,
             editor: OnceCell::new(),
@@ -235,6 +297,13 @@ impl CellView {
         self.editor().map(Editor::text)
     }
 
+    pub fn shows_source(&self, source: &str) -> bool {
+        self.editor().map_or_else(
+            || self.placeholder.label() == source,
+            |editor| editor.text() == source,
+        )
+    }
+
     /// The model's text for a cell with no editor yet.
     pub fn set_source(&self, source: &str) {
         if self.editor().is_none() && self.placeholder.label() != source {
@@ -279,6 +348,7 @@ fn flavour(kind: Kind) -> Flavour {
 pub struct Tools {
     pub bar: gtk::Box,
     pub run: gtk::Button,
+    status: gtk::Box,
     /// Whether the notebook's code cells run: an `.ipynb`'s, not marimo's.
     runs: bool,
     pub up: gtk::Button,
@@ -300,6 +370,9 @@ impl Tools {
             b
         };
         let run = button("media-playback-start-symbolic", "win.notebook-run-cell");
+        let status = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        status.add_css_class("notebook-execution");
+        status.set_valign(gtk::Align::Center);
         let up = button("go-up-symbolic", "win.notebook-move-up");
         let down = button("go-down-symbolic", "win.notebook-move-down");
         let delete = button("user-trash-symbolic", "win.notebook-delete-cell");
@@ -315,6 +388,7 @@ impl Tools {
         bar.add_css_class("notebook-tools");
         bar.set_halign(gtk::Align::End);
         bar.set_valign(gtk::Align::Start);
+        bar.append(&status);
         for b in [&run, &up, &down, &delete] {
             bar.append(b);
         }
@@ -322,6 +396,7 @@ impl Tools {
         Tools {
             bar,
             run,
+            status,
             runs: format == Format::Ipynb,
             up,
             down,
@@ -333,6 +408,12 @@ impl Tools {
 
     /// Float over `view`, or nowhere.
     pub fn place(&self, view: Option<&CellView>) {
+        let code = view.is_some_and(|v| v.kind == Kind::Code);
+        self.run.set_visible(self.runs && code);
+        self.status.set_visible(self.runs && code);
+        if let Some(view) = view {
+            self.show_execution(view.execution.get());
+        }
         let target = view.map(|v| v.over.clone().upcast::<gtk::Widget>());
         if self.bar.parent() == target {
             return;
@@ -341,11 +422,26 @@ impl Tools {
             over.remove_overlay(&self.bar);
         }
         self.cell.set(view.map(|v| v.id));
-        let code = view.is_some_and(|v| v.kind == Kind::Code);
-        self.run.set_visible(self.runs && code);
         if let Some(view) = view {
             view.over.add_overlay(&self.bar);
         }
+    }
+
+    pub fn show_execution(&self, state: Execution) {
+        for class in [
+            "unrun",
+            "running",
+            "succeeded",
+            "failed",
+            "stale-succeeded",
+            "stale-failed",
+        ] {
+            self.status.remove_css_class(class);
+        }
+        self.status.add_css_class(state.class());
+        self.status.set_tooltip_text(Some(state.label()));
+        self.run
+            .update_property(&[gtk::accessible::Property::Description(state.label())]);
     }
 }
 
@@ -408,6 +504,14 @@ pub fn install_css() {
            background-color: var(--view-bg-color); \
            box-shadow: 0 0 0 1px alpha(currentColor, 0.12); } \
          .notebook-tools button { min-height: 24px; min-width: 24px; padding: 0; } \
+         .notebook-execution { min-width: 8px; min-height: 8px; margin: 0 4px 0 8px; \
+           border: 1px solid transparent; border-radius: 50%; } \
+         .notebook-execution.unrun { background-color: alpha(var(--window-fg-color), 0.3); } \
+         .notebook-execution.running { background-color: var(--warning-color); } \
+         .notebook-execution.succeeded { background-color: var(--success-color); } \
+         .notebook-execution.failed { background-color: var(--error-color); } \
+         .notebook-execution.stale-succeeded { border: 1px solid var(--success-color); } \
+         .notebook-execution.stale-failed { border: 1px solid var(--error-color); } \
          .notebook-inserter { opacity: 0; } \
          .notebook-inserter button { min-height: 20px; padding: 0 10px; } \
          .notebook-gap { min-height: 20px; } \
@@ -424,4 +528,33 @@ pub fn install_css() {
         &provider,
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use accent_core::notebook::{EMPTY_IPYNB, Edit, Run, read};
+
+    #[test]
+    fn stored_code_cells_show_their_last_known_result() {
+        let mut notebook = read("empty.ipynb", EMPTY_IPYNB).unwrap();
+        let id = notebook.cells()[0].id();
+        assert_eq!(Execution::for_cell(&notebook.cells()[0]), Execution::Unrun);
+        notebook.apply(Edit::Outputs {
+            id,
+            run: Some(Run::new(Some(1), Vec::new())),
+        });
+        assert_eq!(
+            Execution::for_cell(&notebook.cells()[0]),
+            Execution::Succeeded
+        );
+        let error = serde_json::json!({
+            "output_type": "error", "ename": "ValueError", "evalue": "bad", "traceback": []
+        });
+        notebook.apply(Edit::Outputs {
+            id,
+            run: Some(Run::new(Some(2), vec![error])),
+        });
+        assert_eq!(Execution::for_cell(&notebook.cells()[0]), Execution::Failed);
+    }
 }

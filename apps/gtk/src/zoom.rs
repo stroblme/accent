@@ -260,7 +260,7 @@ pub fn zoom_on_wheel(
     wheel.connect_scroll(move |controller, _, dy| {
         if !controller
             .current_event_state()
-            .contains(gdk::ModifierType::CONTROL_MASK)
+            .contains(crate::platform::PRIMARY_MODIFIER)
         {
             return glib::Propagation::Proceed;
         }

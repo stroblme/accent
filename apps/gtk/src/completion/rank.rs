@@ -123,7 +123,8 @@ pub(super) fn step(
 ) -> Step {
     let chord = gdk::ModifierType::CONTROL_MASK
         | gdk::ModifierType::ALT_MASK
-        | gdk::ModifierType::SUPER_MASK;
+        | gdk::ModifierType::SUPER_MASK
+        | gdk::ModifierType::META_MASK;
     if rows == 0 || state.intersects(chord) {
         return Step::Pass;
     }

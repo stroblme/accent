@@ -258,7 +258,11 @@ pub fn on_key(
     key: gdk::Key,
     state: gdk::ModifierType,
 ) -> glib::Propagation {
-    if state.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK) {
+    if state.intersects(
+        gdk::ModifierType::CONTROL_MASK
+            | gdk::ModifierType::ALT_MASK
+            | gdk::ModifierType::META_MASK,
+    ) {
         return glib::Propagation::Proceed;
     }
     match key {
@@ -409,8 +413,11 @@ pub fn on_code_key(
         .buffer()
         .downcast_ref::<sourceview5::Buffer>()
         .and_then(|source| source.language());
-    if state.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK)
-        || !view.is_editable()
+    if state.intersects(
+        gdk::ModifierType::CONTROL_MASK
+            | gdk::ModifierType::ALT_MASK
+            | gdk::ModifierType::META_MASK,
+    ) || !view.is_editable()
         || language.is_none()
     {
         return glib::Propagation::Proceed;

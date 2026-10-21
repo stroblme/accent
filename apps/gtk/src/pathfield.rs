@@ -58,7 +58,8 @@ fn completion_key(
 ) -> Step {
     let chord = gdk::ModifierType::CONTROL_MASK
         | gdk::ModifierType::ALT_MASK
-        | gdk::ModifierType::SUPER_MASK;
+        | gdk::ModifierType::SUPER_MASK
+        | gdk::ModifierType::META_MASK;
     if offers == 0 || mods.intersects(chord) {
         return Step::Pass;
     }

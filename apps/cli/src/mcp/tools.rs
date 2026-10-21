@@ -1,11 +1,12 @@
 //! The tools, each a façade call or two run on the blocking pool, and the arguments they take.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ops::Range;
 
 use accent_api::{Error, Etag, FileKind, Read, fs};
-use accent_core::markdown;
 use accent_core::path::linked_path;
+use accent_core::{markdown, notebook, path};
 use base64::Engine;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock};
@@ -32,6 +33,15 @@ struct ReadArgs {
     path: String,
     /// Read this heading and its subsections by heading text or slug (e.g. `notes-1`).
     heading: Option<String>,
+    /// An `.ipynb`'s indexed cell sources (default) or `raw` editable JSON; other files are raw.
+    view: Option<ReadView>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum ReadView {
+    Raw,
+    Sources,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -150,8 +160,9 @@ impl Server {
         .await
     }
 
-    /// Read a text file or one heading section. Return `{path, etag}` and text blocks; images
-    /// return image data and other binaries return their size.
+    /// Read file text or one heading section, with an etag for writing. An `.ipynb` defaults to
+    /// indexed cell sources without a write etag; `view: "raw"` returns editable JSON and its
+    /// etag. Images return image data and other binaries return their size.
     #[tool(annotations(read_only_hint = true))]
     async fn read_note(
         &self,
@@ -161,18 +172,43 @@ impl Server {
             let rel = s.inside(&a.path)?;
             match s.vault.read_text(&rel).map_err(fail)? {
                 Read::Text(t) => {
+                    let default = match path::is_notebook(&rel) {
+                        true => ReadView::Sources,
+                        false => ReadView::Raw,
+                    };
+                    let (text, sources) = match a.view.unwrap_or(default) {
+                        ReadView::Raw => (Cow::Borrowed(t.text.as_str()), false),
+                        ReadView::Sources => {
+                            if !path::is_notebook(&rel) {
+                                return Err(format!("{rel} is not an .ipynb notebook"));
+                            }
+                            let text = notebook::search_text(&rel, &t.text)
+                                .ok_or_else(|| format!("{rel} is not a readable notebook"))?;
+                            (Cow::Owned(text), true)
+                        }
+                    };
                     let text = match &a.heading {
-                        Some(heading) => &t.text[section(&t.text, heading)?],
-                        None => &t.text,
+                        Some(_) if sources => {
+                            return Err("heading is unavailable in notebook sources".into());
+                        }
+                        Some(heading) => &text[section(&text, heading)?],
+                        None => text.as_ref(),
                     };
                     if text.len() as u64 > MAX_OUT {
+                        let how = if sources {
+                            ""
+                        } else {
+                            ": read it a section at a time with `heading`"
+                        };
                         return Err(format!(
-                            "{rel} holds {} bytes, more than a read returns ({MAX_OUT}): read it a \
-                             section at a time with `heading`",
+                            "{rel} holds {} bytes, more than a read returns ({MAX_OUT}){how}",
                             text.len()
                         ));
                     }
-                    let mut head = json!({"path": rel, "etag": etag_string(t.etag)});
+                    let mut head = match sources {
+                        true => json!({"path": rel, "view": "sources"}),
+                        false => json!({"path": rel, "etag": etag_string(t.etag)}),
+                    };
                     if t.lossy {
                         // Written back, the replacement characters would replace the bytes.
                         head["lossy"] = json!(true);

@@ -195,7 +195,7 @@ fn bench_chords(app: &Rc<App>, rel: &str) {
         };
         super::git::xtest("move 700 400; focus").await;
         let say = |where_: &str| {
-            let [d, down] = ["<Control>d", "<Control>Down"].map(|a| gtk_app.actions_for_accel(a));
+            let [d, down] = ["<Primary>d", "<Primary>Down"].map(|a| gtk_app.actions_for_accel(a));
             println!("bench chords {where_} ctrl_d={d:?} ctrl_down={down:?}");
         };
         tab.view.grab_focus();

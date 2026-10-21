@@ -210,7 +210,7 @@ fn let_go_on_input(root: &gtk::Widget, columns: &Weak<Columns>) {
         // With Control the wheel zooms: see `zoom::zoom_on_wheel`.
         let zoom = wheel
             .current_event_state()
-            .contains(gdk::ModifierType::CONTROL_MASK);
+            .intersects(crate::platform::PRIMARY_MODIFIER | gdk::ModifierType::CONTROL_MASK);
         if let Some(c) = w.upgrade().filter(|_| !zoom) {
             c.let_go(Some(glib::Priority::HIGH), false);
         }
@@ -224,7 +224,8 @@ fn let_go_on_input(root: &gtk::Widget, columns: &Weak<Columns>) {
         if let Some(c) = w.upgrade().filter(|_| scrolls(key, state)) {
             let resize = glib::Priority::from(gtk::PRIORITY_RESIZE as i32);
             // Control is down for Ctrl+Home or Ctrl+End alone, which go to the caret.
-            let caret = state.contains(gdk::ModifierType::CONTROL_MASK);
+            let caret = state
+                .intersects(crate::platform::PRIMARY_MODIFIER | gdk::ModifierType::CONTROL_MASK);
             c.let_go(Some(resize), caret);
         }
         glib::Propagation::Proceed
@@ -268,7 +269,8 @@ fn let_go_on_input(root: &gtk::Widget, columns: &Weak<Columns>) {
 /// Recognize Page Up/Down without Ctrl and Ctrl+Home/End as reader scroll.
 /// Ctrl+Page switches tabs; caret-edge arrow scrolls are not handled here.
 fn scrolls(key: gdk::Key, state: gdk::ModifierType) -> bool {
-    let control = state.contains(gdk::ModifierType::CONTROL_MASK);
+    let control =
+        state.intersects(crate::platform::PRIMARY_MODIFIER | gdk::ModifierType::CONTROL_MASK);
     match key {
         gdk::Key::Page_Up | gdk::Key::Page_Down | gdk::Key::KP_Page_Up | gdk::Key::KP_Page_Down => {
             !control
@@ -1207,10 +1209,17 @@ mod tests {
 
     #[test]
     fn page_keys_and_control_home_or_end_are_the_reader_scrolling() {
-        let (plain, control) = (gdk::ModifierType::empty(), gdk::ModifierType::CONTROL_MASK);
+        let (plain, control) = (
+            gdk::ModifierType::empty(),
+            crate::platform::PRIMARY_MODIFIER,
+        );
         assert!(scrolls(gdk::Key::Page_Down, plain));
         assert!(scrolls(gdk::Key::KP_Page_Up, gdk::ModifierType::SHIFT_MASK));
         assert!(!scrolls(gdk::Key::Page_Up, control), "a tab switch");
+        assert!(
+            !scrolls(gdk::Key::Page_Up, gdk::ModifierType::CONTROL_MASK),
+            "AdwTabView's literal Control chord"
+        );
         assert!(scrolls(gdk::Key::End, control));
         assert!(scrolls(gdk::Key::KP_Home, control));
         assert!(!scrolls(gdk::Key::Home, plain), "the start of the line");
