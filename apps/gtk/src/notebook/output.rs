@@ -44,10 +44,18 @@ enum Part {
     Placeholder,
 }
 
-/// A cell's outputs: the box they are drawn in, and what restyles them.
+/// A cell's outputs: the box they are drawn in, and a slot per output, so a run redraws only
+/// the outputs it changed.
 pub struct Outputs {
     pub widget: gtk::Box,
-    parts: RefCell<Vec<Part>>,
+    slots: RefCell<Vec<Slot>>,
+}
+
+/// One output's widgets in the box, and its parts.
+#[derive(Default)]
+struct Slot {
+    widgets: Vec<gtk::Widget>,
+    parts: Vec<Part>,
 }
 
 impl Outputs {
@@ -65,6 +73,7 @@ impl Outputs {
         let shown = Outputs::empty();
         for attachment in attachments {
             if let Some(Form::Picture { mime, data }) = core::pick(&attachment.items) {
+                shown.slots.borrow_mut().push(Slot::default());
                 shown.picture(mime, data);
             }
         }
@@ -76,14 +85,49 @@ impl Outputs {
         widget.add_css_class("notebook-outputs");
         Outputs {
             widget,
-            parts: RefCell::default(),
+            slots: RefCell::default(),
         }
+    }
+
+    /// Show `tail` in place of the outputs from the `from`th on.
+    pub fn show(&self, from: usize, tail: &[Output]) {
+        let gone = {
+            let mut slots = self.slots.borrow_mut();
+            let from = from.min(slots.len());
+            slots.split_off(from)
+        };
+        for widget in gone.into_iter().flat_map(|slot| slot.widgets) {
+            self.widget.remove(&widget);
+        }
+        for output in tail {
+            self.add(output);
+        }
+    }
+
+    /// Put `widget` last, in the last output's slot.
+    fn put(&self, widget: &impl IsA<gtk::Widget>) {
+        self.widget.append(widget);
+        if let Some(slot) = self.slots.borrow_mut().last_mut() {
+            slot.widgets.push(widget.clone().upcast());
+        }
+    }
+
+    fn keep(&self, part: Part) {
+        if let Some(slot) = self.slots.borrow_mut().last_mut() {
+            slot.parts.push(part);
+        }
+    }
+
+    /// How many outputs are shown.
+    #[cfg(feature = "bench")]
+    pub fn shown(&self) -> usize {
+        self.slots.borrow().len()
     }
 
     #[cfg(feature = "bench")]
     pub fn counts(&self) -> Counts {
         let mut c = Counts::default();
-        for part in self.parts.borrow().iter() {
+        for part in self.slots.borrow().iter().flat_map(|slot| &slot.parts) {
             match part {
                 Part::Picture { recoloured, .. } => {
                     c.pictures += 1;
@@ -103,6 +147,7 @@ impl Outputs {
     }
 
     fn add(&self, output: &Output) {
+        self.slots.borrow_mut().push(Slot::default());
         match output {
             Output::Stream { stderr, text } => self.text(&core::carriage(text), *stderr),
             Output::Error {
@@ -158,9 +203,9 @@ impl Outputs {
                 }
             }
             paint_ansi(&view);
-            self.parts.borrow_mut().push(Part::Ansi(view.clone()));
+            self.keep(Part::Ansi(view.clone()));
         }
-        self.widget.append(&view);
+        self.put(&view);
     }
 
     fn picture(&self, mime: &str, data: &str) {
@@ -174,7 +219,7 @@ impl Outputs {
             .content_fit(gtk::ContentFit::ScaleDown)
             .halign(gtk::Align::Start)
             .build();
-        self.widget.append(&picture);
+        self.put(&picture);
         let part = Part::Picture {
             picture,
             bytes: Rc::new(bytes),
@@ -182,11 +227,11 @@ impl Outputs {
             recoloured: Rc::default(),
         };
         show_picture(&part);
-        self.parts.borrow_mut().push(part);
+        self.keep(part);
     }
 
     fn table(&self, table: &Table) {
-        self.parts.borrow_mut().push(Part::Table);
+        self.keep(Part::Table);
         let grid = gtk::Grid::builder()
             .column_spacing(18)
             .row_spacing(4)
@@ -214,7 +259,7 @@ impl Outputs {
             .propagate_natural_height(true)
             .child(&grid)
             .build();
-        self.widget.append(&scroller);
+        self.put(&scroller);
         for note in &table.notes {
             let label = gtk::Label::builder()
                 .label(note)
@@ -222,7 +267,7 @@ impl Outputs {
                 .selectable(true)
                 .build();
             label.add_css_class("dim-label");
-            self.widget.append(&label);
+            self.put(&label);
         }
     }
 
@@ -233,8 +278,8 @@ impl Outputs {
         view.add_css_class("notebook-output");
         highlight::apply(&buffer);
         highlight::restyle(&buffer, &view);
-        self.widget.append(&view);
-        self.parts.borrow_mut().push(Part::Markdown(view, buffer));
+        self.put(&view);
+        self.keep(Part::Markdown(view, buffer));
     }
 
     fn latex(&self, latex: &str) {
@@ -247,7 +292,7 @@ impl Outputs {
         stack.add_named(&source, Some("source"));
         stack.add_named(&picture, Some("typeset"));
         stack.set_visible_child_name("source");
-        self.widget.append(&stack);
+        self.put(&stack);
         let latex = Rc::new(Latex {
             stack,
             picture,
@@ -256,12 +301,12 @@ impl Outputs {
             typeset: Cell::new(false),
         });
         typeset(&latex);
-        self.parts.borrow_mut().push(Part::Latex(latex));
+        self.keep(Part::Latex(latex));
     }
 
     /// One line naming what only a script could have shown.
     fn placeholder(&self, items: &[Item]) {
-        self.parts.borrow_mut().push(Part::Placeholder);
+        self.keep(Part::Placeholder);
         let mime = items
             .iter()
             .map(|i| i.mime.as_str())
@@ -273,13 +318,13 @@ impl Outputs {
             .wrap(true)
             .build();
         label.add_css_class("dim-label");
-        self.widget.append(&label);
+        self.put(&label);
     }
 
     /// A new theme, or the Images switch turned: the pictures recoloured again, the colours of
     /// the text and the formulas' ink.
     pub fn restyle(&self) {
-        for part in self.parts.borrow().iter() {
+        for part in self.slots.borrow().iter().flat_map(|slot| &slot.parts) {
             match part {
                 Part::Picture { .. } => show_picture(part),
                 Part::Ansi(view) => paint_ansi(view),
