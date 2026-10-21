@@ -222,6 +222,7 @@ fn shell_group(facts: terminal::Facts) -> Group {
         ("Directory", facts.dir),
         ("Running", facts.running),
         ("Started", facts.started.map(date_label)),
+        ("MCP Access", facts.shared_with.map(|_| "Shared".into())),
     ];
     Group {
         title: "Terminal",

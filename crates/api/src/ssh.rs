@@ -547,6 +547,20 @@ pub fn held_cmd(server: &str) -> String {
     format!("{server} held")
 }
 
+/// Share a held shell with the MCP server for this vault on the same host.
+pub fn share_cmd(server: &str, id: &str, vault: &Path) -> String {
+    format!(
+        "{server} share {} --vault {}",
+        quote(id),
+        quote(&vault.to_string_lossy())
+    )
+}
+
+/// Revoke MCP access to a held shell on the host.
+pub fn revoke_cmd(server: &str, id: &str) -> String {
+    format!("{server} revoke {}", quote(id))
+}
+
 // --------------------------------------------------------------------- cache
 
 /// Find the musl-static server for `arch` ([`SERVER_ARCHES`]), or none if absent.
@@ -1037,6 +1051,11 @@ mod tests {
             Some(&format!("{server} kill '{id}'"))
         );
         assert_eq!(clip_cmd(&server, id), format!("{server} clip '{id}'"));
+        assert_eq!(
+            share_cmd(&server, id, Path::new("/srv/my vault")),
+            format!("{server} share '{id}' --vault '/srv/my vault'")
+        );
+        assert_eq!(revoke_cmd(&server, id), format!("{server} revoke '{id}'"));
     }
 
     #[test]

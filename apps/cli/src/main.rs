@@ -2,6 +2,7 @@
 //! cache index using the app's scan policy.
 
 mod hold;
+mod jobs;
 mod mcp;
 
 use accent_api::{Event, Progress, ReconcileStats, Vault, VaultConfig};
@@ -123,6 +124,16 @@ enum Cmd {
         /// Expose read-only MCP tools.
         #[arg(long)]
         read_only: bool,
+        /// Permit durable command jobs on this machine under the vault's directory.
+        #[arg(long)]
+        allow_jobs: bool,
+    },
+    /// Internal detached supervisor for one MCP job.
+    #[command(hide = true)]
+    JobRun {
+        #[arg(long)]
+        vault: PathBuf,
+        id: String,
     },
     /// Run one shell holder per user and machine. It exits after the last shell, or after ten
     /// idle seconds if no shell was started.
@@ -131,6 +142,12 @@ enum Cmd {
     /// terminal detaches. Exit with the shell status, 0 on detach, or 254 on failure
     /// (reserving 255 for SSH).
     Attach {
+        /// Attach only to an existing shell scoped to --vault; never start a replacement.
+        #[arg(long)]
+        existing: bool,
+        /// Host vault root required with --existing.
+        #[arg(long, requires = "existing")]
+        vault: Option<PathBuf>,
         /// Starting directory for a new shell; defaults to the current directory.
         #[arg(long)]
         cwd: Option<PathBuf>,
@@ -143,6 +160,14 @@ enum Cmd {
     Kill { id: String },
     /// List held shells as JSON lines.
     Held,
+    /// Share one held terminal with the MCP server for a vault.
+    Share {
+        id: String,
+        #[arg(long)]
+        vault: PathBuf,
+    },
+    /// Revoke a held terminal's MCP share.
+    Revoke { id: String },
     /// Print and clear the shell's last OSC 52 copy as base64.
     Clip { id: String },
 }
@@ -265,13 +290,30 @@ fn main() -> Result<()> {
             accent_api::git_remote::serve_once(std::io::stdin().lock(), std::io::stdout().lock())?
         }
         // Logging goes to stderr: stdout is the protocol.
-        Cmd::Mcp { common, read_only } => mcp::run(&common.vault, &common.db_path(), read_only)?,
+        Cmd::Mcp {
+            common,
+            read_only,
+            allow_jobs,
+        } => mcp::run(&common.vault, &common.db_path(), read_only, allow_jobs)?,
+        Cmd::JobRun { vault, id } => jobs::supervise(&vault, &id)?,
         Cmd::Hold => hold::daemon::run()?,
-        Cmd::Attach { cwd, owner, id } => {
+        Cmd::Attach {
+            existing,
+            vault,
+            cwd,
+            owner,
+            id,
+        } => {
+            if existing {
+                let vault = vault.ok_or_else(|| anyhow::anyhow!("--existing requires --vault"))?;
+                std::process::exit(hold::client::attach_existing(&id, &vault))
+            }
             std::process::exit(hold::client::attach(&id, cwd, &owner))
         }
         Cmd::Kill { id } => hold::client::kill(&id)?,
         Cmd::Held => hold::client::held()?,
+        Cmd::Share { id, vault } => hold::client::share(&id, &vault)?,
+        Cmd::Revoke { id } => hold::client::revoke(&id)?,
         Cmd::Clip { id } => hold::clip::take(&id)?,
     }
     Ok(())

@@ -2,9 +2,14 @@
 //! lock orders output replay and live forwarding. Stalled readers are disconnected after
 //! [`STALL`] so they cannot block a pty indefinitely.
 
-use super::protocol::{self, DETACHED, EXIT, HELLO, Hello, INPUT, KILL, LIST, OUTPUT, RESIZE};
+use super::protocol::{
+    self, ACK, ATTACH_EXISTING, CREATE, DETACHED, ERROR, EXIT, HELLO, Hello, INPUT, KILL, LIST,
+    LIST_OWNED, OUTPUT, READ, RESIZE, REVOKE, SEND, SHARE, STOP,
+};
 use super::{FAILED, LOCK, SOCKET, lock, screen};
-use std::collections::{HashMap, HashSet};
+use base64::Engine;
+use serde::Deserialize;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::{CStr, OsStr};
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -30,6 +35,8 @@ const IDLE_MS: i32 = 1000;
 const GRACE: Duration = Duration::from_secs(1);
 /// Maximum pty read and replay chunk size.
 const CHUNK: usize = 64 * 1024;
+/// Recent PTY bytes for MCP cursor reads. Screen replay remains independent of this ring.
+const OUTPUT_CAP: usize = 1024 * 1024;
 /// Idle timeout before the first shell starts. Allows more than `client::connect`'s two-second
 /// connection window, then removes a holder whose attaching client died.
 const WAIT: Duration = Duration::from_secs(10);
@@ -59,6 +66,7 @@ struct Shell {
     /// Owner reported by `held` ([`Hello::owner`]).
     owner: String,
     master: File,
+    input: Mutex<()>,
     screen: Mutex<Screen>,
 }
 
@@ -67,6 +75,36 @@ struct Screen {
     parser: screen::Parser,
     client: Option<(u64, UnixStream)>,
     exit: Option<i32>,
+    output: VecDeque<u8>,
+    output_end: u64,
+    shared_with: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Scoped {
+    id: String,
+    owner: String,
+}
+
+#[derive(Deserialize)]
+struct ReadRequest {
+    #[serde(flatten)]
+    scope: Scoped,
+    offset: u64,
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct SendRequest {
+    #[serde(flatten)]
+    scope: Scoped,
+    input: String,
+}
+
+#[derive(Deserialize)]
+struct ShareRequest {
+    id: String,
+    owner: String,
 }
 
 /// Hold shells until the last exits; return immediately if another holder is running.
@@ -107,7 +145,13 @@ impl Daemon {
         };
         match tag {
             LIST => {
-                let _ = protocol::write_frame(&mut conn, OUTPUT, &self.list());
+                let _ = protocol::write_frame(&mut conn, OUTPUT, &self.list(None));
+            }
+            LIST_OWNED => {
+                let Ok(owner) = std::str::from_utf8(&payload) else {
+                    return;
+                };
+                let _ = protocol::write_frame(&mut conn, OUTPUT, &self.list(Some(owner)));
             }
             KILL => {
                 // Let `accent-cli kill` go before the grace period, not after it.
@@ -116,23 +160,148 @@ impl Daemon {
             }
             HELLO => {
                 if let Some(hello) = Hello::decode(&payload) {
-                    self.attach(&hello, conn);
+                    self.attach(&hello, conn, false);
+                }
+            }
+            ATTACH_EXISTING => {
+                if let Some(hello) = Hello::decode(&payload) {
+                    self.attach(&hello, conn, true);
+                }
+            }
+            CREATE => {
+                let result = Hello::decode(&payload)
+                    .ok_or("invalid terminal request")
+                    .and_then(|hello| {
+                        self.open(&hello)
+                            .map_err(|_| "cannot start terminal")
+                            .and_then(|shell| {
+                                shell
+                                    .filter(|shell| shell.owner == hello.owner)
+                                    .ok_or("terminal ID belongs to another owner")
+                            })
+                    });
+                let (tag, message) = match result {
+                    Ok(_) => (ACK, ""),
+                    Err(error) => (ERROR, error),
+                };
+                let _ = protocol::write_frame(&mut conn, tag, message.as_bytes());
+            }
+            READ => {
+                let result = serde_json::from_slice::<ReadRequest>(&payload)
+                    .ok()
+                    .and_then(|request| {
+                        self.shell(&request.scope.id).and_then(|shell| {
+                            shell.read_owned(&request.scope.owner, request.offset, request.limit)
+                        })
+                    });
+                match result {
+                    Some(value) => {
+                        let _ =
+                            protocol::write_frame(&mut conn, OUTPUT, value.to_string().as_bytes());
+                    }
+                    None => {
+                        let _ = protocol::write_frame(&mut conn, ERROR, b"terminal not found");
+                    }
+                }
+            }
+            SEND => {
+                let result = serde_json::from_slice::<SendRequest>(&payload)
+                    .ok()
+                    .and_then(|request| {
+                        self.shell(&request.scope.id).and_then(|shell| {
+                            shell.send_owned(&request.scope.owner, request.input.as_bytes())
+                        })
+                    });
+                let (tag, message) = match result {
+                    Some(Ok(())) => (ACK, ""),
+                    Some(Err(_)) => (ERROR, "terminal input failed"),
+                    None => (ERROR, "terminal not found"),
+                };
+                let _ = protocol::write_frame(&mut conn, tag, message.as_bytes());
+            }
+            STOP => {
+                let shell = serde_json::from_slice::<Scoped>(&payload)
+                    .ok()
+                    .and_then(|request| self.owned(&request));
+                if let Some(shell) = shell {
+                    let _ = protocol::write_frame(&mut conn, ACK, &[]);
+                    Self::kill_shell(&shell);
+                } else {
+                    let _ = protocol::write_frame(&mut conn, ERROR, b"terminal not found");
+                }
+            }
+            SHARE => {
+                let shell = serde_json::from_slice::<ShareRequest>(&payload)
+                    .ok()
+                    .and_then(|request| {
+                        self.shell(&request.id).map(|shell| (shell, request.owner))
+                    });
+                if let Some((shell, owner)) = shell {
+                    let _input = lock(&shell.input);
+                    let mut term = lock(&shell.screen);
+                    if term
+                        .shared_with
+                        .as_deref()
+                        .is_none_or(|shared| shared == owner)
+                    {
+                        term.shared_with = Some(owner);
+                        let _ = protocol::write_frame(&mut conn, ACK, &[]);
+                    } else {
+                        let _ = protocol::write_frame(
+                            &mut conn,
+                            ERROR,
+                            b"terminal is shared with another vault; revoke it first",
+                        );
+                    }
+                } else {
+                    let _ = protocol::write_frame(&mut conn, ERROR, b"terminal not found");
+                }
+            }
+            REVOKE => {
+                let shell = std::str::from_utf8(&payload)
+                    .ok()
+                    .and_then(|id| self.shell(id));
+                if let Some(shell) = shell {
+                    let _input = lock(&shell.input);
+                    lock(&shell.screen).shared_with = None;
+                    let _ = protocol::write_frame(&mut conn, ACK, &[]);
+                } else {
+                    let _ = protocol::write_frame(&mut conn, ERROR, b"terminal not found");
                 }
             }
             _ => {}
         }
     }
 
+    fn shell(&self, id: &str) -> Option<Arc<Shell>> {
+        lock(&self.shells).live.get(id).cloned()
+    }
+
+    fn owned(&self, request: &Scoped) -> Option<Arc<Shell>> {
+        let shell = self.shell(&request.id)?;
+        let shared = lock(&shell.screen).shared_with.as_deref() == Some(request.owner.as_str());
+        (shell.owner == request.owner || shared).then_some(shell)
+    }
+
     /// Attach a terminal, starting its shell if needed, and forward input until disconnection.
-    fn attach(self: &Arc<Self>, hello: &Hello, mut conn: UnixStream) {
-        let shell = match self.open(hello) {
+    fn attach(self: &Arc<Self>, hello: &Hello, mut conn: UnixStream, existing: bool) {
+        let shell = match if existing {
+            Ok(self.shell(&hello.id))
+        } else {
+            self.open(hello)
+        } {
             Ok(Some(shell)) => shell,
             // Killed before it started: it ends the way the kill would have ended it, with the
             // status of a hangup. The holder stays for [`WAIT`], which is what [`Daemon::watch`]
             // gives it: another tab closed in the same moment may still have its HELLO on the
             // way, and only this holder remembers its kill.
             Ok(None) => {
-                let _ = protocol::write_frame(&mut conn, EXIT, &(128 + libc::SIGHUP).to_be_bytes());
+                if existing {
+                    let _ = protocol::write_frame(&mut conn, ERROR, b"terminal no longer exists");
+                } else {
+                    let _ =
+                        protocol::write_frame(&mut conn, EXIT, &(128 + libc::SIGHUP).to_be_bytes());
+                }
                 return;
             }
             Err(e) => {
@@ -148,14 +317,21 @@ impl Daemon {
             }
         };
         let me = NEXT.fetch_add(1, Ordering::Relaxed);
-        if !shell.attach(me, &conn, hello.rows, hello.cols) {
+        if !shell.attach(
+            me,
+            &conn,
+            hello.rows,
+            hello.cols,
+            existing.then_some(&hello.owner),
+        ) {
             return;
         }
         loop {
             match protocol::read_frame(&mut conn) {
                 // A shell that has just ended cannot take it; the pump is about to say so.
                 Ok(Some((INPUT, keys))) => {
-                    let _ = (&shell.master).write_all(&keys);
+                    let _input = lock(&shell.input);
+                    let _ = shell.write_input(&keys);
                 }
                 Ok(Some((RESIZE, size))) => {
                     if let Some((rows, cols)) = protocol::parse_size(&size) {
@@ -189,10 +365,14 @@ impl Daemon {
                 .map_or(0, |since| since.as_secs()),
             owner: hello.owner.clone(),
             master,
+            input: Mutex::new(()),
             screen: Mutex::new(Screen {
                 parser: screen::parser(hello.rows, hello.cols),
                 client: None,
                 exit: None,
+                output: VecDeque::new(),
+                output_end: 0,
+                shared_with: None,
             }),
         });
         shells.live.insert(hello.id.clone(), shell.clone());
@@ -220,6 +400,7 @@ impl Daemon {
                 }
             }
             match (&shell.master).read(&mut buf) {
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
                 Ok(0) | Err(_) => break,
                 Ok(n) => shell.output(&buf[..n]),
             }
@@ -270,6 +451,10 @@ impl Daemon {
                 }
             }
         };
+        Self::kill_shell(&shell);
+    }
+
+    fn kill_shell(shell: &Shell) {
         // SAFETY: a plain query on a descriptor `shell` keeps open.
         let foreground = unsafe { libc::tcgetpgrp(shell.master.as_raw_fd()) };
         let groups = [shell.pid as libc::pid_t, foreground];
@@ -288,20 +473,26 @@ impl Daemon {
     /// One JSON object per line and shell: its id, pid, working directory, title, whether a
     /// terminal is attached, the program started, when and for whom, and what runs in its
     /// foreground.
-    fn list(&self) -> Vec<u8> {
+    fn list(&self, owner: Option<&str>) -> Vec<u8> {
         // Copied out first, so the `screen` locks below are never taken under `shells`.
         let shells: Vec<_> = lock(&self.shells)
             .live
             .iter()
+            .filter(|(_, shell)| {
+                owner.is_none_or(|owner| {
+                    shell.owner == owner
+                        || lock(&shell.screen).shared_with.as_deref() == Some(owner)
+                })
+            })
             .map(|(id, shell)| (id.clone(), shell.clone()))
             .collect();
         let mut out = Vec::new();
         for (id, shell) in shells {
             let cwd = cwd_of(shell.pid);
-            let (title, attached) = {
+            let (title, attached, shared_with) = {
                 let term = lock(&shell.screen);
                 let title = String::from_utf8_lossy(&term.parser.callbacks().0).into_owned();
-                (title, term.client.is_some())
+                (title, term.client.is_some(), term.shared_with.clone())
             };
             let line = serde_json::json!({
                 "id": id,
@@ -312,6 +503,7 @@ impl Daemon {
                 "shell": shell.program.to_string_lossy(),
                 "started": shell.started,
                 "owner": shell.owner,
+                "shared_with": shared_with,
                 "running": shell.foreground(),
             });
             out.extend(line.to_string().into_bytes());
@@ -327,6 +519,12 @@ impl Shell {
     fn output(&self, bytes: &[u8]) {
         let mut term = lock(&self.screen);
         term.parser.process(bytes);
+        term.output.extend(bytes);
+        term.output_end += bytes.len() as u64;
+        let excess = term.output.len().saturating_sub(OUTPUT_CAP);
+        if excess > 0 {
+            term.output.drain(..excess);
+        }
         if let Some((_, client)) = &mut term.client
             && protocol::write_frame(client, OUTPUT, bytes).is_err()
         {
@@ -335,14 +533,118 @@ impl Shell {
         }
     }
 
+    fn allowed(&self, term: &Screen, owner: &str) -> bool {
+        self.owner == owner || term.shared_with.as_deref() == Some(owner)
+    }
+
+    fn send_owned(&self, owner: &str, input: &[u8]) -> Option<io::Result<()>> {
+        let _input = lock(&self.input);
+        let term = lock(&self.screen);
+        if !self.allowed(&term, owner) {
+            return None;
+        }
+        drop(term);
+        Some(self.write_input(input))
+    }
+
+    fn write_input(&self, input: &[u8]) -> io::Result<()> {
+        let deadline = Instant::now() + Duration::from_millis(500);
+        let mut sent = 0;
+        while sent < input.len() {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "terminal input timed out",
+                ));
+            }
+            let mut ready = libc::pollfd {
+                fd: self.master.as_raw_fd(),
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            // SAFETY: `ready` points at one live descriptor for this call.
+            match unsafe {
+                libc::poll(&mut ready, 1, left.as_millis().min(i32::MAX as u128) as i32)
+            } {
+                0 => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "terminal input timed out",
+                    ));
+                }
+                -1 => return Err(io::Error::last_os_error()),
+                _ => {}
+            }
+            match (&self.master).write(&input[sent..]) {
+                Ok(0) => return Err(io::Error::new(io::ErrorKind::WriteZero, "terminal closed")),
+                Ok(n) => sent += n,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
+    fn read_owned(
+        &self,
+        owner: &str,
+        offset: u64,
+        limit: Option<usize>,
+    ) -> Option<serde_json::Value> {
+        let term = lock(&self.screen);
+        if !self.allowed(&term, owner) {
+            return None;
+        }
+        let base = term.output_end - term.output.len() as u64;
+        let start = offset.max(base).min(term.output_end);
+        let limit = limit.unwrap_or(CHUNK).min(CHUNK);
+        let bytes: Vec<u8> = term
+            .output
+            .iter()
+            .skip((start - base) as usize)
+            .take(limit.saturating_add(3))
+            .copied()
+            .collect();
+        let mut count = limit.min(bytes.len());
+        while count < bytes.len()
+            && matches!(std::str::from_utf8(&bytes[..count]), Err(error) if error.error_len().is_none())
+        {
+            count += 1;
+        }
+        let bytes = &bytes[..count];
+        Some(serde_json::json!({
+            "base_offset": base,
+            "next_offset": start + bytes.len() as u64,
+            "gap": base.saturating_sub(offset),
+            "output": String::from_utf8_lossy(bytes),
+            "output_base64": base64::engine::general_purpose::STANDARD.encode(bytes),
+            "attached": term.client.is_some(),
+            "screen": term.parser.screen().contents(),
+        }))
+    }
+
     /// Hand the shell to terminal `me`: size the pty and the model to it, take the shell from the
     /// terminal that had it, and send the replay. False when the shell has already ended (the
     /// terminal is told how) or the terminal went away meanwhile.
-    fn attach(&self, me: u64, conn: &UnixStream, rows: u16, cols: u16) -> bool {
+    fn attach(
+        &self,
+        me: u64,
+        conn: &UnixStream,
+        rows: u16,
+        cols: u16,
+        owner: Option<&str>,
+    ) -> bool {
         let Ok(mut conn) = conn.try_clone() else {
             return false;
         };
         let mut term = lock(&self.screen);
+        if owner.is_some_and(|owner| !self.allowed(&term, owner)) {
+            let _ =
+                protocol::write_frame(&mut conn, ERROR, b"terminal is not shared with this vault");
+            return false;
+        }
         if let Some(code) = term.exit {
             let _ = protocol::write_frame(&mut conn, EXIT, &code.to_be_bytes());
             return false;
@@ -419,14 +721,14 @@ impl Shell {
 
 /// Open a pty pair without a controlling terminal or inheritable master descriptor.
 fn open_pty() -> io::Result<(File, File)> {
-    let open = |path: &Path| {
+    let open = |path: &Path, flags| {
         OpenOptions::new()
             .read(true)
             .write(true)
-            .custom_flags(libc::O_NOCTTY)
+            .custom_flags(flags)
             .open(path)
     };
-    let master = open(Path::new("/dev/ptmx"))?;
+    let master = open(Path::new("/dev/ptmx"), libc::O_NOCTTY | libc::O_NONBLOCK)?;
     let fd = master.as_raw_fd();
     // 128 bytes, as macOS's `TIOCPTYGNAME` writes.
     let mut name: [libc::c_char; 128] = [0; 128];
@@ -449,7 +751,10 @@ fn open_pty() -> io::Result<(File, File)> {
     }
     // SAFETY: on success the call left a NUL-terminated path in `name`.
     let slave = unsafe { CStr::from_ptr(name.as_ptr()) };
-    let slave = open(Path::new(OsStr::from_bytes(slave.to_bytes())))?;
+    let slave = open(
+        Path::new(OsStr::from_bytes(slave.to_bytes())),
+        libc::O_NOCTTY,
+    )?;
     Ok((master, slave))
 }
 

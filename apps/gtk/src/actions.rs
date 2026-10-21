@@ -82,6 +82,32 @@ impl App {
                 Some(Doc::Text(tab)) => tab.paste_verbatim(),
                 _ => {}
             },
+            "terminal-share" | "terminal-revoke" => {
+                let Some(Doc::Terminal(term)) = self.active_doc() else {
+                    return self.toast("Select a held terminal in a vault to share it with MCP");
+                };
+                let share = name == "terminal-share";
+                let app = Rc::downgrade(self);
+                term.change_share(share, move |term, result| {
+                    let Some(app) = app.upgrade() else { return };
+                    match result {
+                        Ok(()) => {
+                            app.toast(if share {
+                                "Terminal shared with MCP"
+                            } else {
+                                "MCP access revoked"
+                            });
+                            let app = Rc::downgrade(&app);
+                            term.ask(move |_| {
+                                if let Some(app) = app.upgrade() {
+                                    app.sync_details();
+                                }
+                            });
+                        }
+                        Err(why) => app.toast(&why),
+                    }
+                });
+            }
             "paste-plain" => self.with_active(Tab::paste_verbatim),
             "close-tab" => {
                 if let Some(page) = self.tabs().selected_page() {

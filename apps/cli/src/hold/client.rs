@@ -3,7 +3,10 @@
 //! `attach` forwards input, SIGWINCH sizes and output on separate threads. It keeps no
 //! persistent state: terminal closure ends the relay while the holder retains the shell.
 
-use super::protocol::{self, DETACHED, EXIT, HELLO, Hello, INPUT, KILL, LIST, OUTPUT, RESIZE};
+use super::protocol::{
+    self, ACK, ATTACH_EXISTING, DETACHED, ERROR, EXIT, HELLO, Hello, INPUT, KILL, LIST, OUTPUT,
+    RESIZE, REVOKE, SHARE,
+};
 use super::{FAILED, SOCKET, clip, lock};
 use std::io::{self, Read, Write};
 use std::mem::MaybeUninit;
@@ -22,7 +25,33 @@ pub fn attach(id: &str, cwd: Option<PathBuf>, owner: &str) -> i32 {
     let cwd = std::path::absolute(cwd.unwrap_or_else(|| ".".into())).unwrap_or_default();
     let winch = block_winch();
     let saved = raw();
-    let code = relay(id, &cwd, owner, winch);
+    let code = relay(id, &cwd, owner, winch, false);
+    if let Some(saved) = saved {
+        // SAFETY: `saved` is the mode `tcgetattr` gave for this descriptor.
+        unsafe { libc::tcsetattr(0, libc::TCSANOW, &saved) };
+    }
+    code
+}
+
+/// Attach only to a live terminal owned by or shared with this vault; never create a shell.
+pub fn attach_existing(id: &str, vault: &Path) -> i32 {
+    let cwd = match vault.canonicalize() {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("accent-cli: cannot locate vault: {e}");
+            return FAILED;
+        }
+    };
+    let owner = match super::mcp_owner(&cwd) {
+        Ok(owner) => owner,
+        Err(e) => {
+            eprintln!("accent-cli: cannot identify vault: {e}");
+            return FAILED;
+        }
+    };
+    let winch = block_winch();
+    let saved = raw();
+    let code = relay(id, &cwd, &owner, winch, true);
     if let Some(saved) = saved {
         // SAFETY: `saved` is the mode `tcgetattr` gave for this descriptor.
         unsafe { libc::tcsetattr(0, libc::TCSANOW, &saved) };
@@ -47,20 +76,51 @@ pub fn held() -> io::Result<()> {
     Ok(())
 }
 
+/// Share a live terminal with the MCP server for one vault.
+pub fn share(id: &str, vault: &Path) -> io::Result<()> {
+    let owner = super::mcp_owner(vault)?;
+    let payload = serde_json::json!({"id": id, "owner": owner}).to_string();
+    one_shot(SHARE, payload.as_bytes())
+}
+
+/// Immediately revoke a terminal's MCP share.
+pub fn revoke(id: &str) -> io::Result<()> {
+    one_shot(REVOKE, id.as_bytes())
+}
+
+fn one_shot(tag: u8, payload: &[u8]) -> io::Result<()> {
+    let mut conn =
+        holder()?.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no terminal holder"))?;
+    protocol::write_frame(&mut conn, tag, payload)?;
+    match protocol::read_frame(&mut conn)? {
+        Some((ACK, _)) => Ok(()),
+        Some((ERROR, reason)) => Err(io::Error::other(
+            String::from_utf8_lossy(&reason).into_owned(),
+        )),
+        _ => Err(io::Error::other("terminal holder gave no answer")),
+    }
+}
+
 /// Connect to the holder if one is running.
-fn holder() -> io::Result<Option<UnixStream>> {
+pub(super) fn holder() -> io::Result<Option<UnixStream>> {
     Ok(UnixStream::connect(super::dir()?.join(SOCKET)).ok())
 }
 
 /// Relay until shell exit or takeover. Reattach after an unexpected disconnect, restarting a
 /// crashed holder if needed; give up after three silent attempts.
-fn relay(id: &str, cwd: &Path, owner: &str, winch: libc::sigset_t) -> i32 {
+fn relay(id: &str, cwd: &Path, owner: &str, winch: libc::sigset_t, existing: bool) -> i32 {
     let to = Arc::new(Mutex::new(None));
     let mut out = io::stdout().lock();
     let mut copies = clip::Scanner::default();
     let (mut forwarding, mut shown, mut silent) = (false, false, 0);
     while silent < 3 {
-        let mut conn = match connect() {
+        let mut conn = match if existing {
+            holder().and_then(|conn| {
+                conn.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no terminal holder"))
+            })
+        } else {
+            connect()
+        } {
             Ok(conn) => conn,
             Err(e) => {
                 eprintln!("accent-cli: cannot start the terminal holder: {e}");
@@ -76,13 +136,14 @@ fn relay(id: &str, cwd: &Path, owner: &str, winch: libc::sigset_t) -> i32 {
             cols,
             env: std::env::vars_os().collect(),
         };
-        if protocol::write_frame(&mut conn, HELLO, &hello.encode()).is_err() {
+        let tag = if existing { ATTACH_EXISTING } else { HELLO };
+        if protocol::write_frame(&mut conn, tag, &hello.encode()).is_err() {
             silent += 1;
             continue;
         }
         *lock(&to) = conn.try_clone().ok();
         // Only once attached, so that what is typed meanwhile waits in the terminal.
-        if !forwarding {
+        if !forwarding && !existing {
             forward(&to, winch);
             forwarding = true;
         }
@@ -90,6 +151,10 @@ fn relay(id: &str, cwd: &Path, owner: &str, winch: libc::sigset_t) -> i32 {
         loop {
             match protocol::read_frame(&mut conn) {
                 Ok(Some((OUTPUT, bytes))) => {
+                    if !forwarding {
+                        forward(&to, winch);
+                        forwarding = true;
+                    }
                     // Attached again: the replay is the whole screen, so start from a blank one.
                     if shown && !heard {
                         let _ = out.write_all(b"\x1b[H\x1b[2J\x1b[3J");
@@ -113,6 +178,10 @@ fn relay(id: &str, cwd: &Path, owner: &str, winch: libc::sigset_t) -> i32 {
                         .map_or(FAILED, i32::from_be_bytes);
                 }
                 Ok(Some((DETACHED, _))) => return 0,
+                Ok(Some((ERROR, reason))) => {
+                    eprintln!("accent-cli: {}", String::from_utf8_lossy(&reason));
+                    return FAILED;
+                }
                 Ok(Some(_)) => {}
                 Ok(None) | Err(_) => break,
             }
@@ -176,7 +245,7 @@ fn forward(to: &Arc<Mutex<Option<UnixStream>>>, winch: libc::sigset_t) {
 /// another holder every fifth attempt in case the previous one found the lock held while exiting.
 // ponytail: polling puts the first shell after a holder start at about 60 ms (measured), 50 of
 // them this sleep. A shorter step, or a pipe the holder closes once bound, if that ever shows.
-fn connect() -> io::Result<UnixStream> {
+pub(super) fn connect() -> io::Result<UnixStream> {
     let socket = super::dir()?.join(SOCKET);
     let mut tries = 0;
     loop {

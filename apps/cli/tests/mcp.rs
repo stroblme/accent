@@ -2,9 +2,10 @@
 //! stdin, in both of the protocol's lifecycles, and gone once its stdin is.
 
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::DirBuilderExt;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
@@ -17,7 +18,14 @@ impl Scratch {
     fn new(name: &str) -> Scratch {
         let dir = std::env::temp_dir().join(format!("accent-mcp-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        for sub in ["vault/Templates", "outside", "config", "cache"] {
+        for sub in [
+            "vault/Templates",
+            "outside",
+            "config",
+            "cache",
+            "state",
+            "tmp",
+        ] {
             std::fs::create_dir_all(dir.join(sub)).unwrap();
         }
         let write = |rel: &str, text: &str| std::fs::write(dir.join(rel), text).unwrap();
@@ -69,6 +77,8 @@ impl Client {
             .args(args)
             .env("XDG_CONFIG_HOME", scratch.dir.join("config"))
             .env("XDG_CACHE_HOME", scratch.dir.join("cache"))
+            .env("XDG_STATE_HOME", scratch.dir.join("state"))
+            .env("TMPDIR", scratch.dir.join("tmp"))
             // A test never draws on the screen it runs on: `render_diagram` finds no display.
             .env_remove("DISPLAY")
             .env_remove("WAYLAND_DISPLAY")
@@ -149,6 +159,319 @@ impl Client {
         let _ = self.child.kill();
         panic!("mcp outlived its stdin");
     }
+}
+
+#[test]
+fn jobs_survive_mcp_disconnect_and_offer_paged_output() {
+    let scratch = Scratch::new("jobs");
+    let mut client = Client::start(&scratch, &["--allow-jobs"]);
+    client.initialize();
+    let (started, error) = client.call(
+        "start_job",
+        json!({"cwd": "", "argv": ["/bin/sh", "-c", "printf 'first\\n'; sleep 3; printf 'second\\n'"]}),
+    );
+    assert!(!error, "{started:?}");
+    let id = serde_json::from_str::<Value>(&started[0]).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    client.close();
+
+    let mut client = Client::start(&scratch, &["--allow-jobs"]);
+    client.initialize();
+    let (listed, error) = client.call("list_jobs", json!({}));
+    assert!(!error, "{listed:?}");
+    assert!(listed[0].contains(&id));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (read, error) = client.call("read_job", json!({"id": id, "offset": 0, "limit": 6}));
+        assert!(!error, "{read:?}");
+        let read: Value = serde_json::from_str(&read[0]).unwrap();
+        if read["state"] == "exited" {
+            assert_eq!(read["output"], "first\n");
+            assert_eq!(read["next_offset"], 6);
+            let (rest, error) =
+                client.call("read_job", json!({"id": id, "offset": 6, "limit": 100}));
+            assert!(!error, "{rest:?}");
+            let rest: Value = serde_json::from_str(&rest[0]).unwrap();
+            assert_eq!(rest["output"], "second\n");
+            assert_eq!(rest["eof"], true);
+            break;
+        }
+        assert!(Instant::now() < deadline, "job did not exit: {read}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    client.close();
+}
+
+#[test]
+fn terminal_survives_mcp_disconnect_and_accepts_input_on_reconnect() {
+    let scratch = Scratch::new("terminal");
+    let mut client = Client::start(&scratch, &["--allow-jobs"]);
+    client.initialize();
+    let (started, error) = client.call("start_terminal", json!({"cwd": ""}));
+    assert!(!error, "{started:?}");
+    let started: Value = serde_json::from_str(&started[0]).unwrap();
+    let id = started["id"].as_str().unwrap().to_string();
+    assert!(
+        started["attach_command"]
+            .as_str()
+            .unwrap()
+            .contains(" attach --existing --vault ")
+    );
+    assert!(
+        started["attach_command"]
+            .as_str()
+            .unwrap()
+            .ends_with(&format!(" '{id}'"))
+    );
+    assert_eq!(started["run_on"], "host");
+    client.close();
+
+    let mut client = Client::start(&scratch, &["--allow-jobs"]);
+    client.initialize();
+    let (listed, error) = client.call("list_terminals", json!({}));
+    assert!(!error, "{listed:?}");
+    assert!(listed[0].contains(&id));
+    let (sent, error) = client.call(
+        "send_terminal",
+        json!({"id": id, "input": "printf 'mcp-pty-ok\\n' > terminal-result; printf done\\n\n"}),
+    );
+    assert!(!error, "{sent:?}");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let (read, error) = client.call("read_terminal", json!({"id": id, "offset": 0}));
+        assert!(!error, "{read:?}");
+        let read: Value = serde_json::from_str(&read[0]).unwrap();
+        if scratch.exists("vault/terminal-result")
+            && read["output"].as_str().unwrap().contains("done")
+        {
+            assert!(read["next_offset"].as_u64().unwrap() > 0);
+            break;
+        }
+        assert!(Instant::now() < deadline, "terminal gave no output: {read}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let (stopped, error) = client.call("stop_terminal", json!({"id": id}));
+    assert!(!error, "{stopped:?}");
+    client.close();
+}
+
+#[test]
+fn stop_job_ends_the_process_group() {
+    let scratch = Scratch::new("job-stop");
+    let mut client = Client::start(&scratch, &["--allow-jobs"]);
+    client.initialize();
+    let (started, error) = client.call(
+        "start_job",
+        json!({"cwd": "", "argv": ["/bin/sh", "-c", "(sleep 2; printf leaked > marker) & wait"]}),
+    );
+    assert!(!error, "{started:?}");
+    let id = serde_json::from_str::<Value>(&started[0]).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (stopped, error) = client.call("stop_job", json!({"id": id}));
+    assert!(!error, "{stopped:?}");
+    let stopped: Value = serde_json::from_str(&stopped[0]).unwrap();
+    assert_eq!(stopped["state"], "stopped");
+    std::thread::sleep(Duration::from_millis(2300));
+    assert!(
+        !scratch.exists("vault/marker"),
+        "a child escaped the stopped group"
+    );
+    client.close();
+}
+
+#[test]
+fn stop_job_kills_a_descendant_that_ignores_term() {
+    let scratch = Scratch::new("job-stubborn-child");
+    let mut client = Client::start(&scratch, &["--allow-jobs"]);
+    client.initialize();
+    let (started, error) = client.call(
+        "start_job",
+        json!({"cwd": "", "argv": ["/bin/sh", "-c", "(trap '' TERM; printf ready > ready; sleep 2; printf leaked > marker) & wait"]}),
+    );
+    assert!(!error, "{started:?}");
+    let id = serde_json::from_str::<Value>(&started[0]).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let ready_by = Instant::now() + Duration::from_secs(2);
+    while !scratch.exists("vault/ready") {
+        assert!(Instant::now() < ready_by, "the descendant did not start");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let (stopped, error) = client.call("stop_job", json!({"id": id}));
+    assert!(!error, "{stopped:?}");
+    let stopped: Value = serde_json::from_str(&stopped[0]).unwrap();
+    assert_eq!(stopped["state"], "stopped");
+    std::thread::sleep(Duration::from_millis(2300));
+    assert!(
+        !scratch.exists("vault/marker"),
+        "a TERM-ignoring child survived"
+    );
+    client.close();
+}
+
+#[test]
+fn stale_running_job_is_interrupted_and_old_results_are_pruned() {
+    let scratch = Scratch::new("job-reboot");
+    let root = scratch.dir.join("vault").canonicalize().unwrap();
+    let name = accent_api::ssh::hash_of(root.to_string_lossy().as_bytes());
+    let base = scratch.dir.join("state/accent/jobs").join(name);
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&base)
+        .unwrap();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    for (id, state, finished) in [
+        ("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "running", None),
+        (
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "exited",
+            Some(now - 8 * 24 * 60 * 60),
+        ),
+    ] {
+        let dir = base.join(id);
+        std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        std::fs::write(dir.join("output.log"), "partial\n").unwrap();
+        std::fs::write(
+            dir.join("meta.json"),
+            json!({"id": id, "cwd": "", "state": state, "started": now - 8 * 24 * 60 * 60,
+                "finished": finished, "exit_code": null, "error": null,
+                "socket": scratch.dir.join("missing.sock")})
+            .to_string(),
+        )
+        .unwrap();
+    }
+    let incomplete = base.join("cccccccccccccccccccccccccccccccc");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&incomplete)
+        .unwrap();
+    let mut client = Client::start(&scratch, &["--allow-jobs"]);
+    client.initialize();
+    let (listed, error) = client.call("list_jobs", json!({}));
+    assert!(!error, "{listed:?}");
+    let listed: Value = serde_json::from_str(&listed[0]).unwrap();
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    assert_eq!(listed[0]["state"], "interrupted");
+    assert!(!base.join("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").exists());
+    client.close();
+}
+
+#[test]
+fn job_output_is_capped_and_reports_truncation() {
+    let scratch = Scratch::new("job-cap");
+    let mut client = Client::start(&scratch, &["--allow-jobs"]);
+    client.initialize();
+    let (started, error) = client.call(
+        "start_job",
+        json!({"cwd": "", "argv": ["/bin/sh", "-c", "dd if=/dev/zero bs=1048576 count=17 2>/dev/null"]}),
+    );
+    assert!(!error, "{started:?}");
+    let id = serde_json::from_str::<Value>(&started[0]).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (read, error) = client.call("read_job", json!({"id": id, "offset": 0, "limit": 10}));
+        assert!(!error, "{read:?}");
+        let read: Value = serde_json::from_str(&read[0]).unwrap();
+        if read["state"] == "exited" {
+            assert_eq!(read["truncated"], true);
+            assert_eq!(read["base_offset"], 8388608);
+            assert_eq!(read["gap"], 8388608);
+            assert_eq!(read["next_offset"], 8388618);
+            assert_eq!(read["output"].as_str().unwrap().len(), 10);
+            let (last, error) = client.call(
+                "read_job",
+                json!({"id": id, "offset": 17825782, "limit": 10}),
+            );
+            assert!(!error, "{last:?}");
+            let last: Value = serde_json::from_str(&last[0]).unwrap();
+            assert_eq!(last["next_offset"], 17825792);
+            assert_eq!(last["gap"], 0);
+            assert_eq!(last["eof"], true);
+            break;
+        }
+        assert!(Instant::now() < deadline, "job did not exit: {read}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    client.close();
+}
+
+#[test]
+fn job_read_keeps_multibyte_characters_whole_at_small_page_limits() {
+    let scratch = Scratch::new("job-utf8");
+    let mut client = Client::start(&scratch, &["--allow-jobs"]);
+    client.initialize();
+    let (started, error) = client.call(
+        "start_job",
+        json!({"cwd": "", "argv": ["/bin/sh", "-c", "printf '€Z'"]}),
+    );
+    assert!(!error, "{started:?}");
+    let id = serde_json::from_str::<Value>(&started[0]).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let (first, error) = client.call("read_job", json!({"id": id, "offset": 0, "limit": 1}));
+        assert!(!error, "{first:?}");
+        let first: Value = serde_json::from_str(&first[0]).unwrap();
+        if first["state"] == "exited" {
+            assert_eq!(first["output"], "€");
+            assert_eq!(first["next_offset"], 3);
+            let (rest, error) = client.call("read_job", json!({"id": id, "offset": 3, "limit": 1}));
+            assert!(!error, "{rest:?}");
+            let rest: Value = serde_json::from_str(&rest[0]).unwrap();
+            assert_eq!(rest["output"], "Z");
+            assert_eq!(rest["next_offset"], 4);
+            break;
+        }
+        assert!(Instant::now() < deadline, "job did not exit: {first}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    client.close();
+}
+
+#[test]
+fn jobs_require_opt_in_and_refuse_outside_cwd() {
+    let scratch = Scratch::new("job-gates");
+    let mut plain = Client::start(&scratch, &[]);
+    plain.initialize();
+    assert!(!names(&plain.ask("tools/list", json!({}))).contains(&"start_job".into()));
+    assert!(!names(&plain.ask("tools/list", json!({}))).contains(&"start_terminal".into()));
+    plain.close();
+
+    let mut limited = Client::start(&scratch, &["--allow-jobs", "--read-only"]);
+    limited.initialize();
+    let tools = names(&limited.ask("tools/list", json!({})));
+    assert!(tools.contains(&"list_jobs".into()));
+    assert!(tools.contains(&"read_job".into()));
+    assert!(tools.contains(&"list_terminals".into()));
+    assert!(tools.contains(&"read_terminal".into()));
+    assert!(!tools.contains(&"start_job".into()));
+    assert!(!tools.contains(&"stop_job".into()));
+    assert!(!tools.contains(&"start_terminal".into()));
+    assert!(!tools.contains(&"send_terminal".into()));
+    assert!(!tools.contains(&"stop_terminal".into()));
+    limited.close();
+
+    let mut allowed = Client::start(&scratch, &["--allow-jobs"]);
+    allowed.initialize();
+    let (_, error) = allowed.call("start_job", json!({"cwd": "link", "argv": ["/bin/true"]}));
+    assert!(error);
+    let (_, error) = allowed.call("start_job", json!({"cwd": "", "argv": []}));
+    assert!(error);
+    allowed.close();
 }
 
 fn names(list: &Value) -> Vec<String> {

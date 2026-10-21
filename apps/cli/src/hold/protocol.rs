@@ -10,6 +10,8 @@ use std::path::PathBuf;
 
 /// Client: attach to a shell, starting it if none has this id. Payload: [`Hello`].
 pub const HELLO: u8 = b'h';
+/// Client: attach only to an existing shell scoped to the supplied owner. Payload: [`Hello`].
+pub const ATTACH_EXISTING: u8 = b'A';
 /// Client: keystrokes, as the terminal sent them.
 pub const INPUT: u8 = b'i';
 /// Client: the terminal's new size, as [`size`] encodes it.
@@ -18,8 +20,26 @@ pub const RESIZE: u8 = b'r';
 pub const KILL: u8 = b'k';
 /// Client: which shells are held. Answered with one `OUTPUT` of JSON lines.
 pub const LIST: u8 = b'l';
+/// Client: create a held shell without taking a terminal attachment. Payload: [`Hello`].
+pub const CREATE: u8 = b'c';
+/// Client: list only shells with this owner. Payload: owner bytes.
+pub const LIST_OWNED: u8 = b'L';
+/// Client: read a shell's bounded output and screen. Payload: JSON scoped request.
+pub const READ: u8 = b'q';
+/// Client: send input to an owned shell. Payload: JSON scoped request.
+pub const SEND: u8 = b's';
+/// Client: stop an owned shell. Payload: JSON scoped request.
+pub const STOP: u8 = b't';
+/// Client: share a live terminal with one MCP vault. Payload: JSON id and owner.
+pub const SHARE: u8 = b'g';
+/// Client: revoke MCP sharing for a live terminal. Payload: terminal ID.
+pub const REVOKE: u8 = b'v';
 /// Holder: what the shell wrote, or the replay of its screen.
 pub const OUTPUT: u8 = b'o';
+/// Holder: one-shot request succeeded.
+pub const ACK: u8 = b'a';
+/// Holder: one-shot request failed. Payload: UTF-8 reason.
+pub const ERROR: u8 = b'e';
 /// Holder: the shell ended with this status, an `i32` BE.
 pub const EXIT: u8 = b'x';
 /// Holder: another terminal took this shell over.

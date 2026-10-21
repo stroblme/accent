@@ -54,6 +54,9 @@ pub struct Term {
     asking: Cell<bool>,
     again: Cell<bool>,
     waiting: RefCell<Vec<OnFacts>>,
+    /// This vault's root on the shell's host, only when this held shell can be shared with it.
+    share_vault: Option<PathBuf>,
+    sharing: Cell<bool>,
 }
 
 /// A focused shell's live working directory and machine for Git discovery.
@@ -77,6 +80,8 @@ pub struct Facts {
     pub started: Option<i64>,
     /// The title the shell last set (OSC 0 or 2), which the attach's replay hands VTE.
     pub title: Option<String>,
+    /// The vault token granted MCP access, if this shell was explicitly shared.
+    pub shared_with: Option<String>,
 }
 
 impl Term {
@@ -301,6 +306,50 @@ impl Term {
     pub fn paste(&self) {
         self.view.paste_clipboard();
     }
+
+    fn share_state(&self) -> Option<bool> {
+        self.share_vault
+            .as_ref()
+            .filter(|_| !self.lost.get() && !self.ended.get())
+            .map(|_| self.holder.borrow().shared_with.is_some())
+    }
+
+    /// Change this tab's MCP access on its host, then report the holder's answer on the main loop.
+    pub fn change_share(
+        self: &Rc<Self>,
+        share: bool,
+        done: impl FnOnce(&Rc<Self>, Result<(), String>) + 'static,
+    ) {
+        let Some(vault) = self.share_vault.as_deref() else {
+            return done(self, Err("This terminal is not on the vault's host".into()));
+        };
+        if self.lost.get() || self.ended.get() {
+            return done(self, Err("The terminal is disconnected or ended".into()));
+        }
+        if self.sharing.replace(true) {
+            return done(
+                self,
+                Err("A terminal sharing request is still running".into()),
+            );
+        }
+        let Some(argv) = self.shell.share_command(id(&self.key), vault, share) else {
+            self.sharing.set(false);
+            return done(
+                self,
+                Err("Cannot use this terminal or vault path with accent-cli".into()),
+            );
+        };
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let result = crate::work::attempt("change terminal MCP access", move || output(&argv))
+                .await
+                .map(|_| ());
+            if let Some(term) = weak.upgrade() {
+                term.sharing.set(false);
+                done(&term, result);
+            }
+        });
+    }
 }
 
 /// The command a shell tab runs.
@@ -347,6 +396,43 @@ pub struct Program {
 }
 
 impl Shell {
+    /// The terminal and vault must be on the same machine and SSH account.
+    pub fn same_host(&self, vault: Option<&ssh::Url>) -> bool {
+        match (self, vault) {
+            (Shell::Local(_), None) => true,
+            (Shell::Remote { at, .. }, Some(vault)) => at.authority() == vault.authority(),
+            _ => false,
+        }
+    }
+
+    pub fn shareable(&self, vault: Option<&ssh::Url>) -> bool {
+        self.same_host(vault) && self.held().is_some()
+    }
+
+    fn share_command(&self, id: &str, vault: &Path, share: bool) -> Option<Vec<String>> {
+        match self {
+            Shell::Program(_) | Shell::Console => None,
+            Shell::Local(_) => {
+                let mut argv = cli()?;
+                argv.push(if share { "share" } else { "revoke" }.into());
+                argv.push(id.into());
+                if share {
+                    argv.push("--vault".into());
+                    argv.push(vault.to_str()?.into());
+                }
+                Some(argv)
+            }
+            Shell::Remote { at, link, .. } => {
+                let server = ssh::server_path(&accent_api::link::server().ok()?.hash);
+                let command = match share {
+                    true => ssh::share_cmd(&server, id, vault),
+                    false => ssh::revoke_cmd(&server, id),
+                };
+                Some(ssh::run(at, &ssh::control_path(link), &command))
+            }
+        }
+    }
+
     /// The shell `key` names, held on the host `at` names and started in its path, riding the
     /// master of `link`.
     pub fn remote(at: ssh::Url, link: ssh::Url, key: &str) -> Result<Self, String> {
@@ -410,7 +496,13 @@ pub(crate) fn scroller(view: &vte4::Terminal) -> gtk::ScrolledWindow {
 }
 
 /// Open a shell as a tab of `tabs`, at the end or at position `at`, and start it.
-pub fn open(tabs: &adw::TabView, at: Option<i32>, shell: &Shell, key: String) -> Rc<Term> {
+pub fn open(
+    tabs: &adw::TabView,
+    at: Option<i32>,
+    shell: &Shell,
+    key: String,
+    share_vault: Option<PathBuf>,
+) -> Rc<Term> {
     let view = vte4::Terminal::new();
     view.set_scrollback_lines(SCROLLBACK);
     view.set_vexpand(true);
@@ -464,8 +556,6 @@ pub fn open(tabs: &adw::TabView, at: Option<i32>, shell: &Shell, key: String) ->
     ));
 
     install_keys(&view, tabs);
-    install_links(&view);
-
     let term = Rc::new(Term {
         key,
         page,
@@ -477,7 +567,10 @@ pub fn open(tabs: &adw::TabView, at: Option<i32>, shell: &Shell, key: String) ->
         asking: Cell::new(false),
         again: Cell::new(false),
         waiting: RefCell::default(),
+        share_vault,
+        sharing: Cell::new(false),
     });
+    install_links(&term);
     take_copies(&term);
     start(&term);
     term
@@ -644,6 +737,7 @@ fn told(listing: &str, id: &str) -> Facts {
         running: text("running"),
         started: shell["started"].as_i64(),
         title: text("title").filter(|title| !title.is_empty()),
+        shared_with: text("shared_with"),
         ..Facts::default()
     }
 }
@@ -655,6 +749,9 @@ fn facts_after_query(previous: &Facts, listing: Option<&[u8]>, id: &str) -> Fact
         .unwrap_or_default();
     if facts.dir.is_none() {
         facts.dir.clone_from(&previous.dir);
+    }
+    if listing.is_none() {
+        facts.shared_with.clone_from(&previous.shared_with);
     }
     facts
 }
@@ -952,7 +1049,8 @@ fn install_keys(view: &vte4::Terminal, tabs: &adw::TabView) {
 /// Install terminal menus and safe output-link handling.
 /// Only `launchable` schemes reach the desktop; action parameters retain the clicked URL
 /// even if later pointer motion changes the hover target.
-fn install_links(view: &vte4::Terminal) {
+fn install_links(term: &Rc<Term>) {
+    let view = &term.view;
     // OSC 8, for the programs that mark their own links instead of printing a bare URL.
     view.set_allow_hyperlink(true);
     match vte4::Regex::for_match(LINK, PCRE2_MULTILINE) {
@@ -965,17 +1063,26 @@ fn install_links(view: &vte4::Terminal) {
     view.insert_action_group(GROUP, Some(&link_actions(view)));
 
     let menu = gio::Menu::new();
-    fill_menu(&menu, None);
+    fill_menu(&menu, None, term.share_state());
     view.set_context_menu_model(Some(&menu));
 
     // Capture phase, so the model is rebuilt before VTE reads it to pop the menu up.
     let secondary = gtk::GestureClick::new();
     secondary.set_button(gdk::BUTTON_SECONDARY);
     secondary.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let weak = Rc::downgrade(term);
     secondary.connect_pressed(glib::clone!(
         #[weak(rename_to = under)]
         view,
-        move |_, _, x, y| fill_menu(&menu, link_at(&under, x, y).as_deref())
+        move |_, _, x, y| {
+            let Some(term) = weak.upgrade() else { return };
+            let link = link_at(&under, x, y);
+            fill_menu(&menu, link.as_deref(), term.share_state());
+            if term.share_vault.is_some() {
+                let menu = menu.clone();
+                term.ask(move |term| fill_menu(&menu, link.as_deref(), term.share_state()));
+            }
+        }
     ));
     view.add_controller(secondary);
 
@@ -1005,7 +1112,7 @@ fn install_links(view: &vte4::Terminal) {
 /// What the menu holds: the clipboard, then the tab, then the link under the pointer when there
 /// is one. No Select All — VTE binds nothing for it — and no Split, which is a tab gesture the
 /// tab strip already offers.
-fn fill_menu(menu: &gio::Menu, link: Option<&str>) {
+fn fill_menu(menu: &gio::Menu, link: Option<&str>, shared: Option<bool>) {
     menu.remove_all();
     let clipboard = gio::Menu::new();
     for action in ["win.terminal-copy", "win.terminal-paste"] {
@@ -1013,9 +1120,22 @@ fn fill_menu(menu: &gio::Menu, link: Option<&str>) {
     }
     menu.append_section(None, &clipboard);
     let tab = gio::Menu::new();
-    for action in ["win.terminal", "win.close-tab"] {
+    tab.append(
+        Some(crate::actions::label_of("win.terminal")),
+        Some("win.terminal"),
+    );
+    if let Some(shared) = shared {
+        let action = if shared {
+            "win.terminal-revoke"
+        } else {
+            "win.terminal-share"
+        };
         tab.append(Some(crate::actions::label_of(action)), Some(action));
     }
+    tab.append(
+        Some(crate::actions::label_of("win.close-tab")),
+        Some("win.close-tab"),
+    );
     menu.append_section(None, &tab);
     let Some(uri) = link else {
         return;
@@ -1441,7 +1561,7 @@ mod tests {
     fn a_shell_reads_its_own_line_of_the_listing() {
         let listing = [
             r#"{"attached":true,"cwd":"/srv","id":"00000000000000b1","pid":7,"title":""}"#,
-            r#"{"attached":true,"cwd":"/home/me/src","id":"00000000000000b2","pid":42,"title":"cargo build","shell":"/bin/zsh","started":1760000000,"running":"cargo build"}"#,
+            r#"{"attached":true,"cwd":"/home/me/src","id":"00000000000000b2","pid":42,"title":"cargo build","shell":"/bin/zsh","started":1760000000,"running":"cargo build","shared_with":"mcp:vault"}"#,
         ]
         .join("\n");
         assert_eq!(
@@ -1453,13 +1573,59 @@ mod tests {
                 running: Some("cargo build".into()),
                 started: Some(1_760_000_000),
                 title: Some("cargo build".into()),
+                shared_with: Some("mcp:vault".into()),
                 ..Facts::default()
             }
         );
         assert_eq!(told(&listing, "00000000000000b1").running, None);
         // A shell that set no title has none to name its tab with.
         assert_eq!(told(&listing, "00000000000000b1").title, None);
+        assert_eq!(told(&listing, "00000000000000b1").shared_with, None);
         assert_eq!(told(&listing, "00000000000000ff"), Facts::default());
+    }
+
+    #[test]
+    fn only_a_held_shell_on_the_vault_host_can_be_shared() {
+        let local = Shell::Local(PathBuf::from("/home/me"));
+        let at = ssh::parse("ssh://me@host/srv/other").unwrap();
+        let vault = ssh::parse("ssh://me@host/srv/vault").unwrap();
+        let elsewhere = ssh::parse("ssh://other@host/srv/vault").unwrap();
+        let remote = Shell::Remote {
+            argv: vec![],
+            kill: vec![],
+            at,
+            link: vault.clone(),
+        };
+        assert!(local.same_host(None));
+        assert!(!local.same_host(Some(&vault)));
+        assert!(remote.same_host(Some(&vault)));
+        assert!(!remote.same_host(Some(&elsewhere)));
+        assert!(!remote.same_host(None));
+        assert!(!Shell::Console.same_host(None));
+    }
+
+    #[test]
+    fn terminal_menu_offers_only_the_current_sharing_action() {
+        let menu = gio::Menu::new();
+        let actions = |menu: &gio::Menu| {
+            let tab = menu.item_link(1, "section").unwrap();
+            (0..tab.n_items())
+                .filter_map(|i| tab.item_attribute_value(i, "action", None))
+                .filter_map(|action| action.str().map(str::to_string))
+                .collect::<Vec<_>>()
+        };
+        fill_menu(&menu, None, None);
+        assert_eq!(actions(&menu), ["win.terminal", "win.close-tab"]);
+        fill_menu(&menu, None, Some(false));
+        assert_eq!(
+            actions(&menu),
+            ["win.terminal", "win.terminal-share", "win.close-tab"]
+        );
+        fill_menu(&menu, None, Some(true));
+        assert_eq!(
+            actions(&menu),
+            ["win.terminal", "win.terminal-revoke", "win.close-tab"]
+        );
     }
 
     #[test]
@@ -1467,14 +1633,20 @@ mod tests {
         let prior = Facts {
             dir: Some("/srv/changed-repo".into()),
             running: Some("git status".into()),
+            shared_with: Some("mcp:vault".into()),
             ..Facts::default()
         };
         let after = facts_after_query(&prior, None, "shell-id");
         assert_eq!(after.dir.as_deref(), Some("/srv/changed-repo"));
         assert_eq!(after.running, None);
+        assert_eq!(after.shared_with.as_deref(), Some("mcp:vault"));
         assert_eq!(
             facts_after_query(&prior, Some(b""), "shell-id").dir,
             prior.dir
+        );
+        assert_eq!(
+            facts_after_query(&prior, Some(b""), "shell-id").shared_with,
+            None
         );
         assert_eq!(
             facts_after_query(&Facts::default(), None, "shell-id").dir,

@@ -55,10 +55,10 @@ impl Holder {
         Some(holder)
     }
 
-    /// `$TMPDIR/accent-<uid>/hold-2.sock`; the scratch dir is ours, so its owner is our uid.
+    /// `$TMPDIR/accent-<uid>/hold-3.sock`; the scratch dir is ours, so its owner is our uid.
     fn socket(&self) -> PathBuf {
         let uid = std::fs::metadata(&self.tmp).unwrap().uid();
-        self.tmp.join(format!("accent-{uid}/hold-2.sock"))
+        self.tmp.join(format!("accent-{uid}/hold-3.sock"))
     }
 
     /// Attach to shell `id` the way `attach` does, for [`OWNER`], with a small, known environment.
@@ -146,6 +146,328 @@ fn a_held_shell_runs_and_says_how_it_ended() {
     let (seen, code) = until(&conn, None);
     assert!(seen.contains("42"), "{seen:?}");
     assert_eq!(code, Some(3));
+    holder.assert_gone();
+}
+
+#[test]
+fn scoped_terminal_requests_do_not_take_over_an_attached_terminal() {
+    let Some(mut holder) = Holder::start("scoped") else {
+        return;
+    };
+    let id = "mcp-owned-1";
+    let owner = "mcp:test-vault";
+    let mut hello = vec![0, 24, 0, 80];
+    let tmp = holder.tmp.to_str().unwrap();
+    for part in [id, tmp, owner, "SHELL=/bin/sh", "PATH=/usr/bin:/bin"] {
+        hello.extend(part.as_bytes());
+        hello.push(0);
+    }
+    let create = UnixStream::connect(holder.socket()).unwrap();
+    send(&create, b'c', &hello);
+    assert_eq!(frame(&create).0, b'a');
+
+    let attached = UnixStream::connect(holder.socket()).unwrap();
+    attached
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    send(&attached, HELLO, &hello);
+    let _ = frame(&attached);
+
+    let read = UnixStream::connect(holder.socket()).unwrap();
+    send(
+        &read,
+        b'q',
+        serde_json::json!({"id": id, "owner": owner, "offset": 0, "limit": 1024})
+            .to_string()
+            .as_bytes(),
+    );
+    assert_eq!(frame(&read).0, OUTPUT);
+    let denied = UnixStream::connect(holder.socket()).unwrap();
+    send(
+        &denied,
+        b'q',
+        serde_json::json!({"id": id, "owner": "mcp:other", "offset": 0, "limit": 1024})
+            .to_string()
+            .as_bytes(),
+    );
+    assert_eq!(frame(&denied).0, b'e');
+
+    let write = UnixStream::connect(holder.socket()).unwrap();
+    send(
+        &write,
+        b's',
+        serde_json::json!({"id": id, "owner": owner, "input": "echo mcp-scoped-ok\n"})
+            .to_string()
+            .as_bytes(),
+    );
+    assert_eq!(frame(&write).0, b'a');
+    let (seen, exit) = until(&attached, Some("mcp-scoped-ok"));
+    assert!(seen.contains("mcp-scoped-ok"));
+    assert_eq!(exit, None, "one-shot requests detached the terminal");
+
+    let stop = UnixStream::connect(holder.socket()).unwrap();
+    send(
+        &stop,
+        b't',
+        serde_json::json!({"id": id, "owner": owner})
+            .to_string()
+            .as_bytes(),
+    );
+    assert_eq!(frame(&stop).0, b'a');
+    holder.assert_gone();
+}
+
+#[test]
+fn a_gui_terminal_is_readable_only_while_shared_with_the_vault() {
+    let Some(mut holder) = Holder::start("share") else {
+        return;
+    };
+    let attached = holder.hello("gui-1", "/bin/sh");
+    let _ = frame(&attached);
+    let before = UnixStream::connect(holder.socket()).unwrap();
+    send(
+        &before,
+        b'q',
+        serde_json::json!({"id": "gui-1", "owner": "mcp:any", "offset": 0})
+            .to_string()
+            .as_bytes(),
+    );
+    assert_eq!(frame(&before).0, b'e');
+
+    assert!(
+        cli(&holder.tmp)
+            .args(["share", "gui-1", "--vault"])
+            .arg(&holder.tmp)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let held: serde_json::Value =
+        serde_json::from_slice(&cli(&holder.tmp).arg("held").output().unwrap().stdout).unwrap();
+    let owner = held["shared_with"].as_str().unwrap();
+    let during = UnixStream::connect(holder.socket()).unwrap();
+    send(
+        &during,
+        b'q',
+        serde_json::json!({"id": "gui-1", "owner": owner, "offset": 0})
+            .to_string()
+            .as_bytes(),
+    );
+    assert_eq!(frame(&during).0, OUTPUT);
+
+    assert!(
+        cli(&holder.tmp)
+            .args(["revoke", "gui-1"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let after = UnixStream::connect(holder.socket()).unwrap();
+    send(
+        &after,
+        b'q',
+        serde_json::json!({"id": "gui-1", "owner": owner, "offset": 0})
+            .to_string()
+            .as_bytes(),
+    );
+    assert_eq!(frame(&after).0, b'e');
+    send(&attached, INPUT, b"echo still-attached\n");
+    assert!(
+        until(&attached, Some("still-attached"))
+            .0
+            .contains("still-attached")
+    );
+    assert!(
+        cli(&holder.tmp)
+            .args(["kill", "gui-1"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    holder.assert_gone();
+}
+
+#[test]
+fn attach_existing_rejects_missing_and_other_vault_shells_without_creating() {
+    let Some(mut holder) = Holder::start("existing") else {
+        return;
+    };
+    let missing = cli(&holder.tmp)
+        .args(["attach", "--existing", "--vault"])
+        .arg(&holder.tmp)
+        .arg("missing")
+        .status()
+        .unwrap();
+    assert_eq!(missing.code(), Some(254));
+    let listed = cli(&holder.tmp).arg("held").output().unwrap();
+    assert!(listed.stdout.is_empty(), "missing attach created a shell");
+
+    let attached = holder.hello("gui-other", "/bin/sh");
+    let _ = frame(&attached);
+    let denied = cli(&holder.tmp)
+        .args(["attach", "--existing", "--vault"])
+        .arg(&holder.tmp)
+        .arg("gui-other")
+        .status()
+        .unwrap();
+    assert_eq!(denied.code(), Some(254));
+    send(&attached, INPUT, b"echo still-owned-by-gui\n");
+    assert!(
+        until(&attached, Some("still-owned-by-gui"))
+            .0
+            .contains("still-owned-by-gui")
+    );
+    assert!(
+        cli(&holder.tmp)
+            .args(["kill", "gui-other"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    holder.assert_gone();
+}
+
+#[test]
+fn scoped_read_preserves_utf8_with_single_byte_page_and_lossless_bytes() {
+    let Some(mut holder) = Holder::start("utf8") else {
+        return;
+    };
+    let id = "utf8-owned";
+    let owner = "mcp:utf8";
+    let mut hello = vec![0, 24, 0, 80];
+    let tmp = holder.tmp.to_str().unwrap();
+    for part in [id, tmp, owner, "SHELL=/bin/sh", "PATH=/usr/bin:/bin"] {
+        hello.extend(part.as_bytes());
+        hello.push(0);
+    }
+    let create = UnixStream::connect(holder.socket()).unwrap();
+    send(&create, b'c', &hello);
+    assert_eq!(frame(&create).0, b'a');
+    let mut cursor = {
+        let read = UnixStream::connect(holder.socket()).unwrap();
+        send(
+            &read,
+            b'q',
+            serde_json::json!({"id": id, "owner": owner, "offset": 0})
+                .to_string()
+                .as_bytes(),
+        );
+        let (_, payload) = frame(&read);
+        serde_json::from_slice::<serde_json::Value>(&payload).unwrap()["next_offset"]
+            .as_u64()
+            .unwrap()
+    };
+    let write = UnixStream::connect(holder.socket()).unwrap();
+    send(
+        &write,
+        b's',
+        serde_json::json!({"id": id, "owner": owner, "input": "printf '€'\n"})
+            .to_string()
+            .as_bytes(),
+    );
+    assert_eq!(frame(&write).0, b'a');
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let read = UnixStream::connect(holder.socket()).unwrap();
+        send(
+            &read,
+            b'q',
+            serde_json::json!({"id": id, "owner": owner, "offset": cursor, "limit": 1})
+                .to_string()
+                .as_bytes(),
+        );
+        let (_, payload) = frame(&read);
+        let page: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        if page["output"] == "€" {
+            assert_eq!(page["next_offset"].as_u64().unwrap() - cursor, 3);
+            assert_eq!(page["output_base64"], "4oKs");
+            break;
+        }
+        assert_ne!(page["output"], "�", "UTF-8 was split: {page}");
+        cursor = page["next_offset"].as_u64().unwrap();
+        assert!(
+            Instant::now() < deadline,
+            "UTF-8 page was not intact: {page}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        cli(&holder.tmp)
+            .args(["kill", id])
+            .status()
+            .unwrap()
+            .success()
+    );
+    holder.assert_gone();
+}
+
+#[test]
+fn a_nonreading_terminal_cannot_hold_scoped_input_or_screen_access() {
+    let Some(mut holder) = Holder::start("nonreading") else {
+        return;
+    };
+    let id = "mcp-nonreading";
+    let owner = "mcp:slow";
+    let mut hello = vec![0, 24, 0, 80];
+    let tmp = holder.tmp.to_str().unwrap();
+    for part in [id, tmp, owner, "SHELL=/bin/sh", "PATH=/usr/bin:/bin"] {
+        hello.extend(part.as_bytes());
+        hello.push(0);
+    }
+    let create = UnixStream::connect(holder.socket()).unwrap();
+    send(&create, b'c', &hello);
+    assert_eq!(frame(&create).0, b'a');
+    let command = UnixStream::connect(holder.socket()).unwrap();
+    send(
+        &command,
+        b's',
+        serde_json::json!({"id": id, "owner": owner, "input": "stty -icanon -echo; touch ready; exec sleep 5\n"})
+            .to_string()
+            .as_bytes(),
+    );
+    assert_eq!(frame(&command).0, b'a');
+    let ready_by = Instant::now() + Duration::from_secs(2);
+    while !holder.tmp.join("ready").exists() {
+        assert!(
+            Instant::now() < ready_by,
+            "the nonreading program did not start"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let large = UnixStream::connect(holder.socket()).unwrap();
+    large
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    send(
+        &large,
+        b's',
+        serde_json::json!({"id": id, "owner": owner, "input": "x".repeat(64 * 1024)})
+            .to_string()
+            .as_bytes(),
+    );
+    assert_eq!(
+        frame(&large).0,
+        b'e',
+        "input must time out while the PTY is full"
+    );
+    let read = UnixStream::connect(holder.socket()).unwrap();
+    read.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+    send(
+        &read,
+        b'q',
+        serde_json::json!({"id": id, "owner": owner, "offset": 0})
+            .to_string()
+            .as_bytes(),
+    );
+    assert_eq!(frame(&read).0, OUTPUT);
+    assert!(
+        cli(&holder.tmp)
+            .args(["kill", id])
+            .status()
+            .unwrap()
+            .success()
+    );
     holder.assert_gone();
 }
 
