@@ -113,6 +113,8 @@ enum Cmd {
         #[arg(long)]
         db: Option<PathBuf>,
     },
+    /// Serve one index-free Git request for a held SSH shell over stdio.
+    GitRpc,
     /// Serve a local vault over stdio MCP. Expose indexed reads and etag-checked writes
     /// until stdin closes. Run on the host for a remote vault.
     Mcp {
@@ -258,6 +260,9 @@ fn main() -> Result<()> {
             // Logging must not go anywhere near stdout: that is the protocol. Stdin unlocked,
             // because the server reads it on a thread of its own.
             accent_api::rpc::serve(&vault, db.as_deref(), std::io::stdin(), std::io::stdout())?;
+        }
+        Cmd::GitRpc => {
+            accent_api::git_remote::serve_once(std::io::stdin().lock(), std::io::stdout().lock())?
         }
         // Logging goes to stderr: stdout is the protocol.
         Cmd::Mcp { common, read_only } => mcp::run(&common.vault, &common.db_path(), read_only)?,

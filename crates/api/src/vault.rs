@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, channel};
 
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use accent_core::path::linked_path;
@@ -38,7 +39,82 @@ pub(crate) enum Backend {
     Remote(std::sync::Arc<remote::Remote>),
 }
 
+/// One bounded listing of direct children for a cross-vault copy walk.
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) enum CopyPage {
+    File,
+    Unread,
+    Directory {
+        entries: Vec<(String, bool)>,
+        next: Option<Vec<u8>>,
+    },
+}
+
+pub(crate) const COPY_PAGE: usize = 256;
+
+/// Assemble the established copy order from bounded direct-directory listings.
+fn walk_copy_pages(
+    mut page: impl FnMut(&str, Option<&[u8]>) -> Result<CopyPage>,
+) -> Result<fs::Walked> {
+    fn visit(
+        dir: &str,
+        walked: &mut fs::Walked,
+        page: &mut impl FnMut(&str, Option<&[u8]>) -> Result<CopyPage>,
+    ) -> Result<()> {
+        let mut entries = Vec::new();
+        let mut after = None;
+        loop {
+            match page(dir, after.as_deref())? {
+                CopyPage::File if dir.is_empty() => {
+                    walked.files.push(String::new());
+                    return Ok(());
+                }
+                CopyPage::File | CopyPage::Unread => {
+                    walked.unread.push(dir.to_string());
+                    return Ok(());
+                }
+                CopyPage::Directory {
+                    entries: batch,
+                    next,
+                } => {
+                    entries.extend(batch);
+                    match next {
+                        Some(next) => after = Some(next),
+                        None => break,
+                    }
+                }
+            }
+        }
+        walked.dirs.push(dir.to_string());
+        for (name, is_dir) in entries {
+            let below = match dir {
+                "" => name,
+                dir => format!("{dir}/{name}"),
+            };
+            match is_dir {
+                true => visit(&below, walked, page)?,
+                false => walked.files.push(below),
+            }
+        }
+        Ok(())
+    }
+
+    let mut walked = fs::Walked::default();
+    visit("", &mut walked, &mut page)?;
+    Ok(walked)
+}
+
 impl Vault {
+    /// The files carried by `rel`, paged on a remote host so no recursive walk holds one RPC.
+    pub fn list_tree(&self, rel: &str) -> Result<fs::Walked> {
+        match &self.backend {
+            Backend::Local(v) => v.list_tree(rel),
+            Backend::Remote(r) => walk_copy_pages(|dir, after| {
+                r.call("copy_page", json!([rel, dir, after, COPY_PAGE]))
+            }),
+        }
+    }
+
     /// Open a vault on this machine.
     pub fn open(root: &Path, cfg: VaultConfig) -> Result<(Vault, Receiver<Event>)> {
         let (local, events) = Local::open(root, cfg)?;
@@ -339,8 +415,6 @@ methods! {
     /// Nothing is replaced: a taken `to` fails with `AlreadyExists`, and the caller tries its
     /// next free name.
     copy(from: ref str, to: ref str) -> ();
-    /// What copying `rel` into another vault carries ([`fs::walk_copy`]), walked where it is.
-    list_tree(rel: ref str) -> fs::Walked;
     plan_moves(moves: ref [(String, String)]) -> RenamePlan, bounded by MOVE_BOUND;
     rename(plan: ref RenamePlan, update: val bool) -> RenameReport, bounded by MOVE_BOUND;
     /// A note's text as Save As writes it at another path, its relative links pointed back at
@@ -661,8 +735,9 @@ impl Vault {
 
 #[cfg(test)]
 mod tests {
+    use super::{Backend, CopyPage, walk_copy_pages};
     use crate::tests::*;
-    use crate::{Event, Kind, Location, Pos, Range, Severity, Vault, VaultConfig, debug};
+    use crate::{Event, Kind, Location, Pos, Range, Severity, Vault, VaultConfig, debug, fs};
     use std::time::Duration;
 
     #[test]
@@ -941,6 +1016,87 @@ mod tests {
             .unwrap();
         assert_eq!(b.read("x.md"), "mine\n");
         assert_eq!(a.read("F/x.md"), "mine\n", "the original stays");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn paged_copy_walk_matches_local_walk_and_keeps_unread_folders() {
+        use std::os::unix::fs::symlink;
+
+        let f = Fixture::open(VaultConfig::default());
+        f.write("F/a.md", "a");
+        f.write("F/sub/b.md", "b");
+        f.write("F/z.md", "z");
+        f.write("outside.md", "outside");
+        std::fs::create_dir(f.root.path().join("F/empty")).unwrap();
+        symlink("a.md", f.root.path().join("F/inside.md")).unwrap();
+        symlink("../outside.md", f.root.path().join("F/outside.md")).unwrap();
+
+        let Backend::Local(local) = &f.vault.backend else {
+            unreachable!()
+        };
+        let mut pages = 0;
+        let walked = walk_copy_pages(|dir, after| {
+            let page = local.copy_page("F", dir, after, 2)?;
+            if let CopyPage::Directory { entries, .. } = &page {
+                assert!(entries.len() <= 2);
+            }
+            pages += 1;
+            Ok(page)
+        })
+        .unwrap();
+        assert!(pages > 4);
+        assert_eq!(walked, fs::walk_copy(&f.root.path().join("F")));
+        assert_eq!(
+            walk_copy_pages(|dir, after| local.copy_page("F/a.md", dir, after, 2)).unwrap(),
+            fs::walk_copy(&f.root.path().join("F/a.md"))
+        );
+        let unread = walk_copy_pages(|dir, after| match dir {
+            "sub" => Ok(CopyPage::Unread),
+            _ => local.copy_page("F", dir, after, 2),
+        })
+        .unwrap();
+        assert_eq!(unread.unread, ["sub"]);
+        assert!(!unread.dirs.contains(&"sub".to_string()));
+        let interrupted = walk_copy_pages(|dir, after| {
+            if dir.is_empty() && after.is_some() {
+                Err(crate::Error::Protocol("page interrupted".into()))
+            } else {
+                local.copy_page("F", dir, after, 2)
+            }
+        });
+        assert!(
+            interrupted.is_err(),
+            "a failed page cannot yield a partial copy plan"
+        );
+        assert_eq!(
+            local.copy_page("F", "missing", None, 2).unwrap(),
+            CopyPage::Unread
+        );
+    }
+
+    #[test]
+    fn copy_page_cursor_survives_an_earlier_name_being_removed() {
+        let f = Fixture::open(VaultConfig::default());
+        for name in ["a", "b", "c", "d"] {
+            f.write(&format!("F/{name}"), "x");
+        }
+        let Backend::Local(local) = &f.vault.backend else {
+            unreachable!()
+        };
+        let CopyPage::Directory { entries, next } = local.copy_page("F", "", None, 2).unwrap()
+        else {
+            panic!("a directory page expected");
+        };
+        assert_eq!(entries, [("a".into(), false), ("b".into(), false)]);
+        std::fs::remove_file(f.root.path().join("F/a")).unwrap();
+        let CopyPage::Directory { entries, next: end } =
+            local.copy_page("F", "", next.as_deref(), 2).unwrap()
+        else {
+            panic!("a directory page expected");
+        };
+        assert_eq!(entries, [("c".into(), false), ("d".into(), false)]);
+        assert_eq!(end, None);
     }
 
     /// A copied folder is what Paste carries in from this machine: a link to a file inside it

@@ -49,7 +49,7 @@ const BAD_PARAMS: i64 = -32602;
 const FAILED: i64 = -32000;
 
 /// Wire error: JSON-RPC code, display message and the original error in `data`.
-fn to_wire(e: &Error) -> Value {
+pub(crate) fn to_wire(e: &Error) -> Value {
     let code = match e {
         Error::UnknownMethod(_) => NO_METHOD,
         Error::Protocol(_) => BAD_PARAMS,
@@ -545,11 +545,18 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value> {
         .or_else(|| crate::language::dispatch(vault, method, p))
         .or_else(|| crate::debug::dispatch(vault, method, p))
         .or_else(|| crate::kernel::dispatch(vault, method, p))
+        .or_else(|| crate::python::dispatch(vault, method, p))
     {
         return answer;
     }
 
     match method {
+        "copy_page" => answer(vault.copy_page(
+            &arg::<String>(p, 0)?,
+            &arg::<String>(p, 1)?,
+            arg::<Option<Vec<u8>>>(p, 2)?.as_deref(),
+            arg(p, 3)?,
+        )),
         "hello" => {
             vault.set_config(arg(p, 0)?);
             // Ghost text and word suggestions are global preferences, so they ride `hello` rather
@@ -711,6 +718,34 @@ mod tests {
                 let _ = server.join();
             }
         }
+    }
+
+    #[test]
+    fn copy_page_rpc_caps_each_directory_reply() {
+        let w = Wired::seeded(&|root| {
+            std::fs::create_dir(root.join("F")).unwrap();
+            for n in 0..5 {
+                std::fs::write(root.join(format!("F/{n}.md")), "x").unwrap();
+            }
+        });
+        let mut after: Option<Vec<u8>> = None;
+        let mut names = Vec::new();
+        loop {
+            let page: crate::vault::CopyPage = w
+                .client
+                .call("copy_page", json!(["F", "", after, 2]))
+                .unwrap();
+            let crate::vault::CopyPage::Directory { entries, next } = page else {
+                panic!("directory page expected");
+            };
+            assert!(entries.len() <= 2);
+            names.extend(entries.into_iter().map(|(name, _)| name));
+            match next {
+                Some(next) => after = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(names, ["0.md", "1.md", "2.md", "3.md", "4.md"]);
     }
 
     #[test]

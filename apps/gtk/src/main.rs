@@ -60,6 +60,7 @@ mod preview;
 #[cfg(not(feature = "webkit"))]
 #[path = "preview_stub.rs"]
 mod preview;
+mod python;
 mod recall;
 mod reconnect;
 mod references;
@@ -106,6 +107,7 @@ use gtk::{gdk, gio, glib, graphene};
 use layout::{Collapsed, Mode, Presenting};
 use open::Opened;
 use panes::{Held, Pane, Place, Side, Spot, Zone};
+use sourceview5::prelude::BufferExt;
 // The widget and the tab kept the names the rest of the window calls them by when
 // they moved into `pdf/`.
 pub(crate) use pdf as pdfview;
@@ -632,6 +634,7 @@ impl App {
     /// Keep the window subtitle, the Info pane and the preview in step with the active tab.
     fn sync_active(self: &Rc<Self>) {
         self.sync_window_title();
+        self.sync_terminal_git();
         self.retarget_find(&self.pane());
         // F5 presents whatever comes to the front as it presented the tab it began on: a held
         // `Ctrl+Tab` steps through the presented pane's tabs.
@@ -1292,6 +1295,7 @@ impl App {
                     if app.active_doc().is_some_and(|doc| doc.page() == &term.page) {
                         app.title.set_subtitle(&term.subtitle());
                         app.stat_details();
+                        app.sync_terminal_git();
                     }
                 }
             ),
@@ -1302,6 +1306,11 @@ impl App {
                 #[weak(rename_to = app)]
                 self,
                 move |term| app.close_page(&term.page)
+            ),
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |term| app.apply_terminal_git(term)
             ),
         );
         // A key in one lost shell brings back every shell of this window the same link took: the
@@ -1357,6 +1366,62 @@ impl App {
             .map(|d| d.key());
         self.statusbar
             .set_branch(git.branch_label(key.as_deref()).as_deref());
+    }
+
+    /// Follow the focused shell without opening a vault or index on its directory.
+    fn sync_terminal_git(self: &Rc<Self>) {
+        if self.vault().is_some() {
+            return;
+        }
+        let Some(Doc::Terminal(term)) = self.active_doc() else {
+            if let Some(git) = self.git.get() {
+                git.set_source(git::Source::Empty);
+            }
+            return;
+        };
+        self.apply_terminal_git(&term);
+        if self.sidebar_column.is_visible() && term.git_at().is_some() {
+            let weak = Rc::downgrade(self);
+            term.ask(move |term| {
+                if let Some(app) = weak.upgrade() {
+                    app.apply_terminal_git(term);
+                    if app.active_doc().is_some_and(|doc| doc.page() == &term.page)
+                        && app.sidebar.get().is_some_and(|s| s.is_showing("git"))
+                        && let Some(git) = app.git.get()
+                    {
+                        git.schedule_refresh(git::Depth::Status);
+                    }
+                }
+            });
+        }
+    }
+
+    fn apply_terminal_git(self: &Rc<Self>, term: &Rc<terminal::Term>) {
+        if self.vault().is_some()
+            || !self
+                .active_doc()
+                .is_some_and(|doc| doc.page() == &term.page)
+        {
+            return;
+        }
+        let Some(git) = self.git.get() else { return };
+        let source = match term.git_at() {
+            Some(terminal::GitAt::Local(cwd)) => git::Source::Local(cwd),
+            Some(terminal::GitAt::Remote(url, cwd)) => {
+                match accent_api::git_remote::RemoteGit::new(url) {
+                    Ok(remote) => git::Source::Remote {
+                        git: Box::new(remote),
+                        cwd,
+                    },
+                    Err(error) => {
+                        tracing::debug!("remote Git source: {error}");
+                        git::Source::Empty
+                    }
+                }
+            }
+            None => git::Source::Empty,
+        };
+        git.set_source(source);
     }
 
     /// Apply all window updates after Git refresh in one place rather than separate pane hooks.
@@ -1435,7 +1500,11 @@ impl App {
         // merely noticed an edit is telling us about the very buffer the marks came from.
         if git.head_changed() {
             for tab in self.open_tabs() {
-                self.fetch_head(&tab);
+                if git.is_shell_remote() {
+                    tab.set_head(None);
+                } else {
+                    self.fetch_head(&tab);
+                }
             }
         }
     }
@@ -1592,12 +1661,30 @@ impl App {
             // Here, on the main loop, in the order they were changed: a remote vault records
             // them at once and sends them on from a thread of its own, in that order
             // (`Remote::send_hello`).
-            vault.set_config(match vault.is_remote() {
+            let next = match vault.is_remote() {
                 true => config.vault(&self.root()),
                 false => config.local_vault(&self.root()),
-            });
+            };
+            let python_changed = vault.config().debug.python != next.debug.python;
+            vault.set_config(next);
             vault.set_ghost(config.ghost_text);
             vault.set_words(config.word_suggestions);
+            if python_changed {
+                for doc in self.docs() {
+                    match doc {
+                        Doc::Text(tab)
+                            if tab
+                                .buffer
+                                .language()
+                                .is_some_and(|language| language.id() == "python3") =>
+                        {
+                            lang::reopen(&tab);
+                        }
+                        Doc::Notebook(tab) if tab.is_python() => tab.reopen_language(),
+                        _ => {}
+                    }
+                }
+            }
         }
         if changed.shortcuts {
             self.refresh_accels();

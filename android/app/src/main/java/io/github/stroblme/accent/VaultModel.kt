@@ -762,6 +762,11 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         return runCatching { v.asset(rel)?.let { imageAt(it, v.pathOf(it)) } }.getOrNull()
     }
 
+    /** Current file size and modified time for the Details sheet. */
+    suspend fun stat(rel: String): Etag? = withContext(Dispatchers.IO) {
+        runCatching { vault?.stat(rel) }.getOrNull()
+    }
+
     /** The notes that link to the document at [rel], once each ([linkingNotes]). */
     suspend fun linkedFrom(rel: String): Result<List<String>> =
         listing("Cannot list the links") { linkingNotes(vault?.backlinks(rel).orEmpty()) }

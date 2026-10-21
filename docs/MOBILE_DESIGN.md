@@ -144,6 +144,8 @@ Provide a visible control for each action that otherwise depends on a gesture.
 - The bar's button is a note's Edit and Done.
   A PDF's are Find and Contents, the document's bookmarks; on a file with none, Contents is there and disabled: a gap where a control belongs is worse than a control that says it has nothing to offer.
   A PDF's third, and an image's one, is Invert, disabled on an animation, which is never recoloured.
+- The bar's overflow opens Details in a sheet: file size and modified time, then the note's counts,
+  the PDF's page and document information, or the image's dimensions and format.
 - Fill the Invert button with the accent while active (`BarToggle`).
 - Apply window insets once: the vault screen owns them for its PDF; a PDF opened from another app owns its own.
 

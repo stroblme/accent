@@ -358,6 +358,31 @@ mod tests {
         fs::remove_file(vault.path().join("lib.rs")).unwrap();
         ix.update_file(vault.path(), "lib.rs").unwrap();
         assert!(names(&ix).is_empty());
+
+        fs::write(
+            vault.path().join("Math.lean"),
+            "namespace Math\ntheorem yes : True := by trivial\nend Math\n",
+        )
+        .unwrap();
+        ix.update_file(vault.path(), "Math.lean").unwrap();
+        let lean = ix.file_symbols("Math.lean").unwrap();
+        assert_eq!(
+            lean.iter()
+                .map(|s| (s.kind, s.name.as_str(), s.line, s.end_line))
+                .collect::<Vec<_>>(),
+            [
+                (SymbolKind::Module, "Math", 1, 3),
+                (SymbolKind::Function, "yes", 2, 2),
+            ]
+        );
+        assert_eq!(
+            ix.find_symbols("Math.yes", 10)
+                .unwrap()
+                .into_iter()
+                .map(|symbol| symbol.name)
+                .collect::<Vec<_>>(),
+            ["yes"]
+        );
     }
 
     /// A name finds its declarations exactly first, then as a prefix, then inside; a container

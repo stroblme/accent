@@ -642,6 +642,9 @@ pub fn wire_window(app: &Rc<App>) {
             app.follow_outline();
             app.follow_references();
             app.refresh_goals();
+            if app.sidebar_column.is_visible() {
+                app.sync_terminal_git();
+            }
         }
     ));
 

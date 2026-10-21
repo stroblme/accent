@@ -5,6 +5,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use accent_core::config::{DiagramConfig, Route};
+use accent_drawio::Style;
 use accent_drawio::presets::{self, EdgeKind};
 use adw::prelude::*;
 
@@ -26,6 +27,67 @@ pub enum Tool {
 }
 
 impl Tool {
+    /// The creation tool a selected cell's shape belongs to, if this editor can make it.
+    pub fn of(cell: &accent_drawio::Cell) -> Option<Tool> {
+        if cell.edge {
+            return Some(Tool::Connector);
+        }
+        if !cell.vertex || cell.style.names("group") || cell.style.names("edgeLabel") {
+            return None;
+        }
+        match cell.style.resolve(false).shape() {
+            "ellipse" => Some(Tool::Ellipse),
+            "label" if cell.style.names("text") => Some(Tool::Text),
+            "label" => Some(Tool::Rect),
+            _ => None,
+        }
+    }
+
+    pub fn default_attr(self) -> Option<&'static str> {
+        match self {
+            Tool::Rect => Some("accentStyleRect"),
+            Tool::Ellipse => Some("accentStyleEllipse"),
+            Tool::Text => Some("accentStyleText"),
+            Tool::Connector => Some("accentStyleConnector"),
+            Tool::Select | Tool::Image => None,
+        }
+    }
+
+    /// File-specific style, falling back to the ordinary ring preset.
+    pub fn style_in(self, file: &accent_drawio::File, options: &DiagramConfig) -> String {
+        let stored = self
+            .default_attr()
+            .and_then(|key| accent_drawio::model::attr(&file.attrs, key))
+            .map(str::to_string);
+        match stored {
+            Some(style) if self == Tool::Connector => {
+                // Attachment points belong to the old endpoints, not the new edge's look.
+                let mut style = Style::parse(&style);
+                for key in [
+                    "exitX",
+                    "exitY",
+                    "exitDx",
+                    "exitDy",
+                    "exitPerimeter",
+                    "entryX",
+                    "entryY",
+                    "entryDx",
+                    "entryDy",
+                    "entryPerimeter",
+                    "sourcePort",
+                    "targetPort",
+                    "sourcePortConstraint",
+                    "targetPortConstraint",
+                ] {
+                    style.set(key, None);
+                }
+                style.to_string()
+            }
+            Some(style) => style,
+            None => self.style(options),
+        }
+    }
+
     /// Action id shared by ring buttons, status bar and palette to obtain labels from `ACTIONS`.
     pub fn action(self) -> &'static str {
         match self {
@@ -326,5 +388,53 @@ mod tests {
         let edge = Tool::Connector.style(&options);
         assert!(edge.contains("curved=1") && edge.contains("endArrow=none"));
         assert!(Tool::Text.draws_box() && !Tool::Connector.draws_box());
+    }
+
+    #[test]
+    fn only_creation_shapes_can_supply_a_default_style() {
+        use accent_drawio::{Cell, Point, Rect};
+
+        let vertex = |style| Cell::new_vertex("v", "1", Rect::new(0.0, 0.0, 10.0, 10.0), style, "");
+        assert_eq!(Tool::of(&vertex("rounded=1;")), Some(Tool::Rect));
+        assert_eq!(
+            Tool::of(&vertex("ellipse;fillColor=#fff;")),
+            Some(Tool::Ellipse)
+        );
+        assert_eq!(Tool::of(&vertex("text;fillColor=none;")), Some(Tool::Text));
+        assert_eq!(Tool::of(&vertex("group;")), None);
+        assert_eq!(Tool::of(&vertex("shape=image;")), None);
+        let edge = Cell::new_edge(
+            "e",
+            "1",
+            (None, Point::new(0.0, 0.0)),
+            (None, Point::new(10.0, 10.0)),
+            "strokeColor=#fff;",
+        );
+        assert_eq!(Tool::of(&edge), Some(Tool::Connector));
+    }
+
+    #[test]
+    fn each_tool_uses_only_its_own_file_default() {
+        let mut file = accent_drawio::File::blank();
+        let options = DiagramConfig::default();
+        assert_eq!(
+            Tool::Rect.style_in(&file, &options),
+            Tool::Rect.style(&options)
+        );
+        accent_drawio::model::set_attr(&mut file.attrs, "accentStyleRect", "rounded=1;");
+        assert_eq!(Tool::Rect.style_in(&file, &options), "rounded=1;");
+        assert_eq!(
+            Tool::Ellipse.style_in(&file, &options),
+            Tool::Ellipse.style(&options)
+        );
+        accent_drawio::model::set_attr(
+            &mut file.attrs,
+            "accentStyleConnector",
+            "strokeColor=#fff;exitX=0.2;entryY=0.9;sourcePortConstraint=east;targetPortConstraint=west;",
+        );
+        assert_eq!(
+            Tool::Connector.style_in(&file, &options),
+            "strokeColor=#fff;"
+        );
     }
 }

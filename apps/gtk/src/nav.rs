@@ -132,7 +132,11 @@ impl App {
     pub fn cancel_cycle(&self) -> bool {
         // A copy: going back selects a tab, and the selection handlers reach the panes too.
         let panes = self.panes.borrow().clone();
-        panes.iter().any(|pane| pane.cancel_cycle())
+        let mut cancelled = false;
+        for pane in panes {
+            cancelled |= pane.cancel_cycle();
+        }
+        cancelled
     }
 
     // --- back and forward ---------------------------------------------------------------------

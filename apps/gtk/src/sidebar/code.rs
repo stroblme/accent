@@ -69,6 +69,10 @@ impl Code {
             page.append(&debug.strip);
         }
         let (kernel, kernel_state) = debug::strip_of(&[
+            &debug::strip_button(
+                "application-x-executable-symbolic",
+                "win.python-environment",
+            ),
             &debug::strip_button("media-seek-forward-symbolic", "win.notebook-run-all"),
             &debug::strip_button("media-playback-stop-symbolic", "win.notebook-interrupt"),
             &debug::strip_button("view-refresh-symbolic", "win.notebook-restart"),

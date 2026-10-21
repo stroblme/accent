@@ -729,6 +729,10 @@ fn strip() -> (gtk::Box, gtk::Label, gtk::Button, gtk::Button) {
     let resume = strip_button("media-playback-start-symbolic", "win.debug-continue");
     let pause = strip_button("media-playback-pause-symbolic", "win.debug-pause");
     let (strip, state) = strip_of(&[
+        &strip_button(
+            "application-x-executable-symbolic",
+            "win.python-environment",
+        ),
         &resume,
         &pause,
         &strip_button("dap-step-over-symbolic", "win.debug-step-over"),

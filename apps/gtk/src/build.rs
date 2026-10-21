@@ -355,19 +355,33 @@ pub fn build_window(
     }
     app.sync_placeholder();
 
-    // The sidebar is the vault: a tree, a search over the index, the tags in it, the backlinks
-    // between its notes. A window without one is tabs and nothing else.
+    // Vault panes need an index. A vaultless window keeps Outline and Git for its focused shell.
     match &vault {
         Some(vault) => {
             let rows = gio::ListStore::new::<gtk::StringObject>();
             build_sidebar(&app, &rows, vault);
         }
-        // Outline only, and collapsed: a window opened on one file is that file, and the
+        // Outline and Git, collapsed: a window opened on one file is that file, and the
         // sidebar is there for when it is asked for with F9 or Ctrl+Shift+W.
         None => {
             build_outline_sidebar(&app);
             app.sidebar_column.set_visible(false);
         }
+    }
+    if vault.is_none() {
+        let weak = Rc::downgrade(&app);
+        glib::timeout_add_local(Duration::from_secs(3), move || {
+            let Some(app) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            if app.window.is_active()
+                && app.sidebar_column.is_visible()
+                && app.sidebar.get().is_some_and(|s| s.is_showing("git"))
+            {
+                app.sync_terminal_git();
+            }
+            glib::ControlFlow::Continue
+        });
     }
 
     // The banner's one button. `reconnect` returns before the connection exists and reports
@@ -532,10 +546,11 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
         ports: ports_data(vault),
         debug: debug_data(app),
     };
-    let git = build_git(app, vault);
+    let git = build_git(app, Arc::new(git::Source::Vault(vault.clone())));
     adopt_sidebar(
         app,
-        Some((files, data, git.widget().clone(), git.divider().clone())),
+        Some((files, data)),
+        Some((git.widget().clone(), git.divider().clone())),
     );
     let _ = app.git.set(git);
     if let Some(git) = app.git.get() {
@@ -716,7 +731,7 @@ fn ports_data(vault: &Arc<Vault>) -> sidebar::PortsData {
 }
 
 /// Wire Git hooks with weak window captures to avoid retaining the vault after window closure.
-fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
+fn build_git(app: &Rc<App>, source: Arc<git::Source>) -> Rc<git::Panel> {
     let (toast, open, diff, compare, merge, leave, trash, changed, syncing) = (
         Rc::downgrade(app),
         Rc::downgrade(app),
@@ -730,7 +745,7 @@ fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
     );
     git::Panel::new(git::Hooks {
         tree: app.config.borrow().git_tree,
-        vault: vault.clone(),
+        source,
         window: app.window.clone(),
         toast: Box::new(move |text| {
             if let Some(app) = toast.upgrade() {
@@ -815,9 +830,56 @@ fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
             }
         }),
         trash: Box::new(move |keys| {
-            if let Some(ops) = trash.upgrade().and_then(|app| app.ops().cloned()) {
-                fileops::discard_all(&ops, keys.to_vec());
+            let Some(app) = trash.upgrade() else { return };
+            if let Some(ops) = app.ops().cloned() {
+                return fileops::discard_all(&ops, keys.to_vec());
             }
+            let keys = keys.to_vec();
+            glib::spawn_future_local(async move {
+                let mut moved = 0;
+                for key in keys {
+                    let tabs: Vec<_> = app
+                        .open_tabs()
+                        .into_iter()
+                        .filter(|tab| fileops::trashed_with(&key, &tab.rel()))
+                        .collect();
+                    let mut refused = false;
+                    for tab in &tabs {
+                        if let Err(error) = app.flush_tab(tab) {
+                            app.cannot(&format!("trash {key}"), error);
+                            refused = true;
+                        }
+                    }
+                    if refused {
+                        continue;
+                    }
+                    match gio::File::for_path(&key)
+                        .trash_future(glib::Priority::DEFAULT)
+                        .await
+                    {
+                        Ok(()) => {
+                            moved += 1;
+                            for doc in app
+                                .docs()
+                                .into_iter()
+                                .filter(|doc| fileops::trashed_with(&key, &doc.key()))
+                            {
+                                if let Some(tab) = doc.tab() {
+                                    tab.discard();
+                                }
+                                app.close_page(doc.page());
+                            }
+                        }
+                        Err(error) => app.cannot(&format!("trash {key}"), error),
+                    }
+                }
+                if moved > 0 {
+                    app.toast(&format!("Moved {moved} to Trash"));
+                }
+                if let Some(git) = app.git.get() {
+                    git.schedule_refresh(git::Depth::Status);
+                }
+            });
         }),
         changed: Box::new(move || {
             if let Some(app) = changed.upgrade() {
@@ -832,17 +894,25 @@ fn build_git(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<git::Panel> {
     })
 }
 
-/// Standalone-file sidebar: Outline requires no index, including PDF bookmarks; index panes are omitted.
+/// Standalone-file sidebar: Outline and terminal Git require no index.
 fn build_outline_sidebar(app: &Rc<App>) {
-    adopt_sidebar(app, None);
+    let git = build_git(app, Arc::new(git::Source::Empty));
+    adopt_sidebar(
+        app,
+        None,
+        Some((git.widget().clone(), git.divider().clone())),
+    );
+    let _ = app.git.set(git);
 }
 
 fn adopt_sidebar(
     app: &Rc<App>,
-    vault: Option<(gtk::Widget, sidebar::Data, gtk::Widget, gtk::Paned)>,
+    vault: Option<(gtk::Widget, sidebar::Data)>,
+    git: Option<(gtk::Widget, gtk::Paned)>,
 ) {
     let pane = sidebar::Sidebar::new(
         vault,
+        git,
         glib::clone!(
             #[weak]
             app,
@@ -880,6 +950,7 @@ fn adopt_sidebar(
             app.stat_details();
             app.sync_details();
             app.refresh_goals();
+            app.sync_terminal_git();
         }
     ));
     // Which sections are open is session state; and the References section, which follows a
@@ -1237,6 +1308,7 @@ fn install_chrome_css() {
              .accent-strip-button {{ min-width: 0; min-height: 0; padding: 2px; \
                border-radius: 4px; }} \
              box.linked.osd {{ border-radius: 6px; }} \
+             .accent-switcher-backdrop {{ background-color: rgba(0, 0, 0, 0.34); }} \
              .accent-switcher {{ background-color: var(--popover-bg-color); \
                color: var(--popover-fg-color); border-radius: 12px; \
                box-shadow: 0 1px 4px var(--shade-color), 0 0 0 1px var(--shade-color); }} \

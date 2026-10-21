@@ -26,7 +26,7 @@ impl Panel {
         let asked = self.asked.get() + 1;
         self.asked.set(asked);
         let panel = self.clone();
-        let vault = self.hooks.vault.clone();
+        let vault = self.source();
         glib::spawn_future_local(async move {
             let read = {
                 let what = what.clone();
@@ -71,7 +71,14 @@ impl Panel {
     /// file that is no longer unmerged alone. Binary conflicts and deleted sides cannot form
     /// a text merge; leave the file alone and explain why.
     fn show_merge(self: &Rc<Self>, what: Comparison, asked: Option<u64>) {
-        let (panel, vault) = (self.clone(), self.hooks.vault.clone());
+        if self.is_shell_remote() {
+            if asked.is_some() {
+                (self.hooks.toast)("Resolve this host's merge conflict in its terminal");
+            }
+            return;
+        }
+        let (panel, vault, generation) =
+            (self.clone(), self.source(), self.source_generation.get());
         glib::spawn_future_local(async move {
             let read = {
                 let (repo, rel) = (what.repo.clone(), what.rel.clone());
@@ -80,7 +87,8 @@ impl Panel {
                 })
                 .await
             };
-            let fresh = asked.is_none_or(|asked| panel.asked.get() == asked);
+            let fresh = panel.source_generation.get() == generation
+                && asked.is_none_or(|asked| panel.asked.get() == asked);
             let Some(read) = read.filter(|_| fresh) else {
                 return;
             };
@@ -133,14 +141,18 @@ impl Panel {
             self.show_merge(what, None);
             return done();
         }
-        let (panel, vault) = (self.clone(), self.hooks.vault.clone());
+        let (panel, vault, generation) =
+            (self.clone(), self.source(), self.source_generation.get());
         glib::spawn_future_local(async move {
             let read = {
                 let what = what.clone();
                 crate::work::off_thread("git", move || read(&what, &vault)).await
             };
             match read {
-                Some(Ok(read)) => panel.show(what, read, true),
+                Some(Ok(read)) if panel.source_generation.get() == generation => {
+                    panel.show(what, read, true)
+                }
+                Some(Ok(_)) => {}
                 Some(Err(why)) => tracing::debug!("{why}"),
                 None => {}
             }
@@ -192,7 +204,7 @@ impl Panel {
         match what.sides.clone() {
             // The working tree is the file itself, so the comparison lives in its tab and the
             // refresh only ever has the index side to re-read.
-            Sides::Worktree => {
+            Sides::Worktree if !self.is_shell_remote() => {
                 let (panel, key) = (Rc::downgrade(self), what.key.clone());
                 let register = move |compare: Weak<Compare>| {
                     let Some(panel) = panel.upgrade() else {
@@ -229,7 +241,13 @@ impl Panel {
                 };
                 (self.hooks.compare_file)(&key, &left_title, &left, restored, Box::new(register));
             }
-            Sides::Staged { .. } | Sides::Deleted | Sides::Commit { .. } | Sides::Merge => {
+            // A host shell has no editable file tab on this machine; its worktree comparison
+            // uses the same read-only diff as staged and historical changes.
+            Sides::Worktree
+            | Sides::Staged { .. }
+            | Sides::Deleted
+            | Sides::Commit { .. }
+            | Sides::Merge => {
                 // The same test, made where this side can make it: before the tab is opened
                 // rather than once it holds a comparison. A Staged row the index has outgrown
                 // and a file listed under a commit that did not change it both read the same
@@ -244,7 +262,12 @@ impl Panel {
                 if endings {
                     return say(&format!("{name} differs only in line endings"));
                 }
-                let key = format!("diff:{}:{}", tag(&what.sides), what.key);
+                let key = match self.source().as_ref() {
+                    Source::Remote { git, .. } => {
+                        format!("diff:{}:{}:{}", git.url(), tag(&what.sides), what.key)
+                    }
+                    _ => format!("diff:{}:{}", tag(&what.sides), what.key),
+                };
                 let tab = (self.hooks.open_diff)(
                     &key,
                     &name,
@@ -264,11 +287,15 @@ impl Panel {
     /// Open the binary file `what` names as it is now, as a click on it in the Files tree does: an
     /// image or a PDF in its viewer, anything else on the Binary File page. One gone from the disk
     /// — deleted, or moved since the commit that listed it — has nothing to show, which the pane
-    /// says. A file outside the vault is left to the open, which looks for it itself.
+    /// says. A local file outside the vault is left to the open, which looks for it itself;
+    /// a remote path must never be mistaken for a file on this machine.
     fn open_current(self: &Rc<Self>, what: &Comparison) {
-        let key = vault_key(&self.hooks.vault.root(), &what.repo, &what.rel);
+        if matches!(self.source().as_ref(), Source::Remote { .. }) {
+            return (self.hooks.toast)("Open this host's binary file in its terminal");
+        }
+        let key = vault_key(&self.source().key_root(), &what.repo, &what.rel);
         let name = split_name(&what.rel).1.to_string();
-        let (panel, vault, asked) = (self.clone(), self.hooks.vault.clone(), self.asked.get());
+        let (panel, vault, asked) = (self.clone(), self.source(), self.asked.get());
         glib::spawn_future_local(async move {
             let there = {
                 let key = key.clone();
@@ -301,11 +328,19 @@ impl Panel {
             Sides::Staged { .. } => ("unstage", "Unstage Selected Lines", true),
             Sides::Deleted | Sides::Commit { .. } | Sides::Merge => return,
         };
-        let (panel, repo, rel) = (Rc::downgrade(self), what.repo.clone(), what.rel.clone());
+        let (panel, repo, rel, generation) = (
+            Rc::downgrade(self),
+            what.repo.clone(),
+            what.rel.clone(),
+            self.source_generation.get(),
+        );
         let stage: OnLines = Rc::new(move |side, lines, old, new| {
             let Some(panel) = panel.upgrade() else {
                 return;
             };
+            if panel.source_generation.get() != generation {
+                return (panel.hooks.toast)("Git source changed; reopen this comparison to stage");
+            }
             // The index is the left side of the one and the right side of the other.
             let (text, index) = match unstage {
                 false => (diff::apply_lines(old, new, side, lines), old),
@@ -320,12 +355,22 @@ impl Panel {
         // The working tree is the file's own tab, so its side of the comparison is the editor:
         // the selected lines go back to the index's there, as an edit Ctrl+Z takes back, and are
         // saved as any edit is.
-        if !unstage {
+        if !unstage && self.is_shell_remote() {
+            compare.offer_hunks(vec![(
+                "go-previous-symbolic",
+                "Stage",
+                "Stage this hunk",
+                stage,
+            )]);
+        } else if !unstage {
             let (panel, weak) = (Rc::downgrade(self), Rc::downgrade(compare));
             let revert: OnLines = Rc::new(move |side, lines, old, new| {
                 let (Some(panel), Some(compare)) = (panel.upgrade(), weak.upgrade()) else {
                     return;
                 };
+                if panel.source_generation.get() != generation {
+                    return (panel.hooks.toast)("Git source changed; reopen this comparison");
+                }
                 let text = diff::revert_lines(old, new, side, lines);
                 if text == new {
                     return (panel.hooks.toast)("No changes in the selection");
@@ -399,7 +444,8 @@ impl Panel {
         if watches.is_empty() {
             return;
         }
-        let vault = self.hooks.vault.clone();
+        let vault = self.source();
+        let (weak, generation) = (Rc::downgrade(self), self.source_generation.get());
         glib::spawn_future_local(async move {
             let reads = {
                 let whats: Vec<Comparison> = watches.iter().map(|w| w.what.clone()).collect();
@@ -408,7 +454,12 @@ impl Panel {
                 })
                 .await
             };
-            let Some(reads) = reads else { return };
+            let Some(reads) = reads.filter(|_| {
+                weak.upgrade()
+                    .is_some_and(|panel| panel.source_generation.get() == generation)
+            }) else {
+                return;
+            };
             for (watch, read) in watches.into_iter().zip(reads) {
                 // What could not be read leaves the comparison showing what it had.
                 let Ok((Blob::Text(left), Blob::Text(right))) =
@@ -544,7 +595,7 @@ impl Target {
 }
 
 /// Both sides of `what`, on the worker, or the toast that says which one could not be read.
-fn read(what: &Comparison, vault: &Vault) -> Result<(Blob, Blob), String> {
+fn read(what: &Comparison, vault: &Source) -> Result<(Blob, Blob), String> {
     let left = match left_rev(&what.sides) {
         Some(rev) => side(what, vault, rev, left_rel(what))?,
         None => Blob::Text(String::new()),
@@ -577,7 +628,7 @@ fn left_rel(what: &Comparison) -> &str {
 /// `rel` at `rev`. A file git has none of there is a new or deleted file, and an empty string is
 /// exactly the right thing to diff against. A read that failed is not that: an empty side would
 /// draw the whole file as added or deleted, so it is the toast instead.
-fn side(what: &Comparison, vault: &Vault, rev: &str, rel: &str) -> Result<Blob, String> {
+fn side(what: &Comparison, vault: &Source, rev: &str, rel: &str) -> Result<Blob, String> {
     match vault.git_show(&what.repo, rev, rel) {
         Ok(blob) => Ok(blob.unwrap_or_else(|| Blob::Text(String::new()))),
         Err(e) => {
@@ -590,46 +641,38 @@ fn side(what: &Comparison, vault: &Vault, rev: &str, rel: &str) -> Result<Blob, 
     }
 }
 
-/// Read the disk side of a comparison. Vault files use `Vault::read_text`; absolute keys outside
-/// a local vault are read directly because `Local::join` rejects rooted paths. Remote files
-/// outside the vault are refused rather than treated as empty.
-fn worktree(what: &Comparison, vault: &Vault) -> Result<Blob, String> {
-    let outside = Path::new(&what.key).is_absolute();
-    // Outside the vault on a remote vault is on the other machine, and the path would name
-    // this one's file if it named anything: refusing is the only honest answer.
-    if outside && vault.is_remote() {
-        let name = split_name(&what.rel).1;
-        return Err(format!("{name} is outside the vault on the remote host"));
-    }
-    let read = match outside {
-        true => accent_core::fs::read_text(Path::new(&what.key)).map_err(Into::into),
-        false => vault.read_text(&what.key),
-    };
-    Ok(match read {
+/// Read the disk side of a comparison from its repository's machine.
+fn worktree(what: &Comparison, vault: &Source) -> Result<Blob, String> {
+    let read = vault.read_text(&what.repo, &what.rel);
+    match read {
         // With the line endings the file has, each line its own, which reading it as text
         // takes away: a change of those alone is a change to git, and [`line_endings_only`]
         // has to see it. A file that is not UTF-8 cannot be read as it is, and has CRLF put
         // back on every line.
         Ok(accent_api::fs::Read::Text(t)) if t.crlf => {
-            let raw = match outside {
-                true => accent_core::fs::read_note(Path::new(&what.key)).map_err(Into::into),
-                false => vault.read(&what.key),
-            };
-            Blob::Text(raw.map_or_else(
-                |_| accent_api::fs::for_disk(&t.text, true, false),
-                |(text, _)| text,
-            ))
+            if t.lossy {
+                return Ok(Blob::Text(accent_api::fs::for_disk(&t.text, true, false)));
+            }
+            match vault.read(&what.repo, &what.rel) {
+                Ok((text, _)) => Ok(Blob::Text(text)),
+                Err(e) => worktree_error(&what.rel, e),
+            }
         }
-        Ok(accent_api::fs::Read::Text(t)) => Blob::Text(t.text),
-        Ok(_) => Blob::Binary,
-        // A file that is no longer there really is a deletion, and an empty right side is
-        // what draws one. This used to be every absolute key as well, which drew a file
-        // whose repository is above the vault root as wholly deleted.
-        Err(e) => {
-            tracing::debug!("reading {}: {e}", what.key);
-            Blob::Text(String::new())
-        }
-    })
+        Ok(accent_api::fs::Read::Text(t)) => Ok(Blob::Text(t.text)),
+        Ok(_) => Ok(Blob::Binary),
+        Err(e) => worktree_error(&what.rel, e),
+    }
+}
+
+/// A file that disappeared is a deletion; a failed read must stay an error.
+fn worktree_error(rel: &str, error: accent_api::Error) -> Result<Blob, String> {
+    match error {
+        accent_api::Error::Core(accent_core::Error::NotFound(_)) => Ok(Blob::Text(String::new())),
+        error => Err(format!(
+            "Cannot read {} in the worktree: {error:#}",
+            split_name(rel).1
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -662,6 +705,26 @@ mod tests {
         assert_eq!(
             nothing_to_show(&Sides::Deleted),
             nothing_to_show(&Sides::Worktree)
+        );
+    }
+
+    #[test]
+    fn worktree_read_errors_only_look_empty_when_the_file_is_missing() {
+        let missing = accent_core::Error::NotFound("/repo/a.md".into()).into();
+        assert!(matches!(
+            worktree_error("a.md", missing),
+            Ok(Blob::Text(text)) if text.is_empty()
+        ));
+        let timeout = accent_api::Error::Remote("read timed out".into());
+        assert_eq!(
+            worktree_error("a.md", timeout).unwrap_err(),
+            "Cannot read a.md in the worktree: read timed out"
+        );
+        let refused = accent_core::Error::Invalid("path leaves the repository".into()).into();
+        assert!(
+            worktree_error("a.md", refused)
+                .unwrap_err()
+                .contains("path leaves the repository")
         );
     }
 }

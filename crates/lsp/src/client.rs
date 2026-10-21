@@ -66,11 +66,21 @@ struct Inner {
     dead: AtomicBool,
     /// Set by `initialize`, and the answer to `workspace/workspaceFolders` afterwards.
     root_uri: OnceLock<String>,
+    configuration: OnceLock<Value>,
 }
 
 impl Client {
     /// Start `argv` in `cwd` and talk to it over its stdio.
     pub fn spawn(argv: &[String], cwd: &Path) -> std::io::Result<(Client, Notifications)> {
+        Self::spawn_configured(argv, cwd, Value::Null)
+    }
+
+    /// Start a server with the settings returned to its `workspace/configuration` requests.
+    pub fn spawn_configured(
+        argv: &[String],
+        cwd: &Path,
+        configuration: Value,
+    ) -> std::io::Result<(Client, Notifications)> {
         let Some((exe, args)) = argv.split_first() else {
             return Err(std::io::Error::other("no language server command"));
         };
@@ -100,6 +110,7 @@ impl Client {
         });
 
         let (client, notifications) = Client::new(stdout, stdin);
+        let _ = client.inner.configuration.set(configuration);
         *client.child.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
         Ok((client, notifications))
     }
@@ -117,6 +128,7 @@ impl Client {
             next_id: AtomicU64::new(1),
             dead: AtomicBool::new(false),
             root_uri: OnceLock::new(),
+            configuration: OnceLock::new(),
         });
 
         runtime().spawn(write_loop(outbox, writer));
@@ -257,6 +269,12 @@ impl Client {
 
         let result: InitializeResult = self.request_within(STARTING, "initialize", params).await?;
         self.notify("initialized", json!({}))?;
+        if let Some(configuration) = self.inner.configuration.get().filter(|v| !v.is_null()) {
+            self.notify(
+                "workspace/didChangeConfiguration",
+                json!({"settings": configuration}),
+            )?;
+        }
         Ok(result.capabilities)
     }
 
@@ -303,15 +321,10 @@ impl Inner {
             | "client/unregisterCapability"
             | "window/workDoneProgress/create"
             | "window/showMessageRequest" => Ok(Value::Null),
-            // accent has no per-server settings, but the answer must have the shape the server
-            // asked for: one entry per item.
-            "workspace/configuration" => {
-                let items = params
-                    .and_then(|p| p.get("items"))
-                    .and_then(Value::as_array)
-                    .map_or(0, Vec::len);
-                Ok(Value::Array(vec![Value::Null; items]))
-            }
+            "workspace/configuration" => Ok(configuration_for(
+                self.configuration.get().unwrap_or(&Value::Null),
+                params,
+            )),
             "workspace/workspaceFolders" => Ok(match self.root_uri.get() {
                 Some(uri) => json!([{"uri": uri, "name": name_of(uri)}]),
                 None => Value::Null,
@@ -324,6 +337,33 @@ impl Inner {
         };
         let _ = self.send(&message);
     }
+}
+
+fn configuration_for(settings: &Value, params: Option<&Value>) -> Value {
+    let items = params
+        .and_then(|p| p.get("items"))
+        .and_then(Value::as_array);
+    Value::Array(
+        items
+            .into_iter()
+            .flatten()
+            .map(|item| {
+                item.get("section")
+                    .and_then(Value::as_str)
+                    .filter(|section| !section.is_empty())
+                    .map_or_else(
+                        || settings.clone(),
+                        |section| {
+                            section
+                                .split('.')
+                                .try_fold(settings, |value, part| value.get(part))
+                                .cloned()
+                                .unwrap_or(Value::Null)
+                        },
+                    )
+            })
+            .collect(),
+    )
 }
 
 /// Cancels its request unless the answer already arrived. One guard covers both ways a request
@@ -441,6 +481,27 @@ fn name_of(uri: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_configuration_answers_the_requested_sections() {
+        let settings = json!({
+            "python": {"pythonPath": "/vault/.venv/bin/python"},
+            "pylsp": {"plugins": {"jedi": {"environment": "/vault/.venv/bin/python"}}},
+        });
+        let asked = json!({"items": [
+            {"section": "python"},
+            {"section": "pylsp.plugins.jedi"},
+            {"section": "missing"},
+        ]});
+        assert_eq!(
+            configuration_for(&settings, Some(&asked)),
+            json!([
+                {"pythonPath": "/vault/.venv/bin/python"},
+                {"environment": "/vault/.venv/bin/python"},
+                null,
+            ])
+        );
+    }
     use crate::types::Position;
     use std::time::Instant;
     use tokio::io::{AsyncBufRead, ReadHalf, WriteHalf, split};

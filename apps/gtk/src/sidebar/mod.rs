@@ -75,6 +75,8 @@ pub struct Sidebar {
     /// Everything that needs an index behind it. `None` in a window with no vault, where the
     /// Info pane holds Details alone.
     panes: Option<VaultPanes>,
+    /// Git also belongs to a focused shell in a window without a vault.
+    git: Option<(adw::ViewStackPage, gtk::Paned)>,
     /// The Info pane: References, Tags and Details as sections, and what Details shows.
     info: Rc<info::Info>,
     details: details::Details,
@@ -135,10 +137,6 @@ struct VaultPanes {
     /// Refills the tag list if it fell behind while out of sight and is on screen now.
     tags_catch_up: Rc<dyn Fn(&adw::ViewStack)>,
     tags_divider: gtk::Paned,
-    /// The Git pane's page, so it can be hidden: a vault under no version control has nothing to
-    /// put in it, and one more icon in the switcher is one more thing to explain.
-    git_page: adw::ViewStackPage,
-    git_divider: gtk::Paned,
     /// The Ports pane's page, hidden for the same reason the Git one is: a vault on this machine
     /// has no ssh connection to forward anything over.
     ports_page: adw::ViewStackPage,
@@ -153,7 +151,8 @@ impl Sidebar {
     /// vault-relative path and optional location; `on_reference` receives a row with its line
     /// number.
     pub fn new(
-        vault: Option<(gtk::Widget, Data, gtk::Widget, gtk::Paned)>,
+        vault: Option<(gtk::Widget, Data)>,
+        git: Option<(gtk::Widget, gtk::Paned)>,
         on_open: impl Fn(&str, Option<Target>) + 'static,
         on_reference: impl Fn(&str) + 'static,
     ) -> Sidebar {
@@ -169,7 +168,7 @@ impl Sidebar {
         let details = details::Details::new();
         let mut vault_info = None;
         let mut debug = None;
-        let panes = vault.map(|(files, data, git, git_divider)| {
+        let panes = vault.map(|(files, data)| {
             debug = Some(data.debug);
             stack.add_titled_with_icon(&files, Some("files"), "Files", "folder-symbolic");
 
@@ -190,11 +189,6 @@ impl Sidebar {
             );
             stack.add_titled_with_icon(&info.root, Some("info"), "Info", info::ICON);
             vault_info = Some(info.clone());
-
-            stack.add_titled_with_icon(&git, Some("git"), "Git", GIT_ICON);
-            let git_page = stack.page(&git);
-            // Hidden until the pane says there is a repository, which is one refresh away.
-            git_page.set_visible(false);
 
             let (ports, ports_refill) = ports::pane(&Rc::new(data.ports));
             stack.add_titled_with_icon(&ports, Some("ports"), "Ports", ports::ICON);
@@ -245,8 +239,6 @@ impl Sidebar {
                 tags,
                 (references, references_stack, references_empty),
                 tags_catch_up,
-                git_page,
-                git_divider,
                 (ports_page, ports_refill),
             )
         });
@@ -255,6 +247,13 @@ impl Sidebar {
             let info = info::Info::new(None, &details.root);
             stack.add_titled_with_icon(&info.root, Some("info"), "Info", info::ICON);
             info
+        });
+
+        let git = git.map(|(widget, divider)| {
+            stack.add_titled_with_icon(&widget, Some("git"), "Git", GIT_ICON);
+            let page = stack.page(&widget);
+            page.set_visible(false);
+            (page, divider)
         });
 
         let outline_bin = adw::Bin::builder().vexpand(true).build();
@@ -296,16 +295,9 @@ impl Sidebar {
             root: stack.clone().upcast(),
             switcher: switcher.upcast(),
             stack,
+            git,
             panes: panes.map(
-                |(
-                    search,
-                    tags,
-                    references,
-                    tags_catch_up,
-                    git_page,
-                    git_divider,
-                    (ports_page, ports_refill),
-                )| {
+                |(search, tags, references, tags_catch_up, (ports_page, ports_refill))| {
                     let (references, references_stack, references_empty) = references;
                     VaultPanes {
                         search_entry: search.entry,
@@ -337,8 +329,6 @@ impl Sidebar {
                         tags_settle: Debounce::new(INDEX_SETTLE),
                         tags_catch_up,
                         tags_divider: tags.divider,
-                        git_page,
-                        git_divider,
                         ports_page,
                         ports_refill,
                         select_tag: tags.select,
@@ -507,13 +497,16 @@ impl Sidebar {
         if self.info.reset_divider(divider) || self.code.reset_divider(divider) {
             return true;
         }
+        if self.git.as_ref().is_some_and(|(_, git)| git == divider) {
+            divider
+                .set_position(divider.height() * crate::git::GIT_SHARE.0 / crate::git::GIT_SHARE.1);
+            return true;
+        }
         let Some(panes) = self.panes.as_ref() else {
             return false;
         };
         let share = if divider == &panes.tags_divider {
             tags::SHARE
-        } else if divider == &panes.git_divider {
-            crate::git::GIT_SHARE
         } else {
             return false;
         };
@@ -640,8 +633,8 @@ impl Sidebar {
     }
 
     /// Whether this sidebar has the named pane at all, and is showing it. A window with no vault
-    /// has only Info and the outline, and a vault with no repository has no Git pane, so the chords for
-    /// the others must not open a column that cannot answer them.
+    /// has Info, Outline and Git when its focused shell has a repository; chords for other panes
+    /// must not open a column that cannot answer them.
     pub fn has_pane(&self, name: &str) -> bool {
         self.stack
             .child_by_name(name)
@@ -650,8 +643,8 @@ impl Sidebar {
 
     /// Show or hide the Git pane. It starts hidden and the pane's first refresh decides.
     pub fn set_git_visible(&self, on: bool) {
-        if let Some(panes) = self.panes.as_ref() {
-            panes.git_page.set_visible(on);
+        if let Some((page, _)) = self.git.as_ref() {
+            page.set_visible(on);
         }
     }
 

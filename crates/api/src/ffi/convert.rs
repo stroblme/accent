@@ -7,10 +7,22 @@
 use accent_core::fs::Etag;
 use accent_core::index::{self, Backlink, FileRow, Phase};
 use accent_core::markdown::{Click, LinkKind, Style};
-use accent_core::pdf::{self, Comment, Rect, SelectionLink};
+use accent_core::pdf::{self, Comment, Info, Rect, SelectionLink};
 use accent_core::walk::FileKind;
 
 // ------------------------------------------------------------------ what already crosses as is
+
+#[uniffi::remote(Record)]
+pub struct Info {
+    pub title: Option<String>,
+    pub author: Option<String>,
+    pub subject: Option<String>,
+    pub keywords: Option<String>,
+    pub creator: Option<String>,
+    pub producer: Option<String>,
+    pub created: Option<i64>,
+    pub version: Option<String>,
+}
 
 #[uniffi::remote(Record)]
 pub struct Etag {

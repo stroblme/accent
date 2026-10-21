@@ -233,6 +233,9 @@ pub fn open(
 }
 
 impl NotebookTab {
+    pub(crate) fn is_python(&self) -> bool {
+        self.model.borrow().language() == "python"
+    }
     pub fn key(&self) -> String {
         self.key.borrow().clone()
     }

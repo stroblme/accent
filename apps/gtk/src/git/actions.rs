@@ -18,6 +18,29 @@ pub(super) enum Fail {
     AskToForce,
 }
 
+/// The local roots this pane's unfinished jobs can still be running Git in, even after focus
+/// changes to another shell. Several jobs may share a root.
+#[derive(Default)]
+pub(super) struct RunningGit(Vec<Vec<PathBuf>>);
+
+impl RunningGit {
+    pub(super) fn start(&mut self, roots: &[PathBuf]) {
+        if !roots.is_empty() {
+            self.0.push(roots.to_vec());
+        }
+    }
+
+    pub(super) fn finish(&mut self, roots: &[PathBuf]) {
+        if let Some(at) = self.0.iter().position(|job| job == roots) {
+            self.0.remove(at);
+        }
+    }
+
+    fn roots(&self) -> HashSet<PathBuf> {
+        self.0.iter().flatten().cloned().collect()
+    }
+}
+
 impl Panel {
     /// Run a command on the selected repository off the main thread, report its result and
     /// refresh. `what` completes `Cannot <what>: <why>`. `sync` shows the Sync spinner and
@@ -27,10 +50,10 @@ impl Panel {
         what: String,
         sync: bool,
         on_err: Fail,
-        job: impl FnOnce(&Vault, &Repo) -> accent_api::Result<String> + Send + 'static,
+        job: impl FnOnce(&Source, &Repo) -> accent_api::Result<String> + Send + 'static,
     ) {
         let spin = sync.then(|| self.sync_slot.clone());
-        self.command_then(what, spin, on_err, job, |_| ());
+        self.command_then(what, spin, on_err, None, job, |_| ());
     }
 
     /// [`Panel::command`] with something to do back on the main thread once it worked, which only
@@ -41,7 +64,8 @@ impl Panel {
         what: String,
         spin: Option<gtk::Stack>,
         on_err: Fail,
-        job: impl FnOnce(&Vault, &Repo) -> accent_api::Result<String> + Send + 'static,
+        roots: Option<Vec<PathBuf>>,
+        job: impl FnOnce(&Source, &Repo) -> accent_api::Result<String> + Send + 'static,
         then: impl FnOnce(&Rc<Panel>) + 'static,
     ) {
         let repo = {
@@ -60,9 +84,17 @@ impl Panel {
         // The last window closing must not end the process under git (`Panel::stop`).
         let hold = self.hooks.window.application().map(|app| app.hold());
         let panel = self.clone();
-        let vault = self.hooks.vault.clone();
+        let vault = self.source();
+        let roots = if vault.is_remote() {
+            Vec::new()
+        } else {
+            roots.unwrap_or_else(|| vec![repo.root.clone()])
+        };
+        self.running_git.borrow_mut().start(&roots);
+        let generation = self.source_generation.get();
         glib::spawn_future_local(async move {
             let done = crate::work::off_thread("git", move || job(&vault, &repo)).await;
+            panel.running_git.borrow_mut().finish(&roots);
             panel.jobs.set(panel.jobs.get() - 1);
             drop(hold);
             if panel.gone.get() {
@@ -86,6 +118,9 @@ impl Panel {
                 if ok {
                     return;
                 }
+            }
+            if panel.source_generation.get() != generation {
+                return;
             }
             match done {
                 Some(Ok(message)) => {
@@ -147,10 +182,8 @@ impl Panel {
     /// git is the host's, which finishes it within its own bounds once the link closes.
     pub fn stop(&self) {
         self.gone.set(true);
-        if !self.hooks.vault.is_remote() {
-            for repo in &self.state.borrow().repos {
-                git::interrupt(&repo.root);
-            }
+        for root in self.running_git.borrow().roots() {
+            git::interrupt(&root);
         }
     }
 
@@ -192,6 +225,7 @@ impl Panel {
             "commit".to_string(),
             None,
             Fail::Say,
+            None,
             move |vault, repo| {
                 vault
                     .git_commit(repo, &message, all)
@@ -215,7 +249,7 @@ impl Panel {
         }
         let index = {
             let state = self.state.borrow();
-            key.and_then(|key| index_of(&state, &self.hooks.vault.root(), key))
+            key.and_then(|key| index_of(&state, &self.source().key_root(), key))
                 .unwrap_or(state.selected)
         };
         if self.state.borrow().selected != index {
@@ -270,10 +304,12 @@ impl Panel {
         let (fetch_lock, pushing) = (self.fetch_lock.clone(), self.pushing.clone());
         let slot = Some(self.sync_all_slot.clone());
         let what = "sync every repository".to_string();
+        let roots = repos.iter().map(|(repo, _)| repo.root.clone()).collect();
         self.command_then(
             what,
             slot,
             Fail::Say,
+            Some(roots),
             move |vault, _| {
                 let _fetched = fetch_lock.lock();
                 let (mut left, mut gone) = (Vec::new(), false);
@@ -377,10 +413,14 @@ impl Panel {
         show(&entry);
         entry.connect_changed(show);
 
-        let (panel, field) = (self.clone(), entry.clone());
+        let (panel, field, generation) =
+            (self.clone(), entry.clone(), self.source_generation.get());
         dialogs::choose(&dialog, Some(&self.hooks.window), move |response| {
             let name = git::branch_name(&field.text());
-            if response != dialogs::CONFIRM || name.is_empty() {
+            if response != dialogs::CONFIRM
+                || name.is_empty()
+                || panel.source_generation.get() != generation
+            {
                 return;
             }
             let asked = name.clone();
@@ -436,13 +476,18 @@ impl Panel {
             None => format!("Its commits are not in {head} and will be lost."),
         };
         let panel = self.clone();
+        let generation = self.source_generation.get();
         dialogs::confirm(
             &self.hooks.window,
             &format!("Delete {name}?"),
             &body,
             "Delete",
             true,
-            move || panel.delete_branch(name, true),
+            move || {
+                if panel.source_generation.get() == generation {
+                    panel.delete_branch(name, true);
+                }
+            },
         );
     }
 
@@ -470,8 +515,9 @@ impl Panel {
         dialog.set_extra_child(Some(&form));
 
         let panel = self.clone();
+        let generation = self.source_generation.get();
         dialogs::choose(&dialog, Some(&self.hooks.window), move |response| {
-            if response != "delete" {
+            if response != "delete" || panel.source_generation.get() != generation {
                 return;
             }
             if let Some(branch) = others.get(picker.selected() as usize) {
@@ -526,8 +572,9 @@ impl Panel {
         let dialog = dialogs::name_dialog(&format!("Merge into {into}"), "Merge", &form);
 
         let panel = self.clone();
+        let generation = self.source_generation.get();
         dialogs::choose(&dialog, Some(&self.hooks.window), move |response| {
-            if response != dialogs::CONFIRM {
+            if response != dialogs::CONFIRM || panel.source_generation.get() != generation {
                 return;
             }
             if let Some(branch) = others.get(picker.selected() as usize) {
@@ -564,6 +611,7 @@ impl Panel {
             return (self.hooks.toast)("No merge in progress");
         }
         let panel = self.clone();
+        let generation = self.source_generation.get();
         dialogs::confirm(
             &self.hooks.window,
             "Abort Merge?",
@@ -572,6 +620,9 @@ impl Panel {
             "Abort",
             true,
             move || {
+                if panel.source_generation.get() != generation {
+                    return;
+                }
                 panel.command(
                     "abort the merge".to_string(),
                     false,
@@ -612,6 +663,7 @@ impl Panel {
     /// Give up the rebase under way, which asks first for the reason [`Panel::abort_merge`] does.
     pub(super) fn abort_rebase(self: &Rc<Self>) {
         let panel = self.clone();
+        let generation = self.source_generation.get();
         dialogs::confirm(
             &self.hooks.window,
             "Abort Rebase?",
@@ -620,6 +672,9 @@ impl Panel {
             "Abort",
             true,
             move || {
+                if panel.source_generation.get() != generation {
+                    return;
+                }
                 panel.command(
                     "abort the rebase".to_string(),
                     false,
@@ -682,8 +737,12 @@ impl Panel {
         let question =
             format!("{name} still has {blocks}, whose markers would be committed as text.");
         let (panel, done) = (self.clone(), format!("Marked {name} resolved"));
+        let generation = self.source_generation.get();
         let stage = move || {
-            let job = move |vault: &Vault, _: &Repo| {
+            if panel.source_generation.get() != generation {
+                return;
+            }
+            let job = move |vault: &Source, _: &Repo| {
                 vault.git_stage(&what.repo, &[what.rel]).map(|()| done)
             };
             panel.command(format!("mark {name} resolved"), false, Fail::Say, job);
@@ -735,7 +794,7 @@ impl Panel {
         self: &Rc<Self>,
         what: &'static str,
         paths: Vec<String>,
-        job: impl FnOnce(&Vault, &Repo, &[String]) -> accent_api::Result<String> + Send + 'static,
+        job: impl FnOnce(&Source, &Repo, &[String]) -> accent_api::Result<String> + Send + 'static,
     ) {
         if paths.is_empty() {
             return;
@@ -776,7 +835,8 @@ impl Panel {
     ///
     /// Restore tracked files from the index. Trash untracked paths, with wholly untracked
     /// folders handled together by [`Panel::trash_untracked`]. Remote vaults delete permanently;
-    /// this confirmation states that and no second question is shown.
+    /// this confirmation states that and no second question is shown. A remote shell leaves
+    /// untracked files for its host terminal.
     pub(super) fn discard(self: &Rc<Self>, folder: Option<&str>, entries: Vec<Entry>) {
         let Some(repo) = ({
             let state = self.state.borrow();
@@ -787,21 +847,30 @@ impl Panel {
         // A repository of its own is never trashed: skipped, and counted in the question.
         let (kept, entries): (Vec<Entry>, Vec<Entry>) =
             entries.into_iter().partition(|e| own_repository(&e.path));
-        let (untracked, tracked): (Vec<Entry>, Vec<Entry>) =
-            entries.into_iter().partition(|e| e.x == '?');
+        let source = self.source();
+        let (tracked, untracked, skipped) =
+            split_discard_entries(entries, matches!(source.as_ref(), Source::Remote { .. }));
+        if skipped > 0 && tracked.is_empty() {
+            (self.hooks.toast)(REMOTE_UNTRACKED);
+            return;
+        }
         let what = match (folder, tracked.first().or(untracked.first())) {
             (_, None) => return,
             (Some(folder), _) => folder.to_string(),
             (None, Some(entry)) => split_name(&entry.path).1.to_string(),
         };
-        let body = discard_body(
+        let mut body = discard_body(
             &what,
             folder.is_some(),
             tracked.len(),
             untracked.len(),
             kept.len(),
-            !self.hooks.vault.is_remote(),
+            !source.is_remote(),
         );
+        if skipped > 0 {
+            body.push(' ');
+            body.push_str(REMOTE_UNTRACKED);
+        }
         let listed: Vec<String> = untracked.into_iter().map(|e| e.path).collect();
         let under = folder.map(str::to_string);
         let paths: Vec<String> = tracked.into_iter().map(|e| e.path).collect();
@@ -814,13 +883,19 @@ impl Panel {
             _ => ("Discard Changes?", "Discard"),
         };
         let panel = self.clone();
+        let generation = self.source_generation.get();
         dialogs::confirm(&self.hooks.window, heading, &body, verb, true, move || {
+            if panel.source_generation.get() != generation {
+                return;
+            }
             if !listed.is_empty() {
                 panel.trash_untracked(repo, under, listed);
             }
-            panel.write("discard", paths, move |vault, repo, paths| {
-                vault.git_discard(repo, paths).map(|()| done)
-            });
+            if !paths.is_empty() {
+                panel.write("discard", paths, move |vault, repo, paths| {
+                    vault.git_discard(repo, paths).map(|()| done)
+                });
+            }
         });
     }
 
@@ -829,11 +904,13 @@ impl Panel {
     /// operation, one undo — and a folder beside tracked ones is not left behind emptied.
     fn trash_untracked(self: &Rc<Self>, repo: Repo, folder: Option<String>, listed: Vec<String>) {
         let panel = self.clone();
+        let source = self.source();
+        let generation = self.source_generation.get();
         glib::spawn_future_local(async move {
             let named = match folder {
                 None => listed,
                 Some(dir) => {
-                    let (vault, asked) = (panel.hooks.vault.clone(), repo.clone());
+                    let (vault, asked) = (source.clone(), repo.clone());
                     let found = crate::work::attempt("list the untracked files", move || {
                         vault.git_untracked(&asked, &dir)
                     });
@@ -843,14 +920,45 @@ impl Panel {
                     }
                 }
             };
-            let root = panel.hooks.vault.root();
+            if panel.source_generation.get() != generation {
+                return;
+            }
+            let root = source.key_root();
             let keys: Vec<String> = named
                 .iter()
-                .map(|path| vault_key(&root, &repo, path.trim_end_matches('/')))
+                .map(|path| match source.as_ref() {
+                    Source::Local(_) => repo
+                        .root
+                        .join(path.trim_end_matches('/'))
+                        .to_string_lossy()
+                        .into_owned(),
+                    _ => vault_key(&root, &repo, path.trim_end_matches('/')),
+                })
                 .collect();
-            (panel.hooks.trash)(&keys);
-            panel.schedule_refresh(Depth::Status);
+            match source.as_ref() {
+                Source::Vault(_) => {
+                    (panel.hooks.trash)(&keys);
+                    panel.schedule_refresh(Depth::Status);
+                }
+                Source::Local(_) => (panel.hooks.trash)(&keys),
+                Source::Remote { .. } => (panel.hooks.toast)(REMOTE_UNTRACKED),
+                Source::Empty => {}
+            }
         });
+    }
+}
+
+const REMOTE_UNTRACKED: &str =
+    "Untracked files on the host cannot be discarded here. Remove them in the host terminal.";
+
+fn split_discard_entries(
+    entries: Vec<Entry>,
+    remote_shell: bool,
+) -> (Vec<Entry>, Vec<Entry>, usize) {
+    let (untracked, tracked): (Vec<_>, Vec<_>) = entries.into_iter().partition(|e| e.x == '?');
+    match remote_shell {
+        true => (tracked, Vec::new(), untracked.len()),
+        false => (tracked, untracked, 0),
     }
 }
 
@@ -968,6 +1076,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn stop_roots_follow_running_jobs_across_source_switches() {
+        let mut running = RunningGit::default();
+        let old = vec![PathBuf::from("/repo-a")];
+        running.start(&old);
+        running.start(&old);
+        let _focused_now = PathBuf::from("/repo-b");
+        assert_eq!(running.roots(), HashSet::from([PathBuf::from("/repo-a")]));
+        running.finish(&old);
+        assert_eq!(running.roots(), HashSet::from([PathBuf::from("/repo-a")]));
+        running.finish(&old);
+        assert!(running.roots().is_empty());
+    }
+
+    #[test]
     fn a_folder_discard_trashes_an_untracked_folder_whole_and_only_what_was_listed() {
         let listed =
             ["new/deep/z.md", "new/q.md", "mixed/u.md", "mixed/sub/x.md"].map(String::from);
@@ -976,6 +1098,27 @@ mod tests {
             to_trash(named.to_vec(), &listed),
             ["new/", "mixed/u.md", "mixed/sub/"]
         );
+    }
+
+    #[test]
+    fn remote_shell_discard_keeps_untracked_entries_for_host_terminal() {
+        let entry = |path: &str, x| Entry {
+            path: path.into(),
+            orig: None,
+            x,
+            y: '.',
+            unmerged: false,
+            submodule: false,
+        };
+        let entries = vec![entry("edited.md", 'M'), entry("new.md", '?')];
+        let (tracked, untracked, skipped) = split_discard_entries(entries.clone(), true);
+        assert_eq!(tracked, vec![entries[0].clone()]);
+        assert!(untracked.is_empty());
+        assert_eq!(skipped, 1);
+        let (tracked, untracked, skipped) = split_discard_entries(entries.clone(), false);
+        assert_eq!(tracked, vec![entries[0].clone()]);
+        assert_eq!(untracked, vec![entries[1].clone()]);
+        assert_eq!(skipped, 0);
     }
 
     #[test]

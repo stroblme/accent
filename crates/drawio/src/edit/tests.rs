@@ -45,6 +45,39 @@ fn geometry<'a>(e: &'a Editor, id: &str) -> &'a Geometry {
 }
 
 #[test]
+fn file_style_default_is_saved_and_undoable() {
+    let mut e = editor();
+    e.set_file_attr("accentStyleRect", "rounded=1;fillColor=#ff0000;");
+    assert_eq!(
+        crate::model::attr(&e.file().attrs, "accentStyleRect"),
+        Some("rounded=1;fillColor=#ff0000;")
+    );
+    assert!(e.dirty() && e.can_undo());
+    let written = e.file().to_xml();
+    assert_eq!(
+        crate::model::attr(
+            &File::from_bytes(written.as_bytes()).unwrap().attrs,
+            "accentStyleRect"
+        ),
+        Some("rounded=1;fillColor=#ff0000;")
+    );
+    e.mark_saved();
+    e.set_file_attr("accentStyleRect", "rounded=0;");
+    assert!(e.undo());
+    assert_eq!(
+        crate::model::attr(&e.file().attrs, "accentStyleRect"),
+        Some("rounded=1;fillColor=#ff0000;")
+    );
+    assert!(e.undo());
+    assert_eq!(crate::model::attr(&e.file().attrs, "accentStyleRect"), None);
+    assert!(e.redo());
+    assert_eq!(
+        crate::model::attr(&e.file().attrs, "accentStyleRect"),
+        Some("rounded=1;fillColor=#ff0000;")
+    );
+}
+
+#[test]
 fn undo_redo_restore_cells_and_dirty() {
     let mut e = editor();
     let before = e.page(0).unwrap().clone();

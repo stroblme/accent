@@ -64,3 +64,6 @@ futures-channel = "0.3.34"
 [build-dependencies]
 # Compiles the completion-kind icons into the binary's GResource.
 glib-build-tools = "0.22"
+
+[dev-dependencies]
+tempfile.workspace = true

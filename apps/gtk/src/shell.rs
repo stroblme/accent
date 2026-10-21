@@ -140,6 +140,7 @@ impl Changed {
             // Every vault's entries, not this window's: a `hello` too many is harmless.
             vault: old.vaults != new.vaults
                 || old.lsp != new.lsp
+                || old.debug != new.debug
                 || old.ghost_text != new.ghost_text
                 || old.word_suggestions != new.word_suggestions,
             // What a focused shell is left is part of the table.

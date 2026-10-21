@@ -45,12 +45,16 @@ import java.io.File
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
 /** Display a note as rendered HTML or editable Markdown with core styling spans. */
 @Composable
 fun NoteScreen(model: VaultModel, open: Open, chrome: Chrome, onTag: (String) -> Unit) {
     var editing by remember(open.rel) { mutableStateOf(false) }
+    var details by remember(open.rel) { mutableStateOf(false) }
+    val context = LocalContext.current
     Column(Modifier.fillMaxSize()) {
         // Above the bar rather than under it, since the bar lies over the note and would cover
         // them. They never fade, so one coming or going moves the note once, as a decision may.
@@ -84,6 +88,7 @@ fun NoteScreen(model: VaultModel, open: Open, chrome: Chrome, onTag: (String) ->
                     ) {
                         Text(if (editing) "Done" else "Edit")
                     }
+                    DetailsMenu { details = true }
                 }
             },
             modifier = Modifier.weight(1f),
@@ -97,6 +102,11 @@ fun NoteScreen(model: VaultModel, open: Open, chrome: Chrome, onTag: (String) ->
                 Rendered(model, open, chrome, onTag)
             }
         }
+    }
+    if (details) DetailsSheet(onDismiss = { details = false }) {
+        val text = model.buffer.text.toString()
+        val stat = model.stat(open.rel)
+        fileDetails(stat, context) + withContext(Dispatchers.Default) { noteDetails(text) }
     }
 }
 

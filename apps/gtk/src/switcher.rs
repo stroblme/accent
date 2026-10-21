@@ -24,6 +24,7 @@ pub struct Entry {
 
 pub struct Switcher {
     list: gtk::ListBox,
+    backdrop: gtk::Box,
     /// The entry the card's first row shows, where there are more than fit.
     first: Rc<Cell<usize>>,
     soon: Debounce,
@@ -31,6 +32,13 @@ pub struct Switcher {
 
 impl Switcher {
     pub fn new() -> Switcher {
+        let backdrop = gtk::Box::builder()
+            .hexpand(true)
+            .vexpand(true)
+            .can_target(false)
+            .visible(false)
+            .css_classes(["accent-switcher-backdrop"])
+            .build();
         // `.navigation-sidebar` is the palette's row; `.accent-switcher` the popover's surface,
         // opaque over the document (`build::install_chrome_css`).
         let list = gtk::ListBox::builder()
@@ -46,6 +54,7 @@ impl Switcher {
             .build();
         Switcher {
             list,
+            backdrop,
             first: Rc::new(Cell::new(0)),
             soon: Debounce::new(DELAY),
         }
@@ -53,6 +62,10 @@ impl Switcher {
 
     pub fn widget(&self) -> &gtk::Widget {
         self.list.upcast_ref()
+    }
+
+    pub fn backdrop(&self) -> &gtk::Widget {
+        self.backdrop.upcast_ref()
     }
 
     /// Whether the card is up: its own visibility, which `show` and `hide` set, rather than
@@ -72,6 +85,7 @@ impl Switcher {
             return self.hide();
         };
         let fresh = !self.shown();
+        self.backdrop.set_visible(true);
         self.list.set_visible(true);
         self.list.remove_all();
         let fit = self.fit(probe);
@@ -91,6 +105,7 @@ impl Switcher {
 
     pub fn hide(&self) {
         self.soon.cancel();
+        self.backdrop.set_visible(false);
         if self.shown() {
             self.list.set_visible(false);
             self.list.remove_all();
