@@ -827,7 +827,7 @@ impl Source for TabSource {
                 return Completions::default();
             };
             lang::flush(tab.clone()).await;
-            let rel = tab.rel();
+            let rel = tab.language_key();
             match vault.completion(&rel, at, trigger).await {
                 Ok(answer) => {
                     tracing::debug!(
@@ -857,7 +857,10 @@ impl Source for TabSource {
                 return item;
             };
             lang::flush(tab.clone()).await;
-            match vault.resolve_completion(&tab.rel(), item.clone()).await {
+            match vault
+                .resolve_completion(&tab.language_key(), item.clone())
+                .await
+            {
                 Ok(full) => full,
                 Err(e) => {
                     tracing::debug!("completionItem/resolve: {e:#}");

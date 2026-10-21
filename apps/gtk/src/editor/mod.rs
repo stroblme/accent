@@ -438,6 +438,12 @@ impl Tab {
         self.rel.borrow().clone()
     }
 
+    /// Vault language key: the host path for a remote dependency, otherwise this tab's key.
+    pub fn language_key(&self) -> String {
+        let key = self.rel();
+        crate::doc::host_file_path(&key).unwrap_or(&key).to_string()
+    }
+
     pub fn path(&self) -> PathBuf {
         self.path.borrow().clone()
     }
@@ -599,7 +605,13 @@ impl Tab {
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let read = crate::work::off_thread("reader", move || match vault {
+                Some(vault) if crate::doc::host_file_path(&rel).is_some() => {
+                    vault.read_named(crate::doc::host_file_path(&rel).unwrap())
+                }
                 Some(vault) => vault.read_text(&rel),
+                None if crate::doc::host_file_path(&rel).is_some() => {
+                    Err(Core::Invalid("remote host file has no vault".into()).into())
+                }
                 None => fs::read_text(&path).map_err(Into::into),
             })
             .await;

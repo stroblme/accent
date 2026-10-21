@@ -115,7 +115,7 @@ impl Tab {
                     glib::spawn_future_local(async move {
                         lang::flush(tab.clone()).await;
                         let found = !vault
-                            .definition(&tab.rel(), pos)
+                            .definition(&tab.language_key(), pos)
                             .await
                             .unwrap_or_default()
                             .is_empty();

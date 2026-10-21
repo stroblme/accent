@@ -439,7 +439,7 @@ impl App {
         }
         let vault = self
             .vault()
-            .filter(|_| !doc::is_loose_key(&tab.rel()))
+            .filter(|_| !doc::is_loose_key(&tab.rel()) || doc::host_file_path(&tab.rel()).is_some())
             .cloned();
         // The read is off the main thread, so the status is asked for when the text lands rather
         // than here: a reload writes the buffer without an edit event, and nothing else would ask.
@@ -646,7 +646,7 @@ impl App {
     pub fn answer_banner(self: &Rc<Self>, tab: &Rc<Tab>) {
         match tab.alert() {
             // Reports rather than asks, so it has no button and this cannot be reached from one.
-            Some(Alert::ReadOnly | Alert::Installed | Alert::Unread) => {}
+            Some(Alert::ReadOnly | Alert::Installed | Alert::Host | Alert::Unread) => {}
             // Both sides hold work, so neither is thrown away on one click: the diff shows what
             // differs and the user picks (DESIGN.md: a choice that can lose data is a dialog).
             Some(Alert::Compare) => self.compare_with_disk(tab),

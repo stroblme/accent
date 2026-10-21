@@ -178,7 +178,7 @@ pub async fn request(tab: &Rc<Tab>) {
     {
         return;
     }
-    let (rel, pos) = (tab.rel(), lang::pos_of(&at));
+    let (rel, pos) = (tab.language_key(), lang::pos_of(&at));
     match vault.inline_completion(&rel, pos).await {
         Ok(Some(text)) => {
             tracing::debug!("ghost for {rel} at {pos:?}: {text:?}");

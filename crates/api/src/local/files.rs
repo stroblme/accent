@@ -80,6 +80,16 @@ impl Local {
         fs::read_text(&self.resolve(rel)?).map_err(named(rel))
     }
 
+    /// Read a host dependency only while a live language session has named its absolute path.
+    pub fn read_named(&self, abs: &str) -> Result<fs::Read> {
+        if !std::path::Path::new(abs).is_absolute() || !self.lang.named(abs) {
+            return Err(
+                accent_core::Error::Invalid(format!("no language session named {abs}")).into(),
+            );
+        }
+        fs::read_text(std::path::Path::new(abs)).map_err(named(abs))
+    }
+
     /// The file's etag, or `None` when there is no file there. One `stat`, which is how a tab
     /// asks "did this change under me" and how the app asks "does this path exist".
     pub fn stat(&self, rel: &str) -> Result<Option<Etag>> {

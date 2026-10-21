@@ -84,8 +84,8 @@ pub(crate) fn build(
 /// Build a tab for `key` with already-read `text`.
 ///
 /// The caller reads bytes to choose text, binary or oversized document handling before this
-/// point. `key` is vault-relative or absolute for loose files; `root` supplies paths and
-/// tooltips only for relative keys.
+/// point. `key` is vault-relative, local absolute, or a remote host-file key; `root` supplies
+/// paths and tooltips for vault-relative keys.
 pub fn open(
     root: &Path,
     key: &str,
@@ -94,7 +94,9 @@ pub fn open(
     tabs: &adw::TabView,
     prefs: &Prefs,
 ) -> Rc<Tab> {
-    let path = root.join(key);
+    let path = crate::doc::host_file_path(key)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join(key));
     let (zoom, column_width, ghost_text) = (prefs.zoom, prefs.column_width, prefs.ghost_text);
 
     // A language for code, none for a note (our own spans do that) and none for a CSV, whose
@@ -140,7 +142,11 @@ pub fn open(
     let page = tabs.append(&column);
     page.set_title(crate::doc::file_name(key));
     // The title is only the file name, so where the note really lives is a hover away.
-    page.set_tooltip(&crate::fileops::display_path(root, key));
+    let tooltip = match crate::doc::host_file_path(key) {
+        Some(path) => format!("{path} (remote host)"),
+        None => crate::fileops::display_path(root, key),
+    };
+    page.set_tooltip(&tooltip);
 
     let tab = Rc::new(Tab {
         rel: RefCell::new(key.to_string()),
