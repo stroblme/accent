@@ -23,11 +23,13 @@ mod goto;
 mod ignored;
 mod image;
 mod info;
+mod kernel;
 mod keys;
 mod loose;
 mod memory;
 mod minimap;
 mod notebook;
+mod notebook_lsp;
 mod outline;
 mod panes;
 mod pdf;
@@ -256,6 +258,8 @@ use tags::bench_tags;
 ///   from `make drills`.
 /// - `ACCENT_BENCH_DEBUG=<rel>:<line>`: a debugpy session from a breakpoint on
 ///   `<line>` of the program `make drills` writes (`debug::bench_debug`).
+/// - `ACCENT_BENCH_KERNEL=<rel>`: a Jupyter notebook it writes at `<rel>`, run on an ipykernel
+///   (`kernel::bench_kernel`). Saves: a scratch vault under `/tmp`.
 /// - `ACCENT_BENCH_REPLACE=1`: Search-pane Replace All updates.
 /// - `ACCENT_BENCH_FIND=<rel_note>`: query selection/history; `options`:
 ///   search toggles, invalid patterns and replacement captures in a temporary note.
@@ -282,6 +286,9 @@ use tags::bench_tags;
 /// - `ACCENT_BENCH_NOTEBOOK=<ipynb>,<marimo .py>,<long ipynb>`: outputs, cell edits with undo
 ///   and save, marimo kept as written, a long notebook's open time and memory, presentation
 ///   (`notebook::bench_notebook`). Saves: a scratch vault under `/tmp`.
+/// - `ACCENT_BENCH_NOTEBOOK_LSP=<ipynb>,<marimo .py>`: notebooks it writes, their code cells
+///   answered by `build-aux/fake-lsp.py --notebook` (`notebook_lsp::bench_notebook_lsp`). Saves:
+///   a scratch vault under `/tmp`.
 /// - `ACCENT_BENCH_COLLAPSE=1`: responsive sidebar width and saved state.
 /// - `ACCENT_BENCH_LAYOUT=<a>,<b>,<c>,<d>[,shell]`: save split layout and
 ///   active tab; `1`: inspect restored layout without saving; `pick:<rel>`,
@@ -327,6 +334,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let collapse = std::env::var("ACCENT_BENCH_COLLAPSE").is_ok();
     let diagram = std::env::var("ACCENT_BENCH_DIAGRAM").ok();
     let notebook = std::env::var("ACCENT_BENCH_NOTEBOOK").ok();
+    let notebook_lsp = std::env::var("ACCENT_BENCH_NOTEBOOK_LSP").ok();
     let clip = std::env::var("ACCENT_BENCH_CLIP").ok();
     let transfer = std::env::var("ACCENT_BENCH_TRANSFER").ok();
     let carry = std::env::var("ACCENT_BENCH_CARRY").ok();
@@ -338,6 +346,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let info = std::env::var("ACCENT_BENCH_INFO").ok();
     let goals = std::env::var("ACCENT_BENCH_GOALS").ok();
     let debug = std::env::var("ACCENT_BENCH_DEBUG").ok();
+    let kernel = std::env::var("ACCENT_BENCH_KERNEL").ok();
     let search = std::env::var("ACCENT_BENCH_SEARCH").ok();
     let find = std::env::var("ACCENT_BENCH_FIND").ok();
     let diag = std::env::var("ACCENT_BENCH_DIAG").ok();
@@ -364,6 +373,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && info.is_none()
         && goals.is_none()
         && debug.is_none()
+        && kernel.is_none()
         && search.is_none()
         && clip.is_none()
         && transfer.is_none()
@@ -373,6 +383,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && watch.is_none()
         && diagram.is_none()
         && notebook.is_none()
+        && notebook_lsp.is_none()
         && switcher.is_none()
         && style.is_none()
         && panes.is_none()
@@ -606,6 +617,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         if let Some(arg) = debug {
             return debug::bench_debug(&app, &arg);
         }
+        if let Some(rel) = kernel {
+            return kernel::bench_kernel(&app, &rel);
+        }
         if let Some(rel) = tags {
             return bench_tags(&app, &rel);
         }
@@ -638,6 +652,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(arg) = notebook {
             return bench_notebook(&app, &arg);
+        }
+        if let Some(arg) = notebook_lsp {
+            return notebook_lsp::bench_notebook_lsp(&app, &arg);
         }
         if let Some(dir) = scroll {
             own_repository_only(&app, "ACCENT_BENCH_SCROLL");
