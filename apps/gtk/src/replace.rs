@@ -27,6 +27,7 @@ impl App {
         };
         let open: Vec<String> = self.open_tabs().iter().map(|tab| tab.rel()).collect();
         (ops.flush)(&open);
+        self.flush_models();
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let outcome = crate::work::attempt("replace", move || {
@@ -37,6 +38,7 @@ impl App {
                 match outcome {
                     Ok(report) => {
                         let unsaved = (ops.reload)(&report.rewritten);
+                        app.models_rewritten(&report.rewritten);
                         let message = replace_message(
                             report.matches,
                             report.rewritten.len(),
@@ -76,6 +78,7 @@ impl App {
         };
         let open: Vec<String> = self.open_tabs().iter().map(|tab| tab.rel()).collect();
         (ops.flush)(&open);
+        self.flush_models();
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let outcome = crate::work::attempt("undo replace", move || vault.undo_replace()).await;
@@ -83,6 +86,7 @@ impl App {
             match outcome {
                 Ok(report) => {
                     (ops.reload)(&report.restored);
+                    app.models_rewritten(&report.restored);
                     let message = undo_message(&report);
                     tracing::debug!(toast = message, "replace undone");
                     app.toast(&message);
@@ -93,6 +97,36 @@ impl App {
                 Err(why) => app.toast(&why),
             }
         });
+    }
+
+    /// Write out the edits of the tabs that save a model rather than a buffer, a diagram's or a
+    /// notebook's, before a rewrite reads their files from disk.
+    fn flush_models(self: &Rc<Self>) {
+        for diagram in self.diagrams() {
+            if let Err(e) = self.flush_diagram(&diagram) {
+                tracing::debug!("{} not written before a rewrite: {e}", diagram.key());
+            }
+        }
+        for notebook in self.notebooks() {
+            if let Err(e) = self.flush_notebook(&notebook) {
+                tracing::debug!("{} not written before a rewrite: {e}", notebook.key());
+            }
+        }
+    }
+
+    /// Tell those tabs among `rels` that a rewrite of ours changed their files, as the watcher
+    /// tells them of anyone else's: one with no edits reloads, one with edits asks.
+    fn models_rewritten(self: &Rc<Self>, rels: &[String]) {
+        for diagram in self.diagrams() {
+            if rels.contains(&diagram.key()) {
+                self.diagram_changed(&diagram);
+            }
+        }
+        for notebook in self.notebooks() {
+            if rels.contains(&notebook.key()) {
+                self.notebook_changed(&notebook);
+            }
+        }
     }
 }
 

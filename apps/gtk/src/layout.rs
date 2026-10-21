@@ -613,7 +613,25 @@ impl App {
                 find::PreviewOp::Line { line, commit: true } => {
                     pdf.goto_page((line as usize).saturating_sub(1))
                 }
+                find::PreviewOp::Line { commit: false, .. } | find::PreviewOp::Replace { .. } => {}
+            }
+            return;
+        }
+        // A notebook is matched as a buffer is, a cell at a time, and goes to cells.
+        if let Some(nb) = self.notebook_of(pane) {
+            match op {
+                find::PreviewOp::Find(text, options) => nb.find(&text, options),
+                find::PreviewOp::Next => nb.step_match(true),
+                find::PreviewOp::Previous => nb.step_match(false),
+                find::PreviewOp::Clear => {
+                    nb.find_clear();
+                    nb.key_target().grab_focus();
+                }
+                find::PreviewOp::Line { line, commit: true } => {
+                    nb.goto_cell((line as usize).saturating_sub(1))
+                }
                 find::PreviewOp::Line { commit: false, .. } => {}
+                find::PreviewOp::Replace { with, all } => nb.replace(&with, all),
             }
             return;
         }
@@ -627,6 +645,7 @@ impl App {
             find::PreviewOp::Previous => preview.find_previous(),
             find::PreviewOp::Clear => preview.find_clear(),
             find::PreviewOp::Line { line, .. } => preview.scroll_to_line(line),
+            find::PreviewOp::Replace { .. } => {}
         }
     }
 

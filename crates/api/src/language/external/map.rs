@@ -389,6 +389,10 @@ pub(super) fn diagnostics_of(
             severity: severity_of(d.severity),
             message: d.message,
             source: d.source,
+            code: d.code.map(|code| match code {
+                Value::String(code) => code,
+                code => code.to_string(),
+            }),
         })
         .collect()
 }
@@ -731,6 +735,21 @@ mod tests {
             Severity::Error,
             "unsaid is the worst of them"
         );
+    }
+
+    #[test]
+    fn a_diagnostics_code_is_kept_as_text() {
+        let items = diagnostics_of(
+            parse(json!([
+                {"range": range(0, 0, 0, 1), "message": "a", "code": "reportUnusedExpression"},
+                {"range": range(0, 0, 0, 1), "message": "b", "code": 2304},
+                {"range": range(0, 0, 0, 1), "message": "c"},
+            ])),
+            "x\n",
+            Encoding::Utf16,
+        );
+        let codes: Vec<Option<&str>> = items.iter().map(|d| d.code.as_deref()).collect();
+        assert_eq!(codes, [Some("reportUnusedExpression"), Some("2304"), None]);
     }
 
     #[test]

@@ -72,9 +72,9 @@ pub(crate) fn narrow(e: crate::Event) -> Option<Event> {
         crate::Event::Error(message) => Event::Error { message },
         crate::Event::WalkFailed => Event::WalkFailed,
         crate::Event::WorkerGone => Event::WorkerGone,
-        // Git, the remote connection, language servers and their background jobs, debug sessions
-        // and the watch on unindexed folders: none of them run on a phone, so nothing here ever
-        // has to match them.
+        // Git, the remote connection, language servers and their background jobs, debug sessions,
+        // kernels and the watch on unindexed folders: none of them run on a phone, so nothing
+        // here ever has to match them.
         crate::Event::GitChanged
         | crate::Event::UnindexedChanged(_)
         | crate::Event::Connecting { .. }
@@ -84,6 +84,7 @@ pub(crate) fn narrow(e: crate::Event) -> Option<Event> {
         | crate::Event::Diagnostics { .. }
         | crate::Event::Busy { .. }
         | crate::Event::Checking { .. }
-        | crate::Event::Debug { .. } => return None,
+        | crate::Event::Debug { .. }
+        | crate::Event::Kernel { .. } => return None,
     })
 }

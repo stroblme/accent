@@ -73,7 +73,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A wikilink resolves by name, so it changes only when its key no longer names the file and keeps its author's spelling; a markdown link is a path, so it becomes the percent-encoded relative path from its note's new folder; nothing the index did not resolve to a vault file before the move is touched.
 - **Attachments** go where the vault's `attachment_folder` says, with Obsidian's meaning: empty is beside the note, `./sub` a folder there, anything else a folder from the vault root, `/` being the root.
   They are written through `Vault::write_file`, over ssh on a remote vault, whose index is then told at once as a local write tells its own, so the embed and the preview's first render find the image by its name rather than racing the host's watcher — a vault kept in both apps files its images the same way.
-- **Remote vaults** follow Zed: the system `ssh` binary with one ControlMaster per vault (`ControlMaster=auto`), and a musl-static `accent-cli serve`, built for x86_64 and aarch64, of which a connection uploads the one the host's `uname -sm` names, under the blake3 hash of the two, driven by JSON-RPC over the session's stdio; index, watcher, search, git, language servers, debug adapters and shells run on the host — `~/.ssh/config`, ProxyJump and the agent stay ssh's job, the hash is the version, and a static binary starts on any distribution.
+- **Remote vaults** follow Zed: the system `ssh` binary with one ControlMaster per vault (`ControlMaster=auto`), and a musl-static `accent-cli serve`, built for x86_64 and aarch64, of which a connection uploads the one the host's `uname -sm` names, under the blake3 hash of the two, driven by JSON-RPC over the session's stdio; index, watcher, search, git, language servers, debug adapters, kernels and shells run on the host — `~/.ssh/config`, ProxyJump and the agent stay ssh's job, the hash is the version, and a static binary starts on any distribution.
   A host of any other kind is refused, saying what it runs and what the server is built for, rather than sent a binary it cannot start.
   The Flatpak carries the server for its own machine only, Flathub never accepting a build that holds another architecture's binaries (user decision 2026-10-13), so it refuses a host of the other one, naming the one it carries. sshfs needs no code: a mount is a local vault.
 - **Remote prompts**: `SSH_ASKPASS` points back at accent, which runs as its own dialog under `ACCENT_ASKPASS` — a passphrase or a host key reaches a window, not a terminal nobody watches.
@@ -87,6 +87,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The stamp keeps the copy's own etag beside the host's, so a copy written here since — the pen, a page edit — is never fetched over, and a push of one that was not sends nothing.
   A copy between two vaults streams the same way, straight from one machine to the other: down into a `.part` linked to its name only while nothing holds it, and host to host through this machine, one host's `cat` piped into the other's upload, neither host reaching the other.
 - **Remote lifetime**: one `serve` per window, ending on stdin EOF or after 90 s without a ping once it has been pinged; closing stops it and cancels the forwards but leaves the master its 60 s ControlPersist — no zombies after a link that dies without closing, and a reopen within the minute skips the handshake and the passphrase.
+  Its kernels end with it, as its debug sessions do.
   The close runs on a thread of its own, which the app waits for on its way out: it is a second's wait for a wedged server and an ssh run per forward, which a window closing would otherwise hold the main loop for.
 - **Remote session**: stays on this machine, keyed by the `ssh://` address — where the windows and tabs were is a fact about the desk, not about the files.
 - **Git**: shell out to the `git` binary (Zed's choice) — least code, and hooks and credential helpers work.
@@ -100,9 +101,13 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A request is given 10 s, the handshake 120 s (user decision 2026-10-09): a cold `lake serve` loads its package before it answers `initialize`, past 10 s on a busy machine, and a missed handshake left the tab without a server until Restart File; a remote vault's `open_document` waits as long plus a round trip.
 - **Debug client**: our own tokio client in `crates/dap`, over the language client's framing and its one runtime, types transcribed from the DAP JSON schema (MIT) — DAP frames messages as LSP does, and no maintained crate carries its types.
   A request is given 10 s; a `launch` and a REPL `evaluate` wait as long as they take, the first answering once the program runs and the second running the reader's code, and neither is cancelled at the adapter, debugpy having no `cancel`.
-- **Language API**: one `Language` trait over a real server and the index, async `Vault` methods returning a `Task` that cancels at the server when dropped and lets go of the thread waiting on a host at once, positions in characters — every text tab takes one path, and a completion typed past is not answered into the void.
+- **Kernel client**: our own tokio client in `crates/jupyter`, speaking Jupyter's messaging protocol to an ipykernel over ZMTP 3.0's NULL mechanism — DEALER for shell, stdin and control, SUB for IOPub, no heartbeat: the kernel is our child, and its exit is how a death is heard. zmq.rs would bring a second async stack and a regex engine into the uploaded server, and libzmq is C++ to cross-compile for musl.
+  The sockets are unix sockets in a folder of the kernel's own that only the user can enter (`ipc` transport), the messages signed with HMAC-SHA256 under the connection file's key: a TCP port on the loopback is anyone's on a shared host.
+- **Language API**: one `Language` trait over a real server and the index, async `Vault` methods returning a `Task` that cancels at the server when dropped and lets go of the thread waiting on a host at once, positions in characters — every text tab and notebook code cell takes one path, the features asking a `lang::Editor`, a code tab's view over its whole document or a cell's over its lines of the notebook's, and a completion typed past is not answered into the void.
 - **Debug API**: a façade group of its own, `Vault::debug_*`, keyed by a session number the window picks, not the `Language` trait — a session is a program, not a document, and outlives any tab of its files; the number lets its news (`Event::Debug`) arrive before the start is answered.
   Its adapter runs where the vault is and ends with Stop, with the program, or with the vault and so the window — one still starting as the vault closes too, which ends itself rather than register after the vault has stopped the rest.
+- **Kernel API**: `Vault::kernel_*`, keyed by a session number the window picks, as the debug sessions are, each run's news (`Event::Kernel`) under the run number the window gave it.
+  The kernel runs where the vault is, beside `serve` on a remote vault's host, its sockets never leaving it, and ends with Shut Down Kernel, its tab, or the vault and so the window.
 - **Server roots**: a language server is rooted at the nearest folder inside the vault holding `.git` or one of its language's root markers (Lean: `lakefile.toml`, `lakefile.lean`, `lean-toolchain`) — a Lean project is often a folder of a larger repository, and `lake serve` does not look upwards.
   A file under a `.lake` folder is looked up from the folder holding the outermost one: each package there has a lakefile of its own and no build, so a Mathlib file opened by Go to Definition is answered by the project's server rather than one that would start building Mathlib.
   A server command written `~/…` (the table's `~/.elan/bin/lake`, or a vault's own) is looked for in the home of whoever runs the server, the host's for a remote vault: a desktop session's PATH has no `~/.elan/bin`.
@@ -136,8 +141,12 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - **Diagrams**: `crates/drawio` ports mxGraph's model, routing, shapes and label placement faithfully (the Apache-2.0 parts attributed file by file, with `LICENSE-APACHE` and `NOTICE`), keeps every attribute it does not interpret, and hands the app a UI-neutral display list — a file saved here opens in draw.io as it was, the port can be diffed against later draw.io releases, and Android can paint the same list.
   A formula label is typeset by WebKit, as draw.io's MathJax does.
 - **Notebooks**: a Jupyter notebook (`.ipynb`, nbformat 4) and a marimo notebook (a `.py` holding `import marimo` and `app = marimo.App(`) are one model in core, `accent_core::notebook`: cells of a kind with a source and the outputs stored with them, read and written by a backend per format (user decision 2026-10-19).
-  Nothing is run. A save writes back only what changed: a cell left alone keeps its bytes, an edited `.ipynb` cell has its `source` replaced in nbformat's style, and an edited marimo cell keeps its decorator, `def` line and `return` as written.
+  A Jupyter notebook's code cells run on a kernel (Kernel client, Kernel API); a run sets what its cells hold, their outputs and counts, which an `.ipynb` saves as nbformat writes a cell, the rest of the file as it was. A save writes back only what changed: a cell left alone keeps its bytes, an edited `.ipynb` cell has its `source` replaced in nbformat's style, and an edited marimo cell keeps its decorator, `def` line and `return` as written.
   Every change is an edit that answers the edit undoing it, so one history per notebook holds the typing in its cells and the cell operations alike.
+  The index holds an `.ipynb` as its cells' sources, a line break between each two (`Notebook::sources`), as it holds a diagram as its labels, and `Notebook::place` takes a byte of what it holds back to its cell; a marimo notebook is indexed as the Python file it is, and placed from its file.
+  A notebook's language document is its code cells' sources as one program, a line break after each, in the notebook's order, opened on the language layer as a code tab's file is: under the notebook's own path for a marimo notebook, under `<path>.py` for an `.ipynb` (user decision 2026-10-20). A cell is a run of its lines, so a position maps by the cell's first line alone, and the text is the model's, so a cell no editor has been built for is in it.
+  Not the marimo file itself: there a cell is a function whose parameters carry no types, and the `def` lines kept as written go stale as cells are edited. Nor LSP 3.17's notebook sync: of the Python servers only basedpyright (1.27) reads cells as cells, pyright has none, and pylsp (1.8), jedi-language-server (0.44) and pyrefly join the cells as this does.
+  IPython's own syntax is not Python: a line magic or a shell line (`%`, `!`) reads as a comment, and a cell under a cell magic as blank lines, but for `%%time`, `%%timeit` and `%%capture`, whose body is Python. pyright's warning that a cell's last expression is unused (`reportUnusedExpression`) is dropped: a notebook shows that value.
 - **MCP**: `accent-cli mcp` serves the shared core and index over stdio while the app is closed; writes reach an open window through the shared index.
   Its 14 tools include `explore`, reads, `render_diagram` and etag-checked writes; `--read-only` omits the three write tools.
   `explore` ranks files and passages from the index, shows relevant source with line numbers, links, outlines and call paths, and can ask a language server for a `precise` call hierarchy.
@@ -172,7 +181,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 - An `AdwInlineViewSwitcher` in icon mode over an `AdwViewStack` of eight panes: Files, Search, Info, Git, Ports, Outline, Code, Properties.
   The switcher sits in the sidebar header, level with the sidebar toggle, so the tree's first row lines up with the tabs.
-- Git shows only where there is a repository, Ports only on a remote vault, Code only while the window says so — while the tab in front has a proof assistant's goals or can be debugged, or a debug session runs — Properties only while a diagram is in front: each only where it has something to say, so other vaults keep the switcher they had.
+- Git shows only where there is a repository, Ports only on a remote vault, Code only while the window says so — while the tab in front has a proof assistant's goals, can be debugged or is a notebook that runs, or a debug session runs — Properties only while a diagram is in front: each only where it has something to say, so other vaults keep the switcher they had.
 - A vault always opens on Files: a search from another sitting is not where a vault starts.
 - Width is dragged on the `GtkPaned` handle, down to 200 px or the pane switcher's width, whichever is wider: the switcher's icons are never cut.
 - Below 760 sp an `AdwBreakpoint` hides the sidebar: that is the default 280 px sidebar beside the 480 px column floor.
@@ -239,9 +248,12 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - The four toggles are text (`Aa`, `Word`, `.*`, `All`): Adwaita has no glyph for them.
   The first three are the find bar's too (Find bar), built and read by the same code.
   The replace toggle is `edit-find-replace-symbolic`, outside the group: it opens a panel rather than changing the query.
-- The search space is everything the index holds — every note, every other text file under 1 MiB and every diagram's labels — minus what git ignores.
+- The search space is everything the index holds — every note, every other text file under 1 MiB, every diagram's labels and every Jupyter notebook's cells — minus what git ignores.
 - A diagram — named as one, or an `.xml` whose first element is draw.io's — is searched by what its labels say, one line per label with its markup left out and a formula as written, never by its XML, where every style key and id would be a hit.
   Its row names the page the label is on instead of a line, and opens the diagram on that page with the label's shape selected and in view; Replace All rewrites the labels through the diagram's model, its markup kept, and writes the file once.
+- A Jupyter notebook is searched by its cells' sources, never by its JSON, where every output's base64 and every metadata key would be a hit; what its outputs say is not searched.
+  Its row names the cell the match is in instead of a line (`cell 3`), and opens the notebook on that cell with the match selected; Replace All rewrites the cells' sources through the notebook's model, every other cell keeping its bytes, and writes the file once, an open notebook's edits written first.
+  A marimo notebook is the Python it is: searched and rewritten as its file, a hit opening the notebook on the cell it is in.
 - `All` drops that exclusion in either mode, and reaches the trees the walk never entered by walking them: at once in an exact search, and in a ranked one once the box has been still for 400 ms, the next keystroke cancelling the wait and the walk.
   What it finds has no FTS row to rank it by, so it comes last, after the mid-word matches, in path order, under a Not Indexed heading.
   Its tooltip names both halves.
@@ -286,7 +298,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 **Outline**
 
-- What the open tab outlines: a text file's symbols from the language layer (a note's headings, a source file's functions and types, nested as the server nests them), a PDF's bookmarks, comments and thumbnail strip (see PDF), a diagram's pages and their thumbnail strip (see Diagram), or an empty state.
+- What the open tab outlines: a text file's symbols from the language layer (a note's headings, a source file's functions and types, nested as the server nests them), a PDF's bookmarks, comments and thumbnail strip (see PDF), a diagram's pages and their thumbnail strip (see Diagram), a notebook's headings (its markdown cells', in the cells' order), or an empty state.
 - A code file no language server has answered with symbols for — none is installed, or it has not answered yet — is outlined from the index's declarations (Architecture, Code declarations), and a server's first symbols replace them: one inside another's span is nested under it, and a run of a type's methods declared outside it (a Rust `impl`) goes under a row naming the type, as rust-analyzer's `impl Index` does.
   The index holds the file as it was last saved, so its rows are asked for again when a save of it lands, a walk ends or it changes elsewhere, never per keystroke: an edit reaches them with its autosave.
   A server that answers with nothing, or fails before it gave anything, leaves them.
@@ -299,6 +311,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - On a PDF it follows the page being read the same way: the bookmark that page is under — the one starting on it or last before it, the innermost of several starting on one page — is selected and scrolled to as the page under the middle of the view changes, and above the first bookmark the list returns to its top.
   On a diagram the page shown is the selected row.
   A page edit refills the list in place, the thumbnail strip staying under it.
+- On a notebook the caret is followed through its cells: the heading it is under is the last before it, in its own cell or a markdown cell above.
 - While the pointer is over the list it follows nothing, a tab's caret or a PDF's page alike: the list is being read, and a PDF comment's row goes to a page under another bookmark, which following would scroll the row clicked out of sight.
   The followed row comes back as the pointer leaves.
 
@@ -316,7 +329,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Its visibility is a window flag, never a rule about the tab in front, because a debug session keeps it up over any tab: Call Stack, Variables, Watch and Breakpoints follow Goals and Expected Type in the one stack of dividers, the session's controls in a strip over them all.
   While a session runs the pane shows its sections whatever is in front, Goals and Expected Type only with an answer, and neither the No Goals nor the Checking page.
   With no session, a tab in front that can be debugged (Debugger) has the pane too, as the strip over Watch and Breakpoints, ready to start: Call Stack and Variables have nothing to say until a program runs.
-  The pane joins the switcher then without coming to the front, and nothing but its button brings it there, a session starting, stopping or ending included (user decision 2026-10-18); a tab with neither goals nor a debugger takes it away again.
+  The pane joins the switcher then without coming to the front, and nothing but its button brings it there, a session starting, stopping or ending included (user decision 2026-10-18); a tab with no goals, no debugger and no kernel takes it away again.
   Hidden while on screen, it gives way to the Outline.
   Which sections are open and where the dividers are are the vault's session: all open at first.
 - **The strip**: Continue or Pause, whichever the program can take, Step Over, Step Into, Step Out, Restart Debugging and Stop Debugging as flat icon buttons on the window's actions, each greyed while the program's state does not allow it, and while starting all but Stop; then Debug Console, always live.
@@ -324,6 +337,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The row is centred in the pane, as the switcher's icons are in the header above it, and so is the caption under it.
   A press leaves the keyboard where it was, so stepping keeps the reader in the note.
   A dim caption under them says what the program does: Not running, Starting…, Running, Paused, Paused on breakpoint, Paused on exception with the exception's name (its message in the tooltip), Stopping….
+- **The kernel's strip**: a notebook that runs (Notebook) in front has the pane too, joining the switcher as a tab that can be debugged does, its kernel shown in a strip shaped like the debugger's (user decision 2026-10-20): Run All, Interrupt Kernel, Restart Kernel, Shut Down Kernel and Clear All Outputs as flat icon buttons on the window's actions, Interrupt greyed while nothing runs and Restart and Shut Down while there is no kernel.
+  The caption under them says what the kernel does: Not started, Starting…, Idle or Busy, the kernel and its interpreter in the tooltip, or Ended, its last words in the tooltip.
+  While a debug session runs the pane keeps the debugger's strip, and the kernel's commands stay in the palette.
 - **Call Stack** lists the threads, counted, the one that stopped open on its calls, innermost first, and the innermost selected; another thread's calls are asked for as it is opened.
   A call is its function's name with its file and line dimmed beside it, the whole row dimmed for code outside the vault.
   One click on a call shows it (Debugger), as a result list's row opens; a dim "Running" stands in while the program runs.
@@ -603,10 +619,10 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - The vault's own work wins the first slot, being what the reader waits on, and a PDF still opening comes under it, a source of its own, so an open that ends mid-walk shows the walk's line again at once; then a copy to or from a host ("Downloading a.pdf…", "Uploading 3 files…"), the latest one running, from start to toast, saying that it runs — and, for a batch of two files or more, how far by file, as indexing counts ("Copying Photos… 12/120 files", on a local vault too), a folder's total known once it has been walked, and for one file over the link how far by byte, as the connection bar counts the server's upload ("Downloading paper.pdf… 12.3/80.0 MB").
   That is Download…, a single upload, a row dragged in from another window, and the copy a PDF or image tab reads, whose "Opening the document…" waits for the bytes; a completion's, a preview's and Save As's copies stay silent, and a cached copy that is current moves nothing and says nothing.
   A print or an export being made takes the same place, from the command to its toast ("Printing Note.md…", "Exporting Note.pdf…"); then "Indexing suggestions… 1200 files, sorting" (the ghost-text index, in `merl-rt`'s own words on how far it has got, shown as it sends them), a convenience that waits its turn: on a cold vault, whose own walk outlasts it, it shows only if merl is still at it once the walk is done.
-  No language server's progress is shown but Lean's check of the tab in front ("Checking… line 12", the first line it has still to check, the gutter's bar marking the rest (Language servers), from `$/lean/fileProgress`, a new state at most every 100 ms: Lean says where it is a dozen times a line, and over an ssh link each is a message), which is what its goals wait on, and before it a server the tab in front has waited on for a second to open its document, named by the program the vault's config or the built-in table gives ("Starting lake…"), until it answers or fails (user decision 2026-10-10): a cold `lake serve` can take a minute, and a fast handshake does not flash the line.
+  No language server's progress is shown but Lean's check of the tab in front ("Checking… line 12", the first line it has still to check, the gutter's bar marking the rest (Language servers), from `$/lean/fileProgress`, a new state at most every 100 ms: Lean says where it is a dozen times a line, and over an ssh link each is a message), which is what its goals wait on, and before it a server the tab in front, a notebook too, has waited on for a second to open its document, named by the program the vault's config or the built-in table gives ("Starting lake…"), until it answers or fails (user decision 2026-10-10): a cold `lake serve` can take a minute, and a fast handshake does not flash the line.
   Both come after the vault's work and the copies, before the suggestion index. rust-analyzer reports every `cargo check`, and that line would never settle.
 - The facts: what the file is (`Markdown`, `PDF`, `Image`, `Notebook · <language>`, or `<language> · UTF-8 · LF` for code), whether it has unsaved edits, one count of its own, and its zoom; last, at the corner, while a text tab has a selection (a comparison's editor side included), how many characters it holds ("42 characters"): Unicode characters, the unit GTK's offsets count, whitespace and line breaks included, every caret's selection summed, so it reads no text and costs the same at any size.
-- The count is what the tab counts: a note's words (300 ms after the last keystroke), a code tab's errors and warnings, a PDF's `Page 4 of 12` (the page under the middle of the viewport), a notebook's cells.
+- The count is what the tab counts: a note's words (300 ms after the last keystroke), a code tab's errors and warnings, a PDF's `Page 4 of 12` (the page under the middle of the viewport), a notebook's cells, and after them its errors and warnings in every cell, which press as a code tab's do.
   A PDF's count is a button opening Add Page Before, Add Page After and Delete Page for that page, as the page's own menu offers them.
 - The unsaved mark is the `•` a dirty tab wears: one symbol, one meaning.
   A saved file shows nothing.
@@ -707,19 +723,22 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   `Ctrl+F` and its neighbours open the bar of the pane the reader is in.
 - Over a shell the bar goes and the chord opens nothing: vte keeps its own scrollback.
 - F5 keeps the presented pane where it is, so its bar stays its own over the rendered note.
-- **A query is searched as it is typed** and its first match shown, everywhere alike: in a buffer the first from the caret, over a PDF the first on or after the page being read, wrapping round (or the page of the match shown while it is still on screen, so typing on does not move on from it), in the rendered preview the first from the top (WebKit's).
+- **A query is searched as it is typed** and its first match shown, everywhere alike: in a buffer the first from the caret, over a PDF the first on or after the page being read, wrapping round (or the page of the match shown while it is still on screen, so typing on does not move on from it), over a notebook the first from the selected cell's caret, through the cells in order, in the rendered preview the first from the top (WebKit's).
   A long PDF's pages are searched in the background, so its count grows ("1 of 3", then "1 of 57").
   A page edit searches the PDF again without moving the reader, and the next step goes from the page being read.
 - Enter steps to the next match and Shift+Enter to the previous, in every bar.
-- The readout says "3 of 12" in the buffer, a PDF and the rendered preview alike; past WebKit's 500-match ceiling the preview's total is a floor and no position is claimed.
-- Beside the query sit the Search pane's Match Case, Match Whole Word and Regular Expression toggles, the same text buttons in the same `.linked` group, and a buffer is matched by the Search pane's own matcher (`accent_core::search`): the whole text at once, so `^` is the start of the note and a pattern may run across lines, a whole word ends where `\b` says (`_` is a word character), and under Regular Expression a replacement's `$1` names a group, as Replace All in Files writes it.
+- The readout says "3 of 12" in the buffer, a notebook, a PDF and the rendered preview alike; past WebKit's 500-match ceiling the preview's total is a floor and no position is claimed.
+- Beside the query sit the Search pane's Match Case, Match Whole Word and Regular Expression toggles, the same text buttons in the same `.linked` group, and a buffer and a notebook's cells are matched by the Search pane's own matcher (`accent_core::search`): the whole text at once, a cell at a time in a notebook, so `^` is the start of the note or the cell and a pattern may run across lines, a whole word ends where `\b` says (`_` is a word character), and under Regular Expression a replacement's `$1` names a group, as Replace All in Files writes it.
   Each bar keeps its own toggles, apart from the Search pane's and the other pane's bar.
 - A query that does not compile marks the box as the Search pane marks its own, and the readout says "Invalid pattern".
 - Over a PDF, Match Case and Match Whole Word are pdfium's own and mean what they mean in a buffer.
   Over the rendered preview Match Case is WebKit's, and Match Whole Word is a match at the start of a word, the nearest WebKit's find has, so `foo` finds `food` there; its tooltip says so while the preview is searched.
   Regular Expression is insensitive over both, keeping its state, neither engine matching one.
   A toggle searches again over either, as over a buffer; a remote vault's PDF is searched in the copy on this machine, so nothing crosses the link.
-- The matches are painted in the lines on screen and a hundred either side, again as the view scrolls; the count and the steps cover the whole note.
+- Over a notebook the bar searches its cells' sources, not their outputs, as Search does: a step selects the match's cell and scrolls the match into view, the keyboard staying in the bar.
+  Replace takes one match, one Undo step, and Replace All every match in every cell as one step through the notebook's model (user decision 2026-10-20).
+  Go to Line is Go to Cell there ("of 14 cells").
+- The matches are painted in the lines on screen and a hundred either side, a notebook's in the cells on screen and a screen either side, again as the view scrolls; the count and the steps cover the whole note.
   A tag on each of a hundred thousand matches is seconds of work on every keystroke.
 - In a buffer the bar searches folded text too, as VS Code does: the count includes it, a step into a shut block or a collapsed comparison run opens it, and a replacement there leaves it shut.
 - Previous and next are `go-up-symbolic` and `go-down-symbolic`: the matches are places in a vertical document, and back and forward arrows read as history.
@@ -1012,15 +1031,28 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 ### Notebook
 
-- A Jupyter (`.ipynb`) or marimo notebook in a tab of cells, VS Code's notebook editor without its kernel (user decision 2026-10-19): a code cell is a code tab's view in the notebook's language, with its execution count beside it and its stored outputs under it; a markdown cell is a note's styled text, always editable, its attachments under it.
-  The cells are one column in one scroller, laid out whole.
+- A Jupyter (`.ipynb`) or marimo notebook in a tab of cells, VS Code's notebook editor (user decision 2026-10-19), its kernel an ipykernel where the vault is (user decision 2026-10-20): a code cell is a code tab's view in the notebook's language, with its execution count beside it and its stored outputs under it; a markdown cell is a note's styled text, always editable, its attachments under it.
+  The cells are one column in one scroller; a cell's editor is built as the cell comes within a screen of the view, a plain line of its text for each of its lines holding the place until then, and what shows stays still while the cells above it change height (user decision 2026-10-20).
 - An output shows in the first form a widget draws: a PNG, JPEG or SVG picture at its own size up to a column's width, recoloured as an image is (Image); a plain HTML table, a pandas or polars frame's, as a grid; markdown as a note's text; LaTeX typeset as a diagram's formula is, its source until then and without WebKit; JSON and text in monospace, ANSI colours from the terminal's palette and a progress bar's carriage returns played out, stderr and a traceback tinted.
   What only a script draws — an interactive plot, a widget — says what it was.
-- A click or the keyboard in a cell selects it, outlined in the accent; its buttons float over its top right corner, Move Cell Up, Move Cell Down, Delete Cell and a More menu with the rest, and the strip under each cell, and over the first, adds a code or a markdown cell there.
+- A click or the keyboard in a cell selects it, outlined in the accent; the cell buttons float over the top right corner of the cell under the pointer, else the selected one, Run Cell over a code cell of a notebook that runs, Move Cell Up, Move Cell Down, Delete Cell and a More menu with the rest, and the strip under each cell, and over the first, adds a code or a markdown cell there while the pointer is in it.
   Down past a cell's last line goes on into the next cell, and Up past its first back.
+  The view follows the caret, no further than to keep it a margin inside, and never moves for a click.
 - One history per notebook holds both what is typed in its cells and what is done to the cells — added, deleted, moved, converted, split, joined — so Undo walks back through both in the order they happened, typing a word at a time (user decision 2026-10-19).
 - Changing a marimo cell between markdown and code wraps its text in `mo.md(r"""…""")` or takes it out, as marimo does (user decision 2026-10-20); an `.ipynb` cell keeps its text.
 - A notebook saves as a diagram does: a second after the last change, through the etag-gated save, a change on disk under unsaved edits asking Reload or Overwrite.
+- Search, the find bar and the Outline are the other tabs' (Sidebar, Find bar): the cells' sources are what is found, the markdown cells' headings are the Outline, and a search hit or a heading opens on its cell.
+- A code cell is answered by the notebook's language server as a code tab is: diagnostics underlined with their messages at the line ends, hover, completion, signature help, the code tab's keys (a bracket closed, a new line indented), and Go to Definition, Ctrl+click too, which lands in another cell or another file. Folding, the Outline's symbols, References and ghost text are a code tab's only.
+- **Running**: a Jupyter notebook in a vault runs on an ipykernel in the Python the debugger would run it in (Debugger), with no kernel to pick, started by its first run, its working directory the notebook's folder, as Jupyter's and VS Code's is; it is the tab's until Shut Down Kernel, the tab closing or the vault closing, and a notebook whose kernel runs does not move to another window, as a running shell does not.
+- Run Cell runs the selected cell, Run Cell and Advance then selects the next, adding a code cell after the last, and Run All runs every code cell in order: the kernel takes them in turn, and an error stops the rest, which keep what they had. A cell with no code is not run.
+- A cell waiting or running counts `[*]`; its outputs go as it starts, the new ones come in under it, a stream's text running on as it grows, drawn once per turn of the window's event pump, and it counts `[n]` when done.
+- `input()` asks under its cell: an entry with the prompt before it, a password's characters hidden, Return answering; in the notebook in front it takes the keyboard and is brought into view.
+- Interrupt Kernel sends the kernel's process group SIGINT, as Jupyter does; Restart Kernel ends it and starts another, the cells keeping their outputs and counts; Shut Down Kernel ends it, and the next run starts a new one.
+- A run is not an edit: it costs no undo step, marks the notebook changed and saves with it (user decision 2026-10-20), its cells' outputs and counts written as nbformat writes them and the notebook's metadata left as it was.
+  Clear Outputs and Clear All Outputs are edits, which Undo walks back.
+- A kernel that ends on its own says so ("The kernel ended: <why>", its last words), and a link that drops ends it in the window; the cells it ran or held keep what they had.
+- A marimo notebook is not run — its cells are a reactive program marimo runs itself — nor a notebook outside a vault, nor a presented one: the run commands say why.
+- In the Flatpak a local vault's kernel is the host's, through `flatpak-spawn --host --watch-bus`, as a shell is; its sockets are in `$XDG_RUNTIME_DIR/app/<id>`, the one folder the sandbox and the host share, and a venv's `python`, a link into the host's `/usr`, is found by its link.
 - A file that does not read as a notebook opens as text, its banner saying why; Open as Text on a notebook's tab menu shows its file as text.
 
 ### Comparison
@@ -1102,6 +1134,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 ### Language servers
 
 - One client for every text tab: accent's own index answers for markdown (Architecture), and a real server (clangd, rust-analyzer, pyright, taplo, …) starts on demand for code and stops when its last document closes, so nothing runs for a file nobody has open.
+- A notebook's code cells are one document to its server (Architecture, Notebooks); an edit a completion makes outside the cell being typed in, an auto-import, is left out (user decision 2026-10-20).
 - **Completion** is a popup of our own at the caret, one provider behind it whatever the language: kind icon, the label with what was typed in bold, the server's detail, and beside the list the selected row's detail and documentation, resolved once the row has been looked at.
   Rows and documentation are set in the editor's font at the tab's zoom; a list of plain words drops the icons; eight rows show before it scrolls.
 - It opens on the server's trigger characters, after one character of an identifier in code and two of a word in prose, and at once on `[[`, `#` and a link's `(` in a note.
@@ -1492,8 +1525,11 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 
 ### Notebook
 
-- Undo Notebook Edit `Ctrl+Z` and Redo `Ctrl+Shift+Z` / `Ctrl+Y` are the notebook's own keys, as a diagram's canvas's are, the header's two buttons too.
-- Insert Cell Above, Insert Cell Below, Insert Markdown Cell Below, Delete Cell, Move Cell Up, Move Cell Down, Change Cell to Code, to Markdown and to Raw (an `.ipynb`'s), Split Cell (at the caret) and Join with Next Cell act on the selected cell: unbound, in the palette and on the cell's buttons and More menu.
+- Undo Notebook Edit `Ctrl+Z` and Redo `Ctrl+Shift+Z` / `Ctrl+Y` are the notebook's own keys, as a diagram's canvas's are, the header's two buttons too, and so are Insert Cell Below `Alt+Return`, Insert Cell Above `Alt+Shift+Return`, Split Cell `Ctrl+Shift+-` and Move Cell Up / Down `Ctrl+Shift+Up` / `Ctrl+Shift+Down` (user decision 2026-10-20).
+  `Ctrl+Shift+Up` / `Down` select by paragraph everywhere else, as GtkTextView does, and move the cell in a cell only, `Alt+Up` / `Down` being on the never-bind list and `Shift+Alt+Up` / `Down` adding carets.
+- Insert Markdown Cell Below, Delete Cell, Change Cell to Code, to Markdown and to Raw (an `.ipynb`'s) and Join with Next Cell are unbound; every cell command acts on the selected cell, Split Cell at the caret, and is in the palette and on the cell's buttons and More menu.
+- Run Cell is `Ctrl+Return`, Insert Line Below's chord, which a notebook in front answers, and Run Cell and Advance `Shift+Return`, the notebook's own key: Jupyter's and VS Code's (user decision 2026-10-20).
+  Run All, Interrupt Kernel, Restart Kernel, Shut Down Kernel, Clear Outputs and Clear All Outputs are unbound and in the palette; Clear Outputs is on the cell's More menu beside Run Cell, the rest on the Code pane's kernel strip.
 
 ### History
 
@@ -1585,6 +1621,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
   Stops and a completion's placeholders are all Tab walks: GtkSourceView gets no snippet files, so Tab after a word expands nothing.
 - The placeholders are strftime's — `{{date}}`, `{{time}}`, `{{date:%Y-%m-%d}}`, a signed day offset `{{date-1}}` / `{{date+3:%A}}`, `{{title}}`, `{{cursor}}`: one small mapping instead of a moment.js subset.
 - **Rename and New File are one rule**: both take the name as typed, read `/` as a path from the folder they were opened on, create the folders it names as New Folder would, and show the vault-relative destination in a dim line under the entry, the only place `../Archive/note.md` says where it lands.
+- New File with a name ending `.ipynb` writes the empty notebook nbformat writes, one empty Python code cell, rather than an empty file, so it opens as a notebook (user decision 2026-10-20: no command of its own; marimo is left out).
 - A dot-named name is taken like any other (`.gitignore`, `.config/init.lua`), and while Show Hidden Files is off the toast says the file is hidden, so it does not seem to vanish; only what the vault never lists is refused: `.git`, `.trash` and the temporaries.
 - **A typed path completes**: the folders under what the path names so far are listed under the entry as it is typed, and the folder button beside it shows the same list for an empty entry.
   Folders only: the last segment is a name being invented.
@@ -1598,7 +1635,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 
 ### Code
 
-- Go to Definition `Ctrl+Shift+Return` / `F12` / Ctrl+click, one question for every text tab, asked about the text as it stands: on a note it follows a link — offering New File with the path typed in where nothing answers to it, and landing on the heading or the block (`#^id`) its anchor names, and going to the top of the note with a toast for one the note does not have, as a click in the preview does — and an external link (any `scheme://`, `mailto:`, `tel:`, `sms:`; never `file:`, `javascript:` or `data:`) goes to the system.
+- Go to Definition `Ctrl+Shift+Return` / `F12` / Ctrl+click, one question for every text tab and code cell, asked about the text as it stands: on a note it follows a link — offering New File with the path typed in where nothing answers to it, and landing on the heading or the block (`#^id`) its anchor names, and going to the top of the note with a toast for one the note does not have, as a click in the preview does — and an external link (any `scheme://`, `mailto:`, `tel:`, `sms:`; never `file:`, `javascript:` or `data:`) goes to the system.
   A bare `http(s)://` or `mailto:` URL under the caret opens in the browser from any text tab, ahead of the language server (a URL is not a symbol), and Ctrl+hover underlines it as it does a link.
 - Fold / Unfold `Ctrl+Shift+[` / `Ctrl+Shift+]`, Fold All / Unfold All from the palette.
   Fold takes the innermost block holding the caret; the gutter chevron beside a block's first line is the same by pointer.
@@ -1645,7 +1682,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 - Presentation hides the sidebar, the other panes, the tab bars and both header bars, and shows the note rendered.
   The presented pane stays where it is in the pane tree with the branches beside it hidden, so its find bar and its `Ctrl+Tab` card stay its own and every divider is where it was afterwards; the rendered note is the preview laid over the pane's tabs.
   A tab that draws its own document — a source file, a PDF, a diagram, a notebook, an image, a diff, a terminal — is presented as it is; a PDF fits a whole page meanwhile and gets its zoom back afterwards.
-  A presented notebook is read only, its cell buttons and the strips that add cells put away.
+  A presented notebook is read only and runs nothing, its cell buttons and the strips that add cells put away.
   A diagram is a slide deck: each page is fitted as it is shown, Space, Page Down, Right and a wheel notch down go to the next and Shift+Space, Page Up, Left and a notch up to the one before, and leaving gives back its zoom, and its scroll if the page is the one it began on.
   The drawing ring goes away meanwhile, a PDF's and a diagram's alike, and the tool in hand is put down (a PDF back to reading, a diagram to select), a diagram's label being edited finished and its selection let go, so a click never draws on what is presented; leaving brings the ring back as it was, with no tool in hand.
   A presented diagram is read only: a click selects nothing, a drag moves the page rather than what is on it, its menu stays shut and its keys do nothing but page, so only paging, zoom and panning are left.
@@ -1661,7 +1698,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
 ### Window
 
 - Fullscreen `F11`, Preferences `Ctrl+comma`, Keyboard Shortcuts `Ctrl+?`, Primary Menu `F10`, About accent (unbound); `F11` and `F10` are Step Into and Step Over while a debug session runs (Debugging).
-- **Keyboard Shortcuts** is libadwaita's shortcuts dialog over this table as it stands (`shortcuts.rs`): every bound command under this chapter's headings, a rebound one with its new chord, an unbound one left out, and the keys a PDF or a diagram's canvas answers itself beside their commands (a presented diagram's paging aside), Duplicate Selection and Group with the chords they borrow.
+- **Keyboard Shortcuts** is libadwaita's shortcuts dialog over this table as it stands (`shortcuts.rs`): every bound command under this chapter's headings, a rebound one with its new chord, an unbound one left out, and the keys a PDF, a diagram's canvas or a notebook answers itself beside their commands (a presented diagram's paging aside), Duplicate Selection, Group and Run Cell with the chords they borrow.
   The palette's command mode lists every command, bound or not, and is where one is rebound.
 
 ### Tab menu

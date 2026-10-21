@@ -4,6 +4,8 @@
 //! The host needs `git`, `ss`, `pgrep` and an unused [`HOST_PORT`]. Without the variable, the test
 //! skips and passes. The debugger's leg needs debugpy on the host, in its `python3` or in the
 //! interpreter `ACCENT_TEST_REMOTE_DEBUGPY` names, which then runs the adapter; else it is skipped.
+//! The kernel's leg needs ipykernel there likewise, `ACCENT_TEST_REMOTE_IPYKERNEL` naming the
+//! interpreter that has it.
 //!
 //!     make server
 //!     ACCENT_TEST_REMOTE=ssh://myhost/tmp/accent-probe cargo test -p accent-cli --test remote
@@ -15,6 +17,7 @@ use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use accent_api::debug::{Context, Launch, News};
+use accent_api::kernel;
 use accent_api::link;
 use accent_api::ssh::{self, Direction, Forward, Url};
 use accent_api::{Event, Vault, VaultConfig, git, rpc};
@@ -61,6 +64,16 @@ fn a_remote_vault_connects_indexes_and_answers() {
     let debugpy = on_host(
         &url,
         &format!("{asked} -c 'import debugpy' 2>/dev/null && echo yes || true"),
+    );
+    // The host's kernel interpreter, as a remote vault's `[debug] python` is.
+    let ipython = std::env::var("ACCENT_TEST_REMOTE_IPYKERNEL").ok();
+    if let Some(ipython) = &ipython {
+        cfg.debug.python = vec![ipython.clone()];
+    }
+    let asked = ssh::quote(ipython.as_deref().unwrap_or("python3"));
+    let ipykernel = on_host(
+        &url,
+        &format!("{asked} -c 'import ipykernel' 2>/dev/null && echo yes || true"),
     );
 
     let t = Instant::now();
@@ -599,6 +612,55 @@ fn a_remote_vault_connects_indexes_and_answers() {
         assert!(said.contains("total 42"), "the program said {said:?}");
     } else {
         eprintln!("no debugpy on {}: skipping the debugger", url.host);
+    }
+
+    // A notebook's kernel runs on the host beside `serve` too, its news coming back as the
+    // vault's events.
+    if ipykernel.trim() == "yes" {
+        let t = Instant::now();
+        let start = kernel::Start {
+            notebook: "k.ipynb".to_string(),
+        };
+        wait(vault.kernel_start(1, &start)).unwrap();
+        wait(vault.kernel_execute(1, 1, "print(1)".to_string())).unwrap();
+        let ran = |e: &Event| {
+            matches!(
+                e,
+                Event::Kernel {
+                    session: 1,
+                    news: kernel::News::Output { run: 1, .. }
+                }
+            )
+        };
+        let Event::Kernel {
+            news: kernel::News::Output { output, .. },
+            ..
+        } = wait_for(&events, ran)
+        else {
+            unreachable!()
+        };
+        assert_eq!(output["text"], "1\n", "{output}");
+        let done = |e: &Event| {
+            matches!(
+                e,
+                Event::Kernel {
+                    session: 1,
+                    news: kernel::News::Done { run: 1, .. }
+                }
+            )
+        };
+        let Event::Kernel {
+            news: kernel::News::Done { status, count, .. },
+            ..
+        } = wait_for(&events, done)
+        else {
+            unreachable!()
+        };
+        assert_eq!((status, count), (kernel::Status::Ok, Some(1)));
+        wait(vault.kernel_stop(1)).unwrap();
+        eprintln!("ran print(1) on a host kernel in {:?}", t.elapsed());
+    } else {
+        eprintln!("no ipykernel on {}: skipping the kernel", url.host);
     }
 
     // Closing the vault takes the server and every forward it still has off the host. The master

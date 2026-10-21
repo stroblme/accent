@@ -606,10 +606,16 @@ impl Shell {
             move |window| {
                 if let Some(shell) = shell.upgrade() {
                     // Read while the window is still whole: what a reload opens again.
-                    let again = shell
-                        .app_at(window.upcast_ref())
+                    let app = shell.app_at(window.upcast_ref());
+                    let again = app
+                        .as_ref()
                         .filter(|app| app.reloading())
-                        .map(|app| Reopen::of(&app));
+                        .map(|app| Reopen::of(app));
+                    // The notebooks' kernels end with their window, before the process can.
+                    if let Some(vault) = app.as_ref().and_then(|app| app.vault()) {
+                        vault.kernel_shutdown();
+                    }
+                    drop(app);
                     shell.forget(window);
                     if let Some(again) = again {
                         shell.reopen_soon(&gtk_app, again);
@@ -955,9 +961,11 @@ fn shell_dir(command_line: &gio::ApplicationCommandLine, arg: &std::ffi::OsStr) 
 }
 
 /// Whether another window could open what `doc` holds in `app`. A shell is a running process, a
-/// diff is a view of two texts and a remote vault's file is on its host: none is a file here.
+/// diff is a view of two texts and a remote vault's file is on its host: none is a file here. A
+/// notebook whose kernel runs keeps it, as a shell does.
 pub fn movable(app: &App, doc: &Doc) -> bool {
-    !doc.is_transient() && !app.on_host(&doc.key())
+    let running = doc.notebook().is_some_and(|n| n.kernel_runs());
+    !doc.is_transient() && !app.on_host(&doc.key()) && !running
 }
 
 /// Save `doc` before another window reopens its file, preventing lost buffered edits; return errors without moving.

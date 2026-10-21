@@ -5,6 +5,7 @@
 //! become bold lines, links retain their text, and lists lose bullets.
 
 use crate::editor::Tab;
+use crate::lang::{self, Editor};
 use accent_api::Task;
 use accent_api::debug::Evaluated;
 use gtk::subclass::prelude::*;
@@ -130,6 +131,45 @@ fn value_markup(expression: &str, value: &Evaluated) -> String {
     line
 }
 
+/// The hover's markup at `start` in `editor`: the paused program's value of the name there, the
+/// server's answer, then every diagnostic at that position. `None` with none of them, and while
+/// the completion popup, which is about the same text and would sit under it, is up.
+pub(crate) async fn markup_at(editor: Rc<dyn Editor>, start: gtk::TextIter) -> Option<String> {
+    if editor.completion().is_some_and(|s| s.is_shown()) {
+        return None;
+    }
+    let pos = lang::pos_of(&start);
+    let doc = editor.document();
+    let vault = doc.vault()?;
+    // Asked first, so that it is out while the server is asked.
+    let value = editor.clone().value(&start);
+    editor.clone().flush().await;
+    let answer = vault
+        .hover(&doc.key(), editor.to_document(pos)?)
+        .await
+        .ok()
+        .flatten();
+    let value = match value {
+        Some((expression, asked)) => asked.await.ok().map(|v| value_markup(&expression, &v)),
+        None => None,
+    };
+    let items = editor.diagnostics();
+    let here = crate::diagnostics::at(&items, pos);
+    tracing::debug!(
+        "hover for {} at {pos:?}: answer {}, {} diagnostics",
+        doc.key(),
+        answer.is_some(),
+        here.len()
+    );
+    if value.is_none() && answer.is_none() && here.is_empty() {
+        return None;
+    }
+    let mut markup: Vec<String> = value.into_iter().collect();
+    markup.extend(answer.map(|h| markup_of(&h.text)));
+    markup.extend(here.into_iter().map(diagnostic_markup));
+    Some(markup.join("\n"))
+}
+
 // ------------------------------------------------------------------------------------ provider
 
 mod provider_imp {
@@ -144,14 +184,13 @@ mod provider_imp {
     use sourceview5::subclass::prelude::*;
     use sourceview5::{HoverContext, HoverDisplay};
 
-    use super::{diagnostic_markup, limits, markup_of, value_markup, value_of};
-    use crate::editor::Tab;
-    use crate::{diagnostics, lang};
+    use super::{limits, markup_at};
+    use crate::lang::Editor;
 
     #[derive(Default)]
     pub struct Provider {
-        /// Weak tab reference: the tab owns the view, which owns this provider.
-        pub tab: RefCell<Weak<Tab>>,
+        /// Weak: the editor owns the view, which owns this provider.
+        pub(super) editor: RefCell<Option<Weak<dyn Editor>>>,
     }
 
     #[glib::object_subclass]
@@ -169,48 +208,18 @@ mod provider_imp {
             context: &HoverContext,
             display: &HoverDisplay,
         ) -> Pin<Box<dyn Future<Output = Result<(), glib::Error>>>> {
-            let tab = self.tab.borrow().upgrade();
+            let editor = self.editor.borrow().as_ref().and_then(Weak::upgrade);
             let (context, display) = (context.clone(), display.clone());
             Box::pin(async move {
-                // The completion popup is about the same text and would sit under the hover.
-                let Some(tab) = tab.filter(|tab| !tab.popup_shown()) else {
+                let (Some(editor), Some((start, _))) = (editor, context.bounds()) else {
                     return Ok(());
                 };
-                let Some((start, _)) = context.bounds() else {
+                // Nothing appended: an empty display is what stops the assistant showing at all,
+                // which is not the same as showing an empty box.
+                let Some(markup) = markup_at(editor.clone(), start).await else {
                     return Ok(());
                 };
-                let pos = lang::pos_of(&start);
-                let Some(vault) = tab.lang.vault() else {
-                    return Ok(());
-                };
-                // Asked first, so that it is out while the server is asked.
-                let value = value_of(&tab, &start);
-                lang::flush(tab.clone()).await;
-                let answer = vault.hover(&tab.rel(), pos).await.ok().flatten();
-                let value = match value {
-                    Some((expression, asked)) => {
-                        asked.await.ok().map(|v| value_markup(&expression, &v))
-                    }
-                    None => None,
-                };
-                let items = tab.diagnostics().clone();
-                let here = diagnostics::at(&items, pos);
-                tracing::debug!(
-                    "hover for {} at {pos:?}: answer {}, {} diagnostics",
-                    tab.rel(),
-                    answer.is_some(),
-                    here.len()
-                );
-                if value.is_none() && answer.is_none() && here.is_empty() {
-                    // Nothing appended: an empty display is what stops the assistant showing at
-                    // all, which is not the same as showing an empty box.
-                    return Ok(());
-                }
-                let mut markup: Vec<String> = value.into_iter().collect();
-                markup.extend(answer.map(|h| markup_of(&h.text)));
-                markup.extend(here.into_iter().map(diagnostic_markup));
-                let markup = markup.join("\n");
-                let (chars, height) = limits(&tab.view, &start);
+                let (chars, height) = limits(editor.view(), &start);
                 let label = gtk::Label::builder()
                     .use_markup(true)
                     .wrap(true)
@@ -241,11 +250,11 @@ glib::wrapper! {
         @implements sourceview5::HoverProvider;
 }
 
-/// Attach the provider to a tab's view. Called by [`crate::lang::attach`].
-pub fn install(tab: &Rc<Tab>) {
+/// Attach the provider to an editor's view. Called by [`crate::lang::attach`].
+pub fn install(editor: &Rc<dyn Editor>) {
     let provider: Provider = glib::Object::new();
-    *provider.imp().tab.borrow_mut() = Rc::downgrade(tab);
-    tab.view.hover().add_provider(&provider);
+    *provider.imp().editor.borrow_mut() = Some(Rc::downgrade(editor));
+    editor.view().hover().add_provider(&provider);
 }
 
 #[cfg(test)]

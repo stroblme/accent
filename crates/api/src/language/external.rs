@@ -1205,6 +1205,46 @@ mod tests {
         drop(vault);
     }
 
+    /// A notebook's program is a document with no file behind it (`<path>.py` for an `.ipynb`):
+    /// the server answers from the text it was given.
+    #[test]
+    fn a_document_no_file_stands_behind_is_answered() {
+        if !super::super::in_path("pyright-langserver") && !super::super::in_path("pylsp") {
+            eprintln!("no Python server here: skipping the end-to-end test");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let (vault, _events) = crate::Vault::open_at(
+            root.path(),
+            &cache.path().join("index.db"),
+            crate::VaultConfig::default(),
+        )
+        .unwrap();
+        accent_lsp::runtime().block_on(async {
+            let rel = "nb.ipynb.py";
+            let program = "import os\nos.\n".to_string();
+            let support = vault.open_document(rel, "python3", program).await.unwrap();
+            assert_eq!(support.missing, None);
+            let after_dot = Pos {
+                line: 1,
+                character: 3,
+            };
+            let items = vault
+                .completion(rel, after_dot, Some('.'))
+                .await
+                .unwrap()
+                .items;
+            assert!(
+                items.iter().any(|c| c.label == "path"),
+                "{} items",
+                items.len()
+            );
+        });
+        assert!(!root.path().join("nb.ipynb.py").exists());
+        drop(vault);
+    }
+
     /// Verify texlab supplies `\ref` and `\cite` completion without
     /// additional accent-side implementation.
     #[test]

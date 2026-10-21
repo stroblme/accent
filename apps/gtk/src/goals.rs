@@ -6,8 +6,9 @@ use super::*;
 const GOALS: Duration = Duration::from_millis(300);
 
 impl App {
-    /// Show Code while the tab in front has goals or can be debugged, or a debug session runs,
-    /// and request goals. Window-owned visibility keeps the debugger's sections up over any tab.
+    /// Show Code while the tab in front has goals or can be debugged or run, a notebook's kernel,
+    /// or a debug session runs, and request goals. Window-owned visibility keeps the debugger's
+    /// sections up over any tab.
     pub fn sync_code_pane(self: &Rc<Self>) {
         let Some(sidebar) = self.sidebar.get() else {
             return;
@@ -18,7 +19,9 @@ impl App {
             .is_some_and(|support| support.goals);
         let running = self.debugger.running();
         let debuggable = self.debuggable_in_front().is_some();
-        sidebar.set_code_visible(goals || running || debuggable);
+        let runnable = self.runnable_in_front();
+        sidebar.set_code_visible(goals || running || debuggable || runnable);
+        self.sync_kernel();
         if !running {
             sidebar.clear_debug(debuggable);
             self.refill_watches();

@@ -610,11 +610,13 @@ impl App {
                 tracing::debug!("a closing diagram was not written: {e}");
             }
         }
-        // A notebook closing was asked about already (`wire.rs`), as a diagram was.
-        if let Some(Doc::Notebook(n)) = self.doc_for_page(page)
-            && let Err(e) = self.flush_notebook(&n)
-        {
-            tracing::debug!("a closing notebook was not written: {e}");
+        // A notebook closing was asked about already (`wire.rs`), as a diagram was; its kernel
+        // ends with its tab.
+        if let Some(Doc::Notebook(n)) = self.doc_for_page(page) {
+            self.stop_kernel(&n);
+            if let Err(e) = self.flush_notebook(&n) {
+                tracing::debug!("a closing notebook was not written: {e}");
+            }
         }
         // Closing a shell's tab is ending it; closing its window only lets go of it, and a window
         // being destroyed closes no page through here. A shell is refused a move to another

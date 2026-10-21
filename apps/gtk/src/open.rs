@@ -79,12 +79,14 @@ impl App {
     /// Insert the new tab before closing the old one so the pane cannot close while briefly
     /// empty. Earlier tree double-clicks keep the arriving tab; launch tabs retain named order.
     pub(crate) fn mark_opened(self: &Rc<Self>, page: &adw::TabPage, how: Opened) {
-        // A label or a page a diagram waits to show, which a file that turned out to be text
-        // drops.
+        // A label or a page a diagram waits to show, or a notebook's search hit, which a file
+        // that turned out to be text drops.
         if let Some(doc) = self.doc_for_page(page) {
             let reveal = self.revealing.borrow_mut().remove(&doc.key());
-            if let (Some(reveal), Doc::Diagram(tab)) = (reveal, &doc) {
-                reveal(self, tab);
+            match (reveal, &doc) {
+                (Some(Reveal::Diagram(reveal)), Doc::Diagram(tab)) => reveal(self, tab),
+                (Some(Reveal::Notebook(reveal)), Doc::Notebook(tab)) => reveal(self, tab),
+                _ => {}
             }
         }
         // A double click in the Files tree whose second press came before the tab did.
@@ -246,10 +248,14 @@ impl App {
             }
             return self.open_diagram_text(key, text, how);
         }
-        // So is an `.ipynb`, and a `.py` marimo wrote, unless the reader asked for its text.
+        // So is an `.ipynb`, and a `.py` marimo wrote, unless the reader asked for its text; a
+        // search hit in it waits for the notebook as one in a diagram does.
         let as_text = self.as_text.borrow_mut().remove(key);
         if !as_text && accent_core::path::holds_notebook(key, &text.text) {
-            self.drop_awaiting(key, "a notebook, not a text file");
+            match self.revealing.borrow().contains_key(key) {
+                true => drop(self.awaiting.borrow_mut().remove(key)),
+                false => self.drop_awaiting(key, "a notebook, not a text file"),
+            }
             return self.open_notebook_text(key, text, flavour, how);
         }
         self.adopt_text_tab(key, text, flavour, how);
@@ -673,11 +679,14 @@ impl App {
                         let at = bytes.start;
                         self.revealing.borrow_mut().insert(
                             rel.to_string(),
-                            Box::new(move |_, tab| reveal_label(tab, at)),
+                            Reveal::Diagram(Box::new(move |_, tab| reveal_label(tab, at))),
                         );
                         self.select_when_open(rel, sidebar::Target::Range(bytes));
                     }
                 }
+            }
+            Some(sidebar::Target::Range(bytes)) if accent_core::path::may_be_notebook(rel) => {
+                self.open_cell(rel, bytes)
             }
             Some(at) => self.select_when_open(rel, at),
             None => self.open_preview(rel),
@@ -687,7 +696,29 @@ impl App {
     /// Open diagram `rel` at the cell matching byte offset `at` in indexed label lines.
     /// Reveal its page and cell once a pending worker read lands ([`mark_opened`](Self::mark_opened)).
     fn open_label(self: &Rc<Self>, rel: &str, at: usize) {
-        self.reveal_in_diagram(rel, Box::new(move |_, tab| reveal_label(tab, at)));
+        self.reveal_in_diagram(rel, move |_, tab| reveal_label(tab, at));
+    }
+
+    /// Open notebook `rel` on the cell holding `bytes` of what the index holds of it, the match
+    /// selected; a `.py` that turns out not to be a notebook opens as text, on the match.
+    fn open_cell(self: &Rc<Self>, rel: &str, bytes: std::ops::Range<usize>) {
+        match self.doc_for(rel) {
+            Some(Doc::Notebook(tab)) => {
+                self.reveal_page(&tab.page);
+                tab.reveal_hit(bytes);
+            }
+            Some(_) => self.select_when_open(rel, sidebar::Target::Range(bytes)),
+            None => {
+                let hit = bytes.clone();
+                let reveal = Reveal::Notebook(Box::new(move |_, tab| tab.reveal_hit(hit)));
+                self.revealing.borrow_mut().insert(rel.to_string(), reveal);
+                // Only text has a tab to wait on, and only its bytes say what a `.py` is.
+                match accent_core::path::is_notebook(rel) {
+                    true => self.open_preview(rel),
+                    false => self.select_when_open(rel, sidebar::Target::Range(bytes)),
+                }
+            }
+        }
     }
 
     /// Open diagram `rel` on its page called `name`, as a link to it lands: as a jump, or with a
@@ -700,16 +731,21 @@ impl App {
                 None => app.toast(&format!("No page {name} in {}", doc::file_name(&tab.key()))),
             }
         };
-        self.reveal_in_diagram(rel, Box::new(show));
+        self.reveal_in_diagram(rel, show);
     }
 
     /// Show `reveal` in diagram `rel`, now if it is open, else once a worker has read it
     /// ([`mark_opened`](Self::mark_opened)).
-    fn reveal_in_diagram(self: &Rc<Self>, rel: &str, reveal: Reveal) {
+    fn reveal_in_diagram(
+        self: &Rc<Self>,
+        rel: &str,
+        reveal: impl FnOnce(&Rc<App>, &Rc<crate::diagram::DiagramTab>) + 'static,
+    ) {
         if let Some(Doc::Diagram(tab)) = self.doc_for(rel) {
             self.reveal_page(&tab.page);
             return reveal(self, &tab);
         }
+        let reveal = Reveal::Diagram(Box::new(reveal));
         self.revealing.borrow_mut().insert(rel.to_string(), reveal);
         self.open_preview(rel);
     }
@@ -1059,7 +1095,7 @@ impl App {
                     move |tab: &Rc<Tab>| {
                         if app.is_active(tab) {
                             app.statusbar
-                                .set_starting(tab.lang.starting.borrow().as_deref());
+                                .set_starting(tab.lang.doc.starting().as_deref());
                         }
                     }
                 )),
@@ -1191,8 +1227,15 @@ impl App {
     }
 }
 
-/// What a diagram is to show once it is open: see [`App::reveal_in_diagram`].
-pub type Reveal = Box<dyn FnOnce(&Rc<App>, &Rc<crate::diagram::DiagramTab>)>;
+/// What a diagram or a notebook is to show once it is open: see [`App::reveal_in_diagram`] and
+/// [`App::open_cell`].
+pub enum Reveal {
+    Diagram(Shows<crate::diagram::DiagramTab>),
+    Notebook(Shows<crate::notebook::NotebookTab>),
+}
+
+/// What a [`Reveal`] does to the tab it waited for.
+type Shows<T> = Box<dyn FnOnce(&Rc<App>, &Rc<T>)>;
 
 /// Show the label of `tab` whose line in its labels' text holds byte `at`, if there still is one.
 fn reveal_label(tab: &Rc<crate::diagram::DiagramTab>, at: usize) {

@@ -383,6 +383,9 @@ impl App {
                 for tab in self.open_tabs() {
                     lang::resync(&tab);
                 }
+                for notebook in self.notebooks() {
+                    notebook.resync_language();
+                }
                 if let Some(tree) = self.tree.get() {
                     tree.refresh();
                 }
@@ -425,6 +428,7 @@ impl App {
                 self.connect.hide();
                 self.connection_down(&why);
                 self.debug_lost();
+                self.kernels_lost();
             }
             Event::Refused(why) => {
                 self.statusbar.set_progress(None);
@@ -446,6 +450,7 @@ impl App {
             }
             Event::Error(message) => self.toast(&message),
             Event::Debug { session, news } => self.on_debug(session, news),
+            Event::Kernel { session, news } => self.on_kernel(session, news),
             // Every tab of the file holds the check, so a switch to one shows it.
             Event::Checking { rel, lines } => {
                 let line = lines.first().map(|lines| lines.start);
@@ -469,6 +474,18 @@ impl App {
                     tab.set_diagnostics(items);
                     // The count lives in the status bar, which only speaks for the active tab.
                     if self.is_active(&tab) {
+                        self.sync_status();
+                    }
+                } else if let Some(notebook) = self
+                    .notebooks()
+                    .into_iter()
+                    .find(|n| n.document_key().as_deref() == Some(rel.as_str()))
+                {
+                    notebook.set_diagnostics(items);
+                    if self
+                        .active_notebook()
+                        .is_some_and(|n| Rc::ptr_eq(&n, &notebook))
+                    {
                         self.sync_status();
                     }
                 }

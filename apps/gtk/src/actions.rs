@@ -282,7 +282,8 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.diagram-connector", "Add Connector", &[]),
     ("win.diagram-image", "Add Image…", &[]),
     // The notebook tab. Undo and Redo are its own keys, as a diagram's canvas's are, and carry no
-    // chord for the same reason; the cell commands act on the selected cell, and its buttons and
+    // chord for the same reason; so are the cell chords (`notebook::own_key`), which a cell's
+    // editor would take first. The cell commands act on the selected cell, and its buttons and
     // its More menu are the pointer's way to them.
     ("win.notebook-undo", "Undo Notebook Edit", &[]),
     ("win.notebook-redo", "Redo Notebook Edit", &[]),
@@ -301,6 +302,16 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.notebook-to-raw", "Change Cell to Raw", &[]),
     ("win.notebook-split", "Split Cell", &[]),
     ("win.notebook-join", "Join with Next Cell", &[]),
+    // A notebook's kernel (`notebook::kernel`): Run Cell answers Insert Line Below's chord in a
+    // notebook, and Run Cell and Advance is its own key.
+    ("win.notebook-run-cell", "Run Cell", &[]),
+    ("win.notebook-run-advance", "Run Cell and Advance", &[]),
+    ("win.notebook-run-all", "Run All", &[]),
+    ("win.notebook-interrupt", "Interrupt Kernel", &[]),
+    ("win.notebook-restart", "Restart Kernel", &[]),
+    ("win.notebook-shut-down", "Shut Down Kernel", &[]),
+    ("win.notebook-clear-outputs", "Clear Outputs", &[]),
+    ("win.notebook-clear-all-outputs", "Clear All Outputs", &[]),
     ("win.notebook-open-text", "Open as Text", &[]),
     ("win.view-mode", "Toggle Preview", &["<Control>m"]),
     ("win.minimap", "Toggle Minimap", &[]),
@@ -511,7 +522,11 @@ impl App {
             "toggle-wrap" => self.with_active(Tab::toggle_wrap),
             "delete-line" => self.with_active(Tab::delete_line),
             "newline-below" => {
-                // A diagram's label being edited takes `Ctrl+Return` as finishing it.
+                // A notebook in front runs the selected cell, as Jupyter's `Ctrl+Enter` does, and
+                // a diagram's label being edited takes `Ctrl+Return` as finishing it.
+                if let Some(notebook) = self.active_notebook() {
+                    return self.run_selected(&notebook, false);
+                }
                 let committed = self.active_diagram().is_some_and(|d| d.commit_label());
                 if !committed && let Some(tab) = self.active() {
                     tab.newline_below();
@@ -760,6 +775,8 @@ impl App {
             "lsp-restart-file" => {
                 if let Some(tab) = self.active() {
                     lang::reopen(&tab);
+                } else if let Some(notebook) = self.active_notebook() {
+                    notebook.reopen_language();
                 }
             }
             // The tab menu names its own page; F2 and the palette mean the tree's selection, and
@@ -1950,6 +1967,12 @@ mod tests {
             "win.diagram-previous-page",
             "win.notebook-undo",
             "win.notebook-redo",
+            "win.notebook-insert-above",
+            "win.notebook-insert-below",
+            "win.notebook-move-up",
+            "win.notebook-move-down",
+            "win.notebook-split",
+            "win.notebook-run-advance",
         ] {
             let row = ACTIONS.iter().find(|(name, _, _)| *name == action);
             let (_, _, accels) = row.unwrap_or_else(|| panic!("{action} is not in ACTIONS"));

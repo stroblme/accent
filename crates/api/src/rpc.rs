@@ -417,9 +417,11 @@ pub(crate) fn serve_local(
                 // write, so joining them could wait on a full pipe for good. A commit or a sync
                 // still running is the user's, though, so they are given until the longest git
                 // bound to finish; then the vault goes, and the process exits around the rest.
-                // The debug sessions are nobody's any more and end first, as after EOF below.
+                // The debug sessions and kernels are nobody's any more and end first, as after EOF
+                // below.
                 tracing::info!("nothing from the client in {silence:?}; stopping");
                 vault.debug.shutdown();
+                vault.kernels.shutdown();
                 let until = Instant::now() + LINGER;
                 while workers.iter().any(|w| !w.is_finished()) && Instant::now() < until {
                     std::thread::sleep(Duration::from_millis(50));
@@ -478,11 +480,12 @@ pub(crate) fn serve_local(
         workers.retain(|w| !w.is_finished());
     }
 
-    // stdin closed: the window went away. Its debug sessions end first: a console's evaluation
-    // runs the reader's code, which may never return, and the thread waiting on it holds the
-    // vault. Then drop the vault, which stops its worker, and let the event forwarder end with
-    // the channel.
+    // stdin closed: the window went away. Its debug sessions and kernels end first: a console's
+    // evaluation runs the reader's code, which may never return, and the thread waiting on it
+    // holds the vault. Then drop the vault, which stops its worker, and let the event forwarder
+    // end with the channel.
     vault.debug.shutdown();
+    vault.kernels.shutdown();
     drop(vault);
     for worker in workers {
         let _ = worker.join();
@@ -541,6 +544,7 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value> {
     if let Some(answer) = crate::vault::dispatch(vault, method, p)
         .or_else(|| crate::language::dispatch(vault, method, p))
         .or_else(|| crate::debug::dispatch(vault, method, p))
+        .or_else(|| crate::kernel::dispatch(vault, method, p))
     {
         return answer;
     }

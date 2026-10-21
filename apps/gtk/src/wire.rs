@@ -7,7 +7,7 @@ use super::*;
 /// and for every pane a split adds, so a new pane behaves exactly like the first one.
 pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
     // While a note is presented there is no editor on screen, so find and go to line address the
-    // rendered preview instead. Three closures rather than a back-reference, so `find.rs` never
+    // rendered preview instead. Closures rather than a back-reference, so `find.rs` never
     // sees `App`, and each of them answers for *this* pane: the other pane's PDF must not decide
     // whether this bar counts in pages.
     pane.find.wire(find::Wiring {
@@ -18,8 +18,31 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
             pane,
             #[upgrade_or]
             false,
-            // A PDF answers find and go-to itself, whether or not anything is being presented.
-            move || app.presents_rendered(&pane) || app.pdf_of(&pane).is_some()
+            // A PDF and a notebook answer find and go-to themselves, whether or not anything is
+            // being presented.
+            move || {
+                app.presents_rendered(&pane)
+                    || app.pdf_of(&pane).is_some()
+                    || app.notebook_of(&pane).is_some()
+            }
+        )),
+        notebook: Box::new(glib::clone!(
+            #[weak]
+            app,
+            #[weak]
+            pane,
+            #[upgrade_or]
+            None,
+            move || app.notebook_of(&pane).map(|nb| nb.rewritable())
+        )),
+        selected: Box::new(glib::clone!(
+            #[weak]
+            app,
+            #[weak]
+            pane,
+            #[upgrade_or]
+            None,
+            move || app.notebook_of(&pane)?.selected_query()
         )),
         preview: Box::new(glib::clone!(
             #[weak]
@@ -39,6 +62,7 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
                 app.pdf_of(&pane)
                     .map(|pdf| pdf.page_count())
                     .or_else(|| app.diagram_of(&pane).map(|d| d.page_count()))
+                    .or_else(|| app.notebook_of(&pane).map(|nb| nb.cell_count()))
             }
         )),
         mark: Box::new(glib::clone!(
@@ -515,6 +539,10 @@ pub fn wire_window(app: &Rc<App>) {
                 }
                 bar_menu(&app, button, &menu);
                 return;
+            }
+            if let Some(notebook) = app.active_notebook() {
+                notebook.hide_diagnostics(!notebook.diagnostics_hidden());
+                return app.sync_status();
             }
             let Some(tab) = app.active() else {
                 return;

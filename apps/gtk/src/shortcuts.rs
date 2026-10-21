@@ -34,7 +34,7 @@ const SECTIONS: [&str; 18] = [
 /// `DiagramTab::wire_keys`, `NotebookTab::wire_keys`) with these commands, which carry none in the
 /// table: a bare `space` or `Delete` there would be taken from every entry (DESIGN.md, PDF and
 /// Diagram). A presented diagram's paging keys are left out, being its only keys then.
-const TAB_KEYS: [(&str, &[&str]); 18] = [
+const TAB_KEYS: [(&str, &[&str]); 24] = [
     ("win.pdf-next-page", &["space", "n", "Right"]),
     ("win.pdf-previous-page", &["<Shift>space", "p", "Left"]),
     ("win.pdf-copy", &["<Control>c"]),
@@ -56,13 +56,20 @@ const TAB_KEYS: [(&str, &[&str]); 18] = [
     ("win.diagram-previous-page", &["Page_Up"]),
     ("win.notebook-undo", &["<Control>z"]),
     ("win.notebook-redo", &["<Control><Shift>z", "<Control>y"]),
+    ("win.notebook-insert-above", &["<Alt><Shift>Return"]),
+    ("win.notebook-insert-below", &["<Alt>Return"]),
+    ("win.notebook-move-up", &["<Control><Shift>Up"]),
+    ("win.notebook-move-down", &["<Control><Shift>Down"]),
+    ("win.notebook-split", &["<Control><Shift>minus"]),
+    ("win.notebook-run-advance", &["<Shift>Return"]),
 ];
 
-/// Commands a diagram in front runs on another command's chord (`App::run_action`), so they
-/// show whatever that one is bound to.
-const BORROWED: [(&str, &str); 2] = [
+/// Commands a diagram or a notebook in front runs on another command's chord
+/// (`App::run_action`), so they show whatever that one is bound to.
+const BORROWED: [(&str, &str); 3] = [
     ("win.diagram-duplicate", "win.duplicate-line"),
     ("win.diagram-group", "win.goto-line"),
+    ("win.notebook-run-cell", "win.newline-below"),
 ];
 
 /// The heading `action` is listed under in DESIGN.md Keyboard, `None` for one not placed yet.
@@ -212,6 +219,14 @@ mod tests {
         assert_eq!(
             accels_of(&shown, "Duplicate Selection"),
             Some(vec!["<Control>d".into()])
+        );
+        assert_eq!(
+            accels_of(&shown, "Insert Cell Below"),
+            Some(vec!["<Alt>Return".into()])
+        );
+        assert_eq!(
+            accels_of(&shown, "Run Cell"),
+            Some(vec!["<Control>Return".into()])
         );
 
         // A rebind shows, under its heading; an unbind hides; a borrowed chord follows its lender.

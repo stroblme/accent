@@ -665,6 +665,11 @@ fn read_content(f: &walk::FileMeta) -> Content {
         // one line each (`accent_drawio::text`). A label is short however big the file is with
         // its pictures, so the cap does not apply.
         FileKind::Other if crate::path::is_diagram(&f.rel_path) => body().and_then(diagram_labels),
+        // An `.ipynb`'s JSON would make every output's base64 and every metadata key a hit, so
+        // what is indexed is its cells' sources, however big its outputs make the file.
+        FileKind::Other if crate::path::is_notebook(&f.rel_path) => {
+            body().and_then(|read| notebook_sources(read, f))
+        }
         // An `.xml` draw.io wrote is known by its first element once its text is in.
         FileKind::Other if f.size <= MAX_INDEXED_BODY && !path::is_binary(&f.rel_path) => body()
             .and_then(|read| match read {
@@ -916,6 +921,20 @@ fn diagram_labels(read: crate::fs::Read) -> Option<crate::fs::Read> {
         .ok()?;
     t.text = accent_drawio::text::search_text(&file);
     (!t.text.is_empty()).then_some(crate::fs::Read::Text(t))
+}
+
+/// An `.ipynb` read as text, turned into its cells' sources (`notebook::search_text`); one that
+/// does not read as a notebook is the text it is, under the cap any other file has.
+fn notebook_sources(read: crate::fs::Read, f: &walk::FileMeta) -> Option<crate::fs::Read> {
+    let crate::fs::Read::Text(mut t) = read else {
+        return None;
+    };
+    match crate::notebook::search_text(&f.rel_path, &t.text) {
+        Some(sources) => t.text = sources,
+        None if f.size > MAX_INDEXED_BODY => return None,
+        None => {}
+    }
+    Some(crate::fs::Read::Text(t))
 }
 
 /// Everything a file's content produced, so a re-read starts clean — and a file that could not
@@ -1805,6 +1824,39 @@ mod tests {
         ix.reconcile(vault.path(), |_| {}).unwrap();
         let re = crate::search::pattern("zorblat", crate::search::Options::default()).unwrap();
         assert_eq!(ix.grep(&re, 10, false).unwrap().1, 1, "other XML is text");
+    }
+
+    /// An `.ipynb` is found by its cells' sources, never by its outputs or its JSON, while a
+    /// marimo notebook is the Python it is.
+    #[test]
+    fn a_notebooks_cells_are_indexed_and_its_json_is_not() {
+        let (vault, db) = fixture();
+        fs::write(
+            vault.path().join("n.ipynb"),
+            r#"{"cells": [
+              {"cell_type": "code", "execution_count": 1, "metadata": {}, "source": ["print(1)"],
+               "outputs": [{"name": "stdout", "output_type": "stream", "text": ["quux\n"]}]},
+              {"cell_type": "markdown", "metadata": {}, "source": ["zorblat tea"]}
+            ], "metadata": {"kernelspec": {"name": "python3"}}, "nbformat": 4, "nbformat_minor": 4}"#,
+        )
+        .unwrap();
+        fs::write(
+            vault.path().join("m.py"),
+            "import marimo\napp = marimo.App()\n\n\n@app.cell\ndef _():\n    x = 1\n    return\n",
+        )
+        .unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let hits = ix.search("zorblat", 10, false).unwrap();
+        assert_eq!(hits[0].rel_path, "n.ipynb");
+        assert_eq!(hits[0].line, Some(2), "the second cell's line");
+        let count = |pattern: &str| {
+            let re = crate::search::pattern(pattern, crate::search::Options::default()).unwrap();
+            ix.grep(&re, 10, false).unwrap().1
+        };
+        assert_eq!(count("quux|kernelspec|cell_type"), 0, "no output, no JSON");
+        assert_eq!(count("@app.cell"), 1, "marimo's own lines");
     }
 
     /// A file the walk leaves out joins the index once opened, stays through a walk and an edit,

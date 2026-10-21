@@ -10,7 +10,7 @@ use crate::Result;
 
 use accent_core::index::Index;
 use accent_core::walk::{self, FileKind};
-use accent_core::{git, search};
+use accent_core::{git, notebook, search};
 
 use super::{Local, Msg};
 use crate::language::notes;
@@ -110,7 +110,17 @@ impl Local {
             let (mut rows, mut seen) = (Vec::new(), 0usize);
             match fs::read_text(&f.canonical) {
                 Ok(fs::Read::Text(t)) if !t.lossy => {
-                    Index::matches_in(&f.rel_path, None, &t.text, re, limit, &mut rows, &mut seen);
+                    if let Some(text) = searched(&f.rel_path, t.text) {
+                        Index::matches_in(
+                            &f.rel_path,
+                            None,
+                            &text,
+                            re,
+                            limit,
+                            &mut rows,
+                            &mut seen,
+                        );
+                    }
                 }
                 Ok(_) => {}
                 // A file that vanished or cannot be read is not the query's problem.
@@ -306,6 +316,17 @@ impl Local {
             .map(|(_, copy)| copy)
             .collect())
     }
+}
+
+/// What [`Local::grep_unindexed`] matches of the file `rel` holding `text`, as the index would
+/// hold it: a diagram's labels, an `.ipynb`'s cells' sources, any other file's text; `None` for a
+/// diagram that does not parse, which the index keeps no body of.
+fn searched(rel: &str, text: String) -> Option<String> {
+    if accent_core::path::holds_diagram(rel, &text) {
+        let file = accent_drawio::File::from_bytes(text.as_bytes()).ok()?;
+        return Some(accent_drawio::text::search_text(&file));
+    }
+    Some(notebook::search_text(rel, &text).unwrap_or(text))
 }
 
 /// [`Local::list_dir`] on any reader of the index of the vault at `root`.
@@ -532,6 +553,11 @@ mod tests {
         f.write("a.md", "zorblat in a note\n");
         std::fs::create_dir_all(f.vault.root().join("node_modules")).unwrap();
         f.write("node_modules/dep.js", "// zorblat\n");
+        // Matched as the index matches a diagram, by its labels: a style key is no hit.
+        f.write(
+            "node_modules/flow.drawio",
+            r#"<mxfile><diagram><mxGraphModel><root><mxCell id="0" value="Kettle" style="zorblat=1;"/></root></mxGraphModel></diagram></mxfile>"#,
+        );
         f.vault.rescan().unwrap();
         assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
 

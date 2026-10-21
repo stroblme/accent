@@ -11,7 +11,8 @@ use serde_json::ser::PrettyFormatter;
 use serde_json::value::RawValue;
 use serde_json::{Map, Value};
 
-use super::{Attachment, Cell, CellId, Data, Item, Kind, Notebook, Output, invalid};
+use super::output::{self, items, text};
+use super::{Attachment, Cell, CellId, Kind, Notebook, Run, invalid};
 use crate::Result;
 
 #[derive(Debug, Clone)]
@@ -44,6 +45,34 @@ pub(super) struct Kept {
     listed: bool,
     id: Option<String>,
 }
+
+/// What New File writes for an `.ipynb`: nbformat 5.10.4's `new_notebook()` with one empty code
+/// cell and a Python kernel, as `nbformat.write` puts it in a file (its random cell id fixed).
+pub const EMPTY: &str = r#"{
+ "cells": [
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "id": "a1b2c3d4",
+   "metadata": {},
+   "outputs": [],
+   "source": []
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 3",
+   "language": "python",
+   "name": "python3"
+  },
+  "language_info": {
+   "name": "python"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 5
+}
+"#;
 
 #[derive(Deserialize)]
 struct Doc<'a> {
@@ -161,7 +190,7 @@ fn cell(raw: &str, n: u64) -> Result<Cell, String> {
         id: CellId(n),
         kind,
         count: c.execution_count,
-        outputs: c.outputs.iter().filter_map(output).collect(),
+        outputs: c.outputs.iter().filter_map(output::read).collect(),
         attachments: c
             .attachments
             .iter()
@@ -179,62 +208,7 @@ fn cell(raw: &str, n: u64) -> Result<Cell, String> {
             id: c.id,
         })),
         source,
-    })
-}
-
-/// A string, or the lines nbformat splits a string into, joined.
-fn text(value: &Value) -> Option<String> {
-    match value {
-        Value::String(s) => Some(s.clone()),
-        Value::Array(lines) => lines.iter().map(Value::as_str).collect(),
-        _ => None,
-    }
-}
-
-fn items(bundle: &Value) -> Vec<Item> {
-    let Some(bundle) = bundle.as_object() else {
-        return Vec::new();
-    };
-    bundle
-        .iter()
-        .map(|(mime, data)| Item {
-            mime: mime.clone(),
-            data: text(data).map_or_else(|| Data::Json(data.clone()), Data::Text),
-        })
-        .collect()
-}
-
-/// One output; `None` for a type nbformat 4 does not have.
-fn output(o: &Value) -> Option<Output> {
-    let string = |key| o.get(key).and_then(Value::as_str).unwrap_or("").to_string();
-    Some(match o.get("output_type")?.as_str()? {
-        "stream" => Output::Stream {
-            stderr: o.get("name").and_then(Value::as_str) == Some("stderr"),
-            text: text(o.get("text")?)?,
-        },
-        "display_data" | "execute_result" => Output::Data {
-            count: o
-                .get("execution_count")
-                .and_then(Value::as_u64)
-                .and_then(|n| n.try_into().ok()),
-            items: items(o.get("data")?),
-        },
-        "error" => Output::Error {
-            name: string("ename"),
-            value: string("evalue"),
-            traceback: o
-                .get("traceback")
-                .and_then(Value::as_array)
-                .map(|lines| {
-                    lines
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(String::from)
-                        .collect()
-                })
-                .unwrap_or_default(),
-        },
-        _ => return None,
+        run: None,
     })
 }
 
@@ -252,14 +226,21 @@ impl Frame {
         for (i, cell) in cells.iter().enumerate() {
             out.push_str(if i == 0 { &self.lead } else { &self.sep });
             let kept = kept(cell);
-            match (cell.kind == kept.kind, cell.source == kept.source) {
-                (true, true) => out.push_str(&kept.raw),
-                (true, false) => {
+            match (
+                cell.kind == kept.kind,
+                cell.source == kept.source,
+                &cell.run,
+            ) {
+                (true, true, None) => out.push_str(&kept.raw),
+                (true, false, None) => {
                     out.push_str(&kept.raw[..kept.span.start]);
                     out.push_str(&self.source(kept, &cell.source));
                     out.push_str(&kept.raw[kept.span.end..]);
                 }
-                (false, _) => out.push_str(&self.whole(cell.kind, &cell.source, &kept.raw)),
+                (_, _, run) => {
+                    let whole = self.whole(cell.kind, &cell.source, &kept.raw, run.as_deref());
+                    out.push_str(&whole)
+                }
             }
         }
         if !cells.is_empty() {
@@ -290,8 +271,8 @@ impl Frame {
     }
 
     /// A whole cell of `kind` holding `source`, written as nbformat writes one, with whatever
-    /// else the cell held in `raw` that a cell of its kind has.
-    fn whole(&self, kind: Kind, source: &str, raw: &str) -> String {
+    /// else the cell held in `raw` that a cell of its kind has, and a code cell's `run`.
+    fn whole(&self, kind: Kind, source: &str, raw: &str, run: Option<&Run>) -> String {
         let mut cell: Map<String, Value> = serde_json::from_str(raw).unwrap_or_default();
         let name = match kind {
             Kind::Code => "code",
@@ -303,6 +284,11 @@ impl Frame {
         cell.entry("metadata").or_insert_with(|| Map::new().into());
         match kind {
             Kind::Code => {
+                if let Some(run) = run {
+                    let outputs: Vec<Value> = run.outputs.iter().map(split).collect();
+                    cell.insert("execution_count".into(), run.count.into());
+                    cell.insert("outputs".into(), outputs.into());
+                }
                 cell.entry("execution_count").or_insert(Value::Null);
                 cell.entry("outputs")
                     .or_insert_with(|| Vec::<Value>::new().into());
@@ -344,7 +330,7 @@ impl Frame {
                 .find(|fresh| !taken.contains(fresh.as_str()));
             raw.insert("id".into(), fresh.into());
         }
-        let raw = self.whole(kind, "", &json(&raw));
+        let raw = self.whole(kind, "", &json(&raw), None);
         match cell(&raw, id.0) {
             Ok(cell) => *cell.kept,
             Err(why) => unreachable!("a new cell does not read back: {why}"),
@@ -355,6 +341,37 @@ impl Frame {
 /// `value` as compact JSON, which for a string is how nbformat writes it.
 fn json(value: &impl Serialize) -> String {
     serde_json::to_string(value).expect("JSON serialises")
+}
+
+/// `output` as nbformat writes it (`split_lines`): a stream's text, and a bundle's text types,
+/// JavaScript and SVG, as their lines.
+fn split(output: &Value) -> Value {
+    let lines = |value: &mut Value| {
+        if let Value::String(text) = value {
+            let lines: Vec<String> = split_lines(text).into_iter().map(String::from).collect();
+            *value = lines.into();
+        }
+    };
+    let mut output = output.clone();
+    let bundle = matches!(
+        output["output_type"].as_str(),
+        Some("execute_result" | "display_data")
+    );
+    if output["output_type"] == "stream"
+        && let Some(text) = output.get_mut("text")
+    {
+        lines(text);
+    }
+    if bundle && let Some(Value::Object(data)) = output.get_mut("data") {
+        for (mime, value) in data.iter_mut() {
+            if mime.starts_with("text/")
+                || ["application/javascript", "image/svg+xml"].contains(&mime.as_str())
+            {
+                lines(value);
+            }
+        }
+    }
+    output
 }
 
 /// `text` split as Python's `str.splitlines(True)` splits it, which is how nbformat splits a
@@ -384,7 +401,7 @@ fn split_lines(text: &str) -> Vec<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Edit, read};
+    use super::super::{Edit, Output, read};
     use super::*;
 
     const ANALYSIS: &str = include_str!("../../tests/fixtures/notebook/analysis.ipynb");
@@ -437,6 +454,17 @@ mod tests {
 "##;
 
     #[test]
+    fn the_empty_notebook_is_one_empty_python_cell() {
+        let nb = read("new.ipynb", EMPTY).unwrap();
+        let [cell] = nb.cells() else {
+            panic!("{} cells", nb.cells().len());
+        };
+        assert_eq!((cell.kind(), cell.source()), (Kind::Code, ""));
+        assert_eq!(nb.language(), "python");
+        assert_eq!(nb.to_text(), EMPTY);
+    }
+
+    #[test]
     fn serde_json_sorts_keys_as_nbformat_does() {
         // With serde_json's `preserve_order` on, a cell of a new kind would keep its keys in the
         // file's order rather than nbformat's sorted one.
@@ -460,7 +488,10 @@ mod tests {
         // Every cell written whole as nbformat writes one is the cell nbformat wrote.
         for cell in cells {
             let kept = kept(cell);
-            assert_eq!(frame.whole(cell.kind, &cell.source, &kept.raw), kept.raw);
+            assert_eq!(
+                frame.whole(cell.kind, &cell.source, &kept.raw, None),
+                kept.raw
+            );
         }
         let kinds: Vec<Kind> = cells.iter().map(|c| c.kind).collect();
         assert_eq!(kinds[..2], [Kind::Markdown, Kind::Code]);
@@ -492,6 +523,21 @@ mod tests {
         });
         let empty = SMALL.replace("[\n    \"x = 1\\n\",\n    \"y = 2\\n\"\n   ]", "[]");
         assert_eq!(nb.to_text(), empty);
+    }
+
+    #[test]
+    fn a_run_is_written_as_nbformat_writes_it() {
+        let mut nb = read("small.ipynb", SMALL).unwrap();
+        let id = nb.cells()[2].id();
+        let output = serde_json::json!({"name": "stdout", "output_type": "stream", "text": "2\n"});
+        let run = Some(super::super::Run::new(Some(3), vec![output]));
+        let undo = nb.apply(Edit::Outputs { id, run }).unwrap();
+        let ran = SMALL
+            .replace("\"execution_count\": 2,", "\"execution_count\": 3,")
+            .replace("      \"1\\n\"\n", "      \"2\\n\"\n");
+        assert_eq!(nb.to_text(), ran, "the other cells keep their bytes");
+        nb.apply(undo);
+        assert_eq!(nb.to_text(), SMALL);
     }
 
     #[test]

@@ -7,7 +7,7 @@ use std::io;
 use crate::{Error, Result};
 
 use accent_core::path::{basename, is_under, parent_dir, stem};
-use accent_core::{markdown, search, template};
+use accent_core::{markdown, notebook, search, template};
 
 use super::{Local, Msg};
 use crate::paths::{accent_conflict_name, with_md};
@@ -604,7 +604,9 @@ impl Local {
 
     /// Count removed matches from current file text and retain its original;
     /// `None` if no matches. Avoid stale indexed counts. Rewrite diagrams
-    /// through their labels only, preserving XML keys, ids and markup in one write.
+    /// through their labels only, preserving XML keys, ids and markup in one write,
+    /// and an `.ipynb` through its cells' sources, its outputs, metadata and every
+    /// other cell keeping their bytes.
     fn replace_one(
         &self,
         rel: &str,
@@ -620,19 +622,39 @@ impl Local {
                 .into_owned(),
             false => re.replace_all(text, replacement).into_owned(),
         };
-        let (matches, rewritten) = match accent_core::path::holds_diagram(rel, &text) {
-            true => {
-                let mut file = accent_drawio::File::from_bytes(text.as_bytes())
-                    .map_err(|e| accent_core::Error::Invalid(format!("{rel}: {e}")))?;
-                let mut matches = 0;
-                accent_drawio::text::edit_labels(&mut file, |label| {
-                    let found = re.find_iter(label).count();
+        // A marimo notebook is the Python it is, and an `.ipynb` that does not read is its text.
+        let notebook = match accent_core::path::is_notebook(rel) {
+            true => notebook::read(rel, &text).ok(),
+            false => None,
+        };
+        let (matches, rewritten) = if accent_core::path::holds_diagram(rel, &text) {
+            let mut file = accent_drawio::File::from_bytes(text.as_bytes())
+                .map_err(|e| accent_core::Error::Invalid(format!("{rel}: {e}")))?;
+            let mut matches = 0;
+            accent_drawio::text::edit_labels(&mut file, |label| {
+                let found = re.find_iter(label).count();
+                matches += found;
+                (found > 0).then(|| substitute(label))
+            });
+            (matches, file.to_xml())
+        } else if let Some(mut nb) = notebook {
+            let mut matches = 0;
+            let edits: Vec<notebook::Edit> = nb
+                .cells()
+                .iter()
+                .filter_map(|cell| {
+                    let found = re.find_iter(cell.source()).count();
                     matches += found;
-                    (found > 0).then(|| substitute(label))
-                });
-                (matches, file.to_xml())
-            }
-            false => (re.find_iter(&text).count(), substitute(&text)),
+                    (found > 0).then(|| notebook::Edit::Source {
+                        id: cell.id(),
+                        text: substitute(cell.source()),
+                    })
+                })
+                .collect();
+            nb.apply_all(edits);
+            (matches, nb.to_text())
+        } else {
+            (re.find_iter(&text).count(), substitute(&text))
         };
         if matches == 0 {
             return Ok(None);
@@ -1116,6 +1138,71 @@ mod tests {
 
         f.vault.undo_replace().unwrap();
         assert_eq!(f.read(name), xml);
+    }
+
+    /// A notebook is rewritten in its cells' sources through its model, its outputs, metadata and
+    /// every other cell keeping their bytes, and the undo puts the file back as it was.
+    #[test]
+    fn replace_all_rewrites_a_notebooks_cells_and_not_its_json() {
+        let ipynb = r##"{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# The kettle"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 1,
+   "metadata": {},
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "kettle\n"
+     ]
+    }
+   ],
+   "source": [
+    "print(\"kettle\")"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {},
+   "outputs": [],
+   "source": []
+  }
+ ],
+ "metadata": {
+  "kettle": true
+ },
+ "nbformat": 4,
+ "nbformat_minor": 4
+}
+"##;
+        let f = Fixture::open(VaultConfig::default());
+        f.write("n.ipynb", ipynb);
+        f.vault.rescan().unwrap();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        let plain = Options::default();
+        let report = f
+            .vault
+            .replace_all("kettle", plain, "Pot", true, false)
+            .unwrap();
+        assert_eq!((report.rewritten.len(), report.matches), (1, 2));
+        let sources = ipynb
+            .replace("\"# The kettle\"", "\"# The Pot\"")
+            .replace("print(\\\"kettle\\\")", "print(\\\"Pot\\\")");
+        assert_eq!(f.read("n.ipynb"), sources, "the output and metadata kept");
+
+        f.vault.undo_replace().unwrap();
+        assert_eq!(f.read("n.ipynb"), ipynb);
     }
 
     /// The undo writes back through the etag gate, so a note edited since the rewrite keeps the
