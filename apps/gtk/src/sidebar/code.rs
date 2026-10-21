@@ -1,7 +1,8 @@
 //! Show language-layer data at the active caret as independent Code pane sections.
 //!
-//! Proof goals are the first sections, the debugger's the rest (`debug.rs`); the window
-//! controls visibility, so the debugger's stay up over any tab while a session runs.
+//! Proof goals are the first sections, the debugger's the rest (`debug.rs`), and the notebook in
+//! front's kernel has a strip of its own; the window controls visibility, so the debugger's stay
+//! up over any tab while a session runs.
 
 use super::debug::{self, Debug};
 use super::sections::Sections;
@@ -27,6 +28,10 @@ pub(super) struct Code {
     /// Whether the debugger's strip is up — a session runs, or the tab in front can be debugged —
     /// which keeps the sections' page up.
     debugging: Cell<bool>,
+    /// The notebook in front's kernel: Run All, Interrupt, Restart, Shut Down and Clear All
+    /// Outputs over what it is doing, up while it is in front and no debug session runs.
+    kernel: gtk::Box,
+    kernel_state: gtk::Label,
     /// The goals, a label each.
     goal_labels: gtk::Box,
     expected: Section,
@@ -63,6 +68,14 @@ impl Code {
         if let Some(debug) = &debug {
             page.append(&debug.strip);
         }
+        let (kernel, kernel_state) = debug::strip_of(&[
+            &debug::strip_button("media-seek-forward-symbolic", "win.notebook-run-all"),
+            &debug::strip_button("media-playback-stop-symbolic", "win.notebook-interrupt"),
+            &debug::strip_button("view-refresh-symbolic", "win.notebook-restart"),
+            &debug::strip_button("system-shutdown-symbolic", "win.notebook-shut-down"),
+            &debug::strip_button("edit-clear-all-symbolic", "win.notebook-clear-all-outputs"),
+        ]);
+        page.append(&kernel);
         page.append(&sections.root);
         let root = gtk::Stack::builder().vexpand(true).build();
         root.add_named(&page, Some("sections"));
@@ -83,6 +96,8 @@ impl Code {
             goals,
             debug,
             debugging: Cell::new(false),
+            kernel,
+            kernel_state,
             goal_labels,
             expected,
             expected_label,
@@ -103,7 +118,7 @@ impl Code {
             self.answered.set(false);
             self.show(None, None);
         }
-        if checking && !self.answered.get() && !self.debugging.get() {
+        if checking && !self.answered.get() && !self.strip_up() {
             self.root.set_visible_child_name("checking");
         }
     }
@@ -150,12 +165,12 @@ impl Code {
         self.pick_page();
     }
 
-    /// The sections while any has something to say or the debugger's strip is up, else the page
-    /// saying why there are none.
+    /// The sections while any has something to say or a strip is up, else the page saying why
+    /// there are none.
     fn pick_page(&self) {
         let shown = self.goals.root.is_visible() || self.expected.root.is_visible();
         self.root
-            .set_visible_child_name(match shown || self.debugging.get() {
+            .set_visible_child_name(match shown || self.strip_up() {
                 true => "sections",
                 false => "nothing",
             });
@@ -166,6 +181,30 @@ impl Code {
         if self.debugging.replace(on) != on {
             self.pick_page();
         }
+    }
+
+    fn strip_up(&self) -> bool {
+        self.debugging.get() || self.kernel.is_visible()
+    }
+
+    /// The kernel's strip saying `line`, `why` in its tooltip, or put away (`None`).
+    pub(super) fn set_kernel(&self, shown: Option<(&str, Option<&str>)>) {
+        if let Some((line, why)) = shown {
+            self.kernel_state.set_text(line);
+            self.kernel_state.set_tooltip_text(why);
+        }
+        if self.kernel.is_visible() != shown.is_some() {
+            self.kernel.set_visible(shown.is_some());
+            self.pick_page();
+        }
+    }
+
+    /// What the kernel's strip says, while it is up, for `ACCENT_BENCH_KERNEL`.
+    #[cfg(feature = "bench")]
+    pub(super) fn kernel_line(&self) -> Option<String> {
+        self.kernel
+            .is_visible()
+            .then(|| self.kernel_state.text().to_string())
     }
 
     pub(super) fn section(&self, name: &str) -> Option<&Section> {
