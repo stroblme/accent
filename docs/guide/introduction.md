@@ -1,8 +1,16 @@
 # Welcome to Accent
 
-Accent keeps notes, code, PDFs and drawings together in an ordinary folder called a **vault**.
-Your files stay yours, and you can edit them with other apps too.
-The desktop app runs on Linux, with an [Android companion](android.md) for notes on the go.
+![Accent logo and the words “An editor for code, markdown notes and PDFs”](social-preview.png)
+
+Accent brings notes, code, PDFs and drawings into one workspace. A **vault** is an ordinary folder of files: your files stay yours, and other apps can edit them too.
+The desktop app runs on Linux, with an [Android companion](android.md) for editing notes and reading PDFs.
+
+## What you can do
+
+- **Connect notes and sources.** Follow [wikilinks, tags and backlinks](notes.md), embed drawings, and [link a selected PDF passage to a note](pdf.md#link-a-passage-to-a-note). The link takes you back to the passage.
+- **Work directly on documents.** [Annotate and rearrange PDF pages](pdf.md), edit [draw.io diagrams](diagrams.md) on a native canvas, and move between LaTeX source and its PDF with [SyncTeX](code.md#latex-and-synctex).
+- **Keep development in the same window.** Edit [code](code.md), run [Jupyter cells](notebooks.md), review and resolve [Git changes](git.md), and return to [terminal sessions](terminals.md) after closing the window.
+- **Work where the files live.** Open a vault over [SSH](remote.md) with search, Git and tools running on its host, or let an agent use the vault through the [command line and MCP server](cli.md).
 
 ## Install and open a vault
 
