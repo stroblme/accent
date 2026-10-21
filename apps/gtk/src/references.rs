@@ -110,6 +110,9 @@ impl App {
     /// Open bare URLs before querying a provider. Notes query the index against current text,
     /// returning a file, a New File destination or an external URL; cached link tables may lag typing.
     pub fn go_to_definition(self: &Rc<Self>) {
+        if let Some(notebook) = self.active_notebook() {
+            return self.notebook_definition(&notebook);
+        }
         let Some(tab) = self.active() else {
             return;
         };
@@ -145,21 +148,65 @@ impl App {
             lang::flush(tab.clone()).await;
             let found = vault.definition(&tab.rel(), pos).await;
             tracing::debug!("definition for {} at {pos:?}: {found:?}", tab.rel());
-            let Some(app) = weak.upgrade() else { return };
-            // A request that failed found nothing either, and saying so would hide why: a host
-            // that stopped answering, a server that crashed.
-            let found = match found {
-                Ok(found) => found,
-                Err(e) => return app.cannot("go to the definition", e),
-            };
-            match found.as_slice() {
-                [] => app.toast("No definition found"),
-                [one] => app.open_at(one),
-                // More than one place answers to the name — an overload, a trait method, a note
-                // title two files share — so the pane lists them instead of the window guessing.
-                many => app.show_locations(many),
+            if let Some(app) = weak.upgrade() {
+                app.land_definition(found);
             }
         });
+    }
+
+    /// Go to Definition in the selected code cell of `notebook`, asked of the notebook's program
+    /// at the cell's lines.
+    fn notebook_definition(self: &Rc<Self>, notebook: &Rc<crate::notebook::NotebookTab>) {
+        let Some(cell) = notebook.language_editor() else {
+            return;
+        };
+        let caret = editor::caret(&cell.view().buffer());
+        if let Some((_, url)) = editor::url_under(&caret) {
+            return self.launch(&url);
+        }
+        let doc = cell.document();
+        let Some(vault) = doc.vault() else {
+            return self.needs_vault("go to a definition");
+        };
+        // Said once per notebook, as a code tab says it once.
+        if let Some(server) = doc.support().and_then(|s| s.missing.clone()) {
+            if doc.claim_toast() {
+                self.toast(&format!(
+                    "No language server for this notebook ({server} not found)"
+                ));
+            }
+            return;
+        }
+        let pos = lang::pos_of(&caret);
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            cell.clone().flush().await;
+            let Some(at) = cell.to_document(pos) else {
+                return;
+            };
+            let found = vault.definition(&doc.key(), at).await;
+            tracing::debug!("definition for {} at {at:?}: {found:?}", doc.key());
+            if let Some(app) = weak.upgrade() {
+                app.land_definition(found);
+            }
+        });
+    }
+
+    /// Where a definition request lands: the one place answering, or the places listed.
+    fn land_definition(self: &Rc<Self>, found: accent_api::Result<Vec<Location>>) {
+        // A request that failed found nothing either, and saying so would hide why: a host that
+        // stopped answering, a server that crashed.
+        let found = match found {
+            Ok(found) => found,
+            Err(e) => return self.cannot("go to the definition", e),
+        };
+        match found.as_slice() {
+            [] => self.toast("No definition found"),
+            [one] => self.open_at(one),
+            // More than one place answers to the name — an overload, a trait method, a note
+            // title two files share — so the pane lists them instead of the window guessing.
+            many => self.show_locations(many),
+        }
     }
 
     /// Open a location and put the caret on it: a URL in the browser, a path in a tab, and a file
@@ -170,6 +217,16 @@ impl App {
         }
         // Where the caret was, so Back returns to it.
         self.mark();
+        // A notebook's program is its code cells: the place is in one of them.
+        let notebook = self
+            .notebooks()
+            .into_iter()
+            .find(|n| n.document_key().as_deref() == Some(loc.path.as_str()));
+        if let Some(notebook) = notebook {
+            self.reveal_page(&notebook.page);
+            notebook.go_to(loc.range.start);
+            return;
+        }
         if loc.missing {
             // Cancelling says nothing: the reader followed a link and changed their mind.
             if let Some(ops) = self.ops() {

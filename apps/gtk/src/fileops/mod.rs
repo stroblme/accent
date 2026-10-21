@@ -195,14 +195,19 @@ fn new_file_with(ops: &Rc<Ops>, dir: &str, name: &str, templates: Vec<String>) {
                 let name = name.clone();
                 move || {
                     make_parents(&vault, &rel)?;
-                    vault
-                        .create_note(&rel, template.as_deref())
-                        .map_err(|e| match e {
-                            Error::Core(Core::AlreadyExists(_)) => {
-                                format!("Cannot create {name}: it already exists")
-                            }
-                            e => format!("Cannot create {name}: {e}"),
-                        })
+                    // An empty file is no notebook: an `.ipynb` starts as nbformat's empty one.
+                    let made = match accent_core::path::is_notebook(&rel) {
+                        true => vault
+                            .write_file(&rel, accent_core::notebook::EMPTY_IPYNB.as_bytes())
+                            .map(|()| (rel.clone(), Vec::new())),
+                        false => vault.create_note(&rel, template.as_deref()),
+                    };
+                    made.map_err(|e| match e {
+                        Error::Core(Core::AlreadyExists(_)) => {
+                            format!("Cannot create {name}: it already exists")
+                        }
+                        e => format!("Cannot create {name}: {e}"),
+                    })
                 }
             })
             .await

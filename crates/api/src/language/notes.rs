@@ -516,6 +516,7 @@ impl Notes {
                         severity: Severity::Hint,
                         message: format!("No note named {}", l.target),
                         source: Some("accent".to_string()),
+                        code: None,
                     }),
             );
         }
@@ -527,6 +528,7 @@ impl Notes {
                     severity: Severity::Warning,
                     message: format!("Cannot render this formula: {why}"),
                     source: Some("accent".to_string()),
+                    code: None,
                 }),
         );
         Ok(items)

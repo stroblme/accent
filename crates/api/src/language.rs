@@ -234,6 +234,10 @@ pub struct Diagnostic {
     pub severity: Severity,
     pub message: String,
     pub source: Option<String>,
+    /// The server's name for the rule it reports, a number as its text: pyright's
+    /// `reportUnusedExpression`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 /// A language-server call-hierarchy edge relative to the queried declaration.
@@ -1858,6 +1862,7 @@ mod tests {
                 severity: Severity::Hint,
                 message: "No note named b".into(),
                 source: Some("accent".into()),
+                code: None,
             }],
         };
         let json = serde_json::to_string(&event).unwrap();

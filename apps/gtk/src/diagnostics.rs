@@ -7,6 +7,7 @@
 //! Fixed hues mixed with the theme foreground keep diagnostics readable in light and dark
 //! themes; colour literals remain in `theme.rs`.
 
+use std::cell::{Cell, Ref, RefCell};
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 
@@ -174,8 +175,117 @@ pub fn render(
     shown
 }
 
+/// What a language server said about one view's text, and what of it is painted there.
+pub struct Painted {
+    view: sourceview5::View,
+    buffer: sourceview5::Buffer,
+    /// The messages at the line ends.
+    provider: sourceview5::AnnotationProvider,
+    /// The last publish, moved with the text since: what the hover and the status count read.
+    items: RefCell<Vec<Diagnostic>>,
+    /// Kept out of the text, the hover and the count keeping them.
+    hidden: Cell<bool>,
+    /// Last painted line messages with their full source text. Hidden lines are omitted; the
+    /// provider cannot supply the original text back.
+    shown: RefCell<Shown>,
+    /// Line messages to relayout after the ranges moved with an edit ([`Painted::shift`]).
+    relay: RefCell<Option<Shown>>,
+}
+
+impl Painted {
+    /// Paint over `view`, which shows `buffer`, its line-end messages through a provider of
+    /// their own.
+    pub fn new(view: &sourceview5::View, buffer: &sourceview5::Buffer) -> Painted {
+        let provider = sourceview5::AnnotationProvider::new();
+        view.annotations().add_provider(&provider);
+        Painted {
+            view: view.clone(),
+            buffer: buffer.clone(),
+            provider,
+            items: RefCell::default(),
+            hidden: Cell::new(false),
+            shown: RefCell::default(),
+            relay: RefCell::new(None),
+        }
+    }
+
+    /// Replace them with the provider's full publish. Empty clears them.
+    pub fn set(&self, items: Vec<Diagnostic>) {
+        *self.items.borrow_mut() = items;
+        self.paint();
+    }
+
+    /// Take them out of the text, or put them back, keeping what was said.
+    pub fn hide(&self, hidden: bool) {
+        if self.hidden.replace(hidden) != hidden {
+            self.paint();
+        }
+    }
+
+    pub fn hidden(&self) -> bool {
+        self.hidden.get()
+    }
+
+    /// What the server said, painted or not.
+    pub fn items(&self) -> Ref<'_, Vec<Diagnostic>> {
+        self.items.borrow()
+    }
+
+    /// The line-end messages up.
+    pub fn messages(&self) -> Ref<'_, Shown> {
+        self.shown.borrow()
+    }
+
+    /// Repaint, or clear while hidden, every message measured again.
+    pub fn paint(&self) {
+        self.lay(Shown::new());
+    }
+
+    /// The gutter marks again after a breakpoint came or went, which takes its line's cell from
+    /// them ([`render`]); each message keeps its cut.
+    pub fn remark(&self) {
+        let kept = self.shown.take();
+        self.lay(kept);
+    }
+
+    /// [`Painted::paint`], keeping the cut of each message in `kept` still on its line.
+    fn lay(&self, kept: Shown) {
+        let items = self.items.borrow();
+        let painted: &[Diagnostic] = match self.hidden.get() {
+            true => &[],
+            false => &items,
+        };
+        *self.shown.borrow_mut() = render(&self.view, &self.buffer, &self.provider, painted, kept);
+    }
+
+    /// Move them for an upcoming `from..to` edit ([`Edit`]) so hover and repaint use current
+    /// positions before the next publish.
+    pub fn shift(&self, from: &gtk::TextIter, to: &gtk::TextIter, text: &str) {
+        let edit = Edit::new(lang::pos_of(from), lang::pos_of(to), text);
+        if edit.shift(&mut self.items.borrow_mut()) {
+            *self.relay.borrow_mut() = Some(edit.reline(self.shown.take()));
+        }
+    }
+
+    /// The text changed, the caret now on `caret_line`: messages an edit moved to another line
+    /// are laid again there, and the caret's line is cut again to the room typing left it.
+    pub fn edited(&self, caret_line: i32) {
+        // GtkSourceView pins a message to its line number, where the underline and the gutter
+        // mark ride along with the text: one the edit moved to another line is laid again there.
+        if let Some(kept) = self.relay.take() {
+            self.lay(kept);
+        }
+        refit(
+            &self.view,
+            &self.provider,
+            &mut self.shown.borrow_mut(),
+            caret_line,
+        );
+    }
+}
+
 /// Refit `line`'s message to remaining width after edits, replacing its immutable annotation.
-pub fn refit(
+fn refit(
     view: &sourceview5::View,
     provider: &sourceview5::AnnotationProvider,
     shown: &mut Shown,
@@ -451,6 +561,7 @@ mod tests {
             severity,
             message: format!("{severity:?} at {line}:{from}"),
             source: None,
+            code: None,
         }
     }
 

@@ -46,10 +46,11 @@ pub fn options([case, word, regex]: [&gtk::ToggleButton; 3]) -> Options {
     }
 }
 
-/// What the bar wants done to the rendered preview while presentation mode is on.
+/// What the bar wants done to what it searches instead of a buffer: the rendered preview while
+/// presentation mode is on, a PDF or a notebook.
 pub enum PreviewOp {
     /// A query, and the toggles: Match Case and Match Whole Word, Regular Expression being a
-    /// buffer's alone.
+    /// buffer's and a notebook's alone.
     Find(String, Options),
     Next,
     Previous,
@@ -59,13 +60,23 @@ pub enum PreviewOp {
         line: u32,
         commit: bool,
     },
+    /// Replace the current match, or `all` of them: a notebook's alone, the rest being read only.
+    Replace {
+        with: String,
+        all: bool,
+    },
 }
 
 /// Pane-local window operations supplied as closures so find.rs remains independent of App.
 pub struct Wiring {
-    /// Whether something other than this pane's editor — the rendered preview, or a PDF — is what
-    /// the user is looking at, so find and go-to are addressed there instead.
+    /// Whether something other than this pane's editor — the rendered preview, a PDF or a
+    /// notebook — is what the user is looking at, so find and go-to are addressed there instead.
     pub presenting: Box<dyn Fn() -> bool>,
+    /// Whether that is a notebook, and if so whether its cells can be rewritten, which a
+    /// presented one's cannot: a notebook is matched as a buffer is, and replaced in.
+    pub notebook: Box<dyn Fn() -> Option<bool>>,
+    /// A notebook's one-line selection, the query on opening as a buffer's is.
+    pub selected: Box<dyn Fn() -> Option<String>>,
     pub preview: Box<dyn Fn(PreviewOp)>,
     /// How many pages the thing being looked at has, when it is counted in pages rather than
     /// lines. `None` for an editor, which counts lines.
@@ -444,15 +455,16 @@ impl Bar {
     /// Preview whole-word means word starts. Disable unsupported regex without losing its saved state.
     fn sync_toggles(&self) {
         let presenting = self.presenting();
+        let notebook = self.notebook().is_some();
         let [_, word, regex] = &self.toggles;
-        regex.set_sensitive(!presenting);
+        regex.set_sensitive(!presenting || notebook);
         // A PDF is counted in pages; the preview, like a buffer, is not.
         let preview = presenting && self.wiring.get().is_some_and(|w| (w.pages)().is_none());
         word.set_tooltip_text(Some(match preview {
             true => WORD_STARTS,
             false => TOGGLES[1].1,
         }));
-        if presenting {
+        if presenting && !notebook {
             self.query.remove_css_class("error");
         }
     }
@@ -470,13 +482,16 @@ impl Bar {
                 self.line.select_region(0, -1);
             }
             _ => {
-                let selected = self.tab().and_then(|tab| tab.selected_query());
+                let selected = match self.tab() {
+                    Some(tab) => tab.selected_query(),
+                    None => self.wiring.get().and_then(|w| (w.selected)()),
+                };
                 if let Some(selected) = &selected {
                     self.query.set_text(selected);
                 }
                 // Nothing behind a presented preview or PDF can be rewritten, so the row is
                 // not offered there: it used to appear and quietly do nothing.
-                let replacing = mode == Mode::Replace && !self.presenting();
+                let replacing = mode == Mode::Replace && self.rewritable();
                 self.replace_row.set_visible(replacing);
                 self.sync_toggles();
                 self.rows.set_visible_child_name("find");
@@ -526,6 +541,25 @@ impl Bar {
         self.matches.set_text(text);
     }
 
+    /// Mark the query box as not compiling, for a notebook, which matches the query itself.
+    pub fn set_invalid(&self, on: bool) {
+        match on {
+            true => self.query.add_css_class("error"),
+            false => self.query.remove_css_class("error"),
+        }
+    }
+
+    /// Search again for what the box says, if the bar is up on its find row: for a notebook come
+    /// to the front, which keeps a query of its own rather than taking the bar's as a tab does.
+    pub fn research(&self) {
+        if self.showing("find") {
+            self.to_preview(PreviewOp::Find(
+                self.query.text().to_string(),
+                self.options(),
+            ));
+        }
+    }
+
     /// Shown first, so the bar is in the window and slides down rather than appearing at once.
     fn reveal(&self) {
         self.bar.set_visible(true);
@@ -552,6 +586,16 @@ impl Bar {
 
     fn presenting(&self) -> bool {
         self.wiring.get().is_some_and(|w| (w.presenting)())
+    }
+
+    /// Whether the pane shows a notebook, and if so whether it can be rewritten.
+    fn notebook(&self) -> Option<bool> {
+        self.wiring.get().and_then(|w| (w.notebook)())
+    }
+
+    /// Whether what the bar searches can be replaced in: a buffer, or a notebook not presented.
+    fn rewritable(&self) -> bool {
+        !self.presenting() || self.notebook() == Some(true)
     }
 
     /// Whether the bar is up on the `"find"` or the `"goto"` row.
@@ -596,14 +640,17 @@ impl Bar {
 
     fn replace(self: &Rc<Self>, all: bool) {
         // A rendered preview and a PDF are read-only: Ctrl+H reaches neither, and the row that
-        // asks for one is hidden while either is presented.
-        if self.presenting() {
+        // asks for one is hidden while either is presented. A notebook replaces in its cells.
+        if !self.rewritable() {
             return;
         }
-        let Some(tab) = self.tab() else { return };
         let with = self.replace.text();
         recall::remember(&QUERIES, &self.query.text());
         recall::remember(&REPLACEMENTS, &with);
+        let Some(tab) = self.tab() else {
+            let with = with.to_string();
+            return self.to_preview(PreviewOp::Replace { with, all });
+        };
         self.busy.set(true);
         match all {
             true => tab.replace_all(&with),
@@ -640,9 +687,10 @@ impl Bar {
         if !self.showing("goto") {
             return;
         }
-        // A PDF is counted in pages and everything else in lines, and the row says so in both
-        // places: a "Line[:column]" prompt over a page count is nonsense.
+        // A PDF is counted in pages, a notebook in cells and everything else in lines, and the
+        // row says so in both places: a "Line[:column]" prompt over a page count is nonsense.
         let (label, placeholder) = match self.wiring.get().and_then(|w| (w.pages)()) {
+            Some(cells) if self.notebook().is_some() => (format!("of {cells} cells"), "Cell"),
             Some(pages) => (format!("of {pages} pages"), "Page"),
             None => {
                 let count = self.tab().map(|tab| tab.line_count()).unwrap_or(0);

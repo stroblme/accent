@@ -525,6 +525,9 @@ impl App {
     /// Retarget Find to the pane's document; hide it over shells because VTE owns their scrollback.
     fn retarget_find(&self, pane: &Pane) {
         pane.find.retarget(self.tab_of(pane));
+        if self.notebook_of(pane).is_some() {
+            pane.find.research();
+        }
         if self.shows_shell(pane) {
             pane.find.close();
         }
@@ -821,6 +824,28 @@ impl App {
             sidebar.set_outline_rows(&doc.key(), &rows, jump, Some(&d.thumbnails()));
             return self.follow_outline();
         }
+        // A notebook's is its markdown cells' headings.
+        if let Some(nb) = doc.notebook() {
+            let rows: Vec<_> = nb
+                .outline()
+                .into_iter()
+                .map(|(level, text, at)| (sidebar::Line::new(level, text), at))
+                .collect();
+            if rows.is_empty() {
+                let body = "Add a heading to a markdown cell to help navigate this notebook.";
+                let none = sidebar::outline_note("No Headings", body);
+                return sidebar.set_outline(Some(&none));
+            }
+            let jump = glib::clone!(
+                #[weak]
+                nb,
+                move |(id, at)| nb.goto(id, at)
+            );
+            if sidebar.set_outline_rows(&doc.key(), &rows, jump, None) {
+                self.follow_outline();
+            }
+            return;
+        }
         let Some(tab) = doc.tab() else {
             // A shell and a comparison are no file, and take the pane's own "Open a file…".
             let none = match doc {
@@ -883,8 +908,8 @@ impl App {
             && tab.lang.outline().is_empty()
     }
 
-    /// Follow the caret's heading/symbol, PDF bookmark or diagram page and scroll it
-    /// into view. Skip hidden Outline; showing it catches up.
+    /// Follow the caret's heading/symbol, PDF bookmark, diagram page or notebook heading and
+    /// scroll it into view. Skip hidden Outline; showing it catches up.
     fn follow_outline(&self) {
         let Some(sidebar) = self.sidebar.get() else {
             return;
@@ -903,6 +928,10 @@ impl App {
             Some(Doc::Diagram(d)) => {
                 let row = Some(d.page_index());
                 return sidebar.follow_outline(&d.key(), row, row);
+            }
+            Some(Doc::Notebook(nb)) => {
+                let (row, above) = nb.outline_row();
+                return sidebar.follow_outline(&nb.key(), row, row.or(above.then_some(0)));
             }
             _ => return,
         };
@@ -951,29 +980,42 @@ impl App {
                 (Some("PDF".to_string()), facts)
             }
             Some(Doc::Diagram(d)) => (Some("Diagram".to_string()), d.facts()),
-            Some(Doc::Notebook(n)) => (Some(n.kind_label()), Some(n.facts())),
+            // A notebook's cells, and after them what is wrong with its code, in every cell.
+            Some(Doc::Notebook(n)) => (
+                Some(n.kind_label()),
+                Some(match n.diagnostics_counts() {
+                    Some(counts) => format!("{} · {counts}", n.facts()),
+                    None => n.facts(),
+                }),
+            ),
             Some(Doc::Image(_)) => (Some("Image".to_string()), None),
             Some(Doc::Terminal(_)) => (Some("Terminal".to_string()), None),
             Some(Doc::Status(_)) | Some(Doc::Diff(_)) | None => (None, None),
         };
         self.statusbar.set_kind(kind.as_deref());
-        let starting = self
-            .active()
-            .and_then(|tab| tab.lang.starting.borrow().clone());
+        let starting = doc
+            .as_ref()
+            .and_then(Doc::language_document)
+            .and_then(|doc| doc.starting());
         self.statusbar.set_starting(starting.as_deref());
         self.statusbar
             .set_checking(self.active().and_then(|tab| tab.lang.checking.get()));
         // The count of what is wrong with a document is also the switch that keeps it out of the
         // text, and a PDF's page count opens the page commands for that page; every other count
         // is a readout with nothing to press.
-        let press = match &doc {
+        let hidden = match &doc {
             Some(Doc::Text(tab)) if tab.flavour() == editor::Flavour::Code && facts.is_some() => {
-                Some(match tab.diagnostics_hidden() {
-                    true => "Show these in the text",
-                    false => "Hide these in the text; the pointer still shows them",
-                })
+                Some(tab.diagnostics_hidden())
             }
-            Some(Doc::Pdf(pdf)) if pdf.page_count() > 0 => Some("Add or delete a page"),
+            Some(Doc::Notebook(n)) if n.diagnostics_counts().is_some() => {
+                Some(n.diagnostics_hidden())
+            }
+            _ => None,
+        };
+        let press = match (&doc, hidden) {
+            (_, Some(true)) => Some("Show these in the text"),
+            (_, Some(false)) => Some("Hide these in the text; the pointer still shows them"),
+            (Some(Doc::Pdf(pdf)), None) if pdf.page_count() > 0 => Some("Add or delete a page"),
             _ => None,
         };
         self.statusbar.set_facts(facts.as_deref(), press);

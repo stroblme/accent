@@ -381,6 +381,13 @@ smoke: gtk-bench vault xvfb
 # `ACCENT_BENCH_DEBUG` debugs a small Python program with debugpy, held against `debug.expected`,
 # and is skipped where `python3` has no debugpy. Its program runs in a terminal tab, so under a
 # scratch HOME.
+#
+# `ACCENT_BENCH_KERNEL` writes a Jupyter notebook and runs it on an ipykernel, held against
+# `kernel.expected`, and is skipped where `python3` has no ipykernel; under a scratch HOME too,
+# since IPython keeps its history in `~/.ipython`.
+#
+# `ACCENT_BENCH_NOTEBOOK_LSP` writes two notebooks whose code cells `fake-lsp.py --notebook`
+# answers, configured for the scratch vault, and is held against `notebook-lsp.expected`.
 drills: gtk-bench xvfb
 	$(HEADLESS) ACCENT_BENCH_KEYS=1 timeout 60 $(TARGET_DIR)/accent "$$xdg/vault" >"$$xdg/keys" && \
 	grep '^bench ' "$$xdg/keys" | diff -u apps/gtk/src/bench/keys.expected -
@@ -402,6 +409,16 @@ drills: gtk-bench xvfb
 			>"$$0/vault/demo.py" && \
 		ACCENT_BENCH_DEBUG=demo.py:2 timeout 60 $(TARGET_DIR)/accent "$$0/vault" >"$$0/debug" && \
 		grep "^bench debug " "$$0/debug" | diff -u apps/gtk/src/bench/debug.expected -' "$$xdg"
+	$(HEADLESS) sh -c 'export HOME="$$0/home" && mkdir "$$HOME" && \
+		{ python3 -c "import ipykernel" 2>/dev/null || { echo "SKIPPED the kernel drill: no ipykernel"; exit 0; }; } && \
+		ACCENT_BENCH_KERNEL=run.ipynb timeout 90 $(TARGET_DIR)/accent "$$0/vault" >"$$0/kernel" && \
+		grep "^bench kernel " "$$0/kernel" | diff -u apps/gtk/src/bench/kernel.expected -' "$$xdg"
+	$(HEADLESS) sh -c 'mkdir -p "$$XDG_CONFIG_HOME/accent" && \
+		printf "[vaults.\"%s\".lsp.servers]\npython3 = [\"python3\", \"%s\", \"--notebook\"]\n" "$$0" \
+			"$(CURDIR)/build-aux/fake-lsp.py" >"$$XDG_CONFIG_HOME/accent/config.toml" && \
+		ACCENT_BENCH_NOTEBOOK_LSP=lsp.ipynb,lsp_marimo.py timeout 60 $(TARGET_DIR)/accent "$$0"' \
+		"$$xdg/vault" >"$$xdg/notebook-lsp" && \
+	grep '^bench ' "$$xdg/notebook-lsp" | diff -u apps/gtk/src/bench/notebook-lsp.expected -
 
 ## screenshots: regenerate docs/screenshot-1..5.png and data/screenshots (needs magick, htop, Xvfb, debugpy)
 #

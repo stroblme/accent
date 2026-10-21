@@ -46,6 +46,64 @@ pub struct Attachment {
     pub items: Vec<Item>,
 }
 
+/// One output as nbformat 4 stores it, in a file or as a kernel's message makes it; `None` for
+/// a type nbformat 4 does not have.
+pub fn read(o: &Value) -> Option<Output> {
+    let string = |key| o.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+    Some(match o.get("output_type")?.as_str()? {
+        "stream" => Output::Stream {
+            stderr: o.get("name").and_then(Value::as_str) == Some("stderr"),
+            text: text(o.get("text")?)?,
+        },
+        "display_data" | "execute_result" => Output::Data {
+            count: o
+                .get("execution_count")
+                .and_then(Value::as_u64)
+                .and_then(|n| n.try_into().ok()),
+            items: items(o.get("data")?),
+        },
+        "error" => Output::Error {
+            name: string("ename"),
+            value: string("evalue"),
+            traceback: o
+                .get("traceback")
+                .and_then(Value::as_array)
+                .map(|lines| {
+                    lines
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        },
+        _ => return None,
+    })
+}
+
+/// The types of a MIME bundle, an output's `data` or an attachment.
+pub(super) fn items(bundle: &Value) -> Vec<Item> {
+    let Some(bundle) = bundle.as_object() else {
+        return Vec::new();
+    };
+    bundle
+        .iter()
+        .map(|(mime, data)| Item {
+            mime: mime.clone(),
+            data: text(data).map_or_else(|| Data::Json(data.clone()), Data::Text),
+        })
+        .collect()
+}
+
+/// A string, or the lines nbformat splits a string into, joined.
+pub(super) fn text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) => Some(s.clone()),
+        Value::Array(lines) => lines.iter().map(Value::as_str).collect(),
+        _ => None,
+    }
+}
+
 /// The form an output is shown in.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Form<'a> {

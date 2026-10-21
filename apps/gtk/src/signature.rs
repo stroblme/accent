@@ -4,16 +4,16 @@
 //! characters request it; `None`, Escape, leaving the line, losing focus or switching tabs
 //! hide it.
 
-use crate::editor::{Tab, caret};
+use crate::editor::caret;
 use crate::hover::WIDTH;
-use crate::lang;
+use crate::lang::{self, Editor};
 use accent_api::Signature;
 use gtk::prelude::*;
 use gtk::{gdk, glib};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-/// The signature popover of one tab, and the request that would fill it.
+/// The signature popover of one editor, and the request that would fill it.
 #[derive(Default)]
 pub struct Help {
     popover: RefCell<Option<gtk::Popover>>,
@@ -25,6 +25,14 @@ pub struct Help {
 impl Help {
     pub fn is_shown(&self) -> bool {
         self.popover.borrow().is_some()
+    }
+
+    /// The signature line shown, as its markup. `ACCENT_BENCH_NOTEBOOK_LSP` only.
+    #[cfg(feature = "bench")]
+    pub fn shown(&self) -> Option<String> {
+        let popover = self.popover.borrow().clone()?;
+        let line = popover.child()?.first_child()?;
+        Some(line.downcast::<gtk::Label>().ok()?.label().to_string())
     }
 
     /// Take the popover away and drop whatever was being asked for it.
@@ -66,104 +74,110 @@ pub fn markup(sig: &Signature) -> String {
     }
 }
 
-/// Wire a tab's view to ask for a signature and to know when to stop showing one. Called by
+/// Wire an editor's view to ask for a signature and to know when to stop showing one. Called by
 /// [`lang::attach`].
-pub fn install(tab: &Rc<Tab>) {
+pub fn install(editor: &Rc<dyn Editor>) {
+    // Weak throughout: the editor holds the view these handlers hang off.
+    let (view, weak) = (editor.view(), Rc::downgrade(editor));
+    let buffer = view.buffer();
     // A trigger character was typed: one character, or the pair `typing` writes for a bracket,
     // at the caret, as for the completion popup. A template landing with a `(` in it is not a
     // call being typed. Connected before the insertion lands, so the caret is read one idle
     // later, once it sits after the character the server is being asked about.
-    tab.buffer.connect_insert_text(glib::clone!(
-        #[weak(rename_to = tab)]
-        tab,
-        move |buffer, at, text| {
-            let typed = text.chars().count() <= 2 && at.offset() == caret(buffer).offset();
-            let Some(last) = text
-                .chars()
-                .next_back()
-                .filter(|_| typed && !tab.is_loading())
-            else {
-                return;
-            };
-            let asks = tab
-                .lang
-                .support()
-                .is_some_and(|s| s.signature_triggers.contains(&last));
-            if asks {
-                glib::idle_add_local_once(move || request(&tab));
-            }
+    let editor = weak.clone();
+    buffer.connect_insert_text(move |buffer, at, text| {
+        let Some(editor) = editor.upgrade() else {
+            return;
+        };
+        let typed = text.chars().count() <= 2 && at.offset() == caret(buffer).offset();
+        let Some(last) = text
+            .chars()
+            .next_back()
+            .filter(|_| typed && !editor.is_loading())
+        else {
+            return;
+        };
+        let asks = editor
+            .document()
+            .support()
+            .is_some_and(|s| s.signature_triggers.contains(&last));
+        if asks {
+            glib::idle_add_local_once(move || request(&editor));
         }
-    ));
+    });
 
     // The caret left the line the call is on: whatever is being typed now is not this call.
-    tab.buffer.connect_cursor_position_notify(glib::clone!(
-        #[weak(rename_to = tab)]
-        tab,
-        move |buffer| {
-            let line = caret(buffer).line();
-            if tab.lang.signature.is_shown() && line != tab.lang.signature.line.get() {
-                tab.lang.signature.dismiss();
-            }
+    let editor = weak.clone();
+    buffer.connect_cursor_position_notify(move |buffer| {
+        let Some(editor) = editor.upgrade() else {
+            return;
+        };
+        let (line, help) = (caret(buffer).line(), editor.signature());
+        if help.is_shown() && line != help.line.get() {
+            help.dismiss();
         }
-    ));
+    });
 
+    let dismiss = move || {
+        if let Some(editor) = weak.upgrade() {
+            editor.signature().dismiss();
+        }
+    };
     let focus = gtk::EventControllerFocus::new();
-    focus.connect_leave(glib::clone!(
-        #[weak(rename_to = tab)]
-        tab,
-        move |_| tab.lang.signature.dismiss()
-    ));
-    tab.view.add_controller(focus);
+    let leave = dismiss.clone();
+    focus.connect_leave(move |_| leave());
+    view.add_controller(focus);
 
     // The tab was switched away from or closed with a signature up.
-    tab.view.connect_unmap(glib::clone!(
-        #[weak(rename_to = tab)]
-        tab,
-        move |_| tab.lang.signature.dismiss()
-    ));
+    view.connect_unmap(move |_| dismiss());
 }
 
 /// Consume Escape while signature help is visible; return `None` for other keys.
 /// `editor::keys` gives this priority over ghost text so one Escape closes one feature.
-pub fn on_key(tab: &Rc<Tab>, key: gdk::Key) -> Option<glib::Propagation> {
-    (key == gdk::Key::Escape && tab.lang.signature.is_shown()).then(|| {
-        tab.lang.signature.dismiss();
+pub fn on_key(editor: &dyn Editor, key: gdk::Key) -> Option<glib::Propagation> {
+    (key == gdk::Key::Escape && editor.signature().is_shown()).then(|| {
+        editor.signature().dismiss();
         glib::Propagation::Stop
     })
 }
 
 /// Ask what call the caret is inside, and show or hide the popover from the answer.
-pub fn request(tab: &Rc<Tab>) {
-    let Some(vault) = tab.lang.vault() else {
+pub fn request(editor: &Rc<dyn Editor>) {
+    let doc = editor.document();
+    let Some(vault) = doc.vault() else {
         return;
     };
-    if let Some(handle) = tab.lang.signature.request.borrow_mut().take() {
+    if let Some(handle) = editor.signature().request.borrow_mut().take() {
         handle.abort();
     }
-    let weak = Rc::downgrade(tab);
+    let weak = Rc::downgrade(editor);
     let handle = glib::spawn_future_local(async move {
-        let Some(tab) = weak.upgrade() else { return };
-        lang::flush(tab.clone()).await;
+        let Some(editor) = weak.upgrade() else { return };
+        editor.clone().flush().await;
         // Read after the flush, not before: the edit that asked for this may have moved it.
-        let caret = caret(&tab.buffer);
-        let answer = vault.signature_help(&tab.rel(), lang::pos_of(&caret)).await;
+        let caret = caret(&editor.view().buffer());
+        let Some(at) = editor.to_document(lang::pos_of(&caret)) else {
+            return editor.signature().dismiss();
+        };
+        let key = doc.key();
+        let answer = vault.signature_help(&key, at).await;
         tracing::debug!(
-            "signature for {}: {:?}",
-            tab.rel(),
+            "signature for {key}: {:?}",
             answer.as_ref().map(|s| s.as_ref().map(|s| &s.label))
         );
         match answer {
-            Ok(Some(sig)) => show(&tab, &sig),
+            Ok(Some(sig)) => show(editor.as_ref(), &sig),
             // No call here any more, or the server could not say: the popover goes.
-            _ => tab.lang.signature.dismiss(),
+            _ => editor.signature().dismiss(),
         }
     });
-    *tab.lang.signature.request.borrow_mut() = Some(handle);
+    *editor.signature().request.borrow_mut() = Some(handle);
 }
 
 /// Put the signature over the caret, replacing whatever was there.
-fn show(tab: &Rc<Tab>, sig: &Signature) {
-    tab.lang.signature.dismiss();
+fn show(editor: &dyn Editor, sig: &Signature) {
+    let (help, view) = (editor.signature(), editor.view());
+    help.dismiss();
     let content = gtk::Box::new(gtk::Orientation::Vertical, 4);
     let code = gtk::Label::builder()
         .use_markup(true)
@@ -200,12 +214,10 @@ fn show(tab: &Rc<Tab>, sig: &Signature) {
         .position(gtk::PositionType::Top)
         .child(&content)
         .build();
-    popover.set_parent(&tab.view);
-    let caret = caret(&tab.buffer);
-    let at = tab.view.iter_location(&caret);
-    let (x, y) = tab
-        .view
-        .buffer_to_window_coords(gtk::TextWindowType::Widget, at.x(), at.y());
+    popover.set_parent(view);
+    let caret = caret(&view.buffer());
+    let at = view.iter_location(&caret);
+    let (x, y) = view.buffer_to_window_coords(gtk::TextWindowType::Widget, at.x(), at.y());
     popover.set_pointing_to(Some(&gdk::Rectangle::new(
         x,
         y,
@@ -215,8 +227,8 @@ fn show(tab: &Rc<Tab>, sig: &Signature) {
     // A popover parented by hand stays parented until it is unparented by hand.
     popover.connect_closed(|popover| popover.unparent());
     popover.popup();
-    tab.lang.signature.line.set(caret.line());
-    *tab.lang.signature.popover.borrow_mut() = Some(popover);
+    help.line.set(caret.line());
+    *help.popover.borrow_mut() = Some(popover);
 }
 
 #[cfg(test)]

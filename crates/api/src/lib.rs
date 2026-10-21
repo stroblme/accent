@@ -14,6 +14,7 @@ pub mod ffi;
 uniffi::setup_scaffolding!();
 pub mod debug;
 mod error;
+pub mod kernel;
 pub mod language;
 pub mod link;
 mod local;
@@ -131,6 +132,11 @@ pub enum Event {
     Debug {
         session: u64,
         news: debug::News,
+    },
+    /// What kernel `session`, the number [`Vault::kernel_start`] was given, has to say.
+    Kernel {
+        session: u64,
+        news: kernel::News,
     },
 }
 

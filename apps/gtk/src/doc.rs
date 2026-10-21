@@ -160,6 +160,15 @@ impl Doc {
         }
     }
 
+    /// What the document keeps on the language layer: a text tab's file, a notebook's program.
+    pub fn language_document(&self) -> Option<Rc<crate::lang::Document>> {
+        match self {
+            Doc::Text(tab) => Some(tab.lang.doc.clone()),
+            Doc::Notebook(n) => Some(n.language_document()),
+            _ => None,
+        }
+    }
+
     /// A file from outside the vault, opened by its absolute path. There is no index behind it,
     /// so it has no backlinks, never appears in search, and reloads from a file monitor of its
     /// own rather than from the vault's watcher.

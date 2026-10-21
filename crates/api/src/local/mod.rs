@@ -14,7 +14,7 @@ use accent_core::index::{Index, InterruptHandle};
 
 use crate::paths::outside;
 use crate::worker::{self, Msg};
-use crate::{Event, VaultConfig, debug, language, locked};
+use crate::{Event, VaultConfig, debug, kernel, language, locked};
 
 mod files;
 mod ignored;
@@ -42,6 +42,8 @@ pub(crate) struct Local {
     pub(crate) lang: std::sync::Arc<language::Languages>,
     /// The programs being debugged, each under its adapter.
     pub(crate) debug: Arc<debug::Debugs>,
+    /// The notebooks' kernels.
+    pub(crate) kernels: Arc<kernel::Kernels>,
     tx: Sender<Msg>,
     /// Scan-interrupt flag: [`worker::PAUSE`] or [`worker::CLOSE`]. The inbox
     /// is unavailable during scanning and read only between write batches,
@@ -107,6 +109,7 @@ impl Local {
         // The providers send their diagnostics down the same channel the worker's events use.
         let lang = language::Languages::new(root.clone(), db.to_path_buf(), events.clone());
         let debug = Arc::new(debug::Debugs::new(root.clone(), events.clone()));
+        let kernels = Arc::new(kernel::Kernels::new(root.clone(), events.clone()));
         let stop = Arc::new(AtomicU8::new(worker::RUN));
         let handle = worker::spawn(
             root.clone(),
@@ -129,6 +132,7 @@ impl Local {
                 cfg: Mutex::new(cfg),
                 lang,
                 debug,
+                kernels,
                 tx,
                 stop,
                 worker: Some(handle),
@@ -319,6 +323,7 @@ impl Drop for Local {
         self.stop.store(worker::CLOSE, Ordering::Relaxed);
         // Before the worker, because a provider is still sending diagnostics down its channel.
         self.debug.shutdown();
+        self.kernels.shutdown();
         self.lang.shutdown();
         let _ = self.tx.send(Msg::Shutdown);
         if let Some(handle) = self.worker.take() {

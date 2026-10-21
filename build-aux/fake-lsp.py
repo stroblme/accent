@@ -4,7 +4,10 @@
 server's ranking, its indexing or its version. With `--calls FILE` it also answers a call
 hierarchy from that file, which `apps/cli/tests/mcp.rs` holds `explore`'s `precise` mode against.
 With `--inline TEXT` it suggests TEXT as ghost text wherever it is asked, standing in for merl-rt
-in `make screenshots`.
+in `make screenshots`. With `--notebook` it keeps what it is sent and answers about it, for
+`ACCENT_BENCH_NOTEBOOK_LSP`: an error over each `oops` and pyright's unused-expression warning on
+each line that is a name alone, after every change; `NAME at LINE:COLUMN` as the hover; the first
+`NAME =` or `def NAME` as the definition; and `f(a, b)` as the signature, on `(`.
 
 `.` triggers it, `;` commits a row (its `allCommitCharacters`), and it can resolve: `alpha` is a
 snippet with a stop (`${1:x}`, as rust-analyzer fills arguments), `beta` one with a plain stop
@@ -41,6 +44,38 @@ CALLS = json.load(open(sys.argv[sys.argv.index("--calls") + 1])) if "--calls" in
 LOADING = [int(sys.argv[sys.argv.index("--loading") + 1]) if "--loading" in sys.argv else 0]
 ROOT = [""]
 INLINE = sys.argv[sys.argv.index("--inline") + 1] if "--inline" in sys.argv else None
+NOTEBOOK = "--notebook" in sys.argv
+ANSWERS = {"hoverProvider": True, "definitionProvider": True,
+           "signatureHelpProvider": {"triggerCharacters": ["("]}}
+DOCS = {}
+
+
+def span(line, start, end):
+    return {"start": {"line": line, "character": start}, "end": {"line": line, "character": end}}
+
+
+def publish(uri):
+    items = []
+    for n, line in enumerate(DOCS[uri].split("\n")):
+        for at in re.finditer(r"\boops\b", line):
+            items.append({"range": span(n, at.start(), at.end()), "severity": 1, "code": "fake",
+                          "message": "oops is not defined"})
+        name = re.fullmatch(r"(\s*)([A-Za-z_]\w*)\s*", line)
+        if name:
+            items.append({"range": span(n, name.end(1), name.end(2)), "severity": 2,
+                          "code": "reportUnusedExpression", "message": "Expression value is unused"})
+    send({"method": "textDocument/publishDiagnostics",
+          "params": {"uri": uri, "diagnostics": items}})
+
+
+def word_at(params):
+    """The word at a request's position, and where it is asked."""
+    uri, at = params["textDocument"]["uri"], params["position"]
+    line = DOCS.get(uri, "").split("\n")[at["line"]]
+    start = at["character"]
+    while start > 0 and (line[start - 1].isalnum() or line[start - 1] == "_"):
+        start -= 1
+    return uri, at, re.match(r"\w*", line[start:]).group()
 
 
 def declared(rel, line, name):
@@ -89,7 +124,29 @@ def answer(message):
             "completionProvider": {"triggerCharacters": ["."], "resolveProvider": True,
                                    "allCommitCharacters": [";"]},
             "callHierarchyProvider": CALLS is not None,
-            "inlineCompletionProvider": INLINE is not None}}})
+            "inlineCompletionProvider": INLINE is not None,
+            **(ANSWERS if NOTEBOOK else {})}}})
+    elif NOTEBOOK and method in ("textDocument/didOpen", "textDocument/didChange"):
+        p = message["params"]
+        uri = p["textDocument"]["uri"]
+        DOCS[uri] = p["textDocument"]["text"] if "text" in p["textDocument"] \
+            else p["contentChanges"][-1]["text"]
+        publish(uri)
+    elif NOTEBOOK and method == "textDocument/hover":
+        uri, at, word = word_at(message["params"])
+        send({"id": id, "result": {"contents": {"kind": "markdown",
+                                                "value": f"{word} at {at['line']}:{at['character']}"}}})
+    elif NOTEBOOK and method == "textDocument/definition":
+        uri, _, word = word_at(message["params"])
+        lines = DOCS.get(uri, "").split("\n")
+        found = next(((n, l.index(word)) for n, l in enumerate(lines)
+                      if re.match(r"\s*%s\s*=(?!=)" % re.escape(word), l)
+                      or re.search(r"\bdef %s\b" % re.escape(word), l)), None)
+        send({"id": id, "result": found and {"uri": uri, "range": span(found[0], found[1],
+                                                                       found[1] + len(word))}})
+    elif NOTEBOOK and method == "textDocument/signatureHelp":
+        send({"id": id, "result": {"signatures": [{"label": "f(a, b)", "parameters": [
+            {"label": [2, 3]}, {"label": [5, 6]}]}], "activeSignature": 0, "activeParameter": 0}})
     elif method == "textDocument/prepareCallHierarchy" and LOADING[0] > 0:
         LOADING[0] -= 1
         send({"id": id, "error": {"code": -32801, "message": "content modified"}})

@@ -8,6 +8,7 @@
 //! `return` are kept as written (marimo reads neither the parameters nor the `return`), the body
 //! indented as marimo indents it, and a markdown cell's call kept around its string.
 
+use std::borrow::Cow;
 use std::ops::Range;
 
 use super::{Cell, CellId, Kind, Notebook, invalid};
@@ -127,6 +128,7 @@ pub(super) fn read(text: &str) -> Result<Notebook> {
             outputs: Vec::new(),
             attachments: Vec::new(),
             kept: Box::new(super::Kept::Marimo(kept)),
+            run: None,
         });
     }
     let footer = gap + &lines[end..].concat();
@@ -401,13 +403,13 @@ impl Literal {
 }
 
 impl Kept {
-    /// The block holding `source`, set apart by `gap`, with this one's head and tail.
-    fn render(&self, gap: &str, source: &str) -> String {
+    /// The block holding `source`, with this one's head and tail.
+    fn render(&self, source: &str) -> String {
         let body = match &self.literal {
             Some(literal) => literal.render(source),
             None => source.to_string(),
         };
-        let mut out = format!("{gap}{}", self.head);
+        let mut out = self.head.clone();
         if !body.is_empty() {
             for line in body.split('\n') {
                 if !blank(line) {
@@ -419,6 +421,38 @@ impl Kept {
         }
         out.push_str(&self.tail);
         out
+    }
+
+    /// The byte of `source` that byte `at` of `block`, written as this holding `source`, is: 0
+    /// above the source's first line and its end below its last. On a line of a string holding
+    /// escapes it is near that byte, not exact.
+    fn place(&self, block: &str, at: usize, source: &str) -> usize {
+        let before = &block.as_bytes()[..at];
+        let line = before.iter().filter(|&&b| b == b'\n').count();
+        let start = before
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .map_or(0, |i| i + 1);
+        let (mut first, mut indent) = (self.head.matches('\n').count(), self.indent.len());
+        if let Some(literal) = &self.literal {
+            first += literal.open.matches('\n').count() + literal.lead.len();
+            indent += literal.indent.len();
+        }
+        let Some(n) = line.checked_sub(first) else {
+            return 0;
+        };
+        let Some(text) = source.split('\n').nth(n) else {
+            return source.len();
+        };
+        // A string's first line, when no line break follows its quotes, starts after them.
+        if n == 0 && self.literal.as_ref().is_some_and(|l| l.lead.is_empty()) {
+            indent = block[start..]
+                .find(QUOTES)
+                .map_or(indent, |q| q + QUOTES.len());
+        }
+        let line_start: usize = source.split('\n').take(n).map(|l| l.len() + 1).sum();
+        let column = (at - start).saturating_sub(indent).min(text.len());
+        source.floor_char_boundary(line_start + column)
     }
 }
 
@@ -434,23 +468,53 @@ impl Frame {
     pub(super) fn write(&self, cells: &[Cell]) -> String {
         let mut out = self.header.clone();
         for cell in cells {
-            let kept = kept(cell);
-            match (cell.kind == kept.kind, cell.source == kept.source) {
-                (true, true) => {
-                    out.push_str(&kept.gap);
-                    out.push_str(&kept.text);
-                }
-                (true, false) => out.push_str(&kept.render(&kept.gap, &cell.source)),
-                (false, _) => {
-                    out.push_str(&self.template(cell.kind).render(&kept.gap, &cell.source))
-                }
-            }
+            out.push_str(&kept(cell).gap);
+            out.push_str(&self.block(cell).0);
         }
         out.push_str(&self.footer);
         if !self.newline {
             out.pop();
         }
         out
+    }
+
+    /// The block `cell` is written as, without the blank lines before it, and how it is kept:
+    /// as it was read until its source changes, then rendered as it was kept, and once its kind
+    /// changes, as a cell of that kind is.
+    fn block<'a>(&self, cell: &'a Cell) -> (Cow<'a, str>, Cow<'a, Kept>) {
+        let kept = kept(cell);
+        match (cell.kind == kept.kind, cell.source == kept.source) {
+            (true, true) => (Cow::Borrowed(&kept.text), Cow::Borrowed(kept)),
+            (true, false) => (Cow::Owned(kept.render(&cell.source)), Cow::Borrowed(kept)),
+            (false, _) => {
+                let template = self.template(cell.kind);
+                let block = template.render(&cell.source);
+                (Cow::Owned(block), Cow::Owned(template))
+            }
+        }
+    }
+
+    /// The cell holding byte `at` of the file [`write`](Self::write) writes, by its place, and
+    /// the byte of its source that is (`Kept::place`); `None` in the header and the footer.
+    pub(super) fn place(&self, cells: &[Cell], at: usize) -> Option<(usize, usize)> {
+        let mut start = self.header.len();
+        if at < start {
+            return None;
+        }
+        for (n, cell) in cells.iter().enumerate() {
+            let block_start = start + kept(cell).gap.len();
+            let (block, kept) = self.block(cell);
+            start = block_start + block.len();
+            if at < start {
+                let offset = match at.checked_sub(block_start) {
+                    Some(at) => kept.place(&block, at, &cell.source),
+                    // The blank lines before the block are above its source.
+                    None => 0,
+                };
+                return Some((n, offset));
+            }
+        }
+        None
     }
 
     /// How a cell of `kind` that was not one is written: a code cell as marimo writes a new one,
@@ -480,7 +544,7 @@ impl Frame {
         let mut kept = self.template(kind);
         kept.gap = self.gap.clone();
         kept.source = String::new();
-        kept.text = kept.render("", "");
+        kept.text = kept.render("");
         super::Kept::Marimo(kept)
     }
 }

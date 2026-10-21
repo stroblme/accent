@@ -1,5 +1,6 @@
 //! Notebooks: a Jupyter notebook (`.ipynb`, nbformat 4) or a marimo notebook (a `.py` marimo
-//! wrote) as one model of cells, read and written by a backend per format. Nothing is run.
+//! wrote) as one model of cells, read and written by a backend per format. Nothing is run
+//! here: what a kernel's run leaves in an `.ipynb`'s cells comes in as a [`Run`].
 //!
 //! A save writes back only what changed: each cell keeps the text it was read from, written as
 //! it was until its source or its kind changes, and then only its source is rewritten, in the
@@ -9,10 +10,15 @@
 mod ipynb;
 mod marimo;
 pub mod output;
+mod program;
 
 use std::borrow::Cow;
 
+use serde_json::Value;
+
+pub use ipynb::EMPTY as EMPTY_IPYNB;
 pub use output::{Attachment, Data, Item, Output};
+pub use program::Program;
 
 use crate::{Error, Result, conflict, path};
 
@@ -44,6 +50,52 @@ pub struct Cell {
     attachments: Vec<Attachment>,
     /// Boxed, as the largest part of a cell an [`Edit`] carries.
     kept: Box<Kept>,
+    /// What a kernel left in the cell; `None` while it shows what the file stored.
+    run: Option<Box<Run>>,
+}
+
+/// What a kernel left in a code cell: its count, and its outputs as nbformat 4 JSON.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Run {
+    count: Option<u32>,
+    outputs: Vec<Value>,
+    /// `outputs` read, each one that reads.
+    shown: Vec<Output>,
+}
+
+impl Run {
+    pub fn new(count: Option<u32>, outputs: Vec<Value>) -> Run {
+        let shown = outputs.iter().filter_map(output::read).collect();
+        Run {
+            count,
+            outputs,
+            shown,
+        }
+    }
+
+    /// Add `output`, a stream running on into the last output when that is a stream of the same
+    /// name, as Jupyter's output area joins them: `true` when the last output grew.
+    fn push(&mut self, output: Value) -> bool {
+        let stream = |o: &Value| match o["output_type"] == "stream" {
+            true => o["name"].as_str().map(String::from),
+            false => None,
+        };
+        if let (Some(last), Some(more)) = (self.outputs.last_mut(), output["text"].as_str())
+            && stream(last).is_some()
+            && stream(last) == stream(&output)
+            && let Some(Value::String(text)) = last.get_mut("text")
+        {
+            text.push_str(more);
+            // A stream with text reads, so the last output shown is this one.
+            if let Some(Output::Stream { text, .. }) = self.shown.last_mut() {
+                text.push_str(more);
+            }
+            return true;
+        }
+        self.shown.extend(output::read(&output));
+        self.outputs.push(output);
+        false
+    }
 }
 
 impl Cell {
@@ -59,14 +111,15 @@ impl Cell {
         &self.source
     }
 
-    /// The execution count the file stored, shown as `[n]`.
+    /// The execution count, shown as `[n]`: its run's, else the one the file stored.
     pub fn count(&self) -> Option<u32> {
-        self.count
+        self.run.as_ref().map_or(self.count, |run| run.count)
     }
 
-    /// The outputs the file stored. A save writes them back as they were.
+    /// The outputs: its run's, else the ones the file stored, which a save writes back as they
+    /// were.
     pub fn outputs(&self) -> &[Output] {
-        &self.outputs
+        self.run.as_ref().map_or(&self.outputs, |run| &run.shown)
     }
 
     pub fn attachments(&self) -> &[Attachment] {
@@ -112,6 +165,11 @@ pub enum Edit {
     Convert {
         id: CellId,
         kind: Kind,
+    },
+    /// Set what a kernel left in a code cell, `None` for what the file stored; an `.ipynb`'s.
+    Outputs {
+        id: CellId,
+        run: Option<Run>,
     },
 }
 
@@ -218,6 +276,7 @@ impl Notebook {
             outputs: Vec::new(),
             attachments: Vec::new(),
             kept: Box::new(kept),
+            run: None,
         })
     }
 
@@ -261,7 +320,38 @@ impl Notebook {
                 let kind = std::mem::replace(&mut self.cells[at].kind, kind);
                 Edit::Convert { id, kind }
             }
+            Edit::Outputs { id, run } => {
+                let at = self.position(id).filter(|&at| self.runs(at))?;
+                let run = std::mem::replace(&mut self.cells[at].run, run.map(Box::new));
+                Edit::Outputs {
+                    id,
+                    run: run.map(|run| *run),
+                }
+            }
         })
+    }
+
+    /// Whether the `at`th cell holds what a kernel leaves: an `.ipynb`'s code cell. A marimo
+    /// notebook stores no outputs.
+    fn runs(&self, at: usize) -> bool {
+        self.format() == Format::Ipynb && self.cells[at].kind == Kind::Code
+    }
+
+    /// Add `output`, nbformat 4 JSON, to cell `id`'s run, a stream running on into the stream
+    /// before it of the same name: `Some(true)` when the last output grew, `Some(false)` when
+    /// one was added, `None` for a cell without a run. Outside the history: a run is the
+    /// kernel's, not an edit; only [`Edit::Outputs`] answers its undo.
+    pub fn push_output(&mut self, id: CellId, output: Value) -> Option<bool> {
+        let at = self.position(id)?;
+        Some(self.cells[at].run.as_mut()?.push(output))
+    }
+
+    /// Set cell `id`'s run's count; `None` for a cell without a run. Outside the history: a run
+    /// is the kernel's, not an edit; only [`Edit::Outputs`] answers its undo.
+    pub fn set_count(&mut self, id: CellId, count: Option<u32>) -> Option<()> {
+        let at = self.position(id)?;
+        self.cells[at].run.as_mut()?.count = count;
+        Some(())
     }
 
     /// Make cell `id` a cell of `kind`, as its format converts one: an `.ipynb` cell keeps its
@@ -327,18 +417,45 @@ impl Notebook {
         sources.join("\n")
     }
 
+    /// Where each cell's source starts in [`sources`](Self::sources).
+    pub fn starts(&self) -> Vec<usize> {
+        let mut start = 0;
+        let mut starts = Vec::with_capacity(self.cells.len());
+        for cell in &self.cells {
+            starts.push(start);
+            start += cell.source.len() + 1;
+        }
+        starts
+    }
+
     /// The cell whose source in [`sources`](Self::sources) holds byte `at`, by its place, and
     /// where in its source that byte is.
     pub fn locate(&self, at: usize) -> Option<(usize, usize)> {
-        let mut start = 0;
-        for (i, cell) in self.cells.iter().enumerate() {
-            let end = start + cell.source.len();
-            if at <= end {
-                return Some((i, at - start));
-            }
-            start = end + 1;
+        let starts = self.starts();
+        let cell = starts.partition_point(|&s| s <= at).checked_sub(1)?;
+        let offset = at - starts[cell];
+        (offset <= self.cells[cell].source.len()).then_some((cell, offset))
+    }
+
+    /// The cell holding byte `at` of what the index holds of this notebook, by its place, and the
+    /// byte of its source that is: an `.ipynb`'s [`sources`](Self::sources), and a marimo
+    /// notebook's file as [`to_text`](Self::to_text) writes it with LF line breaks.
+    pub fn place(&self, at: usize) -> Option<(usize, usize)> {
+        match &self.frame {
+            Frame::Ipynb(_) => self.locate(at),
+            Frame::Marimo(frame) => frame.place(&self.cells, at),
         }
-        None
+    }
+}
+
+/// What the index holds of the file `rel` holding `text` when it is an `.ipynb`: its cells'
+/// [`sources`](Notebook::sources), as neither an output's base64 nor a metadata key is worth
+/// finding. `None` for any other file, a marimo notebook being the Python it is, and for an
+/// `.ipynb` that does not read, which is indexed as its text.
+pub fn search_text(rel: &str, text: &str) -> Option<String> {
+    match path::is_notebook(rel) {
+        true => read(rel, text).ok().map(|nb| nb.sources()),
+        false => None,
     }
 }
 
@@ -355,7 +472,7 @@ mod tests {
             let mut nb = read(rel, text).unwrap();
             let ids: Vec<CellId> = nb.cells().iter().map(Cell::id).collect();
             let new = nb.new_cell(Kind::Markdown, "# New").unwrap();
-            let groups = [
+            let mut groups = vec![
                 vec![Edit::Source {
                     id: ids[2],
                     text: "edited = True".into(),
@@ -368,6 +485,12 @@ mod tests {
                     kind: Kind::Markdown,
                 }],
             ];
+            if nb.format() == Format::Ipynb {
+                let output =
+                    serde_json::json!({"output_type": "stream", "name": "stdout", "text": "x"});
+                let run = Some(Run::new(Some(7), vec![output]));
+                groups.push(vec![Edit::Outputs { id: ids[2], run }]);
+            }
             for edits in groups {
                 let undo = nb.apply_all(edits);
                 assert!(!undo.is_empty());
@@ -432,6 +555,59 @@ mod tests {
         assert_eq!(nb.locate(0), Some((0, 0)));
         assert_eq!(nb.locate(sources.len()), Some((nb.cells().len() - 1, 0)));
         assert_eq!(nb.locate(sources.len() + 1), None);
+    }
+
+    #[test]
+    fn streams_run_on_as_jupyter_joins_them() {
+        let mut nb = read("analysis.ipynb", ANALYSIS).unwrap();
+        let id = nb.cells()[2].id();
+        let run = Some(Run::new(None, Vec::new()));
+        nb.apply(Edit::Outputs { id, run });
+        let stream =
+            |name, text| serde_json::json!({"output_type": "stream", "name": name, "text": text});
+        let pushed: Vec<Option<bool>> = [
+            ("stdout", "a"),
+            ("stdout", "b\n"),
+            ("stderr", "x"),
+            ("stdout", "c"),
+        ]
+        .into_iter()
+        .map(|(name, text)| nb.push_output(id, stream(name, text)))
+        .collect();
+        assert_eq!(pushed, [Some(false), Some(true), Some(false), Some(false)]);
+        let out = |stderr, text: &str| Output::Stream {
+            stderr,
+            text: text.into(),
+        };
+        let outputs = [out(false, "ab\n"), out(true, "x"), out(false, "c")];
+        assert_eq!(nb.cells()[2].outputs(), outputs);
+        nb.set_count(id, Some(4));
+        assert_eq!(nb.cells()[2].count(), Some(4));
+    }
+
+    #[test]
+    fn a_byte_the_index_holds_is_placed_in_its_cell() {
+        let nb = read("analysis.ipynb", ANALYSIS).unwrap();
+        let at = nb.sources().find("binomial").unwrap();
+        assert_eq!(nb.place(at), nb.locate(at));
+        assert_eq!(nb.place(at).map(|(cell, _)| cell), Some(2));
+
+        let nb = read("explore.py", EXPLORE).unwrap();
+        let place = |text: &str| nb.place(EXPLORE.find(text).unwrap());
+        for (text, cell) in [
+            ("best_amplitude = passing.max()", 6),
+            ("Readout fidelity against", 1),
+        ] {
+            let (at, offset) = place(text).unwrap();
+            let source = nb.cells()[at].source();
+            assert!(at == cell && source[offset..].starts_with(text), "{text}");
+        }
+        // An `@app.function`'s `def` line is its source; above and below the source are its ends.
+        assert_eq!(place("def fidelity(p01"), Some((2, 0)));
+        assert_eq!(place("@app.cell\ndef _(\n"), Some((6, 0)));
+        let end = nb.cells()[6].source().len();
+        assert_eq!(place("return (best_amplitude,)"), Some((6, end)));
+        assert_eq!(place("app = marimo.App("), None, "the header is no cell's");
     }
 
     #[test]

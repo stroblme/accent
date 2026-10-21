@@ -212,7 +212,9 @@ pub(crate) fn interpreter(root: &Path, program: &Path, configured: &[String]) ->
         .take_while(|dir| dir.starts_with(root))
         .flat_map(|dir| [dir.join(".venv/bin/python"), dir.join("venv/bin/python")]);
     for python in venvs {
-        if python.is_file() {
+        // By the link itself: a venv's `python` points into the host's `/usr`, which the Flatpak
+        // cannot see.
+        if python.symlink_metadata().is_ok() {
             return vec![python.to_string_lossy().into_owned()];
         }
     }

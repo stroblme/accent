@@ -28,6 +28,7 @@ use gtk::{gdk, glib};
 use sourceview5::prelude::*;
 
 use crate::editor::{Tab, caret, line_prefix};
+use crate::lang::Editor;
 use crate::{hover, lang, multicaret};
 
 /// Maximum displayed rows, bounding per-keystroke splicing of servers'
@@ -812,7 +813,7 @@ fn doc_markup(item: &Completion) -> Option<String> {
 /// A tab's document, asked through its vault.
 ///
 /// Weak: the session is the tab's, and the tab holds the view the session's handlers hang off.
-struct TabSource(Weak<Tab>);
+pub(crate) struct TabSource(pub(crate) Weak<Tab>);
 
 impl Source for TabSource {
     fn fetch(&self, at: Pos, trigger: Option<char>) -> Reply<Completions> {
@@ -913,28 +914,32 @@ fn abbreviations(tab: &Tab, at: Pos) -> Option<Completions> {
     Some(abbrev::rows(typed, Range { start, end: at }))
 }
 
-/// Install vault-backed completion after [`lang::attach`] establishes
-/// that the tab has a vault provider.
-pub fn install(tab: &Rc<Tab>) {
-    let made = Session::new(&tab.view, Box::new(TabSource(Rc::downgrade(tab))));
+/// Complete in `editor` through `source`, opening on what is typed there ([`typed`]), once there
+/// is a vault to ask. The caller keeps the session, which [`Editor::completion`] answers.
+pub(crate) fn install(editor: &Rc<dyn Editor>, source: Box<dyn Source>) -> Rc<Session> {
+    let made = Session::new(editor.view(), source);
     // What was typed is looked at once it has landed, one idle on: a single character, or the
     // pair `typing` writes for a bracket, at the caret, its first character being the one typed.
     // A paste, a template, the text of a reload and the session's own insert open nothing.
-    tab.buffer.connect_insert_text(glib::clone!(
-        #[weak]
-        tab,
-        move |buffer, at, text| {
-            let quiet = tab.is_loading()
+    // Weak: the editor holds the view the handler hangs off.
+    let weak = Rc::downgrade(editor);
+    editor
+        .view()
+        .buffer()
+        .connect_insert_text(move |buffer, at, text| {
+            let Some(editor) = weak.upgrade() else {
+                return;
+            };
+            let quiet = editor.is_loading()
                 || text.chars().count() > 2
                 || at.offset() != caret(buffer).offset()
-                || session(&tab).is_none_or(|s| s.muted.get());
+                || editor.completion().is_none_or(|s| s.muted.get());
             if !quiet {
                 let first = text.chars().next();
-                glib::idle_add_local_once(move || typed(&tab, first));
+                glib::idle_add_local_once(move || typed(editor.as_ref(), first));
             }
-        }
-    ));
-    *tab.lang.completion.borrow_mut() = Some(made);
+        });
+    made
 }
 
 /// `tab`'s session, once [`install`] gave it one.
@@ -945,16 +950,18 @@ pub(crate) fn session(tab: &Tab) -> Option<Rc<Session>> {
 /// Handle typed completion triggers ([`rank::opens`]) only while focused
 /// and without a caret column, matching ghost-text eligibility. `typed` is
 /// the character the keystroke typed.
-fn typed(tab: &Rc<Tab>, typed: Option<char>) {
-    let Some(session) = session(tab) else {
+fn typed(editor: &dyn Editor, typed: Option<char>) {
+    let Some(session) = editor.completion() else {
         return;
     };
-    if !tab.view.is_focus() || tab.ghost_view().is_some_and(|view| view.has_carets()) {
+    let view = editor.view();
+    let column = view.downcast_ref::<multicaret::View>();
+    if !view.is_focus() || column.is_some_and(|view| view.has_carets()) {
         return;
     }
-    let language = lang::language_id(tab);
-    let mut triggers = tab
-        .lang
+    let language = editor.language_id();
+    let mut triggers = editor
+        .document()
         .support()
         .map(|s| s.completion_triggers.clone())
         .unwrap_or_default();
@@ -966,7 +973,8 @@ fn typed(tab: &Rc<Tab>, typed: Option<char>) {
         true => 2,
         false => 1,
     };
-    let before = line_prefix(&tab.buffer, &caret(&tab.buffer));
+    let buffer = view.buffer();
+    let before = line_prefix(&buffer, &caret(&buffer));
     match rank::opens(&before, &triggers, min_word) {
         // This keystroke typed a trigger that more typing follows by now, the main loop having
         // been busy: an answer up was asked before it, so ask afresh where the caret is.
@@ -978,16 +986,16 @@ fn typed(tab: &Rc<Tab>, typed: Option<char>) {
 
 /// A press offered to the popup first: see [`Session::press`].
 pub(crate) fn press(
-    tab: &Tab,
+    editor: &dyn Editor,
     key: gdk::Key,
     state: gdk::ModifierType,
 ) -> Option<glib::Propagation> {
-    session(tab)?.press(key, state)
+    editor.completion()?.press(key, state)
 }
 
-/// Whether `tab`'s popup is on screen.
-pub(crate) fn is_shown(tab: &Tab) -> bool {
-    session(tab).is_some_and(|s| s.is_shown())
+/// Whether `editor`'s popup is on screen.
+pub(crate) fn is_shown(editor: &dyn Editor) -> bool {
+    editor.completion().is_some_and(|s| s.is_shown())
 }
 
 /// Fixed-answer source for staging drill popups without a server.

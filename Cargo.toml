@@ -1,9 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/lsp", "crates/dap", "crates/api", "crates/drawio", "apps/cli", "apps/gtk", "android/ffi"]
+members = ["crates/core", "crates/lsp", "crates/dap", "crates/jupyter", "crates/api", "crates/drawio", "apps/cli", "apps/gtk", "android/ffi"]
 # apps/gtk needs gtk4/libadwaita dev headers; build it explicitly with `cargo build -p accent`.
 # android/ffi is cross-compiled for the phone by `make android`, never by a desktop build.
-default-members = ["crates/core", "crates/lsp", "crates/dap", "crates/api", "crates/drawio", "apps/cli"]
+default-members = ["crates/core", "crates/lsp", "crates/dap", "crates/jupyter", "crates/api", "crates/drawio", "apps/cli"]
 
 [workspace.package]
 version = "2.0.0"
@@ -17,12 +17,13 @@ repository = "https://github.com/stroblme/accent"
 accent-core = { path = "crates/core" }
 accent-lsp = { path = "crates/lsp" }
 accent-dap = { path = "crates/dap" }
+accent-jupyter = { path = "crates/jupyter" }
 accent-api = { path = "crates/api" }
 accent-drawio = { path = "crates/drawio" }
 anyhow = "1"
 thiserror = "2"
 # One runtime for the language servers now and the MCP server later; `crates/lsp` owns it.
-tokio = { version = "1", features = ["rt-multi-thread", "process", "io-util", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "process", "io-util", "sync", "time", "net"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
