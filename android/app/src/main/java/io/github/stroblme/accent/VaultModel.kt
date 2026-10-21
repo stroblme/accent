@@ -21,6 +21,7 @@ import io.github.stroblme.accent.ffi.Ranker
 import io.github.stroblme.accent.ffi.SearchHit
 import io.github.stroblme.accent.ffi.TagCount
 import io.github.stroblme.accent.ffi.Vault
+import io.github.stroblme.accent.ffi.anchorId
 import io.github.stroblme.accent.ffi.isAnimated
 import io.github.stroblme.accent.ffi.pdfAnchor
 import io.github.stroblme.accent.ui.imageKind
@@ -66,6 +67,8 @@ data class Open(
     val conflicts: List<String> = emptyList(),
     /** Search query to highlight once when the opened note appears ([found]). */
     val find: String? = null,
+    /** Rendered heading or block ID to visit once when the page appears ([VaultModel.anchored]). */
+    val anchor: String? = null,
     /** One-time scroll position for Back or return from editing ([VaultModel.placed]). */
     val scroll: Int = 0,
     /** Whether this note's find bar is open ([VaultModel.finding]). */
@@ -642,14 +645,17 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     // ------------------------------------------------------------------------------ one file
 
     /** Open a file and pass a search query for one-time highlighting. PDFs ignore the query. */
-    fun openFile(rel: String, find: String? = null, at: PdfPlace? = null, back: Back? = null) {
+    fun openFile(
+        rel: String, find: String? = null, at: PdfPlace? = null, back: Back? = null,
+        anchor: String? = null,
+    ) {
         // Asked for now, not once the buffer is written: a file asked for after this one wins,
         // whichever read ends first.
         val ticket = shown.next()
         // What is in the buffer belongs to the note it was typed into, and the buffer is about to
         // hold another note's text: a write left pending across the swap would put these words in
         // that file.
-        leave { show(rel, ticket, find, at, back) }
+        leave { show(rel, ticket, find, at, back, anchor = anchor) }
     }
 
     /**
@@ -663,6 +669,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         at: PdfPlace? = null,
         back: Back? = null,
         scroll: Int = 0,
+        anchor: String? = null,
     ) {
         val v = vault ?: return
         val pdf = rel.endsWith(".pdf", ignoreCase = true)
@@ -681,6 +688,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
                         Open(
                             rel, it.text, it.etag,
                             conflicts = conflicts, find = find, scroll = scroll, back = back,
+                            anchor = anchor?.let { name -> anchorId(it.text, name) },
                         )
                     }
                 }
@@ -829,7 +837,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Follow a note link through the index or disk, opening a PDF link at its passage. */
+    /** Follow a note link through the index or disk, opening its heading, block or PDF passage. */
     fun openLink(target: String) = viewModelScope.launch {
         val v = vault ?: return@launch
         val ticket = shown.next()
@@ -841,9 +849,10 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         val at = pdfAnchor(target.substringAfter('#', ""))?.let {
             PdfPlace(it.page.toInt(), selection = it.selection)
         }
+        val anchor = target.substringAfter('#', "").ifEmpty { null }
         when (val rel = found.getOrNull()) {
             null -> _state.update { it.copy(message = "No note called \"$name\"") }
-            else -> openFile(rel, at = at)
+            else -> openFile(rel, at = at, anchor = anchor)
         }
     }
 
@@ -1061,6 +1070,11 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
 
     /** The query has been marked on the page. One-shot, the same way [said] is. */
     fun found() = _state.update { s -> s.withNote { it.copy(find = null) } }
+
+    /** The rendered note has visited the requested heading or block. */
+    fun anchored(rel: String, anchor: String) = _state.update { s ->
+        s.withNote(rel) { if (it.anchor == anchor) it.copy(anchor = null) else it }
+    }
 
     /** The rendered note has been put back where the reader was ([Open.scroll]). */
     fun placed() = _state.update { s -> s.withNote { it.copy(scroll = 0) } }

@@ -1,6 +1,7 @@
 package io.github.stroblme.accent.ui
 
 import android.graphics.Color as AndroidColor
+import android.net.Uri
 import androidx.activity.compose.BackHandler
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -185,7 +186,7 @@ private fun Rendered(model: VaultModel, open: Open, chrome: Chrome, onTag: (Stri
     // The view, and the page it has finished loading. Both are held here rather than read from
     // inside the client, which is built once and would keep whichever note was open then.
     var view by remember { mutableStateOf<WebView?>(null) }
-    var loaded by remember { mutableStateOf<String?>(null) }
+    var loaded by remember { mutableStateOf<Load?>(null, referentialEqualityPolicy()) }
     // The file each image on the page was served from, by the address the page asks for it at:
     // what a tap on one opens and a long press inverts. Written on the loading thread, read on the
     // main one.
@@ -213,15 +214,32 @@ private fun Rendered(model: VaultModel, open: Open, chrome: Chrome, onTag: (Stri
     LaunchedEffect(loaded, open.find) {
         val reveal = open.find ?: return@LaunchedEffect
         val web = view ?: return@LaunchedEffect
-        if (loaded != html) return@LaunchedEffect
+        if (loaded !== web.tag || loaded?.rel != open.rel || loaded?.html != html) return@LaunchedEffect
         web.findAllAsync(reveal)
         model.found()
+    }
+
+    // A cross-note link names an element in the newly rendered document. Wait for that load and
+    // its first visual state, then let the WebView perform its normal fragment navigation.
+    LaunchedEffect(loaded, open.anchor) {
+        val anchor = open.anchor ?: return@LaunchedEffect
+        val web = view ?: return@LaunchedEffect
+        val load = loaded ?: return@LaunchedEffect
+        if (load !== web.tag || load.rel != open.rel || load.html != html) return@LaunchedEffect
+        web.postVisualStateCallback(0, object : WebView.VisualStateCallback() {
+            override fun onComplete(requestId: Long) {
+                if (web.tag !== load || model.state.value.note?.anchor != anchor) return
+                load.scroll = 0
+                web.loadUrl("${baseUri(load.rel)}#${Uri.encode(anchor)}")
+                model.anchored(load.rel, anchor)
+            }
+        })
     }
 
     // Back from a backlink put the reader where they were ([Open.scroll]), and that is spent once
     // the page is up: the load has already taken it.
     LaunchedEffect(loaded, open.scroll) {
-        if (open.scroll != 0 && loaded == html) model.placed()
+        if (open.scroll != 0 && loaded?.rel == open.rel && loaded?.html == html) model.placed()
     }
 
     // Back puts the bar away, which is how the panel closes too.
@@ -261,12 +279,13 @@ private fun Rendered(model: VaultModel, open: Open, chrome: Chrome, onTag: (Stri
                         /** What is on the screen now, and so what can be searched. */
                         override fun onPageFinished(view: WebView, url: String) {
                             val load = view.tag as? Load ?: return
-                            loaded = load.html
+                            loaded = load
                             // Once the page has been drawn rather than now: the view scrolls no
                             // further than the content it has, and until then it has none.
                             if (load.scroll > 0) {
                                 view.postVisualStateCallback(0, object : WebView.VisualStateCallback() {
                                     override fun onComplete(requestId: Long) {
+                                        if (view.tag !== load) return
                                         view.scrollTo(0, load.scroll)
                                         // The reader did not scroll there: a note they are brought
                                         // back to arrives with its bar up, as any document does.
@@ -329,7 +348,9 @@ private fun Rendered(model: VaultModel, open: Open, chrome: Chrome, onTag: (Stri
                 val load = Load(open.rel, html, dark, inverted)
                 val last = web.tag as? Load
                 if (load != last) {
-                    if (last?.rel == open.rel) {
+                    if (open.anchor != null) {
+                        load.scroll = 0
+                    } else if (last?.rel == open.rel) {
                         load.scroll = web.scrollY
                     } else {
                         load.scroll = open.scroll
