@@ -60,6 +60,8 @@ impl App {
             (nb, text.etag, text.digest()),
         );
         self.wire_notebook(&tab);
+        // A notebook inside the vault opens its code cells' program there; a loose one has none.
+        tab.attach_language(self.vault().filter(|_| !doc::is_loose_key(key)).cloned());
         {
             let config = self.config.borrow();
             tab.set_font(config.editor_font.as_deref(), self.zoom.get());
@@ -99,6 +101,7 @@ impl App {
             if app.is_active_notebook(tab) {
                 app.sync_history();
                 app.sync_status();
+                app.outline_soon();
             }
         }));
         tab.connect_select(on(|app, tab| {
@@ -106,6 +109,13 @@ impl App {
                 app.sync_status();
             }
         }));
+        tab.connect_starting(on(|app, tab| {
+            if app.is_active_notebook(tab) {
+                app.sync_status();
+            }
+        }));
+        tab.connect_follow(on(|app, _| app.go_to_definition()));
+        self.wire_notebook_places(tab);
         tab.connect_autosave(on(|app, tab| app.save_notebook(tab, false)));
         tab.connect_banner(on(|app, tab| app.resolve_notebook(tab)));
         let weak = Rc::downgrade(self);
@@ -151,6 +161,14 @@ impl App {
             "notebook-to-raw" => tab.convert(Kind::Raw),
             "notebook-split" => tab.split(),
             "notebook-join" => tab.join(),
+            "notebook-run-cell" => self.run_selected(&tab, false),
+            "notebook-run-advance" => self.run_selected(&tab, true),
+            "notebook-run-all" => self.run_all(&tab),
+            "notebook-interrupt" => self.interrupt_kernel(&tab),
+            "notebook-restart" => self.restart_kernel(&tab),
+            "notebook-shut-down" => self.shut_down_kernel(&tab),
+            "notebook-clear-outputs" => tab.clear_outputs(false),
+            "notebook-clear-all-outputs" => tab.clear_outputs(true),
             "notebook-open-text" => self.open_notebook_as_text(&tab),
             _ => return false,
         }
@@ -202,6 +220,7 @@ impl App {
             |app, tab, landed, explicit| match landed {
                 editor::Landing::Clean(etag) => {
                     tab.mark_clean(etag);
+                    tab.language_saved();
                     app.sync_status();
                     if report && explicit {
                         app.toast("Saved");
