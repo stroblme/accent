@@ -9,7 +9,8 @@ use crate::dialogs::confirm;
 use crate::recall::{self, QUERIES, REPLACEMENTS};
 use crate::widgets::{Debounce, Pulse, scroller, status_page};
 use accent_core::index::{Index, MIN_INFIX, Match, SearchHit};
-use accent_core::path::{basename, holds_diagram, may_be_diagram, parent_dir};
+use accent_core::notebook;
+use accent_core::path::{basename, holds_diagram, is_notebook, may_be_diagram, parent_dir};
 use accent_core::search::{self, Options, Regex};
 use adw::prelude::*;
 use gtk::{gio, glib, pango};
@@ -203,8 +204,15 @@ fn place_label(rel_path: &str, place: Option<&str>) -> String {
 /// holds it, and the page's name: what names a diagram row's page.
 type PageStarts = Vec<(usize, String)>;
 
-/// The diagrams in an answer, by path: where their pages start.
-type Pages = HashMap<String, PageStarts>;
+/// Where in a file the rows name their matches by other than a line: a diagram's pages, or where
+/// a Jupyter notebook's cells start in its cells' sources, which is what the index holds of it.
+enum Places {
+    Pages(PageStarts),
+    Cells(Vec<usize>),
+}
+
+/// The diagrams and notebooks in an answer, by path.
+type Pages = HashMap<String, Places>;
 
 /// A diagram's text as the index holds it — its labels, a line each — and where its pages start
 /// in it; `None` for one that does not parse.
@@ -228,6 +236,13 @@ fn diagram_text(xml: &str) -> Option<(String, PageStarts)> {
 fn page_label(rel_path: &str, starts: &PageStarts, at: usize) -> Option<String> {
     let (_, page) = starts.iter().rev().find(|(start, _)| *start <= at)?;
     Some(place_label(rel_path, Some(page)))
+}
+
+/// The dim half of a notebook's row: the folder and the cell, counted from 1, the match at byte
+/// `at` of its cells' sources is in.
+fn cell_label(rel_path: &str, starts: &[usize], at: usize) -> String {
+    let cell = starts.partition_point(|start| *start <= at);
+    place_label(rel_path, Some(&format!("cell {cell}")))
 }
 
 /// The row under a file whose matches the per-file cap cut short. The dim line alone, and it
@@ -304,7 +319,7 @@ fn open_tails(rows: Vec<Row>, bodies: &Bodies, accent: &str) -> Vec<Row> {
 }
 
 /// Ask `query`, then read the files in `opened` that its answer cuts short again, and the
-/// diagrams it found, whose rows name their pages. Run on a worker thread, so a question asked
+/// diagrams and notebooks it found, whose rows name their pages and cells. Run on a worker thread, so a question asked
 /// again — the vault moved under it — lands with those files already open ([`open_tails`]):
 /// listed shut first, the list would lose its place.
 fn answer_with_bodies(
@@ -319,22 +334,34 @@ fn answer_with_bodies(
         .filter(|rel| answer.cuts(rel))
         .filter_map(|rel| searchable(read, &rel).map(|body| (rel, body)))
         .collect();
-    let mut diagrams: Vec<&str> = answer.paths().filter(|rel| may_be_diagram(rel)).collect();
-    diagrams.dedup();
-    let pages = diagrams
+    let mut placed: Vec<&str> = answer
+        .paths()
+        .filter(|rel| may_be_diagram(rel) || is_notebook(rel))
+        .collect();
+    placed.dedup();
+    let pages = placed
         .into_iter()
         .filter_map(|rel| {
-            let text = read(rel).filter(|text| holds_diagram(rel, text))?;
-            Some((rel.to_string(), diagram_text(&text)?.1))
+            let text = read(rel)?;
+            // A marimo notebook's rows keep their lines: it is indexed as the Python it is.
+            let places = match is_notebook(rel) {
+                true => Places::Cells(notebook::read(rel, &text).ok()?.starts()),
+                false if holds_diagram(rel, &text) => Places::Pages(diagram_text(&text)?.1),
+                false => return None,
+            };
+            Some((rel.to_string(), places))
         })
         .collect();
     (answer, bodies, pages)
 }
 
-/// A file's text as search found its matches in: a diagram's labels, a line each, as the index
-/// holds them, or the file itself.
+/// A file's text as search found its matches in: a diagram's labels, a line each, or a Jupyter
+/// notebook's cells' sources, as the index holds them, or the file itself.
 fn searchable(read: &dyn Fn(&str) -> Option<String>, rel: &str) -> Option<String> {
     let text = read(rel)?;
+    if let Some(sources) = notebook::search_text(rel, &text) {
+        return Some(sources);
+    }
     match holds_diagram(rel, &text) {
         true => diagram_text(&text).map(|(labels, _)| labels),
         false => Some(text),
@@ -465,7 +492,8 @@ struct Search {
     /// it. The same question asked again — the vault moved under it — opens them again; any
     /// other forgets them.
     opened: RefCell<(Option<Key>, HashSet<String>)>,
-    /// Where the pages start in each diagram the rows list, which the rows name the page by.
+    /// Where the pages start in each diagram the rows list and the cells in each notebook, which
+    /// the rows name the page or the cell by.
     pages: Rc<RefCell<Pages>>,
 }
 
@@ -1204,10 +1232,14 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
                 icon.set_icon_name(Some(crate::doc::icon_for(&hit.rel_path)));
                 icon.set_visible(!hit.name.is_empty() && !heading);
                 name.set_text(&hit.name);
-                // A diagram's row names the page its match is on rather than a line of its labels.
+                // A diagram's row names the page its match is on rather than a line of its labels,
+                // and a notebook's the cell rather than a line of its cells' sources.
                 let page = hit.at.as_ref().and_then(|at| {
                     let pages = pages.borrow();
-                    page_label(&hit.rel_path, pages.get(&hit.rel_path)?, at.start)
+                    match pages.get(&hit.rel_path)? {
+                        Places::Pages(starts) => page_label(&hit.rel_path, starts, at.start),
+                        Places::Cells(starts) => Some(cell_label(&hit.rel_path, starts, at.start)),
+                    }
                 });
                 dir.set_text(page.as_deref().unwrap_or(&hit.dir));
                 // A tail row is the dim line alone, so the empty second line is taken away rather than
@@ -1631,6 +1663,19 @@ mod tests {
             page_label("flow.drawio", &starts, 3).as_deref(),
             Some("One")
         );
+    }
+
+    #[test]
+    fn a_notebooks_row_names_the_cell_its_match_is_in() {
+        const ANALYSIS: &str =
+            include_str!("../../../../crates/core/tests/fixtures/notebook/analysis.ipynb");
+        let rel = "Notebooks/analysis.ipynb";
+        let read = |_: &str| Some(ANALYSIS.to_string());
+        let sources = searchable(&read, rel).expect("its cells' sources");
+        let starts = notebook::read(rel, ANALYSIS).unwrap().starts();
+        let at = sources.find("binomial").expect("a code cell's");
+        assert_eq!(cell_label(rel, &starts, at), "Notebooks/ — cell 3");
+        assert_eq!(cell_label("a.ipynb", &starts, 0), "cell 1");
     }
 
     #[test]

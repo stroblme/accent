@@ -459,6 +459,17 @@ impl Sidebar {
         }
     }
 
+    /// The notebook in front's kernel in the Code pane: its strip saying `line`, `why` in its
+    /// tooltip, or put away (`None`).
+    pub fn set_kernel(&self, shown: Option<(&str, Option<&str>)>) {
+        self.code.set_kernel(shown);
+    }
+
+    #[cfg(feature = "bench")]
+    pub fn kernel_line(&self) -> Option<String> {
+        self.code.kernel_line()
+    }
+
     /// No session: Call Stack and Variables go, and the strip, offering Start Debugging, and
     /// Breakpoints stay only while the tab in front can be debugged (`debuggable`).
     pub fn clear_debug(&self, debuggable: bool) {

@@ -724,30 +724,39 @@ fn watch_body(watched: &Tree, data: &Data) -> gtk::Box {
 
 /// The controls, flat icon buttons on the window's actions, which are enabled as the session's
 /// state allows: Continue or Pause (Start Debugging while no session runs), the steps, Restart
-/// and Stop, then the Debug Console; and under them what the program is doing. A press leaves
-/// the keyboard where it was, so stepping keeps the reader's place.
+/// and Stop, then the Debug Console; and under them what the program is doing.
 fn strip() -> (gtk::Box, gtk::Label, gtk::Button, gtk::Button) {
-    let button = |icon: &str, action: &str| {
-        let button = icon_button(icon, crate::actions::label_of(action));
-        button.set_action_name(Some(action));
-        button.set_focus_on_click(false);
-        button
-    };
-    let resume = button("media-playback-start-symbolic", "win.debug-continue");
-    let pause = button("media-playback-pause-symbolic", "win.debug-pause");
-    // Centred, as the pane switcher's icons are in the header above, and the line under them too.
-    let buttons = gtk::Box::builder().halign(gtk::Align::Center).build();
-    for widget in [
+    let resume = strip_button("media-playback-start-symbolic", "win.debug-continue");
+    let pause = strip_button("media-playback-pause-symbolic", "win.debug-pause");
+    let (strip, state) = strip_of(&[
         &resume,
         &pause,
-        &button("dap-step-over-symbolic", "win.debug-step-over"),
-        &button("dap-step-into-symbolic", "win.debug-step-into"),
-        &button("dap-step-out-symbolic", "win.debug-step-out"),
-        &button("view-refresh-symbolic", "win.debug-restart"),
-        &button("media-playback-stop-symbolic", "win.debug-stop"),
-        &button("dap-console-symbolic", "win.debug-console"),
-    ] {
-        buttons.append(widget);
+        &strip_button("dap-step-over-symbolic", "win.debug-step-over"),
+        &strip_button("dap-step-into-symbolic", "win.debug-step-into"),
+        &strip_button("dap-step-out-symbolic", "win.debug-step-out"),
+        &strip_button("view-refresh-symbolic", "win.debug-restart"),
+        &strip_button("media-playback-stop-symbolic", "win.debug-stop"),
+        &strip_button("dap-console-symbolic", "win.debug-console"),
+    ]);
+    (strip, state, resume, pause)
+}
+
+/// A strip's flat icon button on the window's `action`, named by its label. A press leaves the
+/// keyboard where it was, so stepping keeps the reader's place.
+pub(super) fn strip_button(icon: &str, action: &str) -> gtk::Button {
+    let button = icon_button(icon, crate::actions::label_of(action));
+    button.set_action_name(Some(action));
+    button.set_focus_on_click(false);
+    button
+}
+
+/// A strip of `buttons` over a dim caption, hidden until it is shown: the debugger's, and the
+/// notebook kernel's.
+pub(super) fn strip_of(buttons: &[&gtk::Button]) -> (gtk::Box, gtk::Label) {
+    // Centred, as the pane switcher's icons are in the header above, and the line under them too.
+    let row = gtk::Box::builder().halign(gtk::Align::Center).build();
+    for button in buttons {
+        row.append(*button);
     }
     let state = gtk::Label::builder()
         .ellipsize(pango::EllipsizeMode::End)
@@ -763,7 +772,7 @@ fn strip() -> (gtk::Box, gtk::Label, gtk::Button, gtk::Button) {
         .margin_bottom(6)
         .visible(false)
         .build();
-    strip.append(&buttons);
+    strip.append(&row);
     strip.append(&state);
-    (strip, state, resume, pause)
+    (strip, state)
 }
