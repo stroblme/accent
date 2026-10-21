@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 use crate::local::Ignored;
 use crate::remote::Remote;
 use crate::vault::Backend;
-use crate::{Event, FileEdits, Local, LspConfig, Vault, locked};
+use crate::{Event, FileEdits, Local, LspConfig, Vault, VaultConfig, locked};
 
 pub(crate) mod external;
 mod latex;
@@ -857,10 +857,11 @@ impl Languages {
         rel: String,
         language: String,
         text: String,
-        cfg: &LspConfig,
+        cfg: &VaultConfig,
     ) -> Task<Support> {
         let me = self.clone();
-        let which = server(cfg, &language);
+        let which = server(&cfg.lsp, &language);
+        let configured_python = cfg.debug.python.clone();
         Task::spawn(async move {
             // Outside the vault: a dependency a running server's answer led to is that server's
             // to answer for, and nothing is started for any other file there.
@@ -879,6 +880,23 @@ impl Languages {
                 locked(&me.docs).insert(rel, (Some(key), session, false));
                 return Ok(support);
             }
+            let python = if language == "python3" && matches!(&which, Some(Server::External { .. }))
+            {
+                let root = me.root.clone();
+                let command =
+                    crate::debug::interpreter(&root, &root.join(&rel), &configured_python);
+                let resolved =
+                    tokio::task::spawn_blocking(move || crate::python::executable(&root, &command))
+                        .await?;
+                if configured_python.len() > 1 && resolved.is_none() {
+                    return Err(Error::Language(
+                        "cannot resolve the selected Python command for language analysis".into(),
+                    ));
+                }
+                resolved
+            } else {
+                None
+            };
             // What speaks the file's structure, if anything does: the index for a note, a
             // language server for code, nothing for a `.txt`.
             let (primary, language_id, missing, key): Opened = match which {
@@ -903,8 +921,15 @@ impl Languages {
                     let (root, events) = (me.root.clone(), me.events.clone());
                     let abs = Local::join(&root, &rel)?;
                     let session_root = session_root(&root, &abs, markers(&language));
-                    let key = (argv[0].clone(), session_root.clone());
-                    let start = external::start(argv, session_root, root, events, None);
+                    let key = (
+                        match &python {
+                            Some(python) => format!("{}|{python}", argv[0]),
+                            None => argv[0].clone(),
+                        },
+                        session_root.clone(),
+                    );
+                    let start =
+                        external::start_configured(argv, session_root, root, events, None, python);
                     (
                         Some(me.session(key.clone(), start).await?),
                         language_id,
@@ -1440,7 +1465,7 @@ impl Local {
             rel.to_string(),
             language_id.to_string(),
             text,
-            &self.config().lsp,
+            &self.config(),
         )
     }
 
@@ -1822,7 +1847,7 @@ mod tests {
             tokio::sync::OnceCell::new_with(Some(Arc::new(Naming(None)) as Arc<dyn Language>));
         locked(&langs.sessions).insert(key.clone(), Arc::new(running));
         let open = |rel: &str| {
-            let cfg = LspConfig::default();
+            let cfg = VaultConfig::default();
             langs.open_document(rel.into(), "rust".into(), String::new(), &cfg)
         };
         accent_lsp::runtime().block_on(async {

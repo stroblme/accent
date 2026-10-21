@@ -35,13 +35,14 @@ pub struct Editor {
     current: Option<CellId>,
 }
 
-/// State restored by undo or redo: one page, or the page list after an addition or removal.
+/// State restored by undo or redo: a page, the page list, or file attributes.
 // ponytail: snapshots clone a whole page, fine at a few thousand cells for the hundred steps
 // kept; command objects are the upgrade when memory or diffing matters.
 #[derive(Debug, Clone)]
 enum Snapshot {
     Page { index: usize, page: Page },
     Pages(Vec<Page>),
+    FileAttrs(Vec<(String, String)>),
 }
 
 /// Draw.io cell IDs in `<guid>-<n>` form (`mxGraphModel.createId`).
@@ -81,6 +82,15 @@ impl Editor {
 
     pub fn file(&self) -> &File {
         &self.file
+    }
+
+    /// Set a file-level attribute as one undo step.
+    pub fn set_file_attr(&mut self, key: &str, value: &str) {
+        let before = self.file.attrs.clone();
+        set_attr(&mut self.file.attrs, key, value);
+        if self.file.attrs != before {
+            self.record(Snapshot::FileAttrs(before));
+        }
     }
 
     pub fn page(&self, i: usize) -> Result<&Page, Error> {
@@ -633,6 +643,9 @@ impl Editor {
             },
             Snapshot::Pages(pages) => {
                 Snapshot::Pages(std::mem::replace(&mut self.file.pages, pages))
+            }
+            Snapshot::FileAttrs(attrs) => {
+                Snapshot::FileAttrs(std::mem::replace(&mut self.file.attrs, attrs))
             }
         }
     }

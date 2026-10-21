@@ -15,14 +15,23 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.viewinterop.AndroidView
 import io.github.stroblme.accent.OpenImage
+import io.github.stroblme.accent.VaultModel
 import java.io.File
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * Show an image with the document bar and pinch zoom. [served] applies note image theming;
  * Invert overrides it for this session.
  */
 @Composable
-fun ImageScreen(image: OpenImage, chrome: Chrome) {
+fun ImageScreen(model: VaultModel, image: OpenImage, chrome: Chrome) {
+    var details by remember(image.rel) { mutableStateOf(false) }
+    val context = LocalContext.current
     val colors = MaterialTheme.colorScheme
     val name = File(image.rel).name
     val dark = colors.surface.dark()
@@ -42,6 +51,7 @@ fun ImageScreen(image: OpenImage, chrome: Chrome) {
                     onClick = { Inverted.toggle(image.path) },
                     enabled = !image.animated,
                 )
+                DetailsMenu { details = true }
             }
         },
     ) {
@@ -83,6 +93,10 @@ fun ImageScreen(image: OpenImage, chrome: Chrome) {
                 }
             },
         )
+    }
+    if (details) DetailsSheet(onDismiss = { details = false }) {
+        val stat = model.stat(image.rel)
+        fileDetails(stat, context) + withContext(Dispatchers.IO) { imageDetails(image.path) }
     }
 }
 

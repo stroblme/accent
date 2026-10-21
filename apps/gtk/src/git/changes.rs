@@ -137,7 +137,7 @@ impl Panel {
                 (Some(status), Some(repo)) => rows_of(
                     status,
                     &state.submodules,
-                    &|path| vault_key(&self.hooks.vault.root(), repo, path),
+                    &|path| vault_key(&self.source().key_root(), repo, path),
                     self.tree.get(),
                     &self.collapsed.borrow(),
                 ),

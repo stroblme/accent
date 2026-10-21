@@ -11,6 +11,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import io.github.stroblme.accent.ffi.Comment
 import io.github.stroblme.accent.ffi.Glyph
 import io.github.stroblme.accent.ffi.InkStyle
+import io.github.stroblme.accent.ffi.Info
 import io.github.stroblme.accent.ffi.LinkHighlight
 import io.github.stroblme.accent.ffi.Located
 import io.github.stroblme.accent.ffi.Outline
@@ -60,6 +61,8 @@ class PdfModel(private val session: PdfSession) : AutoCloseable {
     suspend fun load() = on {
         sizes = session.pageSizes()
     }
+
+    suspend fun info(): Info = on { session.info() }
 
     /** Cache whole pages using one-eighth of the app heap; viewport tiles remain uncached. */
     private val pages = object : LruCache<Drawn, ImageBitmap>(

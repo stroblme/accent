@@ -224,6 +224,72 @@ impl Local {
         Ok(fs::walk_copy(&self.resolve(rel)?))
     }
 
+    /// A bounded page of one directory's copy candidates, with the same link rules as `walk_copy`.
+    pub(crate) fn copy_page(
+        &self,
+        root: &str,
+        dir: &str,
+        after: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<crate::vault::CopyPage> {
+        use std::collections::BinaryHeap;
+        use std::os::unix::ffi::OsStrExt;
+
+        use crate::vault::{COPY_PAGE, CopyPage};
+
+        let root = self.resolve(root)?;
+        let path = Local::join(&root, dir)?;
+        if !path.is_dir() {
+            return Ok(match (dir, after) {
+                ("", None) => CopyPage::File,
+                _ => CopyPage::Unread,
+            });
+        }
+        let Ok(children) = std::fs::read_dir(&path) else {
+            return Ok(CopyPage::Unread);
+        };
+        let limit = limit.clamp(1, COPY_PAGE);
+        // Stateless pages rescan names. Keep only the smallest names after the cursor so memory,
+        // metadata checks and wire size are bounded even for a very large flat directory.
+        let mut smallest = BinaryHeap::new();
+        for entry in children.flatten() {
+            if after.is_some_and(|cursor| entry.file_name().as_bytes() <= cursor) {
+                continue;
+            }
+            smallest.push(entry.path());
+            if smallest.len() > limit + 1 {
+                smallest.pop();
+            }
+        }
+        let mut children = smallest.into_sorted_vec();
+        let next = (children.len() > limit).then(|| {
+            children[limit - 1]
+                .file_name()
+                .expect("a directory entry has a name")
+                .as_bytes()
+                .to_vec()
+        });
+        children.truncate(limit);
+        let real_root = root.canonicalize().unwrap_or(root);
+        let entries = children
+            .into_iter()
+            .filter_map(|path| {
+                let name = path.file_name()?.to_string_lossy().into_owned();
+                let meta = path.symlink_metadata().ok()?;
+                if meta.is_dir() {
+                    Some((name, true))
+                } else if meta.is_file()
+                    || (meta.is_symlink() && fs::links_inside(&path, &real_root))
+                {
+                    Some((name, false))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        Ok(CopyPage::Directory { entries, next })
+    }
+
     /// Plan link and import rewrites before moving files, for UI confirmation.
     /// Dry-run candidate notes to omit unchanged bare links; include links to
     /// moved files and relative links in moved notes. Ask running language

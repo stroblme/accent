@@ -687,7 +687,7 @@ impl DiagramTab {
             Edit::Move { ids, delta } => self.move_cells(&ids, delta.x, delta.y),
             Edit::Resize { id, rect } => self.edit(|e, page| e.resize(page, &id, rect)),
             Edit::Add { tool, rect } => {
-                let style = tool.style(&self.options.get());
+                let style = tool.style_in(self.editor.borrow().file(), &self.options.get());
                 let mut added = None;
                 self.edit(|e, page| {
                     added = Some(e.add_vertex(page, None, rect, &style, tool.label())?);
@@ -704,7 +704,8 @@ impl DiagramTab {
                 }
             }
             Edit::Connect { source, target } => {
-                let style = Tool::Connector.style(&self.options.get());
+                let style =
+                    Tool::Connector.style_in(self.editor.borrow().file(), &self.options.get());
                 let style = accent_drawio::presets::constrained(
                     &style,
                     source.2.as_ref(),

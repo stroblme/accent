@@ -3,6 +3,39 @@
 
 use super::*;
 
+/// Only one refresh per source runs at a time; a new focused shell starts without waiting for
+/// the old source's network call, whose late answer is ignored.
+#[derive(Default)]
+pub(super) struct RefreshGate {
+    active: Option<u64>,
+    again: Option<Depth>,
+}
+
+impl RefreshGate {
+    pub(super) fn invalidate(&mut self) {
+        self.active = None;
+        self.again = None;
+    }
+
+    fn begin(&mut self, generation: u64, depth: Depth) -> bool {
+        if self.active == Some(generation) {
+            self.again = self.again.max(Some(depth));
+            return false;
+        }
+        self.active = Some(generation);
+        self.again = None;
+        true
+    }
+
+    fn finish(&mut self, generation: u64) -> Option<Depth> {
+        if self.active != Some(generation) {
+            return None;
+        }
+        self.active = None;
+        self.again.take()
+    }
+}
+
 impl Panel {
     /// Ask git again, once, in [`DEBOUNCE`], for at least `depth`. Calling this ten times in a
     /// row is one query, and the deepest of the ten is what it asks for.
@@ -31,12 +64,11 @@ impl Panel {
     /// Ask git what `depth` says the pane needs, off the main thread, and put the answers on
     /// screen. Whatever it did not ask for, the pane keeps.
     pub(super) fn refresh(self: &Rc<Self>, depth: Depth) {
-        if self.busy.get() {
-            self.again.set(self.again.get().max(Some(depth)));
+        let generation = self.source_generation.get();
+        if !self.refresh_gate.borrow_mut().begin(generation, depth) {
             return;
         }
-        self.busy.set(true);
-        let vault = self.hooks.vault.clone();
+        let vault = self.source();
         // As many commits as are shown, so the pages a Load More brought in outlive a history
         // that moved: a bigger `git log` on every save, but only once Load More was used.
         let (selected, known, rows) = {
@@ -50,11 +82,13 @@ impl Panel {
                 fetch::fetch(&vault, selected, depth, known, rows)
             })
             .await;
-            panel.busy.set(false);
-            if let Some(fetched) = fetched {
+            let again = panel.refresh_gate.borrow_mut().finish(generation);
+            if generation == panel.source_generation.get()
+                && let Some(fetched) = fetched
+            {
                 panel.apply(fetched);
             }
-            if let Some(depth) = panel.again.take() {
+            if let Some(depth) = again {
                 panel.refresh(depth);
             }
         });
@@ -101,7 +135,7 @@ impl Panel {
                 status
                     .ignored
                     .iter()
-                    .map(|path| ignored_key(&self.hooks.vault.root(), repo, path))
+                    .map(|path| ignored_key(&self.source().key_root(), repo, path))
             })
             .collect();
 
@@ -203,5 +237,22 @@ impl Panel {
         self.banner.set_revealed(rebasing || self.merging());
         self.rebuild_changes();
         self.sync_commit();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_source_starts_while_old_refresh_is_busy() {
+        let mut gate = RefreshGate::default();
+        assert!(gate.begin(1, Depth::Discover));
+        assert!(!gate.begin(1, Depth::Status));
+        gate.invalidate();
+        assert!(gate.begin(2, Depth::Discover));
+        assert_eq!(gate.finish(1), None);
+        assert_eq!(gate.active, Some(2));
+        assert_eq!(gate.finish(2), None);
     }
 }

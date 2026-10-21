@@ -14,6 +14,9 @@ pub(super) fn bench_panes(app: &Rc<App>, rels: &str) {
     if let Some(rel) = rels.strip_prefix("chords:") {
         return bench_chords(app, rel);
     }
+    if let Some(rels) = rels.strip_prefix("cancel:") {
+        return bench_cancel_split(app, rels);
+    }
     let Some((a, b)) = rels.split_once(',') else {
         return bench_quit(app);
     };
@@ -31,6 +34,57 @@ pub(super) fn bench_panes(app: &Rc<App>, rels: &str) {
         }
         bench_pane_at(&app, &page);
         bench_pane_step(&app, &page, 0);
+    });
+}
+
+/// Escape must clear both switcher cards if focus crossed a split with Ctrl held.
+fn bench_cancel_split(app: &Rc<App>, rels: &str) {
+    let Some((a, b)) = rels.split_once(',') else {
+        return bench_quit(app);
+    };
+    app.open_path(a);
+    app.open_path(b);
+    let (app, a, b) = (app.clone(), a.to_string(), b.to_string());
+    let ready = {
+        let app = app.clone();
+        let (a, b) = (a.clone(), b.clone());
+        move || app.doc_for(&a).is_some() && app.doc_for(&b).is_some()
+    };
+    bench_layout_when(ready, move || {
+        let left = app.pane();
+        if let Some(page) = app.doc_for(&b).map(|doc| doc.page().clone()) {
+            app.split_page(&left, Side::Right, &page);
+        }
+        glib::timeout_add_local_once(Duration::from_millis(200), move || {
+            let panes = app.panes.borrow().clone();
+            for pane in &panes {
+                pane.step(true);
+                pane.switcher.show(
+                    &[crate::switcher::Entry {
+                        icon: None,
+                        name: "Note".to_string(),
+                        folder: String::new(),
+                    }],
+                    0,
+                );
+            }
+            let states = || {
+                panes
+                    .iter()
+                    .map(|pane| (pane.switcher.shown(), pane.switcher_dimmed()))
+                    .collect::<Vec<_>>()
+            };
+            let before = states();
+            println!("bench cancel_before {before:?}");
+            assert_eq!(before, [(true, true); 2]);
+            let cancelled = app.cancel_cycle();
+            println!("bench cancel_answer {cancelled}");
+            assert!(cancelled);
+            let after = states();
+            println!("bench cancel_after {after:?}");
+            assert_eq!(after, [(false, false); 2]);
+            bench_quit(&app);
+        });
     });
 }
 
@@ -782,9 +836,10 @@ fn bench_cycle_state(app: &Rc<App>, pane: &Pane) -> String {
     let order: Vec<String> = pane.recent().iter().map(|p| p.title().into()).collect();
     let focus = gtk::prelude::GtkWindowExt::focus(&app.window).map(|w| w.type_().name());
     format!(
-        "held={} card={} rows={rows:?} lit={lit:?} front={front:?} order={order:?} focus={focus:?}",
+        "held={} card={} dim={} rows={rows:?} lit={lit:?} front={front:?} order={order:?} focus={focus:?}",
         pane.cycling().is_some(),
         pane.switcher.shown(),
+        pane.switcher_dimmed(),
     )
 }
 

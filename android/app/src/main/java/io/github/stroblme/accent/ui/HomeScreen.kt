@@ -77,7 +77,7 @@ fun HomeScreen(model: VaultModel) {
                         screen = Screen.Browse
                     },
                 )
-                is OpenImage -> ImageScreen(image = doc, chrome = chrome)
+                is OpenImage -> ImageScreen(model = model, image = doc, chrome = chrome)
                 null -> Empty(
                     opening = state.opening,
                     indexing = state.indexing,

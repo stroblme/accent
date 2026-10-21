@@ -36,6 +36,8 @@ const LINK: &str = r"(?:https?://|mailto:)[^\s<>\x22'`]*[^\s<>\x22'`.,:;!?)\]}]"
 /// has to be able to end at a wrapped line rather than only at the end of the buffer.
 const PCRE2_MULTILINE: u32 = 0x0000_0400;
 
+type OnFacts = Box<dyn Fn(&Rc<Term>)>;
+
 /// One open shell.
 pub struct Term {
     key: String,
@@ -51,6 +53,13 @@ pub struct Term {
     holder: RefCell<Facts>,
     asking: Cell<bool>,
     again: Cell<bool>,
+    waiting: RefCell<Vec<OnFacts>>,
+}
+
+/// A focused shell's live working directory and machine for Git discovery.
+pub enum GitAt {
+    Local(PathBuf),
+    Remote(ssh::Url, PathBuf),
 }
 
 /// Shell facts for [`Term::facts`], reported by `accent-cli held`.
@@ -71,6 +80,36 @@ pub struct Facts {
 }
 
 impl Term {
+    pub fn git_at(&self) -> Option<GitAt> {
+        if self.lost.get() || self.ended.get() {
+            return None;
+        }
+        match &self.shell {
+            Shell::Local(start) => {
+                let osc7 = self
+                    .view
+                    .current_directory_uri()
+                    .and_then(|uri| dir_of(&uri, &glib::host_name()));
+                let holder = self.holder.borrow();
+                Some(GitAt::Local(local_git_dir(
+                    osc7,
+                    holder.dir.as_deref(),
+                    start,
+                )))
+            }
+            Shell::Remote { at, .. } => Some(GitAt::Remote(
+                at.clone(),
+                self.holder
+                    .borrow()
+                    .dir
+                    .as_ref()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| at.path.clone()),
+            )),
+            Shell::Program(_) | Shell::Console => None,
+        }
+    }
+
     pub fn key(&self) -> String {
         self.key.clone()
     }
@@ -139,11 +178,17 @@ impl Term {
     /// Query holder facts off-thread and call `landed` after updating [`facts`](Self::facts).
     /// Coalesce overlapping requests into one follow-up; skip unheld or disconnected shells.
     pub fn ask(self: &Rc<Self>, landed: impl Fn(&Rc<Term>) + 'static) {
+        self.ask_boxed(Box::new(landed));
+    }
+
+    fn ask_boxed(self: &Rc<Self>, landed: OnFacts) {
         let Some(argv) = self.shell.held().filter(|_| !self.lost.get()) else {
             return;
         };
         if self.asking.replace(true) {
-            return self.again.set(true);
+            self.again.set(true);
+            self.waiting.borrow_mut().push(landed);
+            return;
         }
         let (weak, id) = (Rc::downgrade(self), id(&self.key).to_string());
         glib::spawn_future_local(async move {
@@ -152,16 +197,22 @@ impl Term {
                 return;
             };
             term.asking.set(false);
+            let previous = term.holder.borrow().clone();
             *term.holder.borrow_mut() = match listing {
-                Ok(listing) => told(&String::from_utf8_lossy(&listing), &id),
+                Ok(listing) => facts_after_query(&previous, Some(&listing), &id),
                 Err(why) => {
                     tracing::debug!("{why}");
-                    Facts::default()
+                    facts_after_query(&previous, None, &id)
                 }
             };
             landed(&term);
             if term.again.take() {
-                term.ask(landed);
+                let waiting = std::mem::take(&mut *term.waiting.borrow_mut());
+                term.ask_boxed(Box::new(move |term| {
+                    for callback in &waiting {
+                        callback(term);
+                    }
+                }));
             }
         });
     }
@@ -425,6 +476,7 @@ pub fn open(tabs: &adw::TabView, at: Option<i32>, shell: &Shell, key: String) ->
         holder: RefCell::default(),
         asking: Cell::new(false),
         again: Cell::new(false),
+        waiting: RefCell::default(),
     });
     take_copies(&term);
     start(&term);
@@ -594,6 +646,22 @@ fn told(listing: &str, id: &str) -> Facts {
         title: text("title").filter(|title| !title.is_empty()),
         ..Facts::default()
     }
+}
+
+/// Keep a verified cwd through a failed holder query, without retaining stale command details.
+fn facts_after_query(previous: &Facts, listing: Option<&[u8]>, id: &str) -> Facts {
+    let mut facts = listing
+        .map(|listing| told(&String::from_utf8_lossy(listing), id))
+        .unwrap_or_default();
+    if facts.dir.is_none() {
+        facts.dir.clone_from(&previous.dir);
+    }
+    facts
+}
+
+fn local_git_dir(osc7: Option<PathBuf>, holder: Option<&str>, start: &Path) -> PathBuf {
+    osc7.or_else(|| holder.map(PathBuf::from))
+        .unwrap_or_else(|| start.to_path_buf())
 }
 
 /// Draw one of [`start`]'s progress lines over the last, from the worker making the host ready:
@@ -785,7 +853,11 @@ pub fn on_report(term: &Rc<Term>, changed: impl Fn(&Rc<Term>) + 'static) {
 ///
 /// Remote disconnects retain the tab for [`Term::reopen`]; local exit 255 is ordinary exit.
 /// Failed `accent-cli attach` tabs also remain so their error can be read. Ctrl+W closes either.
-pub fn on_exit(term: &Rc<Term>, done: impl Fn(&Rc<Term>) + 'static) {
+pub fn on_exit(
+    term: &Rc<Term>,
+    done: impl Fn(&Rc<Term>) + 'static,
+    lost: impl Fn(&Rc<Term>) + 'static,
+) {
     let weak = Rc::downgrade(term);
     term.view.connect_child_exited(move |view, status| {
         let Some(term) = weak.upgrade() else {
@@ -810,6 +882,7 @@ pub fn on_exit(term: &Rc<Term>, done: impl Fn(&Rc<Term>) + 'static) {
                     at.host
                 );
                 view.feed(line.as_bytes());
+                lost(&term);
             }
             _ => {
                 term.ended.set(true);
@@ -1387,6 +1460,39 @@ mod tests {
         // A shell that set no title has none to name its tab with.
         assert_eq!(told(&listing, "00000000000000b1").title, None);
         assert_eq!(told(&listing, "00000000000000ff"), Facts::default());
+    }
+
+    #[test]
+    fn a_failed_holder_query_keeps_the_last_verified_directory() {
+        let prior = Facts {
+            dir: Some("/srv/changed-repo".into()),
+            running: Some("git status".into()),
+            ..Facts::default()
+        };
+        let after = facts_after_query(&prior, None, "shell-id");
+        assert_eq!(after.dir.as_deref(), Some("/srv/changed-repo"));
+        assert_eq!(after.running, None);
+        assert_eq!(
+            facts_after_query(&prior, Some(b""), "shell-id").dir,
+            prior.dir
+        );
+        assert_eq!(
+            facts_after_query(&Facts::default(), None, "shell-id").dir,
+            None
+        );
+    }
+
+    #[test]
+    fn local_git_prefers_live_osc7_over_cached_holder_cwd() {
+        let start = Path::new("/home/me");
+        let old = Some("/home/me/old-repo");
+        let live = PathBuf::from("/home/me/new-repo");
+        assert_eq!(local_git_dir(Some(live.clone()), old, start), live);
+        assert_eq!(
+            local_git_dir(None, old, start),
+            PathBuf::from("/home/me/old-repo")
+        );
+        assert_eq!(local_git_dir(None, None, start), start);
     }
 
     /// VTE hands over the wait status, so ssh's 255 arrives as 255 << 8.

@@ -184,13 +184,17 @@ impl Panel {
         self.expanded.replace(Some(commit.id.clone()));
         let (oid, parent) = (commit.id.clone(), commit.parents.first().cloned());
         let panel = self.clone();
+        let vault = self.source();
+        let generation = self.source_generation.get();
         glib::spawn_future_local(async move {
             let query = oid.clone();
-            let vault = panel.hooks.vault.clone();
             let files = crate::work::attempt("list the commit's files", move || {
                 vault.git_changed_files(&repo, &query)
             })
             .await;
+            if panel.source_generation.get() != generation {
+                return;
+            }
             let files = match files {
                 Ok(files) => files,
                 Err(why) => return (panel.hooks.toast)(&why),
@@ -269,12 +273,16 @@ impl Panel {
             return;
         }
         let (panel, asked) = (self.clone(), repo.clone());
+        let vault = self.source();
+        let generation = self.source_generation.get();
         glib::spawn_future_local(async move {
-            let vault = panel.hooks.vault.clone();
             let page = crate::work::attempt("load more history", move || {
                 vault.git_log(&repo, skip, PAGE)
             })
             .await;
+            if panel.source_generation.get() != generation {
+                return;
+            }
             // Another repository was picked while git answered, and its history is not this; or
             // it was picked away and back, which leaves its first page alone to follow on from.
             let moved = {

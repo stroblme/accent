@@ -13,7 +13,7 @@ use accent_drawio::{CellId, Color, Rect, Resolved};
 use adw::prelude::*;
 use gtk::glib;
 
-use super::DiagramTab;
+use super::{DiagramTab, Tool};
 use crate::widgets::{Debounce, hover_revealer, icon_button, reveal_on_hover};
 
 /// What the pane shows.
@@ -32,6 +32,8 @@ pub enum Target {
         /// The one shape selected: its place and size in its parent, as the file has them, and
         /// whether it is pinned where it is (locked, or on a locked layer).
         geometry: Option<(Rect, bool)>,
+        /// A creation tool this cell can set the default for, and whether it already has one.
+        default_tool: Option<(Tool, bool)>,
     },
     Page {
         name: String,
@@ -48,6 +50,7 @@ pub enum Change {
     EdgeStyle(Vec<(&'static str, Option<String>)>),
     /// The whole style string of the one selected cell.
     Raw(String),
+    DefaultStyle,
     PageAttr(&'static str, Option<String>),
     PageName(String),
     /// The one selected shape's place and size in its parent.
@@ -384,6 +387,7 @@ pub struct Props {
     /// Whether Start and End offer a flex arrow's heads ([`FLEX_HEADS`]) rather than [`HEADS`].
     flex: Cell<bool>,
     raw: adw::EntryRow,
+    default_style: gtk::Button,
     page_name: adw::EntryRow,
     background: Rc<ColourRow>,
     page_width: adw::SpinRow,
@@ -623,6 +627,9 @@ impl Props {
 
         let raw = entry_row("Style");
         raw.add_css_class("monospace");
+        let default_style = icon_button("starred-symbolic", "Set Default Style");
+        default_style.set_valign(gtk::Align::Center);
+        raw.add_suffix(&default_style);
         raw_group.add(&raw);
         let clips = [
             (Clip::Position, &position, "Position"),
@@ -719,6 +726,7 @@ impl Props {
             end_width,
             flex: Cell::new(false),
             raw,
+            default_style,
             page_name,
             background,
             page_width,
@@ -1035,6 +1043,9 @@ impl Props {
         let raw_send = send.clone();
         self.raw
             .connect_apply(move |row| raw_send(Change::Raw(row.text().to_string())));
+        let send_default = send.clone();
+        self.default_style
+            .connect_clicked(move |_| send_default(Change::DefaultStyle));
         self.page_name
             .connect_apply(move |row| send(Change::PageName(row.text().to_string())));
     }
@@ -1057,6 +1068,7 @@ impl Props {
                 fills,
                 swimlane,
                 geometry,
+                default_tool,
             } => {
                 self.position.set_visible(geometry.is_some());
                 self.size.set_visible(geometry.is_some());
@@ -1257,6 +1269,19 @@ impl Props {
                 // A style string is one cell's: with several selected there is none to show.
                 self.raw.set_sensitive(*count == 1);
                 self.raw.set_text(if *count == 1 { raw } else { "" });
+                self.default_style.set_sensitive(default_tool.is_some());
+                if let Some((tool, existing)) = default_tool {
+                    let kind = match tool {
+                        Tool::Rect => "rectangles",
+                        Tool::Ellipse => "ellipses",
+                        Tool::Text => "text boxes",
+                        Tool::Connector => "connectors",
+                        Tool::Select | Tool::Image => unreachable!(),
+                    };
+                    let action = if *existing { "Update" } else { "Set" };
+                    self.default_style
+                        .set_tooltip_text(Some(&format!("{action} Default Style for {kind}")));
+                }
             }
             Target::Page {
                 name,
@@ -1265,6 +1290,7 @@ impl Props {
             } => {
                 self.position.set_visible(false);
                 self.size.set_visible(false);
+                self.default_style.set_sensitive(false);
                 self.page_name.set_text(name);
                 self.background.fill(*background);
                 self.page_width.set_value(size.0);
@@ -1399,6 +1425,16 @@ impl DiagramTab {
                 _ => None,
             };
             let geometry = geometry.map(|g| (g.rect(), pinned(&cells[0].id)));
+            let default_tool = match cells.as_slice() {
+                [cell] => Tool::of(cell).map(|tool| {
+                    let key = tool.default_attr().expect("a creation tool");
+                    (
+                        tool,
+                        accent_drawio::model::attr(&editor.file().attrs, key).is_some(),
+                    )
+                }),
+                _ => None,
+            };
             let target = match cells.first() {
                 Some(first) => Target::Cells {
                     style: first.style.resolve(first.edge),
@@ -1411,6 +1447,7 @@ impl DiagramTab {
                         .iter()
                         .any(|c| c.vertex && c.style.resolve(false).shape() == "swimlane"),
                     geometry,
+                    default_tool,
                 },
                 None => Target::Page {
                     name: page.name().to_string(),
@@ -1449,6 +1486,24 @@ impl DiagramTab {
             Change::Raw(style) => {
                 if let [id] = ids.as_slice() {
                     self.edit(|e, page| e.set_style_string(page, id, &style));
+                }
+            }
+            Change::DefaultStyle => {
+                let captured = {
+                    let editor = self.editor.borrow();
+                    let page = editor.page(self.page_index.get()).ok();
+                    let [id] = ids.as_slice() else { return };
+                    page.and_then(|p| p.cell(id)).and_then(|cell| {
+                        let key = Tool::of(cell)?.default_attr()?;
+                        let style = cell.style.to_string();
+                        (accent_drawio::model::attr(&editor.file().attrs, key)
+                            != Some(style.as_str()))
+                        .then_some((key, style))
+                    })
+                };
+                if let Some((key, style)) = captured {
+                    self.editor.borrow_mut().set_file_attr(key, &style);
+                    self.changed();
                 }
             }
             Change::PageAttr(key, value) => {

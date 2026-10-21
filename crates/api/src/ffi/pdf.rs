@@ -96,6 +96,11 @@ impl PdfSession {
             .page_count() as u32
     }
 
+    /// Document information dictionary and PDF version, with absent entries omitted by callers.
+    pub fn info(&self) -> pdf::Info {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).doc.info()
+    }
+
     /// Every page's size in points, read out of the page tree without loading any of them.
     pub fn page_sizes(&self) -> Answer<Vec<PageSize>> {
         self.with(|s| Ok(convert::all(s.doc.page_sizes()?)))

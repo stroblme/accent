@@ -22,6 +22,7 @@ dependencies = [
  "similar",
  "soup3",
  "sourceview5",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
  "unicode-width",
@@ -56,6 +57,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "toml",
  "tracing",
  "uniffi",
 ]

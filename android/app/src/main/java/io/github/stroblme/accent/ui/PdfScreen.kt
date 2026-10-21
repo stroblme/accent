@@ -132,6 +132,7 @@ fun PdfScreen(model: VaultModel, pdf: OpenPdf, indexing: Boolean, chrome: Chrome
         onPlace = { model.reading(pdf.rel, at = it) },
         finding = pdf.finding,
         onFinding = model::finding,
+        fileFacts = { fileDetails(model.stat(pdf.rel), context) },
     ) { it.save() }
 }
 
@@ -180,6 +181,7 @@ fun LoosePdfScreen(uri: Uri) {
             invertKey = uri.toString(),
             finding = finding,
             onFinding = { finding = it },
+            fileFacts = { uriDetails(context, uri) },
         ) { model ->
             // No path on this side: the bytes go back through whatever handed them over.
             val bytes = model.bytes() ?: return@Reader Result.failure(Exception("Nothing to write"))
@@ -218,9 +220,11 @@ private fun Reader(
     /** Whether its find bar is open. */
     finding: Boolean,
     onFinding: (Boolean) -> Unit,
+    fileFacts: suspend () -> List<DetailGroup> = { emptyList() },
     onSave: suspend (PdfModel) -> Result<Unit>,
 ) {
     val scope = rememberCoroutineScope()
+    var details by remember(invertKey) { mutableStateOf(false) }
     var tool by remember { mutableStateOf(Tool.Read) }
     val snackbar = remember { SnackbarHostState() }
     /** The bookmarks, read once: a document's outline does not change under the reader. */
@@ -280,6 +284,7 @@ private fun Reader(
                             Text("Contents")
                         }
                         BarToggle("Invert", on = inverted, onClick = { Inverted.toggle(invertKey) })
+                        DetailsMenu { details = true }
                     }
                 },
             ) { bar ->
@@ -325,6 +330,9 @@ private fun Reader(
                 }
             }
         }
+    }
+    if (details) DetailsSheet(onDismiss = { details = false }) {
+        fileFacts() + pdfDetails(doc)
     }
 }
 

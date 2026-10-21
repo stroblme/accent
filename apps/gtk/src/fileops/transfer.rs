@@ -10,6 +10,7 @@ use accent_core::path::basename;
 use adw::prelude::*;
 use gtk::{gio, glib};
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -320,10 +321,14 @@ pub fn carry_in(ops: &Rc<Ops>, from: &Rc<Ops>, rels: Vec<String>, dir: &str, mov
                 // A name nothing holds here has nothing under it to take.
                 if vault.exists(&to) {
                     let here = match is_dir {
-                        true => vault.list_tree(&to).map(|w| w.files).unwrap_or_default(),
-                        false => vec![String::new()],
+                        true => vault
+                            .list_tree(&to)?
+                            .files
+                            .into_iter()
+                            .collect::<HashSet<_>>(),
+                        false => HashSet::from([String::new()]),
                     };
-                    existing.extend(walked.files.iter().filter(|file| here.contains(file)).map(
+                    existing.extend(walked.files.iter().filter(|file| here.contains(*file)).map(
                         |file| match file.as_str() {
                             "" => to.clone(),
                             file => child_path(&to, file),
@@ -337,11 +342,13 @@ pub fn carry_in(ops: &Rc<Ops>, from: &Rc<Ops>, rels: Vec<String>, dir: &str, mov
                 let carry = Carry::landing(walked, &to, at);
                 carried.push((rel, to, is_dir, carry));
             }
-            (carried, existing, dir)
+            Ok::<_, accent_api::Error>((carried, existing, dir))
         })
         .await;
-        let Some((carried, existing, dir)) = walked else {
-            return (ops.toast)("Cannot copy");
+        let (carried, existing, dir) = match walked {
+            Some(Ok(plan)) => plan,
+            Some(Err(error)) => return (ops.toast)(&format!("Cannot copy: {error}")),
+            None => return (ops.toast)("Cannot copy"),
         };
         if existing.is_empty() {
             return carry(&ops, &from, &dir, carried, Vec::new(), moving);

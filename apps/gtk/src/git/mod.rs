@@ -14,7 +14,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use accent_api::Vault;
 use accent_api::git::{self, Blob, Branch, Commit, Entry, LogRow, Repo, Status, Submodule};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib, pango};
@@ -32,10 +31,12 @@ mod compare;
 mod fetch;
 mod log;
 mod refresh;
+mod source;
 
 use branch::{branch_line, branch_model, branch_parts, head_name, local_name};
 use compare::Watch;
 use log::same_head;
+pub(crate) use source::Source;
 
 /// Refresh depth: status for worktree changes, repository data for `.git` changes, and discovery
 /// for added or removed directories. Ordered so coalesced requests take the deepest required
@@ -85,7 +86,7 @@ const MESSAGE_MAX_HEIGHT: i32 = 160;
 // signature the caller has to write.
 #[allow(clippy::type_complexity)]
 pub struct Hooks {
-    pub vault: Arc<Vault>,
+    pub source: Arc<Source>,
     /// Where the dialogs are presented.
     pub window: adw::ApplicationWindow,
     pub toast: Box<dyn Fn(&str)>,
@@ -194,6 +195,8 @@ impl State {
 
 pub struct Panel {
     hooks: Hooks,
+    source: RefCell<Arc<Source>>,
+    source_generation: Cell<u64>,
     root: gtk::Widget,
     /// Over the pane while the selected repository is part way through a merge or a rebase.
     banner: adw::Banner,
@@ -230,10 +233,8 @@ pub struct Panel {
     state: RefCell<State>,
     /// The debounce timer, replaced rather than stacked.
     pending: crate::widgets::Debounce,
-    busy: Cell<bool>,
-    /// Something asked for a refresh while one was in flight; run once more when it lands, for
-    /// the deepest of whatever asked.
-    again: Cell<Option<Depth>>,
+    refresh_gate: RefCell<refresh::RefreshGate>,
+    running_git: RefCell<actions::RunningGit>,
     /// What the debounced refresh has been asked for so far, taken when its timer fires.
     pending_depth: Cell<Option<Depth>>,
     /// When [`Panel::rediscover`] last went looking, in `glib::monotonic_time` microseconds. It
@@ -305,6 +306,47 @@ pub struct Panel {
 }
 
 impl Panel {
+    fn source(&self) -> Arc<Source> {
+        self.source.borrow().clone()
+    }
+
+    /// A vaultless window follows its focused shell. Empty clears the pane on focus or link loss.
+    pub fn set_source(self: &Rc<Self>, source: Source) {
+        if self.source.borrow().same_location(&source) {
+            return;
+        }
+        let empty = matches!(source, Source::Empty);
+        self.source.replace(Arc::new(source));
+        self.source_generation.set(self.source_generation.get() + 1);
+        self.refresh_gate.borrow_mut().invalidate();
+        self.pending.cancel();
+        self.pending_depth.take();
+        self.asked.set(self.asked.get() + 1);
+        self.state.replace(State {
+            head_moved: true,
+            ..State::default()
+        });
+        self.watches.borrow_mut().clear();
+        self.collapsed.borrow_mut().clear();
+        self.expanded.take();
+        self.expanded_at.set(None);
+        self.to_head.set(false);
+        self.message.buffer().set_text("");
+        self.syncing.set(true);
+        self.names.splice(0, self.names.n_items(), &[]);
+        self.syncing.set(false);
+        self.changes.remove_all();
+        self.log.remove_all();
+        self.has_more.set(false);
+        self.fetched_once.set(false);
+        self.fetch_failed.set(false);
+        self.draw();
+        (self.hooks.changed)();
+        if !empty {
+            self.refresh(Depth::Discover);
+        }
+    }
+
     pub fn new(hooks: Hooks) -> Rc<Panel> {
         let names = gtk::StringList::new(&[]);
         let chooser = gtk::DropDown::builder()
@@ -409,6 +451,7 @@ impl Panel {
         root.append(&banner);
         root.append(&column);
 
+        let source = RefCell::new(hooks.source.clone());
         let panel = Rc::new(Panel {
             tree: Cell::new(hooks.tree),
             collapsed: RefCell::new(HashSet::new()),
@@ -417,6 +460,8 @@ impl Panel {
             changes_fill: Fill::default(),
             log_fill: Fill::default(),
             hooks,
+            source,
+            source_generation: Cell::new(0),
             root: root.upcast(),
             banner,
             names,
@@ -440,8 +485,8 @@ impl Panel {
             has_more: Cell::new(false),
             state: RefCell::new(State::default()),
             pending: crate::widgets::Debounce::new(DEBOUNCE),
-            busy: Cell::new(false),
-            again: Cell::new(None),
+            refresh_gate: RefCell::new(refresh::RefreshGate::default()),
+            running_git: RefCell::new(actions::RunningGit::default()),
             pending_depth: Cell::new(None),
             discovered: Cell::new(glib::monotonic_time()),
             watches: RefCell::new(Vec::new()),
@@ -744,7 +789,7 @@ impl Panel {
     /// `dir/`, is left to its own status, so each file takes its own repository's word.
     pub fn changed(&self) -> Vec<(String, crate::tree::Change)> {
         let state = self.state.borrow();
-        let root = self.hooks.vault.root();
+        let root = self.source().key_root();
         let mut changed = Vec::new();
         for (repo, status) in state.repos.iter().zip(&state.statuses) {
             for entry in status.entries.iter().filter(|e| !own_repository(&e.path)) {
@@ -758,7 +803,7 @@ impl Panel {
     /// a nested repository is that repository's and not the vault's.
     pub fn repo_of(&self, key: &str) -> Option<(Repo, String)> {
         let state = self.state.borrow();
-        let root = self.hooks.vault.root();
+        let root = self.source().key_root();
         let repo = state.repos.get(index_of(&state, &root, key)?)?;
         let rel = absolute(&root, key)
             .strip_prefix(&repo.root)
@@ -774,7 +819,7 @@ impl Panel {
     pub fn branch_label(&self, key: Option<&str>) -> Option<String> {
         let state = self.state.borrow();
         let index = key
-            .and_then(|key| index_of(&state, &self.hooks.vault.root(), key))
+            .and_then(|key| index_of(&state, &self.source().key_root(), key))
             .unwrap_or(state.selected);
         let status = state.statuses.get(index)?;
         let listed = (index == state.selected).then_some(&state.branches);
@@ -837,20 +882,30 @@ impl Panel {
         self.state.borrow().head_moved
     }
 
+    pub fn is_shell_remote(&self) -> bool {
+        matches!(self.source().as_ref(), Source::Remote { .. })
+    }
+
     /// The text of `key` as HEAD has it, or `None` when HEAD has no such file, git refused, or
     /// the file belongs to no repository.
-    pub fn head_text(&self, key: &str, done: impl FnOnce(Option<String>) + 'static) {
+    pub fn head_text(self: &Rc<Self>, key: &str, done: impl FnOnce(Option<String>) + 'static) {
         let Some((repo, rel)) = self.repo_of(key) else {
             return done(None);
         };
-        let vault = self.hooks.vault.clone();
+        let vault = self.source();
+        let (weak, generation) = (Rc::downgrade(self), self.source_generation.get());
         glib::spawn_future_local(async move {
             let blob =
                 crate::work::off_thread("git", move || vault.git_show(&repo, "HEAD", &rel)).await;
-            done(match blob {
-                Some(Ok(Some(Blob::Text(text)))) => Some(text),
-                _ => None,
-            });
+            if weak
+                .upgrade()
+                .is_some_and(|panel| panel.source_generation.get() == generation)
+            {
+                done(match blob {
+                    Some(Ok(Some(Blob::Text(text)))) => Some(text),
+                    _ => None,
+                });
+            }
         });
     }
 }

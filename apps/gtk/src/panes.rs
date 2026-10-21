@@ -544,6 +544,7 @@ impl Pane {
             .build();
         overlay.add_overlay(&hint);
         let switcher = Switcher::new();
+        overlay.add_overlay(switcher.backdrop());
         overlay.add_overlay(switcher.widget());
 
         let find = find::Bar::new();
@@ -601,6 +602,18 @@ impl Pane {
             f64::from(self.overlay.width()),
             f64::from(self.overlay.height()),
         )
+    }
+
+    #[cfg(feature = "bench")]
+    pub fn switcher_dimmed(&self) -> bool {
+        let mut child = self.overlay.first_child();
+        while let Some(widget) = child {
+            if widget.has_css_class("accent-switcher-backdrop") {
+                return widget.is_visible();
+            }
+            child = widget.next_sibling();
+        }
+        false
     }
 
     /// This pane's pages, in the order the bar shows them.

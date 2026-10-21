@@ -22,7 +22,14 @@ impl Panel {
             return;
         };
         self.fetch_busy.set(true);
-        let (vault, lock) = (self.hooks.vault.clone(), self.fetch_lock.clone());
+        let (vault, lock) = (self.source(), self.fetch_lock.clone());
+        let roots = if vault.is_remote() {
+            Vec::new()
+        } else {
+            vec![repo.root.clone()]
+        };
+        self.running_git.borrow_mut().start(&roots);
+        let generation = self.source_generation.get();
         let panel = self.clone();
         // As a command does: the process outlives the window until the fetch is stopped.
         let hold = self.hooks.window.application().map(|app| app.hold());
@@ -33,8 +40,15 @@ impl Panel {
             })
             .await;
             drop(hold);
+            panel.running_git.borrow_mut().finish(&roots);
             panel.fetch_busy.set(false);
             if panel.gone.get() {
+                return;
+            }
+            if panel.source_generation.get() != generation {
+                // A newly focused shell may have discovered its repository while this old fetch
+                // was in flight. Give it its first fetch now rather than at the next five-minute tick.
+                panel.autofetch();
                 return;
             }
             let failed = !matches!(fetched, Some(Ok(_)));
@@ -117,7 +131,7 @@ pub(super) struct Fetched {
 /// a refresh below [`Depth::Discover`] runs against rather than looking for them again, and `rows`
 /// how many commits of history the pane shows.
 pub(super) fn fetch(
-    vault: &Vault,
+    vault: &Source,
     selected: usize,
     depth: Depth,
     known: Vec<Repo>,

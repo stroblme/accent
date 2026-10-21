@@ -82,8 +82,25 @@ pub(crate) async fn start(
     events: Sender<Event>,
     busy: Option<Busy>,
 ) -> Result<Arc<dyn Language>> {
+    start_configured(argv, root, vault_root, events, busy, None).await
+}
+
+pub(crate) async fn start_configured(
+    argv: Vec<String>,
+    root: PathBuf,
+    vault_root: PathBuf,
+    events: Sender<Event>,
+    busy: Option<Busy>,
+    python: Option<String>,
+) -> Result<Arc<dyn Language>> {
     let name = argv.first().cloned().unwrap_or_default();
-    let (client, notifications) = Client::spawn(&argv, &root)
+    let settings = python.map_or(Value::Null, |python| {
+        json!({
+            "python": {"pythonPath": python},
+            "pylsp": {"plugins": {"jedi": {"environment": python}}},
+        })
+    });
+    let (client, notifications) = Client::spawn_configured(&argv, &root, settings)
         .map_err(|e| Error::Language(format!("cannot start {name}: {e}")))?;
     let caps = client.initialize(&root).await?;
     let encoding = Encoding::parse(caps.position_encoding.as_deref());

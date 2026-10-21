@@ -364,12 +364,23 @@ fn insert_forward(argv: &mut Vec<String>, f: Forward) {
     argv.insert(at + 1, spec);
 }
 
-/// Run a command over the master and collect output. BatchMode prevents
-/// SSH fallback to a new connection from blocking on a prompt with no terminal.
+/// Run a command over the master and collect output. Bound a fallback connection
+/// when its socket has gone stale, and refuse prompts without a terminal.
 pub fn run(url: &Url, ctl: &Path, command: &str) -> Vec<String> {
     let mut argv = base(url, ctl);
-    argv.push("-o".to_string());
-    argv.push("BatchMode=yes".to_string());
+    argv.extend(
+        [
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=10",
+            "-o",
+            "ServerAliveInterval=5",
+            "-o",
+            "ServerAliveCountMax=3",
+        ]
+        .map(String::from),
+    );
     argv.push(url.destination());
     // Everything after `--` is the remote command, even when it starts with a dash.
     argv.push("--".to_string());
@@ -927,6 +938,12 @@ mod tests {
                 "ControlPath=/run/user/1000/accent/0123456789abcdef",
                 "-o",
                 "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "-o",
+                "ServerAliveInterval=5",
+                "-o",
+                "ServerAliveCountMax=3",
                 "box",
                 "--",
                 "uname -s",
@@ -942,6 +959,12 @@ mod tests {
                 "2222",
                 "-o",
                 "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "-o",
+                "ServerAliveInterval=5",
+                "-o",
+                "ServerAliveCountMax=3",
                 "me@box",
                 "--",
                 "uname -s",

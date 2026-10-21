@@ -1,7 +1,8 @@
 //! Source declarations for indexed outlines and call lookup without a language server.
 //!
 //! This scanner masks comments and literals while preserving byte offsets and newlines. Brace
-//! languages use block headers and semicolon-terminated statements; Python uses indentation.
+//! languages use block headers and semicolon-terminated statements; Python uses indentation,
+//! and Lean uses its `namespace`/`end` scopes.
 //! Language patterns determine which declarations are recognised, so macro-generated or
 //! preprocessor-hidden declarations may be missed. Tests compare its results with CodeGraph's
 //! tree-sitter parse of this repository.
@@ -21,6 +22,7 @@ pub enum Lang {
     Script,
     Go,
     C,
+    Lean,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -108,6 +110,7 @@ pub fn lang_of(rel: &str) -> Option<Lang> {
         "java" => Lang::Java,
         "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts" => Lang::Script,
         "go" => Lang::Go,
+        "lean" => Lang::Lean,
         "c" | "h" | "cc" | "cpp" | "cxx" | "hh" | "hpp" | "hxx" | "c++" | "h++" => Lang::C,
         _ => return None,
     })
@@ -139,6 +142,7 @@ pub fn symbols(lang: Lang, text: &str) -> Vec<Decl> {
     let masked = mask(lang, text);
     let mut out = match lang {
         Lang::Python => indented(&masked, text),
+        Lang::Lean => lean(&masked, text),
         _ => braced(lang, &masked, text),
     };
     if lang == Lang::C {
@@ -205,6 +209,10 @@ pub fn mask(lang: Lang, text: &str) -> String {
             (b'#', Lang::Python) => Some(line_end(b, i)),
             (b'"' | b'\'', Lang::Python) => Some(python_string(b, i)),
             (b'/', Lang::Python) => None,
+            (b'-', Lang::Lean) if next == b'-' => Some(line_end(b, i)),
+            (b'/', Lang::Lean) if next == b'-' => Some(lean_block_end(b, i)),
+            (b'"', Lang::Lean) => Some(quoted(b, i, b'"', true)),
+            (b'\'', Lang::Lean) => None,
             (b'/', _) if next == b'/' => Some(line_end(b, i)),
             (b'/', _) if next == b'*' => {
                 Some(block_end(b, i, matches!(lang, Lang::Rust | Lang::Kotlin)))
@@ -284,6 +292,123 @@ fn block_end(b: &[u8], i: usize, nested: bool) -> usize {
         }
     }
     b.len()
+}
+
+/// Lean's nested `/- … -/` comment.
+fn lean_block_end(b: &[u8], i: usize) -> usize {
+    let mut depth = 0;
+    let mut j = i;
+    while j + 1 < b.len() {
+        match (b[j], b[j + 1]) {
+            (b'/', b'-') => {
+                depth += 1;
+                j += 2;
+            }
+            (b'-', b'/') => {
+                depth -= 1;
+                j += 2;
+                if depth == 0 {
+                    return j;
+                }
+            }
+            _ => j += 1,
+        }
+    }
+    b.len()
+}
+
+// ------------------------------------------------------------------------------------------- Lean
+
+/// Lean namespaces are delimited by `end`, while sections and mutual blocks also consume one.
+fn lean(masked: &str, text: &str) -> Vec<Decl> {
+    static SCOPE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^[ \t]*(?P<kind>namespace|section|mutual)\b(?:[ \t]+(?P<name>[\w'.]+))?")
+            .expect("valid Lean scope")
+    });
+    static END: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^[ \t]*end(?:[ \t]+[\w'.]+)?[ \t]*$").expect("valid Lean end")
+    });
+    static ITEM: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+            r"^[ \t]*(?:@\[[^\]\n]*\][ \t]*)*(?:(?:private|protected|noncomputable|unsafe|partial|local|scoped|irreducible)[ \t]+)*(?P<kind>def|theorem|lemma|abbrev|opaque|axiom|constant|structure|class|inductive|instance)[ \t]+(?P<name>[\w'.]+)",
+        )
+        .expect("valid Lean declaration")
+    });
+    let mut out: Vec<Decl> = Vec::new();
+    let mut scopes: Vec<Option<usize>> = Vec::new();
+    let mut start = 0;
+    for code in masked.split_inclusive('\n') {
+        let end = start + code.len();
+        let line = code.trim_end_matches('\n');
+        let container = scopes.iter().rev().find_map(|index| {
+            index.map(|index| out[index].name.rsplit('.').next().unwrap().to_string())
+        });
+        if let Some(c) = SCOPE.captures(line) {
+            let namespace = c.name("kind").is_some_and(|m| m.as_str() == "namespace");
+            let decl = if namespace {
+                c.name("name").map(|name| {
+                    let at = out.len();
+                    out.push(lean_item(
+                        SymbolKind::Module,
+                        name.as_str(),
+                        container,
+                        text,
+                        start,
+                        end,
+                    ));
+                    at
+                })
+            } else {
+                None
+            };
+            scopes.push(decl);
+        } else if END.is_match(line) {
+            if let Some(Some(index)) = scopes.pop() {
+                out[index].range.end = end;
+            }
+        } else if let Some(c) = ITEM.captures(line) {
+            let kind = match c.name("kind").expect("matched kind").as_str() {
+                "structure" => SymbolKind::Struct,
+                "class" => SymbolKind::Class,
+                "inductive" => SymbolKind::Enum,
+                "axiom" | "constant" => SymbolKind::Const,
+                _ => SymbolKind::Function,
+            };
+            out.push(lean_item(
+                kind,
+                c.name("name").expect("matched name").as_str(),
+                container,
+                text,
+                start,
+                end,
+            ));
+        }
+        start = end;
+    }
+    for index in scopes.into_iter().flatten() {
+        out[index].range.end = text.len();
+    }
+    out
+}
+
+fn lean_item(
+    kind: SymbolKind,
+    name: &str,
+    container: Option<String>,
+    text: &str,
+    start: usize,
+    end: usize,
+) -> Decl {
+    Decl {
+        kind,
+        name: name.to_string(),
+        container,
+        range: start..end,
+        line: 0,
+        end_line: 0,
+        signature: text[start..end].trim().chars().take(200).collect(),
+        test: false,
+    }
 }
 
 /// The end of the literal quoted by `q` at `i`, a backslash escaping what follows it; one that
@@ -922,7 +1047,7 @@ fn find_decl(lang: Lang, masked: &str, range: Range<usize>, top: &Open) -> Optio
         Lang::Script => &SCRIPT,
         Lang::Go => &GO,
         Lang::C => &C,
-        Lang::Python => return None,
+        Lang::Python | Lang::Lean => return None,
     };
     let head = &masked[range.clone()];
     let mut best: Option<Found> = None;
@@ -1687,6 +1812,7 @@ double geo::Shape::half() const {
     #[test]
     fn languages_and_test_files_by_path() {
         assert_eq!(lang_of("src/main.rs"), Some(Lang::Rust));
+        assert_eq!(lang_of("Math/Algebra.lean"), Some(Lang::Lean));
         assert_eq!(lang_of("app/x.TSX"), Some(Lang::Script));
         assert_eq!(lang_of("notes/a.md"), None);
         assert_eq!(lang_of("Makefile"), None);
@@ -1696,5 +1822,39 @@ double geo::Shape::half() const {
         assert!(is_test_path("tests/test_api.py"));
         assert!(is_test_path("src/box.spec.ts"));
         assert!(!is_test_path("crates/core/src/index/links.rs"));
+    }
+
+    #[test]
+    fn lean_declarations_nest_in_namespaces_and_ignore_comments() {
+        let text = r#"-- def fake := 0
+/- outer
+   /- nested -/
+   theorem fake : True := by trivial
+-/
+namespace Algebra
+section Helpers
+private def add' (x : Nat) := x + 1
+end Helpers
+namespace Inner
+@[simp] theorem φ' : True := by
+  trivial
+end Inner
+end Algebra
+def outside := "theorem NotReal"
+def quoted := "start
+theorem NotReal : True := by trivial
+end"
+"#;
+        assert_eq!(
+            rows(Lang::Lean, text),
+            [
+                row(Module, "Algebra", None, (6, 14)),
+                row(Function, "add'", Some("Algebra"), (8, 8)),
+                row(Module, "Inner", Some("Algebra"), (10, 13)),
+                row(Function, "φ'", Some("Inner"), (11, 11)),
+                row(Function, "outside", None, (15, 15)),
+                row(Function, "quoted", None, (16, 16)),
+            ]
+        );
     }
 }
