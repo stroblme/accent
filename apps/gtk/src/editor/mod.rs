@@ -42,8 +42,10 @@ pub(crate) use drag::ENDED as DRAG_ENDED;
 #[cfg(feature = "bench")]
 pub(crate) use drag::content as drag_content;
 use follow::Follow;
+pub(crate) use follow::url_under;
 #[cfg(feature = "bench")]
 pub(crate) use indent::on_key as indent_key;
+pub(crate) use keys::attach as attach_keys;
 #[cfg(feature = "bench")]
 pub(crate) use keys::press;
 use lines::primary_paste;
@@ -55,7 +57,8 @@ pub use open::open;
 pub use page::default_font;
 pub(crate) use page::{COLUMN_FLOOR, font_css, install_font, next_view_name, refont, set_margins};
 use page::{GUTTER, line_numbers};
-use search::{match_style, matched, mute};
+pub(crate) use search::{match_style, next_match};
+use search::{matched, mute};
 pub(crate) use text::{caret, line_end, line_prefix};
 
 /// How long a long note waits after the last keystroke before it is re-analysed.
@@ -318,19 +321,8 @@ pub struct Tab {
     /// [`follow`].
     follow_tag: gtk::TextTag,
     follow: RefCell<Follow>,
-    /// Stored diagnostics and line-message provider, read back by hover and
-    /// status after painting.
-    diagnostics: RefCell<Vec<Diagnostic>>,
-    annotations: sourceview5::AnnotationProvider,
-    /// Hide diagnostic squiggles, gutter marks and line messages while
-    /// retaining hover details and status counts.
-    diagnostics_hidden: Cell<bool>,
-    /// Last painted line messages with their full source text. Hidden lines
-    /// are omitted; the provider cannot supply the original text back.
-    annotated: RefCell<diagnostics::Shown>,
-    /// Line messages to relayout after diagnostic ranges move with an edit
-    /// ([`Tab::shift_diagnostics`]).
-    relay: RefCell<Option<diagnostics::Shown>>,
+    /// Stored diagnostics and how they are painted, read back by hover and status.
+    diagnostics: diagnostics::Painted,
     /// Provider fold ranges and header chevrons. Actual hidden state lives
     /// in buffer tags.
     folds: RefCell<Vec<Fold>>,
@@ -711,76 +703,57 @@ impl Tab {
 
     /// Replace stored diagnostics with the provider's full publish. Empty clears them.
     pub fn set_diagnostics(&self, items: Vec<Diagnostic>) {
-        *self.diagnostics.borrow_mut() = items;
-        self.paint_diagnostics();
+        self.diagnostics.set(items);
     }
 
     /// Toggle visible diagnostics per tab through the status count, preserving
     /// the stored answer for this document.
     pub fn hide_diagnostics(&self, hidden: bool) {
-        if self.diagnostics_hidden.replace(hidden) != hidden {
-            self.paint_diagnostics();
-        }
+        self.diagnostics.hide(hidden);
     }
 
     pub fn diagnostics_hidden(&self) -> bool {
-        self.diagnostics_hidden.get()
+        self.diagnostics.hidden()
     }
 
     /// Repaint stored diagnostics, or clear while hidden, using the same
     /// path as provider publishes to keep tags consistent.
     pub(super) fn paint_diagnostics(&self) {
-        self.lay_diagnostics(diagnostics::Shown::new());
+        self.diagnostics.paint();
     }
 
-    /// The diagnostics' gutter marks again after a breakpoint came or went, which takes its line's
-    /// cell from them (`diagnostics::render`); each message keeps its cut.
+    /// The diagnostics' gutter marks again after a breakpoint came or went: see
+    /// [`diagnostics::Painted::remark`].
     pub(crate) fn remark_diagnostics(&self) {
-        let kept = self.annotated.take();
-        self.lay_diagnostics(kept);
+        self.diagnostics.remark();
     }
 
-    /// [`Tab::paint_diagnostics`], keeping the cut of each message in `kept` still on its line.
-    fn lay_diagnostics(&self, kept: diagnostics::Shown) {
-        let items = self.diagnostics.borrow();
-        let painted: &[Diagnostic] = match self.diagnostics_hidden.get() {
-            true => &[],
-            false => &items,
-        };
-        *self.annotated.borrow_mut() =
-            diagnostics::render(&self.view, &self.buffer, &self.annotations, painted, kept);
-    }
-
-    /// Shift diagnostics for an upcoming `from..to` edit ([`diagnostics::Edit`])
-    /// so hover and repaint use current positions before the next publish.
+    /// Shift diagnostics for an upcoming `from..to` edit ([`diagnostics::Painted::shift`]).
     /// Whole-text replacement instead needs a fresh server answer.
     fn shift_diagnostics(&self, from: &gtk::TextIter, to: &gtk::TextIter, text: &str) {
         if self.loading.get() {
             return;
         }
-        let edit = diagnostics::Edit::new(lang::pos_of(from), lang::pos_of(to), text);
-        if edit.shift(&mut self.diagnostics.borrow_mut()) {
-            *self.relay.borrow_mut() = Some(edit.reline(self.annotated.take()));
-        }
+        self.diagnostics.shift(from, to, text);
     }
 
     /// How many end-of-line messages the last paint put up. `ACCENT_BENCH_COMPARE=diag:` only.
     #[cfg(feature = "bench")]
     pub fn annotated(&self) -> usize {
-        self.annotated.borrow().len()
+        self.diagnostics.messages().len()
     }
 
     /// Each of them as its characters shown beside those its line has room for now.
     /// `ACCENT_BENCH_DIAG` only.
     #[cfg(feature = "bench")]
     pub fn cuts(&self) -> Vec<(usize, usize)> {
-        diagnostics::cuts(&self.view, &self.annotated.borrow())
+        diagnostics::cuts(&self.view, &self.diagnostics.messages())
     }
 
     /// The lines the end-of-line messages are drawn on. `ACCENT_BENCH_DIAG` only.
     #[cfg(feature = "bench")]
     pub fn message_lines(&self) -> Vec<i32> {
-        let shown = self.annotated.borrow();
+        let shown = self.diagnostics.messages();
         shown
             .values()
             .map(|(annotation, _)| annotation.line())
@@ -789,7 +762,7 @@ impl Tab {
 
     /// What the server said, painted or not: what the status bar counts and the hover reads back.
     pub fn diagnostics(&self) -> std::cell::Ref<'_, Vec<Diagnostic>> {
-        self.diagnostics.borrow()
+        self.diagnostics.items()
     }
 
     /// The buffer as a plain `GtkTextBuffer`, which is what `fold` works in: nothing it does
@@ -1067,13 +1040,6 @@ impl Tab {
             .is_some_and(|snippet| snippet.buffer().is_some())
     }
 
-    /// Stop all active snippets by toggling `enable-snippets`, the available
-    /// GtkSourceView 5.20 cancellation mechanism.
-    pub(crate) fn end_snippet(&self) {
-        self.view.set_enable_snippets(false);
-        self.view.set_enable_snippets(true);
-    }
-
     /// The view as the subclass that paints ghost text and holds the extra carets.
     pub fn ghost_view(&self) -> Option<&multicaret::View> {
         self.view.downcast_ref::<multicaret::View>()
@@ -1116,15 +1082,6 @@ impl Tab {
     /// Find a bare HTTP(S) or mailto URL at the caret in notes, code or plain text.
     pub fn url_at_cursor(&self) -> Option<String> {
         follow::url_under(&caret(&self.buffer)).map(|(_, url)| url)
-    }
-
-    /// The link under a pointer position in the view's own coordinates.
-    pub fn link_at(&self, x: f64, y: f64) -> Option<Link> {
-        let (bx, by) =
-            self.view
-                .window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
-        let iter = crate::fold::iter_at_location(&self.view, bx, by)?;
-        self.link_at_iter(&iter)
     }
 
     /// Find the link covering `iter` in character coordinates, converted
@@ -1192,20 +1149,10 @@ impl Tab {
             let line = caret(&self.buffer).line();
             highlight::apply_line(&self.buffer, line);
         }
-        // GtkSourceView pins a message to its line number, where the underline and the gutter mark
-        // ride along with the text: one the edit moved to another line is laid again there.
-        if let Some(kept) = self.relay.take() {
-            self.lay_diagnostics(kept);
-        }
         // An end-of-line message is cut to the room its line leaves (`diagnostics::fit`), and
         // typing on that line takes some of it: the caret's line is measured again now, styled,
         // rather than by the next publish.
-        diagnostics::refit(
-            &self.view,
-            &self.annotations,
-            &mut self.annotated.borrow_mut(),
-            caret(&self.buffer).line(),
-        );
+        self.diagnostics.edited(caret(&self.buffer).line());
         // The change bars are a second whole-buffer copy and a line diff against the committed
         // text, which is too much to spend on a keystroke however short the note is, and nothing
         // a typist watches: they follow the debounce at either size.

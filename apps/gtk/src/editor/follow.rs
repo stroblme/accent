@@ -206,7 +206,7 @@ pub(super) fn word_at(at: &gtk::TextIter) -> Option<Range<i32>> {
 
 /// Find the bare URL at `at` in any text, returning buffer character offsets
 /// and the URL.
-pub(super) fn url_under(at: &gtk::TextIter) -> Option<(Range<i32>, String)> {
+pub(crate) fn url_under(at: &gtk::TextIter) -> Option<(Range<i32>, String)> {
     let (base, line) = line_around(at);
     let byte = line.char_indices().nth(at.line_offset() as usize)?.0;
     let url = url_at(&line, byte)?;

@@ -14,23 +14,15 @@
 //! Unclaimed keys continue through the chain, allowing normal typing to narrow completion.
 
 use super::{Flavour, Tab, indent};
-use crate::{completion, ghost, signature, typing};
+use crate::lang::Editor;
+use crate::{completion, multicaret, signature, typing};
 use gtk::prelude::*;
 use gtk::{gdk, glib};
 use std::rc::Rc;
 
 /// Give `tab` its one key controller.
 pub(super) fn install(tab: &Rc<Tab>) {
-    // Capture, so the keys the chain claims never reach the view's own bindings.
-    let keys = gtk::EventControllerKey::new();
-    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
-    keys.connect_key_pressed(glib::clone!(
-        #[weak(rename_to = tab)]
-        tab,
-        #[upgrade_or]
-        glib::Propagation::Proceed,
-        move |_, key, _, state| dispatch(&tab, key, state)
-    ));
+    let keys = attach(&(tab.clone() as Rc<dyn Editor>));
     // Ctrl pressed over a word the pointer is already resting on: the motion controller hears
     // nothing until the pointer moves again, so the underline would wait for a jiggle.
     keys.connect_modifiers(glib::clone!(
@@ -45,30 +37,44 @@ pub(super) fn install(tab: &Rc<Tab>) {
             glib::Propagation::Proceed
         }
     ));
-    tab.view.add_controller(keys);
+}
+
+/// Give `editor`'s view its one key controller, which offers each press to the chain below.
+pub(crate) fn attach(editor: &Rc<dyn Editor>) -> gtk::EventControllerKey {
+    // Capture, so the keys the chain claims never reach the view's own bindings.
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    // Weak: the editor holds the view the controller is on.
+    let weak = Rc::downgrade(editor);
+    keys.connect_key_pressed(move |_, key, _, state| match weak.upgrade() {
+        Some(editor) => dispatch(&editor, key, state),
+        None => glib::Propagation::Proceed,
+    });
+    editor.view().add_controller(keys.clone());
+    keys
 }
 
 /// One press, driven from a drill rather than from the keyboard: what the controller above calls.
 #[cfg(feature = "bench")]
 pub(crate) fn press(tab: &Rc<Tab>, key: gdk::Key, state: gdk::ModifierType) -> glib::Propagation {
-    dispatch(tab, key, state)
+    dispatch(&(tab.clone() as Rc<dyn Editor>), key, state)
 }
 
 /// One key press, offered to each step of the chain in turn.
-fn dispatch(tab: &Rc<Tab>, key: gdk::Key, state: gdk::ModifierType) -> glib::Propagation {
-    if let Some(answer) = completion::press(tab, key, state) {
+fn dispatch(editor: &Rc<dyn Editor>, key: gdk::Key, state: gdk::ModifierType) -> glib::Propagation {
+    if let Some(answer) = completion::press(editor.as_ref(), key, state) {
         return answer;
     }
-    if let Some(answer) = signature::on_key(tab, key) {
+    if let Some(answer) = signature::on_key(editor.as_ref(), key) {
         return answer;
     }
     // A template's stops are what Tab means while one is being walked, so neither the suggestion
     // nor a list item's indent is even asked: `push_snippet` is the only thing that can be in the
     // middle of a template. The view walks them, Shift+Tab back included; Escape ends the walk
     // and leaves the rest of the stops where they are.
-    let walking = tab.snippet_active();
+    let walking = editor.snippet_active();
     if walking && key == gdk::Key::Escape {
-        tab.end_snippet();
+        editor.end_snippet();
         return glib::Propagation::Stop;
     }
     let stepping_a_template = walking
@@ -76,10 +82,14 @@ fn dispatch(tab: &Rc<Tab>, key: gdk::Key, state: gdk::ModifierType) -> glib::Pro
             key,
             gdk::Key::Tab | gdk::Key::KP_Tab | gdk::Key::ISO_Left_Tab
         );
-    if !stepping_a_template && let Some(answer) = ghost::on_key(tab, key, state) {
+    if !stepping_a_template && let Some(answer) = editor.clone().ghost_key(key, state) {
         return answer;
     }
-    if let Some(view) = tab.ghost_view().filter(|view| view.has_carets()) {
+    let view = editor.view();
+    if let Some(view) = view
+        .downcast_ref::<multicaret::View>()
+        .filter(|view| view.has_carets())
+    {
         // A column of carets takes Return and Tab before the list helpers below ever see them,
         // which is one of the ways a note stops continuing its lists (NOTEPAD). A column nobody
         // meant to leave behind looks like no column at all on screen, so say where the carets
@@ -96,12 +106,12 @@ fn dispatch(tab: &Rc<Tab>, key: gdk::Key, state: gdk::ModifierType) -> glib::Pro
         }
         return view.press(key, state);
     }
-    if tab.flavour().is_note() && !stepping_a_template {
-        return typing::on_key(&tab.view, key, state);
+    if editor.flavour().is_note() && !stepping_a_template {
+        return typing::on_key(view, key, state);
     }
-    if tab.flavour() == Flavour::Code && !stepping_a_template {
-        return match typing::on_code_key(&tab.view, key, state) {
-            glib::Propagation::Proceed => indent::on_key(&tab.view, key, state),
+    if editor.flavour() == Flavour::Code && !stepping_a_template {
+        return match typing::on_code_key(view, key, state) {
+            glib::Propagation::Proceed => indent::on_key(view, key, state),
             stop => stop,
         };
     }

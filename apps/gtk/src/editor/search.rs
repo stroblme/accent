@@ -42,7 +42,7 @@ pub(super) fn mute(buffer: &sourceview5::Buffer, tag: &gtk::TextTag) {
 }
 
 /// Apply all properties of the scheme's `search-match` style for find hits.
-pub(super) fn match_style(buffer: &sourceview5::Buffer, tag: &gtk::TextTag) {
+pub(crate) fn match_style(buffer: &sourceview5::Buffer, tag: &gtk::TextTag) {
     if let Some(style) = buffer
         .style_scheme()
         .and_then(|scheme| scheme.style("search-match"))
@@ -97,7 +97,7 @@ pub(super) struct Find {
 /// Choose the next match from selection `at`, wrapping at both ends.
 /// Forward starts at the current start with `from_current`, otherwise
 /// after its end; backward chooses the last match before its start.
-fn next_match(
+pub(crate) fn next_match(
     matches: &[Range<i32>],
     at: Range<i32>,
     forward: bool,
