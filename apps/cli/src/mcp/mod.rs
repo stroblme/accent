@@ -40,7 +40,7 @@ const INSTRUCTIONS: &str = "The notes of one accent vault: markdown files linked
 
 /// Serve the vault at `root`, its index at `db`, until stdin closes; `read_only` leaves out the
 /// tools that write.
-pub fn run(root: &Path, db: &Path, read_only: bool) -> Result<()> {
+pub fn run(root: &Path, db: &Path, read_only: bool, allow_jobs: bool) -> Result<()> {
     let cfg = Config::load().local_vault(root);
     let (vault, events) = Vault::open_at(root, db, cfg)?;
     let ready = Arc::new(Ready::default());
@@ -53,6 +53,22 @@ pub fn run(root: &Path, db: &Path, read_only: bool) -> Result<()> {
         for tool in tools::WRITE_TOOLS {
             tool_router.remove_route(tool);
         }
+        for tool in tools::MUTATING_JOB_TOOLS {
+            tool_router.remove_route(tool);
+        }
+        for tool in tools::MUTATING_TERMINAL_TOOLS {
+            tool_router.remove_route(tool);
+        }
+    }
+    if !allow_jobs {
+        for tool in tools::JOB_TOOLS {
+            tool_router.remove_route(tool);
+        }
+        for tool in tools::TERMINAL_TOOLS {
+            tool_router.remove_route(tool);
+        }
+    } else {
+        crate::jobs::prune(root)?;
     }
     let shared = Arc::new(Shared {
         vault,

@@ -5,12 +5,14 @@
 pub mod client;
 pub mod clip;
 pub mod daemon;
+pub mod mcp;
 mod protocol;
 mod screen;
 
 use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 /// Failure status for `attach`. Avoid 255, which SSH uses for lost connections.
@@ -18,11 +20,11 @@ pub const FAILED: i32 = 254;
 
 // Versioned: a holder speaking an older wire keeps running past an upgrade, so a new one must not
 // try to talk to it. Bump only when the protocol changes.
-const SOCKET: &str = "hold-2.sock";
-const LOCK: &str = "hold-2.lock";
+const SOCKET: &str = "hold-3.sock";
+const LOCK: &str = "hold-3.lock";
 
 /// Create a private `$TMPDIR/accent-<uid>` directory, rejecting one accessible to others.
-fn dir() -> io::Result<PathBuf> {
+pub(crate) fn dir() -> io::Result<PathBuf> {
     // SAFETY: `getuid` takes nothing and cannot fail.
     let uid = unsafe { libc::getuid() };
     let dir = std::env::temp_dir().join(format!("accent-{uid}"));
@@ -37,6 +39,15 @@ fn dir() -> io::Result<PathBuf> {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, why));
     }
     Ok(dir)
+}
+
+/// The same vault token is used by its MCP server and a terminal explicitly shared with it.
+pub(crate) fn mcp_owner(vault: &Path) -> io::Result<String> {
+    let root = vault.canonicalize()?;
+    Ok(format!(
+        "mcp:{}",
+        accent_api::ssh::hash_of(root.as_os_str().as_bytes())
+    ))
 }
 
 /// Ignore lock poison so one connection panic cannot terminate every held shell.

@@ -114,7 +114,7 @@ for name in files git terminals focus debug; do
 	# Scene 3 ends its shells, and the holder leaves with the last; one a failed scene left behind
 	# still has its socket. Bounded: fuser stats every mount, and hangs on an unreachable one.
 	held=$tmp/accent-$(id -u)
-	test ! -S "$held/hold-2.sock" || timeout 60 fuser -k "$held/hold-2.lock" >/dev/null 2>&1 || true
+	test ! -S "$held/hold-3.sock" || timeout 60 fuser -k "$held/hold-3.lock" >/dev/null 2>&1 || true
 	rm -rf "$tmp"
 	test "$status" = 0 || { echo "scene $n failed with $status" >&2; exit 1; }
 	"$repo/build-aux/split-screenshot.sh" "$root/out/shot-$n-light.png" \

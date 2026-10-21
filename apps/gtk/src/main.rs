@@ -1266,7 +1266,11 @@ impl App {
             Some((pane, at)) => (pane.tabs.clone(), Some(at)),
             None => (self.tabs_for(&key), None),
         };
-        let term = terminal::open(&tabs, at, &shell, key);
+        let share_vault = self
+            .vault()
+            .filter(|vault| shell.shareable(vault.remote().map(|remote| remote.url())))
+            .map(|vault| vault.root());
+        let term = terminal::open(&tabs, at, &shell, key, share_vault);
         // A new shell is part of the session, as a new tab is; a restored one is in it already.
         if how != Opened::Restored {
             self.save_session_soon();

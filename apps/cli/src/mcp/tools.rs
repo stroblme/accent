@@ -125,11 +125,187 @@ struct TemplateArgs {
     path: Option<String>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+struct StartJobArgs {
+    /// Existing directory relative to the vault root; the root when omitted.
+    cwd: Option<String>,
+    /// Program and arguments. To use shell syntax, explicitly pass ["sh", "-lc", "..."].
+    argv: Vec<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct JobIdArgs {
+    id: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct ReadJobArgs {
+    id: String,
+    /// Byte offset returned by the previous read, starting at zero.
+    offset: Option<u64>,
+    /// Maximum bytes to read, up to 256 KiB.
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct StartTerminalArgs {
+    /// Existing directory relative to the vault root; the root when omitted.
+    cwd: Option<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct TerminalIdArgs {
+    id: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct ReadTerminalArgs {
+    id: String,
+    /// Absolute byte cursor returned by the previous read; zero for all retained output.
+    offset: Option<u64>,
+    /// Maximum recent output bytes to return, up to 64 KiB.
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+struct SendTerminalArgs {
+    id: String,
+    /// Literal terminal input. Include `\n` to press Enter.
+    input: String,
+}
+
 /// Tools omitted by `--read-only`.
 pub(super) const WRITE_TOOLS: [&str; 3] = ["patch_note", "write_note", "create_note_from_template"];
+pub(super) const JOB_TOOLS: [&str; 4] = ["start_job", "list_jobs", "read_job", "stop_job"];
+pub(super) const MUTATING_JOB_TOOLS: [&str; 2] = ["start_job", "stop_job"];
+pub(super) const TERMINAL_TOOLS: [&str; 5] = [
+    "start_terminal",
+    "list_terminals",
+    "read_terminal",
+    "send_terminal",
+    "stop_terminal",
+];
+pub(super) const MUTATING_TERMINAL_TOOLS: [&str; 3] =
+    ["start_terminal", "send_terminal", "stop_terminal"];
 
 #[tool_router(vis = "pub(super)")]
 impl Server {
+    /// Start a held interactive terminal on this host; it survives MCP disconnection.
+    #[tool]
+    async fn start_terminal(
+        &self,
+        Parameters(a): Parameters<StartTerminalArgs>,
+    ) -> Result<CallToolResult, String> {
+        self.blocking(move |s| {
+            let terminal = crate::hold::mcp::start(&s.vault.root(), a.cwd.as_deref().unwrap_or(""))
+                .map_err(fail)?;
+            Ok(answer(terminal, None))
+        })
+        .await
+    }
+
+    /// List this vault's held terminals and GTK terminals explicitly shared with it.
+    #[tool(annotations(read_only_hint = true))]
+    async fn list_terminals(&self) -> Result<CallToolResult, String> {
+        self.blocking(move |s| {
+            let terminals = crate::hold::mcp::list(&s.vault.root()).map_err(fail)?;
+            Ok(answer(json!(terminals), None))
+        })
+        .await
+    }
+
+    /// Read a held terminal's recent output and current screen without taking its attachment.
+    #[tool(annotations(read_only_hint = true))]
+    async fn read_terminal(
+        &self,
+        Parameters(a): Parameters<ReadTerminalArgs>,
+    ) -> Result<CallToolResult, String> {
+        self.blocking(move |s| {
+            let output =
+                crate::hold::mcp::read(&s.vault.root(), &a.id, a.offset.unwrap_or(0), a.limit)
+                    .map_err(fail)?;
+            Ok(answer(output, None))
+        })
+        .await
+    }
+
+    /// Send literal keystrokes to a held terminal; include a newline to execute a command.
+    #[tool]
+    async fn send_terminal(
+        &self,
+        Parameters(a): Parameters<SendTerminalArgs>,
+    ) -> Result<CallToolResult, String> {
+        self.blocking(move |s| {
+            crate::hold::mcp::send(&s.vault.root(), &a.id, &a.input).map_err(fail)?;
+            Ok(answer(json!({"id": a.id, "sent": true}), None))
+        })
+        .await
+    }
+
+    /// Stop a held terminal and its foreground job.
+    #[tool]
+    async fn stop_terminal(
+        &self,
+        Parameters(a): Parameters<TerminalIdArgs>,
+    ) -> Result<CallToolResult, String> {
+        self.blocking(move |s| {
+            crate::hold::mcp::stop(&s.vault.root(), &a.id).map_err(fail)?;
+            Ok(answer(json!({"id": a.id, "stopped": true}), None))
+        })
+        .await
+    }
+
+    /// Start a detached command on this host. It continues after MCP or SSH disconnects.
+    #[tool]
+    async fn start_job(
+        &self,
+        Parameters(a): Parameters<StartJobArgs>,
+    ) -> Result<CallToolResult, String> {
+        self.blocking(move |s| {
+            let job = crate::jobs::start(&s.vault.root(), a.cwd.as_deref().unwrap_or(""), &a.argv)
+                .map_err(fail)?;
+            Ok(answer(serde_json::to_value(job).map_err(fail)?, None))
+        })
+        .await
+    }
+
+    /// List recent jobs in this vault, including their exit state and truncated-output flag.
+    #[tool(annotations(read_only_hint = true))]
+    async fn list_jobs(&self) -> Result<CallToolResult, String> {
+        self.blocking(move |s| {
+            let jobs = crate::jobs::list(&s.vault.root()).map_err(fail)?;
+            Ok(answer(serde_json::to_value(jobs).map_err(fail)?, None))
+        })
+        .await
+    }
+
+    /// Read a bounded output chunk by byte offset and get the next offset.
+    #[tool(annotations(read_only_hint = true))]
+    async fn read_job(
+        &self,
+        Parameters(a): Parameters<ReadJobArgs>,
+    ) -> Result<CallToolResult, String> {
+        self.blocking(move |s| {
+            let output = crate::jobs::read(&s.vault.root(), &a.id, a.offset.unwrap_or(0), a.limit)
+                .map_err(fail)?;
+            Ok(answer(serde_json::to_value(output).map_err(fail)?, None))
+        })
+        .await
+    }
+
+    /// Stop a live job's process group, with a brief TERM grace before KILL.
+    #[tool]
+    async fn stop_job(
+        &self,
+        Parameters(a): Parameters<JobIdArgs>,
+    ) -> Result<CallToolResult, String> {
+        self.blocking(move |s| {
+            let job = crate::jobs::stop(&s.vault.root(), &a.id).map_err(fail)?;
+            Ok(answer(serde_json::to_value(job).map_err(fail)?, None))
+        })
+        .await
+    }
+
     /// Full-text search over the vault's indexed files. Each row is one occurrence: the file,
     /// its title, the 1-based line, and a snippet with the match between « and ».
     #[tool(annotations(read_only_hint = true))]
