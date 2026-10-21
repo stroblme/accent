@@ -1,0 +1,21 @@
+[package]
+name = "accent-jupyter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+accent-lsp.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+libc = "0.2"
+hmac = "0.13"
+sha2 = "0.11"
+
+[dev-dependencies]
+tempfile.workspace = true
