@@ -1,8 +1,8 @@
 //! Search widgets and an asynchronous vault-query loop.
 //!
 //! [`Data::search`] runs on a worker to keep typing responsive. A pulsing bar reports work;
-//! old results remain until replacement results arrive. Request numbers discard superseded
-//! answers because an in-flight query cannot be cancelled.
+//! a changed query clears old results at once. Request numbers discard superseded answers
+//! because an in-flight query cannot be cancelled.
 
 use super::{OnOpen, Target};
 use crate::dialogs::confirm;
@@ -545,13 +545,28 @@ impl Search {
         self.running.get() > 0 || self.replacing.get()
     }
 
+    /// Remove rows for a question the entry no longer asks, before its debounce has elapsed.
+    /// Supersede workers now too, or one could repopulate the old rows in that gap.
+    fn clear_for_changed_query(&self) -> u64 {
+        let mine = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        self.results.remove_all();
+        self.body.set_visible_child_name("results");
+        self.count.set_text("");
+        self.set_total(0);
+        mine
+    }
+
     /// Run what the box currently asks for. Whatever was already running is superseded rather
     /// than waited for: its answer is dropped when it lands.
     fn start(self: &Rc<Self>) {
         let key = self.key();
         // Taken before anything else, so the branches that paint without asking the vault also
         // put the answer of a query still in flight out of date.
-        let mine = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
+        let mine = if self.opened.borrow().0.as_ref() != Some(&key) {
+            self.clear_for_changed_query()
+        } else {
+            self.generation.fetch_add(1, Ordering::Relaxed) + 1
+        };
         // The bar tracks what is running in every branch: a query still on a worker thread keeps
         // it pulsing, and the one that lands after the box was cleared takes it down through here.
         if key.text.trim().is_empty() {
@@ -625,8 +640,8 @@ impl Search {
                 }
                 _ => None,
             };
-            // The box has moved on since this was asked, so a newer query is already on its way
-            // with the answer that belongs on screen. Old results stay up until it lands.
+            // The box has moved on since this was asked, so its rows were already cleared and a
+            // newer query is on its way with the answer that belongs on screen.
             if search.generation.load(Ordering::Relaxed) == mine {
                 search.pages.replace(pages);
                 search.show(&key, answer, &bodies);
@@ -1468,6 +1483,13 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
         )
     });
 
+    entry.connect_changed(glib::clone!(
+        #[weak]
+        search,
+        move |_| {
+            search.clear_for_changed_query();
+        }
+    ));
     entry.connect_search_changed({
         let (debounced, debounce) = (debounced.clone(), debounce.clone());
         glib::clone!(

@@ -82,6 +82,8 @@ pub struct NotebookTab {
     kernel: kernel::Hold,
     /// The notebook's fonts at its zoom, one rule for all its cells.
     font: RefCell<Option<gtk::CssProvider>>,
+    /// A font change recuts code-cell messages after the new text layout has landed.
+    refit_after_layout: Cell<bool>,
     pub save: SaveState,
     /// The write an edit schedules, which a burst of edits shares.
     autosave: Debounce,
@@ -174,6 +176,7 @@ pub fn open(
         presenting: Cell::new(false),
         kernel: kernel::Hold::default(),
         font: RefCell::default(),
+        refit_after_layout: Cell::new(false),
         save: SaveState::at(etag, digest),
         autosave: Debounce::new(crate::editor::AUTOSAVE),
         monitor: RefCell::default(),
@@ -321,12 +324,12 @@ impl NotebookTab {
                 Some(i) => old.swap_remove(i),
                 None => self.build_view(id),
             };
-            match view.editor() {
-                Some(editor) if editor.text() != source => {
-                    self.replay(|| editor.buffer.set_text(&source));
+            if !view.shows_source(&source) {
+                match view.editor() {
+                    Some(editor) => self.replay(|| editor.buffer.set_text(&source)),
+                    None => view.set_source(&source),
                 }
-                Some(_) => {}
-                None => view.set_source(&source),
+                self.source_changed(&view, &source);
             }
             views.push(view);
         }
@@ -564,10 +567,27 @@ impl NotebookTab {
         self.on_history.emit(self);
     }
 
+    /// A code cell's last result may no longer describe its source.
+    fn source_changed(&self, view: &CellView, source: &str) {
+        if view.kind == Kind::Code {
+            let state = view.last_result.get().stale();
+            view.last_result.set(state);
+            let shown = if kernel::queued_for_source(self.kernel().as_deref(), view.id, source) {
+                cell::Execution::Running
+            } else {
+                state
+            };
+            self.set_execution(view.id, shown);
+        }
+    }
+
     /// Cell `id`'s text changed.
     fn edited(self: &Rc<Self>, id: CellId) {
         if self.replaying.get() {
             return;
+        }
+        if let Some(view) = self.view_of(Some(id)) {
+            self.source_changed(&view, &view.text().unwrap_or_default());
         }
         {
             let mut stale = self.stale.borrow_mut();
@@ -602,17 +622,26 @@ impl NotebookTab {
 
     /// After any change, an undo included.
     fn changed(self: &Rc<Self>) {
+        self.mark_changed();
+        self.save_soon();
+    }
+
+    /// Mark a run's output changed without scheduling a write on every stream flush.
+    fn mark_changed(self: &Rc<Self>) {
         self.save.edits.set(self.save.edits.get() + 1);
         self.save.modified.set(true);
         self.set_title();
         self.on_history.emit(self);
         self.find_changed();
+        self.language_changed();
+    }
+
+    fn save_soon(self: &Rc<Self>) {
         self.autosave.call_once(glib::clone!(
             #[weak(rename_to = tab)]
             self,
             move || tab.on_autosave.emit(&tab)
         ));
-        self.language_changed();
     }
 
     // -------------------------------------------------------------------------- the history
@@ -690,6 +719,7 @@ impl NotebookTab {
                 false => changes.iter().for_each(&mut apply),
             }
         });
+        self.source_changed(&view, &editor.text());
         buffer.place_cursor(&buffer.iter_at_offset(caret));
         {
             let mut stale = self.stale.borrow_mut();
@@ -1068,6 +1098,7 @@ impl NotebookTab {
         self.keep_anchor();
         self.show_pending();
         self.build_near(clock);
+        self.refit_diagnostics(self.refit_after_layout.replace(false));
         self.anchor.set(self.top_cell());
     }
 
@@ -1304,6 +1335,7 @@ impl NotebookTab {
         for editor in self.views.borrow().iter().filter_map(|v| v.editor()) {
             crate::editor::refont(&editor.view);
         }
+        self.refit_after_layout.set(true);
     }
 
     /// What the drill counts: code cells, markdown cells, stored outputs, and how they show.
@@ -1413,7 +1445,16 @@ impl NotebookTab {
             #[upgrade_or]
             glib::Propagation::Proceed,
             move |_, key, _, state| {
-                let Some(action) = own_key(key, state) else {
+                let entry_focused = tab
+                    .scroller
+                    .root()
+                    .and_then(|root| root.focus())
+                    .is_some_and(|focus| {
+                        std::iter::successors(Some(focus), |widget| widget.parent()).any(|widget| {
+                            widget.is::<gtk::Entry>() || widget.is::<gtk::PasswordEntry>()
+                        })
+                    });
+                let Some(action) = own_key(key, state, entry_focused) else {
                     return glib::Propagation::Proceed;
                 };
                 let _ = tab.scroller.activate_action(action, None);
@@ -1447,10 +1488,23 @@ impl NotebookTab {
 /// The command a key pressed over the notebook is the chord of (DESIGN.md, Keyboard › Notebook).
 /// Undo and Redo are its one history's, the cells' buffers keeping none, and the cell chords take
 /// GtkTextView's `Ctrl+Shift+Up` / `Down`, which extend the selection by a paragraph, in a cell.
-fn own_key(key: gdk::Key, state: gdk::ModifierType) -> Option<&'static str> {
+fn own_key(key: gdk::Key, state: gdk::ModifierType, entry_focused: bool) -> Option<&'static str> {
+    if entry_focused {
+        return None;
+    }
     use gdk::ModifierType as M;
-    let mods = state & (M::CONTROL_MASK | M::SHIFT_MASK | M::ALT_MASK | M::SUPER_MASK);
-    let (ctrl, shift, alt) = (M::CONTROL_MASK, M::SHIFT_MASK, M::ALT_MASK);
+    let mods = state
+        & (crate::platform::PRIMARY_MODIFIER
+            | M::CONTROL_MASK
+            | M::SHIFT_MASK
+            | M::ALT_MASK
+            | M::SUPER_MASK
+            | M::META_MASK);
+    let (ctrl, shift, alt) = (
+        crate::platform::PRIMARY_MODIFIER,
+        M::SHIFT_MASK,
+        M::ALT_MASK,
+    );
     Some(match key {
         gdk::Key::z | gdk::Key::Z if mods == ctrl => "win.notebook-undo",
         gdk::Key::z | gdk::Key::Z if mods == ctrl | shift => "win.notebook-redo",
@@ -1652,7 +1706,11 @@ mod tests {
 
     #[test]
     fn the_notebook_keys_name_their_commands() {
-        let (ctrl, shift, alt) = (M::CONTROL_MASK, M::SHIFT_MASK, M::ALT_MASK);
+        let (ctrl, shift, alt) = (
+            crate::platform::PRIMARY_MODIFIER,
+            M::SHIFT_MASK,
+            M::ALT_MASK,
+        );
         let cases = [
             (gdk::Key::z, ctrl, Some("win.notebook-undo")),
             (gdk::Key::Z, ctrl | shift, Some("win.notebook-redo")),
@@ -1693,7 +1751,16 @@ mod tests {
             (gdk::Key::z, ctrl | alt, None),
         ];
         for (key, state, action) in cases {
-            assert_eq!(own_key(key, state), action, "{key:?} {state:?}");
+            assert_eq!(own_key(key, state, false), action, "{key:?} {state:?}");
         }
+    }
+
+    #[test]
+    fn an_input_entry_keeps_its_own_keys() {
+        assert_eq!(own_key(gdk::Key::Return, M::SHIFT_MASK, true), None);
+        assert_eq!(
+            own_key(gdk::Key::z, crate::platform::PRIMARY_MODIFIER, true),
+            None
+        );
     }
 }

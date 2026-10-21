@@ -8,3 +8,4 @@ bench notebook_lsp complete rows=alpha,beta,gamma text="y = x + oops.alpha(x)" i
 bench notebook_lsp signature "<tt>f(<b>a</b>, b)</tt>"
 bench notebook_lsp moved hover "x at 4:4"
 bench notebook_lsp marimo key=lsp_marimo.py definition cell=0 at=0:0
+bench notebook_lsp marimo closed=Some((1, 0, 0))

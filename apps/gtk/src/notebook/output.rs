@@ -56,6 +56,13 @@ pub struct Outputs {
 struct Slot {
     widgets: Vec<gtk::Widget>,
     parts: Vec<Part>,
+    stream: Option<Stream>,
+}
+
+struct Stream {
+    raw: String,
+    stderr: bool,
+    view: gtk::TextView,
 }
 
 impl Outputs {
@@ -91,6 +98,23 @@ impl Outputs {
 
     /// Show `tail` in place of the outputs from the `from`th on.
     pub fn show(&self, from: usize, tail: &[Output]) {
+        if let [Output::Stream { stderr, text }] = tail {
+            let mut slots = self.slots.borrow_mut();
+            if from + 1 == slots.len()
+                && let Some(Stream {
+                    raw,
+                    stderr: previous,
+                    view,
+                }) = slots[from].stream.as_mut()
+                && previous == stderr
+                && let Some(more) = plain_append(raw, text)
+            {
+                let mut end = view.buffer().end_iter();
+                view.buffer().insert(&mut end, more);
+                raw.push_str(&text[raw.len()..]);
+                return;
+            }
+        }
         let gone = {
             let mut slots = self.slots.borrow_mut();
             let from = from.min(slots.len());
@@ -149,22 +173,39 @@ impl Outputs {
     fn add(&self, output: &Output) {
         self.slots.borrow_mut().push(Slot::default());
         match output {
-            Output::Stream { stderr, text } => self.text(&core::carriage(text), *stderr),
+            Output::Stream { stderr, text } => {
+                let view = self.text(&core::carriage(text), *stderr);
+                if !text.contains(['\r', '\u{1b}']) {
+                    self.slots.borrow_mut().last_mut().unwrap().stream = Some(Stream {
+                        raw: text.clone(),
+                        stderr: *stderr,
+                        view,
+                    });
+                }
+            }
             Output::Error {
                 name,
                 value,
                 traceback,
             } => match traceback.is_empty() {
-                true => self.text(&format!("{name}: {value}"), true),
-                false => self.text(&traceback.join("\n"), true),
+                true => {
+                    self.text(&format!("{name}: {value}"), true);
+                }
+                false => {
+                    self.text(&traceback.join("\n"), true);
+                }
             },
             Output::Data { items, .. } => match core::pick(items) {
                 Some(Form::Picture { mime, data }) => self.picture(mime, data),
                 Some(Form::Table(table)) => self.table(&table),
                 Some(Form::Markdown(text)) => self.markdown(text),
                 Some(Form::Latex(tex)) => self.latex(tex),
-                Some(Form::Json(text)) => self.text(&text, false),
-                Some(Form::Text(text)) => self.text(text, false),
+                Some(Form::Json(text)) => {
+                    self.text(&text, false);
+                }
+                Some(Form::Text(text)) => {
+                    self.text(text, false);
+                }
                 None => self.placeholder(items),
             },
         }
@@ -172,7 +213,7 @@ impl Outputs {
 
     /// Monospace text, its escape sequences turned into the terminal's colours; tinted as the
     /// terminal tints nothing, for stderr and a traceback.
-    fn text(&self, text: &str, stderr: bool) {
+    fn text(&self, text: &str, stderr: bool) -> gtk::TextView {
         let (plain, spans) = core::ansi(text);
         let view = output_view(plain.trim_end_matches('\n'));
         if stderr {
@@ -206,6 +247,7 @@ impl Outputs {
             self.keep(Part::Ansi(view.clone()));
         }
         self.put(&view);
+        view
     }
 
     fn picture(&self, mime: &str, data: &str) {
@@ -337,6 +379,16 @@ impl Outputs {
             }
         }
     }
+}
+
+/// The visible suffix of an append-only stream without terminal controls.
+fn plain_append<'a>(old: &str, new: &'a str) -> Option<&'a str> {
+    let added = new.strip_prefix(old)?;
+    if old.contains(['\r', '\u{1b}']) || added.contains(['\r', '\u{1b}']) {
+        return None;
+    }
+    new.trim_end_matches('\n')
+        .strip_prefix(old.trim_end_matches('\n'))
 }
 
 /// A read-only monospace view of `text`, selectable.
@@ -485,6 +537,15 @@ fn tex_of(latex: &str) -> (&str, bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_stream_append_keeps_the_visible_suffix() {
+        assert_eq!(plain_append("first\n", "first\nsecond\n"), Some("\nsecond"));
+        assert_eq!(plain_append("first\n", "first\n\n"), Some(""));
+        assert_eq!(plain_append("first", "other"), None);
+        assert_eq!(plain_append("first", "first\rnext"), None);
+        assert_eq!(plain_append("first", "first\u{1b}[31mnext"), None);
+    }
 
     #[test]
     fn a_formula_is_read_inside_its_delimiters() {

@@ -158,7 +158,7 @@ pub fn present(
     // the window rather than an app accelerator, so it dies with this window.
     let shortcuts = gtk::ShortcutController::new();
     shortcuts.add_shortcut(gtk::Shortcut::new(
-        gtk::ShortcutTrigger::parse_string("<Control>o"),
+        gtk::ShortcutTrigger::parse_string("<Primary>o"),
         Some(gtk::CallbackAction::new(move |_, _| {
             open.emit_clicked();
             glib::Propagation::Stop

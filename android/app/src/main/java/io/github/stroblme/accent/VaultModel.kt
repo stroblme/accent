@@ -700,6 +700,10 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
                 // another note's text.
                 if (doc is Open) buffer.load(doc.text)
                 _state.update { it.copy(doc = doc) }
+                viewModelScope.launch(Dispatchers.IO) {
+                    runCatching { v.keepOpened(rel) }
+                        .onFailure { logged("Cannot keep this file in search", it) }
+                }
             }
         }
         // Words typed while the file was read are still waiting out their autosave, which the
@@ -950,29 +954,43 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch { show(open.rel, ticket, back = open.back) }
     }
 
-    fun newNote(rel: String) = viewModelScope.launch {
-        val v = vault ?: return@launch
+    private suspend fun makeNote(v: Vault, rel: String, ticket: Int) {
         val made = withContext(Dispatchers.IO) { runCatching { v.createNote(rel, null) } }
-        made.onSuccess {
-            openFile(rel)
-        }.onFailure { fail("Cannot create this note", it) }
+        if (!shown.holds(ticket) || vault !== v) return
+        made.onSuccess { leave { show(rel, ticket) } }
+            .onFailure { fail("Cannot create this note", it) }
+    }
+
+    fun newNote(rel: String) {
+        val v = vault ?: return
+        val ticket = shown.next()
+        viewModelScope.launch { makeNote(v, rel, ticket) }
     }
 
     /** Create or open the note at [template]'s target, including an existing daily note. */
-    fun fromTemplate(template: String) = viewModelScope.launch {
-        val v = vault ?: return@launch
-        val made = withContext(Dispatchers.IO) { runCatching { v.noteFromTemplate(template) } }
-        made.onSuccess { rel ->
-            // The file changed since the list was read; nothing was made.
-            if (rel == null) return@onSuccess said("This template no longer has a destination")
-            openFile(rel)
-        }.onFailure { fail("Cannot create this note", it) }
+    fun fromTemplate(template: String) {
+        val v = vault ?: return
+        val ticket = shown.next()
+        viewModelScope.launch {
+            val made = withContext(Dispatchers.IO) { runCatching { v.noteFromTemplate(template) } }
+            if (!shown.holds(ticket) || vault !== v) return@launch
+            made.onSuccess { rel ->
+                // The file changed since the list was read; nothing was made.
+                if (rel == null) return@onSuccess said("This template no longer has a destination")
+                leave { show(rel, ticket) }
+            }.onFailure { fail("Cannot create this note", it) }
+        }
     }
 
     /** Create a missing linked note or open it if another writer created it first. */
-    fun create(rel: String) = viewModelScope.launch {
-        val v = vault ?: return@launch
-        if (withContext(Dispatchers.IO) { v.exists(rel) }) openFile(rel) else newNote(rel)
+    fun create(rel: String) {
+        val v = vault ?: return
+        val ticket = shown.next()
+        viewModelScope.launch {
+            val exists = withContext(Dispatchers.IO) { v.exists(rel) }
+            if (!shown.holds(ticket) || vault !== v) return@launch
+            if (exists) leave { show(rel, ticket) } else makeNote(v, rel, ticket)
+        }
     }
 
     // ----------------------------------------------------------------------- sync conflicts

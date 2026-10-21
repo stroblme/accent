@@ -311,6 +311,15 @@ impl Local {
             tracing::debug!("vault worker is gone; not waiting for the index");
         }
     }
+
+    /// End services while the closing window still holds the vault. Drop calls this again if
+    /// another reference outlives the window; each shutdown is safe to repeat.
+    pub(crate) fn shutdown_services(&self) {
+        self.stop.store(worker::CLOSE, Ordering::Relaxed);
+        self.debug.shutdown();
+        self.kernels.shutdown();
+        self.lang.shutdown();
+    }
 }
 
 impl Drop for Local {
@@ -319,12 +328,8 @@ impl Drop for Local {
     /// links for indexed files; skipping this would leave stale links that the
     /// next diff would not revisit.
     fn drop(&mut self) {
-        // First, so the walk winds down while the language servers stop.
-        self.stop.store(worker::CLOSE, Ordering::Relaxed);
         // Before the worker, because a provider is still sending diagnostics down its channel.
-        self.debug.shutdown();
-        self.kernels.shutdown();
-        self.lang.shutdown();
+        self.shutdown_services();
         let _ = self.tx.send(Msg::Shutdown);
         if let Some(handle) = self.worker.take() {
             let _ = handle.join();

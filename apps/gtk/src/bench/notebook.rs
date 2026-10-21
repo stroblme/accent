@@ -294,7 +294,33 @@ async fn hit_drill(app: &Rc<App>, ipynb: &str, marimo: &str) {
         (copy, indexed(copy)),
         (marimo, marimo_at),
     ] {
-        if let Some(at) = at {
+        if rel == copy {
+            if let Some(sidebar) = app.sidebar.get() {
+                sidebar.show_pane("search");
+                sidebar.set_search_text("binomial");
+                for _ in 0..100 {
+                    if sidebar
+                        .search_state()
+                        .1
+                        .iter()
+                        .any(|row| row == "hit.ipynb")
+                    {
+                        break;
+                    }
+                    glib::timeout_future(Duration::from_millis(20)).await;
+                }
+                if let (Some(view), Some(row)) = (
+                    sidebar.search_view(),
+                    sidebar
+                        .search_state()
+                        .1
+                        .iter()
+                        .position(|row| row == "hit.ipynb"),
+                ) {
+                    view.emit_by_name::<()>("activate", &[&(row as u32)]);
+                }
+            }
+        } else if let Some(at) = at {
             app.open_note_at(rel, Some(sidebar::Target::Range(at)));
         }
         let mut tab = None;
@@ -493,10 +519,30 @@ async fn text_drill(app: &Rc<App>, ipynb: &str) {
             break;
         }
     }
+    let at = app.vault().and_then(|vault| {
+        vault
+            .search("binomial", 20, false)
+            .ok()?
+            .into_iter()
+            .find(|hit| hit.rel_path == ipynb)?
+            .at
+    });
+    if let Some(at) = at {
+        app.open_note_at(ipynb, Some(sidebar::Target::Range(at)));
+    }
+    let selected = app
+        .doc_for(ipynb)
+        .and_then(|doc| doc.tab().cloned())
+        .and_then(|tab| {
+            let (start, end) = tab.buffer.selection_bounds()?;
+            Some(tab.buffer.text(&start, &end, false) == "binomial")
+        })
+        .unwrap_or(false);
     println!(
-        "bench notebook text unread={} open_as_text={}",
+        "bench notebook text unread={} open_as_text={} json_hit={}",
         u8::from(unread),
-        u8::from(as_text)
+        u8::from(as_text),
+        u8::from(selected)
     );
 }
 

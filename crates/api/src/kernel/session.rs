@@ -29,9 +29,16 @@ pub(super) async fn start(
     notebook: PathBuf,
     argv: Vec<String>,
     under: PathBuf,
+    host: bool,
     interpreter: String,
 ) -> Result<Info> {
     let cwd = notebook.parent().unwrap_or(&kernels.root);
+    if !host && let Err(e) = Kernel::sweep(&under) {
+        tracing::debug!(
+            "cannot remove old kernel folders in {}: {e}",
+            under.display()
+        );
+    }
     // As jupyter_client launches one: ipykernel then ends itself once we are gone, a crash or a
     // kill included, rather than outliving us.
     let parent = [("JPY_PARENT_PID".to_string(), std::process::id().to_string())];
@@ -200,9 +207,21 @@ impl Runs {
                 pending.idle |= content["execution_state"] == "idle";
                 None
             }
-            (Channel::Iopub, msg_type) => {
-                nbformat(msg_type, content).map(|output| News::Output { run, output })
-            }
+            (Channel::Iopub, "update_display_data") => content["transient"]["display_id"]
+                .as_str()
+                .and_then(|display_id| {
+                    nbformat("display_data", content).map(|output| News::Update {
+                        display_id: display_id.to_string(),
+                        output,
+                    })
+                }),
+            (Channel::Iopub, msg_type) => nbformat(msg_type, content).map(|output| News::Output {
+                run,
+                output,
+                display_id: content["transient"]["display_id"]
+                    .as_str()
+                    .map(String::from),
+            }),
             (Channel::Shell, "execute_reply") => {
                 let status = match content["status"].as_str() {
                     Some("ok") => Status::Ok,
@@ -244,8 +263,7 @@ impl Runs {
 }
 
 /// An IOPub message as the output nbformat 4 stores (nbformat's `output_from_msg`); `None` for
-/// one that is not an output. What a message carries beyond it, such as a display's
-/// `transient` id, is left out.
+/// one that is not an output. A display's `transient` id stays outside saved nbformat JSON.
 fn nbformat(msg_type: &str, content: &Value) -> Option<Value> {
     let keys: &[&str] = match msg_type {
         "execute_result" => &["data", "metadata", "execution_count"],
@@ -310,7 +328,11 @@ mod tests {
                 .chain(&ending)
                 .flat_map(|i| runs.take(i))
                 .collect();
-            let output = |output| News::Output { run: 7, output };
+            let output = |output| News::Output {
+                run: 7,
+                output,
+                display_id: None,
+            };
             let done = News::Done {
                 run: 7,
                 status: Status::Ok,
@@ -353,5 +375,46 @@ mod tests {
             count: None,
         };
         assert_eq!(news, [done]);
+    }
+
+    #[test]
+    fn a_display_update_keeps_its_id_out_of_nbformat_output() {
+        let mut runs = Runs::default();
+        runs.register("ours".to_string(), 7);
+        let display = |kind, text| {
+            message(
+                Channel::Iopub,
+                kind,
+                json!({
+                    "data": {"text/plain": text},
+                    "metadata": {},
+                    "transient": {"display_id": "shared"}
+                }),
+            )
+        };
+        let output = json!({
+            "output_type": "display_data",
+            "data": {"text/plain": "before"},
+            "metadata": {}
+        });
+        assert_eq!(
+            runs.take(&display("display_data", "before")),
+            [News::Output {
+                run: 7,
+                output,
+                display_id: Some("shared".into()),
+            }]
+        );
+        assert_eq!(
+            runs.take(&display("update_display_data", "after")),
+            [News::Update {
+                display_id: "shared".into(),
+                output: json!({
+                    "output_type": "display_data",
+                    "data": {"text/plain": "after"},
+                    "metadata": {}
+                }),
+            }]
+        );
     }
 }

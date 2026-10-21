@@ -286,7 +286,15 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
         app,
         #[weak]
         pane,
-        move |tabs, _, _| {
+        move |tabs, page, _| {
+            if let Some(next) = pane.dragged_survivor(page) {
+                let (pane, page) = (pane.clone(), page.clone());
+                glib::idle_add_local_once(move || {
+                    if !pane.has(&page) && pane.has(&next) {
+                        pane.tabs.set_selected_page(&next);
+                    }
+                });
+            }
             if tabs.n_pages() > 0 {
                 return;
             }

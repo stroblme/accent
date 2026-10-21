@@ -54,8 +54,14 @@ pub enum Status {
 pub enum News {
     /// The run began, its cell's earlier outputs going.
     Started { run: u64, count: Option<u32> },
-    /// One output as nbformat 4 stores it (nbformat's `output_from_msg`).
-    Output { run: u64, output: Value },
+    /// One output as nbformat 4 stores it, with its kernel-only display ID.
+    Output {
+        run: u64,
+        output: Value,
+        display_id: Option<String>,
+    },
+    /// Replace every output this kernel gave the ID, in any cell.
+    Update { display_id: String, output: Value },
     /// The run's outputs go; with `wait`, as its next output comes.
     Clear { run: u64, wait: bool },
     /// `input()` asks; answered with [`Vault::kernel_input`].
@@ -100,8 +106,8 @@ impl Kernels {
         let notebook = self.root.join(&start.notebook);
         let python = crate::debug::interpreter(&self.root, &notebook, &cfg.python);
         let interpreter = python.first().cloned().unwrap_or_default();
-        let (argv, under) = command(python, &notebook);
-        let start = session::start(self.clone(), id, notebook, argv, under, interpreter);
+        let (argv, under, host) = command(python, &notebook);
+        let start = session::start(self.clone(), id, notebook, argv, under, host, interpreter);
         Task::spawn(start)
     }
 
@@ -179,7 +185,7 @@ impl Kernels {
 /// The kernel's command, `python -m ipykernel_launcher`, and the folder its sockets go in. In
 /// the Flatpak the kernel is the host's, through `flatpak-spawn`, its sockets in the one folder
 /// the sandbox and the host share.
-fn command(python: Vec<String>, notebook: &Path) -> (Vec<String>, PathBuf) {
+fn command(python: Vec<String>, notebook: &Path) -> (Vec<String>, PathBuf, bool) {
     let mut argv = python;
     argv.extend(["-m", "ipykernel_launcher"].map(String::from));
     let sandbox = std::env::var("FLATPAK_ID").ok();
@@ -190,9 +196,9 @@ fn command(python: Vec<String>, notebook: &Path) -> (Vec<String>, PathBuf) {
             let host = ["flatpak-spawn", "--host", "--watch-bus"].map(String::from);
             let directory = format!("--directory={}", cwd.display());
             let argv = host.into_iter().chain([directory]).chain(argv).collect();
-            (argv, Path::new(&runtime).join("app").join(id))
+            (argv, Path::new(&runtime).join("app").join(id), true)
         }
-        _ => (argv, std::env::temp_dir()),
+        _ => (argv, std::env::temp_dir(), false),
     }
 }
 
@@ -250,15 +256,6 @@ impl Vault {
             json!([session]),
             crate::rpc::DEADLINE,
         )
-    }
-
-    /// End every kernel now, within 2 s, for a window that is closing: its last window closing
-    /// ends the process before the vault is dropped. A remote vault's end with `serve`, as the
-    /// link closes.
-    pub fn kernel_shutdown(&self) {
-        if let Backend::Local(v) = &self.backend {
-            v.kernels.shutdown();
-        }
     }
 
     fn kernel_call<T: DeserializeOwned + Send + 'static>(

@@ -491,6 +491,8 @@ pub struct Pane {
     /// Most-recent-first tab history, pruned against live pages on every read.
     /// Transferred tabs leave automatically and enter their destination history on selection.
     history: RefCell<Vec<adw::TabPage>>,
+    /// MRU order before libadwaita selects a neighbour while a dragged tab leaves.
+    transfer_order: RefCell<Option<Vec<adw::TabPage>>>,
     /// How deep into `history` a held `Ctrl+Tab` has walked, `None` when no chord is in flight.
     /// See [`Pane::step`].
     cycling: Cell<Option<usize>>,
@@ -562,6 +564,7 @@ impl Pane {
             shade,
             drop,
             history: RefCell::new(Vec::new()),
+            transfer_order: RefCell::new(None),
             cycling: Cell::new(None),
             switcher,
             nav: RefCell::new(Nav::default()),
@@ -648,7 +651,23 @@ impl Pane {
 
     /// Which tab to show once `page` goes: the most recently used one that is left.
     pub fn survivor(&self, page: &adw::TabPage) -> Option<adw::TabPage> {
-        self.recent().into_iter().find(|p| p != page)
+        let order = self.transfer_order.borrow();
+        let recent = order
+            .as_ref()
+            .map(|before| recent_order(before, &self.pages()))
+            .unwrap_or_else(|| self.recent());
+        recent.into_iter().find(|p| p != page)
+    }
+
+    /// The previous selection order is needed after libadwaita auto-selects a neighbour.
+    pub fn dragged_survivor(&self, page: &adw::TabPage) -> Option<adw::TabPage> {
+        if !self.tabs.is_transferring_page() {
+            return None;
+        }
+        let order = self.transfer_order.borrow();
+        recent_order(order.as_ref()?, &self.pages())
+            .into_iter()
+            .find(|p| p != page)
     }
 
     /// Step the fixed MRU order while Ctrl is held; Shift reverses direction.
@@ -736,6 +755,20 @@ impl Pane {
 
     /// Wire tab-view preview promotion on eye clicks and page transfers.
     fn wire_preview(self: &Rc<Self>) {
+        let weak = Rc::downgrade(self);
+        self.tabs.connect_is_transferring_page_notify(move |tabs| {
+            let Some(pane) = weak.upgrade() else { return };
+            if tabs.is_transferring_page() {
+                *pane.transfer_order.borrow_mut() = Some(pane.recent());
+            } else {
+                let weak = Rc::downgrade(&pane);
+                glib::idle_add_local_once(move || {
+                    if let Some(pane) = weak.upgrade() {
+                        pane.transfer_order.borrow_mut().take();
+                    }
+                });
+            }
+        });
         let weak = Rc::downgrade(self);
         self.tabs.connect_indicator_activated(move |_, page| {
             if let Some(pane) = weak.upgrade() {

@@ -32,7 +32,7 @@ pub(super) fn install(tab: &Rc<Tab>) {
         glib::Propagation::Proceed,
         move |_, state| {
             if let Some((x, y)) = tab.follow_pointer() {
-                tab.follow_hint(x, y, state.contains(gdk::ModifierType::CONTROL_MASK));
+                tab.follow_hint(x, y, state.contains(crate::platform::PRIMARY_MODIFIER));
             }
             glib::Propagation::Proceed
         }

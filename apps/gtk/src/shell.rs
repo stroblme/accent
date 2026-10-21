@@ -611,9 +611,9 @@ impl Shell {
                         .as_ref()
                         .filter(|app| app.reloading())
                         .map(|app| Reopen::of(app));
-                    // The notebooks' kernels end with their window, before the process can.
+                    // Local services end with their window, before the process can.
                     if let Some(vault) = app.as_ref().and_then(|app| app.vault()) {
-                        vault.kernel_shutdown();
+                        vault.shutdown_window_services();
                     }
                     drop(app);
                     shell.forget(window);

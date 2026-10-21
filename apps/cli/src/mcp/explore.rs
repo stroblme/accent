@@ -8,6 +8,7 @@ use std::ops::RangeInclusive;
 use accent_api::{CodeSymbol, Read};
 use accent_core::code;
 use accent_core::markdown::{self, LinkKind};
+use accent_core::notebook;
 use accent_core::path::{self, FileType};
 use rmcp::schemars;
 use serde::Deserialize;
@@ -408,8 +409,8 @@ fn passages(
         let Ok(Read::Text(t)) = s.vault.read_text(rel) else {
             continue;
         };
-        let lines: Vec<u32> = t
-            .text
+        let text = notebook::search_text(rel, &t.text).unwrap_or(t.text);
+        let lines: Vec<u32> = text
             .lines()
             .map(|l| mask(&l.to_lowercase(), words))
             .collect();
@@ -480,7 +481,7 @@ fn mask(line: &str, words: &[String]) -> u32 {
 fn card(s: &Shared, rel: &str, f: &Found, cap: usize, whole: bool) -> Result<String, String> {
     let mut out = format!("### `{rel}`");
     let max = if whole { LIST_WHOLE } else { LIST };
-    let text = match s.vault.read_text(rel).map_err(fail)? {
+    let raw = match s.vault.read_text(rel).map_err(fail)? {
         Read::Text(t) => t.text,
         Read::Binary { size } => {
             out.push_str(&format!(" — binary, {size} bytes\n"));
@@ -489,6 +490,9 @@ fn card(s: &Shared, rel: &str, f: &Found, cap: usize, whole: bool) -> Result<Str
         }
         Read::TooLarge { size } => return Ok(out + &format!(" — {size} bytes, too large\n\n")),
     };
+    let source = notebook::search_text(rel, &raw);
+    let source_view = source.is_some();
+    let text = source.unwrap_or(raw);
     let note = path::file_type(rel) == FileType::Note;
     let analysis = note.then(|| markdown::analyze(&text));
     let starts: Vec<usize> = std::iter::once(0)
@@ -500,7 +504,8 @@ fn card(s: &Shared, rel: &str, f: &Found, cap: usize, whole: bool) -> Result<Str
     if let Some(title) = analysis.as_ref().and_then(|a| a.title.as_ref()) {
         out.push_str(&format!(" — {title}"));
     }
-    out.push_str(&format!(" ({} lines)\n", starts.len()));
+    let label = if source_view { " indexed source" } else { "" };
+    out.push_str(&format!(" ({}{label} lines)\n", starts.len()));
     let mut heads = Vec::new();
     if let Some(a) = &analysis {
         let tags: BTreeSet<&str> = a.tags.iter().map(|t| t.name.as_str()).collect();
@@ -552,9 +557,10 @@ fn card(s: &Shared, rel: &str, f: &Found, cap: usize, whole: bool) -> Result<Str
         (false, false) => code_lines(&all, &symbols, &f.symbols, &lines),
     };
     let fence = "`".repeat(longest_tick_run(&text).max(2) + 1);
-    let lang = match note {
-        true => "markdown",
-        false => std::path::Path::new(rel)
+    let lang = match (note, source_view) {
+        (true, _) => "markdown",
+        (_, true) => "text",
+        _ => std::path::Path::new(rel)
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or_default(),

@@ -198,7 +198,10 @@ async fn bench_column(view: &multicaret::View) {
         println!("bench column_{step} {text:?} {:?}", view.caret_positions());
     };
     let column = |text: &str| column(view, text);
-    let (none, ctrl) = (gdk::ModifierType::empty(), gdk::ModifierType::CONTROL_MASK);
+    let (none, ctrl) = (
+        gdk::ModifierType::empty(),
+        crate::platform::PRIMARY_MODIFIER,
+    );
     let undo = || view.press(gdk::Key::z, ctrl);
 
     // Modifiers pressed on their own leave the column up, so what AltGr and Shift type — `@` and
@@ -819,7 +822,7 @@ async fn bench_selections(view: &multicaret::View) {
     let none = gdk::ModifierType::empty();
     let (shift, ctrl) = (
         gdk::ModifierType::SHIFT_MASK,
-        gdk::ModifierType::CONTROL_MASK,
+        crate::platform::PRIMARY_MODIFIER,
     );
     let select = |key, times| {
         for _ in 0..times {
@@ -1232,7 +1235,7 @@ pub(super) fn bench_shell_keys(app: &Rc<App>) {
     let print = move |when: &str| {
         println!(
             "bench shell_keys {when} {:?}",
-            gtk_app.actions_for_accel("<Control>s")
+            gtk_app.actions_for_accel("<Primary>s")
         );
     };
     // The shell takes focus from an idle.
@@ -1256,7 +1259,7 @@ fn bench_shell_kept(app: &Rc<App>, when: &str) {
     let Some(gtk_app) = app.window.application() else {
         return;
     };
-    let [e, w, copy] = ["<Control>e", "<Control>w", "<Control><Shift>c"]
+    let [e, w, copy] = ["<Primary>e", "<Primary>w", "<Control><Shift>c"]
         .map(|accel| gtk_app.actions_for_accel(accel));
     println!("bench shell_keys {when} ctrl_e={e:?} ctrl_w={w:?} copy={copy:?}");
 }
@@ -1803,7 +1806,7 @@ pub(super) fn bench_menu_caret(app: &Rc<App>, rel: &str) {
 /// took from `Ctrl+Shift+L`: the actions the application binds them to, and any shortcut on the
 /// view itself.
 fn bench_occurrence_claims(app: &Rc<App>, tab: &Rc<Tab>) {
-    let chords = ["<Alt>j", "<Control><Shift>l", "<Control><Shift>w"];
+    let chords = ["<Alt>j", "<Primary><Shift>l", "<Primary><Shift>w"];
     if let Some(gtk_app) = app.window.application() {
         for chord in chords {
             println!(

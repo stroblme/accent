@@ -127,6 +127,11 @@ impl Vault {
 
     // ------------------------------------------------------------------------------- the index
 
+    /// Keep an opened file in search even when its folder is not walked.
+    pub fn keep_opened(&self, rel: String) -> Answer<()> {
+        Ok(self.inner.keep_opened(&rel)?)
+    }
+
     /// The direct children of a vault-relative directory; `""` is the root.
     pub fn list_dir(&self, rel: String) -> Answer<Vec<FileRow>> {
         Ok(self.inner.list_dir(&rel)?)
@@ -266,6 +271,38 @@ impl Vault {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opened_ignored_note_is_searchable_through_android_vault() {
+        let root = tempfile::tempdir().unwrap();
+        let index = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join(".gitignore"), "build/\n").unwrap();
+        std::fs::create_dir(root.path().join("build")).unwrap();
+        std::fs::write(root.path().join("build/out.md"), "zorblat\n").unwrap();
+        let (inner, events) = crate::Vault::open_unwatched_at(
+            root.path(),
+            &index.path().join("index.db"),
+            VaultConfig::default(),
+        )
+        .unwrap();
+        let v = Vault {
+            inner,
+            events: Mutex::new(events),
+        };
+        assert!(
+            v.search("zorblat".to_string(), 10, false)
+                .unwrap()
+                .is_empty()
+        );
+        v.keep_opened("build/out.md".to_string()).unwrap();
+        assert!(crate::tests::poll_until(
+            || !v
+                .search("zorblat".to_string(), 10, false)
+                .unwrap()
+                .is_empty(),
+            crate::tests::BUDGET,
+        ));
+    }
 
     /// Verify template creation returns the same path on repeated requests,
     /// preserving daily-note behavior.

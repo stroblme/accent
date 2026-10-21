@@ -32,8 +32,11 @@ pub(crate) fn on_key(
     let Ok(buffer) = view.buffer().downcast::<sourceview5::Buffer>() else {
         return glib::Propagation::Proceed;
     };
-    if state.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK)
-        || !view.is_editable()
+    if state.intersects(
+        gdk::ModifierType::CONTROL_MASK
+            | gdk::ModifierType::ALT_MASK
+            | gdk::ModifierType::META_MASK,
+    ) || !view.is_editable()
         || buffer.language().is_none()
         || buffer.has_selection()
     {

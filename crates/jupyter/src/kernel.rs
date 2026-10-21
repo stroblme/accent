@@ -1,8 +1,10 @@
 //! A kernel we started: its process in a group of its own, its connection file and sockets in a
 //! folder only the user can enter, and every message it sends, as [`Incoming`]s.
 
+use std::fs::File;
 use std::io::{self, Read, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -58,6 +60,8 @@ pub struct Kernel {
     /// The kernel's process group, which is its process id.
     group: i32,
     folder: PathBuf,
+    /// Held until the client ends, so another Accent can identify an abandoned folder.
+    _lock: File,
     /// `Some` once its process has ended, with the exit code when it had one.
     ended: watch::Receiver<Option<Option<i32>>>,
     last_words: Arc<Mutex<Option<String>>>,
@@ -74,7 +78,7 @@ impl Kernel {
         under: &Path,
     ) -> Result<(Kernel, Incomings, Value), Error> {
         let key = wire::hex(&random::<32>()?);
-        let folder = folder(under)?;
+        let (folder, lock) = folder(under)?;
         let mut child = match spawn(argv, cwd, env, &folder, &key) {
             Ok(child) => child,
             Err(e) => {
@@ -102,6 +106,7 @@ impl Kernel {
             out: out.try_into().expect("an outbox per writable channel"),
             group,
             folder,
+            _lock: lock,
             ended,
             last_words,
         };
@@ -213,6 +218,40 @@ impl Kernel {
         let _ = std::fs::remove_dir_all(&self.folder);
     }
 
+    /// Remove folders left by a dead local client. A live client holds each folder's lock;
+    /// folders without one predate this marker and cannot be judged safely here.
+    pub fn sweep(under: &Path) -> io::Result<()> {
+        // SAFETY: geteuid has no pointers or mutable process state.
+        let owner = unsafe { libc::geteuid() };
+        for entry in std::fs::read_dir(under)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir()
+                || !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("accent-kernel-")
+                || entry.metadata()?.uid() != owner
+            {
+                continue;
+            }
+            let lock = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .open(entry.path().join("owner.lock"));
+            let Ok(lock) = lock else { continue };
+            let marker = lock.metadata()?;
+            if !marker.is_file() || marker.uid() != owner {
+                continue;
+            }
+            // SAFETY: flock only receives the open file's descriptor and plain lock flags.
+            if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                std::fs::remove_dir_all(entry.path())?;
+            }
+        }
+        Ok(())
+    }
+
     /// Its last line on stderr: why one that ended did, such as `No module named ipykernel`.
     pub fn last_words(&self) -> Option<String> {
         self.last_words.lock().ok()?.clone()
@@ -308,12 +347,29 @@ fn spawn(
 }
 
 /// A fresh folder under `under` that only the user can enter.
-fn folder(under: &Path) -> io::Result<PathBuf> {
+fn folder(under: &Path) -> io::Result<(PathBuf, File)> {
     loop {
         let folder = under.join(format!("accent-kernel-{}", wire::hex(&random::<4>()?)));
         match std::fs::DirBuilder::new().mode(0o700).create(&folder) {
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-            made => return made.map(|()| folder),
+            Err(e) => return Err(e),
+            Ok(()) => {
+                let lock = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(folder.join("owner.lock"))
+                    .and_then(|lock| {
+                        // SAFETY: flock only receives the new file's descriptor and lock flags.
+                        match unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } {
+                            0 => Ok(lock),
+                            _ => Err(io::Error::last_os_error()),
+                        }
+                    });
+                return lock.map(|lock| (folder.clone(), lock)).inspect_err(|_| {
+                    let _ = std::fs::remove_dir_all(folder);
+                });
+            }
         }
     }
 }
@@ -385,6 +441,31 @@ async fn write<W: AsyncWrite + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_start_reclaims_abandoned_kernel_folders_without_touching_live_ones() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (live, live_lock) = folder(tmp.path()).unwrap();
+        let (stale, stale_lock) = folder(tmp.path()).unwrap();
+        std::fs::write(stale.join("kernel.json"), "secret").unwrap();
+        let old = tmp.path().join("accent-kernel-old");
+        std::fs::create_dir(&old).unwrap();
+        drop(stale_lock);
+
+        Kernel::sweep(tmp.path()).unwrap();
+        assert!(live.exists());
+        assert!(!stale.exists());
+        assert!(old.exists(), "an old folder has no safe liveness marker");
+
+        drop(live_lock);
+        // A concurrent fork can briefly inherit the lock before its exec closes it.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while live.exists() && Instant::now() < deadline {
+            Kernel::sweep(tmp.path()).unwrap();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!live.exists());
+    }
 
     fn has_ipykernel() -> bool {
         std::process::Command::new("python3")

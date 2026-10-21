@@ -1201,8 +1201,8 @@ mod tests {
     fn the_empty_state_names_the_chord_in_force() {
         let label = |accel: &str| Some(accel.to_string());
         let mut config = Config::default();
-        assert!(empty_hint(&config, false, label).contains("<Control>e"));
-        assert!(empty_hint(&config, true, label).contains("<Control>j"));
+        assert!(empty_hint(&config, false, label).contains("<Primary>e"));
+        assert!(empty_hint(&config, true, label).contains("<Primary>j"));
 
         let files = "win.palette-files".to_string();
         config
@@ -1210,7 +1210,7 @@ mod tests {
             .insert(files.clone(), vec!["<Control>o".into()]);
         let hint = empty_hint(&config, false, label);
         assert!(
-            hint.contains("<Control>o") && !hint.contains("<Control>e"),
+            hint.contains("<Control>o") && !hint.contains("<Primary>e"),
             "{hint}"
         );
 

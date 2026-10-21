@@ -13,10 +13,140 @@ use accent_core::notebook::{CellId, Edit, Format, Kind, Run};
 use serde_json::Value;
 
 use super::NotebookTab;
+use super::cell::Execution;
 use crate::*;
 
 /// Kernel session numbers, unique in the process and so in any vault.
 static SESSIONS: AtomicU64 = AtomicU64::new(0);
+
+struct RunJob {
+    cell: CellId,
+    source: String,
+}
+
+fn after_run(last: Execution, status: Status, still_queued: bool) -> (Execution, Execution) {
+    let last = match status {
+        Status::Ok => Execution::Succeeded,
+        Status::Error => Execution::Failed,
+        Status::Aborted => last,
+    };
+    let shown = if still_queued {
+        Execution::Running
+    } else {
+        last
+    };
+    (last, shown)
+}
+
+fn queued_for(kernel: Option<&Kernel>, id: CellId) -> bool {
+    kernel.is_some_and(|k| k.runs.borrow().values().any(|job| job.cell == id))
+}
+
+pub(super) fn queued_for_source(kernel: Option<&Kernel>, id: CellId, source: &str) -> bool {
+    kernel.is_some_and(|k| {
+        k.runs
+            .borrow()
+            .values()
+            .any(|job| job.cell == id && job.source == source)
+    })
+}
+
+fn output_save_due(kernel: Option<&Kernel>) -> bool {
+    kernel.is_none_or(|kernel| kernel.runs.borrow().is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::cell::Execution;
+    use super::*;
+
+    #[test]
+    fn queued_and_aborted_runs_keep_the_last_settled_result() {
+        assert_eq!(Execution::Unrun.stale(), Execution::Unrun);
+        assert_eq!(Execution::Succeeded.stale(), Execution::StaleSucceeded);
+        assert_eq!(Execution::Failed.stale(), Execution::StaleFailed);
+        let (last, shown) = after_run(Execution::Unrun, Status::Ok, true);
+        assert_eq!((last, shown), (Execution::Succeeded, Execution::Running));
+        assert_eq!(
+            after_run(last, Status::Aborted, false),
+            (Execution::Succeeded, Execution::Succeeded)
+        );
+        assert_eq!(
+            after_run(Execution::Succeeded, Status::Error, false),
+            (Execution::Failed, Execution::Failed)
+        );
+        assert_eq!(
+            after_run(Execution::Succeeded, Status::Aborted, true),
+            (Execution::Succeeded, Execution::Running)
+        );
+        assert_eq!(
+            after_run(Execution::StaleFailed, Status::Aborted, false),
+            (Execution::StaleFailed, Execution::StaleFailed)
+        );
+        assert_eq!(
+            after_run(Execution::StaleSucceeded, Status::Ok, false),
+            (Execution::Succeeded, Execution::Succeeded)
+        );
+    }
+
+    #[test]
+    fn a_queued_run_of_old_source_does_not_mark_the_edited_source_running() {
+        let notebook =
+            accent_core::notebook::read("cell.ipynb", accent_core::notebook::EMPTY_IPYNB).unwrap();
+        let id = notebook.cells()[0].id();
+        let kernel = Kernel {
+            session: 1,
+            info: RefCell::default(),
+            runs: RefCell::default(),
+            outbox: RefCell::default(),
+            sending: Cell::new(false),
+            clear_next: RefCell::default(),
+            last_run: Cell::new(0),
+        };
+        kernel.runs.borrow_mut().insert(
+            1,
+            RunJob {
+                cell: id,
+                source: "old".into(),
+            },
+        );
+        assert!(!queued_for_source(Some(&kernel), id, "new"));
+        kernel.runs.borrow_mut().insert(
+            2,
+            RunJob {
+                cell: id,
+                source: "new".into(),
+            },
+        );
+        assert!(queued_for_source(Some(&kernel), id, "new"));
+    }
+
+    #[test]
+    fn stream_updates_save_only_after_the_run_finishes() {
+        let notebook =
+            accent_core::notebook::read("cell.ipynb", accent_core::notebook::EMPTY_IPYNB).unwrap();
+        let kernel = Kernel {
+            session: 1,
+            info: RefCell::default(),
+            runs: RefCell::default(),
+            outbox: RefCell::default(),
+            sending: Cell::new(false),
+            clear_next: RefCell::default(),
+            last_run: Cell::new(0),
+        };
+        assert!(output_save_due(Some(&kernel)));
+        kernel.runs.borrow_mut().insert(
+            1,
+            RunJob {
+                cell: notebook.cells()[0].id(),
+                source: String::new(),
+            },
+        );
+        assert!(!output_save_due(Some(&kernel)));
+        kernel.runs.borrow_mut().clear();
+        assert!(output_save_due(Some(&kernel)));
+    }
+}
 
 /// A tab's kernel, from its start until it ends.
 pub(super) struct Kernel {
@@ -25,7 +155,7 @@ pub(super) struct Kernel {
     /// What it answered once started; `None` while it starts.
     info: RefCell<Option<Info>>,
     /// The runs not done yet, by number, and their cells.
-    runs: RefCell<BTreeMap<u64, CellId>>,
+    runs: RefCell<BTreeMap<u64, RunJob>>,
     /// Runs yet to be sent, with their code: held while it starts, then sent one at a time,
     /// each once the last has reached it, so it takes them in the order they were given.
     outbox: RefCell<VecDeque<(u64, String)>>,
@@ -48,12 +178,62 @@ pub(super) struct Hold {
 }
 
 impl NotebookTab {
+    pub(super) fn set_execution(&self, id: CellId, state: Execution) {
+        if let Some(view) = self.view_of(Some(id)) {
+            view.execution.set(state);
+            if self.tools.cell.get() == Some(id) {
+                self.tools.show_execution(state);
+            }
+        }
+    }
+
+    fn settle_execution(&self, id: CellId, status: Status) {
+        let Some(view) = self.view_of(Some(id)) else {
+            return;
+        };
+        let still_queued = self.current_source_queued(id);
+        let (last, shown) = after_run(view.last_result.get(), status, still_queued);
+        view.last_result.set(last);
+        self.set_execution(id, shown);
+    }
+
+    fn leave_execution(&self, id: CellId) {
+        let Some(view) = self.view_of(Some(id)) else {
+            return;
+        };
+        let still_queued = self.current_source_queued(id);
+        let (_, shown) = after_run(view.last_result.get(), Status::Aborted, still_queued);
+        self.set_execution(id, shown);
+    }
+
+    fn current_source_queued(&self, id: CellId) -> bool {
+        self.sync_model();
+        let model = self.model.borrow();
+        let Some(at) = model.position(id) else {
+            return false;
+        };
+        queued_for_source(self.kernel().as_deref(), id, model.cells()[at].source())
+    }
+
+    fn stale_execution(&self) {
+        for view in self
+            .views
+            .borrow()
+            .iter()
+            .filter(|view| view.kind == Kind::Code)
+        {
+            let state = view.last_result.get().stale();
+            view.last_result.set(state);
+            self.set_execution(view.id, state);
+        }
+    }
+
     /// Whether a kernel runs for the tab, which then stays in its window.
     pub(crate) fn kernel_runs(&self) -> bool {
         self.kernel.kernel.borrow().is_some()
     }
 
-    fn kernel(&self) -> Option<Rc<Kernel>> {
+    pub(super) fn kernel(&self) -> Option<Rc<Kernel>> {
         self.kernel.kernel.borrow().clone()
     }
 
@@ -62,9 +242,7 @@ impl NotebookTab {
         let Some(view) = self.view_of(Some(id)) else {
             return;
         };
-        let queued = self
-            .kernel()
-            .is_some_and(|k| k.runs.borrow().values().any(|cell| *cell == id));
+        let queued = queued_for(self.kernel().as_deref(), id);
         let model = self.model.borrow();
         match (queued, model.position(id)) {
             (true, _) => view.set_count("[*]"),
@@ -157,10 +335,10 @@ impl NotebookTab {
     }
 
     /// One more output of cell `id`'s run, or more of its last stream.
-    fn add_output(self: &Rc<Self>, id: CellId, output: Value) {
+    fn add_output(self: &Rc<Self>, id: CellId, output: Value, display_id: Option<String>) {
         let shown = {
             let mut model = self.model.borrow_mut();
-            model.push_output(id, output).and_then(|_| {
+            model.push_output(id, output, display_id).and_then(|_| {
                 let at = model.position(id)?;
                 Some(model.cells()[at].outputs().len())
             })
@@ -174,6 +352,7 @@ impl NotebookTab {
     fn finish_run(self: &Rc<Self>, id: CellId, count: Option<u32>) {
         if self.model.borrow_mut().set_count(id, count).is_some() {
             self.changed_soon();
+            self.save_soon();
         }
     }
 
@@ -200,16 +379,19 @@ impl NotebookTab {
             let Some(tab) = weak.upgrade() else { return };
             tab.kernel.due.set(false);
             for (id, from) in tab.kernel.dirty.take() {
-                let tail = {
+                if let Some(view) = tab.view_of(Some(id)) {
                     let model = tab.model.borrow();
-                    let outputs = model.position(id).map(|at| model.cells()[at].outputs());
-                    outputs.map(|o| o.get(from..).unwrap_or_default().to_vec())
-                };
-                if let (Some(view), Some(tail)) = (tab.view_of(Some(id)), tail) {
-                    view.outputs.show(from, &tail);
+                    if let Some(at) = model.position(id) {
+                        let outputs = model.cells()[at].outputs();
+                        view.outputs
+                            .show(from, outputs.get(from..).unwrap_or_default());
+                    }
                 }
             }
-            tab.changed();
+            tab.mark_changed();
+            if output_save_due(tab.kernel().as_deref()) {
+                tab.save_soon();
+            }
         });
     }
 
@@ -224,8 +406,9 @@ impl NotebookTab {
         let Some(kernel) = self.kernel.kernel.take() else {
             return;
         };
+        self.stale_execution();
         kernel.outbox.take();
-        for id in kernel.runs.take().into_values() {
+        for id in kernel.runs.take().into_values().map(|job| job.cell) {
             self.end_ask(id);
             self.relabel(id);
         }
@@ -366,8 +549,15 @@ impl App {
         for (id, code) in codes {
             let run = kernel.last_run.get() + 1;
             kernel.last_run.set(run);
-            kernel.runs.borrow_mut().insert(run, id);
+            kernel.runs.borrow_mut().insert(
+                run,
+                RunJob {
+                    cell: id,
+                    source: code.clone(),
+                },
+            );
             kernel.outbox.borrow_mut().push_back((run, code));
+            tab.set_execution(id, Execution::Running);
             tab.relabel(id);
         }
         self.send_runs(tab, &kernel);
@@ -376,6 +566,7 @@ impl App {
 
     /// Start a kernel for `tab`; the runs it is given meanwhile wait for its answer.
     fn start_kernel(self: &Rc<Self>, tab: &Rc<NotebookTab>, vault: &Vault) -> Rc<Kernel> {
+        tab.stale_execution();
         let kernel = Rc::new(Kernel {
             session: SESSIONS.fetch_add(1, Ordering::Relaxed) + 1,
             info: RefCell::default(),
@@ -444,7 +635,8 @@ impl App {
                     break;
                 }
                 let unsent = kernel.runs.borrow_mut().remove(&run);
-                if let Some(id) = unsent {
+                if let Some(RunJob { cell: id, .. }) = unsent {
+                    tab.leave_execution(id);
                     tab.relabel(id);
                 }
                 app.kernel_toast(&format!("Cannot run the cell: {e}"));
@@ -478,15 +670,16 @@ impl App {
     }
 
     /// Shut Down Kernel; the next run starts another.
-    pub(crate) fn shut_down_kernel(&self, tab: &NotebookTab) {
+    pub(crate) fn shut_down_kernel(&self, tab: &Rc<NotebookTab>) {
         self.stop_kernel(tab);
         self.sync_kernel();
     }
 
     /// End `tab`'s kernel, if it has one: Shut Down, Restart and the tab closing.
-    pub(crate) fn stop_kernel(&self, tab: &NotebookTab) {
+    pub(crate) fn stop_kernel(&self, tab: &Rc<NotebookTab>) {
         if let Some(kernel) = tab.kernel() {
             tab.kernel_over();
+            tab.save_soon();
             self.send_kernel_stop(kernel.session);
         }
     }
@@ -507,6 +700,7 @@ impl App {
     pub(crate) fn kernels_lost(&self) {
         for tab in self.notebooks() {
             tab.kernel_over();
+            tab.save_soon();
         }
         self.sync_kernel();
     }
@@ -520,19 +714,29 @@ impl App {
         let Some((tab, kernel)) = found else {
             return;
         };
-        let cell = |run: u64| kernel.runs.borrow().get(&run).copied();
+        let cell = |run: u64| kernel.runs.borrow().get(&run).map(|job| job.cell);
         match news {
             News::Started { run, count } => {
                 if let Some(id) = cell(run) {
                     tab.empty_run(id, count);
                 }
             }
-            News::Output { run, output } => {
+            News::Output {
+                run,
+                output,
+                display_id,
+            } => {
                 if let Some(id) = cell(run) {
                     if kernel.clear_next.borrow_mut().remove(&run) {
                         tab.empty_run(id, tab.count_of(id));
                     }
-                    tab.add_output(id, output);
+                    tab.add_output(id, output, display_id);
+                }
+            }
+            News::Update { display_id, output } => {
+                let changed = tab.model.borrow_mut().update_display(&display_id, output);
+                for (id, from) in changed {
+                    tab.ran(id, from);
                 }
             }
             News::Clear { run, wait: true } => {
@@ -554,12 +758,25 @@ impl App {
             }
             News::Done { run, status, count } => {
                 kernel.clear_next.borrow_mut().remove(&run);
-                let Some(id) = kernel.runs.borrow_mut().remove(&run) else {
+                let Some(RunJob { cell: id, source }) = kernel.runs.borrow_mut().remove(&run)
+                else {
                     return;
                 };
                 // An aborted run never started, and keeps what its cell had.
                 if status != Status::Aborted {
                     tab.finish_run(id, count);
+                }
+                tab.sync_model();
+                let same_source = {
+                    let model = tab.model.borrow();
+                    model
+                        .position(id)
+                        .is_some_and(|at| model.cells()[at].source() == source)
+                };
+                if same_source {
+                    tab.settle_execution(id, status);
+                } else {
+                    tab.leave_execution(id);
                 }
                 tab.end_ask(id);
                 tab.relabel(id);
@@ -567,6 +784,7 @@ impl App {
             }
             News::Ended { error } => {
                 tab.kernel_over();
+                tab.save_soon();
                 if let Some(why) = error {
                     self.kernel_toast(&format!("The kernel ended: {why}"));
                     tab.kernel.ended.replace(Some(why));
@@ -647,6 +865,11 @@ impl App {
 /// What `ACCENT_BENCH_KERNEL` reads.
 #[cfg(feature = "bench")]
 impl NotebookTab {
+    pub fn bench_execution(&self, n: usize) -> Option<String> {
+        let view = self.views.borrow().get(n).cloned()?;
+        Some(format!("{:?}", view.execution.get()))
+    }
+
     /// Cell `n`'s count label, its outputs as the model holds them, and how many its view shows.
     pub fn bench_cell(&self, n: usize) -> Option<(String, Vec<Output>, usize)> {
         let view = self.views.borrow().get(n).cloned()?;

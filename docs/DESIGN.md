@@ -108,6 +108,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Its adapter runs where the vault is and ends with Stop, with the program, or with the vault and so the window — one still starting as the vault closes too, which ends itself rather than register after the vault has stopped the rest.
 - **Kernel API**: `Vault::kernel_*`, keyed by a session number the window picks, as the debug sessions are, each run's news (`Event::Kernel`) under the run number the window gave it.
   The kernel runs where the vault is, beside `serve` on a remote vault's host, its sockets never leaving it, and ends with Shut Down Kernel, its tab, or the vault and so the window.
+- A local window explicitly ends its vault's debug sessions, kernels and language servers on close: the last window can end the process before a retained vault reaches `Drop`.
 - **Server roots**: a language server is rooted at the nearest folder inside the vault holding `.git` or one of its language's root markers (Lean: `lakefile.toml`, `lakefile.lean`, `lean-toolchain`) — a Lean project is often a folder of a larger repository, and `lake serve` does not look upwards.
   A file under a `.lake` folder is looked up from the folder holding the outermost one: each package there has a lakefile of its own and no build, so a Mathlib file opened by Go to Definition is answered by the project's server rather than one that would start building Mathlib.
   A server command written `~/…` (the table's `~/.elan/bin/lake`, or a vault's own) is looked for in the home of whoever runs the server, the host's for a remote vault: a desktop session's PATH has no `~/.elan/bin`.
@@ -146,10 +147,11 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The index holds an `.ipynb` as its cells' sources, a line break between each two (`Notebook::sources`), as it holds a diagram as its labels, and `Notebook::place` takes a byte of what it holds back to its cell; a marimo notebook is indexed as the Python file it is, and placed from its file.
   A notebook's language document is its code cells' sources as one program, a line break after each, in the notebook's order, opened on the language layer as a code tab's file is: under the notebook's own path for a marimo notebook, under `<path>.py` for an `.ipynb` (user decision 2026-10-20). A cell is a run of its lines, so a position maps by the cell's first line alone, and the text is the model's, so a cell no editor has been built for is in it.
   Not the marimo file itself: there a cell is a function whose parameters carry no types, and the `def` lines kept as written go stale as cells are edited. Nor LSP 3.17's notebook sync: of the Python servers only basedpyright (1.27) reads cells as cells, pyright has none, and pylsp (1.8), jedi-language-server (0.44) and pyrefly join the cells as this does.
-  IPython's own syntax is not Python: a line magic or a shell line (`%`, `!`) reads as a comment, and a cell under a cell magic as blank lines, but for `%%time`, `%%timeit` and `%%capture`, whose body is Python. pyright's warning that a cell's last expression is unused (`reportUnusedExpression`) is dropped: a notebook shows that value.
+  IPython's own syntax is not Python: a line magic or a shell line (`%`, `!`) reads as a comment at the margin or a `pass` in a block, `x = !cmd` reads as `x = []`, and `obj?` as `obj`; a cell under a cell magic is blank lines, apart from `%%time`, `%%timeit` and `%%capture`, whose body is Python. pyright's warning that a cell's last expression is unused (`reportUnusedExpression`) is dropped: a notebook shows that value.
 - **MCP**: `accent-cli mcp` serves the shared core and index over stdio while the app is closed; writes reach an open window through the shared index.
   Its 14 tools include `explore`, reads, `render_diagram` and etag-checked writes; `--read-only` omits the three write tools.
   `explore` ranks files and passages from the index, shows relevant source with line numbers, links, outlines and call paths, and can ask a language server for a `precise` call hierarchy.
+  An `.ipynb` read returns indexed cell sources by default, without a write etag; `read_note` with `view: "raw"` returns its editable JSON and etag for `write_note`.
   Return partial index or language-server answers with an explicit reason when a cold walk, missing server or timeout prevents a full answer.
   Keep reads under 1 MiB, pass etags as strings, and confine every given or returned path to the real vault root.
   Run MCP beside a remote vault on its host; the Flatpak runs its bundled `accent-cli`.
@@ -385,6 +387,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   It opens the pane's preview tab (Tabs), so walking a list replaces one tab instead of leaving twenty.
 - A search result row is a match, not a file: each quotes its line with the match marked and the file and line dim beside it, and past five rows from one file the rest gather into a "+N more in this file" row, so no file takes the list.
   A hit opens on its place with the match marked.
+  Changing the query clears those rows immediately, before the next answer arrives.
 - The "+N more" row opens nothing: a click lists those matches in its place, the first where the row was, so the pointer rests on a match and the list does not move.
   A hundred come at a time, any rest behind a "+N more" row again, so a file with thousands of matches is walked rather than poured into the list.
   The file stays open through the vault changing under the same query, and a new query lists it shut; there is no collapse.
@@ -1413,6 +1416,7 @@ How much fades is the Focus Mode preference, three levels in one combo row under
 ## Keyboard
 
 Every user-facing action is a `GAction` with an accelerator and an entry in the palette's command mode: without an action it cannot be scripted, tested or found, and without a palette entry it does not exist. <https://developer.gnome.org/hig/guidelines/keyboard.html> · <https://developer.gnome.org/hig/reference/keyboard.html>
+The `Ctrl` chords for application and document commands use GTK's `<Primary>` modifier: Command on macOS, Control elsewhere. Terminal control keys and toolkit bindings stated as such remain literal Control.
 
 ### Files
 
@@ -1615,6 +1619,7 @@ Every user-facing action is a `GAction` with an accelerator and an entry in the 
   It opens with a file's name selected up to its last dot, so typing keeps the extension, and a folder's selected whole.
 - A template names where its notes go with an `accent-target:` front-matter line, so `accent-target: Daily/{{date:%Y-%m-%d}}.md` is the daily note, and asking twice in a day opens the one already made.
   The directive never reaches the note.
+- New File uses its typed name for the destination; its template picker fills content only. New from Template follows `accent-target:`.
 - Insert Template… puts any template at the caret of the open note, whose stem is its `{{title}}`: a meeting is typed into the day's note, not filed as one.
 - Every `{{cursor}}` is a stop: the first takes the caret, Tab moves to the next and past the last to the template's end, Shift+Tab back, Escape leaves the rest.
   So a template asks for its fields in the editor, with `#` and `[[` completion, rather than in a dialog, and Templater's prompts and pickers are left out.

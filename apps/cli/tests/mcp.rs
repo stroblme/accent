@@ -332,6 +332,62 @@ fn explore_ranks_by_links_and_answers_a_path_with_its_card() {
     c.close();
 }
 
+#[test]
+fn explore_notebook_lines_match_searchable_cell_sources() {
+    let scratch = Scratch::new("notebook-explore");
+    std::fs::write(
+        scratch.dir.join("vault/analysis.ipynb"),
+        r#"{"nbformat":4,"cells":[{"cell_type":"markdown","source":["alpha\n"]},{"cell_type":"code","source":["needle line\n"],"outputs":[{"text":"hidden output"}]}],"metadata":{"name":"hidden metadata"}}"#,
+    )
+    .unwrap();
+    let mut c = Client::start(&scratch, &[]);
+    c.initialize();
+
+    let (hits, error) = c.call("search_notes", json!({"query": "needle"}));
+    assert!(!error, "{hits:?}");
+    let hits: Value = serde_json::from_str(&hits[0]).unwrap();
+    assert_eq!(hits[0]["path"], "analysis.ipynb");
+    assert_eq!(hits[0]["line"], 3);
+
+    for query in ["needle", "analysis.ipynb"] {
+        let (said, error) = c.call("explore", json!({"query": query}));
+        assert!(!error, "{said:?}");
+        assert!(said[0].contains("3\tneedle line"), "{}", said[0]);
+        assert!(!said[0].contains("hidden output"), "{}", said[0]);
+        assert!(!said[0].contains("hidden metadata"), "{}", said[0]);
+    }
+    for args in [
+        json!({"path": "analysis.ipynb"}),
+        json!({"path": "analysis.ipynb", "view": "sources"}),
+    ] {
+        let (source, error) = c.call("read_note", args);
+        assert!(!error, "{source:?}");
+        let head: Value = serde_json::from_str(&source[0]).unwrap();
+        assert_eq!(head["view"], "sources");
+        assert!(head.get("etag").is_none(), "{head}");
+        assert_eq!(source[1], "alpha\n\nneedle line\n");
+        let (said, error) = c.call(
+            "write_note",
+            json!({"path": "analysis.ipynb", "content": source[1]}),
+        );
+        assert!(error && said[0].contains("pass the etag"), "{said:?}");
+    }
+    let (raw, error) = c.call(
+        "read_note",
+        json!({"path": "analysis.ipynb", "view": "raw"}),
+    );
+    assert!(!error, "{raw:?}");
+    let head: Value = serde_json::from_str(&raw[0]).unwrap();
+    assert!(head["etag"].is_string());
+    assert!(raw[1].contains("hidden output"), "{}", raw[1]);
+    let (_, error) = c.call(
+        "write_note",
+        json!({"path": "analysis.ipynb", "content": raw[1], "etag": head["etag"]}),
+    );
+    assert!(!error);
+    c.close();
+}
+
 /// Explore shows named declarations, callers, callees, test reachability, paths, and file outlines.
 #[test]
 fn explore_follows_code_by_name() {

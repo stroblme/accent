@@ -151,7 +151,7 @@ fn ends_column(key: gdk::Key, state: gdk::ModifierType) -> bool {
 /// `Some(true)` for GtkTextView's Undo chord, `Ctrl+Z`, and `Some(false)` for its Redo,
 /// `Ctrl+Shift+Z` or `Ctrl+Y`.
 fn undo_or_redo(key: gdk::Key, state: gdk::ModifierType) -> Option<bool> {
-    if !state.contains(gdk::ModifierType::CONTROL_MASK)
+    if !state.contains(crate::platform::PRIMARY_MODIFIER)
         || state.contains(gdk::ModifierType::ALT_MASK)
     {
         return None;
@@ -180,7 +180,7 @@ fn spread(text: &str, carets: usize) -> Vec<&str> {
 /// Only supported Ctrl motions have mappings; Alt combinations remain GTK's. Shift+Delete
 /// also stays GTK Cut, whose signal reaches the column-aware `editor::lines` handler.
 fn edit_for(key: gdk::Key, state: gdk::ModifierType) -> Option<Edit> {
-    if state.contains(gdk::ModifierType::ALT_MASK) {
+    if state.intersects(gdk::ModifierType::ALT_MASK | gdk::ModifierType::META_MASK) {
         return None;
     }
     let extend = state.contains(gdk::ModifierType::SHIFT_MASK);
@@ -1431,14 +1431,23 @@ mod tests {
 
     #[test]
     fn undo_and_redo_are_gtks_chords() {
-        assert_eq!(undo_or_redo(Key::z, Mod::CONTROL_MASK), Some(true));
         assert_eq!(
-            undo_or_redo(Key::Z, Mod::CONTROL_MASK | Mod::SHIFT_MASK),
+            undo_or_redo(Key::z, crate::platform::PRIMARY_MODIFIER),
+            Some(true)
+        );
+        assert_eq!(
+            undo_or_redo(Key::Z, crate::platform::PRIMARY_MODIFIER | Mod::SHIFT_MASK),
             Some(false)
         );
-        assert_eq!(undo_or_redo(Key::y, Mod::CONTROL_MASK), Some(false));
+        assert_eq!(
+            undo_or_redo(Key::y, crate::platform::PRIMARY_MODIFIER),
+            Some(false)
+        );
         assert_eq!(undo_or_redo(Key::z, Mod::empty()), None);
-        assert_eq!(undo_or_redo(Key::v, Mod::CONTROL_MASK), None);
+        assert_eq!(
+            undo_or_redo(Key::v, crate::platform::PRIMARY_MODIFIER),
+            None
+        );
     }
 
     /// A paste with one line per caret hands them out; any other puts all of it at every caret.

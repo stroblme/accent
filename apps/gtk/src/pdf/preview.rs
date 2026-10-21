@@ -64,7 +64,7 @@ impl PdfTab {
 
     /// Ctrl over a link: show where it leads. Anything else takes the preview away.
     fn hover(self: &Rc<Self>, x: f64, y: f64, state: gtk::gdk::ModifierType) {
-        if !state.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
+        if !state.contains(crate::platform::PRIMARY_MODIFIER) {
             return self.hide_preview();
         }
         let Some(target) = self.link_at(&self.view, x, y) else {

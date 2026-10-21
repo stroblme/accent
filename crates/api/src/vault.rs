@@ -95,6 +95,13 @@ impl Vault {
         Vault { backend, key }
     }
 
+    /// End this window's local services before it closes; the remote connection closes with it.
+    pub fn shutdown_window_services(&self) {
+        if let Backend::Local(v) = &self.backend {
+            v.shutdown_services();
+        }
+    }
+
     /// The vault root: an absolute path *on the machine holding the files*. Every `rel` this API
     /// takes or returns is relative to it, and so is every path a [`Repo`] carries.
     pub fn root(&self) -> PathBuf {
@@ -655,13 +662,50 @@ impl Vault {
 #[cfg(test)]
 mod tests {
     use crate::tests::*;
-    use crate::{Event, Kind, Location, Pos, Range, Severity, Vault, VaultConfig};
+    use crate::{Event, Kind, Location, Pos, Range, Severity, Vault, VaultConfig, debug};
     use std::time::Duration;
 
     #[test]
     fn vault_is_send_and_sync() {
         fn assert<T: Send + Sync>() {}
         assert::<Vault>();
+    }
+
+    #[test]
+    fn closing_services_ends_debug_and_language_before_vault_drop() {
+        let cfg = VaultConfig {
+            debug: fake_adapter(),
+            ..Default::default()
+        };
+        let f = Fixture::open(cfg);
+        f.write("demo.py", "print(1)\n");
+        accent_lsp::runtime().block_on(async {
+            f.vault
+                .open_document("note.md", "markdown", "# Note\n".to_string())
+                .await
+                .unwrap();
+            f.vault
+                .debug_start(
+                    1,
+                    &debug::Launch {
+                        program: "demo.py".to_string(),
+                        language: "python3".to_string(),
+                        breakpoints: Vec::new(),
+                        exceptions: Vec::new(),
+                    },
+                )
+                .await
+                .unwrap();
+        });
+        let super::Backend::Local(local) = &f.vault.backend else {
+            unreachable!()
+        };
+        assert!(local.lang.provider("note.md").is_ok());
+
+        f.vault.shutdown_window_services();
+
+        assert!(local.lang.provider("note.md").is_err());
+        assert!(poll_until(|| f.root.path().join("ended").exists(), BUDGET));
     }
 
     /// Assert the vault can cross threads: the desktop runs costly vault-wide

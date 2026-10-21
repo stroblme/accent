@@ -810,8 +810,11 @@ pub fn navigates(key: gdk::Key, state: gdk::ModifierType, surface: Surface) -> b
         Key::Home | Key::End | Key::Page_Up | Key::Page_Down => true,
         Key::KP_Home | Key::KP_End | Key::KP_Page_Up | Key::KP_Page_Down => true,
         Key::space | Key::KP_Space => surface != Surface::Text,
-        // `Ctrl+N` is New Note, and a capital is Shift.
-        Key::n | Key::p => surface == Surface::Pdf && !state.contains(M::CONTROL_MASK),
+        // `Primary+N` is New Note, and a capital is Shift.
+        Key::n | Key::p => {
+            surface == Surface::Pdf
+                && !state.intersects(crate::platform::PRIMARY_MODIFIER | M::CONTROL_MASK)
+        }
         _ => false,
     }
 }
@@ -828,8 +831,8 @@ mod tests {
         let chords = [
             M::empty(),
             M::SHIFT_MASK,
-            M::CONTROL_MASK,
-            M::CONTROL_MASK | M::SHIFT_MASK,
+            crate::platform::PRIMARY_MODIFIER,
+            crate::platform::PRIMARY_MODIFIER | M::SHIFT_MASK,
             M::LOCK_MASK,
         ];
         for key in [Key::Up, Key::Right, Key::Home, Key::Page_Down, Key::KP_End] {
@@ -851,9 +854,10 @@ mod tests {
         assert!(navigates(Key::space, M::empty(), Surface::Pdf));
         assert!(navigates(Key::n, M::empty(), Surface::Pdf));
         assert!(
-            !navigates(Key::n, M::CONTROL_MASK, Surface::Pdf),
+            !navigates(Key::n, crate::platform::PRIMARY_MODIFIER, Surface::Pdf),
             "New Note"
         );
+        assert!(!navigates(Key::n, M::CONTROL_MASK, Surface::Pdf));
         assert!(!navigates(Key::n, M::empty(), Surface::Preview));
         assert!(!navigates(Key::a, M::empty(), Surface::Pdf));
         assert!(!navigates(Key::Return, M::empty(), Surface::Text));

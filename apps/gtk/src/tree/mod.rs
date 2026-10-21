@@ -1080,7 +1080,7 @@ fn marking(
                 return;
             };
             let held = gesture.current_event_state();
-            let ctrl = held.contains(gdk::ModifierType::CONTROL_MASK);
+            let ctrl = held.contains(crate::platform::PRIMARY_MODIFIER);
             let shift = held.contains(gdk::ModifierType::SHIFT_MASK);
             // The second press of a double click on a file, which the list does not activate
             // again: the first one opened it as a preview, and this keeps it.

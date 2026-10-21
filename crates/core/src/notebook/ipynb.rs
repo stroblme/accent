@@ -38,6 +38,8 @@ pub(super) struct Frame {
 #[derive(Debug, Clone)]
 pub(super) struct Kept {
     raw: String,
+    /// Byte of `raw` in the file as read; absent on a new cell.
+    file_start: Option<usize>,
     kind: Kind,
     source: String,
     /// Where the `source` value sits in `raw`, and whether it is a list of lines or a string.
@@ -152,7 +154,8 @@ pub(super) fn read(text: &str) -> Result<Notebook> {
         .iter()
         .enumerate()
         .map(|(n, raw)| {
-            cell(raw.get(), n as u64).map_err(|why| invalid(format!("cell {}: {why}", n + 1)))
+            cell(raw.get(), n as u64, Some(at(raw.get())))
+                .map_err(|why| invalid(format!("cell {}: {why}", n + 1)))
         })
         .collect::<Result<Vec<Cell>, _>>()?;
     let meta = |key: &str| doc.metadata.pointer(key).and_then(Value::as_str);
@@ -175,7 +178,7 @@ pub(super) fn read(text: &str) -> Result<Notebook> {
 }
 
 /// The cell `raw` holds, as the `n`th read.
-fn cell(raw: &str, n: u64) -> Result<Cell, String> {
+fn cell(raw: &str, n: u64, file_start: Option<usize>) -> Result<Cell, String> {
     let c: RawCell = serde_json::from_str(raw).map_err(|e| e.to_string())?;
     let kind = match c.cell_type.as_str() {
         "code" => Kind::Code,
@@ -201,6 +204,7 @@ fn cell(raw: &str, n: u64) -> Result<Cell, String> {
             .collect(),
         kept: Box::new(super::Kept::Ipynb(Kept {
             raw: raw.to_string(),
+            file_start,
             kind,
             source: source.clone(),
             span: start..start + c.source.get().len(),
@@ -218,6 +222,13 @@ fn kept(cell: &Cell) -> &Kept {
         // `Notebook::apply` takes no cell another format made.
         super::Kept::Marimo(_) => unreachable!("a marimo cell in an .ipynb"),
     }
+}
+
+pub(super) fn json_hit(cell: &Cell, hit: Range<usize>) -> Option<Range<usize>> {
+    let kept = kept(cell);
+    let mapped = source_hit(&kept.raw[kept.span.clone()], hit)?;
+    let base = kept.file_start? + kept.span.start;
+    Some(base + mapped.start..base + mapped.end)
 }
 
 impl Frame {
@@ -331,11 +342,63 @@ impl Frame {
             raw.insert("id".into(), fresh.into());
         }
         let raw = self.whole(kind, "", &json(&raw), None);
-        match cell(&raw, id.0) {
+        match cell(&raw, id.0, None) {
             Ok(cell) => *cell.kept,
             Err(why) => unreachable!("a new cell does not read back: {why}"),
         }
     }
+}
+
+/// Map decoded source bytes to their spelling inside a JSON string or list of strings.
+fn source_hit(raw: &str, hit: Range<usize>) -> Option<Range<usize>> {
+    let mut decoded = 0;
+    let mut cursor = 0;
+    let (mut start, mut end) = (None, None);
+    let mut last_content_end = None;
+    while let Some(next) = raw[cursor..].find('"') {
+        cursor += next + 1;
+        if decoded == hit.start && start.is_none() {
+            start = Some(cursor);
+        }
+        if decoded == hit.end && end.is_none() {
+            end = Some(cursor);
+        }
+        while raw.as_bytes().get(cursor) != Some(&b'"') {
+            if decoded == hit.start && start.is_none() {
+                start = Some(cursor);
+            }
+            let ch = raw[cursor..].chars().next()?;
+            let (next, len) = if ch == '\\' {
+                let escape = *raw.as_bytes().get(cursor + 1)?;
+                let mut next = cursor + if escape == b'u' { 6 } else { 2 };
+                if escape == b'u'
+                    && (0xD800..=0xDBFF)
+                        .contains(&u16::from_str_radix(raw.get(cursor + 2..next)?, 16).ok()?)
+                {
+                    next += 6;
+                }
+                let letter: String =
+                    serde_json::from_str(&format!("\"{}\"", raw.get(cursor..next)?)).ok()?;
+                (next, letter.len())
+            } else {
+                (cursor + ch.len_utf8(), ch.len_utf8())
+            };
+            decoded += len;
+            cursor = next;
+            if decoded == hit.end && end.is_none() {
+                end = Some(cursor);
+            }
+        }
+        last_content_end = Some(cursor);
+        cursor += 1;
+    }
+    if decoded == hit.start && start.is_none() {
+        start = last_content_end;
+    }
+    if decoded == hit.end && end.is_none() {
+        end = last_content_end;
+    }
+    Some(start?..end?)
 }
 
 /// `value` as compact JSON, which for a string is how nbformat writes it.

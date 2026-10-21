@@ -37,30 +37,30 @@ const SECTIONS: [&str; 18] = [
 const TAB_KEYS: [(&str, &[&str]); 24] = [
     ("win.pdf-next-page", &["space", "n", "Right"]),
     ("win.pdf-previous-page", &["<Shift>space", "p", "Left"]),
-    ("win.pdf-copy", &["<Control>c"]),
-    ("win.pdf-undo", &["<Control>z"]),
-    ("win.pdf-redo", &["<Control><Shift>z", "<Control>y"]),
-    ("win.diagram-undo", &["<Control>z"]),
-    ("win.diagram-redo", &["<Control><Shift>z", "<Control>y"]),
+    ("win.pdf-copy", &["<Primary>c"]),
+    ("win.pdf-undo", &["<Primary>z"]),
+    ("win.pdf-redo", &["<Primary><Shift>z", "<Primary>y"]),
+    ("win.diagram-undo", &["<Primary>z"]),
+    ("win.diagram-redo", &["<Primary><Shift>z", "<Primary>y"]),
     ("win.diagram-delete", &["Delete", "BackSpace"]),
     (
         "win.diagram-delete-all",
-        &["<Control>Delete", "<Control>BackSpace"],
+        &["<Primary>Delete", "<Primary>BackSpace"],
     ),
-    ("win.diagram-select-all", &["<Control>a"]),
-    ("win.diagram-cut", &["<Control>x"]),
-    ("win.diagram-copy", &["<Control>c"]),
-    ("win.diagram-paste", &["<Control>v"]),
+    ("win.diagram-select-all", &["<Primary>a"]),
+    ("win.diagram-cut", &["<Primary>x"]),
+    ("win.diagram-copy", &["<Primary>c"]),
+    ("win.diagram-paste", &["<Primary>v"]),
     ("win.diagram-edit-label", &["Return"]),
     ("win.diagram-next-page", &["Page_Down"]),
     ("win.diagram-previous-page", &["Page_Up"]),
-    ("win.notebook-undo", &["<Control>z"]),
-    ("win.notebook-redo", &["<Control><Shift>z", "<Control>y"]),
+    ("win.notebook-undo", &["<Primary>z"]),
+    ("win.notebook-redo", &["<Primary><Shift>z", "<Primary>y"]),
     ("win.notebook-insert-above", &["<Alt><Shift>Return"]),
     ("win.notebook-insert-below", &["<Alt>Return"]),
-    ("win.notebook-move-up", &["<Control><Shift>Up"]),
-    ("win.notebook-move-down", &["<Control><Shift>Down"]),
-    ("win.notebook-split", &["<Control><Shift>minus"]),
+    ("win.notebook-move-up", &["<Primary><Shift>Up"]),
+    ("win.notebook-move-down", &["<Primary><Shift>Down"]),
+    ("win.notebook-split", &["<Primary><Shift>minus"]),
     ("win.notebook-run-advance", &["<Shift>Return"]),
 ];
 
@@ -206,7 +206,7 @@ mod tests {
         assert_eq!(shown[0].0, "Files");
         assert_eq!(
             accels_of(&shown, "Save"),
-            Some(vec!["<Control>s".to_string()])
+            Some(vec!["<Primary>s".to_string()])
         );
         // Unbound by default, so not listed.
         assert_eq!(accels_of(&shown, "About accent"), None);
@@ -218,7 +218,7 @@ mod tests {
         );
         assert_eq!(
             accels_of(&shown, "Duplicate Selection"),
-            Some(vec!["<Control>d".into()])
+            Some(vec!["<Primary>d".into()])
         );
         assert_eq!(
             accels_of(&shown, "Insert Cell Below"),
@@ -226,7 +226,7 @@ mod tests {
         );
         assert_eq!(
             accels_of(&shown, "Run Cell"),
-            Some(vec!["<Control>Return".into()])
+            Some(vec!["<Primary>Return".into()])
         );
 
         // A rebind shows, under its heading; an unbind hides; a borrowed chord follows its lender.
