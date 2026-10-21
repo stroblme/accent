@@ -466,7 +466,7 @@ pub fn join(tab: &Rc<Tab>, vault: Arc<Vault>) {
     let opening = open(tab, vault);
     index_outline(tab);
 
-    let (rel, id) = (tab.rel(), language_id(tab));
+    let (rel, id) = (tab.language_key(), language_id(tab));
     let weak = Rc::downgrade(tab);
     glib::spawn_future_local(async move {
         let support = opening.await;
@@ -510,7 +510,7 @@ pub fn saved(tab: &Rc<Tab>) {
     let tab = tab.clone();
     glib::spawn_future_local(async move {
         flush(tab.clone()).await;
-        let rel = tab.rel();
+        let rel = tab.language_key();
         if let Err(e) = vault.save_document(&rel).await {
             tracing::debug!("saved {rel}: {e:#}");
         }
@@ -564,7 +564,7 @@ pub fn settle(tab: &Rc<Tab>) {
     let tab = tab.clone();
     glib::spawn_future_local(async move {
         flush(tab.clone()).await;
-        let rel = tab.rel();
+        let rel = tab.language_key();
         if let Err(e) = vault.settle(&rel).await {
             tracing::debug!("settling {rel}: {e:#}");
         }
@@ -576,7 +576,7 @@ pub fn rediagnose(tab: &Rc<Tab>) {
     let Some(vault) = tab.lang.vault() else {
         return;
     };
-    let rel = tab.rel();
+    let rel = tab.language_key();
     glib::spawn_future_local(async move {
         if let Err(e) = vault.rediagnose(&rel).await {
             tracing::debug!("re-diagnosing {rel}: {e:#}");
@@ -628,7 +628,13 @@ fn open(
         }
     };
     let doc = &tab.lang.doc;
-    doc.open(vault, &tab.rel(), &language_id(tab), tab.text(), told)
+    doc.open(
+        vault,
+        &tab.language_key(),
+        &language_id(tab),
+        tab.text(),
+        told,
+    )
 }
 
 /// The provider said what it can do: tell the window, and read what it answers.
@@ -711,7 +717,7 @@ async fn refresh(tab: Rc<Tab>, rest: Duration) {
     // behind it feed panes that are already drawn.
     crate::ghost::request(&tab).await;
     pause(rest).await;
-    let rel = tab.rel();
+    let rel = tab.language_key();
     match vault.symbols(&rel).await {
         Ok(symbols) if !symbols.is_empty() => {
             tab.lang.served.set(true);

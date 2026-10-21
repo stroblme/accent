@@ -989,6 +989,10 @@ impl Languages {
         })
     }
 
+    pub(crate) fn named(&self, path: &str) -> bool {
+        self.naming(path).is_some()
+    }
+
     /// Close the document and stop its session if no documents remain. Reopening
     /// pays a cold start rather than retaining an unused server. The vault-wide
     /// ghost session is separate and ends with the vault or Ghost Text preference.
@@ -1760,7 +1764,10 @@ mod tests {
 
     /// A server whose definition answer named `/dep/lib.rs`, as rust-analyzer's names a crate
     /// in `~/.cargo/registry`, and answers nothing else.
-    struct Naming(Option<Arc<AtomicBool>>);
+    struct Naming {
+        stopped: Option<Arc<AtomicBool>>,
+        named: String,
+    }
 
     impl Language for Naming {
         fn open(&self, _: &str, _: &str, _: String) -> Result<Support> {
@@ -1795,11 +1802,11 @@ mod tests {
             Box::pin(async { Ok(Vec::new()) })
         }
         fn named(&self, path: &str) -> bool {
-            path == "/dep/lib.rs"
+            path == self.named
         }
         fn shutdown(&self) -> Fut<'_, ()> {
             Box::pin(async move {
-                if let Some(stopped) = &self.0 {
+                if let Some(stopped) = &self.stopped {
                     stopped.store(true, Ordering::SeqCst);
                 }
                 Ok(())
@@ -1821,7 +1828,10 @@ mod tests {
                     .session(("server".to_string(), "/vault".into()), async move {
                         began.send(()).unwrap();
                         waiting.await.unwrap();
-                        Ok(Arc::new(Naming(Some(stopped))) as Arc<dyn Language>)
+                        Ok(Arc::new(Naming {
+                            stopped: Some(stopped),
+                            named: "/dep/lib.rs".into(),
+                        }) as Arc<dyn Language>)
                     })
                     .await
             }
@@ -1843,8 +1853,10 @@ mod tests {
         let (events, _said) = std::sync::mpsc::channel();
         let langs = Languages::new("/vault".into(), "/index.db".into(), events);
         let key = ("rust-analyzer".to_string(), PathBuf::from("/vault"));
-        let running =
-            tokio::sync::OnceCell::new_with(Some(Arc::new(Naming(None)) as Arc<dyn Language>));
+        let running = tokio::sync::OnceCell::new_with(Some(Arc::new(Naming {
+            stopped: None,
+            named: "/dep/lib.rs".into(),
+        }) as Arc<dyn Language>));
         locked(&langs.sessions).insert(key.clone(), Arc::new(running));
         let open = |rel: &str| {
             let cfg = VaultConfig::default();
@@ -1865,6 +1877,51 @@ mod tests {
                 "the dependency was the last document holding the session"
             );
         });
+    }
+
+    #[test]
+    fn a_host_read_requires_an_absolute_file_named_by_a_running_session() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let dep = cache.path().join("lib.rs");
+        std::fs::write(&dep, "pub fn helper() {}\n").unwrap();
+        let (vault, _events) = Local::open_at(
+            root.path(),
+            &cache.path().join("index.db"),
+            VaultConfig::default(),
+        )
+        .unwrap();
+        let key = ("rust-analyzer".to_string(), root.path().to_path_buf());
+        let running = tokio::sync::OnceCell::new_with(Some(Arc::new(Naming {
+            stopped: None,
+            named: dep.to_str().unwrap().into(),
+        }) as Arc<dyn Language>));
+        locked(&vault.lang.sessions).insert(key, Arc::new(running));
+
+        let read = vault.read_named(dep.to_str().unwrap()).unwrap();
+        assert!(
+            matches!(read, accent_core::fs::Read::Text(text) if text.text == "pub fn helper() {}\n")
+        );
+        let wire = crate::vault::dispatch(&vault, "read_named", &json!([dep.to_str().unwrap()]))
+            .unwrap()
+            .unwrap();
+        let read: accent_core::fs::Read = serde_json::from_value(wire).unwrap();
+        assert!(
+            matches!(read, accent_core::fs::Read::Text(text) if text.text == "pub fn helper() {}\n")
+        );
+        assert!(
+            vault.read_named("lib.rs").is_err(),
+            "relative paths are not host files"
+        );
+        assert!(
+            vault.read_named(root.path().to_str().unwrap()).is_err(),
+            "the session did not name this path"
+        );
+        locked(&vault.lang.sessions).clear();
+        assert!(
+            vault.read_named(dep.to_str().unwrap()).is_err(),
+            "a closed session no longer authorizes a host read"
+        );
     }
 
     /// Verify longer startup waits until the server first answers, then stop it

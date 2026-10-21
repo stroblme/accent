@@ -37,6 +37,10 @@ impl App {
         // still coming.
         sidebar.set_references(title, None, empty);
         let (key, tab) = (doc.key(), doc.tab().cloned());
+        let language_key = tab
+            .as_ref()
+            .map(|tab| tab.language_key())
+            .unwrap_or_else(|| key.clone());
         let note = tab.as_ref().is_some_and(|tab| tab.flavour().is_note());
         let pos = tab
             .as_ref()
@@ -49,7 +53,7 @@ impl App {
                 lang::flush(tab.clone()).await;
                 found = crate::work::or_empty(
                     "finding the references",
-                    vault.references(&key, pos).await,
+                    vault.references(&language_key, pos).await,
                 );
             }
             // A note's answer is its backlinks already, and nothing links to a dependency.
@@ -147,8 +151,11 @@ impl App {
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             lang::flush(tab.clone()).await;
-            let found = vault.definition(&tab.rel(), pos).await;
-            tracing::debug!("definition for {} at {pos:?}: {found:?}", tab.rel());
+            let found = vault.definition(&tab.language_key(), pos).await;
+            tracing::debug!(
+                "definition for {} at {pos:?}: {found:?}",
+                tab.language_key()
+            );
             if let Some(app) = weak.upgrade() {
                 app.land_definition(found);
             }
@@ -235,9 +242,16 @@ impl App {
             }
             return;
         }
-        let (key, at) = (loc.path.clone(), loc.range.start);
-        // Outside the vault: the same door a file dropped on the window comes through, and the
-        // tab it opens starts no language server of its own, joining the one that named it.
+        let key = if self.vault().is_some_and(|v| v.is_remote())
+            && Path::new(&loc.path).is_absolute()
+            && matches!(doc::kind_of(&loc.path), Kind::Note | Kind::Text)
+        {
+            doc::host_file_key(&loc.path).unwrap()
+        } else {
+            loc.path.clone()
+        };
+        let at = loc.range.start;
+        // Outside the vault: join the session that named the file once the tab opens.
         let how = match doc::is_loose_key(&key) {
             true => Opened::Kept,
             false => Opened::Preview,

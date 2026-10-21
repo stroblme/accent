@@ -432,7 +432,8 @@ impl App {
 
     /// Whether `key` belongs to the remote host; loose tabs stay local even in a remote-vault window.
     fn on_host(&self, key: &str) -> bool {
-        !doc::is_loose_key(key) && self.vault().is_some_and(|v| v.is_remote())
+        (!doc::is_loose_key(key) || doc::host_file_path(key).is_some())
+            && self.vault().is_some_and(|v| v.is_remote())
     }
 
     /// Whether the remote vault is connecting or disconnected; retry pending reads on `Event::Connected`.
@@ -689,9 +690,13 @@ impl App {
                 None => doc.page().title().to_string(),
             }),
             false => {
-                self.file_used(&key);
+                if doc::host_file_path(&key).is_none() {
+                    self.file_used(&key);
+                }
                 let where_ = match doc.is_loose() {
-                    true => fileops::display_path(&self.root(), &key),
+                    true => doc::host_file_path(&key)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| fileops::display_path(&self.root(), &key)),
                     false => key.clone(),
                 };
                 // On a remote vault the path alone is ambiguous — the same note path exists on

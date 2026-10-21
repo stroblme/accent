@@ -1189,7 +1189,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   That goes by the path alone, so any tab from outside the vault there opens read-only at once, a restored one or one from Open File… included, before and without a server, and joins when a definition lands on it.
   Any other, a sibling crate a path dependency names, joins all the same and stays editable (user decisions 2026-10-13).
   A file from outside the vault no running server named is a tab like any other from there, and joins once a definition lands on it again (a restored tab, say).
-  Local vaults only: a remote vault's dependency is on the host, and a tab from outside the vault reads this machine's disk.
+  On a remote vault, a dependency named by a host language session has its own host-file tab key, distinct from a loose file at the same path on this machine. The host reads its absolute path only while that session names it; the tab is read-only and has no local file monitor. Such tabs are not restored after a restart, when no session has named them yet. Other loose tabs still read this machine's disk.
 - A C or C++ header goes to clangd as its language does: a `.h` as C (`languageId` `c`, GtkSourceView's own reading of the name), a `.hpp` as C++ — clangd takes the dialect from the compile command, so a C++ header named `.h` is read as C++ all the same.
 - Which server answers for which language is a table in the app, overridden in `config.toml` for every vault on this machine (`[lsp.servers]`) and per vault (`[vaults."<root>".lsp.servers]`), the vault's own winning key by key; a remote vault takes its own table alone, the host's servers being the host's.
   No preference, the answer being whether it is installed.

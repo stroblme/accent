@@ -110,7 +110,7 @@ impl App {
     /// A running program is told the file's breakpoints, all of them, and the marks move to where
     /// it holds them.
     pub(crate) fn toggle_breakpoint(self: &Rc<Self>, tab: &Rc<Tab>, line: u32) {
-        if debuggable(&lang::language_id(tab)) {
+        if crate::doc::host_file_path(&tab.rel()).is_none() && debuggable(&lang::language_id(tab)) {
             breakpoints::toggle(tab, line);
             breakpoints::redraw(tab);
             self.save_session_soon();

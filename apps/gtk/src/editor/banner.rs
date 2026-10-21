@@ -21,6 +21,8 @@ pub enum Alert {
     /// A file a package manager or a toolchain installed, outside the vault, read-only with no
     /// action button: it is theirs, not the vault's to edit.
     Installed,
+    /// A dependency outside a remote vault, read from its host and never saved locally.
+    Host,
     /// A notebook that does not read as one, open as text; the title says why ([`Tab::unread`]).
     Unread,
 }
@@ -33,6 +35,7 @@ impl Alert {
             Alert::Conflict => "A sync conflict copy of this file exists",
             Alert::ReadOnly => "This file is not valid UTF-8 and is shown read-only",
             Alert::Installed => "This file belongs to an installed package and is shown read-only",
+            Alert::Host => "This file is on the remote host and is shown read-only",
             Alert::Unread => "This notebook opens as text",
         }
     }
@@ -47,7 +50,7 @@ impl Alert {
             Alert::Compare => Some("Compare"),
             Alert::Restore => Some("Save"),
             Alert::Conflict => Some("Resolve"),
-            Alert::ReadOnly | Alert::Installed | Alert::Unread => None,
+            Alert::ReadOnly | Alert::Installed | Alert::Host | Alert::Unread => None,
         }
     }
 }
@@ -64,6 +67,7 @@ fn banner_alert(standing: &[Alert]) -> Option<Alert> {
         Alert::Conflict,
         Alert::ReadOnly,
         Alert::Installed,
+        Alert::Host,
         Alert::Unread,
     ]
     .into_iter()

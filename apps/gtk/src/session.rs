@@ -340,10 +340,13 @@ impl App {
                 .docs
                 .borrow()
                 .iter()
-                .filter(|d| d.is_kept())
+                .filter(|d| d.is_kept() && doc::host_file_path(&d.key()).is_none())
                 .map(|d| d.key())
                 .collect(),
-            active: self.active_doc().filter(Doc::is_kept).map(|d| d.key()),
+            active: self
+                .active_doc()
+                .filter(|d| d.is_kept() && doc::host_file_path(&d.key()).is_none())
+                .map(|d| d.key()),
             layout: self.layout(),
             // Neither presentation nor a narrow window is session state, so a sidebar either one
             // hid is saved as it was.
@@ -390,6 +393,7 @@ impl App {
                 .borrow()
                 .iter()
                 .filter_map(|page| self.doc_for_page(page))
+                .filter(|d| doc::host_file_path(&d.key()).is_none())
                 .map(|d| d.key())
                 .collect(),
             web_images: {

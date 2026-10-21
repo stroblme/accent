@@ -50,7 +50,8 @@ impl App {
             self.awaiting.borrow_mut().remove(key);
             // Deleted since the session named it, or never in this vault: the vault has answered
             // the same way for both, and this machine's disk cannot tell them apart for a remote.
-            return self.cannot(&format!("open {key}"), "not in this vault");
+            let shown = doc::host_file_path(key).unwrap_or(key);
+            return self.cannot(&format!("open {shown}"), "not in this vault");
         };
         // A note that is already open keeps whatever it is: looking at a real tab again does not
         // demote it, and looking at the preview again does not promote it.
@@ -174,8 +175,11 @@ impl App {
     /// Read text on a worker before opening an editor, or choose another tab kind from the bytes.
     /// Remote round trips must not block the window.
     fn open_text(self: &Rc<Self>, key: &str, path: &Path, flavour: Flavour, how: Opened) {
-        // A loose file has no vault to ask, so it still reads its own absolute path.
-        let vault = self.vault().filter(|_| !doc::is_loose_key(key)).cloned();
+        // Host dependencies read through the host's named-file gate; other loose files are local.
+        let vault = self
+            .vault()
+            .filter(|_| !doc::is_loose_key(key) || doc::host_file_path(key).is_some())
+            .cloned();
         let (key, path) = (key.to_string(), path.to_path_buf());
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
@@ -191,6 +195,9 @@ impl App {
                         std::thread::sleep(std::time::Duration::from_millis(ms));
                     }
                     match vault {
+                        Some(vault) if doc::host_file_path(&key).is_some() => {
+                            vault.read_named(doc::host_file_path(&key).unwrap())
+                        }
                         Some(vault) => vault.read_text(&key),
                         None => accent_core::fs::read_text(&path).map_err(Into::into),
                     }
@@ -255,7 +262,7 @@ impl App {
         };
         // An `.xml` that draw.io wrote is a diagram, whatever its name says: known by its bytes.
         // A search hit in it waits for the diagram instead of the text tab it asked for.
-        if accent_core::path::holds_diagram(key, &text.text) {
+        if doc::host_file_path(key).is_none() && accent_core::path::holds_diagram(key, &text.text) {
             match self.revealing.borrow().contains_key(key) {
                 true => drop(self.awaiting.borrow_mut().remove(key)),
                 false => self.drop_awaiting(key, "a diagram, not a text file"),
@@ -265,7 +272,10 @@ impl App {
         // So is an `.ipynb`, and a `.py` marimo wrote, unless the reader asked for its text; a
         // search hit in it waits for the notebook as one in a diagram does.
         let as_text = self.as_text.borrow_mut().remove(key);
-        if !as_text && accent_core::path::holds_notebook(key, &text.text) {
+        if doc::host_file_path(key).is_none()
+            && !as_text
+            && accent_core::path::holds_notebook(key, &text.text)
+        {
             match self.revealing.borrow().contains_key(key) {
                 true => drop(self.awaiting.borrow_mut().remove(key)),
                 false => self.drop_awaiting(key, "a notebook, not a text file"),
@@ -574,34 +584,35 @@ impl App {
             .title(title)
             .description(body)
             .build();
-        // A file on the host is on no disk here for a file manager to show, so there the one
-        // button is the copy that puts it on one.
-        let on_host = self.on_host(&key);
-        let button = gtk::Button::builder()
-            .label(if on_host {
-                "Download…"
-            } else {
-                "Show in Files"
-            })
-            .halign(gtk::Align::Center)
-            .css_classes(["pill"])
-            .build();
-        button.connect_clicked(glib::clone!(
-            #[weak(rename_to = app)]
-            self,
-            #[strong]
-            key,
-            move |_| {
-                if !on_host {
-                    let path = app.root().join(&key);
-                    let toast = app.clone();
-                    fileops::reveal(&app.window, &path, move |m| toast.toast(m));
-                } else if let Some(ops) = app.ops() {
-                    fileops::download(ops, &key);
+        // The vault downloader takes vault paths; a host dependency has no such path.
+        if doc::host_file_path(&key).is_none() {
+            let on_host = self.on_host(&key);
+            let button = gtk::Button::builder()
+                .label(if on_host {
+                    "Download…"
+                } else {
+                    "Show in Files"
+                })
+                .halign(gtk::Align::Center)
+                .css_classes(["pill"])
+                .build();
+            button.connect_clicked(glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                #[strong]
+                key,
+                move |_| {
+                    if !on_host {
+                        let path = app.root().join(&key);
+                        let toast = app.clone();
+                        fileops::reveal(&app.window, &path, move |m| toast.toast(m));
+                    } else if let Some(ops) = app.ops() {
+                        fileops::download(ops, &key);
+                    }
                 }
-            }
-        ));
-        status.set_child(Some(&button));
+            ));
+            status.set_child(Some(&button));
+        }
         self.adopt_viewer(Doc::Status, &key, &status, "dialog-warning-symbolic", how);
     }
 
@@ -663,7 +674,11 @@ impl App {
     ) -> Rc<doc::Viewer> {
         let page = self.tabs_for(key).append(child);
         page.set_title(doc::file_name(key));
-        page.set_tooltip(&fileops::display_path(&self.root(), key));
+        let tooltip = match doc::host_file_path(key) {
+            Some(path) => format!("{path} (remote host)"),
+            None => fileops::display_path(&self.root(), key),
+        };
+        page.set_tooltip(&tooltip);
         page.set_icon(Some(&gio::ThemedIcon::new(icon)));
         self.mark_loose(&page, key);
         let viewer = doc::Viewer::new(key, page.clone());
@@ -860,13 +875,23 @@ impl App {
         }
     }
 
-    /// Resolve the opening key and read path using the vault's lexical containment rule.
+    /// Resolve a vault key, local loose path, or remote host-file key to its read path.
     ///
     /// Reject escaping wikilinks here, since note content reaches this entry point directly.
     /// Avoid canonicalisation so intentionally indexed directory symlinks still work. Existence
     /// checks stay on the reader's worker to avoid a remote round trip on the main thread;
     /// [`cannot_open`](Self::cannot_open) reports failure.
     pub(crate) fn locate(&self, key: &str) -> Option<(String, PathBuf)> {
+        if key.starts_with("host-file:") {
+            let path = doc::host_file_path(key)?;
+            if !matches!(doc::kind_of(key), Kind::Note | Kind::Text) {
+                return None;
+            }
+            return self
+                .vault()
+                .is_some_and(|vault| vault.is_remote())
+                .then(|| (key.to_string(), PathBuf::from(path)));
+        }
         if doc::is_loose_key(key) {
             let path = PathBuf::from(key);
             return path.is_file().then(|| (key.to_string(), path));
@@ -882,11 +907,12 @@ impl App {
     /// session naming a note deleted since, or a link to one never written.
     pub(crate) fn cannot_open(&self, key: &str, e: Error) {
         self.keep_on_landing.borrow_mut().remove(key);
+        let shown = doc::host_file_path(key).unwrap_or(key);
         match e {
             Error::Core(Core::NotFound(_)) => {
-                self.cannot(&format!("open {key}"), "not in this vault")
+                self.cannot(&format!("open {shown}"), "not in this vault")
             }
-            e => self.cannot(&format!("open {key}"), e),
+            e => self.cannot(&format!("open {shown}"), e),
         }
     }
 
@@ -921,10 +947,10 @@ impl App {
         );
     }
 
-    /// Mark loose-file tabs and watch their files because the vault worker cannot report outside its tree.
+    /// Watch a local loose file, which the vault worker cannot report outside its tree.
     /// Changes reach PDF/image tabs through changed_on_disk; vault files return None.
     pub(crate) fn watch_loose(self: &Rc<Self>, key: &str, path: &Path) -> Option<gio::FileMonitor> {
-        if !doc::is_loose_key(key) {
+        if !doc::is_loose_key(key) || doc::host_file_path(key).is_some() {
             return None;
         }
         let key = key.to_string();
@@ -939,18 +965,23 @@ impl App {
     }
 
     /// The vault `tab`'s language document opens on: this window's for its own files, and for
-    /// code from outside it, a dependency its server may have named (`lang::join`). Not a remote
-    /// vault's: its dependencies are on the host, and a loose tab reads this machine's disk.
+    /// code from outside it, a dependency its server may have named (`lang::join`). Remote host
+    /// dependencies use their own key; ordinary loose tabs read this machine's disk.
     pub(crate) fn language_vault(&self, tab: &Tab) -> Option<Arc<Vault>> {
         let vault = self.vault()?;
         let loose_code = tab.flavour() == Flavour::Code && !vault.is_remote();
-        (!doc::is_loose_key(&tab.rel()) || loose_code).then(|| vault.clone())
+        (!doc::is_loose_key(&tab.rel()) || loose_code || doc::host_file_path(&tab.rel()).is_some())
+            .then(|| vault.clone())
     }
 
     pub(crate) fn mark_loose(&self, page: &adw::TabPage, key: &str) {
         if self.vault.is_some() && doc::is_loose_key(key) {
             page.set_indicator_icon(Some(&gio::ThemedIcon::new("document-open-symbolic")));
-            page.set_indicator_tooltip("Outside this vault");
+            page.set_indicator_tooltip(if doc::host_file_path(key).is_some() {
+                "On remote host"
+            } else {
+                "Outside this vault"
+            });
         }
     }
 
@@ -1131,7 +1162,7 @@ impl App {
         self.offer_show_in_pdf(&tab);
 
         // Nothing else watches a loose file: the vault's worker only reports on its own tree.
-        if doc::is_loose_key(&tab.rel()) {
+        if doc::is_loose_key(&tab.rel()) && doc::host_file_path(&tab.rel()).is_none() {
             tab.watch_file(glib::clone!(
                 #[weak(rename_to = app)]
                 self,
@@ -1141,12 +1172,18 @@ impl App {
         self.mark_loose(&tab.page, &tab.rel());
         // A package manager's or a toolchain's file is theirs, not the user's to edit, however it
         // was opened and before any server answers; a sibling crate a path dependency names is not.
-        if doc::is_loose_key(&tab.rel()) && accent_core::path::managed(Path::new(&tab.rel())) {
+        if doc::host_file_path(&tab.rel()).is_some() {
+            tab.view.set_editable(false);
+            tab.show_alert(Alert::Host);
+        } else if doc::is_loose_key(&tab.rel()) && accent_core::path::managed(Path::new(&tab.rel()))
+        {
             tab.view.set_editable(false);
             tab.show_alert(Alert::Installed);
         }
         let page = tab.page.clone();
-        self.fetch_head(&tab);
+        if doc::host_file_path(&tab.rel()).is_none() {
+            self.fetch_head(&tab);
+        }
         self.watch_folder_of(&tab.rel());
         self.docs.borrow_mut().push(Doc::Text(tab.clone()));
         self.select_new_page(&page, how);
@@ -1221,7 +1258,8 @@ impl App {
             return f(self, &tab);
         }
         let waiting = Waiting {
-            what: (how != Opened::Restored).then(|| format!("{what} {key}")),
+            what: (how != Opened::Restored)
+                .then(|| format!("{what} {}", doc::host_file_path(key).unwrap_or(key))),
             run: Box::new(f),
         };
         self.awaiting.borrow_mut().insert(key.to_string(), waiting);

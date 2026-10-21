@@ -400,6 +400,8 @@ methods! {
     // ------------------------------------------------------------------ files
     read(rel: ref str) -> (String, Etag);
     read_text(rel: ref str) -> fs::Read;
+    /// Read an absolute dependency file only if a live host language session named it.
+    read_named(abs: ref str) -> fs::Read;
     stat(rel: ref str) -> Option<Etag>;
     /// Permanently delete a remote file or directory after UI confirmation.
     /// Local deletion uses the desktop system trash.

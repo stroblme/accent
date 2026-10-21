@@ -169,9 +169,8 @@ impl Doc {
         }
     }
 
-    /// A file from outside the vault, opened by its absolute path. There is no index behind it,
-    /// so it has no backlinks, never appears in search, and reloads from a file monitor of its
-    /// own rather than from the vault's watcher.
+    /// A file from outside the vault, local or on the remote host. Neither has an index entry;
+    /// local files have their own file monitor, while host files read through the vault.
     pub fn is_loose(&self) -> bool {
         is_loose_key(&self.key())
     }
@@ -195,7 +194,19 @@ impl Doc {
 }
 
 pub fn is_loose_key(key: &str) -> bool {
-    Path::new(key).is_absolute()
+    Path::new(key).is_absolute() || key.starts_with("host-file:")
+}
+
+/// A remote host dependency has a tab identity distinct from a local file at the same path.
+pub fn host_file_key(path: &str) -> Option<String> {
+    Path::new(path)
+        .is_absolute()
+        .then(|| format!("host-file:{path}"))
+}
+
+pub fn host_file_path(key: &str) -> Option<&str> {
+    let path = key.strip_prefix("host-file:")?;
+    Path::new(path).is_absolute().then_some(path)
 }
 
 /// Return the final path segment used as the tab title.
@@ -313,5 +324,16 @@ mod tests {
         assert!(!is_loose_key("Inbox/note.md"));
         // A diff key names a comparison, not a path, so it is never loose whatever it compares.
         assert!(!is_loose_key("diff:worktree:/etc/hosts"));
+    }
+
+    #[test]
+    fn a_host_file_has_a_distinct_key_from_the_same_local_path() {
+        let local = "/home/user/.cargo/registry/src/lib.rs";
+        let host = host_file_key(local).unwrap();
+        assert_ne!(host, local);
+        assert_eq!(host_file_path(&host), Some(local));
+        assert!(is_loose_key(&host));
+        assert!(host_file_key("src/lib.rs").is_none());
+        assert!(host_file_path("host-file:src/lib.rs").is_none());
     }
 }
