@@ -108,7 +108,7 @@ pub fn open(
     if text.lossy {
         view.set_editable(false);
     }
-    let (numbers, marks, annotations, folds) = gutters(&view, &buffer, flavour);
+    let (numbers, marks, diagnostics, folds) = gutters(&view, &buffer, flavour);
     // Plain-text cut and copy, and whole-line with nothing selected, whatever the tab holds: an
     // editor where Ctrl+X on no selection does nothing is one that makes the user select the line
     // first.
@@ -183,11 +183,7 @@ pub fn open(
         words: Cell::new(None),
         follow_tag,
         follow: RefCell::new(Follow::default()),
-        diagnostics: RefCell::new(Vec::new()),
-        annotations,
-        diagnostics_hidden: Cell::new(false),
-        annotated: RefCell::default(),
-        relay: RefCell::new(None),
+        diagnostics,
         folds: RefCell::new(Vec::new()),
         fold_renderer: folds.clone(),
         breakpoints: RefCell::new(Vec::new()),
@@ -266,7 +262,7 @@ fn gutters(
 ) -> (
     sourceview5::GutterRenderer,
     crate::marks::Renderer,
-    sourceview5::AnnotationProvider,
+    diagnostics::Painted,
     crate::fold::Renderer,
 ) {
     let numbers = line_numbers(view, buffer);
@@ -288,12 +284,11 @@ fn gutters(
         }
         child = widget.next_sibling();
     }
-    let annotations = sourceview5::AnnotationProvider::new();
-    view.annotations().add_provider(&annotations);
+    let diagnostics = diagnostics::Painted::new(view, buffer);
     // Outside the change bars, next to the text: a chevron is about the block it opens.
     let folds = crate::fold::Renderer::new();
     sourceview5::prelude::ViewExt::gutter(view, gtk::TextWindowType::Left).insert(&folds, 2);
-    (numbers, marks, annotations, folds)
+    (numbers, marks, diagnostics, folds)
 }
 
 /// The page around a tab's view, from [`frame`].
@@ -456,7 +451,7 @@ fn mark_tooltips(tab: &Rc<Tab>) {
             #[upgrade_or_default]
             move |_, mark| {
                 let line = tab.buffer.iter_at_mark(mark).line().max(0) as u32;
-                diagnostics::messages_on(&tab.diagnostics.borrow(), line)
+                diagnostics::messages_on(&tab.diagnostics(), line)
             }
         ));
         // Above the git change bars, which have no icon and nothing to say.
@@ -491,7 +486,7 @@ fn follow_layout(tab: &Rc<Tab>, width: &gtk::DrawingArea) {
             tab,
             move |adjustment| {
                 if width.replace(adjustment.page_size()) != adjustment.page_size()
-                    && !tab.annotated.borrow().is_empty()
+                    && !tab.diagnostics.messages().is_empty()
                 {
                     let weak = Rc::downgrade(&tab);
                     tab.refit.call(move || {
