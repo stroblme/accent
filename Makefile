@@ -93,7 +93,7 @@ XVFB_ENV := DISPLAY=:$(DISPLAY_NUM) GDK_BACKEND=x11 GSK_RENDERER=cairo GTK_A11Y=
 .PHONY: all core gtk gtk-bench clean distclean install uninstall test test-pdf check fmt fmt-check \
         clippy doc run smoke drills xvfb vault validate icons flatpak cargo-sources pdfium server \
         help requirements install-requirements android android-check android-test android-tools apk apk-release \
-        pdfium-android bindings screenshots
+        pdfium-android bindings screenshots docs
 
 ## all: build everything, core plus the desktop app
 all: core gtk
@@ -315,6 +315,9 @@ check: fmt-check clippy test drills
 ## doc: build and open the API documentation
 doc:
 	$(CARGO) doc --workspace --no-deps --open
+
+docs:
+	mdbook serve docs --open
 
 ## run: build and run the desktop app on the test vault
 run: gtk vault

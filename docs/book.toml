@@ -1,0 +1,18 @@
+[book]
+title = "Accent"
+language = "en"
+src = "guide"
+
+[build]
+build-dir = "../target/book"
+
+[output.html]
+# Follows the system's light or dark preference, as the app's System theme does.
+default-theme = "light"
+preferred-dark-theme = "coal"
+site-url = "/accent/"
+git-repository-url = "https://github.com/stroblme/accent"
+edit-url-template = "https://github.com/stroblme/accent/edit/main/docs/{path}"
+additional-css = ["theme/accent.css"]
+# The table of contents reads as the app's sidebar, whose rows carry no numbers.
+no-section-label = true
