@@ -1,9 +1,11 @@
 //! `ACCENT_BENCH_NOTEBOOK=<ipynb>,<marimo .py>,<long ipynb>`: the notebook tab on the generated
 //! vault's `Notebooks/` (a copy under /tmp: it saves). It prints how the first notebook's outputs
-//! show, an edit of each kind with its undo and the save that follows, the marimo notebook kept
-//! as written, the long notebook's open time and memory, and a presented notebook's read-only.
-//! All under Dark, which recolours the pictures. `ACCENT_BENCH_NOTEBOOK_SHOT=<png>` adds a picture
-//! of the window with the first notebook open, for looking at rather than asserting on.
+//! show, an edit of each kind with its undo and the save that follows, the view kept still by a
+//! click and following the arrows, the marimo notebook kept as written, the long notebook's open
+//! time, memory and editors built, the view kept still as more are built above what shows, and a
+//! presented notebook's read-only. All under Dark, which recolours the pictures.
+//! `ACCENT_BENCH_NOTEBOOK_SHOT=<png>` adds a picture of the window with the first notebook open,
+//! for looking at rather than asserting on.
 
 use super::*;
 use crate::notebook::NotebookTab;
@@ -21,6 +23,10 @@ pub(super) fn bench_notebook(app: &Rc<App>, arg: &str) {
         app.restyle_all();
         open_drill(&app, &ipynb).await;
         edit_drill(&app, &ipynb).await;
+        scroll_drill(&app).await;
+        find_drill(&app, &ipynb).await;
+        hit_drill(&app, &ipynb, &marimo).await;
+        outline_drill(&app, &ipynb, &marimo).await;
         marimo_drill(&app, &marimo).await;
         big_drill(&app, &big).await;
         present_drill(&app).await;
@@ -146,6 +152,215 @@ async fn edit_drill(app: &Rc<App>, rel: &str) {
     );
 }
 
+/// A click on a cell's line half under the view's bottom edge leaves the view where it is, and
+/// Down from the last line in sight brings the next cell's caret in by the notebook's margin.
+async fn scroll_drill(app: &Rc<App>) {
+    let Some(tab) = app.active_notebook() else {
+        return;
+    };
+    // Cell 7 built and laid out, the keyboard then in another cell.
+    tab.bench_select(7);
+    glib::timeout_future(Duration::from_millis(300)).await;
+    tab.bench_select(2);
+    glib::timeout_future(Duration::from_millis(300)).await;
+    let before = tab.bench_click(7);
+    // Longer than GtkViewport's scroll to a focused widget takes to play out.
+    glib::timeout_future(Duration::from_millis(500)).await;
+    let still = before.is_some_and(|b| (tab.bench_scrolled() - b).abs() < 0.5);
+    tab.bench_down_at_edge(9);
+    glib::timeout_future(Duration::from_millis(300)).await;
+    let below = tab.bench_caret_above_edge().unwrap_or(-1.0);
+    println!(
+        "bench notebook scroll click_still={} down_margin={below:.0}",
+        u8::from(still)
+    );
+}
+
+/// The pane's find bar over the notebook: the readout as it steps, the count against core's over
+/// the saved file, a regular expression anchored at each cell's start, a query that does not
+/// compile, Replace and Replace All each undone in one step, and Go to Cell.
+async fn find_drill(app: &Rc<App>, rel: &str) {
+    use crate::find::Mode;
+    let Some(tab) = app.active_notebook() else {
+        return;
+    };
+    let text = std::fs::read_to_string(app.root().join(rel)).unwrap_or_default();
+    let expected = |query: &str, regex: bool| -> usize {
+        let options = accent_core::search::Options {
+            regex,
+            ..Default::default()
+        };
+        let re = accent_core::search::pattern(query, options);
+        let (Ok(re), Ok(nb)) = (re, accent_core::notebook::read(rel, &text)) else {
+            return 0;
+        };
+        nb.cells()
+            .iter()
+            .map(|c| re.find_iter(c.source()).count())
+            .sum()
+    };
+    // The query box searches 150 ms after the last change.
+    let settle = || glib::timeout_future(Duration::from_millis(300));
+    let sources = |tab: &Rc<NotebookTab>| -> Vec<String> {
+        (0..tab.cell_count()).map(|n| tab.bench_source(n)).collect()
+    };
+    let bar = app.pane().find.clone();
+    // The caret at the top and the view at the bottom: the first match is scrolled to with the
+    // keyboard in the bar.
+    tab.goto_cell(0);
+    settle().await;
+    tab.bench_scroll(10_000);
+    settle().await;
+    bar.open(Mode::Find);
+    bar.query_box().set_text("fidelity");
+    settle().await;
+    let count = tab.bench_found().0;
+    let readout = bar.readout().0;
+    let shown = tab.bench_caret_shown();
+    bar.step(true);
+    let next = bar.readout().0;
+    let [_, _, regex] = bar.toggles();
+    let sensitive = regex.is_sensitive();
+    regex.set_active(true);
+    bar.query_box().set_text("^import");
+    settle().await;
+    let anchored = tab.bench_found().0;
+    bar.query_box().set_text("(");
+    settle().await;
+    let invalid = bar.readout() == ("Invalid pattern".to_string(), true);
+    regex.set_active(false);
+    bar.query_box().set_text("fidelity");
+    settle().await;
+    let before = sources(&tab);
+    tab.replace("kettle", false);
+    let one = tab.bench_found().0 == count - 1;
+    tab.undo();
+    let one = one && sources(&tab) == before;
+    bar.replace_box().set_text("kettle");
+    bar.press_replace_all();
+    let replaced: usize = sources(&tab)
+        .iter()
+        .map(|s| s.matches("kettle").count())
+        .sum();
+    let left = tab.bench_found().0;
+    tab.undo();
+    let undone = sources(&tab) == before;
+    bar.open(Mode::Goto);
+    let cells = bar.line_box().placeholder_text().unwrap_or_default();
+    bar.line_box().set_text("5");
+    bar.line_box().emit_activate();
+    let goto = tab.bench_found().1;
+    println!(
+        "bench notebook find query=fidelity count={count} expected={} readout={readout:?} \
+         shown={} next={next:?} regex={anchored}/{} regex_toggle={} invalid={} replace_one={} \
+         replace_all={replaced} left={left} one_undo={} goto={cells}:{}",
+        expected("fidelity", false),
+        u8::from(shown),
+        expected("^import", true),
+        u8::from(sensitive),
+        u8::from(invalid),
+        u8::from(one),
+        u8::from(undone),
+        goto.map_or(-1, |n| n as i64),
+    );
+}
+
+/// A search hit in each kind of notebook lands on its cell with the match selected: the open
+/// `.ipynb`'s and a closed copy's from the index, and the closed marimo notebook's from its file,
+/// none with a toast (it used to say a notebook is no text file).
+async fn hit_drill(app: &Rc<App>, ipynb: &str, marimo: &str) {
+    let copy = "Notebooks/hit.ipynb";
+    let toasted = app.toasted.get();
+    let _ = std::fs::copy(app.root().join(ipynb), app.root().join(copy));
+    super::files::until(|| app.reconciled.get()).await;
+    let indexed = |rel: &str| {
+        let hits = app.vault()?.search("binomial", 20, false).ok()?;
+        hits.into_iter().find(|h| h.rel_path == rel)?.at
+    };
+    // The copy is the watcher's to index, a moment after the walk.
+    for _ in 0..50 {
+        if indexed(copy).is_some() {
+            break;
+        }
+        glib::timeout_future(Duration::from_millis(100)).await;
+    }
+    let text = std::fs::read_to_string(app.root().join(marimo)).unwrap_or_default();
+    let marimo_at = text
+        .find("best_amplitude")
+        .map(|at| at..at + "best_amplitude".len());
+    let mut landed = Vec::new();
+    for (rel, at) in [
+        (ipynb, indexed(ipynb)),
+        (copy, indexed(copy)),
+        (marimo, marimo_at),
+    ] {
+        if let Some(at) = at {
+            app.open_note_at(rel, Some(sidebar::Target::Range(at)));
+        }
+        let mut tab = None;
+        for _ in 0..100 {
+            tab = app.doc_for(rel).and_then(|d| d.notebook().cloned());
+            if tab.is_some() {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(20)).await;
+        }
+        glib::timeout_future(Duration::from_millis(300)).await;
+        let (_, cell, selected) = tab.map(|tab| tab.bench_found()).unwrap_or_default();
+        landed.push(format!("{}:{selected}", cell.map_or(-1, |n| n as i64)));
+    }
+    let quiet = app.toasted.get() == toasted;
+    println!(
+        "bench notebook hit ipynb={} closed={} marimo={} quiet={}",
+        landed[0],
+        landed[1],
+        landed[2],
+        u8::from(quiet)
+    );
+}
+
+/// The Outline of each notebook, the heading the caret is under, and a row's jump back up to it.
+async fn outline_drill(app: &Rc<App>, ipynb: &str, marimo: &str) {
+    let Some(sidebar) = app.sidebar.get() else {
+        return;
+    };
+    app.show_pane("outline");
+    // The marimo notebook first, so the `.ipynb` is the one in front after.
+    let mut first = Vec::new();
+    for rel in [marimo, ipynb] {
+        if let Some(doc) = app.doc_for(rel) {
+            app.reveal_page(doc.page());
+        }
+        glib::timeout_future(Duration::from_millis(300)).await;
+        first.push(
+            sidebar
+                .outline_lines(None)
+                .first()
+                .cloned()
+                .unwrap_or_default(),
+        );
+    }
+    let Some(tab) = app.active_notebook() else {
+        return;
+    };
+    tab.bench_select(5);
+    let (follow, _) = tab.outline_row();
+    tab.bench_scroll(10_000);
+    glib::timeout_future(Duration::from_millis(300)).await;
+    let low = tab.bench_scrolled();
+    sidebar.outline_lines(Some(0));
+    glib::timeout_future(Duration::from_millis(300)).await;
+    let jumped =
+        tab.bench_found().1 == Some(0) && tab.bench_scrolled() < low && tab.bench_caret_shown();
+    println!(
+        "bench notebook outline ipynb={:?} marimo={:?} follow={} jumped={}",
+        first[1],
+        first[0],
+        follow.map_or(-1, |n| n as i64),
+        u8::from(jumped)
+    );
+}
+
 /// How many of `before`'s cells are in `after` byte for byte.
 fn untouched(before: &str, after: &str) -> usize {
     use serde_json::value::RawValue;
@@ -209,11 +424,32 @@ async fn big_drill(app: &Rc<App>, rel: &str) {
     }
     glib::timeout_future(Duration::from_millis(500)).await;
     let after = rss_mb();
+    let built = tab.bench_built();
+    // Scrolled to the end and back up half a screen at a time, the cell at the top of the view
+    // moves with the scroll and no further, as the editors above it are built on the way.
+    tab.bench_scroll(10_000);
+    glib::timeout_future(Duration::from_millis(300)).await;
+    let mut drift: f64 = 0.0;
+    for _ in 0..12 {
+        let Some((n, y)) = tab.bench_top_cell() else {
+            break;
+        };
+        let up = tab.bench_scroll_by(-0.5);
+        glib::timeout_future(Duration::from_millis(150)).await;
+        if let Some(moved) = tab.bench_cell_y(n) {
+            drift = drift.max((moved - y - up).abs());
+        }
+    }
     println!(
-        "bench notebook big cells={} open_ms={ms:.0} drawn_ms={:.0} rss_mb={after} grew_mb={}",
+        "bench notebook big cells={} built={built} open_ms={ms:.0} drawn_ms={:.0} rss_mb={after} \
+         grew_mb={}",
         tab.cell_count(),
         drawn.get().unwrap_or_default(),
         after.saturating_sub(before),
+    );
+    println!(
+        "bench notebook anchor built={} drift_px={drift:.0}",
+        tab.bench_built() - built
     );
 }
 

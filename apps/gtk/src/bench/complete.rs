@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::completion::{self, Session};
+use crate::lang::Editor as _;
 
 /// `=note:<rel>` and `=code:<rel>[,<typed>]` type into files in a scratch vault under `/tmp`.
 ///
