@@ -169,6 +169,22 @@ pub fn anchor_range(text: &str, anchor: &str) -> Option<Range<usize>> {
     }
 }
 
+/// The rendered element ID an anchor names in this note.
+pub fn anchor_id(text: &str, anchor: &str) -> Option<String> {
+    match anchor.trim().strip_prefix('^') {
+        Some(id) => block_ids(text)
+            .into_iter()
+            .find(|b| b.id.eq_ignore_ascii_case(id))
+            .map(|b| format!("^{}", b.id)),
+        None => {
+            let headings = analyze(text).headings;
+            let texts: Vec<&str> = headings.iter().map(|h| h.text.as_str()).collect();
+            let i = heading_named(&texts, anchor)?;
+            slugs(texts).into_iter().nth(i)
+        }
+    }
+}
+
 /// `scheme:` or `//host` — anything with an authority is not a vault path.
 fn is_external(dest: &str) -> bool {
     dest.starts_with("//") || scheme(dest).is_some()
@@ -906,6 +922,15 @@ mod tests {
         assert_eq!(at("intro"), Some("# Intro"));
         assert_eq!(at("^gone"), None);
         assert_eq!(at("Para-1"), None, "an id is only named with its caret");
+    }
+
+    #[test]
+    fn a_cross_note_anchor_uses_the_rendered_element_id() {
+        let text = "# My Section\n# My Section\nParagraph ^Block-1\n";
+        assert_eq!(anchor_id(text, "My Section"), Some("my-section".into()));
+        assert_eq!(anchor_id(text, "my-section-1"), Some("my-section-1".into()));
+        assert_eq!(anchor_id(text, "^block-1"), Some("^Block-1".into()));
+        assert_eq!(anchor_id(text, "^missing"), None);
     }
 
     /// A section is what follows its heading's line, its subsections included, down to the next

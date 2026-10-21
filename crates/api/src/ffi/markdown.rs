@@ -16,6 +16,12 @@ pub fn pdf_anchor(anchor: String) -> Option<PdfAnchor> {
     })
 }
 
+/// Resolve a heading or block anchor to the ID rendered in this note's HTML.
+#[uniffi::export]
+pub fn anchor_id(text: String, anchor: String) -> Option<String> {
+    markdown::anchor_id(&text, &anchor)
+}
+
 /// Render the desktop-compatible HTML fragment: `accent://open/…` links,
 /// `accent://tag/…` tags, `accent://file/…` embeds, MathML, block `data-line`
 /// markers and heading slugs.
@@ -142,6 +148,16 @@ mod tests {
                 .is_none()
         );
         assert!(pdf_anchor("A Heading".to_string()).is_none());
+    }
+
+    #[test]
+    fn a_note_anchor_resolves_to_the_rendered_id() {
+        let note = "# Intro\n# Intro\nParagraph ^Block\n".to_string();
+        let html = to_html(note.clone());
+        for (anchor, id) in [("intro-1", "intro-1"), ("^block", "^Block")] {
+            assert_eq!(anchor_id(note.clone(), anchor.into()).as_deref(), Some(id));
+            assert!(html.contains(&format!("id=\"{id}\"")), "{html}");
+        }
     }
 
     #[test]
