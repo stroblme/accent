@@ -10,6 +10,8 @@ use gtk::{gdk, pango};
 
 #[cfg(target_os = "macos")]
 pub mod bundle;
+#[cfg(target_os = "macos")]
+mod login;
 
 /// The modifier GTK spells `<Primary>` in accelerator strings.
 pub const PRIMARY_MODIFIER: gdk::ModifierType = if cfg!(target_os = "macos") {

@@ -19,6 +19,7 @@ const PATHS: [(&str, &str); 3] = [
 /// When running from the app, point GLib, GIO and gdk-pixbuf into it, then put the environment
 /// back, so that a shell, a language server or a GTK program run in a terminal tab does not
 /// inherit the app's paths. A build run from `target/` uses the package manager's as it is.
+/// Started from the Dock or Finder, which only the app is, it also takes the login shell's PATH.
 pub fn setup() {
     let Some(resources) = std::env::current_exe().ok().and_then(|exe| resources(&exe)) else {
         return;
@@ -44,6 +45,7 @@ pub fn setup() {
             }
         }
     }
+    super::login::take_path();
 }
 
 /// `Contents/Resources` of the app `exe` runs from, if it runs from one.
