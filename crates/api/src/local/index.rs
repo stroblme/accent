@@ -401,7 +401,9 @@ mod tests {
 
         f.vault.keep_opened("build/out.md").unwrap();
         f.vault.watch_unindexed(&["build".to_string()]).unwrap();
-        assert!(poll_until(|| found("zorblat") == 1, BUDGET));
+        // Both landed, and the folder's watch with them: an edit made before it goes unheard.
+        f.vault.settle_index();
+        assert_eq!(found("zorblat"), 1);
         f.write("build/out.md", "quux\n");
         assert!(
             poll_until(|| found("quux") == 1, BUDGET),
