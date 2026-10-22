@@ -110,6 +110,22 @@ fn dump(l: &Layout) -> String {
             Item::Rule { x, y, w, h, color } => {
                 format!("r {} {} {} {} {}\n", n(x), n(y), n(w), n(h), c(color))
             }
+            Item::Line {
+                x,
+                y,
+                x2,
+                y2,
+                thickness,
+                color,
+            } => format!(
+                "l {} {} {} {} {} {}\n",
+                n(x),
+                n(y),
+                n(x2),
+                n(y2),
+                n(thickness),
+                c(color)
+            ),
             Item::Text {
                 ref text,
                 x,

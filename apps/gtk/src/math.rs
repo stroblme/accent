@@ -180,6 +180,22 @@ pub fn paint(
                 snapshot.append_color(&rgba(color), &graphene::Rect::new(x, y, w, h));
                 1
             }
+            Item::Line {
+                x,
+                y,
+                x2,
+                y2,
+                thickness,
+                color,
+            } => {
+                let path = gsk::PathBuilder::new();
+                path.move_to(origin.0 + x * scale, origin.1 + y * scale);
+                path.line_to(origin.0 + x2 * scale, origin.1 + y2 * scale);
+                // At least a pixel wide, as a rule is at least a pixel thick.
+                let stroke = gsk::Stroke::new((thickness * scale).max(1.0));
+                snapshot.append_stroke(&path.to_path(), &stroke, &rgba(color));
+                1
+            }
             Item::Text {
                 ref text,
                 x,

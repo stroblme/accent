@@ -61,12 +61,14 @@ fn parse_node(node: roxmltree::Node, warnings: &mut Vec<String>) -> Node {
 }
 
 /// The style an element sets: `displaystyle` and `scriptlevel` (88-92), the colours `open_tag`
-/// writes into `style` (106-125), and `class="small"`, 70 % (746, 757).
+/// writes into `style` (106-125), `class="small"`, 70 % (746, 757), and the stroke of `\not`
+/// before a group (`mop-negated`, 413).
 fn style_overrides(node: roxmltree::Node) -> StyleOverrides {
     let mut styles = StyleOverrides {
         display_style: bool_attr(node, "displaystyle"),
         script_level: node.attribute("scriptlevel").and_then(parse_script_level),
         size: has_class(node, "small").then_some(0.7),
+        strike: has_class(node, "mop-negated"),
         ..StyleOverrides::default()
     };
     for (property, value) in css(node) {
@@ -109,13 +111,7 @@ fn parse_element(node: roxmltree::Node, warnings: &mut Vec<String>) -> Node {
             },
         },
         "mtext" => Node::Text(text_content(node)),
-        "mrow" => {
-            // `\not` before a group (413) strikes it through, which is not drawn.
-            if has_class(node, "mop-negated") {
-                warnings.push("a negated group is drawn without its stroke".into());
-            }
-            Node::Row(parse_children(node, warnings))
-        }
+        "mrow" => Node::Row(parse_children(node, warnings)),
         "mfrac" => match <[Node; 2]>::try_from(parse_children(node, warnings)) {
             Ok([num, den]) => Node::Frac {
                 num: Box::new(num),
@@ -290,8 +286,9 @@ fn accented(base: Box<Node>, mark: char, under: bool, stretchy: bool) -> Node {
 /// Cells align right then left in turn in `align`-like tables, as a whole table says
 /// (`menv-cells-left`) or as a cell says (`cell-left`). An array's vertical lines are cell
 /// borders, dashed ones drawn solid, a line beside a line a cell of its own 0.1 em wide
-/// (`menv-border-only`); `\hline` is a row border. `menv-multline` and equation numbers
-/// (`menv-with-eqn`) are not drawn.
+/// (`menv-border-only`); `\hline` is a row border, and a doubled one has a row between for room
+/// (`menv-nonumber`). Equation numbers (`menv-with-eqn`) are not drawn: draw.io's and Jupyter's
+/// MathJax leave them out (`tags: 'none'`).
 fn parse_table(node: roxmltree::Node, warnings: &mut Vec<String>) -> Node {
     let class = |c| has_class(node, c);
     let (alignlike, align_env, cases) = (
@@ -321,8 +318,14 @@ fn parse_table(node: roxmltree::Node, warnings: &mut Vec<String>) -> Node {
                 cells: vec![plain(parse_node(row, warnings))],
                 rule_above: false,
                 min_height: None,
+                spacer: false,
             };
         }
+        let mut elements = row.children().filter(|c| c.is_element());
+        let spacer = matches!(
+            (elements.next(), elements.next()),
+            (Some(cell), None) if has_class(cell, "menv-nonumber")
+        );
         let cells = row
             .children()
             .filter(|c| c.is_element())
@@ -376,6 +379,7 @@ fn parse_table(node: roxmltree::Node, warnings: &mut Vec<String>) -> Node {
             min_height: css(row)
                 .find(|(p, _)| *p == "height")
                 .and_then(|(_, v)| parse_length(v)),
+            spacer,
         }
     });
     let mut rows: Vec<TableRow> = rows.collect();
@@ -384,6 +388,25 @@ fn parse_table(node: roxmltree::Node, warnings: &mut Vec<String>) -> Node {
         && matches!(last.cells.as_slice(), [Cell { content: Node::Row(c), .. }] if c.is_empty())
     {
         last.cells.clear();
+    }
+    // `multline` sets its first line to the left, its last to the right and any between in the
+    // middle, as TeX does, here within the formula's own width. `styles.css` means the same, but
+    // its `mtd:first-child` and `mtd:last-child` both match a line's one cell.
+    if class("menv-multline") {
+        let mut lines: Vec<_> = rows
+            .iter_mut()
+            .filter(|r| !r.spacer && !r.cells.is_empty())
+            .collect();
+        let last = lines.len().saturating_sub(1);
+        for (i, line) in lines.iter_mut().enumerate() {
+            let align = match i {
+                _ if last == 0 => Align::Center,
+                0 => Align::Left,
+                i if i == last => Align::Right,
+                _ => Align::Center,
+            };
+            line.cells.iter_mut().for_each(|c| c.align = align);
+        }
     }
     Node::Table(rows)
 }
