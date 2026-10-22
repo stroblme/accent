@@ -1,18 +1,18 @@
 //! A cell's stored outputs as widgets, each in the first form core's `pick` says a widget draws
 //! (user decision 2026-10-19): a picture, recoloured as an image is; a plain table as a grid;
-//! markdown as a note's text; LaTeX typeset as a diagram's formula is, its source until then and
-//! for good without WebKit; JSON and text in monospace, ANSI colours from the terminal's palette.
+//! markdown as a note's text; LaTeX typeset as a diagram's formula is (`crate::math`), its source
+//! where it does not parse; JSON and text in monospace, ANSI colours from the terminal's palette.
 //! What only a script draws says what it was.
 
 use std::cell::{Cell, RefCell};
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 
 use accent_core::notebook::output::{self as core, Form, Item, Output, Table};
 use adw::prelude::*;
 use gtk::{gdk, glib};
 
-use crate::diagram::math;
 use crate::editor::Flavour;
+use crate::math;
 use crate::{highlight, look, theme};
 
 /// What the drill counts of a notebook's outputs.
@@ -39,7 +39,7 @@ enum Part {
     },
     Ansi(gtk::TextView),
     Markdown(sourceview5::View, sourceview5::Buffer),
-    Latex(Rc<Latex>),
+    Latex,
     Table,
     Placeholder,
 }
@@ -151,16 +151,17 @@ impl Outputs {
     #[cfg(feature = "bench")]
     pub fn counts(&self) -> Counts {
         let mut c = Counts::default();
+        for slot in self.slots.borrow().iter() {
+            let typeset = slot.widgets.iter().filter(|w| w.is::<math::FormulaView>());
+            c.typeset += typeset.count();
+        }
         for part in self.slots.borrow().iter().flat_map(|slot| &slot.parts) {
             match part {
                 Part::Picture { recoloured, .. } => {
                     c.pictures += 1;
                     c.recoloured += usize::from(recoloured.get());
                 }
-                Part::Latex(latex) => {
-                    c.latex += 1;
-                    c.typeset += usize::from(latex.typeset.get());
-                }
+                Part::Latex => c.latex += 1,
                 Part::Ansi(_) => c.ansi += 1,
                 Part::Table => c.tables += 1,
                 Part::Placeholder => c.placeholders += 1,
@@ -325,25 +326,16 @@ impl Outputs {
     }
 
     fn latex(&self, latex: &str) {
-        let stack = gtk::Stack::new();
-        let source = output_view(latex);
-        let picture = gtk::Picture::builder()
-            .can_shrink(false)
-            .halign(gtk::Align::Start)
-            .build();
-        stack.add_named(&source, Some("source"));
-        stack.add_named(&picture, Some("typeset"));
-        stack.set_visible_child_name("source");
-        self.put(&stack);
-        let latex = Rc::new(Latex {
-            stack,
-            picture,
-            tex: latex.to_string(),
-            key: Cell::new(None),
-            typeset: Cell::new(false),
-        });
-        typeset(&latex);
-        self.keep(Part::Latex(latex));
+        let (tex, display) = tex_of(latex);
+        match math::formula(&self.widget, tex, display, 16.0) {
+            Some(formula) => {
+                let view = math::FormulaView::new(formula);
+                view.set_halign(gtk::Align::Start);
+                self.put(&view);
+            }
+            None => self.put(&output_view(latex)),
+        }
+        self.keep(Part::Latex);
     }
 
     /// One line naming what only a script could have shown.
@@ -363,8 +355,8 @@ impl Outputs {
         self.put(&label);
     }
 
-    /// A new theme, or the Images switch turned: the pictures recoloured again, the colours of
-    /// the text and the formulas' ink.
+    /// A new theme, or the Images switch turned: the pictures recoloured again and the colours of
+    /// the text. A formula needs nothing: it paints in its widget's colour.
     pub fn restyle(&self) {
         for part in self.slots.borrow().iter().flat_map(|slot| &slot.parts) {
             match part {
@@ -374,8 +366,7 @@ impl Outputs {
                     crate::editor::sync_scheme(buffer);
                     highlight::restyle(buffer, view);
                 }
-                Part::Latex(latex) => typeset(latex),
-                Part::Table | Part::Placeholder => {}
+                Part::Latex | Part::Table | Part::Placeholder => {}
             }
         }
     }
@@ -458,62 +449,6 @@ fn show_picture(part: &Part) {
         picture.set_paintable(Some(&paintable));
         recoloured.set(changed);
     });
-}
-
-/// A formula output, shown as its source until it is typeset.
-struct Latex {
-    stack: gtk::Stack,
-    picture: gtk::Picture,
-    tex: String,
-    /// What it is typeset under now: its MathML in the ink of the theme it was asked in.
-    key: Cell<Option<u64>>,
-    typeset: Cell<bool>,
-}
-
-/// Ask the shared typesetter for `latex` in the theme's ink, and show it once it comes in. Its
-/// source stays where WebKit is missing or the formula does not parse.
-fn typeset(latex: &Rc<Latex>) {
-    let (tex, display) = tex_of(&latex.tex);
-    let (Some(typesetter), Some(mathml)) =
-        (math::shared(), accent_core::markdown::mathml(tex, display))
-    else {
-        return;
-    };
-    let dark = adw::StyleManager::default().is_dark();
-    let ink = gdk::RGBA::parse(theme::view_fg(dark)).map_or([0, 0, 0], theme::rgb_of);
-    let html = format!(
-        "<div style=\"font-size: 16px; color: rgb({}, {}, {});\">{mathml}</div>",
-        ink[0], ink[1], ink[2]
-    );
-    let key = math::key_of(&html);
-    latex.key.set(Some(key));
-    let land = move |latex: &Latex, typesetter: &math::Typesetter| match typesetter.get(key) {
-        Some(Some(rendered)) => {
-            latex.picture.set_paintable(Some(&rendered.texture));
-            let (w, h) = rendered.size;
-            latex
-                .picture
-                .set_size_request(w.ceil() as i32, h.ceil() as i32);
-            latex.stack.set_visible_child_name("typeset");
-            latex.typeset.set(true);
-            true
-        }
-        Some(None) => true,
-        None => false,
-    };
-    if land(latex, &typesetter) {
-        return;
-    }
-    let weak: Weak<Latex> = Rc::downgrade(latex);
-    let shared = Rc::downgrade(&typesetter);
-    typesetter.connect_ready(move || {
-        let (Some(latex), Some(typesetter)) = (weak.upgrade(), shared.upgrade()) else {
-            return false;
-        };
-        // A newer look asked again under another key; this one's answer is not wanted.
-        latex.key.get() == Some(key) && !land(&latex, &typesetter)
-    });
-    typesetter.ask(math::Label { key, html });
 }
 
 /// The TeX inside a `text/latex` output's delimiters, and whether it is set as a display.

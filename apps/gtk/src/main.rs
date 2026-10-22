@@ -43,8 +43,6 @@ mod layout;
 mod look;
 mod malloc;
 mod marks;
-// ponytail: until the diagram and notebook callers land.
-#[allow(dead_code)]
 mod math;
 mod minimap;
 mod multicaret;
