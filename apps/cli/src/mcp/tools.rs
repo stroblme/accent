@@ -417,7 +417,7 @@ impl Server {
     }
 
     /// Draw one page of a draw.io diagram as a PNG, as the app's Export as PNG draws it (formulas
-    /// as their TeX, pictures from the web as dashed boxes), to see an edit made with
+    /// typeset, pictures from the web as dashed boxes), to see an edit made with
     /// `write_note`. Also returns `{path, etag}` and every page's number, name and size. Needs
     /// the accent app and a display where this server runs, so not on a remote vault's host.
     #[tool(annotations(read_only_hint = true))]

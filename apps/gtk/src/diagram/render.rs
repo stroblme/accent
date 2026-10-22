@@ -1,16 +1,12 @@
 //! Shared diagram rendering for exports, printing and note embeds (`paint::prim`).
 //! Use file colours and paper (`Tint::FILE`) independently of the screen theme.
-//! Keep fills, strokes and text as PDF/SVG vectors; formulas and pictures remain images.
-
-use std::rc::Rc;
-use std::time::{Duration, Instant};
+//! Keep fills, strokes, text and formulas as PDF/SVG vectors; pictures remain images.
 
 use accent_drawio::{Color, File, Prim, Rect};
 use gtk::prelude::*;
-use gtk::{cairo, glib, gsk};
+use gtk::{cairo, gsk};
 
 use super::geometry::Frame;
-use super::math::Typesetter;
 use super::paint::{self, Cache, Tint};
 
 /// Points per page unit: draw.io's unit is a CSS pixel, 1/96 in, and a PDF's point 1/72 in, so
@@ -20,12 +16,9 @@ const PDF_POINT: f64 = 0.75;
 /// Pixels per page unit in an exported PNG: sharp on a display at twice the scale.
 const PNG_SCALE: f64 = 2.0;
 
-/// Render detail in content units per page unit. GSK's cairo path rasterizes scaled
-/// images at this resolution so formulas retain typeset detail regardless of output scale.
-const DETAIL: f64 = super::math::RENDER_ZOOM;
-
-/// How long a page's formulas may take to be typeset before it goes out with their source.
-const PATIENCE: Duration = Duration::from_secs(30);
+/// Render detail in content units per page unit: GSK's cairo path rasterizes a scaled picture at
+/// this resolution, whatever the output's scale.
+const DETAIL: f64 = 3.0;
 
 /// What of a page goes out, as draw.io's export takes it by default.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -66,15 +59,9 @@ impl Drawn {
     }
 }
 
-/// Page `i` of `file`, its formulas typeset by `typesetter` first, its pictures on the web drawn
-/// as downloaded where `web` (the reader said Load for it). `None` for no such page.
-pub async fn draw(
-    file: &File,
-    i: usize,
-    area: Area,
-    typesetter: Option<&Rc<Typesetter>>,
-    web: bool,
-) -> Option<Drawn> {
+/// Page `i` of `file`, its pictures on the web drawn as downloaded where `web` (the reader said
+/// Load for it). `None` for no such page.
+pub fn draw(file: &File, i: usize, area: Area, web: bool) -> Option<Drawn> {
     let page = file.pages.get(i)?;
     let scene = accent_drawio::scene_with(page, &super::shown(i, file.pages.len()));
     // Pango lays labels out through a widget; their sizes are absolute, so any one does.
@@ -85,31 +72,12 @@ pub async fn draw(
         scale: DETAIL,
         ..Frame::default()
     };
-    let paint = || {
-        let snapshot = gtk::Snapshot::new();
-        for (j, prim) in scene.prims.iter().enumerate() {
-            paint::prim(
-                &snapshot,
-                widget.upcast_ref(),
-                j,
-                prim,
-                &frame,
-                &cache,
-                typesetter,
-                Tint::FILE,
-            );
-        }
-        snapshot.to_node()
-    };
-    let mut node = paint();
-    // A formula painted as its source has just been asked for: painted again once it is in.
-    if let Some(t) = typesetter.filter(|t| t.busy()) {
-        let started = Instant::now();
-        while t.busy() && started.elapsed() < PATIENCE {
-            glib::timeout_future(Duration::from_millis(20)).await;
-        }
-        node = paint();
+    let snapshot = gtk::Snapshot::new();
+    for (j, prim) in scene.prims.iter().enumerate() {
+        let widget = widget.upcast_ref();
+        paint::prim(&snapshot, widget, j, prim, &frame, &cache, Tint::FILE);
     }
+    let node = snapshot.to_node();
     let (w, h) = page.size();
     let sheet = page.page_view().then(|| Rect::new(0.0, 0.0, w, h));
     // Out to whole units, so nothing drawn is cut.
@@ -153,14 +121,10 @@ fn painted(prims: &[Prim], cache: &Cache) -> Option<Rect> {
 }
 
 /// Every page of `file` as a PDF, a PDF page the size of each sheet.
-pub async fn pdf(
-    file: &File,
-    typesetter: Option<&Rc<Typesetter>>,
-    web: bool,
-) -> Result<Vec<u8>, String> {
+pub fn pdf(file: &File, web: bool) -> Result<Vec<u8>, String> {
     let surface = cairo::PdfSurface::for_stream(1.0, 1.0, Vec::<u8>::new()).map_err(say)?;
     for i in 0..file.pages.len() {
-        let Some(drawn) = draw(file, i, Area::Sheet, typesetter, web).await else {
+        let Some(drawn) = draw(file, i, Area::Sheet, web) else {
             continue;
         };
         let (w, h) = (drawn.area.w * PDF_POINT, drawn.area.h * PDF_POINT);
@@ -173,16 +137,8 @@ pub async fn pdf(
 }
 
 /// Page `i` of `file` as an SVG of `area`, a page unit to a pixel.
-pub async fn svg(
-    file: &File,
-    i: usize,
-    area: Area,
-    typesetter: Option<&Rc<Typesetter>>,
-    web: bool,
-) -> Result<Vec<u8>, String> {
-    let drawn = draw(file, i, area, typesetter, web)
-        .await
-        .ok_or("there is no such page")?;
+pub fn svg(file: &File, i: usize, area: Area, web: bool) -> Result<Vec<u8>, String> {
+    let drawn = draw(file, i, area, web).ok_or("there is no such page")?;
     let mut surface =
         cairo::SvgSurface::for_stream(drawn.area.w, drawn.area.h, Vec::<u8>::new()).map_err(say)?;
     surface.set_document_unit(cairo::SvgUnit::Px);
@@ -194,16 +150,8 @@ pub async fn svg(
 
 /// Page `i` of `file`, its drawing, as a PNG at [`PNG_SCALE`] pixels per page unit, or fewer
 /// where its longer side would be more than `longest` pixels.
-pub async fn png(
-    file: &File,
-    i: usize,
-    typesetter: Option<&Rc<Typesetter>>,
-    web: bool,
-    longest: Option<f64>,
-) -> Result<Vec<u8>, String> {
-    let drawn = draw(file, i, Area::Drawing, typesetter, web)
-        .await
-        .ok_or("there is no such page")?;
+pub fn png(file: &File, i: usize, web: bool, longest: Option<f64>) -> Result<Vec<u8>, String> {
+    let drawn = draw(file, i, Area::Drawing, web).ok_or("there is no such page")?;
     let scale = png_scale((drawn.area.w, drawn.area.h), longest);
     let (w, h) = (drawn.area.w * scale, drawn.area.h * scale);
     let surface =

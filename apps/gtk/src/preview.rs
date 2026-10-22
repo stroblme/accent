@@ -1155,7 +1155,7 @@ fn image_menu(inner: &Inner, on_invert: impl Fn(&str) + 'static) {
 ///
 /// Retain the request while a worker resolves remote assets and applies [`look::serve`],
 /// then finish on the main loop to avoid blocking it on downloads. Diagrams render on the
-/// main loop for GTK/typesetter access, then use [`look::serve_svg`].
+/// main loop for GTK access, then use [`look::serve_svg`].
 fn serve(assets: &Rc<Assets>, request: &webkit6::URISchemeRequest) {
     #[cfg(feature = "bench")]
     assets.requests.set(assets.requests.get() + 1);

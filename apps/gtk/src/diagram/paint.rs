@@ -17,21 +17,18 @@ use gtk::prelude::*;
 use gtk::{gdk, glib, graphene, gsk, pango};
 
 use super::geometry::Frame;
-use super::math::{self, Typesetter};
-use crate::theme;
+use crate::{math, theme};
 
 /// Cached label layouts at their layout scale and decoded images, reused between frames.
 #[derive(Default)]
 pub struct Cache {
-    /// By prim index, with the scale it was laid out at.
-    layouts: RefCell<HashMap<usize, (f64, pango::Layout)>>,
+    /// By prim index.
+    layouts: RefCell<HashMap<usize, Laid>>,
     /// By prim index, for the display list on screen.
     textures: RefCell<HashMap<usize, Option<Rc<Picture>>>>,
     /// By a hash of the data URI, across display lists, so an edit does not decode every
     /// picture on the page again.
     decoded: RefCell<HashMap<u64, Option<Rc<Picture>>>>,
-    /// By prim index: a label with a formula as the HTML the typesetter is given, and its key.
-    math: RefCell<HashMap<usize, (u64, String)>>,
     /// By prim index: where each label on screen was painted, for finding a label by its text.
     boxes: RefCell<HashMap<usize, Painted>>,
     /// Whether pictures on the web are drawn, from the download cache (`super::web`): the
@@ -53,7 +50,6 @@ impl Cache {
     pub fn forget(&self) {
         self.layouts.borrow_mut().clear();
         self.textures.borrow_mut().clear();
-        self.math.borrow_mut().clear();
         self.boxes.borrow_mut().clear();
     }
 
@@ -66,7 +62,6 @@ impl Cache {
             layouts: kept(&self.layouts, keep),
             textures: kept(&self.textures, keep),
             decoded: self.decoded.clone(),
-            math: kept(&self.math, keep),
             boxes: RefCell::default(),
             web: self.web.clone(),
         }
@@ -265,7 +260,7 @@ impl Tint {
     }
 
     /// Paint under the remap as a colour matrix, for pixels painting does not choose one by one:
-    /// a picture, a typeset formula.
+    /// a picture's.
     fn under(self, snapshot: &gtk::Snapshot, paint: impl FnOnce()) {
         let Some((paper, ink)) = self.0 else {
             return paint();
@@ -301,9 +296,7 @@ pub fn grect(r: &Rect) -> graphene::Rect {
     graphene::Rect::new(r.x as f32, r.y as f32, r.w as f32, r.h as f32)
 }
 
-/// Paint one prim, `index` being its place in the display list. A label with a formula goes to
-/// `typesetter` when there is one, and is painted as its source until it has been typeset.
-#[allow(clippy::too_many_arguments)]
+/// Paint one prim, `index` being its place in the display list.
 pub fn prim(
     snapshot: &gtk::Snapshot,
     widget: &gtk::Widget,
@@ -311,7 +304,6 @@ pub fn prim(
     prim: &Prim,
     frame: &Frame,
     cache: &Cache,
-    typesetter: Option<&Rc<Typesetter>>,
     tint: Tint,
 ) {
     match prim {
@@ -358,42 +350,19 @@ pub fn prim(
                 border: *border,
                 opacity: *opacity,
             };
-            let has_math = runs.iter().any(|r| matches!(r, Run::Math { .. }));
-            if let Some(typesetter) = typesetter.filter(|_| has_math) {
-                let (key, html) = cache
-                    .math
-                    .borrow_mut()
-                    .entry(index)
-                    .or_insert_with(|| {
-                        let html = math::label_html(runs, font, *align, wrap.then_some(rect.w));
-                        (math::key_of(&html), html)
-                    })
-                    .clone();
-                match typesetter.get(key) {
-                    Some(Some(rendered)) => {
-                        let block =
-                            typeset(snapshot, &rendered, &placed, *rotation, frame, look, tint);
-                        return cache.painted(index, frame, block, *anchor, *rotation);
-                    }
-                    Some(None) => {}
-                    None => typesetter.ask(math::Label { key, html }),
-                }
-            }
-            let layout = {
+            let laid = {
                 let mut layouts = cache.layouts.borrow_mut();
                 match layouts.get(&index) {
-                    Some((scale, layout)) if *scale == frame.scale => layout.clone(),
+                    Some(laid) if laid.scale == frame.scale => laid.clone(),
                     _ => {
                         let width = wrap.then_some(rect.w);
-                        let layout = lay_out(widget, runs, font, width, *align, frame.scale, tint);
-                        layouts.insert(index, (frame.scale, layout.clone()));
-                        layout
+                        let laid = lay_out(widget, runs, font, width, *align, frame.scale, tint);
+                        layouts.insert(index, laid.clone());
+                        laid
                     }
                 }
             };
-            let block = label(
-                snapshot, &layout, &placed, *rotation, font.color, look, tint,
-            );
+            let block = label(snapshot, &laid, &placed, *rotation, font.color, look, tint);
             cache.painted(index, frame, block, *anchor, *rotation);
         }
         Prim::Image {
@@ -718,36 +687,6 @@ impl Look {
     }
 }
 
-/// A label WebKit typeset, painted where Pango would have put the same block, which is returned
-/// (content coordinates, unturned).
-fn typeset(
-    snapshot: &gtk::Snapshot,
-    rendered: &math::Rendered,
-    at: &Placed,
-    rotation: f64,
-    frame: &Frame,
-    look: Look,
-    tint: Tint,
-) -> Rect {
-    let (w, h) = (rendered.size.0 * frame.scale, rendered.size.1 * frame.scale);
-    let (x, y) = text_origin(at, (w, h), 0.0);
-    let dest = Rect::new(x, y, w, h);
-    rotated(snapshot, at.anchor, rotation, || {
-        with_opacity(snapshot, look.opacity, || {
-            look.frame(snapshot, &dest, tint);
-            // Typeset in the file's colours, so a theme switch typesets nothing again.
-            tint.under(snapshot, || {
-                snapshot.append_scaled_texture(
-                    &rendered.texture,
-                    gsk::ScalingFilter::Trilinear,
-                    &grect(&dest),
-                )
-            });
-        })
-    });
-    dest
-}
-
 /// Where a label goes, in content coordinates.
 struct Placed {
     rect: Rect,
@@ -757,17 +696,32 @@ struct Placed {
     wrap: bool,
 }
 
+/// A label laid out at a scale, with its formulas where Pango set their placeholders.
+#[derive(Clone)]
+struct Laid {
+    scale: f64,
+    layout: pango::Layout,
+    formulas: Rc<[Set]>,
+}
+
+/// A formula in a laid-out label, and the left end of its baseline in the layout's pixels.
+struct Set {
+    formula: Rc<accent_math::Layout>,
+    at: (f32, f32),
+}
+
 /// A laid-out label, painted; the block its text took is returned (content coordinates,
 /// unturned).
 fn label(
     snapshot: &gtk::Snapshot,
-    layout: &pango::Layout,
+    laid: &Laid,
     at: &Placed,
     rotation: f64,
     colour: Color,
     look: Look,
     tint: Tint,
 ) -> Rect {
+    let layout = &laid.layout;
     let (_, logical) = layout.pixel_extents();
     let (tw, th) = (f64::from(logical.width()), f64::from(logical.height()));
     let (x, y) = text_origin(at, (tw, th), f64::from(logical.x()));
@@ -777,7 +731,26 @@ fn label(
             look.frame(snapshot, &block, tint);
             snapshot.save();
             snapshot.translate(&graphene::Point::new(x as f32, y as f32));
-            snapshot.append_layout(layout, &tint.rgba(colour));
+            let ink = tint.rgba(colour);
+            snapshot.append_layout(layout, &ink);
+            let colour = |c: accent_math::Color| {
+                tint.rgba(Color {
+                    r: c.r,
+                    g: c.g,
+                    b: c.b,
+                    a: c.a,
+                })
+            };
+            for set in laid.formulas.iter() {
+                math::paint(
+                    snapshot,
+                    &set.formula,
+                    set.at,
+                    laid.scale as f32,
+                    &ink,
+                    colour,
+                );
+            }
             snapshot.restore();
         })
     });
@@ -805,25 +778,53 @@ fn text_origin(at: &Placed, size: (f64, f64), logical_x: f64) -> (f64, f64) {
     (at.anchor.x - tw * mx - logical_x, at.anchor.y - th * my)
 }
 
-/// A label's text as one string, with the byte ranges each run's marks cover. A formula is
-/// shown as its source until the canvas can typeset it.
-fn text_of(runs: &[Run]) -> (String, Vec<(Range<usize>, Marks, bool)>) {
+/// What a byte range of a label's text is.
+#[derive(Debug, PartialEq)]
+enum Span {
+    Text(Marks),
+    /// A formula's TeX, shown dimmed: it does not lay out.
+    Source,
+    /// A formula's placeholder, which Pango gives the room the formula takes.
+    Formula(Rc<accent_math::Layout>),
+}
+
+/// The character a formula's room is kept by.
+const PLACEHOLDER: char = '\u{FFFC}';
+
+/// A label's text as one string, with what each byte range is. A formula `laid` lays out is a
+/// [`PLACEHOLDER`], a display formula on a line of its own; one it does not is its source.
+fn text_of(
+    runs: &[Run],
+    laid: impl Fn(&str, bool) -> Option<Rc<accent_math::Layout>>,
+) -> (String, Vec<(Range<usize>, Span)>) {
     let (mut text, mut spans) = (String::new(), Vec::new());
-    for run in runs {
+    for (i, run) in runs.iter().enumerate() {
+        let start = text.len();
         match run {
             Run::Text { text: t, marks } => {
-                let start = text.len();
                 text.push_str(t);
-                spans.push((start..text.len(), marks.clone(), false));
+                spans.push((start..text.len(), Span::Text(marks.clone())));
             }
-            Run::Math { tex, display } => {
-                let start = text.len();
-                match display {
-                    true => text.push_str(&format!("$${tex}$$")),
-                    false => text.push_str(&format!("\\({tex}\\)")),
+            Run::Math { tex, display } => match laid(tex, *display) {
+                Some(formula) => {
+                    if *display && !text.is_empty() && !text.ends_with('\n') {
+                        text.push('\n');
+                    }
+                    let start = text.len();
+                    text.push(PLACEHOLDER);
+                    spans.push((start..text.len(), Span::Formula(formula)));
+                    if *display && !matches!(runs.get(i + 1), None | Some(Run::Break)) {
+                        text.push('\n');
+                    }
                 }
-                spans.push((start..text.len(), Marks::default(), true));
-            }
+                None => {
+                    match display {
+                        true => text.push_str(&format!("$${tex}$$")),
+                        false => text.push_str(&format!("\\({tex}\\)")),
+                    }
+                    spans.push((start..text.len(), Span::Source));
+                }
+            },
             Run::Break => text.push('\n'),
             Run::Bullet => text.push_str("• "),
         }
@@ -832,7 +833,8 @@ fn text_of(runs: &[Run]) -> (String, Vec<(Range<usize>, Marks, bool)>) {
 }
 
 /// A Pango layout of `runs` in `font`, at `scale`, wrapped to `width` page units when given, its
-/// runs' own colours through `tint`.
+/// runs' own colours through `tint`, and where its formulas are set. A formula is laid out at the
+/// label's font size, in page units, so a zoom lays out only the Pango layout again.
 fn lay_out(
     widget: &gtk::Widget,
     runs: &[Run],
@@ -841,8 +843,11 @@ fn lay_out(
     align: Align,
     scale: f64,
     tint: Tint,
-) -> pango::Layout {
-    let (text, spans) = text_of(runs);
+) -> Laid {
+    let size = font.size as f32;
+    let (text, spans) = text_of(runs, |tex, display| {
+        math::formula(widget, tex, display, size)
+    });
     let layout = widget.create_pango_layout(Some(&text));
     let px = |size: f64| (size * scale * f64::from(pango::SCALE)) as i32;
     let mut desc = pango::FontDescription::new();
@@ -867,15 +872,26 @@ fn lay_out(
             &(0..text.len()),
         );
     }
-    for (range, marks, math) in &spans {
-        if *math {
-            put(pango::AttrString::new_family("monospace").into(), range);
-            put(
-                pango::AttrInt::new_foreground_alpha(u16::MAX / 5 * 3).into(),
-                range,
-            );
-            continue;
-        }
+    for (range, span) in &spans {
+        let marks = match span {
+            Span::Text(marks) => marks,
+            Span::Source => {
+                put(pango::AttrString::new_family("monospace").into(), range);
+                put(
+                    pango::AttrInt::new_foreground_alpha(u16::MAX / 5 * 3).into(),
+                    range,
+                );
+                continue;
+            }
+            Span::Formula(f) => {
+                let units =
+                    |v: f32| (f64::from(v) * scale * f64::from(pango::SCALE)).round() as i32;
+                let (ascent, height) = (units(f.ascent), units(f.ascent + f.descent));
+                let room = pango::Rectangle::new(0, -ascent, units(f.width), height);
+                put(pango::AttrShape::new(&room, &room).into(), range);
+                continue;
+            }
+        };
         if marks.bold {
             put(
                 pango::AttrInt::new_weight(pango::Weight::Bold).into(),
@@ -917,18 +933,57 @@ fn lay_out(
         Align::Center => pango::Alignment::Center,
         Align::Right => pango::Alignment::Right,
     });
-    layout
+    let formulas = set(&layout, &spans);
+    Laid {
+        scale,
+        layout,
+        formulas,
+    }
+}
+
+/// Where Pango set each formula of `spans` in `layout`: its placeholder's left end and line's
+/// baseline.
+fn set(layout: &pango::Layout, spans: &[(Range<usize>, Span)]) -> Rc<[Set]> {
+    let mut formulas = spans
+        .iter()
+        .filter_map(|(range, span)| match span {
+            Span::Formula(f) => Some((range.start, f)),
+            _ => None,
+        })
+        .peekable();
+    let mut sets = Vec::new();
+    let mut iter = layout.iter();
+    let px = |v: i32| v as f32 / pango::SCALE as f32;
+    while let Some(&(start, formula)) = formulas.peek() {
+        if iter.index() as usize == start {
+            let at = (px(iter.char_extents().x()), px(iter.baseline()));
+            sets.push(Set {
+                formula: formula.clone(),
+                at,
+            });
+            formulas.next();
+        } else if !iter.next_char() {
+            break;
+        }
+    }
+    sets.into()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// A formula that lays out is a placeholder, a display one on a line of its own; one that
+    /// does not is its source.
     #[test]
     fn runs_become_one_string_with_their_marks() {
         let bold = Marks {
             bold: true,
             ..Marks::default()
+        };
+        let math = |tex: &str, display| Run::Math {
+            tex: tex.into(),
+            display,
         };
         let runs = [
             Run::Bullet,
@@ -936,17 +991,25 @@ mod tests {
                 text: "ab".into(),
                 marks: bold.clone(),
             },
-            Run::Break,
-            Run::Math {
-                tex: "x^2".into(),
-                display: false,
-            },
+            math("x^2", false),
+            math("y", true),
+            math("bad", false),
         ];
-        let (text, spans) = text_of(&runs);
-        assert_eq!(text, "• ab\n\\(x^2\\)");
-        assert_eq!(spans[0], ("• ".len().."• ab".len(), bold, false));
-        assert_eq!(&text[spans[1].0.clone()], "\\(x^2\\)");
-        assert!(spans[1].2);
+        let formula = Rc::new(accent_math::Layout {
+            width: 10.0,
+            ascent: 8.0,
+            descent: 2.0,
+            items: Vec::new(),
+        });
+        let (text, spans) = text_of(&runs, |tex, _| (tex != "bad").then(|| formula.clone()));
+        assert_eq!(text, "• ab\u{FFFC}\n\u{FFFC}\n\\(bad\\)");
+        assert_eq!(spans[0], ("• ".len().."• ab".len(), Span::Text(bold)));
+        assert_eq!(spans[1].1, Span::Formula(formula.clone()));
+        assert_eq!(&text[spans[2].0.clone()], "\u{FFFC}");
+        assert_eq!(
+            (&text[spans[3].0.clone()], &spans[3].1),
+            ("\\(bad\\)", &Span::Source)
+        );
     }
 
     #[test]

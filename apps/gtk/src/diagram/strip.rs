@@ -14,7 +14,6 @@ use gtk::subclass::prelude::*;
 use gtk::{gdk, glib, graphene, gsk};
 
 use super::geometry::Frame;
-use super::math::Typesetter;
 use super::paint::{self, Cache, Tint};
 use crate::pdf::geometry::{Layout, PageRect, PdfZoom, fit_scale, layout, page_at};
 use crate::theme;
@@ -34,8 +33,6 @@ struct Thumb {
     /// Painted since the page last changed, into this node (`None` for nothing drawn).
     painted: bool,
     node: Option<gsk::RenderNode>,
-    /// Painted while formulas were still being typeset: painted again once they are in.
-    provisional: bool,
 }
 
 impl Thumb {
@@ -48,7 +45,6 @@ impl Thumb {
             scene: None,
             painted: false,
             node: None,
-            provisional: false,
         };
         if !page.page_view() {
             let drawing = thumb
@@ -157,25 +153,6 @@ impl PageStrip {
         self.forget();
     }
 
-    /// Typeset formulas here too, and paint a page again once its formulas are in.
-    pub fn set_typesetter(&self, typesetter: Rc<Typesetter>) {
-        let weak = self.downgrade();
-        typesetter.connect_ready(move || {
-            let strip = weak.upgrade();
-            if let Some(strip) = &strip {
-                for thumb in strip.imp().thumbs.borrow_mut().iter_mut() {
-                    if thumb.provisional {
-                        thumb.painted = false;
-                        thumb.node = None;
-                    }
-                }
-                strip.queue_draw();
-            }
-            strip.is_some()
-        });
-        self.imp().typesetter.replace(Some(typesetter));
-    }
-
     /// Frame `page`, the one the canvas shows.
     pub fn set_framed(&self, page: usize) {
         if self.imp().framed.replace(page) != page {
@@ -268,23 +245,13 @@ impl PageStrip {
         let tint = imp.tint.get();
         if !thumb.painted {
             imp.cache.forget();
-            let typesetter = imp.typesetter.borrow();
             let drawn = gtk::Snapshot::new();
+            let frame = Frame::default();
             for (j, prim) in thumb.scene().prims.iter().enumerate() {
-                paint::prim(
-                    &drawn,
-                    self.upcast_ref(),
-                    j,
-                    prim,
-                    &Frame::default(),
-                    &imp.cache,
-                    typesetter.as_ref(),
-                    tint,
-                );
+                paint::prim(&drawn, self.upcast_ref(), j, prim, &frame, &imp.cache, tint);
             }
             thumb.node = drawn.to_node();
             thumb.painted = true;
-            thumb.provisional = typesetter.as_ref().is_some_and(|t| t.busy());
         }
         let bounds = graphene::Rect::new(rect.x, rect.y, rect.w, rect.h);
         let paper = thumb.scene().background.unwrap_or(Color::WHITE);
@@ -324,7 +291,6 @@ mod imp {
         pub(super) tint: Cell<Tint>,
         /// Label layouts and decoded pictures, kept across the pages painted.
         pub(super) cache: Cache,
-        pub(super) typesetter: RefCell<Option<Rc<Typesetter>>>,
         pub(super) on_goto: Hook<dyn Fn(usize)>,
     }
 

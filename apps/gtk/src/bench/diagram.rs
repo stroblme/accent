@@ -3,8 +3,8 @@
 use super::*;
 use accent_core::config::Theme;
 
-/// A two-page diagram with a shape, an ellipse, an edge between them, a formula, and a bracket
-/// and a text turned a quarter each way.
+/// A two-page diagram with a shape, an ellipse, an edge between them, a formula, a label of text
+/// and formulas, and a bracket and a text turned a quarter each way.
 pub(super) const SAMPLE: &str = r#"<mxfile host="accent">
   <diagram name="One" id="bench-one">
     <mxGraphModel grid="1" gridSize="10" page="1" pageWidth="800" pageHeight="500" math="1">
@@ -22,6 +22,9 @@ pub(super) const SAMPLE: &str = r#"<mxfile host="accent">
         </mxCell>
         <mxCell id="m" value="\(x^2\)" style="text;html=1;" parent="1" vertex="1">
           <mxGeometry x="100" y="300" width="80" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="f" value="Area \(\pi r^2\) and $$\frac{a}{b}$$" style="text;html=1;whiteSpace=wrap;align=center;" parent="1" vertex="1">
+          <mxGeometry x="100" y="380" width="200" height="80" as="geometry" />
         </mxCell>
         <mxCell id="k" style="shape=curlyBracket;whiteSpace=wrap;html=1;rounded=1;rotation=90;" parent="1" vertex="1">
           <mxGeometry x="350" y="260" width="20" height="160" as="geometry" />
@@ -153,20 +156,13 @@ fn shoot_pages(tab: &Rc<crate::diagram::DiagramTab>, dir: &Path) {
     for i in 0..tab.page_count() {
         tab.show_page(i);
         bench_pump();
-        // Formulas are typeset in WebKit's own time; the picture waits for them.
+        // A window still coming up has no canvas to picture yet.
         let asked = Instant::now();
-        while asked.elapsed() < Duration::from_secs(10) {
+        while !tab.laid_out() && asked.elapsed() < Duration::from_secs(10) {
             glib::MainContext::default().iteration(false);
-            if tab.typesetting() {
-                std::thread::sleep(Duration::from_millis(5));
-                continue;
-            }
-            // One more frame paints what arrived and asks for what the paint found missing.
-            bench_pump();
-            if !tab.typesetting() {
-                break;
-            }
+            std::thread::sleep(Duration::from_millis(5));
         }
+        bench_pump();
         let started = Instant::now();
         let shot = shoot(&tab.key_target(), &dir.join(format!("page-{}.png", i + 1)));
         println!(
@@ -234,7 +230,7 @@ fn export(app: &Rc<App>, rel: &str, dir: &Path) {
         }
         let print = dir.join("print.pdf");
         let _ = std::fs::remove_file(&print);
-        let op = operation(&tab.file(), tab.typesetter().as_ref(), false, "print").await;
+        let op = operation(&tab.file(), false, "print");
         op.set_export_filename(&print);
         // From an idle, as Print… runs it: the export runs a main loop of its own.
         let ran = gio::GioFuture::new(&op, |op, _, done| {
@@ -245,7 +241,7 @@ fn export(app: &Rc<App>, rel: &str, dir: &Path) {
         })
         .await;
         println!("bench diagram print {ran:?} {}", exported(&print));
-        // A note's embed: the first page, its formula typeset by the typesetter no tab holds.
+        // A note's embed: the first page, its formulas glyphs as in an export, and page Two.
         for page in [None, Some("Two")] {
             let started = Instant::now();
             let svg = crate::diagram::embed::svg(&tab.path(), page, false).await;
@@ -256,7 +252,7 @@ fn export(app: &Rc<App>, rel: &str, dir: &Path) {
                 svg.as_ref().map_or(0, |s| s.matches("<image").count())
             );
         }
-        // The tab's formulas and the embed's typeset by one view, which is one web process.
+        // Formulas are typeset natively: no web process.
         println!("bench diagram web_processes={}", web_processes());
         // A click on one, which follows `rel#Two` as a link: onto that page, or a toast.
         app.open_target(&format!("{rel}#Two"));
@@ -306,7 +302,7 @@ fn web_processes() -> usize {
 }
 
 /// What an export wrote: a PDF's page sizes in points, a picture's size and its commonest pixel,
-/// and the pictures an SVG holds (the formula, typeset).
+/// and the pictures and glyphs an SVG holds (a formula is glyphs, no picture).
 fn exported(path: &Path) -> String {
     if path.extension().is_some_and(|e| e == "pdf") {
         return match accent_core::pdf::PdfDoc::open(path).and_then(|d| d.page_sizes()) {
@@ -325,12 +321,13 @@ fn exported(path: &Path) -> String {
         *counts.entry(pixel).or_default() += 1;
     }
     let paper = counts.into_iter().max_by_key(|(_, n)| *n).map(|(p, _)| p);
-    let pictures = match path.extension().is_some_and(|e| e == "svg") {
-        true => std::fs::read_to_string(path).map_or(0, |svg| svg.matches("<image").count()),
-        false => 0,
+    let svg = match path.extension().is_some_and(|e| e == "svg") {
+        true => std::fs::read_to_string(path).unwrap_or_default(),
+        false => String::new(),
     };
+    let (pictures, glyphs) = (svg.matches("<image").count(), svg.matches("<use").count());
     format!(
-        "size={}x{} paper={paper:?} pictures={pictures}",
+        "size={}x{} paper={paper:?} pictures={pictures} glyphs={glyphs}",
         texture.width(),
         texture.height()
     )
@@ -368,10 +365,6 @@ fn look(app: &Rc<App>, rel: &str, dir: &Path) {
                 tab.select(vec!["a".to_string()]);
                 let props_fill = tab.props_fill();
                 tab.select(Vec::new());
-                let started = Instant::now();
-                while tab.typesetting() && started.elapsed() < Duration::from_secs(10) {
-                    glib::timeout_future(Duration::from_millis(20)).await;
-                }
                 bench_pump();
                 let canvas = tab.key_target();
                 let Some(shot) = picture(&canvas) else {
