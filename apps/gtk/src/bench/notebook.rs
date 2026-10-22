@@ -3,7 +3,9 @@
 //! show, an edit of each kind with its undo and the save that follows, the view kept still by a
 //! click and following the arrows, the marimo notebook kept as written, the long notebook's open
 //! time, memory and editors built, the view kept still as more are built above what shows, and a
-//! presented notebook's read-only. All under Dark, which recolours the pictures.
+//! presented notebook's read-only, and a notebook of its own written beside them taking a text
+//! tab's editing chords, occurrences, heading markers, spelling and links in its cells. All under
+//! Dark, which recolours the pictures.
 //! `ACCENT_BENCH_NOTEBOOK_SHOT=<png>` adds a picture of the window with the first notebook open,
 //! for looking at rather than asserting on.
 
@@ -31,6 +33,7 @@ pub(super) fn bench_notebook(app: &Rc<App>, arg: &str) {
         big_drill(&app, &big).await;
         present_drill(&app).await;
         text_drill(&app, &ipynb).await;
+        parity_drill(&app, &marimo).await;
         bench_quit(&app);
     });
 }
@@ -555,4 +558,166 @@ async fn present_drill(app: &Rc<App>) {
     let read_only = tab.bench_read_only();
     app.set_presenting(false);
     println!("bench notebook present read_only={}", u8::from(read_only));
+}
+
+/// The notebook the parity step writes: a markdown cell whose heading markers hang and whose link
+/// goes to the marimo notebook, and two code cells sharing a name.
+fn parity_notebook(marimo: &str) -> String {
+    let name = std::path::Path::new(marimo)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
+    let mut nb = accent_core::notebook::read("parity.ipynb", accent_core::notebook::EMPTY_IPYNB)
+        .expect("the empty notebook reads");
+    let id = nb.cells()[0].id();
+    nb.apply(accent_core::notebook::Edit::Source {
+        id,
+        text: "import numpy as np\nx = np.zeros(3)".into(),
+    });
+    for (at, kind, source) in [
+        (
+            0,
+            accent_core::notebook::Kind::Markdown,
+            format!("# Title\nsee [[{name}]]\nprose"),
+        ),
+        // Tall enough to scroll.
+        (
+            2,
+            accent_core::notebook::Kind::Code,
+            format!("y = np.ones(3){}", "\npass".repeat(80)),
+        ),
+    ] {
+        if let Some(cell) = nb.new_cell(kind, &source) {
+            nb.apply(accent_core::notebook::Edit::Insert { at, cell });
+        }
+    }
+    nb.to_text()
+}
+
+/// A text tab's editing in the cells: the chords on the selected cell, a column of carets typing
+/// in a markdown cell, the selection's other occurrences painted in every cell, the heading
+/// markers hung left of text aligned with the code's, Scroll Viewport, spelling, Paste as Plain
+/// Text and a link followed.
+async fn parity_drill(app: &Rc<App>, marimo: &str) {
+    let rel = format!("{}/parity.ipynb", accent_core::path::parent_dir(marimo));
+    if std::fs::write(app.root().join(&rel), parity_notebook(marimo)).is_err() {
+        return println!("bench notebook parity unwritten");
+    }
+    let Some((tab, _)) = opened(app, &rel).await else {
+        return;
+    };
+    glib::timeout_future(Duration::from_millis(500)).await;
+    let act = |action: &str| {
+        let _ = WidgetExt::activate_action(&app.window, action, None);
+    };
+    let at_start = |n: usize| {
+        tab.bench_select(n);
+        if let Some(view) = tab.bench_view(n) {
+            view.buffer().place_cursor(&view.buffer().start_iter());
+        }
+    };
+    let source = tab.bench_source(1);
+    at_start(1);
+    act("win.duplicate-line");
+    let duplicate = tab
+        .bench_source(1)
+        .starts_with("import numpy as np\nimport numpy as np\n");
+    tab.undo();
+    act("win.toggle-comment");
+    let comment = tab.bench_source(1).starts_with("# import numpy");
+    tab.undo();
+    act("win.delete-line");
+    let delete = tab.bench_source(1) == "x = np.zeros(3)";
+    tab.undo();
+    let undo = tab.bench_source(1) == source;
+    // Two carets in the markdown cell, one character typed at both.
+    at_start(0);
+    act("win.caret-below");
+    let carets = tab.bench_view(0).is_some_and(|view| {
+        crate::editor::typed_keys(
+            &view,
+            editor::Flavour::Note,
+            gdk::Key::z,
+            gdk::ModifierType::empty(),
+        );
+        let typed = tab.bench_source(0);
+        typed.starts_with("z# Title\nzsee")
+    });
+    tab.undo();
+    println!(
+        "bench notebook parity keys duplicate={} comment={} delete={} undo={} carets={}",
+        u8::from(duplicate),
+        u8::from(comment),
+        u8::from(delete),
+        u8::from(undo),
+        u8::from(carets),
+    );
+
+    // `np` selected in the first code cell: the second paints it too, the selection itself not.
+    tab.bench_select(1);
+    if let Some(view) = tab.bench_view(1) {
+        let buffer = view.buffer();
+        if let (Some(from), Some(to)) = (
+            buffer.iter_at_line_offset(0, 16),
+            buffer.iter_at_line_offset(0, 18),
+        ) {
+            buffer.select_range(&from, &to);
+        }
+    }
+    let (painted, own) = tab.bench_occurrences();
+    println!(
+        "bench notebook parity occurrences cells={painted} selection_painted={}",
+        u8::from(own)
+    );
+
+    glib::timeout_future(Duration::from_millis(300)).await;
+    let x = |n, line, column| tab.bench_char_x(n, line, column).unwrap_or(-100.0);
+    let (marker, heading, prose, code) = (x(0, 0, 0), x(0, 0, 2), x(0, 2, 0), x(1, 0, 0));
+    println!(
+        "bench notebook parity hang marker_left={} heading_aligned={} prose_aligned={}",
+        u8::from(marker < heading - 4.0),
+        u8::from((heading - code).abs() <= 1.0),
+        u8::from((prose - code).abs() <= 1.0),
+    );
+
+    let before = tab.bench_scrolled();
+    tab.bench_select(1);
+    act("win.scroll-down");
+    let scrolled = tab.bench_scrolled() > before;
+    tab.set_spellcheck(true);
+    let spelled = tab.bench_spelled(0);
+    at_start(2);
+    app.window.clipboard().set_text("pasted");
+    act("win.paste-plain");
+    glib::timeout_future(Duration::from_millis(300)).await;
+    let pasted = tab.bench_source(2).starts_with("pasted");
+    // The link's target opens, as a note's Ctrl+click opens it: closed first, an earlier step
+    // having opened it.
+    if let Some(doc) = app.doc_for(marimo) {
+        app.close_page(&doc.page().clone());
+        glib::timeout_future(Duration::from_millis(200)).await;
+    }
+    tab.bench_select(0);
+    if let Some(view) = tab.bench_view(0) {
+        let buffer = view.buffer();
+        if let Some(inside) = buffer.iter_at_line_offset(1, 7) {
+            buffer.place_cursor(&inside);
+        }
+    }
+    app.go_to_definition();
+    let mut followed = false;
+    for _ in 0..40 {
+        glib::timeout_future(Duration::from_millis(50)).await;
+        if app.doc_for(marimo).is_some() {
+            followed = true;
+            break;
+        }
+    }
+    println!(
+        "bench notebook parity scroll={} spell={} paste_plain={} link={}",
+        u8::from(scrolled),
+        u8::from(spelled),
+        u8::from(pasted),
+        u8::from(followed),
+    );
 }

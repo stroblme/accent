@@ -165,7 +165,16 @@ impl App {
     /// Go to Definition in the selected code cell of `notebook`, asked of the notebook's program
     /// at the cell's lines.
     fn notebook_definition(self: &Rc<Self>, notebook: &Rc<crate::notebook::NotebookTab>) {
+        if let Some(link) = notebook.link_at_caret() {
+            return self.follow_cell_link(notebook, &link);
+        }
         let Some(cell) = notebook.language_editor() else {
+            // A markdown cell's bare URL, which no language answers for.
+            if let Some(view) = notebook.editing_view()
+                && let Some((_, url)) = editor::url_under(&editor::caret(&view.buffer()))
+            {
+                self.launch(&url);
+            }
             return;
         };
         let caret = editor::caret(&cell.view().buffer());
@@ -198,6 +207,39 @@ impl App {
                 app.land_definition(found);
             }
         });
+    }
+
+    /// Follow a markdown cell's `link` as a note's Ctrl+click does: out to the system, to a
+    /// heading of the notebook's own, or to the file it names, a markdown path read from the
+    /// notebook's folder.
+    fn follow_cell_link(
+        self: &Rc<Self>,
+        notebook: &Rc<crate::notebook::NotebookTab>,
+        link: &accent_core::markdown::Link,
+    ) {
+        use accent_core::markdown::LinkKind;
+        use accent_core::path;
+        let anchor = link.anchor.as_deref().unwrap_or_default();
+        if link.kind == LinkKind::External {
+            return self.launch(&link.target);
+        }
+        if link.target.is_empty() {
+            if !notebook.goto_heading(anchor) {
+                self.toast(&format!(
+                    "No heading {anchor} in {}",
+                    doc::file_name(&notebook.key())
+                ));
+            }
+            return;
+        }
+        let target = match link.kind {
+            LinkKind::Markdown => path::resolve(path::parent_dir(&notebook.key()), &link.target),
+            _ => link.target.clone(),
+        };
+        match anchor.is_empty() {
+            true => self.open_target(&target),
+            false => self.open_target(&format!("{target}#{anchor}")),
+        }
     }
 
     /// Where a definition request lands: the one place answering, or the places listed.

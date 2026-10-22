@@ -81,6 +81,18 @@ pub(crate) fn build(
     (view, buffer)
 }
 
+/// Give a document's view what it does with the clipboard and the pointer, a tab's and a notebook
+/// cell's alike: plain-text cut and copy, and the whole line with nothing selected (an editor where
+/// Ctrl+X on no selection does nothing makes the user select the line first), the middle-click
+/// paste styled again, a selection dragged with its folds, and in a note a URL pasted over a
+/// selection linking it. Answers that paste's handler, which [`paste_verbatim`] holds back.
+pub(crate) fn interact(view: &sourceview5::View, flavour: Flavour) -> glib::SignalHandlerId {
+    line_clipboard(view);
+    primary_paste(view);
+    drag::install(view);
+    paste::link_paste(view, flavour)
+}
+
 /// Build a tab for `key` with already-read `text`.
 ///
 /// The caller reads bytes to choose text, binary or oversized document handling before this
@@ -111,13 +123,7 @@ pub fn open(
         view.set_editable(false);
     }
     let (numbers, marks, diagnostics, folds) = gutters(&view, &buffer, flavour);
-    // Plain-text cut and copy, and whole-line with nothing selected, whatever the tab holds: an
-    // editor where Ctrl+X on no selection does nothing is one that makes the user select the line
-    // first.
-    line_clipboard(&view);
-    primary_paste(&view);
-    drag::install(&view);
-    let paste_link = paste::link_paste(&view, flavour);
+    let paste_link = interact(&view, flavour);
     let Frame {
         clamp,
         scroller,
@@ -410,11 +416,7 @@ struct Tags {
 
 /// Add the highlight tags to `buffer`'s table, lowest first.
 fn tags(view: &sourceview5::View, buffer: &sourceview5::Buffer) -> Tags {
-    // Made before the find bar's match tag, so it stays under it: a tag added later to the table
-    // outranks an earlier one, and the match tag is only ever raised. See [`Tab::occurrence_tag`].
-    let occurrence_tag = gtk::TextTag::new(Some("occurrence"));
-    buffer.tag_table().add(&occurrence_tag);
-    mute(buffer, &occurrence_tag);
+    let occurrence_tag = occurrence_tag(buffer);
     // After the muted hint and before the find bar's match tag, which is the order the three
     // paint in: see [`Tab::reveal_range`].
     let reveal_tag = gtk::TextTag::new(Some("reveal"));

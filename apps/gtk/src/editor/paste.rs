@@ -156,13 +156,18 @@ pub(super) fn link_paste(view: &sourceview5::View, flavour: Flavour) -> glib::Si
     })
 }
 
+/// Paste verbatim at all of `view`'s carets using GTK, suppressing its [`link_paste`] handler
+/// `link` for this emission (`Ctrl+Shift+V`).
+pub(crate) fn paste_verbatim(view: &sourceview5::View, link: &glib::SignalHandlerId) {
+    view.block_signal(link);
+    view.emit_paste_clipboard();
+    view.unblock_signal(link);
+}
+
 impl Tab {
-    /// Paste verbatim at all carets using GTK, suppressing [`link_paste`]
-    /// for this emission (`Ctrl+Shift+V`).
+    /// [`paste_verbatim`] in this tab.
     pub fn paste_verbatim(&self) {
-        self.view.block_signal(&self.paste_link);
-        self.view.emit_paste_clipboard();
-        self.view.unblock_signal(&self.paste_link);
+        paste_verbatim(&self.view, &self.paste_link);
     }
 }
 

@@ -80,6 +80,7 @@ impl App {
             "terminal-paste" => match self.active_doc() {
                 Some(Doc::Terminal(term)) => term.paste(),
                 Some(Doc::Text(tab)) => tab.paste_verbatim(),
+                Some(Doc::Notebook(notebook)) => notebook.paste_verbatim(),
                 _ => {}
             },
             "terminal-share" | "terminal-revoke" => {
@@ -108,7 +109,10 @@ impl App {
                     }
                 });
             }
-            "paste-plain" => self.with_active(Tab::paste_verbatim),
+            "paste-plain" => match self.active_notebook() {
+                Some(notebook) => notebook.paste_verbatim(),
+                None => self.with_active(Tab::paste_verbatim),
+            },
             "close-tab" => {
                 if let Some(page) = self.tabs().selected_page() {
                     self.tabs().close_page(&page);
@@ -160,11 +164,12 @@ impl App {
             // dispatched at the window, so the canvas cannot claim the chord for itself.
             "duplicate-line" => match self.active_diagram() {
                 Some(d) => d.duplicate(),
-                None => self.with_active(Tab::duplicate_line),
+                None => self.with_view(editor::duplicate_line),
             },
-            "toggle-comment" => self.with_active(Tab::toggle_comment),
+            "toggle-comment" => self.with_view(editor::toggle_comment),
+            // Not over a notebook, whose column never scrolls sideways.
             "toggle-wrap" => self.with_active(Tab::toggle_wrap),
-            "delete-line" => self.with_active(Tab::delete_line),
+            "delete-line" => self.with_view(editor::delete_line),
             "newline-below" => {
                 // A notebook in front runs the selected cell, as Jupyter's `Ctrl+Enter` does, and
                 // a diagram's label being edited takes `Ctrl+Return` as finishing it.
@@ -176,12 +181,27 @@ impl App {
                     tab.newline_below();
                 }
             }
-            "scroll-up" => self.with_active(|tab| tab.scroll_lines(-1)),
-            "scroll-down" => self.with_active(|tab| tab.scroll_lines(1)),
-            "caret-above" => self.with_active(|tab| tab.add_caret(false)),
-            "caret-below" => self.with_active(|tab| tab.add_caret(true)),
-            "next-occurrence" => self.with_active(Tab::add_next_occurrence),
-            "all-occurrences" => self.with_active(Tab::select_all_occurrences),
+            "scroll-up" | "scroll-down" => {
+                let n = if name == "scroll-up" { -1 } else { 1 };
+                match self.active_notebook() {
+                    Some(notebook) => notebook.scroll_lines(n),
+                    None => self.with_active(|tab| tab.scroll_lines(n)),
+                }
+            }
+            "caret-above" | "caret-below" => {
+                let below = name == "caret-below";
+                match self.active() {
+                    Some(tab) => tab.add_caret(below),
+                    // A cell's column stays in the cell.
+                    None => self.with_view(|view| {
+                        if let Some(column) = view.downcast_ref::<multicaret::View>() {
+                            column.add_caret(below);
+                        }
+                    }),
+                }
+            }
+            "next-occurrence" => self.with_view(editor::add_next_occurrence),
+            "all-occurrences" => self.with_view(editor::select_all_occurrences),
             "zoom-in" | "zoom-out" | "zoom-reset" => self.zoom_action(name),
             "back" => self.navigate(false),
             "forward" => self.navigate(true),
@@ -480,6 +500,17 @@ impl App {
     fn with_active(&self, f: impl FnOnce(&Tab)) {
         if let Some(tab) = self.active() {
             f(&tab);
+        }
+    }
+
+    /// Run `f` on the view the editing chords act on: the active text tab's, or the selected
+    /// cell's of the notebook in front.
+    fn with_view(&self, f: impl FnOnce(&sourceview5::View)) {
+        if let Some(tab) = self.active() {
+            return f(&tab.view);
+        }
+        if let Some(view) = self.active_notebook().and_then(|n| n.editing_view()) {
+            f(&view);
         }
     }
 

@@ -329,6 +329,33 @@ pub(crate) fn refont(view: &impl IsA<gtk::Widget>) {
     }
 }
 
+/// Style a note's text, a tab's or a notebook markdown cell's: the markdown tags, and the wrap of
+/// the lines a fence took in or let go.
+pub(crate) fn style_note(
+    view: &sourceview5::View,
+    buffer: &sourceview5::Buffer,
+) -> (accent_core::markdown::Analysis, highlight::Offsets) {
+    wrap::refence(view, || highlight::apply(buffer))
+}
+
+/// A note's tags in the theme's colours, and its heading markers hung outside the text's left
+/// edge in the view's margin.
+pub(crate) fn restyle_note(view: &sourceview5::View, buffer: &sourceview5::Buffer) {
+    highlight::restyle(buffer, view);
+    highlight::hang(buffer, view);
+}
+
+/// Measure again what is measured in the view's font, once a new one is in: a note's hung
+/// heading markers and every wrap indent.
+pub(crate) fn remeasure(view: &sourceview5::View, flavour: Flavour) {
+    if flavour.is_note()
+        && let Some(buffer) = view.buffer().downcast_ref::<sourceview5::Buffer>()
+    {
+        highlight::hang(buffer, view);
+    }
+    wrap::measure(view);
+}
+
 /// Zoom-scaled page margins, shared by standalone comparison views
 /// ([`Tab::set_page`]).
 pub(crate) fn set_margins(view: &sourceview5::View, zoom: f64) {
@@ -460,11 +487,7 @@ impl Tab {
             #[weak(rename_to = tab)]
             self,
             move || {
-                // Only a note has markers hanging in the gutter.
-                if tab.flavour.is_note() {
-                    highlight::hang(&tab.buffer, &tab.view);
-                }
-                wrap::measure(&tab.view);
+                remeasure(&tab.view, tab.flavour);
                 tab.map.relayout();
                 // A comparison's companion is set in the same font, and takes the page with it.
                 if let Some(hosted) = tab.hosted() {

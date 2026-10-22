@@ -1728,6 +1728,9 @@ impl App {
             // The goals are set in the editor's font when they land.
             self.refresh_goals();
         }
+        for notebook in self.notebooks() {
+            notebook.set_spellcheck(config.spellcheck);
+        }
         for pdf in self.pdfs() {
             pdf.set_drawing_config(config.drawing.clone());
         }

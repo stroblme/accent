@@ -45,20 +45,29 @@ use follow::Follow;
 pub(crate) use follow::url_under;
 #[cfg(feature = "bench")]
 pub(crate) use indent::on_key as indent_key;
-pub(crate) use keys::attach as attach_keys;
 #[cfg(feature = "bench")]
 pub(crate) use keys::press;
+pub(crate) use keys::{attach as attach_keys, typed as typed_keys};
 use lines::primary_paste;
-pub(crate) use lines::{caret_to_click, line_clipboard, pressed_at};
+pub(crate) use lines::{
+    caret_to_click, delete_line, duplicate_line, line_clipboard, pressed_at, toggle_comment,
+};
 #[cfg(feature = "bench")]
-pub(crate) use lines::{delete_line, duplicate_line, newline_below, paste_primary, toggle_comment};
-pub(crate) use open::build;
+pub(crate) use lines::{newline_below, paste_primary};
 pub use open::open;
+pub(crate) use open::{build, interact};
 pub use page::default_font;
-pub(crate) use page::{COLUMN_FLOOR, font_css, install_font, next_view_name, refont, set_margins};
+pub(crate) use page::{
+    COLUMN_FLOOR, font_css, install_font, next_view_name, refont, remeasure, restyle_note,
+    set_margins, style_note,
+};
 use page::{GUTTER, line_numbers};
-pub(crate) use search::{match_style, next_match};
-use search::{matched, mute};
+pub(crate) use paste::paste_verbatim;
+use search::matched;
+pub(crate) use search::{
+    match_style, mute, next_match, occurrence_tag, paint_occurrences, selected_occurrence,
+    selected_ranges,
+};
 pub(crate) use text::{caret, line_end, line_prefix};
 
 /// How long a long note waits after the last keystroke before it is re-analysed.
@@ -115,6 +124,28 @@ pub fn spell_adapter(
     });
     view.add_controller(click);
     adapter
+}
+
+/// Turn spell checking on or off in a view of prose, its adapter kept in `slot` and made the
+/// first time it is turned on.
+pub(crate) fn set_spelling(
+    slot: &RefCell<Option<libspelling::TextBufferAdapter>>,
+    buffer: &sourceview5::Buffer,
+    view: &sourceview5::View,
+    on: bool,
+) {
+    // Cloned out first: the adapter is created inside the `else`, which borrows mutably.
+    let existing = slot.borrow().clone();
+    let adapter = match existing {
+        Some(adapter) => adapter,
+        None if !on => return,
+        None => {
+            let adapter = spell_adapter(buffer, view);
+            *slot.borrow_mut() = Some(adapter.clone());
+            adapter
+        }
+    };
+    adapter.set_enabled(on);
 }
 
 /// One in-flight save per tab, retaining its starting state and reply channel.
@@ -673,10 +704,7 @@ impl Tab {
         matched(&self.buffer, &self.reveal_tag);
         match_style(&self.buffer, &self.find_tag);
         match self.flavour {
-            Flavour::Note => {
-                highlight::restyle(&self.buffer, &self.view);
-                highlight::hang(&self.buffer, &self.view);
-            }
+            Flavour::Note => restyle_note(&self.view, &self.buffer),
             // The column hues are rotated from the accent, which the theme can change under us.
             Flavour::Csv(_) => highlight::restyle_csv(&self.buffer),
             Flavour::Code => {}
@@ -945,21 +973,9 @@ impl Tab {
 
     pub fn set_spellcheck(&self, on: bool) {
         // Prose only. A checker over identifiers and keywords is a wall of red squiggles.
-        if !self.flavour.is_note() {
-            return;
+        if self.flavour.is_note() {
+            set_spelling(&self.spell, &self.buffer, &self.view, on);
         }
-        // Cloned out first: the adapter is created inside the `else`, which borrows mutably.
-        let existing = self.spell.borrow().clone();
-        let adapter = match existing {
-            Some(adapter) => adapter,
-            None if !on => return,
-            None => {
-                let adapter = spell_adapter(&self.buffer, &self.view);
-                *self.spell.borrow_mut() = Some(adapter.clone());
-                adapter
-            }
-        };
-        adapter.set_enabled(on);
     }
 
     /// Add a caret above/below via the view subclass without changing the
@@ -971,48 +987,6 @@ impl Tab {
         {
             self.revealed_at(opened);
         }
-    }
-
-    /// Select the current word on the first press, then add a caret at each
-    /// next occurrence (JetBrains Add Caret at Next Occurrence).
-    pub fn add_next_occurrence(&self) {
-        let Some(view) = self.view.downcast_ref::<multicaret::View>() else {
-            return;
-        };
-        if self.buffer.has_selection() {
-            view.add_next_occurrence();
-        } else if self.select_word() {
-            view.match_whole_words();
-        }
-    }
-
-    /// Place carets at all selection occurrences, or all current-word
-    /// occurrences without a selection (VS Code semantics).
-    pub fn select_all_occurrences(&self) {
-        let Some(view) = self.view.downcast_ref::<multicaret::View>() else {
-            return;
-        };
-        if !self.buffer.has_selection() && self.select_word() {
-            view.match_whole_words();
-        }
-        if self.buffer.has_selection() {
-            view.select_all_occurrences();
-        }
-    }
-
-    /// Select the current or just-completed word ([`follow::word_at`]), ending
-    /// any caret column. Keep underscores and put the caret at the word end.
-    /// Return whether a word existed.
-    fn select_word(&self) -> bool {
-        let at = caret(&self.buffer);
-        let mut before = at;
-        before.backward_char();
-        let Some(word) = follow::word_at(&at).or_else(|| follow::word_at(&before)) else {
-            return false;
-        };
-        let iter = |offset| self.buffer.iter_at_offset(offset);
-        self.buffer.select_range(&iter(word.end), &iter(word.start));
-        true
     }
 
     /// Focus mode's line fade, which the view subclass paints (`fade.rs`), on a comparison's
@@ -1200,8 +1174,7 @@ impl Tab {
     fn analyse_text(&self) {
         match self.flavour {
             Flavour::Note => {
-                let (analysis, offsets) =
-                    wrap::refence(&self.view, || highlight::apply(&self.buffer));
+                let (analysis, offsets) = style_note(&self.view, &self.buffer);
                 *self.links.borrow_mut() = analysis
                     .links
                     .into_iter()
@@ -1335,6 +1308,48 @@ impl Drop for Tab {
         }
         release(&self.view);
     }
+}
+
+/// Select the current word on the first press, then add a caret at each next occurrence
+/// (JetBrains Add Caret at Next Occurrence).
+pub(crate) fn add_next_occurrence(view: &sourceview5::View) {
+    let Some(column) = view.downcast_ref::<multicaret::View>() else {
+        return;
+    };
+    if view.buffer().has_selection() {
+        column.add_next_occurrence();
+    } else if select_word(&view.buffer()) {
+        column.match_whole_words();
+    }
+}
+
+/// Place carets at all selection occurrences, or all current-word occurrences without a
+/// selection (VS Code semantics).
+pub(crate) fn select_all_occurrences(view: &sourceview5::View) {
+    let Some(column) = view.downcast_ref::<multicaret::View>() else {
+        return;
+    };
+    let buffer = view.buffer();
+    if !buffer.has_selection() && select_word(&buffer) {
+        column.match_whole_words();
+    }
+    if buffer.has_selection() {
+        column.select_all_occurrences();
+    }
+}
+
+/// Select the current or just-completed word ([`follow::word_at`]), ending any caret column.
+/// Keep underscores and put the caret at the word end. Return whether a word existed.
+fn select_word(buffer: &gtk::TextBuffer) -> bool {
+    let at = buffer.iter_at_mark(&buffer.get_insert());
+    let mut before = at;
+    before.backward_char();
+    let Some(word) = follow::word_at(&at).or_else(|| follow::word_at(&before)) else {
+        return false;
+    };
+    let iter = |offset| buffer.iter_at_offset(offset);
+    buffer.select_range(&iter(word.end), &iter(word.start));
+    true
 }
 
 /// Dispose an unused, detached view from an idle to release GtkSourceView gutter cycles.

@@ -24,8 +24,11 @@ pub struct CellView {
     pub over: gtk::Overlay,
     /// The strip under the cell, where the add buttons show while the pointer is over it.
     pub gap: gtk::Overlay,
-    /// `[n]`, the count of the run that left the outputs; `[*]` while a run waits or runs.
+    /// `[n]`, the count of the run that left the outputs; `[*]` while a run waits or runs. Not
+    /// in a markdown cell, whose heading markers hang where it would be.
     count: gtk::Label,
+    /// How wide the `[n]` column is ([`count_width`]).
+    gutter: std::cell::Cell<i32>,
     /// Execution state shown beside Run Cell.
     pub execution: std::cell::Cell<Execution>,
     /// Last settled result while another request may still show Running.
@@ -34,6 +37,10 @@ pub struct CellView {
     /// The source as plain text in the editor's font, holding the editor's place until it is built.
     placeholder: gtk::Label,
     editor: OnceCell<Editor>,
+    /// The editor's paste that links a URL over a selection, which Paste as Plain Text holds back.
+    paste_link: OnceCell<gtk::glib::SignalHandlerId>,
+    /// A markdown cell's spell checker, made the first time it is turned on.
+    pub spell: RefCell<Option<libspelling::TextBufferAdapter>>,
     pub outputs: Outputs,
     /// What `input()` asks under the outputs, while it asks.
     asking: RefCell<Option<gtk::Box>>,
@@ -100,6 +107,8 @@ impl Execution {
 pub struct Editor {
     pub view: sourceview5::View,
     pub buffer: sourceview5::Buffer,
+    /// What the other occurrences of the selection are painted with.
+    pub occurrence: gtk::TextTag,
 }
 
 impl Editor {
@@ -110,11 +119,12 @@ impl Editor {
 }
 
 impl CellView {
-    /// `cell`'s widgets, its source shown by a placeholder until [`build_editor`](Self::build_editor).
-    pub fn new(cell: &Cell) -> CellView {
+    /// `cell`'s widgets, its source shown by a placeholder until [`build_editor`](Self::build_editor),
+    /// its `[n]` column `gutter` wide.
+    pub fn new(cell: &Cell, gutter: i32) -> CellView {
         let count = gtk::Label::builder()
             .label(count_label(cell))
-            .width_chars(6)
+            .width_request(gutter)
             .xalign(1.0)
             .valign(gtk::Align::Start)
             .margin_top(8)
@@ -129,8 +139,8 @@ impl CellView {
             .ellipsize(gtk::pango::EllipsizeMode::End)
             .xalign(0.0)
             .yalign(0.0)
-            .margin_start(8)
-            .margin_end(8)
+            .margin_start(text_start(cell.kind(), gutter))
+            .margin_end(MARGIN)
             .margin_top(6)
             .margin_bottom(6)
             .build();
@@ -149,9 +159,11 @@ impl CellView {
         body.append(&outputs.widget);
 
         let over = gtk::Overlay::builder().child(&body).hexpand(true).build();
-        let card = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let card = gtk::Box::new(gtk::Orientation::Horizontal, SPACING);
         card.add_css_class("notebook-cell");
-        card.append(&count);
+        if cell.kind() != Kind::Markdown {
+            card.append(&count);
+        }
         card.append(&over);
 
         let room = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -168,13 +180,37 @@ impl CellView {
             over,
             gap,
             count,
+            gutter: std::cell::Cell::new(gutter),
             execution: std::cell::Cell::new(Execution::for_cell(cell)),
             last_result: std::cell::Cell::new(Execution::for_cell(cell)),
             body,
             placeholder,
             editor: OnceCell::new(),
+            paste_link: OnceCell::new(),
+            spell: RefCell::default(),
             outputs,
             asking: RefCell::default(),
+        }
+    }
+
+    /// The `[n]` column is `gutter` wide now: a code cell's count takes it, and a markdown cell's
+    /// text starts past it, its markers measured again once the view's font is in.
+    pub fn set_gutter(&self, gutter: i32) {
+        if self.gutter.replace(gutter) == gutter {
+            return;
+        }
+        self.count.set_width_request(gutter);
+        let start = text_start(self.kind, gutter);
+        self.placeholder.set_margin_start(start);
+        if let Some(editor) = self.editor() {
+            editor.view.set_left_margin(start);
+        }
+    }
+
+    /// Paste as Plain Text into the editor: the paste that would link a URL held back.
+    pub fn paste_verbatim(&self) {
+        if let (Some(editor), Some(link)) = (self.editor(), self.paste_link.get()) {
+            crate::editor::paste_verbatim(&editor.view, link);
         }
     }
 
@@ -268,18 +304,22 @@ impl CellView {
         let (view, buffer) = crate::editor::build(flavour, language, source);
         // The notebook's one history records what is typed (`history.rs`).
         buffer.set_enable_undo(false);
-        view.set_left_margin(8);
-        view.set_right_margin(8);
+        view.set_left_margin(text_start(self.kind, self.gutter.get()));
+        view.set_right_margin(MARGIN);
         view.set_top_margin(6);
         view.set_bottom_margin(6);
         view.set_hexpand(true);
         view.set_editable(!presenting);
+        // Before any find tag, which paints over it.
+        let occurrence = crate::editor::occurrence_tag(&buffer);
+        let _ = self.paste_link.set(crate::editor::interact(&view, flavour));
         if flavour == Flavour::Note {
-            crate::highlight::apply(&buffer);
-            // The tags' colours are read off the view's own, which it has once it is realised.
+            crate::editor::style_note(&view, &buffer);
+            // The tags' colours, and the markers' widths, are read off the view's own font and
+            // colour, which it has once it is realised.
             view.connect_realize(|view| {
                 if let Some(buffer) = view.buffer().downcast_ref::<sourceview5::Buffer>() {
-                    crate::highlight::restyle(buffer, view);
+                    crate::editor::restyle_note(view, buffer);
                 }
             });
         } else {
@@ -287,7 +327,11 @@ impl CellView {
         }
         self.body.prepend(&view);
         self.body.remove(&self.placeholder);
-        let editor = Editor { view, buffer };
+        let editor = Editor {
+            view,
+            buffer,
+            occurrence,
+        };
         let _ = self.editor.set(editor.clone());
         editor
     }
@@ -356,7 +400,32 @@ pub fn count_label(cell: &Cell) -> String {
     }
 }
 
-fn flavour(kind: Kind) -> Flavour {
+/// The room between a cell's `[n]` column and its text.
+const SPACING: i32 = 6;
+/// The margins of a cell's text inside its editor.
+const MARGIN: i32 = 8;
+
+/// How wide the `[n]` column is: six characters of `widget`'s font set in monospace, as the
+/// count is, so `[9999]` fits.
+pub fn count_width(widget: &impl IsA<gtk::Widget>) -> i32 {
+    let layout = widget.create_pango_layout(Some("[0000]"));
+    let mut font = layout.context().font_description().unwrap_or_default();
+    font.set_family("monospace");
+    layout.set_font_description(Some(&font));
+    layout.pixel_size().0
+}
+
+/// Where a cell's text starts in its editor. A markdown cell has no `[n]` column: its text starts
+/// where a code cell's does, and its heading markers hang in the column's room, as a note's hang
+/// in its page margin.
+fn text_start(kind: Kind, gutter: i32) -> i32 {
+    match kind {
+        Kind::Markdown => gutter + SPACING + MARGIN,
+        Kind::Code | Kind::Raw => MARGIN,
+    }
+}
+
+pub fn flavour(kind: Kind) -> Flavour {
     match kind {
         Kind::Markdown => Flavour::Note,
         Kind::Code | Kind::Raw => Flavour::Code,
