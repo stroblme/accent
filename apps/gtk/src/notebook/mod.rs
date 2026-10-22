@@ -53,6 +53,8 @@ pub struct NotebookTab {
     placing: Cell<bool>,
     /// The frame the editors near the view were last built in, and the hook that builds them.
     built_at: Cell<i64>,
+    /// The cells within a screen of the view as of that frame.
+    near: RefCell<Vec<Rc<CellView>>>,
     /// The first cell reaching into the view at the last layout, and its top in the content.
     anchor: Cell<Option<(CellId, f64)>>,
     /// A cell whose caret is to be brought into view once its editor is laid out ([`show`]).
@@ -160,6 +162,7 @@ pub fn open(
         hovered: Cell::new(None),
         placing: Cell::new(false),
         built_at: Cell::new(-1),
+        near: RefCell::default(),
         anchor: Cell::new(None),
         reveal: Cell::new(None),
         layout_hook: RefCell::default(),
@@ -1101,6 +1104,16 @@ impl NotebookTab {
         self.keep_anchor();
         self.show_pending();
         self.build_near(clock);
+        // Every pass, not once a frame: GTK lays out again within the frame, and a view built in
+        // one pass first wraps at its width in the next.
+        for view in self
+            .near
+            .borrow()
+            .iter()
+            .filter(|v| v.root.parent().is_some())
+        {
+            view.refit();
+        }
         self.refit_diagnostics(self.refit_after_layout.replace(false));
         self.anchor.set(self.top_cell());
     }
@@ -1113,11 +1126,13 @@ impl NotebookTab {
         if self.built_at.replace(frame) == frame {
             return;
         }
-        for view in self.near() {
+        let near = self.near();
+        for view in &near {
             if view.editor().is_none() {
-                self.build_editor(&view);
+                self.build_editor(view);
             }
         }
+        *self.near.borrow_mut() = near;
     }
 
     /// The views of the cells within a screen above and below what shows, in order.

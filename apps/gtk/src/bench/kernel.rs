@@ -110,6 +110,10 @@ pub(super) fn bench_kernel(app: &Rc<App>, rel: &str) {
             return;
         }
         print_cell(&tab, 1, "");
+        // The text views of its output and of every editor are as tall as their text once laid
+        // out, not as they were before they wrapped at their width.
+        glib::timeout_future(Duration::from_millis(300)).await;
+        println!("bench kernel fit unfit={}", tab.bench_unfit());
 
         // Run and Advance left cell 3 selected.
         act("win.notebook-run-cell");

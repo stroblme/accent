@@ -142,6 +142,19 @@ impl Outputs {
         }
     }
 
+    /// The outputs drawn as text: a stream, an error, plain text, JSON, markdown.
+    pub fn text_views(&self) -> Vec<gtk::TextView> {
+        let mut views = Vec::new();
+        let mut child = self.widget.first_child();
+        while let Some(widget) = child {
+            if let Some(view) = widget.downcast_ref::<gtk::TextView>() {
+                views.push(view.clone());
+            }
+            child = widget.next_sibling();
+        }
+        views
+    }
+
     /// How many outputs are shown.
     #[cfg(feature = "bench")]
     pub fn shown(&self) -> usize {
