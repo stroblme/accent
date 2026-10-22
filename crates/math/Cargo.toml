@@ -13,5 +13,9 @@ thiserror.workspace = true
 # The MathML pulldown-latex writes, read as XML.
 roxmltree = "0.21"
 
+[dev-dependencies]
+# TeX as a note writes it, through the MathML core makes of it (`tests/latex.rs`).
+accent-core.workspace = true
+
 [build-dependencies]
 pkg-config = "0.3"
