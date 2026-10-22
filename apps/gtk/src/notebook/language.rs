@@ -26,7 +26,7 @@ use crate::{diagnostics, lang, signature};
 pub(super) struct State {
     doc: Rc<lang::Document>,
     /// The program last handed to the server, whose lines its answers are in.
-    program: RefCell<Program>,
+    sent: RefCell<Sent>,
     editors: RefCell<HashMap<CellId, Rc<CellEditor>>>,
     /// What the server said about cells with no editor yet, in their own lines.
     waiting: RefCell<HashMap<CellId, Vec<Diagnostic>>>,
@@ -36,6 +36,36 @@ pub(super) struct State {
     refresh: RefCell<Option<glib::JoinHandle<()>>>,
     on_follow: TabHook,
     on_starting: TabHook,
+}
+
+/// The program last handed to the server, and whether it is known to have got there: a flush
+/// dropped part way (by the next edit's, or a completion typed past) may have been cancelled
+/// before it was sent, and a program taken as sent then would never be sent again.
+#[derive(Default)]
+struct Sent {
+    program: Program,
+    arrived: bool,
+}
+
+impl Sent {
+    /// The text to send for `now`, which answers are read against from here on; `None` while the
+    /// server holds it.
+    fn next(&mut self, now: Program) -> Option<String> {
+        if self.arrived && now == self.program {
+            return None;
+        }
+        let text = now.text.clone();
+        self.program = now;
+        self.arrived = false;
+        Some(text)
+    }
+
+    /// `text` reached the server.
+    fn arrived(&mut self, text: &str) {
+        if self.program.text == text {
+            self.arrived = true;
+        }
+    }
 }
 
 impl Drop for State {
@@ -71,7 +101,13 @@ struct CellEditor {
 impl CellEditor {
     /// The lines of the program last sent that are this cell's.
     fn lines(&self) -> Option<Range<u32>> {
-        self.tab.upgrade()?.lang.program.borrow().lines(self.id)
+        self.tab
+            .upgrade()?
+            .lang
+            .sent
+            .borrow()
+            .program
+            .lines(self.id)
     }
 
     fn detach(&self) {
@@ -310,7 +346,11 @@ impl NotebookTab {
         self.sync_model();
         let program = self.model.borrow().program();
         let text = program.text.clone();
-        self.lang.program.replace(program);
+        let opened = text.clone();
+        self.lang.sent.replace(Sent {
+            program,
+            arrived: false,
+        });
         let weak = Rc::downgrade(self);
         let told = move || {
             if let Some(tab) = weak.upgrade() {
@@ -326,12 +366,21 @@ impl NotebookTab {
             if let Some(old) = closing {
                 let _ = vault.close_document(&old).await;
             }
-            match opening.await {
-                Ok(support) => tracing::debug!("opened {key}: {support:?}"),
-                Err(e) => tracing::warn!("cannot open {key} on the language layer: {e:#}"),
-            }
+            let opened = match opening.await {
+                Ok(support) => {
+                    tracing::debug!("opened {key}: {support:?}");
+                    Some(opened)
+                }
+                Err(e) => {
+                    tracing::warn!("cannot open {key} on the language layer: {e:#}");
+                    None
+                }
+            };
             // What was typed while it opened.
             if let Some(tab) = weak.upgrade() {
+                if let Some(opened) = opened {
+                    tab.lang.sent.borrow_mut().arrived(&opened);
+                }
                 tab.flush_language().await;
             }
         });
@@ -383,25 +432,28 @@ impl NotebookTab {
         }
     }
 
-    /// Send the server the program as it stands, if it is not the one it holds.
+    /// Send the server the program as it stands, if it is not the one it holds. Dropped part way
+    /// or refused, it leaves the program unsent, and the next flush sends it again.
     async fn flush_language(self: Rc<Self>) {
         let doc = self.lang.doc.clone();
-        if !doc.flush(|| self.program_text()).await {
-            // Refused: sent again with the next flush, whatever changes meanwhile.
-            self.lang.program.take();
+        let handed = RefCell::new(None);
+        let sent = doc
+            .flush(|| {
+                let text = self.program_text();
+                handed.replace(text.clone());
+                text
+            })
+            .await;
+        if let (true, Some(text)) = (sent, handed.take()) {
+            self.lang.sent.borrow_mut().arrived(&text);
         }
     }
 
-    /// The program as the model holds it, `None` while it is the one last sent.
+    /// The program as the model holds it, `None` while the server holds it already.
     fn program_text(&self) -> Option<String> {
         self.sync_model();
         let program = self.model.borrow().program();
-        if program == *self.lang.program.borrow() {
-            return None;
-        }
-        let text = program.text.clone();
-        self.lang.program.replace(program);
-        Some(text)
+        self.lang.sent.borrow_mut().next(program)
     }
 
     /// The server saved the document: what it does on a save of a code tab's file.
@@ -427,7 +479,7 @@ impl NotebookTab {
     /// A publish for the program: each cell's share painted in its editor, or kept for when it
     /// has one.
     pub fn set_diagnostics(&self, items: Vec<Diagnostic>) {
-        let mut cells = cells_of(&self.lang.program.borrow(), items);
+        let mut cells = cells_of(&self.lang.sent.borrow().program, items);
         let editors: Vec<Rc<CellEditor>> = self.lang.editors.borrow().values().cloned().collect();
         for cell in editors {
             cell.painted.set(cells.remove(&cell.id).unwrap_or_default());
@@ -608,7 +660,7 @@ impl NotebookTab {
 
     /// The caret at `at` in the program, in the cell that line is in, a quarter down the view.
     pub fn go_to(self: &Rc<Self>, at: Pos) -> bool {
-        let found = self.lang.program.borrow().cell_at(at.line);
+        let found = self.lang.sent.borrow().program.cell_at(at.line);
         let Some((id, line)) = found else {
             return false;
         };
@@ -805,6 +857,22 @@ mod tests {
         assert_eq!(at(&ids[1]), [(0, 8, 0, 12)], "in the cell's own lines");
         assert_eq!(at(&ids[2]), [], "a shown value is not unused");
         assert_eq!(cells.len(), 2, "nothing for a line in no cell");
+    }
+
+    #[test]
+    fn a_program_handed_over_is_sent_again_until_it_arrives() {
+        let (program, _) = program();
+        let mut sent = Sent::default();
+        assert_eq!(sent.next(program.clone()), Some(program.text.clone()));
+        assert!(
+            sent.next(program.clone()).is_some(),
+            "a flush dropped part way may have sent nothing"
+        );
+        sent.arrived("an older text");
+        assert!(sent.next(program.clone()).is_some(), "not this program");
+        sent.arrived(&program.text);
+        assert_eq!(sent.next(program.clone()), None, "the server holds it");
+        assert!(sent.next(Program::default()).is_some(), "an edit is sent");
     }
 
     #[test]
