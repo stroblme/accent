@@ -149,10 +149,7 @@ impl CellView {
             _ => "accent-code",
         });
 
-        let outputs = match cell.kind() {
-            Kind::Code => Outputs::new(cell.outputs()),
-            _ => Outputs::attachments(cell.attachments()),
-        };
+        let outputs = Outputs::new(cell);
         let body = gtk::Box::new(gtk::Orientation::Vertical, 6);
         body.set_hexpand(true);
         body.append(&placeholder);

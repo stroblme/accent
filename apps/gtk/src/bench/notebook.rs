@@ -2,7 +2,8 @@
 //! vault's `Notebooks/` (a copy under /tmp: it saves). It prints how the first notebook's outputs
 //! show, an edit of each kind with its undo and the save that follows, the view kept still by a
 //! click and following the arrows, the marimo notebook kept as written, the long notebook's open
-//! time, memory and editors built, the view kept still as more are built above what shows, and a
+//! time, memory and editors built, the view kept still as more are built above what shows, its
+//! outputs built as they near the view in the place of placeholders as tall, and a
 //! presented notebook's read-only, and a notebook of its own written beside them taking a text
 //! tab's editing chords, occurrences, heading markers, spelling and links in its cells. All under
 //! Dark, which recolours the pictures.
@@ -31,6 +32,7 @@ pub(super) fn bench_notebook(app: &Rc<App>, arg: &str) {
         outline_drill(&app, &ipynb, &marimo).await;
         marimo_drill(&app, &marimo).await;
         big_drill(&app, &big).await;
+        lazy_drill(&app, &big).await;
         present_drill(&app).await;
         text_drill(&app, &ipynb).await;
         parity_drill(&app, &marimo).await;
@@ -56,6 +58,12 @@ async fn open_drill(app: &Rc<App>, rel: &str) {
     let Some((tab, ms)) = opened(app, rel).await else {
         return;
     };
+    // Outputs are built as their cells near the view: shown down to the end once laid out, so all
+    // of them are.
+    for n in [10_000, 0] {
+        glib::timeout_future(Duration::from_millis(300)).await;
+        tab.bench_scroll(n);
+    }
     // The pictures decode on workers: given the time they take.
     for _ in 0..50 {
         glib::timeout_future(Duration::from_millis(100)).await;
@@ -480,6 +488,188 @@ async fn big_drill(app: &Rc<App>, rel: &str) {
         "bench notebook anchor built={} drift_px={drift:.0}",
         tab.bench_built() - built
     );
+}
+
+/// How narrow the window is made, so the long notebook's text wraps.
+const NARROW: i32 = 560;
+
+/// The long notebook's outputs are built as their cells near the view, in the place of
+/// placeholders as tall as their text will wrap and their pictures show: how far those were off,
+/// and how still the scroll's range and what shows keep as they are built. Scrolled through a
+/// screen at a time at the window's width and at a narrow one, jumped to the end and back,
+/// narrowed and widened while scrolled, Find landing in a cell nothing was built for, and a cell
+/// run far below the view and one far above it.
+async fn lazy_drill(app: &Rc<App>, rel: &str) {
+    let (width, height) = (app.window.default_width(), app.window.default_height());
+    for w in [width, NARROW] {
+        resized(app, w, height).await;
+        let Some(tab) = reopened(app, rel).await else {
+            return;
+        };
+        let (built, off, step, range, drift) = sweep(&tab).await;
+        println!(
+            "bench notebook lazy sweep width={} built={built} off_px={off} \
+             range_step_px={step:.0} range_px={range:.0} drift_px={drift:.0}",
+            app.window.width()
+        );
+    }
+    resized(app, width, height).await;
+
+    let Some(tab) = reopened(app, rel).await else {
+        return;
+    };
+    let upper = tab.bench_range().0;
+    tab.bench_scroll(10_000);
+    glib::timeout_future(Duration::from_millis(300)).await;
+    let (now, page) = tab.bench_range();
+    let at_end = tab.bench_scrolled() + page >= now - 1.0;
+    tab.bench_scroll(0);
+    glib::timeout_future(Duration::from_millis(300)).await;
+    let back = tab.bench_scrolled() == 0.0 && tab.bench_top_cell().is_some_and(|(n, _)| n == 0);
+    println!(
+        "bench notebook lazy far at_end={} range_px={:.0} back={}",
+        u8::from(at_end),
+        (now - upper).abs(),
+        u8::from(back)
+    );
+
+    tab.bench_scroll(12);
+    glib::timeout_future(Duration::from_millis(300)).await;
+    let mut moved = Vec::new();
+    for w in [NARROW, width] {
+        let Some((n, y)) = tab.bench_top_cell() else {
+            break;
+        };
+        resized(app, w, height).await;
+        glib::timeout_future(Duration::from_millis(300)).await;
+        moved.push(tab.bench_cell_y(n).map_or(-1.0, |now| (now - y).abs()));
+    }
+    println!(
+        "bench notebook lazy resize narrowed_px={:.0} widened_px={:.0}",
+        moved.first().unwrap_or(&-1.0),
+        moved.get(1).unwrap_or(&-1.0)
+    );
+
+    // Cell 241 is a code cell with a picture, far below the top.
+    let far = 241;
+    let Some(tab) = reopened(app, rel).await else {
+        return;
+    };
+    let bar = app.pane().find.clone();
+    bar.open(crate::find::Mode::Find);
+    bar.query_box().set_text(&format!("x{far} = {far}"));
+    glib::timeout_future(Duration::from_millis(300)).await;
+    let (shown, y) = (tab.bench_caret_shown(), tab.bench_caret_y());
+    glib::timeout_future(Duration::from_millis(500)).await;
+    let moved = match (y, tab.bench_caret_y()) {
+        (Some(was), Some(now)) => (now - was).abs(),
+        _ => -1.0,
+    };
+    let built = tab.bench_outputs().get(far).is_some_and(|(held, _)| !held);
+    bar.close();
+    println!(
+        "bench notebook lazy find shown={} moved_px={moved:.0} built={}",
+        u8::from(shown),
+        u8::from(built)
+    );
+
+    let kernel = std::process::Command::new("python3")
+        .args(["-c", "import ipykernel"])
+        .output()
+        .is_ok_and(|out| out.status.success());
+    if !kernel {
+        return println!("bench notebook lazy run skipped: no ipykernel");
+    }
+    let Some(tab) = reopened(app, rel).await else {
+        return;
+    };
+    let run = |n: usize| {
+        tab.bench_pick(n);
+        let _ = WidgetExt::activate_action(&app.window, "win.notebook-run-cell", None);
+    };
+    run(far);
+    if !super::kernel::done(app, &tab, "far run").await {
+        return;
+    }
+    let still = tab.bench_scrolled() == 0.0 && tab.bench_top_cell().is_some_and(|(n, _)| n == 0);
+    let held = tab.bench_outputs().get(far).is_some_and(|(held, _)| *held);
+    tab.bench_select(far);
+    glib::timeout_future(Duration::from_millis(500)).await;
+    let (count, outputs, shown) = tab.bench_cell(far).unwrap_or_default();
+    // Cell 1's picture goes with its run, far above what shows.
+    let top = tab.bench_top_cell();
+    run(1);
+    if !super::kernel::done(app, &tab, "run above").await {
+        return;
+    }
+    glib::timeout_future(Duration::from_millis(300)).await;
+    let above = top
+        .and_then(|(n, y)| Some((tab.bench_cell_y(n)? - y).abs()))
+        .unwrap_or(-1.0);
+    app.stop_kernel(&tab);
+    println!(
+        "bench notebook lazy run still={} held={} count={count} shown={shown}/{} \
+         above_drift_px={above:.0}",
+        u8::from(still),
+        u8::from(held),
+        outputs.len()
+    );
+}
+
+/// The window made `w` by `h`, once the X server has resized it.
+async fn resized(app: &Rc<App>, w: i32, h: i32) {
+    let before = app.window.width();
+    app.window.set_default_size(w, h);
+    for _ in 0..40 {
+        glib::timeout_future(Duration::from_millis(50)).await;
+        if app.window.width() != before {
+            break;
+        }
+    }
+}
+
+/// `rel` closed and opened again, so nothing is built but what shows, and settled.
+async fn reopened(app: &Rc<App>, rel: &str) -> Option<Rc<NotebookTab>> {
+    if let Some(doc) = app.doc_for(rel) {
+        app.close_page(&doc.page().clone());
+        glib::timeout_future(Duration::from_millis(200)).await;
+    }
+    let (tab, _) = opened(app, rel).await?;
+    glib::timeout_future(Duration::from_millis(500)).await;
+    Some(tab)
+}
+
+/// Scrolled from the top to the end a screen at a time: how many cells' outputs were built on the
+/// way, how far the most mistaken of their placeholders was, the most the scroll's range changed
+/// in a step and all told, and how far a cell in view moved other than with the scroll.
+async fn sweep(tab: &Rc<NotebookTab>) -> (usize, i32, f64, f64, f64) {
+    let (mut built, mut off, mut step, mut drift) = (0, 0, 0.0f64, 0.0f64);
+    let first = tab.bench_range().0;
+    for _ in 0..500 {
+        let (held, upper, top) = (
+            tab.bench_outputs(),
+            tab.bench_range().0,
+            tab.bench_top_cell(),
+        );
+        let went = -tab.bench_scroll_by(1.0);
+        if went < 1.0 {
+            break;
+        }
+        glib::timeout_future(Duration::from_millis(300)).await;
+        for ((was, before), (now, after)) in held.iter().zip(tab.bench_outputs()) {
+            if *was && !now {
+                built += 1;
+                off = off.max((after - before).abs());
+            }
+        }
+        step = step.max((tab.bench_range().0 - upper).abs());
+        if let Some((n, y)) = top
+            && let Some(now) = tab.bench_cell_y(n)
+        {
+            drift = drift.max((now - (y - went)).abs());
+        }
+    }
+    (built, off, step, (tab.bench_range().0 - first).abs(), drift)
 }
 
 /// The process's resident size in MB.

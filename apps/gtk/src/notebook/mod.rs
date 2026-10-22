@@ -1138,9 +1138,9 @@ impl NotebookTab {
         self.anchor.set(self.top_cell());
     }
 
-    /// Build the editors of the cells within a screen of what shows, once a frame after the
-    /// window is laid out, so the frame lays them out again and draws no cell scrolled to without
-    /// its editor.
+    /// Build the editors and the outputs of the cells within a screen of what shows, once a frame
+    /// after the window is laid out, so the frame lays them out again and draws no cell scrolled
+    /// to without them.
     fn build_near(self: &Rc<Self>, clock: &gdk::FrameClock) {
         let frame = clock.frame_counter();
         if self.built_at.replace(frame) == frame {
@@ -1150,6 +1150,14 @@ impl NotebookTab {
         for view in &near {
             if view.editor().is_none() {
                 self.build_editor(view);
+            }
+        }
+        {
+            let model = self.model.borrow();
+            for view in &near {
+                if let Some(at) = model.position(view.id) {
+                    view.outputs.build(&model.cells()[at]);
+                }
             }
         }
         *self.near.borrow_mut() = near;
@@ -1738,6 +1746,37 @@ impl NotebookTab {
     pub fn bench_scroll(&self, n: usize) {
         let adjustment = self.scroller.vadjustment();
         adjustment.set_value(n as f64 * adjustment.page_size() * 0.9);
+    }
+
+    /// How tall the notebook is laid out, and how much of it the view shows.
+    pub fn bench_range(&self) -> (f64, f64) {
+        let adjustment = self.scroller.vadjustment();
+        (adjustment.upper(), adjustment.page_size())
+    }
+
+    /// Each cell's outputs: whether they are still held by a placeholder, and how tall they ask
+    /// to be at their width, which a text view's allocation may not have caught up with yet.
+    pub fn bench_outputs(&self) -> Vec<(bool, i32)> {
+        let views = self.views.borrow();
+        let tall = |w: &gtk::Box| w.measure(gtk::Orientation::Vertical, w.width()).1;
+        views
+            .iter()
+            .map(|v| (v.outputs.is_held(), tall(&v.outputs.widget)))
+            .collect()
+    }
+
+    /// Select cell `n` as its buttons do, the keyboard and the view left where they are.
+    pub fn bench_pick(self: &Rc<Self>, n: usize) {
+        let id = self.views.borrow().get(n).map(|v| v.id);
+        if let Some(id) = id {
+            self.select(id);
+        }
+    }
+
+    /// Where the selected cell's caret is in the view.
+    pub fn bench_caret_y(&self) -> Option<f64> {
+        let editor = self.view_of(self.selected.get())?.editor()?.clone();
+        Some(self.caret_at(&editor)?.0 - self.scroller.vadjustment().value())
     }
 
     /// Whether no cell can be typed into and no cell button or add strip is out.

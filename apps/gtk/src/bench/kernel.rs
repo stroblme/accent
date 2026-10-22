@@ -202,7 +202,7 @@ pub(super) fn bench_kernel(app: &Rc<App>, rel: &str) {
 }
 
 /// Wait until no run waits or runs, saying `what` timed out otherwise.
-async fn done(app: &Rc<App>, tab: &NotebookTab, what: &str) -> bool {
+pub(super) async fn done(app: &Rc<App>, tab: &NotebookTab, what: &str) -> bool {
     // A turn first, so a run just asked for is counted.
     glib::timeout_future(Duration::from_millis(50)).await;
     until(app, what, || (!tab.bench_busy()).then_some(()))
