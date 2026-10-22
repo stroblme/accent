@@ -785,7 +785,10 @@ enum Span {
     /// A formula's TeX, shown dimmed: it does not lay out.
     Source,
     /// A formula's placeholder, which Pango gives the room the formula takes.
-    Formula(Rc<accent_math::Layout>),
+    Formula {
+        formula: Rc<accent_math::Layout>,
+        display: bool,
+    },
 }
 
 /// The character a formula's room is kept by.
@@ -812,7 +815,11 @@ fn text_of(
                     }
                     let start = text.len();
                     text.push(PLACEHOLDER);
-                    spans.push((start..text.len(), Span::Formula(formula)));
+                    let span = Span::Formula {
+                        formula,
+                        display: *display,
+                    };
+                    spans.push((start..text.len(), span));
                     if *display && !matches!(runs.get(i + 1), None | Some(Run::Break)) {
                         text.push('\n');
                     }
@@ -883,12 +890,19 @@ fn lay_out(
                 );
                 continue;
             }
-            Span::Formula(f) => {
+            Span::Formula {
+                formula: f,
+                display,
+            } => {
                 let units =
                     |v: f32| (f64::from(v) * scale * f64::from(pango::SCALE)).round() as i32;
                 let (ascent, height) = (units(f.ascent), units(f.ascent + f.descent));
-                let room = pango::Rectangle::new(0, -ascent, units(f.width), height);
-                put(pango::AttrShape::new(&room, &room).into(), range);
+                let ink = pango::Rectangle::new(0, -ascent, units(f.width), height);
+                // A display formula's line has an em of room above and below it, as MathJax's
+                // display container has (`margin: .7em 0; padding: .3em 2px`).
+                let em = if *display { px(font.size) } else { 0 };
+                let room = pango::Rectangle::new(0, -ascent - em, ink.width(), height + 2 * em);
+                put(pango::AttrShape::new(&ink, &room).into(), range);
                 continue;
             }
         };
@@ -947,7 +961,7 @@ fn set(layout: &pango::Layout, spans: &[(Range<usize>, Span)]) -> Rc<[Set]> {
     let mut formulas = spans
         .iter()
         .filter_map(|(range, span)| match span {
-            Span::Formula(f) => Some((range.start, f)),
+            Span::Formula { formula, .. } => Some((range.start, formula)),
             _ => None,
         })
         .peekable();
@@ -1004,8 +1018,15 @@ mod tests {
         let (text, spans) = text_of(&runs, |tex, _| (tex != "bad").then(|| formula.clone()));
         assert_eq!(text, "• ab\u{FFFC}\n\u{FFFC}\n\\(bad\\)");
         assert_eq!(spans[0], ("• ".len().."• ab".len(), Span::Text(bold)));
-        assert_eq!(spans[1].1, Span::Formula(formula.clone()));
-        assert_eq!(&text[spans[2].0.clone()], "\u{FFFC}");
+        let laid = |display| Span::Formula {
+            formula: formula.clone(),
+            display,
+        };
+        assert_eq!(spans[1].1, laid(false));
+        assert_eq!(
+            (&text[spans[2].0.clone()], &spans[2].1),
+            ("\u{FFFC}", &laid(true))
+        );
         assert_eq!(
             (&text[spans[3].0.clone()], &spans[3].1),
             ("\\(bad\\)", &Span::Source)
