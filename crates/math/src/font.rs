@@ -100,6 +100,8 @@ pub(crate) enum Stretched {
 /// One glyph of a shaped run, in design units.
 pub(crate) struct Shaped {
     pub id: u16,
+    /// The byte in the run's text the glyph's cluster starts at.
+    pub cluster: usize,
     pub x_advance: f32,
     pub x_offset: f32,
     /// Up, as HarfBuzz has it.
@@ -130,7 +132,12 @@ pub struct MathFont {
     ssty: Vec<c_uint>,
     /// HarfBuzz walks a CFF charstring for every extents call; layout asks per glyph placed.
     ink: RefCell<HashMap<u16, Option<Ink>>>,
+    fallback: Option<Box<Fallback>>,
 }
+
+/// The caller's measure of text in a font of its own: a run's advance, and its ink above and
+/// below the baseline, at a size; see [`MathFont::set_fallback`].
+type Fallback = dyn Fn(&str, f32) -> Option<(f32, f32, f32)>;
 
 impl MathFont {
     /// The math font behind a HarfBuzz font, such as the one a Pango font draws with. Only its
@@ -217,8 +224,25 @@ impl MathFont {
                 units_per_em: upem as f32,
                 ssty,
                 ink: RefCell::default(),
+                fallback: None,
             })
         }
+    }
+
+    /// Have the characters this font lacks laid out by `measure`, the caller's own text stack,
+    /// which answers a run's advance and its ink above and below the baseline at a size. The run
+    /// becomes an [`Item::Text`](crate::Item::Text) the caller draws in the font it measured with.
+    /// Without a fallback such characters are left out.
+    pub fn set_fallback(
+        &mut self,
+        measure: impl Fn(&str, f32) -> Option<(f32, f32, f32)> + 'static,
+    ) {
+        self.fallback = Some(Box::new(measure));
+    }
+
+    /// `text`, characters this font lacks, measured at `size` by the caller's fallback.
+    pub(crate) fn fallback(&self, text: &str, size: f32) -> Option<(f32, f32, f32)> {
+        self.fallback.as_ref()?(text, size)
     }
 
     fn hb(&self) -> *mut hb::hb_font_t {
@@ -427,6 +451,7 @@ impl MathFont {
                     let (info, pos) = (&*infos.add(i), &*positions.add(i));
                     Shaped {
                         id: u16::try_from(info.codepoint).unwrap_or(0),
+                        cluster: info.cluster as usize,
                         x_advance: unscale(pos.x_advance),
                         x_offset: unscale(pos.x_offset),
                         y_offset: unscale(pos.y_offset),

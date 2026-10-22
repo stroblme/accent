@@ -27,6 +27,7 @@ fn sane(l: &Layout) -> bool {
         && l.items.iter().all(|i| match *i {
             Item::Glyph { x, y, size, .. } => [x, y, size].iter().all(|v| v.is_finite()),
             Item::Rule { x, y, w, h, .. } => [x, y, w, h].iter().all(|v| v.is_finite()),
+            Item::Text { x, y, size, .. } => [x, y, size].iter().all(|v| v.is_finite()),
         })
 }
 
@@ -35,7 +36,7 @@ fn glyphs(l: &Layout) -> Vec<(f32, f32)> {
         .iter()
         .filter_map(|i| match *i {
             Item::Glyph { x, size, .. } => Some((x, size)),
-            Item::Rule { .. } => None,
+            _ => None,
         })
         .collect()
 }
@@ -126,6 +127,26 @@ fn color_inks_its_glyph() {
         a: 255,
     });
     assert!(matches!(l.items[..], [Item::Glyph { color, .. }] if color == red));
+}
+
+/// A character the math font lacks is the caller's to measure and draw, and is left out where
+/// the caller has no fallback.
+#[test]
+fn missing_characters_fall_back() {
+    let mathml = accent_core::markdown::mathml(r"\text{a中b}", false).unwrap();
+    let root = parse(&mathml).unwrap();
+    let without = layout(&root, &font(), 16.0);
+    let mut fallback = font();
+    fallback.set_fallback(|text, size| (text == "中").then_some((size, 0.9 * size, 0.1 * size)));
+    let with = layout(&root, &fallback, 16.0);
+    assert!((with.width - without.width - 16.0).abs() < 0.01);
+    assert!(with.ascent >= 14.4 && with.descent >= 1.6);
+    let a = laid(r"\text{a}", false).width;
+    assert!(
+        matches!(&with.items[..], [Item::Glyph { .. }, Item::Text { text, x, .. }, Item::Glyph { .. }]
+            if text == "中" && (x - a).abs() < 0.01),
+        "{with:?}"
+    );
 }
 
 #[test]

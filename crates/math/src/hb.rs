@@ -68,7 +68,7 @@ pub struct hb_font_extents_t {
 pub struct hb_glyph_info_t {
     pub codepoint: hb_codepoint_t,
     mask: u32,
-    cluster: u32,
+    pub cluster: u32,
     var1: u32,
     var2: u32,
 }
