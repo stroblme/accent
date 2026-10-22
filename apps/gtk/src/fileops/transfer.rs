@@ -5,6 +5,7 @@ use super::paths::{at_free_name, child_path, free_path, topmost};
 use super::{Ops, batch_to, trash_all};
 use crate::dialogs::confirm;
 use crate::statusbar::Bytes;
+use accent_api::link::Stop;
 use accent_core::fs::{Walked, walk_copy};
 use accent_core::path::basename;
 use adw::prelude::*;
@@ -44,18 +45,20 @@ pub fn download_to(ops: &Rc<Ops>, rel: &str, dest: PathBuf) {
     let name = basename(&rel).to_string();
     let bytes = Arc::new(Bytes::default());
     let what = format!("Downloading {name}");
+    let stop = Stop::default();
     // Bytes over ssh, so off the main thread: a large PDF would otherwise freeze the window for
     // as long as the copy takes.
     glib::spawn_future_local(async move {
         let asked = format!("download {name}");
         let work = crate::work::attempt(&asked, {
-            let bytes = bytes.clone();
-            move || vault.download_with(&rel, &dest, &|done, total| bytes.set(done, total))
+            let (bytes, stop) = (bytes.clone(), stop.clone());
+            move || vault.download_with(&rel, &dest, &|done, total| bytes.set(done, total), &stop)
         });
         let line = move || Some(bytes.line(&what).unwrap_or_else(|| format!("{what}…")));
-        let done = counting_on(&ops, line, work).await;
+        let done = counting_on(&ops, line, &stop, work).await;
         (ops.toast)(&match done {
             Ok(()) => format!("Downloaded {name}"),
+            Err(_) if stop.stopped() => stopped_message("Download", 0, &[]),
             Err(why) => why,
         });
     });
@@ -155,31 +158,37 @@ fn send(ops: &Rc<Ops>, dir: &str, chosen: Vec<PathBuf>, replace: Vec<String>) {
     let count = Arc::new(Count::default());
     count.total.store(chosen.len(), Ordering::Relaxed);
     let line = batch_line("Uploading", &chosen, &count);
+    let stop = Stop::default();
     glib::spawn_future_local(async move {
         let work = crate::work::off_thread("upload", {
-            let count = count.clone();
+            let (count, stop) = (count.clone(), stop.clone());
             move || {
                 let (mut uploaded, mut failed) = (0, Vec::new());
                 for file in &chosen {
                     let Some(name) = local_name(file) else {
                         continue;
                     };
+                    if stop.stopped() {
+                        return (uploaded, failed, true);
+                    }
                     let to = child_path(&dir, &name);
                     let progress = |done, total| count.bytes.set(done, total);
-                    match vault.upload_with(file, &to, replace.contains(&name), &progress) {
+                    match vault.upload_with(file, &to, replace.contains(&name), &progress, &stop) {
                         Ok(()) => uploaded += 1,
+                        Err(_) if stop.stopped() => return (uploaded, failed, true),
                         Err(_) => failed.push(name),
                     }
                     count.done.fetch_add(1, Ordering::Relaxed);
                 }
-                (uploaded, failed)
+                (uploaded, failed, false)
             }
         });
-        let done = counting_on(&ops, line, work).await;
+        let done = counting_on(&ops, line, &stop, work).await;
         // Neither the tree nor the index is poked here: the watcher on the host reports what
         // landed, the same way it reports anything else written there.
         (ops.toast)(&match done {
-            Some((uploaded, failed)) => upload_message(uploaded, &failed),
+            Some((uploaded, failed, true)) => stopped_message("Upload", uploaded, &failed),
+            Some((uploaded, failed, false)) => upload_message(uploaded, &failed),
             None => "Cannot upload".to_string(),
         });
     });
@@ -195,9 +204,10 @@ pub fn import(ops: &Rc<Ops>, dir: &str, files: Vec<PathBuf>, cut: bool) {
     let (vault, dir, ops) = (ops.vault.clone(), dir.to_string(), ops.clone());
     let count = Arc::new(Count::default());
     let line = batch_line("Copying", &files, &count);
+    let stop = Stop::default();
     glib::spawn_future_local(async move {
         let work = crate::work::off_thread("copy", {
-            let count = count.clone();
+            let (count, stop) = (count.clone(), stop.clone());
             move || {
                 // Every name and every walk first, so the count has its total before the first
                 // file goes. A name is taken once chosen, or two pasted files of one name would
@@ -240,11 +250,12 @@ pub fn import(ops: &Rc<Ops>, dir: &str, files: Vec<PathBuf>, cut: bool) {
                     // Where a file pasted alone landed: its name, or the next free one when that
                     // was taken since. What a folder holds goes into the folder made for it.
                     let landed = RefCell::new(to.clone());
-                    let (sent, failed) = carry.send(
+                    let sent = carry.send(
                         |rel| vault.create_dir(rel, true),
                         |from, rel| {
                             let progress = |done, total| count.bytes.set(done, total);
-                            let upload = |rel: &str| vault.upload_with(from, rel, false, &progress);
+                            let upload =
+                                |rel: &str| vault.upload_with(from, rel, false, &progress, &stop);
                             let sent = match is_dir {
                                 true => upload(rel),
                                 false => at_free_name(
@@ -265,25 +276,31 @@ pub fn import(ops: &Rc<Ops>, dir: &str, files: Vec<PathBuf>, cut: bool) {
                             }
                             sent
                         },
+                        || stop.stopped(),
                     );
                     if cut {
                         carry.take_emptied();
                     }
-                    if !failed.contains(&to) {
+                    if !sent.failed.contains(&to) {
                         report.landed.push(landed.into_inner());
                         report.folders |= is_dir;
                     }
-                    report.files += sent;
+                    report.files += sent.files;
                     report
                         .failed
-                        .extend(failed.iter().map(|rel| inside(&dir, rel)));
+                        .extend(sent.failed.iter().map(|rel| inside(&dir, rel)));
+                    if sent.stopped {
+                        return (report, true);
+                    }
                 }
-                report
+                (report, false)
             }
         });
-        let done = counting_on(&ops, line, work).await;
+        let done = counting_on(&ops, line, &stop, work).await;
+        let what = if cut { "Move" } else { "Copy" };
         (ops.toast)(&match done {
-            Some(report) => report.message(cut),
+            Some((report, true)) => stopped_message(what, report.files, &report.failed),
+            Some((report, false)) => report.message(cut),
             None => "Cannot paste".to_string(),
         });
     });
@@ -373,53 +390,63 @@ fn carry(
     moving: bool,
 ) {
     let (source, vault) = (from.vault.clone(), ops.vault.clone());
-    let verb = match (source.is_remote(), vault.is_remote()) {
-        (true, false) => "Downloading",
-        (false, true) => "Uploading",
-        _ => "Copying",
+    let (verb, what) = match (source.is_remote(), vault.is_remote()) {
+        (true, false) => ("Downloading", "Download"),
+        (false, true) => ("Uploading", "Upload"),
+        _ => ("Copying", "Copy"),
     };
+    let what = if moving { "Move" } else { what };
     let count = Arc::new(Count::default());
     let total = carried.iter().map(|(.., carry)| carry.files.len()).sum();
     count.total.store(total, Ordering::Relaxed);
     let names: Vec<PathBuf> = carried.iter().map(|(rel, ..)| rel.into()).collect();
     let line = batch_line(verb, &names, &count);
     let (ops, from, dir) = (ops.clone(), from.clone(), dir.to_string());
+    let stop = Stop::default();
     glib::spawn_future_local(async move {
         let work = crate::work::off_thread("copy", {
-            let count = count.clone();
+            let (count, stop) = (count.clone(), stop.clone());
             move || {
                 let (mut report, mut whole) = (Imported::default(), Vec::new());
                 for (rel, to, is_dir, carry) in carried {
-                    let (sent, failed) = carry.send(
+                    let sent = carry.send(
                         |rel| vault.create_dir(rel, true),
                         |from, rel| {
                             let progress = |done, total| count.bytes.set(done, total);
                             let over = replace.iter().any(|r| r == rel);
-                            let sent = source.copy_to(from, &vault, rel, over, &progress);
+                            let sent = source.copy_to(from, &vault, rel, over, &progress, &stop);
                             count.done.fetch_add(1, Ordering::Relaxed);
                             sent
                         },
+                        || stop.stopped(),
                     );
-                    if !failed.contains(&to) {
+                    if !sent.failed.contains(&to) {
                         report.landed.push(to);
                         report.folders |= is_dir;
                     }
-                    if failed.is_empty() {
+                    // Only a path that all landed leaves its vault on a move.
+                    if sent.failed.is_empty() && !sent.stopped {
                         whole.push(rel);
                     }
-                    report.files += sent;
+                    report.files += sent.files;
                     report
                         .failed
-                        .extend(failed.iter().map(|rel| inside(&dir, rel)));
+                        .extend(sent.failed.iter().map(|rel| inside(&dir, rel)));
+                    if sent.stopped {
+                        return (report, whole, true);
+                    }
                 }
-                (report, whole)
+                (report, whole, false)
             }
         });
-        let done = counting_on(&ops, line, work).await;
-        let Some((report, whole)) = done else {
+        let done = counting_on(&ops, line, &stop, work).await;
+        let Some((report, whole, stopped)) = done else {
             return (ops.toast)("Cannot copy");
         };
-        (ops.toast)(&report.message(false));
+        (ops.toast)(&match stopped {
+            true => stopped_message(what, report.files, &report.failed),
+            false => report.message(false),
+        });
         if moving && !whole.is_empty() {
             trash_all(&from, whole);
         }
@@ -476,15 +503,17 @@ fn batch_line(
     }
 }
 
-/// [`crate::statusbar::counting`] on the window's status bar, through `ops`.
+/// [`crate::statusbar::counting`] on the window's status bar, through `ops`, with `stop` behind
+/// the line's Stop.
 async fn counting_on<T>(
     ops: &Rc<Ops>,
     line: impl Fn() -> Option<String> + 'static,
+    stop: &Stop,
     work: impl std::future::Future<Output = T>,
 ) -> T {
-    let (say, retell) = (ops.clone(), ops.clone());
+    let (say, retell, stop) = (ops.clone(), ops.clone(), stop.clone());
     crate::statusbar::counting(
-        move |text, running| (say.transferring)(text, running),
+        move |text, running| (say.transferring)(text, running, &stop),
         move |from, to| (retell.transfer_count)(from, to),
         line,
         work,
@@ -519,14 +548,19 @@ impl<S> Carry<S> {
     }
 
     /// Make the folders, then send the files, keeping whatever lands when a later step fails, as a
-    /// file manager does. Answers how many files landed and what did not, by where it would have
-    /// landed: a folder that could not be made is named once, and nothing under it is tried.
+    /// file manager does, until `stopped` says to go no further. A folder that could not be made
+    /// is named once among what failed, and nothing under it is tried; the step a stop cut short
+    /// failed for no reason of its own, and is not named.
     fn send(
         &self,
         make_dir: impl Fn(&str) -> accent_api::Result<()>,
         send: impl Fn(&S, &str) -> accent_api::Result<()>,
-    ) -> (usize, Vec<String>) {
-        let mut failed = self.unread.clone();
+        stopped: impl Fn() -> bool,
+    ) -> Sent {
+        let mut sent = Sent {
+            failed: self.unread.clone(),
+            ..Sent::default()
+        };
         let under = |rel: &str, failed: &[String]| {
             failed.iter().any(|f| {
                 rel.strip_prefix(f.as_str())
@@ -534,22 +568,51 @@ impl<S> Carry<S> {
             })
         };
         for (_, rel) in &self.dirs {
-            if !under(rel, &failed) && make_dir(rel).is_err() {
-                failed.push(rel.clone());
-            }
-        }
-        let mut sent = 0;
-        for (from, rel) in &self.files {
-            if under(rel, &failed) {
+            if under(rel, &sent.failed) {
                 continue;
             }
-            match send(from, rel) {
-                Ok(()) => sent += 1,
-                Err(_) => failed.push(rel.clone()),
+            if stopped() {
+                return Sent {
+                    stopped: true,
+                    ..sent
+                };
+            }
+            if make_dir(rel).is_err() {
+                sent.failed.push(rel.clone());
             }
         }
-        (sent, failed)
+        for (from, rel) in &self.files {
+            if under(rel, &sent.failed) {
+                continue;
+            }
+            if stopped() {
+                return Sent {
+                    stopped: true,
+                    ..sent
+                };
+            }
+            match send(from, rel) {
+                Ok(()) => sent.files += 1,
+                Err(_) if stopped() => {
+                    return Sent {
+                        stopped: true,
+                        ..sent
+                    };
+                }
+                Err(_) => sent.failed.push(rel.clone()),
+            }
+        }
+        sent
     }
+}
+
+/// What [`Carry::send`] did: how many files landed, what did not by where it would have landed,
+/// and whether a stop ended it before every step was tried.
+#[derive(Debug, Default)]
+struct Sent {
+    files: usize,
+    failed: Vec<String>,
+    stopped: bool,
 }
 
 impl Carry<PathBuf> {
@@ -636,6 +699,19 @@ fn upload_message(uploaded: usize, failed: &[String]) -> String {
             file_count(n),
             listed_names(failed)
         ),
+    }
+}
+
+/// What the toast says after a stop: `what` was stopped, after how many files had landed, then
+/// the ones that had failed before it, by name.
+fn stopped_message(what: &str, files: usize, failed: &[String]) -> String {
+    let stopped = match files {
+        0 => format!("{what} stopped"),
+        n => format!("{what} stopped after {}", file_count(n)),
+    };
+    match failed.is_empty() {
+        true => stopped,
+        false => format!("{stopped}, but not {}", listed_names(failed)),
     }
 }
 
@@ -760,7 +836,7 @@ mod tests {
             unread: vec!["P/locked".to_string()],
         };
         let made = std::cell::RefCell::new(Vec::new());
-        let (sent, failed) = carry.send(
+        let sent = carry.send(
             |rel| {
                 made.borrow_mut().push(rel.to_string());
                 match rel {
@@ -772,10 +848,57 @@ mod tests {
                 "P/c" => Err(accent_core::Error::Io("no".into()).into()),
                 _ => Ok(()),
             },
+            || false,
         );
-        assert_eq!(sent, 1, "P/a landed and stays");
+        assert_eq!(sent.files, 1, "P/a landed and stays");
         assert_eq!(*made.borrow(), ["P", "P/bad"]);
-        assert_eq!(failed, ["P/locked", "P/bad", "P/c"]);
+        assert_eq!(sent.failed, ["P/locked", "P/bad", "P/c"]);
+        assert!(!sent.stopped);
+    }
+
+    /// A stop between files keeps what landed and tries nothing more, and the file it cut short
+    /// is not named as one that failed.
+    #[test]
+    fn a_stop_keeps_what_landed_and_tries_nothing_more() {
+        let carry = Carry {
+            dirs: vec![("P".to_string(), "P".to_string())],
+            files: ["P/a", "P/b", "P/c"]
+                .map(|rel| (rel.to_string(), rel.to_string()))
+                .to_vec(),
+            unread: Vec::new(),
+        };
+        let (stop, tried) = (Stop::default(), RefCell::new(Vec::new()));
+        let send = |_: &String, rel: &str| {
+            tried.borrow_mut().push(rel.to_string());
+            match rel {
+                // The stop comes while P/b is on its way, and kills its copy.
+                "P/b" => {
+                    stop.stop();
+                    Err(accent_core::Error::Io("killed".into()).into())
+                }
+                _ => Ok(()),
+            }
+        };
+        let sent = carry.send(|_| Ok(()), send, || stop.stopped());
+        assert_eq!(*tried.borrow(), ["P/a", "P/b"]);
+        assert_eq!((sent.files, sent.failed.len(), sent.stopped), (1, 0, true));
+
+        // Stopped before it starts, it makes no folder either.
+        let sent = carry.send(|_| panic!("a folder made after the stop"), send, || true);
+        assert_eq!((sent.files, sent.stopped), (0, true));
+    }
+
+    #[test]
+    fn a_stopped_batch_says_how_far_it_got() {
+        assert_eq!(stopped_message("Download", 0, &[]), "Download stopped");
+        assert_eq!(
+            stopped_message("Upload", 2, &[]),
+            "Upload stopped after 2 files"
+        );
+        assert_eq!(
+            stopped_message("Copy", 1, &["a.png".into()]),
+            "Copy stopped after 1 file, but not a.png"
+        );
     }
 
     /// A Cut takes away the folders its files left empty, and what did not go stays where it was,

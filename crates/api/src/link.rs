@@ -4,8 +4,8 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::ssh::{self, Url};
@@ -258,25 +258,74 @@ fn upload(
         Some(0.0),
     );
     let argv = ssh::run(url, ctl, &ssh::install_server_cmd(hash, total));
-    send(&argv, bytes.as_slice(), total as u64, &|done, total| {
-        match done < total {
-            true => say(
-                &format!(
-                    "Uploading the server ({} / {} MB)",
-                    mb(done as usize),
-                    mb(total as usize)
-                ),
-                Some(done as f64 / total as f64),
+    let progress = |done, total| match done < total {
+        true => say(
+            &format!(
+                "Uploading the server ({} / {} MB)",
+                mb(done as usize),
+                mb(total as usize)
             ),
-            // The bytes are all written, and the host is still unpacking them: without this the
-            // bar would sit full for seconds under a message saying the upload had finished.
-            false => say("Installing the server", None),
-        }
-    })
+            Some(done as f64 / total as f64),
+        ),
+        // The bytes are all written, and the host is still unpacking them: without this the
+        // bar would sit full for seconds under a message saying the upload had finished.
+        false => say("Installing the server", None),
+    };
+    send(
+        &argv,
+        bytes.as_slice(),
+        total as u64,
+        &progress,
+        &Stop::default(),
+    )
     .map_err(|e| Error::Remote(format!("cannot install the server: {e}")))
 }
 
-/// Run `argv` and stream `input` in chunks, reporting bytes written of `total`.
+/// Stops a copy to or from a host from another thread: [`Stop::stop`] kills the ssh child moving
+/// the bytes, so the file in flight is cut short and lands nowhere (the host's temporary of
+/// [`ssh::put_cmd`], a download's `.part`), and a caller copying several files asks
+/// [`Stop::stopped`] between them.
+#[derive(Clone, Default)]
+pub struct Stop(Arc<Stopping>);
+
+#[derive(Default)]
+struct Stopping {
+    stopped: AtomicBool,
+    /// The child moving bytes right now, if one is.
+    child: Mutex<Option<Child>>,
+}
+
+impl Stop {
+    /// Kill the child moving bytes, and every one held after this.
+    pub fn stop(&self) {
+        self.0.stopped.store(true, Ordering::SeqCst);
+        if let Some(child) = locked(&self.0.child).as_mut() {
+            let _ = child.kill();
+        }
+    }
+
+    pub fn stopped(&self) -> bool {
+        self.0.stopped.load(Ordering::SeqCst)
+    }
+
+    /// Run `work` while a stop can kill `child`, then hand the child back to be waited for. It is
+    /// taken back before it is reaped, so a kill never reaches a process given its pid since.
+    pub(crate) fn holding<T>(&self, child: Child, work: impl FnOnce() -> T) -> (Child, T) {
+        {
+            let mut held = locked(&self.0.child);
+            let child = held.insert(child);
+            // A stop that came before the child did, and found nothing to kill.
+            if self.stopped() {
+                let _ = child.kill();
+            }
+        }
+        let answer = work();
+        let child = locked(&self.0.child).take().expect("the child held above");
+        (child, answer)
+    }
+}
+
+/// Run `argv` and stream `input` in chunks, reporting bytes written of `total`, until `stop`.
 /// On write failure, use SSH stderr rather than the resulting broken-pipe error.
 /// SSH exit 255 maps to [`Error::Offline`] and [`ssh::TAKEN`] to `AlreadyExists`, the command
 /// naming what was taken; other failures belong to the command.
@@ -285,6 +334,7 @@ pub(crate) fn send(
     mut input: impl Read,
     total: u64,
     progress: &dyn Fn(u64, u64),
+    stop: &Stop,
 ) -> Result<()> {
     let mut child = command(argv)
         .stdin(Stdio::piped())
@@ -292,12 +342,10 @@ pub(crate) fn send(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(no_ssh)?;
-    let written = (|| -> std::io::Result<()> {
+    let stdin = child.stdin.take();
+    let (child, written) = stop.holding(child, || -> std::io::Result<()> {
         // Dropped on the way out, which closes the pipe: the host's `cat` ends there.
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| std::io::Error::other("ssh has no stdin"))?;
+        let mut stdin = stdin.ok_or_else(|| std::io::Error::other("ssh has no stdin"))?;
         let (mut buf, mut done) = (vec![0; CHUNK], 0);
         loop {
             let n = input.read(&mut buf)?;
@@ -308,7 +356,7 @@ pub(crate) fn send(
             done += n as u64;
             progress(done, total);
         }
-    })();
+    });
     let out = child.wait_with_output().map_err(no_ssh)?;
     let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
     match (written, out.status.success()) {
@@ -401,7 +449,7 @@ mod tests {
     fn a_transfer_the_link_dropped_is_offline() {
         let sent = |script: &str| {
             let argv = ["sh", "-c", script].map(String::from);
-            send(&argv, &b"bytes"[..], 5, &|_, _| ()).unwrap_err()
+            send(&argv, &b"bytes"[..], 5, &|_, _| (), &Stop::default()).unwrap_err()
         };
         assert_eq!(
             sent("cat >/dev/null; echo lost >&2; exit 255"),
@@ -498,8 +546,36 @@ mod tests {
             "echo 'Permission denied (publickey).' >&2; exit 255",
         ]
         .map(String::from);
-        let err = send(&argv, &[0u8; 1 << 20][..], 1 << 20, &|_, _| ()).unwrap_err();
+        let err = send(
+            &argv,
+            &[0u8; 1 << 20][..],
+            1 << 20,
+            &|_, _| (),
+            &Stop::default(),
+        )
+        .unwrap_err();
         assert_eq!(err.to_string(), "Permission denied (publickey).");
+    }
+
+    /// A stop kills the child moving the bytes, so a copy that would run for half a minute ends at
+    /// once, mid-file; one stopped before it starts ends at once too.
+    #[test]
+    fn a_stop_cuts_a_transfer_short_mid_file() {
+        // `exec`, so the child is the one holding the pipe, as ssh is.
+        let argv = ["sh", "-c", "exec sleep 30"].map(String::from);
+        let endless = || std::io::repeat(0);
+        let stop = Stop::default();
+        let t = std::time::Instant::now();
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(QUEUED);
+                stop.stop();
+            });
+            assert!(send(&argv, endless(), u64::MAX, &|_, _| (), &stop).is_err());
+        });
+        assert!(stop.stopped());
+        assert!(send(&argv, endless(), u64::MAX, &|_, _| (), &stop).is_err());
+        assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
     }
 
     #[test]

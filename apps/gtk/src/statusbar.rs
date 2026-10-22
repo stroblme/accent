@@ -8,6 +8,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use accent_api::link::Stop;
 use gtk::glib;
 use gtk::prelude::*;
 
@@ -39,15 +40,19 @@ pub struct Bar {
     /// the vault indexes leaves the indexing line, where one shared slot kept "Opening the
     /// document…" until the walk next reported, 22 s on the Mac.
     opening: Cell<bool>,
-    transfers: RefCell<Vec<String>>,
+    /// Each copy's line, newest last, and its Stop where the reader can stop it.
+    transfers: RefCell<Vec<(String, Option<Stop>)>>,
     /// Delayed language-server startup and subsequent checking progress for the active tab.
     starting: RefCell<Option<String>>,
     checking: RefCell<Option<String>>,
     provider_busy: RefCell<Option<String>>,
-    /// Indexing Stop/Resume control beside progress. Transfers and suggestion indexing cannot be stopped here.
+    /// Indexing Stop/Resume control beside progress. Suggestion indexing cannot be stopped here.
     index: gtk::Button,
     index_label: gtk::Label,
     indexing: Cell<Indexing>,
+    /// Stop for the copy whose line is shown, and that copy's [`Stop`].
+    transfer_stop: gtk::Button,
+    shown_stop: Rc<RefCell<Option<Stop>>>,
     /// Branch readout and Sync control.
     branch: gtk::Button,
     branch_label: gtk::Label,
@@ -78,6 +83,22 @@ impl Bar {
         // would be an action for one button, and the window wires it in `wire_window`.
         let index_label = label(false);
         let index = bar_button(&index_label, None, "");
+        // A copy's Stop needs nothing from the window, so it is wired here.
+        let stop_label = label(false);
+        stop_label.set_label("Stop");
+        stop_label.set_visible(true);
+        let transfer_stop =
+            bar_button(&stop_label, None, "Stop copying; files already copied stay");
+        let shown_stop: Rc<RefCell<Option<Stop>>> = Rc::default();
+        transfer_stop.connect_clicked({
+            let shown = shown_stop.clone();
+            move |button| {
+                if let Some(stop) = shown.borrow().as_ref() {
+                    stop.stop();
+                }
+                button.set_visible(false);
+            }
+        });
         // The branch is the Sync control as well as the readout: it names the repository the
         // document sits in, and clicking it pulls and pushes that one (DESIGN.md, Layout map).
         let branch_label = label(true);
@@ -100,6 +121,7 @@ impl Bar {
 
         row.append(&progress);
         row.append(&index);
+        row.append(&transfer_stop);
         row.append(&branch);
         // The file's own facts sit at the far end, away from what the window is busy with.
         kind.set_hexpand(true);
@@ -123,6 +145,8 @@ impl Bar {
             index,
             index_label,
             indexing: Cell::new(Indexing::Idle),
+            transfer_stop,
+            shown_stop,
             branch,
             branch_label,
             kind,
@@ -204,12 +228,22 @@ impl Bar {
     /// Start or end a transfer readout, also used while closing waits for Git.
     /// Single files report activity without stat calls; batches count files through [`Bar::retell_transfer`].
     pub fn set_transfer(&self, text: &str, running: bool) {
+        self.transfer(text, running, None);
+    }
+
+    /// [`set_transfer`](Self::set_transfer) for a copy the reader started, which the Stop beside
+    /// its line stops.
+    pub fn set_stoppable(&self, text: &str, running: bool, stop: &Stop) {
+        self.transfer(text, running, Some(stop));
+    }
+
+    fn transfer(&self, text: &str, running: bool, stop: Option<&Stop>) {
         {
             let mut transfers = self.transfers.borrow_mut();
             match running {
-                true => transfers.push(text.to_string()),
+                true => transfers.push((text.to_string(), stop.cloned())),
                 false => {
-                    if let Some(at) = transfers.iter().position(|t| t == text) {
+                    if let Some(at) = transfers.iter().position(|(t, _)| t == text) {
                         transfers.remove(at);
                     }
                 }
@@ -221,7 +255,12 @@ impl Bar {
     /// A running copy's line says something new, in its place among the others: how many of its
     /// files a batch has sent ("Copying Photos… 12/120 files").
     pub fn retell_transfer(&self, from: &str, to: &str) {
-        if let Some(line) = self.transfers.borrow_mut().iter_mut().find(|t| *t == from) {
+        if let Some((line, _)) = self
+            .transfers
+            .borrow_mut()
+            .iter_mut()
+            .find(|(t, _)| t == from)
+        {
             *line = to.to_string();
         }
         self.show_busy();
@@ -237,6 +276,12 @@ impl Bar {
         }
     }
 
+    /// The Stop beside a copy's line, for the drills.
+    #[cfg(feature = "bench")]
+    pub fn transfer_stop(&self) -> &gtk::Button {
+        &self.transfer_stop
+    }
+
     /// Choose progress text by priority: vault work, an open, newest transfer, active server startup/checking, then suggestions.
     /// Keep user-requested work ahead of background conveniences.
     fn show_busy(&self) {
@@ -245,17 +290,23 @@ impl Bar {
         let starting = self.starting.borrow();
         let checking = self.checking.borrow();
         let provider = self.provider_busy.borrow();
-        let transfer = transfers.last().map(String::as_str);
+        let ahead = vault.is_some() || self.opening.get();
+        let transfer = transfers.last().filter(|_| !ahead);
         set(
             &self.progress,
             vault
                 .as_deref()
                 .or(self.opening.get().then_some(OPENING))
-                .or(transfer)
+                .or(transfer.map(|(line, _)| line.as_str()))
                 .or(starting.as_deref())
                 .or(checking.as_deref())
                 .or(provider.as_deref()),
         );
+        // The Stop goes with the line it stops, and once pressed stays gone.
+        let stop = transfer.and_then(|(_, stop)| stop.clone());
+        self.transfer_stop
+            .set_visible(stop.as_ref().is_some_and(|stop| !stop.stopped()));
+        *self.shown_stop.borrow_mut() = stop;
     }
 
     /// Show the active document repository's branch, upstream counts and uncommitted-work dot.

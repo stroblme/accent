@@ -66,8 +66,9 @@ pub struct Ops {
     pub vault: Arc<Vault>,
     pub window: adw::ApplicationWindow,
     pub toast: Box<dyn Fn(&str)>,
-    /// Say in the status bar that a copy to or from the host is running (`true`) or over.
-    pub transferring: Box<dyn Fn(&str, bool)>,
+    /// Say in the status bar that a copy to or from the host is running (`true`) or over, and
+    /// what its Stop stops.
+    pub transferring: Box<dyn Fn(&str, bool, &accent_api::link::Stop)>,
     /// Change a running copy's line in the status bar, from the first text to the second: a
     /// batch's count of the files it has sent.
     pub transfer_count: Box<dyn Fn(&str, &str)>,

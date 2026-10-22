@@ -108,6 +108,51 @@ fn land(part: &Path, dest: &Path, replace: bool) -> Result<()> {
     landed.map_err(|e| cached(dest, e))
 }
 
+/// Stream `child`'s stdout into `dest` in chunks, reporting bytes of `total`, until `stop`.
+/// Write a neighboring `.part` file and [`land`] it only when complete, preserving
+/// the last good copy on interruption, a stop included, and existing readers' open files.
+fn receive_from(
+    mut child: Child,
+    dest: &Path,
+    total: u64,
+    replace: bool,
+    progress: &dyn Fn(u64, u64),
+    stop: &link::Stop,
+) -> Result<()> {
+    let mut part = dest.as_os_str().to_owned();
+    part.push(".part");
+    let part = PathBuf::from(part);
+    let stdout = child.stdout.take();
+    let (child, received) = stop.holding(child, || -> std::io::Result<()> {
+        let mut stdout = stdout.ok_or_else(|| std::io::Error::other("ssh has no stdout"))?;
+        let mut out = std::fs::File::create(&part)?;
+        let (mut buf, mut done) = (vec![0; CHUNK], 0);
+        loop {
+            let n = stdout.read(&mut buf)?;
+            if n == 0 {
+                return Ok(());
+            }
+            out.write_all(&buf[..n])?;
+            done += n as u64;
+            progress(done, total);
+        }
+    });
+    let out = child.wait_with_output().map_err(link::no_ssh)?;
+    let finished =
+        received
+            .map_err(|e| cached(&part, e))
+            .and_then(|()| match out.status.success() {
+                true => land(&part, dest, replace),
+                false => Err(Error::Remote(
+                    String::from_utf8_lossy(&out.stderr).trim().to_string(),
+                )),
+            });
+    if finished.is_err() {
+        let _ = std::fs::remove_file(&part);
+    }
+    finished
+}
+
 /// Rename `from` to `to` unless something holds `to`, a dangling link included.
 #[cfg(target_os = "linux")]
 fn rename_new(from: &Path, to: &Path) -> std::io::Result<()> {
@@ -572,7 +617,14 @@ impl Remote {
         if let Some(dir) = dest.parent() {
             std::fs::create_dir_all(dir).map_err(|e| cached(dir, e))?;
         }
-        self.receive(rel, &dest, current.size, true, progress)?;
+        self.receive(
+            rel,
+            &dest,
+            current.size,
+            true,
+            progress,
+            &link::Stop::default(),
+        )?;
         // A copy fetched afresh holds no page edit made here, so none waits on it for the notes.
         if let Some(edits) = ssh::relink_path(&self.url, rel) {
             let _ = std::fs::remove_file(edits);
@@ -612,7 +664,7 @@ impl Remote {
         if Some(current) != stamped.map(|s| s.host) {
             return Ok(self.push_beside(&dest, rel));
         }
-        let copy = self.send(&dest, rel, true, &|_, _| ())?;
+        let copy = self.send(&dest, rel, true, &|_, _| (), &link::Stop::default())?;
         if let Ok(Some(host)) = self.call::<Option<crate::Etag>>("stat", json!([rel])) {
             let _ = stamp.set(&Stamped { host, copy });
         }
@@ -653,7 +705,7 @@ impl Remote {
     /// `.kept.pdf` copy and report it.
     fn push_beside(&self, dest: &Path, rel: &str) -> Pushed {
         let sent = self.free_edited_name(rel).and_then(|name| {
-            let copy = self.send(dest, &name, false, &|_, _| ())?;
+            let copy = self.send(dest, &name, false, &|_, _| (), &link::Stop::default())?;
             Ok((name, copy))
         });
         match sent {
@@ -699,19 +751,20 @@ impl Remote {
     /// Copy a local file into the vault, over the file at `rel` when `replace` and otherwise to a
     /// name nothing holds. The remote watcher indexes it as it lands.
     pub fn upload(&self, local: &Path, rel: &str, replace: bool) -> Result<()> {
-        self.upload_with(local, rel, replace, &|_, _| ())
+        self.upload_with(local, rel, replace, &|_, _| (), &link::Stop::default())
     }
 
     /// [`upload`](Self::upload), read and sent a chunk at a time, telling `progress` the bytes
-    /// sent so far and how many there are.
+    /// sent so far and how many there are, until `stop`.
     pub fn upload_with(
         &self,
         local: &Path,
         rel: &str,
         replace: bool,
         progress: &dyn Fn(u64, u64),
+        stop: &link::Stop,
     ) -> Result<()> {
-        self.send(local, rel, replace, progress).map(|_| ())
+        self.send(local, rel, replace, progress, stop).map(|_| ())
     }
 
     /// Send a local file to host `rel`. With `replace`, require the destination
@@ -724,6 +777,7 @@ impl Remote {
         rel: &str,
         replace: bool,
         progress: &dyn Fn(u64, u64),
+        stop: &link::Stop,
     ) -> Result<crate::Etag> {
         let unread = |e| accent_core::Error::io(local.display(), e);
         let file = std::fs::File::open(local).map_err(unread)?;
@@ -733,6 +787,7 @@ impl Remote {
             file,
             sent.size,
             progress,
+            stop,
         )?;
         Ok(sent)
     }
@@ -743,7 +798,14 @@ impl Remote {
     /// Notification failure does not fail the write; the watcher still indexes it.
     pub fn write_file(&self, rel: &str, bytes: &[u8]) -> Result<()> {
         let size = bytes.len() as u64;
-        link::send(&self.put_into(rel, size, false), bytes, size, &|_, _| ())?;
+        let never = link::Stop::default();
+        link::send(
+            &self.put_into(rel, size, false),
+            bytes,
+            size,
+            &|_, _| (),
+            &never,
+        )?;
         if let Err(e) = self.call::<()>("wrote", json!([rel])) {
             tracing::debug!("telling the host's index of {rel}: {e}");
         }
@@ -758,26 +820,28 @@ impl Remote {
 
     /// Copy a file out of the vault to somewhere on this machine.
     pub fn download(&self, rel: &str, dest: &Path) -> Result<()> {
-        self.download_with(rel, dest, true, &|_, _| ())
+        self.download_with(rel, dest, true, &|_, _| (), &link::Stop::default())
     }
 
     /// [`download`](Self::download), telling `progress` the bytes received so far and how many
-    /// there are, as they arrive. Over whatever is at `dest` when `replace`; otherwise only where
-    /// nothing is, a taken name failing with `AlreadyExists`.
+    /// there are, as they arrive, until `stop`. Over whatever is at `dest` when `replace`;
+    /// otherwise only where nothing is, a taken name failing with `AlreadyExists`.
     pub fn download_with(
         &self,
         rel: &str,
         dest: &Path,
         replace: bool,
         progress: &dyn Fn(u64, u64),
+        stop: &link::Stop,
     ) -> Result<()> {
         let size: Option<crate::Etag> = self.call("stat", json!([rel]))?;
         let size = size.map_or(0, |etag| etag.size);
-        self.receive(rel, dest, size, replace, progress)
+        self.receive(rel, dest, size, replace, progress, stop)
     }
 
     /// Copy host `rel` to `to_rel` on `to`'s host, piped through this machine: this host's `cat`
-    /// into the other's upload ([`ssh::put_cmd`]), so neither host has to reach the other.
+    /// into the other's upload ([`ssh::put_cmd`]), so neither host has to reach the other. A stop
+    /// kills the upload, and the `cat` ends on the pipe it then writes into.
     pub fn send_to(
         &self,
         rel: &str,
@@ -785,6 +849,7 @@ impl Remote {
         to_rel: &str,
         replace: bool,
         progress: &dyn Fn(u64, u64),
+        stop: &link::Stop,
     ) -> Result<()> {
         let size: Option<crate::Etag> = self.call("stat", json!([rel]))?;
         let size = size
@@ -795,7 +860,13 @@ impl Remote {
             .stdout
             .take()
             .ok_or_else(|| Error::Remote("ssh has no stdout".to_string()))?;
-        let sent = link::send(&to.put_into(to_rel, size, replace), stdout, size, progress);
+        let sent = link::send(
+            &to.put_into(to_rel, size, replace),
+            stdout,
+            size,
+            progress,
+            stop,
+        );
         let out = child.wait_with_output().map_err(link::no_ssh)?;
         // A read that failed here cuts the upload short there, and says why it did.
         let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
@@ -819,9 +890,7 @@ impl Remote {
         .map_err(link::no_ssh)
     }
 
-    /// Stream host `rel` into `dest` in chunks, reporting bytes of `total`.
-    /// Write a neighboring `.part` file and [`land`] it only when complete, preserving
-    /// the last good copy on interruption and existing readers' open files.
+    /// Stream host `rel` into `dest` ([`receive_from`]).
     fn receive(
         &self,
         rel: &str,
@@ -829,42 +898,9 @@ impl Remote {
         total: u64,
         replace: bool,
         progress: &dyn Fn(u64, u64),
+        stop: &link::Stop,
     ) -> Result<()> {
-        let mut child = self.cat(rel)?;
-        let mut part = dest.as_os_str().to_owned();
-        part.push(".part");
-        let part = PathBuf::from(part);
-        let received = (|| -> std::io::Result<()> {
-            let mut stdout = child
-                .stdout
-                .take()
-                .ok_or_else(|| std::io::Error::other("ssh has no stdout"))?;
-            let mut out = std::fs::File::create(&part)?;
-            let (mut buf, mut done) = (vec![0; CHUNK], 0);
-            loop {
-                let n = stdout.read(&mut buf)?;
-                if n == 0 {
-                    return Ok(());
-                }
-                out.write_all(&buf[..n])?;
-                done += n as u64;
-                progress(done, total);
-            }
-        })();
-        let out = child.wait_with_output().map_err(link::no_ssh)?;
-        let finished =
-            received
-                .map_err(|e| cached(&part, e))
-                .and_then(|()| match out.status.success() {
-                    true => land(&part, dest, replace),
-                    false => Err(Error::Remote(
-                        String::from_utf8_lossy(&out.stderr).trim().to_string(),
-                    )),
-                });
-        if finished.is_err() {
-            let _ = std::fs::remove_file(&part);
-        }
-        finished
+        receive_from(self.cat(rel)?, dest, total, replace, progress, stop)
     }
 
     fn remote_path(&self, rel: &str) -> String {
@@ -1180,9 +1216,37 @@ fn drain(stream: impl Read + Send + 'static) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Stamp, Stamped, carry, edited_name, kept_path, land, rename_new, uncache, unsent};
+    use super::{
+        Stamp, Stamped, carry, edited_name, kept_path, land, receive_from, rename_new, uncache,
+        unsent,
+    };
     use std::path::Path;
     use std::time::Duration;
+
+    /// A download stopped mid-file leaves neither the file nor its `.part`.
+    #[test]
+    fn a_stopped_download_leaves_nothing_behind() {
+        use std::process::{Command, Stdio};
+        let dir = tempfile::tempdir().unwrap();
+        // A first chunk, then a host that sends nothing more: `exec`, as ssh is the child.
+        let cat = Command::new("sh")
+            .args(["-c", "echo first; exec sleep 30"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stop = crate::link::Stop::default();
+        let dest = dir.path().join("a.pdf");
+        let received = std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(Duration::from_millis(200));
+                stop.stop();
+            });
+            receive_from(cat, &dest, 1 << 20, true, &|_, _| (), &stop)
+        });
+        assert!(received.is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
 
     /// A deleted file's cached copy goes with its stamp and the copy kept beside it, a deleted
     /// folder's with all of theirs, and the answer says whether one held edits the host never had.

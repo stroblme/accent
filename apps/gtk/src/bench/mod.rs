@@ -63,8 +63,8 @@ use diagnostics::bench_diagnostics;
 use diagram::bench_diagram;
 use export::bench_export;
 use files::{
-    bench_carry, bench_clip, bench_clip_outside, bench_close, bench_hidden, bench_paths,
-    bench_save_as, bench_templates, bench_transfer,
+    bench_carry, bench_clip, bench_clip_outside, bench_clip_stop, bench_close, bench_hidden,
+    bench_paths, bench_save_as, bench_templates, bench_transfer,
 };
 use find::bench_find;
 use folders::{
@@ -238,7 +238,8 @@ use tags::bench_tags;
 ///   exits 1 if anything survives.
 /// - `ACCENT_BENCH_CLIP=<rel_file>`: copy/cut, multi-file paste and link updates;
 ///   waits up to a minute per paste. `outside:<dir>`: external folder/file
-///   paste, with empty `<dir>` meaning root.
+///   paste, with empty `<dir>` meaning root. `stop:<dir>`: an external
+///   paste stopped from the status bar.
 /// - `ACCENT_BENCH_TRANSFER=<rel_pdf>`: remote open/download/upload byte counts.
 /// - `ACCENT_BENCH_CARRY=<local vault>`: on a remote vault, rows carried to and from a second
 ///   window on the local vault, as another window's tree drop hands them over.
@@ -595,6 +596,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         if let Some(rel) = clip {
             if let Some(dir) = rel.strip_prefix("outside:") {
                 return bench_clip_outside(&app, dir);
+            }
+            if let Some(dir) = rel.strip_prefix("stop:") {
+                return bench_clip_stop(&app, dir);
             }
             return bench_clip(&app, &rel);
         }
