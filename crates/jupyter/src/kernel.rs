@@ -446,11 +446,14 @@ mod tests {
     fn a_start_reclaims_abandoned_kernel_folders_without_touching_live_ones() {
         let tmp = tempfile::tempdir().unwrap();
         let (live, live_lock) = folder(tmp.path()).unwrap();
-        let (stale, stale_lock) = folder(tmp.path()).unwrap();
+        // A dead client's folder: a lock no process holds. Not one `folder` made and dropped: a
+        // test forking beside this one copies the open lock into its child until that execs.
+        let stale = tmp.path().join("accent-kernel-stale");
+        std::fs::create_dir(&stale).unwrap();
+        std::fs::write(stale.join("owner.lock"), "").unwrap();
         std::fs::write(stale.join("kernel.json"), "secret").unwrap();
         let old = tmp.path().join("accent-kernel-old");
         std::fs::create_dir(&old).unwrap();
-        drop(stale_lock);
 
         Kernel::sweep(tmp.path()).unwrap();
         assert!(live.exists());
@@ -550,8 +553,10 @@ mod tests {
             let result = next(&mut incomings, 30, |i| caused(i, &id, "execute_result")).await;
             assert_eq!(content(result).1["data"]["text/plain"], "'abc'");
 
-            let id = execute("import time; time.sleep(30)");
-            next(&mut incomings, 30, |i| caused(i, &id, "execute_input")).await;
+            // Interrupted once its print says the code runs: ipykernel says `execute_input` before
+            // it, and swallows a SIGINT that comes in between, with no `error` to say so.
+            let id = execute("print('sleeping'); import time; time.sleep(30)");
+            next(&mut incomings, 30, |i| caused(i, &id, "stream")).await;
             kernel.interrupt().unwrap();
             let error = next(&mut incomings, 5, |i| caused(i, &id, "error")).await;
             assert_eq!(content(error).1["ename"], "KeyboardInterrupt");
