@@ -44,6 +44,16 @@ pub enum Item {
         h: f32,
         color: Option<Color>,
     },
+    /// A straight stroke `thickness` wide from `(x, y)` to `(x2, y2)`: what `\not` sets across
+    /// a group.
+    Line {
+        x: f32,
+        y: f32,
+        x2: f32,
+        y2: f32,
+        thickness: f32,
+        color: Option<Color>,
+    },
     /// Characters the math font lacks, drawn at `size` in the font the caller measured them
     /// with ([`MathFont::set_fallback`]), the left end of their baseline at `(x, y)`.
     Text {
@@ -57,7 +67,14 @@ pub enum Item {
 
 impl Item {
     fn translate(&mut self, dx: f32, dy: f32) {
-        let (Item::Glyph { x, y, .. } | Item::Rule { x, y, .. } | Item::Text { x, y, .. }) = self;
+        if let Item::Line { x2, y2, .. } = self {
+            *x2 += dx;
+            *y2 += dy;
+        }
+        let (Item::Glyph { x, y, .. }
+        | Item::Rule { x, y, .. }
+        | Item::Line { x, y, .. }
+        | Item::Text { x, y, .. }) = self;
         *x += dx;
         *y += dy;
     }
@@ -320,7 +337,7 @@ fn layout_styled(ctx: &Ctx, styles: &StyleOverrides, children: &[Node]) -> MathB
 }
 
 /// The scope's border around its box, 0.06 em as pulldown-latex writes it (113) and the box
-/// grown by it, and its background behind the lot.
+/// grown by it, its background behind the lot, and its stroke over it.
 fn decorate(ctx: &Ctx, styles: &StyleOverrides, mut b: MathBox) -> MathBox {
     if let Some(color) = styles.border {
         let t = 0.06 * ctx.size;
@@ -350,6 +367,18 @@ fn decorate(ctx: &Ctx, styles: &StyleOverrides, mut b: MathBox) -> MathBox {
     if let Some(color) = styles.background {
         let (x, y, w, h, color) = (0.0, -b.ascent, b.width, b.ascent + b.descent, Some(color));
         b.items.insert(0, Item::Rule { x, y, w, h, color });
+    }
+    // From the bottom-left corner to the top-right, as `styles.css` strikes `mop-negated`
+    // through, as thick as pulldown-latex's rules.
+    if styles.strike {
+        b.items.push(Item::Line {
+            x: 0.0,
+            y: b.descent,
+            x2: b.width,
+            y2: -b.ascent,
+            thickness: 0.06 * ctx.size,
+            color: ctx.color,
+        });
     }
     b
 }
@@ -435,6 +464,10 @@ fn layout_table(ctx: &Ctx, rows: &[TableRow]) -> MathBox {
         .map(|(row, cells)| {
             if cells.is_empty() {
                 return (0.0, 0.0);
+            }
+            // The empty row between two `\hline`s is 0.1 em tall (`styles.css`).
+            if row.spacer && row.rule_above {
+                return (0.1 * em, 0.0);
             }
             let ascent = vpad + cells.iter().map(|c| c.0.ascent).fold(0.0, f32::max);
             let descent = vpad + cells.iter().map(|c| c.0.descent).fold(0.0, f32::max);

@@ -27,6 +27,7 @@ fn sane(l: &Layout) -> bool {
         && l.items.iter().all(|i| match *i {
             Item::Glyph { x, y, size, .. } => [x, y, size].iter().all(|v| v.is_finite()),
             Item::Rule { x, y, w, h, .. } => [x, y, w, h].iter().all(|v| v.is_finite()),
+            Item::Line { x, y, x2, y2, .. } => [x, y, x2, y2].iter().all(|v| v.is_finite()),
             Item::Text { x, y, size, .. } => [x, y, size].iter().all(|v| v.is_finite()),
         })
 }
@@ -66,6 +67,9 @@ const FORMULAS: &[&str] = &[
     r"\color{red}{x}",
     r"\fcolorbox{red}{yellow}{x}",
     r"\not\in",
+    r"a \not{a+b} c",
+    r"\begin{multline} a + b \\ c \\ d + e + f \end{multline}",
+    r"\begin{array}{c|c} a & b \\ \hline\hline c & d \end{array}",
     r"\mathbb R",
     r"\sin x",
     r"2\sin^2 x",
@@ -147,6 +151,46 @@ fn missing_characters_fall_back() {
             if text == "中" && (x - a).abs() < 0.01),
         "{with:?}"
     );
+}
+
+/// `\not` before a group strikes it through from its bottom-left corner to its top-right.
+#[test]
+fn a_negated_group_is_struck_through() {
+    let l = laid(r"\not{a+b}", false);
+    let close = |a: f32, b: f32| (a - b).abs() < 0.01;
+    assert!(
+        matches!(l.items.last(), Some(&Item::Line { x, y, x2, y2, .. })
+            if close(x, 0.0) && close(y, l.descent) && close(x2, l.width) && close(y2, -l.ascent)),
+        "{l:?}"
+    );
+}
+
+/// `multline` sets its first line left, its last right and the one between in the middle.
+#[test]
+fn multline_steps_its_lines() {
+    let l = laid(r"\begin{multline} a+b+c+d \\ e \\ f \end{multline}", true);
+    let g = glyphs(&l);
+    let (x0, xe, xf) = (g[0].0, g[7].0, g[8].0);
+    let (e, f) = (laid("e", false).width, laid("f", false).width);
+    assert!(x0.abs() < 0.01, "{g:?}");
+    assert!((xe + e / 2.0 - l.width / 2.0).abs() < 0.01, "{g:?}");
+    assert!((xf + f - l.width).abs() < 0.01, "{g:?}");
+}
+
+/// Two `\hline`s are 0.1 em apart, the row between them for room only.
+#[test]
+fn a_doubled_hline_is_two_close_rules() {
+    let l = laid(r"\begin{array}{c} a \\ \hline\hline b \end{array}", true);
+    let ys: Vec<f32> = l
+        .items
+        .iter()
+        .filter_map(|i| match *i {
+            Item::Rule { y, h, w, .. } if w > h => Some(y),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ys.len(), 2, "{l:?}");
+    assert!((ys[1] - ys[0] - 1.6).abs() < 0.01, "{ys:?}");
 }
 
 #[test]

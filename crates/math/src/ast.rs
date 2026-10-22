@@ -36,6 +36,8 @@ pub(crate) struct StyleOverrides {
     pub border: Option<Color>,
     /// The font size as a share of the size around (`<mo class="small">`).
     pub size: Option<f32>,
+    /// A stroke across the subtree's box (`\not` before a group).
+    pub strike: bool,
 }
 
 impl StyleOverrides {
@@ -148,6 +150,9 @@ pub(crate) struct TableRow {
     pub rule_above: bool,
     /// `style="height: …"`, the least height of the row.
     pub min_height: Option<Length>,
+    /// Only for room (`menv-nonumber`): the gap `\\[…]` asks for, or what keeps two `\hline`s
+    /// apart.
+    pub spacer: bool,
 }
 
 /// An `<mtd>`, its children an implied `mrow`.
