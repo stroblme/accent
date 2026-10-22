@@ -1,7 +1,8 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/lsp", "crates/dap", "crates/jupyter", "crates/api", "crates/drawio", "apps/cli", "apps/gtk", "android/ffi"]
+members = ["crates/core", "crates/lsp", "crates/dap", "crates/jupyter", "crates/api", "crates/drawio", "crates/math", "apps/cli", "apps/gtk", "android/ffi"]
 # apps/gtk needs gtk4/libadwaita dev headers; build it explicitly with `cargo build -p accent`.
+# crates/math links the system HarfBuzz (8.3.1 or newer), a desktop dependency as apps/gtk's are.
 # android/ffi is cross-compiled for the phone by `make android`, never by a desktop build.
 default-members = ["crates/core", "crates/lsp", "crates/dap", "crates/jupyter", "crates/api", "crates/drawio", "apps/cli"]
 
@@ -20,6 +21,7 @@ accent-dap = { path = "crates/dap" }
 accent-jupyter = { path = "crates/jupyter" }
 accent-api = { path = "crates/api" }
 accent-drawio = { path = "crates/drawio" }
+accent-math = { path = "crates/math" }
 anyhow = "1"
 thiserror = "2"
 # One runtime for the language servers now and the MCP server later; `crates/lsp` owns it.

@@ -27,8 +27,9 @@ jobs:
       # dependencies, so the missing GTK dev headers on this runner do not matter.
       - run: cargo fmt --all --check
       # apps/gtk links gtk4, libadwaita, gtksourceview5, webkit6 and libspelling, whose -devel
-      # packages ubuntu-latest does not carry. The gtk job below lints and tests it instead.
-      - run: cargo clippy --workspace --exclude accent --all-targets --locked --features accent-core/pdf -- -D warnings
+      # packages ubuntu-latest does not carry, and accent-math HarfBuzz 8.3.1's, which this job
+      # does not install. The gtk job below lints and tests both instead.
+      - run: cargo clippy --workspace --exclude accent --exclude accent-math --all-targets --locked --features accent-core/pdf -- -D warnings
       # debugpy is for accent-api's end-to-end debugger tests and ipykernel for accent-jupyter's
       # kernel test, which skip themselves without them: the distribution's, ipykernel 6 with
       # its PUB IOPub socket (the gtk job's 7 has XPUB).
@@ -66,6 +67,8 @@ jobs:
       - run: cargo clippy -p accent --locked -- -D warnings
       - run: cargo clippy -p accent --locked --features bench -- -D warnings
       - run: cargo test -p accent --locked --no-fail-fast
+      - run: cargo clippy -p accent-math --all-targets --locked -- -D warnings
+      - run: cargo test -p accent-math --locked --no-fail-fast
       # With the drills, which is the build `make smoke` runs.
       - run: cargo build --release --locked -p accent -p accent-cli --features accent/bench
       # The generator is a core example, not a CLI subcommand; `make vault` is its only caller.

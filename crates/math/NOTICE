@@ -1,0 +1,16 @@
+accent-math
+Copyright (C) 2026 the accent contributors. Licensed GPL-3.0-or-later.
+
+This crate contains code derived from formulary 0.3.0:
+
+    Copyright (c) 2026 Jeffrey T. Peckham (Ophymx)
+    https://github.com/ophymx/formulary
+    Licensed under the MIT license or the Apache License, Version 2.0, at your option
+    (see LICENSE-MIT and LICENSE-APACHE).
+
+The derived code was cut down to the MathML that pulldown-latex writes, moved from read-fonts,
+skrifa and harfrust onto the system HarfBuzz, and otherwise modified for accent. Each derived
+source file names, in its header, the formulary file it comes from.
+
+fonts/STIXTwoMath-Regular.otf is STIX Two Math, licensed under the SIL Open Font License 1.1
+(fonts/OFL.txt); fonts/README.md says where it is from.
