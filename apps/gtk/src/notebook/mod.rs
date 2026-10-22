@@ -56,12 +56,17 @@ pub struct NotebookTab {
     built_at: Cell<i64>,
     /// The cells within a screen of the view as of that frame.
     near: RefCell<Vec<Rc<CellView>>>,
-    /// The first cell reaching into the view at the last layout, and its top in the content.
+    /// The cell what shows was kept still by at the last layout, the first reaching into the view
+    /// or the one [`show`](Self::show) brought into it, and its top in the content.
     anchor: Cell<Option<(CellId, f64)>>,
     /// A cell whose caret is to be brought into view once its editor is laid out ([`show`]).
     ///
     /// [`show`]: Self::show
     reveal: Cell<Option<(CellId, Option<f64>)>>,
+    /// The cell [`show`](Self::show) brought into view, which the view keeps still in place of the
+    /// first cell in it until it is scrolled otherwise or another cell is selected, and the
+    /// scroll it was left at.
+    shown: Cell<Option<(CellId, f64)>>,
     layout_hook: RefCell<Option<(gdk::FrameClock, glib::SignalHandlerId)>>,
     model: RefCell<Notebook>,
     /// A view per cell, in the model's order.
@@ -172,6 +177,7 @@ pub fn open(
         near: RefCell::default(),
         anchor: Cell::new(None),
         reveal: Cell::new(None),
+        shown: Cell::new(None),
         layout_hook: RefCell::default(),
         model: RefCell::new(notebook),
         views: RefCell::default(),
@@ -904,6 +910,8 @@ impl NotebookTab {
             view.set_selected(true);
         }
         self.selected.set(Some(id));
+        // Work in another cell than the one shown: the first cell in view holds the view again.
+        self.shown.set(None);
         self.complete_in(id);
         self.place_soon();
         self.history.borrow_mut().seal();
@@ -1032,6 +1040,8 @@ impl NotebookTab {
             Some(editor) => {
                 self.reveal.set(None);
                 self.scroll_to_caret(&editor, align);
+                let value = self.scroller.vadjustment().value();
+                self.shown.set(Some((id, value)));
             }
             None => self.reveal.set(None),
         }
@@ -1121,6 +1131,12 @@ impl NotebookTab {
         if !self.scroller.is_mapped() {
             return;
         }
+        let adjustment = self.scroller.vadjustment();
+        // Scrolled since by more than the notebook: the first cell in view holds it again.
+        let value = adjustment.value();
+        if self.shown.get().is_some_and(|(_, at)| at != value) {
+            self.shown.set(None);
+        }
         self.keep_anchor();
         self.show_pending();
         self.build_near(clock);
@@ -1135,7 +1151,12 @@ impl NotebookTab {
             view.refit();
         }
         self.refit_diagnostics(self.refit_after_layout.replace(false));
-        self.anchor.set(self.top_cell());
+        // A cell shown far from where the view was stays where it landed while the cells around
+        // it, in view too, are built and take their own heights.
+        let shown = self.shown.get().map(|(id, _)| (id, adjustment.value()));
+        self.shown.set(shown);
+        let held = shown.and_then(|(id, _)| self.top_of(id));
+        self.anchor.set(held.or_else(|| self.top_cell()));
     }
 
     /// Build the editors and the outputs of the cells within a screen of what shows, once a frame
@@ -1187,9 +1208,9 @@ impl NotebookTab {
     }
 
     /// Keep what shows where it is when the cells above it change height, an editor built in its
-    /// placeholder's place or a picture decoded: the first cell in view moved in the content
-    /// since the last layout, so the view moves as far. Not at the top, where what is added
-    /// above shows.
+    /// placeholder's place or a picture decoded: the first cell in view (or the one shown) moved
+    /// in the content since the last layout, so the view moves as far. Not at the top, where what
+    /// is added above shows.
     fn keep_anchor(&self) {
         let adjustment = self.scroller.vadjustment();
         let value = adjustment.value();
@@ -1205,6 +1226,15 @@ impl NotebookTab {
         {
             adjustment.set_value(value + now - was);
         }
+    }
+
+    /// Cell `id`, and its top in the content.
+    fn top_of(&self, id: CellId) -> Option<(CellId, f64)> {
+        let bounds = self
+            .view_of(Some(id))?
+            .root
+            .compute_bounds(&self.content()?)?;
+        Some((id, f64::from(bounds.y())))
     }
 
     /// The first cell reaching into the view, and its top in the content.
