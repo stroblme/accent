@@ -1,14 +1,26 @@
 // Derived from formulary 0.3.0 `src/parse.rs` (MIT OR Apache-2.0, Copyright (c) 2026 Jeffrey T.
 // Peckham (Ophymx)), modified for accent; see crates/math/NOTICE.
-//! MathML to the element tree, for the elements and attributes pulldown-latex 0.8 writes.
+//! MathML to the element tree, for the elements and attributes pulldown-latex 0.8 writes. Its
+//! `class` and `style` attributes are read as its `styles.css` and inline CSS mean them; the
+//! line numbers below are in its `src/mathml.rs`.
 //!
 //! Lenient as MathML Core is: an unknown element, or a known one with the wrong children, lays
 //! out as an `mrow` of its children and adds a warning. Only malformed XML and a root other than
 //! `<math>` are errors.
 
 use crate::Error;
-use crate::ast::{Length, MathRoot, Node, OperatorAttrs, ScriptLevel, StyleOverrides};
+use crate::ast::{
+    Align, Cell, Color, Length, MathRoot, Node, OperatorAttrs, ScriptLevel, StyleOverrides,
+    TableRow,
+};
 use crate::mathvariant::to_math_italic;
+
+/// The marks `\hat`, `\vec`, `\overbrace` and the like set over their argument
+/// (`parser/primitives.rs:635-690`), written as a plain `<mover>`. `\Overrightarrow`'s ⇒ has no
+/// combining form to be drawn as an accent in, and stays an overscript.
+const OVER_ACCENTS: &str = "´‾˘ˇ˙¨`^~→˚←↔↼⇀⏜⏠⏞⎴";
+/// The marks `\underline`, `\underbrace` and the like set under theirs; ↔ stays an underscript.
+const UNDER_ACCENTS: &str = "_←→⏟⏝⎵⏡";
 
 /// Parses a MathML fragment whose root element is `<math>`.
 pub fn parse(source: &str) -> Result<MathRoot, Error> {
@@ -48,13 +60,25 @@ fn parse_node(node: roxmltree::Node, warnings: &mut Vec<String>) -> Node {
     }
 }
 
-/// The style attributes on an element.
+/// The style an element sets: `displaystyle` and `scriptlevel` (88-92), the colours `open_tag`
+/// writes into `style` (106-125), and `class="small"`, 70 % (746, 757).
 fn style_overrides(node: roxmltree::Node) -> StyleOverrides {
-    StyleOverrides {
+    let mut styles = StyleOverrides {
         display_style: bool_attr(node, "displaystyle"),
         script_level: node.attribute("scriptlevel").and_then(parse_script_level),
+        size: has_class(node, "small").then_some(0.7),
         ..StyleOverrides::default()
+    };
+    for (property, value) in css(node) {
+        match property {
+            "color" => styles.color = parse_rgb(value),
+            "background-color" => styles.background = parse_rgb(value),
+            // Always `0.06em solid rgb(…)`: the colour is what varies.
+            "border" => styles.border = value.find("rgb(").and_then(|i| parse_rgb(&value[i..])),
+            _ => {}
+        }
     }
+    styles
 }
 
 fn parse_element(node: roxmltree::Node, warnings: &mut Vec<String>) -> Node {
@@ -85,7 +109,13 @@ fn parse_element(node: roxmltree::Node, warnings: &mut Vec<String>) -> Node {
             },
         },
         "mtext" => Node::Text(text_content(node)),
-        "mrow" => Node::Row(parse_children(node, warnings)),
+        "mrow" => {
+            // `\not` before a group (413) strikes it through, which is not drawn.
+            if has_class(node, "mop-negated") {
+                warnings.push("a negated group is drawn without its stroke".into());
+            }
+            Node::Row(parse_children(node, warnings))
+        }
         "mfrac" => match <[Node; 2]>::try_from(parse_children(node, warnings)) {
             Ok([num, den]) => Node::Frac {
                 num: Box::new(num),
@@ -95,71 +125,26 @@ fn parse_element(node: roxmltree::Node, warnings: &mut Vec<String>) -> Node {
             Err(children) => invalid(name, children, warnings),
         },
         "msub" | "msup" | "msubsup" | "munder" | "mover" | "munderover" => {
-            let children = parse_children(node, warnings);
-            let both = matches!(name, "msubsup" | "munderover");
-            if children.len() != if both { 3 } else { 2 } {
+            let mut children = parse_children(node, warnings);
+            let arity = if matches!(name, "msubsup" | "munderover") {
+                3
+            } else {
+                2
+            };
+            // The thin space before a function name goes inside the script element the name is
+            // the base of (642-648): `2\sin^2 x` gives `<msup><mspace/><mi>sin</mi>…`.
+            let space = (children.len() == arity + 1 && matches!(children[0], Node::Space { .. }))
+                .then(|| children.remove(0));
+            if children.len() != arity {
                 return invalid(name, children, warnings);
             }
-            let mut children = children.into_iter().map(Box::new);
-            let base = children.next().expect("length checked");
-            let (first, second) = (children.next(), children.next());
-            match name {
-                "msub" => Node::Scripts {
-                    base,
-                    sub: first,
-                    sup: None,
-                },
-                "msup" => Node::Scripts {
-                    base,
-                    sub: None,
-                    sup: first,
-                },
-                "msubsup" => Node::Scripts {
-                    base,
-                    sub: first,
-                    sup: second,
-                },
-                _ => {
-                    let (under, over) = match name {
-                        "munder" => (first, None),
-                        "mover" => (None, first),
-                        _ => (first, second),
-                    };
-                    Node::UnderOver {
-                        base,
-                        under,
-                        over,
-                        accent: bool_attr(node, "accent").unwrap_or(false),
-                        accent_under: bool_attr(node, "accentunder").unwrap_or(false),
-                    }
-                }
+            let scripted = scripts(node, name, children);
+            match space {
+                Some(space) => Node::Row(vec![space, scripted]),
+                None => scripted,
             }
         }
-        "mtable" => {
-            let rows = node
-                .children()
-                .filter(|c| c.is_element())
-                .map(|row| {
-                    if row.tag_name().name() != "mtr" {
-                        // Wrapped as browsers do: a stray child is a row of one cell.
-                        warnings.push(format!("<{}> in <mtable>", row.tag_name().name()));
-                        return vec![parse_node(row, warnings)];
-                    }
-                    row.children()
-                        .filter(|c| c.is_element())
-                        .map(|cell| {
-                            if cell.tag_name().name() == "mtd" {
-                                Node::Row(parse_children(cell, warnings))
-                            } else {
-                                warnings.push(format!("<{}> in <mtr>", cell.tag_name().name()));
-                                parse_node(cell, warnings)
-                            }
-                        })
-                        .collect()
-                })
-                .collect();
-            Node::Table { rows }
-        }
+        "mtable" => parse_table(node, warnings),
         "msqrt" => Node::Sqrt(parse_children(node, warnings)),
         "mroot" => match <[Node; 2]>::try_from(parse_children(node, warnings)) {
             Ok([base, index]) => Node::Root {
@@ -183,6 +168,250 @@ fn parse_element(node: roxmltree::Node, warnings: &mut Vec<String>) -> Node {
             }
         }
     }
+}
+
+/// `<msub>`, `<msup>`, `<msubsup>`, `<munder>`, `<mover>` or `<munderover>` of `children`,
+/// as many as it takes.
+fn scripts(node: roxmltree::Node, name: &str, children: Vec<Node>) -> Node {
+    let mut children = children.into_iter();
+    let base = Box::new(children.next().expect("length checked"));
+    let unsaid = |a| node.attribute(a).is_none();
+    let (first, second) = match (name, children.next(), children.next()) {
+        ("mover", Some(script), None) if unsaid("accent") => match accent(&script, OVER_ACCENTS) {
+            Some('‾') => return Node::Bar { base, under: false },
+            Some(c) => return accented(base, c, false),
+            None => (Some(script), None),
+        },
+        ("munder", Some(script), None) if unsaid("accentunder") => {
+            match accent(&script, UNDER_ACCENTS) {
+                Some('_') => return Node::Bar { base, under: true },
+                Some(c) => return accented(base, c, true),
+                None => (Some(script), None),
+            }
+        }
+        (_, first, second) => (first, second),
+    };
+    let (first, second) = (first.map(Box::new), second.map(Box::new));
+    match name {
+        "msub" => Node::Scripts {
+            base,
+            sub: first,
+            sup: None,
+        },
+        "msup" => Node::Scripts {
+            base,
+            sub: None,
+            sup: first,
+        },
+        "msubsup" => Node::Scripts {
+            base,
+            sub: first,
+            sup: second,
+        },
+        _ => {
+            let (under, over) = match name {
+                "munder" => (first, None),
+                "mover" => (None, first),
+                _ => (first, second),
+            };
+            Node::UnderOver {
+                base,
+                under,
+                over,
+                accent: bool_attr(node, "accent").unwrap_or(false),
+                accent_under: bool_attr(node, "accentunder").unwrap_or(false),
+            }
+        }
+    }
+}
+
+/// The accent mark `script` is, if it is a lone character from `marks` in an `<mi>` or `<mo>`:
+/// pulldown-latex gives the `<mover>` or `<munder>` no `accent` attribute (2086-2114).
+fn accent(script: &Node, marks: &str) -> Option<char> {
+    let (Node::Identifier(text) | Node::Operator { text, .. }) = script else {
+        return None;
+    };
+    let mut chars = text.chars();
+    match (chars.next(), chars.next()) {
+        (Some(c), None) if marks.contains(c) => Some(c),
+        _ => None,
+    }
+}
+
+/// `base` with the accent `mark` over or under it, an operator that stretches across it. A
+/// spacing mark or an arrow becomes its combining form: that is what a math font draws to sit
+/// on a base and has wide variants of, where its arrows sit on the math axis.
+fn accented(base: Box<Node>, mark: char, under: bool) -> Node {
+    let mark = match (mark, under) {
+        ('^', _) => '\u{302}',
+        ('~', _) => '\u{303}',
+        ('ˇ', _) => '\u{30C}',
+        ('´', _) => '\u{301}',
+        ('`', _) => '\u{300}',
+        ('˘', _) => '\u{306}',
+        ('˙', _) => '\u{307}',
+        ('¨', _) => '\u{308}',
+        ('˚', _) => '\u{30A}',
+        ('→', false) => '\u{20D7}',
+        ('←', false) => '\u{20D6}',
+        ('↔', false) => '\u{20E1}',
+        ('⇀', false) => '\u{20D1}',
+        ('↼', false) => '\u{20D0}',
+        ('→', true) => '\u{20EF}',
+        ('←', true) => '\u{20EE}',
+        (c, _) => c,
+    };
+    let script = Some(Box::new(Node::Operator {
+        text: mark.to_string(),
+        attrs: OperatorAttrs {
+            stretchy: Some(true),
+            ..OperatorAttrs::default()
+        },
+    }));
+    let (over, under) = if under {
+        (None, script)
+    } else {
+        (script, None)
+    };
+    Node::UnderOver {
+        accent: over.is_some(),
+        accent_under: under.is_some(),
+        base,
+        under,
+        over,
+    }
+}
+
+/// An `<mtable>` with pulldown-latex's classes (196-389, 1021-1165) as its `styles.css` has
+/// them. A cell has no padding beside it but 0.4 em in an array or matrix
+/// (`menv-arraylike`); `align` puts 1 em before columns 3, 5, … and `cases` after column 1.
+/// Cells align right then left in turn in `align`-like tables, as a whole table says
+/// (`menv-cells-left`) or as a cell says (`cell-left`). An array's vertical lines are cell
+/// borders, dashed ones drawn solid, a line beside a line a cell of its own 0.1 em wide
+/// (`menv-border-only`); `\hline` is a row border. `menv-multline` and equation numbers
+/// (`menv-with-eqn`) are not drawn.
+fn parse_table(node: roxmltree::Node, warnings: &mut Vec<String>) -> Node {
+    let class = |c| has_class(node, c);
+    let (alignlike, align_env, cases) = (
+        class("menv-alignlike"),
+        class("menv-align"),
+        class("menv-cases"),
+    );
+    let pad = if class("menv-arraylike") { 0.4 } else { 0.0 };
+    let all = if class("menv-cells-left") {
+        Some(Align::Left)
+    } else if class("menv-cells-right") {
+        Some(Align::Right)
+    } else {
+        None
+    };
+    let plain = |content| Cell {
+        content,
+        align: Align::Center,
+        pad: (pad, pad),
+        rules: (false, false),
+    };
+    let rows = node.children().filter(|c| c.is_element()).map(|row| {
+        if row.tag_name().name() != "mtr" {
+            // Wrapped as browsers do: a stray child is a row of one cell.
+            warnings.push(format!("<{}> in <mtable>", row.tag_name().name()));
+            return TableRow {
+                cells: vec![plain(parse_node(row, warnings))],
+                rule_above: false,
+                min_height: None,
+            };
+        }
+        let cells = row
+            .children()
+            .filter(|c| c.is_element())
+            .enumerate()
+            .map(|(j, cell)| {
+                if cell.tag_name().name() != "mtd" {
+                    warnings.push(format!("<{}> in <mtr>", cell.tag_name().name()));
+                    return plain(parse_node(cell, warnings));
+                }
+                let class = |c| has_class(cell, c);
+                let align = if class("cell-left") {
+                    Align::Left
+                } else if class("cell-right") {
+                    Align::Right
+                } else if let Some(all) = all {
+                    all
+                } else if alignlike {
+                    // nth-child(odd) right, nth-child(even) left.
+                    if j % 2 == 0 {
+                        Align::Right
+                    } else {
+                        Align::Left
+                    }
+                } else {
+                    Align::Center
+                };
+                let pad = if class("menv-border-only") {
+                    (0.05, 0.05)
+                } else {
+                    let left = if align_env && j >= 2 && j % 2 == 0 {
+                        1.0
+                    } else {
+                        pad
+                    };
+                    let right = if cases && j == 0 { 1.0 } else { pad };
+                    (left, right)
+                };
+                Cell {
+                    content: Node::Row(parse_children(cell, warnings)),
+                    align,
+                    pad,
+                    rules: (
+                        class("menv-left-solid") || class("menv-left-dashed"),
+                        class("menv-right-solid") || class("menv-right-dashed"),
+                    ),
+                }
+            });
+        TableRow {
+            cells: cells.collect(),
+            rule_above: has_class(row, "menv-hline") || has_class(row, "menv-hdashline"),
+            min_height: css(row)
+                .find(|(p, _)| *p == "height")
+                .and_then(|(_, v)| parse_length(v)),
+        }
+    });
+    let mut rows: Vec<TableRow> = rows.collect();
+    // A last row of one empty cell is not shown (`styles.css`): what a trailing `\\` leaves.
+    if let Some(last) = rows.last_mut()
+        && matches!(last.cells.as_slice(), [Cell { content: Node::Row(c), .. }] if c.is_empty())
+    {
+        last.cells.clear();
+    }
+    Node::Table(rows)
+}
+
+fn has_class(node: roxmltree::Node, class: &str) -> bool {
+    node.attribute("class")
+        .is_some_and(|c| c.split_whitespace().any(|c| c == class))
+}
+
+/// The declarations of an element's `style` attribute.
+fn css<'a>(node: roxmltree::Node<'a, '_>) -> impl Iterator<Item = (&'a str, &'a str)> {
+    node.attribute("style")
+        .unwrap_or("")
+        .split(';')
+        .filter_map(|d| d.split_once(':'))
+        .map(|(p, v)| (p.trim(), v.trim()))
+}
+
+/// `rgb(r g b)`, the one colour form pulldown-latex writes.
+fn parse_rgb(s: &str) -> Option<Color> {
+    let inner = s.trim().strip_prefix("rgb(")?.strip_suffix(')')?;
+    let channels: Vec<u8> = inner
+        .split_whitespace()
+        .map(str::parse)
+        .collect::<Result<_, _>>()
+        .ok()?;
+    let [r, g, b] = channels[..] else {
+        return None;
+    };
+    Some(Color { r, g, b, a: 255 })
 }
 
 /// The `mrow` a fixed-arity element with the wrong number of children lays out as.
@@ -214,9 +443,15 @@ fn parse_length(s: &str) -> Option<Length> {
     let value: f32 = num.parse().ok()?;
     match unit.trim() {
         "em" => Some(Length::Em(value)),
+        // pulldown-latex converts mu to em and writes the unit as mu (`event.rs:762-764`).
+        "mu" => Some(Length::Em(value)),
         "ex" => Some(Length::Ex(value)),
         "px" => Some(Length::Px(value)),
-        "pt" => Some(Length::Pt(value)),
+        "pt" => Some(Length::Px(value * 96.0 / 72.0)),
+        "pc" => Some(Length::Px(value * 16.0)),
+        "in" => Some(Length::Px(value * 96.0)),
+        "cm" => Some(Length::Px(value * 96.0 / 2.54)),
+        "mm" => Some(Length::Px(value * 96.0 / 25.4)),
         // A unitless number other than zero is invalid in MathML Core.
         "" if value == 0.0 => Some(Length::Px(0.0)),
         _ => None,

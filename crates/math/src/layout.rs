@@ -6,7 +6,9 @@
 //! layout's left edge, `y` downwards from the baseline at 0. `ascent` and `descent` are
 //! distances above and below the baseline, so the top edge is at `y = -ascent`.
 
-use crate::ast::{Color, Form, Length, MathRoot, Node, ScriptLevel, StyleOverrides};
+use crate::ast::{
+    Align, Cell, Color, Form, Length, MathRoot, Node, ScriptLevel, StyleOverrides, TableRow,
+};
 use crate::font::{Constant, Corner, MathFont, Stretched};
 use crate::opdict;
 
@@ -71,7 +73,8 @@ pub fn layout(root: &MathRoot, font: &MathFont, size: f32) -> Layout {
     let ctx = Ctx::derive(font, size, 0, root.display, false, None);
     let b = layout_row(&ctx, &root.children);
     Layout {
-        width: b.width,
+        // Negative space (`\!`) can pull a row narrower than nothing.
+        width: b.width.max(0.0),
         ascent: b.ascent,
         descent: b.descent,
         items: b.items,
@@ -172,7 +175,7 @@ impl<'a> Ctx<'a> {
         };
         Ctx::derive(
             self.font,
-            self.base_size,
+            self.base_size * styles.size.unwrap_or(1.0),
             script_level,
             styles.display_style.unwrap_or(self.display_style),
             self.cramped,
@@ -212,7 +215,6 @@ impl<'a> Ctx<'a> {
             Length::Em(v) => v * self.size,
             Length::Ex(v) => v * self.font.x_height() * self.scale,
             Length::Px(v) => v,
-            Length::Pt(v) => v * 96.0 / 72.0,
         }
     }
 }
@@ -266,7 +268,8 @@ fn layout_node(ctx: &Ctx, node: &Node) -> MathBox {
             *accent,
             *accent_under,
         ),
-        Node::Table { rows } => layout_table(ctx, rows),
+        Node::Bar { base, under } => layout_bar(ctx, base, *under),
+        Node::Table(rows) => layout_table(ctx, rows),
         Node::Sqrt(children) => {
             let content = layout_row(&ctx.cramped_child(), children);
             layout_radical(ctx, content, None)
@@ -283,7 +286,8 @@ fn layout_node(ctx: &Ctx, node: &Node) -> MathBox {
         } => {
             let length = |l: &Option<Length>| l.map_or(0.0, |l| ctx.resolve(l)).max(0.0);
             MathBox {
-                width: length(width),
+                // A negative width (`\!`, pulldown-latex 454-456) pulls what follows back.
+                width: width.map_or(0.0, |l| ctx.resolve(l)),
                 ascent: length(height),
                 descent: length(depth),
                 ..MathBox::default()
@@ -303,18 +307,23 @@ fn layout_styled(ctx: &Ctx, styles: &StyleOverrides, children: &[Node]) -> MathB
         [only] => layout_node(&inner, only),
         _ => layout_row(&inner, children),
     };
-    decorate(styles, b)
+    decorate(&inner, styles, b)
 }
 
-/// The scope's background put first and its border rules last.
-fn decorate(styles: &StyleOverrides, mut b: MathBox) -> MathBox {
-    let (x, y, w, h) = (0.0, -b.ascent, b.width, b.ascent + b.descent);
-    if let Some(color) = styles.background {
-        let color = Some(color);
-        b.items.insert(0, Item::Rule { x, y, w, h, color });
-    }
+/// The scope's border around its box, 0.06 em as pulldown-latex writes it (113) and the box
+/// grown by it, and its background behind the lot.
+fn decorate(ctx: &Ctx, styles: &StyleOverrides, mut b: MathBox) -> MathBox {
     if let Some(color) = styles.border {
-        let t = 1.0;
+        let t = 0.06 * ctx.size;
+        for item in &mut b.items {
+            item.translate(t, 0.0);
+        }
+        b.width += 2.0 * t;
+        b.ascent += t;
+        b.descent += t;
+        b.italic_correction = 0.0;
+        b.lone_glyph = None;
+        let (w, h, top) = (b.width, b.ascent + b.descent, -b.ascent);
         let edge = |x, y, w, h| Item::Rule {
             x,
             y,
@@ -322,51 +331,111 @@ fn decorate(styles: &StyleOverrides, mut b: MathBox) -> MathBox {
             h,
             color: Some(color),
         };
-        b.items.push(edge(x, y, w, t));
-        b.items.push(edge(x, y + h - t, w, t));
-        b.items.push(edge(x, y, t, h));
-        b.items.push(edge(x + w - t, y, t, h));
+        b.items.extend([
+            edge(0.0, top, w, t),
+            edge(0.0, top + h - t, w, t),
+            edge(0.0, top, t, h),
+            edge(w - t, top, t, h),
+        ]);
+    }
+    if let Some(color) = styles.background {
+        let (x, y, w, h, color) = (0.0, -b.ascent, b.width, b.ascent + b.descent, Some(color));
+        b.items.insert(0, Item::Rule { x, y, w, h, color });
     }
     b
 }
 
-/// `<mtable>`: cells on their row's baseline, columns as wide as their widest cell, cells
-/// centred in them, and the table centred on the math axis. Cells are in text style, as MathML
-/// Core has them, padded 0.4 em and 0.5 ex on each side as its user-agent stylesheet does.
-fn layout_table(ctx: &Ctx, rows: &[Vec<Node>]) -> MathBox {
+/// `\overline` and `\underline` as TeX draws them, by the MATH bar constants: a rule as wide
+/// as the base, a gap from it, and space beyond. An overlined base is cramped (TeX's rule 9).
+fn layout_bar(ctx: &Ctx, base: &Node, under: bool) -> MathBox {
+    let mut b = if under {
+        layout_node(ctx, base)
+    } else {
+        layout_node(&ctx.cramped_child(), base)
+    };
+    let (gap, t, extra) = if under {
+        (
+            ctx.constant(Constant::UnderbarVerticalGap),
+            ctx.constant(Constant::UnderbarRuleThickness),
+            ctx.constant(Constant::UnderbarExtraDescender),
+        )
+    } else {
+        (
+            ctx.constant(Constant::OverbarVerticalGap),
+            ctx.constant(Constant::OverbarRuleThickness),
+            ctx.constant(Constant::OverbarExtraAscender),
+        )
+    };
+    let y = if under {
+        b.descent + gap
+    } else {
+        -(b.ascent + gap + t)
+    };
+    b.items.push(Item::Rule {
+        x: 0.0,
+        y,
+        w: b.width,
+        h: t,
+        color: ctx.color,
+    });
+    if under {
+        b.descent += gap + t + extra;
+    } else {
+        b.ascent += gap + t + extra;
+    }
+    b.italic_correction = 0.0;
+    b.lone_glyph = None;
+    b
+}
+
+/// `<mtable>`: cells on their row's baseline, columns as wide as their widest cell, and the
+/// table centred on the math axis. Cells are in text style and padded 0.5 ex above and below,
+/// as MathML Core has them; the space beside them, their alignment and the rules are what
+/// pulldown-latex's classes ask (`parse_table`).
+fn layout_table(ctx: &Ctx, rows: &[TableRow]) -> MathBox {
     let cell_ctx = ctx.styled_child(&StyleOverrides {
         display_style: Some(false),
         ..StyleOverrides::default()
     });
-    let cells: Vec<Vec<MathBox>> = rows
-        .iter()
-        .map(|row| row.iter().map(|c| layout_node(&cell_ctx, c)).collect())
-        .collect();
-    let n_cols = cells.iter().map(Vec::len).max().unwrap_or(0);
-
-    let hpad = 0.4 * ctx.size;
+    let em = cell_ctx.size;
+    let rule = 0.06 * em;
     let vpad = 0.5 * ctx.font.x_height() * ctx.scale;
 
-    let mut col_widths = vec![0.0_f32; n_cols];
+    // Each cell's box, and what its padding and rules take on either side.
+    let cells: Vec<Vec<(MathBox, f32, f32)>> = rows
+        .iter()
+        .map(|row| {
+            let side = |pad: f32, ruled: bool| pad * em + if ruled { rule } else { 0.0 };
+            let lay = |c: &Cell| {
+                let b = layout_node(&cell_ctx, &c.content);
+                (b, side(c.pad.0, c.rules.0), side(c.pad.1, c.rules.1))
+            };
+            row.cells.iter().map(lay).collect()
+        })
+        .collect();
+    let mut col_widths = vec![0.0_f32; cells.iter().map(Vec::len).max().unwrap_or(0)];
     for row in &cells {
-        for (w, cell) in col_widths.iter_mut().zip(row) {
-            *w = w.max(cell.width);
+        for (w, (b, left, right)) in col_widths.iter_mut().zip(row) {
+            *w = w.max(left + b.width + right);
         }
     }
-    let row_ascent: Vec<f32> = cells
+    // A row's extents, padded; a row without cells (what a trailing `\\` leaves) takes none.
+    let extents: Vec<(f32, f32)> = rows
         .iter()
-        .map(|row| row.iter().map(|c| c.ascent).fold(0.0, f32::max))
-        .collect();
-    let row_descent: Vec<f32> = cells
-        .iter()
-        .map(|row| row.iter().map(|c| c.descent).fold(0.0, f32::max))
+        .zip(&cells)
+        .map(|(row, cells)| {
+            if cells.is_empty() {
+                return (0.0, 0.0);
+            }
+            let ascent = vpad + cells.iter().map(|c| c.0.ascent).fold(0.0, f32::max);
+            let descent = vpad + cells.iter().map(|c| c.0.descent).fold(0.0, f32::max);
+            let min = row.min_height.map_or(0.0, |l| cell_ctx.resolve(l));
+            (ascent, descent.max(min - ascent))
+        })
         .collect();
 
-    let total_width = col_widths.iter().sum::<f32>() + 2.0 * hpad * n_cols as f32;
-    let total_height = row_ascent.iter().sum::<f32>()
-        + row_descent.iter().sum::<f32>()
-        + 2.0 * vpad * cells.len() as f32;
-
+    let total_width: f32 = col_widths.iter().sum();
+    let total_height: f32 = extents.iter().map(|(a, d)| a + d).sum();
     // Centred on the math axis; a table shorter than twice the axis height sits on the
     // baseline rather than dipping below it.
     let axis = ctx.constant(Constant::AxisHeight);
@@ -378,19 +447,42 @@ fn layout_table(ctx: &Ctx, rows: &[Vec<Node>]) -> MathBox {
         ..MathBox::default()
     };
 
-    let mut y = -out.ascent;
-    for (r, row) in cells.into_iter().enumerate() {
-        let baseline = y + vpad + row_ascent[r];
+    let line = |x, y, w, h| Item::Rule {
+        x,
+        y,
+        w,
+        h,
+        color: ctx.color,
+    };
+    let mut top = -out.ascent;
+    for ((row, cells), (ascent, descent)) in rows.iter().zip(cells).zip(extents) {
+        let (baseline, bottom) = (top + ascent, top + ascent + descent);
+        if row.rule_above {
+            out.items.push(line(0.0, top, total_width, rule));
+        }
         let mut x = 0.0;
-        for (cell, w) in row.into_iter().zip(&col_widths) {
-            let dx = x + hpad + (w - cell.width) / 2.0;
-            for mut item in cell.items {
+        for ((cell, (b, left, right)), w) in row.cells.iter().zip(cells).zip(&col_widths) {
+            let slack = w - left - b.width - right;
+            let dx = x
+                + left
+                + match cell.align {
+                    Align::Left => 0.0,
+                    Align::Center => slack / 2.0,
+                    Align::Right => slack,
+                };
+            for mut item in b.items {
                 item.translate(dx, baseline);
                 out.items.push(item);
             }
-            x += w + 2.0 * hpad;
+            if cell.rules.0 {
+                out.items.push(line(x, top, rule, bottom - top));
+            }
+            if cell.rules.1 {
+                out.items.push(line(x + w - rule, top, rule, bottom - top));
+            }
+            x += w;
         }
-        y = baseline + row_descent[r] + vpad;
+        top = bottom;
     }
     out
 }
@@ -509,7 +601,8 @@ fn layout_underover(
         .width
         .max(over_box.as_ref().map_or(0.0, |b| b.width))
         .max(under_box.as_ref().map_or(0.0, |b| b.width));
-    let stretch_h = |ctx: &Ctx, node: &Node, natural: MathBox| -> MathBox {
+    // An accent stretches across, whatever the dictionary says of its character.
+    let stretch_h = |ctx: &Ctx, node: &Node, natural: MathBox, accent: bool| -> MathBox {
         if natural.width >= width - 1e-3 {
             return natural;
         }
@@ -518,7 +611,7 @@ fn layout_underover(
         };
         let flags = dictionary_entry(text, Form::Infix).2;
         let stretchy = attrs.stretchy.unwrap_or(flags & opdict::STRETCHY != 0)
-            && flags & opdict::HORIZONTAL != 0;
+            && (flags & opdict::HORIZONTAL != 0 || accent);
         match single_char(text).and_then(|c| ctx.font.glyph_index(c)) {
             Some(g) if stretchy => {
                 layout_stretched_horizontal(ctx, &ctx.font.stretch_horizontal(g, width / ctx.scale))
@@ -526,11 +619,13 @@ fn layout_underover(
             _ => natural,
         }
     };
-    let base_box = stretch_h(ctx, base, base_box);
-    let over_box = over.zip(over_box).map(|(n, b)| stretch_h(&over_ctx, n, b));
+    let base_box = stretch_h(ctx, base, base_box, false);
+    let over_box = over
+        .zip(over_box)
+        .map(|(n, b)| stretch_h(&over_ctx, n, b, accent));
     let under_box = under
         .zip(under_box)
-        .map(|(n, b)| stretch_h(&under_ctx, n, b));
+        .map(|(n, b)| stretch_h(&under_ctx, n, b, accent_under));
 
     // Operators with limits take the limit constants, other bases the bar constants.
     let limits_base = base_flags & (opdict::LARGEOP | opdict::MOVABLE_LIMITS) != 0;
@@ -940,7 +1035,7 @@ fn layout_embellished_stretchy(
                 max_ascent,
                 max_descent,
             );
-            decorate(styles, core)
+            decorate(&inner, styles, core)
         }
         Node::Operator { text, attrs } => match single_char(text) {
             Some(c) => layout_stretchy_operator(
@@ -1074,7 +1169,8 @@ fn layout_operator_base(ctx: &Ctx, node: &Node) -> MathBox {
         }
         Node::Styled { styles, children } if children.len() == 1 => {
             let inner = ctx.styled_child(styles);
-            decorate(styles, layout_operator_base(&inner, &children[0]))
+            let core = layout_operator_base(&inner, &children[0]);
+            decorate(&inner, styles, core)
         }
         _ => layout_node(ctx, node),
     }
@@ -1207,9 +1303,11 @@ fn layout_text_run(ctx: &Ctx, text: &str) -> MathBox {
         let x = out.width + g.x_offset * ctx.scale;
         // HarfBuzz offsets point up; the display list's y points down.
         let y = -g.y_offset * ctx.scale;
-        if g.id == 0 {
-            out.width += g.x_advance * ctx.scale;
-            continue; // unmapped: advance, draw nothing
+        // A character the font lacks is left out, .notdef's advance with it, and so is one
+        // HarfBuzz hides: U+2061–U+2064 (`\sin x`'s function application) shape to an
+        // inkless glyph without advance, which would only lend the run the font's line height.
+        if g.id == 0 || g.x_advance == 0.0 && ctx.font.ink_box(g.id).is_none() {
+            continue;
         }
         let gid = ctx.script_glyph(g.id);
         // An alternate has an advance of its own; the shaped one is the replaced glyph's.

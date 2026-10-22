@@ -6,8 +6,9 @@
 
 use accent_math::{Item, Layout, MathFont, STIX_TWO_MATH, layout, parse};
 
-/// Name and MathML; formulary's own golden formulas, `mstyle` written as the `mrow`
-/// pulldown-latex gives `\displaystyle`.
+/// Name and MathML: formulary's own golden formulas, written as pulldown-latex would mean the
+/// same: `mstyle` as the `mrow` it gives `\displaystyle`, the matrix with the class it gives
+/// `pmatrix`, and the arrow over `abc` said not to be an accent, which `\vec` would make it.
 const GOLDENS: &[(&str, &str)] = &[
     ("simple_row", "<math><mi>x</mi><mo>+</mo><mn>2</mn></math>"),
     (
@@ -58,7 +59,7 @@ const GOLDENS: &[(&str, &str)] = &[
     ),
     (
         "accent_and_arrow",
-        r#"<math><mover accent="true"><mi>x</mi><mo>&#x302;</mo></mover><mo>+</mo><mover><mrow><mi>a</mi><mi>b</mi><mi>c</mi></mrow><mo>&#x2192;</mo></mover></math>"#,
+        r#"<math><mover accent="true"><mi>x</mi><mo>&#x302;</mo></mover><mo>+</mo><mover accent="false"><mrow><mi>a</mi><mi>b</mi><mi>c</mi></mrow><mo>&#x2192;</mo></mover></math>"#,
     ),
     (
         "integral_bounds",
@@ -66,7 +67,7 @@ const GOLDENS: &[(&str, &str)] = &[
     ),
     (
         "matrix",
-        r#"<math><mo>(</mo><mtable><mtr><mtd><mi>a</mi></mtd><mtd><mi>b</mi></mtd></mtr><mtr><mtd><mi>c</mi></mtd><mtd><mi>d</mi></mtd></mtr></mtable><mo>)</mo></math>"#,
+        r#"<math><mo>(</mo><mtable class="menv-arraylike"><mtr><mtd><mi>a</mi></mtd><mtd><mi>b</mi></mtd></mtr><mtr><mtd><mi>c</mi></mtd><mtd><mi>d</mi></mtd></mtr></mtable><mo>)</mo></math>"#,
     ),
     (
         "binomial",

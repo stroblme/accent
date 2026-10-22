@@ -167,6 +167,7 @@ dependencies = [
 name = "accent-math"
 version = "2.0.0"
 dependencies = [
+ "accent-core",
  "pkg-config",
  "roxmltree",
  "thiserror",

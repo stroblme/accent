@@ -9,10 +9,9 @@ pub(crate) enum Length {
     Em(f32),
     /// Relative to the font's x-height at the current size.
     Ex(f32),
-    /// CSS pixels, taken 1:1 as layout units: the caller's size is assumed to be in px.
+    /// CSS pixels, taken 1:1 as layout units: the caller's size is assumed to be in px. The
+    /// other absolute units are read as CSS converts them.
     Px(f32),
-    /// CSS points (`1pt = 96/72 px`).
-    Pt(f32),
 }
 
 /// An sRGB colour with alpha.
@@ -35,6 +34,8 @@ pub(crate) struct StyleOverrides {
     pub background: Option<Color>,
     /// A rule in this colour around the subtree's box.
     pub border: Option<Color>,
+    /// The font size as a share of the size around (`<mo class="small">`).
+    pub size: Option<f32>,
 }
 
 impl StyleOverrides {
@@ -133,6 +134,37 @@ pub(crate) enum Node {
         /// The underscript is an accent.
         accent_under: bool,
     },
-    /// `<mtable>`: rows of cells, each an implied `mrow`. A short row's missing cells are empty.
-    Table { rows: Vec<Vec<Node>> },
+    /// `\overline` or `\underline`: a rule over or under the base, as TeX draws one.
+    Bar { base: Box<Node>, under: bool },
+    /// `<mtable>`. A short row's missing cells are empty.
+    Table(Vec<TableRow>),
+}
+
+/// An `<mtr>`, with what pulldown-latex's classes and style ask of it.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TableRow {
+    pub cells: Vec<Cell>,
+    /// A rule along the row's top edge (`menv-hline`).
+    pub rule_above: bool,
+    /// `style="height: …"`, the least height of the row.
+    pub min_height: Option<Length>,
+}
+
+/// An `<mtd>`, its children an implied `mrow`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Cell {
+    pub content: Node,
+    pub align: Align,
+    /// Space left and right of the content, in em.
+    pub pad: (f32, f32),
+    /// Rules along the cell's left and right edges (`menv-left-solid`, …).
+    pub rules: (bool, bool),
+}
+
+/// Where a cell's content sits in its column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Align {
+    Left,
+    Center,
+    Right,
 }
