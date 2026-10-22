@@ -2,6 +2,7 @@
 //! default) to vault paths and Unicode scalar columns. Open-document text supports conversion;
 //! pure mappings in [`map`] can be tested without a server.
 
+mod actions;
 pub(super) mod map;
 
 use std::collections::{HashMap, HashSet};
@@ -22,8 +23,8 @@ use accent_lsp::types::{
 use accent_lsp::{Client, Notifications, from_uri, to_uri};
 
 use super::{
-    Call, Completion, Completions, Fold, Fut, Goals, Hover, Language, Location, Pos, Signature,
-    Support, Symbol,
+    ActionEdits, Call, CodeAction, Completion, Completions, Fold, Fut, Goals, Hover, Language,
+    Location, Pos, Signature, Support, Symbol,
 };
 use crate::{Event, FileEdits, Local, locked};
 use map::{
@@ -43,9 +44,13 @@ const INVALID_PARAMS: i64 = -32602;
 // ------------------------------------------------------------------ the provider
 
 /// A document as the editor has it, which is what the server was last told about it.
+#[derive(Default)]
 struct Doc {
     version: i32,
     text: String,
+    /// The diagnostics the server last published for it, as it sent them: a code action request
+    /// hands them back (clangd finds its fixes by them).
+    diagnostics: Vec<Value>,
 }
 
 type Docs = Arc<Mutex<HashMap<String, Doc>>>;
@@ -202,6 +207,7 @@ async fn forward_notifications(
         };
         match n.method.as_str() {
             "textDocument/publishDiagnostics" => {
+                let raw = n.params.get("diagnostics").cloned();
                 let Ok(params) = serde_json::from_value::<PublishDiagnosticsParams>(n.params)
                 else {
                     continue;
@@ -209,7 +215,11 @@ async fn forward_notifications(
                 let Some(rel) = rel_of(&params.uri, &vault_root) else {
                     continue;
                 };
-                let Some(text) = locked(&docs).get(&rel).map(|d| d.text.clone()) else {
+                let Some(text) = locked(&docs).get_mut(&rel).map(|d| {
+                    d.diagnostics =
+                        serde_json::from_value(raw.unwrap_or_default()).unwrap_or_default();
+                    d.text.clone()
+                }) else {
                     continue;
                 };
                 let items = diagnostics_of(params.diagnostics, &text, encoding);
@@ -593,7 +603,12 @@ impl Language for External {
                 "uri": uri, "languageId": language_id, "version": 1, "text": text,
             }}),
         )?;
-        locked(&self.docs).insert(rel.to_string(), Doc { version: 1, text });
+        let doc = Doc {
+            version: 1,
+            text,
+            ..Doc::default()
+        };
+        locked(&self.docs).insert(rel.to_string(), doc);
         Ok(self.support())
     }
 
@@ -754,6 +769,89 @@ impl Language for External {
         })
     }
 
+    /// The context carries the diagnostics touching `range` as the server published them.
+    fn code_actions(&self, rel: &str, range: super::Range) -> Fut<'_, Vec<CodeAction>> {
+        let rel = rel.to_string();
+        Box::pin(async move {
+            if !types::on(&self.caps.code_action_provider) {
+                return Ok(Vec::new());
+            }
+            let (from, to, diagnostics) = {
+                let docs = locked(&self.docs);
+                let doc = docs
+                    .get(&rel)
+                    .ok_or_else(|| Error::Language(format!("{rel} is not open")))?;
+                let (from, to) = (
+                    self.encoding.lsp_pos(&doc.text, range.start),
+                    self.encoding.lsp_pos(&doc.text, range.end),
+                );
+                let touches = |d: &&Value| {
+                    let at = |end: &str| {
+                        serde_json::from_value::<types::Position>(d["range"][end].clone()).ok()
+                    };
+                    let key = |p: types::Position| (p.line, p.character);
+                    at("start")
+                        .zip(at("end"))
+                        .is_some_and(|(start, end)| key(start) <= key(to) && key(from) <= key(end))
+                };
+                let here: Vec<Value> = doc.diagnostics.iter().filter(touches).cloned().collect();
+                (from, to, here)
+            };
+            let params = json!({
+                "textDocument": self.doc_id(&rel)?,
+                "range": {"start": from, "end": to},
+                "context": {"diagnostics": diagnostics, "triggerKind": 1},
+            });
+            let answer: Option<Vec<Value>> = self.ask("textDocument/codeAction", params).await?;
+            Ok(actions::actions_of(answer.unwrap_or_default()))
+        })
+    }
+
+    /// A bare command, or an action's command where it has no edit, is run, its edits being the
+    /// ones it asks to apply meanwhile; an action sent without its edit is resolved first. A
+    /// command beside an edit is left out, logged: none of the servers probed sent both.
+    fn action_edits(&self, _rel: &str, action: CodeAction) -> Fut<'_, ActionEdits> {
+        Box::pin(async move {
+            let run = |command: Value| async move {
+                self.client
+                    .execute_command(&command)
+                    .await
+                    .map_err(|e| Error::Language(format!("workspace/executeCommand: {e}")))
+            };
+            let mut raw = action.raw;
+            let edits = if raw["command"].is_string() {
+                run(raw).await?
+            } else {
+                let resolves = self
+                    .caps
+                    .code_action_provider
+                    .as_ref()
+                    .is_some_and(|p| p["resolveProvider"] == true);
+                if raw.get("edit").is_none() && raw.get("data").is_some() && resolves {
+                    raw = self.ask("codeAction/resolve", raw).await?;
+                }
+                match (raw.get("edit"), raw.get("command")) {
+                    (Some(edit), command) => {
+                        if command.is_some() {
+                            tracing::debug!("{}: its command is left out", action.title);
+                        }
+                        let edit = serde_json::from_value(edit.clone());
+                        vec![edit.map_err(|e| Error::Language(format!("its edit: {e}")))?]
+                    }
+                    (None, Some(command)) => run(command.clone()).await?,
+                    (None, None) => Vec::new(),
+                }
+            };
+            let open: HashMap<String, (i32, String)> = locked(&self.docs)
+                .iter()
+                .map(|(rel, doc)| (rel.clone(), (doc.version, doc.text.clone())))
+                .collect();
+            actions::edits_of(edits, &open, &self.root, self.encoding, |rel| {
+                crate::fs::read_note(&Local::join(&self.root, rel).ok()?).ok()
+            })
+        })
+    }
+
     fn definition(&self, rel: &str, pos: Pos) -> Fut<'_, Vec<Location>> {
         let rel = rel.to_string();
         Box::pin(async move {
@@ -906,7 +1004,7 @@ impl Language for External {
                 .ask("workspace/willRenameFiles", json!({"files": files}))
                 .await?;
             let mut out = Vec::new();
-            for (uri, edits) in answer
+            for (uri, _, edits) in answer
                 .map(types::WorkspaceEdit::text_edits)
                 .unwrap_or_default()
             {
@@ -1087,6 +1185,7 @@ mod tests {
             Doc {
                 version: 1,
                 text: text.to_string(),
+                ..Doc::default()
             },
         )])));
         server
@@ -1244,6 +1343,83 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         left
+    }
+
+    /// clangd's two kinds of code action: a fix-it, offered only for the diagnostic it was
+    /// published with, and a tweak, a command whose edit comes back through `applyEdit`.
+    #[test]
+    fn clangd_fixes_and_tweaks_come_back_as_edits() {
+        if !super::super::in_path("clangd") {
+            eprintln!("clangd is not installed: skipping the end-to-end test");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let broken = "int main(void) {\n    int x = 1\n    return x;\n}\n";
+        let tweak = "int f(int a) {\n    return a * 3;\n}\n";
+        std::fs::write(root.path().join("fix.c"), broken).unwrap();
+        std::fs::write(root.path().join("tweak.c"), tweak).unwrap();
+        let (vault, events) = crate::Vault::open_at(
+            root.path(),
+            &cache.path().join("index.db"),
+            crate::VaultConfig::default(),
+        )
+        .unwrap();
+        let rt = accent_lsp::runtime();
+        rt.block_on(vault.open_document("fix.c", "c", broken.to_string()))
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut error = None;
+        while error.is_none() && std::time::Instant::now() < deadline {
+            if let Ok(Event::Diagnostics { rel, items }) =
+                events.recv_timeout(std::time::Duration::from_millis(500))
+                && rel == "fix.c"
+            {
+                error = items.into_iter().find(|d| d.severity == Severity::Error);
+            }
+        }
+        let error = error.expect("clangd has to miss the ';'");
+        let fixes = rt
+            .block_on(vault.code_actions("fix.c", error.range))
+            .unwrap();
+        let fix = fixes
+            .into_iter()
+            .find(|a| a.preferred)
+            .expect("a preferred fix");
+        assert_eq!(fix.kind, "quickfix");
+        let edits = rt.block_on(vault.code_action_edits("fix.c", fix)).unwrap();
+        let at = Pos {
+            line: 1,
+            character: 13,
+        };
+        let insert = super::super::TextEdit {
+            range: super::super::Range { start: at, end: at },
+            text: ";".to_string(),
+        };
+        assert_eq!(edits.open, [("fix.c".to_string(), vec![insert])]);
+
+        rt.block_on(vault.open_document("tweak.c", "c", tweak.to_string()))
+            .unwrap();
+        let star = Pos {
+            line: 1,
+            character: 13,
+        };
+        let range = super::super::Range {
+            start: star,
+            end: star,
+        };
+        let swap = rt
+            .block_on(vault.code_actions("tweak.c", range))
+            .unwrap()
+            .into_iter()
+            .find(|a| a.raw["command"]["command"] == "clangd.applyTweak")
+            .expect("a tweak at the operator");
+        let edits = rt
+            .block_on(vault.code_action_edits("tweak.c", swap))
+            .unwrap();
+        let (rel, swapped) = &edits.open[0];
+        assert_eq!(rel, "tweak.c");
+        assert!(swapped.iter().any(|e| e.text == "a"), "{swapped:?}");
     }
 
     /// pylsp is the fallback of the Python row; pyright is tried first where it is installed.
@@ -1417,7 +1593,8 @@ mod tests {
         }
         let root = tempfile::tempdir().unwrap();
         let cache = tempfile::tempdir().unwrap();
-        let proof = "theorem t (p : Prop) (h : p) : p := by\n  exact h";
+        let proof = "theorem t (p : Prop) (h : p) : p := by\n  exact h\n\n\
+                     example (n : Nat) : n ≤ n := by\n  exact?";
         std::fs::write(root.path().join("T.lean"), proof).unwrap();
         let config = crate::VaultConfig {
             lsp: crate::LspConfig {
@@ -1458,6 +1635,34 @@ mod tests {
             Some("p : Prop\nh : p\n⊢ p"),
             "`h` is a `p`"
         );
+
+        // `exact?`'s "Try this" is a code action replacing the tactic.
+        let tactic = Pos {
+            line: 4,
+            character: 4,
+        };
+        let range = super::super::Range {
+            start: tactic,
+            end: tactic,
+        };
+        let actions = rt.block_on(vault.code_actions("T.lean", range)).unwrap();
+        let try_this = actions
+            .into_iter()
+            .find(|a| a.title.starts_with("Try this: exact"))
+            .expect("Lean offers what exact? found");
+        let edits = rt
+            .block_on(vault.code_action_edits("T.lean", try_this))
+            .unwrap();
+        let (rel, replaced) = &edits.open[0];
+        assert_eq!(rel, "T.lean");
+        assert_eq!(
+            replaced[0].range.start,
+            Pos {
+                line: 4,
+                character: 2
+            }
+        );
+        assert!(replaced[0].text.starts_with("exact "), "{replaced:?}");
     }
 
     #[test]

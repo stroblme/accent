@@ -240,6 +240,29 @@ pub struct Diagnostic {
     pub code: Option<String>,
 }
 
+/// A change a language server offers at a place: a quick fix, a refactoring, a source action.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CodeAction {
+    pub title: String,
+    /// The LSP kind (`quickfix`, `refactor.extract`, `source.organizeImports`); empty when the
+    /// server gave none.
+    pub kind: String,
+    /// The fix the server thinks likeliest (`isPreferred`).
+    pub preferred: bool,
+    /// The action or command as the server sent it, handed back to apply it; opaque to the UI.
+    pub raw: Value,
+}
+
+/// What a code action changes, file by file.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct ActionEdits {
+    /// Documents open at the server: edits in characters to the text it was last sent.
+    pub open: Vec<(String, Vec<TextEdit>)>,
+    /// Files no document of the server holds: byte edits to their text on disk, by etag
+    /// ([`Vault::edit_files`]).
+    pub files: Vec<FileEdits>,
+}
+
 /// A language-server call-hierarchy edge relative to the queried declaration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Call {
@@ -391,6 +414,14 @@ pub(crate) trait Language: Send + Sync {
     /// What holds at `pos` in a proof; `None` from anything that is not a proof assistant.
     fn goals(&self, _rel: &str, _pos: Pos) -> Fut<'_, Option<Goals>> {
         Box::pin(async { Ok(None) })
+    }
+    /// What the server offers over `range`, the diagnostics there going along as it published them.
+    fn code_actions(&self, _rel: &str, _range: Range) -> Fut<'_, Vec<CodeAction>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+    /// Resolve or run `action` and say what it changes.
+    fn action_edits(&self, _rel: &str, _action: CodeAction) -> Fut<'_, ActionEdits> {
+        Box::pin(async { Err(Error::Language("nothing answers it here".to_string())) })
     }
     /// Whether the provider's `willRename` filters match the file or folder at `abs`.
     fn renames(&self, _abs: &Path, _is_dir: bool) -> bool {
@@ -1401,6 +1432,10 @@ requests! {
     folds => folds() -> Vec<Fold>;
     /// The proof goals at a position, from a proof assistant's server ([`Support::goals`]).
     goals => goals(pos: Pos) -> Option<Goals>;
+    /// Quick fixes and refactorings over `range`: the selection's, or the caret's.
+    code_actions => code_actions(range: Range) -> Vec<CodeAction>;
+    /// What applying `action` changes, resolved or run at the server first where it must be.
+    code_action_edits => action_edits(action: CodeAction) -> ActionEdits;
     /// Inline ghost text, or none. Queried on typing pauses, so dropping stale
     /// tasks is the normal cancellation path.
     inline_completion => inline_completion(pos: Pos) -> Option<String>;

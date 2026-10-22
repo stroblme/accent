@@ -12,8 +12,8 @@ use accent_core::path::linked_path;
 
 use crate::local::Local;
 use crate::{
-    Backlink, CodeSymbol, Commit, Etag, Event, FileRow, HeadingHit, KeptLink, Location, Match,
-    Mention, Options, OutLink, PageEdit, PdfLink, RenamePlan, RenameReport, RepageReport,
+    Backlink, CodeSymbol, Commit, Etag, Event, FileEdits, FileRow, HeadingHit, KeptLink, Location,
+    Match, Mention, Options, OutLink, PageEdit, PdfLink, RenamePlan, RenameReport, RepageReport,
     ReplaceReport, Repo, Result, SearchHit, Session, Stats, Status, Submodule, SymbolName,
     UndoReport, VaultConfig, fs, git, remote, rpc, ssh,
 };
@@ -419,6 +419,9 @@ methods! {
     copy(from: ref str, to: ref str) -> ();
     plan_moves(moves: ref [(String, String)]) -> RenamePlan, bounded by MOVE_BOUND;
     rename(plan: ref RenamePlan, update: val bool) -> RenameReport, bounded by MOVE_BOUND;
+    /// Apply a code action's edits to files no tab holds, each gated on its etag; the files that
+    /// failed, and why.
+    edit_files(edits: ref [FileEdits]) -> Vec<(String, String)>;
     /// A note's text as Save As writes it at another path, its relative links pointed back at
     /// what they named: asked where the index is.
     relink_copy(from: ref str, to: ref str, text: ref str) -> Option<String>;
