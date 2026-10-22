@@ -1027,9 +1027,9 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
                 app.toast(message);
             }
         }),
-        transferring: Box::new(move |what, running| {
+        transferring: Box::new(move |what, running, stop| {
             if let Some(app) = transferring.upgrade() {
-                app.statusbar.set_transfer(what, running);
+                app.statusbar.set_stoppable(what, running, stop);
             }
         }),
         transfer_count: Box::new(move |from, to| {

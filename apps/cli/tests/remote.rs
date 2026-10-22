@@ -191,7 +191,7 @@ fn a_remote_vault_connects_indexes_and_answers() {
     let walked = vault.list_tree("tree").unwrap();
     assert_eq!(walked.dirs, ["", "in"]);
     assert_eq!(walked.files, ["in/x.md"]);
-    let none = &|_, _| ();
+    let (none, stop) = (&|_, _| (), &link::Stop::default());
     let taken = |copied: accent_api::Result<()>| {
         matches!(
             copied,
@@ -206,14 +206,14 @@ fn a_remote_vault_connects_indexes_and_answers() {
         let db = scratch.join("here.db");
         let (here, _events) = Vault::open_unwatched_at(&root, &db, VaultConfig::default()).unwrap();
         vault
-            .copy_to("blob.bin", &here, "blob.bin", false, none)
+            .copy_to("blob.bin", &here, "blob.bin", false, none, stop)
             .unwrap();
         assert!(std::fs::read(root.join("blob.bin")).unwrap() == bytes);
         assert!(taken(
-            vault.copy_to("blob.bin", &here, "blob.bin", false, none)
+            vault.copy_to("blob.bin", &here, "blob.bin", false, none, stop)
         ));
         assert!(!root.join("blob.bin.part").exists());
-        here.copy_to("blob.bin", &vault, "back.bin", false, none)
+        here.copy_to("blob.bin", &vault, "back.bin", false, none, stop)
             .unwrap();
         assert_eq!(
             vault.stat("back.bin").unwrap().map(|e| e.size),
@@ -227,14 +227,14 @@ fn a_remote_vault_connects_indexes_and_answers() {
     wait_for(&there_events, |e| matches!(e, Event::Connected));
     let t = Instant::now();
     vault
-        .copy_to("blob.bin", &there, "blob.bin", false, none)
+        .copy_to("blob.bin", &there, "blob.bin", false, none, stop)
         .unwrap();
     eprintln!("host to host through here in {:?}", t.elapsed());
     assert!(taken(
-        vault.copy_to("back.bin", &there, "blob.bin", false, none)
+        vault.copy_to("back.bin", &there, "blob.bin", false, none, stop)
     ));
     vault
-        .copy_to("back.bin", &there, "blob.bin", true, none)
+        .copy_to("back.bin", &there, "blob.bin", true, none, stop)
         .unwrap();
     let hop = scratch.join("hop.bin");
     there.download("blob.bin", &hop).unwrap();

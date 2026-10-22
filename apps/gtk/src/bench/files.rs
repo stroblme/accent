@@ -670,6 +670,79 @@ pub(super) fn bench_clip_outside(app: &Rc<App>, dir: &str) {
     });
 }
 
+/// A folder of 20 000 files from this machine pasted into `dir` of the vault ("" is the root) and
+/// stopped by the status bar's Stop once its count has moved. Prints the line Stop was pressed
+/// beside and whether it hid at once, then the toast, whether some but not all files landed,
+/// whether the sources stayed and whether the line went. The folder is made under `$TMPDIR` and
+/// taken out of the vault again.
+pub(super) fn bench_clip_stop(app: &Rc<App>, dir: &str) {
+    const FILES: usize = 20000;
+    let (Some(ops), Some(vault)) = (app.ops().cloned(), app.vault().cloned()) else {
+        return bench_quit(app);
+    };
+    let src = std::env::temp_dir().join(format!("clip-stop-{}", std::process::id()));
+    let folder = src.join("Many");
+    let _ = std::fs::create_dir_all(&folder);
+    for n in 0..FILES {
+        let _ = std::fs::write(folder.join(format!("{n:04}.md")), "many\n");
+    }
+    let carried = match dir {
+        "" => "Many".to_string(),
+        dir => format!("{dir}/Many"),
+    };
+    let (app, dir) = (app.clone(), dir.to_string());
+    glib::spawn_future_local(async move {
+        until(|| app.reconciled.get()).await;
+        fileops::import(&ops, &dir, vec![folder.clone()], false);
+        let stop = app.statusbar.transfer_stop().clone();
+        // "Copying Many… 12/20000 files": some have landed and the rest have not.
+        let moved = |line: &str| {
+            let count = line.split_once("… ").and_then(|(_, c)| c.split_once('/'));
+            count.is_some_and(|(done, _)| done.parse::<usize>().is_ok_and(|n| n > 0))
+        };
+        let t = Instant::now();
+        let mut line = app.statusbar.progress_text();
+        while !(moved(&line) && stop.is_visible()) && t.elapsed() < Duration::from_secs(60) {
+            glib::timeout_future(Duration::from_millis(20)).await;
+            line = app.statusbar.progress_text();
+        }
+        stop.emit_clicked();
+        println!(
+            "bench clip_stop pressed_beside_count={} hidden_after_press={}",
+            moved(&line),
+            !stop.is_visible()
+        );
+        // Among the others standing, the first index's included.
+        let copied = || {
+            app.toasts
+                .shown()
+                .into_iter()
+                .find(|t| t.starts_with("Cop"))
+        };
+        until(|| copied().is_some()).await;
+        let toast = copied().unwrap_or_default();
+        let landed = vault
+            .resolve(&carried)
+            .ok()
+            .and_then(|at| std::fs::read_dir(at).ok())
+            .map_or(0, |dir| dir.count());
+        println!(
+            "bench clip_stop said_stopped={} landed_some={} landed_fewer={} sources_kept={} \
+             line_gone={} button_gone={}",
+            toast.starts_with("Copy stopped after "),
+            landed > 0,
+            landed < FILES,
+            std::fs::read_dir(&folder).map_or(0, |d| d.count()) == FILES,
+            !app.statusbar.progress_text().starts_with("Copying"),
+            !stop.is_visible()
+        );
+        println!("bench clip_stop toast {toast:?} landed={landed}/{FILES}");
+        let _ = vault.delete(&carried);
+        let _ = std::fs::remove_dir_all(&src);
+        bench_quit(&app);
+    });
+}
+
 /// A remote vault's bytes counted on the status bar three ways: `rel`, a PDF, opened in a tab and
 /// fetched into the ssh cache; the same file through Download… to `$TMPDIR`; and a 16 MB file
 /// of this machine's pasted into the vault root. Prints each one's lines with when they came and

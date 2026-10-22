@@ -10,6 +10,7 @@ use serde_json::json;
 
 use accent_core::path::linked_path;
 
+use crate::link::Stop;
 use crate::local::Local;
 use crate::{
     Backlink, CodeSymbol, Commit, Etag, Event, FileEdits, FileRow, HeadingHit, KeptLink, Location,
@@ -605,21 +606,22 @@ impl Vault {
     /// a caller passes once Replace was confirmed; otherwise only to a name nothing holds, a taken
     /// one failing with `AlreadyExists`.
     pub fn upload(&self, local: &Path, rel: &str, replace: bool) -> Result<()> {
-        self.upload_with(local, rel, replace, &|_, _| ())
+        self.upload_with(local, rel, replace, &|_, _| (), &Stop::default())
     }
 
-    /// [`upload`](Self::upload) with sent and total byte counts for remote uploads.
-    /// Local copies do not report progress.
+    /// [`upload`](Self::upload) with sent and total byte counts for remote uploads, which `stop`
+    /// cuts short. Local copies neither report progress nor stop.
     pub fn upload_with(
         &self,
         local: &Path,
         rel: &str,
         replace: bool,
         progress: &dyn Fn(u64, u64),
+        stop: &Stop,
     ) -> Result<()> {
         match &self.backend {
             Backend::Local(v) => v.upload(local, rel, replace),
-            Backend::Remote(r) => r.upload_with(local, rel, replace, progress),
+            Backend::Remote(r) => r.upload_with(local, rel, replace, progress, stop),
         }
     }
 
@@ -635,25 +637,32 @@ impl Vault {
 
     /// Copy a file out of the vault to somewhere on this machine.
     pub fn download(&self, rel: &str, dest: &Path) -> Result<()> {
-        self.download_with(rel, dest, &|_, _| ())
+        self.download_with(rel, dest, &|_, _| (), &Stop::default())
     }
 
     /// [`download`](Self::download), telling `progress` the bytes so far and how many there are
-    /// on a remote vault.
-    pub fn download_with(&self, rel: &str, dest: &Path, progress: &dyn Fn(u64, u64)) -> Result<()> {
+    /// on a remote vault, which `stop` cuts short.
+    pub fn download_with(
+        &self,
+        rel: &str,
+        dest: &Path,
+        progress: &dyn Fn(u64, u64),
+        stop: &Stop,
+    ) -> Result<()> {
         match &self.backend {
             Backend::Local(v) => match std::fs::copy(v.resolve(rel)?, dest) {
                 Ok(_) => Ok(()),
                 Err(e) => Err(accent_core::Error::io(rel, e).into()),
             },
-            Backend::Remote(r) => r.download_with(rel, dest, true, progress),
+            Backend::Remote(r) => r.download_with(rel, dest, true, progress, stop),
         }
     }
 
     /// Copy the file `rel` into the vault `to` at `to_rel`, its bytes going straight from one
     /// machine to the other: read here and written there, downloaded, uploaded, or piped from host
     /// to host through this machine. Over the file there when `replace`; otherwise only to a name
-    /// nothing holds, a taken one failing with `AlreadyExists`.
+    /// nothing holds, a taken one failing with `AlreadyExists`. `stop` cuts a copy over a link
+    /// short; one from disk to disk runs to its end.
     pub fn copy_to(
         &self,
         rel: &str,
@@ -661,14 +670,17 @@ impl Vault {
         to_rel: &str,
         replace: bool,
         progress: &dyn Fn(u64, u64),
+        stop: &Stop,
     ) -> Result<()> {
         match (&self.backend, &to.backend) {
-            (Backend::Local(v), _) => to.upload_with(&v.resolve(rel)?, to_rel, replace, progress),
+            (Backend::Local(v), _) => {
+                to.upload_with(&v.resolve(rel)?, to_rel, replace, progress, stop)
+            }
             (Backend::Remote(r), Backend::Local(d)) => {
-                r.download_with(rel, &d.resolve(to_rel)?, replace, progress)
+                r.download_with(rel, &d.resolve(to_rel)?, replace, progress, stop)
             }
             (Backend::Remote(r), Backend::Remote(t)) => {
-                r.send_to(rel, t, to_rel, replace, progress)
+                r.send_to(rel, t, to_rel, replace, progress, stop)
             }
         }
     }
@@ -740,7 +752,7 @@ impl Vault {
 
 #[cfg(test)]
 mod tests {
-    use super::{Backend, CopyPage, walk_copy_pages};
+    use super::{Backend, CopyPage, Stop, walk_copy_pages};
     use crate::tests::*;
     use crate::{Event, Kind, Location, Pos, Range, Severity, Vault, VaultConfig, debug, fs};
     use std::time::Duration;
@@ -1006,18 +1018,19 @@ mod tests {
         assert_eq!(walked.dirs, ["", "sub"]);
         assert_eq!(walked.files, ["sub/y.md", "x.md"]);
 
-        let none = &|_, _| ();
+        let (none, stop) = (&|_, _| (), &Stop::default());
         a.vault
-            .copy_to("F/x.md", &b.vault, "y.md", false, none)
+            .copy_to("F/x.md", &b.vault, "y.md", false, none, stop)
             .unwrap();
         assert_eq!(b.read("y.md"), "mine\n");
         assert!(matches!(
-            a.vault.copy_to("F/x.md", &b.vault, "x.md", false, none),
+            a.vault
+                .copy_to("F/x.md", &b.vault, "x.md", false, none, stop),
             Err(crate::Error::Core(accent_core::Error::AlreadyExists(_)))
         ));
         assert_eq!(b.read("x.md"), "theirs\n");
         a.vault
-            .copy_to("F/x.md", &b.vault, "x.md", true, none)
+            .copy_to("F/x.md", &b.vault, "x.md", true, none, stop)
             .unwrap();
         assert_eq!(b.read("x.md"), "mine\n");
         assert_eq!(a.read("F/x.md"), "mine\n", "the original stays");
