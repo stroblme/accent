@@ -139,6 +139,13 @@ fn big_delimiters_are_taller() {
     assert!(height(laid(r"\big(", false)) > height(laid("(", false)));
 }
 
+/// `\displaystyle`, which SymPy starts every formula with, sets a large operator large.
+#[test]
+fn display_style_enlarges_an_integral() {
+    let height = |l: Layout| l.ascent + l.descent;
+    assert!(height(laid(r"\displaystyle \int x", false)) > height(laid(r"\int x", false)));
+}
+
 /// The function application after `\sin` takes no room: x sits where a plain thin space puts it.
 #[test]
 fn a_function_name_leaves_no_gap() {

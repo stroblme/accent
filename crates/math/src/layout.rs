@@ -982,7 +982,8 @@ fn layout_row(ctx: &Ctx, children: &[Node]) -> MathBox {
                     _ => Slot::Fixed(layout_text_run(ctx, text)),
                 }
             } else {
-                Slot::Fixed(layout_node(ctx, child))
+                // pulldown-latex's `\displaystyle` puts a style on the `<mo>` itself.
+                Slot::Fixed(layout_operator_base(ctx, child))
             };
             (lspace, rspace, slot)
         } else {
