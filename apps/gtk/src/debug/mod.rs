@@ -2,7 +2,7 @@
 //! the expressions it watches, the session itself (`run`), and its Debug Console (`console`).
 
 use super::*;
-use accent_api::debug::{ExceptionFilter, debuggable};
+use accent_api::debug::{Breakpoint, ExceptionFilter, Supports, debuggable};
 use std::collections::BTreeMap;
 
 pub(crate) mod breakpoints;
@@ -17,7 +17,9 @@ use run::Run;
 pub struct Debugger {
     /// The breakpoints of the files no tab has open, by file key; an open tab holds its own as
     /// marks that move with its text.
-    kept: RefCell<BTreeMap<String, Vec<u32>>>,
+    kept: RefCell<BTreeMap<String, Vec<Breakpoint>>>,
+    /// What the last session's adapter takes beside a breakpoint's line, for the window's life.
+    supports: Cell<Option<Supports>>,
     /// The Watch section's expressions, in its order; the vault's session keeps them.
     watches: RefCell<Vec<String>>,
     /// The exceptions the adapter last offered to stop at, as the reader set them; the vault's
@@ -47,7 +49,7 @@ impl Debugger {
     }
 
     /// Every file's breakpoints: those kept, with each open tab's as its marks stand now.
-    pub(crate) fn saved(&self, app: &App) -> BTreeMap<String, Vec<u32>> {
+    pub(crate) fn saved(&self, app: &App) -> BTreeMap<String, Vec<Breakpoint>> {
         let mut saved = self.kept.borrow().clone();
         for tab in app.open_tabs() {
             keep(&mut saved, &tab);
@@ -68,6 +70,16 @@ impl Debugger {
         self.exceptions.replace(session.exceptions.clone());
     }
 
+    /// What the Breakpoints rows offer to set: until an adapter has said, all of it, which
+    /// debugpy takes.
+    pub(crate) fn supports(&self) -> Supports {
+        self.supports.get().unwrap_or(Supports {
+            condition: true,
+            hit_condition: true,
+            log_message: true,
+        })
+    }
+
     pub(crate) fn watches(&self) -> Vec<String> {
         self.watches.borrow().clone()
     }
@@ -78,8 +90,8 @@ impl Debugger {
 
     /// Put a file's kept breakpoints on its newly opened tab.
     pub(crate) fn place(&self, tab: &Tab) {
-        if let Some(lines) = self.kept.borrow().get(&tab.rel()) {
-            breakpoints::place(tab, lines);
+        if let Some(kept) = self.kept.borrow().get(&tab.rel()) {
+            breakpoints::place(tab, kept);
         }
     }
 
@@ -98,10 +110,10 @@ impl Debugger {
 }
 
 /// `tab`'s breakpoints into `map`, or its entry out of it when it has none.
-fn keep(map: &mut BTreeMap<String, Vec<u32>>, tab: &Tab) {
-    match breakpoints::lines(tab) {
-        lines if lines.is_empty() => map.remove(&tab.rel()),
-        lines => map.insert(tab.rel(), lines),
+fn keep(map: &mut BTreeMap<String, Vec<Breakpoint>>, tab: &Tab) {
+    match breakpoints::saved(tab) {
+        saved if saved.is_empty() => map.remove(&tab.rel()),
+        saved => map.insert(tab.rel(), saved),
     };
 }
 
@@ -114,9 +126,38 @@ impl App {
             breakpoints::toggle(tab, line);
             breakpoints::redraw(tab);
             self.save_session_soon();
-            self.send_breakpoints(tab.rel(), breakpoints::lines(tab));
+            self.send_breakpoints(tab.rel(), breakpoints::saved(tab));
             self.refill_breakpoints();
         }
+    }
+
+    /// Set what the breakpoint on `edited.line` of file `key` does beside stopping there, from
+    /// its Breakpoints row; a running program is told. Nothing when no breakpoint is on that line
+    /// any more.
+    pub(crate) fn edit_breakpoint(self: &Rc<Self>, key: &str, edited: Breakpoint) {
+        let now = match self.tab_for(key) {
+            Some(tab) => {
+                if !breakpoints::edit(&tab, &edited) {
+                    return;
+                }
+                breakpoints::redraw(&tab);
+                breakpoints::saved(&tab)
+            }
+            None => {
+                let mut kept = self.debugger.kept.borrow_mut();
+                let Some(file) = kept.get_mut(key) else {
+                    return;
+                };
+                let Some(here) = file.iter_mut().find(|b| b.line == edited.line) else {
+                    return;
+                };
+                *here = edited;
+                file.clone()
+            }
+        };
+        self.save_session_soon();
+        self.send_breakpoints(key.to_string(), now);
+        self.refill_breakpoints();
     }
 
     /// Watch `expression`, after those watched already; one watched already stays where it is.

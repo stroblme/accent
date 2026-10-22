@@ -8,17 +8,17 @@ use std::sync::{Arc, Mutex, Weak};
 
 use accent_core::config::DebugConfig;
 use accent_dap::types::{
-    Breakpoint, BreakpointEventBody, CompletionsResponse, EvaluateResponse, ExitedEventBody,
-    OutputEventBody, RunInTerminalRequestArguments, ScopesResponse, SetBreakpointsResponse,
-    StackTraceResponse, StoppedEventBody, ThreadsResponse, VariablesResponse,
+    BreakpointEventBody, CompletionsResponse, EvaluateResponse, ExitedEventBody, OutputEventBody,
+    RunInTerminalRequestArguments, ScopesResponse, SetBreakpointsResponse, StackTraceResponse,
+    StoppedEventBody, ThreadsResponse, VariablesResponse,
 };
 use accent_dap::{Client, Incoming, Incomings};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use super::{
-    Candidate, Category, Context, Debugs, Evaluated, ExceptionFilter, Frame, Launch, News, Placed,
-    Scope, Step, Thread, Variable,
+    Breakpoint, Candidate, Category, Context, Debugs, Evaluated, ExceptionFilter, Frame, Launch,
+    News, Placed, Scope, Step, Supports, Thread, Variable,
 };
 use crate::language::{Pos, session_root};
 use crate::{Error, Event, Result, locked};
@@ -53,6 +53,14 @@ pub(super) async fn start(
         Ok(capabilities) => capabilities,
         Err(e) => return Err(failed(&argv[0], &client, e)),
     };
+    let _ = debugs.events.send(Event::Debug {
+        session: id,
+        news: News::Supports(Supports {
+            condition: capabilities.supports_conditional_breakpoints,
+            hit_condition: capabilities.supports_hit_conditional_breakpoints,
+            log_message: capabilities.supports_log_points,
+        }),
+    });
     // Each as the window had it, else as the adapter defaults it.
     let exceptions: Vec<ExceptionFilter> = capabilities
         .exception_breakpoint_filters
@@ -135,7 +143,7 @@ async fn forward(
     session: Weak<Session>,
     debugs: Weak<Debugs>,
     events: Sender<Event>,
-    breakpoints: Vec<(String, Vec<u32>)>,
+    breakpoints: Vec<(String, Vec<Breakpoint>)>,
     exceptions: Vec<String>,
 ) {
     let emit = |news| {
@@ -264,12 +272,12 @@ impl Session {
     /// run.
     async fn configure(
         &self,
-        files: Vec<(String, Vec<u32>)>,
+        files: Vec<(String, Vec<Breakpoint>)>,
         exceptions: Vec<String>,
         emit: &impl Fn(News),
     ) {
-        for (path, lines) in files {
-            match self.breakpoints(path.clone(), lines).await {
+        for (path, breakpoints) in files {
+            match self.breakpoints(path.clone(), breakpoints).await {
                 Ok(placed) => emit(News::Breakpoints { path, placed }),
                 Err(e) => tracing::warn!("cannot set the breakpoints of {path}: {e}"),
             }
@@ -294,15 +302,19 @@ impl Session {
         Ok(())
     }
 
-    pub(super) async fn breakpoints(&self, path: String, lines: Vec<u32>) -> Result<Vec<Placed>> {
-        let asked: Vec<Value> = lines.iter().map(|l| json!({"line": l + 1})).collect();
+    pub(super) async fn breakpoints(
+        &self,
+        path: String,
+        breakpoints: Vec<Breakpoint>,
+    ) -> Result<Vec<Placed>> {
+        let asked: Vec<Value> = breakpoints.iter().map(asked).collect();
         let arguments = json!({"source": {"path": self.root.join(&path)}, "breakpoints": asked});
         let answer: SetBreakpointsResponse =
             self.client.request("setBreakpoints", arguments).await?;
         let held: Held = answer
             .breakpoints
             .iter()
-            .zip(lines)
+            .zip(&breakpoints)
             .map(|(b, asked)| (b.id, placed(b, asked)))
             .collect();
         let now = held.iter().map(|(_, p)| p.clone()).collect();
@@ -320,7 +332,7 @@ impl Session {
         })?;
         match event.reason.as_str() {
             "removed" => drop(held.remove(at)),
-            _ => held[at].1 = placed(&event.breakpoint, held[at].1.line),
+            _ => held[at].1 = placed(&event.breakpoint, &held[at].1.breakpoint),
         }
         Some((path.clone(), held.iter().map(|(_, p)| p.clone()).collect()))
     }
@@ -484,11 +496,58 @@ impl Session {
     }
 }
 
-/// Where the adapter put a breakpoint asked for on `asked`.
-fn placed(b: &Breakpoint, asked: u32) -> Placed {
+/// A breakpoint as `setBreakpoints` asks for it: its line, 1-based, and what was set beside it.
+fn asked(b: &Breakpoint) -> Value {
+    let mut asked = json!({"line": b.line + 1});
+    let set = [
+        ("condition", &b.condition),
+        ("hitCondition", &b.hit_condition),
+        ("logMessage", &b.log_message),
+    ];
+    for (key, value) in set {
+        if let Some(value) = value {
+            asked[key] = value.as_str().into();
+        }
+    }
+    asked
+}
+
+/// Where the adapter put the breakpoint `asked`, which keeps what was set beside its line.
+fn placed(b: &accent_dap::types::Breakpoint, asked: &Breakpoint) -> Placed {
     Placed {
-        line: b.line.map_or(asked, |line| line.saturating_sub(1)),
+        breakpoint: Breakpoint {
+            line: b.line.map_or(asked.line, |line| line.saturating_sub(1)),
+            ..asked.clone()
+        },
         verified: b.verified,
         message: b.message.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_breakpoint_asks_for_what_was_set_beside_its_line() {
+        assert_eq!(asked(&Breakpoint::at(0)), json!({"line": 1}));
+        let set = Breakpoint {
+            line: 4,
+            condition: Some("x > 1".to_string()),
+            hit_condition: Some(">= 2".to_string()),
+            log_message: Some("x is {x}".to_string()),
+        };
+        assert_eq!(
+            asked(&set),
+            json!({"line": 5, "condition": "x > 1", "hitCondition": ">= 2", "logMessage": "x is {x}"})
+        );
+        // The adapter moved it to line 7: the settings go along.
+        let answer = accent_dap::types::Breakpoint {
+            line: Some(7),
+            verified: true,
+            ..Default::default()
+        };
+        let moved = placed(&answer, &set).breakpoint;
+        assert_eq!(moved, Breakpoint { line: 6, ..set });
     }
 }

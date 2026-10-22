@@ -25,13 +25,21 @@ const WATCH: &str = "x + 1";
 /// Asked at the console for an answer that holds more, which Variables then lists first.
 const HOLDS: &str = "[x, {'a': 1}]";
 
+/// Set through their Breakpoints rows before the start, on the program's 0-based lines: a
+/// condition that never holds on `total = double(21)`, which runs before `double`'s line, and a
+/// log message on the `print` after it.
+const HELD_BACK: (u32, &str, &str) = (4, "Condition", "1 == 2");
+const LOGGED: (u32, &str, &str) = (5, "Log Message", "total is {total}");
+
 /// `ACCENT_BENCH_DEBUG=<rel>:<line>` debugs the program `make drills` writes, whose `double(x)`
-/// is called with 21, from a breakpoint on 1-based `<line>`, `y = x * 2`. It prints what the
-/// window shows at each step, `bench debug …`: the breakpoint, the stop, the top call, its
+/// is called with 21, from a breakpoint on 1-based `<line>`, `y = x * 2`, beside [`HELD_BACK`]
+/// and [`LOGGED`]. It prints what the window shows at each step, `bench debug …`: the
+/// breakpoints' marks and rows, the stop, which the condition did not take, the top call, its
 /// locals, [`WATCH`]'s value, the Debug Console's answers to [`REPL`], to [`CALL`] after
 /// [`BLOCK`] and to [`TYPED`] completed with Tab and called, [`HOLDS`] atop Variables and opened,
 /// the hover's value of the first name after the line's `=`, the line a step over lands on, the
-/// session's exit code, the program's output in its tab, that tab kept, and the Code pane shown
+/// session's exit code, the program's output in its tab, the logpoint's in the Debug Console,
+/// that tab kept, and the Code pane shown
 /// with the program's file in front and hidden behind its tab. Timings go on `bench debug_ms …`
 /// lines; a step that never comes prints `bench debug timeout <what>` and quits.
 pub(super) fn bench_debug(app: &Rc<App>, arg: &str) {
@@ -59,8 +67,30 @@ pub(super) fn bench_debug(app: &Rc<App>, arg: &str) {
         };
         app.toggle_breakpoint(&tab, line);
         app.add_watch(WATCH);
-        for at in breakpoints::lines(&tab) {
-            println!("bench debug breakpoint {rel}:{}", at + 1);
+        for (at, field, value) in [HELD_BACK, LOGGED] {
+            app.toggle_breakpoint(&tab, at);
+            if let Some(sidebar) = app.sidebar.get() {
+                sidebar.edit_breakpoint_row(&rel, at, &[(field, value)]);
+            }
+            let edited = || {
+                let shown = breakpoints::shown(&tab);
+                let mark = shown.iter().find(|(line, _)| *line == at + 1)?;
+                (mark.1 != "breakpoint").then_some(())
+            };
+            if until(&app, "edited", edited).await.is_none() {
+                return;
+            }
+        }
+        for (at, category) in breakpoints::shown(&tab) {
+            println!("bench debug breakpoint {rel}:{at} {category}");
+        }
+        for row in app
+            .sidebar
+            .get()
+            .map(|s| s.breakpoint_rows())
+            .unwrap_or_default()
+        {
+            println!("bench debug row {row}");
         }
 
         let t = Instant::now();
@@ -196,6 +226,17 @@ pub(super) fn bench_debug(app: &Rc<App>, arg: &str) {
             return;
         };
         println!("bench debug output {output}");
+        let logged = || {
+            let console = app.console()?;
+            let text = text(&console);
+            text.lines()
+                .find(|l| l.starts_with("total is "))
+                .map(|l| l.trim_end().to_string())
+        };
+        let Some(logged) = until(&app, "log", logged).await else {
+            return;
+        };
+        println!("bench debug log {logged}");
         // Once it has said how it ended: a shell's tab would close there.
         let said = || text(&program).contains("[Exited with code").then_some(());
         if until(&app, "program end", said).await.is_none() {

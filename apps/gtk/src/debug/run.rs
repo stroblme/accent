@@ -116,8 +116,8 @@ impl App {
                     app.sync_debug();
                     let now = app.debugger.saved(&app);
                     for key in run.changed.take() {
-                        let lines = now.get(&key).cloned().unwrap_or_default();
-                        app.send_breakpoints(key, lines);
+                        let breakpoints = now.get(&key).cloned().unwrap_or_default();
+                        app.send_breakpoints(key, breakpoints);
                     }
                     if run.exceptions_changed.take() {
                         app.send_exceptions();
@@ -304,6 +304,10 @@ impl App {
             // The adapter answering for the lines it was launched with, which the reader has
             // changed since: theirs go once the program runs.
             News::Breakpoints { path, .. } if run.changed.borrow().contains(&path) => {}
+            News::Supports(supports) => {
+                self.debugger.supports.set(Some(supports));
+                self.refill_breakpoints();
+            }
             News::Exceptions(offered) => {
                 self.debugger.exceptions.replace(offered);
                 self.save_session_soon();
@@ -574,7 +578,7 @@ impl App {
         self.show_watches(None);
         for tab in self.open_tabs() {
             if !tab.breakpoints.borrow().is_empty() {
-                breakpoints::place(&tab, &breakpoints::lines(&tab));
+                breakpoints::place(&tab, &breakpoints::saved(&tab));
                 breakpoints::redraw(&tab);
             }
         }
@@ -746,14 +750,14 @@ impl App {
     /// Tell a running program file `key`'s breakpoints, all of them, and move its tab's marks to
     /// where the program holds them. One still starting is told once it runs; an answer that
     /// does not come leaves the marks as the reader set them.
-    pub(super) fn send_breakpoints(self: &Rc<Self>, key: String, lines: Vec<u32>) {
+    pub(super) fn send_breakpoints(self: &Rc<Self>, key: String, breakpoints: Vec<Breakpoint>) {
         let (Some(run), Some(vault)) = (self.debugger.run(), self.vault()) else {
             return;
         };
         if !run.takes_breakpoints(&key) {
             return;
         }
-        let asked = vault.debug_breakpoints(run.id, key.clone(), lines);
+        let asked = vault.debug_breakpoints(run.id, key.clone(), breakpoints);
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let placed = match asked.await {
@@ -773,18 +777,18 @@ impl App {
         });
     }
 
-    /// The Breakpoints section's rows, `path:line` as References' are.
+    /// The Breakpoints section's rows, every file's breakpoints, and the fields they offer.
     pub(crate) fn refill_breakpoints(&self) {
         let Some(sidebar) = self.sidebar.get() else {
             return;
         };
-        let rows: Vec<String> = self
+        let rows: Vec<sidebar::BreakpointRow> = self
             .debugger
             .saved(self)
-            .iter()
-            .flat_map(|(key, lines)| lines.iter().map(move |line| format!("{key}:{}", line + 1)))
+            .into_iter()
+            .flat_map(|(key, set)| set.into_iter().map(move |b| (key.clone(), b)))
             .collect();
-        sidebar.set_breakpoint_rows(&rows);
+        sidebar.set_breakpoint_rows(&rows, self.debugger.supports());
     }
 
     /// A debugging toast: a newer one takes its place.

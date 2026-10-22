@@ -16,7 +16,7 @@ use std::process::Stdio;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-use accent_api::debug::{Context, Launch, News};
+use accent_api::debug::{Breakpoint, Context, Launch, News};
 use accent_api::kernel;
 use accent_api::link;
 use accent_api::ssh::{self, Direction, Forward, Url};
@@ -554,7 +554,7 @@ fn a_remote_vault_connects_indexes_and_answers() {
         let launch = Launch {
             program: "demo.py".to_string(),
             language: "python3".to_string(),
-            breakpoints: vec![("demo.py".to_string(), vec![1])],
+            breakpoints: vec![("demo.py".to_string(), vec![Breakpoint::at(1)])],
             exceptions: Vec::new(),
         };
         let news = |want: fn(&News) -> bool| match wait_for(
