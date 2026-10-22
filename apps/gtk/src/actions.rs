@@ -814,16 +814,11 @@ fn fill_captured(controller: &gtk::ShortcutController, bindings: &[(&str, String
         controller.add_shortcut(gtk::Shortcut::new(
             Some(trigger),
             Some(gtk::CallbackAction::new(move |widget, _| {
-                let focus = widget
+                let editing = widget
                     .root()
                     .and_downcast::<gtk::Window>()
-                    .and_then(|w| gtk::prelude::GtkWindowExt::focus(&w));
-                // A notebook cell keeps `Alt+Return` as Insert Cell Below (user decision
-                // 2026-10-20) until it is decided what Quick Fix's chord means there.
-                let cell = |f: &gtk::Widget| f.has_css_class("notebook-source");
-                let editing = focus.is_some_and(|f| {
-                    f.is::<sourceview5::View>() && !(action == "win.quick-fix" && cell(&f))
-                });
+                    .and_then(|w| gtk::prelude::GtkWindowExt::focus(&w))
+                    .is_some_and(|f| f.is::<sourceview5::View>());
                 if !editing {
                     return glib::Propagation::Proceed;
                 }

@@ -1565,7 +1565,7 @@ The `Ctrl` chords for application and document commands use GTK's `<Primary>` mo
 
 ### Notebook
 
-- Undo Notebook Edit `Ctrl+Z` and Redo `Ctrl+Shift+Z` / `Ctrl+Y` are the notebook's own keys, as a diagram's canvas's are, the header's two buttons too, and so are Insert Cell Below `Alt+Return`, Insert Cell Above `Alt+Shift+Return`, Split Cell `Ctrl+Shift+-` and Move Cell Up / Down `Ctrl+Shift+Up` / `Ctrl+Shift+Down` (user decision 2026-10-20).
+- Undo Notebook Edit `Ctrl+Z` and Redo `Ctrl+Shift+Z` / `Ctrl+Y` are the notebook's own keys, as a diagram's canvas's are, the header's two buttons too, and so are Insert Cell Below `Alt+B` (Jupyter's `B`; `Alt+Return` is Quick Fix's, user decision 2026-10-22), Insert Cell Above `Alt+Shift+Return`, Split Cell `Ctrl+Shift+-` and Move Cell Up / Down `Ctrl+Shift+Up` / `Ctrl+Shift+Down` (user decision 2026-10-20).
   `Ctrl+Shift+Up` / `Down` select by paragraph everywhere else, as GtkTextView does, and move the cell in a cell only, `Alt+Up` / `Down` being on the never-bind list and `Shift+Alt+Up` / `Down` adding carets.
 - Insert Markdown Cell Below, Delete Cell, Change Cell to Code, to Markdown and to Raw (an `.ipynb`'s) and Join with Next Cell are unbound; every cell command acts on the selected cell, Split Cell at the caret, and is in the palette and on the cell's buttons and More menu.
 - Run Cell is `Ctrl+Return`, Insert Line Below's chord, which a notebook in front answers, and Run Cell and Advance `Shift+Return`, the notebook's own key: Jupyter's and VS Code's (user decision 2026-10-20).
@@ -1679,7 +1679,7 @@ The `Ctrl` chords for application and document commands use GTK's `<Primary>` mo
 - Go to Definition `Ctrl+Shift+Return` / `F12` / Ctrl+click, one question for every text tab and code cell, asked about the text as it stands: on a note it follows a link — offering New File with the path typed in where nothing answers to it, and landing on the heading or the block (`#^id`) its anchor names, and going to the top of the note with a toast for one the note does not have, as a click in the preview does — and an external link (any `scheme://`, `mailto:`, `tel:`, `sms:`; never `file:`, `javascript:` or `data:`) goes to the system.
   A bare `http(s)://` or `mailto:` URL under the caret opens in the browser from any text tab, ahead of the language server (a URL is not a symbol), and Ctrl+hover underlines it as it does a link.
 - Quick Fix `Alt+Return`, an editing chord: Lean's "Try this", clangd's fix-its and tweaks, rust-analyzer's fixes and assists (Language servers).
-  VS Code's `Ctrl+.` is GtkTextView's emoji chooser here (user decision 2026-10-22); in a notebook cell `Alt+Return` is still Insert Cell Below (Notebook), so a cell's quick fixes are the palette's and the hover's.
+  VS Code's `Ctrl+.` is GtkTextView's emoji chooser here; Quick Fix takes `Alt+Return` in a notebook's cells too, Insert Cell Below moving to `Alt+B` (user decision 2026-10-22).
 - Fold / Unfold `Ctrl+Shift+[` / `Ctrl+Shift+]`, Fold All / Unfold All from the palette.
   Fold takes the innermost block holding the caret; the gutter chevron beside a block's first line is the same by pointer.
   A block shut over a column of carets brings each caret it hides out to the end of its header, those meeting there merging, and the column stays up, as in VS Code.
