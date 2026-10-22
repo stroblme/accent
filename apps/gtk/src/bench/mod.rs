@@ -35,6 +35,7 @@ mod panes;
 mod pdf;
 mod present;
 mod preview;
+mod quickfix;
 mod replace;
 mod scroll;
 mod search;
@@ -265,6 +266,8 @@ use tags::bench_tags;
 ///   search toggles, invalid patterns and replacement captures in a temporary note.
 /// - `ACCENT_BENCH_DIAG=<rel_code_file>`: diagnostic expansion and line-end
 ///   truncation. Writes the file; use a scratch vault.
+/// - `ACCENT_BENCH_QUICKFIX=<rel_c_file>`: Quick Fix's menu and each kind of code action,
+///   against `fake-lsp.py --actions` (`quickfix::bench_quickfix`). Writes files; a scratch vault.
 /// - `ACCENT_BENCH_SEARCH=<query>[:<n>]`: result refresh after external writes;
 ///   `type:<query>`: ranked timing; `walk:<query>`: All/unindexed timing;
 ///   `more:<query>[:<n>]`: expanded per-file results; `click:`: wait for XTEST;
@@ -350,6 +353,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let search = std::env::var("ACCENT_BENCH_SEARCH").ok();
     let find = std::env::var("ACCENT_BENCH_FIND").ok();
     let diag = std::env::var("ACCENT_BENCH_DIAG").ok();
+    let quickfix = std::env::var("ACCENT_BENCH_QUICKFIX").ok();
     let save_as = std::env::var("ACCENT_BENCH_SAVE_AS").ok();
     let attach = std::env::var("ACCENT_BENCH_ATTACH").ok();
     let answer = std::env::var("ACCENT_BENCH_ANSWER").ok();
@@ -368,6 +372,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && save_as.is_none()
         && find.is_none()
         && diag.is_none()
+        && quickfix.is_none()
         && tags.is_none()
         && !replace
         && info.is_none()
@@ -634,6 +639,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(rel) = diag {
             return bench_diagnostics(&app, &rel);
+        }
+        if let Some(rel) = quickfix {
+            return quickfix::bench_quickfix(&app, &rel);
         }
         if let Some(rel) = menu {
             if let Some(rel) = rel.strip_prefix("press:") {

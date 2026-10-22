@@ -107,6 +107,16 @@ impl Document {
         self.version.set(self.version.get().wrapping_add(1));
     }
 
+    /// How many times the text has changed, to tell later whether it has since.
+    pub fn version(&self) -> u64 {
+        self.version.get()
+    }
+
+    /// Whether the server holds the text as it is: every change sent.
+    pub fn in_step(&self) -> bool {
+        self.sent.get() >= self.version.get()
+    }
+
     /// Open as `key` in `language` (a GtkSourceView id) holding `text`, the key and the vault
     /// taken at once, so what is asked meanwhile goes there. `told` is called when
     /// [`starting`](Self::starting) changes: once the server has kept it waiting [`SLOW_START`]

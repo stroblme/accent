@@ -412,6 +412,7 @@ impl App {
                     self.toast("No conflicts in this file");
                 }
             }
+            "quick-fix" => self.quick_fix(),
             "fold" => self.with_active(Tab::fold_at_caret),
             "unfold" => self.with_active(Tab::unfold_at_caret),
             "fold-all" => self.with_active(Tab::fold_all),
@@ -635,6 +636,8 @@ const CAPTURED: &[&str] = &[
     // GtkTextView binds Ctrl+K to deleting to the end of the line, which is not something anyone
     // reaches for in an editor that has Ctrl+L for the whole line.
     "win.toggle-comment",
+    // GtkTextView takes Return with any modifier for a new line.
+    "win.quick-fix",
 ];
 
 /// The chords that edit the tab in front or move about in it. They are bound only while the
@@ -658,6 +661,7 @@ const EDITING: &[&str] = &[
     "win.terminal-paste",
     "win.fold",
     "win.unfold",
+    "win.quick-fix",
     "win.debug-toggle-breakpoint",
 ];
 
@@ -779,11 +783,16 @@ fn fill_captured(controller: &gtk::ShortcutController, bindings: &[(&str, String
         controller.add_shortcut(gtk::Shortcut::new(
             Some(trigger),
             Some(gtk::CallbackAction::new(move |widget, _| {
-                let editing = widget
+                let focus = widget
                     .root()
                     .and_downcast::<gtk::Window>()
-                    .and_then(|w| gtk::prelude::GtkWindowExt::focus(&w))
-                    .is_some_and(|f| f.is::<sourceview5::View>());
+                    .and_then(|w| gtk::prelude::GtkWindowExt::focus(&w));
+                // A notebook cell keeps `Alt+Return` as Insert Cell Below (user decision
+                // 2026-10-20) until it is decided what Quick Fix's chord means there.
+                let cell = |f: &gtk::Widget| f.has_css_class("notebook-source");
+                let editing = focus.is_some_and(|f| {
+                    f.is::<sourceview5::View>() && !(action == "win.quick-fix" && cell(&f))
+                });
                 if !editing {
                     return glib::Propagation::Proceed;
                 }

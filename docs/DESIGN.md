@@ -102,6 +102,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Its socket is `$TMPDIR/accent-<uid>/hold-3.sock`, versioned — `$XDG_RUNTIME_DIR` goes at a full logout, and the version keeps a new `attach` off an older holder.
 - **Language client**: our own tokio client in `crates/lsp`, protocol types transcribed from `lsp-types` (MIT), one process-wide runtime — `lsp-types` is unmaintained and `async-lsp` pins an old one, and `accent-core` stays runtime-free for Android.
   A request is given 10 s, the handshake 120 s (user decision 2026-10-09): a cold `lake serve` loads its package before it answers `initialize`, past 10 s on a busy machine, and a missed handshake left the tab without a server until Restart File; a remote vault's `open_document` waits as long plus a round trip.
+  A server's `workspace/applyEdit` is taken only while a command accent asked it to run is running, and its edits come back as that command's answer; at any other time it is refused, as on a remote vault there would be nobody on the host to ask.
 - **Debug client**: our own tokio client in `crates/dap`, over the language client's framing and its one runtime, types transcribed from the DAP JSON schema (MIT) — DAP frames messages as LSP does, and no maintained crate carries its types.
   A request is given 10 s; a `launch` and a REPL `evaluate` wait as long as they take, the first answering once the program runs and the second running the reader's code, and neither is cancelled at the adapter, debugpy having no `cancel`.
 - **Kernel client**: our own tokio client in `crates/jupyter`, speaking Jupyter's messaging protocol to an ipykernel over ZMTP 3.0's NULL mechanism — DEALER for shell, stdin and control, SUB for IOPub, no heartbeat: the kernel is our child, and its exit is how a death is heard. zmq.rs would bring a second async stack and a regex engine into the uploaded server, and libzmq is C++ to cross-compile for musl.
@@ -1182,6 +1183,11 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - The status bar counts them where a note counts words, and pressing the count takes the underlines, marks and line-end messages out of the text and back, the count and hover staying.
   Per tab, and not kept across a restart: a way past something in the way, not a preference.
 - On a note they are accent's own: a hint on a link the index cannot resolve, and a warning with the converter's reason over each formula the preview shows as source — a warning because pulldown-latex rejects some valid LaTeX.
+- **Quick Fix** lists what the server offers over the selection or at the caret, in a menu at the caret: its quick fixes first, the one it prefers on top, then its refactorings; source actions (Organize Imports) are not listed.
+  The diagnostics there go to the server as it published them, which is how clangd finds its fixes.
+- Picking one applies its edit, resolved first where the server sent it without one, or runs its command (clangd's tweaks): each open document's part as one undo step, and files no tab holds written as a move's import updates are, gated on their etags, and named in a toast.
+  A fix that would create, rename or delete a file, or change one outside the vault, is refused, and so is one whose file was typed in while the server answered.
+  There is no lightbulb (user decision 2026-10-22): asking at every caret move would wait on Lean's check and cross a remote link each time.
 - **Outline** and the Info pane's **References** section are the sidebar's; **folding** is the gutter chevrons.
 - **Checking**: while Lean checks a file, a bar in the change bars' column marks the lines it has still to check, as VS Code's Lean extension does, and shrinks as the check passes them until it is gone: `$/lean/fileProgress`'s ranges in progress, whole lines, those that touch made one.
   Lean checks declarations in parallel, so the bar is in pieces, each declaration in flight one, and the rest of the file below.
@@ -1660,6 +1666,8 @@ The `Ctrl` chords for application and document commands use GTK's `<Primary>` mo
 
 - Go to Definition `Ctrl+Shift+Return` / `F12` / Ctrl+click, one question for every text tab and code cell, asked about the text as it stands: on a note it follows a link — offering New File with the path typed in where nothing answers to it, and landing on the heading or the block (`#^id`) its anchor names, and going to the top of the note with a toast for one the note does not have, as a click in the preview does — and an external link (any `scheme://`, `mailto:`, `tel:`, `sms:`; never `file:`, `javascript:` or `data:`) goes to the system.
   A bare `http(s)://` or `mailto:` URL under the caret opens in the browser from any text tab, ahead of the language server (a URL is not a symbol), and Ctrl+hover underlines it as it does a link.
+- Quick Fix `Alt+Return`, an editing chord: Lean's "Try this", clangd's fix-its and tweaks, rust-analyzer's fixes and assists (Language servers).
+  VS Code's `Ctrl+.` is GtkTextView's emoji chooser here (user decision 2026-10-22); in a notebook cell `Alt+Return` is still Insert Cell Below (Notebook), and the notebook's cells offer no quick fixes yet.
 - Fold / Unfold `Ctrl+Shift+[` / `Ctrl+Shift+]`, Fold All / Unfold All from the palette.
   Fold takes the innermost block holding the caret; the gutter chevron beside a block's first line is the same by pointer.
   A block shut over a column of carets brings each caret it hides out to the end of its header, those meeting there merging, and the column stays up, as in VS Code.
@@ -1762,6 +1770,7 @@ The `Ctrl` chords for application and document commands use GTK's `<Primary>` mo
 ### Widget chords
 
 - Five Editing chords are the widget's class shortcuts — GtkTextView's `Ctrl+Up`/`Ctrl+Down` (paragraph movement) and `Ctrl+K` (delete to line end), GtkSourceView's `Shift+Alt+Up`/`Shift+Alt+Down` (`move-viewport`) — which run before the window's accelerators, so a capture-phase controller on the window claims them for our actions, except in a shell, where `Ctrl+K` kills to the end of the line.
+  Quick Fix's `Alt+Return` is claimed the same way: GtkTextView types a new line for Return whatever the modifiers.
   Taking a widget binding needs that deliberation; it is not the default way to add a shortcut.
 - The other way round, a controller on one of our own widgets never sees a chord the table holds while it holds it, so a chord a focused widget must own is left out of the table there: the editing chords are bound only while the keyboard is in a tab (Editing), which is how the commit box keeps `Ctrl+Return`.
 - GtkPaned binds `F6` / `Shift+F6` to the next or previous pane and `F8` / `Shift+F8` to its divider, and the innermost split around the focus takes them; every document sits in one.

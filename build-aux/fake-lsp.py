@@ -9,6 +9,14 @@ in `make screenshots`. With `--notebook` it keeps what it is sent and answers ab
 each line that is a name alone, after every change; `NAME at LINE:COLUMN` as the hover; the first
 `NAME =` or `def NAME` as the definition; and `f(a, b)` as the signature, on `(`.
 
+With `--actions` it keeps what it is sent too, an error over each `oops`, and offers the code
+actions `ACCENT_BENCH_QUICKFIX` applies, one of each shape a real server sends: "Replace oops with
+0", preferred and only for the diagnostic handed back (clangd's rule), its edit versioned as
+rust-analyzer's and Lean's are; "Declare oops in other.c", an edit to a file no tab holds;
+"Upper-case the line", resolved for its edit (rust-analyzer's assists); and "Swap the operands", a
+command whose edit comes as its own `workspace/applyEdit` request, the command answered once that
+is (clangd's tweaks).
+
 `.` triggers it, `;` commits a row (its `allCommitCharacters`), and it can resolve: `alpha` is a
 snippet with a stop (`${1:x}`, as rust-analyzer fills arguments), `beta` one with a plain stop
 (`$1`, as typescript-language-server has it), and `gamma` resolves to its documentation; `alpha`
@@ -45,6 +53,9 @@ LOADING = [int(sys.argv[sys.argv.index("--loading") + 1]) if "--loading" in sys.
 ROOT = [""]
 INLINE = sys.argv[sys.argv.index("--inline") + 1] if "--inline" in sys.argv else None
 NOTEBOOK = "--notebook" in sys.argv
+ACTIONS = "--actions" in sys.argv
+VERSIONS = {}
+COMMAND = [None]
 ANSWERS = {"hoverProvider": True, "definitionProvider": True,
            "signatureHelpProvider": {"triggerCharacters": ["("]}}
 DOCS = {}
@@ -66,6 +77,23 @@ def publish(uri):
                           "code": "reportUnusedExpression", "message": "Expression value is unused"})
     send({"method": "textDocument/publishDiagnostics",
           "params": {"uri": uri, "diagnostics": items}})
+
+
+def actions(params):
+    """The code actions at a request's range, in the order a server might list them."""
+    uri, line = params["textDocument"]["uri"], params["range"]["start"]["line"]
+    other = "file://" + os.path.join(ROOT[0], "other.c")
+    found = [d for d in params["context"]["diagnostics"] if d.get("code") == "fake"]
+    fixes = [{"title": "Declare oops in other.c", "kind": "quickfix",
+              "edit": {"changes": {other: [{"range": TOP, "newText": "int oops;\n"}]}}},
+             {"title": "Replace oops with 0", "kind": "quickfix", "isPreferred": True,
+              "edit": {"documentChanges": [{
+                  "textDocument": {"uri": uri, "version": VERSIONS[uri]},
+                  "edits": [{"range": found[0]["range"] if found else TOP, "newText": "0"}]}]}}]
+    return (fixes if found else []) + [
+        {"title": "Upper-case the line", "kind": "refactor.rewrite",
+         "data": {"uri": uri, "line": line}},
+        {"title": "Swap the operands", "command": "fake.swap", "arguments": [uri]}]
 
 
 def word_at(params):
@@ -125,13 +153,35 @@ def answer(message):
                                    "allCommitCharacters": [";"]},
             "callHierarchyProvider": CALLS is not None,
             "inlineCompletionProvider": INLINE is not None,
-            **(ANSWERS if NOTEBOOK else {})}}})
-    elif NOTEBOOK and method in ("textDocument/didOpen", "textDocument/didChange"):
+            **(ANSWERS if NOTEBOOK else {}),
+            **({"codeActionProvider": {"resolveProvider": True},
+                "executeCommandProvider": {"commands": ["fake.swap"]}} if ACTIONS else {})}}})
+    elif method is None and id == "swap":
+        # The client applied the command's edit: the command is done.
+        send({"id": COMMAND[0], "result": None})
+    elif (NOTEBOOK or ACTIONS) and method in ("textDocument/didOpen", "textDocument/didChange"):
         p = message["params"]
         uri = p["textDocument"]["uri"]
         DOCS[uri] = p["textDocument"]["text"] if "text" in p["textDocument"] \
             else p["contentChanges"][-1]["text"]
+        VERSIONS[uri] = p["textDocument"]["version"]
         publish(uri)
+    elif ACTIONS and method == "textDocument/codeAction":
+        send({"id": id, "result": actions(message["params"])})
+    elif ACTIONS and method == "codeAction/resolve":
+        item = dict(message["params"])
+        uri, line = item["data"]["uri"], item["data"]["line"]
+        text = DOCS[uri].split("\n")[line]
+        item["edit"] = {"changes": {uri: [{"range": span(line, 0, len(text)),
+                                           "newText": text.upper()}]}}
+        send({"id": id, "result": item})
+    elif ACTIONS and method == "workspace/executeCommand":
+        uri = message["params"]["arguments"][0]
+        line, text = next((n, l) for n, l in enumerate(DOCS[uri].split("\n")) if "1 + 2" in l)
+        at = text.index("1 + 2")
+        COMMAND[0] = id
+        send({"id": "swap", "method": "workspace/applyEdit", "params": {"edit": {"changes": {
+            uri: [{"range": span(line, at, at + 5), "newText": "2 + 1"}]}}}})
     elif NOTEBOOK and method == "textDocument/hover":
         uri, at, word = word_at(message["params"])
         send({"id": id, "result": {"contents": {"kind": "markdown",
