@@ -28,6 +28,8 @@ accent-core = { workspace = true, features = ["pdf"] }
 # `pdf` for the `[[paper.pdf#` completion, which reads the document's outline.
 accent-api = { workspace = true, features = ["pdf"] }
 accent-drawio.workspace = true
+# Formulas laid out natively, in a math font the system HarfBuzz reads (`math`).
+accent-math.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

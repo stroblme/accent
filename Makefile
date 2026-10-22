@@ -122,11 +122,12 @@ gtk-bench:
 #
 # One line per missing item; `install-requirements` installs them per distro. The library
 # floors are what the binding features in apps/gtk/Cargo.toml ask pkg-config for (`v4_18` is
-# gtk4 >= 4.18), and Rust's is the workspace's `rust-version` in Cargo.toml.
+# gtk4 >= 4.18), HarfBuzz's what crates/math/build.rs asks for, and Rust's is the workspace's
+# `rust-version` in Cargo.toml.
 # An optional item only warns: the app runs without it and lacks the feature it names.
 RUST_MIN := 1.95
 # On macOS WebKitGTK and VTE 0.78 are optional, as `gtk` builds without what they are for there.
-GTK_LIBS := gtk4:4.18 libadwaita-1:1.8 gtksourceview-5:5.18 \
+GTK_LIBS := gtk4:4.18 libadwaita-1:1.8 gtksourceview-5:5.18 harfbuzz:8.3.1 \
             $(if $(DARWIN),vte-2.91-gtk4:0.76,webkitgtk-6.0:2.40 vte-2.91-gtk4:0.78) libspelling-1:0.1
 OPTIONAL_LIBS := $(if $(DARWIN),webkitgtk-6.0:2.40:webkit vte-2.91-gtk4:0.78:termprops)
 requirements:
