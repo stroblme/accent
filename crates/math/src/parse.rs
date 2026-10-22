@@ -179,13 +179,13 @@ fn scripts(node: roxmltree::Node, name: &str, children: Vec<Node>) -> Node {
     let (first, second) = match (name, children.next(), children.next()) {
         ("mover", Some(script), None) if unsaid("accent") => match accent(&script, OVER_ACCENTS) {
             Some('‾') => return Node::Bar { base, under: false },
-            Some(c) => return accented(base, c, false),
+            Some(c) => return accented(base, c, false, matches!(script, Node::Operator { .. })),
             None => (Some(script), None),
         },
         ("munder", Some(script), None) if unsaid("accentunder") => {
             match accent(&script, UNDER_ACCENTS) {
                 Some('_') => return Node::Bar { base, under: true },
-                Some(c) => return accented(base, c, true),
+                Some(c) => return accented(base, c, true, matches!(script, Node::Operator { .. })),
                 None => (Some(script), None),
             }
         }
@@ -238,10 +238,12 @@ fn accent(script: &Node, marks: &str) -> Option<char> {
     }
 }
 
-/// `base` with the accent `mark` over or under it, an operator that stretches across it. A
-/// spacing mark or an arrow becomes its combining form: that is what a math font draws to sit
-/// on a base and has wide variants of, where its arrows sit on the math axis.
-fn accented(base: Box<Node>, mark: char, under: bool) -> Node {
+/// `base` with the accent `mark` over or under it. A spacing mark or an arrow becomes its
+/// combining form: that is what a math font draws to sit on a base and has wide variants of,
+/// where its arrows sit on the math axis. Only a mark that came as an `<mo>` (`\widehat`,
+/// `\overrightarrow`) stretches across the base; one that came as an `<mi>` (`\hat`, `\vec`)
+/// keeps its natural size, as in TeX.
+fn accented(base: Box<Node>, mark: char, under: bool, stretchy: bool) -> Node {
     let mark = match (mark, under) {
         ('^', _) => '\u{302}',
         ('~', _) => '\u{303}',
@@ -264,7 +266,7 @@ fn accented(base: Box<Node>, mark: char, under: bool) -> Node {
     let script = Some(Box::new(Node::Operator {
         text: mark.to_string(),
         attrs: OperatorAttrs {
-            stretchy: Some(true),
+            stretchy: Some(stretchy),
             ..OperatorAttrs::default()
         },
     }));

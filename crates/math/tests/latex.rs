@@ -96,6 +96,17 @@ fn an_accent_keeps_its_base_size() {
     assert_eq!(g[0].1, g[1].1, "the hat is as large as the x");
 }
 
+/// `\hat` keeps the mark's natural glyph over a wide base, as TeX draws it; `\widehat` stretches.
+#[test]
+fn only_wide_accents_stretch() {
+    let mark = |tex| match laid(tex, false).items.last() {
+        Some(Item::Glyph { id, .. }) => *id,
+        other => panic!("{tex}: {other:?}"),
+    };
+    assert_eq!(mark(r"\hat{abc}"), mark(r"\hat x"));
+    assert_ne!(mark(r"\widehat{abc}"), mark(r"\hat x"));
+}
+
 #[test]
 fn align_puts_its_first_column_right() {
     let l = laid(r"\begin{aligned} a &= b \\ ccc &= d \end{aligned}", false);
