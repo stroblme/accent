@@ -143,6 +143,14 @@ impl lang::Editor for CellEditor {
         })
     }
 
+    fn to_view(&self, at: Pos) -> Option<Pos> {
+        let lines = self.lines()?;
+        lines.contains(&at.line).then(|| Pos {
+            line: at.line - lines.start,
+            ..at
+        })
+    }
+
     fn diagnostics(&self) -> Ref<'_, Vec<Diagnostic>> {
         self.painted.items()
     }

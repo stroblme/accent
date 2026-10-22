@@ -1,21 +1,31 @@
-//! Quick Fix against `build-aux/fake-lsp.py --actions`: the menu, and each kind of action applied.
+//! Quick Fix against `build-aux/fake-lsp.py --actions`: the menu, and each kind of action applied,
+//! in a C file and in a notebook's code cell.
 
 use super::*;
+use accent_core::notebook::{self, Edit, Kind};
 
 /// The note the drill writes and fixes, and the file one of the fixes reaches into.
 const FIX: &str = "int a = oops;\nint b = 1 + 2;\n";
 const OTHER: &str = "int other;\n";
 
-/// `ACCENT_BENCH_QUICKFIX=<rel>` writes `<rel>` and `other.c` in a scratch vault under `/tmp`,
-/// opens `<rel>` with the caret on `oops` once its error is in, and prints the Quick Fix menu's
-/// rows. Then, a fresh menu each time, it picks each row: the preferred fix and the resolved
-/// refactoring and the command each change the text and are undone in one step, and the fix
-/// reaching into `other.c` writes that file on disk.
-pub(super) fn bench_quickfix(app: &Rc<App>, rel: &str) {
+/// `ACCENT_BENCH_QUICKFIX=<rel>,<ipynb>` writes `<rel>` and `other.c` in a scratch vault under
+/// `/tmp`, opens `<rel>` with the caret on `oops` once its error is in, and prints the Quick Fix
+/// menu's rows. Then, a fresh menu each time, it picks each row: the preferred fix and the
+/// resolved refactoring and the command each change the text and are undone in one step, and the
+/// fix reaching into `other.c` writes that file on disk. The hover's fixes over `oops` follow.
+/// Then `<ipynb>`, `b = 1 + 2` and `a = oops` in two code cells, the same four rows picked in the
+/// second: the two inside it change it, the two reaching into the first cell and `other.c` do
+/// nothing.
+pub(super) fn bench_quickfix(app: &Rc<App>, arg: &str) {
     scratch_only(app, "ACCENT_BENCH_QUICKFIX");
-    let (app, rel) = (app.clone(), rel.to_string());
+    let Some((rel, ipynb)) = arg.split_once(',') else {
+        eprintln!("ACCENT_BENCH_QUICKFIX=<rel>,<ipynb>");
+        return bench_quit(app);
+    };
+    let (app, rel, ipynb) = (app.clone(), rel.to_string(), ipynb.to_string());
     glib::spawn_future_local(async move {
         bench_fixes(&app, &rel).await;
+        bench_cell_fixes(&app, &ipynb).await;
         bench_quit(&app);
     });
 }
@@ -83,12 +93,102 @@ async fn bench_fixes(app: &Rc<App>, rel: &str) {
         }
         crate::lang::flush(tab.clone()).await;
     }
+    let on = accent_api::Pos {
+        line: 0,
+        character: 9,
+    };
+    let hover = crate::hover::fixes_at(tab.clone(), on).await;
+    let titles: Vec<String> = hover.into_iter().map(|a| a.title).collect();
+    println!("bench quickfix hover {titles:?}");
+}
+
+async fn bench_cell_fixes(app: &Rc<App>, rel: &str) {
+    let Some(vault) = app.vault().cloned() else {
+        return;
+    };
+    let Ok(mut nb) = notebook::read(rel, notebook::EMPTY_IPYNB) else {
+        return;
+    };
+    let id = nb.cells()[0].id();
+    nb.apply(Edit::Source {
+        id,
+        text: "b = 1 + 2".into(),
+    });
+    if let Some(cell) = nb.new_cell(Kind::Code, "a = oops") {
+        nb.apply(Edit::Insert { at: 1, cell });
+    }
+    if let Err(e) = vault.save(rel, &nb.to_text(), None) {
+        return println!("bench quickfix write_failed {rel} {e:?}");
+    }
+    app.open_path(rel);
+    let mut found = None;
+    for _ in 0..300 {
+        let tab = app.doc_for(rel).and_then(|d| d.notebook().cloned());
+        if let Some(tab) = tab.filter(|t| {
+            t.bench_diagnostics()
+                .get(1)
+                .is_some_and(|c| !c.0.is_empty())
+        }) {
+            found = Some(tab);
+            break;
+        }
+        glib::timeout_future(Duration::from_millis(100)).await;
+    }
+    let Some(tab) = found else {
+        return println!("bench quickfix cell_no_diagnostics {rel}");
+    };
+    let sources =
+        |tab: &Rc<crate::notebook::NotebookTab>| [tab.bench_source(0), tab.bench_source(1)];
+    for pick in 0..4u32 {
+        tab.bench_select(1);
+        let Some(cell) = tab.bench_language_editor(1) else {
+            return println!("bench quickfix no_cell_editor");
+        };
+        let view = cell.view().clone();
+        let mut caret = view.buffer().start_iter();
+        caret.set_line_offset(5);
+        view.buffer().place_cursor(&caret);
+        app.quick_fix();
+        let Some(menu) = menu_on(&view).await else {
+            return println!("bench quickfix cell_no_menu {pick}");
+        };
+        if pick == 0 {
+            let rows = menu.menu_model().map(|m| fileops::labels(&m));
+            println!("bench quickfix cell_menu {rows:?}");
+        }
+        let before = sources(&tab);
+        let _ = view.activate_action("fix.apply", Some(&pick.to_variant()));
+        menu.popdown();
+        for _ in 0..20 {
+            if sources(&tab) != before {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(100)).await;
+        }
+        println!(
+            "bench quickfix cell_applied={pick} cells={:?}",
+            sources(&tab)
+        );
+        if sources(&tab) != before {
+            tab.undo();
+            println!(
+                "bench quickfix cell_undone={pick} cells={:?}",
+                sources(&tab)
+            );
+        }
+        cell.clone().flush().await;
+    }
 }
 
 /// The Quick Fix menu once it is up on `tab`'s view.
 async fn shown_menu(tab: &Rc<Tab>) -> Option<gtk::PopoverMenu> {
+    menu_on(&tab.view).await
+}
+
+/// The Quick Fix menu once it is up on `view`.
+async fn menu_on(view: &sourceview5::View) -> Option<gtk::PopoverMenu> {
     for _ in 0..50 {
-        let mut child = tab.view.first_child();
+        let mut child = view.first_child();
         while let Some(widget) = child {
             if let Some(menu) = widget.downcast_ref::<gtk::PopoverMenu>()
                 && menu.is_visible()
