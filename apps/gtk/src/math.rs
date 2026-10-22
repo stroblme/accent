@@ -3,7 +3,8 @@
 //!
 //! The font is the first of [`FAMILIES`] Pango has that is a math font, its glyphs drawn as text
 //! in that Pango font. Without one it is the bundled STIX Two Math, which no font map knows (and
-//! CoreText cannot be given), its glyphs drawn from their outlines.
+//! CoreText cannot be given), its glyphs drawn from their outlines. A character the math font
+//! lacks, a CJK `\text{}` say, is set by Pango in [`FALLBACK`] and the fonts it falls back on.
 
 use std::cell::{OnceCell, RefCell};
 use std::collections::HashMap;
@@ -21,16 +22,21 @@ use gtk::{gdk, glib, graphene, gsk, pango};
 /// draw.io's MathJax.
 const FAMILIES: [&str; 3] = ["Latin Modern Math", "STIX Two Math", "DejaVu Math TeX Gyre"];
 
+/// The family characters the math font lacks are set in: MathJax's `unknownFamily`, as draw.io
+/// and Jupyter set them.
+const FALLBACK: &str = "serif";
+
 /// The math font formulas are laid out in, and how its glyphs are drawn.
 struct Fonts {
     math: MathFont,
     draw: Draw,
+    /// The widget's own, so glyphs are rendered with GTK's font options as text is.
+    context: pango::Context,
 }
 
 enum Draw {
     /// A system font, as text: Pango's font of `family` at each size, by 1/64 px.
     Text {
-        context: pango::Context,
         family: &'static str,
         sized: RefCell<HashMap<u32, pango::Font>>,
     },
@@ -54,7 +60,6 @@ fn fonts(widget: &gtk::Widget) -> Rc<Fonts> {
 }
 
 fn find(widget: &gtk::Widget) -> Fonts {
-    // The widget's own context, so glyphs are rendered with GTK's font options as text is.
     let context = widget.pango_context();
     let system = FAMILIES.into_iter().find_map(|family| {
         let font = context.load_font(&description(family, 16.0))?;
@@ -70,16 +75,9 @@ fn find(widget: &gtk::Widget) -> Fonts {
             MathFont::from_hb_font(NonNull::new(hb.cast_mut())?)
         };
         let sized = RefCell::default();
-        Some((
-            math.ok()?,
-            Draw::Text {
-                context: context.clone(),
-                family,
-                sized,
-            },
-        ))
+        Some((math.ok()?, Draw::Text { family, sized }))
     });
-    let (math, draw) = system.unwrap_or_else(|| {
+    let (mut math, draw) = system.unwrap_or_else(|| {
         let math = MathFont::from_static(accent_math::STIX_TWO_MATH)
             .expect("the bundled STIX Two Math has a MATH table");
         (math, Draw::Outlines(RefCell::default()))
@@ -88,7 +86,31 @@ fn find(widget: &gtk::Widget) -> Fonts {
         Draw::Text { family, .. } => tracing::debug!("formulas in {family}"),
         Draw::Outlines(_) => tracing::debug!("formulas in the bundled STIX Two Math"),
     }
-    Fonts { math, draw }
+    let measure = context.clone();
+    math.set_fallback(move |text, size| {
+        let layout = fallback(&measure, text, size);
+        let (ink, logical) = layout.extents();
+        let baseline = layout.baseline();
+        let px = |v: i32| v as f32 / pango::SCALE as f32;
+        Some((
+            px(logical.width()),
+            px(baseline - ink.y()),
+            px(ink.y() + ink.height() - baseline),
+        ))
+    });
+    Fonts {
+        math,
+        draw,
+        context,
+    }
+}
+
+/// `text`, characters the math font lacks, as Pango sets it at `px` pixels.
+fn fallback(context: &pango::Context, text: &str, px: f32) -> pango::Layout {
+    let layout = pango::Layout::new(context);
+    layout.set_font_description(Some(&description(FALLBACK, f64::from(px))));
+    layout.set_text(text);
+    layout
 }
 
 fn description(family: &str, px: f64) -> pango::FontDescription {
@@ -158,6 +180,22 @@ pub fn paint(
                 snapshot.append_color(&rgba(color), &graphene::Rect::new(x, y, w, h));
                 1
             }
+            Item::Text {
+                ref text,
+                x,
+                y,
+                size,
+                color,
+            } => {
+                let layout = fallback(&fonts.context, text, size * scale);
+                let baseline = layout.baseline() as f32 / pango::SCALE as f32;
+                let (x, y) = (origin.0 + x * scale, origin.1 + y * scale - baseline);
+                snapshot.save();
+                snapshot.translate(&graphene::Point::new(x, y));
+                snapshot.append_layout(&layout, &rgba(color));
+                snapshot.restore();
+                1
+            }
             Item::Glyph { size, color, .. } => {
                 let n = items
                     .iter()
@@ -183,14 +221,10 @@ impl Fonts {
     ) {
         let glyphs = run.iter().filter_map(|i| match *i {
             Item::Glyph { id, x, y, size, .. } => Some((id, x * scale, y * scale, size * scale)),
-            Item::Rule { .. } => None,
+            _ => None,
         });
         match &self.draw {
-            Draw::Text {
-                context,
-                family,
-                sized,
-            } => {
+            Draw::Text { family, sized } => {
                 let Some(Item::Glyph { size, .. }) = run.first() else {
                     return;
                 };
@@ -198,7 +232,9 @@ impl Fonts {
                 let key = (px * 64.0).round() as u32;
                 let kept = sized.borrow().get(&key).cloned();
                 let font = kept.or_else(|| {
-                    let font = context.load_font(&description(family, f64::from(key) / 64.0))?;
+                    let font = self
+                        .context
+                        .load_font(&description(family, f64::from(key) / 64.0))?;
                     let mut sized = sized.borrow_mut();
                     // A size for every zoom: the last few dozen are kept.
                     if sized.len() > 64 {

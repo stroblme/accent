@@ -44,11 +44,20 @@ pub enum Item {
         h: f32,
         color: Option<Color>,
     },
+    /// Characters the math font lacks, drawn at `size` in the font the caller measured them
+    /// with ([`MathFont::set_fallback`]), the left end of their baseline at `(x, y)`.
+    Text {
+        text: String,
+        x: f32,
+        y: f32,
+        size: f32,
+        color: Option<Color>,
+    },
 }
 
 impl Item {
     fn translate(&mut self, dx: f32, dy: f32) {
-        let (Item::Glyph { x, y, .. } | Item::Rule { x, y, .. }) = self;
+        let (Item::Glyph { x, y, .. } | Item::Rule { x, y, .. } | Item::Text { x, y, .. }) = self;
         *x += dx;
         *y += dy;
     }
@@ -1300,14 +1309,26 @@ fn dictionary_entry(text: &str, form: Form) -> (u8, u8, u8) {
 /// A run of token text, shaped by HarfBuzz (kerning; `ssty` in scripts).
 fn layout_text_run(ctx: &Ctx, text: &str) -> MathBox {
     let mut out = MathBox::default();
-    for g in ctx.font.shape(text, ctx.script_level) {
+    let shaped = ctx.font.shape(text, ctx.script_level);
+    let mut glyphs = shaped.iter().peekable();
+    while let Some(g) = glyphs.next() {
+        // Characters the font lacks go to the caller's fallback together, without .notdef's
+        // advance, so a CJK `\text{}` is drawn as the system draws it.
+        if g.id == 0 {
+            while glyphs.next_if(|g| g.id == 0).is_some() {}
+            let end = glyphs.peek().map_or(text.len(), |g| g.cluster);
+            if let Some(missing) = text.get(g.cluster..end) {
+                fall_back(ctx, missing, &mut out);
+            }
+            continue;
+        }
         let x = out.width + g.x_offset * ctx.scale;
         // HarfBuzz offsets point up; the display list's y points down.
         let y = -g.y_offset * ctx.scale;
-        // A character the font lacks is left out, .notdef's advance with it, and so is one
-        // HarfBuzz hides: U+2061–U+2064 (`\sin x`'s function application) shape to an
-        // inkless glyph without advance, which would only lend the run the font's line height.
-        if g.id == 0 || g.x_advance == 0.0 && ctx.font.ink_box(g.id).is_none() {
+        // One HarfBuzz hides is left out: U+2061–U+2064 (`\sin x`'s function application)
+        // shape to an inkless glyph without advance, which would only lend the run the font's
+        // line height.
+        if g.x_advance == 0.0 && ctx.font.ink_box(g.id).is_none() {
             continue;
         }
         let gid = ctx.script_glyph(g.id);
@@ -1335,4 +1356,23 @@ fn layout_text_run(ctx: &Ctx, text: &str) -> MathBox {
         out.lone_glyph = Some(*id);
     }
     out
+}
+
+/// `text`, characters the font lacks, onto the end of `out` as the caller's fallback measures
+/// it; left out without one.
+fn fall_back(ctx: &Ctx, text: &str, out: &mut MathBox) {
+    let Some((width, ascent, descent)) = ctx.font.fallback(text, ctx.size) else {
+        return;
+    };
+    out.items.push(Item::Text {
+        text: text.to_string(),
+        x: out.width,
+        y: 0.0,
+        size: ctx.size,
+        color: ctx.color,
+    });
+    out.width += width;
+    out.ascent = out.ascent.max(ascent);
+    out.descent = out.descent.max(descent);
+    out.italic_correction = 0.0;
 }

@@ -110,6 +110,13 @@ fn dump(l: &Layout) -> String {
             Item::Rule { x, y, w, h, color } => {
                 format!("r {} {} {} {} {}\n", n(x), n(y), n(w), n(h), c(color))
             }
+            Item::Text {
+                ref text,
+                x,
+                y,
+                size,
+                color,
+            } => format!("t {text} {} {} {} {}\n", n(x), n(y), n(size), c(color)),
         };
     }
     out
@@ -152,7 +159,7 @@ fn glyphs(l: &Layout) -> Vec<(u16, f32, f32)> {
         .iter()
         .filter_map(|i| match *i {
             Item::Glyph { id, x, y, .. } => Some((id, x, y)),
-            Item::Rule { .. } => None,
+            _ => None,
         })
         .collect()
 }
