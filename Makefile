@@ -20,6 +20,8 @@ DATADIR   ?= $(PREFIX)/share
 DARWIN    := $(filter Darwin,$(shell uname -s))
 # Where macOS's `install` puts Accent.app: Launchpad and Spotlight list a per-user folder too.
 APPSDIR   ?= $(HOME)/Applications
+# The workspace's, for Accent.app's Info.plist and the disk image's name.
+VERSION   := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml)
 
 # libpdfium is a 7 MB binary, so it is not in git: `make pdfium` fetches the matching build from
 # bblanchon/pdfium-binaries. Bump PDFIUM_BUILD and every checksum below it together; the release
@@ -93,7 +95,7 @@ XVFB_ENV := DISPLAY=:$(DISPLAY_NUM) GDK_BACKEND=x11 GSK_RENDERER=cairo GTK_A11Y=
 .PHONY: all core gtk gtk-bench clean distclean install uninstall test test-pdf check fmt fmt-check \
         clippy doc run smoke drills xvfb vault validate icons flatpak cargo-sources pdfium server \
         help requirements install-requirements android android-check android-test android-tools apk apk-release \
-        pdfium-android bindings screenshots docs
+        pdfium-android bindings screenshots docs app dmg
 
 ## all: build everything, core plus the desktop app
 all: core gtk
@@ -451,21 +453,51 @@ server:
 		echo "Server binary: $(call SERVER_BIN,$$arch)"; \
 	done
 
-## install: install into ~/.local (no sudo); override PREFIX for a system-wide install
-install: all
-	@# Each folder made first: macOS's BSD install has no -D.
+# macOS's app icon, from the SVG: iconutil reads a folder named .iconset with each size and its @2x.
+$(TARGET_DIR)/accent.icns: data/icons/hicolor/scalable/apps/$(APP_ID).svg
+	iconset=$$(mktemp -d)/accent.iconset && mkdir $$iconset && \
+	for s in 16 32 128 256 512; do \
+		rsvg-convert -w $$s -h $$s -o $$iconset/icon_$${s}x$$s.png $< && \
+		rsvg-convert -w $$((s * 2)) -h $$((s * 2)) -o $$iconset/icon_$${s}x$$s@2x.png $< || exit 1; \
+	done && \
+	mkdir -p $(dir $@) && iconutil -c icns -o $@ $$iconset && rm -rf $$(dirname $$iconset)
+
+## app: build Accent.app in the target folder, holding every library and file it loads (macOS)
+app: all pdfium $(TARGET_DIR)/accent.icns
+	build-aux/macos-bundle.sh $(TARGET_DIR) $(VERSION)
+
+## dmg: Accent.app as a disk image to ship, with a link to Applications to drag it onto (macOS)
+dmg: app
+	rm -rf $(TARGET_DIR)/dmg && mkdir $(TARGET_DIR)/dmg
+	ditto $(TARGET_DIR)/Accent.app $(TARGET_DIR)/dmg/Accent.app
+	ln -s /Applications $(TARGET_DIR)/dmg/Applications
+	hdiutil create -volname Accent -srcfolder $(TARGET_DIR)/dmg -ov -format ULFO \
+		$(TARGET_DIR)/accent-$(VERSION)-macos-$(shell uname -m).dmg
+	rm -rf $(TARGET_DIR)/dmg
+
+## install: install into ~/.local (no sudo), on macOS Accent.app into ~/Applications; override PREFIX for a system-wide install
+install: $(if $(DARWIN),app,all)
+ifdef DARWIN
+	@# The app, and `accent` and `accent-cli` in $(BINDIR) starting its own, for a launch from a
+	@# shell and an MCP client's config: scripts rather than links, so that the binary still runs
+	@# from inside the app (`platform/bundle.rs`).
+	mkdir -p $(DESTDIR)$(APPSDIR) $(DESTDIR)$(BINDIR)
+	rm -rf $(DESTDIR)$(APPSDIR)/Accent.app
+	ditto $(TARGET_DIR)/Accent.app $(DESTDIR)$(APPSDIR)/Accent.app
+	for bin in accent accent-cli; do \
+		printf '#!/bin/sh\nexec "%s" "$$@"\n' '$(APPSDIR)/Accent.app/Contents/MacOS/'$$bin \
+			>$(DESTDIR)$(BINDIR)/$$bin && chmod 755 $(DESTDIR)$(BINDIR)/$$bin || exit 1; \
+	done
+else
 	mkdir -p $(DESTDIR)$(BINDIR) $(DESTDIR)$(DATADIR)/icons/hicolor/scalable/apps \
 		$(DESTDIR)$(DATADIR)/icons/hicolor/symbolic/apps
 	install -m755 $(TARGET_DIR)/accent      $(DESTDIR)$(BINDIR)/accent
 	install -m755 $(TARGET_DIR)/accent-cli  $(DESTDIR)$(BINDIR)/accent-cli
-ifndef DARWIN
-	@# A desktop entry and AppStream data, which nothing on macOS reads.
 	mkdir -p $(DESTDIR)$(DATADIR)/applications $(DESTDIR)$(DATADIR)/metainfo
 	install -m644 data/$(APP_ID).desktop \
 		$(DESTDIR)$(DATADIR)/applications/$(APP_ID).desktop
 	install -m644 data/$(APP_ID).metainfo.xml \
 		$(DESTDIR)$(DATADIR)/metainfo/$(APP_ID).metainfo.xml
-endif
 	install -m644 data/icons/hicolor/scalable/apps/$(APP_ID).svg \
 		$(DESTDIR)$(DATADIR)/icons/hicolor/scalable/apps/$(APP_ID).svg
 	install -m644 data/icons/hicolor/symbolic/apps/$(APP_ID)-symbolic.svg \
@@ -481,31 +513,11 @@ endif
 		test -f $(call SERVER_BIN,$$arch) && mkdir -p $(DESTDIR)$(LIBDIR)/accent && \
 			install -m755 $(call SERVER_BIN,$$arch) $(DESTDIR)$(LIBDIR)/accent/accent-cli-$$arch; \
 	done; true
-ifndef DARWIN
 	@# Best effort: without these the launcher and icon can take a re-login to appear.
 	-@update-desktop-database $(DESTDIR)$(DATADIR)/applications 2>/dev/null
 	-@gtk-update-icon-cache -qtf $(DESTDIR)$(DATADIR)/icons/hicolor 2>/dev/null
-else
-	@# macOS's desktop entry: a bundle that only starts the installed binary. A script rather than
-	@# a copy, as the binary finds accent-cli and libpdfium beside itself; `exec` keeps the PID
-	@# LaunchServices started, and with it the bundle's Dock icon.
-	app=$(DESTDIR)$(APPSDIR)/Accent.app/Contents && mkdir -p $$app/MacOS $$app/Resources && \
-		sed 's/@VERSION@/$(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml)/' data/Info.plist \
-			>$$app/Info.plist && \
-		printf '#!/bin/sh\nexec "%s/accent" "$$@"\n' '$(BINDIR)' >$$app/MacOS/accent && \
-		chmod 755 $$app/MacOS/accent
-	@# Best effort: without librsvg's rsvg-convert the bundle has no icon. iconutil reads a folder
-	@# named .iconset with each size and its @2x.
-	-@command -v rsvg-convert >/dev/null && iconset=$$(mktemp -d)/accent.iconset && mkdir $$iconset && { \
-		svg=data/icons/hicolor/scalable/apps/$(APP_ID).svg; \
-		for s in 16 32 128 256 512; do \
-			rsvg-convert -w $$s -h $$s -o $$iconset/icon_$${s}x$$s.png $$svg; \
-			rsvg-convert -w $$((s * 2)) -h $$((s * 2)) -o $$iconset/icon_$${s}x$$s@2x.png $$svg; \
-		done; \
-		iconutil -c icns -o $(DESTDIR)$(APPSDIR)/Accent.app/Contents/Resources/accent.icns $$iconset; \
-		rm -rf $$(dirname $$iconset); }
 endif
-	@echo "Installed to $(DESTDIR)$(PREFIX)"
+	@echo "Installed to $(DESTDIR)$(if $(DARWIN),$(APPSDIR)/Accent.app,$(PREFIX))"
 	@case ":$$PATH:" in *":$(BINDIR):"*) ;; \
 		*) echo "Note: $(BINDIR) is not in your PATH." ;; esac
 
