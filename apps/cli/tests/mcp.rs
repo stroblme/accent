@@ -25,6 +25,7 @@ impl Scratch {
             "cache",
             "state",
             "tmp",
+            "home",
         ] {
             std::fs::create_dir_all(dir.join(sub)).unwrap();
         }
@@ -79,6 +80,11 @@ impl Client {
             .env("XDG_CACHE_HOME", scratch.dir.join("cache"))
             .env("XDG_STATE_HOME", scratch.dir.join("state"))
             .env("TMPDIR", scratch.dir.join("tmp"))
+            // A held terminal runs `$SHELL` under `$HOME` from this environment: a plain `sh` in
+            // a scratch home, never the developer's shell and its startup files.
+            .env("SHELL", "/bin/sh")
+            .env("HOME", scratch.dir.join("home"))
+            .env_remove("ENV")
             // A test never draws on the screen it runs on: `render_diagram` finds no display.
             .env_remove("DISPLAY")
             .env_remove("WAYLAND_DISPLAY")
