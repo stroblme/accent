@@ -12,7 +12,6 @@ use gtk::prelude::*;
 use gtk::{gio, glib};
 
 use super::DiagramTab;
-use super::math::Typesetter;
 use super::render::{self, Area, Drawn};
 use crate::App;
 use crate::export::Export;
@@ -38,18 +37,17 @@ pub fn offered_name(tab: &DiagramTab, to: Export) -> Option<String> {
 /// through the atomic save, and a toast.
 pub fn export_to(app: &Rc<App>, tab: &Rc<DiagramTab>, to: Export, dest: PathBuf) {
     let name = crate::export::dest_name(&dest);
-    let (file, page, typesetter) = (tab.file(), tab.page_index(), tab.typesetter());
+    let (file, page) = (tab.file(), tab.page_index());
     let web = tab.web_allowed();
     let done = format!("Exported {name}");
     app.busy_with(
         format!("Exporting {name}…"),
         format!("export {name}"),
         async move {
-            let typesetter = typesetter.as_ref();
             let bytes = match to {
-                Export::Pdf => render::pdf(&file, typesetter, web).await,
-                Export::Png => render::png(&file, page, typesetter, web, None).await,
-                Export::Svg => render::svg(&file, page, Area::Drawing, typesetter, web).await,
+                Export::Pdf => render::pdf(&file, web),
+                Export::Png => render::png(&file, page, web, None),
+                Export::Svg => render::svg(&file, page, Area::Drawing, web),
                 Export::Html => return Ok(None),
             }?;
             let write = move || accent_core::fs::write_bytes(&dest, &bytes, None);
@@ -68,9 +66,9 @@ const RENDER_LONGEST: f64 = 1568.0;
 
 /// `accent --render-diagram PAGE`: page PAGE (from 0) of the diagram on stdin as a PNG on stdout,
 /// drawn as Export as PNG… draws it, for `accent-cli mcp`. Answered by this process before
-/// GApplication, so it opens no window and never reaches a running instance. Formulas are drawn
-/// as their TeX and pictures from the web as their boxes: a web process to typeset and a download
-/// per call would cost more than a picture to check an edit by.
+/// GApplication, so it opens no window and never reaches a running instance. Formulas are typeset
+/// as on the canvas, and pictures from the web drawn as their boxes: a download per call would
+/// cost more than a picture to check an edit by.
 pub fn render_command(mut args: impl Iterator<Item = OsString>) -> Option<glib::ExitCode> {
     if args.nth(1)? != "--render-diagram" {
         return None;
@@ -92,8 +90,7 @@ fn render_stdin(page: Option<OsString>) -> Result<(), String> {
     std::io::stdin().read_to_end(&mut xml).map_err(say)?;
     let file = File::from_bytes(&xml).map_err(say)?;
     gtk::init().map_err(|e| format!("there is no display to draw on ({e})"))?;
-    let png = render::png(&file, page, None, false, Some(RENDER_LONGEST));
-    let png = glib::MainContext::default().block_on(png)?;
+    let png = render::png(&file, page, false, Some(RENDER_LONGEST))?;
     std::io::stdout().write_all(&png).map_err(say)
 }
 
@@ -104,13 +101,13 @@ fn say(e: impl std::fmt::Display) -> String {
 /// Print…: every page through GTK's print dialog, each fitted to a sheet of the paper chosen.
 pub fn print(app: &Rc<App>, tab: &Rc<DiagramTab>) {
     let name = crate::doc::file_name(&tab.key()).to_string();
-    let (file, typesetter, window) = (tab.file(), tab.typesetter(), app.window.clone());
+    let (file, window) = (tab.file(), app.window.clone());
     let web = tab.web_allowed();
     app.busy_with(
         format!("Printing {name}…"),
         format!("print {name}"),
         async move {
-            let op = operation(&file, typesetter.as_ref(), web, &name).await;
+            let op = operation(&file, web, &name);
             // From an idle, as a note's print: the dialog runs a main loop of its own, and glib
             // aborts on a future polled inside another's poll.
             let ran = gio::GioFuture::new(&op, move |op, _, done| {
@@ -127,15 +124,10 @@ pub fn print(app: &Rc<App>, tab: &Rc<DiagramTab>) {
 
 /// Print one sheet per page, aspect-preserving and centred within note margins.
 /// Match paper orientation to each page.
-pub async fn operation(
-    file: &File,
-    typesetter: Option<&Rc<Typesetter>>,
-    web: bool,
-    name: &str,
-) -> gtk::PrintOperation {
+pub fn operation(file: &File, web: bool, name: &str) -> gtk::PrintOperation {
     let mut pages: Vec<Drawn> = Vec::new();
     for i in 0..file.pages.len() {
-        pages.extend(render::draw(file, i, Area::Sheet, typesetter, web).await);
+        pages.extend(render::draw(file, i, Area::Sheet, web));
     }
     let pages = Rc::new(pages);
     let op = gtk::PrintOperation::new();

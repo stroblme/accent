@@ -11,14 +11,11 @@ mod geometry;
 mod input;
 mod label;
 mod layers;
-pub(crate) mod math;
 mod paint;
 mod props;
 mod render;
 mod strip;
 mod tools;
-#[cfg(feature = "webkit")]
-mod typeset;
 mod view;
 mod web;
 mod window;
@@ -173,8 +170,6 @@ pub fn open(
         ),
     );
     let pages = file.pages.len();
-    // A WebKit view is a process; only a diagram that has formulas pays for one.
-    let has_math = file.pages.iter().any(|p| p.model_attr("math") == Some("1"));
     let tab = Rc::new(DiagramTab {
         key: RefCell::new(key.to_string()),
         path: RefCell::new(path.to_path_buf()),
@@ -218,10 +213,6 @@ pub fn open(
         on_web: Hook::default(),
         on_toast: Hook::default(),
     });
-    if has_math && let Some(typesetter) = math::shared() {
-        tab.view.set_typesetter(typesetter.clone());
-        tab.strip.set_typesetter(typesetter);
-    }
     tab.strip.set_pages(tab.editor.borrow().file());
     tab.strip.connect_goto(glib::clone!(
         #[weak]
@@ -965,12 +956,6 @@ impl DiagramTab {
         self.view.bench_move(ids, delta)
     }
 
-    /// Whether formulas are still being typeset.
-    #[cfg(feature = "bench")]
-    pub fn typesetting(&self) -> bool {
-        self.view.typesetting()
-    }
-
     /// A cell's frame on the page: what the selection box is drawn around.
     #[cfg(feature = "bench")]
     pub fn frame_of(&self, id: &str) -> Option<accent_drawio::Rect> {
@@ -1107,11 +1092,6 @@ impl DiagramTab {
     /// and avoids serialization on the main thread.
     pub fn file(&self) -> File {
         self.editor.borrow().file().clone()
-    }
-
-    /// What typesets this diagram's formulas, `None` for a diagram without any.
-    pub fn typesetter(&self) -> Option<Rc<math::Typesetter>> {
-        self.view.typesetter()
     }
 
     /// A write of the model landed: the tab is clean at `etag`.

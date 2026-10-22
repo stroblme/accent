@@ -47,14 +47,10 @@ pub async fn svg(path: &Path, page: Option<&str>, web: bool) -> Option<Rc<str>> 
         Some(name) => super::page_named(&file, name)?,
         None => 0,
     };
-    let math = file.pages.get(i)?.model_attr("math") == Some("1");
-    let typesetter = math.then(super::math::shared).flatten();
     if web {
         super::web::fetch(&super::web::urls(&file)).await;
     }
-    let bytes = render::svg(&file, i, Area::Drawing, typesetter.as_ref(), web)
-        .await
-        .ok()?;
+    let bytes = render::svg(&file, i, Area::Drawing, web).ok()?;
     let svg: Rc<str> = String::from_utf8(bytes).ok()?.into();
     DRAWN.with_borrow_mut(|drawn| drawn.insert(key, (stamp, svg.clone())));
     Some(svg)

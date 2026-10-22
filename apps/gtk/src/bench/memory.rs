@@ -147,18 +147,15 @@ pub(super) fn bench_memory(app: &Rc<App>, arg: &str) {
 
 /// `ACCENT_BENCH_WEBIDLE=<note>` checks WebKit process release after the drill's
 /// 2 s idle interval ([`crate::preview::idle_for`]). Print process PSS before/during/
-/// after split preview and compare rendered length and scroll when reopened. Check
-/// formula typesetting before/after idle and in a second diagram. Writes
-/// `webidle.drawio` and `webidle-2.drawio`; use a scratch vault.
+/// after split preview and compare rendered length and scroll when reopened, then open a
+/// diagram with formulas, which starts no web process. Writes `webidle.drawio`; use a scratch
+/// vault.
 pub(super) fn bench_webidle(app: &Rc<App>, note: &str) {
-    for (rel, formula) in [("webidle.drawio", "x^2"), ("webidle-2.drawio", "y^3")] {
-        let sample = super::diagram::SAMPLE.replace("x^2", formula);
-        let _ = std::fs::write(app.root().join(rel), sample);
-    }
+    let _ = std::fs::write(app.root().join("webidle.drawio"), super::diagram::SAMPLE);
     let (app, note) = (app.clone(), note.to_string());
     glib::spawn_future_local(async move {
         let wait = |ms| glib::timeout_future(Duration::from_millis(ms));
-        // The watcher has to have seen the diagrams.
+        // The watcher has to have seen the diagram.
         wait(2000).await;
         println!("bench webidle start {}", webkit());
         let Some(Doc::Text(tab)) = open(&app, &note).await else {
@@ -186,24 +183,14 @@ pub(super) fn bench_webidle(app: &Rc<App>, note: &str) {
             webkit()
         );
         app.set_mode(Mode::Editor);
-        for (step, rel) in [("typeset", "webidle.drawio"), ("again", "webidle-2.drawio")] {
-            let Some(Doc::Diagram(d)) = open(&app, rel).await else {
-                println!("bench webidle no_diagram {rel}");
-                return bench_quit(&app);
-            };
-            for _ in 0..100 {
-                wait(100).await;
-                if !d.typesetting() && d.typesetter().is_some_and(|t| t.typeset() > 0) {
-                    break;
-                }
-            }
-            let typeset = d.typesetter().map_or(0, |t| t.typeset());
-            println!("bench webidle {step} formulas={typeset} {}", webkit());
-            if step == "typeset" {
-                wait(3000).await;
-                println!("bench webidle idle {}", webkit());
-            }
+        wait(3000).await;
+        println!("bench webidle idle {}", webkit());
+        if !matches!(open(&app, "webidle.drawio").await, Some(Doc::Diagram(_))) {
+            println!("bench webidle no_diagram");
+            return bench_quit(&app);
         }
+        wait(1000).await;
+        println!("bench webidle diagram {}", webkit());
         bench_quit(&app);
     });
 }
@@ -317,10 +304,6 @@ fn watch(doc: &Doc) -> Watch {
         Doc::Diagram(diagram) => rc("tab", diagram),
         Doc::Notebook(notebook) => rc("tab", notebook),
     });
-    // A diagram's formulas are typeset by a WebKit view of its own.
-    if let Some(web) = find_widget(&page.child(), &|w| w.is::<webkit6::WebView>()) {
-        watch.push(object("webview", &web));
-    }
     if let Doc::Pdf(pdf) = doc {
         watch.extend(pdf.views().iter().map(|view| object("pdfview", view)));
     }

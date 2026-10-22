@@ -299,38 +299,10 @@ impl DiagramView {
         self.set_scroll((x, y));
     }
 
-    /// Typeset labels with formulas here, and paint again whenever it has finished some.
-    pub fn set_typesetter(&self, typesetter: Rc<super::math::Typesetter>) {
-        let weak = self.downgrade();
-        typesetter.connect_ready(move || {
-            let view = weak.upgrade();
-            if let Some(view) = &view {
-                view.queue_draw();
-            }
-            view.is_some()
-        });
-        *self.imp().typesetter.borrow_mut() = Some(typesetter);
-    }
-
-    /// What typesets the page's formulas, which an export of the diagram asks too.
-    pub fn typesetter(&self) -> Option<Rc<super::math::Typesetter>> {
-        self.imp().typesetter.borrow().clone()
-    }
-
     /// Whether the page has been laid out at the canvas's size: a drill aiming at it waits.
     #[cfg(feature = "bench")]
     pub fn laid_out(&self) -> bool {
         self.imp().laid_out.get()
-    }
-
-    /// Whether formulas are still being typeset: the drill waits for them.
-    #[cfg(feature = "bench")]
-    pub fn typesetting(&self) -> bool {
-        self.imp()
-            .typesetter
-            .borrow()
-            .as_ref()
-            .is_some_and(|t| t.busy())
     }
 
     pub fn connect_edit(&self, f: impl Fn(Edit) + 'static) {
@@ -446,8 +418,6 @@ mod imp {
         pub cache: Cache,
         /// The colours the page is painted in.
         pub tint: Cell<Tint>,
-        /// Where labels with formulas are typeset, for a diagram that has any.
-        pub typesetter: RefCell<Option<Rc<super::super::math::Typesetter>>>,
         pub on_edit: RefCell<Option<OnEdit>>,
         pub on_zoom: RefCell<Option<OnZoom>>,
     }
@@ -477,7 +447,6 @@ mod imp {
                 over: Cell::new(None),
                 cache: Cache::default(),
                 tint: Cell::new(Tint::FILE),
-                typesetter: RefCell::new(None),
                 on_edit: RefCell::new(None),
                 on_zoom: RefCell::new(None),
             }
@@ -749,19 +718,9 @@ mod imp {
                 Some(Preview::Live(live)) => (&live.scene.prims, &live.bounds, &live.cache),
                 _ => (&sheet.scene.prims, &sheet.bounds, &self.cache),
             };
-            let typesetter = self.typesetter.borrow();
             for (i, prim) in prims.iter().enumerate() {
                 if bounds[i].intersects(&visible) {
-                    paint::prim(
-                        snapshot,
-                        obj.upcast_ref(),
-                        i,
-                        prim,
-                        &frame,
-                        cache,
-                        typesetter.as_ref(),
-                        tint,
-                    );
+                    paint::prim(snapshot, obj.upcast_ref(), i, prim, &frame, cache, tint);
                 }
             }
             obj.paint_overlays(snapshot, &sheet, &frame);
