@@ -161,6 +161,9 @@ fn ms() -> u128 {
 
 fn main() -> glib::ExitCode {
     malloc::tune();
+    // Before anything reads a path into GTK's data, which the askpass dialog draws with too.
+    #[cfg(target_os = "macos")]
+    platform::bundle::setup();
     // ssh spawns accent as its own askpass helper; that process only answers the question.
     if let Some(code) = askpass::maybe_run() {
         return code;

@@ -58,6 +58,13 @@ pub async fn fetch(urls: &[String]) -> (usize, usize) {
     let (mut fetched, mut failed) = (0, 0);
     let session = soup::Session::new();
     session.set_timeout(TIMEOUT_S);
+    // GnuTLS as MacPorts and Homebrew build it trusts what is under their prefix, which Accent.app
+    // does not carry: Apple's own CA bundle stands in.
+    #[cfg(target_os = "macos")]
+    match gtk::gio::TlsFileDatabase::new("/etc/ssl/cert.pem") {
+        Ok(anchors) => session.set_tls_database(Some(&anchors)),
+        Err(e) => tracing::info!("no CA bundle for diagram pictures: {e}"),
+    }
     for url in urls.iter().filter(|url| !path(url).is_file()) {
         if !FETCHING.with_borrow_mut(|f| f.insert(url.clone())) {
             continue;

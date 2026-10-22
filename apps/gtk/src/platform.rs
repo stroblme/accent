@@ -8,6 +8,9 @@
 
 use gtk::{gdk, pango};
 
+#[cfg(target_os = "macos")]
+pub mod bundle;
+
 /// The modifier GTK spells `<Primary>` in accelerator strings.
 pub const PRIMARY_MODIFIER: gdk::ModifierType = if cfg!(target_os = "macos") {
     gdk::ModifierType::META_MASK
