@@ -879,13 +879,26 @@ impl NotebookTab {
         Some((view.count_text(), outputs, view.outputs.shown()))
     }
 
-    /// Whether a run waits or runs.
+    /// Whether a run waits or runs, or what one changed is still to be drawn: the drawing waits
+    /// for an idle, which a busy loop runs after the drill's own timeouts.
     pub fn bench_busy(&self) -> bool {
-        self.kernel().is_some_and(|k| !k.runs.borrow().is_empty())
+        self.kernel().is_some_and(|k| !k.runs.borrow().is_empty()) || self.kernel.due.get()
     }
 
     /// The prompt `input()` shows, whether its entry hides what is typed, and the entry.
     pub fn bench_asking(&self) -> Option<(String, bool, gtk::Widget)> {
         self.views.borrow().iter().find_map(|v| v.asking())
+    }
+
+    /// How many of the cells' text views are allocated a height other than the one they ask for.
+    pub fn bench_unfit(&self) -> usize {
+        self.views
+            .borrow()
+            .iter()
+            .flat_map(|v| v.text_views())
+            .filter(|v| {
+                v.width() > 0 && v.measure(gtk::Orientation::Vertical, v.width()).1 != v.height()
+            })
+            .count()
     }
 }

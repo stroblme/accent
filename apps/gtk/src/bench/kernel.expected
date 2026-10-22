@@ -3,6 +3,7 @@ bench kernel status succeeded=1 edited=1 undone=1
 bench kernel status stale_running=1 stale_done=1
 bench kernel pane shown Idle
 bench kernel cell 2 count=[3] outputs=execute_result:"2"
+bench kernel fit unfit=0
 bench kernel input prompt="name? " password=false
 bench kernel cell 3 count=[4] outputs=stream:"hello ada\n"
 bench kernel interrupted cell 4 count=[5] outputs=error:KeyboardInterrupt

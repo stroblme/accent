@@ -292,6 +292,27 @@ impl CellView {
         editor
     }
 
+    /// The cell's text views: its editor, once built, and its outputs drawn as text.
+    pub fn text_views(&self) -> Vec<gtk::TextView> {
+        let mut views = self.outputs.text_views();
+        if let Some(editor) = self.editor() {
+            views.insert(0, editor.view.clone().upcast());
+        }
+        views
+    }
+
+    /// Ask again for the height of each text view whose request no longer matches what it was
+    /// given: a text view re-wraps to a new width inside its own allocation, and GTK drops the
+    /// resize it asks for there (ISSUES.md), so it would keep its old height until the next scroll.
+    pub fn refit(&self) {
+        for view in self.text_views() {
+            let width = view.width();
+            if width > 0 && view.measure(gtk::Orientation::Vertical, width).1 != view.height() {
+                view.queue_resize();
+            }
+        }
+    }
+
     /// The editor's text, once it is built; until then the model's is the cell's.
     pub fn text(&self) -> Option<String> {
         self.editor().map(Editor::text)
