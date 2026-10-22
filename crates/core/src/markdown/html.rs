@@ -55,6 +55,7 @@ fn latex<'a>(src: &'a str, storage: &'a Storage) -> Result<Vec<LatexEvent<'a>>, 
 /// The renderer itself never reports a failure — it writes `<merror>` and carries on — so the
 /// parser events are collected first, and that is what decides between MathML and the caller's
 /// raw-source fallback. WebKit draws MathML natively, so no stylesheet or script goes with it.
+/// The result is well-formed XML, which the renderer's own output is not (see [`well_formed`]).
 pub fn mathml(src: &str, display: bool) -> Option<String> {
     use pulldown_latex::RenderConfig;
     use pulldown_latex::config::DisplayMode;
@@ -75,7 +76,31 @@ pub fn mathml(src: &str, display: bool) -> Option<String> {
         },
     )
     .ok()?;
-    Some(out)
+    Some(well_formed(&out))
+}
+
+/// pulldown-latex 0.8's MathML repaired for an XML parser (ISSUES.md): a space before `minsize`,
+/// `&#160;` for the HTML-only `&nbsp;`, and a `<` or `&` symbol escaped.
+fn well_formed(mathml: &str) -> String {
+    let mathml = mathml
+        .replace("\"minsize=", "\" minsize=")
+        .replace("&nbsp;", "&#160;");
+    let mut out = String::with_capacity(mathml.len());
+    for (i, c) in mathml.char_indices() {
+        let rest = &mathml[i + c.len_utf8()..];
+        // Every tag starts with a letter or a `/`: any other `<` is the symbol.
+        let tag = rest.starts_with(|n: char| n.is_ascii_alphabetic() || n == '/');
+        // The renderer writes no other entity, and text it escapes itself.
+        let entity = ["amp;", "lt;", "gt;", "#"]
+            .iter()
+            .any(|e| rest.starts_with(e));
+        match c {
+            '<' if !tag => out.push_str("&lt;"),
+            '&' if !entity => out.push_str("&amp;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// Every formula in `text` the preview shows as source instead of MathML: where it is written,
@@ -554,6 +579,22 @@ mod tests {
         let h = bare("$\\nosuchcommand$");
         assert!(h.contains("class=\"math math-inline\""), "{h}");
         assert!(h.contains("\\nosuchcommand"), "{h}");
+    }
+
+    /// The renderer's MathML is only good enough for an HTML parser; an XML parser has to read it.
+    #[test]
+    fn mathml_is_well_formed_xml() {
+        let m = mathml(r"\big( x \big)", false).unwrap();
+        assert!(m.contains("stretchy=\"true\" minsize=\"1.2em\""), "{m}");
+        let m = mathml(r"\text{ a }", false).unwrap();
+        assert!(m.contains("<mtext>&#160;a&#160;</mtext>"), "{m}");
+        let m = mathml(r"a < b \not< c \& d", false).unwrap();
+        assert!(m.contains("<mo>&lt;</mo>"), "{m}");
+        assert!(m.contains("<mo>&lt;\u{338}</mo>"), "{m}");
+        assert!(m.contains("<mi>&amp;</mi>"), "{m}");
+        // What the renderer escaped itself stays as it is.
+        let m = mathml(r"\text{<&>}", false).unwrap();
+        assert!(m.contains("<mtext>&lt;&amp;&gt;</mtext>"), "{m}");
     }
 
     /// Exactly the formulas the preview shows as source are reported, where they are written,
