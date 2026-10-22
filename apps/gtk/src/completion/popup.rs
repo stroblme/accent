@@ -92,8 +92,11 @@ impl Popup {
         list.add_css_class("navigation-sidebar");
         // The row column takes whatever width the documentation leaves: the popover is at least
         // the CSS's 240 px and keeps the widest it has been, and narrower rows would leave a gap.
+        // Its width is the widest row it has shown ([`measure_later`]), never what the list asks:
+        // the list builds rows far past the eight on screen and asks for the widest of them.
+        // External, as only then is that width held to `max-content-width`.
         let rows = gtk::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk::PolicyType::Never)
+            .hscrollbar_policy(gtk::PolicyType::External)
             .propagate_natural_height(true)
             .propagate_natural_width(true)
             .hexpand(true)
@@ -136,6 +139,24 @@ impl Popup {
             .build();
         popover.add_css_class("accent-completion");
         popover.set_parent(view);
+        let widest: Rc<Cell<i32>> = Rc::default();
+        let measure: Rc<RefCell<Option<gtk::TickCallbackId>>> = Rc::default();
+        // A row scrolled into view may be wider than any shown before it.
+        rows.vadjustment().connect_value_changed(glib::clone!(
+            #[weak]
+            popover,
+            #[weak]
+            list,
+            #[weak]
+            rows,
+            #[weak]
+            doc_scroll,
+            #[strong]
+            widest,
+            #[strong]
+            measure,
+            move |_| measure_later(&popover, &list, &rows, &doc_scroll, &widest, &measure)
+        ));
         Popup {
             popover,
             store,
@@ -146,8 +167,8 @@ impl Popup {
             doc_scroll,
             doc,
             font,
-            widest: Rc::default(),
-            measure: Rc::default(),
+            widest,
+            measure,
             selected,
             quiet,
         }
@@ -191,6 +212,8 @@ impl Popup {
         }
         let inset = CONTENTS_PADDING + ROW_PADDING + if icons { ICON_ROOM } else { 0 };
         self.popover.set_offset(-inset, 0);
+        // No wider than the rows it has shown, until the rows now on screen are measured.
+        self.rows.set_max_content_width(self.widest.get());
         self.popover.set_pointing_to(Some(&at));
         if !self.popover.is_visible() {
             self.popover.popup();
@@ -211,36 +234,14 @@ impl Popup {
     /// After the next frame, use measured row heights up to [`MAX_ROWS`]
     /// and retain maximum width; present again only if dimensions changed.
     fn measure(&self) {
-        if let Some(waiting) = self.measure.take() {
-            waiting.remove();
-        }
-        let (popover, rows, doc, widest, measure) = (
-            self.popover.clone(),
-            self.rows.clone(),
-            self.doc_scroll.clone(),
-            self.widest.clone(),
-            self.measure.clone(),
+        measure_later(
+            &self.popover,
+            &self.list,
+            &self.rows,
+            &self.doc_scroll,
+            &self.widest,
+            &self.measure,
         );
-        let id = self.list.add_tick_callback(move |list, _| {
-            let Some(row) = list.first_child().filter(|row| row.height() > 0) else {
-                return glib::ControlFlow::Continue;
-            };
-            // At no width: a row is one line whatever its width, and the width it was given can
-            // be less than a row just bound to it needs, which GTK warns about.
-            let (_, tall, _, _) = row.measure(gtk::Orientation::Vertical, -1);
-            let mut changed = set_tall(&rows, &doc, tall * MAX_ROWS as i32);
-            if rows.width() > widest.get() {
-                widest.set(rows.width());
-                rows.set_size_request(rows.width(), -1);
-                changed = true;
-            }
-            if changed {
-                present(&popover);
-            }
-            measure.take();
-            glib::ControlFlow::Break
-        });
-        self.measure.replace(Some(id));
     }
 
     pub(super) fn hide(&self) {
@@ -281,7 +282,12 @@ impl Popup {
     pub(super) fn set_doc(&self, markup: Option<&str>) {
         if let Some(markup) = markup {
             self.doc.set_markup(markup);
+            self.doc.set_size_request(-1, -1);
             let (_, wide, _, _) = self.doc.measure(gtk::Orientation::Horizontal, -1);
+            // Held at the width it asks for: start-aligned, the popover is laid out at the least
+            // width that fits the rows' height, which wrapped the text a word a line beside a
+            // narrow list and left the rest of its surface unpainted.
+            self.doc.set_size_request(wide, -1);
             let (_, tall, _, _) = self.doc.measure(gtk::Orientation::Vertical, wide);
             self.doc_scroll
                 .set_vscrollbar_policy(scrollbar(tall > self.doc_scroll.max_content_height()));
@@ -311,6 +317,68 @@ impl Drop for Popup {
     fn drop(&mut self) {
         self.popover.unparent();
     }
+}
+
+/// [`Popup::measure`], for the popup's parts: after the next frame, the rows' height up to
+/// [`MAX_ROWS`], and the widest row on screen it has had.
+fn measure_later(
+    popover: &gtk::Popover,
+    list: &gtk::ListView,
+    rows: &gtk::ScrolledWindow,
+    doc: &gtk::ScrolledWindow,
+    widest: &Rc<Cell<i32>>,
+    measure: &Rc<RefCell<Option<gtk::TickCallbackId>>>,
+) {
+    if let Some(waiting) = measure.take() {
+        waiting.remove();
+    }
+    let (popover, rows, doc, widest, waiting) = (
+        popover.clone(),
+        rows.clone(),
+        doc.clone(),
+        widest.clone(),
+        measure.clone(),
+    );
+    let id = list.add_tick_callback(move |list, _| {
+        let Some(row) = list.first_child().filter(|row| row.height() > 0) else {
+            return glib::ControlFlow::Continue;
+        };
+        // At no width: a row is one line whatever its width, and the width it was given can
+        // be less than a row just bound to it needs, which GTK warns about.
+        let (_, tall, _, _) = row.measure(gtk::Orientation::Vertical, -1);
+        let mut changed = set_tall(&rows, &doc, tall * MAX_ROWS as i32);
+        let wide = widest_shown(list, &rows);
+        if wide > widest.get() {
+            widest.set(wide);
+            rows.set_max_content_width(wide);
+            rows.set_size_request(wide, -1);
+            changed = true;
+        }
+        if changed {
+            present(&popover);
+        }
+        waiting.take();
+        glib::ControlFlow::Break
+    });
+    measure.replace(Some(id));
+}
+
+/// The widest of `list`'s rows that `rows` shows, as each would be laid out.
+fn widest_shown(list: &gtk::ListView, rows: &gtk::ScrolledWindow) -> i32 {
+    let mut widest = 0;
+    let mut row = list.first_child();
+    while let Some(at) = row {
+        // The rows the list built beyond the view are its children too, hidden.
+        let shown = at.is_child_visible()
+            && at
+                .compute_bounds(rows)
+                .is_some_and(|b| b.y() < rows.height() as f32 && b.y() + b.height() > 0.0);
+        if shown {
+            widest = widest.max(at.measure(gtk::Orientation::Horizontal, -1).1);
+        }
+        row = at.next_sibling();
+    }
+    widest
 }
 
 /// Present `popover` again where it points, which is what fits it to its content.
@@ -363,7 +431,14 @@ fn factory(
         item.set_activatable(false);
         let icon = gtk::Image::new();
         icon.add_css_class("kind");
-        let label = gtk::Label::builder().xalign(0.0).hexpand(true).build();
+        // Cut short only while it is wider than the rows shown so far, which a row scrolled into
+        // view is for a frame; built but not shown, it would otherwise widen the popup's least
+        // width to its own and push its detail out of sight.
+        let label = gtk::Label::builder()
+            .xalign(0.0)
+            .hexpand(true)
+            .ellipsize(pango::EllipsizeMode::End)
+            .build();
         let detail = gtk::Label::builder()
             .xalign(1.0)
             .ellipsize(pango::EllipsizeMode::End)
