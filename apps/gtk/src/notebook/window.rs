@@ -65,6 +65,7 @@ impl App {
         {
             let config = self.config.borrow();
             tab.set_font(config.editor_font.as_deref(), self.zoom.get());
+            tab.set_spellcheck(config.spellcheck);
         }
         // Nothing else watches a loose file: the vault's worker only reports on its own tree.
         if doc::is_loose_key(key) {

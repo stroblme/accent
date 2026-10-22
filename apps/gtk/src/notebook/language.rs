@@ -529,7 +529,8 @@ impl NotebookTab {
     }
 
     /// Give code cell `view`'s editor, just built, the code tab's keys and the language features
-    /// over the notebook's document, and the diagnostics that waited for it.
+    /// over the notebook's document, and the diagnostics that waited for it; a markdown cell's, a
+    /// note's keys, which ask no language, and its links followed by Ctrl+click.
     pub(super) fn attach_cell(self: &Rc<Self>, view: &CellView, editor: &Editor) {
         if view.kind == Kind::Markdown {
             let keys = gtk::EventControllerKey::new();
@@ -541,9 +542,10 @@ impl NotebookTab {
                 if !view.is_editable() {
                     return glib::Propagation::Proceed;
                 }
-                crate::typing::on_key(&view, key, state)
+                crate::editor::typed_keys(&view, Flavour::Note, key, state)
             });
             editor.view.add_controller(keys);
+            self.follow_clicks(&editor.view);
             return;
         }
         if view.kind != Kind::Code {
@@ -575,7 +577,16 @@ impl NotebookTab {
         crate::editor::attach_keys(&features);
         crate::hover::install(&features);
         crate::signature::install(&features);
-        // Ctrl+click is Go to Definition, at the place clicked, as in a code tab.
+        self.follow_clicks(&editor.view);
+        self.lang.editors.borrow_mut().insert(view.id, cell);
+        if self.selected.get() == Some(view.id) {
+            self.complete_in(view.id);
+        }
+    }
+
+    /// Ctrl+click in `view` is Go to Definition at the place clicked, as in a text tab: a code
+    /// cell's name, a markdown cell's link.
+    fn follow_clicks(self: &Rc<Self>, view: &sourceview5::View) {
         let click = gtk::GestureClick::new();
         let weak = Rc::downgrade(self);
         click.connect_pressed(move |gesture, _, x, y| {
@@ -594,11 +605,7 @@ impl NotebookTab {
             gesture.set_state(gtk::EventSequenceState::Claimed);
             tab.lang.on_follow.emit(&tab);
         });
-        editor.view.add_controller(click);
-        self.lang.editors.borrow_mut().insert(view.id, cell);
-        if self.selected.get() == Some(view.id) {
-            self.complete_in(view.id);
-        }
+        view.add_controller(click);
     }
 
     /// Cell `id` was selected: its editor gets its completion popup, if it has none yet. Made

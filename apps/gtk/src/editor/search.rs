@@ -33,12 +33,69 @@ fn search_match_colour(buffer: &sourceview5::Buffer) -> Option<gdk::RGBA> {
 
 /// Paint a muted `search-match` colour at one-third weight so occurrences
 /// remain weaker than find hits in every theme.
-pub(super) fn mute(buffer: &sourceview5::Buffer, tag: &gtk::TextTag) {
+pub(crate) fn mute(buffer: &sourceview5::Buffer, tag: &gtk::TextTag) {
     let Some(mut colour) = search_match_colour(buffer) else {
         return;
     };
     colour.set_alpha(colour.alpha() * OCCURRENCE_WEIGHT);
     tag.set_background_rgba(Some(&colour));
+}
+
+/// `buffer`'s tag for the other occurrences of the selection. Made before the find bar's match
+/// tag, so it stays under it: a tag added later to the table outranks an earlier one, and the
+/// match tag is only ever raised.
+pub(crate) fn occurrence_tag(buffer: &sourceview5::Buffer) -> gtk::TextTag {
+    let tag = gtk::TextTag::new(Some("occurrence"));
+    buffer.tag_table().add(&tag);
+    mute(buffer, &tag);
+    tag
+}
+
+/// The selection whose other occurrences are hinted: one line of two characters or more. One
+/// character is too common, and a selection of lines is a block.
+pub(crate) fn selected_occurrence(buffer: &impl IsA<gtk::TextBuffer>) -> Option<String> {
+    let (start, end) = buffer.selection_bounds()?;
+    let text = buffer.text(&start, &end, false);
+    (text.chars().count() >= 2 && !text.contains('\n')).then(|| text.to_string())
+}
+
+/// Tag `query`'s case-insensitive occurrences in `buffer`, at most [`OCCURRENCE_CAP`], with
+/// `tag`, taking the last ones off; none for no query. The `selected` ranges stay untagged: a
+/// tag's background paints over GTK's selection and would colour the primary and the other
+/// selections differently.
+pub(crate) fn paint_occurrences(
+    buffer: &impl IsA<gtk::TextBuffer>,
+    tag: &gtk::TextTag,
+    query: Option<&str>,
+    selected: &[(i32, i32)],
+) {
+    buffer.remove_tag(tag, &buffer.start_iter(), &buffer.end_iter());
+    let Some(query) = query else { return };
+    let mut at = buffer.start_iter();
+    for _ in 0..OCCURRENCE_CAP {
+        let found = at.forward_search(query, gtk::TextSearchFlags::CASE_INSENSITIVE, None);
+        let Some((from, to)) = found else {
+            break;
+        };
+        if !selected.contains(&(from.offset(), to.offset())) {
+            buffer.apply_tag(tag, &from, &to);
+        }
+        at = to;
+    }
+}
+
+/// `view`'s selected character ranges, every caret's of a column or the primary's alone.
+pub(crate) fn selected_ranges(view: &sourceview5::View) -> Vec<(i32, i32)> {
+    let offsets = |(start, end): (gtk::TextIter, gtk::TextIter)| (start.offset(), end.offset());
+    match view.downcast_ref::<multicaret::View>() {
+        Some(column) => column.selections().into_iter().map(offsets).collect(),
+        None => view
+            .buffer()
+            .selection_bounds()
+            .map(offsets)
+            .into_iter()
+            .collect(),
+    }
 }
 
 /// Apply all properties of the scheme's `search-match` style for find hits.
@@ -276,56 +333,20 @@ impl Tab {
         Some(self.buffer.text(&start, &end, false).to_string())
     }
 
-    /// Use single-line selections of at least two characters for occurrence
-    /// hints. One character is too common; multiline selections represent blocks.
-    fn selected_occurrence(&self) -> Option<String> {
-        self.selection_text()
-            .filter(|s| s.chars().count() >= 2 && !s.contains('\n'))
-    }
-
-    /// Highlight other case-insensitive occurrences of the selection, capped at [`OCCURRENCE_CAP`].
-    ///
-    /// Leave selected ranges untagged: tag backgrounds paint above GTK selection and would
-    /// colour primary and secondary selections differently. Reuse unchanged text matches so
-    /// caret movement remains cheap.
+    /// Highlight other case-insensitive occurrences of the selection ([`paint_occurrences`]),
+    /// re-tagging nothing for a caret move that leaves the query as it was.
     pub(super) fn highlight_occurrences(&self) {
-        let query = self.selected_occurrence();
+        let query = selected_occurrence(&self.buffer);
         if *self.occurrence_query.borrow() == query {
             return;
         }
         *self.occurrence_query.borrow_mut() = query.clone();
-        self.buffer.remove_tag(
+        paint_occurrences(
+            &self.buffer,
             &self.occurrence_tag,
-            &self.buffer.start_iter(),
-            &self.buffer.end_iter(),
+            query.as_deref(),
+            &selected_ranges(&self.view),
         );
-        let Some(query) = query else { return };
-        let selected = self.selected_ranges();
-        let mut at = self.buffer.start_iter();
-        for _ in 0..OCCURRENCE_CAP {
-            let found = at.forward_search(&query, gtk::TextSearchFlags::CASE_INSENSITIVE, None);
-            let Some((from, to)) = found else {
-                break;
-            };
-            if !selected.contains(&(from.offset(), to.offset())) {
-                self.buffer.apply_tag(&self.occurrence_tag, &from, &to);
-            }
-            at = to;
-        }
-    }
-
-    /// Current selected character ranges for all column carets, or the primary alone.
-    fn selected_ranges(&self) -> Vec<(i32, i32)> {
-        let offsets = |(start, end): (gtk::TextIter, gtk::TextIter)| (start.offset(), end.offset());
-        match self.view.downcast_ref::<multicaret::View>() {
-            Some(column) => column.selections().into_iter().map(offsets).collect(),
-            None => self
-                .buffer
-                .selection_bounds()
-                .map(offsets)
-                .into_iter()
-                .collect(),
-        }
     }
 
     /// What the muted highlight is showing, and the tag it paints it with. Only

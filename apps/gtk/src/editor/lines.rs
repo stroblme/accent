@@ -624,21 +624,6 @@ impl Tab {
         newline_below(&self.view);
     }
 
-    /// [`duplicate_line`] in this tab.
-    pub fn duplicate_line(&self) {
-        duplicate_line(&self.view);
-    }
-
-    /// [`delete_line`] in this tab.
-    pub fn delete_line(&self) {
-        delete_line(&self.view);
-    }
-
-    /// [`toggle_comment`] in this tab.
-    pub fn toggle_comment(&self) {
-        toggle_comment(&self.view);
-    }
-
     /// Place the caret at the first template `{{cursor}}` and turn later
     /// byte offsets into Tab stops. GtkSourceView requires snippet-inserted
     /// text, so reinsert unchanged bytes without undo or dirty state.

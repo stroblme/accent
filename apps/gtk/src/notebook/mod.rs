@@ -5,6 +5,7 @@
 //! note (`window`).
 
 mod cell;
+mod editing;
 mod find;
 mod history;
 mod kernel;
@@ -67,6 +68,12 @@ pub struct NotebookTab {
     views: RefCell<Vec<Rc<CellView>>>,
     /// The code cells' language, from the notebook's own metadata.
     language: Option<sourceview5::Language>,
+    /// How wide the code cells' `[n]` column is, where the markdown cells' markers hang.
+    gutter: Cell<i32>,
+    /// Whether the markdown cells are spell checked: the Preferences switch a note follows.
+    spellcheck: Cell<bool>,
+    /// The selection whose other occurrences are painted in every cell.
+    occurrence: RefCell<Option<String>>,
     selected: Cell<Option<CellId>>,
     history: RefCell<History>,
     /// The cell a user action is changing, and its changes so far, until the action ends.
@@ -169,6 +176,9 @@ pub fn open(
         model: RefCell::new(notebook),
         views: RefCell::default(),
         language,
+        gutter: Cell::new(0),
+        spellcheck: Cell::new(false),
+        occurrence: RefCell::default(),
         selected: Cell::new(None),
         history: RefCell::default(),
         pending: RefCell::default(),
@@ -193,6 +203,7 @@ pub fn open(
         on_caret: Hook::default(),
         lang: language::State::default(),
     });
+    tab.gutter.set(cell::count_width(&tab.scroller));
     tab.reconcile();
     // The notebook follows the caret itself (`follow_caret`): the viewport's own scroll to the
     // focused widget would bring a clicked cell's whole editor into view, moving what was clicked.
@@ -381,7 +392,7 @@ impl NotebookTab {
         let view = {
             let model = self.model.borrow();
             let at = model.position(id).expect("a cell of the model");
-            Rc::new(CellView::new(&model.cells()[at]))
+            Rc::new(CellView::new(&model.cells()[at], self.gutter.get()))
         };
         let weak = Rc::downgrade(self);
         let on = move |f: fn(&Rc<NotebookTab>, CellId)| {
@@ -493,9 +504,13 @@ impl NotebookTab {
             tab.follow_caret(id);
             tab.on_caret.emit(tab);
         });
+        let occurrences = on(|tab, id| tab.highlight_occurrences(id));
         buffer.connect_mark_set(move |buffer, _, mark| {
             if *mark == buffer.get_insert() {
                 follow();
+            }
+            if *mark == buffer.get_insert() || *mark == buffer.selection_bound() {
+                occurrences();
             }
         });
         let focus = gtk::EventControllerFocus::new();
@@ -522,6 +537,11 @@ impl NotebookTab {
             }
         });
         editor.view.add_controller(keys);
+        if view.kind == Kind::Markdown && self.spellcheck.get() {
+            crate::editor::set_spelling(&view.spell, &editor.buffer, &editor.view, true);
+        }
+        let query = self.occurrence.borrow().clone();
+        crate::editor::paint_occurrences(&editor.buffer, &editor.occurrence, query.as_deref(), &[]);
         self.attach_cell(view, &editor);
         editor
     }
@@ -605,7 +625,7 @@ impl NotebookTab {
             && let Some(editor) = view.editor()
             && view.kind == Kind::Markdown
         {
-            crate::highlight::apply(&editor.buffer);
+            crate::editor::style_note(&editor.view, &editor.buffer);
         }
         // Typing moves the caret without setting its mark.
         self.follow_caret(id);
@@ -734,7 +754,7 @@ impl NotebookTab {
             }
         }
         if view.kind == Kind::Markdown {
-            crate::highlight::apply(buffer);
+            crate::editor::style_note(&editor.view, buffer);
         }
         self.select(id);
         editor.view.grab_focus();
@@ -1314,8 +1334,9 @@ impl NotebookTab {
         for view in self.views.borrow().iter() {
             if let Some(editor) = view.editor() {
                 crate::editor::sync_scheme(&editor.buffer);
+                crate::editor::mute(&editor.buffer, &editor.occurrence);
                 if view.kind == Kind::Markdown {
-                    crate::highlight::restyle(&editor.buffer, &editor.view);
+                    crate::editor::restyle_note(&editor.view, &editor.buffer);
                 }
             }
             view.outputs.restyle();
@@ -1350,10 +1371,23 @@ impl NotebookTab {
             gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
         *self.font.borrow_mut() = Some(provider);
-        for editor in self.views.borrow().iter().filter_map(|v| v.editor()) {
-            crate::editor::refont(&editor.view);
+        self.gutter.set(cell::count_width(&self.scroller));
+        for view in self.views.borrow().iter() {
+            view.set_gutter(self.gutter.get());
+            if let Some(editor) = view.editor() {
+                crate::editor::refont(&editor.view);
+            }
         }
         self.refit_after_layout.set(true);
+        // What is measured in the cells' fonts, once the new rule has reached their views.
+        let views: Vec<_> = self.views.borrow().iter().map(Rc::downgrade).collect();
+        glib::idle_add_local_once(move || {
+            for view in views.iter().filter_map(std::rc::Weak::upgrade) {
+                if let Some(editor) = view.editor() {
+                    crate::editor::remeasure(&editor.view, cell::flavour(view.kind));
+                }
+            }
+        });
     }
 
     /// What the drill counts: code cells, markdown cells, stored outputs, and how they show.

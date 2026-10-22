@@ -86,34 +86,66 @@ fn dispatch(editor: &Rc<dyn Editor>, key: gdk::Key, state: gdk::ModifierType) ->
         return answer;
     }
     let view = editor.view();
-    if let Some(view) = view
+    if let Some(answer) = carets(view, key, state) {
+        return answer;
+    }
+    match stepping_a_template {
+        true => glib::Propagation::Proceed,
+        false => helpers(view, editor.flavour(), key, state),
+    }
+}
+
+/// The chain's last steps, which ask nothing of a language: the secondary carets, then a note's
+/// typing helpers or code's brackets and indentation. A notebook's markdown cell, which has no
+/// document on the language layer, takes these alone.
+pub(crate) fn typed(
+    view: &sourceview5::View,
+    flavour: Flavour,
+    key: gdk::Key,
+    state: gdk::ModifierType,
+) -> glib::Propagation {
+    carets(view, key, state).unwrap_or_else(|| helpers(view, flavour, key, state))
+}
+
+/// A press for a column of secondary carets, if there is one.
+fn carets(
+    view: &sourceview5::View,
+    key: gdk::Key,
+    state: gdk::ModifierType,
+) -> Option<glib::Propagation> {
+    let view = view
         .downcast_ref::<multicaret::View>()
-        .filter(|view| view.has_carets())
-    {
-        // A column of carets takes Return and Tab before the list helpers below ever see them,
-        // which is one of the ways a note stops continuing its lists (NOTEPAD). A column nobody
-        // meant to leave behind looks like no column at all on screen, so say where the carets
-        // are: the primary one first, then the extras.
-        if matches!(
-            key,
-            gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::Tab | gdk::Key::KP_Tab
-        ) {
-            tracing::debug!(
-                key = key.name().as_deref().unwrap_or("?"),
-                carets = ?view.caret_positions(),
-                "a column of carets answers the key, not the list helpers"
-            );
-        }
-        return view.press(key, state);
+        .filter(|view| view.has_carets())?;
+    // A column of carets takes Return and Tab before the list helpers below ever see them,
+    // which is one of the ways a note stops continuing its lists (NOTEPAD). A column nobody
+    // meant to leave behind looks like no column at all on screen, so say where the carets
+    // are: the primary one first, then the extras.
+    if matches!(
+        key,
+        gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::Tab | gdk::Key::KP_Tab
+    ) {
+        tracing::debug!(
+            key = key.name().as_deref().unwrap_or("?"),
+            carets = ?view.caret_positions(),
+            "a column of carets answers the key, not the list helpers"
+        );
     }
-    if editor.flavour().is_note() && !stepping_a_template {
-        return typing::on_key(view, key, state);
-    }
-    if editor.flavour() == Flavour::Code && !stepping_a_template {
-        return match typing::on_code_key(view, key, state) {
+    Some(view.press(key, state))
+}
+
+/// Markdown typing helpers in a note, brackets and indentation in code.
+fn helpers(
+    view: &sourceview5::View,
+    flavour: Flavour,
+    key: gdk::Key,
+    state: gdk::ModifierType,
+) -> glib::Propagation {
+    match flavour {
+        Flavour::Note => typing::on_key(view, key, state),
+        Flavour::Code => match typing::on_code_key(view, key, state) {
             glib::Propagation::Proceed => indent::on_key(view, key, state),
             stop => stop,
-        };
+        },
+        Flavour::Csv(_) => glib::Propagation::Proceed,
     }
-    glib::Propagation::Proceed
 }
