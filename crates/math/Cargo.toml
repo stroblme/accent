@@ -1,0 +1,17 @@
+[package]
+name = "accent-math"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+# GPL-3.0-or-later like the rest of the workspace. The files headed "Derived from" come from
+# formulary 0.3.0, MIT OR Apache-2.0; both flow into GPLv3, and their terms are met by
+# LICENSE-MIT, LICENSE-APACHE, NOTICE and those headers.
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+# The MathML pulldown-latex writes, read as XML.
+roxmltree = "0.21"
+
+[build-dependencies]
+pkg-config = "0.3"
