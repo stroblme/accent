@@ -416,27 +416,23 @@ impl Local {
         Ok(report)
     }
 
-    /// Apply server edits at `now` from back to front, requiring the planned
-    /// etag. Reject changed files and overlapping edits rather than guessing ranges.
+    /// Code action edits to files no tab holds ([`crate::Vault::edit_files`]): each file on its
+    /// own, a failure leaving the rest to be written.
+    pub fn edit_files(&self, edits: &[FileEdits]) -> Result<Vec<(String, String)>> {
+        Ok(edits
+            .iter()
+            .filter_map(|found| {
+                let failed = self.edit_one(&found.rel, found).err()?;
+                Some((found.rel.clone(), format!("{failed:#}")))
+            })
+            .collect())
+    }
+
+    /// Apply server edits at `now`, requiring the planned etag.
     fn edit_one(&self, now: &str, found: &FileEdits) -> Result<()> {
         let path = self.resolve_inside(now)?;
-        let (mut text, _) = fs::read_note(&path)?;
-        let mut edits = found.edits.clone();
-        edits.sort_by_key(|(start, ..)| std::cmp::Reverse(*start));
-        let mut end = text.len();
-        for (start, stop, with) in &edits {
-            let fits = start <= stop
-                && *stop <= end
-                && text.is_char_boundary(*start)
-                && text.is_char_boundary(*stop);
-            if !fits {
-                return Err(Error::Language(
-                    "the language server's edits overlap".to_string(),
-                ));
-            }
-            text.replace_range(*start..*stop, with);
-            end = *start;
-        }
+        let (text, _) = fs::read_note(&path)?;
+        let text = applied(text, &found.edits)?;
         fs::write_note(&path, &text, Some(found.etag))?;
         self.post(Msg::Update {
             rel: now.to_string(),
@@ -850,6 +846,29 @@ fn imports_by_path(rel: &str) -> bool {
         .is_some_and(|ext| IMPORTING.contains(&ext))
 }
 
+/// `text` with a language server's byte edits applied, back to front. Inserts at one place keep
+/// the order the server listed them in, as LSP has it; overlapping edits are refused rather than
+/// guessed at.
+fn applied(mut text: String, edits: &[(usize, usize, String)]) -> Result<String> {
+    let mut order: Vec<_> = edits.iter().enumerate().collect();
+    order.sort_by_key(|(i, (start, ..))| std::cmp::Reverse((*start, *i)));
+    let mut end = text.len();
+    for (_, (start, stop, with)) in order {
+        let fits = start <= stop
+            && *stop <= end
+            && text.is_char_boundary(*start)
+            && text.is_char_boundary(*stop);
+        if !fits {
+            return Err(Error::Language(
+                "the language server's edits overlap".to_string(),
+            ));
+        }
+        text.replace_range(*start..*stop, with);
+        end = *start;
+    }
+    Ok(text)
+}
+
 /// Rewrite a core file error's absolute path as vault-relative `rel`.
 fn named(rel: &str) -> impl FnOnce(accent_core::Error) -> Error + '_ {
     move |e| {
@@ -934,6 +953,19 @@ fn copy_file(from: &std::path::Path, to: &std::path::Path) -> io::Result<()> {
 mod tests {
     use crate::tests::*;
     use crate::{Etag, Event, Options, UndoReport, VaultConfig, fs};
+
+    /// Back to front, two inserts at one place in the server's order, an overlap refused.
+    #[test]
+    fn server_edits_apply_back_to_front_in_their_order() {
+        let edit = |start, stop, with: &str| (start, stop, with.to_string());
+        let text = "int x = 1\n".to_string();
+        let edits = [edit(9, 9, ";"), edit(0, 0, "static "), edit(0, 0, "const ")];
+        assert_eq!(
+            super::applied(text.clone(), &edits).unwrap(),
+            "static const int x = 1;\n"
+        );
+        assert!(super::applied(text, &[edit(0, 5, "a"), edit(3, 7, "b")]).is_err());
+    }
 
     /// `a.md` links to `B.md`; renaming it to `C.md` must move the link with it.
     fn linked_vault() -> Fixture {

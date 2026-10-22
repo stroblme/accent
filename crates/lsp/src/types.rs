@@ -108,6 +108,8 @@ pub struct ServerCapabilities {
     pub folding_range_provider: Option<Value>,
     pub inline_completion_provider: Option<Value>,
     pub call_hierarchy_provider: Option<Value>,
+    /// `true` or `{"codeActionKinds": […], "resolveProvider": true}`.
+    pub code_action_provider: Option<Value>,
     pub workspace: Option<WorkspaceServerCapabilities>,
 }
 
@@ -398,10 +400,10 @@ pub struct CallHierarchyOutgoingCall {
 
 // ------------------------------------------------------------------- edits
 
-/// Edits to other files, in the two shapes a server may send them: `changes`, keyed by URI, and
-/// `documentChanges`, which also carries create/rename/delete operations. accent advertises no
-/// `documentChanges` support, but reads it anyway, keeping the text edits and leaving the
-/// resource operations: the file operation that asked is already moving the files.
+/// Edits to files, in the two shapes a server may send them: `changes`, keyed by URI, and
+/// `documentChanges`, which also carries create/rename/delete operations. rust-analyzer and Lean
+/// send the second whatever the client says; accent reads the text edits of both and says no
+/// resource operations are supported ([`WorkspaceEdit::has_file_operations`]).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct WorkspaceEdit {
@@ -421,17 +423,38 @@ pub struct TextDocumentEdit {
 #[serde(rename_all = "camelCase")]
 pub struct TextDocumentIdentifier {
     pub uri: String,
+    /// The version of the document the edits were made against; `None` for a file on disk.
+    #[serde(default)]
+    pub version: Option<i32>,
 }
 
 impl WorkspaceEdit {
-    /// Every file's text edits, whichever shape they came in.
-    pub fn text_edits(self) -> Vec<(String, Vec<TextEdit>)> {
+    /// Every file's text edits, whichever shape they came in, with the document version they
+    /// were made against where the server said.
+    pub fn text_edits(self) -> Vec<(String, Option<i32>, Vec<TextEdit>)> {
         let documents = self
             .document_changes
             .into_iter()
             .filter_map(|change| serde_json::from_value::<TextDocumentEdit>(change).ok())
-            .map(|edit| (edit.text_document.uri, edit.edits));
-        self.changes.into_iter().chain(documents).collect()
+            .map(|edit| {
+                (
+                    edit.text_document.uri,
+                    edit.text_document.version,
+                    edit.edits,
+                )
+            });
+        let changes = self
+            .changes
+            .into_iter()
+            .map(|(uri, edits)| (uri, None, edits));
+        changes.chain(documents).collect()
+    }
+
+    /// Whether it creates, renames or deletes a file: a `documentChanges` entry with a `kind`.
+    pub fn has_file_operations(&self) -> bool {
+        self.document_changes
+            .iter()
+            .any(|c| c.get("kind").is_some())
     }
 }
 
@@ -597,11 +620,13 @@ mod tests {
             {"kind": "rename", "oldUri": "file:///b.rs", "newUri": "file:///c.rs"}
         ]}))
         .unwrap();
-        for shape in [changes, documents] {
+        assert!(!changes.has_file_operations() && documents.has_file_operations());
+        for (shape, version) in [(changes, None), (documents, Some(3))] {
             let edits = shape.text_edits();
             assert_eq!(edits.len(), 1, "the resource operation is left out");
             assert_eq!(edits[0].0, "file:///a.rs");
-            assert_eq!(edits[0].1[0].new_text, "bar");
+            assert_eq!(edits[0].1, version);
+            assert_eq!(edits[0].2[0].new_text, "bar");
         }
     }
 

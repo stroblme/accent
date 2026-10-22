@@ -17,7 +17,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 use tokio::sync::{mpsc, oneshot};
 
 use crate::runtime::runtime;
-use crate::types::{InitializeResult, ServerCapabilities};
+use crate::types::{InitializeResult, ServerCapabilities, WorkspaceEdit};
 use crate::{codec, from_uri, to_uri};
 
 /// Request timeout, long enough for normal replies while bounding a stalled server.
@@ -67,6 +67,11 @@ struct Inner {
     /// Set by `initialize`, and the answer to `workspace/workspaceFolders` afterwards.
     root_uri: OnceLock<String>,
     configuration: OnceLock<Value>,
+    /// The edits the server asks to apply (`workspace/applyEdit`) while a command of ours runs;
+    /// `None` between commands, when such a request is refused.
+    edits: Mutex<Option<Collect>>,
+    /// One command at a time, so each one's edits are its own.
+    command: tokio::sync::Mutex<()>,
 }
 
 impl Client {
@@ -129,6 +134,8 @@ impl Client {
             dead: AtomicBool::new(false),
             root_uri: OnceLock::new(),
             configuration: OnceLock::new(),
+            edits: Mutex::new(None),
+            command: tokio::sync::Mutex::new(()),
         });
 
         runtime().spawn(write_loop(outbox, writer));
@@ -177,10 +184,23 @@ impl Client {
         method: &str,
         params: impl Serialize,
     ) -> Result<R, Error> {
+        self.request_numbered(deadline, method, params, |_| ())
+            .await
+    }
+
+    /// [`Client::request_within`], telling `numbered` the request's id before it is sent.
+    async fn request_numbered<R: DeserializeOwned>(
+        &self,
+        deadline: Duration,
+        method: &str,
+        params: impl Serialize,
+        numbered: impl FnOnce(u64),
+    ) -> Result<R, Error> {
         if self.is_dead() {
             return Err(Error::Closed);
         }
         let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
+        numbered(id);
         let (tx, rx) = oneshot::channel();
         self.inner.waiting().insert(id, tx);
 
@@ -254,14 +274,30 @@ impl Client {
                     "documentSymbol": {"hierarchicalDocumentSymbolSupport": true},
                     "foldingRange": {"lineFoldingOnly": true},
                     "callHierarchy": {},
-                    "publishDiagnostics": {}
+                    "publishDiagnostics": {},
+                    // Literals, resolved for their edit once picked; no `disabled` ones.
+                    "codeAction": {
+                        "codeActionLiteralSupport": {"codeActionKind": {"valueSet": [
+                            "", "quickfix", "refactor", "refactor.extract", "refactor.inline",
+                            "refactor.rewrite", "source", "source.organizeImports",
+                            "source.fixAll"
+                        ]}},
+                        "isPreferredSupport": true,
+                        "dataSupport": true,
+                        "resolveSupport": {"properties": ["edit"]}
+                    }
                 },
                 // `willRename` alone: asked before a move, answered with the imports it breaks.
-                // No `documentChanges`, so the answer comes as plain `changes`.
+                // A command's own edits come back through `applyEdit` while it runs
+                // ([`Client::execute_command`]). `documentChanges` for the versions they carry,
+                // without file operations.
                 "workspace": {
                     "configuration": true,
                     "workspaceFolders": true,
-                    "fileOperations": {"willRename": true}
+                    "fileOperations": {"willRename": true},
+                    "applyEdit": true,
+                    "executeCommand": {},
+                    "workspaceEdit": {"documentChanges": true}
                 },
                 "window": {"workDoneProgress": true}
             }
@@ -276,6 +312,32 @@ impl Client {
             )?;
         }
         Ok(result.capabilities)
+    }
+
+    /// Run `command` (`{"command", "arguments"}`) at the server and return the edits it asked to
+    /// apply meanwhile, each answered as applied: clangd's tweaks edit through `applyEdit` and
+    /// answer the command once it is answered. Edits asked for at any other time are refused.
+    pub async fn execute_command(&self, command: &Value) -> Result<Vec<WorkspaceEdit>, Error> {
+        let _one = self.inner.command.lock().await;
+        let collecting = Collecting(&self.inner);
+        let params = json!({
+            "command": command.get("command").cloned().unwrap_or(Value::Null),
+            "arguments": command.get("arguments").cloned().unwrap_or(json!([])),
+        });
+        let start = |id| {
+            *lock(&self.inner.edits) = Some(Collect {
+                id,
+                edits: Vec::new(),
+                open: true,
+            })
+        };
+        self.request_numbered::<Value>(DEADLINE, "workspace/executeCommand", params, start)
+            .await?;
+        collecting
+            .take()
+            .into_iter()
+            .map(|edit| Ok(serde_json::from_value(edit)?))
+            .collect()
     }
 
     /// Attempt orderly shutdown within a short timeout, then kill an unresponsive server so
@@ -329,6 +391,15 @@ impl Inner {
                 Some(uri) => json!([{"uri": uri, "name": name_of(uri)}]),
                 None => Value::Null,
             }),
+            "workspace/applyEdit" => Ok(match lock(&self.edits).as_mut().filter(|c| c.open) {
+                Some(command) => {
+                    let edit = params.and_then(|p| p.get("edit"));
+                    command.edits.push(edit.cloned().unwrap_or(Value::Null));
+                    json!({"applied": true})
+                }
+                None => json!({"applied": false, "failureReason":
+                    "accent applies a server's edits only while a command it asked for runs"}),
+            }),
             _ => Err(json!({"code": -32601, "message": "method not found"})),
         };
         let message = match outcome {
@@ -364,6 +435,36 @@ fn configuration_for(settings: &Value, params: Option<&Value>) -> Value {
             })
             .collect(),
     )
+}
+
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The edits a running command's server asked for, taken until the command's own answer is read.
+struct Collect {
+    /// The `workspace/executeCommand` request's id.
+    id: u64,
+    edits: Vec<Value>,
+    /// Cleared by the reader as the command's answer arrives, so an edit after it is refused.
+    open: bool,
+}
+
+/// Refuses the server's `applyEdit` requests again once dropped, however the command ends.
+struct Collecting<'a>(&'a Inner);
+
+impl Collecting<'_> {
+    fn take(&self) -> Vec<Value> {
+        lock(&self.0.edits)
+            .take()
+            .map_or_else(Vec::new, |c| c.edits)
+    }
+}
+
+impl Drop for Collecting<'_> {
+    fn drop(&mut self) {
+        lock(&self.0.edits).take();
+    }
 }
 
 /// Cancels its request unless the answer already arrived. One guard covers both ways a request
@@ -438,6 +539,9 @@ fn route(inner: &Arc<Inner>, message: Value, notifier: &mpsc::UnboundedSender<No
                 }),
                 None => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
             };
+            if let Some(command) = lock(&inner.edits).as_mut().filter(|c| c.id == id) {
+                command.open = false;
+            }
             if let Some(tx) = inner.waiting().remove(&id) {
                 let _ = tx.send(answer);
             }
@@ -616,6 +720,53 @@ mod tests {
         });
     }
 
+    /// clangd's tweaks: the command's edit comes as the server's own `applyEdit` request, which
+    /// is answered before the command is; one sent with no command running is refused.
+    #[test]
+    fn a_command_returns_the_edits_the_server_asked_for_while_it_ran() {
+        runtime().block_on(async {
+            let (client, _notifications, mut theirs, mut their_write) = wired();
+            let edit = json!({"changes": {"file:///a.c": [
+                {"range": {"start": {"line": 0, "character": 0},
+                           "end": {"line": 0, "character": 0}}, "newText": ";"}
+            ]}});
+            let server = tokio::spawn({
+                let edit = edit.clone();
+                async move {
+                    let ask = recv(&mut theirs).await;
+                    assert_eq!(ask["method"], "workspace/executeCommand");
+                    assert_eq!(ask["params"]["command"], "clangd.applyTweak");
+                    send(
+                        &mut their_write,
+                        json!({"jsonrpc": "2.0", "id": "e1",
+                        "method": "workspace/applyEdit", "params": {"edit": edit}}),
+                    )
+                    .await;
+                    assert_eq!(recv(&mut theirs).await["result"]["applied"], true);
+                    send(
+                        &mut their_write,
+                        json!({"jsonrpc": "2.0", "id": ask["id"],
+                        "result": "Tweak applied."}),
+                    )
+                    .await;
+                    // After the command: refused.
+                    send(
+                        &mut their_write,
+                        json!({"jsonrpc": "2.0", "id": "e2",
+                        "method": "workspace/applyEdit", "params": {"edit": edit}}),
+                    )
+                    .await;
+                    recv(&mut theirs).await
+                }
+            });
+            let command = json!({"command": "clangd.applyTweak", "arguments": [{}]});
+            let edits = sendable(client.execute_command(&command)).await.unwrap();
+            assert_eq!(edits.len(), 1);
+            assert_eq!(edits[0].clone().text_edits()[0].2[0].new_text, ";");
+            assert_eq!(server.await.unwrap()["result"]["applied"], false);
+        });
+    }
+
     #[test]
     fn a_dead_server_frees_its_waiters_at_once() {
         runtime().block_on(async {
@@ -646,6 +797,9 @@ mod tests {
                 let caps = &ask["params"]["capabilities"];
                 assert_eq!(caps["workspace"]["fileOperations"]["willRename"], true);
                 assert!(caps["textDocument"]["callHierarchy"].is_object());
+                assert_eq!(caps["workspace"]["applyEdit"], true);
+                let resolved = &caps["textDocument"]["codeAction"]["resolveSupport"]["properties"];
+                assert_eq!(resolved, &json!(["edit"]));
                 send(
                     &mut their_write,
                     json!({"jsonrpc": "2.0", "id": ask["id"], "result": {"capabilities": {
