@@ -11,6 +11,20 @@ pub(super) fn move_content(rel: &str) -> gdk::ContentProvider {
     gdk::ContentProvider::for_value(&gtk::StringObject::new(rel).to_value())
 }
 
+/// What a drag out of the tree hands another application: the files themselves, a `GdkFileList`
+/// GTK writes out as `text/uri-list`. `root` is the vault's folder on this machine, `None` on a
+/// remote vault, whose files have no path here until they are downloaded. [`import_target`]
+/// never takes a drag that began in accent, so inside accent a row stays a row.
+pub(super) fn files_content(root: Option<&Path>, rels: &[String]) -> Option<gdk::ContentProvider> {
+    let root = root?;
+    let files: Vec<gio::File> = rels
+        .iter()
+        .map(|rel| gio::File::for_path(root.join(rel)))
+        .collect();
+    let list = gdk::FileList::from_array(&files);
+    Some(gdk::ContentProvider::for_value(&list.to_value()))
+}
+
 /// What a drop is handed to: each path a drag carried, and the path it goes to.
 pub(super) type Move = Rc<dyn Fn(Vec<(String, String)>)>;
 
@@ -209,7 +223,7 @@ pub(super) type Import = Rc<dyn Fn(Vec<PathBuf>, String, bool)>;
 ///
 /// `dir` uses the same zones as [`move_target`]. GDK deserialises URI lists into GdkFileList.
 /// Move-only offers move; other offers copy. A copied PDF on a PDF row appends pages instead;
-/// a moved PDF remains a file move.
+/// a moved PDF remains a file move. A drag that began inside accent is never taken.
 pub(super) fn import_target(
     on_import: &Import,
     on_append: &Append,
@@ -219,6 +233,16 @@ pub(super) fn import_target(
         gdk::FileList::static_type(),
         gdk::DragAction::COPY | gdk::DragAction::MOVE,
     );
+    // GTK's own test, an action and a format in common, and never a drag that began in accent: a
+    // tree row offers its files to other applications, and this target, sharing the row with
+    // the move's, would otherwise darken the row the move lit and take the drop from it.
+    target.connect_accept(|target, drop| {
+        drop.drag().is_none()
+            && drop.actions().intersects(target.actions())
+            && target
+                .formats()
+                .is_some_and(|ours| ours.match_(&drop.formats()))
+    });
     let dir = Rc::new(dir);
     let spring = Spring::new(crate::widgets::Debounce::new(SPRING_OPEN));
     let answer = {

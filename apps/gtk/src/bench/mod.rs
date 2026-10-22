@@ -68,7 +68,8 @@ use files::{
 };
 use find::bench_find;
 use folders::{
-    bench_drop, bench_expand, bench_menu, bench_menu_press, bench_move, bench_unfold, bench_watch,
+    bench_drag_out, bench_drop, bench_expand, bench_menu, bench_menu_press, bench_move,
+    bench_unfold, bench_watch,
 };
 use git::{
     bench_git, bench_git_branch, bench_git_close, bench_git_commit_focus, bench_git_focus,
@@ -281,6 +282,8 @@ use tags::bench_tags;
 ///   Changing modes write files; use a scratch vault.
 /// - `ACCENT_BENCH_MOVE=<rel>,<rel>,…`: Move to… dialogs and refusal cases.
 ///   Requires a scratch vault under `/tmp`.
+/// - `ACCENT_BENCH_DROP=out:<rel_file>,<rel_folder>`: what a row's drag offers other
+///   applications, and XTEST drags of it the tree never takes as an import; moves the file.
 /// - `ACCENT_BENCH_SCROLL=<rel_dir>`: list scroll retention during vault/git
 ///   changes. Creates a repository; requires a scratch vault under `/tmp`.
 /// - `ACCENT_BENCH_DIAGRAM=<rel>`: diagram edits/save, creating a sample if
@@ -654,6 +657,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             return bench_menu(&app, &rel);
         }
         if let Some(arg) = drop {
+            if let Some(arg) = arg.strip_prefix("out:") {
+                return bench_drag_out(&app, arg);
+            }
             return bench_drop(&app, &arg);
         }
         if let Some(arg) = watch {

@@ -447,15 +447,7 @@ pub(super) fn bench_drop(app: &Rc<App>, arg: &str) {
 /// The drop target on `dir`'s row that takes files from another application, found among the
 /// controllers the row expander carries.
 fn import_target_on(view: &gtk::ListView, dir: &str) -> Option<gtk::DropTarget> {
-    let expander = tree::expanders(view).into_iter().find(|expander| {
-        expander
-            .list_row()
-            .and_then(|row| row.item())
-            .as_ref()
-            .and_then(tree::decode)
-            .is_some_and(|row| row.rel == dir)
-    })?;
-    expander
+    expander_of(view, dir)?
         .observe_controllers()
         .into_iter()
         .flatten()
@@ -464,6 +456,194 @@ fn import_target_on(view: &gtk::ListView, dir: &str) -> Option<gtk::DropTarget> 
             t.formats()
                 .is_some_and(|f| f.contains_type(gdk::FileList::static_type()))
         })
+}
+
+/// `ACCENT_BENCH_DROP=out:<rel_file>,<rel_folder>`: what a row hands another application, and
+/// that accent never takes it back as an import. Prints what the file row's drag offers and the
+/// `text/uri-list` it writes, vault-relative, then the same for the file and the folder marked;
+/// then drags the file row with XTEST onto its own row, a move the tree refuses, and onto the
+/// folder's row, a move, printing whether each drag began, lit its target and ended, where the
+/// file is and whether a `(copy)` landed. The file must have no backlinks (an Update Links?
+/// question takes no answer under Xvfb) and it is moved, so point it at a scratch vault.
+pub(super) fn bench_drag_out(app: &Rc<App>, arg: &str) {
+    let Some(vault) = app.vault().cloned() else {
+        return bench_quit(app);
+    };
+    let Some((file, folder)) = arg.split_once(',') else {
+        return bench_quit(app);
+    };
+    let (app, file, folder) = (app.clone(), file.to_string(), folder.to_string());
+    glib::spawn_future_local(async move {
+        let tree = app.tree.get().expect("a tree");
+        until(|| app.reconciled.get() && tree.reveal(&file) && tree.reveal(&folder)).await;
+        glib::timeout_future(Duration::from_millis(400)).await;
+        let root = vault.root();
+        println!("bench drag_out row {}", offered(tree, &root, &file).await);
+        tree.toggle_mark(&file);
+        tree.toggle_mark(&folder);
+        println!("bench drag_out set {}", offered(tree, &root, &file).await);
+        tree.clear_marks();
+
+        let (sx, sy) = app.window.surface_transform();
+        let at = |rel: &str| {
+            centre(&app, tree, rel).map(|p| (f64::from(p.x()) + sx, f64::from(p.y()) + sy))
+        };
+        let (Some(from), Some(to)) = (at(&file), at(&folder)) else {
+            println!("bench drag_out rows off screen");
+            return bench_quit(&app);
+        };
+
+        // A secondary press on the status bar, which does nothing: the first press the window
+        // gets under Xvfb starts no drag.
+        let bar = app.statusbar.widget();
+        let middle = graphene::Point::new(bar.width() as f32 / 2.0, bar.height() as f32 / 2.0);
+        if let Some(p) = bar.compute_point(&app.window, &middle) {
+            let (bx, by) = (f64::from(p.x()) + sx, f64::from(p.y()) + sy);
+            super::git::xtest(&format!("move {bx} {by}; sleep 0.2; down 3; up 3")).await;
+        }
+        let parent = accent_core::path::parent_dir(&file).to_string();
+        let copies = || {
+            vault
+                .list_dir(&parent)
+                .unwrap_or_default()
+                .iter()
+                .filter(|row| row.rel_path.contains("(copy)"))
+                .count()
+        };
+        let (began, lit, ended) = drag_row(&app, from, from, &file).await;
+        println!(
+            "bench drag_out onto_itself began={began} lit={lit} ended={ended} there={} copies={}",
+            vault.exists(&file),
+            copies()
+        );
+        let (began, lit, ended) = drag_row(&app, from, to, &folder).await;
+        let moved = format!("{folder}/{}", accent_core::path::basename(&file));
+        until(|| vault.exists(&moved)).await;
+        println!(
+            "bench drag_out onto_folder began={began} lit={lit} ended={ended} moved={} left={} \
+             copies={}",
+            vault.exists(&moved),
+            vault.exists(&file),
+            copies()
+        );
+        bench_quit(&app);
+    });
+}
+
+/// Drag with XTEST from `from` to `to`, out past the drag threshold first, and let go there
+/// before a shut folder springs open; say whether a tree drag began and whether `onto`'s row lit
+/// up as a drop target meanwhile, and whether the drag had ended a second after.
+async fn drag_row(
+    app: &Rc<App>,
+    from: (f64, f64),
+    to: (f64, f64),
+    onto: &str,
+) -> (bool, bool, bool) {
+    let in_flight = |app: &App| {
+        app.shell
+            .upgrade()
+            .is_some_and(|shell| shell.tree_drag.borrow().is_some())
+    };
+    let ((x, y), out) = (from, from.0 + 30.0);
+    let path: String = (1..=10)
+        .map(|i| {
+            let f = f64::from(i) / 10.0;
+            format!(
+                "move {} {}; sleep 0.03; ",
+                out + (to.0 - out) * f,
+                y + (to.1 - y) * f
+            )
+        })
+        .collect();
+    let (began, lit) = (Rc::new(Cell::new(false)), Rc::new(Cell::new(false)));
+    let watch = glib::timeout_add_local(Duration::from_millis(20), {
+        let (app, began, lit, onto) = (app.clone(), began.clone(), lit.clone(), onto.to_string());
+        move || {
+            began.set(began.get() || in_flight(&app));
+            let row = app
+                .tree
+                .get()
+                .and_then(|tree| expander_of(tree.view(), &onto));
+            let lit_now =
+                row.is_some_and(|row| row.state_flags().contains(gtk::StateFlags::DROP_ACTIVE));
+            lit.set(lit.get() || lit_now);
+            glib::ControlFlow::Continue
+        }
+    });
+    super::git::xtest(&format!(
+        "move {x} {y}; sleep 0.3; down; sleep 0.1; move {} {y}; sleep 0.05; move {} {y}; \
+         sleep 0.05; move {out} {y}; sleep 0.1; {path}sleep 0.3; up",
+        x + 10.0,
+        x + 20.0
+    ))
+    .await;
+    watch.remove();
+    glib::timeout_future(Duration::from_millis(400)).await;
+    (began.get(), lit.get(), !in_flight(app))
+}
+
+/// What dragging `rel`'s row offers: the move, set, pane and file types, whether it can be
+/// written as `text/uri-list`, and the paths it writes there, under `root`.
+async fn offered(tree: &tree::Tree, root: &Path, rel: &str) -> String {
+    let source = expander_of(tree.view(), rel).and_then(|expander| {
+        expander
+            .observe_controllers()
+            .into_iter()
+            .flatten()
+            .find_map(|c| c.downcast::<gtk::DragSource>().ok())
+    });
+    let Some(source) = source else {
+        return "no row".to_string();
+    };
+    let prepared = source.emit_by_name::<Option<gdk::ContentProvider>>("prepare", &[&1.0, &1.0]);
+    let Some(provider) = prepared else {
+        return "nothing".to_string();
+    };
+    let formats = provider.formats();
+    let has = |t: glib::Type| formats.contains_type(t);
+    let uri_list = formats
+        .clone()
+        .union_serialize_mime_types()
+        .contain_mime_type("text/uri-list");
+    // As GDK serves a drag to another process: the value of a type the list is written from.
+    let stream = gio::MemoryOutputStream::new_resizable();
+    let wrote = match provider.value(gdk::FileList::static_type()) {
+        Ok(value) => {
+            gdk::content_serialize_future(&stream, "text/uri-list", &value, glib::Priority::DEFAULT)
+                .await
+        }
+        Err(e) => Err(e),
+    };
+    let _ = stream.close(gio::Cancellable::NONE);
+    let text = String::from_utf8_lossy(&stream.steal_as_bytes()).into_owned();
+    let paths: Vec<String> = text
+        .lines()
+        .filter_map(|uri| gio::File::for_uri(uri.trim()).path())
+        .map(|path| match path.strip_prefix(root) {
+            Ok(rel) => rel.display().to_string(),
+            Err(_) => path.display().to_string(),
+        })
+        .collect();
+    format!(
+        "move={} set={} pane={} files={} uri_list={uri_list} wrote={} {paths:?}",
+        has(gtk::StringObject::static_type()),
+        has(gtk::StringList::static_type()),
+        has(String::static_type()),
+        has(gdk::FileList::static_type()),
+        wrote.is_ok(),
+    )
+}
+
+/// The row widget bound to `rel`, if the list has one.
+fn expander_of(view: &gtk::ListView, rel: &str) -> Option<gtk::TreeExpander> {
+    tree::expanders(view).into_iter().find(|expander| {
+        expander
+            .list_row()
+            .and_then(|row| row.item())
+            .as_ref()
+            .and_then(tree::decode)
+            .is_some_and(|row| row.rel == rel)
+    })
 }
 
 /// What the vault lists in `dir` now, by name.
