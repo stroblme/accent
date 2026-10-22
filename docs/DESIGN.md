@@ -238,6 +238,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A move or a trash lets the marks go, since it may have taken what they named.
 - Files is a drag surface both ways: a row dropped into a pane opens there, on a pane's edge splits it; dropped in the tree it moves — onto a folder into it, onto a file beside it, onto the vault label or the blank area below the rows into the root.
   Folders drag too, but can never be dropped into a pane and opened as a note.
+- A row dragged out to another application — GNOME Files, a browser's upload — carries its file as a `text/uri-list` on a local vault, a marked set its top-most paths; a host's row carries nothing there, Download… being its way out.
+  A drag has one set of actions for every target, the move and the copy the tree needs, so the other application decides as for any file dragged to it: Files moves one on the same disk unless Ctrl is held.
+  Inside accent a row stays a row: no drop target of accent's reads the list of a drag that began in accent, so another window's tree still copies it by its own rule, and a move the tree refuses is never turned into a copy.
 - A marked set dragged lands as one move: one plan, one Update Links? question, and a name the destination already holds refuses all of it.
 - A move that cannot happen (a folder onto itself or into what is under it, anything into the folder it is in) is refused while the pointer is over the row, which does not light up; GTK's `:drop(active)` outline is the whole feedback, with no insertion line.
   Moves go through Rename's plan-and-rewrite, so open tabs follow the file and links keep their confirmation.

@@ -11,7 +11,7 @@ use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -20,7 +20,7 @@ mod drag;
 mod listing;
 
 pub use drag::dropped_paths;
-use drag::{Append, Carry, Import, Move, import_target, move_content, move_target};
+use drag::{Append, Carry, Import, Move, files_content, import_target, move_content, move_target};
 use listing::{Asked, ShowHidden, Watches, children_model, fill, watch_unindexed};
 pub use listing::{decode, dot_named};
 
@@ -722,6 +722,7 @@ pub fn build(
     let row_imports = imports.clone();
     let row_appends = appends.clone();
     let row_carries = carries.clone();
+    let local: Option<Rc<Path>> = (!vault.is_remote()).then(|| vault.root().into());
     // A folder's listing is kept for as long as the window is open, which is what makes binding
     // its row free, and it moves only when the vault says the folder changed. So each opening of
     // a folder lists it again: a dependency tree is watched by nothing, and a folder whose news
@@ -748,6 +749,7 @@ pub fn build(
                 &root_label,
                 &drag_marked,
                 &dragging,
+                local.as_ref(),
                 &row_moves,
                 &row_imports,
                 &row_appends,
@@ -873,6 +875,7 @@ fn setup_row(
     root_label: &str,
     marked: &Rc<RefCell<Marks>>,
     dragging: &Rc<dyn Fn(bool)>,
+    local: Option<&Rc<Path>>,
     moves: &Move,
     imports: &Import,
     appends: &Append,
@@ -922,7 +925,7 @@ fn setup_row(
         tooltip.set_text(Some(&format!("{root_label}/{}", row.rel)));
         true
     });
-    expander.add_controller(drag_source(marked, dragging));
+    expander.add_controller(drag_source(marked, dragging, local));
     // Dropped on a row: into the folder, or into the folder holding the file, which is where
     // that row's New File would have put one too.
     let row_dir = |target: &gtk::DropTarget, _: f64, _: f64| {
@@ -939,15 +942,21 @@ fn setup_row(
     expander
 }
 
-/// Drag row paths as pane-opening strings and separate tree-move payloads.
+/// Drag row paths as pane-opening strings and separate tree-move payloads, and on a local vault
+/// the files for other applications ([`files_content`]).
 ///
 /// Paths survive widget recycling. Panes open or split; tree targets move files. Offer COPY
 /// and MOVE so pointers reflect targets, while pane ties still choose COPY.
-fn drag_source(marked: &Rc<RefCell<Marks>>, dragging: &Rc<dyn Fn(bool)>) -> gtk::DragSource {
+fn drag_source(
+    marked: &Rc<RefCell<Marks>>,
+    dragging: &Rc<dyn Fn(bool)>,
+    local: Option<&Rc<Path>>,
+) -> gtk::DragSource {
     let source = gtk::DragSource::builder()
         .actions(gdk::DragAction::COPY | gdk::DragAction::MOVE)
         .build();
     let marked = marked.clone();
+    let local = local.cloned();
     source.connect_prepare(move |source, _, _| {
         let expander = source.widget()?.downcast::<gtk::TreeExpander>().ok()?;
         let row = expander.list_row()?.item().as_ref().and_then(decode)?;
@@ -961,18 +970,26 @@ fn drag_source(marked: &Rc<RefCell<Marks>>, dragging: &Rc<dyn Fn(bool)>) -> gtk:
         if is_marked(&marks, &row.rel) && !(marks.len() == 1 && marks.contains_key(&row.rel)) {
             let set: Vec<&str> = marks.keys().map(String::as_str).collect();
             let set = gtk::StringList::new(&set);
-            return Some(gdk::ContentProvider::for_value(&set.to_value()));
+            let marked: Vec<(String, bool)> = marks.iter().map(|(r, d)| (r.clone(), *d)).collect();
+            let top: Vec<String> = crate::fileops::topmost(&marked)
+                .into_iter()
+                .map(|(rel, _)| rel)
+                .collect();
+            let mut offered = vec![gdk::ContentProvider::for_value(&set.to_value())];
+            offered.extend(files_content(local.as_deref(), &top));
+            return Some(gdk::ContentProvider::new_union(&offered));
         }
-        let moving = move_content(&row.rel);
-        // A directory offers the move type alone: it has no single note to open, so a pane
-        // must never be able to take it.
-        Some(match row.is_dir() {
-            true => moving,
-            false => gdk::ContentProvider::new_union(&[
-                moving,
-                gdk::ContentProvider::for_value(&row.rel.to_value()),
-            ]),
-        })
+        let mut offered = vec![move_content(&row.rel)];
+        // A directory offers no pane type: it has no single note to open, so a pane must never
+        // be able to take it.
+        if !row.is_dir() {
+            offered.push(gdk::ContentProvider::for_value(&row.rel.to_value()));
+        }
+        offered.extend(files_content(
+            local.as_deref(),
+            std::slice::from_ref(&row.rel),
+        ));
+        Some(gdk::ContentProvider::new_union(&offered))
     });
     let begin = dragging.clone();
     source.connect_drag_begin(move |_, _| begin(true));
