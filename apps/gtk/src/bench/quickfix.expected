@@ -6,3 +6,11 @@ bench quickfix applied=2 text="INT A = OOPS;\nint b = 1 + 2;\n" other="int oops;
 bench quickfix undone=2 text="int a = oops;\nint b = 1 + 2;\n"
 bench quickfix applied=3 text="int a = oops;\nint b = 2 + 1;\n" other="int oops;\nint other;\n"
 bench quickfix undone=3 text="int a = oops;\nint b = 1 + 2;\n"
+bench quickfix hover ["Declare oops in other.c", "Replace oops with 0", "Upper-case the line", "Swap the operands"]
+bench quickfix cell_menu Some(["Replace oops with 0", "Declare oops in other.c", "Upper-case the line", "Swap the operands"])
+bench quickfix cell_applied=0 cells=["b = 1 + 2", "a = 0"]
+bench quickfix cell_undone=0 cells=["b = 1 + 2", "a = oops"]
+bench quickfix cell_applied=1 cells=["b = 1 + 2", "a = oops"]
+bench quickfix cell_applied=2 cells=["b = 1 + 2", "A = OOPS"]
+bench quickfix cell_undone=2 cells=["b = 1 + 2", "a = oops"]
+bench quickfix cell_applied=3 cells=["b = 1 + 2", "a = oops"]

@@ -326,6 +326,11 @@ pub(crate) trait Editor {
     /// Where `at` in the view is in the document, read after a [`flush`](Self::flush); `None` for
     /// a view that is no part of it any more.
     fn to_document(&self, at: Pos) -> Option<Pos>;
+    /// Where document position `at` is in the view: [`to_document`](Self::to_document) backwards,
+    /// `None` outside the view's part of the document.
+    fn to_view(&self, at: Pos) -> Option<Pos> {
+        Some(at)
+    }
     /// What the server said about the view's text, in the view's positions.
     fn diagnostics(&self) -> Ref<'_, Vec<Diagnostic>>;
     /// The LSP language id: see [`language_id`].
@@ -355,6 +360,10 @@ pub(crate) trait Editor {
         _state: gdk::ModifierType,
     ) -> Option<glib::Propagation> {
         None
+    }
+    /// Whether the server's quick fixes are offered here: wherever the text can be edited.
+    fn offers_fixes(&self) -> bool {
+        self.view().is_editable()
     }
 }
 

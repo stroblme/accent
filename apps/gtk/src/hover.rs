@@ -9,11 +9,14 @@
 //! on a word for [`DELAY`], up while the pointer is on that word or in the popover, whose text a
 //! wheel scrolls, and gone on a key press, a scroll of the text, the caret moving, the view losing
 //! focus, or the pointer leaving both.
+//!
+//! Over a diagnostic the server has fixes for, a Quick Fix… button under the text opens the menu
+//! `Alt+Return` opens (`fixes.rs`).
 
 use crate::editor::Tab;
 use crate::lang::{self, Editor};
-use accent_api::Task;
 use accent_api::debug::Evaluated;
+use accent_api::{CodeAction, Pos, Task};
 use gtk::{gdk, glib, graphene, pango};
 use pulldown_cmark::{Event, Parser, Tag, TagEnd};
 use sourceview5::prelude::*;
@@ -199,6 +202,34 @@ pub(crate) async fn markup_at(editor: Rc<dyn Editor>, start: gtk::TextIter) -> O
     Some(markup.join("\n"))
 }
 
+/// What the server offers over the first diagnostic at `pos` in the view, which the Quick Fix…
+/// button stands for: nothing where the editor takes no fixes or there is no diagnostic, and
+/// nothing it fails to answer.
+pub(crate) async fn fixes_at(editor: Rc<dyn Editor>, pos: Pos) -> Vec<CodeAction> {
+    let range = {
+        let items = editor.diagnostics();
+        crate::diagnostics::at(&items, pos).first().map(|d| d.range)
+    };
+    let doc = editor.document();
+    let (Some(range), Some(vault), true) = (range, doc.vault(), editor.offers_fixes()) else {
+        return Vec::new();
+    };
+    let (Some(from), Some(to)) = (
+        editor.to_document(range.start),
+        editor.to_document(range.end),
+    ) else {
+        return Vec::new();
+    };
+    let range = accent_api::Range {
+        start: from,
+        end: to,
+    };
+    vault
+        .code_actions(&doc.key(), range)
+        .await
+        .unwrap_or_default()
+}
+
 // ------------------------------------------------------------------------------------- popover
 
 /// One view's hover: the popover over it, and what it was asked about.
@@ -208,6 +239,10 @@ struct Hover {
     popover: gtk::Popover,
     scroller: gtk::ScrolledWindow,
     label: gtk::Label,
+    /// Quick Fix…, shown where the server has fixes for the diagnostic hovered.
+    fix: gtk::Button,
+    /// Where those fixes are, as a buffer offset.
+    fixes: Cell<Option<i32>>,
     /// Whether the pointer is over the view, and whether in the popover.
     over_view: gtk::EventControllerMotion,
     over_popover: gtk::EventControllerMotion,
@@ -242,13 +277,25 @@ pub fn install(editor: &Rc<dyn Editor>) {
         .build();
     // Over the line, as GtkSourceView put it, start-aligned and pulled left by its inset so the
     // text starts where the word does; never autohiding, so the view keeps the keyboard.
+    // Never taking the keyboard from the view, which would take the hover down.
+    let fix = gtk::Button::builder()
+        .label("Quick Fix…")
+        .halign(gtk::Align::Start)
+        .focus_on_click(false)
+        .can_focus(false)
+        .visible(false)
+        .build();
+    fix.add_css_class("flat");
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    content.append(&scroller);
+    content.append(&fix);
     let popover = gtk::Popover::builder()
         .autohide(false)
         .has_arrow(false)
         .can_focus(false)
         .position(gtk::PositionType::Top)
         .halign(gtk::Align::Start)
-        .child(&scroller)
+        .child(&content)
         .build();
     popover.add_css_class("accent-hover");
     popover.set_offset(-INSET_X, 0);
@@ -257,6 +304,8 @@ pub fn install(editor: &Rc<dyn Editor>) {
         popover,
         scroller,
         label,
+        fix,
+        fixes: Cell::new(None),
         over_view: gtk::EventControllerMotion::new(),
         over_popover: gtk::EventControllerMotion::new(),
         pointer: Cell::new(None),
@@ -302,6 +351,11 @@ impl Hover {
             move |_| me.left()
         ));
         self.popover.add_controller(self.over_popover.clone());
+        self.fix.connect_clicked(glib::clone!(
+            #[weak(rename_to = me)]
+            self,
+            move |_| me.fix()
+        ));
 
         // Any key goes to the text, so the hover goes. Captured, ahead of the view's own
         // bindings, which take a typed character for good.
@@ -431,10 +485,17 @@ impl Hover {
         }
         self.dismiss();
         self.word.set(Some((start.offset(), rect)));
+        let (at, pos) = (start.offset(), lang::pos_of(&start));
         let me = Rc::downgrade(self);
         let asking = glib::spawn_future_local(async move {
-            let markup = markup_at(editor.clone(), start).await;
-            if let (Some(me), Some(markup)) = (me.upgrade(), markup) {
+            let Some(markup) = markup_at(editor.clone(), start).await else {
+                return;
+            };
+            // Before it is shown: GTK does not lay a popover on screen out again as it grows.
+            let fixes = fixes_at(editor.clone(), pos).await;
+            if let Some(me) = me.upgrade() {
+                me.fixes.set((!fixes.is_empty()).then_some(at));
+                me.fix.set_visible(!fixes.is_empty());
                 me.show(editor.view(), &markup);
             }
         });
@@ -484,9 +545,25 @@ impl Hover {
             asking.abort();
         }
         self.word.set(None);
+        self.fixes.set(None);
         if self.popover.is_visible() {
             self.popover.popdown();
         }
+    }
+
+    /// Quick Fix… was pressed: the hover goes, and the caret goes to the fixes, where the menu
+    /// `Alt+Return` opens comes up.
+    fn fix(&self) {
+        let (Some(editor), Some(at)) = (self.editor.upgrade(), self.fixes.take()) else {
+            return;
+        };
+        self.dismiss();
+        let view = editor.view();
+        // A notebook selects the cell whose text takes the keyboard.
+        view.grab_focus();
+        view.buffer()
+            .place_cursor(&view.buffer().iter_at_offset(at));
+        let _ = view.activate_action("win.quick-fix", None);
     }
 }
 

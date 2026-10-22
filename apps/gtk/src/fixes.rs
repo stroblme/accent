@@ -3,153 +3,189 @@
 
 use super::*;
 use accent_api::{ActionEdits, CodeAction, Range, TextEdit};
+use lang::Editor;
 
 impl App {
-    /// Ask the active text tab's server for its fixes and refactorings over the selection, or at
-    /// the caret, and list them in a menu there.
+    /// Ask the server for its fixes and refactorings over the selection, or at the caret, of the
+    /// text tab in front or the notebook's selected code cell, and list them in a menu there.
     pub fn quick_fix(self: &Rc<Self>) {
-        if self.active_notebook().is_some() {
-            return self.toast("Quick fixes are not offered in notebook cells yet");
-        }
-        let Some(tab) = self.active() else {
-            return;
+        let (editor, cell, what): (Rc<dyn Editor>, bool, String) = match self.active_notebook() {
+            Some(notebook) => match notebook.language_editor() {
+                Some(cell) => (cell, true, "this notebook".to_string()),
+                None => return self.toast("No quick fixes here"),
+            },
+            None => match self.active() {
+                Some(tab) => {
+                    let what = tab.language().unwrap_or_else(|| "this file".to_string());
+                    (tab, false, what)
+                }
+                None => return,
+            },
         };
-        let Some(vault) = tab.lang.vault() else {
+        let doc = editor.document();
+        let Some(vault) = doc.vault() else {
             return self.needs_vault("list quick fixes");
         };
-        if let Some(server) = tab.lang.support().and_then(|s| s.missing.clone()) {
-            let language = tab.language().unwrap_or_else(|| "this file".to_string());
+        if let Some(server) = doc.support().and_then(|s| s.missing.clone()) {
             return self.toast(&format!(
-                "No language server for {language} ({server} not found)"
+                "No language server for {what} ({server} not found)"
             ));
         }
-        if !tab.view.is_editable() {
+        if !editor.offers_fixes() {
             return self.cannot("apply a quick fix", "the file is read-only");
         }
         // At the primary caret alone, as `Ctrl+Space` asks, and with nothing else over the text.
-        if let Some(column) = tab.view.downcast_ref::<multicaret::View>() {
+        let view = editor.view().clone();
+        if let Some(column) = view.downcast_ref::<multicaret::View>() {
             column.clear_carets();
         }
-        if let Some(session) = completion::session(&tab) {
+        if let Some(session) = editor.completion() {
             session.close();
         }
-        tab.lang.signature.dismiss();
-        let caret = editor::caret(&tab.buffer);
-        let (from, to) = tab.buffer.selection_bounds().unwrap_or((caret, caret));
-        let range = Range {
-            start: lang::pos_of(&from),
-            end: lang::pos_of(&to),
-        };
+        editor.signature().dismiss();
+        let buffer = view.buffer();
+        let caret = editor::caret(&buffer);
+        let (from, to) = buffer.selection_bounds().unwrap_or((caret, caret));
+        let (from, to) = (lang::pos_of(&from), lang::pos_of(&to));
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            lang::flush(tab.clone()).await;
-            let asked = tab.lang.doc.version();
-            let found = vault.code_actions(&tab.language_key(), range).await;
+            editor.clone().flush().await;
+            let asked = doc.version();
+            let (Some(start), Some(end)) = (editor.to_document(from), editor.to_document(to))
+            else {
+                return;
+            };
+            let found = vault.code_actions(&doc.key(), Range { start, end }).await;
             let Some(app) = weak.upgrade() else {
                 return;
             };
             // Typed past: the answer is about text that is not there any more.
-            if tab.lang.doc.version() != asked {
+            if doc.version() != asked {
                 return;
             }
             match found {
-                Ok(actions) => app.offer_fixes(&tab, actions),
+                Ok(actions) => app.offer_fixes(&editor, cell, actions),
                 Err(e) => app.cannot("list quick fixes", e),
             }
         });
     }
 
-    /// The menu of `actions` at `tab`'s caret, in [`sections`]; picking one applies it.
-    fn offer_fixes(self: &Rc<Self>, tab: &Rc<Tab>, actions: Vec<CodeAction>) {
+    /// The menu of `actions` at `editor`'s caret, in [`sections`]; picking one applies it.
+    fn offer_fixes(self: &Rc<Self>, editor: &Rc<dyn Editor>, cell: bool, actions: Vec<CodeAction>) {
         let sections = sections(actions);
         if sections.iter().all(Vec::is_empty) {
             return self.toast("No quick fixes here");
         }
         let menu = gio::Menu::new();
         let listed: Vec<CodeAction> = sections.concat();
-        let mut at = 0u32;
+        let mut index = 0u32;
         for section in sections.iter().filter(|s| !s.is_empty()) {
             let items = gio::Menu::new();
             for action in section {
                 // A menu reads `_` as a mnemonic: `snake_case` in a title must stay itself.
                 let item = gio::MenuItem::new(Some(&action.title.replace('_', "__")), None);
-                item.set_action_and_target_value(Some("fix.apply"), Some(&at.to_variant()));
+                item.set_action_and_target_value(Some("fix.apply"), Some(&index.to_variant()));
                 items.append_item(&item);
-                at += 1;
+                index += 1;
             }
             menu.append_section(None, &items);
         }
         let apply = gio::SimpleAction::new("apply", Some(glib::VariantTy::UINT32));
-        let (app, picked) = (Rc::downgrade(self), Rc::downgrade(tab));
+        let (app, picked) = (Rc::downgrade(self), Rc::downgrade(editor));
         apply.connect_activate(move |_, target| {
             let index = target.and_then(u32::from_variant).map(|i| i as usize);
-            if let (Some(app), Some(tab), Some(index)) = (app.upgrade(), picked.upgrade(), index)
+            if let (Some(app), Some(editor), Some(index)) = (app.upgrade(), picked.upgrade(), index)
                 && let Some(action) = listed.get(index)
             {
-                app.apply_fix(&tab, action.clone());
+                app.apply_fix(editor, cell, action.clone());
             }
         });
         let group = gio::SimpleActionGroup::new();
         group.add_action(&apply);
         // On the view before the menu is up: an item whose action is not found yet starts greyed.
-        tab.view.insert_action_group("fix", Some(&group));
-        let at = tab.view.iter_location(&editor::caret(&tab.buffer));
-        let (x, y) = tab
-            .view
-            .buffer_to_window_coords(gtk::TextWindowType::Widget, at.x(), at.y());
-        let anchor = gdk::Rectangle::new(x, y, 1, at.height());
-        widgets::popup_menu(&tab.view, &menu, Some(anchor));
+        let view = editor.view();
+        view.insert_action_group("fix", Some(&group));
+        let place = view.iter_location(&editor::caret(&view.buffer()));
+        let (x, y) =
+            view.buffer_to_window_coords(gtk::TextWindowType::Widget, place.x(), place.y());
+        let anchor = gdk::Rectangle::new(x, y, 1, place.height());
+        widgets::popup_menu(view, &menu, Some(anchor));
     }
 
-    /// Apply `action`, picked in `tab`: resolved or run at its server first, then its edits made.
-    pub(crate) fn apply_fix(self: &Rc<Self>, tab: &Rc<Tab>, action: CodeAction) {
-        let Some(vault) = tab.lang.vault() else {
+    /// Apply `action`, picked in `editor`: resolved or run at its server first, then its edits
+    /// made; in a notebook `cell`, only edits inside it.
+    fn apply_fix(self: &Rc<Self>, editor: Rc<dyn Editor>, cell: bool, action: CodeAction) {
+        let doc = editor.document();
+        let Some(vault) = doc.vault() else {
             return;
         };
-        let (weak, tab) = (Rc::downgrade(self), tab.clone());
+        let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            lang::flush(tab.clone()).await;
-            let asked = tab.lang.doc.version();
-            let edits = vault.code_action_edits(&tab.language_key(), action).await;
+            editor.clone().flush().await;
+            let asked = doc.version();
+            let edits = vault.code_action_edits(&doc.key(), action).await;
             let Some(app) = weak.upgrade() else {
                 return;
             };
             match edits {
-                Ok(edits) => app.make_edits(&tab, asked, vault, edits),
+                Ok(edits) => app.make_edits(&editor, cell, asked, vault, edits),
                 Err(e) => app.cannot("apply the fix", e),
             }
         });
     }
 
-    /// Make `edits`: each open file's in its tab as one undo step, all of them or none, then the
-    /// files no tab holds on disk, gated on their etags. `asked` is the version of `tab`'s text
-    /// the server answered about.
+    /// Make `edits`: each open file's in its view as one undo step, all of them or none, then the
+    /// files no tab holds on disk, gated on their etags. `asked` is the version of `editor`'s
+    /// document the server answered about; a notebook `cell` takes edits inside it alone.
     fn make_edits(
         self: &Rc<Self>,
-        tab: &Rc<Tab>,
+        editor: &Rc<dyn Editor>,
+        cell: bool,
         asked: u64,
         vault: Arc<Vault>,
         edits: ActionEdits,
     ) {
-        let mut open = Vec::new();
+        let beyond = || self.cannot("apply the fix", "it changes more than this cell");
+        if cell && !edits.files.is_empty() {
+            return beyond();
+        }
+        let doc = editor.document();
+        let mut open: Vec<(gtk::TextBuffer, Vec<TextEdit>)> = Vec::new();
         for (rel, list) in edits.open {
+            if rel == doc.key() {
+                if doc.version() != asked {
+                    return self.cannot("apply the fix", format!("{rel} changed meanwhile"));
+                }
+                let into_view = |edit: TextEdit| {
+                    let start = editor.to_view(edit.range.start)?;
+                    let end = editor.to_view(edit.range.end)?;
+                    Some(TextEdit {
+                        range: Range { start, end },
+                        ..edit
+                    })
+                };
+                let Some(list) = list.into_iter().map(into_view).collect() else {
+                    return beyond();
+                };
+                open.push((editor.view().buffer(), list));
+                continue;
+            }
+            if cell {
+                return beyond();
+            }
             let Some(target) = self.tab_for(&rel) else {
                 return self.cannot("apply the fix", format!("{rel} is not open here"));
             };
-            let unchanged = match Rc::ptr_eq(&target, tab) {
-                true => target.lang.doc.version() == asked,
-                false => target.lang.doc.in_step(),
-            };
-            if !unchanged {
+            if !target.lang.doc.in_step() {
                 return self.cannot("apply the fix", format!("{rel} changed meanwhile"));
             }
             if !target.view.is_editable() {
                 return self.cannot("apply the fix", format!("{rel} is read-only"));
             }
-            open.push((target, list));
+            open.push((target.buffer.clone().upcast(), list));
         }
-        for (target, list) in open {
-            apply_edits(target.buffer.upcast_ref(), list);
+        for (buffer, list) in open {
+            apply_edits(&buffer, list);
         }
         if edits.files.is_empty() {
             return;
