@@ -381,6 +381,9 @@ smoke: gtk-bench vault xvfb
 # `ACCENT_BENCH_COMPLETE` types completions into a note and into a C file answered by
 # `build-aux/fake-lsp.py`, configured for the scratch vault, and is held against `complete.expected`.
 #
+# `ACCENT_BENCH_QUICKFIX` opens Quick Fix's menu on a C file `build-aux/fake-lsp.py --actions`
+# answers and applies each kind of code action, held against `quickfix.expected`.
+#
 # `ACCENT_BENCH_SWITCHER=goto:…` exits 1 when a note picked in Go to File, from the Files tree or
 # from a note, has not taken the keyboard; the keys are real, through XTEST.
 #
@@ -409,6 +412,12 @@ drills: gtk-bench xvfb
 		ACCENT_BENCH_COMPLETE=code:complete.c timeout 60 $(TARGET_DIR)/accent "$$0"' \
 		"$$xdg/vault" >"$$xdg/complete" && \
 	grep '^bench ' "$$xdg/complete" | diff -u apps/gtk/src/bench/complete.expected -
+	$(HEADLESS) sh -c 'mkdir -p "$$XDG_CONFIG_HOME/accent" && \
+		printf "[vaults.\"%s\".lsp.servers]\nc = [\"python3\", \"%s\", \"--actions\"]\n" "$$0" \
+			"$(CURDIR)/build-aux/fake-lsp.py" >"$$XDG_CONFIG_HOME/accent/config.toml" && \
+		ACCENT_BENCH_QUICKFIX=fix.c timeout 60 $(TARGET_DIR)/accent "$$0"' \
+		"$$xdg/vault" >"$$xdg/quickfix" && \
+	grep '^bench ' "$$xdg/quickfix" | diff -u apps/gtk/src/bench/quickfix.expected -
 	$(HEADLESS) sh -c 'export HOME="$$0/home" && mkdir "$$HOME" && \
 		{ python3 -c "import debugpy" 2>/dev/null || { echo "SKIPPED the debugger drill: no debugpy"; exit 0; }; } && \
 		printf "def double(x):\n    y = x * 2\n    return y\n\ntotal = double(21)\nprint(\"total\", total)\n" \

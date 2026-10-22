@@ -32,6 +32,7 @@ mod export;
 mod fade;
 mod fileops;
 mod find;
+mod fixes;
 mod fold;
 mod ghost;
 mod git;
