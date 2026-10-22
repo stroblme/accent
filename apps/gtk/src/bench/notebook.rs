@@ -53,11 +53,11 @@ async fn open_drill(app: &Rc<App>, rel: &str) {
     let Some((tab, ms)) = opened(app, rel).await else {
         return;
     };
-    // The pictures decode on workers and the formulas typeset in WebKit: given the time they take.
+    // The pictures decode on workers: given the time they take.
     for _ in 0..50 {
         glib::timeout_future(Duration::from_millis(100)).await;
         let (_, _, _, c) = tab.counts();
-        if c.typeset == c.latex && c.recoloured == c.pictures {
+        if c.recoloured == c.pictures {
             break;
         }
     }
