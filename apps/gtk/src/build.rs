@@ -1227,9 +1227,8 @@ thread_local! {
 // Its arrow is drawn at Adwaita's `dim-label` opacity: the folder's icon and name say what the
 // row is, the arrow only that it opens (user decision 2026-10-19).
 //
-// A GtkSourceView assistant is never narrower than 1 px: GtkSourceView empties a hover that is up
-// before asking the providers again, and the view's allocations present it meanwhile at what it
-// measures, 0 wide when empty, which `gdk_popup_present` refuses with a critical.
+// The hover's popover takes the view's font, which libadwaita resets on a popover, as the text it
+// is about has it.
 /// Register embedded icons and GtkSourceView language specifications.
 ///
 /// GResources make icons available before installation while retaining normal theme lookup
@@ -1345,10 +1344,8 @@ fn install_chrome_css() {
              textview.accent-doc text {{ color: var(--view-fg-color); }} \
              textview.accent-carets text {{ caret-color: transparent; }} \
              textview border gutter {{ background-color: var(--view-bg-color); }} \
-             GtkSourceAssistant {{ background-color: var(--popover-bg-color); \
-               color: var(--popover-fg-color); \
-               box-shadow: 0 1px 4px var(--shade-color), 0 0 0 1px var(--shade-color); }} \
-             GtkSourceAssistant > contents {{ min-width: 1px; min-height: 1px; }} \
+             popover.accent-hover {{ font: inherit; }} \
+             popover.accent-hover > contents {{ padding: {hover_y}px {hover_x}px; }} \
              popover.accent-completion > contents {{ padding: {inset}px; min-width: 240px; }} \
              popover.accent-completion listview {{ background: none; }} \
              popover.accent-completion listview > row {{ margin: 0; min-height: {text}px; \
@@ -1367,6 +1364,8 @@ fn install_chrome_css() {
             row = crate::completion::ROW_PADDING,
             row_y = crate::completion::ROW_PADDING_Y,
             text = crate::completion::ROW_TEXT_MIN,
+            hover_x = crate::hover::INSET_X,
+            hover_y = crate::hover::INSET_Y,
         ));
         gtk::style_context_add_provider_for_display(
             &display,
