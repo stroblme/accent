@@ -1561,7 +1561,8 @@ fn own_key(key: gdk::Key, state: gdk::ModifierType, entry_focused: bool) -> Opti
         gdk::Key::z | gdk::Key::Z if mods == ctrl => "win.notebook-undo",
         gdk::Key::z | gdk::Key::Z if mods == ctrl | shift => "win.notebook-redo",
         gdk::Key::y | gdk::Key::Y if mods == ctrl => "win.notebook-redo",
-        gdk::Key::Return | gdk::Key::KP_Enter if mods == alt => "win.notebook-insert-below",
+        // `B`, Jupyter's below: `Alt+Return` is Quick Fix's (user decision 2026-10-22).
+        gdk::Key::b | gdk::Key::B if mods == alt => "win.notebook-insert-below",
         gdk::Key::Return | gdk::Key::KP_Enter if mods == alt | shift => "win.notebook-insert-above",
         gdk::Key::Return | gdk::Key::KP_Enter if mods == shift => "win.notebook-run-advance",
         gdk::Key::minus | gdk::Key::underscore if mods == ctrl | shift => "win.notebook-split",
@@ -1767,8 +1768,8 @@ mod tests {
             (gdk::Key::z, ctrl, Some("win.notebook-undo")),
             (gdk::Key::Z, ctrl | shift, Some("win.notebook-redo")),
             (gdk::Key::y, ctrl, Some("win.notebook-redo")),
-            (gdk::Key::Return, alt, Some("win.notebook-insert-below")),
-            (gdk::Key::KP_Enter, alt, Some("win.notebook-insert-below")),
+            (gdk::Key::b, alt, Some("win.notebook-insert-below")),
+            (gdk::Key::Return, alt, None),
             (
                 gdk::Key::Return,
                 alt | shift,

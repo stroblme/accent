@@ -57,7 +57,7 @@ const TAB_KEYS: [(&str, &[&str]); 24] = [
     ("win.notebook-undo", &["<Primary>z"]),
     ("win.notebook-redo", &["<Primary><Shift>z", "<Primary>y"]),
     ("win.notebook-insert-above", &["<Alt><Shift>Return"]),
-    ("win.notebook-insert-below", &["<Alt>Return"]),
+    ("win.notebook-insert-below", &["<Alt>b"]),
     ("win.notebook-move-up", &["<Primary><Shift>Up"]),
     ("win.notebook-move-down", &["<Primary><Shift>Down"]),
     ("win.notebook-split", &["<Primary><Shift>minus"]),
@@ -221,7 +221,7 @@ mod tests {
         );
         assert_eq!(
             accels_of(&shown, "Insert Cell Below"),
-            Some(vec!["<Alt>Return".into()])
+            Some(vec!["<Alt>b".into()])
         );
         assert_eq!(
             accels_of(&shown, "Run Cell"),
