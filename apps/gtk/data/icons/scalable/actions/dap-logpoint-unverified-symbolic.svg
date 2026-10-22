@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- tabler-icons "square-rotated", MIT (see LICENSE.tabler); scaled to the breakpoint glyphs' size, strokes converted to fills. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24">
+    <path fill-rule="evenodd" d="M 12,4 L 20,12 12,20 4,12 Z M 12,6.83 L 6.83,12 12,17.17 17.17,12 Z" fill="currentColor"/>
+</svg>

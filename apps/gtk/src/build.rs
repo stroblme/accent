@@ -586,6 +586,11 @@ fn debug_data(app: &Rc<App>) -> sidebar::DebugData {
                 }
             }
         )),
+        edit: Rc::new(glib::clone!(
+            #[weak]
+            app,
+            move |key: &str, edited| app.edit_breakpoint(key, edited)
+        )),
         watch: Rc::new(glib::clone!(
             #[weak]
             app,

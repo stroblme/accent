@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- tabler-icons "point-filled", MIT (see LICENSE.tabler). -->
+<!-- tabler-icons "point-filled", MIT (see LICENSE.tabler); enlarged to r 7, one size with the other breakpoint glyphs. -->
 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24">
-    <path d="M 12,7 A 5,5 0 1 1 12,17 5,5 0 1 1 12,7 Z" fill="currentColor"/>
+    <path d="M 12,5 A 7,7 0 1 1 12,19 7,7 0 1 1 12,5 Z" fill="currentColor"/>
 </svg>

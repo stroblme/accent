@@ -3,6 +3,7 @@
 //! Finished widgets and closures in [`Data`] supply vault integration without exposing app
 //! state. Each pane receives only the data and operations it uses.
 
+mod breakpoints;
 mod code;
 mod debug;
 mod details;
@@ -14,6 +15,7 @@ mod sections;
 mod tags;
 mod widgets;
 
+pub use breakpoints::Row as BreakpointRow;
 #[cfg(feature = "bench")]
 pub use debug::Shown as DebugShown;
 pub use debug::{Data as DebugData, Watched};
@@ -442,10 +444,31 @@ impl Sidebar {
         }
     }
 
-    /// The Breakpoints section's rows, each `path:line`.
-    pub fn set_breakpoint_rows(&self, rows: &[String]) {
+    /// The Breakpoints section's rows, each a file key and a breakpoint, and what the adapter
+    /// takes beside a line.
+    pub fn set_breakpoint_rows(
+        &self,
+        rows: &[BreakpointRow],
+        supports: accent_api::debug::Supports,
+    ) {
         if let Some(debug) = &self.code.debug {
-            debug.set_breakpoints(rows);
+            debug.set_breakpoints(rows, supports);
+        }
+    }
+
+    /// The Breakpoints rows as they read, `path:line` and what is set beside it.
+    #[cfg(feature = "bench")]
+    pub fn breakpoint_rows(&self) -> Vec<String> {
+        let debug = self.code.debug.as_ref();
+        debug.map_or_else(Vec::new, |d| d.breakpoint_rows().shown())
+    }
+
+    /// Edit a breakpoint through its row as a reader does: its button, `values` typed into the
+    /// fields with those titles, and Enter.
+    #[cfg(feature = "bench")]
+    pub fn edit_breakpoint_row(&self, key: &str, line: u32, values: &[(&str, &str)]) {
+        if let Some(debug) = &self.code.debug {
+            debug.breakpoint_rows().edit_as_typed(key, line, values);
         }
     }
 

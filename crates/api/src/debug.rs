@@ -15,7 +15,7 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-pub use accent_core::config::ExceptionFilter;
+pub use accent_core::config::{Breakpoint, ExceptionFilter};
 
 use accent_core::config::DebugConfig;
 use serde::{Deserialize, Serialize};
@@ -29,20 +29,21 @@ use session::Session;
 // ---------------------------------------------------------------- the façade's types
 
 /// What to debug: `program` in `language` (a GtkSourceView id), stopping at `breakpoints`, each
-/// a file and its lines, and at the `exceptions` switched on, as the window last had them; one
+/// a file and its own, and at the `exceptions` switched on, as the window last had them; one
 /// the window has not seen is as the adapter defaults it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Launch {
     pub program: String,
     pub language: String,
-    pub breakpoints: Vec<(String, Vec<u32>)>,
+    pub breakpoints: Vec<(String, Vec<Breakpoint>)>,
     pub exceptions: Vec<ExceptionFilter>,
 }
 
 /// A breakpoint as the adapter holds it: maybe on another line than asked, and maybe not bound.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Placed {
-    pub line: u32,
+    /// On the line the adapter holds it, with what was asked of it beside the line.
+    pub breakpoint: Breakpoint,
     pub verified: bool,
     /// Why it is not bound, for the reader.
     pub message: Option<String>,
@@ -103,6 +104,14 @@ pub enum Step {
     Out,
 }
 
+/// What an adapter takes beside a breakpoint's line, as its capabilities say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Supports {
+    pub condition: bool,
+    pub hit_condition: bool,
+    pub log_message: bool,
+}
+
 /// Who asks for an expression: the console's prompt runs whatever it is given, a hover and a
 /// watch must change nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +153,8 @@ pub enum News {
         category: Category,
         text: String,
     },
+    /// What the adapter's breakpoints take beside their lines.
+    Supports(Supports),
     /// The exceptions the adapter can stop at, each on or off as the program is launched with.
     Exceptions(Vec<ExceptionFilter>),
     /// What the adapter holds of `path`'s breakpoints now: a configuration answer or a
@@ -351,9 +362,9 @@ macro_rules! sessions {
 }
 
 sessions! {
-    /// Set `path`'s breakpoints to `lines`, all of them; the answer is where the adapter holds
-    /// them.
-    debug_breakpoints => breakpoints(path: String, lines: Vec<u32>) -> Vec<Placed>;
+    /// Set `path`'s breakpoints to `breakpoints`, all of them; the answer is where the adapter
+    /// holds them.
+    debug_breakpoints => breakpoints(path: String, breakpoints: Vec<Breakpoint>) -> Vec<Placed>;
     /// Run on; the adapter resumes every thread.
     debug_continue => resume(thread: i64) -> ();
     debug_pause => pause(thread: i64) -> ();
@@ -522,7 +533,7 @@ mod tests {
         let launch = Launch {
             program: "demo.py".to_string(),
             language: "python3".to_string(),
-            breakpoints: vec![("demo.py".to_string(), vec![1])],
+            breakpoints: vec![("demo.py".to_string(), vec![Breakpoint::at(1)])],
             exceptions: Vec::new(),
         };
         let started = vault.debug_start(1, &launch);
@@ -559,7 +570,7 @@ mod tests {
 
         let placed = next(|n| matches!(n, News::Breakpoints { .. }));
         let line_1 = Placed {
-            line: 1,
+            breakpoint: Breakpoint::at(1),
             verified: true,
             message: None,
         };

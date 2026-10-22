@@ -46,6 +46,10 @@
     <file preprocess="xml-stripblanks">icons/scalable/actions/remote-server-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/dap-breakpoint-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/dap-breakpoint-unverified-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/dap-breakpoint-conditional-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/dap-breakpoint-conditional-unverified-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/dap-logpoint-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/dap-logpoint-unverified-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/dap-step-over-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/dap-step-into-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/dap-step-out-symbolic.svg</file>

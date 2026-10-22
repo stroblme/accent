@@ -1,9 +1,10 @@
 //! The debugger's half of the Code pane: its controls in a strip, and Call Stack, Variables,
 //! Watch and Breakpoints as sections, filled as the window asks the paused program.
 
-use super::widgets::{Section, path_list};
+use super::breakpoints::{Edited, Row, Rows};
+use super::widgets::Section;
 use crate::widgets::{icon_button, scroller};
-use accent_api::debug::{Evaluated, ExceptionFilter, Frame, Scope, Thread, Variable};
+use accent_api::debug::{Evaluated, ExceptionFilter, Frame, Scope, Supports, Thread, Variable};
 use gtk::prelude::*;
 use gtk::{gio, glib, pango};
 use std::cell::{Cell, RefCell};
@@ -22,6 +23,8 @@ pub struct Data {
     pub frame: Rc<dyn Fn(&Frame)>,
     /// A Breakpoints row activated, as its `path:line`.
     pub breakpoint: Rc<dyn Fn(&str)>,
+    /// A breakpoint edited in its row.
+    pub edit: Edited,
     /// An expression typed into Watch's entry, to watch.
     pub watch: Rc<dyn Fn(&str)>,
     /// A watched expression's remove button pressed.
@@ -389,7 +392,7 @@ pub(super) struct Debug {
     watched: Tree,
     pub(super) breakpoints: Section,
     breakpoints_body: gtk::Stack,
-    breakpoint_rows: gtk::StringList,
+    breakpoint_rows: Rc<Rows>,
     /// The exception switches atop Breakpoints, and the filters they show.
     exception_rows: gtk::Box,
     exceptions: RefCell<Vec<ExceptionFilter>>,
@@ -464,14 +467,9 @@ impl Debug {
         }));
         let watch = Section::new("Watch", &watch_body(&watched, &data));
 
-        let breakpoint_rows = gtk::StringList::new(&[]);
-        let pick = data.breakpoint.clone();
-        let list = path_list(
-            &breakpoint_rows,
-            crate::references::reference_icon,
-            move |row| pick(row),
-        );
-        let (breakpoints_body, _) = body(&list, "Click a line's gutter to stop there");
+        let breakpoint_rows = Rows::new(data.breakpoint.clone(), data.edit.clone());
+        let (breakpoints_body, _) =
+            body(&breakpoint_rows.list, "Click a line's gutter to stop there");
         let exception_rows = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let breakpoints_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
         breakpoints_page.append(&exception_rows);
@@ -621,10 +619,8 @@ impl Debug {
         }
     }
 
-    pub(super) fn set_breakpoints(&self, rows: &[String]) {
-        let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
-        self.breakpoint_rows
-            .splice(0, self.breakpoint_rows.n_items(), &rows);
+    pub(super) fn set_breakpoints(&self, rows: &[Row], supports: Supports) {
+        self.breakpoint_rows.set(rows, supports);
         self.breakpoints.set_count(Some(rows.len()));
         self.breakpoints_body
             .set_visible_child_name(match rows.is_empty() {
@@ -691,6 +687,11 @@ impl Debug {
             _ => None,
         });
         (self.state.text().to_string(), calls, values, watched)
+    }
+
+    #[cfg(feature = "bench")]
+    pub(super) fn breakpoint_rows(&self) -> &Rc<Rows> {
+        &self.breakpoint_rows
     }
 
     pub(super) fn sections(&self) -> [&Section; 4] {

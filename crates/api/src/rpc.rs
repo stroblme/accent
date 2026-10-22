@@ -1323,7 +1323,7 @@ mod tests {
     /// comes back as the vault's events. The window runs the program, here this test.
     #[test]
     fn a_debug_session_crosses_the_wire() {
-        use crate::debug::{Context, Frame, Launch, News};
+        use crate::debug::{Breakpoint, Context, Frame, Launch, News};
         let demo = "def double(x):\n    y = x * 2\n    return y\n\ntotal = double(21)\nprint(\"total\", total)\n";
         let w = Wired::seeded(&|root| std::fs::write(root.join("demo.py"), demo).unwrap());
         let refused = w.client.call::<()>("debug_threads", json!([9]));
@@ -1343,10 +1343,15 @@ mod tests {
                 e => panic!("{e:?}"),
             }
         };
+        // A condition that holds: it crosses the wire and the program still stops.
+        let held = Breakpoint {
+            condition: Some("x == 21".to_string()),
+            ..Breakpoint::at(1)
+        };
         let launch = Launch {
             program: "demo.py".to_string(),
             language: "python3".to_string(),
-            breakpoints: vec![("demo.py".to_string(), vec![1])],
+            breakpoints: vec![("demo.py".to_string(), vec![held.clone()])],
             exceptions: Vec::new(),
         };
         std::thread::scope(|s| {
@@ -1377,6 +1382,11 @@ mod tests {
             let answer = json!([1, seq, program.id()]);
             w.client.call::<()>("debug_answer", answer).unwrap();
 
+            let News::Breakpoints { placed, .. } = next(|n| matches!(n, News::Breakpoints { .. }))
+            else {
+                unreachable!()
+            };
+            assert_eq!(placed[0].breakpoint, held);
             let News::Stopped { thread, .. } = next(|n| matches!(n, News::Stopped { .. })) else {
                 unreachable!()
             };

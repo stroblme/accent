@@ -35,6 +35,10 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase", default)]
 pub struct Capabilities {
     pub exception_breakpoint_filters: Vec<ExceptionBreakpointsFilter>,
+    /// What a breakpoint may ask beside its line: `condition`, `hitCondition`, `logMessage`.
+    pub supports_conditional_breakpoints: bool,
+    pub supports_hit_conditional_breakpoints: bool,
+    pub supports_log_points: bool,
 }
 
 /// A kind of exception the program can stop at, which the reader switches on and off.

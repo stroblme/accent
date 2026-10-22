@@ -502,13 +502,43 @@ pub struct Session {
     /// its own tab under the note's, and a staged change or a commit's file, a tab of its own,
     /// under that tab's. A comparison with anything else is not kept.
     pub compared: BTreeMap<String, Comparison>,
-    /// By file key (vault-relative, absolute outside the vault), the 0-based lines a program
-    /// stops at; kept here and never in the vault.
-    pub breakpoints: BTreeMap<String, Vec<u32>>,
+    /// By file key (vault-relative, absolute outside the vault), the breakpoints a program stops
+    /// at; kept here and never in the vault. Under DAP's name for them: the key `breakpoints`
+    /// held bare lines.
+    #[serde(rename = "source_breakpoints")]
+    pub breakpoints: BTreeMap<String, Vec<Breakpoint>>,
     /// The expressions the debugger's Watch section evaluates at each stop, in its order.
     pub watches: Vec<String>,
     /// The exceptions the debug adapter last offered to stop at, as the reader set them.
     pub exceptions: Vec<ExceptionFilter>,
+}
+
+/// A line a debugged program stops at, and what the reader set beside it: VS Code's conditional
+/// breakpoints, hit counts and logpoints, each as typed, for the adapter to read.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Breakpoint {
+    /// 0-based.
+    pub line: u32,
+    /// The program stops only where this expression is true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
+    /// The program stops only on the hits this names (debugpy reads `5`, `>= 5`, `% 5`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hit_condition: Option<String>,
+    /// Printed to the Debug Console instead of stopping, the `{expression}`s in it evaluated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_message: Option<String>,
+}
+
+impl Breakpoint {
+    /// A plain breakpoint on `line`.
+    pub fn at(line: u32) -> Breakpoint {
+        Breakpoint {
+            line,
+            ..Breakpoint::default()
+        }
+    }
 }
 
 /// A kind of exception a debugged program can stop at, as its adapter names it, and whether it
@@ -1631,7 +1661,17 @@ daily_dir = "Daily"
                     },
                 },
             )]),
-            breakpoints: BTreeMap::from([("run.py".to_string(), vec![0, 7])]),
+            breakpoints: BTreeMap::from([(
+                "run.py".to_string(),
+                vec![
+                    Breakpoint::at(0),
+                    Breakpoint {
+                        condition: Some("x > 1".to_string()),
+                        log_message: Some("{x}".to_string()),
+                        ..Breakpoint::at(7)
+                    },
+                ],
+            )]),
             watches: vec!["len(items)".to_string()],
             exceptions: vec![ExceptionFilter {
                 filter: "raised".to_string(),
@@ -1695,7 +1735,7 @@ daily_dir = "Daily"
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(
                 &path,
-                r#"{"open":["a.md"],"active":"a.md","sidebar":true,"sidebar_width":280,"view":"editor","pane":"git","recent_notes":["a.md","b.pdf"]}"#,
+                r#"{"open":["a.md"],"active":"a.md","sidebar":true,"sidebar_width":280,"view":"editor","pane":"git","recent_notes":["a.md","b.pdf"],"breakpoints":{"run.py":[0,7]}}"#,
             )
             .unwrap();
 
@@ -1703,6 +1743,8 @@ daily_dir = "Daily"
             assert_eq!(back.open, ["a.md"]);
             assert_eq!(back.zoom, 1.0);
             assert_eq!(back.recent_files, ["a.md", "b.pdf"]);
+            // Breakpoints kept as bare lines, before they had settings, are gone; the rest stays.
+            assert!(back.breakpoints.is_empty());
             // No layout was written then, so every tab comes back into one pane.
             assert_eq!(back.layout, None);
             assert_eq!(back.panes(), Some(pane(&["a.md"], None)));
