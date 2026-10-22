@@ -559,9 +559,11 @@ mod tests {
             ]),
         };
         let began = std::time::Instant::now();
+        // Past a pipe's 64 KiB, so the write blocks, and no more: its serialisation is timed too,
+        // and an unoptimised build's 8 MiB took 0.3 s of CPU, past the bound on a busy machine.
         let result: Result<Value> = remote.call(
             "git_stage_text",
-            json!(["x".repeat(8 * 1024 * 1024)]),
+            json!(["x".repeat(1024 * 1024)]),
             std::time::Duration::from_millis(100),
         );
         assert!(result.is_err());
