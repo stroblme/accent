@@ -17,9 +17,9 @@ pub fn run(app: &Rc<App>) {
         let vault = app.vault().unwrap().clone();
         vault.create_dir("library", true).unwrap();
         vault.create_dir("project", true).unwrap();
-        let original = "% Keep my layout and comments.\n@article{smith_quantum_2024,\n  title = {A {Quantum} Paper},\n  author = {Smith, Jane},\n  year = {2024},\n  journal = {Physical Review},\n  doi = {10.1234/paper},\n  file = {:paper.pdf:PDF},\n}\n@book{other,title={Another Work},author={Jones, Sam},year=2020,publisher={Example}}\n@article{lee_readout_2025,title={Fast high-fidelity readout of superconducting qubits},author={Lee, Morgan and Patel, Alex},year=2025,journal={Quantum}}\n@article{garcia_control_2023,title={Robust control in open quantum systems},author={García, Elena},year=2023,journal={Physical Review A}}\n";
+        let original = "% Keep my layout and comments.\n@article{smith_quantum_2024,\n  title = {A {Quantum} Paper},\n  author = {Smith, Jane},\n  year = {2024},\n  journal = {Physical Review},\n  doi = {10.1234/paper},\n  file = {:paper.pdf:PDF},\n}\n@book{other,title={Another Work},author={Jones, Sam},year=2020,publisher={Example}}\n@article{lee_readout_2025,title={Fast high-fidelity readout of superconducting qubits},author={Lee, Morgan and Patel, Alex},year=2025,journal={Quantum},file={:paper.pdf:PDF}}\n@article{garcia_control_2023,title={Robust control in open quantum systems},author={García, Elena},year=2023,journal={Physical Review A}}\n";
         vault
-            .write_file("library/main.bib", original.as_bytes())
+            .write_file("library/a-long-bibliography-filename-that-must-fit-the-sidebar-without-widening-it-references.bib", original.as_bytes())
             .unwrap();
         vault
             .write_file(
@@ -34,8 +34,8 @@ pub fn run(app: &Rc<App>) {
             )
             .unwrap();
         app.show_pane("files");
-        app.open_path("library/main.bib");
-        let tab = wait_tab(&app, "library/main.bib").await;
+        app.open_path("library/a-long-bibliography-filename-that-must-fit-the-sidebar-without-widening-it-references.bib");
+        let tab = wait_tab(&app, "library/a-long-bibliography-filename-that-must-fit-the-sidebar-without-widening-it-references.bib").await;
         assert!(
             app.sidebar.get().unwrap().is_showing("files"),
             "opening a bibliography must not switch sidebar panes"
@@ -53,7 +53,7 @@ pub fn run(app: &Rc<App>) {
                 &tab,
                 &bib,
                 &[0],
-                "project/../library/main.bib",
+                "project/../library/a-long-bibliography-filename-that-must-fit-the-sidebar-without-widening-it-references.bib",
                 true,
                 false
             )
@@ -138,6 +138,57 @@ pub fn run(app: &Rc<App>) {
         assert_eq!(at.line(), 1, "activating a reference reveals its source");
         assert!(tab.view.is_drawable());
         glib::timeout_future(Duration::from_millis(400)).await;
+        // A filtered row must delete its own entry, not the source caret's reference.
+        panel.entries.search.set_text("lee_readout");
+        panel.entries.filter();
+        glib::timeout_future(Duration::from_millis(250)).await;
+        let remove = descendant::<gtk::Button>(&panel.entries.view.clone().upcast(), |b| {
+            b.tooltip_text().as_deref() == Some("Remove Reference")
+        })
+        .expect("a delete button on the reference row");
+        let actions = remove
+            .parent()
+            .unwrap()
+            .downcast::<gtk::Revealer>()
+            .unwrap();
+        let row = actions.parent().unwrap().parent().unwrap();
+        row.set_state_flags(gtk::StateFlags::PRELIGHT, false);
+        assert!(actions.reveals_child(), "hover reveals the delete action");
+        row.unset_state_flags(gtk::StateFlags::PRELIGHT);
+        assert!(
+            !actions.reveals_child(),
+            "leaving the row hides the delete action"
+        );
+        remove.emit_clicked();
+        glib::timeout_future(Duration::from_millis(100)).await;
+        let dialog = app.window.visible_dialog().expect("removal review");
+        let apply = descendant::<gtk::Button>(&dialog.clone().upcast(), |b| {
+            b.label().as_deref() == Some("Apply Changes")
+        })
+        .unwrap();
+        apply.emit_clicked();
+        assert!(!tab.text().contains("@article{lee_readout_2025"));
+        assert!(tab.text().contains("@article{smith_quantum_2024"));
+        assert!(tab.text().contains("@article{garcia_control_2023"));
+        assert!(vault.stat("library/paper.pdf").unwrap().is_some());
+        tab.buffer.undo();
+        panel.entries.search.set_text("");
+        panel.refresh();
+        glib::timeout_future(Duration::from_millis(350)).await;
+        // Long paths must not become the sidebar's minimum width.
+        assert!(panel.chooser.measure(gtk::Orientation::Horizontal, -1).0 < 280);
+        let remove = descendant::<gtk::Button>(&panel.entries.view.clone().upcast(), |b| {
+            b.tooltip_text().as_deref() == Some("Remove Reference")
+        })
+        .unwrap();
+        remove
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .set_state_flags(gtk::StateFlags::PRELIGHT, false);
         app.toasts.dismiss_all();
         for (name, scheme) in [("light", "default"), ("dark", "prefer-dark")] {
             gio::Settings::new("org.gnome.desktop.interface")
@@ -167,7 +218,7 @@ pub fn run(app: &Rc<App>) {
             "/tmp/accent-bibliography-narrow.png",
         );
         println!(
-            "bench bibliography source_only=true source_preserved=true undo=true sidebar_unchanged=true copy=true move=true stale_review_refused=true"
+            "bench bibliography row_delete=true source_only=true source_preserved=true undo=true sidebar_unchanged=true copy=true move=true stale_review_refused=true"
         );
         app.window.application().unwrap().quit();
     });
@@ -196,4 +247,23 @@ fn shot(widget: &gtk::Widget, path: &str) {
         let texture = renderer.render_texture(&node, None);
         texture.save_to_png(path).unwrap();
     }
+}
+
+fn descendant<T: IsA<gtk::Widget> + glib::object::IsClass>(
+    widget: &gtk::Widget,
+    matches: impl Fn(&T) -> bool + Copy,
+) -> Option<T> {
+    if let Ok(found) = widget.clone().downcast::<T>()
+        && matches(&found)
+    {
+        return Some(found);
+    }
+    let mut child = widget.first_child();
+    while let Some(next) = child {
+        if let Some(found) = descendant(&next, matches) {
+            return Some(found);
+        }
+        child = next.next_sibling();
+    }
+    None
 }

@@ -32,7 +32,7 @@ struct Entries {
     message: gtk::Label,
 }
 impl Entries {
-    fn new() -> Rc<Self> {
+    fn new(app: &Rc<App>) -> Rc<Self> {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 6);
         let search = gtk::SearchEntry::builder()
             .placeholder_text("Search References")
@@ -41,27 +41,55 @@ impl Entries {
             .build();
         let model = gio::ListStore::new::<glib::BoxedAnyObject>();
         let selection = gtk::MultiSelection::new(Some(model.clone()));
+        let weak = Rc::downgrade(app);
         let factory = crate::widgets::factory(
-            |_| {
-                let row = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            move |item| {
+                let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
                 row.set_margin_top(6);
                 row.set_margin_bottom(6);
+                let text = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                text.set_hexpand(true);
                 for classes in [&["heading"][..], &["dim-label"], &["caption", "dim-label"]] {
                     let label = gtk::Label::builder()
                         .xalign(0.0)
                         .ellipsize(pango::EllipsizeMode::End)
                         .css_classes(classes)
                         .build();
-                    row.append(&label);
+                    text.append(&label);
                 }
+                row.append(&text);
+                let remove = crate::widgets::icon_button("user-trash-symbolic", "Remove Reference");
+                let weak = weak.clone();
+                remove.connect_clicked(glib::clone!(
+                    #[weak]
+                    item,
+                    move |_| {
+                        if let Some(app) = weak.upgrade()
+                            && let Some(panel) = app.bibliography.get()
+                        {
+                            panel.remove(item.position());
+                        }
+                    }
+                ));
+                let actions = crate::widgets::hover_revealer();
+                actions.set_valign(gtk::Align::Center);
+                actions.set_child(Some(&remove));
+                row.append(&actions);
                 row
             },
             |row: &gtk::Box, item: &gtk::ListItem| {
+                // As in Git, wire the GTK list row after the list manager finishes binding it.
+                let list_row = row.parent();
+                glib::idle_add_local_once(move || {
+                    if let Some(row) = list_row {
+                        crate::widgets::reveal_on_hover(&row);
+                    }
+                });
                 let Some(value) = item.item().and_downcast::<glib::BoxedAnyObject>() else {
                     return;
                 };
                 let fields = value.borrow::<[String; 3]>();
-                let mut child = row.first_child();
+                let mut child = row.first_child().and_then(|text| text.first_child());
                 for text in fields.iter() {
                     let Some(label) = child.and_downcast::<gtk::Label>() else {
                         return;
@@ -262,6 +290,17 @@ impl Panel {
             .factory(&crate::widgets::label_factory(
                 pango::EllipsizeMode::End,
                 |label, item| {
+                    // Cap the natural request, not the allocated width: the label fills the pane.
+                    label.set_max_width_chars(1);
+                    if let Some(name) = item.item().and_downcast::<gtk::StringObject>() {
+                        label.set_text(&name.string());
+                        label.set_tooltip_text(Some(&name.string()));
+                    }
+                },
+            ))
+            .list_factory(&crate::widgets::label_factory(
+                pango::EllipsizeMode::None,
+                |label, item| {
                     if let Some(name) = item.item().and_downcast::<gtk::StringObject>() {
                         label.set_text(&name.string());
                     }
@@ -270,16 +309,18 @@ impl Panel {
             .build();
         let single = gtk::Label::builder()
             .ellipsize(pango::EllipsizeMode::Middle)
+            .max_width_chars(1)
+            .hexpand(true)
             .xalign(0.0)
             .margin_start(6)
             .margin_end(6)
             .build();
         root.append(&chooser);
         root.append(&single);
-        let entries = Entries::new();
+        let entries = Entries::new(app);
         let bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         bar.append(&entries.search);
-        let open = action_button("document-open-symbolic", "Open Bibliography", "bib-open");
+        let open = action_button("filetype-file-symbolic", "Open Bibliography", "bib-open");
         open.add_css_class("flat");
         bar.append(&open);
         let more = menu();
@@ -336,6 +377,29 @@ impl Panel {
         ));
         panel
     }
+    fn remove(self: &Rc<Self>, row: u32) {
+        let (Some(app), Some(path)) = (self.app.upgrade(), self.path()) else {
+            return;
+        };
+        let Some(index) = self.entries.indices.borrow().get(row as usize).copied() else {
+            return;
+        };
+        let Some(before) = self
+            .entries
+            .library
+            .borrow()
+            .as_ref()
+            .map(|bib| bib.source.clone())
+        else {
+            return;
+        };
+        app.with_tab(&path, Opened::Kept, "remove reference", move |app, tab| {
+            if tab.text() != before {
+                return app.toast("Bibliography changed; select the reference again");
+            }
+            edit::operate(app, tab, "remove", vec![index]);
+        });
+    }
     pub fn path(&self) -> Option<String> {
         self.files
             .string(self.chooser.selected())
@@ -374,6 +438,8 @@ impl Panel {
         self.single.set_visible(paths.len() == 1);
         self.single
             .set_text(paths.first().map(String::as_str).unwrap_or(""));
+        self.single
+            .set_tooltip_text(paths.first().map(String::as_str));
         if let Some(app) = self.app.upgrade()
             && let Some(sidebar) = app.sidebar.get()
         {
