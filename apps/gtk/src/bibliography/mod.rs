@@ -1,4 +1,4 @@
-//! Bibliography surfaces share the text tab's buffer, save gate and undo history.
+//! The bibliography sidebar edits ordinary source tabs through their save gate and undo history.
 #[cfg(feature = "bench")]
 pub mod bench;
 mod edit;
@@ -20,11 +20,11 @@ pub fn is_bib(path: &str) -> bool {
         .is_some_and(|s| s.eq_ignore_ascii_case("bib"))
 }
 
-/// Virtualized rows shared by the sidebar and the full bibliography tab.
+/// Virtualized reference rows, styled like the Search pane.
 struct Entries {
     root: gtk::Box,
     search: gtk::SearchEntry,
-    model: gtk::StringList,
+    model: gio::ListStore,
     selection: gtk::MultiSelection,
     view: gtk::ListView,
     indices: RefCell<Vec<usize>>,
@@ -36,37 +36,45 @@ impl Entries {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 6);
         let search = gtk::SearchEntry::builder()
             .placeholder_text("Search References")
-            .margin_start(6)
-            .margin_end(6)
+            .hexpand(true)
+            .width_chars(1)
             .build();
-        root.append(&search);
-        let model = gtk::StringList::new(&[]);
+        let model = gio::ListStore::new::<glib::BoxedAnyObject>();
         let selection = gtk::MultiSelection::new(Some(model.clone()));
-        let factory = gtk::SignalListItemFactory::new();
-        factory.connect_setup(|_, item| {
-            let item = item.downcast_ref::<gtk::ListItem>().unwrap();
-            let label = gtk::Label::builder()
-                .xalign(0.0)
-                .ellipsize(pango::EllipsizeMode::End)
-                .lines(3)
-                .margin_start(12)
-                .margin_end(12)
-                .margin_top(8)
-                .margin_bottom(8)
-                .build();
-            item.set_child(Some(&label));
-        });
-        factory.connect_bind(|_, item| {
-            let item = item.downcast_ref::<gtk::ListItem>().unwrap();
-            if let (Some(label), Some(text)) = (
-                item.child().and_downcast::<gtk::Label>(),
-                item.item().and_downcast::<gtk::StringObject>(),
-            ) {
-                label.set_text(&text.string());
-            }
-        });
+        let factory = crate::widgets::factory(
+            |_| {
+                let row = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                row.set_margin_top(6);
+                row.set_margin_bottom(6);
+                for classes in [&["heading"][..], &["dim-label"], &["caption", "dim-label"]] {
+                    let label = gtk::Label::builder()
+                        .xalign(0.0)
+                        .ellipsize(pango::EllipsizeMode::End)
+                        .css_classes(classes)
+                        .build();
+                    row.append(&label);
+                }
+                row
+            },
+            |row: &gtk::Box, item: &gtk::ListItem| {
+                let Some(value) = item.item().and_downcast::<glib::BoxedAnyObject>() else {
+                    return;
+                };
+                let fields = value.borrow::<[String; 3]>();
+                let mut child = row.first_child();
+                for text in fields.iter() {
+                    let Some(label) = child.and_downcast::<gtk::Label>() else {
+                        return;
+                    };
+                    label.set_text(text);
+                    label.set_tooltip_text(Some(text));
+                    child = label.next_sibling();
+                }
+            },
+        );
         let view = gtk::ListView::new(Some(selection.clone()), Some(factory));
-        view.set_single_click_activate(false);
+        view.add_css_class("navigation-sidebar");
+        view.set_single_click_activate(true);
         let keys = gtk::EventControllerKey::new();
         keys.connect_key_pressed(glib::clone!(
             #[weak]
@@ -106,7 +114,7 @@ impl Entries {
             .margin_end(12)
             .margin_bottom(6)
             .build();
-        message.add_css_class("dim-label");
+        message.set_css_classes(&["caption", "dim-label", "numeric"]);
         root.append(&message);
         let this = Rc::new(Self {
             root,
@@ -152,7 +160,7 @@ impl Entries {
             }
             Err(why) => {
                 *self.library.borrow_mut() = None;
-                self.model.splice(0, self.model.n_items(), &[]);
+                self.model.remove_all();
                 self.indices.borrow_mut().clear();
                 self.message.set_text(&why);
             }
@@ -174,29 +182,33 @@ impl Entries {
         for (i, e) in bib.entries.iter().enumerate() {
             let title = bib.value(e, "title");
             let author = bib.value(e, "author");
-            let row = format!(
-                "{}\n{} · {}\n{}{}",
-                if title.is_empty() { &e.key } else { &title },
-                author,
-                bib.year(e),
-                e.key,
-                if bib.raw(e, "file").is_some() {
-                    " · PDF"
+            let row = [
+                if title.is_empty() {
+                    e.key.clone()
                 } else {
-                    ""
-                }
-            );
+                    title
+                },
+                format!("{} · {}", author, bib.year(e)),
+                format!(
+                    "{}{}",
+                    e.key,
+                    if bib.raw(e, "file").is_some() {
+                        " · PDF"
+                    } else {
+                        ""
+                    }
+                ),
+            ];
             if query.split_whitespace().all(|q| {
-                format!("{row} {}", bib.value(e, "doi"))
+                format!("{} {}", row.join(" "), bib.value(e, "doi"))
                     .to_lowercase()
                     .contains(q)
             }) {
-                rows.push(row);
+                rows.push(glib::BoxedAnyObject::new(row));
                 indices.push(i);
             }
         }
-        let refs = rows.iter().map(String::as_str).collect::<Vec<_>>();
-        self.model.splice(0, self.model.n_items(), &refs);
+        self.model.splice(0, self.model.n_items(), &rows);
         *self.indices.borrow_mut() = indices;
         for (row, &i) in self.indices.borrow().iter().enumerate() {
             if selected.contains(&bib.entries[i].key) {
@@ -218,20 +230,6 @@ impl Entries {
             .map(|(_, i)| *i)
             .collect()
     }
-    fn select(&self, key: &str) {
-        let bib = self.library.borrow();
-        let Some(bib) = bib.as_ref() else {
-            return;
-        };
-        if let Some(row) = self
-            .indices
-            .borrow()
-            .iter()
-            .position(|i| bib.entries[*i].key == key)
-        {
-            self.selection.select_item(row as u32, true);
-        }
-    }
 }
 
 pub struct Panel {
@@ -243,32 +241,54 @@ pub struct Panel {
     entries: Rc<Entries>,
     generation: Cell<u64>,
     changing: Cell<bool>,
+    changed: crate::widgets::Debounce,
 }
 impl Panel {
     pub fn new(app: &Rc<App>) -> Rc<Self> {
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        let root = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(12)
+            .margin_start(6)
+            .margin_end(6)
+            .margin_top(6)
+            .margin_bottom(6)
+            .build();
         let files = gtk::StringList::new(&[]);
-        let chooser = gtk::DropDown::new(Some(files.clone()), None::<gtk::Expression>);
-        chooser.set_enable_search(true);
-        chooser.set_tooltip_text(Some("Bibliography File"));
+        let chooser = gtk::DropDown::builder()
+            .model(&files)
+            .hexpand(true)
+            .enable_search(true)
+            .tooltip_text("Bibliography File")
+            .factory(&crate::widgets::label_factory(
+                pango::EllipsizeMode::End,
+                |label, item| {
+                    if let Some(name) = item.item().and_downcast::<gtk::StringObject>() {
+                        label.set_text(&name.string());
+                    }
+                },
+            ))
+            .build();
         let single = gtk::Label::builder()
             .ellipsize(pango::EllipsizeMode::Middle)
             .xalign(0.0)
-            .margin_start(12)
-            .margin_end(12)
+            .margin_start(6)
+            .margin_end(6)
             .build();
         root.append(&chooser);
         root.append(&single);
-        let bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        for (icon, label, action) in [
-            ("list-add-symbolic", "Add Reference…", "bib-add"),
-            ("document-open-symbolic", "Open Bibliography", "bib-open"),
-        ] {
-            bar.append(&action_button(icon, label, action));
-        }
-        bar.append(&menu());
-        root.append(&bar);
         let entries = Entries::new();
+        let bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        bar.append(&entries.search);
+        let open = action_button("document-open-symbolic", "Open Bibliography", "bib-open");
+        open.add_css_class("flat");
+        bar.append(&open);
+        let more = menu();
+        more.add_css_class("flat");
+        bar.append(&more);
+        let add = action_button("list-add-symbolic", "Add Reference…", "bib-add");
+        add.add_css_class("suggested-action");
+        bar.append(&add);
+        root.append(&bar);
         root.append(&entries.root);
         let panel = Rc::new(Self {
             root,
@@ -279,6 +299,7 @@ impl Panel {
             entries,
             generation: Cell::new(0),
             changing: Cell::new(false),
+            changed: crate::widgets::Debounce::new(Duration::from_millis(150)),
         });
         panel.chooser.connect_selected_notify(glib::clone!(
             #[weak]
@@ -293,19 +314,23 @@ impl Panel {
             #[weak]
             panel,
             move |_, row| {
-                if let (Some(app), Some(path), Some(&i)) = (
-                    panel.app.upgrade(),
-                    panel.path(),
-                    panel.entries.indices.borrow().get(row as usize),
-                ) {
-                    let key = panel
-                        .entries
-                        .library
-                        .borrow()
-                        .as_ref()
-                        .and_then(|b| b.entries.get(i))
-                        .map(|e| e.key.clone());
-                    app.open_bibliography(&path, key);
+                let key = panel
+                    .entries
+                    .indices
+                    .borrow()
+                    .get(row as usize)
+                    .and_then(|&i| {
+                        panel
+                            .entries
+                            .library
+                            .borrow()
+                            .as_ref()
+                            .and_then(|b| b.entries.get(i))
+                            .map(|e| e.key.clone())
+                    });
+                if let (Some(app), Some(path), Some(key)) = (panel.app.upgrade(), panel.path(), key)
+                {
+                    app.open_bibliography(&path, Some(key));
                 }
             }
         ));
@@ -401,124 +426,12 @@ impl Panel {
     }
 }
 
-pub struct Editor {
-    pub root: gtk::Box,
-    app: Weak<App>,
-    tab: Weak<Tab>,
-    entries: Rc<Entries>,
-    body: gtk::Box,
-    source: gtk::ToggleButton,
-    refresh: crate::widgets::Debounce,
-}
-impl Editor {
-    pub fn new(app: &Rc<App>, tab: &Rc<Tab>) -> Rc<Self> {
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        toolbar.add_css_class("toolbar");
-        toolbar.append(&action_button(
-            "list-add-symbolic",
-            "Add Reference…",
-            "bib-add",
-        ));
-        toolbar.append(&menu());
-        let source = gtk::ToggleButton::builder()
-            .label("Source")
-            .tooltip_text("Edit BibTeX Source")
-            .build();
-        toolbar.append(&source);
-        root.append(&toolbar);
-        let entries = Entries::new();
-        let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        body.append(&entries.root);
-        body.set_vexpand(true);
-        root.append(&body);
-        let editor = Rc::new(Self {
-            root,
-            app: Rc::downgrade(app),
-            tab: Rc::downgrade(tab),
-            entries,
-            body,
-            source,
-            refresh: crate::widgets::Debounce::new(Duration::from_millis(150)),
-        });
-        editor.source.connect_toggled(glib::clone!(
-            #[weak]
-            editor,
-            move |button| {
-                editor.body.set_visible(!button.is_active());
-                if let Some(tab) = editor.tab.upgrade() {
-                    tab.bibliography_source(button.is_active());
-                }
-            }
-        ));
-        tab.buffer.connect_changed(glib::clone!(
-            #[weak]
-            editor,
-            move |_| {
-                editor.refresh.call(glib::clone!(
-                    #[weak]
-                    editor,
-                    move || editor.reload()
-                ));
-            }
-        ));
-        tab.buffer.connect_mark_set(glib::clone!(
-            #[weak]
-            editor,
-            move |buffer, iter, mark| {
-                if editor.source.is_active() && mark.name().as_deref() == Some("insert") {
-                    let offset = buffer.text(&buffer.start_iter(), iter, true).len();
-                    let key = editor.entries.library.borrow().as_ref().and_then(|bib| {
-                        bib.entries
-                            .iter()
-                            .find(|e| e.span.contains(&offset))
-                            .map(|e| e.key.clone())
-                    });
-                    if let Some(key) = key {
-                        editor.entries.select(&key);
-                    }
-                }
-            }
-        ));
-        editor.entries.view.connect_activate(glib::clone!(
-            #[weak]
-            editor,
-            move |_, row| {
-                let i = editor.entries.indices.borrow().get(row as usize).copied();
-                if let Some(i) = i {
-                    editor.edit(i);
-                }
-            }
-        ));
-        editor.reload();
-        editor
-    }
-    fn reload(&self) {
-        if let Some(tab) = self.tab.upgrade() {
-            self.entries.set(
-                Library::parse(&tab.text()).map_err(|e| format!("{e}. Correct this in Source.")),
-            );
-        }
-        if let Some(app) = self.app.upgrade()
-            && let Some(panel) = app.bibliography.get()
-        {
-            panel.refresh();
-        }
-    }
-    pub fn key_target(&self) -> Option<gtk::Widget> {
-        (!self.source.is_active()).then(|| self.entries.view.clone().upcast())
-    }
-
-    pub fn show_source(&self) {
-        self.source.set_active(true);
-    }
-}
-
 fn action_button(icon: &str, label: &str, action: &str) -> gtk::Button {
     gtk::Button::builder()
         .icon_name(icon)
         .tooltip_text(label)
         .action_name(format!("win.{action}"))
+        .valign(gtk::Align::Center)
         .build()
 }
 fn menu() -> gtk::MenuButton {
@@ -553,25 +466,46 @@ fn menu() -> gtk::MenuButton {
 
 impl App {
     pub fn open_bibliography(self: &Rc<Self>, path: &str, key: Option<String>) {
-        self.with_tab(path, Opened::Kept, "open bibliography", move |_, tab| {
-            if let Some(editor) = tab.bibliography.borrow().as_ref() {
-                editor.source.set_active(false);
-                if let Some(key) = &key {
-                    editor.entries.select(key);
+        if let Some(key) = key {
+            self.with_tab(path, Opened::Preview, "open bibliography", move |_, tab| {
+                if let Ok(bib) = Library::parse(&tab.text())
+                    && let Some(entry) = bib.entries.iter().find(|e| e.key == key)
+                {
+                    let at = tab
+                        .buffer
+                        .iter_at_offset(bib.source[..entry.span.start].chars().count() as i32);
+                    tab.buffer.place_cursor(&at);
+                    tab.show_at(&at, 0.25);
                 }
-            }
-        });
+            });
+        } else {
+            self.open_path(path);
+        }
     }
-    pub fn install_bibliography(self: &Rc<Self>, tab: &Rc<Tab>) {
+
+    pub fn watch_bibliography(self: &Rc<Self>, tab: &Rc<Tab>) {
         if !is_bib(&tab.rel()) {
             return;
         }
-        let editor = Editor::new(self, tab);
-        tab.install_bibliography(&editor.root);
-        *tab.bibliography.borrow_mut() = Some(editor);
-        if let Some(panel) = self.bibliography.get() {
-            panel.select(&tab.rel());
-        }
+        let Some(panel) = self.bibliography.get() else {
+            return;
+        };
+        panel.select(&tab.rel());
+        tab.buffer.connect_changed(glib::clone!(
+            #[weak]
+            panel,
+            #[weak]
+            tab,
+            move |_| {
+                if panel.path().as_deref() == Some(tab.rel().as_str()) {
+                    panel.changed.call(glib::clone!(
+                        #[weak]
+                        panel,
+                        move || panel.refresh()
+                    ));
+                }
+            }
+        ));
     }
     pub fn sync_bibliography(self: &Rc<Self>) {
         if let Some(tab) = self.active()
@@ -588,9 +522,17 @@ impl App {
         });
         if !sidebar_focused
             && let Some(tab) = self.active()
-            && let Some(editor) = tab.bibliography.borrow().as_ref()
+            && is_bib(&tab.rel())
         {
-            return Some((tab.rel(), editor.entries.selected()));
+            let bib = Library::parse(&tab.text()).ok();
+            let at = tab.buffer.iter_at_mark(&tab.buffer.get_insert());
+            let offset = tab.buffer.text(&tab.buffer.start_iter(), &at, true).len();
+            let selected = bib
+                .as_ref()
+                .and_then(|b| b.entries.iter().position(|e| e.span.contains(&offset)))
+                .into_iter()
+                .collect();
+            return Some((tab.rel(), selected));
         }
         self.bibliography
             .get()
@@ -622,10 +564,7 @@ impl App {
                     if shown.as_ref().is_some_and(|text| *text != tab.text()) {
                         return app.toast("Bibliography changed; select the references again");
                     }
-                    let editor = tab.bibliography.borrow().clone();
-                    if let Some(editor) = editor {
-                        editor.operate(app, &name, selected);
-                    }
+                    edit::operate(app, tab, &name, selected);
                 });
             }
         }

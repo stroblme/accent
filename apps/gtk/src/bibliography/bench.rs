@@ -17,7 +17,7 @@ pub fn run(app: &Rc<App>) {
         let vault = app.vault().unwrap().clone();
         vault.create_dir("library", true).unwrap();
         vault.create_dir("project", true).unwrap();
-        let original = "% Keep my layout and comments.\n@article{smith_quantum_2024,\n  title = {A {Quantum} Paper},\n  author = {Smith, Jane},\n  year = {2024},\n  journal = {Physical Review},\n  doi = {10.1234/paper},\n  file = {:paper.pdf:PDF},\n}\n@book{other,title={Another Work},author={Jones, Sam},year=2020,publisher={Example}}\n";
+        let original = "% Keep my layout and comments.\n@article{smith_quantum_2024,\n  title = {A {Quantum} Paper},\n  author = {Smith, Jane},\n  year = {2024},\n  journal = {Physical Review},\n  doi = {10.1234/paper},\n  file = {:paper.pdf:PDF},\n}\n@book{other,title={Another Work},author={Jones, Sam},year=2020,publisher={Example}}\n@article{lee_readout_2025,title={Fast high-fidelity readout of superconducting qubits},author={Lee, Morgan and Patel, Alex},year=2025,journal={Quantum}}\n@article{garcia_control_2023,title={Robust control in open quantum systems},author={García, Elena},year=2023,journal={Physical Review A}}\n";
         vault
             .write_file("library/main.bib", original.as_bytes())
             .unwrap();
@@ -40,8 +40,12 @@ pub fn run(app: &Rc<App>) {
             app.sidebar.get().unwrap().is_showing("files"),
             "opening a bibliography must not switch sidebar panes"
         );
-        let editor = tab.bibliography.borrow().clone().unwrap();
-        assert!(editor.key_target().is_some());
+        glib::timeout_future(Duration::from_millis(100)).await;
+        assert!(
+            tab.view.is_drawable(),
+            "bibliographies always open as source"
+        );
+        let panel = app.bibliography.get().unwrap();
         let bib = Library::parse(&tab.text()).unwrap();
         assert!(
             operations::transfer(
@@ -59,16 +63,20 @@ pub fn run(app: &Rc<App>) {
         assert_eq!(tab.text(), original);
         let after = bib.set_field(0, "year", "2025").unwrap();
         edit::apply(&tab, original, &after).unwrap();
-        editor.entries.view.grab_focus();
-        editor
+        glib::timeout_future(Duration::from_millis(250)).await;
+        {
+            let shown = panel.entries.library.borrow();
+            let shown = shown.as_ref().unwrap();
+            assert_eq!(shown.value(&shown.entries[0], "year"), "2025");
+        }
+        panel.entries.view.grab_focus();
+        panel
             .entries
             .view
             .activate_action("win.bib-undo", None)
             .unwrap();
         assert_eq!(tab.text(), original);
-        editor.source.set_active(true);
-        assert!(editor.key_target().is_none());
-        editor.source.set_active(false);
+
         operations::transfer(
             &app,
             &tab,
@@ -123,7 +131,12 @@ pub fn run(app: &Rc<App>) {
         assert!(edit::apply(&tab, &before, &before).is_err());
         tab.buffer.undo();
         app.show_pane("bibliography");
-        editor.entries.select("smith_quantum_2024");
+        panel.refresh();
+        panel.entries.selection.select_item(0, true);
+        panel.entries.view.emit_by_name::<()>("activate", &[&0u32]);
+        let at = tab.buffer.iter_at_mark(&tab.buffer.get_insert());
+        assert_eq!(at.line(), 1, "activating a reference reveals its source");
+        assert!(tab.view.is_drawable());
         glib::timeout_future(Duration::from_millis(400)).await;
         app.toasts.dismiss_all();
         for (name, scheme) in [("light", "default"), ("dark", "prefer-dark")] {
@@ -137,7 +150,7 @@ pub fn run(app: &Rc<App>) {
                 &format!("/tmp/accent-bibliography-{name}.png"),
             );
         }
-        editor.edit(0);
+        edit::edit(&app, &tab, 0);
         glib::timeout_future(Duration::from_millis(300)).await;
         shot(
             &app.window.clone().upcast(),
@@ -146,14 +159,15 @@ pub fn run(app: &Rc<App>) {
         if let Some(dialog) = app.window.visible_dialog() {
             dialog.close();
         }
-        app.window.set_default_size(650, 700);
+        app.window.set_default_size(900, 700);
+        app.restore_sidebar(true, 240);
         glib::timeout_future(Duration::from_millis(400)).await;
         shot(
             &app.window.clone().upcast(),
             "/tmp/accent-bibliography-narrow.png",
         );
         println!(
-            "bench bibliography source_preserved=true undo=true sidebar_unchanged=true copy=true move=true stale_review_refused=true"
+            "bench bibliography source_only=true source_preserved=true undo=true sidebar_unchanged=true copy=true move=true stale_review_refused=true"
         );
         app.window.application().unwrap().quit();
     });

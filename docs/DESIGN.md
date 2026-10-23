@@ -411,15 +411,16 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 ### Bibliography
 
-- BibTeX and BibLaTeX files remain authoritative. The shared core parses source ranges and changes only edited fields, preserving comments, custom fields, protected capitals, string expressions and unrelated whitespace. Malformed files remain editable in Source; structured edits wait for a valid parse.
+- BibTeX and BibLaTeX files remain authoritative. The shared core parses source ranges and changes only edited fields, preserving comments, custom fields, protected capitals, string expressions and unrelated whitespace. Malformed files remain editable in the source editor; structured edits wait for a valid parse.
 - The pane selects one `.bib` by vault-relative path, with a plain name for a single file and a searchable dropdown for several. A `.bib` tab selects its file without switching the sidebar. The palette always offers New Bibliography and Add Reference.
-- The sidebar and bibliography tab list title, author/year, key and attachment availability, with search and multiselection. Activating a reference opens its fields. Source toggles the tab's existing editor: one buffer, undo history, autosave and external-change banner for both views. Comparisons and source navigation reveal Source.
+- Bibliography files always open in the ordinary source editor; the rendered list lives only in the sidebar. Activating a reference reveals its source, and Edit Reference opens its fields. Sidebar changes use the same buffer, undo history, autosave and external-change banner.
+- The pane follows Git’s 6 px outer margins and 12 px group spacing. Search and the icon buttons share one row: Open and More are flat, Add uses the same suggested-action styling as Commit. Reference rows use Search’s navigation-sidebar styling, with heading titles, dim author/year text and dim caption keys.
 - Add Reference accepts a DOI/resolver URL, pasted BibTeX or a manual entry. Metadata is reviewed before insertion. Refresh Metadata selects missing fields initially and leaves existing values for explicit selection; key generation uses the global `bibliography_key_pattern` (`{author}_{title}_{year}` by default), never running on save.
 - Checks report missing fields, duplicate keys, malformed DOIs, missing inheritance records and broken attachments. DOI cleanup has a diff preview; duplicate merging offers field choices and retains attachments. Key renames and merges that remove a used key stop when it occurs in another indexed manuscript, note or bibliography; external files are outside that check.
 - Copy/Move to Bibliography uses an explicit selection, never a generated or synchronized subset. It includes inherited entries, preambles and required string definitions, refuses conflicting destination keys, and preserves existing destination text. Copies are independent. Moves cannot leave remaining source entries without their inheritance dependencies. The destination must save before a move removes source entries; a failed source write keeps the destination and reports the incomplete move.
 - Attachments use JabRef's `file` field and paths relative to the bibliography. Transfers rebase those paths, sharing the PDFs by default; Copy Attachments explicitly copies files beside the destination. Removing a reference never removes its attachments. Markdown passage highlights remain in their existing notes when a PDF is copied.
 - PDF download is optional and separate from metadata: a supplied URL, Crossref PDF links, or Unpaywall when the reader supplies its required email. Transfers are bounded and cancellable; a failed download retains the reference, a non-PDF response is refused, and a taken filename is never overwritten. Attach PDF can import a browser download into the vault.
-- Insert Citation writes `\cite{keys}` into the active LaTeX document; Copy Citation Keys works elsewhere. Existing texlab definition and reference support remains available in Source.
+- Insert Citation writes `\cite{keys}` into the active LaTeX document; Copy Citation Keys works elsewhere. Existing texlab definition and reference support remains available in the source editor.
 - The desktop owns these controls; parsing and edits are in core. Vault reads, writes and attachment transfers use the existing API on local and SSH vaults. Android continues to read the portable files; it has no bibliography management controls yet.
 
 ### Git pane
@@ -1552,7 +1553,7 @@ The `Ctrl` chords for application and document commands use GTK's `<Primary>` mo
 
 ### Bibliography
 
-In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes through the shared text history. Other bibliography commands have no default chords. The palette and Bibliography menu expose creation, import, editing, checks, merge, metadata refresh, citation keys, citation insertion/usages, attachments and manual copying/moving. Custom bindings appear under Bibliography in Keyboard Shortcuts. Source uses the existing editor chords and undo history.
+In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes through the shared text history. Other bibliography commands have no default chords. The palette and Bibliography menu expose creation, import, editing, checks, merge, metadata refresh, citation keys, citation insertion/usages, attachments and manual copying/moving. Custom bindings appear under Bibliography in Keyboard Shortcuts. Bibliography source tabs use the existing editor chords and undo history.
 
 ### PDF
 

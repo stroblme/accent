@@ -552,12 +552,7 @@ impl App {
     /// pages use their page; blob comparisons use the right column.
     fn key_target(&self, pane: &Pane) -> Option<gtk::Widget> {
         Some(match self.doc_of(pane)? {
-            Doc::Text(tab) => tab
-                .bibliography
-                .borrow()
-                .as_ref()
-                .and_then(|b| b.key_target())
-                .unwrap_or_else(|| tab.view.clone().upcast()),
+            Doc::Text(tab) => tab.view.clone().upcast(),
             Doc::Terminal(term) => term.view.clone().upcast(),
             Doc::Pdf(pdf) => pdf.key_target(),
             Doc::Diagram(d) => d.key_target(),

@@ -183,87 +183,84 @@ impl App {
     }
 }
 
-impl Editor {
-    pub(super) fn transfer(
-        &self,
-        app: &Rc<App>,
-        tab: &Rc<Tab>,
-        bib: Library,
-        selected: Vec<usize>,
-        moving: bool,
-    ) {
-        let form = dialogs::form();
-        let paths = app
-            .bibliography
-            .get()
-            .map(|p| p.paths())
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|p| *p != tab.rel())
-            .collect::<Vec<_>>();
-        let destination = field(
-            &form,
-            "Destination .bib (existing or new)",
-            paths
-                .first()
-                .map(String::as_str)
-                .unwrap_or("project/references.bib"),
-        );
-        if !paths.is_empty() {
-            let chooser =
-                gtk::DropDown::from_strings(&paths.iter().map(String::as_str).collect::<Vec<_>>());
-            chooser.connect_selected_notify(glib::clone!(
-                #[weak]
-                destination,
-                move |c| {
-                    if let Some(p) = paths.get(c.selected() as usize) {
-                        destination.set_text(p);
-                    }
+pub(super) fn transfer_dialog(
+    app: &Rc<App>,
+    tab: &Rc<Tab>,
+    bib: Library,
+    selected: Vec<usize>,
+    moving: bool,
+) {
+    let form = dialogs::form();
+    let paths = app
+        .bibliography
+        .get()
+        .map(|p| p.paths())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| *p != tab.rel())
+        .collect::<Vec<_>>();
+    let destination = field(
+        &form,
+        "Destination .bib (existing or new)",
+        paths
+            .first()
+            .map(String::as_str)
+            .unwrap_or("project/references.bib"),
+    );
+    if !paths.is_empty() {
+        let chooser =
+            gtk::DropDown::from_strings(&paths.iter().map(String::as_str).collect::<Vec<_>>());
+        chooser.connect_selected_notify(glib::clone!(
+            #[weak]
+            destination,
+            move |c| {
+                if let Some(p) = paths.get(c.selected() as usize) {
+                    destination.set_text(p);
                 }
-            ));
-            form.append(&chooser);
-        }
-        let copies =
-            gtk::CheckButton::with_label("Copy attachments beside the destination bibliography");
-        form.append(&copies);
-        form.append(&gtk::Label::builder().label("Otherwise the entries share the existing PDFs. Copies are independent; later changes are not propagated. Markdown reading notes remain linked to their original PDFs.").wrap(true).xalign(0.0).build());
-        let source = tab.clone();
-        let app = app.clone();
-        let parent = app.clone();
-        form_dialog(
-            &parent,
-            if moving {
-                "Move References"
-            } else {
-                "Copy References"
-            },
-            if moving { "Move" } else { "Copy" },
-            &form,
-            move || {
-                let to = destination.text().to_string();
-                if !is_bib(&to) || to == source.rel() {
-                    return Err("Choose a different .bib file".into());
-                }
-                let (app, source, bib, selected) =
-                    (app.clone(), source.clone(), bib.clone(), selected.clone());
-                let copy_files = copies.is_active();
-                glib::spawn_future_local(async move {
-                    let result =
-                        transfer(&app, &source, &bib, &selected, &to, moving, copy_files).await;
-                    match result {
-                        Ok(()) => app.toast(if moving {
-                            "References moved"
-                        } else {
-                            "References copied"
-                        }),
-                        Err(why) => app.toast(&why),
-                    }
-                    app.refresh_corpus(false);
-                });
-                Ok(())
-            },
-        );
+            }
+        ));
+        form.append(&chooser);
     }
+    let copies =
+        gtk::CheckButton::with_label("Copy attachments beside the destination bibliography");
+    form.append(&copies);
+    form.append(&gtk::Label::builder().label("Otherwise the entries share the existing PDFs. Copies are independent; later changes are not propagated. Markdown reading notes remain linked to their original PDFs.").wrap(true).xalign(0.0).build());
+    let source = tab.clone();
+    let app = app.clone();
+    let parent = app.clone();
+    form_dialog(
+        &parent,
+        if moving {
+            "Move References"
+        } else {
+            "Copy References"
+        },
+        if moving { "Move" } else { "Copy" },
+        &form,
+        move || {
+            let to = destination.text().to_string();
+            if !is_bib(&to) || to == source.rel() {
+                return Err("Choose a different .bib file".into());
+            }
+            let (app, source, bib, selected) =
+                (app.clone(), source.clone(), bib.clone(), selected.clone());
+            let copy_files = copies.is_active();
+            glib::spawn_future_local(async move {
+                let result =
+                    transfer(&app, &source, &bib, &selected, &to, moving, copy_files).await;
+                match result {
+                    Ok(()) => app.toast(if moving {
+                        "References moved"
+                    } else {
+                        "References copied"
+                    }),
+                    Err(why) => app.toast(&why),
+                }
+                app.refresh_corpus(false);
+            });
+            Ok(())
+        },
+    );
 }
 
 async fn saved(app: &Rc<App>, tab: &Rc<Tab>) -> Result<(), String> {
