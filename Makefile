@@ -399,6 +399,7 @@ smoke: gtk-bench vault xvfb
 # `ACCENT_BENCH_NOTEBOOK_LSP` writes two notebooks whose code cells `fake-lsp.py --notebook`
 # answers, configured for the scratch vault, and is held against `notebook-lsp.expected`.
 drills: gtk-bench xvfb
+	$(HEADLESS) ACCENT_BENCH_BIBLIOGRAPHY=1 timeout 90 $(TARGET_DIR)/accent "$$xdg/vault"
 	$(HEADLESS) ACCENT_BENCH_KEYS=1 timeout 60 $(TARGET_DIR)/accent "$$xdg/vault" >"$$xdg/keys" && \
 	grep '^bench ' "$$xdg/keys" | diff -u apps/gtk/src/bench/keys.expected -
 	$(HEADLESS) sh -c 'echo "# Note" >"$$0/note.md" && \

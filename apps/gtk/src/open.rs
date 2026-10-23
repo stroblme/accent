@@ -302,6 +302,7 @@ impl App {
             &self.tabs_for(key),
             &prefs,
         );
+        self.install_bibliography(&tab);
         self.adopt(tab.clone(), how);
         self.sync_conflict_banner(key, None);
         tab

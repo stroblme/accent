@@ -497,6 +497,9 @@ impl Tab {
     /// [`jump_to`](Self::jump_to) leaving the keyboard where it is: where a debugged program
     /// paused, which the reader may be typing elsewhere than in.
     pub fn show_at(&self, iter: &gtk::TextIter, align: f64) {
+        if let Some(editor) = self.bibliography.borrow().as_ref() {
+            editor.show_source();
+        }
         let opened = self.reveal_select(iter, iter);
         self.scroll_to_caret(align, opened);
     }

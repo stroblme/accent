@@ -277,6 +277,7 @@ pub struct Tab {
     path: RefCell<PathBuf>,
     pub view: sourceview5::View,
     pub buffer: sourceview5::Buffer,
+    pub(crate) bibliography: RefCell<Option<Rc<crate::bibliography::Editor>>>,
     /// Committed text and diff gutter, or `None` for untracked/nonrepository files.
     head: RefCell<Option<String>>,
     marks: crate::marks::Renderer,
@@ -465,6 +466,15 @@ pub fn watch_file(path: &Path, f: impl Fn() + 'static) -> Option<gio::FileMonito
 // ---------------------------------------------------------------------------------------- tab
 
 impl Tab {
+    pub fn install_bibliography(&self, widget: &gtk::Box) {
+        self.content.insert_child_after(widget, Some(&self.banner));
+        self.document.set_visible(false);
+    }
+
+    pub fn bibliography_source(&self, source: bool) {
+        self.document.set_visible(source);
+    }
+
     pub fn rel(&self) -> String {
         self.rel.borrow().clone()
     }
@@ -529,7 +539,11 @@ impl Tab {
     /// original line endings. Preserve note whitespace, including Markdown
     /// hard breaks from two trailing spaces.
     pub fn for_disk(&self) -> String {
-        fs::for_disk(&self.text(), self.crlf.get(), !self.flavour.is_note())
+        fs::for_disk(
+            &self.text(),
+            self.crlf.get(),
+            !self.flavour.is_note() && !crate::bibliography::is_bib(&self.rel()),
+        )
     }
 
     /// How the file is encoded and how its lines end, for the readout in the header.

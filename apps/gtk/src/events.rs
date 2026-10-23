@@ -119,6 +119,11 @@ impl App {
             }
             _ => None,
         };
+        if depth.is_some()
+            && let Some(panel) = self.bibliography.get()
+        {
+            panel.refresh();
+        }
         if let Some(depth) = depth {
             if let Some(git) = self.git.get() {
                 git.schedule_refresh(depth);

@@ -187,8 +187,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 ### Sidebar
 
-- An `AdwInlineViewSwitcher` in icon mode over an `AdwViewStack` of eight panes: Files, Search, Info, Git, Ports, Outline, Code, Properties.
+- An `AdwInlineViewSwitcher` in icon mode over an `AdwViewStack` of nine panes: Files, Search, Info, Git, Ports, Outline, Code, Properties, Bibliography.
   The switcher sits in the sidebar header, level with the sidebar toggle, so the tree's first row lines up with the tabs.
+- Bibliography shows when a `.bib` file is discovered or opened, without changing the selected sidebar pane.
 - Git shows only where there is a repository, Ports only on a remote vault, Code only while the window says so — while the tab in front has a proof assistant's goals, can be debugged or is a notebook that runs, or a debug session runs — Properties only while a diagram is in front: each only where it has something to say, so other vaults keep the switcher they had.
 - A vault always opens on Files: a search from another sitting is not where a vault starts.
 - Width is dragged on the `GtkPaned` handle, down to 200 px or the pane switcher's width, whichever is wider: the switcher's icons are never cut.
@@ -407,6 +408,19 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The file stays open through the vault changing under the same query, and a new query lists it shut; there is no collapse.
 - The marks are the tab's, not the bar's: they last until an edit moves them or that pane's bar replaces or clears the query.
 - A refill behind the reader — a save, a watcher event — leaves every list here and in Info and Outline where it is, as the tree's does (Files): a row that goes with the keyboard on it hands it to the row now in its place.
+
+### Bibliography
+
+- BibTeX and BibLaTeX files remain authoritative. The shared core parses source ranges and changes only edited fields, preserving comments, custom fields, protected capitals, string expressions and unrelated whitespace. Malformed files remain editable in Source; structured edits wait for a valid parse.
+- The pane selects one `.bib` by vault-relative path, with a plain name for a single file and a searchable dropdown for several. A `.bib` tab selects its file without switching the sidebar. The palette always offers New Bibliography and Add Reference.
+- The sidebar and bibliography tab list title, author/year, key and attachment availability, with search and multiselection. Activating a reference opens its fields. Source toggles the tab's existing editor: one buffer, undo history, autosave and external-change banner for both views. Comparisons and source navigation reveal Source.
+- Add Reference accepts a DOI/resolver URL, pasted BibTeX or a manual entry. Metadata is reviewed before insertion. Refresh Metadata selects missing fields initially and leaves existing values for explicit selection; key generation uses the global `bibliography_key_pattern` (`{author}_{title}_{year}` by default), never running on save.
+- Checks report missing fields, duplicate keys, malformed DOIs, missing inheritance records and broken attachments. DOI cleanup has a diff preview; duplicate merging offers field choices and retains attachments. Key renames and merges that remove a used key stop when it occurs in another indexed manuscript, note or bibliography; external files are outside that check.
+- Copy/Move to Bibliography uses an explicit selection, never a generated or synchronized subset. It includes inherited entries, preambles and required string definitions, refuses conflicting destination keys, and preserves existing destination text. Copies are independent. Moves cannot leave remaining source entries without their inheritance dependencies. The destination must save before a move removes source entries; a failed source write keeps the destination and reports the incomplete move.
+- Attachments use JabRef's `file` field and paths relative to the bibliography. Transfers rebase those paths, sharing the PDFs by default; Copy Attachments explicitly copies files beside the destination. Removing a reference never removes its attachments. Markdown passage highlights remain in their existing notes when a PDF is copied.
+- PDF download is optional and separate from metadata: a supplied URL, Crossref PDF links, or Unpaywall when the reader supplies its required email. Transfers are bounded and cancellable; a failed download retains the reference, a non-PDF response is refused, and a taken filename is never overwritten. Attach PDF can import a browser download into the vault.
+- Insert Citation writes `\cite{keys}` into the active LaTeX document; Copy Citation Keys works elsewhere. Existing texlab definition and reference support remains available in Source.
+- The desktop owns these controls; parsing and edits are in core. Vault reads, writes and attachment transfers use the existing API on local and SSH vaults. Android continues to read the portable files; it has no bibliography management controls yet.
 
 ### Git pane
 
@@ -1535,6 +1549,10 @@ The `Ctrl` chords for application and document commands use GTK's `<Primary>` mo
   Each key is one undo step with the padding it brought.
   A template being walked, the suggestion and a completion's selected row keep Tab first, and a column of carets takes both keys before the table can, so only a single caret lines a table up.
   A cell splits at every pipe not escaped, inside code too, as the preview reads it, and widths are display columns, a wide character taking two, so the table lines up in a monospace font.
+
+### Bibliography
+
+In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes through the shared text history. Other bibliography commands have no default chords. The palette and Bibliography menu expose creation, import, editing, checks, merge, metadata refresh, citation keys, citation insertion/usages, attachments and manual copying/moving. Custom bindings appear under Bibliography in Keyboard Shortcuts. Source uses the existing editor chords and undo history.
 
 ### PDF
 

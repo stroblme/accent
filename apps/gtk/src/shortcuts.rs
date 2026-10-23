@@ -9,10 +9,11 @@ use accent_api::Config;
 use adw::prelude::*;
 
 /// DESIGN.md Keyboard's headings that hold commands, in its order.
-const SECTIONS: [&str; 18] = [
+const SECTIONS: [&str; 19] = [
     "Files",
     "Palette and find",
     "Editing",
+    "Bibliography",
     "PDF",
     "Diagram",
     "Notebook",
@@ -34,7 +35,9 @@ const SECTIONS: [&str; 18] = [
 /// `DiagramTab::wire_keys`, `NotebookTab::wire_keys`) with these commands, which carry none in the
 /// table: a bare `space` or `Delete` there would be taken from every entry (DESIGN.md, PDF and
 /// Diagram). A presented diagram's paging keys are left out, being its only keys then.
-const TAB_KEYS: [(&str, &[&str]); 24] = [
+const TAB_KEYS: [(&str, &[&str]); 26] = [
+    ("win.bib-undo", &["<Primary>z"]),
+    ("win.bib-redo", &["<Primary><Shift>z", "<Primary>y"]),
     ("win.pdf-next-page", &["space", "n", "Right"]),
     ("win.pdf-previous-page", &["<Shift>space", "p", "Left"]),
     ("win.pdf-copy", &["<Primary>c"]),
@@ -92,6 +95,7 @@ fn section(action: &str) -> Option<&'static str> {
         "new-drawing" => "Diagram",
         _ if starts(&["diagram-"]) => "Diagram",
         _ if starts(&["notebook-"]) => "Notebook",
+        _ if starts(&["bib-"]) => "Bibliography",
         "back" | "forward" => "History",
         _ if starts(&["zoom-"]) => "Zoom",
         "save-session" | "close-session" => "Terminal",

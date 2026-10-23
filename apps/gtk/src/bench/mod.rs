@@ -296,6 +296,7 @@ use tags::bench_tags;
 /// - `ACCENT_BENCH_NOTEBOOK_LSP=<ipynb>,<marimo .py>`: notebooks it writes, their code cells
 ///   answered by `build-aux/fake-lsp.py --notebook` (`notebook_lsp::bench_notebook_lsp`). Saves:
 ///   a scratch vault under `/tmp`.
+/// - `ACCENT_BENCH_BIBLIOGRAPHY=1`: source-preserving edits, undo, manual transfer and sidebar visibility.
 /// - `ACCENT_BENCH_COLLAPSE=1`: responsive sidebar width and saved state.
 /// - `ACCENT_BENCH_LAYOUT=<a>,<b>,<c>,<d>[,shell]`: save split layout and
 ///   active tab; `1`: inspect restored layout without saving; `pick:<rel>`,
@@ -305,6 +306,11 @@ use tags::bench_tags;
 /// - `ACCENT_BENCH_SHOT=<n>:<dir>`: README screenshot `n`, light and dark, into `<dir>`. Only
 ///   on the vault and launch `build-aux/screenshots.sh` makes (`make screenshots`).
 pub fn install_bench_hooks(app: &Rc<App>) {
+    if std::env::var_os("ACCENT_BENCH_BIBLIOGRAPHY").is_some() {
+        scratch_only(app, "ACCENT_BENCH_BIBLIOGRAPHY");
+        crate::bibliography::bench::run(app);
+        return;
+    }
     let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
     let minimap = std::env::var("ACCENT_BENCH_MINIMAP").ok();
     let switcher = std::env::var("ACCENT_BENCH_SWITCHER").ok();

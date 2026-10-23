@@ -13,6 +13,7 @@ mod askpass;
 mod attach;
 #[cfg(feature = "bench")]
 mod bench;
+mod bibliography;
 mod build;
 mod comment;
 mod completion;
@@ -310,6 +311,7 @@ struct App {
     tree: OnceCell<tree::Tree>,
     /// Files / Search / Tags / References over the vault tree.
     sidebar: OnceCell<sidebar::Sidebar>,
+    bibliography: OnceCell<Rc<bibliography::Panel>>,
     /// The Git pane, in a vault window whose sidebar has one. Set once, with the sidebar.
     git: OnceCell<Rc<git::Panel>>,
     /// Last applied git/search exclusion set, `None` before refresh. Cache it to avoid
@@ -639,6 +641,7 @@ impl App {
 
     /// Keep the window subtitle, the Info pane and the preview in step with the active tab.
     fn sync_active(self: &Rc<Self>) {
+        self.sync_bibliography();
         self.sync_window_title();
         self.sync_terminal_git();
         self.retarget_find(&self.pane());

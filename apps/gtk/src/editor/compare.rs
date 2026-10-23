@@ -250,6 +250,9 @@ impl Tab {
         label: &str,
         make: impl FnOnce(&Rc<Self>, diff::Pane) -> Hosted,
     ) -> Hosted {
+        if let Some(editor) = self.bibliography.borrow().as_ref() {
+            editor.show_source();
+        }
         self.leave_compare();
         let shut = self.open_folds();
         let close = gtk::Button::from_icon_name("window-close-symbolic");

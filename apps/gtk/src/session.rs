@@ -91,6 +91,9 @@ impl App {
                 app.recent_files
                     .borrow_mut()
                     .retain(|rel| !gone.contains(rel));
+                if let Some(panel) = app.bibliography.get() {
+                    panel.files(&files[..real]);
+                }
                 let files = palette::Files {
                     paths: Rc::new(files),
                     real,

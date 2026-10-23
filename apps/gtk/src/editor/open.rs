@@ -159,6 +159,7 @@ pub fn open(
         path: RefCell::new(path),
         view: view.clone(),
         buffer: buffer.clone(),
+        bibliography: RefCell::default(),
         content: column.clone(),
         document: document.clone(),
         comparing: RefCell::new(None),

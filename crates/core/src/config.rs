@@ -111,6 +111,8 @@ pub struct Config {
     /// `None` follows the GNOME document font.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub editor_font: Option<String>,
+    /// Pattern used for newly generated bibliography keys; existing keys are never changed on save.
+    pub bibliography_key_pattern: String,
     pub spellcheck: bool,
     /// Offer words as one is typed in prose: the document's own, then the system dictionary's.
     pub word_suggestions: bool,
@@ -282,6 +284,7 @@ impl Default for Config {
         Config {
             recent_vaults: Vec::new(),
             editor_font: None,
+            bibliography_key_pattern: crate::bib::PATTERN.into(),
             spellcheck: true,
             word_suggestions: true,
             ghost_text: true,

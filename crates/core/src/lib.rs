@@ -3,6 +3,7 @@
 
 pub mod animation;
 pub mod attachment;
+pub mod bib;
 pub mod code;
 pub mod config;
 pub mod conflict;

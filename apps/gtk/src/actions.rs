@@ -10,6 +10,10 @@ pub use catalog::ACTIONS;
 
 impl App {
     fn run_action(self: &Rc<Self>, name: &str) {
+        if let Some(name) = name.strip_prefix("bib-") {
+            self.bibliography_action(name);
+            return;
+        }
         if name.starts_with("diagram-") {
             self.diagram_action(name);
             return;
@@ -294,6 +298,7 @@ impl App {
             "sidebar" => self
                 .sidebar_column
                 .set_visible(!self.sidebar_column.is_visible()),
+            "pane-bibliography" => self.show_pane("bibliography"),
             "pane-files" => self.show_pane("files"),
             "pane-search" => {
                 self.seed_search();

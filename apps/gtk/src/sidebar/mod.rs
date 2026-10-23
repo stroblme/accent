@@ -348,6 +348,26 @@ impl Sidebar {
         }
     }
 
+    pub fn add_bibliography(&self, widget: &impl IsA<gtk::Widget>) {
+        self.stack
+            .add_titled_with_icon(
+                widget,
+                Some("bibliography"),
+                "Bibliography",
+                "accessories-dictionary-symbolic",
+            )
+            .set_visible(false);
+    }
+
+    pub fn set_bibliography_visible(&self, visible: bool) {
+        if let Some(child) = self.stack.child_by_name("bibliography") {
+            if !visible && self.is_showing("bibliography") {
+                self.stack.set_visible_child_name("files");
+            }
+            self.stack.page(&child).set_visible(visible);
+        }
+    }
+
     /// Show a diagram's properties in their pane, or with `None` take the pane away — to the
     /// Outline first when it is the one on screen, so the stack is never left showing nothing.
     pub fn set_properties(&self, content: Option<&gtk::Widget>) {

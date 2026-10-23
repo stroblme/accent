@@ -300,6 +300,7 @@ pub fn build_window(
         restore: RefCell::new(std::rc::Weak::new()),
         tree: OnceCell::new(),
         sidebar: OnceCell::new(),
+        bibliography: OnceCell::new(),
         git: OnceCell::new(),
         excluded: RefCell::new(None),
         references: RefCell::new(None),
@@ -975,6 +976,9 @@ fn adopt_sidebar(
             }
         }
     ));
+    let bibliography = bibliography::Panel::new(app);
+    pane.add_bibliography(&bibliography.root);
+    let _ = app.bibliography.set(bibliography);
     app.sidebar_column.set_content(Some(pane.widget()));
     let _ = app.sidebar.set(pane);
 }
