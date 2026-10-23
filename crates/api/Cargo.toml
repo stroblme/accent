@@ -32,6 +32,8 @@ tracing.workspace = true
 chrono.workspace = true
 # `ssh` names a control socket and the uploaded server binary by content hash.
 blake3.workspace = true
+# Already in the kernel client; checks that a packaged XZ archive belongs to its server binary.
+sha2 = "0.11"
 # Already built for `ignore`: a language server's `willRename` filters are globs.
 globset = "0.4"
 # Already in core; `renameat2` lands a download where the vault's filesystem has no links.

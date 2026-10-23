@@ -33,7 +33,7 @@ jobs:
       # debugpy is for accent-api's end-to-end debugger tests and ipykernel for accent-jupyter's
       # kernel test, which skip themselves without them: the distribution's, ipykernel 6 with
       # its PUB IOPub socket (the gtk job's 7 has XPUB).
-      - run: sudo apt-get update && sudo apt-get install -y python3-debugpy python3-ipykernel
+      - run: sudo apt-get update && sudo apt-get install -y python3-debugpy python3-ipykernel xz-utils
       # Without --no-fail-fast the first failing test binary hides every crate after it.
       - run: cargo test --locked --no-fail-fast
       # The PDF tests skip themselves when libpdfium is missing, so without this the job would

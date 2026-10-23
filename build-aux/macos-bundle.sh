@@ -32,7 +32,9 @@ cp vendor/pdfium/libpdfium.dylib "$c/lib/accent/"
 # needs its output, which sits beside this profile's folder.
 for arch in x86_64 aarch64; do
 	server=$(dirname "$bin")/$arch-unknown-linux-musl/$(basename "$bin")/accent-cli
-	if [ -f "$server" ]; then cp "$server" "$c/lib/accent/accent-cli-$arch"; fi
+	for suffix in "" .xz .xz.sha256; do
+		if [ -f "$server$suffix" ]; then cp "$server$suffix" "$c/lib/accent/accent-cli-$arch$suffix"; fi
+	done
 done
 
 # gdk-pixbuf's loaders, the cache naming them by @executable_path: dlopen() resolves it, and

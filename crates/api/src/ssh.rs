@@ -455,26 +455,30 @@ pub fn hash_of(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex()[..16].to_string()
 }
 
-/// Probe `uname -sm` and installed-server byte count (zero if absent), one per
-/// stdout line. Check size to reject truncated binaries left by older builds.
+/// Probe `uname -sm`, installed-server byte count (zero if absent) and `xz` or `raw`,
+/// one per stdout line. Check size to reject truncated binaries left by older builds.
 /// Use stdout rather than exit status so a failed session is not mistaken
 /// for a missing server.
 pub fn have_server_cmd(hash: &str) -> String {
     let installed = server_path(hash);
-    format!("uname -sm; if test -x {installed}; then wc -c < {installed}; else echo 0; fi")
+    format!(
+        "uname -sm; if test -x {installed}; then wc -c < {installed}; else echo 0; fi; \
+         if command -v xz >/dev/null 2>&1; then echo xz; else echo raw; fi"
+    )
 }
 
-/// Install exactly `size` stdin bytes through a dotted temporary file.
-/// Check length before renaming so a partial upload is never executable under
-/// the trusted final name. Sweep older builds only after success, preserving
-/// the working server on failure; the dotted temporary escapes the sweep glob.
-pub fn install_server_cmd(hash: &str, size: usize) -> String {
+/// Install `size` uncompressed bytes through a dotted temporary file, decoding XZ if asked.
+/// Check decoding and length before renaming; sweep older builds only after success.
+pub fn install_server_cmd(hash: &str, size: usize, xz: bool) -> String {
     let dir = format!("$HOME/{SERVER_DIR}");
     let name = server_name(hash);
     let tmp = format!("{dir}/.{name}.tmp");
     let installed = server_path(hash);
+    let read = if xz { "xz -dc" } else { "cat" };
     format!(
-        "mkdir -p {dir} && cat > {tmp} && \
+        "mkdir -p {dir} && \
+         if ! {read} > {tmp}; then \
+         rm -f {tmp}; echo 'cannot receive the server' >&2; exit 1; fi && \
          if [ \"$(wc -c < {tmp})\" -ne {size} ]; then \
          rm -f {tmp}; echo 'the upload was cut short' >&2; exit 1; fi && \
          chmod 755 {tmp} && mv -f {tmp} {installed} && \
@@ -1096,19 +1100,28 @@ mod tests {
             server_path(hash),
             "$HOME/.local/share/accent/server/accent-cli-0123456789abcdef"
         );
-        // The host's kind and the server's size, which a short leftover under the final name
-        // fails, so it is uploaded again; a session that never ran the test prints neither.
-        let installed = server_path(hash);
-        assert_eq!(
-            have_server_cmd(hash),
-            format!("uname -sm; if test -x {installed}; then wc -c < {installed}; else echo 0; fi")
-        );
+        // An empty PATH models a host without xz; a shell function makes it available.
+        let scratch = tempfile::tempdir().unwrap();
+        let probe =
+            have_server_cmd(hash).replace("$HOME", &quote(scratch.path().to_str().unwrap()));
+        for (setup, encoding) in [("", "raw"), ("xz() { :; };", "xz")] {
+            let cmd = format!("PATH=; uname() {{ echo 'Linux x86_64'; }}; {setup} {probe}");
+            let out = std::process::Command::new("sh")
+                .args(["-c", &cmd])
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+            assert_eq!(
+                String::from_utf8(out.stdout).unwrap(),
+                format!("Linux x86_64\n0\n{encoding}\n")
+            );
+        }
     }
 
     #[test]
     fn installing_the_server_is_atomic_and_sweeps_stale_builds() {
         let hash = "0123456789abcdef";
-        let cmd = install_server_cmd(hash, 8_300_000);
+        let cmd = install_server_cmd(hash, 8_300_000, false);
         let installed = server_path(hash);
         let tmp = "$HOME/.local/share/accent/server/.accent-cli-0123456789abcdef.tmp";
         assert!(cmd.contains("mkdir -p $HOME/.local/share/accent/server"));
@@ -1124,6 +1137,68 @@ mod tests {
         // The sweep spares what was just installed.
         assert!(cmd.contains("accent-cli-*"));
         assert!(cmd.contains(&format!("[ \"$f\" = {installed} ] || rm -f \"$f\"")));
+    }
+
+    #[test]
+    fn a_server_install_requires_complete_decoding_and_the_right_size() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::{Command, Stdio};
+
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = scratch.path().join(SERVER_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        let hash = "0123456789abcdef";
+        let installed = dir.join(server_name(hash));
+        let old = dir.join("accent-cli-old");
+        std::fs::write(&installed, b"working server").unwrap();
+        std::fs::write(&old, b"older server").unwrap();
+        let raw = b"new binary";
+        let packed = Command::new("python3")
+            .args([
+                "-c",
+                "import lzma,sys; sys.stdout.buffer.write(lzma.compress(b'new binary'))",
+            ])
+            .output()
+            .unwrap();
+        assert!(packed.status.success());
+        let packed = packed.stdout;
+        let install = |bytes: &[u8], size, xz| {
+            let cmd = install_server_cmd(hash, size, xz)
+                .replace("$HOME", &quote(scratch.path().to_str().unwrap()));
+            let mut child = Command::new("sh")
+                .args(["-c", &cmd])
+                .stdin(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(bytes).unwrap();
+            child.wait_with_output().unwrap().status.success()
+        };
+        // Missing footer: xz can have produced every byte yet still fail validation.
+        let mut corrupt = packed.clone();
+        corrupt[0] ^= 1;
+        for (bytes, size, xz) in [
+            (&packed[..packed.len() - 1], raw.len(), true),
+            (&corrupt[..], raw.len(), true),
+            (&packed[..], raw.len() + 1, true),
+            (&raw[..raw.len() - 1], raw.len(), false),
+        ] {
+            assert!(!install(bytes, size, xz));
+            assert_eq!(std::fs::read(&installed).unwrap(), b"working server");
+            assert!(old.exists());
+            assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+        }
+        assert!(install(&packed, raw.len(), true));
+        assert_eq!(std::fs::read(&installed).unwrap(), raw);
+        assert_ne!(
+            std::fs::metadata(&installed).unwrap().permissions().mode() & 0o111,
+            0
+        );
+        assert!(!old.exists());
+        assert!(install(b"raw fallback", 12, false));
+        assert_eq!(std::fs::read(&installed).unwrap(), b"raw fallback");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
     }
 
     /// The command run by the shell here, as the host's runs it: a file replaced only once every

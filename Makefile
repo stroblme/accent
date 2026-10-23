@@ -155,6 +155,8 @@ requirements:
 	command -v ssh >/dev/null || echo "optional: ssh, for remote vaults"; \
 	{ command -v cargo-zigbuild && command -v zig; } >/dev/null || \
 		echo "optional: cargo-zigbuild and zig, for make server, which remote vaults need"; \
+	python3 -c 'import lzma' >/dev/null 2>&1 || \
+		echo "optional: Python 3 with lzma, for make server's compressed uploads"; \
 	command -v merl-rt >/dev/null || echo "optional: merl-rt, for ghost text"; \
 	fc-list -q "DejaVu Sans Mono" 2>/dev/null || echo "optional: DejaVu Sans Mono, which make drills is written against"; \
 	if test $$missing = 0; then echo "All requirements met."; \
@@ -461,6 +463,7 @@ server:
 			|| rustup target add "$$arch-unknown-linux-musl" || exit 1; \
 		$(CARGO) zigbuild -p accent-cli $(CARGO_PROFILE_FLAG) --target "$$arch-unknown-linux-musl" \
 			|| exit 1; \
+		python3 build-aux/compress-server.py "$(call SERVER_BIN,$$arch)" || exit 1; \
 		echo "Server binary: $(call SERVER_BIN,$$arch)"; \
 	done
 
@@ -521,8 +524,13 @@ else
 	@# Also best effort: `make server` needs a musl toolchain, and everything but opening a vault
 	@# on another machine works without it. Same `../lib/accent` the app looks in for libpdfium.
 	-@for arch in $(SERVER_ARCHES); do \
-		test -f $(call SERVER_BIN,$$arch) && mkdir -p $(DESTDIR)$(LIBDIR)/accent && \
+		test -f $(call SERVER_BIN,$$arch) || continue; \
+		mkdir -p $(DESTDIR)$(LIBDIR)/accent && \
 			install -m755 $(call SERVER_BIN,$$arch) $(DESTDIR)$(LIBDIR)/accent/accent-cli-$$arch; \
+		for suffix in .xz .xz.sha256; do \
+			test ! -f $(call SERVER_BIN,$$arch)$$suffix || \
+				install -m644 $(call SERVER_BIN,$$arch)$$suffix $(DESTDIR)$(LIBDIR)/accent/accent-cli-$$arch$$suffix; \
+		done; \
 	done; true
 	@# Best effort: without these the launcher and icon can take a re-login to appear.
 	-@update-desktop-database $(DESTDIR)$(DATADIR)/applications 2>/dev/null
@@ -541,6 +549,7 @@ uninstall:
 	rm -f $(DESTDIR)$(DATADIR)/icons/hicolor/symbolic/apps/$(APP_ID)-symbolic.svg
 	rm -f $(DESTDIR)$(LIBDIR)/accent/$(notdir $(PDFIUM_LIB))
 	rm -f $(foreach arch,$(SERVER_ARCHES),$(DESTDIR)$(LIBDIR)/accent/accent-cli-$(arch))
+	rm -f $(foreach arch,$(SERVER_ARCHES),$(DESTDIR)$(LIBDIR)/accent/accent-cli-$(arch).xz $(DESTDIR)$(LIBDIR)/accent/accent-cli-$(arch).xz.sha256)
 	-@rmdir $(DESTDIR)$(LIBDIR)/accent 2>/dev/null
 ifdef DARWIN
 	rm -rf $(DESTDIR)$(APPSDIR)/Accent.app

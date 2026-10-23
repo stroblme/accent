@@ -34,6 +34,36 @@ struct Build {
     size: usize,
 }
 
+impl Build {
+    /// A checked build-time archive when the host can unpack it; otherwise the raw binary.
+    fn payload(&self, xz: bool) -> Result<(Vec<u8>, bool)> {
+        use sha2::{Digest, Sha256};
+
+        let sha256 = |bytes: &[u8]| -> String {
+            Sha256::digest(bytes)
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect()
+        };
+        let raw = std::fs::read(&self.path).map_err(|e| unreadable(&self.path, e))?;
+        if ssh::hash_of(&raw) != self.hash {
+            return Err(Error::Remote(
+                "the server binary changed while connecting; try again".to_string(),
+            ));
+        }
+        // Both digests must match: a rebuild or an interrupted install can leave either
+        // sidecar from another build, even when the uncompressed sizes are identical.
+        if xz
+            && let Ok(sums) = std::fs::read_to_string(self.path.with_extension("xz.sha256"))
+            && let Ok(bytes) = std::fs::read(self.path.with_extension("xz"))
+            && sums == format!("{}\n{}\n", sha256(&raw), sha256(&bytes))
+        {
+            return Ok((bytes, true));
+        }
+        Ok((raw, false))
+    }
+}
+
 impl Server {
     /// The build for a host whose `uname -sm` says `system`, or why there is none: a host that is
     /// not Linux on one of [`ssh::SERVER_ARCHES`], or a build of this app that left that one out.
@@ -151,7 +181,7 @@ pub fn prepare(url: &Url, ctl: &Path, quiet: bool, say: &dyn Fn(&str, Option<f64
         };
         match missing {
             None => Ok(()),
-            Some(build) => upload(url, ctl, &server.hash, build, say),
+            Some((build, xz)) => upload(url, ctl, &server.hash, build, xz, say),
         }
     })
 }
@@ -216,7 +246,7 @@ fn installed<'s>(
     ctl: &Path,
     server: &'s Server,
     say: &dyn Fn(&str, Option<f64>),
-) -> Result<Option<&'s Build>> {
+) -> Result<Option<(&'s Build, bool)>> {
     say("Checking the remote server", None);
     let out = command(&ssh::run(url, ctl, &ssh::have_server_cmd(&server.hash)))
         .stdin(Stdio::null())
@@ -234,7 +264,7 @@ fn installed<'s>(
         ));
     };
     let build = server.for_host(&url.host, system)?;
-    Ok((size != build.size).then_some(build))
+    Ok((size != build.size).then_some((build, lines.next() == Some("xz"))))
 }
 
 /// Put the server built for the host on it, under the name `hash` every build of it shares.
@@ -243,21 +273,16 @@ fn upload(
     ctl: &Path,
     hash: &str,
     build: &Build,
+    xz: bool,
     say: &dyn Fn(&str, Option<f64>),
 ) -> Result<()> {
-    let total = build.size;
-    let bytes = std::fs::read(&build.path).map_err(|e| unreadable(&build.path, e))?;
-    // Rebuilt since it was hashed: these bytes would go up under another build's name.
-    if ssh::hash_of(&bytes) != build.hash {
-        return Err(Error::Remote(
-            "the server binary changed while connecting; try again".to_string(),
-        ));
-    }
+    let (bytes, xz) = build.payload(xz)?;
+    let total = bytes.len();
     say(
         &format!("Uploading the server (0 / {} MB)", mb(total)),
         Some(0.0),
     );
-    let argv = ssh::run(url, ctl, &ssh::install_server_cmd(hash, total));
+    let argv = ssh::run(url, ctl, &ssh::install_server_cmd(hash, build.size, xz));
     let progress = |done, total| match done < total {
         true => say(
             &format!(
@@ -442,6 +467,51 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn a_server_upload_uses_only_a_matching_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("accent-cli");
+        let raw = b"a server binary";
+        std::fs::write(&path, raw).unwrap();
+        let mut build = Build {
+            arch: "x86_64",
+            path: path.clone(),
+            hash: ssh::hash_of(raw),
+            size: raw.len(),
+        };
+        assert_eq!(build.payload(true).unwrap(), (raw.to_vec(), false));
+        let script =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../build-aux/compress-server.py");
+        assert!(
+            Command::new("python3")
+                .arg(script)
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let archive = path.with_extension("xz");
+        let packed = std::fs::read(&archive).unwrap();
+        assert_eq!(build.payload(true).unwrap(), (packed.clone(), true));
+        assert_eq!(build.payload(false).unwrap(), (raw.to_vec(), false));
+
+        // A rebuild can leave an older archive beside a binary of the same size.
+        let rebuilt = b"a newer binary!";
+        assert_eq!(rebuilt.len(), raw.len());
+        std::fs::write(&path, rebuilt).unwrap();
+        assert!(build.payload(true).is_err());
+        build.hash = ssh::hash_of(rebuilt);
+        assert_eq!(build.payload(true).unwrap(), (rebuilt.to_vec(), false));
+
+        std::fs::write(&path, raw).unwrap();
+        build.hash = ssh::hash_of(raw);
+        std::fs::write(&archive, &packed[..packed.len() - 1]).unwrap();
+        assert_eq!(build.payload(true).unwrap(), (raw.to_vec(), false));
+        std::fs::write(&archive, packed).unwrap();
+        std::fs::remove_file(path.with_extension("xz.sha256")).unwrap();
+        assert_eq!(build.payload(true).unwrap(), (raw.to_vec(), false));
+    }
 
     /// ssh ending on its own (255) is the link that went; the command failing is the host
     /// refusing.
