@@ -10,16 +10,26 @@
   <a href="https://github.com/stroblme/accent/releases/latest"><img src="https://img.shields.io/github/v/release/stroblme/accent" alt="Latest Release"></a>
 </p>
 
-Accent is a Linux workspace for Markdown notes, code, PDFs and draw.io diagrams. A vault is an ordinary folder of files that remains usable in other apps.
+Accent is an opinionated text editor for code, markdown notes, and PDFs with an integrated terminal.
 
-- **Connect notes to their sources:** wikilinks, tags and backlinks sit beside PDF passage links that take you from a note to the exact selection and back.
-- **Edit the documents, not just view them:** annotate and rearrange PDFs, edit draw.io diagrams on a native canvas, and jump between LaTeX source and its PDF with SyncTeX.
-- **Keep your tools together:** split panes, multi-caret code editing, language servers, Jupyter cells, Git diffs and merge resolution, and terminal sessions that survive closing the window.
-- **Work on another machine:** open a vault over SSH while search, Git and development tools run on the host. `accent-cli` also exposes vault search, links and code exploration to agents over MCP.
-- **Choose how to focus:** a command palette and keyboard shortcuts sit alongside focus and presentation modes, system light and dark themes, and Solarized. An Android companion edits notes and reads PDFs.
+- Edit code with multi-line carets, inline suggestions and syntax highlighting.
+- Write notes, use templates, and browse links and tags.
+- Read and mark up PDFs; link highlighted passages back to your notes.
+- Use split panes, shortcuts, and a command palette to work productively.
+- Work with Git history, diff-views, terminal sessions, and on remote hosts over SSH.
+- Available on Linux (Gnome) with an Android companion app
+
+Some other cool features involve (but are not limited to):
+- Focus mode, which fades out everything that is not around the caret
+- Persistent terminal sessions a la `tmux`; no panic when closing a window with an actively running shell
+- Automatic light and dark theme with a solarized option for both
+- Presentation mode to show off whatever you're working on
+- Early version of a draw.io editor (not just embedded; an actual native rust version!)
+- MCP server and [Codegraph](https://github.com/colbymchenry/codegraph)-like `explore` command to make agents more efficient
+- LaTeX (SyncTeX) PDF <-> Code sync: navigate from text to pdf and vice-versa
 
 Accent is open source under GPL-3.0-or-later and still evolving.
-Read the [user guide](https://stroblme.github.io/accent/) for setup, feature details and current platform limits.
+Read the [user guide](https://stroblme.github.io/accent/) for setup and everyday tasks.
 
 ## Screenshots
 
