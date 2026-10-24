@@ -529,9 +529,10 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 ### Editor
 
 - `sourceview5::View` in an `AdwClampScrollable` in a `GtkScrolledWindow`: a plain `AdwClamp` makes GTK insert a `GtkViewport`, whose dead adjustments break the view's own scrolling to the caret.
-- A sticky block title over the top of the view pins the opening line of the heading or fenced block the first visible line is in, as VS Code pins a function signature, until that line is back on screen; the innermost block wins.
-  Only those two blocks, both already tagged by the styling pass: a language's own structure would need a parser.
-  A plain label in the document font, aligned with the text, a fence's opening line on the wash the code under it has, on a `.view` box with a rule under it; never in a code or CSV tab.
+- A sticky block title over the top of the view pins the opening line of the block the first visible line is in, as VS Code pins a function signature, until that line is back on screen; the innermost block wins.
+  A note's blocks are its headings and fenced blocks, both already tagged by the styling pass.
+  A code tab's are the language layer's symbols, a source file's functions and types or an org file's headings, each pinned at the line of its name rather than where the server's range starts, which may be a doc comment (`lang::innermost`); a CSV tab has none.
+  A plain label in the document font, aligned with the text, a fence's opening line on the wash the code under it has, on a `.view` box with a rule under it.
 - **The minimap** (off by default: Minimap in Preferences, or Toggle Minimap) stands in for the vertical scrollbar, as VS Code's does, so the column loses width once.
   It is ours (`minimap/`), 100 px wide: a bar per word, a pixel per character and two per row, in the foreground at 45 %; a dimmer tone where the editor dims the text (markup, quotes, done tasks, a code comment) and the accent where it writes in the accent (a note's links and tags) and, in code, on a keyword: a tag whose look is the style scheme's keyword or statement style, GtkSourceView's highlighting tags having no names.
   No other syntax colour.
