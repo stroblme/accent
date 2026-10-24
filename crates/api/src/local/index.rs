@@ -30,6 +30,11 @@ impl Local {
         list_dir(&self.index(), &self.root, rel)
     }
 
+    /// See [`Vault::indexed_text`](crate::Vault::indexed_text).
+    pub fn indexed_text(&self, rel: &str) -> Result<Option<String>> {
+        Ok(self.index().indexed_text(rel)?)
+    }
+
     /// Ranked search on a separate connection, superseded by newer pane queries
     /// ([`supersede`](Local::supersede)). `include_ignored` implements All; notes
     /// are included regardless, while other gitignored files require it.

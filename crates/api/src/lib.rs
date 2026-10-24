@@ -123,6 +123,14 @@ pub enum Event {
         busy: bool,
         message: Option<String>,
     },
+    /// How far the reading of the vault's PDFs' text into the index has got: `done` of `total`
+    /// files while `running`, and once more, not running, when it has ended, finished or stopped
+    /// ([`Vault::stop_pdf_text`]).
+    PdfText {
+        done: usize,
+        total: usize,
+        running: bool,
+    },
     /// Pending checks of `rel` as sorted, separate zero-based line ranges;
     /// empty when complete. Lean's `$/lean/fileProgress` reports parallel checks
     /// whose lines may lack answers while Mathlib loads.

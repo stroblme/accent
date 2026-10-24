@@ -529,6 +529,7 @@ fn a_worker_that_panics_says_it_is_gone() {
         false,
         Arc::new(AtomicU8::new(RUN)),
         Arc::new(Ignored::new(PathBuf::new())),
+        None,
     )
     .unwrap();
     assert!(wait_for(&event_rx, |e| matches!(e, Event::Reconciled(_)), BUDGET).is_some());
@@ -568,6 +569,7 @@ fn an_own_save_stays_quiet_behind_a_late_echo_of_another_change() {
         false,
         Arc::new(AtomicU8::new(RUN)),
         Arc::new(Ignored::new(PathBuf::new())),
+        None,
     )
     .unwrap();
     assert!(wait_for(&event_rx, |e| matches!(e, Event::Reconciled(_)), BUDGET).is_some());
@@ -1031,6 +1033,7 @@ fn saves_of_a_gitignore_inside_the_floor_are_one_walk() {
         false,
         Arc::new(AtomicU8::new(RUN)),
         Arc::new(Ignored::new(PathBuf::new())),
+        None,
     )
     .unwrap();
     assert!(wait_for(&event_rx, |e| matches!(e, Event::Reconciled(_)), BUDGET).is_some());
@@ -1094,6 +1097,7 @@ fn a_write_just_before_the_watch_set_changes_is_still_indexed() {
         true,
         Arc::new(AtomicU8::new(RUN)),
         Arc::new(Ignored::new(PathBuf::new())),
+        None,
     )
     .unwrap();
     assert!(wait_for(&event_rx, |e| matches!(e, Event::Reconciled(_)), BUDGET).is_some());
@@ -1135,6 +1139,7 @@ fn a_watched_unindexed_folder_is_relisted_and_never_indexed() {
         true,
         Arc::new(AtomicU8::new(RUN)),
         Arc::new(Ignored::new(PathBuf::new())),
+        None,
     )
     .unwrap();
     assert!(wait_for(&event_rx, |e| matches!(e, Event::Reconciled(_)), BUDGET).is_some());
@@ -1217,6 +1222,7 @@ fn the_inbox_is_read_between_the_batches_of_a_walk() {
         true,
         Arc::new(AtomicU8::new(RUN)),
         Arc::new(Ignored::new(PathBuf::new())),
+        None,
     )
     .unwrap();
 

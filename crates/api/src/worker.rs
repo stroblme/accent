@@ -28,7 +28,7 @@ use crate::{Etag, Event};
 /// Disable `watch` on Android storage where inotify drops events; the app sends
 /// [`Msg::Rescan`] on foregrounding instead. `stop` holds [`RUN`], [`PAUSE`] or
 /// [`CLOSE`] and interrupts scans while the inbox waits between batches.
-/// See [`Worker::reconcile`].
+/// See [`Worker::reconcile`]. `pdf_text` wakes the pass reading PDFs' text, if one runs.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn(
     root: PathBuf,
@@ -39,6 +39,7 @@ pub(crate) fn spawn(
     watch: bool,
     stop: Arc<AtomicU8>,
     ignored: Arc<Ignored>,
+    pdf_text: Option<Sender<()>>,
 ) -> Result<JoinHandle<()>> {
     let worker = Worker {
         root,
@@ -60,6 +61,7 @@ pub(crate) fn spawn(
         next_walk: Instant::now(),
         due: None,
         ignored,
+        pdf_text,
     };
     std::thread::Builder::new()
         .name("accent-vault".to_string())
@@ -176,6 +178,9 @@ struct Worker {
     due: Option<String>,
     /// Told the ignored folders each walk finds, which are all Go to File's ignored notes walk.
     ignored: Arc<Ignored>,
+    /// Wakes the pass that reads PDFs' text: after a walk that finished, and after a batch that
+    /// wrote a PDF's row.
+    pdf_text: Option<Sender<()>>,
 }
 
 /// What one batch has accumulated: the directories whose children changed, and the paths it took
@@ -189,6 +194,8 @@ struct Batch {
     /// New directories to watch at batch end. Scan their contents then,
     /// since writes before the watch starts cannot emit events.
     made: Vec<String>,
+    /// A PDF's row was written, so its text is unread.
+    pdfs: bool,
 }
 
 impl Worker {
@@ -416,6 +423,9 @@ impl Worker {
         if !batched.dirs.is_empty() {
             self.emit(Event::DirsChanged(batched.dirs.into_iter().collect()));
         }
+        if batched.pdfs {
+            self.wake_pdf_text();
+        }
         if let Some(dir) = walk_after {
             self.reconcile(&dir);
         }
@@ -566,6 +576,7 @@ impl Worker {
                 if !stats.stopped {
                     let found = std::mem::take(&mut stats.ignored_dirs);
                     self.ignored.found(&stats.dir, found);
+                    self.wake_pdf_text();
                 }
                 // What the walk took in before the watcher's news of it could arrive, which then
                 // reads as no change (`Worker::unchanged`): in an unwatched vault, an open tab
@@ -587,6 +598,12 @@ impl Worker {
                 // Every time, unlike the error: it is what ends the walk on screen.
                 self.emit(Event::WalkFailed);
             }
+        }
+    }
+
+    fn wake_pdf_text(&self) {
+        if let Some(wake) = &self.pdf_text {
+            let _ = wake.send(());
         }
     }
 
@@ -809,7 +826,11 @@ impl Worker {
         }
         // The links the file holds and the ones its names answer to are resolved as it goes, in a
         // few index lookups: a pass over every link is 0.1–0.35 s a batch at `make vault`.
-        match self.index.update_file(&self.root, rel) {
+        let change = self.index.update_file(&self.root, rel);
+        if let Ok(Change::Added(FileKind::Pdf) | Change::Updated(FileKind::Pdf)) = change {
+            b.pdfs = true;
+        }
+        match change {
             Ok(Change::Added(kind)) => {
                 b.dirs.insert(parent_dir(rel).to_string());
                 if kind == FileKind::Dir {

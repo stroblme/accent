@@ -1,5 +1,5 @@
-//! Local vault storage: three SQLite connections, one writing worker and
-//! shared path validation. [`Local`] also serves remote RPC requests through
+//! Local vault storage: three SQLite connections (four in a watched vault, whose PDFs' text a pass
+//! of its own reads), one writing worker and shared path validation. [`Local`] also serves remote RPC requests through
 //! `accent-cli serve`; [`files`] handles files and [`index`] handles queries.
 
 use std::path::{Component, Path, PathBuf};
@@ -19,6 +19,7 @@ use crate::{Event, VaultConfig, debug, kernel, language, locked};
 mod files;
 mod ignored;
 mod index;
+mod pdf_text;
 
 pub(crate) use ignored::{Ignored, Listing};
 pub(crate) use index::list_dir;
@@ -50,6 +51,8 @@ pub(crate) struct Local {
     /// so interruptions cannot use messages.
     stop: Arc<AtomicU8>,
     worker: Option<JoinHandle<()>>,
+    /// The pass reading the PDFs' text behind the walk, in a vault that stays open (a watched one).
+    pdf_text: Option<pdf_text::PdfText>,
     /// What the last Replace All rewrote, as it was before: [`Local::undo_replace`]'s to write
     /// back. `None` when there is nothing to undo, or when it was too much to keep.
     undo: Mutex<Option<Vec<files::Before>>>,
@@ -106,6 +109,16 @@ impl Local {
                 "the index could not be read and is built anew: {damage}"
             )));
         }
+        // Only where the vault stays open: a one-shot `accent-cli` query is over before it would
+        // have read a page, and a phone has nothing to read the text with.
+        let pdf_text = match watch {
+            true => Some(pdf_text::PdfText::spawn(
+                Index::open(db)?,
+                events.clone(),
+                accent_core::pdf_text::extractor(),
+            )?),
+            false => None,
+        };
         // The providers send their diagnostics down the same channel the worker's events use.
         let lang = language::Languages::new(root.clone(), db.to_path_buf(), events.clone());
         let debug = Arc::new(debug::Debugs::new(root.clone(), events.clone()));
@@ -120,6 +133,7 @@ impl Local {
             watch,
             stop.clone(),
             lang.ignored.clone(),
+            pdf_text.as_ref().map(pdf_text::PdfText::waker),
         )?;
 
         Ok((
@@ -136,6 +150,7 @@ impl Local {
                 tx,
                 stop,
                 worker: Some(handle),
+                pdf_text,
                 undo: Mutex::new(None),
             },
             event_rx,
@@ -196,6 +211,14 @@ impl Local {
     pub fn resume_indexing(&self) {
         self.stop.store(worker::RUN, Ordering::Relaxed);
         self.post(Msg::Resume);
+    }
+
+    /// See [`Vault::stop_pdf_text`](crate::Vault::stop_pdf_text).
+    pub fn stop_pdf_text(&self) -> Result<()> {
+        if let Some(pass) = &self.pdf_text {
+            pass.stop();
+        }
+        Ok(())
     }
 
     /// See [`Vault::watch_unindexed`](crate::Vault::watch_unindexed).
@@ -316,6 +339,7 @@ impl Local {
     /// another reference outlives the window; each shutdown is safe to repeat.
     pub(crate) fn shutdown_services(&self) {
         self.stop.store(worker::CLOSE, Ordering::Relaxed);
+        self.stop_pdf_text().ok();
         self.debug.shutdown();
         self.kernels.shutdown();
         self.lang.shutdown();

@@ -466,6 +466,12 @@ methods! {
     /// [`rescan`](Vault::rescan) scans the whole vault.
     rescan_dir(dir: ref str) -> ();
     search(query: ref str, limit: val usize, include_ignored: val bool) -> Vec<SearchHit>;
+    /// The text the index holds of `rel`: for a PDF, its pages joined by form feeds, which the
+    /// Search pane lists the rest of its matches from (`Index::indexed_text`).
+    indexed_text(rel: ref str) -> Option<String>;
+    /// End the reading of the vault's PDFs' text until the vault is opened again
+    /// ([`Event::PdfText`]).
+    stop_pdf_text() -> ();
     search_mid_word(
         query: ref str,
         limit: val usize,
