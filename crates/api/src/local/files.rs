@@ -6,6 +6,7 @@ use std::io;
 
 use crate::{Error, Result};
 
+use accent_core::note::Syntax;
 use accent_core::path::{basename, is_under, parent_dir, stem};
 use accent_core::{markdown, notebook, search, template};
 
@@ -325,7 +326,9 @@ impl Local {
             .filter(|rel| match self.read(rel) {
                 Ok((text, _)) => {
                     let now = files.get(rel).unwrap_or(rel);
-                    markdown::rewrite_moved(&text, rel, now, &targets, &files).is_some()
+                    Syntax::of(rel)
+                        .rewrite_moved(&text, rel, now, &targets, &files)
+                        .is_some()
                 }
                 Err(_) => true,
             })
@@ -479,7 +482,7 @@ impl Local {
     ) -> Result<bool> {
         let path = self.resolve_inside(now)?;
         let (text, etag) = fs::read_note(&path)?;
-        let Some(rewritten) = markdown::rewrite_moved(&text, old, now, targets, files) else {
+        let Some(rewritten) = Syntax::of(old).rewrite_moved(&text, old, now, targets, files) else {
             return Ok(false);
         };
         fs::write_note(&path, &rewritten, Some(etag))?;
@@ -496,21 +499,15 @@ impl Local {
     /// rather than relying on stale indexed links.
     pub fn relink_copy(&self, from: &str, to: &str, text: &str) -> Result<Option<String>> {
         let targets = self.path_targets(from, text)?;
-        Ok(markdown::rewrite_moved(
-            text,
-            from,
-            to,
-            &targets,
-            &HashMap::new(),
-        ))
+        Ok(Syntax::of(from).rewrite_moved(text, from, to, &targets, &HashMap::new()))
     }
 
     /// What every path `text` spells from the note at `rel` resolves to
-    /// ([`markdown::path_link_keys`]), asked of the index one by one.
+    /// ([`Syntax::path_link_keys`]), asked of the index one by one.
     fn path_targets(&self, rel: &str, text: &str) -> Result<HashMap<String, String>> {
         let index = self.index();
         let mut out = HashMap::new();
-        for key in markdown::path_link_keys(text, rel) {
+        for key in Syntax::of(rel).path_link_keys(text, rel) {
             if let Some(file) = index.resolve_target(&key)? {
                 out.insert(key, file);
             }
@@ -1439,6 +1436,31 @@ mod tests {
         assert!(report.rewritten.is_empty());
         assert_eq!(f.read("a.md"), "see [[B]] for details\n");
         assert!(f.vault.root().join("C.md").exists());
+    }
+
+    /// An org file's links follow a rename by org's rules, and a Save As copy's too.
+    #[test]
+    fn an_org_files_links_follow_by_orgs_rules() {
+        let f = vault_of(&[
+            ("a.md", "the target\n"),
+            ("b.org", "* See [[file:a.md][the target]] and [[./a.md]]\n"),
+        ]);
+        let plan = f.vault.plan_moves(&one("a.md", "c.md")).unwrap();
+        assert_eq!(plan.rewrites, ["b.org"]);
+        assert!(f.vault.rename(&plan, true).unwrap().failed.is_empty());
+        let now = "* See [[file:c.md][the target]] and [[./c.md]]\n";
+        assert_eq!(f.read("b.org"), now);
+        assert!(poll_until(
+            || f.vault.backlinks("c.md").unwrap().len() == 2,
+            BUDGET
+        ));
+        assert_eq!(
+            f.vault
+                .relink_copy("b.org", "d/b.org", now)
+                .unwrap()
+                .as_deref(),
+            Some("* See [[file:../c.md][the target]] and [[../c.md]]\n")
+        );
     }
 
     /// A note that keeps its name keeps its bare links; only the one spelling its path is stale.
