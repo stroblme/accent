@@ -528,6 +528,29 @@ pub fn wire_window(app: &Rc<App>) {
         }
     ));
 
+    // The PDF text line's Stop, a round trip on a remote vault too. The line goes at once: the
+    // pass ends with the page it is on, and says so.
+    app.statusbar
+        .pdf_text_control()
+        .connect_clicked(glib::clone!(
+            #[weak]
+            app,
+            move |_| {
+                let (Some(vault), weak) = (app.vault().cloned(), Rc::downgrade(&app)) else {
+                    return;
+                };
+                app.statusbar.set_pdf_text(None);
+                glib::spawn_future_local(async move {
+                    let asked =
+                        crate::work::attempt("reach the vault", move || vault.stop_pdf_text())
+                            .await;
+                    if let (Err(why), Some(app)) = (asked, weak.upgrade()) {
+                        app.toast(&why);
+                    }
+                });
+            }
+        ));
+
     // The diagnostic count is also the switch that keeps what it counts out of the text: the
     // squiggles, the gutter marks and the messages at the ends of the lines all go, while the
     // count itself and the hover stay, so a diagnostic that is in the way is still readable by

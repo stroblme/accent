@@ -718,6 +718,12 @@ impl App {
             Some(sidebar::Target::Range(bytes)) if accent_core::path::may_be_notebook(rel) => {
                 self.open_cell(rel, bytes)
             }
+            Some(sidebar::Target::Page { page, text }) => {
+                self.open_preview(rel);
+                if let Some(Doc::Pdf(pdf)) = self.doc_for(rel) {
+                    pdf.show_hit(page, &text);
+                }
+            }
             Some(at) => self.select_when_open(rel, at),
             None => self.open_preview(rel),
         }
@@ -787,6 +793,8 @@ impl App {
         self.with_tab(rel, Opened::Preview, "open", move |_, tab| match &at {
             sidebar::Target::Range(bytes) => select_text_range(tab, bytes.clone()),
             sidebar::Target::Tag(name) => tab.goto_tag(name),
+            // A PDF's, which has no text tab: `open_note_at` takes it.
+            sidebar::Target::Page { .. } => {}
         });
     }
 

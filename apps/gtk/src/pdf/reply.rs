@@ -267,6 +267,10 @@ impl PdfTab {
         if let Some((page, sel)) = self.pending_show.get() {
             self.show_link(page, sel);
         }
+        // Or a search hit on one of its pages.
+        if let Some((page, text)) = self.pending_hit.take() {
+            self.show_hit(page, &text);
+        }
         self.on_open.emit(self);
     }
 }

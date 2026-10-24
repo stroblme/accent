@@ -45,6 +45,8 @@ pub struct Bar {
     /// Delayed language-server startup and subsequent checking progress for the active tab.
     starting: RefCell<Option<String>>,
     checking: RefCell<Option<String>>,
+    /// How far the reading of the vault's PDFs' text has got, while it runs.
+    pdf_text: RefCell<Option<String>>,
     provider_busy: RefCell<Option<String>>,
     /// Indexing Stop/Resume control beside progress. Suggestion indexing cannot be stopped here.
     index: gtk::Button,
@@ -53,6 +55,8 @@ pub struct Bar {
     /// Stop for the copy whose line is shown, and that copy's [`Stop`].
     transfer_stop: gtk::Button,
     shown_stop: Rc<RefCell<Option<Stop>>>,
+    /// Stop beside the PDF text line, which the window wires to the vault.
+    pdf_stop: gtk::Button,
     /// Branch readout and Sync control.
     branch: gtk::Button,
     branch_label: gtk::Label,
@@ -90,6 +94,14 @@ impl Bar {
         let transfer_stop =
             bar_button(&stop_label, None, "Stop copying; files already copied stay");
         let shown_stop: Rc<RefCell<Option<Stop>>> = Rc::default();
+        let pdf_stop_label = label(false);
+        pdf_stop_label.set_label("Stop");
+        pdf_stop_label.set_visible(true);
+        let pdf_stop = bar_button(
+            &pdf_stop_label,
+            None,
+            "Stop indexing PDF text until the vault is opened again",
+        );
         transfer_stop.connect_clicked({
             let shown = shown_stop.clone();
             move |button| {
@@ -122,6 +134,7 @@ impl Bar {
         row.append(&progress);
         row.append(&index);
         row.append(&transfer_stop);
+        row.append(&pdf_stop);
         row.append(&branch);
         // The file's own facts sit at the far end, away from what the window is busy with.
         kind.set_hexpand(true);
@@ -141,12 +154,14 @@ impl Bar {
             transfers: RefCell::new(Vec::new()),
             starting: RefCell::new(None),
             checking: RefCell::new(None),
+            pdf_text: RefCell::new(None),
             provider_busy: RefCell::new(None),
             index,
             index_label,
             indexing: Cell::new(Indexing::Idle),
             transfer_stop,
             shown_stop,
+            pdf_stop,
             branch,
             branch_label,
             kind,
@@ -225,6 +240,20 @@ impl Bar {
         self.show_busy();
     }
 
+    /// How far the reading of the vault's PDFs' text has got, `done` of `total` files, or `None`
+    /// once it has ended: "Indexing PDF text… 12/80 files", after the language servers' lines and
+    /// before the suggestion index, with its Stop.
+    pub fn set_pdf_text(&self, progress: Option<(usize, usize)>) {
+        *self.pdf_text.borrow_mut() =
+            progress.map(|(done, total)| format!("Indexing PDF text… {done}/{total} files"));
+        self.show_busy();
+    }
+
+    /// The Stop beside the PDF text line, which the window hangs its click on.
+    pub fn pdf_text_control(&self) -> &gtk::Button {
+        &self.pdf_stop
+    }
+
     /// Start or end a transfer readout, also used while closing waits for Git.
     /// Single files report activity without stat calls; batches count files through [`Bar::retell_transfer`].
     pub fn set_transfer(&self, text: &str, running: bool) {
@@ -282,26 +311,27 @@ impl Bar {
         &self.transfer_stop
     }
 
-    /// Choose progress text by priority: vault work, an open, newest transfer, active server startup/checking, then suggestions.
+    /// Choose progress text by priority: vault work, an open, newest transfer, active server
+    /// startup/checking, the PDF text, then suggestions.
     /// Keep user-requested work ahead of background conveniences.
     fn show_busy(&self) {
         let vault = self.vault_busy.borrow();
         let transfers = self.transfers.borrow();
         let starting = self.starting.borrow();
         let checking = self.checking.borrow();
+        let pdf_text = self.pdf_text.borrow();
         let provider = self.provider_busy.borrow();
         let ahead = vault.is_some() || self.opening.get();
         let transfer = transfers.last().filter(|_| !ahead);
-        set(
-            &self.progress,
-            vault
-                .as_deref()
-                .or(self.opening.get().then_some(OPENING))
-                .or(transfer.map(|(line, _)| line.as_str()))
-                .or(starting.as_deref())
-                .or(checking.as_deref())
-                .or(provider.as_deref()),
-        );
+        let before = vault
+            .as_deref()
+            .or(self.opening.get().then_some(OPENING))
+            .or(transfer.map(|(line, _)| line.as_str()))
+            .or(starting.as_deref())
+            .or(checking.as_deref());
+        let pdf_text = pdf_text.as_deref().filter(|_| before.is_none());
+        set(&self.progress, before.or(pdf_text).or(provider.as_deref()));
+        self.pdf_stop.set_visible(pdf_text.is_some());
         // The Stop goes with the line it stops, and once pressed stays gone.
         let stop = transfer.and_then(|(_, stop)| stop.clone());
         self.transfer_stop

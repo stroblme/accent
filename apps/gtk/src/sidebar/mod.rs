@@ -57,6 +57,9 @@ pub enum Target {
     /// The tag a row under the Tags section was listed under. The section knows the name and not
     /// where in the note it is written, so the note itself is asked once it is open.
     Tag(String),
+    /// A PDF's page a search hit is on, 0-based, and the text it matched there, which the PDF's
+    /// own Find marks: the index holds the page's text, not where on the page it is drawn.
+    Page { page: usize, text: String },
 }
 
 /// Open a note, over the place in it the activated row names.

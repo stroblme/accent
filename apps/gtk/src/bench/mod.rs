@@ -276,7 +276,8 @@ use tags::bench_tags;
 /// - `ACCENT_BENCH_SEARCH=<query>[:<n>]`: result refresh after external writes;
 ///   `type:<query>`: ranked timing; `walk:<query>`: All/unindexed timing;
 ///   `more:<query>[:<n>]`: expanded per-file results; `click:`: wait for XTEST;
-///   `label:<query>` or `label:<query>:xml`: diagram-label navigation;
+///   `label:<query>` or `label:<query>:xml`: diagram-label navigation; `pdf:<word>`: a PDF's
+///   page row, opened on its page with the match marked (writes a PDF; a scratch vault);
 ///   `seed:<rel_note>`: XTEST search/replace shortcuts and box focus.
 /// - `ACCENT_BENCH_HIDDEN=1`: hidden-file visibility and git row colours.
 /// - `ACCENT_BENCH_UNFOLD=<rel>,<rel>,…`: folder expansion; `race:<dir>`,

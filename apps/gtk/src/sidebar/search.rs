@@ -238,6 +238,11 @@ fn page_label(rel_path: &str, starts: &PageStarts, at: usize) -> Option<String> 
     Some(place_label(rel_path, Some(page)))
 }
 
+/// The dim half of a PDF's row: the folder and the page, counted from 1, as "p. 12".
+fn page_of(rel_path: &str, page: u32) -> String {
+    place_label(rel_path, Some(&format!("p. {page}")))
+}
+
 /// The dim half of a notebook's row: the folder and the cell, counted from 1, the match at byte
 /// `at` of its cells' sources is in.
 fn cell_label(rel_path: &str, starts: &[usize], at: usize) -> String {
@@ -251,6 +256,7 @@ fn more_row(rel_path: &str, count: usize, more: More) -> Row {
     Row {
         rel_path: rel_path.to_string(),
         at: None,
+        page: None,
         name: String::new(),
         dir: format!("+{count} more in this file"),
         snippet: String::new(),
@@ -431,6 +437,8 @@ struct Row {
     /// The match's byte range in the note; `None` opens the note at the top, which is all a hit
     /// on a note's title alone can name.
     at: Option<Range<usize>>,
+    /// On a PDF's row, which is one of its pages: that page, 0-based, and the text matched there.
+    page: Option<(usize, String)>,
     /// The file's name, and beside it in dim the folder it sits in — plus, on a grep row, the
     /// line. A row with no `snippet` is a tail row: the dim line alone, saying what the per-file
     /// cap left out.
@@ -820,9 +828,12 @@ impl Search {
                 let Ok(re) = compile_regex(key) else {
                     return;
                 };
-                // `total` is every match the index holds, however many were listed; the walk
-                // past it counts what it listed alone, so only All's number can be a floor.
-                let found = total + walked.iter().map(|m| 1 + m.more).sum::<usize>();
+                // `total` is every match the index holds, however many were listed, a PDF's
+                // aside, which Replace All never rewrites: its pages are counted as listed, as is
+                // what the walk past the index found, so only All's number can be a floor.
+                let listed = |m: &Match| 1 + m.more;
+                let pages: usize = hits.iter().filter(|m| m.page.is_some()).map(listed).sum();
+                let found = total + pages + walked.iter().map(listed).sum::<usize>();
                 let files = hits.iter().chain(&walked).map(|m| m.rel_path.as_str());
                 let files = files.collect::<HashSet<_>>().len();
                 let cut = hits.len() + walked.len() >= crate::SEARCH_LIMIT;
@@ -1038,11 +1049,23 @@ fn compile_regex(key: &Key) -> accent_core::Result<Regex> {
 fn fts_rows(hits: Vec<SearchHit>, query: &str) -> Vec<Row> {
     let mut rows: Vec<Row> = Vec::with_capacity(hits.len());
     for hit in hits {
+        // The marked text, which a PDF's own Find looks for on its page.
+        let marked = || {
+            let (_, rest) = hit.snippet.split_once('«')?;
+            Some(rest.split_once('»')?.0.to_string())
+        };
         rows.push(Row {
             name: basename(&hit.rel_path).to_string(),
-            dir: dir_label(&hit.rel_path, hit.line),
+            dir: match hit.page {
+                Some(page) => page_of(&hit.rel_path, page),
+                None => dir_label(&hit.rel_path, hit.line),
+            },
             snippet: snippet_markup(&hit.snippet),
             at: hit.at.clone(),
+            page: hit
+                .page
+                .zip(marked())
+                .map(|(page, text)| (page as usize - 1, text)),
             rel_path: hit.rel_path.clone(),
             more: None,
         });
@@ -1072,15 +1095,23 @@ fn grep_rows(
     for m in hits {
         let matched = &m.line_text[m.range.clone()];
         let at = m.offset..m.offset + m.range.len();
-        let replaced = replacement.map(|r| match literal {
-            true => re.replace(matched, search::NoExpand(r)).into_owned(),
-            false => re.replace(matched, r).into_owned(),
-        });
+        // A PDF is never rewritten, so its rows promise no replacement.
+        let replaced = replacement
+            .filter(|_| m.page.is_none())
+            .map(|r| match literal {
+                true => re.replace(matched, search::NoExpand(r)).into_owned(),
+                false => re.replace(matched, r).into_owned(),
+            });
+        let page = m.page.map(|page| (page as usize - 1, matched.to_string()));
         rows.push(Row {
             name: basename(&m.rel_path).to_string(),
-            dir: dir_label(&m.rel_path, Some(m.line)),
+            dir: match m.page {
+                Some(page) => page_of(&m.rel_path, page),
+                None => dir_label(&m.rel_path, Some(m.line)),
+            },
             snippet: match_markup(&m.line_text, m.range, replaced.as_deref(), accent),
             at: Some(at),
+            page,
             rel_path: m.rel_path.clone(),
             more: None,
         });
@@ -1128,6 +1159,7 @@ fn heading(name: &str) -> Row {
     Row {
         rel_path: String::new(),
         at: None,
+        page: None,
         name: name.to_string(),
         dir: String::new(),
         snippet: String::new(),
@@ -1465,7 +1497,14 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
                     view.scroll_to(pos, flags, None);
                     return search.expand(boxed);
                 }
-                on_open(&row.rel_path, row.at.clone().map(Target::Range));
+                let target = match &row.page {
+                    Some((page, text)) => Some(Target::Page {
+                        page: *page,
+                        text: text.clone(),
+                    }),
+                    None => row.at.clone().map(Target::Range),
+                };
+                on_open(&row.rel_path, target);
             }
         )
     });
@@ -1797,6 +1836,38 @@ mod tests {
         let opened = open_tails(rows, &bodies, "teal");
         assert_eq!(opened.len(), 7);
         assert!(opened.iter().all(|r| r.more.is_none()));
+    }
+
+    #[test]
+    fn a_pdfs_row_names_its_page_opens_it_and_promises_no_replacement() {
+        let hit = SearchHit {
+            rel_path: "papers/a.pdf".into(),
+            title: None,
+            snippet: "the «Zebrafish» count".into(),
+            at: Some(40..49),
+            line: None,
+            page: Some(12),
+            more: 0,
+        };
+        let rows = fts_rows(vec![hit], "zebrafish");
+        assert_eq!(rows[0].dir, "papers/ — p. 12");
+        assert_eq!(rows[0].page, Some((11, "Zebrafish".to_string())));
+
+        let re = search::pattern("zebra", Options::default()).unwrap();
+        let m = Match {
+            rel_path: "a.pdf".into(),
+            title: None,
+            line: 3,
+            line_text: "a zebra".into(),
+            range: 2..7,
+            offset: 90,
+            page: Some(2),
+            more: 0,
+        };
+        let rows = grep_rows(vec![m], &re, Some("horse"), true, "teal");
+        assert_eq!(rows[0].dir, "p. 2");
+        assert_eq!(rows[0].page, Some((1, "zebra".to_string())));
+        assert_eq!(rows[0].snippet, "a <b>zebra</b>");
     }
 
     #[test]

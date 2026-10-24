@@ -695,9 +695,13 @@ fn search_data(app: &Rc<App>, vault: &Arc<Vault>) -> sidebar::SearchData {
         )),
         read: Arc::new({
             let vault = vault.clone();
-            move |rel| match vault.read_text(rel) {
-                Ok(accent_api::Read::Text(text)) => Some(text.text),
-                _ => None,
+            move |rel| match accent_core::path::file_type(rel) {
+                // Its pages' text, as the index holds it: the file is no text to read.
+                accent_core::path::FileType::Pdf => vault.indexed_text(rel).ok().flatten(),
+                _ => match vault.read_text(rel) {
+                    Ok(accent_api::Read::Text(text)) => Some(text.text),
+                    _ => None,
+                },
             }
         }),
     }

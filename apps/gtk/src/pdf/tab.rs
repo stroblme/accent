@@ -108,6 +108,8 @@ pub struct PdfTab {
     pub(super) notes: RefCell<Vec<PdfLink>>,
     /// A page and selection to show once the glyphs for it arrive: Follow Link into a PDF.
     pub(super) pending_show: Cell<Option<(usize, Option<[usize; 4]>)>>,
+    /// A search hit to show once the document is open: its page and the text matched there.
+    pub(super) pending_hit: RefCell<Option<(usize, String)>>,
     /// The page and point the page's menu was opened on or Ctrl was clicked at, for Go to Source
     /// and the page commands, until the menu has gone. See [`PdfTab::source_point`] and
     /// [`PdfTab::command_page`].
@@ -291,6 +293,7 @@ pub fn open(
         ranges: RefCell::new(Vec::new()),
         notes: RefCell::new(Vec::new()),
         pending_show: Cell::new(None),
+        pending_hit: RefCell::default(),
         pointed: Cell::new(None),
         without_synctex: Cell::new(false),
         spot: Cell::new(None),
@@ -873,6 +876,24 @@ impl PdfTab {
         let from = shown
             .filter(|page| jump && self.view.visible_pages().contains(page))
             .unwrap_or_else(|| self.current_page());
+        self.find_from(text, options, jump, from);
+    }
+
+    /// Go to `page` and find `text` there with the find's own marks, as a Search pane row for that
+    /// page asks: the first match from its top is the current one, and F3 steps on from it. A
+    /// document still opening shows it once it has.
+    pub fn show_hit(self: &Rc<Self>, page: usize, text: &str) {
+        if self.view.page_count() == 0 {
+            *self.pending_hit.borrow_mut() = Some((page, text.to_string()));
+            return;
+        }
+        self.jumping();
+        self.view.goto_page(page, None);
+        self.find_from(text, Options::default(), true, page);
+    }
+
+    /// [`find`](Self::find) from page `from` on, and round.
+    fn find_from(self: &Rc<Self>, text: &str, options: Options, jump: bool, from: usize) {
         *self.searched.borrow_mut() = (text.to_string(), options);
         self.matches.borrow_mut().clear();
         self.current.set(None);

@@ -36,6 +36,10 @@ pub(super) fn bench_search(app: &Rc<App>, arg: &str) {
     if let Some(rel) = arg.strip_prefix("seed:") {
         return bench_seed(app, rel);
     }
+    if let Some(word) = arg.strip_prefix("pdf:") {
+        let word = word.to_string();
+        return bench_search_indexed(app.clone(), Instant::now(), move |app| bench_pdf(app, word));
+    }
     if let Some(query) = arg.strip_prefix("label:") {
         // `:xml` saves the diagram as a plain `.xml`, known for one by its first element alone.
         let (query, ext) = match query.strip_suffix(":xml") {
@@ -591,6 +595,88 @@ fn bench_label(app: Rc<App>, query: String, ext: &'static str) {
                 });
             });
         });
+    });
+}
+
+/// `ACCENT_BENCH_SEARCH=pdf:<word>` writes a three-page PDF that says `word` on its third page
+/// alone, waits for the PDF text pass to read it, searches for `word`, prints the rows, opens the
+/// first and prints the page the PDF shows and its find's count — expected `page=3 matches=1 of 1`
+/// — and, under `ACCENT_BENCH_SHOTS=<dir>`, saves the window as `pdf-hit.png` there. Writes a file
+/// into the vault and takes it away.
+fn bench_pdf(app: Rc<App>, word: String) {
+    let path = app.root().join(format!("{NOTE}.pdf"));
+    let pages = [
+        "The first page",
+        "The second page",
+        &format!("The third page names {word}"),
+    ];
+    // A4, so the page the view says it is on is the one at its top.
+    let written = cairo::PdfSurface::new(595.0, 842.0, &path).and_then(|surface| {
+        let cr = cairo::Context::new(&surface)?;
+        cr.set_font_size(14.0);
+        for text in pages {
+            cr.move_to(60.0, 120.0);
+            cr.show_text(text)?;
+            cr.show_page()?;
+        }
+        drop(cr);
+        surface.finish();
+        Ok(())
+    });
+    if let Err(e) = written {
+        println!("bench search pdf wrote=false {e}");
+        return bench_quit(&app);
+    }
+    let rel = format!("{NOTE}.pdf");
+    let since = Instant::now();
+    glib::spawn_future_local(async move {
+        // Read once its row says a page: the pass may have a vault's worth before it.
+        let read = loop {
+            let vault = app.vault().cloned();
+            let (word, rel) = (word.clone(), rel.clone());
+            let hit = crate::work::off_thread("search", move || {
+                let hits = vault?.search(&word, 10, false).ok()?;
+                hits.into_iter()
+                    .find(|h| h.rel_path == rel && h.page.is_some())
+            })
+            .await
+            .flatten();
+            if hit.is_some() || since.elapsed() > INDEXED {
+                break hit.is_some();
+            }
+            glib::timeout_future(Duration::from_millis(200)).await;
+        };
+        println!(
+            "bench search pdf read={read} after_ms={}",
+            since.elapsed().as_millis()
+        );
+        let Some(sidebar) = app.sidebar.get().filter(|_| read) else {
+            bench_search_remove(&[path]);
+            return bench_quit(&app);
+        };
+        sidebar.show_pane("search");
+        sidebar.set_search_text(&word);
+        glib::timeout_future(SETTLE).await;
+        bench_label_open(&app, "pdf");
+        glib::timeout_future(SETTLE).await;
+        match app.active_pdf() {
+            Some(tab) => println!(
+                "bench search pdf opened page={} matches={}",
+                tab.current_page() + 1,
+                tab.matches_label()
+            ),
+            None => println!("bench search pdf opened=none"),
+        }
+        if let Ok(dir) = std::env::var("ACCENT_BENCH_SHOTS") {
+            let shot = Path::new(&dir).join("pdf-hit.png");
+            println!(
+                "bench search pdf shot={}",
+                super::minimap::window_png(&app.window, &shot)
+            );
+        }
+        glib::timeout_future(SETTLE).await;
+        bench_search_remove(&[path]);
+        bench_quit(&app);
     });
 }
 

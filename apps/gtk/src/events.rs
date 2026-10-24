@@ -194,6 +194,18 @@ impl App {
                     git.rediscover();
                 }
             }
+            Event::PdfText {
+                done,
+                total,
+                running,
+            } => {
+                self.statusbar
+                    .set_pdf_text(running.then_some((done, total)));
+                // The rows a search shows may be short of the pages read meanwhile.
+                if !running && let Some(sidebar) = self.sidebar.get() {
+                    sidebar.requery_search_soon();
+                }
+            }
             Event::Busy {
                 what,
                 busy,

@@ -234,7 +234,7 @@ async fn look(app: &Rc<App>, tab: &Rc<Tab>) {
 }
 
 /// `window` as it is on screen, painted by its own renderer into `path`.
-fn window_png(window: &adw::ApplicationWindow, path: &Path) -> bool {
+pub(super) fn window_png(window: &adw::ApplicationWindow, path: &Path) -> bool {
     let (w, h) = (f64::from(window.width()), f64::from(window.height()));
     let snapshot = gtk::Snapshot::new();
     gtk::WidgetPaintable::new(Some(window)).snapshot(&snapshot, w, h);
