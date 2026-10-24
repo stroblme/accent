@@ -400,6 +400,10 @@ smoke: gtk-bench vault xvfb
 #
 # `ACCENT_BENCH_NOTEBOOK_LSP` writes two notebooks whose code cells `fake-lsp.py --notebook`
 # answers, configured for the scratch vault, and is held against `notebook-lsp.expected`.
+#
+# `ACCENT_BENCH_SEARCH=pdf:` writes a PDF that names a word on its third page, waits for the PDF
+# text pass to read it, and opens its Search row, which has to land on page 3 with the match
+# marked; skipped without libpdfium, which reads the text and shows the page.
 drills: gtk-bench xvfb
 	$(HEADLESS) ACCENT_BENCH_BIBLIOGRAPHY=1 timeout 90 $(TARGET_DIR)/accent "$$xdg/vault"
 	$(HEADLESS) ACCENT_BENCH_KEYS=1 timeout 60 $(TARGET_DIR)/accent "$$xdg/vault" >"$$xdg/keys" && \
@@ -438,6 +442,11 @@ drills: gtk-bench xvfb
 		ACCENT_BENCH_NOTEBOOK_LSP=lsp.ipynb,lsp_marimo.py timeout 60 $(TARGET_DIR)/accent "$$0"' \
 		"$$xdg/vault" >"$$xdg/notebook-lsp" && \
 	grep '^bench ' "$$xdg/notebook-lsp" | diff -u apps/gtk/src/bench/notebook-lsp.expected -
+	$(HEADLESS) sh -c '{ test -e "$(PDFIUM_LIB)" || { echo "SKIPPED the PDF search drill: no libpdfium"; exit 0; }; } && \
+		ACCENT_BENCH_SEARCH=pdf:zebrafish timeout 60 $(TARGET_DIR)/accent "$$0/vault" >"$$0/pdf-search" && \
+		grep -qx "bench search label=pdf rows=\[\"accent-bench-search.pdf | p. 3\"\]" "$$0/pdf-search" && \
+		grep -qx "bench search pdf opened page=3 matches=1 of 1" "$$0/pdf-search" || \
+		{ cat "$$0/pdf-search"; exit 1; }' "$$xdg"
 
 ## screenshots: regenerate docs/screenshot-1..5.png and data/screenshots (needs magick, htop, Xvfb, debugpy)
 #
