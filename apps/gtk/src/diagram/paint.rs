@@ -17,6 +17,7 @@ use gtk::prelude::*;
 use gtk::{gdk, glib, graphene, gsk, pango};
 
 use super::geometry::Frame;
+use crate::theme::gsk_matrix;
 use crate::{math, theme};
 
 /// Cached label layouts at their layout scale and decoded images, reused between frames.
@@ -273,19 +274,6 @@ impl Tint {
         paint();
         snapshot.pop();
     }
-}
-
-/// `recolour::colour_matrix`'s rows of five as GSK's matrix and offset. GSK multiplies the
-/// unpremultiplied pixel as a row vector by the matrix, so its row `j` holds what channel `j`
-/// adds to each output.
-fn gsk_matrix(m: &[f32; 20]) -> ([f32; 16], [f32; 4]) {
-    let mut matrix = [0.0; 16];
-    for i in 0..4 {
-        for j in 0..4 {
-            matrix[j * 4 + i] = m[i * 5 + j];
-        }
-    }
-    (matrix, [m[4], m[9], m[14], m[19]])
 }
 
 fn gpoint(p: Point) -> graphene::Point {

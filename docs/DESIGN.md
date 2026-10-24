@@ -929,7 +929,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - With a pen on the seat the mouse selects and only the pen draws, its eraser tip erasing under any tool; "Draw with the Mouse" in Preferences gives the mouse back.
   A finger never draws: touch moves the page.
   The pen is known by the event's device tool, since on Wayland a tablet's events come through a device whose source is a mouse.
-- A stroke stays painted over the page until the re-rendered tile carries it.
+- A stroke stays painted over the page until the re-rendered tile carries it, as that tile will show it, under the highlights and the selection.
+  pdfium multiplies a highlighter onto the file's white paper and the page is recoloured after, so no colour laid over a recoloured page is that stroke: the page itself is painted again inside it, through the matrix that turns what is on screen into the recolouring of the file's pixel times the stroke (`recolour::multiplied`).
 - Ink and page edits are written into the file itself, atomically and gated on the etag the document was read at; the tab does not reload over its own write.
 - On a remote vault that file is the ssh cache copy, and each write goes up to the host behind it, a tab closed at once included.
   One the host will not take (a folder it may not write, a full disk) is said once, with Retry, and goes again with the next stroke, a reconnect, the next opening of the document, or a change of the host's file, which is then never fetched over it.

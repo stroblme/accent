@@ -8,8 +8,8 @@ use gtk::{gdk, graphene, gsk};
 
 use super::imp;
 use crate::pdf::cache::{TILE, TileKey, Want, reach, tiles_across, tiles_within};
-use crate::pdf::geometry::{PageRect, gap_middle, on_grid, page_at};
-use crate::pdf::tools::{HANDLE, Mode, mapped};
+use crate::pdf::geometry::{Layout, PageRect, gap_middle, on_grid, page_at};
+use crate::pdf::tools::{HANDLE, Mode, Stroke, mapped};
 use crate::theme;
 
 /// How thick the line a dropped PDF's pages would go in at is: the thumbnail strip's drop bar.
@@ -69,8 +69,12 @@ impl imp::PdfView {
                 ..*at
             };
             let bounds = graphene::Rect::new(rect.x, rect.y, rect.w, rect.h);
+            // The page as the render leaves it, the strokes no tile carries yet included, is
+            // drawn on a snapshot of its own: a highlighter's stroke is that page again, seen
+            // through its colour (`stroked`).
+            let base = gtk::Snapshot::new();
             // The page's own paper, so a tile that has not arrived is not a hole.
-            snapshot.append_color(&self.paper(), &bounds);
+            base.append_color(&self.paper(), &bounds);
 
             let page = index as u32;
             let low = cache.borrow_mut().lowres(page, theme);
@@ -147,7 +151,7 @@ impl imp::PdfView {
             // scaled draw per page.
             match low {
                 Some(low) if thumbnails || blank => {
-                    snapshot.append_scaled_texture(&low, gsk::ScalingFilter::Linear, &bounds);
+                    base.append_scaled_texture(&low, gsk::ScalingFilter::Linear, &bounds);
                 }
                 // Not even a stand-in yet: ask for one, with what is on screen if it is to be
                 // painted now. `u16::MAX` is the whole page.
@@ -170,7 +174,28 @@ impl imp::PdfView {
                 let y = rect.y + (ty * TILE) as f32 / sf as f32;
                 let w = texture.width() as f32 / sf as f32;
                 let h = texture.height() as f32 / sf as f32;
-                snapshot.append_texture(&texture, &graphene::Rect::new(x, y, w, h));
+                base.append_texture(&texture, &graphene::Rect::new(x, y, w, h));
+            }
+            // Under the highlights and the selection, as in the tile that will carry them.
+            let mut page_node = base.to_node();
+            for stroke in strokes.iter().filter(|s| s.page == index) {
+                let style = obj.ink_style(stroke.tool);
+                let next = gtk::Snapshot::new();
+                if let Some(node) = &page_node {
+                    next.append_node(node);
+                }
+                let path = stroke_path(stroke, rect, &layout);
+                let line = gsk::Stroke::new(style.width * layout.scale);
+                line.set_line_cap(gsk::LineCap::Round);
+                line.set_line_join(gsk::LineJoin::Round);
+                match (style.multiply, &page_node) {
+                    (true, Some(node)) => stroked(&next, &path, &line, style, theme, node),
+                    _ => next.append_stroke(&path, &line, &as_rendered(style, theme)),
+                }
+                page_node = next.to_node();
+            }
+            if let Some(node) = page_node {
+                snapshot.append_node(&node);
             }
 
             // A hairline, so a white page on a light background still reads as a page.
@@ -201,45 +226,6 @@ impl imp::PdfView {
                 for glyph in boxes {
                     snapshot.append_color(&colour, &layout.rect_of(rect, glyph));
                 }
-            }
-            for stroke in strokes.iter().filter(|s| s.page == index) {
-                let builder = gsk::PathBuilder::new();
-                let point = |&(x, y): &(f32, f32)| {
-                    graphene::Point::new(rect.x + x * layout.scale, rect.y + y * layout.scale)
-                };
-                let points = &stroke.points;
-                match (stroke.tool, points.as_slice()) {
-                    (Mode::Rect, &[a, b]) => {
-                        builder.add_rect(
-                            &layout.rect_of(rect, &accent_core::pdf::Rect::from_corners(a, b)),
-                        );
-                    }
-                    (Mode::Circle, &[a, b]) => {
-                        let radius = (b.0 - a.0).hypot(b.1 - a.1) * layout.scale;
-                        builder.add_circle(&point(&a), radius);
-                    }
-                    _ => {
-                        if let Some(first) = points.first() {
-                            builder.move_to(point(first).x(), point(first).y());
-                            for p in &points[1..] {
-                                builder.line_to(point(p).x(), point(p).y());
-                            }
-                            // A stroke of one point is a dot, which a round cap draws from
-                            // a zero-length line.
-                            if points.len() == 1 {
-                                builder.line_to(point(first).x(), point(first).y());
-                            }
-                        }
-                    }
-                }
-                // The tool's own style, as the render will leave it: what the hand sees
-                // must not change colour when the tile lands.
-                let style = obj.ink_style(stroke.tool);
-                let colour = as_rendered(style, theme, self.paper());
-                let stroke_style = gsk::Stroke::new(style.width * layout.scale);
-                stroke_style.set_line_cap(gsk::LineCap::Round);
-                stroke_style.set_line_join(gsk::LineJoin::Round);
-                snapshot.append_stroke(&builder.to_path(), &stroke_style, &colour);
             }
             // The stroke the Adjust tool holds: its box with eight handles, and while the
             // hand is on it, a ghost of the stroke where the drag has taken it.
@@ -339,28 +325,82 @@ impl imp::PdfView {
     }
 }
 
-/// Overlay colour matching the eventual rendered stroke. Apply the theme's paper/ink ramp and
-/// highlighter multiplication so colour does not jump when tiles arrive. Approximate
-/// multiplication against paper; ink beneath the stroke can darken it slightly.
-fn as_rendered(style: accent_core::pdf::InkStyle, theme: Theme, paper: gdk::RGBA) -> gdk::RGBA {
+/// A stroke no tile carries yet, in page-local pixels: a rectangle or a circle from its two
+/// points, any other tool a line through them.
+fn stroke_path(stroke: &Stroke, rect: &PageRect, layout: &Layout) -> gsk::Path {
+    let builder = gsk::PathBuilder::new();
+    let point = |&(x, y): &(f32, f32)| {
+        graphene::Point::new(rect.x + x * layout.scale, rect.y + y * layout.scale)
+    };
+    let points = &stroke.points;
+    match (stroke.tool, points.as_slice()) {
+        (Mode::Rect, &[a, b]) => {
+            builder.add_rect(&layout.rect_of(rect, &accent_core::pdf::Rect::from_corners(a, b)));
+        }
+        (Mode::Circle, &[a, b]) => {
+            let radius = (b.0 - a.0).hypot(b.1 - a.1) * layout.scale;
+            builder.add_circle(&point(&a), radius);
+        }
+        _ => {
+            if let Some(first) = points.first() {
+                builder.move_to(point(first).x(), point(first).y());
+                for p in &points[1..] {
+                    builder.line_to(point(p).x(), point(p).y());
+                }
+                // A stroke of one point is a dot, which a round cap draws from a zero-length
+                // line.
+                if points.len() == 1 {
+                    builder.line_to(point(first).x(), point(first).y());
+                }
+            }
+        }
+    }
+    builder.to_path()
+}
+
+/// A stroke that covers, in its colour as the render leaves it: the theme's remap of an opaque
+/// pixel of it, laid over the page at its alpha, is what the remap of the two blended is.
+fn as_rendered(style: accent_core::pdf::InkStyle, theme: Theme) -> gdk::RGBA {
     let [r, g, b, a] = style.rgba;
     let rgb = match theme {
-        Theme::Recolour { paper: page, ink } => {
-            let px = accent_core::recolour::recolour_pixel([r, g, b, 255], page, ink);
+        Theme::Recolour { paper, ink } => {
+            let px = accent_core::recolour::recolour_pixel([r, g, b, 255], paper, ink);
             [px[0], px[1], px[2]]
         }
         Theme::Plain => [r, g, b],
     };
-    let colour = theme::rgba(rgb, f32::from(a) / 255.0);
-    match style.multiply {
-        true => gdk::RGBA::new(
-            colour.red() * paper.red(),
-            colour.green() * paper.green(),
-            colour.blue() * paper.blue(),
-            colour.alpha(),
-        ),
-        false => colour,
-    }
+    theme::rgba(rgb, f32::from(a) / 255.0)
+}
+
+/// A `Multiply` stroke as the render leaves it: `page`, the page drawn so far, again inside the
+/// stroke, through the matrix that turns what is on screen into the remap of the file's pixel
+/// times the stroke. pdfium multiplies on the file's white paper and the page is remapped after,
+/// so a colour laid over the remapped page cannot be it: on a dark page the old overlay, the
+/// stroke's remap times the paper, was nearly the paper itself.
+fn stroked(
+    snapshot: &gtk::Snapshot,
+    path: &gsk::Path,
+    line: &gsk::Stroke,
+    style: accent_core::pdf::InkStyle,
+    theme: Theme,
+    page: &gsk::RenderNode,
+) {
+    let [r, g, b, a] = style.rgba.map(|v| f32::from(v) / 255.0);
+    // One pass of the stroke at alpha `a` over a channel `c` leaves `c·(1 − a + a·s)`.
+    let by = [r, g, b].map(|s| 1.0 - a + a * s);
+    let onto = match theme {
+        Theme::Recolour { paper, ink } => Some((paper, ink)),
+        Theme::Plain => None,
+    };
+    let (matrix, offset) = theme::gsk_matrix(&accent_core::recolour::multiplied(onto, by));
+    snapshot.push_stroke(path, line);
+    snapshot.push_color_matrix(
+        &graphene::Matrix::from_float(matrix),
+        &graphene::Vec4::from_float(offset),
+    );
+    snapshot.append_node(page);
+    snapshot.pop();
+    snapshot.pop();
 }
 
 /// Whether the tile at `(tx, ty)` covers any of `area`, which is in page points, on a page

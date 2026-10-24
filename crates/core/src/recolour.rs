@@ -121,6 +121,40 @@ pub fn colour_matrix(paper: [u8; 3], ink: [u8; 3]) -> [f32; 20] {
     m
 }
 
+/// The [`colour_matrix`]-shaped matrix that takes a pixel as the remap onto `page` showed it to
+/// what the file's own pixel, multiplied channel by channel by `by`, remaps to; `None` is a page
+/// left alone, where it is the product itself. A highlighter's `Multiply` stroke laid over a
+/// page already on screen, so it shows as the render will leave it.
+///
+/// The remap is `A·c + ink`, `A = I + k·Lᵀ` with `k = paper − ink − 1` and `L` the luma weights,
+/// so this is `A·diag(by)·A⁻¹` offset by `ink` less its own image of `ink`, `A⁻¹` being
+/// Sherman–Morrison's `I − k·Lᵀ / (1 + L·k)`. Exact where the remap did not clamp.
+pub fn multiplied(page: Option<Page>, by: [f32; 3]) -> [f32; 20] {
+    let unit = |v: [u8; 3]| v.map(|c| f32::from(c) / 255.0);
+    let (k, ink) = match page {
+        Some((paper, ink)) => {
+            let (paper, ink) = (unit(paper), unit(ink));
+            ([0, 1, 2].map(|i| paper[i] - ink[i] - 1.0), ink)
+        }
+        None => ([0.0; 3], [0.0; 3]),
+    };
+    let lk: f32 = (0..3).map(|i| LUMA[i] * k[i]).sum();
+    let identity = |i: usize, j: usize| f32::from(u8::from(i == j));
+    let remap = |i: usize, j: usize| identity(i, j) + k[i] * LUMA[j];
+    let unmap = |i: usize, j: usize| identity(i, j) - k[i] * LUMA[j] / (1.0 + lk);
+    let mut m = [0.0; 20];
+    for i in 0..3 {
+        for j in 0..3 {
+            m[i * 5 + j] = (0..3).map(|n| remap(i, n) * by[n] * unmap(n, j)).sum();
+        }
+    }
+    for i in 0..3 {
+        m[i * 5 + 4] = ink[i] - (0..3).map(|j| m[i * 5 + j] * ink[j]).sum::<f32>();
+    }
+    m[18] = 1.0;
+    m
+}
+
 // ---------------------------------------------------------------------------------------------
 // Which images are documents
 // ---------------------------------------------------------------------------------------------
@@ -438,6 +472,56 @@ mod tests {
                                 "{:?} -> {out:?}, pixel path {want:?}",
                                 [r, g, b]
                             );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// A highlighter over a page on screen lands where its render will: the file's pixel times
+    /// the stroke, remapped, for every theme and for a page left alone. Pixels the remap clamps
+    /// are left out, since what was clamped away cannot be read back off the screen.
+    #[test]
+    fn a_multiplied_pixel_on_screen_is_the_remapped_product() {
+        // Accent blue and yellow at the highlighter's 0.4: what one pass over white leaves.
+        let by = [[0x35, 0x84, 0xe4], [0xf6, 0xd3, 0x2d]]
+            .map(|c: [u8; 3]| c.map(|v| 0.6 + 0.4 * f32::from(v) / 255.0));
+        let apply = |m: &[f32; 20], c: [f32; 3]| {
+            [0, 1, 2].map(|i| (0..3).map(|j| m[i * 5 + j] * c[j]).sum::<f32>() + m[i * 5 + 4])
+        };
+        let levels = || (0..=255u8).step_by(15);
+        for page in [
+            None,
+            Some(ADWAITA_DARK),
+            Some(SOLARIZED_LIGHT),
+            Some(SOLARIZED_DARK),
+        ] {
+            let (remap, flat) = match page {
+                Some((paper, ink)) => (colour_matrix(paper, ink), false),
+                None => (multiplied(None, [1.0; 3]), true),
+            };
+            let shown = |c: [f32; 3]| apply(&remap, c);
+            let inside = |c: [f32; 3]| c.iter().all(|v| (0.0..=1.0).contains(v));
+            for by in by {
+                let m = multiplied(page, by);
+                for r in levels() {
+                    for g in levels() {
+                        for b in levels() {
+                            let file = [r, g, b].map(|v| f32::from(v) / 255.0);
+                            let product = [0, 1, 2].map(|i| file[i] * by[i]);
+                            if !flat && !(inside(shown(file)) && inside(shown(product))) {
+                                continue;
+                            }
+                            let got = apply(&m, shown(file));
+                            let want = shown(product);
+                            for i in 0..3 {
+                                assert!(
+                                    (got[i] - want[i]).abs() < 1.0 / 255.0,
+                                    "{page:?} {:?} -> {got:?}, want {want:?}",
+                                    [r, g, b]
+                                );
+                            }
                         }
                     }
                 }
