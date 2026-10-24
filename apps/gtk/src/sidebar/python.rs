@@ -2,6 +2,7 @@
 //! and Python language analysis use, picked from those found on the vault's machine.
 
 use accent_api::python::{Environment, Environments};
+use gtk::pango;
 use gtk::prelude::*;
 use std::cell::Cell;
 use std::rc::Rc;
@@ -17,19 +18,19 @@ pub struct Data {
 
 /// A flat menu button naming the chosen interpreter, as the Git pane's branch is, over a popover
 /// listing the choices, asked for afresh each time it opens: a venv made since is found.
+#[derive(Clone)]
 pub(super) struct Picker {
     pub(super) button: gtk::MenuButton,
-    name: gtk::Inscription,
+    name: gtk::Label,
 }
 
 impl Picker {
     pub(super) fn new(data: &Rc<Data>) -> Picker {
-        // An inscription rather than a label, so the name can give up all its width, ellipsis
-        // included: while a session's steps fill the row the dropdown shrinks to its chevron
-        // instead of widening the sidebar.
-        let name = gtk::Inscription::builder()
-            .min_chars(0)
-            .text_overflow(gtk::InscriptionOverflow::EllipsizeEnd)
+        // Ellipsized as the branch's name is, so a long path does not decide how narrow the
+        // sidebar can be.
+        let name = gtk::Label::builder()
+            .xalign(0.0)
+            .ellipsize(pango::EllipsizeMode::End)
             .build();
         let face = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         face.add_css_class("heading");
@@ -101,8 +102,13 @@ impl Picker {
         let face = face(command);
         self.button
             .set_tooltip_text(Some(&format!("Python Environment: {face}")));
-        self.name.set_nat_chars(face.chars().count() as u32);
-        self.name.set_text(Some(&face));
+        self.name.set_text(&face);
+    }
+
+    /// Show the chevron alone (`compact`), for a row the session's steps fill: an ellipsis is
+    /// all the name would keep there, and its width would widen the sidebar.
+    pub(super) fn set_compact(&self, compact: bool) {
+        self.name.set_visible(!compact);
     }
 }
 

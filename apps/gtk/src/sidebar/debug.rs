@@ -2,6 +2,7 @@
 //! Watch and Breakpoints as sections, filled as the window asks the paused program.
 
 use super::breakpoints::{Edited, Row, Rows};
+use super::python::Picker;
 use super::widgets::Section;
 use crate::widgets::{icon_button, scroller};
 use accent_api::debug::{Evaluated, ExceptionFilter, Frame, Scope, Supports, Thread, Variable};
@@ -376,8 +377,9 @@ pub(super) struct Debug {
     /// The controls, and the state line under them.
     pub(super) strip: gtk::Box,
     state: gtk::Label,
-    resume: gtk::Button,
-    pause: gtk::Button,
+    controls: Controls,
+    /// The Python Environment dropdown leading the row.
+    python: Option<Picker>,
     pub(super) stack: Section,
     stack_body: gtk::Stack,
     stack_line: gtk::Label,
@@ -402,8 +404,8 @@ pub(super) struct Debug {
 }
 
 impl Debug {
-    pub(super) fn new(data: Data, python: Option<&gtk::MenuButton>) -> Debug {
-        let (strip, state, resume, pause) = strip(python);
+    pub(super) fn new(data: Data, python: Option<Picker>) -> Debug {
+        let (strip, state, controls) = strip(python.as_ref().map(|p| &p.button));
 
         let frames = data.frames.clone();
         let calls = Tree::new(Rc::new(move |thread, list| {
@@ -482,8 +484,8 @@ impl Debug {
         Debug {
             strip,
             state,
-            resume,
-            pause,
+            controls,
+            python,
             stack,
             stack_body,
             stack_line,
@@ -513,9 +515,13 @@ impl Debug {
         }
         self.state.set_text(line);
         self.state.set_tooltip_text(why);
-        self.set_play("win.debug-continue");
-        self.resume.set_visible(paused);
-        self.pause.set_visible(!paused);
+        self.controls.session.set_visible(true);
+        self.controls.start.set_visible(false);
+        if let Some(python) = &self.python {
+            python.set_compact(true);
+        }
+        self.controls.resume.set_visible(paused);
+        self.controls.pause.set_visible(!paused);
         if !paused {
             self.calls.set(Vec::new());
             self.stack.set_count(None);
@@ -635,9 +641,11 @@ impl Debug {
         self.strip.set_visible(debuggable);
         self.state.set_text("Not running");
         self.state.set_tooltip_text(None);
-        self.set_play("win.debug-start");
-        self.resume.set_visible(true);
-        self.pause.set_visible(false);
+        self.controls.session.set_visible(false);
+        self.controls.start.set_visible(true);
+        if let Some(python) = &self.python {
+            python.set_compact(false);
+        }
         self.stack.root.set_visible(false);
         self.variables.root.set_visible(false);
         self.watch.root.set_visible(debuggable);
@@ -645,15 +653,6 @@ impl Debug {
         self.calls.set(Vec::new());
         self.values.set(Vec::new());
         self.answer.replace(None);
-    }
-
-    /// Point the play button at `action`, named by its label as the strip's other buttons are.
-    fn set_play(&self, action: &str) {
-        let label = crate::actions::label_of(action);
-        self.resume.set_action_name(Some(action));
-        self.resume.set_tooltip_text(Some(label));
-        self.resume
-            .update_property(&[gtk::accessible::Property::Label(label)]);
     }
 
     /// The strip's line, the calls listed as `name file:line`, the values as `name=value` and the
@@ -723,27 +722,62 @@ fn watch_body(watched: &Tree, data: &Data) -> gtk::Box {
     body
 }
 
+/// What the strip shows of the session's controls: the session's own while one runs, Start
+/// Debugging while none does.
+struct Controls {
+    /// Continue or Pause, the steps, Restart and Stop.
+    session: gtk::Box,
+    resume: gtk::Button,
+    pause: gtk::Button,
+    start: gtk::Button,
+}
+
 /// The Python Environment dropdown, then the controls, flat icon buttons on the window's
-/// actions, which are enabled as the session's state allows: Continue or Pause (Start Debugging
-/// while no session runs), the steps, Restart and Stop, then the Debug Console; and under them
-/// what the program is doing.
-fn strip(python: Option<&gtk::MenuButton>) -> (gtk::Box, gtk::Label, gtk::Button, gtk::Button) {
+/// actions, which are enabled as the session's state allows: Continue or Pause, the steps,
+/// Restart and Stop, then the Debug Console, and Start Debugging in their place while no session
+/// runs; and under them what the program is doing.
+fn strip(python: Option<&gtk::MenuButton>) -> (gtk::Box, gtk::Label, Controls) {
     let resume = strip_button("media-playback-start-symbolic", "win.debug-continue");
     let pause = strip_button("media-playback-pause-symbolic", "win.debug-pause");
+    let session = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    for button in [
+        &resume,
+        &pause,
+        &strip_button("dap-step-over-symbolic", "win.debug-step-over"),
+        &strip_button("dap-step-into-symbolic", "win.debug-step-into"),
+        &strip_button("dap-step-out-symbolic", "win.debug-step-out"),
+        &strip_button("view-refresh-symbolic", "win.debug-restart"),
+        &strip_button("media-playback-stop-symbolic", "win.debug-stop"),
+    ] {
+        session.append(button);
+    }
+    // The Git pane's Commit: a text button in the accent colour at the row's trailing edge,
+    // where GNOME puts the affirmative action, 6 px from the button before it as Commit is from
+    // Sync. The greyed steps it replaces had nothing to offer before a program runs. One word, as
+    // Commit is, so the Python Environment dropdown keeps room to name the interpreter.
+    let start = gtk::Button::builder()
+        .label("Debug")
+        .tooltip_text(crate::actions::label_of("win.debug-start"))
+        .action_name("win.debug-start")
+        .focus_on_click(false)
+        .margin_start(6)
+        .build();
+    start.add_css_class("suggested-action");
     let (strip, state) = strip_of(
         python,
         &[
-            &resume,
-            &pause,
-            &strip_button("dap-step-over-symbolic", "win.debug-step-over"),
-            &strip_button("dap-step-into-symbolic", "win.debug-step-into"),
-            &strip_button("dap-step-out-symbolic", "win.debug-step-out"),
-            &strip_button("view-refresh-symbolic", "win.debug-restart"),
-            &strip_button("media-playback-stop-symbolic", "win.debug-stop"),
-            &strip_button("dap-console-symbolic", "win.debug-console"),
+            session.clone().upcast(),
+            strip_button("dap-console-symbolic", "win.debug-console").upcast(),
+            start.clone().upcast(),
         ],
     );
-    (strip, state, resume, pause)
+    let controls = Controls {
+        session,
+        resume,
+        pause,
+        start,
+    };
+    (strip, state, controls)
 }
 
 /// A strip's flat icon button on the window's `action`, named by its label. A press leaves the
@@ -760,11 +794,11 @@ pub(super) fn strip_button(icon: &str, action: &str) -> gtk::Button {
 /// dropdown taking the spare width, the buttons at the trailing edge.
 pub(super) fn strip_of(
     python: Option<&gtk::MenuButton>,
-    buttons: &[&gtk::Button],
+    buttons: &[gtk::Widget],
 ) -> (gtk::Box, gtk::Label) {
     let controls = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     for button in buttons {
-        controls.append(*button);
+        controls.append(button);
     }
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     match python {

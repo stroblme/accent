@@ -350,7 +350,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Hidden while on screen, it gives way to the Outline.
   Which sections are open and where the dividers are are the vault's session: all open at first.
 - **The strip**: the Python Environment dropdown (Notebook, Running), then Continue or Pause, whichever the program can take, Step Over, Step Into, Step Out, Restart Debugging and Stop Debugging as flat icon buttons on the window's actions, each greyed while the program's state does not allow it, and while starting all but Stop; then Debug Console, always live.
-  With no session the first is Start Debugging and the rest but Debug Console are greyed.
+  With no session Start Debugging stands in for all of them but Debug Console, after it, a text button reading Debug in the accent colour as the Git pane's Commit is (`suggested-action`): a step greyed until a program runs has nothing to offer, and one word leaves the dropdown room to name the interpreter.
   The row is the Git pane's branch row: the dropdown, a flat button naming the interpreter as the branch button names the branch, takes the spare width at the leading edge, the buttons stand at the trailing edge, and the caption under them is centred.
   A press leaves the keyboard where it was, so stepping keeps the reader in the note.
   A dim caption under them says what the program does: Not running, Starting…, Running, Paused, Paused on breakpoint, Paused on exception with the exception's name (its message in the tooltip), Stopping….

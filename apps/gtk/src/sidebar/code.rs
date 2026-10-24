@@ -65,11 +65,7 @@ impl Code {
         let expected = Section::new("Expected Type", &scroller(&expected_label));
         let python = python.map(Rc::new);
         let pythons = python.map(|data| [Picker::new(&data), Picker::new(&data)]);
-        let [debug_python, kernel_python] = pythons
-            .as_ref()
-            .map(|[d, k]| [Some(&d.button), Some(&k.button)])
-            .unwrap_or_default();
-        let debug = debug.map(|data| Debug::new(data, debug_python));
+        let debug = debug.map(|data| Debug::new(data, pythons.as_ref().map(|[d, _]| d.clone())));
         let mut stacked = vec![&goals.root, &expected.root];
         stacked.extend(debug.iter().flat_map(|d| d.sections().map(|s| &s.root)));
         let sections = Sections::new(&stacked);
@@ -79,13 +75,15 @@ impl Code {
             page.append(&debug.strip);
         }
         let (kernel, kernel_state) = debug::strip_of(
-            kernel_python,
+            pythons.as_ref().map(|[_, k]| &k.button),
             &[
-                &debug::strip_button("media-seek-forward-symbolic", "win.notebook-run-all"),
-                &debug::strip_button("media-playback-stop-symbolic", "win.notebook-interrupt"),
-                &debug::strip_button("view-refresh-symbolic", "win.notebook-restart"),
-                &debug::strip_button("system-shutdown-symbolic", "win.notebook-shut-down"),
-                &debug::strip_button("edit-clear-all-symbolic", "win.notebook-clear-all-outputs"),
+                debug::strip_button("media-seek-forward-symbolic", "win.notebook-run-all").upcast(),
+                debug::strip_button("media-playback-stop-symbolic", "win.notebook-interrupt")
+                    .upcast(),
+                debug::strip_button("view-refresh-symbolic", "win.notebook-restart").upcast(),
+                debug::strip_button("system-shutdown-symbolic", "win.notebook-shut-down").upcast(),
+                debug::strip_button("edit-clear-all-symbolic", "win.notebook-clear-all-outputs")
+                    .upcast(),
             ],
         );
         page.append(&kernel);
