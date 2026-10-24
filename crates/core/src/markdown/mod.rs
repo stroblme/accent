@@ -15,6 +15,8 @@ mod uri;
 
 pub use blocks::{BlockId, block_ids};
 pub use html::{math_errors, mathml, to_html};
+/// What org's file links share with a markdown link's path (`crate::org`).
+pub(crate) use links::{Moved, path_key};
 pub use links::{
     Repaged, anchor_id, anchor_range, heading_for, is_image, is_url, link_key, path_keys,
     path_link_keys, pdf_anchor, percent_decode, percent_encode, repage_links, rewrite_moved,

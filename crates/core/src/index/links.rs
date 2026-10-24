@@ -238,6 +238,31 @@ mod tests {
     }
 
     #[test]
+    fn an_org_file_links_both_ways_with_its_title_tags_and_headings() {
+        let (vault, db) = fixture();
+        fs::write(
+            vault.path().join("b.org"),
+            "#+TITLE: Bee\n* Plan :work:\nSee [[file:a.md][alpha]] and [[*Plan]].\n",
+        )
+        .unwrap();
+        fs::write(vault.path().join("c.md"), "[[b]]\n").unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let sources = |rel: &str| -> Vec<String> {
+            let rows = ix.backlinks(rel).unwrap().into_iter();
+            rows.map(|b| b.src_rel_path).collect()
+        };
+        assert!(sources("a.md").contains(&"b.org".to_string()));
+        assert_eq!(sources("b.org"), ["c.md"]);
+        let row = ix.get_file("b.org").unwrap().unwrap();
+        assert_eq!(row.title.as_deref(), Some("Bee"));
+        assert_eq!(ix.files_with_tag("work").unwrap()[0].rel_path, "b.org");
+        let hits = ix.headings_matching(&["plan".to_string()], 5).unwrap();
+        assert_eq!((hits[0].rel_path.as_str(), hits[0].level), ("b.org", 1));
+    }
+
+    #[test]
     fn links_resolve_by_shortest_path_and_backlinks_read_back() {
         let (vault, db) = fixture();
         let mut ix = open(&db);

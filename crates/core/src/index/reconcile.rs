@@ -3,6 +3,7 @@
 use super::links::{BEST_FILE, resolve_links_of};
 use super::schema::{BATCH, MAX_INDEXED_BODY, OPENED_CAP};
 use super::{Change, Index, Phase, Progress, ReconcileStats};
+use crate::note::Syntax;
 use crate::walk::{self, FileKind, ScanOptions};
 use crate::{Error, Result};
 use crate::{markdown, path};
@@ -686,11 +687,11 @@ fn read_content(f: &walk::FileMeta) -> Content {
         // content.
         _ => None,
     };
-    // Only a note is markdown. A `.py`'s `#` comments are not tags and its `#!` line is not a
-    // heading, so nothing but a note reaches the analyser.
-    let analysis = match f.kind {
-        FileKind::Markdown => text.as_deref().map(markdown::analyze),
-        _ => None,
+    // Only a note and an org file have links, tags and headings. A `.py`'s `#` comments are not
+    // tags and its `#!` line is not a heading, so nothing else reaches an analyser.
+    let analysis = match f.kind == FileKind::Markdown || path::is_org(&f.rel_path) {
+        true => text.as_deref().map(|t| Syntax::of(&f.rel_path).analyze(t)),
+        false => None,
     };
     // A code file's declarations, read from the text its body is.
     let symbols = match (f.kind, text.as_deref()) {

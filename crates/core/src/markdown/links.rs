@@ -377,12 +377,12 @@ fn moved<'a>(
 }
 
 /// What one move is, for the three path forms that have to follow it.
-struct Moved<'a> {
+pub(crate) struct Moved<'a> {
     /// The note's folder before the move, and after it.
-    dir_old: &'a str,
-    dir_new: &'a str,
-    targets: &'a HashMap<String, String>,
-    moves: &'a HashMap<String, String>,
+    pub(crate) dir_old: &'a str,
+    pub(crate) dir_new: &'a str,
+    pub(crate) targets: &'a HashMap<String, String>,
+    pub(crate) moves: &'a HashMap<String, String>,
 }
 
 impl Moved<'_> {
@@ -393,7 +393,7 @@ impl Moved<'_> {
     /// Nothing outside the vault is reachable through it: a path is only ever rewritten when the
     /// index resolved it to a file *before* the move, which is what leaves an `https://` URL, a
     /// bare `#anchor` and a `../..` past the root alone.
-    fn repoint(&self, written: &str) -> Option<String> {
+    pub(crate) fn repoint(&self, written: &str) -> Option<String> {
         let key = path_key(self.dir_old, written)?;
         let (old, new) = moved(&key, self.targets, self.moves)?;
         // A path, so it still finds the file only if it spells that file's path from the note's
@@ -431,7 +431,7 @@ fn markdown_edit(text: &str, link: &Link, m: &Moved) -> Option<(Range<usize>, St
 
 /// The key a path written in a note in `dir` is looked up by — from that folder, or from the vault
 /// root when it starts with `/` — or `None` for an empty one and one that climbs out of the vault.
-fn path_key(dir: &str, written: &str) -> Option<String> {
+pub(crate) fn path_key(dir: &str, written: &str) -> Option<String> {
     let rooted = written.starts_with('/');
     (!written.is_empty() && (rooted || path::stays_inside(dir, written)))
         .then(|| link_key(&path::resolve(dir, written)))

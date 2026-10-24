@@ -112,6 +112,14 @@ pub fn is_note(rel: &str) -> bool {
     file_type(rel) == FileType::Note
 }
 
+/// Whether `rel` is an org file by its name: `.org`, in any case. A text file to everything but
+/// what reads its links and headings ([`crate::note::Syntax`]).
+pub fn is_org(rel: &str) -> bool {
+    basename(rel)
+        .rsplit_once('.')
+        .is_some_and(|(stem, ext)| !stem.is_empty() && ext.eq_ignore_ascii_case("org"))
+}
+
 /// Whether `rel` is a draw.io diagram by its name: `.drawio`, `.dio`, or `.drawio.xml`, the three
 /// names draw.io saves under. A plain `.xml` holding a diagram is only known by its bytes.
 pub fn is_diagram(rel: &str) -> bool {
