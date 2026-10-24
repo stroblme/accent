@@ -522,6 +522,13 @@ async fn lazy_drill(app: &Rc<App>, rel: &str) {
         );
     }
     resized(app, width, height).await;
+    // Placeholders as tall as their outputs at another zoom too, pictures scaled with the text.
+    app.set_zoom(2.0);
+    if let Some(tab) = reopened(app, rel).await {
+        let (built, off, ..) = sweep(&tab).await;
+        println!("bench notebook lazy sweep zoom=200 built={built} off_px={off}");
+    }
+    app.set_zoom(1.0);
 
     let Some(tab) = reopened(app, rel).await else {
         return;
@@ -945,6 +952,11 @@ async fn look_drill(app: &Rc<App>, rel: &str, dir: &Path) {
                 let shot = format!("{name}-{:.0}-{screen}.png", zoom * 100.0);
                 super::diagram::shoot(app.window.upcast_ref(), &dir.join(shot));
             }
+            println!(
+                "bench notebook look {name} zoom={:.0} pictures={:?}",
+                zoom * 100.0,
+                tab.bench_pictures()
+            );
         }
     }
     app.set_zoom(1.0);

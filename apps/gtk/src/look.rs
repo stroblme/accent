@@ -355,20 +355,22 @@ fn paint(texture: &gdk::Texture, look: Look, (paper, ink): Page) -> Option<gdk::
 }
 
 /// A picture with no file behind it, a notebook's output: `bytes` decoded, or an SVG's text drawn
-/// at `scale`, recoloured as [`show`] recolours an image file (the image rule), and whether the
-/// look changed it. Nothing is cached, there being no file to keep a verdict for. On a worker.
+/// at `scale` and `zoom`, recoloured as [`show`] recolours an image file (the image rule), and
+/// whether the look changed it. Nothing is cached, there being no file to keep a verdict for. On a
+/// worker.
 pub fn show_bytes(
     bytes: &[u8],
     svg: bool,
     look: Look,
     scale: i32,
+    zoom: f64,
 ) -> Result<(Shown, bool), glib::Error> {
     if svg {
         let filtered = look
             .palette(true, false)
             .and_then(|page| filtered(&String::from_utf8_lossy(bytes), page, look.fills(page)));
         let drawn = filtered.as_deref().map_or(bytes, str::as_bytes);
-        let (texture, size) = rasterise(drawn, scale, 1.0)?;
+        let (texture, size) = rasterise(drawn, scale, zoom)?;
         let shown = Shown {
             original: None,
             texture,

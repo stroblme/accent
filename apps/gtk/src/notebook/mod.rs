@@ -96,6 +96,8 @@ pub struct NotebookTab {
     kernel: kernel::Hold,
     /// The notebook's fonts at its zoom, one rule for all its cells.
     font: RefCell<Option<gtk::CssProvider>>,
+    /// Its zoom, which its outputs' pictures and formulas are drawn at as the rule sets its text.
+    zoom: Rc<Cell<f64>>,
     /// A font change recuts code-cell messages after the new text layout has landed.
     refit_after_layout: Cell<bool>,
     pub save: SaveState,
@@ -195,6 +197,7 @@ pub fn open(
         presenting: Cell::new(false),
         kernel: kernel::Hold::default(),
         font: RefCell::default(),
+        zoom: Rc::new(Cell::new(1.0)),
         refit_after_layout: Cell::new(false),
         save: SaveState::at(etag, digest),
         autosave: Debounce::new(crate::editor::AUTOSAVE),
@@ -398,7 +401,11 @@ impl NotebookTab {
         let view = {
             let model = self.model.borrow();
             let at = model.position(id).expect("a cell of the model");
-            Rc::new(CellView::new(&model.cells()[at], self.gutter.get()))
+            Rc::new(CellView::new(
+                &model.cells()[at],
+                self.gutter.get(),
+                &self.zoom,
+            ))
         };
         let weak = Rc::downgrade(self);
         let on = move |f: fn(&Rc<NotebookTab>, CellId)| {
@@ -1399,6 +1406,11 @@ impl NotebookTab {
             crate::editor::font_css(&doc, &format!("#{name} .accent-doc"), zoom),
             crate::editor::font_css(&mono, &format!("#{name} .accent-code"), zoom),
             crate::editor::font_css(&mono, &format!("#{name} .notebook-output"), zoom),
+            // What outputs draw in the interface font, a table and the lines about it, scaled too.
+            format!(
+                "#{name} .notebook-outputs label {{ font-size: {:.0}%; }}",
+                zoom * 100.0
+            ),
         ]
         .join(" ");
         let provider = gtk::CssProvider::new();
@@ -1410,8 +1422,12 @@ impl NotebookTab {
         );
         *self.font.borrow_mut() = Some(provider);
         self.gutter.set(cell::count_width(&self.scroller));
+        let rezoomed = self.zoom.replace(zoom) != zoom;
         for view in self.views.borrow().iter() {
             view.set_gutter(self.gutter.get());
+            if rezoomed {
+                view.outputs.rezoom();
+            }
             if let Some(editor) = view.editor() {
                 crate::editor::refont(&editor.view);
             }
@@ -1801,6 +1817,15 @@ impl NotebookTab {
         if let Some(id) = id {
             self.select(id);
         }
+    }
+
+    /// The sizes every cell's built pictures show at, and the width of the outputs they are in.
+    pub fn bench_pictures(&self) -> Vec<(i32, i32, i32)> {
+        let views = self.views.borrow();
+        views
+            .iter()
+            .flat_map(|v| v.outputs.picture_sizes())
+            .collect()
     }
 
     /// Show the add strip in cell `n`'s gap, as the pointer coming into it does.

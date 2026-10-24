@@ -4,7 +4,8 @@
 //! where it does not parse; JSON and text in monospace, ANSI colours from the terminal's palette.
 //! What only a script draws says what it was.
 //! A cell's outputs are built as its editor is, once it nears the view: until then a placeholder
-//! as tall as they will be holds their place ([`Held`]).
+//! as tall as they will be holds their place ([`Held`]). Pictures and formulas are drawn at the
+//! notebook's zoom, as its text is set ([`Figure`]).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -37,7 +38,7 @@ pub struct Counts {
 enum Part {
     /// A picture's data, decoded and recoloured on a worker each time the look changes.
     Picture {
-        picture: gtk::Picture,
+        picture: Figure,
         bytes: Rc<Vec<u8>>,
         svg: bool,
         recoloured: Rc<Cell<bool>>,
@@ -56,6 +57,8 @@ pub struct Outputs {
     slots: RefCell<Vec<Slot>>,
     /// What holds their place until they are built.
     held: RefCell<Option<Held>>,
+    /// The notebook's zoom.
+    zoom: Rc<Cell<f64>>,
 }
 
 /// One output's widgets in the box, and its parts.
@@ -74,15 +77,15 @@ struct Stream {
 
 impl Outputs {
     /// The place of `cell`'s outputs, a code cell's, or of the pictures a markdown cell carries,
-    /// held until they are [built](Self::build).
-    pub fn new(cell: &NotebookCell) -> Outputs {
+    /// held until they are [built](Self::build), at the notebook's `zoom`.
+    pub fn new(cell: &NotebookCell, zoom: Rc<Cell<f64>>) -> Outputs {
         let shapes: Vec<Shape> = match cell.kind() {
             Kind::Code => cell.outputs().iter().map(shape).collect(),
             _ => pictures(cell.attachments()).map(picture_shape).collect(),
         };
         let widget = gtk::Box::new(gtk::Orientation::Vertical, SPACING);
         widget.add_css_class("notebook-outputs");
-        let held = (!shapes.is_empty()).then(|| Held::new(shapes));
+        let held = (!shapes.is_empty()).then(|| Held::new(shapes, zoom.clone()));
         if let Some(held) = &held {
             widget.append(held);
         }
@@ -90,6 +93,25 @@ impl Outputs {
             widget,
             slots: RefCell::default(),
             held: RefCell::new(held),
+            zoom,
+        }
+    }
+
+    /// The notebook's zoom changed: what is drawn at it is measured again, and an SVG drawn
+    /// again at it.
+    pub fn rezoom(&self) {
+        if let Some(held) = self.held.borrow().as_ref() {
+            held.queue_resize();
+        }
+        for slot in self.slots.borrow().iter() {
+            for widget in &slot.widgets {
+                widget.queue_resize();
+            }
+            for part in &slot.parts {
+                if let Part::Picture { svg: true, .. } = part {
+                    show_picture(part);
+                }
+            }
         }
     }
 
@@ -122,6 +144,19 @@ impl Outputs {
     #[cfg(feature = "bench")]
     pub fn is_stale(&self) -> bool {
         self.widget.has_css_class("stale")
+    }
+
+    /// The sizes the pictures show at, and the width of the outputs they are in.
+    #[cfg(feature = "bench")]
+    pub fn picture_sizes(&self) -> Vec<(i32, i32, i32)> {
+        let slots = self.slots.borrow();
+        let parts = slots.iter().flat_map(|slot| &slot.parts);
+        let pictures = parts.filter_map(|part| match part {
+            Part::Picture { picture, .. } => Some(picture.imp().picture.clone()),
+            _ => None,
+        });
+        let of = self.widget.width();
+        pictures.map(|p| (p.width(), p.height(), of)).collect()
     }
 
     /// Whether the outputs are still held.
@@ -308,15 +343,10 @@ impl Outputs {
             true => data.as_bytes().to_vec(),
             false => glib::base64_decode(data),
         };
-        let picture = gtk::Picture::builder()
-            .can_shrink(true)
-            .content_fit(gtk::ContentFit::ScaleDown)
-            .halign(gtk::Align::Start)
-            .build();
+        let picture = Figure::new(self.zoom.clone());
         // As large as it will show before it is decoded, so the cell does not grow then.
         if let Some(size) = picture_size(mime, data) {
-            let (w, h) = shown_size(size);
-            picture.set_size_request(w, h);
+            picture.set_own(size);
         }
         self.put(&picture);
         let part = Part::Picture {
@@ -385,7 +415,7 @@ impl Outputs {
         let (tex, display) = tex_of(latex);
         match math::formula(&self.widget, tex, display, 16.0) {
             Some(formula) => {
-                let view = math::FormulaView::new(formula);
+                let view = math::FormulaView::new(formula, self.zoom.clone());
                 view.set_halign(gtk::Align::Start);
                 self.put(&view);
             }
@@ -445,8 +475,10 @@ fn pictures(attachments: &[core::Attachment]) -> impl Iterator<Item = (&str, &st
 struct Shape {
     /// Its text, as lines of the outputs' monospace font that wrap at the width they are given.
     text: Option<String>,
-    /// A part of a fixed width and height: a picture, or a table's spacing.
-    fixed: (i32, i32),
+    /// A picture's own size, which shows as [`shown_size`] says; `(0, 0)` for none.
+    picture: (i32, i32),
+    /// Room of a fixed height besides: a table's spacing.
+    gaps: i32,
 }
 
 /// `output`'s shape, in the form [`Outputs::add`] draws it. A table's rows and notes, markdown
@@ -470,7 +502,8 @@ fn shape(output: &Output) -> Shape {
                 let gaps = 4 * (table.rows as i32 - 1).max(0) + SPACING * table.notes.len() as i32;
                 Shape {
                     text: Some("\n".repeat(lines.saturating_sub(1))),
-                    fixed: (0, gaps),
+                    picture: (0, 0),
+                    gaps,
                 }
             }
             Some(Form::Markdown(text) | Form::Latex(text) | Form::Text(text)) => text_shape(text),
@@ -486,15 +519,17 @@ fn text_shape(text: &str) -> Shape {
     plain.truncate(plain.trim_end_matches('\n').len());
     Shape {
         text: Some(plain),
-        fixed: (0, 0),
+        picture: (0, 0),
+        gaps: 0,
     }
 }
 
-/// A picture as large as it will show.
+/// A picture, of its own size.
 fn picture_shape((mime, data): (&str, &str)) -> Shape {
     Shape {
         text: None,
-        fixed: picture_size(mime, data).map_or((0, 0), shown_size),
+        picture: picture_size(mime, data).unwrap_or((0, 0)),
+        gaps: 0,
     }
 }
 
@@ -590,20 +625,22 @@ fn svg_size(svg: &str) -> Option<(i32, i32)> {
 }
 
 glib::wrapper! {
-    /// A cell's outputs before they are built: as tall as they will be at the width it is given,
-    /// and as wide at least as their widest picture, so nothing moves when they are built.
+    /// A cell's outputs before they are built: as tall as they will be at the width it is given
+    /// and the notebook's zoom, and as wide as their widest picture would be, so nothing moves
+    /// when they are built.
     pub struct Held(ObjectSubclass<imp::Held>)
         @extends gtk::Widget,
         @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
 }
 
 impl Held {
-    fn new(shapes: Vec<Shape>) -> Held {
+    fn new(shapes: Vec<Shape>, zoom: Rc<Cell<f64>>) -> Held {
         let held: Held = glib::Object::new();
         // The text views' font: their class, and `monospace` until a notebook's font is set.
         held.add_css_class("notebook-output");
         held.add_css_class("monospace");
         held.imp().shapes.replace(shapes);
+        held.imp().zoom.replace(zoom);
         held
     }
 
@@ -617,7 +654,8 @@ impl Held {
     }
 
     /// How tall the outputs are at `width`: their lines wrapped at as many columns of the font as
-    /// fit, each as tall as a text view rounds it, their fixed parts, and the room between them.
+    /// fit, each as tall as a text view rounds it, their pictures as they show at `width`, their
+    /// fixed parts, and the room between them.
     fn height(&self, width: i32) -> i32 {
         let shapes = self.imp().shapes.borrow();
         if shapes.is_empty() {
@@ -636,9 +674,12 @@ impl Held {
                 lines.map(|l| (i64::from(rows(l, fit)) * i64::from(line) + scale / 2) / scale);
             each.sum::<i64>() as i32
         };
+        let zoom = self.imp().zoom.borrow().get();
         let parts: i32 = shapes
             .iter()
-            .map(|s| s.text.as_deref().map_or(0, tall) + s.fixed.1)
+            .map(|s| {
+                s.text.as_deref().map_or(0, tall) + shown_size(s.picture, zoom, width).1 + s.gaps
+            })
             .sum();
         parts + SPACING * (shapes.len() as i32 - 1)
     }
@@ -650,6 +691,7 @@ mod imp {
     #[derive(Default)]
     pub struct Held {
         pub(super) shapes: RefCell<Vec<Shape>>,
+        pub(super) zoom: RefCell<Rc<Cell<f64>>>,
     }
 
     #[glib::object_subclass]
@@ -667,14 +709,21 @@ mod imp {
         }
 
         fn measure(&self, orientation: gtk::Orientation, for_size: i32) -> (i32, i32, i32, i32) {
-            let size = match orientation {
+            match orientation {
+                // As narrow as a picture may shrink to, as wide as the widest shows.
                 gtk::Orientation::Horizontal => {
+                    let zoom = self.zoom.borrow().get();
                     let shapes = self.shapes.borrow();
-                    shapes.iter().map(|s| s.fixed.0).max().unwrap_or(0)
+                    let widths = shapes
+                        .iter()
+                        .map(|s| shown_size(s.picture, zoom, i32::MAX).0);
+                    (0, widths.max().unwrap_or(0), -1, -1)
                 }
-                _ => self.obj().height(for_size),
-            };
-            (size, size, -1, -1)
+                _ => {
+                    let size = self.obj().height(for_size);
+                    (size, size, -1, -1)
+                }
+            }
         }
     }
 }
@@ -715,19 +764,118 @@ fn paint_ansi(view: &gtk::TextView) {
     }
 }
 
-/// How wide a picture is shown at most, in pixels.
+/// How wide a picture is shown at most at 100 %, in pixels.
 const MAX_WIDTH: i32 = 720;
 
-/// How large a picture `w` by `h` shows: at its own size, as Jupyter shows a picture, but no
-/// wider than a column of text.
-fn shown_size((w, h): (i32, i32)) -> (i32, i32) {
-    let shown = w.min(MAX_WIDTH);
+/// How large a picture `w` by `h` shows at `zoom` in `width`: at its own size, as Jupyter shows a
+/// picture, scaled as the notebook's text is, but no wider than a column of text nor than `width`.
+fn shown_size((w, h): (i32, i32), zoom: f64, width: i32) -> (i32, i32) {
+    let zoomed = |n: i32| f64::from(n) * zoom;
+    let shown = zoomed(w)
+        .min(zoomed(MAX_WIDTH))
+        .min(f64::from(width.max(0)));
     match w {
-        0 => (shown, h),
+        0 => (0, zoomed(h).round() as i32),
         w => (
-            shown,
-            (f64::from(h) * f64::from(shown) / f64::from(w)).round() as i32,
+            shown.round() as i32,
+            (f64::from(h) * shown / f64::from(w)).round() as i32,
         ),
+    }
+}
+
+glib::wrapper! {
+    /// A picture as large as it shows ([`shown_size`]) in the width it is given, its height
+    /// following its width; until it is decoded, as large as its header says it will be.
+    pub struct Figure(ObjectSubclass<figure::Figure>)
+        @extends gtk::Widget,
+        @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
+}
+
+impl Figure {
+    fn new(zoom: Rc<Cell<f64>>) -> Figure {
+        let figure: Figure = glib::Object::new();
+        figure.imp().zoom.replace(zoom);
+        figure
+    }
+
+    /// The picture's own size, in pixels at 100 %.
+    fn set_own(&self, size: (i32, i32)) {
+        self.imp().own.set(size);
+        self.queue_resize();
+    }
+
+    fn set_paintable(&self, paintable: &gdk::Paintable) {
+        self.imp().picture.set_paintable(Some(paintable));
+    }
+
+    fn zoom(&self) -> f64 {
+        self.imp().zoom.borrow().get()
+    }
+}
+
+mod figure {
+    use super::*;
+
+    pub struct Figure {
+        pub(super) picture: gtk::Picture,
+        pub(super) own: Cell<(i32, i32)>,
+        pub(super) zoom: RefCell<Rc<Cell<f64>>>,
+    }
+
+    impl Default for Figure {
+        fn default() -> Self {
+            Figure {
+                picture: gtk::Picture::builder()
+                    .can_shrink(true)
+                    .content_fit(gtk::ContentFit::Contain)
+                    .build(),
+                own: Cell::default(),
+                zoom: RefCell::default(),
+            }
+        }
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for Figure {
+        const NAME: &'static str = "AccentNotebookFigure";
+        type Type = super::Figure;
+        type ParentType = gtk::Widget;
+    }
+
+    impl ObjectImpl for Figure {
+        fn constructed(&self) {
+            self.parent_constructed();
+            self.picture.set_parent(&*self.obj());
+        }
+
+        fn dispose(&self) {
+            self.picture.unparent();
+        }
+    }
+
+    impl WidgetImpl for Figure {
+        fn request_mode(&self) -> gtk::SizeRequestMode {
+            gtk::SizeRequestMode::HeightForWidth
+        }
+
+        fn measure(&self, orientation: gtk::Orientation, for_size: i32) -> (i32, i32, i32, i32) {
+            let (own, zoom) = (self.own.get(), self.zoom.borrow().get());
+            match orientation {
+                gtk::Orientation::Horizontal => (0, shown_size(own, zoom, i32::MAX).0, -1, -1),
+                _ => {
+                    let width = if for_size < 0 { i32::MAX } else { for_size };
+                    let h = shown_size(own, zoom, width).1;
+                    (h, h, -1, -1)
+                }
+            }
+        }
+
+        /// At the start of the width it is given, as large as it shows there.
+        fn size_allocate(&self, width: i32, height: i32, _baseline: i32) {
+            let (w, h) = shown_size(self.own.get(), self.zoom.borrow().get(), width);
+            self.picture
+                .size_allocate(&gtk::Allocation::new(0, 0, w, h.min(height)), -1);
+        }
     }
 }
 
@@ -744,12 +892,12 @@ fn show_picture(part: &Part) {
         return;
     };
     let (bytes, svg, look) = (bytes.clone(), *svg, look::Look::now());
-    let scale = picture.scale_factor().max(1);
+    let (scale, zoom) = (picture.scale_factor().max(1), picture.zoom());
     let data = bytes.to_vec();
     let (picture, recoloured) = (picture.downgrade(), recoloured.clone());
     glib::spawn_future_local(async move {
         let shown = crate::work::off_thread("notebook picture", move || {
-            look::show_bytes(&data, svg, look, scale).ok()
+            look::show_bytes(&data, svg, look, scale, zoom).ok()
         })
         .await
         .flatten();
@@ -757,10 +905,8 @@ fn show_picture(part: &Part) {
             return;
         };
         let paintable = shown.paintable();
-        // A picture's natural size alone is not what a shrinkable one is given in a column.
-        let (w, h) = shown_size((paintable.intrinsic_width(), paintable.intrinsic_height()));
-        picture.set_size_request(w, h);
-        picture.set_paintable(Some(&paintable));
+        picture.set_own((paintable.intrinsic_width(), paintable.intrinsic_height()));
+        picture.set_paintable(&paintable);
         recoloured.set(changed);
     });
 }
@@ -802,7 +948,17 @@ mod tests {
         png.extend([0, 0, 5, 160, 0, 0, 3, 132, 8, 6, 0, 0, 0]);
         let png = glib::base64_encode(&png);
         assert_eq!(picture_size("image/png", &png), Some((1440, 900)));
-        assert_eq!(shown_size((1440, 900)), (720, 450));
+        assert_eq!(shown_size((1440, 900), 1.0, i32::MAX), (720, 450));
+        assert_eq!(
+            shown_size((300, 200), 2.0, i32::MAX),
+            (600, 400),
+            "scaled as the text is"
+        );
+        assert_eq!(
+            shown_size((1440, 900), 2.0, 1000),
+            (1000, 625),
+            "no wider than the cell"
+        );
         // A JFIF segment, then the frame header: 160 high, 240 wide.
         let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0, 16];
         jpeg.extend([0; 14]);

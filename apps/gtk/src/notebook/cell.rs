@@ -5,6 +5,7 @@
 //! serve ([`Tools`], [`inserter`]): a long notebook would otherwise build them per cell up front.
 
 use std::cell::{OnceCell, RefCell};
+use std::rc::Rc;
 
 use accent_core::notebook::{Cell, CellId, Format, Kind, Output};
 use adw::prelude::*;
@@ -120,8 +121,8 @@ impl Editor {
 
 impl CellView {
     /// `cell`'s widgets, its source shown by a placeholder until [`build_editor`](Self::build_editor),
-    /// its `[n]` column `gutter` wide.
-    pub fn new(cell: &Cell, gutter: i32) -> CellView {
+    /// its `[n]` column `gutter` wide, its outputs at the notebook's `zoom`.
+    pub fn new(cell: &Cell, gutter: i32, zoom: &Rc<std::cell::Cell<f64>>) -> CellView {
         let count = gtk::Label::builder()
             .label(count_label(cell))
             .width_request(gutter)
@@ -149,7 +150,7 @@ impl CellView {
             _ => "accent-code",
         });
 
-        let outputs = Outputs::new(cell);
+        let outputs = Outputs::new(cell, zoom.clone());
         let body = gtk::Box::new(gtk::Orientation::Vertical, 6);
         body.set_hexpand(true);
         body.append(&placeholder);

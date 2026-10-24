@@ -6,7 +6,7 @@
 //! CoreText cannot be given), its glyphs drawn from their outlines. A character the math font
 //! lacks, a CJK `\text{}` say, is set by Pango in [`FALLBACK`] and the fonts it falls back on.
 
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::NonNull;
@@ -327,17 +327,18 @@ impl Fonts {
 }
 
 glib::wrapper! {
-    /// A formula on its own, as a notebook's LaTeX output: as large as its layout, painted in the
-    /// widget's colour, so a theme change only paints it again.
+    /// A formula on its own, as a notebook's LaTeX output: as large as its layout at the
+    /// notebook's zoom, painted in the widget's colour, so a theme change only paints it again.
     pub struct FormulaView(ObjectSubclass<imp::FormulaView>)
         @extends gtk::Widget,
         @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
 }
 
 impl FormulaView {
-    pub fn new(formula: Rc<Layout>) -> FormulaView {
+    pub fn new(formula: Rc<Layout>, zoom: Rc<Cell<f64>>) -> FormulaView {
         let view: FormulaView = glib::Object::new();
         let _ = view.imp().formula.set(formula);
+        let _ = view.imp().zoom.set(zoom);
         view
     }
 }
@@ -348,6 +349,13 @@ mod imp {
     #[derive(Default)]
     pub struct FormulaView {
         pub(super) formula: OnceCell<Rc<Layout>>,
+        pub(super) zoom: OnceCell<Rc<Cell<f64>>>,
+    }
+
+    impl FormulaView {
+        fn scale(&self) -> f32 {
+            self.zoom.get().map_or(1.0, |zoom| zoom.get() as f32)
+        }
     }
 
     #[glib::object_subclass]
@@ -365,13 +373,15 @@ mod imp {
             let Some(f) = self.formula.get() else {
                 return (0, 0, -1, -1);
             };
+            let scale = self.scale();
             match orientation {
                 gtk::Orientation::Horizontal => {
-                    let w = f.width.ceil() as i32;
+                    let w = (f.width * scale).ceil() as i32;
                     (w, w, -1, -1)
                 }
                 _ => {
-                    let (above, below) = (f.ascent.ceil() as i32, f.descent.ceil() as i32);
+                    let above = (f.ascent * scale).ceil() as i32;
+                    let below = (f.descent * scale).ceil() as i32;
                     (above + below, above + below, above, above)
                 }
             }
@@ -381,9 +391,10 @@ mod imp {
             let Some(f) = self.formula.get() else {
                 return;
             };
-            let ink = self.obj().color();
+            let (ink, scale) = (self.obj().color(), self.scale());
             let colour = |c: Color| crate::theme::rgba([c.r, c.g, c.b], f32::from(c.a) / 255.0);
-            paint(snapshot, f, (0.0, f.ascent.ceil()), 1.0, &ink, colour);
+            let baseline = (f.ascent * scale).ceil();
+            paint(snapshot, f, (0.0, baseline), scale, &ink, colour);
         }
     }
 }
