@@ -402,8 +402,8 @@ pub(super) struct Debug {
 }
 
 impl Debug {
-    pub(super) fn new(data: Data) -> Debug {
-        let (strip, state, resume, pause) = strip();
+    pub(super) fn new(data: Data, python: Option<&gtk::MenuButton>) -> Debug {
+        let (strip, state, resume, pause) = strip(python);
 
         let frames = data.frames.clone();
         let calls = Tree::new(Rc::new(move |thread, list| {
@@ -723,26 +723,26 @@ fn watch_body(watched: &Tree, data: &Data) -> gtk::Box {
     body
 }
 
-/// The controls, flat icon buttons on the window's actions, which are enabled as the session's
-/// state allows: Continue or Pause (Start Debugging while no session runs), the steps, Restart
-/// and Stop, then the Debug Console; and under them what the program is doing.
-fn strip() -> (gtk::Box, gtk::Label, gtk::Button, gtk::Button) {
+/// The Python Environment dropdown, then the controls, flat icon buttons on the window's
+/// actions, which are enabled as the session's state allows: Continue or Pause (Start Debugging
+/// while no session runs), the steps, Restart and Stop, then the Debug Console; and under them
+/// what the program is doing.
+fn strip(python: Option<&gtk::MenuButton>) -> (gtk::Box, gtk::Label, gtk::Button, gtk::Button) {
     let resume = strip_button("media-playback-start-symbolic", "win.debug-continue");
     let pause = strip_button("media-playback-pause-symbolic", "win.debug-pause");
-    let (strip, state) = strip_of(&[
-        &strip_button(
-            "application-x-executable-symbolic",
-            "win.python-environment",
-        ),
-        &resume,
-        &pause,
-        &strip_button("dap-step-over-symbolic", "win.debug-step-over"),
-        &strip_button("dap-step-into-symbolic", "win.debug-step-into"),
-        &strip_button("dap-step-out-symbolic", "win.debug-step-out"),
-        &strip_button("view-refresh-symbolic", "win.debug-restart"),
-        &strip_button("media-playback-stop-symbolic", "win.debug-stop"),
-        &strip_button("dap-console-symbolic", "win.debug-console"),
-    ]);
+    let (strip, state) = strip_of(
+        python,
+        &[
+            &resume,
+            &pause,
+            &strip_button("dap-step-over-symbolic", "win.debug-step-over"),
+            &strip_button("dap-step-into-symbolic", "win.debug-step-into"),
+            &strip_button("dap-step-out-symbolic", "win.debug-step-out"),
+            &strip_button("view-refresh-symbolic", "win.debug-restart"),
+            &strip_button("media-playback-stop-symbolic", "win.debug-stop"),
+            &strip_button("dap-console-symbolic", "win.debug-console"),
+        ],
+    );
     (strip, state, resume, pause)
 }
 
@@ -756,13 +756,23 @@ pub(super) fn strip_button(icon: &str, action: &str) -> gtk::Button {
 }
 
 /// A strip of `buttons` over a dim caption, hidden until it is shown: the debugger's, and the
-/// notebook kernel's.
-pub(super) fn strip_of(buttons: &[&gtk::Button]) -> (gtk::Box, gtk::Label) {
-    // Centred, as the pane switcher's icons are in the header above, and the line under them too.
-    let row = gtk::Box::builder().halign(gtk::Align::Center).build();
+/// notebook kernel's. With the `python` dropdown, the row is the Git pane's branch row: the
+/// dropdown taking the spare width, the buttons at the trailing edge.
+pub(super) fn strip_of(
+    python: Option<&gtk::MenuButton>,
+    buttons: &[&gtk::Button],
+) -> (gtk::Box, gtk::Label) {
+    let controls = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     for button in buttons {
-        row.append(*button);
+        controls.append(*button);
     }
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    match python {
+        Some(python) => row.append(python),
+        // Centred, as the pane switcher's icons are in the header above.
+        None => row.set_halign(gtk::Align::Center),
+    }
+    row.append(&controls);
     let state = gtk::Label::builder()
         .ellipsize(pango::EllipsizeMode::End)
         .build();

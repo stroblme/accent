@@ -1687,6 +1687,9 @@ impl App {
             vault.set_ghost(config.ghost_text);
             vault.set_words(config.word_suggestions);
             if python_changed {
+                if let Some(sidebar) = self.sidebar.get() {
+                    sidebar.set_python(&vault.config().debug.python);
+                }
                 for doc in self.docs() {
                     match doc {
                         Doc::Text(tab)

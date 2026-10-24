@@ -5,6 +5,7 @@
 //! up over any tab while a session runs.
 
 use super::debug::{self, Debug};
+use super::python::{self, Picker};
 use super::sections::Sections;
 use super::widgets::Section;
 use crate::widgets::{scroller, status_page};
@@ -32,6 +33,9 @@ pub(super) struct Code {
     /// Outputs over what it is doing, up while it is in front and no debug session runs.
     kernel: gtk::Box,
     kernel_state: gtk::Label,
+    /// The Python Environment dropdowns of the debugger's strip and of the kernel's, in a window
+    /// with a vault: each row holds its own.
+    pythons: Option<[Picker; 2]>,
     /// The goals, a label each.
     goal_labels: gtk::Box,
     expected: Section,
@@ -45,7 +49,7 @@ pub(super) struct Code {
 }
 
 impl Code {
-    pub(super) fn new(debug: Option<debug::Data>) -> Code {
+    pub(super) fn new(debug: Option<debug::Data>, python: Option<python::Data>) -> Code {
         let goal_labels = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(12)
@@ -59,7 +63,13 @@ impl Code {
         expected_label.set_margin_end(12);
         expected_label.set_margin_bottom(12);
         let expected = Section::new("Expected Type", &scroller(&expected_label));
-        let debug = debug.map(Debug::new);
+        let python = python.map(Rc::new);
+        let pythons = python.map(|data| [Picker::new(&data), Picker::new(&data)]);
+        let [debug_python, kernel_python] = pythons
+            .as_ref()
+            .map(|[d, k]| [Some(&d.button), Some(&k.button)])
+            .unwrap_or_default();
+        let debug = debug.map(|data| Debug::new(data, debug_python));
         let mut stacked = vec![&goals.root, &expected.root];
         stacked.extend(debug.iter().flat_map(|d| d.sections().map(|s| &s.root)));
         let sections = Sections::new(&stacked);
@@ -68,17 +78,16 @@ impl Code {
         if let Some(debug) = &debug {
             page.append(&debug.strip);
         }
-        let (kernel, kernel_state) = debug::strip_of(&[
-            &debug::strip_button(
-                "application-x-executable-symbolic",
-                "win.python-environment",
-            ),
-            &debug::strip_button("media-seek-forward-symbolic", "win.notebook-run-all"),
-            &debug::strip_button("media-playback-stop-symbolic", "win.notebook-interrupt"),
-            &debug::strip_button("view-refresh-symbolic", "win.notebook-restart"),
-            &debug::strip_button("system-shutdown-symbolic", "win.notebook-shut-down"),
-            &debug::strip_button("edit-clear-all-symbolic", "win.notebook-clear-all-outputs"),
-        ]);
+        let (kernel, kernel_state) = debug::strip_of(
+            kernel_python,
+            &[
+                &debug::strip_button("media-seek-forward-symbolic", "win.notebook-run-all"),
+                &debug::strip_button("media-playback-stop-symbolic", "win.notebook-interrupt"),
+                &debug::strip_button("view-refresh-symbolic", "win.notebook-restart"),
+                &debug::strip_button("system-shutdown-symbolic", "win.notebook-shut-down"),
+                &debug::strip_button("edit-clear-all-symbolic", "win.notebook-clear-all-outputs"),
+            ],
+        );
         page.append(&kernel);
         page.append(&sections.root);
         let root = gtk::Stack::builder().vexpand(true).build();
@@ -102,6 +111,7 @@ impl Code {
             debugging: Cell::new(false),
             kernel,
             kernel_state,
+            pythons,
             goal_labels,
             expected,
             expected_label,
@@ -187,8 +197,10 @@ impl Code {
         }
     }
 
+    /// `get_visible`, not `is_visible`: the strip's own flag, which a hidden sidebar does not
+    /// clear, so a strip put away meanwhile is not left up for the sidebar's return.
     fn strip_up(&self) -> bool {
-        self.debugging.get() || self.kernel.is_visible()
+        self.debugging.get() || self.kernel.get_visible()
     }
 
     /// The kernel's strip saying `line`, `why` in its tooltip, or put away (`None`).
@@ -197,9 +209,26 @@ impl Code {
             self.kernel_state.set_text(line);
             self.kernel_state.set_tooltip_text(why);
         }
-        if self.kernel.is_visible() != shown.is_some() {
+        if self.kernel.get_visible() != shown.is_some() {
             self.kernel.set_visible(shown.is_some());
             self.pick_page();
+        }
+    }
+
+    /// Name `command`, the vault's Python, on the dropdowns.
+    pub(super) fn set_python(&self, command: &[String]) {
+        for picker in self.pythons.iter().flatten() {
+            picker.set(command);
+        }
+    }
+
+    /// The dropdown of the strip that is up, if one is.
+    pub(super) fn python_button(&self) -> Option<gtk::MenuButton> {
+        let [debug, kernel] = self.pythons.as_ref()?;
+        match (self.debugging.get(), self.kernel.get_visible()) {
+            (true, _) => Some(debug.button.clone()),
+            (_, true) => Some(kernel.button.clone()),
+            _ => None,
         }
     }
 

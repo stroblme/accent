@@ -1,16 +1,22 @@
-//! Choose the Python used by this vault's notebooks, debugger and language server.
+//! Choose the Python used by this vault's notebooks, debugger and language server, through the
+//! Code pane's Python Environment dropdown (`sidebar::python`).
 
-use accent_api::python::{Environment, Environments};
-use adw::prelude::*;
+use accent_api::python::Environments;
 use sourceview5::prelude::BufferExt;
 use std::rc::Rc;
 
 use crate::App;
 
 impl App {
-    pub(crate) fn choose_python_environment(self: &Rc<Self>) {
+    /// The environments for the dropdown, found for the Python file or notebook in front, whose
+    /// project may name its own for Pyright. A debug session keeps the dropdown up over any tab,
+    /// and then the vault's root stands in, which names no project.
+    pub(crate) fn python_environments(
+        self: &Rc<Self>,
+        then: Box<dyn FnOnce(Result<Environments, String>)>,
+    ) {
         let Some(vault) = self.vault().cloned() else {
-            return self.needs_vault("select a Python environment");
+            return;
         };
         let rel = self
             .active()
@@ -24,84 +30,36 @@ impl App {
                 self.active_notebook()
                     .filter(|tab| tab.is_python())
                     .map(|tab| tab.key())
-            });
-        let Some(rel) = rel else {
-            return self.toast("Open a Python file or notebook to select its environment");
-        };
+            })
+            .unwrap_or_default();
         let asked = vault.python_environments(&rel);
-        let app = Rc::downgrade(self);
         gtk::glib::spawn_future_local(async move {
-            let result = asked.await;
-            let Some(app) = app.upgrade() else { return };
-            match result {
-                Ok(environments) => app.show_python_environments(environments),
-                Err(error) => app.toast(&format!("Cannot list Python environments: {error}")),
-            }
+            then(asked.await.map_err(|error| error.to_string()));
         });
     }
 
-    fn show_python_environments(self: &Rc<Self>, environments: Environments) {
-        let dialog = adw::PreferencesDialog::builder()
-            .title("Python Environment")
-            .build();
-        let page = adw::PreferencesPage::new();
-        let group = adw::PreferencesGroup::builder()
-            .title("Python environments")
-            .description("Language analysis updates now; restart running kernels or debug sessions to use a new choice")
-            .build();
-        let selected = environments.selected;
-        if environments.choices.len() == 1 {
-            let row = adw::ActionRow::builder()
-                .title("No Python environment with ipykernel was found")
-                .subtitle("Install ipykernel in a vault environment, then reopen this picker")
-                .build();
-            group.add(&row);
+    /// Keep `command` as the vault's Python, empty for the default configuration.
+    pub(crate) fn pick_python(&self, command: Vec<String>) {
+        let root = self.root();
+        let mut config = self.config.borrow_mut();
+        let mut vault = config.vault(&root);
+        if vault.debug.python != command {
+            vault.debug.python = command;
+            config.set_vault(&root, vault);
+            drop(config);
+            self.config_changed();
         }
-        for Environment { command, label } in environments.choices {
-            let row = adw::ActionRow::builder()
-                .title(&label)
-                .activatable(true)
-                .build();
-            if command.is_empty() {
-                row.set_subtitle(
-                    "Global setting, nearest environment, or python3; notebooks need ipykernel",
-                );
-            }
-            if command == selected {
-                row.add_suffix(&gtk::Image::from_icon_name("object-select-symbolic"));
-            }
-            let app = Rc::downgrade(self);
-            let dialog = dialog.downgrade();
-            row.connect_activated(move |_| {
-                if let Some(app) = app.upgrade() {
-                    let root = app.root();
-                    let mut config = app.config.borrow_mut();
-                    let mut vault = config.vault(&root);
-                    if vault.debug.python != command {
-                        vault.debug.python = command.clone();
-                        config.set_vault(&root, vault);
-                        drop(config);
-                        app.config_changed();
-                    }
-                }
-                if let Some(dialog) = dialog.upgrade() {
-                    dialog.close();
-                }
-            });
-            group.add(&row);
+    }
+
+    /// Select Python Environment: the Code pane's dropdown, opened, while a strip holds one.
+    pub(crate) fn choose_python_environment(self: &Rc<Self>) {
+        if self.vault().is_none() {
+            return self.needs_vault("select a Python environment");
         }
-        page.add(&group);
-        if let Some(path) = environments.pyright_override {
-            let group = adw::PreferencesGroup::builder()
-                .title("Language analysis")
-                .description(format!(
-                    "{path} overrides the selected environment for Pyright"
-                ))
-                .build();
-            page.add(&group);
-        }
-        dialog.add(&page);
-        crate::dialogs::close_on_outside_press(dialog.upcast_ref());
-        dialog.present(Some(&self.window));
+        let Some(button) = self.sidebar.get().and_then(|s| s.python_button()) else {
+            return self.toast("Open a Python file or notebook to select its environment");
+        };
+        self.show_pane("code");
+        button.popup();
     }
 }

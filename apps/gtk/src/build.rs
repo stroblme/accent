@@ -546,6 +546,18 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
         tags: tags_data(vault),
         ports: ports_data(vault),
         debug: debug_data(app),
+        python: sidebar::PythonData {
+            list: Rc::new(glib::clone!(
+                #[weak]
+                app,
+                move |then| app.python_environments(then)
+            )),
+            pick: Rc::new(glib::clone!(
+                #[weak]
+                app,
+                move |command| app.pick_python(command)
+            )),
+        },
     };
     let git = build_git(app, Arc::new(git::Source::Vault(vault.clone())));
     adopt_sidebar(
@@ -556,6 +568,9 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
     let _ = app.git.set(git);
     if let Some(git) = app.git.get() {
         git.schedule_refresh(git::Depth::Discover);
+    }
+    if let Some(sidebar) = app.sidebar.get() {
+        sidebar.set_python(&vault.config().debug.python);
     }
 }
 
@@ -1291,7 +1306,8 @@ fn install_chrome_css() {
              .file-tree label.git-modified {{ color: var(--accent-color); }} \
              .file-tree label.git-added {{ color: {added}; }} \
              .git-actions {{ opacity: 0; }} \
-             popover.git-branches button {{ font-weight: normal; }} \
+             popover.git-branches button, popover.python-environments button {{ \
+               font-weight: normal; }} \
              row:hover .git-actions, row:focus-within .git-actions {{ opacity: 1; }} \
              .git-log > row {{ margin-top: 0; margin-bottom: 0; }} \
              .git-ref {{ padding: 0 4px; border-radius: 4px; \

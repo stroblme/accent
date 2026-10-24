@@ -10,6 +10,7 @@ mod details;
 mod info;
 mod outline;
 mod ports;
+mod python;
 mod search;
 mod sections;
 mod tags;
@@ -22,6 +23,7 @@ pub use debug::{Data as DebugData, Watched};
 pub use details::{Fact, Group};
 pub use outline::{Line, above, outline_note};
 pub use ports::Data as PortsData;
+pub use python::Data as PythonData;
 pub use search::{Answer, Data as SearchData, Query};
 pub use tags::Data as TagsData;
 
@@ -68,6 +70,7 @@ pub struct Data {
     pub tags: tags::Data,
     pub ports: ports::Data,
     pub debug: debug::Data,
+    pub python: python::Data,
 }
 
 pub struct Sidebar {
@@ -170,8 +173,10 @@ impl Sidebar {
         let details = details::Details::new();
         let mut vault_info = None;
         let mut debug = None;
+        let mut python = None;
         let panes = vault.map(|(files, data)| {
             debug = Some(data.debug);
+            python = Some(data.python);
             stack.add_titled_with_icon(&files, Some("files"), "Files", "folder-symbolic");
 
             let search = search::pane(&Rc::new(data.search), &on_open);
@@ -262,7 +267,7 @@ impl Sidebar {
         outline_bin.set_child(Some(&outline::empty()));
         stack.add_titled_with_icon(&outline_bin, Some("outline"), "Outline", outline::ICON);
 
-        let code = code::Code::new(debug);
+        let code = code::Code::new(debug, python);
         stack.add_titled_with_icon(&code.root, Some("code"), "Code", code::ICON);
         let code_page = stack.page(&code.root);
         code_page.set_visible(false);
@@ -501,6 +506,17 @@ impl Sidebar {
     #[cfg(feature = "bench")]
     pub fn kernel_line(&self) -> Option<String> {
         self.code.kernel_line()
+    }
+
+    /// Name `command`, the vault's Python, on the Code pane's Python Environment dropdowns; empty
+    /// is the default configuration.
+    pub fn set_python(&self, command: &[String]) {
+        self.code.set_python(command);
+    }
+
+    /// The Python Environment dropdown of the Code pane's strip that is up, if one is.
+    pub fn python_button(&self) -> Option<gtk::MenuButton> {
+        self.code.python_button()
     }
 
     /// No session: Call Stack and Variables go, and the strip, offering Start Debugging, and
