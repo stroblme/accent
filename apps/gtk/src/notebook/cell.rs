@@ -532,12 +532,12 @@ impl Tools {
     }
 }
 
-/// The strip that adds a code or a markdown cell where it is, shown while the pointer is over it.
+/// The strip that adds a code or a markdown cell where it is, shown while the pointer is over it:
+/// buttons of a button's size, as the sidebar's are.
 pub fn inserter() -> (gtk::Box, gtk::Button, gtk::Button) {
     let add = |label: &str| {
         let b = gtk::Button::builder().label(label).build();
         b.add_css_class("flat");
-        b.add_css_class("caption");
         b
     };
     let (code, markdown) = (add("+ Code"), add("+ Markdown"));
@@ -571,8 +571,9 @@ fn cell_menu() -> gio::Menu {
 }
 
 /// The stylesheet every notebook shares, installed with the first one. A cell's strip is as tall
-/// as the add buttons, which are put over it while the pointer is there: shown at once, since a
-/// widget put under a resting pointer is not hovered until the pointer moves.
+/// as the add buttons, Adwaita's 24 px and 5 px of padding above and below, which are put over it
+/// while the pointer is there: shown at once, since a widget put under a resting pointer is not
+/// hovered until the pointer moves.
 pub fn install_css() {
     thread_local! {
         static DONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -600,8 +601,7 @@ pub fn install_css() {
          .notebook-execution.stale-succeeded { border: 1px solid var(--success-color); } \
          .notebook-execution.stale-failed { border: 1px solid var(--error-color); } \
          .notebook-inserter { opacity: 0; } \
-         .notebook-inserter button { min-height: 20px; padding: 0 10px; } \
-         .notebook-gap { min-height: 20px; } \
+         .notebook-gap { min-height: 34px; } \
          .notebook-inserter:hover, .notebook-inserter:focus-within, \
          .notebook-gap .notebook-inserter { opacity: 1; } \
          .notebook-count { opacity: var(--dim-opacity); font-family: monospace; } \

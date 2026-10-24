@@ -295,7 +295,8 @@ use tags::bench_tags;
 ///   of the window (`diagram::bench_diagram`).
 /// - `ACCENT_BENCH_NOTEBOOK=<ipynb>,<marimo .py>,<long ipynb>`: outputs, cell edits with undo
 ///   and save, marimo kept as written, a long notebook's open time and memory, presentation
-///   (`notebook::bench_notebook`). Saves: a scratch vault under `/tmp`.
+///   (`notebook::bench_notebook`). Saves: a scratch vault under `/tmp`. `look:<ipynb>:<dir>`:
+///   pictures of it under Light and Dark at two zooms, the add strip shown, into `<dir>`.
 /// - `ACCENT_BENCH_NOTEBOOK_LSP=<ipynb>,<marimo .py>`: notebooks it writes, their code cells
 ///   answered by `build-aux/fake-lsp.py --notebook` (`notebook_lsp::bench_notebook_lsp`). Saves:
 ///   a scratch vault under `/tmp`.

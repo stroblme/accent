@@ -1803,6 +1803,14 @@ impl NotebookTab {
         }
     }
 
+    /// Show the add strip in cell `n`'s gap, as the pointer coming into it does.
+    pub fn bench_gap(self: &Rc<Self>, n: usize) {
+        let id = self.views.borrow().get(n).map(|v| v.id);
+        if let Some(id) = id {
+            self.hover_gap(id, true);
+        }
+    }
+
     /// Where the selected cell's caret is in the view.
     pub fn bench_caret_y(&self) -> Option<f64> {
         let editor = self.view_of(self.selected.get())?.editor()?.clone();

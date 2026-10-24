@@ -14,6 +14,14 @@ use super::*;
 use crate::notebook::NotebookTab;
 
 pub(super) fn bench_notebook(app: &Rc<App>, arg: &str) {
+    if let Some((rel, dir)) = arg.strip_prefix("look:").and_then(|a| a.split_once(':')) {
+        let (app, rel, dir) = (app.clone(), rel.to_string(), PathBuf::from(dir));
+        glib::spawn_future_local(async move {
+            look_drill(&app, &rel, &dir).await;
+            bench_quit(&app);
+        });
+        return;
+    }
     scratch_only(app, "ACCENT_BENCH_NOTEBOOK");
     let rels: Vec<String> = arg.split(',').map(str::to_string).collect();
     let [ipynb, marimo, big] = &rels[..] else {
@@ -910,4 +918,34 @@ async fn parity_drill(app: &Rc<App>, marimo: &str) {
         u8::from(pasted),
         u8::from(followed),
     );
+}
+
+/// `look:<ipynb>:<dir>`: pictures of the window for looking at rather than asserting on, under
+/// Light and Dark at 100 % and 200 %, a screen at a time down as far as three screens at 100 %
+/// reach, the add strip in the gap under its first cell. Nothing is written but the pictures.
+async fn look_drill(app: &Rc<App>, rel: &str, dir: &Path) {
+    let Some((tab, _)) = opened(app, rel).await else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(dir);
+    for (theme, name) in [
+        (accent_core::config::Theme::Light, "light"),
+        (accent_core::config::Theme::Dark, "dark"),
+    ] {
+        crate::theme::apply(theme);
+        app.restyle_all();
+        for zoom in [1.0, 2.0] {
+            app.set_zoom(zoom);
+            for screen in 0..(3.0 * zoom) as usize {
+                tab.bench_scroll(screen);
+                tab.bench_gap(0);
+                // The outputs coming into view are built, and their pictures decoded on workers.
+                glib::timeout_future(Duration::from_millis(800)).await;
+                bench_pump();
+                let shot = format!("{name}-{:.0}-{screen}.png", zoom * 100.0);
+                super::diagram::shoot(app.window.upcast_ref(), &dir.join(shot));
+            }
+        }
+    }
+    app.set_zoom(1.0);
 }
