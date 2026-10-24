@@ -239,9 +239,13 @@ impl App {
                         app.toast(said);
                     }
                 }
+                // Landed under newer edits, which the next save writes, as a note's does.
                 editor::Landing::Behind(etag) => {
                     tab.save.etag.set(Some(etag));
                     tab.clear_changed();
+                    if report && explicit {
+                        app.toast(said);
+                    }
                 }
                 editor::Landing::Failed(Error::Core(Core::ChangedOnDisk { .. })) if report => {
                     tab.show_changed();
