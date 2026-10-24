@@ -1289,6 +1289,9 @@ fn install_chrome_css() {
             false => String::new(),
         };
         let provider = gtk::CssProvider::new();
+        // The `tabbar.inline tabbox` pair: a tab bar under the header bar carries its tabs 6 px
+        // higher, level with the sidebar's first row (the Git pane's Commit), its height kept so
+        // nothing under it moves; one under a split's divider keeps Adwaita's even padding.
         provider.load_from_string(&format!(
             "{fade}.chrome-hidden {{ opacity: 0; }} \
              .chrome-away {{ opacity: {away}; }} \
@@ -1325,6 +1328,9 @@ fn install_chrome_css() {
                .accent-flat > revealer > box, .accent-flat > revealer > box:backdrop {{ \
                background-color: var(--view-bg-color); }} \
              .accent-flat > revealer > box {{ box-shadow: none; }} \
+             tabbar.inline tabbox {{ padding-top: 0; padding-bottom: 12px; }} \
+             paned.vertical > :last-child tabbar.inline tabbox {{ \
+               padding-top: 6px; padding-bottom: 6px; }} \
              tabbar.accent-idle-pane tabbox:not(.single-tab) tab:selected:not(:hover) {{ \
                background-color: transparent; \
                box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 25%, transparent); }} \

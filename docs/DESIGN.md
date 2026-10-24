@@ -690,6 +690,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 - One `AdwTabView` + `AdwTabBar` per pane, panes nesting in `GtkPaned`s.
   Each bar lives in its pane's document column (`.inline`), so it spans its own pane, and presentation mode hides it with the rest of the chrome.
+  A bar under the header bar holds its tabs 6 px above Adwaita's even padding, level with the sidebar's first row (the Git pane's Commit), and keeps its height, so nothing under it moves; a bar under a split's divider keeps the even padding.
 - A bar hides only while its pane is the window's only one and holds a single tab: with several panes the bar says which notes are where.
 - The active pane's selected tab keeps Adwaita's filled pill; every other pane's is drawn as an outline, so a split says which pane the keyboard and the next note go to.
   A bar of one tab has no pill either way, and a tab under the pointer takes the hover fill.
