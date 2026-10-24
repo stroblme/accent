@@ -597,6 +597,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Five minutes, so turning Split view off and on again finds it there.
 - A click on a link into the vault is followed as a link is; one out of it goes to the system when Go to Definition's would (`markdown::is_url`), and only on a click — a redirect the page makes on its own opens nothing.
 - A `#tag` is a link to the tag (`accent://tag/…`), drawn as the editor draws a tag, in the accent without a link's underline; a click shows the Info pane's Tags section with that tag picked, as the palette's tag does.
+- A task in progress, `[/]` opening a list item (Toggle Task, Editing), is drawn as a box of its own beside the open and done checkboxes: their size, half filled in the done box's accent (user decision 2026-10-24); a checkbox has no such state without a script, and GFM reads `[/]` as text.
+  Printouts, the HTML export and Android's rendered note draw it too.
 - A conflict block (Editor) shows as its sides, one box each and no marker: current, a diff3 base, incoming, in the editor's tints (`conflict::tints`), each under its marker's label — `HEAD`, the branch — in the marker line's stronger tint, laid on the page as the editor lays that line, so the two panes agree.
   The note has to read as conflicted, and blanking the markers as the analysis does would run the two sides together as one text.
 - Each side is the markdown it holds: `to_html` cuts the note at the blocks and parses every stretch alone, so a fence or a list one side leaves open ends with its box, and every line marker is still the note's own line.

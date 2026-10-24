@@ -451,6 +451,12 @@ ${if (diagrams(body)) mermaid(if (bg.dark()) "dark" else "neutral") else ""}
   th, td { padding: 4px 10px 4px 0; text-align: left; }
   math[display="block"] { margin: 1.2em 0; }
   hr { border: 0; border-top: 1px solid ${fg.css()}; opacity: 0.15; }
+  /* `[/]`, a task in progress: the desktop preview's half-filled box (no checkbox state draws it). */
+  input.in-progress {
+    appearance: none; box-sizing: border-box; width: 12px; height: 12px;
+    border: 2px solid ${accent.css()}; border-radius: 3px; opacity: 0.5;
+    background: linear-gradient(to right, ${accent.css()} 50%, transparent 50%);
+  }
   .conflict { margin: 1em 0; border-radius: 6px; overflow: auto; }
   .conflict > div { display: flow-root; padding: 0 12px; }
   .conflict-label { margin: 0 -12px; padding: 2px 12px; font-size: 0.85em; font-weight: 700; }

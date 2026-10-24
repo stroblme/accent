@@ -5,12 +5,18 @@ use super::blocks::block_ids;
 use super::frontmatter::scan_tags;
 use super::links::{heading_named, is_image, percent_decode, percent_encode, slugs, split_anchor};
 use super::options;
+use super::spans::list_marker;
+use super::task::in_progress;
 use crate::conflict::{self, Block};
 use pulldown_cmark::{CowStr, Event, LinkType, Options, Parser, Tag as Cm, TagEnd};
 use pulldown_latex::{Event as LatexEvent, ParserError, Storage};
 use std::collections::HashMap;
 use std::error::Error;
 use std::ops::Range;
+
+/// An in-progress task's box: a checkbox has no such state without a script, so the preview's
+/// stylesheet draws this one itself. The newline is pulldown-cmark's after a task's own box.
+const IN_PROGRESS: &str = "<input disabled=\"\" type=\"checkbox\" class=\"in-progress\"/>\n";
 
 fn esc_attr(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -210,6 +216,16 @@ impl<'a> Page<'a> {
         self.evts.push(Event::Html(html.into()));
     }
 
+    /// Give the item being read the class GitHub gives a task, so the preview draws its box in
+    /// place of the bullet. The box is the first thing in its item, so the nearest item start is
+    /// its own.
+    fn task_item(&mut self) {
+        let item = |e: &Event| matches!(e, Event::Start(Cm::Item));
+        if let Some(li) = self.evts.iter().rposition(item) {
+            self.evts[li] = Event::Html("<li class=\"task-list-item\">".into());
+        }
+    }
+
     /// A text run of `src` at `r`, its `#tag`s as `accent://tag/<tag>` links the app follows to
     /// the tag. They are found in the source by the rule the index reads tags with, so a run the
     /// parser rewrote (an escape, an entity) is left as it is; one whose block id was cut off its
@@ -263,6 +279,9 @@ impl<'a> Page<'a> {
         let mut link_wiki: Vec<bool> = Vec::new();
         let mut image_wiki: Vec<bool> = Vec::new();
         let mut skip = 0usize;
+        // The `[/]` the item being read opens with, and once its box is in, the bytes it covered.
+        let mut doing: Option<Range<usize>> = None;
+        let mut dropped = 0..0;
         let mut in_heading = false;
         // Where a text run is never a tag, as `analyze` reads them: code and the front matter.
         let mut in_code = false;
@@ -398,18 +417,27 @@ impl<'a> Page<'a> {
                         None => self.evts.push(ev),
                     }
                 }
-                // The class GitHub uses, so the preview can draw the checkbox in place of the
-                // bullet. The marker is the first thing in its item, so the nearest item start is
-                // its own.
                 Event::TaskListMarker(_) => {
-                    if let Some(li) = self
-                        .evts
-                        .iter()
-                        .rposition(|e| matches!(e, Event::Start(Cm::Item)))
-                    {
-                        self.evts[li] = Event::Html("<li class=\"task-list-item\">".into());
-                    }
+                    self.task_item();
                     self.evts.push(ev);
+                }
+                Event::Start(Cm::Item) => {
+                    doing = list_marker(src, &r).and_then(|m| in_progress(src, m.end));
+                    self.evts.push(ev);
+                }
+                // `[/]` is three runs of text to pulldown-cmark: a box of its own takes the first
+                // one's place, and the other two and the space after them go, as the parser drops
+                // a task's own brackets.
+                Event::Text(_) if doing.as_ref().is_some_and(|d| d.start == r.start) => {
+                    dropped = doing.take().unwrap_or_default();
+                    self.task_item();
+                    self.html(IN_PROGRESS.into());
+                }
+                Event::Text(_) if dropped.contains(&r.start) => {}
+                Event::Text(t) if !dropped.is_empty() && dropped.end == r.start => {
+                    dropped = 0..0;
+                    let shown = t.trim_start().to_string();
+                    self.tagged(src, r.end - shown.len()..r.end, shown.into());
                 }
                 Event::Text(t)
                     if !in_code && !in_meta && link_wiki.is_empty() && image_wiki.is_empty() =>
@@ -635,6 +663,17 @@ mod tests {
         // A loose list puts the checkbox inside a paragraph; the item still takes the class.
         let h = bare("1. [x] one\n\n2. [ ] two\n");
         assert_eq!(h.matches("<li class=\"task-list-item\">").count(), 2, "{h}");
+    }
+
+    /// `[/]` opening an item is a task in progress, with a box of its own and its brackets gone;
+    /// anywhere else it is text.
+    #[test]
+    fn html_draws_an_in_progress_task() {
+        let h = bare("- [/] doing #x\n\n1. [/] loose\n\n2. two\n\nnot [/] here\n");
+        let item = format!("<li class=\"task-list-item\">{IN_PROGRESS}doing <a href=");
+        assert!(h.contains(&item), "{h}");
+        assert!(h.contains(&format!("<p>{IN_PROGRESS}loose</p>")), "{h}");
+        assert_eq!(h.matches("[/]").count(), 1, "{h}");
     }
 
     /// Both embed forms have to end up as a URL the preview's `accent:` scheme can serve: a

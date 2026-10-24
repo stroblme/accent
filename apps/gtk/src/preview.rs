@@ -1463,6 +1463,12 @@ fn theme_css(
             its text lines up with a plain item's beside it. */\n\
          li.task-list-item {{ list-style: none; }}\n\
          li.task-list-item input {{ margin: 0 0 0 -1.4em; }}\n\
+         /* `[/]`, a task in progress, has a box no checkbox state draws without a script: the\n\
+            open box's size and corners, half filled in the done box's accent and faded as the\n\
+            disabled boxes are. */\n\
+         li.task-list-item input.in-progress {{ appearance: none; box-sizing: border-box; \
+         width: 12px; height: 12px; border: 2px solid {accent}; border-radius: 3px; \
+         background: linear-gradient(to right, {accent} 50%, transparent 50%); opacity: 0.5; }}\n\
          a {{ color: {accent}; text-decoration: underline; }}\n\
          /* A tag is drawn as the editor draws one: in the accent, not underlined. */\n\
          a.tag {{ text-decoration: none; }}\n\
