@@ -20,7 +20,7 @@ use crate::locked;
 
 /// Language ids whose files are prose enough to want words. `text` is what a file with no
 /// language at all is opened as.
-pub(crate) const PROSE: &[&str] = &["markdown", "latex", "bibtex", "rst", "text"];
+pub(crate) const PROSE: &[&str] = &["markdown", "org", "latex", "bibtex", "rst", "text"];
 
 /// Fewer typed characters than this offer nothing: one letter matches too much of any list.
 const MIN_PREFIX: usize = 2;

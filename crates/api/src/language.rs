@@ -1172,7 +1172,7 @@ const TYPESCRIPT: &[&[&str]] = &[&["typescript-language-server", "--stdio"]];
 pub(crate) fn server(cfg: &LspConfig, language: &str) -> Option<Server> {
     let row = SERVERS.iter().find(|(id, ..)| *id == language);
     let configured = cfg.servers.get(language).filter(|argv| !argv.is_empty());
-    if configured.is_none() && language == "markdown" {
+    if configured.is_none() && matches!(language, "markdown" | "org") {
         return Some(Server::Notes);
     }
     // A configured command line replaces the built-in alternatives rather than joining them.
@@ -1689,10 +1689,12 @@ mod tests {
                 Some(Server::Missing(name)) if name == "/no/such/server"),
             "a named server that is not there is what the UI reports"
         );
-        assert!(matches!(
-            server(&LspConfig::default(), "markdown"),
-            Some(Server::Notes)
-        ));
+        for notes in ["markdown", "org"] {
+            assert!(matches!(
+                server(&LspConfig::default(), notes),
+                Some(Server::Notes)
+            ));
+        }
         assert!(server(&LspConfig::default(), "brainfuck").is_none());
     }
 

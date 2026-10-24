@@ -13,6 +13,7 @@ use crate::Result;
 use accent_core::fuzzy;
 use accent_core::index::Index;
 use accent_core::markdown::{self, LinkKind};
+use accent_core::note::Syntax;
 use accent_core::path::{self, FileType, basename, parent_dir, stem};
 
 use super::{
@@ -193,6 +194,11 @@ pub(crate) fn link_names(rel: &str) -> (String, String) {
         FileType::Note => (stem(rel), markdown::strip_ext(rel)),
         _ => (basename(rel).to_string(), rel.to_string()),
     }
+}
+
+/// Whether `rel` has headings a link's `#` can name: a note, or an org file.
+fn has_headings(rel: &str) -> bool {
+    path::is_note(rel) || path::is_org(rel)
 }
 
 /// Rank path candidates using [`fuzzy::Query::as_typed`], preserving word
@@ -493,7 +499,8 @@ impl Notes {
     /// for markdown links; anchors are unchecked. Warn about formulas the
     /// preview cannot render rather than marking valid unsupported LaTeX as errors.
     fn diagnose(&self, rel: &str, text: &str) -> Result<Vec<Diagnostic>> {
-        let a = markdown::analyze(text);
+        let syntax = Syntax::of(rel);
+        let a = syntax.analyze(text);
         let (links, targets): (Vec<&markdown::Link>, Vec<String>) = a
             .links
             .iter()
@@ -520,21 +527,26 @@ impl Notes {
                     }),
             );
         }
-        items.extend(
-            markdown::math_errors(text)
-                .into_iter()
-                .map(|(range, why)| Diagnostic {
-                    range: range_of(text, &range),
-                    severity: Severity::Warning,
-                    message: format!("Cannot render this formula: {why}"),
-                    source: Some("accent".to_string()),
-                    code: None,
-                }),
-        );
+        // Org's formulas are not read yet: only a note's reach the preview.
+        let formulas = match syntax {
+            Syntax::Markdown => markdown::math_errors(text),
+            Syntax::Org => Vec::new(),
+        };
+        items.extend(formulas.into_iter().map(|(range, why)| Diagnostic {
+            range: range_of(text, &range),
+            severity: Severity::Warning,
+            message: format!("Cannot render this formula: {why}"),
+            source: Some("accent".to_string()),
+            code: None,
+        }));
         Ok(items)
     }
 
     fn completion(&self, rel: &str, pos: Pos) -> Result<Completions> {
+        // Nothing for org yet: its `[[` and tags are not a note's, and `#` opens every `#+KEY:`.
+        if Syntax::of(rel) == Syntax::Org {
+            return Ok(Completions::default());
+        }
         let text = self.text_of(rel)?;
         let Some(caret) = byte_of(&text, pos) else {
             return Ok(Completions::default());
@@ -655,19 +667,24 @@ impl Notes {
                         let target =
                             path::resolve(parent_dir(rel), &markdown::percent_decode(dest));
                         match self.find(&locked(&self.index), &target)? {
-                            Some(note) if path::is_note(&note) => Some(self.text_of(&note)?),
+                            Some(note) if has_headings(&note) => {
+                                Some((Syntax::of(&note), self.text_of(&note)?))
+                            }
                             _ => return Ok(Completions::default()),
                         }
                     }
                 };
-                let text = other.as_deref().unwrap_or(&text);
+                let (syntax, text) = match &other {
+                    Some((syntax, other)) => (*syntax, other.as_str()),
+                    None => (Syntax::Markdown, text.as_str()),
+                };
                 if prefix.starts_with('^') {
                     return Ok(Completions {
                         items: block_links(text, &format!("{dest}#"), "", replace),
                         ..Completions::default()
                     });
                 }
-                let headings = markdown::analyze(text).headings;
+                let headings = syntax.analyze(text).headings;
                 let slugs = markdown::slugs(headings.iter().map(|h| h.text.as_str()));
                 let items = headings
                     .iter()
@@ -777,7 +794,7 @@ impl Notes {
             };
             return Ok(pages.answer(outline));
         }
-        if !path::is_note(&target) {
+        if !has_headings(&target) {
             return Ok(Completions::default());
         }
         let text = self.text_of(&target)?;
@@ -787,7 +804,7 @@ impl Notes {
                 ..Completions::default()
             });
         }
-        let items = heading_names(&markdown::analyze(&text).headings)
+        let items = heading_names(&Syntax::of(&target).analyze(&text).headings)
             .into_iter()
             .map(|name| {
                 let link = format!("[[{note}#{name}");
@@ -812,7 +829,7 @@ impl Notes {
         let Some(caret) = byte_of(&text, pos) else {
             return Ok(None);
         };
-        let a = markdown::analyze(&text);
+        let a = Syntax::of(rel).analyze(&text);
 
         if let Some(link) = a.links.iter().find(|l| l.range.contains(&caret)) {
             let range = Some(range_of(&text, &link.range));
@@ -850,7 +867,7 @@ impl Notes {
         let Some(caret) = byte_of(&text, pos) else {
             return Ok(Vec::new());
         };
-        let a = markdown::analyze(&text);
+        let a = Syntax::of(rel).analyze(&text);
         let Some(link) = a.links.iter().find(|l| l.range.contains(&caret)) else {
             return Ok(Vec::new());
         };
@@ -908,17 +925,19 @@ impl Notes {
     /// Where the heading or the block an anchor names sits in `rel`, if it is there at all.
     fn anchored(&self, rel: &str, anchor: &str) -> Option<Range> {
         let text = self.text_of(rel).ok()?;
-        markdown::anchor_range(&text, anchor).map(|r| range_of(&text, &r))
+        Syntax::of(rel)
+            .anchor_range(&text, anchor)
+            .map(|r| range_of(&text, &r))
     }
 
     fn symbols(&self, rel: &str) -> Result<Vec<Symbol>> {
         let text = self.text_of(rel)?;
-        Ok(symbols_of(&text, &markdown::analyze(&text).headings))
+        Ok(symbols_of(&text, &Syntax::of(rel).analyze(&text).headings))
     }
 
     fn folds(&self, rel: &str) -> Result<Vec<Fold>> {
         let text = self.text_of(rel)?;
-        Ok(folds_of(&text, &markdown::analyze(&text)))
+        Ok(folds_of(&text, &Syntax::of(rel).analyze(&text)))
     }
 
     /// Every link that resolves to this note, where it is written.
@@ -932,10 +951,14 @@ impl Language for Notes {
     fn open(&self, rel: &str, _language_id: &str, text: String) -> Result<Support> {
         self.publish(rel, &text);
         locked(&self.docs).insert(rel.to_string(), text);
+        // One `[` offers nothing, and nor does a `(` outside a link; `context` is what decides,
+        // and it wants the second `[` or the `](` of a link's destination. Org has none yet.
+        let completion_triggers = match Syntax::of(rel) {
+            Syntax::Markdown => vec!['[', '#', '('],
+            Syntax::Org => Vec::new(),
+        };
         Ok(Support {
-            // One `[` offers nothing, and nor does a `(` outside a link; `context` is what
-            // decides, and it wants the second `[` or the `](` of a link's destination.
-            completion_triggers: vec!['[', '#', '('],
+            completion_triggers,
             ..Support::default()
         })
     }
@@ -1623,6 +1646,22 @@ mod tests {
             !folds.iter().any(|f| f.start_line == 8),
             "a heading with nothing under it folds nothing"
         );
+    }
+
+    #[test]
+    fn an_org_file_outlines_and_folds_as_a_note_does() {
+        let text = "#+TITLE: T\n* One\ntext\n#+begin_src sh\nls\n#+end_src\n** Two :x:\n* Three\n";
+        let a = Syntax::Org.analyze(text);
+        let rows: Vec<(String, usize)> = symbols_of(text, &a.headings)
+            .into_iter()
+            .map(|s| (s.name, s.children.len()))
+            .collect();
+        assert_eq!(rows, [("One".to_string(), 1), ("Three".to_string(), 0)]);
+        let folds: Vec<(u32, u32)> = folds_of(text, &a)
+            .into_iter()
+            .map(|f| (f.start_line, f.end_line))
+            .collect();
+        assert_eq!(folds, [(1, 6), (3, 5)]);
     }
 
     #[test]
