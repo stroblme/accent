@@ -211,10 +211,6 @@ pub struct InkStyle {
     pub multiply: bool,
 }
 
-/// One `/Ink` annotation as the eraser sees it: where it sits in the page's `/Annots`, and the
-/// points of the path it draws.
-pub type InkPath = (usize, Vec<(f32, f32)>);
-
 /// A shape drawn in one drag, in top-left page points.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Shape {

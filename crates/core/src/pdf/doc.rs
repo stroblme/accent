@@ -250,19 +250,6 @@ impl PdfDoc {
         Ok(out)
     }
 
-    /// Text inside a rectangle, empty if the page or region has none.
-    pub fn text_in_rect(&self, page: usize, rect: Rect) -> String {
-        let _guard = lock();
-        let Ok(p) = self.page(page) else {
-            return String::new();
-        };
-        let page_height = p.height().value;
-        let Ok(text) = p.text() else {
-            return String::new();
-        };
-        text.inside_rect(rect.to_pdf(page_height))
-    }
-
     /// Serialise the document with annotations.
     ///
     /// After rendering leaves pdfium-generated objects ([`PdfDoc::drawn`]), blank the

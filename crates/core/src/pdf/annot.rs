@@ -13,7 +13,7 @@ use super::ink::{
 };
 use super::text::{line_top, same_quads, selection_quads};
 use super::{
-    Comment, Cut, Glyph, Highlight, InkPath, InkShape, InkStyle, Matrix, PdfDoc, Rect, Shape, lock,
+    Comment, Cut, Glyph, Highlight, InkShape, InkStyle, Matrix, PdfDoc, Rect, Shape, lock,
 };
 use crate::index::PdfLink;
 
@@ -443,16 +443,6 @@ impl PdfDoc {
                 .map_err(refused("delete annotation"))?;
         }
         Ok(())
-    }
-
-    /// Every `/Ink` annotation on a page with the points of its drawn path, for the eraser to
-    /// aim at. The index is the annotation's place in `/Annots`, which is what deletes it.
-    pub fn ink_paths(&self, page: usize) -> Result<Vec<InkPath>> {
-        Ok(self
-            .inks(page)?
-            .into_iter()
-            .map(|ink| (ink.index, ink.points))
-            .collect())
     }
 
     /// Return visible `/Ink` annotations with flattened strokes, bounds and style for the Adjust

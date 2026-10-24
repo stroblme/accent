@@ -189,18 +189,6 @@ fn glyphs_are_non_empty_and_in_reading_order() {
 }
 
 #[test]
-fn text_in_rect_reads_the_line() {
-    let Some((_d, doc)) = open_tiny() else { return };
-    let whole = Rect {
-        left: 0.0,
-        top: 0.0,
-        right: 200.0,
-        bottom: 100.0,
-    };
-    assert!(doc.text_in_rect(0, whole).contains("Hello"));
-}
-
-#[test]
 fn selection_link_has_the_obsidian_shape() {
     let Some((_d, doc)) = open_tiny() else { return };
     let sel = Selection {
@@ -308,12 +296,12 @@ fn a_copy_carries_the_highlights_and_leaves_the_document_alone() {
     let copy = PdfDoc::from_bytes(doc.copy_with_highlights(&[hl]).unwrap()).unwrap();
     assert_eq!(copy.page_count(), doc.page_count());
     assert_eq!(copy.highlights().unwrap().len(), 2);
-    assert_eq!(copy.ink_paths(0).unwrap().len(), 1);
+    assert_eq!(copy.inks(0).unwrap().len(), 1);
     assert_eq!(doc.highlights().unwrap().len(), 1);
     // Nothing to add is the document as it stands (not byte for byte: each save draws a new /ID).
     let plain = PdfDoc::from_bytes(doc.copy_with_highlights(&[]).unwrap()).unwrap();
     assert_eq!(plain.highlights().unwrap().len(), 1);
-    assert_eq!(plain.ink_paths(0).unwrap().len(), 1);
+    assert_eq!(plain.inks(0).unwrap().len(), 1);
 }
 
 #[test]
@@ -331,9 +319,9 @@ fn ink_round_trips_through_save() {
         .unwrap();
     assert_eq!(doc.annotation_count(0).unwrap(), before + 1);
 
-    let strokes = doc.ink_paths(0).unwrap();
+    let strokes = doc.inks(0).unwrap();
     assert_eq!(strokes.len(), 1, "{strokes:?}");
-    let start = strokes[0].1[0];
+    let start = strokes[0].points[0];
     assert!(
         (start.0 - 20.0).abs() < 0.5 && (start.1 - 20.0).abs() < 0.5,
         "{start:?}"
@@ -342,7 +330,7 @@ fn ink_round_trips_through_save() {
     // It survives the file, which is the whole point of drawing into the PDF.
     let back = reopen(&dir, &doc);
     assert_eq!(back.annotation_count(0).unwrap(), before + 1);
-    assert_eq!(back.ink_paths(0).unwrap().len(), 1);
+    assert_eq!(back.inks(0).unwrap().len(), 1);
     // And it is drawn: the stroke passes through the middle of the page in red.
     let img = back.render_page(0, 1.0, Theme::Plain).unwrap();
     let red = img
@@ -355,9 +343,9 @@ fn ink_round_trips_through_save() {
 
     // Erasing takes the whole stroke and leaves what was there before.
     let mut back = back;
-    back.take_ink(0, strokes[0].0).unwrap();
+    back.take_ink(0, strokes[0].index).unwrap();
     assert_eq!(back.annotation_count(0).unwrap(), before);
-    assert!(back.ink_paths(0).unwrap().is_empty());
+    assert!(back.inks(0).unwrap().is_empty());
 }
 
 /// A small zigzag drawn slowly at two pixels a point: what is stored still reaches every corner
@@ -393,7 +381,7 @@ fn a_small_drawing_keeps_its_corners() {
     };
     let scale = 2.0;
     doc.add_ink(0, &points, pen, scale).unwrap();
-    let stored = &doc.ink_paths(0).unwrap()[0].1;
+    let stored = &doc.inks(0).unwrap()[0].points;
     for corner in corners {
         assert!(hit(stored, corner, 1.0 / scale), "{corner:?} in {stored:?}");
     }
@@ -432,7 +420,7 @@ fn shape_round_trips_through_save() {
     assert_eq!(inks[0].style, red);
 
     let back = reopen(&dir, &doc);
-    assert_eq!(back.ink_paths(0).unwrap().len(), 1);
+    assert_eq!(back.inks(0).unwrap().len(), 1);
     let img = back.render_page(0, 1.0, Theme::Plain).unwrap();
     let red = img
         .data
@@ -495,7 +483,7 @@ fn flattened_ink_hits_a_circles_rim() {
         radius: 30.0,
     };
     doc.add_shape(0, circle, style).unwrap();
-    let (_, points) = doc.ink_paths(0).unwrap().remove(0);
+    let points = doc.inks(0).unwrap().remove(0).points;
     // The rim at 45°, the control polygon's corner 4 pt outside it, and the centre.
     assert!(hit(&points, (121.2, 28.8), 1.0));
     assert!(!hit(&points, (83.4, 20.0), 3.0));

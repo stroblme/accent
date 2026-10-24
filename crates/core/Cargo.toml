@@ -57,11 +57,6 @@ pdfium-render = { version = "=0.9.3", optional = true, default-features = false,
 anyhow.workspace = true
 tempfile.workspace = true
 
-# `cargo test` builds examples too, so this one must not be built without its feature.
-[[example]]
-name = "pdf_spike"
-required-features = ["pdf"]
-
 # Repo tooling, not a library target (see the example's own docs). `test = true` keeps its unit
 # tests in `cargo test`, which is where they were before it moved out of accent-cli.
 [[example]]
