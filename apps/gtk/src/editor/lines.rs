@@ -3,7 +3,7 @@
 //! carrying buffer tags. Templates use snippet Tab stops.
 
 use super::{Tab, caret, indent, line_end};
-use crate::{comment, multicaret};
+use crate::{comment, multicaret, typing};
 use accent_core::markdown;
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
@@ -355,8 +355,8 @@ pub(crate) fn toggle_comment(view: &sourceview5::View) {
 
 /// Toggle Task: each line a caret or the selection covers one step along
 /// [`markdown::toggle_task`], as one undo step. A blank line is passed over inside a run of
-/// several, so a selected list keeps its gaps, and the carets stay on their text, only the box
-/// being spliced in or changed.
+/// several, so a selected list keeps its gaps, and so is a line of the front matter or a code
+/// block. The carets stay on their text, only the box being spliced in or changed.
 pub(crate) fn toggle_task(view: &sourceview5::View) {
     if !view.is_editable() {
         return;
@@ -374,7 +374,9 @@ pub(crate) fn toggle_task(view: &sourceview5::View) {
     buffer.end_user_action();
 }
 
-/// [`toggle_task`] over the inclusive lines `first..=last`.
+/// [`toggle_task`] over the inclusive lines `first..=last`, passing over the front matter and
+/// code blocks as the styling pass tagged them from the note's spans: its first character, or the
+/// end of a blank line, is in one.
 fn task_run(buffer: &gtk::TextBuffer, first: i32, last: i32) {
     for line in first..=last {
         let Some(start) = buffer.iter_at_line(line) else {
@@ -382,7 +384,9 @@ fn task_run(buffer: &gtk::TextBuffer, first: i32, last: i32) {
         };
         let end = line_end(buffer, line);
         let text = buffer.text(&start, &end, true);
-        if first < last && text.trim().is_empty() {
+        let mut head = start;
+        head.forward_chars(text.chars().take_while(|c| c.is_whitespace()).count() as i32);
+        if (first < last && text.trim().is_empty()) || typing::verbatim(buffer, &head) {
             continue;
         }
         splice(buffer, start, end, &text, &markdown::toggle_task(&text));

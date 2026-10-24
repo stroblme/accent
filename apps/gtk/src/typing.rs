@@ -575,7 +575,7 @@ fn inside(buffer: &gtk::TextBuffer, at: &gtk::TextIter) -> bool {
 
 /// Whether `iter` is inside a code block or the frontmatter, where none of this applies but
 /// front matter's own lists ([`sequence_item`]).
-fn verbatim(buffer: &gtk::TextBuffer, iter: &gtk::TextIter) -> bool {
+pub(crate) fn verbatim(buffer: &gtk::TextBuffer, iter: &gtk::TextIter) -> bool {
     [crate::highlight::CODEBLOCK, "frontmatter"]
         .iter()
         .any(|name| tagged(buffer, iter, name))

@@ -1031,6 +1031,22 @@ async fn bench_lines(view: &multicaret::View) {
     show("task_column");
     view.press(gdk::Key::z, crate::platform::PRIMARY_MODIFIER);
     show("task_column_undo");
+    // Nor a line of the front matter or of a code block, as the styling pass tags them, a caret's
+    // own line included.
+    view.clear_carets();
+    if let Some(source) = buffer.downcast_ref::<sourceview5::Buffer>() {
+        crate::highlight::install_tags(source);
+        source.set_text("---\na: b\n---\n\n```\nx\n\n```\n    y\nz");
+        crate::highlight::apply(source);
+    }
+    buffer.select_range(&buffer.start_iter(), &buffer.end_iter());
+    editor::toggle_task(view.upcast_ref());
+    show("task_verbatim");
+    for line in [1, 6] {
+        buffer.place_cursor(&at(&buffer, line, 0));
+        editor::toggle_task(view.upcast_ref());
+    }
+    show("task_verbatim_carets");
 
     // Shift+Delete is GTK's Cut binding, so the column leaves the press to it rather than deleting
     // a character at every caret, and answers the signal it emits with its own whole-line cut.
