@@ -1,0 +1,308 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: GPL-3.0-or-later
+
+  accent's own Org mode spec (https://orgmode.org/worg/org-syntax.html): GtkSourceView 5.20 ships
+  none. A line-oriented reading, as a language spec has to be: headings with their TODO keyword,
+  priority and tags; `#+KEY:` lines; blocks, a source block coloured as the language it names;
+  drawers; `# ` comments and `: ` fixed-width lines; lists, checkboxes and tables; links,
+  timestamps and the emphasis markers. The TODO keywords are org's defaults and a few common
+  ones, a file's own `#+TODO:` line being out of a spec's reach. Code, links, tags and keywords
+  are `no-spell-check`; the rest is prose to the spell checker.
+-->
+<language id="org" name="Org" version="2.0" _section="Markup">
+  <metadata>
+    <property name="mimetypes">text/org;text/x-org</property>
+    <property name="globs">*.org</property>
+    <property name="line-comment-start">#</property>
+    <property name="suggested-suffix">.org</property>
+  </metadata>
+
+  <styles>
+    <style id="heading" name="Heading" map-to="def:heading"/>
+    <style id="todo" name="TODO Keyword" map-to="def:keyword"/>
+    <style id="done" name="DONE Keyword" map-to="def:comment"/>
+    <style id="priority" name="Priority" map-to="def:special-char"/>
+    <style id="tag" name="Tag" map-to="def:type"/>
+    <style id="keyword" name="Keyword Line" map-to="def:preprocessor"/>
+    <style id="block" name="Block" map-to="def:preformatted-section"/>
+    <style id="drawer" name="Drawer" map-to="def:comment"/>
+    <style id="property" name="Property" map-to="def:preprocessor"/>
+    <style id="comment" name="Comment" map-to="def:comment"/>
+    <style id="fixed-width" name="Fixed Width" map-to="def:preformatted-section"/>
+    <style id="list-marker" name="List Marker" map-to="def:list-marker"/>
+    <style id="checkbox" name="Checkbox" map-to="def:special-char"/>
+    <style id="table" name="Table" map-to="def:operator"/>
+    <style id="rule" name="Horizontal Rule" map-to="def:thematic-break"/>
+    <style id="link" name="Link" map-to="def:link-destination"/>
+    <style id="link-text" name="Link Text" map-to="def:link-text"/>
+    <style id="target" name="Target" map-to="def:link-symbol"/>
+    <style id="footnote" name="Footnote" map-to="def:link-symbol"/>
+    <style id="timestamp" name="Timestamp" map-to="def:special-constant"/>
+    <style id="cookie" name="Statistics Cookie" map-to="def:special-char"/>
+    <style id="bold" name="Bold" map-to="def:strong-emphasis"/>
+    <style id="italic" name="Italic" map-to="def:emphasis"/>
+    <style id="underline" name="Underline" map-to="def:underlined"/>
+    <style id="strike" name="Strike-through" map-to="def:deletion"/>
+    <style id="code" name="Code" map-to="def:inline-code"/>
+  </styles>
+
+  <definitions>
+    <!-- Org's emphasis rules: an opening marker at the start of a line, after a space or one of
+         -({'", not before a space; a closing one not after a space, before a space, the end of
+         the line or one of -.,;:!?')}[" and a backslash. -->
+    <define-regex id="pre">(?&lt;![^\s\-({'"])</define-regex>
+    <define-regex id="post">(?![^\s\-.,;:!?')}\["\\])</define-regex>
+
+    <context id="link" class="no-spell-check" style-ref="link">
+      <match>\[\[((?:[^\[\]\\]|\\.)+)\](?:\[([^\]]+)\])?\]</match>
+      <include>
+        <context sub-pattern="2" style-ref="link-text" class-disabled="no-spell-check"/>
+      </include>
+    </context>
+
+    <context id="angle-link" class="no-spell-check" style-ref="link">
+      <match>&lt;[a-zA-Z][a-zA-Z0-9+.-]*:[^&lt;&gt;\n]+&gt;</match>
+    </context>
+
+    <context id="plain-link" class="no-spell-check" style-ref="link">
+      <match>\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\s()&lt;&gt;\[\]{}"']*[^\s()&lt;&gt;\[\]{}"'.,;:!?]</match>
+    </context>
+
+    <context id="target" class="no-spell-check" style-ref="target">
+      <match>&lt;&lt;&lt;?[^&lt;&gt;\s][^&lt;&gt;\n]*&gt;&gt;&gt;?</match>
+    </context>
+
+    <context id="footnote" class="no-spell-check" style-ref="footnote">
+      <match>\[fn:[^\]\s]*\]</match>
+    </context>
+
+    <context id="timestamp" class="no-spell-check" style-ref="timestamp">
+      <match>&lt;\d{4}-\d{2}-\d{2}[^&gt;\n]*&gt;|\[\d{4}-\d{2}-\d{2}[^\]\n]*\]</match>
+    </context>
+
+    <context id="cookie" class="no-spell-check" style-ref="cookie">
+      <match>\[\d*/\d*\]|\[\d*%\]</match>
+    </context>
+
+    <context id="verbatim" class="no-spell-check" style-ref="code">
+      <match>\%{pre}=\S(?:[^\n]*?\S)??=\%{post}</match>
+    </context>
+
+    <context id="code" class="no-spell-check" style-ref="code">
+      <match>\%{pre}~\S(?:[^\n]*?\S)??~\%{post}</match>
+    </context>
+
+    <context id="bold" style-ref="bold">
+      <match>\%{pre}\*[^\s*](?:[^*\n]*[^\s*])?\*\%{post}</match>
+    </context>
+
+    <context id="italic" style-ref="italic">
+      <match>\%{pre}/[^\s/](?:[^/\n]*[^\s/])?/\%{post}</match>
+    </context>
+
+    <context id="underline" style-ref="underline">
+      <match>\%{pre}_[^\s_](?:[^_\n]*[^\s_])?_\%{post}</match>
+    </context>
+
+    <context id="strike" style-ref="strike">
+      <match>\%{pre}\+[^\s+](?:[^+\n]*[^\s+])?\+\%{post}</match>
+    </context>
+
+    <!-- What a line of prose holds, a heading's title included. -->
+    <context id="inline">
+      <include>
+        <context ref="link"/>
+        <context ref="angle-link"/>
+        <context ref="plain-link"/>
+        <context ref="target"/>
+        <context ref="footnote"/>
+        <context ref="timestamp"/>
+        <context ref="cookie"/>
+        <context ref="verbatim"/>
+        <context ref="code"/>
+        <context ref="bold"/>
+        <context ref="italic"/>
+        <context ref="underline"/>
+        <context ref="strike"/>
+      </include>
+    </context>
+
+    <context id="heading" style-ref="heading" end-at-line-end="true">
+      <start extended="true">
+        ^\*+[ \t]+
+        (?:(TODO|NEXT|STARTED|WAITING|HOLD)(?=[ \t]|$)[ \t]*
+          | (DONE|CANCELLED|CANCELED)(?=[ \t]|$)[ \t]*)?
+        (\[\#[A-Za-z0-9]+\](?=[ \t]|$))?
+      </start>
+      <include>
+        <context sub-pattern="1" where="start" style-ref="todo" class="no-spell-check"/>
+        <context sub-pattern="2" where="start" style-ref="done" class="no-spell-check"/>
+        <context sub-pattern="3" where="start" style-ref="priority" class="no-spell-check"/>
+        <context id="heading-tags" style-ref="tag" class="no-spell-check">
+          <match>(?&lt;=[ \t]):[[:alnum:]_@#%:]+:(?=[ \t]*$)</match>
+        </context>
+        <context ref="inline"/>
+      </include>
+    </context>
+
+    <!-- A source block coloured as the language it names, as accent's latex.lang colours a
+         listing: one context per language, not extending the block, so its end is found ahead
+         of the language's own contexts. Any other language, or none, is plain text. -->
+    <define-regex id="src" case-sensitive="false">(?&lt;=#\+begin_src)[ \t]+</define-regex>
+    <define-regex id="src-end">(?=[ \t]|$).*$</define-regex>
+
+    <context id="src-block" class="no-spell-check" style-ref="block">
+      <start case-sensitive="false">^[ \t]*(#\+begin_src)</start>
+      <end case-sensitive="false">^[ \t]*(#\+end_src)[ \t]*$|^(?=\*+[ \t])</end>
+      <include>
+        <context sub-pattern="1" where="start" style-ref="keyword"/>
+        <context sub-pattern="1" where="end" style-ref="keyword"/>
+        <context id="src-python" extend-parent="false">
+          <start>\%{src}(?i:python3?|ipython|jupyter-python)\%{src-end}</start>
+          <include><context ref="python3:python3"/></include>
+        </context>
+        <context id="src-sh" extend-parent="false">
+          <start>\%{src}(?i:sh|bash|shell|zsh)\%{src-end}</start>
+          <include><context ref="sh:sh"/></include>
+        </context>
+        <context id="src-elisp" extend-parent="false">
+          <start>\%{src}(?i:emacs-lisp|elisp|lisp)\%{src-end}</start>
+          <include><context ref="commonlisp:commonlisp"/></include>
+        </context>
+        <context id="src-c" extend-parent="false">
+          <start>\%{src}(?i:c)\%{src-end}</start>
+          <include><context ref="c:c"/></include>
+        </context>
+        <context id="src-cpp" extend-parent="false">
+          <start>\%{src}(?i:c\+\+|cpp)\%{src-end}</start>
+          <include><context ref="cpp:cpp"/></include>
+        </context>
+        <context id="src-rust" extend-parent="false">
+          <start>\%{src}(?i:rust)\%{src-end}</start>
+          <include><context ref="rust:rust"/></include>
+        </context>
+        <context id="src-js" extend-parent="false">
+          <start>\%{src}(?i:js|javascript)\%{src-end}</start>
+          <include><context ref="js:js"/></include>
+        </context>
+        <context id="src-sql" extend-parent="false">
+          <start>\%{src}(?i:sql|sqlite)\%{src-end}</start>
+          <include><context ref="sql:sql"/></include>
+        </context>
+        <context id="src-r" extend-parent="false">
+          <start>\%{src}(?i:r)\%{src-end}</start>
+          <include><context ref="r:r"/></include>
+        </context>
+        <context id="src-latex" extend-parent="false">
+          <start>\%{src}(?i:latex)\%{src-end}</start>
+          <include><context ref="latex:latex"/></include>
+        </context>
+        <context id="src-haskell" extend-parent="false">
+          <start>\%{src}(?i:haskell)\%{src-end}</start>
+          <include><context ref="haskell:haskell"/></include>
+        </context>
+        <context id="src-go" extend-parent="false">
+          <start>\%{src}(?i:go)\%{src-end}</start>
+          <include><context ref="go:go"/></include>
+        </context>
+        <context id="src-java" extend-parent="false">
+          <start>\%{src}(?i:java)\%{src-end}</start>
+          <include><context ref="java:java"/></include>
+        </context>
+        <context id="src-julia" extend-parent="false">
+          <start>\%{src}(?i:julia)\%{src-end}</start>
+          <include><context ref="julia:julia"/></include>
+        </context>
+      </include>
+    </context>
+
+    <!-- The other verbatim blocks; a quote, a centre or a verse block is prose, its delimiters
+         keyword lines. -->
+    <context id="block" class="no-spell-check" style-ref="block">
+      <start case-sensitive="false">^[ \t]*(#\+begin_(example|export|comment))\b.*$</start>
+      <end case-sensitive="false">^[ \t]*(#\+end_\%{2@start})[ \t]*$|^(?=\*+[ \t])</end>
+      <include>
+        <context sub-pattern="1" where="start" style-ref="keyword"/>
+        <context sub-pattern="1" where="end" style-ref="keyword"/>
+      </include>
+    </context>
+
+    <context id="drawer" class="no-spell-check" style-ref="drawer">
+      <start>^[ \t]*:(?!(?i:end):)[A-Za-z0-9_-]+:[ \t]*$</start>
+      <end case-sensitive="false">^[ \t]*:end:[ \t]*$|^(?=\*+[ \t])</end>
+      <include>
+        <context id="property" style-ref="property">
+          <match>^[ \t]*:(?!(?i:end):)[^:\s]+:</match>
+        </context>
+      </include>
+    </context>
+
+    <context id="comment" style-ref="comment" class="comment" class-disabled="no-spell-check">
+      <match>^[ \t]*#(?:[ \t].*)?$</match>
+    </context>
+
+    <!-- A title, a caption, an author: prose after the key. Any other key's value is not. -->
+    <context id="keyword-prose" end-at-line-end="true">
+      <start case-sensitive="false">^[ \t]*(#\+(?:title|subtitle|author|description|caption):)</start>
+      <include>
+        <context sub-pattern="1" where="start" style-ref="keyword" class="no-spell-check"/>
+        <context ref="inline"/>
+      </include>
+    </context>
+
+    <context id="keyword" class="no-spell-check" style-ref="keyword">
+      <match>^[ \t]*#\+\S*.*$</match>
+    </context>
+
+    <context id="fixed-width" class="no-spell-check" style-ref="fixed-width">
+      <match>^[ \t]*:(?:[ \t].*)?$</match>
+    </context>
+
+    <context id="rule" style-ref="rule">
+      <match>^[ \t]*-{5,}[ \t]*$</match>
+    </context>
+
+    <context id="table-rule" class="no-spell-check" style-ref="table">
+      <match>^[ \t]*\|[-+|]*$</match>
+    </context>
+
+    <context id="table" end-at-line-end="true">
+      <start>^[ \t]*(\|)</start>
+      <include>
+        <context sub-pattern="1" where="start" style-ref="table"/>
+        <context id="table-pipe" style-ref="table">
+          <match>\|</match>
+        </context>
+        <context ref="inline"/>
+      </include>
+    </context>
+
+    <context id="list-marker" style-ref="list-marker">
+      <match>^[ \t]*(?:[-+]|[0-9]+[.)])(?=[ \t])|^[ \t]+\*(?=[ \t])</match>
+    </context>
+
+    <context id="checkbox" class="no-spell-check" style-ref="checkbox">
+      <match>(?&lt;=[-+.)*] )\[[ Xx-]\](?=[ \t]|$)</match>
+    </context>
+
+    <context id="org">
+      <include>
+        <context ref="heading"/>
+        <context ref="src-block"/>
+        <context ref="block"/>
+        <context ref="drawer"/>
+        <context ref="comment"/>
+        <context ref="keyword-prose"/>
+        <context ref="keyword"/>
+        <context ref="fixed-width"/>
+        <context ref="rule"/>
+        <context ref="table-rule"/>
+        <context ref="table"/>
+        <context ref="list-marker"/>
+        <context ref="checkbox"/>
+        <context ref="inline"/>
+      </include>
+    </context>
+  </definitions>
+</language>

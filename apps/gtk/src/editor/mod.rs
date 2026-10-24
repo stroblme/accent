@@ -525,6 +525,12 @@ impl Tab {
         self.flavour
     }
 
+    /// An org file (`org.lang`): code to the editor, prose to the spell checker and the notes
+    /// layer.
+    pub fn is_org(&self) -> bool {
+        self.buffer.language().is_some_and(|l| l.id() == "org")
+    }
+
     /// Set committed text for git change bars, or clear with `None`. The Git
     /// pane supplies it because it already queries the repository.
     pub fn set_head(&self, head: Option<String>) {
@@ -1018,8 +1024,9 @@ impl Tab {
     }
 
     pub fn set_spellcheck(&self, on: bool) {
-        // Prose only. A checker over identifiers and keywords is a wall of red squiggles.
-        if self.flavour.is_note() {
+        // Prose only. A checker over identifiers and keywords is a wall of red squiggles; org's
+        // are `no-spell-check` in its language spec.
+        if self.flavour.is_note() || self.is_org() {
             set_spelling(&self.spell, &self.buffer, &self.view, on);
         }
     }

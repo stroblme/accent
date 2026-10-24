@@ -1513,10 +1513,10 @@ impl Local {
     }
 }
 
-/// Compute headings and folds from note text for documents outside a vault,
-/// where no notes provider is available.
-pub fn note_outline(text: &str) -> (Vec<Symbol>, Vec<Fold>) {
-    let analysis = markdown::analyze(text);
+/// Compute headings and folds from a note's or an org file's text, `rel` saying which, for
+/// documents outside a vault, where no notes provider is available.
+pub fn note_outline(rel: &str, text: &str) -> (Vec<Symbol>, Vec<Fold>) {
+    let analysis = accent_core::note::Syntax::of(rel).analyze(text);
     (
         notes::symbols_of(text, &analysis.headings),
         notes::folds_of(text, &analysis),
@@ -1566,7 +1566,7 @@ mod tests {
     /// provider would answer: its headings nested, and the folds of their sections.
     #[test]
     fn a_note_is_outlined_from_its_text_alone() {
-        let (symbols, folds) = note_outline("# One\ntext\n## Two\n");
+        let (symbols, folds) = note_outline("n.md", "# One\ntext\n## Two\n");
         assert_eq!(symbols[0].name, "One");
         assert_eq!(symbols[0].children[0].name, "Two");
         assert_eq!(

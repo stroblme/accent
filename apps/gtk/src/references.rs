@@ -22,7 +22,7 @@ impl App {
         };
         let doc = self.active_doc();
         let empty = references_empty(doc.as_ref());
-        let code = matches!(&doc, Some(Doc::Text(tab)) if !tab.flavour().is_note());
+        let code = matches!(&doc, Some(Doc::Text(tab)) if !linked(tab));
         // Whatever code asks, the answer is backlinks; a code tab's says which once it lands.
         let title = (!code).then_some("Backlinks");
         // A diff, a shell and a file from outside the vault are nothing the index links to, and
@@ -41,7 +41,7 @@ impl App {
             .as_ref()
             .map(|tab| tab.language_key())
             .unwrap_or_else(|| key.clone());
-        let note = tab.as_ref().is_some_and(|tab| tab.flavour().is_note());
+        let note = tab.as_ref().is_some_and(|tab| linked(tab));
         let pos = tab
             .as_ref()
             .map(|tab| lang::pos_of(&tab.buffer.iter_at_mark(&tab.buffer.get_insert())));
@@ -86,7 +86,7 @@ impl App {
 
     /// Refresh caret-based references only while visible; reopening catches up with hidden caret moves.
     pub fn follow_references(self: &Rc<Self>) {
-        let code = matches!(self.active_doc(), Some(Doc::Text(tab)) if !tab.flavour().is_note());
+        let code = matches!(self.active_doc(), Some(Doc::Text(tab)) if !linked(&tab));
         let live = self.sidebar_column.is_visible()
             && self
                 .sidebar
@@ -379,13 +379,18 @@ fn references_empty(doc: Option<&Doc>) -> &'static str {
         Some(doc) if doc.is_transient() || doc.is_loose() => {
             "Open a file from this vault to see what links to it."
         }
-        Some(Doc::Text(tab)) if !tab.flavour().is_note() => {
+        Some(Doc::Text(tab)) if !linked(tab) => {
             "Nothing refers to the symbol under the caret, and no note links to this file."
         }
         Some(_) => "No notes link to this file yet.",
         // Nothing open at all.
         None => "Open a file from this vault to see what links to it.",
     }
+}
+
+/// A tab whose references are its backlinks: a note, or an org file.
+fn linked(tab: &Tab) -> bool {
+    tab.flavour().is_note() || tab.is_org()
 }
 
 /// A dependency outside the vault, answered by the server that named it.

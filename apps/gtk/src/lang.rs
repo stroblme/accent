@@ -456,7 +456,7 @@ pub fn language_id(tab: &Tab) -> String {
 /// Open the tab's language document and wire its providers.
 ///
 /// Skip CSV because styling is local and language queries add no results. Without a vault,
-/// notes use [`outline_alone`] and other files have no language-layer providers.
+/// notes and org files use [`outline_alone`] and other files have no language-layer providers.
 pub fn attach(tab: &Rc<Tab>, vault: Option<Arc<Vault>>, hooks: Hooks) {
     if matches!(tab.flavour(), Flavour::Csv(_)) {
         return;
@@ -769,16 +769,17 @@ async fn refresh(tab: Rc<Tab>, rest: Duration) {
     }
 }
 
-/// [`refresh`] for a note outside every vault: its headings and folds are read from its own text,
-/// off the main loop, as the notes provider reads them inside one.
+/// [`refresh`] for a note or an org file outside every vault: its headings and folds are read
+/// from its own text, off the main loop, as the notes provider reads them inside one.
 async fn outline_alone(tab: Rc<Tab>, rest: Duration) {
-    if !tab.flavour().is_note() {
+    if !tab.flavour().is_note() && !tab.is_org() {
         return;
     }
     pause(rest).await;
-    let (edits, text) = (tab.save.edits.get(), tab.text());
-    let outline =
-        crate::work::off_thread("outline", move || accent_api::language::note_outline(&text));
+    let (edits, text, rel) = (tab.save.edits.get(), tab.text(), tab.rel());
+    let outline = crate::work::off_thread("outline", move || {
+        accent_api::language::note_outline(&rel, &text)
+    });
     let Some((symbols, folds)) = outline.await else {
         return;
     };

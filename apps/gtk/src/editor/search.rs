@@ -6,7 +6,7 @@ use super::{Tab, caret, line_end};
 use crate::{fold, lang, multicaret};
 use accent_api::Pos;
 use accent_api::language::pos_of;
-use accent_core::markdown;
+use accent_core::note::Syntax;
 use accent_core::search::{self, Options, Regex};
 use gtk::prelude::*;
 use gtk::{gdk, glib};
@@ -116,12 +116,14 @@ pub(super) fn matched(buffer: &sourceview5::Buffer, tag: &gtk::TextTag) {
     }
 }
 
-/// Return the byte range of the first exact `#name`, including its marker, or `None`.
+/// Return the byte range of the first exact `#name`, including its marker, or `None`; an org
+/// file's `:name:` without its colons.
 ///
 /// Parse the note to exclude code and URLs while including frontmatter tags. Exact matching
 /// agrees with the index's case-sensitive tag groups.
-fn tag_range(text: &str, name: &str) -> Option<Range<usize>> {
-    let found = markdown::analyze(text)
+fn tag_range(text: &str, name: &str, syntax: Syntax) -> Option<Range<usize>> {
+    let found = syntax
+        .analyze(text)
         .tags
         .into_iter()
         .find(|t| t.name == name)?;
@@ -569,7 +571,7 @@ impl Tab {
     /// Missing anchors leave the caret unchanged.
     pub fn goto_heading(&self, anchor: &str) -> bool {
         let text = self.text();
-        let Some(at) = markdown::anchor_range(&text, anchor) else {
+        let Some(at) = Syntax::of(&self.rel()).anchor_range(&text, anchor) else {
             return false;
         };
         self.goto_pos(pos_of(&text, at.start));
@@ -610,7 +612,8 @@ impl Tab {
     /// Leave the caret unchanged if the tag no longer exists.
     pub fn goto_tag(&self, name: &str) {
         let text = self.text();
-        let found = tag_range(&text, name).and_then(|at| crate::references::char_range(&text, at));
+        let found = tag_range(&text, name, Syntax::of(&self.rel()))
+            .and_then(|at| crate::references::char_range(&text, at));
         if let Some(chars) = found {
             self.goto_range(chars);
         }
@@ -693,7 +696,7 @@ impl Tab {
 
 #[cfg(test)]
 mod tests {
-    use super::{next_match, tag_range};
+    use super::{Syntax, next_match, tag_range};
 
     /// Forward from the caret, forward past the match selected, back before it, and round at
     /// either end.
@@ -714,7 +717,7 @@ mod tests {
     #[test]
     fn a_tag_is_found_where_the_note_writes_it() {
         let text = "---\ntags: [draft]\n---\n\nSee #rust and `#rust` and #rust again.\n";
-        let at = tag_range(text, "rust").expect("the note writes the tag");
+        let at = tag_range(text, "rust", Syntax::Markdown).expect("the note writes the tag");
         assert_eq!(
             &text[at.clone()],
             "#rust",
@@ -722,8 +725,8 @@ mod tests {
         );
         assert_eq!(at.start, text.find("#rust").unwrap(), "the first one");
         // The frontmatter is where a tag listed there is, so that is where the jump lands.
-        let front = tag_range(text, "draft").expect("the frontmatter lists it");
+        let front = tag_range(text, "draft", Syntax::Markdown).expect("the frontmatter lists it");
         assert!(front.start < text.find("See").unwrap());
-        assert_eq!(tag_range(text, "python"), None);
+        assert_eq!(tag_range(text, "python", Syntax::Markdown), None);
     }
 }
