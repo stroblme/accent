@@ -927,14 +927,47 @@ async fn parity_drill(app: &Rc<App>, marimo: &str) {
     );
 }
 
+/// The cell buttons go with the pointer onto a cell, and stay as it goes on into the cell's rail
+/// and down the bar past the cell's end: real input, through XTEST.
+async fn hover_probe(app: &Rc<App>, tab: &Rc<NotebookTab>) {
+    tab.bench_scroll(0);
+    tab.bench_pick(0);
+    glib::timeout_future(Duration::from_millis(500)).await;
+    let Some([card, rail, past]) = tab.bench_rail_points(1, app.window.upcast_ref(), 175.0) else {
+        return println!("bench notebook look hover unplaced");
+    };
+    let mut on = Vec::new();
+    for (x, y) in [card, rail, past] {
+        super::git::xtest(&format!("move {x:.0} {y:.0}")).await;
+        on.push(tab.bench_tools_cell().map_or(-1, |n| n as i64));
+    }
+    println!(
+        "bench notebook look hover card={} rail={} past={} card_px={}",
+        on[0],
+        on[1],
+        on[2],
+        tab.bench_card_height(1)
+    );
+    // Off the notebook, so the pictures show the selected cell's buttons.
+    super::git::xtest("move 5 890").await;
+}
+
 /// `look:<ipynb>:<dir>`: pictures of the window for looking at rather than asserting on, under
 /// Light and Dark at 100 % and 200 %, a screen at a time down as far as three screens at 100 %
-/// reach, the add strip in the gap under its first cell. Nothing is written but the pictures.
+/// reach, the add strip in the gap under its first cell and the cell buttons beside its second;
+/// then narrow, its top and its end, the buttons beside its last cell. Nothing is written but
+/// the pictures.
 async fn look_drill(app: &Rc<App>, rel: &str, dir: &Path) {
     let Some((tab, _)) = opened(app, rel).await else {
         return;
     };
     let _ = std::fs::create_dir_all(dir);
+    hover_probe(app, &tab).await;
+    let (width, height) = (app.window.default_width(), app.window.default_height());
+    let shoot = |shot: String| {
+        bench_pump();
+        super::diagram::shoot(app.window.upcast_ref(), &dir.join(shot));
+    };
     for (theme, name) in [
         (accent_core::config::Theme::Light, "light"),
         (accent_core::config::Theme::Dark, "dark"),
@@ -946,11 +979,10 @@ async fn look_drill(app: &Rc<App>, rel: &str, dir: &Path) {
             for screen in 0..(3.0 * zoom) as usize {
                 tab.bench_scroll(screen);
                 tab.bench_gap(0);
+                tab.bench_pick(1);
                 // The outputs coming into view are built, and their pictures decoded on workers.
                 glib::timeout_future(Duration::from_millis(800)).await;
-                bench_pump();
-                let shot = format!("{name}-{:.0}-{screen}.png", zoom * 100.0);
-                super::diagram::shoot(app.window.upcast_ref(), &dir.join(shot));
+                shoot(format!("{name}-{:.0}-{screen}.png", zoom * 100.0));
             }
             println!(
                 "bench notebook look {name} zoom={:.0} pictures={:?}",
@@ -958,6 +990,15 @@ async fn look_drill(app: &Rc<App>, rel: &str, dir: &Path) {
                 tab.bench_pictures()
             );
         }
+        app.set_zoom(1.0);
+        resized(app, NARROW, height).await;
+        tab.bench_scroll(0);
+        glib::timeout_future(Duration::from_millis(800)).await;
+        shoot(format!("{name}-narrow-top.png"));
+        tab.bench_pick(tab.cell_count() - 1);
+        tab.bench_scroll(1000);
+        glib::timeout_future(Duration::from_millis(800)).await;
+        shoot(format!("{name}-narrow-end.png"));
+        resized(app, width, height).await;
     }
-    app.set_zoom(1.0);
 }

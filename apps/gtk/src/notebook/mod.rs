@@ -136,11 +136,14 @@ pub fn open(
     column.set_widget_name(&crate::editor::next_view_name());
     column.set_margin_top(12);
     column.set_margin_bottom(96);
+    head.set_margin_end(cell::RAIL_ROOM);
     column.append(&head);
+    // The cell buttons stand over the column, in the rail of the cell they serve (`cell::stand`).
+    let overlay = gtk::Overlay::builder().child(&column).build();
     let clamp = adw::Clamp::builder()
         .maximum_size(1100)
         .tightening_threshold(900)
-        .child(&column)
+        .child(&overlay)
         .build();
     // The cells go in before the column is in the window, where each widget made would be
     // styled on its own as it is added.
@@ -213,6 +216,11 @@ pub fn open(
         lang: language::State::default(),
     });
     tab.gutter.set(cell::count_width(&tab.scroller));
+    overlay.add_overlay(&tab.tools.bar);
+    let rail = tab.tools.rail.clone();
+    overlay.connect_get_child_position(move |overlay, bar| {
+        cell::stand(overlay, bar, rail.borrow().as_ref())
+    });
     tab.reconcile();
     // The notebook follows the caret itself (`follow_caret`): the viewport's own scroll to the
     // focused widget would bring a clicked cell's whole editor into view, moving what was clicked.
@@ -421,7 +429,8 @@ impl NotebookTab {
         let press = on(|tab, id| tab.press(id));
         click.connect_pressed(move |_, _, _, _| press());
         view.card.add_controller(click);
-        // The buttons follow the pointer from cell to cell, and the add strip from gap to gap.
+        // The buttons follow the pointer from cell to cell, its rail included, and the add strip
+        // from gap to gap.
         let hover = |widget: &gtk::Widget, enter: fn(&Rc<NotebookTab>, CellId), leave| {
             let motion = gtk::EventControllerMotion::new();
             let (enter, leave) = (on(enter), on(leave));
@@ -430,7 +439,7 @@ impl NotebookTab {
             widget.add_controller(motion);
         };
         hover(
-            view.card.upcast_ref(),
+            view.row.upcast_ref(),
             |tab, id| tab.hover(id, true),
             |tab, id| tab.hover(id, false),
         );
@@ -1275,6 +1284,22 @@ impl NotebookTab {
         act(&self.tools.run, |tab| {
             let _ = tab.scroller.activate_action("win.notebook-run-cell", None);
         });
+        // Over the bar, which reaches past a short cell's rail, the pointer is still on its cell.
+        let motion = gtk::EventControllerMotion::new();
+        let over = |on: bool| {
+            let weak = Rc::downgrade(self);
+            move || {
+                if let Some(tab) = weak.upgrade()
+                    && let Some(id) = tab.tools.cell.get()
+                {
+                    tab.hover(id, on);
+                }
+            }
+        };
+        let (enter, leave) = (over(true), over(false));
+        motion.connect_enter(move |_, _, _| enter());
+        motion.connect_leave(move |_| leave());
+        self.tools.bar.add_controller(motion);
         act(&self.tools.up, |tab| tab.move_cell(false));
         act(&self.tools.down, |tab| tab.move_cell(true));
         act(&self.tools.delete, |tab| tab.delete());
@@ -1828,6 +1853,37 @@ impl NotebookTab {
             .collect()
     }
 
+    /// How tall cell `n`'s card is laid out.
+    pub fn bench_card_height(&self, n: usize) -> i32 {
+        self.views.borrow().get(n).map_or(0, |v| v.card.height())
+    }
+
+    /// Which cell the buttons serve.
+    pub fn bench_tools_cell(&self) -> Option<usize> {
+        let id = self.tools.cell.get()?;
+        self.views.borrow().iter().position(|v| v.id == id)
+    }
+
+    /// Points of `window` on cell `n`: on its card, in its rail by its top, and in its rail `below`
+    /// px under its top.
+    pub fn bench_rail_points(
+        &self,
+        n: usize,
+        window: &gtk::Widget,
+        below: f32,
+    ) -> Option<[(f32, f32); 3]> {
+        let view = self.views.borrow().get(n).cloned()?;
+        let at = |widget: &gtk::Box, x: f32, y: f32| {
+            let point = widget.compute_point(window, &graphene::Point::new(x, y))?;
+            Some((point.x(), point.y()))
+        };
+        Some([
+            at(&view.card, 60.0, 20.0)?,
+            at(&view.rail, 17.0, 40.0)?,
+            at(&view.rail, 17.0, below)?,
+        ])
+    }
+
     /// Show the add strip in cell `n`'s gap, as the pointer coming into it does.
     pub fn bench_gap(self: &Rc<Self>, n: usize) {
         let id = self.views.borrow().get(n).map(|v| v.id);
@@ -1848,7 +1904,7 @@ impl NotebookTab {
         views
             .iter()
             .all(|v| v.editor().is_none_or(|e| !e.view.is_editable()))
-            && self.tools.bar.parent().is_none()
+            && !self.tools.bar.is_visible()
             && self.gap.parent().is_none()
             && !self.head.is_visible()
     }

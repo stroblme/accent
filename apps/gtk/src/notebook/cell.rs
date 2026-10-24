@@ -3,13 +3,14 @@
 //! text until the cell nears the view and the tab builds its editor (`NotebookTab::editor`). The
 //! buttons and the strip's own buttons are the notebook's, one of each, moved to the cell they
 //! serve ([`Tools`], [`inserter`]): a long notebook would otherwise build them per cell up front.
+//! The buttons stand in a rail right of every cell, so they cover none of it.
 
 use std::cell::{OnceCell, RefCell};
 use std::rc::Rc;
 
 use accent_core::notebook::{Cell, CellId, Format, Kind, Output};
 use adw::prelude::*;
-use gtk::gio;
+use gtk::{gdk, gio};
 
 use super::output::Outputs;
 use crate::editor::Flavour;
@@ -19,10 +20,12 @@ pub struct CellView {
     pub kind: Kind,
     /// The cell and the strip under it, the unit the notebook's column holds.
     pub root: gtk::Box,
+    /// The cell and its rail, where the pointer brings the buttons.
+    pub row: gtk::Box,
     /// The cell itself, outlined in the accent while selected.
     pub card: gtk::Box,
-    /// Where the buttons float, over the cell's top right corner.
-    pub over: gtk::Overlay,
+    /// The room right of the cell where the buttons stand while they serve it ([`stand`]).
+    pub rail: gtk::Box,
     /// The strip under the cell, where the add buttons show while the pointer is over it.
     pub gap: gtk::Overlay,
     /// `[n]`, the count of the run that left the outputs; `[*]` while a run waits or runs. Not
@@ -156,26 +159,34 @@ impl CellView {
         body.append(&placeholder);
         body.append(&outputs.widget);
 
-        let over = gtk::Overlay::builder().child(&body).hexpand(true).build();
         let card = gtk::Box::new(gtk::Orientation::Horizontal, SPACING);
         card.add_css_class("notebook-cell");
+        card.set_hexpand(true);
         if cell.kind() != Kind::Markdown {
             card.append(&count);
         }
-        card.append(&over);
+        card.append(&body);
+        // Every cell's, whether its buttons stand there or not, so nothing moves when they do.
+        let rail = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        rail.set_width_request(RAIL);
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, SPACING);
+        row.append(&card);
+        row.append(&rail);
 
         let room = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         let gap = gtk::Overlay::builder().child(&room).build();
         gap.add_css_class("notebook-gap");
+        gap.set_margin_end(RAIL_ROOM);
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        root.append(&card);
+        root.append(&row);
         root.append(&gap);
         CellView {
             id: cell.id(),
             kind: cell.kind(),
             root,
+            row,
             card,
-            over,
+            rail,
             gap,
             count,
             gutter: std::cell::Cell::new(gutter),
@@ -398,8 +409,13 @@ pub fn count_label(cell: &Cell) -> String {
     }
 }
 
-/// The room between a cell's `[n]` column and its text.
+/// The room between a cell's `[n]` column and its text, and between the cell and its rail.
 const SPACING: i32 = 6;
+/// How wide a cell's rail is: a button's width (`.notebook-tools button`).
+const RAIL: i32 = 34;
+/// The room the rail takes right of a cell, which the add strips leave too, to be centred under
+/// the cell.
+pub const RAIL_ROOM: i32 = RAIL + SPACING;
 /// The margins of a cell's text inside its editor.
 const MARGIN: i32 = 8;
 
@@ -430,9 +446,9 @@ pub fn flavour(kind: Kind) -> Flavour {
     }
 }
 
-/// The cell buttons, one bar the notebook floats over the cell it serves: Run Cell over a code
-/// cell of a notebook that runs, Move Cell Up, Move Cell Down, Delete Cell and a More menu with
-/// the rest.
+/// The cell buttons, one column of them the notebook stands in the rail of the cell it serves:
+/// Run Cell beside a code cell of a notebook that runs, Move Cell Up, Move Cell Down, Delete Cell
+/// and a More menu with the rest.
 pub struct Tools {
     pub bar: gtk::Box,
     pub run: gtk::Button,
@@ -443,8 +459,10 @@ pub struct Tools {
     pub down: gtk::Button,
     pub delete: gtk::Button,
     pub more: gtk::MenuButton,
-    /// The cell it is over.
+    /// The cell it serves.
     pub cell: std::cell::Cell<Option<CellId>>,
+    /// That cell's rail, where the notebook's overlay stands the bar ([`stand`]).
+    pub rail: Rc<RefCell<Option<gtk::Widget>>>,
 }
 
 impl Tools {
@@ -460,7 +478,7 @@ impl Tools {
         let run = button("media-playback-start-symbolic", "win.notebook-run-cell");
         let status = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         status.add_css_class("notebook-execution");
-        status.set_valign(gtk::Align::Center);
+        status.set_halign(gtk::Align::Center);
         let up = button("go-up-symbolic", "win.notebook-move-up");
         let down = button("go-down-symbolic", "win.notebook-move-down");
         let delete = button("user-trash-symbolic", "win.notebook-delete-cell");
@@ -470,12 +488,11 @@ impl Tools {
             .menu_model(&cell_menu())
             .build();
         more.add_css_class("flat");
-        // Over the editor's top right corner, as VS Code floats a cell's toolbar, so a cell is
-        // as tall as its text and its outputs.
-        let bar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        // A column beside the cell's top, so a cell covers nothing and is as tall as its text
+        // and its outputs (user decision 2026-10-24).
+        let bar = gtk::Box::new(gtk::Orientation::Vertical, 0);
         bar.add_css_class("notebook-tools");
-        bar.set_halign(gtk::Align::End);
-        bar.set_valign(gtk::Align::Start);
+        bar.set_visible(false);
         bar.append(&status);
         for b in [&run, &up, &down, &delete] {
             bar.append(b);
@@ -491,10 +508,11 @@ impl Tools {
             delete,
             more,
             cell: std::cell::Cell::new(None),
+            rail: Rc::default(),
         }
     }
 
-    /// Float over `view`, or nowhere.
+    /// Stand in `view`'s rail, or nowhere.
     pub fn place(&self, view: Option<&CellView>) {
         let code = view.is_some_and(|v| v.kind == Kind::Code);
         self.run.set_visible(self.runs && code);
@@ -502,16 +520,11 @@ impl Tools {
         if let Some(view) = view {
             self.show_execution(view.execution.get());
         }
-        let target = view.map(|v| v.over.clone().upcast::<gtk::Widget>());
-        if self.bar.parent() == target {
-            return;
-        }
-        if let Some(over) = self.bar.parent().and_downcast::<gtk::Overlay>() {
-            over.remove_overlay(&self.bar);
-        }
         self.cell.set(view.map(|v| v.id));
-        if let Some(view) = view {
-            view.over.add_overlay(&self.bar);
+        self.rail.replace(view.map(|v| v.rail.clone().upcast()));
+        self.bar.set_visible(view.is_some());
+        if let Some(overlay) = self.bar.parent() {
+            overlay.queue_allocate();
         }
     }
 
@@ -531,6 +544,19 @@ impl Tools {
         self.run
             .update_property(&[gtk::accessible::Property::Description(state.label())]);
     }
+}
+
+/// Where the notebook's overlay stands `bar`: in `rail`, at its cell's top, unless the notebook
+/// ends too soon below for the whole bar, which then ends where the notebook does.
+pub fn stand(
+    overlay: &gtk::Overlay,
+    bar: &gtk::Widget,
+    rail: Option<&gtk::Widget>,
+) -> Option<gdk::Rectangle> {
+    let at = rail?.compute_bounds(overlay)?;
+    let tall = bar.preferred_size().1.height();
+    let top = (at.y() as i32).min(overlay.height() - tall).max(0);
+    Some(gdk::Rectangle::new(at.x() as i32, top, RAIL, tall))
 }
 
 /// The strip that adds a code or a markdown cell where it is, shown while the pointer is over it:
@@ -571,7 +597,8 @@ fn cell_menu() -> gio::Menu {
     menu
 }
 
-/// The stylesheet every notebook shares, installed with the first one. A cell's strip is as tall
+/// The stylesheet every notebook shares, installed with the first one. The cell buttons are a
+/// sidebar button's 34 px square, as wide as a cell's rail. A cell's strip is as tall
 /// as the add buttons, Adwaita's 24 px and 5 px of padding above and below, which are put over it
 /// while the pointer is there: shown at once, since a widget put under a resting pointer is not
 /// hovered until the pointer moves.
@@ -589,11 +616,8 @@ pub fn install_css() {
     provider.load_from_string(
         ".notebook-cell { border: 1px solid transparent; border-radius: 8px; padding: 4px; } \
          .notebook-cell.selected { border-color: var(--accent-bg-color); } \
-         .notebook-tools { margin: 2px; border-radius: 6px; \
-           background-color: var(--view-bg-color); \
-           box-shadow: 0 0 0 1px alpha(currentColor, 0.12); } \
-         .notebook-tools button { min-height: 24px; min-width: 24px; padding: 0; } \
-         .notebook-execution { min-width: 8px; min-height: 8px; margin: 0 4px 0 8px; \
+         .notebook-tools button { min-height: 24px; min-width: 24px; padding: 5px; } \
+         .notebook-execution { min-width: 8px; min-height: 8px; margin: 6px 0; \
            border: 1px solid transparent; border-radius: 50%; } \
          .notebook-execution.unrun { background-color: alpha(var(--window-fg-color), 0.3); } \
          .notebook-execution.running { background-color: var(--warning-color); } \
