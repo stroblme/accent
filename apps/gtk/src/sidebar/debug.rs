@@ -376,7 +376,7 @@ fn tree_view(tree: &Tree, unwatch: Unwatch) -> gtk::ListView {
 pub(super) struct Debug {
     /// The controls, and the state line under them.
     pub(super) strip: gtk::Box,
-    state: gtk::Label,
+    state: Caption,
     controls: Controls,
     /// The Python Environment dropdown leading the row.
     python: Option<Picker>,
@@ -513,8 +513,8 @@ impl Debug {
         for section in self.sections() {
             section.root.set_visible(true);
         }
-        self.state.set_text(line);
-        self.state.set_tooltip_text(why);
+        // Starting, running or stopping, the program is at work until it pauses.
+        self.state.say(line, why, !paused);
         self.controls.session.set_visible(true);
         self.controls.start.set_visible(false);
         if let Some(python) = &self.python {
@@ -639,8 +639,7 @@ impl Debug {
     /// (`debuggable`) the strip offers Start Debugging over the breakpoints.
     pub(super) fn set_idle(&self, debuggable: bool) {
         self.strip.set_visible(debuggable);
-        self.state.set_text("Not running");
-        self.state.set_tooltip_text(None);
+        self.state.say("Not running", None, false);
         self.controls.session.set_visible(false);
         self.controls.start.set_visible(true);
         if let Some(python) = &self.python {
@@ -685,7 +684,7 @@ impl Debug {
             Item::Watch((expression, _)) => Some(expression.clone()),
             _ => None,
         });
-        (self.state.text().to_string(), calls, values, watched)
+        (self.state.text(), calls, values, watched)
     }
 
     #[cfg(feature = "bench")]
@@ -736,7 +735,7 @@ struct Controls {
 /// actions, which are enabled as the session's state allows: Continue or Pause, the steps,
 /// Restart and Stop, then the Debug Console, and Start Debugging in their place while no session
 /// runs; and under them what the program is doing.
-fn strip(python: Option<&gtk::MenuButton>) -> (gtk::Box, gtk::Label, Controls) {
+fn strip(python: Option<&gtk::MenuButton>) -> (gtk::Box, Caption, Controls) {
     let resume = strip_button("media-playback-start-symbolic", "win.debug-continue");
     let pause = strip_button("media-playback-pause-symbolic", "win.debug-pause");
     let session = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -795,7 +794,7 @@ pub(super) fn strip_button(icon: &str, action: &str) -> gtk::Button {
 pub(super) fn strip_of(
     python: Option<&gtk::MenuButton>,
     buttons: &[gtk::Widget],
-) -> (gtk::Box, gtk::Label) {
+) -> (gtk::Box, Caption) {
     let controls = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     for button in buttons {
         controls.append(button);
@@ -807,11 +806,7 @@ pub(super) fn strip_of(
         None => row.set_halign(gtk::Align::Center),
     }
     row.append(&controls);
-    let state = gtk::Label::builder()
-        .ellipsize(pango::EllipsizeMode::End)
-        .build();
-    state.add_css_class("caption");
-    state.add_css_class("dim-label");
+    let state = Caption::new();
     let strip = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(2)
@@ -822,6 +817,53 @@ pub(super) fn strip_of(
         .visible(false)
         .build();
     strip.append(&row);
-    strip.append(&state);
+    strip.append(&state.root);
     (strip, state)
+}
+
+/// A strip's dim caption: what the program or kernel does, beside a spinner while it works, the
+/// indicator the Git pane's Sync shows while it syncs.
+pub(super) struct Caption {
+    root: gtk::Box,
+    line: gtk::Label,
+    spinner: adw::Spinner,
+}
+
+impl Caption {
+    fn new() -> Caption {
+        let line = gtk::Label::builder()
+            .ellipsize(pango::EllipsizeMode::End)
+            .build();
+        // Not dimmed with the words: what is at work should catch the eye, as Sync's does.
+        let spinner = adw::Spinner::builder().visible(false).build();
+        line.add_css_class("caption");
+        line.add_css_class("dim-label");
+        // Centred, as the switcher's icons are, and as tall as the spinner with it or without,
+        // so the sections under it stay put as it comes and goes.
+        let root = gtk::Box::builder()
+            .spacing(6)
+            .halign(gtk::Align::Center)
+            .height_request(16)
+            .build();
+        root.append(&spinner);
+        root.append(&line);
+        Caption {
+            root,
+            line,
+            spinner,
+        }
+    }
+
+    /// Say `line`, `why` in its tooltip, the spinner up while `working`.
+    pub(super) fn say(&self, line: &str, why: Option<&str>, working: bool) {
+        self.line.set_text(line);
+        self.line.set_tooltip_text(why);
+        self.spinner.set_visible(working);
+    }
+
+    /// What it says, for the drills.
+    #[cfg(feature = "bench")]
+    pub(super) fn text(&self) -> String {
+        self.line.text().to_string()
+    }
 }

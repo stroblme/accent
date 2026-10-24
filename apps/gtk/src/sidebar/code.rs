@@ -32,7 +32,7 @@ pub(super) struct Code {
     /// The notebook in front's kernel: Run All, Interrupt, Restart, Shut Down and Clear All
     /// Outputs over what it is doing, up while it is in front and no debug session runs.
     kernel: gtk::Box,
-    kernel_state: gtk::Label,
+    kernel_state: debug::Caption,
     /// The Python Environment dropdowns of the debugger's strip and of the kernel's, in a window
     /// with a vault: each row holds its own.
     pythons: Option<[Picker; 2]>,
@@ -201,11 +201,11 @@ impl Code {
         self.debugging.get() || self.kernel.get_visible()
     }
 
-    /// The kernel's strip saying `line`, `why` in its tooltip, or put away (`None`).
-    pub(super) fn set_kernel(&self, shown: Option<(&str, Option<&str>)>) {
+    /// The kernel's strip saying `line`, `why` in its tooltip, with a spinner while it is `busy`
+    /// running cells, or put away (`None`).
+    pub(super) fn set_kernel(&self, shown: Option<(&str, Option<&str>)>, busy: bool) {
         if let Some((line, why)) = shown {
-            self.kernel_state.set_text(line);
-            self.kernel_state.set_tooltip_text(why);
+            self.kernel_state.say(line, why, busy);
         }
         if self.kernel.get_visible() != shown.is_some() {
             self.kernel.set_visible(shown.is_some());
@@ -233,9 +233,7 @@ impl Code {
     /// What the kernel's strip says, while it is up, for `ACCENT_BENCH_KERNEL`.
     #[cfg(feature = "bench")]
     pub(super) fn kernel_line(&self) -> Option<String> {
-        self.kernel
-            .is_visible()
-            .then(|| self.kernel_state.text().to_string())
+        self.kernel.is_visible().then(|| self.kernel_state.text())
     }
 
     pub(super) fn section(&self, name: &str) -> Option<&Section> {

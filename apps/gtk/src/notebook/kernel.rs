@@ -891,6 +891,7 @@ impl App {
             sidebar.set_kernel(
                 said.as_ref()
                     .map(|(line, why)| (line.as_str(), why.as_deref())),
+                busy,
             );
         }
     }

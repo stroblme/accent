@@ -498,9 +498,9 @@ impl Sidebar {
     }
 
     /// The notebook in front's kernel in the Code pane: its strip saying `line`, `why` in its
-    /// tooltip, or put away (`None`).
-    pub fn set_kernel(&self, shown: Option<(&str, Option<&str>)>) {
-        self.code.set_kernel(shown);
+    /// tooltip, with a spinner while it is `busy` running cells, or put away (`None`).
+    pub fn set_kernel(&self, shown: Option<(&str, Option<&str>)>, busy: bool) {
+        self.code.set_kernel(shown, busy);
     }
 
     #[cfg(feature = "bench")]
