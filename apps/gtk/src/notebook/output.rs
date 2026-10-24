@@ -110,6 +110,20 @@ impl Outputs {
         }
     }
 
+    /// Dimmed while they are the last run's, a new run of their cell not having replaced them.
+    pub fn set_stale(&self, on: bool) {
+        match on {
+            true => self.widget.add_css_class("stale"),
+            false => self.widget.remove_css_class("stale"),
+        }
+    }
+
+    /// Whether the outputs are dimmed as the last run's.
+    #[cfg(feature = "bench")]
+    pub fn is_stale(&self) -> bool {
+        self.widget.has_css_class("stale")
+    }
+
     /// Whether the outputs are still held.
     #[cfg(feature = "bench")]
     pub fn is_held(&self) -> bool {

@@ -264,7 +264,8 @@ use tags::bench_tags;
 /// - `ACCENT_BENCH_DEBUG=<rel>:<line>`: a debugpy session from a breakpoint on
 ///   `<line>` of the program `make drills` writes (`debug::bench_debug`).
 /// - `ACCENT_BENCH_KERNEL=<rel>`: a Jupyter notebook it writes at `<rel>`, run on an ipykernel
-///   (`kernel::bench_kernel`). Saves: a scratch vault under `/tmp`.
+///   (`kernel::bench_kernel`). Saves: a scratch vault under `/tmp`. `ACCENT_BENCH_KERNEL_SHOT=<png>`
+///   adds a picture of the window while a cell's last outputs wait, dimmed, for its new ones.
 /// - `ACCENT_BENCH_REPLACE=1`: Search-pane Replace All updates.
 /// - `ACCENT_BENCH_FIND=<rel_note>`: query selection/history; `options`:
 ///   search toggles, invalid patterns and replacement captures in a temporary note.

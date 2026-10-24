@@ -605,6 +605,7 @@ pub fn install_css() {
          .notebook-inserter:hover, .notebook-inserter:focus-within, \
          .notebook-gap .notebook-inserter { opacity: 1; } \
          .notebook-count { opacity: var(--dim-opacity); font-family: monospace; } \
+         .notebook-outputs.stale { opacity: var(--dim-opacity); } \
          textview.notebook-source { border-radius: 6px; \
            box-shadow: inset 0 0 0 1px alpha(currentColor, 0.12); } \
          textview.notebook-output, textview.notebook-output > text { background: none; } \

@@ -31,8 +31,9 @@ const NOTEBOOK: &str = r#"{
 
 /// `ACCENT_BENCH_KERNEL=<rel>` writes [`NOTEBOOK`] at `<rel>` and runs it: Run Cell on
 /// Insert Line Below's chord, Run Cell and Advance, `input()` answered, an interrupt, Run All
-/// stopped by one, Restart, Clear Outputs and its undo, the save, and the tab closed with its
-/// kernel. It prints `bench kernel …` lines as the window shows each cell, timings on
+/// stopped by one, the last run's outputs dimmed until the new ones replace them, Restart, a run
+/// with no output clearing its cell, Clear Outputs and its undo, the save, and the tab closed
+/// with its kernel. It prints `bench kernel …` lines as the window shows each cell, timings on
 /// `bench kernel_ms …`; a step that never comes prints `bench kernel timeout <what>` and quits.
 pub(super) fn bench_kernel(app: &Rc<App>, rel: &str) {
     scratch_only(app, "ACCENT_BENCH_KERNEL");
@@ -127,7 +128,7 @@ pub(super) fn bench_kernel(app: &Rc<App>, rel: &str) {
         tab.bench_type(3, " ");
         let edited_running = tab.bench_execution(3).as_deref() == Some("Unrun");
         let t = Instant::now();
-        if !interrupt(&app, &tab, 3).await {
+        if !interrupt(&app, &tab, 3, false).await {
             return;
         }
         println!("bench kernel_ms interrupt {:.0}", ms_since(t));
@@ -141,9 +142,10 @@ pub(super) fn bench_kernel(app: &Rc<App>, rel: &str) {
         tab.undo();
 
         act("win.notebook-run-all");
-        if !answer(&app, &tab, "ada", false).await || !interrupt(&app, &tab, 3).await {
+        if !answer(&app, &tab, "ada", false).await || !interrupt(&app, &tab, 3, true).await {
             return;
         }
+        print_cell(&tab, 3, &stale(&tab, 3, "replaced"));
         print_cell(&tab, 4, "run_all stops ");
 
         let t = Instant::now();
@@ -163,6 +165,14 @@ pub(super) fn bench_kernel(app: &Rc<App>, rel: &str) {
             "bench kernel restart cell 1 count={}",
             count.unwrap_or_default()
         );
+        // IPython shows no result for a line ending in `;`.
+        tab.bench_type(1, ";");
+        act("win.notebook-run-cell");
+        if !done(&app, &tab, "quiet").await {
+            return;
+        }
+        print_cell(&tab, 1, &stale(&tab, 1, "quiet"));
+        tab.bench_select(0);
 
         act("win.notebook-clear-outputs");
         let cleared = shown_outputs(&tab, 0);
@@ -226,8 +236,9 @@ async fn answer(app: &Rc<App>, tab: &NotebookTab, value: &str, say: bool) -> boo
     true
 }
 
-/// Interrupt cell `n`'s run once it has begun, and wait for the kernel to be idle.
-async fn interrupt(app: &Rc<App>, tab: &NotebookTab, n: usize) -> bool {
+/// Interrupt cell `n`'s run once it has begun, and wait for the kernel to be idle; `say` prints
+/// the cell as the run left it till then.
+async fn interrupt(app: &Rc<App>, tab: &NotebookTab, n: usize, say: bool) -> bool {
     // Its outputs going say it began; the sleep is under way a moment later.
     let running = || {
         let busy = tab.bench_busy();
@@ -238,6 +249,14 @@ async fn interrupt(app: &Rc<App>, tab: &NotebookTab, n: usize) -> bool {
         return false;
     }
     glib::timeout_future(Duration::from_millis(1500)).await;
+    if say {
+        print_cell(tab, n, &stale(tab, n, "running"));
+        // `ACCENT_BENCH_KERNEL_SHOT=<png>`: the window as the run has left it, for looking at.
+        if let Ok(path) = std::env::var("ACCENT_BENCH_KERNEL_SHOT") {
+            bench_pump();
+            super::diagram::shoot(app.window.upcast_ref(), Path::new(&path));
+        }
+    }
     let _ = WidgetExt::activate_action(&app.window, "win.notebook-interrupt", None);
     done(app, tab, "interrupt").await
 }
@@ -261,6 +280,11 @@ fn print_cell(tab: &NotebookTab, n: usize, said: &str) {
         "bench kernel {said}cell {} count={count} outputs={outputs}{differs}",
         n + 1
     );
+}
+
+/// `print_cell`'s `said` for cell `n`: `what`, and whether its outputs are dimmed.
+fn stale(tab: &NotebookTab, n: usize, what: &str) -> String {
+    format!("{what} dimmed={} ", u8::from(tab.bench_stale(n)))
 }
 
 fn describe(output: &Output) -> String {

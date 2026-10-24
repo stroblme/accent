@@ -3,7 +3,7 @@
 //! history, being the kernel's and not an edit, and the cells it changed are drawn once per turn
 //! of the event pump; Clear Outputs is an edit.
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use accent_api::kernel::{Info, News, Start, Status};
@@ -101,6 +101,7 @@ mod tests {
             outbox: RefCell::default(),
             sending: Cell::new(false),
             clear_next: RefCell::default(),
+            stale: RefCell::default(),
             last_run: Cell::new(0),
         };
         kernel.runs.borrow_mut().insert(
@@ -132,6 +133,7 @@ mod tests {
             outbox: RefCell::default(),
             sending: Cell::new(false),
             clear_next: RefCell::default(),
+            stale: RefCell::default(),
             last_run: Cell::new(0),
         };
         assert!(output_save_due(Some(&kernel)));
@@ -162,6 +164,9 @@ pub(super) struct Kernel {
     sending: Cell<bool>,
     /// Runs whose next output clears their cell first, as `clear_output(wait=True)` asks.
     clear_next: RefCell<HashSet<u64>>,
+    /// Runs begun whose cell still shows the last run's outputs, dimmed, until their first
+    /// output takes their place or they end with none, and the count each began as.
+    stale: RefCell<HashMap<u64, Option<u32>>>,
     last_run: Cell<u64>,
 }
 
@@ -386,6 +391,8 @@ impl NotebookTab {
                         view.outputs
                             .show(from, outputs.get(from..).unwrap_or_default());
                     }
+                    // Dimmed until what took the last run's place is drawn, in the same frame.
+                    view.outputs.set_stale(tab.shows_stale(id));
                 }
             }
             tab.mark_changed();
@@ -395,20 +402,36 @@ impl NotebookTab {
         });
     }
 
+    /// Whether cell `id` still shows the outputs of the run before the one it is in.
+    fn shows_stale(&self, id: CellId) -> bool {
+        self.kernel().is_some_and(|kernel| {
+            let runs = kernel.runs.borrow();
+            let stale = kernel.stale.borrow();
+            stale
+                .keys()
+                .any(|run| runs.get(run).is_some_and(|job| job.cell == id))
+        })
+    }
+
     fn end_ask(&self, id: CellId) {
         if let Some(view) = self.view_of(Some(id)) {
             view.end_ask();
         }
     }
 
-    /// The kernel is over: its runs end where they are, each cell counted as the model has it.
-    fn kernel_over(&self) {
+    /// The kernel is over: its runs end where they are, each cell counted as the model has it,
+    /// and one still showing the last run's outputs has none.
+    fn kernel_over(self: &Rc<Self>) {
         let Some(kernel) = self.kernel.kernel.take() else {
             return;
         };
         self.stale_execution();
         kernel.outbox.take();
-        for id in kernel.runs.take().into_values().map(|job| job.cell) {
+        let stale = kernel.stale.take();
+        for (run, RunJob { cell: id, .. }) in kernel.runs.take() {
+            if let Some(&count) = stale.get(&run) {
+                self.empty_run(id, count);
+            }
             self.end_ask(id);
             self.relabel(id);
         }
@@ -574,6 +597,7 @@ impl App {
             outbox: RefCell::default(),
             sending: Cell::new(false),
             clear_next: RefCell::default(),
+            stale: RefCell::default(),
             last_run: Cell::new(0),
         });
         tab.kernel.kernel.replace(Some(kernel.clone()));
@@ -716,9 +740,13 @@ impl App {
         };
         let cell = |run: u64| kernel.runs.borrow().get(&run).map(|job| job.cell);
         match news {
+            // The last run's outputs stay, dimmed, for the new ones to be held against.
             News::Started { run, count } => {
                 if let Some(id) = cell(run) {
-                    tab.empty_run(id, count);
+                    kernel.stale.borrow_mut().insert(run, count);
+                    if let Some(view) = tab.view_of(Some(id)) {
+                        view.outputs.set_stale(true);
+                    }
                 }
             }
             News::Output {
@@ -727,8 +755,12 @@ impl App {
                 display_id,
             } => {
                 if let Some(id) = cell(run) {
-                    if kernel.clear_next.borrow_mut().remove(&run) {
-                        tab.empty_run(id, tab.count_of(id));
+                    let stale = kernel.stale.borrow_mut().remove(&run);
+                    let wait = kernel.clear_next.borrow_mut().remove(&run);
+                    match (stale, wait) {
+                        (Some(count), _) => tab.empty_run(id, count),
+                        (None, true) => tab.empty_run(id, tab.count_of(id)),
+                        (None, false) => {}
                     }
                     tab.add_output(id, output, display_id);
                 }
@@ -744,7 +776,8 @@ impl App {
             }
             News::Clear { run, wait: false } => {
                 if let Some(id) = cell(run) {
-                    tab.empty_run(id, tab.count_of(id));
+                    let stale = kernel.stale.borrow_mut().remove(&run);
+                    tab.empty_run(id, stale.unwrap_or_else(|| tab.count_of(id)));
                 }
             }
             News::Input {
@@ -758,10 +791,15 @@ impl App {
             }
             News::Done { run, status, count } => {
                 kernel.clear_next.borrow_mut().remove(&run);
+                let stale = kernel.stale.borrow_mut().remove(&run);
                 let Some(RunJob { cell: id, source }) = kernel.runs.borrow_mut().remove(&run)
                 else {
                     return;
                 };
+                // Over with no output: nothing takes the last run's place.
+                if let Some(started) = stale {
+                    tab.empty_run(id, started);
+                }
                 // An aborted run never started, and keeps what its cell had.
                 if status != Status::Aborted {
                     tab.finish_run(id, count);
@@ -877,6 +915,14 @@ impl NotebookTab {
         let at = model.position(view.id)?;
         let outputs = model.cells()[at].outputs().to_vec();
         Some((view.count_text(), outputs, view.outputs.shown()))
+    }
+
+    /// Whether cell `n`'s outputs are dimmed as the last run's.
+    pub fn bench_stale(&self, n: usize) -> bool {
+        self.views
+            .borrow()
+            .get(n)
+            .is_some_and(|v| v.outputs.is_stale())
     }
 
     /// Whether a run waits or runs, or what one changed is still to be drawn: the drawing waits
