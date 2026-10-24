@@ -709,6 +709,15 @@ fn lineart_png() -> Vec<u8> {
     png_of(w, h, 4, &px)
 }
 
+/// An org file's fixture: TODO keywords set by the file, tags, a title, its three kinds of link
+/// and a source block and a drawer, which hold none.
+const OUTLINE_ORG: &str = "#+TITLE: Org outline\n#+FILETAGS: :org:\n#+TODO: TODO NEXT | DONE\n\n\
+The Outline, folds and links of an org file: [[file:Real.md][the real note]], \
+[[./Figures.md::*Figures]] and [[*Tasks]].\n\n\
+* Tasks :todo:\n** NEXT [#A] Read the figures\n** DONE Index this file\n\
+* Code\n#+begin_src python\ndef f():\n    return [[1]]\n#+end_src\n\
+* Drawers\n:PROPERTIES:\n:ID: 0f6c9e1c\n:END:\n<<here>> is where [[here]] lands.\n";
+
 /// Print/export fixture covering headings, inline and display math, diagrams, long code lines,
 /// tables, local and web images, and local, external and heading links. Its script must neither
 /// execute nor appear in the export.
@@ -1215,10 +1224,10 @@ fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Result
     let venv_in = (files / 40).clamp(2, 1000);
     let venv_ext = (files / 20).clamp(4, 2000);
 
-    // 35: the files written at fixed paths below (ignore files, .obsidian, templates, Code/,
+    // 36: the files written at fixed paths below (ignore files, .obsidian, templates, Code/,
     // Syncthing artefacts, pyvenv.cfg, the five-page and the commented PDF, the image-theming
-    // figures and their note), which the bulk fill has to leave room for.
-    let floor = notes + 35 + venv_in + flat_imgs + flat_pdfs + excal;
+    // figures and their note, the org file), which the bulk fill has to leave room for.
+    let floor = notes + 36 + venv_in + flat_imgs + flat_pdfs + excal;
     if files < floor {
         bail!("--files {files} is too small for --notes {notes}: need at least {floor}");
     }
@@ -1533,6 +1542,7 @@ fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Result
     )?;
     // Print and export's drill input: one of everything a page has to carry off the screen.
     g.write("Notes-QC/Export.md", EXPORT_NOTE.as_bytes())?;
+    g.write("Notes-QC/Outline.org", OUTLINE_ORG.as_bytes())?;
     // The notebook drill's inputs.
     g.mkdir("Notebooks")?;
     g.write("Notebooks/analysis.ipynb", ANALYSIS_IPYNB.as_bytes())?;
@@ -1788,6 +1798,11 @@ mod tests {
                 "{figures}"
             );
         }
+
+        // The org fixture reads as org: its headings, and its links but the one its code holds.
+        let org = fs::read_to_string(vault.join("Notes-QC/Outline.org")).unwrap();
+        let a = accent_core::org::analyze(&org);
+        assert_eq!((a.headings.len(), a.links.len()), (5, 4));
 
         // The notebook drill's inputs read as notebooks and are written back as they were.
         for (rel, cells) in [

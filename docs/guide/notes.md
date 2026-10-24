@@ -29,6 +29,14 @@ Paste an image or drop one into a note to copy it into the vault and insert an e
 You can also write `![[map.png]]` by hand.
 Set the destination under **Preferences → This Vault → Attachments Folder**.
 
+## Org files
+
+Accent opens an [Org mode](https://orgmode.org) file (`.org`) as text, coloured as Org and spell checked.
+Its headings fill the **Outline** and fold, and its links work as a note's do: `[[file:Trip plan.md]]` or `[[./trip.org::*Packing]]` reaches a file, `[[*Packing]]` a heading in the same file, and `F12` or `Ctrl`+click follows one.
+A note reaches an Org file as `[[trip]]`; a note of the same name wins.
+Heading tags such as `:travel:` and `#+FILETAGS` are listed with the note tags, `#+TITLE` names the file in search, and moving or renaming a file updates the links in Org files too.
+Org files have no preview yet, and `[[id:…]]` links are not followed.
+
 ## Templates
 
 Put `.md` files directly in the vault's **Templates Folder**, which is `Templates/` by default.
