@@ -1,12 +1,12 @@
 //! The tables, and the knobs that shape how they are filled.
 
 /// Bump on any schema change: `open` then drops and recreates the cache.
-pub(super) const SCHEMA_VERSION: i64 = 16;
+pub(super) const SCHEMA_VERSION: i64 = 17;
 
 /// Maximum indexed body size for non-markdown files. Stricter than [`crate::fs::MAX_TEXT`]
 /// because indexing repeatedly consumes database space and FTS query work, whereas opening a
-/// large file is explicit. Markdown notes are exempt.
-pub(super) const MAX_INDEXED_BODY: u64 = 1024 * 1024;
+/// large file is explicit. Markdown notes are exempt; a PDF's text is held to it too (`pdf_text`).
+pub(crate) const MAX_INDEXED_BODY: u64 = 1024 * 1024;
 
 /// Files per write transaction. Big enough to amortise the WAL commit, small enough that a
 /// killed process loses little work and progress reporting stays lively.
@@ -32,7 +32,11 @@ CREATE TABLE files(
     -- Written by the git refresh, not by the walk: the vault tree is walked whatever the
     -- ignore files say (hiding the user's notes is never right), and this is what lets a
     -- query leave the build output out again without the walk having to guess.
-    git_ignored  INTEGER NOT NULL DEFAULT 0
+    git_ignored  INTEGER NOT NULL DEFAULT 0,
+    -- A PDF's text, read after the walk by a pass of its own (`Index::claim_pdfs`): NULL until it
+    -- is read, -1 while a reader has it, then how many pages were read. Back to NULL whenever
+    -- the walk writes the row again, the file having changed.
+    text_pages   INTEGER
 );
 CREATE TABLE aliases(rel_path TEXT PRIMARY KEY, file_id INTEGER NOT NULL);
 -- The files the walk leaves out (a gitignored folder's, a dependency tree's) or search excludes
@@ -176,6 +180,10 @@ CREATE INDEX idx_files_kind_mt  ON files(kind, mtime_ns DESC);
 CREATE INDEX idx_symbols_name   ON symbols(name COLLATE NOCASE);
 CREATE INDEX idx_symbols_file   ON symbols(file_id);
 CREATE INDEX idx_aliases_file   ON aliases(file_id);
+-- The PDFs whose text is still to be read, newest first: a claim is a lookup rather than a pass
+-- over every PDF already read. `2` is `FileKind::Pdf`, written out because SQLite uses a partial
+-- index only for a query whose own `WHERE` says the same.
+CREATE INDEX idx_files_unread   ON files(mtime_ns DESC) WHERE kind = 2 AND text_pages IS NULL;
 "#;
 
 /// The `notes` rows a transaction rewrites, waiting to be written together

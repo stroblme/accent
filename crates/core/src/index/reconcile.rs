@@ -635,8 +635,9 @@ struct Content {
 /// Read, hash and parse one scanned entry for [`upsert`]. Use the editor's text reader so indexed
 /// byte offsets match its buffer, including normalised CRLF and replacement characters in notes.
 /// Lossy source files have no indexed body. Only notes may exceed [`MAX_INDEXED_BODY`]; the walk's
-/// stat avoids reading other oversized files. PDFs and binaries keep stat-only rows. Unreadable
-/// files also keep their stat rows, with the missing body logged at debug level.
+/// stat avoids reading other oversized files. Binaries keep stat-only rows, and so does a PDF
+/// until a pass of its own reads its text ([`Index::claim_pdfs`]). Unreadable files also keep
+/// their stat rows, with the missing body logged at debug level.
 fn read_content(f: &walk::FileMeta) -> Content {
     let body = || match crate::fs::read_text(&f.canonical) {
         Ok(read) => Some(read),
@@ -771,7 +772,7 @@ fn upsert(
                 parent_dir=excluded.parent_dir,
                 canonical=excluded.canonical, dev=excluded.dev, ino=excluded.ino,
                 mtime_ns=excluded.mtime_ns, size=excluded.size, kind=excluded.kind,
-                title=excluded.title, content_hash=excluded.content_hash
+                title=excluded.title, content_hash=excluded.content_hash, text_pages=NULL
              RETURNING id",
         )?
         .query_row(
@@ -884,7 +885,7 @@ fn upsert(
 /// Apply pending body deletions and insertions together through the FTS triggers. Per-file
 /// writes create extra FTS segments at statement savepoints; batching avoids costly segment
 /// merges while producing the same index.
-fn write_bodies(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+pub(super) fn write_bodies(tx: &rusqlite::Transaction<'_>) -> Result<()> {
     tx.prepare_cached("DELETE FROM notes WHERE file_id IN (SELECT file_id FROM temp.bodies)")?
         .execute([])?;
     tx.prepare_cached(

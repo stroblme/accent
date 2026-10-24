@@ -1708,6 +1708,7 @@ mod tests {
             snippet: snippet.into(),
             at: Some(at),
             line,
+            page: None,
             more,
         };
         let rows = fts_rows(
@@ -1720,6 +1721,7 @@ mod tests {
                     snippet: "# «Ferris»".into(),
                     at: None,
                     line: None,
+                    page: None,
                     more: 0,
                 },
             ],
@@ -1827,6 +1829,7 @@ mod tests {
             line_text: "// zorblat".into(),
             range: 3..10,
             offset: 3,
+            page: None,
             more: 0,
         }];
         let rows = walked_rows(walked, &re, "teal");
@@ -1847,6 +1850,7 @@ mod tests {
             snippet: "Uni«café»".into(),
             at: Some(3..8),
             line: Some(1),
+            page: None,
             more: 0,
         };
         let rows = mid_word_rows(vec![hit], "afe");

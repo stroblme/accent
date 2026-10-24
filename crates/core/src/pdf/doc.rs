@@ -223,6 +223,18 @@ impl PdfDoc {
         self.page_text_locked(page)
     }
 
+    /// The page's text as one string, as pdfium reads it out (`FPDFText_GetText`): the text its
+    /// [`search`](Self::search) runs over, which is what the index holds of a PDF.
+    pub fn page_plain_text(&self, page: usize) -> Result<String> {
+        let _guard = lock();
+        let text = self
+            .page(page)?
+            .text()
+            .map_err(|e| Error::Pdf(format!("text page {page}: {e:?}")))?
+            .all();
+        Ok(text)
+    }
+
     /// [`Self::page_text`] without taking `CALLS`, for callers that already hold it.
     fn page_text_locked(&self, page: usize) -> Result<Vec<Glyph>> {
         let p = self.page(page)?;

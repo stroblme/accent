@@ -3,6 +3,7 @@
 
 use super::{Index, Match, SearchHit};
 use crate::Result;
+use crate::path::{FileType, file_type};
 use crate::search::Regex;
 use crate::walk::FileKind;
 use rusqlite::{OptionalExtension, params};
@@ -23,7 +24,8 @@ pub(super) const PER_FILE: usize = 5;
 
 impl Index {
     /// Search indexed titles and bodies as an ordered phrase ([`fts_query`]), returning byte
-    /// ranges. Directories, PDFs, conflict copies and binaries have no searchable body.
+    /// ranges. Directories, conflict copies, binaries and a PDF whose text is not read yet have no
+    /// searchable body; a PDF's rows are one a page ([`SearchHit::page`]).
     ///
     /// Exclude ignored non-note files unless `include_ignored`; filter before applying `limit`.
     ///
@@ -223,7 +225,8 @@ impl Index {
     }
 
     /// List up to `limit` regex matches in `rel_path` order and count all matches, including
-    /// those omitted. [`grep_paths`](Self::grep_paths) visits the same bodies for Replace All.
+    /// those omitted, that Replace All would rewrite: a PDF's rows are listed, one a page, and
+    /// never counted. [`grep_paths`](Self::grep_paths) visits the same bodies for Replace All.
     ///
     /// Bodies stream from the index without disk reads or materialising the vault. Ignored-file
     /// handling matches [`search`](Self::search), always retaining markdown notes.
@@ -244,6 +247,11 @@ impl Index {
                 continue;
             }
             let (rel_path, title): (String, Option<String>) = (row.get(0)?, row.get(1)?);
+            let mut listed = 0;
+            let counted = match row.get::<_, i64>(3)? == FileKind::Pdf.as_i64() {
+                true => &mut listed,
+                false => &mut total,
+            };
             Self::matches_in(
                 &rel_path,
                 title.as_deref(),
@@ -251,7 +259,7 @@ impl Index {
                 re,
                 limit,
                 &mut out,
-                &mut total,
+                counted,
             );
         }
         Ok((out, total))
@@ -284,6 +292,9 @@ impl Index {
     ///
     /// The regex still runs from the top of the body, so `^` and `\b` read the text before `from`
     /// as the first pass did and the matches are the ones it counted.
+    ///
+    /// A PDF's body is matched a page at a time: its first match on a page is the page's row, the
+    /// rest of that page counts for nothing, and a `from` inside a page goes on from the next.
     pub fn matches_from(
         rel: &str,
         title: Option<&str>,
@@ -294,9 +305,21 @@ impl Index {
     ) -> (Vec<Match>, usize) {
         // `find_iter` walks forward, so the line number follows it instead of being counted
         // from the start of the note for every hit.
-        let mut lines = Lines::new(body);
+        let pdf = file_type(rel) == FileType::Pdf;
+        let from = match pdf && from > 0 {
+            true => next_page(body, from),
+            false => from,
+        };
+        let mut lines = Lines::new(body, pdf);
         let (mut out, mut total): (Vec<Match>, usize) = (Vec::new(), 0);
+        let mut page = None;
         for m in re.find_iter(body).skip_while(|m| m.start() < from) {
+            if pdf {
+                lines.advance(m.start());
+                if page.replace(lines.page) == Some(lines.page) {
+                    continue;
+                }
+            }
             total += 1;
             if out.len() >= cap {
                 if let Some(last) = out.last_mut() {
@@ -312,6 +335,7 @@ impl Index {
                 line_text,
                 range,
                 offset: m.start(),
+                page: pdf.then_some(lines.page),
                 more: 0,
             });
         }
@@ -335,13 +359,16 @@ impl Index {
 
     /// The files whose indexed body matches at all, in `rel_path` order: the bodies
     /// [`grep`](Self::grep) reads under the same `include_ignored`, so a Replace All rewrites
-    /// exactly what that count promised. Uncapped on purpose: a global replace has to visit every
-    /// file, not only the ones the sidebar had room to list.
+    /// exactly what that count promised, which leaves the PDFs out. Uncapped on purpose: a global
+    /// replace has to visit every file, not only the ones the sidebar had room to list.
     pub fn grep_paths(&self, re: &Regex, include_ignored: bool) -> Result<Vec<String>> {
         let mut st = self.conn.prepare_cached(GREP_SQL)?;
         let mut rows = st.query(params![include_ignored, FileKind::Markdown.as_i64()])?;
         let mut out = Vec::new();
         while let Some(row) = rows.next()? {
+            if row.get::<_, i64>(3)? == FileKind::Pdf.as_i64() {
+                continue;
+            }
             let body: String = row.get(2)?;
             if re.is_match(&body) {
                 out.push(row.get(0)?);
@@ -356,7 +383,7 @@ impl Index {
 ///
 /// `?1` drops the git-ignored exclusion, `?2` is [`FileKind::Markdown`] — the escape that keeps a
 /// note in the results whatever ignores it.
-const GREP_SQL: &str = "SELECT f.rel_path, f.title, n.body
+const GREP_SQL: &str = "SELECT f.rel_path, f.title, n.body, f.kind
      FROM notes n JOIN files f ON f.id = n.file_id
      WHERE ?1 OR f.git_ignored = 0 OR f.kind = ?2
      ORDER BY f.rel_path";
@@ -364,21 +391,28 @@ const GREP_SQL: &str = "SELECT f.rel_path, f.title, n.body
 /// A walk down a body's matches, handing each one the line it starts on. Both searches walk their
 /// matches forward, so the line number follows the walk instead of being counted from the top of
 /// the note for every one of them.
+///
+/// In a PDF's body a form feed ends a page as well as a line, and the line is counted on its page.
 struct Lines<'a> {
     body: &'a str,
+    pdf: bool,
     /// How far the line counter has read. Matches arrive in order, so it never reads twice.
     cursor: usize,
     line: u32,
     line_start: usize,
+    /// The 1-based page the cursor is on, in a PDF's body.
+    page: u32,
 }
 
 impl<'a> Lines<'a> {
-    fn new(body: &'a str) -> Self {
+    fn new(body: &'a str, pdf: bool) -> Self {
         Self {
             body,
+            pdf,
             cursor: 0,
             line: 1,
             line_start: 0,
+            page: 1,
         }
     }
 
@@ -387,23 +421,35 @@ impl<'a> Lines<'a> {
     /// of its line — a phrase the note wrote across two — is marked to the end of the line, and
     /// one that starts in the `\r\n` the row trims is an empty mark at its end.
     fn at(&mut self, start: usize, end: usize) -> (u32, String, Range<usize>) {
-        while self.cursor < start {
-            if self.body.as_bytes()[self.cursor] == b'\n' {
-                self.line += 1;
-                self.line_start = self.cursor + 1;
-            }
-            self.cursor += 1;
-        }
+        self.advance(start);
         let rest = &self.body[self.line_start..];
-        let line_text = rest
-            .split('\n')
-            .next()
-            .unwrap_or(rest)
-            .trim_end_matches('\r');
+        let stop = match self.pdf {
+            true => rest.find(['\n', '\x0c']),
+            false => rest.find('\n'),
+        };
+        let line_text = rest[..stop.unwrap_or(rest.len())].trim_end_matches('\r');
         let from = (start - self.line_start).min(line_text.len());
         let to = (end - self.line_start).min(line_text.len());
         let (text, range) = clip(line_text, from..to);
         (self.line, text, range)
+    }
+
+    /// Read on to byte `start`, counting the lines and pages passed.
+    fn advance(&mut self, start: usize) {
+        while self.cursor < start {
+            match self.body.as_bytes()[self.cursor] {
+                b'\n' => {
+                    self.line += 1;
+                    self.line_start = self.cursor + 1;
+                }
+                b'\x0c' if self.pdf => {
+                    (self.line, self.page) = (1, self.page + 1);
+                    self.line_start = self.cursor + 1;
+                }
+                _ => {}
+            }
+            self.cursor += 1;
+        }
     }
 }
 
@@ -413,6 +459,9 @@ impl<'a> Lines<'a> {
 ///
 /// Empty where the body does not hold the phrase — a hit on the title, or one folded across a
 /// stretch [`folded_find`] cannot put back together — and the caller keeps its file row then.
+///
+/// A PDF's rows are its pages: the first occurrence on a page is its row, the next row is on a
+/// later page, and a `from` inside a page goes on from the next.
 fn phrase_hits(
     rel: &str,
     title: Option<&str>,
@@ -422,16 +471,23 @@ fn phrase_hits(
     cap: usize,
 ) -> Vec<SearchHit> {
     let mut out: Vec<SearchHit> = Vec::new();
-    let mut lines = Lines::new(body);
+    let pdf = file_type(rel) == FileType::Pdf;
+    let mut lines = Lines::new(body, pdf);
     // A place read off an earlier copy of the file may be past its end or inside a character.
     let mut from = from.min(body.len());
     while !body.is_char_boundary(from) {
         from += 1;
     }
+    if pdf && from > 0 {
+        from = next_page(body, from);
+    }
     // A zero-length match would never advance, so an empty query lists nothing rather than looping.
     while let Some((at, len)) = folded_find(&body[from..], phrase).filter(|&(_, len)| len > 0) {
         let start = from + at;
-        from = start + len;
+        from = match pdf {
+            true => next_page(body, start),
+            false => start + len,
+        };
         if out.len() >= cap {
             if let Some(last) = out.last_mut() {
                 last.more += 1;
@@ -451,11 +507,17 @@ fn phrase_hits(
                 &text[range.end..]
             ),
             at: Some(start..start + len),
-            line: Some(line),
+            line: (!pdf).then_some(line),
+            page: pdf.then_some(lines.page),
             more: 0,
         });
     }
     out
+}
+
+/// Where the page after the one holding byte `at` of a PDF's body starts, or the body's end.
+fn next_page(body: &str, at: usize) -> usize {
+    body[at..].find('\x0c').map_or(body.len(), |i| at + i + 1)
 }
 
 /// The slice of a matched line worth putting in a sidebar row, and where the match sits in it.
@@ -505,6 +567,7 @@ fn hit(r: &rusqlite::Row<'_>, phrase: &str) -> rusqlite::Result<SearchHit> {
         // A file row until [`Index::per_match`] has read the body and found where in it the
         // phrase occurs; what is left of one is the hit whose body does not hold it at all.
         line: None,
+        page: None,
         more: 0,
     })
 }

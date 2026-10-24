@@ -7,6 +7,7 @@
 
 mod files;
 mod links;
+mod pdf_text;
 mod reconcile;
 mod schema;
 mod search;
@@ -14,9 +15,11 @@ mod symbols;
 
 use crate::walk::FileKind;
 use crate::{Error, Result};
+pub use pdf_text::UnreadPdf;
 pub use rusqlite::InterruptHandle;
 use rusqlite::functions::FunctionFlags;
 use rusqlite::{Connection, OptionalExtension};
+pub(crate) use schema::MAX_INDEXED_BODY;
 use schema::{BODIES, DROP_ALL, SCHEMA, SCHEMA_VERSION};
 pub use search::MIN_INFIX;
 use search::{folded_find, snippet_window};
@@ -136,6 +139,10 @@ pub struct SearchHit {
     /// 1-based line the occurrence sits on, the way an editor counts lines; `None` on the one
     /// row a hit with no occurrence in the body makes, which quotes the head of the note instead.
     pub line: Option<u32>,
+    /// On a PDF's row, which is one of its pages rather than an occurrence: that page, 1-based as
+    /// a `#page=` link counts, `line` being `None`. `None` on every other file's row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<u32>,
     /// Occurrences in this file the per-file cap left out, on its last listed row and 0 on every
     /// other: [`Match::more`] for the ranked path.
     pub more: usize,
@@ -154,6 +161,10 @@ pub struct Match {
     pub range: Range<usize>,
     /// Byte offset of the match in the note, so activating the row can place the caret on it.
     pub offset: usize,
+    /// On a PDF's row, which is the first match on one of its pages: that page, 1-based, `line`
+    /// counting from its top. `None` on every other file's row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<u32>,
     /// Matches in this file the cap left out, on its last listed row and 0 on every other, so the
     /// list can say "+N more in this file" instead of quietly dropping them.
     pub more: usize,
