@@ -1364,11 +1364,23 @@ fn changed_runs<T: Clone + Eq + std::hash::Hash + 'static>(
 /// needed, so a recycled row can be any of them ([`layout`]). Not homogeneous: a header's button is
 /// taller than an entry, a commit two lines to a file's one, and every row taking the tallest
 /// height would turn the list into a ladder.
+///
+/// The stack carries the row's tooltip. Where the pointer comes straight from another row's,
+/// GTK hides that one on the motion that brings it here and arms this one only on the next,
+/// which a flick that stops at once never sends (ISSUES.md); asking again on the way in arms it.
 fn row_stack() -> gtk::Stack {
-    gtk::Stack::builder()
+    let stack = gtk::Stack::builder()
         .hhomogeneous(false)
         .vhomogeneous(false)
-        .build()
+        .build();
+    let enter = gtk::EventControllerMotion::new();
+    enter.connect_enter(|enter, _, _| {
+        if let Some(stack) = enter.widget() {
+            stack.trigger_tooltip_query();
+        }
+    });
+    stack.add_controller(enter);
+    stack
 }
 
 /// Build a row layout on its first binding, then return it for filling. Avoid constructing every
