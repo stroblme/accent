@@ -649,8 +649,7 @@ mod tests {
         assert_eq!(hits(&ix, false), ["notes/a.md"]);
 
         fs::write(vault.path().join("paper/main.log"), "zorblat\n").unwrap();
-        ix.update_file_batched(vault.path(), "paper/main.log")
-            .unwrap();
+        ix.update_file(vault.path(), "paper/main.log").unwrap();
         assert_eq!(
             hits(&ix, false),
             ["notes/a.md"],
@@ -660,9 +659,8 @@ mod tests {
         // And a directory made under it hands the exclusion on to what lands inside.
         fs::create_dir(vault.path().join("paper/out")).unwrap();
         fs::write(vault.path().join("paper/out/deep.log"), "zorblat\n").unwrap();
-        ix.update_file_batched(vault.path(), "paper/out").unwrap();
-        ix.update_file_batched(vault.path(), "paper/out/deep.log")
-            .unwrap();
+        ix.update_file(vault.path(), "paper/out").unwrap();
+        ix.update_file(vault.path(), "paper/out/deep.log").unwrap();
         assert_eq!(hits(&ix, false), ["notes/a.md"]);
 
         // A row already in the index keeps whatever the set last said about it.

@@ -167,12 +167,6 @@ impl Synctex {
         }
     }
 
-    /// Whether `file` is one of the inputs, by its path with `./` and `..` taken out.
-    pub fn has_input(&self, file: &Path) -> bool {
-        let file = normal(file);
-        self.inputs.values().any(|input| *input == file)
-    }
-
     /// The source line typeset at `(x, y)` on `page` (from 0), in PDF points from its top-left
     /// corner. The innermost box under the point, or the nearest one; in it, the last record at
     /// or left of the point (the first of several at one place), or its first.
@@ -489,7 +483,7 @@ pub fn pdf_of(synctex: &Path) -> Option<PathBuf> {
 /// The SyncTeX files that may hold `tex`, below `root`, nearest first, each the one `build` takes
 /// for the build of the PDF beside it ([`beside`], unless the caller knows more): the build of
 /// `tex` itself, then every other one in the folders [`build_dirs`] names, for a file `\input` by
-/// another. Whether one lists `tex` is for [`Synctex::has_input`] to say once it is read.
+/// another. Whether one lists `tex` is for [`Synctex::view`] to say once it is read.
 pub fn near(root: &Path, tex: &Path, build: impl Fn(&Path) -> Option<PathBuf>) -> Vec<PathBuf> {
     let (Some(dir), Some(stem)) = (tex.parent(), tex.file_stem()) else {
         return Vec::new();
@@ -687,8 +681,7 @@ mod tests {
         is("main.tex", 3, 0, 134.764_62, 9.843_078);
         is("main.tex", 8, 0, 182.433_06, 8.855_677);
         // `./` as the engine writes it, and a file the build never read.
-        assert!(s.has_input(Path::new("/tmp/synctex/./chapter.tex")));
-        assert!(!s.has_input(Path::new("/tmp/synctex/other.tex")));
+        assert!(s.view(Path::new("/tmp/synctex/./chapter.tex"), 1).is_some());
         assert_eq!(s.view(Path::new("/tmp/synctex/other.tex"), 1), None);
     }
 

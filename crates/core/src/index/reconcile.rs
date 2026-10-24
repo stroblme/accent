@@ -430,17 +430,6 @@ impl Index {
     /// This path does not deduplicate `(dev, ino)`; duplicate symlink entries remain until full
     /// reconciliation.
     pub fn update_file(&mut self, root: &Path, rel: &str) -> Result<Change> {
-        self.update_one(root, rel, true)
-    }
-
-    /// [`update_file`](Self::update_file) without the link resolution: the file's own links are
-    /// written unresolved, and links into it stay as they were until
-    /// [`resolve_links`](Self::resolve_links) runs.
-    pub fn update_file_batched(&mut self, root: &Path, rel: &str) -> Result<Change> {
-        self.update_one(root, rel, false)
-    }
-
-    fn update_one(&mut self, root: &Path, rel: &str, resolve: bool) -> Result<Change> {
         let meta = match self.stat(root, rel) {
             Ok(Some(meta)) => meta,
             Ok(None) => return Ok(Change::Ignored),
@@ -450,7 +439,7 @@ impl Index {
             }
             Err(e) => return Err(e),
         };
-        self.write_one(&meta, resolve)
+        self.write_one(&meta)
     }
 
     /// Keep `rel`, an opened file, in the index although the walk leaves it out or search
@@ -467,7 +456,7 @@ impl Index {
         let Some(meta) = walk::stat_opened(root, rel)? else {
             return Ok(());
         };
-        self.write_one(&meta, true)?;
+        self.write_one(&meta)?;
         let tx = self.write_tx()?;
         tx.execute(
             "UPDATE files SET git_ignored = 0 WHERE rel_path = ?1",
@@ -522,7 +511,7 @@ impl Index {
     }
 
     /// Write one stat'd file's rows, unless its stat is the row's already.
-    fn write_one(&mut self, meta: &walk::FileMeta, resolve: bool) -> Result<Change> {
+    fn write_one(&mut self, meta: &walk::FileMeta) -> Result<Change> {
         let rel = meta.rel_path.as_str();
         let existing: Option<(i64, i64, i64, i64)> = self
             .conn
@@ -547,9 +536,7 @@ impl Index {
         // resolved deeper. Both are the links its keys name, and nothing else moved. In the same
         // transaction, or a reader in between sees the note link to nothing: a page edit asking
         // for the backlinks of a PDF right after the last one rewrote a note would skip it.
-        if resolve {
-            resolve_links_of(&tx, rel)?;
-        }
+        resolve_links_of(&tx, rel)?;
         tx.commit()?;
         Ok(match existing_id {
             Some(_) => Change::Updated(meta.kind),
@@ -561,9 +548,7 @@ impl Index {
     /// subtree has to go with it. Returns how many rows went.
     ///
     /// The links that pointed into the subtree are re-resolved as each row goes
-    /// ([`delete_file_rows`]), so there is nothing for a batch caller to defer — the name keeps
-    /// the `_batched` suffix of [`update_file_batched`](Self::update_file_batched), which has to
-    /// have one.
+    /// ([`delete_file_rows`]), so there is nothing for a batch caller to defer.
     pub fn remove_file_batched(&mut self, rel: &str) -> Result<usize> {
         let (lo, hi) = path::subtree_range(rel);
         let ids: Vec<i64> = {

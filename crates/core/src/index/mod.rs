@@ -500,7 +500,7 @@ mod tests {
 
         fs::write(vault.path().join("a.md"), "# Alpha\nrewritten\n").unwrap();
         let t = Instant::now();
-        let change = ix.update_file_batched(vault.path(), "a.md");
+        let change = ix.update_file(vault.path(), "a.md");
         let waited = t.elapsed();
         other.join().unwrap();
 
