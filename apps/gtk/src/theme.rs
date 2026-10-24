@@ -154,6 +154,7 @@ pub fn view_fg(dark: bool) -> &'static str {
 }
 
 /// White paper and opaque precomposited ink for print/export, independent of screen theme.
+#[cfg(feature = "webkit")]
 pub fn paper() -> (&'static str, gdk::RGBA) {
     (VIEW_LIGHT, rgba(rgb(VIEW_LIGHT_TEXT), 1.0))
 }

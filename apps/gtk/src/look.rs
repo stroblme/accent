@@ -49,6 +49,7 @@ impl Look {
 
     /// The look of a printout or an export: every image as its file is, whatever the theme on
     /// screen and whatever the reader inverted.
+    #[cfg(feature = "webkit")]
     pub fn paper() -> Look {
         Look {
             theme: None,
@@ -70,6 +71,7 @@ impl Look {
 
     /// [`Self::palette`] for a diagram a note embeds, under the diagrams' switch: the canvas's
     /// rule (`DiagramTab::restyle`).
+    #[cfg(feature = "webkit")]
     fn diagram(&self, inverted: bool) -> Option<Page> {
         recolour::onto(self.diagrams, inverted, self.theme, self.opposite)
     }
@@ -215,6 +217,7 @@ fn rasterise(svg: &[u8], scale: i32, zoom: f64) -> Result<(gdk::Texture, (i32, i
 }
 
 /// What the preview hands WebKit for an image: the file as it is, or new bytes of a type.
+#[cfg(feature = "webkit")]
 pub enum Served {
     File,
     Bytes(glib::Bytes, &'static str),
@@ -222,6 +225,7 @@ pub enum Served {
 
 /// Serve preview images unchanged unless recolouring, EXIF correction or unsupported formats require PNG.
 /// Failures fall back to the original file.
+#[cfg(feature = "webkit")]
 pub fn serve(path: &Path, look: Look, inverted: bool) -> Served {
     if svg(path) {
         return match look
@@ -250,6 +254,7 @@ pub fn serve(path: &Path, look: Look, inverted: bool) -> Served {
 
 /// [`serve`] for an SVG's text rather than its file: a diagram embedded in a note, drawn for it
 /// (`diagram::embed`), goes through the filter as an SVG image does, under the diagrams' switch.
+#[cfg(feature = "webkit")]
 pub fn serve_svg(text: &str, look: Look, inverted: bool) -> Served {
     let svg = look
         .diagram(inverted)
@@ -490,6 +495,7 @@ pub(crate) fn animated(path: &Path) -> bool {
 pub(crate) const ANIMATED: &str = "Animated images are shown without recolouring";
 
 /// The same, after the command's name in the preview's menu.
+#[cfg(feature = "webkit")]
 pub(crate) const ANIMATED_LABEL: &str = "(animated)";
 
 fn extension(path: &Path) -> String {
@@ -619,6 +625,7 @@ pub(crate) mod tests {
             );
         }
         // Paper shows every image as its file, inverted or not.
+        #[cfg(feature = "webkit")]
         for (document, inverted) in [(false, false), (true, false), (false, true), (true, true)] {
             assert_eq!(Look::paper().palette(document, inverted), None);
         }

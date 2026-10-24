@@ -57,12 +57,14 @@ pub(crate) use lines::{
 pub(crate) use lines::{newline_below, paste_primary};
 pub use open::open;
 pub(crate) use open::{build, interact};
+#[cfg(feature = "webkit")]
+pub(crate) use page::COLUMN_FLOOR;
 pub use page::default_font;
-pub(crate) use page::{
-    COLUMN_FLOOR, font_css, install_font, next_view_name, refont, remeasure, restyle_note,
-    set_margins, style_note,
-};
 use page::{GUTTER, line_numbers};
+pub(crate) use page::{
+    font_css, install_font, next_view_name, refont, remeasure, restyle_note, set_margins,
+    style_note,
+};
 pub(crate) use paste::paste_verbatim;
 use search::matched;
 pub(crate) use search::{
