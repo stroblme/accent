@@ -467,22 +467,29 @@ pub fn have_server_cmd(hash: &str) -> String {
     )
 }
 
-/// Install `size` uncompressed bytes through a dotted temporary file, decoding XZ if asked.
-/// Check decoding and length before renaming; sweep older builds only after success.
+/// Install `size` uncompressed bytes through a private temporary file, decoding XZ if asked.
+/// Check decoding and length before renaming; sweep unused older builds only after success.
 pub fn install_server_cmd(hash: &str, size: usize, xz: bool) -> String {
     let dir = format!("$HOME/{SERVER_DIR}");
     let name = server_name(hash);
-    let tmp = format!("{dir}/.{name}.tmp");
+    let template = format!("{dir}/.{name}.XXXXXX");
+    let tmp = "\"$tmp\"";
     let installed = server_path(hash);
     let read = if xz { "xz -dc" } else { "cat" };
     format!(
         "mkdir -p {dir} && \
+         tmp=$(mktemp {template}) && \
          if ! {read} > {tmp}; then \
          rm -f {tmp}; echo 'cannot receive the server' >&2; exit 1; fi && \
          if [ \"$(wc -c < {tmp})\" -ne {size} ]; then \
          rm -f {tmp}; echo 'the upload was cut short' >&2; exit 1; fi && \
          chmod 755 {tmp} && mv -f {tmp} {installed} && \
-         for f in {dir}/accent-cli-*; do [ \"$f\" = {installed} ] || rm -f \"$f\"; done"
+         if [ -d /proc/self ]; then \
+         for f in {dir}/accent-cli-*; do \
+         [ \"$f\" = {installed} ] && continue; used=0; \
+         for exe in /proc/[0-9]*/exe; do \
+         if [ \"$f\" -ef \"$exe\" ]; then used=1; break; fi; done; \
+         [ \"$used\" = 1 ] || rm -f \"$f\"; done; fi"
     )
 }
 
@@ -1123,8 +1130,11 @@ mod tests {
         let hash = "0123456789abcdef";
         let cmd = install_server_cmd(hash, 8_300_000, false);
         let installed = server_path(hash);
-        let tmp = "$HOME/.local/share/accent/server/.accent-cli-0123456789abcdef.tmp";
+        let tmp = "\"$tmp\"";
         assert!(cmd.contains("mkdir -p $HOME/.local/share/accent/server"));
+        assert!(cmd.contains(
+            "mktemp $HOME/.local/share/accent/server/.accent-cli-0123456789abcdef.XXXXXX"
+        ));
         // The binary is never written to the path it is finally seen at.
         assert!(cmd.contains(&format!("cat > {tmp}")));
         assert!(cmd.contains(&format!("chmod 755 {tmp}")));
@@ -1136,7 +1146,7 @@ mod tests {
         assert!(counted < cmd.find("mv -f").expect(&cmd));
         // The sweep spares what was just installed.
         assert!(cmd.contains("accent-cli-*"));
-        assert!(cmd.contains(&format!("[ \"$f\" = {installed} ] || rm -f \"$f\"")));
+        assert!(cmd.contains(&format!("[ \"$f\" = {installed} ] && continue")));
     }
 
     #[test]
@@ -1195,9 +1205,93 @@ mod tests {
             std::fs::metadata(&installed).unwrap().permissions().mode() & 0o111,
             0
         );
-        assert!(!old.exists());
+        // Server hosts are Linux; on a test host without /proc cleanup must retain old builds.
+        let retained = !Path::new("/proc/self").is_dir();
+        assert_eq!(old.exists(), retained);
         assert!(install(b"raw fallback", 12, false));
         assert_eq!(std::fs::read(&installed).unwrap(), b"raw fallback");
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            1 + usize::from(retained)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn installing_a_server_retains_executables_still_used_by_a_process() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = scratch.path().join(SERVER_DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("accent-cli-old");
+        std::fs::copy("/bin/sleep", &old).unwrap();
+        let mut live = Command::new(&old).arg("30").spawn().unwrap();
+        let command = install_server_cmd("0123456789abcdef", 3, false)
+            .replace("$HOME", &quote(scratch.path().to_str().unwrap()));
+        let install = || {
+            let mut child = Command::new("sh")
+                .args(["-c", &command])
+                .stdin(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child.stdin.take().unwrap().write_all(b"new").unwrap();
+            child.wait().unwrap().success()
+        };
+        let installed = install();
+        let retained = old.exists();
+        live.kill().unwrap();
+        live.wait().unwrap();
+        assert!(installed);
+        assert!(retained, "an update removed a running holder's executable");
+        assert!(install());
+        assert!(!old.exists(), "an unused older build was not swept");
+    }
+
+    #[test]
+    fn overlapping_server_uploads_do_not_write_into_an_installed_binary() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        let scratch = tempfile::tempdir().unwrap();
+        let dir = scratch.path().join(SERVER_DIR);
+        let hash = "0123456789abcdef";
+        let command = install_server_cmd(hash, 8, false)
+            .replace("$HOME", &quote(scratch.path().to_str().unwrap()));
+        let start = || {
+            Command::new("sh")
+                .args(["-c", &command])
+                .stdin(Stdio::piped())
+                .spawn()
+                .unwrap()
+        };
+        let mut first = start();
+        let mut input = first.stdin.take().unwrap();
+        input.write_all(b"aaaa").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !std::fs::read_dir(&dir).is_ok_and(|mut files| {
+            files.any(|entry| {
+                entry
+                    .ok()
+                    .and_then(|entry| entry.metadata().ok())
+                    .is_some_and(|meta| meta.len() == 4)
+            })
+        }) {
+            assert!(Instant::now() < deadline, "first upload never started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let mut second = start();
+        second.stdin.take().unwrap().write_all(b"BBBBBBBB").unwrap();
+        assert!(second.wait().unwrap().success());
+        let installed = dir.join(server_name(hash));
+        assert_eq!(std::fs::read(&installed).unwrap(), b"BBBBBBBB");
+        // The first upload continues but is cut short: it must not change what just landed.
+        input.write_all(b"aa").unwrap();
+        drop(input);
+        assert!(!first.wait().unwrap().success());
+        assert_eq!(std::fs::read(&installed).unwrap(), b"BBBBBBBB");
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
     }
 

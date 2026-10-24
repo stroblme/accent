@@ -5,6 +5,7 @@
 pub mod client;
 pub mod clip;
 pub mod daemon;
+mod discovery;
 pub mod mcp;
 mod protocol;
 mod screen;
@@ -18,8 +19,8 @@ use std::sync::{Mutex, MutexGuard};
 /// Failure status for `attach`. Avoid 255, which SSH uses for lost connections.
 pub const FAILED: i32 = 254;
 
-// Versioned: a holder speaking an older wire keeps running past an upgrade, so a new one must not
-// try to talk to it. Bump only when the protocol changes.
+// Bump only for incompatible wire changes; discovery keeps existing shells on supported older
+// holders. Additive operations should preserve the terminal wire and negotiate their support.
 const SOCKET: &str = "hold-3.sock";
 const LOCK: &str = "hold-3.lock";
 

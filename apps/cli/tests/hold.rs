@@ -20,6 +20,7 @@ const OWNER: &str = "/home/me/.local/state";
 struct Holder {
     tmp: PathBuf,
     child: Child,
+    version: u8,
 }
 
 impl Holder {
@@ -43,7 +44,11 @@ impl Holder {
             .stdout(Stdio::null())
             .spawn()
             .expect("accent-cli must be built");
-        let holder = Holder { tmp, child };
+        let holder = Holder {
+            tmp,
+            child,
+            version: 3,
+        };
         let deadline = Instant::now() + Duration::from_secs(5);
         while !holder.socket().exists() {
             assert!(
@@ -55,10 +60,23 @@ impl Holder {
         Some(holder)
     }
 
-    /// `$TMPDIR/accent-<uid>/hold-3.sock`; the scratch dir is ours, so its owner is our uid.
+    /// The versioned socket; the scratch dir is ours, so its owner is our uid.
     fn socket(&self) -> PathBuf {
         let uid = std::fs::metadata(&self.tmp).unwrap().uid();
-        self.tmp.join(format!("accent-{uid}/hold-3.sock"))
+        self.tmp
+            .join(format!("accent-{uid}/hold-{}.sock", self.version))
+    }
+
+    /// Model an older holder's namespace; the basic v2 terminal wire is unchanged in v3.
+    fn version(&mut self, version: u8) {
+        let socket = self.socket();
+        self.version = version;
+        std::fs::rename(
+            socket.with_extension("lock"),
+            self.socket().with_extension("lock"),
+        )
+        .unwrap();
+        std::fs::rename(socket, self.socket()).unwrap();
     }
 
     /// Attach to shell `id` the way `attach` does, for [`OWNER`], with a small, known environment.
@@ -505,6 +523,87 @@ fn a_detached_shell_is_redrawn_on_reattach_and_ends_on_kill() {
     // SIGHUP: 128 + 1, as a shell reports a child that died of it.
     assert_eq!(until(&conn, None).1, Some(129));
     holder.assert_gone();
+}
+
+#[test]
+fn an_upgrade_lists_resumes_and_kills_the_previous_holders_shell() {
+    let Some(mut holder) = Holder::start("upgrade") else {
+        return;
+    };
+    let conn = holder.hello("old", "/bin/sh");
+    send(&conn, INPUT, b"echo before-$$; sleep 1; echo after-$$\n");
+    until(&conn, Some("before-"));
+    drop(conn);
+    holder.version(2);
+
+    let listed = cli(&holder.tmp).arg("held").output().unwrap();
+    assert!(listed.status.success());
+    let old: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(old["id"], "old");
+    let pid = old["pid"].as_u64().unwrap();
+    let log = holder.tmp.join("attach.log");
+    let mut attached = cli(&holder.tmp)
+        .env("SHELL", "/bin/sh")
+        .args(["attach", "--cwd"])
+        .arg(&holder.tmp)
+        .arg("old")
+        .stdin(Stdio::piped())
+        .stdout(std::fs::File::create(&log).unwrap())
+        .spawn()
+        .unwrap();
+    // Child::wait closes its stored stdin, which would detach before the holder reports exit.
+    let _input = attached.stdin.take().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let output = std::fs::read_to_string(&log).unwrap();
+        if output.contains(&format!("after-{pid}")) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "old job did not resume: {output}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!holder.socket().with_file_name("hold-3.sock").exists());
+    let shared = cli(&holder.tmp)
+        .args(["share", "old", "--vault"])
+        .arg(&holder.tmp)
+        .output()
+        .unwrap();
+    assert!(
+        !shared.status.success(),
+        "legacy shells cannot use MCP sharing"
+    );
+    assert!(
+        cli(&holder.tmp)
+            .args(["kill", "old"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert_eq!(attached.wait().unwrap().code(), Some(129));
+    holder.child.wait().unwrap();
+}
+
+#[test]
+fn an_unknown_live_holder_prevents_a_replacement_shell() {
+    let Some(mut holder) = Holder::start("unknown-wire") else {
+        return;
+    };
+    let conn = holder.hello("old", "/bin/sh");
+    holder.version(99);
+    let out = cli(&holder.tmp)
+        .env("SHELL", "/bin/sh")
+        .args(["attach", "--cwd"])
+        .arg(&holder.tmp)
+        .arg("old")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(254));
+    assert!(!holder.socket().with_file_name("hold-3.sock").exists());
+    send(&conn, INPUT, b"echo still-running; exit\n");
+    assert!(until(&conn, None).0.contains("still-running"));
 }
 
 #[test]

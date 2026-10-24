@@ -4,10 +4,10 @@
 //! persistent state: terminal closure ends the relay while the holder retains the shell.
 
 use super::protocol::{
-    self, ACK, ATTACH_EXISTING, DETACHED, ERROR, EXIT, HELLO, Hello, INPUT, KILL, LIST, OUTPUT,
-    RESIZE, REVOKE, SHARE,
+    self, ACK, ATTACH_EXISTING, DETACHED, ERROR, EXIT, HELLO, Hello, INPUT, KILL, OUTPUT, RESIZE,
+    REVOKE, SHARE,
 };
-use super::{FAILED, SOCKET, clip, lock};
+use super::{FAILED, SOCKET, clip, discovery, lock};
 use std::io::{self, Read, Write};
 use std::mem::MaybeUninit;
 use std::os::unix::net::UnixStream;
@@ -61,17 +61,21 @@ pub fn attach_existing(id: &str, vault: &Path) -> i32 {
 
 /// End shell `id`, starting a holder if needed to prevent a pending attach from creating it.
 pub fn kill(id: &str) -> io::Result<()> {
-    protocol::write_frame(&mut connect()?, KILL, id.as_bytes())
+    let mut conn = match discovery::find(id)? {
+        Some(socket) => UnixStream::connect(socket)?,
+        None => connect()?,
+    };
+    protocol::write_frame(&mut conn, KILL, id.as_bytes())
 }
 
 /// Print one JSON object per held shell. Do not start a holder to list them.
 pub fn held() -> io::Result<()> {
-    let Some(mut conn) = holder()? else {
-        return Ok(());
-    };
-    protocol::write_frame(&mut conn, LIST, &[])?;
-    if let Some((OUTPUT, lines)) = protocol::read_frame(&mut conn)? {
-        io::stdout().write_all(&lines)?;
+    let holders = discovery::running()?;
+    let mut out = io::stdout().lock();
+    for holder in holders {
+        for shell in holder.shells {
+            writeln!(out, "{shell}")?;
+        }
     }
     Ok(())
 }
@@ -80,17 +84,25 @@ pub fn held() -> io::Result<()> {
 pub fn share(id: &str, vault: &Path) -> io::Result<()> {
     let owner = super::mcp_owner(vault)?;
     let payload = serde_json::json!({"id": id, "owner": owner}).to_string();
-    one_shot(SHARE, payload.as_bytes())
+    one_shot(id, SHARE, payload.as_bytes())
 }
 
 /// Immediately revoke a terminal's MCP share.
 pub fn revoke(id: &str) -> io::Result<()> {
-    one_shot(REVOKE, id.as_bytes())
+    one_shot(id, REVOKE, id.as_bytes())
 }
 
-fn one_shot(tag: u8, payload: &[u8]) -> io::Result<()> {
-    let mut conn =
-        holder()?.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no terminal holder"))?;
+fn one_shot(id: &str, tag: u8, payload: &[u8]) -> io::Result<()> {
+    let socket = discovery::find(id)?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "terminal not found"))?;
+    if socket.file_name().is_none_or(|name| name != SOCKET) {
+        return Err(io::Error::other(
+            "this terminal's older holder does not support MCP sharing",
+        ));
+    }
+    let mut conn = UnixStream::connect(socket)?;
+    conn.set_read_timeout(Some(Duration::from_secs(5)))?;
+    conn.set_write_timeout(Some(Duration::from_secs(5)))?;
     protocol::write_frame(&mut conn, tag, payload)?;
     match protocol::read_frame(&mut conn)? {
         Some((ACK, _)) => Ok(()),
@@ -103,18 +115,31 @@ fn one_shot(tag: u8, payload: &[u8]) -> io::Result<()> {
 
 /// Connect to the holder if one is running.
 pub(super) fn holder() -> io::Result<Option<UnixStream>> {
-    Ok(UnixStream::connect(super::dir()?.join(SOCKET)).ok())
+    discovery::open(&super::dir()?.join(SOCKET))
 }
 
 /// Relay until shell exit or takeover. Reattach after an unexpected disconnect, restarting a
-/// crashed holder if needed; give up after three silent attempts.
+/// crashed current holder if needed; never move a legacy session to another holder.
 fn relay(id: &str, cwd: &Path, owner: &str, winch: libc::sigset_t, existing: bool) -> i32 {
+    let legacy = if existing {
+        None
+    } else {
+        match discovery::find(id) {
+            Ok(socket) => socket.filter(|p| p.file_name().is_some_and(|name| name != SOCKET)),
+            Err(e) => {
+                eprintln!("accent-cli: cannot locate terminal: {e}");
+                return FAILED;
+            }
+        }
+    };
     let to = Arc::new(Mutex::new(None));
     let mut out = io::stdout().lock();
     let mut copies = clip::Scanner::default();
     let (mut forwarding, mut shown, mut silent) = (false, false, 0);
     while silent < 3 {
-        let mut conn = match if existing {
+        let mut conn = match if let Some(socket) = &legacy {
+            UnixStream::connect(socket)
+        } else if existing {
             holder().and_then(|conn| {
                 conn.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no terminal holder"))
             })

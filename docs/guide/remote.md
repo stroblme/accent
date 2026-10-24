@@ -28,3 +28,21 @@ Accent restores active forwards after a reconnect.
 If an established connection drops, Accent retries and shows the next attempt in a banner.
 Choose **Reconnect Now** if you want to retry sooner or need to enter a passphrase.
 If the first connection fails, choose **Reconnect** after fixing the problem.
+
+## Remove uploaded helpers
+
+Accent stores uploaded binaries in `~/.local/share/accent/server/` on the host, named `accent-cli-<hash>`.
+An upload removes unused older builds and retains those still used by running processes.
+
+To remove all uploaded binaries:
+
+1. Let remote terminal jobs finish, then close their terminal tabs. Closing a window alone leaves its shells running.
+2. Close all Accent windows connected to that host, including those on other computers using the same SSH account.
+3. From a separate local terminal, run the following, replacing `user@host` with your SSH destination or config alias:
+
+   ```sh
+   ssh user@host 'rm -f -- "$HOME"/.local/share/accent/server/accent-cli-*'
+   ```
+
+This removes the uploaded binaries, leaving vault files and indexes in place.
+Accent uploads its helper again the next time you connect.
