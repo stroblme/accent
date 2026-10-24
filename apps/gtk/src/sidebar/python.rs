@@ -18,8 +18,9 @@ pub struct Data {
 
 /// A flat menu button naming the chosen interpreter, as the Git pane's branch is, over a popover
 /// listing the choices, asked for afresh each time it opens: a venv made since is found.
-#[derive(Clone)]
 pub(super) struct Picker {
+    /// The row it stands in, over the strips, hidden until one is up.
+    pub(super) row: gtk::Box,
     pub(super) button: gtk::MenuButton,
     name: gtk::Label,
 }
@@ -69,6 +70,14 @@ impl Picker {
             .popover(&menu)
             .build();
         button.add_css_class("flat");
+        // At the strips' 6 px inset, which the strip under it keeps between the two.
+        let row = gtk::Box::builder()
+            .margin_start(6)
+            .margin_end(6)
+            .margin_top(6)
+            .visible(false)
+            .build();
+        row.append(&button);
 
         // Only the last opening's answer is shown: a slow probe must not land over a later list.
         let asked = Rc::new(Cell::new(0u32));
@@ -94,7 +103,7 @@ impl Picker {
                 }
             }));
         });
-        Picker { button, name }
+        Picker { row, button, name }
     }
 
     /// Name `command`, the vault's choice, on the button.
@@ -103,12 +112,6 @@ impl Picker {
         self.button
             .set_tooltip_text(Some(&format!("Python Environment: {face}")));
         self.name.set_text(&face);
-    }
-
-    /// Show the chevron alone (`compact`), for a row the session's steps fill: an ellipsis is
-    /// all the name would keep there, and its width would widen the sidebar.
-    pub(super) fn set_compact(&self, compact: bool) {
-        self.name.set_visible(!compact);
     }
 }
 

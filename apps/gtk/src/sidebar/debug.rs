@@ -2,7 +2,6 @@
 //! Watch and Breakpoints as sections, filled as the window asks the paused program.
 
 use super::breakpoints::{Edited, Row, Rows};
-use super::python::Picker;
 use super::widgets::Section;
 use crate::widgets::{icon_button, scroller};
 use accent_api::debug::{Evaluated, ExceptionFilter, Frame, Scope, Supports, Thread, Variable};
@@ -378,8 +377,6 @@ pub(super) struct Debug {
     pub(super) strip: gtk::Box,
     state: Caption,
     controls: Controls,
-    /// The Python Environment dropdown leading the row.
-    python: Option<Picker>,
     pub(super) stack: Section,
     stack_body: gtk::Stack,
     stack_line: gtk::Label,
@@ -404,8 +401,8 @@ pub(super) struct Debug {
 }
 
 impl Debug {
-    pub(super) fn new(data: Data, python: Option<Picker>) -> Debug {
-        let (strip, state, controls) = strip(python.as_ref().map(|p| &p.button));
+    pub(super) fn new(data: Data) -> Debug {
+        let (strip, state, controls) = strip();
 
         let frames = data.frames.clone();
         let calls = Tree::new(Rc::new(move |thread, list| {
@@ -485,7 +482,6 @@ impl Debug {
             strip,
             state,
             controls,
-            python,
             stack,
             stack_body,
             stack_line,
@@ -517,9 +513,6 @@ impl Debug {
         self.state.say(line, why, !paused);
         self.controls.session.set_visible(true);
         self.controls.start.set_visible(false);
-        if let Some(python) = &self.python {
-            python.set_compact(true);
-        }
         self.controls.resume.set_visible(paused);
         self.controls.pause.set_visible(!paused);
         if !paused {
@@ -642,9 +635,6 @@ impl Debug {
         self.state.say("Not running", None, false);
         self.controls.session.set_visible(false);
         self.controls.start.set_visible(true);
-        if let Some(python) = &self.python {
-            python.set_compact(false);
-        }
         self.stack.root.set_visible(false);
         self.variables.root.set_visible(false);
         self.watch.root.set_visible(debuggable);
@@ -731,11 +721,11 @@ struct Controls {
     start: gtk::Button,
 }
 
-/// The Python Environment dropdown, then the controls, flat icon buttons on the window's
-/// actions, which are enabled as the session's state allows: Continue or Pause, the steps,
-/// Restart and Stop, then the Debug Console, and Start Debugging in their place while no session
-/// runs; and under them what the program is doing.
-fn strip(python: Option<&gtk::MenuButton>) -> (gtk::Box, Caption, Controls) {
+/// The controls, flat icon buttons on the window's actions, which are enabled as the session's
+/// state allows: Continue or Pause, the steps, Restart and Stop, then the Debug Console, and
+/// Start Debugging in their place while no session runs; and under them what the program is
+/// doing.
+fn strip() -> (gtk::Box, Caption, Controls) {
     let resume = strip_button("media-playback-start-symbolic", "win.debug-continue");
     let pause = strip_button("media-playback-pause-symbolic", "win.debug-pause");
     let session = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -750,10 +740,9 @@ fn strip(python: Option<&gtk::MenuButton>) -> (gtk::Box, Caption, Controls) {
     ] {
         session.append(button);
     }
-    // The Git pane's Commit: a text button in the accent colour at the row's trailing edge,
-    // where GNOME puts the affirmative action, 6 px from the button before it as Commit is from
-    // Sync. The greyed steps it replaces had nothing to offer before a program runs. One word, as
-    // Commit is, so the Python Environment dropdown keeps room to name the interpreter.
+    // The Git pane's Commit: a text button in the accent colour, one word as Commit is, after
+    // the Debug Console and 6 px from it as Commit is from Sync. The greyed steps it replaces had
+    // nothing to offer before a program runs.
     let start = gtk::Button::builder()
         .label("Debug")
         .tooltip_text(crate::actions::label_of("win.debug-start"))
@@ -762,14 +751,11 @@ fn strip(python: Option<&gtk::MenuButton>) -> (gtk::Box, Caption, Controls) {
         .margin_start(6)
         .build();
     start.add_css_class("suggested-action");
-    let (strip, state) = strip_of(
-        python,
-        &[
-            session.clone().upcast(),
-            strip_button("dap-console-symbolic", "win.debug-console").upcast(),
-            start.clone().upcast(),
-        ],
-    );
+    let (strip, state) = strip_of(&[
+        session.clone().upcast(),
+        strip_button("dap-console-symbolic", "win.debug-console").upcast(),
+        start.clone().upcast(),
+    ]);
     let controls = Controls {
         session,
         resume,
@@ -789,23 +775,13 @@ pub(super) fn strip_button(icon: &str, action: &str) -> gtk::Button {
 }
 
 /// A strip of `buttons` over a dim caption, hidden until it is shown: the debugger's, and the
-/// notebook kernel's. With the `python` dropdown, the row is the Git pane's branch row: the
-/// dropdown taking the spare width, the buttons at the trailing edge.
-pub(super) fn strip_of(
-    python: Option<&gtk::MenuButton>,
-    buttons: &[gtk::Widget],
-) -> (gtk::Box, Caption) {
-    let controls = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+/// notebook kernel's.
+pub(super) fn strip_of(buttons: &[gtk::Widget]) -> (gtk::Box, Caption) {
+    // Centred, as the pane switcher's icons are in the header above.
+    let row = gtk::Box::builder().halign(gtk::Align::Center).build();
     for button in buttons {
-        controls.append(button);
+        row.append(button);
     }
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    match python {
-        Some(python) => row.append(python),
-        // Centred, as the pane switcher's icons are in the header above.
-        None => row.set_halign(gtk::Align::Center),
-    }
-    row.append(&controls);
     let state = Caption::new();
     let strip = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
