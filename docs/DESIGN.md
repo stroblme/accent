@@ -469,6 +469,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A `git init` in a vault with no repository is such a write, so the pane shows itself unasked.
 - The commit message box takes `Ctrl+Return` while it has the keyboard, although the chord is Insert Line Below: the editing chords are bound only while the keyboard is in a tab (Editing).
 - Commit commits what is staged, or `git commit -a` where nothing is (tracked changes in, untracked files out, as VS Code does with an empty index).
+  Where every change is an untracked file, `-a` has nothing to take: Commit keeps the message and says Stage untracked files before committing, where git would only refuse.
+  git says why it refused a commit on stdout alone (nothing to commit) or, for a hook, not at all, so the toast gives that verdict or names the hook rather than an empty reason.
   Never `-a` during a merge, where it would stage files with their markers: the box reads Merge message (optional), Commit is live with nothing staged, and an empty box commits git's own message with its `# Conflicts:` list stripped.
   While a conflict is unstaged, Commit is insensitive, tooltipped Stage the resolved conflicts first, and `Ctrl+Return` does nothing: git would only refuse.
 - The box is one line at rest and grows with its text to eight lines, then scrolls: a message has a body, but must not push the changes and the history off the pane.

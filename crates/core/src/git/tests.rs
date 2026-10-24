@@ -1241,6 +1241,13 @@ fn commit_all_takes_tracked_changes_and_leaves_untracked_files_alone() {
         Some(Blob::Text("two\n".into())),
         "the tracked change went in"
     );
+    // git says why on stdout alone, which a refusal read off stderr turned into "Cannot commit: ".
+    assert_eq!(
+        commit(&repo, "untracked only\n", true),
+        Err(Error::Git(
+            "nothing added to commit but untracked files present".into()
+        ))
+    );
 }
 
 /// `base` on `main`, then `side` and `main` each writing their own `f.md`. The merge settings are

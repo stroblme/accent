@@ -711,6 +711,16 @@ impl Panel {
         (staged, staged || status.changes().next().is_some())
     }
 
+    /// Whether every change in the selected repository is an untracked file, which a
+    /// `git commit -a` leaves out.
+    fn only_untracked(&self) -> bool {
+        let state = self.state.borrow();
+        state
+            .statuses
+            .get(state.selected)
+            .is_some_and(|s| !s.entries.is_empty() && s.entries.iter().all(|e| e.x == '?'))
+    }
+
     /// Whether the selected repository is part way through a merge.
     fn merging(&self) -> bool {
         let state = self.state.borrow();

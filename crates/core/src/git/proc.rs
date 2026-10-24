@@ -190,6 +190,18 @@ pub fn interrupt(root: &Path) {
 /// session disables terminal prompts and groups helpers for [`end`] to signal. Output is drained
 /// concurrently so full pipes cannot block git.
 pub(super) fn bounded(
+    cmd: Command,
+    stdin: Option<&[u8]>,
+    cap: Duration,
+    what: &str,
+    stoppable: Option<&Path>,
+) -> Result<Output, Error> {
+    checked(finished(cmd, stdin, cap, what, stoppable)?)
+}
+
+/// [`bounded`] without its [`checked`]: git's output whatever its exit status, for a caller that
+/// reads a refusal off stdout.
+pub(super) fn finished(
     mut cmd: Command,
     stdin: Option<&[u8]>,
     cap: Duration,
@@ -245,7 +257,7 @@ pub(super) fn bounded(
     };
     registry().retain(|(_, _, s)| !Arc::ptr_eq(s, &stop));
     let until = Instant::now() + LINGER;
-    checked(Output {
+    Ok(Output {
         status: waited?,
         stdout: collect(&out, until),
         stderr: collect(&err, until),

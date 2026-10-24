@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 
 use crate::Error;
-use proc::{bounded, checked, command, network, run};
+use proc::{bounded, checked, command, finished, network, run};
 use serde::{Deserialize, Serialize};
 
 // ----------------------------------------------------------------- data types
@@ -1132,9 +1132,24 @@ pub fn commit(repo: &Repo, message: &str, all: bool) -> Result<String, Error> {
         false => (&["-F", "-"], Some(message.as_bytes())),
     };
     let cmd = command(&repo.root, &[args, from].concat(), false);
-    bounded(cmd, stdin, TRANSFER_TIMEOUT, "commit", None)?;
+    let out = finished(cmd, stdin, TRANSFER_TIMEOUT, "commit", None)?;
+    if !out.status.success() && out.stderr.trim_ascii().is_empty() {
+        return Err(Error::Git(silent_refusal(&out.stdout)));
+    }
+    checked(out)?;
     let out = run(&repo.root, &["rev-parse", "--short", "HEAD"], true)?;
     Ok(String::from_utf8_lossy(&out).trim().to_string())
+}
+
+/// Why git refused a commit with nothing on stderr: the verdict ending the status it printed on
+/// stdout ("nothing to commit, working tree clean"), less its `(use "git add" …)` hint; or a hook,
+/// the one refusal git prints nothing at all for.
+fn silent_refusal(stdout: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stdout);
+    match text.lines().map(str::trim).rfind(|line| !line.is_empty()) {
+        Some(verdict) => verdict.split(" (").next().unwrap_or(verdict).to_string(),
+        None => "a hook refused it".to_string(),
+    }
 }
 
 /// A Sync's second half. A push can be stopped part way ([`interrupt`]): the remote takes it

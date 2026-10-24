@@ -218,6 +218,10 @@ impl Panel {
         // file goes in and an untracked one stays untracked, as VS Code's smart commit does. Never
         // during a merge, where it would stage the unresolved files with their markers in them.
         let all = !merging && !self.to_commit().0;
+        // With nothing else to take, git would only refuse, and say why on stdout alone.
+        if all && self.only_untracked() {
+            return (self.hooks.toast)("Stage untracked files before committing");
+        }
         // The box is cleared once the commit is in, not before it runs: a commit git refuses — an
         // unset identity, a hook that said no, nothing staged after all — must leave the message
         // where it was written rather than make the user type it again.
