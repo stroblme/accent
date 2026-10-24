@@ -181,7 +181,7 @@ fn task_body(body: &str) -> Option<&str> {
     let tick = rest
         .chars()
         .next()
-        .filter(|c| matches!(c, ' ' | 'x' | 'X'))?;
+        .filter(|c| matches!(c, ' ' | '/' | 'x' | 'X'))?;
     let rest = rest[tick.len_utf8()..].strip_prefix(']')?;
     Some(rest.strip_prefix(' ').unwrap_or(rest))
 }
@@ -741,6 +741,7 @@ mod tests {
         assert_eq!(inserts("- [ ] todo"), "- [ ] ");
         assert_eq!(inserts("- [x] done"), "- [ ] ");
         assert_eq!(inserts("- [X] done"), "- [ ] ");
+        assert_eq!(inserts("- [/] doing"), "- [ ] ");
     }
 
     #[test]

@@ -231,10 +231,11 @@ fn bench_bar(app: &Rc<App>, rels: &str) {
     });
 }
 
-/// `ACCENT_BENCH_PANES=chords:<rel>`: which action `Ctrl+D` and `Ctrl+Down` name with the
-/// keyboard in the note, in the Files tree and in the find bar, and what `Ctrl+Down` and `Ctrl+D`
-/// pressed in the tree do: move the tree's focus, and leave the note alone. Under Xvfb with the
-/// pointer over the window, which the drill moves there.
+/// `ACCENT_BENCH_PANES=chords:<rel>`: which action `Ctrl+D`, `Ctrl+Down` and `Alt+X` name with
+/// the keyboard in the tab, in the Files tree and in the find bar, what `Alt+X` pressed in the tab
+/// does to its first line (Toggle Task: only in a note), and what the three pressed in the tree
+/// do: move the tree's focus, and leave the tab alone. Under Xvfb with the pointer over the
+/// window, which the drill moves there.
 fn bench_chords(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -249,18 +250,23 @@ fn bench_chords(app: &Rc<App>, rel: &str) {
         };
         super::git::xtest("move 700 400; focus").await;
         let say = |where_: &str| {
-            let [d, down] = ["<Primary>d", "<Primary>Down"].map(|a| gtk_app.actions_for_accel(a));
-            println!("bench chords {where_} ctrl_d={d:?} ctrl_down={down:?}");
+            let [d, down, x] =
+                ["<Primary>d", "<Primary>Down", "<Alt>x"].map(|a| gtk_app.actions_for_accel(a));
+            println!("bench chords {where_} ctrl_d={d:?} ctrl_down={down:?} alt_x={x:?}");
         };
         tab.view.grab_focus();
         glib::timeout_future(Duration::from_millis(200)).await;
         say("note");
+        let first = || tab.text().lines().next().unwrap_or_default().to_string();
+        let before = first();
+        super::git::xtest("key alt+x").await;
+        println!("bench chords tab_alt_x {before:?} -> {:?}", first());
         tree.view().grab_focus();
         glib::timeout_future(Duration::from_millis(200)).await;
         say("tree");
         let focus = || gtk::prelude::GtkWindowExt::focus(&app.window);
         let (text, row) = (tab.text(), focus());
-        super::git::xtest("key ctrl+Down; key ctrl+d").await;
+        super::git::xtest("key ctrl+Down; key ctrl+d; key alt+x").await;
         println!(
             "bench chords tree_keys focus_moved={} note_changed={}",
             focus() != row,

@@ -87,9 +87,9 @@ fn section(action: &str) -> Option<&'static str> {
         "find" | "find-next" | "find-previous" | "replace" | "replace-in-files" | "search-all"
         | "goto-line" => "Palette and find",
         _ if starts(&["palette-"]) => "Palette and find",
-        "duplicate-line" | "delete-line" | "newline-below" | "toggle-comment" | "toggle-wrap"
-        | "scroll-up" | "scroll-down" | "caret-above" | "caret-below" | "next-occurrence"
-        | "all-occurrences" | "paste-plain" => "Editing",
+        "duplicate-line" | "delete-line" | "newline-below" | "toggle-comment" | "toggle-task"
+        | "toggle-wrap" | "scroll-up" | "scroll-down" | "caret-above" | "caret-below"
+        | "next-occurrence" | "all-occurrences" | "paste-plain" => "Editing",
         "image-invert" | "insert-sketch" | "show-in-pdf" => "PDF",
         _ if starts(&["pdf-"]) => "PDF",
         "new-drawing" => "Diagram",

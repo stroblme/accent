@@ -139,6 +139,8 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
         &["<Primary>Return"],
     ),
     ("win.toggle-comment", "Toggle Comment", &["<Primary>k"]),
+    // Notes only. `Ctrl+L` is Delete Line, `Ctrl+Shift+L` Select All Occurrences.
+    ("win.toggle-task", "Toggle Task", &["<Alt>x"]),
     ("win.toggle-wrap", "Toggle Word Wrap", &["<Alt>z"]),
     ("win.scroll-up", "Scroll Up", &["<Primary>Up"]),
     ("win.scroll-down", "Scroll Down", &["<Primary>Down"]),

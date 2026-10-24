@@ -951,8 +951,8 @@ async fn bench_selections(view: &multicaret::View) {
 }
 
 /// The line commands where a caret and a column answer differently: Delete Line over a selection,
-/// Toggle Comment at a column, `Shift+Delete` left to GTK's Cut binding, and a read-only view
-/// refusing the lot. Prints the buffer and every caret after each step.
+/// Toggle Comment at a column, Toggle Task over both, `Shift+Delete` left to GTK's Cut binding,
+/// and a read-only view refusing the lot. Prints the buffer and every caret after each step.
 async fn bench_lines(view: &multicaret::View) {
     use sourceview5::prelude::BufferExt as _;
     let buffer = view.buffer();
@@ -1013,6 +1013,25 @@ async fn bench_lines(view: &multicaret::View) {
     editor::toggle_comment(view.upcast_ref());
     show("comment_mixed_column");
 
+    // Toggle Task: a selection's lines a step each, its blank line passed over and the selection
+    // still on its text; every caret's line, a blank one too. Each one undo step.
+    view.clear_carets();
+    buffer.set_text("- [ ] a\n\nb");
+    buffer.select_range(&at(&buffer, 0, 6), &buffer.end_iter());
+    editor::toggle_task(view.upcast_ref());
+    let selection = buffer
+        .selection_bounds()
+        .map(|(start, end)| buffer.text(&start, &end, true).to_string());
+    show("task");
+    println!("bench lines_task_selection {selection:?}");
+    buffer.undo();
+    show("task_undo");
+    column(view, "a\n\n- [x] c");
+    editor::toggle_task(view.upcast_ref());
+    show("task_column");
+    view.press(gdk::Key::z, crate::platform::PRIMARY_MODIFIER);
+    show("task_column_undo");
+
     // Shift+Delete is GTK's Cut binding, so the column leaves the press to it rather than deleting
     // a character at every caret, and answers the signal it emits with its own whole-line cut.
     column(view, "ab\ncd\nef");
@@ -1036,6 +1055,7 @@ async fn bench_lines(view: &multicaret::View) {
         editor::delete_line,
         editor::newline_below,
         editor::toggle_comment,
+        editor::toggle_task,
     ] {
         command(view.upcast_ref());
     }

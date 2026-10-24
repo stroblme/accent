@@ -51,6 +51,7 @@ pub(crate) use keys::{attach as attach_keys, typed as typed_keys};
 use lines::primary_paste;
 pub(crate) use lines::{
     caret_to_click, delete_line, duplicate_line, line_clipboard, pressed_at, toggle_comment,
+    toggle_task,
 };
 #[cfg(feature = "bench")]
 pub(crate) use lines::{newline_below, paste_primary};

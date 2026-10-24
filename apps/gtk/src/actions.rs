@@ -171,6 +171,11 @@ impl App {
                 None => self.with_view(editor::duplicate_line),
             },
             "toggle-comment" => self.with_view(editor::toggle_comment),
+            "toggle-task" => {
+                if let Some(tab) = self.active().filter(|tab| tab.flavour().is_note()) {
+                    editor::toggle_task(&tab.view);
+                }
+            }
             // Not over a notebook, whose column never scrolls sideways.
             "toggle-wrap" => self.with_active(Tab::toggle_wrap),
             "delete-line" => self.with_view(editor::delete_line),
@@ -519,6 +524,16 @@ impl App {
         }
     }
 
+    /// Toggle Task means something only over a note: greyed elsewhere, where its chord goes on to
+    /// the focused widget.
+    pub(crate) fn sync_toggle_task(&self) {
+        let note = self.active().is_some_and(|tab| tab.flavour().is_note());
+        let action = self.window.lookup_action("toggle-task");
+        if let Some(action) = action.and_downcast::<gio::SimpleAction>() {
+            action.set_enabled(note);
+        }
+    }
+
     /// The same for the actions that only mean something over a PDF.
     fn with_pdf(&self, f: impl FnOnce(&Rc<pdftab::PdfTab>)) {
         if let Some(pdf) = self.active_pdf() {
@@ -685,6 +700,7 @@ const EDITING: &[&str] = &[
     "win.delete-line",
     "win.newline-below",
     "win.toggle-comment",
+    "win.toggle-task",
     "win.toggle-wrap",
     "win.scroll-up",
     "win.scroll-down",
@@ -863,9 +879,11 @@ pub fn install_actions(app: &Rc<App>) {
             app.window.add_action(&action);
         }
     }
-    // The session's controls wait for a session, and Print and the exports for a document.
+    // The session's controls wait for a session, Print and the exports for a document, and
+    // Toggle Task for a note.
     app.sync_debug();
     app.sync_prints();
+    app.sync_toggle_task();
 
     app.captured
         .set_propagation_phase(gtk::PropagationPhase::Capture);

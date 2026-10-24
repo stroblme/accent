@@ -74,6 +74,11 @@ bench lines_comment_column "    // a();\n    // b();\n    // c();" [(0, 1), (1, 
 bench lines_uncomment_column_carets true
 bench lines_uncomment_column "    a();\n    b();\n    c();" [(0, 1), (1, 1), (2, 1)]
 bench lines_comment_mixed_column "    // // x();\n    b();\n    // x();" [(0, 11), (2, 8)]
+bench lines_task "- [/] a\n\n- [ ] b" [(0, 6)]
+bench lines_task_selection Some("a\n\n- [ ] b")
+bench lines_task_undo "- [ ] a\n\nb" [(0, 6)]
+bench lines_task_column "- [ ] a\n- [ ] \n- [ ] c" [(0, 7), (1, 6), (2, 0)]
+bench lines_task_column_undo "a\n\n- [x] c" [(0, 1), (1, 0), (2, 0)]
 bench lines_shift_delete passed=true
 bench lines_shift_delete "ab\ncd\nef" [(0, 1), (1, 1), (2, 1)]
 bench lines_shift_delete_cut "" [(0, 0)]

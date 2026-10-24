@@ -1,9 +1,10 @@
-//! Whole-line cut/copy, insertion, duplication, deletion, comments and wrapping.
+//! Whole-line cut/copy, insertion, duplication, deletion, comments, task boxes and wrapping.
 //! Line commands apply at every caret; plain-text middle-click paste avoids
 //! carrying buffer tags. Templates use snippet Tab stops.
 
 use super::{Tab, caret, indent, line_end};
 use crate::{comment, multicaret};
+use accent_core::markdown;
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use sourceview5::prelude::*;
@@ -349,6 +350,42 @@ pub(crate) fn toggle_comment(view: &sourceview5::View) {
     // left to the marks: toggling never adds or removes a line, so they are still these two.
     if had_selection && let Some(start) = buffer.iter_at_line(first) {
         buffer.select_range(&start, &line_end(&buffer, last));
+    }
+}
+
+/// Toggle Task: each line a caret or the selection covers one step along
+/// [`markdown::toggle_task`], as one undo step. A blank line is passed over inside a run of
+/// several, so a selected list keeps its gaps, and the carets stay on their text, only the box
+/// being spliced in or changed.
+pub(crate) fn toggle_task(view: &sourceview5::View) {
+    if !view.is_editable() {
+        return;
+    }
+    if let Some(column) = column(view) {
+        return column.each_block(&covered(column), |buffer, first, last| {
+            task_run(buffer, first, last);
+            None
+        });
+    }
+    let buffer = view.buffer();
+    let (first, last) = selected_lines(&buffer);
+    buffer.begin_user_action();
+    task_run(&buffer, first, last);
+    buffer.end_user_action();
+}
+
+/// [`toggle_task`] over the inclusive lines `first..=last`.
+fn task_run(buffer: &gtk::TextBuffer, first: i32, last: i32) {
+    for line in first..=last {
+        let Some(start) = buffer.iter_at_line(line) else {
+            return;
+        };
+        let end = line_end(buffer, line);
+        let text = buffer.text(&start, &end, true);
+        if first < last && text.trim().is_empty() {
+            continue;
+        }
+        splice(buffer, start, end, &text, &markdown::toggle_task(&text));
     }
 }
 

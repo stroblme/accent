@@ -11,6 +11,7 @@ mod html;
 mod links;
 mod spans;
 mod table;
+mod task;
 mod uri;
 
 pub use blocks::{BlockId, block_ids};
@@ -23,6 +24,7 @@ pub use links::{
     section, section_end, slugs, strip_ext,
 };
 pub use table::{TableEdit, TableKey, table_key};
+pub use task::toggle_task;
 pub use uri::{Click, accent_file, base_uri, click};
 
 use frontmatter::{frontmatter, scan_tags};
@@ -209,6 +211,10 @@ pub fn analyze(text: &str) -> Analysis {
             }
             Event::Start(Cm::Item) => {
                 if let Some(m) = list_marker(text, &r) {
+                    // GFM reads `[/]`, Toggle Task's in-progress box, as text: styled as an open one.
+                    if let Some(b) = task::in_progress(text, m.end) {
+                        a.spans.push(sp(b, Style::TaskMarker { checked: false }));
+                    }
                     a.spans.push(sp(m.clone(), Style::ListMarker));
                     a.spans.push(sp(m, Style::Marker));
                 }
