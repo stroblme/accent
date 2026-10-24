@@ -1004,9 +1004,11 @@ fn pdf_pages_are_search_rows_once_pdftotext_is_on_the_path() {
         serde_json::from_str(&hits[0]).unwrap()
     };
 
+    // No libpdfium either, which a workspace build links into this `accent-cli` too.
     let empty = scratch.dir.join("bin");
     std::fs::create_dir_all(&empty).unwrap();
-    let mut c = Client::start_with(&scratch, &[], &[("PATH", empty.as_os_str())]);
+    let no_pdfium = ("ACCENT_PDFIUM_DIR", empty.as_os_str());
+    let mut c = Client::start_with(&scratch, &[], &[("PATH", empty.as_os_str()), no_pdfium]);
     c.initialize();
     // The walk is over once a search answers; give the pass a moment it would have used.
     rows(&mut c);
@@ -1015,7 +1017,7 @@ fn pdf_pages_are_search_rows_once_pdftotext_is_on_the_path() {
     c.close();
 
     let bin = exe.parent().unwrap().as_os_str();
-    let mut c = Client::start_with(&scratch, &[], &[("PATH", bin)]);
+    let mut c = Client::start_with(&scratch, &[], &[("PATH", bin), no_pdfium]);
     c.initialize();
     let deadline = Instant::now() + Duration::from_secs(20);
     let hits = loop {
