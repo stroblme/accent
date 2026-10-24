@@ -29,7 +29,8 @@ impl Index {
     /// How many PDFs wait for their text to be read.
     pub fn unread_pdfs(&self) -> Result<usize> {
         let n: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM files WHERE kind = 2 AND text_pages IS NULL",
+            "SELECT COUNT(*) FROM files INDEXED BY idx_files_unread
+              WHERE kind = 2 AND text_pages IS NULL",
             [],
             |r| r.get(0),
         )?;
@@ -42,7 +43,8 @@ impl Index {
         let tx = self.write_tx()?;
         let claimed: Vec<UnreadPdf> = {
             let mut st = tx.prepare_cached(
-                "SELECT id, rel_path, canonical, mtime_ns, size, ino FROM files
+                "SELECT id, rel_path, canonical, mtime_ns, size, ino
+                   FROM files INDEXED BY idx_files_unread
                   WHERE kind = 2 AND text_pages IS NULL ORDER BY mtime_ns DESC LIMIT ?1",
             )?;
             let rows = st.query_map([n as i64], |r| {

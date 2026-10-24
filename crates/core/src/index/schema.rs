@@ -181,7 +181,8 @@ CREATE INDEX idx_symbols_name   ON symbols(name COLLATE NOCASE);
 CREATE INDEX idx_symbols_file   ON symbols(file_id);
 CREATE INDEX idx_aliases_file   ON aliases(file_id);
 -- The PDFs whose text is still to be read, newest first: a claim is a lookup rather than a pass
--- over every PDF already read. `2` is `FileKind::Pdf`, written out because SQLite uses a partial
+-- over every PDF already read, which `idx_files_kind_mt` would be, and the planner picks that one
+-- unless told (`INDEXED BY`). `2` is `FileKind::Pdf`, written out because SQLite uses a partial
 -- index only for a query whose own `WHERE` says the same.
 CREATE INDEX idx_files_unread   ON files(mtime_ns DESC) WHERE kind = 2 AND text_pages IS NULL;
 "#;
