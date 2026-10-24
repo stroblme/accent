@@ -928,7 +928,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - With a tool in hand the other tools' icons dim to Adwaita's `--dim-opacity`, their discs staying opaque, so the options read as that tool's; a dimmed tool comes back under the pointer or the keyboard and still takes a click.
   A press between the ring's buttons reaches the page.
 - With a pen on the seat the mouse selects and only the pen draws, its eraser tip erasing under any tool; "Draw with the Mouse" in Preferences gives the mouse back.
-  A finger never draws: touch moves the page.
+  A finger never draws, under any tool: its drag moves the page, kinetically, through the scrolled window's own touch drag, and two fingers pinch-zoom (Zoom), the pinch taking both touches as the second lands so a pan cannot cancel it.
+  A finger held still for a long press (GTK's, half a second) and then dragged selects from where it was held, as on a phone; the scrolled window's own long press stops it panning that touch.
+  A tap follows a link on its release, once it is known to be no pan.
   The pen is known by the event's device tool, since on Wayland a tablet's events come through a device whose source is a mouse.
 - A stroke stays painted over the page until the re-rendered tile carries it, as that tile will show it, under the highlights and the selection.
   pdfium multiplies a highlighter onto the file's white paper and the page is recoloured after, so no colour laid over a recoloured page is that stroke: the page itself is painted again inside it, through the matrix that turns what is on screen into the recolouring of the file's pixel times the stroke (`recolour::multiplied`).

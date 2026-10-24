@@ -627,8 +627,12 @@ mod imp {
         /// What a drag over the page does: select, draw, or erase.
         pub mode: Cell<super::Mode>,
         /// The tool this drag really uses — the mode, or Select for a mouse press while a pen
-        /// is attached, or Eraser for the stylus's eraser tip — decided once, on the press.
-        pub drag_mode: Cell<super::Mode>,
+        /// is attached, or Eraser for the stylus's eraser tip — decided once, on the press;
+        /// `None` for a finger's, which pans (`tools::drag_of`).
+        pub drag_mode: Cell<Option<super::Mode>>,
+        /// Whether the finger on the page was held still for a long press, which makes its drag
+        /// a selection rather than a pan.
+        pub held: Cell<bool>,
         /// What the config says about the tools; see [`super::PdfView::set_drawing_config`].
         pub style: RefCell<accent_core::config::DrawingConfig>,
         /// Pages whose content changed and whose visible tiles are therefore out of date. The
@@ -714,7 +718,8 @@ mod imp {
                 selection: RefCell::new(Vec::new()),
                 drag_from: Cell::new(None),
                 mode: Cell::new(super::Mode::default()),
-                drag_mode: Cell::new(super::Mode::default()),
+                drag_mode: Cell::new(None),
+                held: Cell::new(false),
                 style: RefCell::new(accent_core::config::DrawingConfig::default()),
                 stale_pages: RefCell::new(HashMap::new()),
                 stale_tiles: RefCell::new(HashSet::new()),

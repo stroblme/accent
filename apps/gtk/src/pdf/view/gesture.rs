@@ -10,8 +10,8 @@ use crate::pdf::Span;
 use crate::pdf::geometry::page_at;
 use crate::pdf::protocol::{Pass, fresh_id};
 use crate::pdf::tools::{
-    ADJUST_RADIUS, HANDLE, Handle, Mode, Selected, Stroke, drag_matrix, handle_at, mapped,
-    shape_of, snap,
+    ADJUST_RADIUS, HANDLE, Hand, Handle, Mode, Selected, Stroke, drag_matrix, drag_of, handle_at,
+    mapped, shape_of, snap,
 };
 
 impl PdfView {
@@ -41,17 +41,23 @@ impl PdfView {
 
         // Dragging over the page selects the text under it. Claimed on the first motion
         // rather than on the press, so a plain click still reaches the link handler below.
+        // A finger's drag is never claimed here: the scrolled window's own touch drag takes
+        // it past GTK's drag threshold and pans, kinetically, and its long press stops that.
         let drag = gtk::GestureDrag::new();
         drag.connect_drag_begin(glib::clone!(
             #[weak]
             obj,
             move |gesture, x, y| {
                 obj.imp().drag_from.set(Some((x, y)));
+                obj.imp().held.set(false);
                 // A pen or an eraser claims the sequence at once, unlike a selection, which
                 // waits to see whether the pointer moves: a stroke that let the scrolled
                 // window have the first few pixels would scroll the page under the hand.
                 let mode = obj.effective_mode(gesture);
                 obj.imp().drag_mode.set(mode);
+                let Some(mode) = mode else {
+                    return;
+                };
                 match mode {
                     Mode::Select => {}
                     mode if mode.draws() => {
@@ -88,7 +94,13 @@ impl PdfView {
                 let Some((x, y)) = obj.imp().drag_from.get() else {
                     return;
                 };
-                match obj.imp().drag_mode.get() {
+                // A finger's drag is a selection once a long press has made it one, and until
+                // then the scrolled window's to pan.
+                let held = obj.imp().held.get().then_some(Mode::Select);
+                let Some(mode) = obj.imp().drag_mode.get().or(held) else {
+                    return;
+                };
+                match mode {
                     Mode::Select => {
                         // A few pixels of travel is a click with a shaky hand, not a
                         // selection. And the strip selects nothing: a drag there moves the
@@ -134,11 +146,12 @@ impl PdfView {
             obj,
             move |drag, dx, dy| {
                 let from = obj.imp().drag_from.replace(None);
+                let held = obj.imp().held.replace(false);
                 let mode = obj.imp().drag_mode.get();
-                if mode == Mode::Adjust {
+                if mode == Some(Mode::Adjust) {
                     return obj.adjust_release();
                 }
-                if mode.draws() {
+                if let Some(mode) = mode.filter(|m| m.draws()) {
                     let mut strokes = obj.imp().strokes.borrow_mut();
                     // A click in a shape mode is no shape, and leaves nothing behind waiting
                     // for a tile that will never carry it.
@@ -165,18 +178,50 @@ impl PdfView {
                     return;
                 }
                 // The same few pixels the update handler calls a shaky hand rather than a
-                // selection: what is left is a click, and a click can be on a highlight.
+                // selection: what is left is a click, and a click can be on a highlight. A long
+                // press is none, nor a touch a pinch took: a denial leaves its state, and a
+                // cancel forgot where the drag began.
+                let taken = drag.current_sequence().is_some_and(|sequence| {
+                    drag.sequence_state(&sequence) == gtk::EventSequenceState::Denied
+                });
                 if let Some((x, y)) = from
                     && dx.abs() < 3.0
                     && dy.abs() < 3.0
+                    && !held
+                    && !taken
                     && !obj.imp().thumbnails.get()
-                    && let Some(f) = obj.imp().on_clicked.borrow().as_ref()
                 {
-                    f(&obj, x, y, drag.current_event_state());
+                    // A finger's press waited to be known as a tap: a touch that pans has not
+                    // pressed the link under it.
+                    if mode.is_none()
+                        && let Some(f) = obj.imp().on_pressed.borrow().as_ref()
+                    {
+                        f(&obj, x, y);
+                    }
+                    if let Some(f) = obj.imp().on_clicked.borrow().as_ref() {
+                        f(&obj, x, y, drag.current_event_state());
+                    }
                 }
             }
         ));
+        drag.connect_cancel(glib::clone!(
+            #[weak]
+            obj,
+            move |_, _| obj.imp().drag_from.set(None)
+        ));
         obj.add_controller(drag);
+
+        // A finger held still selects from where it is held, as on a phone: the scrolled
+        // window's own long press stops its drag from panning that touch, and this one lets
+        // the drag above select.
+        let hold = gtk::GestureLongPress::new();
+        hold.set_touch_only(true);
+        hold.connect_pressed(glib::clone!(
+            #[weak]
+            obj,
+            move |_, _, _| obj.imp().held.set(true)
+        ));
+        obj.add_controller(hold);
 
         let click = gtk::GestureClick::builder().button(0).build();
         click.connect_pressed(glib::clone!(
@@ -184,8 +229,9 @@ impl PdfView {
             obj,
             move |gesture, _, x, y| {
                 obj.grab_focus();
-                // While a pen is out, a press is the start of a mark, not a link to follow.
-                if obj.effective_mode(gesture) != Mode::Select {
+                // While a pen is out, a press is the start of a mark, not a link to follow; a
+                // finger's may be the start of a pan, and waits to be a tap (`drag-end`).
+                if obj.effective_mode(gesture) != Some(Mode::Select) {
                     return;
                 }
                 match gesture.current_button() {
@@ -221,40 +267,20 @@ impl PdfView {
         obj.add_controller(click);
     }
 
-    /// The tool a press really means. A pen draws, its eraser tip erases whatever is in hand,
-    /// and a finger never draws — touch is for moving the page. A mouse draws while nothing
-    /// but a mouse is plugged in; with a pen attached the hand selects, unless the preference
-    /// says otherwise.
-    fn effective_mode(&self, controller: &impl IsA<gtk::EventController>) -> Mode {
-        let mode = self.imp().mode.get();
-        if mode == Mode::Select {
-            return mode;
-        }
-        let tool = controller.current_event().and_then(|e| e.device_tool());
-        if tool
-            .as_ref()
-            .is_some_and(|t| t.tool_type() == gdk::DeviceToolType::Eraser)
-        {
-            return Mode::Eraser;
-        }
-        if from_stylus(controller) {
-            return mode;
-        }
-        let source = controller.current_event_device().map(|d| d.source());
-        if source == Some(gdk::InputSource::Touchscreen) {
-            return Mode::Select;
-        }
-        match self.imp().style.borrow().mouse || !stylus_attached() {
-            true => mode,
-            false => Mode::Select,
-        }
+    /// What a press means, by what pressed and the tool in hand (`tools::drag_of`): `None` for
+    /// a finger, which moves the page. A mouse draws while nothing but a mouse is plugged in;
+    /// with a pen attached the hand selects, unless the preference says otherwise.
+    fn effective_mode(&self, controller: &impl IsA<gtk::EventController>) -> Option<Mode> {
+        let mouse_draws = self.imp().style.borrow().mouse || !stylus_attached();
+        drag_of(self.imp().mode.get(), hand_of(controller), mouse_draws)
     }
 
     /// Under a stylus with a tool in hand the pointer is a dot where the ink will go; under
     /// anything else it is the arrow a tool shows. Set only when that changes: a cursor per event
     /// of travel is what the link hover avoids too.
     fn show_dot(&self, controller: &impl IsA<gtk::EventController>) {
-        let dot = self.imp().mode.get() != Mode::Select && from_stylus(controller);
+        let pen = matches!(hand_of(controller), Hand::Pen { .. });
+        let dot = self.imp().mode.get() != Mode::Select && pen;
         if self.imp().dot.replace(dot) == dot {
             return;
         }
@@ -478,14 +504,19 @@ fn piece_of(
     }
 }
 
-/// Detect stylus tip or eraser events. Wayland exposes tablets as logical mouse devices, so use
-/// the tool; X11 without libwacom falls back to device source.
-fn from_stylus(controller: &impl IsA<gtk::EventController>) -> bool {
-    controller
-        .current_event()
-        .and_then(|e| e.device_tool())
-        .is_some()
-        || controller.current_event_device().map(|d| d.source()) == Some(gdk::InputSource::Pen)
+/// What pressed: a stylus by its tool, since Wayland exposes a tablet as a logical mouse, or by
+/// its device's source on X11 without libwacom; a finger by its touchscreen.
+fn hand_of(controller: &impl IsA<gtk::EventController>) -> Hand {
+    let tool = controller.current_event().and_then(|e| e.device_tool());
+    let source = controller.current_event_device().map(|d| d.source());
+    match (tool, source) {
+        (Some(tool), _) => Hand::Pen {
+            eraser: tool.tool_type() == gdk::DeviceToolType::Eraser,
+        },
+        (None, Some(gdk::InputSource::Pen)) => Hand::Pen { eraser: false },
+        (None, Some(gdk::InputSource::Touchscreen)) => Hand::Finger,
+        _ => Hand::Mouse,
+    }
 }
 
 /// The stylus's pointer: a dark dot ringed in white so it reads on any paper, its hotspot in the

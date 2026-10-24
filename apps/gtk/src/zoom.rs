@@ -314,7 +314,11 @@ pub fn zoom_on_pinch(
         start,
         #[strong]
         last,
-        move |_, _| {
+        move |gesture, _| {
+            // Both fingers are the pinch's from the moment the second lands: the scrolled
+            // window's touch drag would otherwise take the first once it moved past the drag
+            // threshold, its pan cancelling the pinch.
+            gesture.set_state(gtk::EventSequenceState::Claimed);
             start.set(from());
             last.set(pinched_zoom(start.get(), 1.0));
         }

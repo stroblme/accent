@@ -84,6 +84,32 @@ impl crate::ring::Tool for Mode {
     }
 }
 
+/// What pressed the page, which decides what a drag does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hand {
+    /// A stylus: its tip, or the eraser at its other end.
+    Pen { eraser: bool },
+    /// A finger on a touchscreen.
+    Finger,
+    /// A mouse or a touchpad.
+    Mouse,
+}
+
+/// What a drag begun by `hand` does with `tool` in hand. A pen's tip draws and its eraser erases
+/// under any tool; a mouse draws only while it may (`mouse_draws`: no pen on the seat, or the
+/// preference), and selects otherwise. A finger is `None` under every tool: it never draws, and
+/// its drag is the scrolled window's to pan, a long press first making it a selection.
+pub fn drag_of(tool: Mode, hand: Hand, mouse_draws: bool) -> Option<Mode> {
+    match hand {
+        Hand::Finger => None,
+        _ if tool == Mode::Select => Some(Mode::Select),
+        Hand::Pen { eraser: true } => Some(Mode::Eraser),
+        Hand::Pen { eraser: false } => Some(tool),
+        Hand::Mouse if mouse_draws => Some(tool),
+        Hand::Mouse => Some(Mode::Select),
+    }
+}
+
 /// How close to an axis, in degrees, a line has to be to snap onto it.
 const SNAP_DEG: f32 = 7.0;
 /// How near the pointer has to come to a stroke, in page points, for the Adjust tool to take it.
@@ -244,6 +270,29 @@ pub struct Stroke {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_finger_never_draws_or_selects_and_a_pen_always_draws() {
+        let tools = [
+            Mode::Select,
+            Mode::Pen,
+            Mode::Highlighter,
+            Mode::Eraser,
+            Mode::Adjust,
+        ];
+        for tool in tools {
+            for mouse_draws in [true, false] {
+                assert_eq!(drag_of(tool, Hand::Finger, mouse_draws), None, "{tool:?}");
+                let tip = drag_of(tool, Hand::Pen { eraser: false }, mouse_draws);
+                assert_eq!(tip, Some(tool), "{tool:?}");
+            }
+        }
+        let eraser = Hand::Pen { eraser: true };
+        assert_eq!(drag_of(Mode::Pen, eraser, false), Some(Mode::Eraser));
+        assert_eq!(drag_of(Mode::Select, eraser, false), Some(Mode::Select));
+        assert_eq!(drag_of(Mode::Pen, Hand::Mouse, true), Some(Mode::Pen));
+        assert_eq!(drag_of(Mode::Pen, Hand::Mouse, false), Some(Mode::Select));
+    }
 
     #[test]
     fn a_line_snaps_to_the_axis_within_seven_degrees() {
