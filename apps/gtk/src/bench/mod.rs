@@ -48,7 +48,8 @@ mod synctex;
 mod tags;
 mod toasts;
 
-use answer::{bench_answer, bench_answer_same};
+pub(crate) use answer::{SLOW_RELOAD_MS, hold};
+use answer::{bench_answer, bench_answer_doc, bench_answer_same};
 use attach::bench_attach;
 use chrome::{bench_chrome, bench_chrome_find, bench_chrome_keys};
 use compare::{
@@ -246,7 +247,8 @@ use tags::bench_tags;
 ///   window on the local vault, as another window's tree drop hands them over.
 /// - `ACCENT_BENCH_ATTACH=<rel_note>,<rel_vault_png>,<rel_code>`: image paste/drop.
 /// - `ACCENT_BENCH_ANSWER=<rel_note>`: conflict responses and main-loop timing;
-///   `same:<rel_note>`: etag-only change during typing.
+///   `same:<rel_note>`: etag-only change during typing; `doc:<rel_ipynb>,<rel_drawio>`: a
+///   notebook's and a diagram's reloads on a slow host (`answer::bench_answer_doc`).
 /// - `ACCENT_BENCH_EXPORT=pdf:<rel_pdf>`: annotated export and print copy;
 ///   `note:<rel_note>`: PDF/HTML export and print dialog. Outputs use `$TMPDIR`.
 /// - `ACCENT_BENCH_SAVE_AS=<rel_file>`: note/diagram/PDF/image Save As and errors.
@@ -622,6 +624,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(rel) = answer.as_deref().and_then(|a| a.strip_prefix("same:")) {
             return bench_answer_same(&app, rel);
+        }
+        if let Some(rels) = answer.as_deref().and_then(|a| a.strip_prefix("doc:")) {
+            return bench_answer_doc(&app, rels);
         }
         if let Some(rel) = answer {
             return bench_answer(&app, &rel);

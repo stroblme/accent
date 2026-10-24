@@ -280,12 +280,15 @@ impl App {
         });
     }
 
-    fn reload_notebook(self: &Rc<Self>, tab: &Rc<NotebookTab>) {
+    /// Read the file again into the tab, unless the tab changed while it was read
+    /// ([`editor::Reloaded`]).
+    pub(crate) fn reload_notebook(self: &Rc<Self>, tab: &Rc<NotebookTab>) {
         let vault = self
             .vault()
             .filter(|_| !doc::is_loose_key(&tab.key()))
             .cloned();
         let (key, path) = (tab.key(), tab.path());
+        let reading = tab.save.begin_reload(&key);
         let (app, reloading) = (Rc::downgrade(self), Rc::downgrade(tab));
         glib::spawn_future_local(async move {
             let read = crate::work::off_thread("notebook reader", move || {
@@ -293,6 +296,8 @@ impl App {
                     Some(vault) => vault.read_text(&key),
                     None => accent_core::fs::read_text(&path).map_err(Into::into),
                 };
+                #[cfg(feature = "bench")]
+                crate::bench::hold(&crate::bench::SLOW_RELOAD_MS);
                 match read {
                     Ok(accent_core::fs::Read::Text(text)) => notebook::read(&key, &text.text)
                         .map(|nb| (nb, text.etag, text.digest()))
@@ -305,6 +310,11 @@ impl App {
             let (Some(app), Some(tab)) = (app.upgrade(), reloading.upgrade()) else {
                 return;
             };
+            match tab.save.reloaded(&reading, &tab.key()) {
+                editor::Reloaded::Adopt => {}
+                editor::Reloaded::Edited => return tab.show_changed(),
+                editor::Reloaded::Superseded => return,
+            }
             match read {
                 Some(Ok((nb, etag, digest))) => {
                     tab.reload(nb, etag, digest);

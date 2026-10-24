@@ -440,24 +440,35 @@ impl App {
         });
     }
 
-    fn reload_diagram(self: &Rc<Self>, tab: &Rc<DiagramTab>) {
+    /// Read the file again into the tab, unless the tab changed while it was read
+    /// ([`editor::Reloaded`]).
+    pub(crate) fn reload_diagram(self: &Rc<Self>, tab: &Rc<DiagramTab>) {
         let vault = self
             .vault()
             .filter(|_| !doc::is_loose_key(&tab.key()))
             .cloned();
         let (key, path) = (tab.key(), tab.path());
+        let reading = tab.save.begin_reload(&key);
         let (app, reloading) = (Rc::downgrade(self), Rc::downgrade(tab));
         glib::spawn_future_local(async move {
             let parsed = crate::work::off_thread("diagram reader", move || {
-                parse(match vault {
+                let read = match vault {
                     Some(vault) => vault.read_text(&key),
                     None => accent_core::fs::read_text(&path).map_err(Into::into),
-                })
+                };
+                #[cfg(feature = "bench")]
+                crate::bench::hold(&crate::bench::SLOW_RELOAD_MS);
+                parse(read)
             })
             .await;
             let (Some(app), Some(tab)) = (app.upgrade(), reloading.upgrade()) else {
                 return;
             };
+            match tab.save.reloaded(&reading, &tab.key()) {
+                editor::Reloaded::Adopt => {}
+                editor::Reloaded::Edited => return tab.show_changed(),
+                editor::Reloaded::Superseded => return,
+            }
             match parsed {
                 Some(Parsed::Diagram(file, etag, digest)) => {
                     tab.reload(file, etag, digest);

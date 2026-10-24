@@ -216,6 +216,8 @@ pub struct SaveState {
     pub save_again: Cell<Option<bool>>,
     /// Watcher event during a save; restat after landing establishes the saved etag.
     pub recheck: Cell<bool>,
+    /// Reloads begun, so that a read answered after a newer one began is dropped.
+    pub reloads: Cell<u64>,
 }
 
 impl SaveState {
@@ -227,6 +229,46 @@ impl SaveState {
             ..SaveState::default()
         }
     }
+
+    /// A reload of the file at `key` begins reading it.
+    pub fn begin_reload(&self, key: &str) -> Reading {
+        self.reloads.set(self.reloads.get() + 1);
+        Reading {
+            reload: self.reloads.get(),
+            edits: self.edits.get(),
+            key: key.to_string(),
+        }
+    }
+
+    /// What the read begun as `reading` means now it is in, for a tab now at `key`.
+    pub fn reloaded(&self, reading: &Reading, key: &str) -> Reloaded {
+        if self.reloads.get() != reading.reload || key != reading.key {
+            Reloaded::Superseded
+        } else if self.edits.get() != reading.edits {
+            Reloaded::Edited
+        } else {
+            Reloaded::Adopt
+        }
+    }
+}
+
+/// A tab as a reload found it when it began reading ([`SaveState::begin_reload`]).
+pub struct Reading {
+    reload: u64,
+    edits: u64,
+    key: String,
+}
+
+/// What a reload's read means for its tab once it is in ([`SaveState::reloaded`]).
+#[derive(Debug, PartialEq)]
+pub enum Reloaded {
+    /// Nothing changed meanwhile: the read replaces what the tab holds.
+    Adopt,
+    /// Edited while the file was read: the tab holds the only copy of those edits, so the
+    /// banner asks rather than the read replacing them.
+    Edited,
+    /// Another reload began since, or the tab now shows another file: the read is dropped.
+    Superseded,
 }
 
 /// A tab the save path can write: its [`SaveState`], where its file is, and what the file should
@@ -1433,5 +1475,32 @@ mod tests {
             ),
             Landing::Failed(Error::Offline(_))
         ));
+    }
+
+    /// Verify a reload's read replaces only the tab it was begun for: not edits made while it
+    /// was out, nor what a newer read or another file brought.
+    #[test]
+    fn a_reload_adopts_only_a_read_nothing_overtook() {
+        let save = SaveState::default();
+        let read = save.begin_reload("a.ipynb");
+        assert_eq!(save.reloaded(&read, "a.ipynb"), Reloaded::Adopt);
+        save.edits.set(save.edits.get() + 1);
+        assert_eq!(
+            save.reloaded(&read, "a.ipynb"),
+            Reloaded::Edited,
+            "typed into while the file was read: the edits stay and the banner asks"
+        );
+        let (older, newer) = (save.begin_reload("a.ipynb"), save.begin_reload("a.ipynb"));
+        assert_eq!(
+            save.reloaded(&older, "a.ipynb"),
+            Reloaded::Superseded,
+            "answered after a newer read began: dropped, whichever lands first"
+        );
+        assert_eq!(save.reloaded(&newer, "a.ipynb"), Reloaded::Adopt);
+        assert_eq!(
+            save.reloaded(&newer, "b.ipynb"),
+            Reloaded::Superseded,
+            "the tab moved to another file meanwhile"
+        );
     }
 }
