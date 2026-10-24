@@ -215,19 +215,34 @@ impl App {
         tab: &Rc<NotebookTab>,
         report: bool,
     ) -> Option<bool> {
+        self.land_notebook_saying(tab, report, "Saved")
+    }
+
+    /// [`land_notebook`](Self::land_notebook) saying `said` for a write asked for. A write that
+    /// landed is what the disk holds, so no question of a change there is left.
+    fn land_notebook_saying(
+        self: &Rc<Self>,
+        tab: &Rc<NotebookTab>,
+        report: bool,
+        said: &'static str,
+    ) -> Option<bool> {
         self.land_flight(
             tab,
             Self::notebook_changed,
-            |app, tab, landed, explicit| match landed {
+            move |app, tab, landed, explicit| match landed {
                 editor::Landing::Clean(etag) => {
                     tab.mark_clean(etag);
+                    tab.clear_changed();
                     tab.language_saved();
                     app.sync_status();
                     if report && explicit {
-                        app.toast("Saved");
+                        app.toast(said);
                     }
                 }
-                editor::Landing::Behind(etag) => tab.save.etag.set(Some(etag)),
+                editor::Landing::Behind(etag) => {
+                    tab.save.etag.set(Some(etag));
+                    tab.clear_changed();
+                }
                 editor::Landing::Failed(Error::Core(Core::ChangedOnDisk { .. })) if report => {
                     tab.show_changed();
                     if explicit {
@@ -327,37 +342,32 @@ impl App {
         });
     }
 
-    /// Ask which version to keep when the disk changed under unsaved edits. There is no
-    /// comparison of two notebooks to offer, as there is none of two diagrams.
+    /// Ask which version to keep when the disk changed under unsaved edits
+    /// ([`App::ask_reload_or_overwrite`]).
     pub(crate) fn resolve_notebook(self: &Rc<Self>, tab: &Rc<NotebookTab>) {
-        let dialog = adw::AlertDialog::new(
-            Some("Notebook Changed on Disk"),
-            Some(&format!(
-                "{} changed on disk. Reload to discard your edits, or overwrite the disk version.",
-                doc::file_name(&tab.key())
-            )),
+        let (reloaded, written) = (tab.clone(), tab.clone());
+        self.ask_reload_or_overwrite(
+            "Notebook",
+            &tab.key(),
+            move |app| app.reload_notebook(&reloaded),
+            move |app| app.overwrite_notebook(&written),
         );
-        dialog.add_responses(&[
-            ("cancel", "Cancel"),
-            ("reload", "Reload"),
-            ("overwrite", "Overwrite"),
-        ]);
-        dialog.set_response_appearance("reload", adw::ResponseAppearance::Destructive);
-        dialog.set_response_appearance("overwrite", adw::ResponseAppearance::Destructive);
-        dialog.set_default_response(Some("cancel"));
-        dialog.set_close_response("cancel");
-        let (app, tab) = (self.clone(), tab.clone());
-        dialogs::choose(
-            &dialog,
-            Some(&self.window),
-            move |response| match response.as_str() {
-                "reload" => app.reload_notebook(&tab),
-                "overwrite" => match app.write_notebook(&tab, None) {
-                    Ok(()) => app.toast("Overwritten"),
-                    Err(e) => app.cannot("save", e),
-                },
-                _ => {}
-            },
+    }
+
+    /// Overwrite: the edits written over the disk's version on a worker, as a save is.
+    fn overwrite_notebook(self: &Rc<Self>, tab: &Rc<NotebookTab>) {
+        self.land_notebook(tab, false);
+        let text = tab.text();
+        self.start_write(
+            tab,
+            true,
+            None,
+            Self::save_notebook,
+            |app, tab, report| app.land_notebook_saying(tab, report, "Overwritten"),
+            move || text,
         );
+        // Edits made while it is out wait on the question it answers until it lands: a save
+        // is asked for after it, as one asked for meanwhile would be.
+        tab.save.save_again.set(Some(false));
     }
 }

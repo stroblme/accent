@@ -8,9 +8,11 @@ use crate::notebook::NotebookTab;
 use pdf::online;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// How long a diagram's or a notebook's reload holds what it read before answering, as a slow
-/// host's round trip would: set by `ACCENT_BENCH_ANSWER=doc:` for the case it probes.
+/// How long a diagram's or a notebook's reload holds what it read before answering, and a save
+/// its write before writing, as a slow host's round trips would: set by `ACCENT_BENCH_ANSWER=doc:`
+/// for the case it probes.
 pub(crate) static SLOW_RELOAD_MS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static SLOW_WRITE_MS: AtomicU64 = AtomicU64::new(0);
 
 /// Wait as long as `slow` says, on the worker it is called from.
 pub(crate) fn hold(slow: &AtomicU64) {
@@ -249,10 +251,13 @@ pub(super) fn bench_answer_same(app: &Rc<App>, rel: &str) {
 }
 
 /// `ACCENT_BENCH_ANSWER=doc:<rel_ipynb>,<rel_drawio>` writes a notebook and a diagram at those
-/// paths and reloads each on a slow host (`SLOW_RELOAD_MS`), a fresh tab a case. `racing`: an
-/// edit made while the read is out stays, and the banner asks. `overlap`: of two reloads out at
-/// once, the newer one's read is what the tab holds, though the older is answered last. Writes
-/// files; use a scratch vault.
+/// paths and reloads and overwrites each on a slow host (`SLOW_RELOAD_MS`, `SLOW_WRITE_MS`), a
+/// fresh tab a case. `racing`: an edit made while the read is out stays, and the banner asks.
+/// `overlap`: of two reloads out at once, the newer one's read is what the tab holds, though the
+/// older is answered last. `overwrite`: the conflict dialog's Overwrite holds the main loop for
+/// no write (`held_ms`), and an edit made during it is written after it. `failed`: a write the
+/// folder refuses says so, the edits and the banner kept. Writes files, and makes the folder
+/// read only for a moment; use a scratch vault.
 pub(super) fn bench_answer_doc(app: &Rc<App>, arg: &str) {
     let Some((notebook, diagram)) = arg.split_once(',') else {
         eprintln!("ACCENT_BENCH_ANSWER=doc:<rel_ipynb>,<rel_drawio>");
@@ -283,6 +288,7 @@ trait Probe: Saves + Sized {
     /// What the tab would write now.
     fn holds(&self) -> String;
     fn reload(app: &Rc<App>, tab: &Rc<Self>);
+    fn resolve(app: &Rc<App>, tab: &Rc<Self>);
 }
 
 impl Probe for NotebookTab {
@@ -304,6 +310,9 @@ impl Probe for NotebookTab {
     fn reload(app: &Rc<App>, tab: &Rc<Self>) {
         app.reload_notebook(tab);
     }
+    fn resolve(app: &Rc<App>, tab: &Rc<Self>) {
+        app.resolve_notebook(tab);
+    }
 }
 
 impl Probe for DiagramTab {
@@ -315,7 +324,8 @@ impl Probe for DiagramTab {
         app.doc_for(rel).and_then(|d| d.diagram().cloned())
     }
     fn edit(self: &Rc<Self>, mark: &str) {
-        self.rename_page(mark);
+        let name = self.page_names().first().cloned().unwrap_or_default();
+        self.rename_page(&format!("{name} {mark}"));
     }
     fn holds(&self) -> String {
         self.text()
@@ -323,14 +333,19 @@ impl Probe for DiagramTab {
     fn reload(app: &Rc<App>, tab: &Rc<Self>) {
         app.reload_diagram(tab);
     }
+    fn resolve(app: &Rc<App>, tab: &Rc<Self>) {
+        app.resolve_diagram(tab);
+    }
 }
 
 async fn doc_drill<T: Probe>(app: &Rc<App>, rel: &str) {
     let kind = T::KIND;
     let path = app.root().join(rel);
     let write = |version: &str| std::fs::write(&path, T::file(version)).is_ok();
-    for case in ["racing", "overlap"] {
+    for case in ["racing", "overlap", "overwrite", "failed"] {
         SLOW_RELOAD_MS.store(0, Ordering::Relaxed);
+        SLOW_WRITE_MS.store(0, Ordering::Relaxed);
+        app.toasts.dismiss_all();
         write("base");
         // A file written a moment ago is only in the vault once the watcher has seen it.
         glib::timeout_future(Duration::from_millis(1500)).await;
@@ -347,6 +362,7 @@ async fn doc_drill<T: Probe>(app: &Rc<App>, rel: &str) {
             println!("bench answer doc {kind} {case} no_tab");
             return;
         };
+        let mut said = String::new();
         match case {
             "racing" => {
                 SLOW_RELOAD_MS.store(800, Ordering::Relaxed);
@@ -354,7 +370,7 @@ async fn doc_drill<T: Probe>(app: &Rc<App>, rel: &str) {
                 T::reload(app, &tab);
                 tab.edit("mine");
             }
-            _ => {
+            "overlap" => {
                 SLOW_RELOAD_MS.store(1500, Ordering::Relaxed);
                 write("theirs A");
                 T::reload(app, &tab);
@@ -363,11 +379,70 @@ async fn doc_drill<T: Probe>(app: &Rc<App>, rel: &str) {
                 write("theirs B");
                 T::reload(app, &tab);
             }
+            _ => {
+                tab.edit("mine");
+                write("theirs");
+                for _ in 0..100 {
+                    if tab.save_state().disk_changed.get() {
+                        break;
+                    }
+                    glib::timeout_future(Duration::from_millis(50)).await;
+                }
+                let folder = path.parent().unwrap_or(&path).to_path_buf();
+                let mode = |mode| {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ =
+                        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(mode));
+                };
+                match case {
+                    "overwrite" => SLOW_WRITE_MS.store(1500, Ordering::Relaxed),
+                    _ => mode(0o555),
+                }
+                T::resolve(app, &tab);
+                let Some(dialog) = app
+                    .window
+                    .visible_dialog()
+                    .and_downcast::<adw::AlertDialog>()
+                else {
+                    println!("bench answer doc {kind} {case} no_dialog");
+                    mode(0o755);
+                    return;
+                };
+                let t = Instant::now();
+                dialog.emit_by_name::<()>("response", &[&"overwrite"]);
+                said = format!(" held_ms={:.0}", ms_since(t));
+                dialog.close();
+                if case == "overwrite" {
+                    tab.edit("during");
+                }
+                let t = Instant::now();
+                // The first toast standing while it lands, which outlasts no wait.
+                let mut toast = String::new();
+                while t.elapsed() < Duration::from_secs(6)
+                    && (tab.save_state().modified.get() || case == "failed")
+                {
+                    glib::timeout_future(Duration::from_millis(50)).await;
+                    if toast.is_empty() {
+                        toast = app.toasts.shown().into_iter().next().unwrap_or_default();
+                    }
+                    if case == "failed" && tab.save_state().flight.borrow().is_none() {
+                        break;
+                    }
+                }
+                mode(0o755);
+                let file = std::fs::read_to_string(&path).unwrap_or_default();
+                said += &format!(
+                    " file_mine={} file_during={} toast={:?}",
+                    file.contains("mine"),
+                    file.contains("during"),
+                    toast.split(':').next().unwrap_or_default(),
+                );
+            }
         }
         glib::timeout_future(Duration::from_millis(2500)).await;
         let (save, holds) = (tab.save_state(), tab.holds());
         println!(
-            "bench answer doc {kind} {case} modified={} banner={} mine={} theirs={}",
+            "bench answer doc {kind} {case} modified={} banner={} mine={} theirs={}{said}",
             save.modified.get(),
             save.disk_changed.get(),
             holds.contains("mine"),
@@ -381,6 +456,7 @@ async fn doc_drill<T: Probe>(app: &Rc<App>, rel: &str) {
         glib::timeout_future(Duration::from_millis(300)).await;
     }
     SLOW_RELOAD_MS.store(0, Ordering::Relaxed);
+    SLOW_WRITE_MS.store(0, Ordering::Relaxed);
 }
 
 /// The page of the tab showing `rel`.

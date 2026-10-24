@@ -63,7 +63,7 @@ impl App {
     }
 
     /// [`Self::start_save`] gated on `expected` rather than the tab's own etag.
-    fn start_write<T: Saves>(
+    pub(crate) fn start_write<T: Saves>(
         self: &Rc<Self>,
         tab: &Rc<T>,
         explicit: bool,
@@ -229,6 +229,8 @@ impl App {
         let vault = self.vault().filter(|_| !doc::is_loose_key(&rel)).cloned();
         let base = tab.save_state().digest.get();
         move |text, expected| {
+            #[cfg(feature = "bench")]
+            crate::bench::hold(&crate::bench::SLOW_WRITE_MS);
             let write = |expected| match &vault {
                 Some(vault) => vault.save(&rel, text, expected),
                 None => accent_core::fs::write_note(&path, text, expected).map_err(Into::into),
@@ -538,6 +540,45 @@ impl App {
             move || discarded.discard(),
             move |app| app.write_notebook(&written, None),
             after,
+        );
+    }
+
+    /// Ask which version to keep when the disk changed under a diagram's or a notebook's unsaved
+    /// edits, `kind` saying which: there is no comparison of two of them to offer, as there is
+    /// of two notes, so `reload` throws the edits away and `overwrite` the disk's version.
+    pub(crate) fn ask_reload_or_overwrite(
+        self: &Rc<Self>,
+        kind: &str,
+        key: &str,
+        reload: impl FnOnce(&Rc<Self>) + 'static,
+        overwrite: impl FnOnce(&Rc<Self>) + 'static,
+    ) {
+        let dialog = dialogs::alert(
+            &format!("{kind} Changed on Disk"),
+            &format!(
+                "{} changed on disk. Reload to discard your edits, or overwrite the disk version.",
+                doc::file_name(key)
+            ),
+            &[
+                ("cancel", "Cancel", adw::ResponseAppearance::Default),
+                ("reload", "Reload", adw::ResponseAppearance::Destructive),
+                (
+                    "overwrite",
+                    "Overwrite",
+                    adw::ResponseAppearance::Destructive,
+                ),
+            ],
+            "cancel",
+        );
+        let app = self.clone();
+        dialogs::choose(
+            &dialog,
+            Some(&self.window),
+            move |response| match response.as_str() {
+                "reload" => reload(&app),
+                "overwrite" => overwrite(&app),
+                _ => {}
+            },
         );
     }
 

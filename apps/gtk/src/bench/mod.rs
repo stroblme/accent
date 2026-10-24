@@ -48,7 +48,7 @@ mod synctex;
 mod tags;
 mod toasts;
 
-pub(crate) use answer::{SLOW_RELOAD_MS, hold};
+pub(crate) use answer::{SLOW_RELOAD_MS, SLOW_WRITE_MS, hold};
 use answer::{bench_answer, bench_answer_doc, bench_answer_same};
 use attach::bench_attach;
 use chrome::{bench_chrome, bench_chrome_find, bench_chrome_keys};
