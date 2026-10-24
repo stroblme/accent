@@ -58,7 +58,7 @@ fn floating(icon: &str, tooltip: &str) -> gtk::Revealer {
     let button = gtk::Button::builder()
         .icon_name(icon)
         .tooltip_text(tooltip)
-        .css_classes(["osd", "circular"])
+        .css_classes(["opaque", "accent-floating", "circular"])
         .build();
     gtk::Revealer::builder()
         .child(&button)

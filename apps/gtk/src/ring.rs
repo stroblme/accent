@@ -8,11 +8,11 @@ use gtk::{gdk, glib};
 use std::cell::Cell;
 
 /// The distance from the hub to a tool button, in pixels.
-const ORBIT: f64 = 60.0;
-/// The distance from the hub to an option button.
-const OPTIONS: f64 = 96.0;
+const ORBIT: f64 = 54.0;
+/// The distance from the hub to an option button: just clear of the tools.
+const OPTIONS: f64 = 88.0;
 /// The whole ring's box, wide enough for the outer orbit plus a button either side of it.
-const SIZE: i32 = 220;
+const SIZE: i32 = 204;
 /// How far the ring sits from the corner it starts in.
 const INSET: f64 = 24.0;
 
@@ -56,7 +56,8 @@ impl<T: Tool> Ring<T> {
             .build();
         hub.set_cursor_from_name(Some("grab"));
         hub.add_css_class("circular");
-        hub.add_css_class("osd");
+        hub.add_css_class("opaque");
+        hub.add_css_class("accent-floating");
         hub.add_css_class("accent-ring-hub");
         place(&root, &hub, centre, centre, BUTTON);
 
@@ -72,7 +73,8 @@ impl<T: Tool> Ring<T> {
                 .action_name(action)
                 .build();
             button.add_css_class("circular");
-            button.add_css_class("osd");
+            button.add_css_class("opaque");
+            button.add_css_class("accent-floating");
             button.add_css_class("accent-ring-tool");
             place(&root, &button, centre + dx, centre + dy, BUTTON);
             buttons.push((*tool, button));
@@ -95,7 +97,8 @@ impl<T: Tool> Ring<T> {
         button.set_child(Some(child));
         button.set_visible(false);
         button.add_css_class("circular");
-        button.add_css_class("osd");
+        button.add_css_class("opaque");
+        button.add_css_class("accent-floating");
         button.add_css_class("accent-ring-tool");
         let centre = f64::from(SIZE) / 2.0;
         let (dx, dy) = orbit(i, n, OPTIONS);
@@ -272,9 +275,9 @@ fn place(root: &RingBox, button: &impl IsA<gtk::Widget>, cx: f64, cy: f64, size:
     root.put(button, cx - half, cy - half);
 }
 
-/// A tool button's diameter. Big enough to hit while drawing, small enough to leave the page
-/// visible around the ring.
-const BUTTON: i32 = 38;
+/// A tool button's diameter. Big enough to hit while drawing, and above libadwaita's 34 px
+/// minimum, small enough to leave the page visible around the ring.
+const BUTTON: i32 = 36;
 /// An option button's: a dot, not a glyph, so it can be smaller.
 const OPTION: i32 = 24;
 

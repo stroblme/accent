@@ -1322,12 +1322,14 @@ fn install_chrome_css() {
                box-shadow: 0 1px 4px var(--shade-color), 0 0 0 1px var(--shade-color); }} \
              .accent-statusbar {{ padding: 6px 12px; }} \
              .accent-toasts toast {{ margin: 0; }} \
-             .accent-ring-tool, .accent-ring-hub {{ min-width: 0; min-height: 0; padding: 0; \
+             .accent-floating {{ background-color: color-mix(in srgb, var(--window-bg-color) 85%, \
+               rgb(from var(--window-fg-color) r g b / 1)); \
                box-shadow: 0 1px 4px var(--shade-color); }} \
+             .accent-ring-tool, .accent-ring-hub {{ min-width: 0; min-height: 0; padding: 0; }} \
              .accent-ring-tool:checked {{ background-color: var(--accent-bg-color); \
                color: var(--accent-fg-color); }} \
-             .accent-ring-hub {{ opacity: 0.75; }} \
-             .accent-ring-dim:not(:hover):not(:focus-visible) {{ opacity: var(--dim-opacity); }} \
+             .accent-ring-dim:not(:hover):not(:focus-visible) > * {{ \
+               opacity: var(--dim-opacity); }} \
              .accent-label-editor {{ box-shadow: 0 0 0 1px var(--accent-bg-color), \
                0 1px 4px var(--shade-color); }} \
              .accent-current-layer {{ box-shadow: inset 3px 0 var(--accent-bg-color); }} \

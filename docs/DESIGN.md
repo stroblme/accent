@@ -910,6 +910,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Export as PDF… writes it where the chooser says (`paper (exported).pdf` unless renamed there), and refuses the PDF itself.
 - The drawing tools are a **ring**: Pen, Highlighter, Eraser, Line, Rectangle, Circle and Adjust orbiting a hub that floats over the page, opening in the top right (the page is read from the left, a hand comes in from the bottom right), dragged anywhere by the hub and kept where this window left it.
   The header's Drawing toggle opens and closes it.
+  Its buttons are opaque discs, 36 px, in libadwaita's `.opaque` button colour with the foreground's alpha dropped from the mix, so the disc stays whole on a light theme too, and a shade under them: an `.osd` disc let the text under it through, and went into a dark page.
   Presentation puts it away and the tool in hand down, so nothing draws on a presented page, and brings it back as it was afterwards, the tool still down (Views).
 - With a tool in hand the pointer is the plain arrow over the whole page, the I-beam inviting a selection that will not happen; under a stylus it is a small dot where the ink goes.
 - Pen draws `/Ink` at a uniform width in the accent; Highlighter draws it wide and translucent with a `Multiply` blend, darkening the text rather than covering it.
@@ -924,7 +925,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Ours is drawn again along the moved path, its line keeping its width; another editor's keeps everything it carries, only its `/Rect` and `/InkList` moving, and every reader fits its appearance stream into the new `/Rect`, so it scales as a picture would, its line too.
 - A second orbit holds the tool's options: three widths, and for the pen, the shapes and the highlighter six swatches (the accent, four hues round the wheel by the CSV rule, and black); for the eraser, Whole Strokes (`edit-delete-symbolic`) and Partial (`edit-cut-symbolic`).
   Each pick is kept in the config's `[drawing]`.
-- With a tool in hand the other tools dim to Adwaita's `--dim-opacity`, so the options read as that tool's; a dimmed tool comes back under the pointer or the keyboard and still takes a click.
+- With a tool in hand the other tools' icons dim to Adwaita's `--dim-opacity`, their discs staying opaque, so the options read as that tool's; a dimmed tool comes back under the pointer or the keyboard and still takes a click.
   A press between the ring's buttons reaches the page.
 - With a pen on the seat the mouse selects and only the pen draws, its eraser tip erasing under any tool; "Draw with the Mouse" in Preferences gives the mouse back.
   A finger never draws: touch moves the page.
@@ -942,7 +943,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Insert Sketch puts a blank A4 page beside the note, embeds it and hands it the pen; New Drawing makes one where the tree says.
   Both write through the vault, on the host for a remote one, off the main loop.
 - **The thumbnail strip organises pages:** dragging a thumbnail moves its page, an accent bar marks the destination gap, and the strip scrolls near an edge.
-  The thumbnail under the pointer carries two round `.osd` buttons: Delete Page (absent on a one-page document, which a PDF keeps) and Insert Page Here on the gap below.
+  The thumbnail under the pointer carries two round buttons, opaque as the ring's are: Delete Page (absent on a one-page document, which a PDF keeps) and Insert Page Here on the gap below.
   A click goes to its page on release, a press being how a drag begins.
 - The page's menu has Add Page Before, Add Page After and Delete Page for the page it was opened on; the status bar's page count and the palette have them for the page being read, and the palette Move Page Up and Move Page Down.
   A document grows at its end by Add Page After on its last page, never by itself: the view clamps a stroke to the page under it, so running off the end is no gesture to observe.
