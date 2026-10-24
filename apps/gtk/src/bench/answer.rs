@@ -24,8 +24,10 @@ pub(crate) fn hold(slow: &AtomicU64) {
 
 /// `ACCENT_BENCH_ANSWER=<rel_note>` probes Overwrite, Keep Mine and saving after disk
 /// deletion. After initial indexing, externally change the file (on the host if
-/// remote) and type into the tab. Report main-loop blocking, time to become clean,
-/// final line and remaining banner. Writes files; use a scratch vault.
+/// remote) and type into the tab, then answer on a slow host (`SLOW_WRITE_MS`) and type
+/// again while the answer is written. Report main-loop blocking, time to become clean,
+/// final line, which is what was typed during the write once the save after it lands,
+/// and remaining banner. Writes files; use a scratch vault.
 pub(super) fn bench_answer(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
@@ -63,13 +65,22 @@ pub(super) fn bench_answer(app: &Rc<App>, rel: &str) {
                 "restore" => "rm -f {}".to_string(),
                 _ => format!("printf '{case} theirs\\n' > {{}}"),
             };
+            // Typed first where the file goes: a clean tab closes with its file. And past the
+            // watcher's debounce, which drops a file made and removed inside one, as the last
+            // save's rename and the removal would be.
+            let typed = format!("{case} mine\n");
+            if case == "restore" {
+                tab.buffer.insert(&mut tab.buffer.end_iter(), &typed);
+                glib::timeout_future(Duration::from_millis(600)).await;
+            }
             let changed = crate::work::off_thread("bench", {
                 let (vault, rel) = (vault.clone(), rel.clone());
                 move || behind(&vault, &rel, &script)
             })
             .await;
-            tab.buffer
-                .insert(&mut tab.buffer.end_iter(), &format!("{case} mine\n"));
+            if case != "restore" {
+                tab.buffer.insert(&mut tab.buffer.end_iter(), &typed);
+            }
             let wanted = match case {
                 "restore" => Alert::Restore,
                 _ => Alert::Compare,
@@ -82,8 +93,9 @@ pub(super) fn bench_answer(app: &Rc<App>, rel: &str) {
             }
             if tab.alert() != Some(wanted) {
                 println!(
-                    "bench answer {case} no_alert changed={changed:?} alert={:?} modified={} \
-                     disk_changed={} flight={}",
+                    "bench answer {case} no_alert changed={changed:?} open={} alert={:?} \
+                     modified={} disk_changed={} flight={}",
+                    app.doc_for(&rel).is_some(),
                     tab.alert(),
                     tab.save.modified.get(),
                     tab.save.disk_changed.get(),
@@ -91,6 +103,7 @@ pub(super) fn bench_answer(app: &Rc<App>, rel: &str) {
                 );
                 return bench_quit(&app);
             }
+            SLOW_WRITE_MS.store(1500, Ordering::Relaxed);
             let held = match case {
                 "overwrite" => {
                     app.save_tab(&tab, true);
@@ -136,11 +149,14 @@ pub(super) fn bench_answer(app: &Rc<App>, rel: &str) {
                     ms_since(t)
                 }
             };
+            tab.buffer
+                .insert(&mut tab.buffer.end_iter(), &format!("{case} during\n"));
             let t = Instant::now();
-            while tab.save.modified.get() && t.elapsed() < Duration::from_secs(5) {
+            while tab.save.modified.get() && t.elapsed() < Duration::from_secs(8) {
                 glib::timeout_future(Duration::from_millis(5)).await;
             }
             let clean = ms_since(t);
+            SLOW_WRITE_MS.store(0, Ordering::Relaxed);
             let read = crate::work::off_thread("bench", {
                 let (vault, rel) = (vault.clone(), rel.clone());
                 move || vault.read(&rel).map(|(text, _)| text)

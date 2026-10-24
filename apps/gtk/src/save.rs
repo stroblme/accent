@@ -289,10 +289,13 @@ impl App {
             move |app, tab, report| app.land_answer(tab, report, said),
             move || text,
         );
+        // What is typed while it is out waits on the question it answers until it lands: a save
+        // is asked for after it, as one asked for meanwhile would be.
+        tab.save.save_again.set(Some(false));
     }
 
     /// [`Self::land_flight`] for [`Self::write_answer`]: the question is answered once the write
-    /// is in, whatever was typed meanwhile, which the next save writes after it.
+    /// is in, whatever was typed meanwhile, which the save asked for after it writes.
     fn land_answer(self: &Rc<Self>, tab: &Rc<Tab>, report: bool, said: &str) -> Option<bool> {
         self.land_flight(
             tab,
