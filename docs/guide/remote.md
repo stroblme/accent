@@ -12,6 +12,7 @@ The host field accepts an SSH config alias, and `~` in the path means your home 
 You can also open a vault with `accent ssh://user@host/path/to/vault`.
 
 Your files stay on the host, where [search](search.md), [Git](git.md), language servers, and notebook kernels run.
+To search the text of PDFs, install `pdftotext` (the `poppler-utils` package) on the host; without it, Accent says once that their text is not searched.
 **New Terminal** opens a shell there too; see [Terminals](terminals.md) for local and other remote shells.
 Deleting a file from a remote vault is permanent, so Accent asks before doing it.
 

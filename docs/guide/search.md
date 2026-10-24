@@ -1,8 +1,13 @@
 # Search and info
 
 Press `Ctrl+Shift+F` to search across the vault.
-Results include notes, code and other indexed text, plus labels in diagrams and sources in notebooks.
+Results include notes, code and other indexed text, plus labels in diagrams, sources in notebooks and the text of PDFs.
 Choose a result to open its file.
+
+A PDF is listed once for each page that matches, with the page number, such as `p. 12`.
+Choosing it opens the PDF on that page with the match highlighted; press `F3` for the next match.
+After a vault opens, Accent reads the text of its PDFs in the background and shows its progress in the status bar, where **Stop** ends it until you open the vault again.
+Scanned PDFs without a text layer are not searchable.
 
 The buttons under the query let you match case (`Aa`), whole words (`Word`) or a regular expression (`.*`).
 Use **All** to search ignored folders too.
