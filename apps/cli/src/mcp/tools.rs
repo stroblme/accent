@@ -307,7 +307,8 @@ impl Server {
     }
 
     /// Full-text search over the vault's indexed files. Each row is one occurrence: the file,
-    /// its title, the 1-based line, and a snippet with the match between « and ».
+    /// its title, the 1-based line, and a snippet with the match between « and ». A PDF's rows are
+    /// its pages instead, one a page holding the match, with the 1-based `page` and no line.
     #[tool(annotations(read_only_hint = true))]
     async fn search_notes(
         &self,
@@ -328,7 +329,11 @@ impl Server {
             let rows: Vec<Value> = hits
                 .into_iter()
                 .map(|h| {
-                    json!({"path": h.rel_path, "title": h.title, "line": h.line, "snippet": h.snippet})
+                    let mut row = json!({"path": h.rel_path, "title": h.title, "line": h.line, "snippet": h.snippet});
+                    if let Some(page) = h.page {
+                        row["page"] = json!(page);
+                    }
+                    row
                 })
                 .collect();
             Ok(answer(json!(rows), partial))

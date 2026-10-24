@@ -69,6 +69,11 @@ struct Client {
 
 impl Client {
     fn start(scratch: &Scratch, args: &[&str]) -> Client {
+        Client::start_with(scratch, args, &[])
+    }
+
+    /// [`start`](Self::start) with these variables set as well.
+    fn start_with(scratch: &Scratch, args: &[&str], env: &[(&str, &std::ffi::OsStr)]) -> Client {
         let mut child = Command::new(env!("CARGO_BIN_EXE_accent-cli"))
             .arg("mcp")
             .arg("--vault")
@@ -89,6 +94,7 @@ impl Client {
             .env_remove("DISPLAY")
             .env_remove("WAYLAND_DISPLAY")
             .env("GDK_BACKEND", "x11")
+            .envs(env.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -931,5 +937,97 @@ fn read_only_leaves_the_writing_tools_out() {
     let mut c = Client::start(&scratch, &["--read-only"]);
     c.initialize();
     assert_eq!(names(&c.ask("tools/list", json!({}))), READ_TOOLS);
+    c.close();
+}
+
+/// A one-line Helvetica page per entry, as `accent_core::pdf_text`'s tests write theirs.
+fn text_pdf(pages: &[&str]) -> Vec<u8> {
+    let n = pages.len();
+    let kids: Vec<String> = (0..n).map(|i| format!("{} 0 R", 4 + 2 * i)).collect();
+    let mut objs = vec![
+        "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+        format!("<</Type/Pages/Kids[{}]/Count {n}>>", kids.join(" ")),
+        "<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>".to_string(),
+    ];
+    for (i, text) in pages.iter().enumerate() {
+        let content = format!("BT /F1 12 Tf 20 60 Td ({text}) Tj ET");
+        objs.push(format!(
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 100]\
+             /Resources<</Font<</F1 3 0 R>>>>/Contents {} 0 R>>",
+            5 + 2 * i
+        ));
+        objs.push(format!(
+            "<</Length {}>>stream\n{content}\nendstream",
+            content.len()
+        ));
+    }
+    let mut out = String::from("%PDF-1.4\n");
+    let mut offsets = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offsets.push(out.len());
+        out.push_str(&format!("{} 0 obj\n{o}\nendobj\n", i + 1));
+    }
+    let xref = out.len();
+    out.push_str(&format!(
+        "xref\n0 {}\n0000000000 65535 f \n",
+        objs.len() + 1
+    ));
+    for off in &offsets {
+        out.push_str(&format!("{off:010} 00000 n \n"));
+    }
+    out.push_str(&format!(
+        "trailer\n<</Size {}/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n",
+        objs.len() + 1
+    ));
+    out.into_bytes()
+}
+
+/// A host's server reads PDFs with `pdftotext` when its `PATH` has one; without, it reads none and
+/// leaves them unread, so the next server on a `PATH` that has one does.
+#[test]
+fn pdf_pages_are_search_rows_once_pdftotext_is_on_the_path() {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let Some(accent_core::pdf_text::Extractor::Pdftotext(exe)) =
+        accent_core::pdf_text::pdftotext_on(&path)
+    else {
+        return eprintln!("skipping: no pdftotext on PATH");
+    };
+    let scratch = Scratch::new("pdf-text");
+    std::fs::write(
+        scratch.dir.join("vault/paper.pdf"),
+        text_pdf(&["intro", "the quokka count"]),
+    )
+    .unwrap();
+    let rows = |c: &mut Client| -> Value {
+        let (hits, error) = c.call("search_notes", json!({"query": "quokka"}));
+        assert!(!error, "{hits:?}");
+        serde_json::from_str(&hits[0]).unwrap()
+    };
+
+    let empty = scratch.dir.join("bin");
+    std::fs::create_dir_all(&empty).unwrap();
+    let mut c = Client::start_with(&scratch, &[], &[("PATH", empty.as_os_str())]);
+    c.initialize();
+    // The walk is over once a search answers; give the pass a moment it would have used.
+    rows(&mut c);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(rows(&mut c), json!([]));
+    c.close();
+
+    let bin = exe.parent().unwrap().as_os_str();
+    let mut c = Client::start_with(&scratch, &[], &[("PATH", bin)]);
+    c.initialize();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let hits = loop {
+        let hits = rows(&mut c);
+        if hits.as_array().is_some_and(|a| !a.is_empty()) || Instant::now() > deadline {
+            break hits;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(hits[0]["path"], "paper.pdf", "{hits}");
+    assert_eq!(hits[0]["page"], 2, "{hits}");
+    assert_eq!(hits[0]["line"], Value::Null, "{hits}");
+    assert_eq!(hits[0]["snippet"], "the «quokka» count", "{hits}");
     c.close();
 }

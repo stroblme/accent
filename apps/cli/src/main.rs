@@ -259,9 +259,12 @@ fn main() -> Result<()> {
         } => {
             let (vault, _) = common.open(|_| {})?;
             // A row is an occurrence, so a file says itself once per match: the line is what
-            // tells two of its rows apart.
+            // tells two of its rows apart, and a PDF's page, written as a link to it is.
             for h in vault.search(&query.join(" "), limit, all)? {
-                let at = h.line.map(|l| format!(":{l}")).unwrap_or_default();
+                let at = match (h.page, h.line) {
+                    (Some(page), _) => format!("#page={page}"),
+                    (None, line) => line.map(|l| format!(":{l}")).unwrap_or_default(),
+                };
                 println!("{}{at}\n  {}", h.rel_path, h.snippet.replace('\n', " "));
             }
         }
