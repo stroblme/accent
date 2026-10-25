@@ -614,7 +614,7 @@ pub fn install_css() {
     };
     let provider = gtk::CssProvider::new();
     provider.load_from_string(
-        ".notebook-cell { border: 1px solid transparent; border-radius: 8px; padding: 4px; } \
+        ".notebook-cell { border: 1px solid transparent; border-radius: 9px; padding: 4px; } \
          .notebook-cell.selected { border-color: var(--accent-bg-color); } \
          .notebook-tools button { min-height: 24px; min-width: 24px; padding: 5px; } \
          .notebook-execution { min-width: 8px; min-height: 8px; margin: 6px 0; \

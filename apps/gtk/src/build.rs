@@ -1330,7 +1330,7 @@ fn install_chrome_css() {
                font-weight: normal; }} \
              row:hover .git-actions, row:focus-within .git-actions {{ opacity: 1; }} \
              .git-log > row {{ margin-top: 0; margin-bottom: 0; }} \
-             .git-ref {{ padding: 0 4px; border-radius: 4px; \
+             .git-ref {{ padding: 0 4px; border-radius: 6px; \
                background-color: color-mix(in srgb, currentColor 10%, transparent); }} \
              .git-ref.head {{ color: var(--accent-color); \
                background-color: color-mix(in srgb, var(--accent-bg-color) 15%, transparent); }} \
