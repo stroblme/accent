@@ -619,7 +619,8 @@ pub fn install_css() {
          .notebook-tools button { min-height: 24px; min-width: 24px; padding: 5px; } \
          .notebook-execution { min-width: 8px; min-height: 8px; margin: 6px 0; \
            border: 1px solid transparent; border-radius: 50%; } \
-         .notebook-execution.unrun { background-color: alpha(var(--window-fg-color), 0.3); } \
+         .notebook-execution.unrun { background-color: \
+           color-mix(in srgb, var(--window-fg-color) 30%, transparent); } \
          .notebook-execution.running { background-color: var(--warning-color); } \
          .notebook-execution.succeeded { background-color: var(--success-color); } \
          .notebook-execution.failed { background-color: var(--error-color); } \
@@ -632,9 +633,11 @@ pub fn install_css() {
          .notebook-count { opacity: var(--dim-opacity); font-family: monospace; } \
          .notebook-outputs.stale { opacity: var(--dim-opacity); } \
          textview.notebook-source { border-radius: 6px; \
-           box-shadow: inset 0 0 0 1px alpha(currentColor, 0.12); } \
+           box-shadow: inset 0 0 0 1px \
+             color-mix(in srgb, currentColor var(--border-opacity), transparent); } \
          textview.notebook-output, textview.notebook-output > text { background: none; } \
-         textview.notebook-stderr > text { background-color: alpha(var(--error-color), 0.08); }",
+         textview.notebook-stderr > text { background-color: \
+           color-mix(in srgb, var(--error-color) 8%, transparent); }",
     );
     gtk::style_context_add_provider_for_display(
         &display,
