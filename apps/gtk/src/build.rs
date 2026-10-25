@@ -1334,7 +1334,7 @@ fn install_chrome_css() {
                background-color: color-mix(in srgb, currentColor 10%, transparent); }} \
              .git-ref.head {{ color: var(--accent-color); \
                background-color: color-mix(in srgb, var(--accent-bg-color) 15%, transparent); }} \
-             .git-ref.remote {{ opacity: 0.6; }} \
+             .git-ref.remote {{ opacity: var(--dim-opacity); }} \
              .git-ref.tag {{ background-color: transparent; \
                box-shadow: inset 0 0 0 1px color-mix(in srgb, currentColor 40%, transparent); }} \
              paned.dragging > separator {{ min-width: 3px; min-height: 3px; \
@@ -1396,8 +1396,9 @@ fn install_chrome_css() {
              popover.accent-completion listview {{ background: none; }} \
              popover.accent-completion listview > row {{ margin: 0; min-height: {text}px; \
                padding: {row_y}px {row}px; }} \
-             popover.accent-completion .kind {{ opacity: 0.7; }} \
-             popover.accent-completion .detail {{ opacity: 0.6; margin-left: 12px; }} \
+             popover.accent-completion .kind, popover.accent-completion .detail {{ \
+               opacity: var(--dim-opacity); }} \
+             popover.accent-completion .detail {{ margin-left: 12px; }} \
              popover.accent-completion .doc {{ margin: 3px 8px; }} \
              minimap {{ color: var(--view-fg-color); }} \
              expander {{ -gtk-icon-source: -gtk-icontheme(\"go-next-symbolic\"); }} \
