@@ -1,5 +1,6 @@
 //! Exercise the real bibliography surfaces and save path in a scratch vault.
 use super::*;
+use accent_core::bib::Attachment;
 
 pub fn run(app: &Rc<App>) {
     assert!(
@@ -269,8 +270,56 @@ pub fn run(app: &Rc<App>) {
             &app.window.clone().upcast(),
             "/tmp/accent-bibliography-narrow.png",
         );
+        // Add Reference downloads the new reference's PDF by itself, the switch on by default.
+        assert!(app.config.borrow().bibliography_download_pdf);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/auto.pdf", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while !request.ends_with(b"\r\n\r\n") && stream.read_exact(&mut byte).is_ok() {
+                request.push(byte[0]);
+            }
+            let body = "%PDF-1.4\n% downloaded on add\n";
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        });
+        app.review_import(
+            &tab.rel(),
+            "@article{auto,title={Automatic Download},author={Doe, Ada},year=2026}".into(),
+            true,
+            url,
+        );
+        glib::timeout_future(Duration::from_millis(200)).await;
+        let dialog = app.window.visible_dialog().expect("reference review");
+        descendant::<gtk::Button>(&dialog.clone().upcast(), |b| {
+            b.label().as_deref() == Some("Add Reference")
+        })
+        .unwrap()
+        .emit_clicked();
+        let mut attached = None;
+        for _ in 0..100 {
+            let bib = Library::parse(&tab.text()).unwrap();
+            attached = bib
+                .entries
+                .iter()
+                .find(|e| bib.value(e, "title") == "Automatic Download")
+                .and_then(|e| Attachment::parse(&bib.value(e, "file")).ok())
+                .and_then(|files| files.into_iter().next());
+            if attached.is_some() {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(50)).await;
+        }
+        let pdf = bib::attachment_path(&tab.rel(), &attached.expect("PDF attached").path).unwrap();
+        assert!(vault.read(&pdf).unwrap().0.starts_with("%PDF-"));
         println!(
-            "bench bibliography row_delete=true source_only=true source_preserved=true undo=true sidebar_unchanged=true copy=true move=true stale_review_refused=true chooser_search=true row_actions=true"
+            "bench bibliography row_delete=true source_only=true source_preserved=true undo=true sidebar_unchanged=true copy=true move=true stale_review_refused=true chooser_search=true row_actions=true download_on_add=true"
         );
         app.window.application().unwrap().quit();
     });

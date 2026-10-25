@@ -22,6 +22,7 @@ impl App {
         form.append(&view);
         raw.set_text("@article{new_reference,\n  title = {},\n  author = {},\n  year = {},\n}\n");
         let download = gtk::CheckButton::with_label("Download PDF after adding the reference");
+        download.set_active(self.config.borrow().bibliography_download_pdf);
         form.append(&download);
         let direct = field(&form, "PDF URL (optional)", "");
         let note = gtk::Label::builder()
@@ -50,6 +51,12 @@ impl App {
                 }
                 let (app, path) = (app.clone(), path.clone());
                 let download = download.is_active();
+                if app.config.borrow().bibliography_download_pdf != download {
+                    app.config.borrow_mut().bibliography_download_pdf = download;
+                    if let Some(shell) = app.shell.upgrade() {
+                        shell.save_config_soon();
+                    }
+                }
                 let direct = direct.text().to_string();
                 glib::spawn_future_local(async move {
                     let fetched = if input.trim().is_empty() {
@@ -75,7 +82,13 @@ impl App {
         );
     }
 
-    fn review_import(self: &Rc<Self>, path: &str, raw: String, download: bool, direct: String) {
+    pub(super) fn review_import(
+        self: &Rc<Self>,
+        path: &str,
+        raw: String,
+        download: bool,
+        direct: String,
+    ) {
         self.with_tab(path, Opened::Kept, "add reference", move |app, tab| {
             let imported = match Library::parse(&raw) {
                 Ok(b) => b,
@@ -142,14 +155,18 @@ impl App {
                     .copy_entries(&[0], &before)
                     .map_err(|e| e.to_string())?;
                 apply(&target, &before, &after)?;
-                if download {
-                    let bib = Library::parse(&after).map_err(|e| e.to_string())?;
-                    let index = bib
-                        .entries
-                        .iter()
-                        .position(|e| e.key == key.text())
-                        .unwrap();
-                    parent.pdf_dialog(&target, bib, index, &direct);
+                let doi = bib::doi(&incoming.value(&incoming.entries[0], "doi"));
+                // Nothing to try without either, as for a manual entry; the switch stays quiet.
+                if download && (doi.is_some() || !direct.trim().is_empty()) {
+                    let key = key.text().to_string();
+                    let email = parent.config.borrow().bibliography_unpaywall_email.clone();
+                    let rel = pdf_path(&key);
+                    // The reference is in already, so a failure is told, not kept in the dialog.
+                    if let Err(why) =
+                        parent.fetch_pdf(&target, key, doi, direct.trim().into(), email, rel)
+                    {
+                        parent.cannot("download PDF (reference kept)", why);
+                    }
                 }
                 Ok(())
             });
@@ -237,100 +254,99 @@ impl App {
     }
 
     pub(super) fn download_reference(self: &Rc<Self>, tab: &Rc<Tab>, bib: Library, index: usize) {
-        self.pdf_dialog(tab, bib, index, "");
-    }
-    fn pdf_dialog(self: &Rc<Self>, tab: &Rc<Tab>, bib: Library, index: usize, direct: &str) {
         let form = dialogs::form();
-        let url = field(
-            &form,
-            "PDF URL (optional; otherwise look up the DOI)",
-            direct,
-        );
+        let url = field(&form, "PDF URL (optional; otherwise look up the DOI)", "");
         let email = field(
             &form,
             "Unpaywall Email (optional, sent to Unpaywall for open-access lookup)",
-            "",
+            &self.config.borrow().bibliography_unpaywall_email,
         );
-        let filename = bib.entries[index]
-            .key
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || "_-".contains(c) {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect::<String>();
+        let key = bib.entries[index].key.clone();
         let path = field(
             &form,
             "PDF Path Relative to This Bibliography",
-            &format!("papers/{filename}.pdf"),
+            &pdf_path(&key),
         );
         form.append(&gtk::Label::builder().label("The reference is kept if downloading fails. A login page is not saved as a PDF. Existing attachments are never overwritten.").wrap(true).xalign(0.0).build());
         let parent = self.clone();
         let target = tab.clone();
         form_dialog(self, "Download PDF", "Download", &form, move || {
-            let rel = path.text().to_string();
-            let dest = bib::attachment_path(&target.rel(), &rel).map_err(|e| e.to_string())?;
             let doi = bib::doi(&bib.value(&bib.entries[index], "doi"));
-            let url = url.text().to_string();
-            if url.is_empty() && doi.is_none() {
-                return Err("Supply a PDF URL or add a DOI to the reference".into());
+            let email = email.text().trim().to_string();
+            if parent.config.borrow().bibliography_unpaywall_email != email {
+                parent.config.borrow_mut().bibliography_unpaywall_email = email.clone();
+                if let Some(shell) = parent.shell.upgrade() {
+                    shell.save_config_soon();
+                }
             }
-            let (app, tab, bib, email) = (
-                parent.clone(),
-                target.clone(),
-                bib.clone(),
-                email.text().to_string(),
-            );
-            let Some(vault) = app.vault().cloned() else {
-                return Err("Open a vault to download attachments".into());
-            };
-            let key = bib.entries[index].key.clone();
-            glib::spawn_future_local(async move {
-                let (progress, cancel) = web::progress(&app, "Downloading PDF…");
-                let urls = if url.is_empty() {
-                    web::pdf_urls(&doi.unwrap(), &email, &cancel).await
-                } else {
-                    Ok(vec![url])
-                };
-                let bytes = match urls {
-                    Ok(urls) => web::pdf(&urls, &cancel).await,
-                    Err(e) => Err(e),
-                };
-                let cancelled = cancel.is_cancelled();
-                progress.close();
-                if cancelled {
-                    return;
-                }
-                let bytes = match bytes {
-                    Ok(bytes) => bytes,
-                    Err(why) => return app.cannot("download PDF (reference kept)", why),
-                };
-                let saved = dest.clone();
-                let done = work::attempt("save PDF", move || {
-                    if let Some(dir) = std::path::Path::new(&saved).parent() {
-                        vault.create_dir(&dir.to_string_lossy(), true)?;
-                    }
-                    vault.write_file(&saved, &bytes)
-                })
-                .await;
-                match done {
-                    Ok(()) => match attach(&tab, &key, &rel) {
-                        Ok(()) => {
-                            app.toast("PDF downloaded and attached");
-                            app.open_path(&dest);
-                        }
-                        Err(why) => {
-                            app.cannot(&format!("attach downloaded {dest} (file kept)"), why)
-                        }
-                    },
-                    Err(why) => app.toast(&why),
-                }
-            });
-            Ok(())
+            parent.fetch_pdf(
+                &target,
+                key.clone(),
+                doi,
+                url.text().into(),
+                email,
+                path.text().into(),
+            )
         });
+    }
+    /// Download `key`'s PDF from `url`, or else the DOI's open-access and publisher links, to
+    /// `rel` beside the bibliography, and attach it; failing leaves the reference as it is.
+    fn fetch_pdf(
+        self: &Rc<Self>,
+        tab: &Rc<Tab>,
+        key: String,
+        doi: Option<String>,
+        url: String,
+        email: String,
+        rel: String,
+    ) -> Result<(), String> {
+        let dest = bib::attachment_path(&tab.rel(), &rel).map_err(|e| e.to_string())?;
+        if url.is_empty() && doi.is_none() {
+            return Err("Supply a PDF URL or add a DOI to the reference".into());
+        }
+        let Some(vault) = self.vault().cloned() else {
+            return Err("Open a vault to download attachments".into());
+        };
+        let (app, tab) = (self.clone(), tab.clone());
+        glib::spawn_future_local(async move {
+            let (progress, cancel) = web::progress(&app, "Downloading PDF…");
+            let urls = match doi {
+                Some(doi) if url.is_empty() => web::pdf_urls(&doi, &email, &cancel).await,
+                _ => Ok(vec![url]),
+            };
+            let bytes = match urls {
+                Ok(urls) => web::pdf(&urls, &cancel).await,
+                Err(e) => Err(e),
+            };
+            let cancelled = cancel.is_cancelled();
+            progress.close();
+            if cancelled {
+                return;
+            }
+            let bytes = match bytes {
+                Ok(bytes) => bytes,
+                Err(why) => return app.cannot("download PDF (reference kept)", why),
+            };
+            let saved = dest.clone();
+            let done = work::attempt("save PDF", move || {
+                if let Some(dir) = std::path::Path::new(&saved).parent() {
+                    vault.create_dir(&dir.to_string_lossy(), true)?;
+                }
+                vault.write_file(&saved, &bytes)
+            })
+            .await;
+            match done {
+                Ok(()) => match attach(&tab, &key, &rel) {
+                    Ok(()) => {
+                        app.toast("PDF downloaded and attached");
+                        app.open_path(&dest);
+                    }
+                    Err(why) => app.cannot(&format!("attach downloaded {dest} (file kept)"), why),
+                },
+                Err(why) => app.toast(&why),
+            }
+        });
+        Ok(())
     }
 
     pub(super) fn attach_reference(self: &Rc<Self>, tab: &Rc<Tab>, bib: Library, index: usize) {
@@ -422,6 +438,21 @@ impl App {
             Ok(())
         });
     }
+}
+
+/// Where a downloaded PDF goes by default, relative to its bibliography.
+fn pdf_path(key: &str) -> String {
+    let name = key
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || "_-".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    format!("papers/{name}.pdf")
 }
 
 fn attach(tab: &Rc<Tab>, key: &str, path: &str) -> Result<(), String> {
