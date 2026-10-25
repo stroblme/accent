@@ -72,7 +72,7 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
             pane,
             move || {
                 if let Some(here) = app.here(&pane) {
-                    app.record(&pane, here);
+                    app.record(here);
                 }
             }
         )),
@@ -194,9 +194,17 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
                 if active && !app.restoring() {
                     crate::widgets::fade_in(&page.child());
                 }
-                // The tab being left is still the front of the MRU order until `touch` runs, and
-                // it still holds its caret, so this is where the reader was.
-                if let Some(left) = pane.recent().first().filter(|p| **p != page) {
+                // The tab being left is still the front of the pane's MRU order until `touch`
+                // runs, and it still holds its caret, so this is where the reader was: in the
+                // active pane, with the keyboard there or outside every pane. A tab picked in
+                // another pane is reached by its pane becoming the active one, which records the
+                // place left (`App::set_active_pane`), and a file Back opens again is the step
+                // itself.
+                let reader = active && app.keyboard_pane().is_none_or(|k| Rc::ptr_eq(&k, &pane));
+                if !app.reopened(&page)
+                    && reader
+                    && let Some(left) = pane.recent().first().filter(|p| **p != page)
+                {
                     app.mark_page(left);
                 }
                 pane.touch(&page);

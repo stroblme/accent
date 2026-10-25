@@ -716,7 +716,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - **The active pane is the one holding the keyboard**: a click into a pane's document or a press on its tab bar gives it the keyboard, as VS Code's editor groups do, and so does a tab moved there or a note open there opened again from another pane (from the sidebar the keyboard stays in the list).
   The press puts it in the document of the tab it brings to the front, or of the tab in front when the keyboard was outside the pane; the tab in front pressed again from within the pane keeps it on its label.
   A tab that comes to the front of another pane behind the reader's back — a sync deleting the note in front of it — leaves the keyboard and the active pane where they are.
-  Close Tab, `Ctrl+Tab`, Back and Forward, the splits, the title, the find bar and focus mode all go by it.
+  Close Tab, the splits, the title, the find bar and focus mode all go by it; `Ctrl+Tab` and Back and Forward reach every pane (below, and History).
 - A tab is titled with the file's whole name, `.md` included: a vault holds more than notes, and `todo` beside `todo.txt` should not be told apart by an icon.
 - The icon slot is the document's own — a PDF, an image, a shell, a comparison, a file that would not open — and empty for a note or a source file: file-type icons belong to the file lists (Iconography).
 - A pane is split from the tab or tree menu, `win.split-*`, or by dropping a tab or a tree row on one of its four edges.
@@ -1635,13 +1635,15 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 ### History
 
 - Back / Forward `Alt+Left` / `Alt+Right`, and the mouse's side buttons (8 and 9) through the same actions.
-- **One history per pane**, of places rather than tabs: a document and a position in it, a caret or a PDF's page anchor.
-  Back may switch tabs within the pane and never moves the keyboard to another pane, which owns its document as it owns its find bar.
-  A PDF's page edit takes its places with the pages.
-- What goes in is a jump — a wikilink followed, a search hit opened, Go to Definition or References landing, a page or line typed into Go to Line, a find's first step (so Back returns to where the search began), a switch to another document in the pane — and an edit, coalesced: keystrokes within ten lines and ten seconds of the last entry replace it, so a typed paragraph leaves one mark.
+- **One history per window** (user decision 2026-10-25), of places rather than tabs: a document and a position in it, a caret, a PDF's page anchor or a diagram's page.
+  Back goes to the tab that holds the place, in whichever pane, with the keyboard, and that pane becomes the active one.
+  A PDF's page edit takes its places with the pages, and a rename or move takes them with the file.
+- What goes in is a jump — a wikilink followed, a search hit opened, Go to Definition or References landing, a page or line typed into Go to Line, a find's first step (so Back returns to where the search began), a switch to another document in the active pane, a move to another pane — and an edit, coalesced: keystrokes within ten lines and ten seconds of the last entry replace it, so a typed paragraph leaves one mark.
+  Places where the reader already is — the last edit's, say — are passed over, so Back never seems to do nothing.
 - A hundred places.
-  Closing a tab drops its places, in every pane, nothing being left to go back into.
-- **A caret's place is a mark in its buffer**, so Back lands on the character the reader left however the text around it was edited since; a mark dies with its place.
+  A closed file's places stay: Back to one opens the file again in the active pane, at the place (user decision 2026-10-25, as VS Code does).
+  A shell's and a comparison's go with their tab, there being nothing to open again.
+- **A caret's place is a mark in its buffer**, so Back lands on the character the reader left however the text around it was edited since; a mark dies with its place, and with its tab, which leaves the line and column it had reached.
   Where the whole text was replaced since, a reload from disk, it lands on the line and column the place was taken at.
 
 ### Zoom

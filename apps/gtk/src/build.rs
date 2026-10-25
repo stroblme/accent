@@ -290,6 +290,8 @@ pub fn build_window(
         recent,
         cycle: RefCell::new(None),
         switcher,
+        nav: RefCell::default(),
+        reopening: RefCell::new(None),
         title,
         toasts,
         #[cfg(feature = "bench")]

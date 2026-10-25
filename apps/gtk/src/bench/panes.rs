@@ -589,18 +589,10 @@ fn bench_layout_print(app: &Rc<App>) {
         "bench layout_active {}",
         app.active_key().unwrap_or_default()
     );
-    // Back/forward per pane, in the order the panes were made: a restore must write none of its
-    // own landings or re-selections into them.
-    let history: Vec<String> = app
-        .panes
-        .borrow()
-        .iter()
-        .map(|pane| {
-            let (back, forward) = pane.nav.borrow().depth();
-            format!("{back}/{forward}")
-        })
-        .collect();
-    println!("bench layout_history {}", history.join(" "));
+    // The window's back/forward: a restore must write none of its own landings or re-selections
+    // into it.
+    let (back, forward) = app.nav.borrow().depth();
+    println!("bench layout_history {back}/{forward}");
     println!("bench layout_panes {}", app.panes.borrow().len());
 }
 
@@ -764,6 +756,40 @@ pub(super) fn bench_back(app: &Rc<App>, rels: &str) {
             // Put back as an edit, which the autosave writes over the one the inserted lines had.
             left.buffer.set_text(&own);
             glib::timeout_future(Duration::from_millis(1500)).await;
+
+            // One history for the window: `b` split off to the right, the reader on line 20 of
+            // `a` on the left, then over in `b`'s pane. Back goes into the other pane.
+            let pane = app.pane();
+            app.split_page(&pane, Side::Right, &right.page);
+            glib::timeout_future(Duration::from_millis(300)).await;
+            app.reveal_page(&left.page);
+            left.goto_line(20, 1);
+            glib::timeout_future(Duration::from_millis(300)).await;
+            app.reveal_page(&right.page);
+            glib::timeout_future(Duration::from_millis(300)).await;
+            let where_ = |app: &Rc<App>| {
+                let front = app.active().map(|t| t.rel());
+                let line = app.active().map(|t| caret(&t).line() + 1);
+                let index = app
+                    .panes
+                    .borrow()
+                    .iter()
+                    .position(|p| Rc::ptr_eq(p, &app.pane()));
+                format!("front={front:?} line={line:?} pane={index:?}")
+            };
+            println!("bench back split_from {}", where_(&app));
+            bench_step(&app, "win.back").await;
+            println!("bench back split_back {}", where_(&app));
+            bench_step(&app, "win.forward").await;
+            println!("bench back split_forward {}", where_(&app));
+            // `a` closed: Back opens it again, in the active pane, on line 20.
+            app.close_page(&left.page);
+            glib::timeout_future(Duration::from_millis(300)).await;
+            bench_step(&app, "win.back").await;
+            glib::timeout_future(Duration::from_millis(700)).await;
+            println!("bench back reopened {}", where_(&app));
+            bench_step(&app, "win.forward").await;
+            println!("bench back reopened_forward {}", where_(&app));
             bench_quit(&app);
         });
     });

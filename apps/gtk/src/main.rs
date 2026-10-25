@@ -277,6 +277,10 @@ struct App {
     cycle: RefCell<Option<(Vec<adw::TabPage>, usize)>>,
     /// The card listing [`Self::cycle`] over the window while the chord is held.
     switcher: switcher::Switcher,
+    /// Back and forward across the window's documents and panes.
+    nav: RefCell<panes::Nav>,
+    /// A closed file Back or Forward is opening again: its tab landing is not a jump of its own.
+    reopening: RefCell<Option<String>>,
     title: adw::WindowTitle,
     toasts: Rc<toasts::Toasts>,
     /// Toast count for drills checking that repeated events do not duplicate messages.

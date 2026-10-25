@@ -233,37 +233,32 @@ impl App {
     /// Record where the reader is in the active pane, so Back returns there. Every jump calls
     /// this before it moves; a place that coalesces with the last one replaces it.
     pub fn mark(&self) {
-        let pane = self.pane();
-        if let Some(here) = self.here(&pane) {
-            self.record(&pane, here);
+        if let Some(here) = self.here(&self.pane()) {
+            self.record(here);
         }
     }
 
     /// The same, for a document that is about to stop being the selected one: the tab being left
     /// still holds its caret, so this is read before the switch has happened.
     pub fn mark_page(&self, page: &adw::TabPage) {
-        let Some(pane) = self.pane_of(page) else {
-            return;
-        };
         if let Some(doc) = self.doc_for_page(page) {
-            self.record(&pane, Self::place_of(&doc));
+            self.record(Self::place_of(&doc));
         }
     }
 
-    pub fn record(&self, pane: &Pane, place: Place) {
+    pub fn record(&self, place: Place) {
         // A restore brings each pane's stored tab to the front as its tabs land; none of that is
         // somewhere the reader went, so a restored window comes up with an empty history.
         if self.navigating.get() || self.restoring() {
             return;
         }
-        pane.nav.borrow_mut().record(place, Instant::now());
+        self.nav.borrow_mut().record(place, Instant::now());
     }
 
-    /// Step pane-local history for Alt+Left/Right and side mouse buttons.
-    /// Skip entries whose documents transferred out of the pane without moving focus to another pane.
+    /// Step the window's history for Alt+Left/Right and the mouse's side buttons, into whichever
+    /// pane holds the place, or opening a closed file again in the active pane.
     pub fn navigate(self: &Rc<Self>, forward: bool) {
-        let pane = self.pane();
-        let Some(mut here) = self.here(&pane) else {
+        let Some(mut here) = self.here(&self.pane()) else {
             return;
         };
         self.navigating.set(true);
@@ -271,11 +266,11 @@ impl App {
             // Bound first, so the history is not borrowed while `go_to` selects a page and the
             // selection handler writes to it.
             let step = match forward {
-                true => pane.nav.borrow_mut().forward(here.clone()),
-                false => pane.nav.borrow_mut().back(here.clone()),
+                true => self.nav.borrow_mut().forward(here.clone()),
+                false => self.nav.borrow_mut().back(here.clone()),
             };
             let Some(to) = step else { break };
-            if self.go_to(&pane, &to) {
+            if self.go_to(&to) {
                 break;
             }
             here = to;
@@ -283,17 +278,14 @@ impl App {
         self.navigating.set(false);
     }
 
-    /// Put the reader at `to`, if the document it names is still one of this pane's.
-    fn go_to(&self, pane: &Pane, to: &Place) -> bool {
-        let Some(doc) = self
-            .docs()
-            .into_iter()
-            .find(|d| d.key() == to.key && pane.has(d.page()))
-        else {
-            return false;
+    /// Put the reader at `to`: in the tab that has its document, or in the file opened again,
+    /// where it can be. `false` for a document that cannot be.
+    fn go_to(self: &Rc<Self>, to: &Place) -> bool {
+        let Some(doc) = self.doc_for(&to.key) else {
+            return self.reopen(to);
         };
         tracing::debug!("navigating to {to:?}");
-        pane.tabs.set_selected_page(doc.page());
+        self.reveal_page(doc.page());
         match (&doc, to.at) {
             // The mark, which has followed the edits since; the line and column it was at
             // where it can say nothing.
@@ -312,6 +304,51 @@ impl App {
             _ => {}
         }
         true
+    }
+
+    /// Open the closed file of `to` in the active pane, at its place once it lands (user
+    /// decision 2026-10-25, as VS Code does). Its landing is the step itself, so the selection it
+    /// makes records nothing (`Self::reopened`).
+    fn reopen(self: &Rc<Self>, to: &Place) -> bool {
+        if self.locate(&to.key).is_none() {
+            return false;
+        }
+        *self.reopening.borrow_mut() = Some(to.key.clone());
+        match to.at {
+            Spot::Caret(line, column) => {
+                self.with_tab(&to.key, Opened::Kept, "go back to", move |_, tab| {
+                    tab.goto_line(line, column)
+                });
+            }
+            Spot::Sheet(page) => {
+                let show = move |_: &Rc<App>, d: &Rc<crate::diagram::DiagramTab>| d.show_page(page);
+                let reveal = open::Reveal::Diagram(Box::new(show));
+                self.revealing.borrow_mut().insert(to.key.clone(), reveal);
+                self.open_path(&to.key);
+            }
+            Spot::Page(anchor) => {
+                self.open_path(&to.key);
+                // A PDF is one of the window's documents as soon as its open returns.
+                if let Some(Doc::Pdf(pdf)) = self.doc_for(&to.key) {
+                    pdf.scroll_to(anchor);
+                }
+            }
+            Spot::Whole => self.open_path(&to.key),
+        }
+        true
+    }
+
+    /// Whether `page` is the file Back or Forward is opening again, which its selection says by
+    /// landing; asked once, by the selection handler.
+    pub(crate) fn reopened(&self, page: &adw::TabPage) -> bool {
+        let mut reopening = self.reopening.borrow_mut();
+        let landed = reopening
+            .as_ref()
+            .is_some_and(|key| self.doc_for_page(page).is_some_and(|doc| doc.key() == *key));
+        if landed {
+            *reopening = None;
+        }
+        landed
     }
 
     /// Select the previous MRU tab before detaching `page`.
@@ -574,6 +611,8 @@ impl App {
         if Rc::ptr_eq(&self.active_pane.borrow(), pane) {
             return false;
         }
+        // Going to another pane is a switch of document like any other, which Back returns from.
+        self.mark();
         *self.active_pane.borrow_mut() = pane.clone();
         self.mark_active_pane();
         true

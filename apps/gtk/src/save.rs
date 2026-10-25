@@ -672,12 +672,16 @@ impl App {
         if let Some(Doc::Text(tab)) = self.doc_for_page(page) {
             self.debugger.closing(&tab);
         }
-        // Every pane's: a tab moved out of one leaves its places there, and a caret's place
-        // holds a mark in its buffer.
-        if let Some(doc) = self.doc_for_page(page) {
-            for pane in self.panes.borrow().iter() {
-                pane.nav.borrow_mut().forget(&doc.key());
+        // A file's places stay for Back to open it again, letting go of the marks in its
+        // buffer; a shell's and a comparison's go, there being nothing to open again.
+        match self.doc_for_page(page) {
+            Some(doc) if doc.is_transient() => self.nav.borrow_mut().forget(&doc.key()),
+            Some(Doc::Text(tab)) => {
+                let text = (tab.buffer.upcast_ref::<gtk::TextBuffer>(), tab.replaced());
+                self.nav.borrow_mut().release(&tab.rel(), Some(text));
             }
+            Some(doc) => self.nav.borrow_mut().release(&doc.key(), None),
+            None => {}
         }
         self.docs.borrow_mut().retain(|d| d.page() != page);
         self.pinned.borrow_mut().retain(|p| p != page);

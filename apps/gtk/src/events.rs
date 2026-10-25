@@ -24,6 +24,7 @@ impl App {
             self.watch_folder_of(&moved);
         }
         accent_core::config::rename_in(&mut self.recent_files.borrow_mut(), from, to);
+        self.nav.borrow_mut().rename(from, to);
         self.debugger.renamed(from, to);
         self.relinks_renamed(from, to);
         self.sync_active();

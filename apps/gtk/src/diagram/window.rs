@@ -164,13 +164,11 @@ impl App {
                 app.sync_status();
             }
         }));
-        // The pane's Back and Forward places in the diagram follow its pages, as a PDF's do.
+        // The window's Back and Forward places in the diagram follow its pages, as a PDF's do.
         let weak = Rc::downgrade(self);
         tab.connect_repaged(move |tab, map| {
             if let Some(app) = weak.upgrade() {
-                for pane in app.panes.borrow().iter() {
-                    pane.nav.borrow_mut().repage(&tab.key(), map);
-                }
+                app.nav.borrow_mut().repage(&tab.key(), map);
             }
         });
         tab.connect_selection(on(|_, _| {}));

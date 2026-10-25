@@ -193,7 +193,7 @@ pub fn mark_pinned(page: &adw::TabPage, pinned: bool) {
 
 // --- back and forward ----------------------------------------------------------------------
 
-/// Maximum pane navigation history, shared with the PDF reader.
+/// Maximum window navigation history, shared with the PDF reader.
 const HISTORY: usize = 100;
 /// Line distance separating navigation entries, coalescing nearby typing into one place.
 const NEARBY: i32 = 10;
@@ -224,7 +224,7 @@ pub struct Place {
 }
 
 /// Navigation mark removed from its buffer when the last history entry releases it.
-/// Closing its tab removes entries through [`Nav::forget`].
+/// Closing its tab lets go of it through [`Nav::release`].
 #[derive(Debug, PartialEq)]
 pub struct Held {
     mark: gtk::TextMark,
@@ -278,8 +278,8 @@ pub fn coalesces(last: &Place, next: &Place, apart: Duration) -> bool {
     }
 }
 
-/// A pane's back/forward history: the places the reader has left, and the ones Back took them
-/// from. One per pane, so Back may switch tabs but never moves the keyboard to another pane.
+/// A window's back/forward history: the places the reader has left, and the ones Back took them
+/// from, across every tab and pane of the window.
 #[derive(Default)]
 pub struct Nav {
     back: Vec<Place>,
@@ -309,9 +309,10 @@ impl Nav {
         self.forward.clear();
     }
 
-    /// Back: where to go, given that the reader is at `here`.
+    /// Back: where to go, given that the reader is at `here`. Entries that are `here` already —
+    /// the last edit's, say — are passed over, or Back would seem to do nothing.
     pub fn back(&mut self, here: Place) -> Option<Place> {
-        let to = self.back.pop()?;
+        let to = Self::away(&mut self.back, &here)?;
         self.forward.push(here);
         // The entry now on top is older than whatever was recorded last, so nothing may coalesce
         // into it on the strength of a timestamp that belonged to the entry just taken off.
@@ -320,10 +321,20 @@ impl Nav {
     }
 
     pub fn forward(&mut self, here: Place) -> Option<Place> {
-        let to = self.forward.pop()?;
+        let to = Self::away(&mut self.forward, &here)?;
         self.back.push(here);
         self.at = None;
         Some(to)
+    }
+
+    /// Pop `stack` down to the first place that is not `here`.
+    fn away(stack: &mut Vec<Place>, here: &Place) -> Option<Place> {
+        loop {
+            let to = stack.pop()?;
+            if !coalesces(&to, here, Duration::ZERO) {
+                return Some(to);
+            }
+        }
     }
 
     /// Back/forward entry counts for checking that session restoration adds no navigation steps.
@@ -332,10 +343,38 @@ impl Nav {
         (self.back.len(), self.forward.len())
     }
 
-    /// A tab has closed: its places go with it, because there is nothing left to go back into.
+    /// A shell's or a comparison's tab has closed: its places go with it, there being nothing to
+    /// open again.
     pub fn forget(&mut self, key: &str) {
         self.back.retain(|p| p.key != key);
         self.forward.retain(|p| p.key != key);
+    }
+
+    /// A file's tab has closed: its places stay, for Back to open it again there, but let go of
+    /// their marks, which the buffer `text` (with its count of replacements) resolves into the
+    /// line and column each has moved to since.
+    pub fn release(&mut self, key: &str, text: Option<(&gtk::TextBuffer, u32)>) {
+        for place in self.back.iter_mut().chain(&mut self.forward) {
+            if place.key != key {
+                continue;
+            }
+            let held = place.mark.take();
+            if let Some(iter) = held
+                .zip(text)
+                .and_then(|(held, (buffer, replaced))| held.iter_in(buffer, replaced))
+            {
+                place.at = Spot::Caret(iter.line() + 1, iter.line_offset() + 1);
+            }
+        }
+    }
+
+    /// `from` was renamed to `to`: the places in it, or under it for a folder, follow.
+    pub fn rename(&mut self, from: &str, to: &str) {
+        for place in self.back.iter_mut().chain(&mut self.forward) {
+            if let Some(key) = crate::relink::renamed(&place.key, from, to) {
+                place.key = key;
+            }
+        }
     }
 
     /// Remap the pages of `key`'s history places (a PDF's or a diagram's) through `map`, keeping
@@ -506,8 +545,6 @@ pub struct Pane {
     history: Rc<RefCell<Vec<adw::TabPage>>>,
     /// MRU order before libadwaita selects a neighbour while a dragged tab leaves.
     transfer_order: RefCell<Option<Vec<adw::TabPage>>>,
-    /// Back and forward across this pane's documents. See [`Nav`].
-    pub nav: RefCell<Nav>,
     /// The preview tab, if this pane has one: the tab a single click in the sidebar or a followed
     /// link opened, which the next such open replaces instead of piling up beside it.
     preview: RefCell<Option<adw::TabPage>>,
@@ -572,7 +609,6 @@ impl Pane {
             drop,
             history,
             transfer_order: RefCell::new(None),
-            nav: RefCell::new(Nav::default()),
             preview: RefCell::new(None),
         });
         pane.wire_preview();
@@ -1130,6 +1166,74 @@ mod tests {
     }
 
     /// Back after typing goes to where the reader was before, not to where the caret already is:
+    /// the edit's own entry is a duplicate of here and is passed over, both ways.
+    #[test]
+    fn back_passes_over_the_place_it_is_at() {
+        let mut nav = Nav::default();
+        let now = Instant::now();
+        nav.record(caret("a.md", 10), now);
+        // A jump to b.md, then typing there: its last entry is where the caret is.
+        nav.record(caret("b.md", 40), now);
+        assert_eq!(nav.back(caret("b.md", 42)), Some(caret("a.md", 10)));
+        // Forward from a.md lands in b.md, not on a second copy of a.md.
+        let mut nav = Nav::default();
+        nav.record(caret("a.md", 10), now);
+        nav.record(caret("b.md", 1), now);
+        assert_eq!(nav.back(caret("c.md", 1)), Some(caret("b.md", 1)));
+        assert_eq!(nav.back(caret("b.md", 1)), Some(caret("a.md", 10)));
+        assert_eq!(nav.forward(caret("a.md", 11)), Some(caret("b.md", 1)));
+        // Only duplicates of here left: nothing to go back to, and nothing moves to Forward.
+        let mut nav = Nav::default();
+        nav.record(caret("a.md", 10), now);
+        assert!(nav.back(caret("a.md", 12)).is_none());
+        assert!(nav.forward(caret("a.md", 12)).is_none());
+    }
+
+    /// One history for the window: a closed file's places stay, to be opened again, while a
+    /// shell's or a comparison's go with its tab; a rename takes the places with the file; a new
+    /// jump after Back ends the branch; and a hundred places are kept.
+    #[test]
+    fn places_outlive_their_tab_but_not_their_shell() {
+        let now = Instant::now();
+        let mut nav = Nav::default();
+        nav.record(caret("a.md", 1), now);
+        nav.record(caret("shell:1", 1), now);
+        nav.record(caret("b.md", 1), now);
+        nav.release("a.md", None);
+        nav.forget("shell:1");
+        assert_eq!(nav.back(caret("c.md", 1)), Some(caret("b.md", 1)));
+        assert_eq!(nav.back(caret("b.md", 1)), Some(caret("a.md", 1)));
+        assert!(nav.back(caret("a.md", 1)).is_none());
+
+        // A folder renamed: the places under it follow, a file of the same prefix does not.
+        let mut nav = Nav::default();
+        nav.record(caret("dir/a.md", 1), now);
+        nav.record(caret("dirt.md", 1), now);
+        nav.rename("dir", "new");
+        assert_eq!(nav.back(caret("c.md", 1)), Some(caret("dirt.md", 1)));
+        assert_eq!(nav.back(caret("c.md", 1)), Some(caret("new/a.md", 1)));
+
+        // Back twice, then a jump: Forward has nothing left, and Back walks the new branch.
+        let mut nav = Nav::default();
+        for key in ["a.md", "b.md", "c.md"] {
+            nav.record(caret(key, 1), now);
+        }
+        assert_eq!(nav.back(caret("d.md", 1)), Some(caret("c.md", 1)));
+        assert_eq!(nav.back(caret("c.md", 1)), Some(caret("b.md", 1)));
+        nav.record(caret("b.md", 1), now);
+        assert!(nav.forward(caret("e.md", 1)).is_none());
+        assert_eq!(nav.back(caret("e.md", 1)), Some(caret("b.md", 1)));
+        assert_eq!(nav.back(caret("b.md", 1)), Some(caret("a.md", 1)));
+
+        // The oldest place goes once there are more than a hundred.
+        let mut nav = Nav::default();
+        for line in 0..=HISTORY as i32 {
+            nav.record(caret("a.md", line * 100), now);
+        }
+        assert_eq!(nav.back.len(), HISTORY);
+        assert_eq!(nav.back[0], caret("a.md", 100));
+    }
+
     /// Two tabs pinned besides the one asked about: a pinned tab goes no further right than the
     /// end of that group, and any other no further left, whatever moved it there.
     #[test]

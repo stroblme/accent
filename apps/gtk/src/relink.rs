@@ -118,7 +118,7 @@ impl Relinks {
 }
 
 /// `key` after `from` was renamed to `to`, if it is at or under it.
-fn renamed(key: &str, from: &str, to: &str) -> Option<String> {
+pub(crate) fn renamed(key: &str, from: &str, to: &str) -> Option<String> {
     match key.strip_prefix(from)? {
         "" => Some(to.to_string()),
         rest => rest.starts_with('/').then(|| format!("{to}{rest}")),
@@ -136,9 +136,7 @@ impl App {
         let (key, last) = (pdf.key(), pdf.page_count().saturating_sub(1));
         // A place on the page that went is on the one that took its place, as the reader is.
         let map = |page| edit.map(page).unwrap_or(page).min(last);
-        for pane in self.panes.borrow().iter() {
-            pane.nav.borrow_mut().repage(&key, map);
-        }
+        self.nav.borrow_mut().repage(&key, map);
         // A file opened from outside the vault has no notes that link into it.
         let Some(vault) = self.vault().filter(|_| !doc::is_loose_key(&key)) else {
             return;
