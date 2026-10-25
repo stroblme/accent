@@ -317,6 +317,7 @@ pub fn build_window(
         excluded: RefCell::new(None),
         references: RefCell::new(None),
         goals: RefCell::new(None),
+        code_tab: RefCell::default(),
         details_stat: RefCell::new(None),
         ops: OnceCell::new(),
         preferences: OnceCell::new(),

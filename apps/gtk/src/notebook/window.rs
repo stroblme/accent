@@ -143,9 +143,20 @@ impl App {
             .collect()
     }
 
-    /// The notebook commands, over the notebook in front. `false` for a name that is not one.
+    /// The notebook commands, over the notebook in front; the kernel's strip's, with none in
+    /// front, over the Code pane's. `false` for a name that is not one.
     pub(crate) fn notebook_action(self: &Rc<Self>, name: &str) -> bool {
-        let Some(tab) = self.active_notebook() else {
+        let strip = matches!(
+            name,
+            "notebook-run-all"
+                | "notebook-interrupt"
+                | "notebook-restart"
+                | "notebook-shut-down"
+                | "notebook-clear-all-outputs"
+        );
+        let code = || self.code_doc().and_then(|doc| doc.notebook().cloned());
+        let tab = self.active_notebook().or_else(|| code().filter(|_| strip));
+        let Some(tab) = tab else {
             return name.starts_with("notebook-");
         };
         match name {

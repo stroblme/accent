@@ -34,14 +34,14 @@ const LOGGED: (u32, &str, &str) = (5, "Log Message", "total is {total}");
 /// `ACCENT_BENCH_DEBUG=<rel>:<line>` debugs the program `make drills` writes, whose `double(x)`
 /// is called with 21, from a breakpoint on 1-based `<line>`, `y = x * 2`, beside [`HELD_BACK`]
 /// and [`LOGGED`]. It prints what the window shows at each step, `bench debug …`: the
-/// breakpoints' marks and rows, the tab in front once the program's opens behind it, the stop, which the condition did not take, the top call, its
-/// locals, [`WATCH`]'s value, the Debug Console's answers to [`REPL`], to [`CALL`] after
-/// [`BLOCK`] and to [`TYPED`] completed with Tab and called, [`HOLDS`] atop Variables and opened,
-/// the hover's value of the first name after the line's `=`, the line a step over lands on, the
-/// session's exit code, the program's output in its tab, the logpoint's in the Debug Console,
-/// that tab kept, and the Code pane shown
-/// with the program's file in front and hidden behind its tab. Timings go on `bench debug_ms …`
-/// lines; a step that never comes prints `bench debug timeout <what>` and quits.
+/// breakpoints' marks and rows, the tab in front once the program's opens behind it, the stop,
+/// which the condition did not take, the top call, its locals, [`WATCH`]'s value, the Debug
+/// Console's answers to [`REPL`], to [`CALL`] after [`BLOCK`] and to [`TYPED`] completed with Tab
+/// and called, [`HOLDS`] atop Variables and opened, the hover's value of the first name after the
+/// line's `=`, the line a step over lands on, the session's exit code, the program's output in
+/// its tab, the logpoint's in the Debug Console, that tab kept, and the Code pane shown with the
+/// program's file in front and behind its tab. Timings go on `bench debug_ms …` lines; a step
+/// that never comes prints `bench debug timeout <what>` and quits.
 pub(super) fn bench_debug(app: &Rc<App>, arg: &str) {
     let place = arg
         .rsplit_once(':')
@@ -258,8 +258,8 @@ pub(super) fn bench_debug(app: &Rc<App>, arg: &str) {
             "bench debug program {}",
             if kept { "kept" } else { "closed" }
         );
-        // The end leaves the strip over the program's file, which can be debugged again; a tab
-        // that cannot takes the pane away.
+        // The end leaves the strip over the program's file, which can be debugged again, and
+        // the program's tab brought forward leaves the pane as it was.
         let code = || match app.sidebar.get().is_some_and(|s| s.has_pane("code")) {
             true => "shown",
             false => "hidden",

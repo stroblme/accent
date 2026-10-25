@@ -6,21 +6,42 @@ use super::*;
 const GOALS: Duration = Duration::from_millis(300);
 
 impl App {
-    /// Show Code while the tab in front has goals or can be debugged or run, a notebook's kernel,
-    /// or a debug session runs, and request goals. Window-owned visibility keeps the debugger's
-    /// sections up over any tab.
+    /// The tab the Code pane is about: the one in front where the pane has something to say for
+    /// it — goals, a debugger, a kernel — else the last such tab in front, while it is open, so
+    /// a terminal or a note brought forward leaves the pane as it was (user decision 2026-10-25).
+    pub(crate) fn code_doc(&self) -> Option<Doc> {
+        if let Some(doc) = self.active_doc().filter(|doc| self.code_is_for(doc)) {
+            self.code_tab.replace(Some(doc.key()));
+            return Some(doc);
+        }
+        let key = self.code_tab.borrow().clone()?;
+        let doc = self.doc_for(&key).filter(|doc| self.code_is_for(doc));
+        if doc.is_none() {
+            self.code_tab.replace(None);
+        }
+        doc
+    }
+
+    /// Whether the Code pane has something to say for `doc`: goals, a debugger or a kernel.
+    fn code_is_for(&self, doc: &Doc) -> bool {
+        match doc {
+            Doc::Text(tab) => {
+                tab.lang.support().is_some_and(|s| s.goals) || self.program_of(tab).is_some()
+            }
+            Doc::Notebook(tab) => self.why_not_run(tab).is_none(),
+            _ => false,
+        }
+    }
+
+    /// Show Code while the window has a tab it is for (`code_doc`) or a debug session runs, and
+    /// request goals. Window-owned visibility keeps the debugger's sections up over any tab.
     pub fn sync_code_pane(self: &Rc<Self>) {
         let Some(sidebar) = self.sidebar.get() else {
             return;
         };
-        let goals = self
-            .active()
-            .and_then(|tab| tab.lang.support())
-            .is_some_and(|support| support.goals);
         let running = self.debugger.running();
-        let debuggable = self.debuggable_in_front().is_some();
-        let runnable = self.runnable_in_front();
-        sidebar.set_code_visible(goals || running || debuggable || runnable);
+        let debuggable = self.code_program().is_some();
+        sidebar.set_code_visible(self.code_doc().is_some() || running);
         self.sync_kernel();
         if !running {
             sidebar.clear_debug(debuggable);
@@ -33,8 +54,9 @@ impl App {
         self.refresh_goals();
     }
 
-    /// Request active-caret goals only while Code is visible, with debounce and cancellation.
-    /// Retain previous answers during requests to avoid flashing; clear on tab switches.
+    /// Request goals at the caret of the Code pane's tab only while Code is visible, with
+    /// debounce and cancellation. Retain previous answers during requests to avoid flashing;
+    /// clear when the pane is about another tab.
     pub fn refresh_goals(self: &Rc<Self>) {
         if let Some(handle) = self.goals.borrow_mut().take() {
             handle.abort();
@@ -42,18 +64,19 @@ impl App {
         let Some(sidebar) = self.sidebar.get() else {
             return;
         };
-        let key = self.active_key().unwrap_or_default();
-        let checking = self
-            .active()
+        let tab = match self.code_doc() {
+            Some(Doc::Text(tab)) => Some(tab),
+            _ => None,
+        };
+        let key = self.code_tab.borrow().clone().unwrap_or_default();
+        let checking = tab
+            .as_ref()
             .is_some_and(|tab| tab.lang.checking.get().is_some());
         sidebar.sync_code(&key, checking);
         if !self.sidebar_column.is_visible() || !sidebar.is_showing("code") {
             return;
         }
-        let Some(tab) = self
-            .active()
-            .filter(|tab| tab.lang.support().is_some_and(|s| s.goals))
-        else {
+        let Some(tab) = tab.filter(|tab| tab.lang.support().is_some_and(|s| s.goals)) else {
             return;
         };
         let Some(vault) = tab.lang.vault() else {
@@ -66,7 +89,7 @@ impl App {
             lang::flush(tab.clone()).await;
             let answer = vault.goals(&key, pos).await;
             let Some(app) = weak.upgrade() else { return };
-            if app.active_key().as_deref() != Some(&key) {
+            if app.code_tab.borrow().as_deref() != Some(&key) {
                 return;
             }
             // A position the server has not checked yet can outlast the request; the end of the

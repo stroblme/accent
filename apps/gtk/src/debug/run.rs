@@ -42,7 +42,7 @@ enum State {
 }
 
 impl App {
-    /// Start Debugging: the Python file in front, else the program last debugged here.
+    /// Start Debugging: the Code pane's Python file, else the program last debugged here.
     pub(crate) fn start_debugging(self: &Rc<Self>) {
         // A remote vault's adapter and program are its host's. On a local vault both would have
         // to be this machine's: debugpy's launcher calls back over a loopback the sandbox does
@@ -58,18 +58,24 @@ impl App {
             return self.debug_cannot("start debugging", "a program is already being debugged");
         }
         let last = self.debugger.last.borrow().clone();
-        match self.debuggable_in_front().or(last) {
+        match self.code_program().or(last) {
             Some((program, language)) => self.launch_program(program, language),
             None => self.debug_cannot("start debugging", "no Python file is in front"),
         }
     }
 
-    /// The file in front and its language, where Start Debugging can run it: a vault's file a
-    /// debugger runs.
-    pub(crate) fn debuggable_in_front(&self) -> Option<(String, String)> {
-        self.active()
-            .filter(|tab| self.vault().is_some() && !doc::is_loose_key(&tab.rel()))
-            .map(|tab| (tab.rel(), lang::language_id(&tab)))
+    /// The Code pane's file and its language, where Start Debugging can run it.
+    pub(crate) fn code_program(&self) -> Option<(String, String)> {
+        match self.code_doc()? {
+            Doc::Text(tab) => self.program_of(&tab),
+            _ => None,
+        }
+    }
+
+    /// `tab`'s file and language, where it is a vault's file a debugger runs.
+    pub(crate) fn program_of(&self, tab: &Tab) -> Option<(String, String)> {
+        Some((tab.rel(), lang::language_id(tab)))
+            .filter(|(rel, _)| self.vault().is_some() && !doc::is_loose_key(rel))
             .filter(|(_, language)| debuggable(language))
     }
 
@@ -633,7 +639,7 @@ impl App {
             return;
         };
         let (Some(run), Some(state)) = (run, state) else {
-            return sidebar.clear_debug(self.debuggable_in_front().is_some());
+            return sidebar.clear_debug(self.code_program().is_some());
         };
         let said = run.paused.borrow();
         let (line, why) = match state {

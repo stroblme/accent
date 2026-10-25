@@ -209,7 +209,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - An `AdwInlineViewSwitcher` in icon mode over an `AdwViewStack` of nine panes: Files, Search, Info, Git, Ports, Outline, Code, Properties, Bibliography.
   The switcher sits in the sidebar header, level with the sidebar toggle, so the tree's first row lines up with the tabs.
 - Bibliography shows when a `.bib` file is discovered or opened, without changing the selected sidebar pane.
-- Git shows only where there is a repository, Ports only on a remote vault, Code only while the window says so — while the tab in front has a proof assistant's goals, can be debugged or is a notebook that runs, or a debug session runs — Properties only while a diagram is in front: each only where it has something to say, so other vaults keep the switcher they had.
+- Git shows only where there is a repository, Ports only on a remote vault, Code only while the window says so — while it has a tab with a proof assistant's goals, one that can be debugged or a notebook that runs, or a debug session runs — Properties only while a diagram is in front: each only where it has something to say, so other vaults keep the switcher they had.
 - A vault always opens on Files: a search from another sitting is not where a vault starts.
 - Width is dragged on the `GtkPaned` handle, down to 200 px or the pane switcher's width, whichever is wider: the switcher's icons are never cut.
 - Below 760 sp an `AdwBreakpoint` hides the sidebar: that is the default 280 px sidebar beside the 480 px column floor.
@@ -358,12 +358,13 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A section with nothing to say is hidden; with neither, the pane shows one `.compact` status page, "No Goals", "Place the caret in a proof".
   While the tab in front is still being checked and has no answer yet, that page reads "Checking…", "Goals show once the check reaches the caret" instead — goals wait on the check, and the status bar says how far it has got — until the answer asked for at the end of the check replaces it.
 - It follows the caret, moves and typing alike, by 300 ms while it is on screen, and asks again as it comes back on screen, the sidebar with it, and when the zoom changes, which its font follows.
-  The last answer stays up while the next is asked, so a caret move does not flash the pane; another tab coming to the front clears it.
+  The last answer stays up while the next is asked, so a caret move does not flash the pane; the pane turning to another tab clears it.
   An answer that fails while the file is being checked leaves the pane as it is, and the end of the check asks again.
 - Its visibility is a window flag, never a rule about the tab in front, because a debug session keeps it up over any tab: Call Stack, Variables, Watch and Breakpoints follow Goals and Expected Type in the one stack of dividers, the session's controls in a strip over them all.
   While a session runs the pane shows its sections whatever is in front, Goals and Expected Type only with an answer, and neither the No Goals nor the Checking page.
   With no session, a tab in front that can be debugged (Debugger) has the pane too, as the strip over Watch and Breakpoints, ready to start: Call Stack and Variables have nothing to say until a program runs.
-  The pane joins the switcher then without coming to the front, and nothing but its button brings it there, a session starting, stopping or ending included (user decision 2026-10-18); a tab with no goals, no debugger and no kernel takes it away again.
+  The pane joins the switcher then without coming to the front, and nothing but its button brings it there, a session starting, stopping or ending included (user decision 2026-10-18).
+  A tab in front with no goals, no debugger and no kernel — a terminal, a note — leaves the pane on the last tab in front that had one, while that tab is open, its goals as last answered, Debug running its file and the kernel's strip working its notebook; with no such tab left it goes (user decision 2026-10-25).
   Hidden while on screen, it gives way to the Outline.
   Which sections are open and where the dividers are are the vault's session: all open at first.
 - **Python Environment**: beside either strip, the debugger's or the kernel's, in one row with its buttons, the dropdown that chooses the vault's interpreter (Notebook, Running), a flat button naming it as the Git pane's branch button names the branch, the buttons at the row's end with the caption under them; the same for a Python file and a notebook.
@@ -1300,7 +1301,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - They are kept in the session per file, with what is set beside each line, never in the vault: a file closed and opened again, or the vault reopened, has them back; a file renamed or moved takes them along, and a file deleted takes them with it.
 - A breakpoint is a foreground symbolic glyph, as a diagnostic's icon is, never red, one size whatever its kind, as VS Code's: a dot, a dot with `=` for a condition or a hit count, a diamond for a log message, and each as an outline for one the program has not bound, its tooltip saying what is set and why it is not bound where the program said.
   The dot takes its line's cell from a diagnostic's icon, which GtkSourceView would draw under it rather than hide; the line's message and underline stay.
-- **Start Debugging** (`Ctrl+F5`) runs the Python file in front, else the program last debugged in the window, which the window remembers for its life and never in the vault's session.
+- **Start Debugging** (`Ctrl+F5`) runs the Code pane's Python file — the one in front, else the last one in front (Code) — else the program last debugged in the window, which the window remembers for its life and never in the vault's session.
   The vault's tabs with edits are written first, as VS Code's `debug.saveBeforeStart` does: the program runs what is on disk.
   One session at a time: a second Start says "Cannot start debugging: a program is already being debugged".
   The sidebar stays on the pane it shows, and hidden if it was: the session is in the Code pane, which its button in the switcher brings up (user decision 2026-10-18).

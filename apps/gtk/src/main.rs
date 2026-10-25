@@ -329,6 +329,8 @@ struct App {
     references: RefCell<Option<glib::JoinHandle<()>>>,
     /// The goals request in flight, replaced the same way.
     goals: RefCell<Option<glib::JoinHandle<()>>>,
+    /// The key of the last tab in front the Code pane was for (`App::code_doc`).
+    code_tab: RefCell<Option<String>>,
     /// Last Details stat target/answer; `None` while pending or missing (`App::stat_details`).
     details_stat: RefCell<Option<(String, Option<Etag>)>>,
     ops: OnceCell<Rc<fileops::Ops>>,

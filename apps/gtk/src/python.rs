@@ -6,11 +6,12 @@ use sourceview5::prelude::BufferExt;
 use std::rc::Rc;
 
 use crate::App;
+use crate::doc::Doc;
 
 impl App {
-    /// The environments for the dropdown, found for the Python file or notebook in front, whose
-    /// project may name its own for Pyright. A debug session keeps the dropdown up over any tab,
-    /// and then the vault's root stands in, which names no project.
+    /// The environments for the dropdown, found for the Code pane's Python file or notebook,
+    /// whose project may name its own for Pyright; without one the vault's root stands in, which
+    /// names no project.
     pub(crate) fn python_environments(
         self: &Rc<Self>,
         then: Box<dyn FnOnce(Result<Environments, String>)>,
@@ -18,20 +19,18 @@ impl App {
         let Some(vault) = self.vault().cloned() else {
             return;
         };
-        let rel = self
-            .active()
-            .filter(|tab| {
-                tab.buffer
+        let rel = match self.code_doc() {
+            Some(Doc::Text(tab))
+                if tab
+                    .buffer
                     .language()
-                    .is_some_and(|language| language.id() == "python3")
-            })
-            .map(|tab| tab.rel())
-            .or_else(|| {
-                self.active_notebook()
-                    .filter(|tab| tab.is_python())
-                    .map(|tab| tab.key())
-            })
-            .unwrap_or_default();
+                    .is_some_and(|language| language.id() == "python3") =>
+            {
+                tab.rel()
+            }
+            Some(Doc::Notebook(tab)) if tab.is_python() => tab.key(),
+            _ => String::new(),
+        };
         let asked = vault.python_environments(&rel);
         gtk::glib::spawn_future_local(async move {
             then(asked.await.map_err(|error| error.to_string()));

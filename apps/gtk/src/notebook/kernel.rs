@@ -494,7 +494,7 @@ impl NotebookTab {
 
 impl App {
     /// Why `tab` runs nothing where it is, `None` when it can run: a Jupyter notebook in a vault.
-    fn why_not_run(&self, tab: &NotebookTab) -> Option<&'static str> {
+    pub(crate) fn why_not_run(&self, tab: &NotebookTab) -> Option<&'static str> {
         if self.vault().is_none() || doc::is_loose_key(&tab.key()) {
             return Some("it is not in a vault");
         }
@@ -502,12 +502,6 @@ impl App {
             return Some("marimo runs its own notebooks");
         }
         None
-    }
-
-    /// Whether the notebook in front can run, so the Code pane shows its kernel.
-    pub(crate) fn runnable_in_front(&self) -> bool {
-        self.active_notebook()
-            .is_some_and(|tab| self.why_not_run(&tab).is_none())
     }
 
     /// `tab`'s cells may run now, else a toast says why not.
@@ -862,12 +856,10 @@ impl App {
         }
     }
 
-    /// The kernel commands as the notebook in front's kernel allows them, and the Code pane's
+    /// The kernel commands as the Code pane's notebook's kernel allows them, and the pane's
     /// strip saying what it does, unless a debug session holds the pane.
     pub(crate) fn sync_kernel(&self) {
-        let tab = self
-            .active_notebook()
-            .filter(|tab| self.why_not_run(tab).is_none());
+        let tab = self.code_doc().and_then(|doc| doc.notebook().cloned());
         let kernel = tab.as_ref().and_then(|tab| tab.kernel());
         let started = kernel.as_ref().is_some_and(|k| k.info.borrow().is_some());
         let busy = started && kernel.as_ref().is_some_and(|k| !k.runs.borrow().is_empty());
