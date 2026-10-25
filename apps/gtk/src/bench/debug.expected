@@ -4,6 +4,7 @@ bench debug breakpoint demo.py:6 logpoint
 bench debug row demo.py:2
 bench debug row demo.py:5 1 == 2
 bench debug row demo.py:6 total is {total}
+bench debug front demo.py
 bench debug stopped demo.py:2 breakpoint
 bench debug top double demo.py:2
 bench debug locals x=21

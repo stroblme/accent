@@ -3,7 +3,7 @@
 //! Shared config, vault and `on_change` are supplied by the caller, avoiding a dependency
 //! on `App`.
 
-use accent_core::config::{Config, FocusMode, RecolourConfig, Theme, VaultConfig};
+use accent_core::config::{Config, DebugTerminal, FocusMode, RecolourConfig, Theme, VaultConfig};
 use adw::prelude::*;
 use gtk::{gio, pango};
 use std::cell::{Cell, RefCell};
@@ -31,6 +31,16 @@ const FOCUS_MODES: [(FocusMode, &str, &str); 3] = [
         "High",
         "The text away from the caret and the other panes fade too",
     ),
+];
+
+/// Where a debugged program's terminal opens, in the order the combo row lists them, named as the
+/// tab menu's splits are.
+const DEBUG_TERMINALS: [(DebugTerminal, &str); 5] = [
+    (DebugTerminal::Same, "Same Pane"),
+    (DebugTerminal::Right, "Split Right"),
+    (DebugTerminal::Left, "Split Left"),
+    (DebugTerminal::Up, "Split Up"),
+    (DebugTerminal::Down, "Split Down"),
 ];
 
 /// Cached Preferences dialog, built before its first opening to reduce main-thread
@@ -604,6 +614,30 @@ fn terminal_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Pre
         }
     });
     group.add(&forward);
+
+    let chosen = config.borrow().debug_terminal;
+    let names: Vec<&str> = DEBUG_TERMINALS.iter().map(|(_, name)| *name).collect();
+    let place = adw::ComboRow::builder()
+        .title("Debug Terminal")
+        .subtitle("Where a debugged program's terminal and the Debug Console open")
+        .model(&gtk::StringList::new(&names))
+        .selected(
+            DEBUG_TERMINALS
+                .iter()
+                .position(|(p, _)| *p == chosen)
+                .unwrap_or(0) as u32,
+        )
+        .build();
+    place.connect_selected_notify({
+        let (config, save) = (config.clone(), save.clone());
+        move |r| {
+            if let Some((place, _)) = DEBUG_TERMINALS.get(r.selected() as usize) {
+                config.borrow_mut().debug_terminal = *place;
+                save();
+            }
+        }
+    });
+    group.add(&place);
 
     group
 }

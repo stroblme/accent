@@ -34,7 +34,7 @@ const LOGGED: (u32, &str, &str) = (5, "Log Message", "total is {total}");
 /// `ACCENT_BENCH_DEBUG=<rel>:<line>` debugs the program `make drills` writes, whose `double(x)`
 /// is called with 21, from a breakpoint on 1-based `<line>`, `y = x * 2`, beside [`HELD_BACK`]
 /// and [`LOGGED`]. It prints what the window shows at each step, `bench debug …`: the
-/// breakpoints' marks and rows, the stop, which the condition did not take, the top call, its
+/// breakpoints' marks and rows, the tab in front once the program's opens behind it, the stop, which the condition did not take, the top call, its
 /// locals, [`WATCH`]'s value, the Debug Console's answers to [`REPL`], to [`CALL`] after
 /// [`BLOCK`] and to [`TYPED`] completed with Tab and called, [`HOLDS`] atop Variables and opened,
 /// the hover's value of the first name after the line's `=`, the line a step over lands on, the
@@ -95,6 +95,12 @@ pub(super) fn bench_debug(app: &Rc<App>, arg: &str) {
 
         let t = Instant::now();
         let _ = WidgetExt::activate_action(&app.window, "win.debug-start", None);
+        // Behind the program's file, which keeps the front and the Code pane.
+        if until(&app, "program", || program_tab(&app)).await.is_none() {
+            return;
+        }
+        let front = app.active_key().unwrap_or_default();
+        println!("bench debug front {front}");
         let Some(at) = until(&app, "stopped", || paused_line(&tab)).await else {
             return;
         };
@@ -237,7 +243,12 @@ pub(super) fn bench_debug(app: &Rc<App>, arg: &str) {
             return;
         };
         println!("bench debug log {logged}");
-        // Once it has said how it ended: a shell's tab would close there.
+        // Once it has said how it ended: a shell's tab would close there. Brought to the front
+        // first, as a reader would look at it: VTE reports the end of a program behind another
+        // tab only once it is shown.
+        if let Some(pane) = app.pane_of(&program.page) {
+            pane.tabs.set_selected_page(&program.page);
+        }
         let said = || text(&program).contains("[Exited with code").then_some(());
         if until(&app, "program end", said).await.is_none() {
             return;

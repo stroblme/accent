@@ -638,7 +638,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - The tab key is `terminal:<16 hex>`, the holder's id; the shell's directory (OSC 7, else where it started) goes into the session, so a shell the holder lost (a reboot) starts again there.
 - **The debugger's two terminals, the program's and the Debug Console, are the shells not held** (user decisions 2026-10-17). The program's: the adapter's `runInTerminal` is answered with a tab running its command line in its folder with its environment, under VTE directly, on a host over the vault's master with `ssh -t`, so the program reads its input there; the program is its session's and must not outlive it, where a held shell would.
   Its key is `program:<16 hex>`, which no holder and no session restore takes for a shell's.
-  It opens in the active pane, in front with the keyboard, as a new shell does, titled with the program's file name.
+  It opens where Preferences → Terminal → Debug Terminal says (`debug_terminal`): behind the tab in front of the active pane (Same Pane, the default), or in front in a pane split off it on a side (Split Right, Left, Up, Down); either way the keyboard and the active pane stay where they were, so the file stays in front with its Code pane (user decision 2026-10-25). New Terminal is not this setting's.
+  It is titled with the program's file name, and starts at once behind another tab, at VTE's default size, the adapter waiting for it.
   It stays when the program ends, its output kept and a last line saying how — `[Exited with code N]`, `[Ended by signal N]`, on a host `[Lost the connection to host]` — with no reconnect, and the next session's takes its place in its pane and bar.
   The Debug Console runs nothing: what it shows is fed to it, and its prompt is a line editor of the window's own over the keys the terminal would send a shell (Debugger). Its key is `debug:console`.
 - Shells a window left held with no session to come back in (a quit, SIGTERM, a logout) are ended at the next start, before the first window: only this machine's holder is asked, and only shells started for the same state directory, which `attach --owner` hands the holder and `held` lists: the Flatpak cannot read a host shell's environment, which holds the host's `XDG_STATE_HOME` anyway.
@@ -877,7 +878,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 ### Preferences
 
-- `AdwPreferencesDialog` of `AdwPreferencesGroup` / `AdwSwitchRow`, an `AdwComboRow` each for the theme and the focus mode (its subtitle saying what the level fades), and a destructive `AdwButtonRow` for Restore Defaults.
+- `AdwPreferencesDialog` of `AdwPreferencesGroup` / `AdwSwitchRow`, an `AdwComboRow` each for the theme, the focus mode (its subtitle saying what the level fades) and the Debug Terminal (Terminal), and a destructive `AdwButtonRow` for Restore Defaults.
 - A click outside it closes it, as one outside the palette does (Palette).
 - Recolour to the Theme holds a switch each for Images, PDFs and Diagrams, all on (user decision 2026-10-09).
   A kind switched off shows its files as they are, and its Invert command recolours one file onto the theme's paper and ink instead (PDF, Image, Diagram).
@@ -1314,7 +1315,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - A failure is a toast under one key, so the next takes its place: "Cannot start debugging: <why>", the why being the adapter's own last words where it exited before answering — Python's `No module named debugpy`, once — and "The debug session ended: <why>" for an adapter that died under a running program.
   What the adapter marks important is a toast as well, and all its output goes to the Debug Console.
 - **The Debug Console** is a terminal tab (user decision 2026-10-17), not an editor: it has no file, and as a terminal it has the shells' palette, font, zoom, scrollback, menu and links.
-  It opens with the program's tab, the program keeping the keyboard for its input; a new session clears it, and Debug Console, the strip's last button, brings it to the front with the keyboard, or opens it in the active pane once closed.
+  It opens with the program's tab, after it and behind it, the keyboard staying where it was; a new session clears it, and Debug Console, the strip's last button, brings it to the front with the keyboard, or opens it in the active pane once closed.
 - It says what is debugged ("Debugging demo.py"), prints the adapter's output and what the console's evaluations print — the program's own is its terminal's — and at the end says how the session ended ("Session ended (exit code 0)"), leaving no prompt.
   Its own words and the adapter's are the terminal's ink at 0.6 over its page, as a quote's are (SGR's dim is VTE's darker ink on a light page), stderr is the palette's red and what the adapter marks important bold.
   What it prints is text alone: escape sequences and control characters but newlines and tabs are dropped from output, answers and tracebacks, so nothing a program prints retitles the tab, moves the cursor out from under the prompt, or asks the terminal a question whose answer VTE would type at the prompt.

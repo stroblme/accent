@@ -5,6 +5,7 @@ use super::*;
 use accent_api::debug::{
     Candidate, Category, Context, Evaluated, Frame, Launch, News, Step, Variable,
 };
+use accent_core::config::DebugTerminal;
 use sourceview5::prelude::BufferExt as _;
 
 /// One session, from Start until its end.
@@ -649,8 +650,10 @@ impl App {
         self.terminals().into_iter().find(|term| term.is_program())
     }
 
-    /// The program's terminal, as the adapter asked: in the active pane, in front with the
-    /// keyboard, as a new shell is; or where the last session's was, in its place.
+    /// The program's terminal, as the adapter asked: where the last session's was, in its place;
+    /// else behind the tab in front of the active pane, or in a pane split off it, as Preferences
+    /// says (`debug_terminal`). The keyboard and the active pane stay where they were, and with
+    /// them the Code pane over the file being debugged.
     fn open_program(
         self: &Rc<Self>,
         run: &Run,
@@ -690,10 +693,30 @@ impl App {
             let at = pane.tabs.page_position(&old.page);
             Some((pane, at))
         });
+        let active = self.pane();
+        let side = match self.config.borrow().debug_terminal {
+            DebugTerminal::Same => None,
+            DebugTerminal::Right => Some(Side::Right),
+            DebugTerminal::Left => Some(Side::Left),
+            DebugTerminal::Up => Some(Side::Up),
+            DebugTerminal::Down => Some(Side::Down),
+        };
+        let place = place.or_else(|| Some((self.split_beside(&active, side?), 0)));
         // Put in its place, not moved there: AdwTabBar's reorder animation stalls on a tab that
         // closes while it runs, and leaves the new tab undrawn.
         let shell = terminal::Shell::Program(Rc::new(program));
-        self.open_shell_at(terminal::program_key(), shell, Opened::Kept, place);
+        let key = terminal::program_key();
+        self.open_shell_at(key.clone(), shell, Opened::Restored, place);
+        if self.set_active_pane(&active) {
+            self.sync_active();
+        }
+        // In front of its pane where the last session's was.
+        if let (Some(old), Some(new)) = (&old, self.doc_for(&key))
+            && old.page.is_selected()
+            && let Some(pane) = self.pane_of(new.page())
+        {
+            pane.tabs.set_selected_page(new.page());
+        }
         // A turn later: closed in the turn the new tab went in beside it, with the console after
         // it, the new tab was left undrawn all the same (ISSUES.md).
         if let Some(old) = old {

@@ -25,6 +25,7 @@ column_width = 50
 full_width_preview = true
 indent_width = 4
 forward_keys_to_terminal = false
+debug_terminal = "down"
 theme = "solarized"
 focus_mode = "high"
 
@@ -100,6 +101,20 @@ pub enum FocusMode {
     High,
 }
 
+/// Where a debugged program's terminal and the Debug Console open: behind the tab in front of
+/// the active pane, or in a pane split off it on a side. The keyboard stays where it was either
+/// way, so the Code pane stays up over the file being debugged.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DebugTerminal {
+    #[default]
+    Same,
+    Right,
+    Left,
+    Up,
+    Down,
+}
+
 /// The global config file.
 #[doc = concat!("\n```toml\n", example!(), "```")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -152,6 +167,7 @@ pub struct Config {
     /// Terminal. Off by default: the shell then gets every key but a small reserved set the
     /// window keeps (DESIGN.md, Keyboard → Terminal).
     pub forward_keys_to_terminal: bool,
+    pub debug_terminal: DebugTerminal,
     pub theme: Theme,
     pub focus_mode: FocusMode,
     pub recolour: RecolourConfig,
@@ -304,6 +320,7 @@ impl Default for Config {
             full_width_preview: false,
             indent_width: 4,
             forward_keys_to_terminal: false,
+            debug_terminal: DebugTerminal::Same,
             theme: Theme::System,
             focus_mode: FocusMode::default(),
             recolour: RecolourConfig::default(),
@@ -1216,6 +1233,7 @@ daily_template = "DailyNote.md"
         assert!(c.full_width_preview);
         assert_eq!(c.indent_width, 4);
         assert!(!c.forward_keys_to_terminal);
+        assert_eq!(c.debug_terminal, DebugTerminal::Down);
         assert_eq!(c.theme, Theme::Solarized);
         assert_eq!(c.focus_mode, FocusMode::High);
         assert!(c.recolour.images && !c.recolour.pdfs && c.recolour.diagrams);
@@ -1250,6 +1268,7 @@ daily_template = "DailyNote.md"
         assert_eq!(again.show_hidden, c.show_hidden);
         assert_eq!(again.theme, Theme::Solarized);
         assert_eq!(again.focus_mode, FocusMode::High);
+        assert_eq!(again.debug_terminal, DebugTerminal::Down);
         assert_eq!(again.vaults["/home/me/Notes"].new_file_dir, "Inbox");
         assert_eq!(again.shortcuts, c.shortcuts);
         assert_eq!(again.search.exclude, c.search.exclude);
@@ -1343,6 +1362,7 @@ daily_template = "DailyNote.md"
         assert!(c.git_tint);
         assert!(!c.full_width_preview);
         assert_eq!(c.focus_mode, FocusMode::Medium);
+        assert_eq!(c.debug_terminal, DebugTerminal::Same);
         assert!(c.recent_vaults.is_empty());
         assert!(!config_path_exists(tmp.path()));
     }

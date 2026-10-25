@@ -581,7 +581,7 @@ pub fn open(
 fn start(term: &Rc<Term>) {
     let Shell::Remote { link, .. } = &term.shell else {
         name_unshown(term);
-        return spawn(&term.view, &term.shell, id(&term.key));
+        return spawn(term);
     };
     term.view
         .feed(format!("Connecting to {}…", link.host).as_bytes());
@@ -610,7 +610,7 @@ fn start(term: &Rc<Term>) {
         match ready {
             Ok(()) => {
                 name_unshown(&term);
-                spawn(&term.view, &term.shell, id(&term.key))
+                spawn(&term)
             }
             Err(why) => {
                 term.lost.set(true);
@@ -804,8 +804,10 @@ pub fn on_reconnect(term: &Rc<Term>, reconnect: impl Fn(&Rc<Term>) + 'static) {
 ///
 /// Wait for [`when_laid_out`] before attaching: replay at VTE's default or unsettled size
 /// persists until the program redraws. Restored background tabs attach when first shown;
-/// new tabs wait for two stable frames.
-fn spawn(view: &vte4::Terminal, shell: &Shell, id: &str) {
+/// new tabs wait for two stable frames. A debugged program behind another tab starts at once, at
+/// VTE's default size, as the adapter is waiting for it.
+fn spawn(term: &Term) {
+    let (view, shell, id) = (&term.view, &term.shell, id(&term.key));
     let (cwd, argv, env) = match (shell, cli()) {
         (Shell::Local(cwd), Some(mut argv)) => {
             argv.extend([
@@ -844,7 +846,8 @@ fn spawn(view: &vte4::Terminal, shell: &Shell, id: &str) {
         Shell::Program(program) => Some(program.clone()),
         _ => None,
     };
-    when_laid_out(view, move |view| {
+    let behind = program.is_some() && !term.page.is_selected();
+    let run = move |view: &vte4::Terminal| {
         let named = argv.join(" ");
         let args: Vec<&str> = argv.iter().map(String::as_str).collect();
         // VTE adds these to the environment the tab would have anyway.
@@ -873,7 +876,11 @@ fn spawn(view: &vte4::Terminal, shell: &Shell, id: &str) {
                 }
             },
         );
-    });
+    };
+    match behind {
+        true => run(view),
+        false => when_laid_out(view, run),
+    }
 }
 
 /// Run `then` once `view` is mapped with a stable allocation, or immediately if already laid out.
