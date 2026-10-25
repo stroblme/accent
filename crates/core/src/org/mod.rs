@@ -5,11 +5,12 @@
 //! line and a fixed-width line hold none of them, nor does `=verbatim=` or `~code~` hold a link.
 //!
 //! A subset of <https://orgmode.org/worg/org-syntax.html>, not a parser of all of it. Ranges are
-//! byte offsets of the text as written; the only spans are the blocks and drawers a fold hides.
+//! byte offsets of the text as written. The spans are a note's ([`Style`]), so an org file is
+//! styled as a note is: the content in its style, the syntax around it dimmed as [`Style::Marker`].
 
 mod links;
 
-pub use links::{path_link_keys, rewrite_moved};
+pub use links::{link, path_link_keys, rewrite_moved};
 
 use crate::markdown::{Analysis, Heading, Span, Style, Tag, heading_for};
 use links::OrgLink;
@@ -55,37 +56,45 @@ fn scan(text: &str) -> Scan {
     while i < lines.len() {
         let line = lines[i].clone();
         if let Some((last, style)) = closed(text, &lines, i) {
-            s.analysis.spans.push(Span {
-                range: line.start..lines[last].end,
-                style,
-            });
+            s.span(line.start..lines[last].end, style);
+            // A block's `#+begin_…` and `#+end_…` lines are its fences.
+            if style == Style::CodeBlock {
+                s.span(trimmed(text, line), Style::Marker);
+                s.span(trimmed(text, lines[last].clone()), Style::Marker);
+            }
             i = last + 1;
             continue;
         }
-        let trimmed = text[line.clone()].trim_start();
-        if let Some((level, at, tags)) = heading(text, line.clone(), &keywords) {
-            s.analysis.headings.push(Heading {
-                range: line,
-                level,
-                text: text[at.clone()].to_string(),
-            });
-            s.analysis.tags.extend(tags);
-            inline(text, at, &mut s);
-        } else if let Some((key, value)) = keyword(text, line.clone()) {
-            if key.eq_ignore_ascii_case("title") && !value.is_empty() {
-                title.push(&text[value]);
-            } else if key.eq_ignore_ascii_case("filetags") {
-                s.analysis
-                    .tags
-                    .extend(tags_in(text, value, |c| c == ':' || c.is_whitespace()));
-            }
-        // A comment (`# …`) and a fixed-width line (`: …`).
-        } else if !["#", ":"].iter().any(|m| {
-            trimmed
+        let lead = line.start + text[line.clone()].len() - text[line.clone()].trim_start().len();
+        let marker = |m: &str| {
+            text[lead..line.end]
                 .strip_prefix(m)
                 .is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', '\t']))
-        }) {
-            inline(text, line, &mut s);
+        };
+        if let Some(head) = heading(text, line.clone(), &keywords) {
+            s.heading(text, line, head);
+        } else if text[lead..line.end].starts_with("#+") {
+            // A keyword line, or a block's line that is no verbatim block.
+            s.span(trimmed(text, line.clone()), Style::Frontmatter);
+            match keyword(text, line.clone()) {
+                Some((key, value)) if key.eq_ignore_ascii_case("title") && !value.is_empty() => {
+                    title.push(&text[value])
+                }
+                Some((key, value)) if key.eq_ignore_ascii_case("filetags") => {
+                    s.tags(tags_in(text, value, |c| c == ':' || c.is_whitespace()))
+                }
+                Some(_) => {}
+                None => inline(text, line, &mut s),
+            }
+        } else if marker("#") {
+            s.span(trimmed(text, line), Style::Marker);
+        } else if marker(":") {
+            // A fixed-width line: verbatim, as code.
+            s.span(lead..lead + 1, Style::Marker);
+            s.span(lead + 1..line.end, Style::CodeInline);
+        } else {
+            let body = s.list_item(text, line.clone());
+            inline(text, body..line.end, &mut s);
         }
         i += 1;
     }
@@ -106,10 +115,130 @@ fn lines(text: &str) -> Vec<Range<usize>> {
     out
 }
 
-/// The TODO keywords a heading may open with: every word of the file's `#+TODO`, `#+SEQ_TODO`
-/// and `#+TYP_TODO` lines, but the `|` between the open and the done ones, a fast-access key
-/// such as `(t)` dropped; org's own TODO and DONE when the file sets none.
-fn keywords<'a>(text: &'a str, lines: &[Range<usize>]) -> Vec<&'a str> {
+impl Scan {
+    fn span(&mut self, range: Range<usize>, style: Style) {
+        if !range.is_empty() {
+            self.analysis.spans.push(Span { range, style });
+        }
+    }
+
+    /// Tags, in the accent as a note's are, the colons around them dimmed.
+    fn tags(&mut self, tags: Vec<Tag>) {
+        for tag in &tags {
+            self.span(tag.range.clone(), Style::Tag);
+        }
+        self.analysis.tags.extend(tags);
+    }
+
+    /// A link in the accent, as a note's are, what is not its description dimmed: `[[`, `]]`, a
+    /// described link's target, and an address's angle brackets.
+    fn link(&mut self, text: &str, link: &OrgLink) {
+        let r = link.range.clone();
+        self.span(r.clone(), Style::Link);
+        match (&link.desc, text.as_bytes()[r.start]) {
+            (Some(desc), _) => {
+                self.span(r.start..desc.start, Style::Marker);
+                self.span(desc.end..r.end, Style::Marker);
+            }
+            (None, b'[') => {
+                self.span(r.start..link.link.start, Style::Marker);
+                self.span(link.link.end..r.end, Style::Marker);
+            }
+            (None, b'<') => {
+                self.span(r.start..r.start + 1, Style::Marker);
+                self.span(r.end - 1..r.end, Style::Marker);
+            }
+            _ => {}
+        }
+    }
+
+    /// A heading's row and spans: its stars dimmed as a note's `#` are, an open keyword a task
+    /// marker, a done one, the priority and `COMMENT` dimmed, and its title read for links.
+    fn heading(&mut self, text: &str, line: Range<usize>, head: Head) {
+        self.span(line.clone(), Style::Heading(head.level));
+        self.span(head.stars, Style::Marker);
+        if let Some((at, done)) = head.keyword {
+            let style = match done {
+                true => Style::Marker,
+                false => Style::TaskMarker { checked: false },
+            };
+            self.span(at, style);
+        }
+        for at in head.marks {
+            self.span(at, Style::Marker);
+        }
+        if let Some(block) = head.tag_block {
+            for (i, _) in text[block.clone()].match_indices(':') {
+                self.span(block.start + i..block.start + i + 1, Style::Marker);
+            }
+        }
+        self.tags(head.tags);
+        self.analysis.headings.push(Heading {
+            range: line,
+            level: head.level,
+            text: text[head.title.clone()].to_string(),
+        });
+        inline(text, head.title, self);
+    }
+
+    /// The bullet or counter opening a list item on `line`, and its checkbox, styled as a note's;
+    /// where the item's text starts, or the line's start for a line that is no item. A `*` at the
+    /// start of a line opens a heading, so a `*` bullet is indented.
+    fn list_item(&mut self, text: &str, line: Range<usize>) -> usize {
+        let s = &text[line.clone()];
+        let lead = s.len() - s.trim_start_matches([' ', '\t']).len();
+        let rest = &s[lead..];
+        let bullet = match rest.bytes().next() {
+            Some(b'-' | b'+') => 1,
+            Some(b'*') if lead > 0 => 1,
+            _ => {
+                let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+                match rest.as_bytes().get(digits) {
+                    Some(b'.' | b')') if digits > 0 => digits + 1,
+                    _ => return line.start,
+                }
+            }
+        };
+        let after = &rest[bullet..];
+        if !(after.is_empty() || after.starts_with([' ', '\t'])) {
+            return line.start;
+        }
+        let at = line.start + lead;
+        self.span(at..at + bullet, Style::ListMarker);
+        self.span(at..at + bullet, Style::Marker);
+        let body = at + bullet + after.len() - after.trim_start().len();
+        let tick = text[body..line.end]
+            .strip_prefix('[')
+            .and_then(|r| r.chars().next())
+            .filter(|c| matches!(c, ' ' | '-' | 'X' | 'x'));
+        let closes = text[body..line.end].get(2..3) == Some("]")
+            && text[body + 3..line.end]
+                .chars()
+                .next()
+                .is_none_or(char::is_whitespace);
+        match tick {
+            Some(tick) if closes => {
+                let checked = tick.eq_ignore_ascii_case(&'x');
+                self.span(body..body + 3, Style::TaskMarker { checked });
+                body + 3
+            }
+            _ => body,
+        }
+    }
+}
+
+/// The line `line` without the blanks around it.
+fn trimmed(text: &str, line: Range<usize>) -> Range<usize> {
+    let s = &text[line.clone()];
+    let start = line.start + s.len() - s.trim_start().len();
+    start..line.start + s.trim_end().len()
+}
+
+/// The TODO keywords a heading may open with, each with whether it is a done one: every word of
+/// the file's `#+TODO`, `#+SEQ_TODO` and `#+TYP_TODO` lines, a fast-access key such as `(t)`
+/// dropped, the ones after a `|` done, or the last one of a line without `|`; org's own TODO and
+/// DONE when the file sets none.
+fn keywords<'a>(text: &'a str, lines: &[Range<usize>]) -> Vec<(&'a str, bool)> {
     let mut out = Vec::new();
     for line in lines {
         let Some((key, value)) = keyword(text, line.clone()) else {
@@ -119,16 +248,24 @@ fn keywords<'a>(text: &'a str, lines: &[Range<usize>]) -> Vec<&'a str> {
             .iter()
             .any(|k| key.eq_ignore_ascii_case(k))
         {
+            let words: Vec<&str> = text[value]
+                .split_whitespace()
+                .filter_map(|w| w.split('(').next())
+                .filter(|w| !w.is_empty())
+                .collect();
+            let bar = words.iter().position(|w| *w == "|");
+            let done_from = bar.unwrap_or(words.len().saturating_sub(1));
             out.extend(
-                text[value]
-                    .split_whitespace()
-                    .filter_map(|w| w.split('(').next())
-                    .filter(|w| !w.is_empty() && *w != "|"),
+                words
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, w)| **w != "|")
+                    .map(|(i, w)| (*w, i >= done_from)),
             );
         }
     }
     if out.is_empty() {
-        out = vec!["TODO", "DONE"];
+        out = vec![("TODO", false), ("DONE", true)];
     }
     out
 }
@@ -184,12 +321,23 @@ fn is_heading(line: &str) -> bool {
     stars > 0 && matches!(line.as_bytes().get(stars), Some(b' ' | b'\t'))
 }
 
-/// `* TODO [#A] COMMENT Title :a:b:` read into its level, where its title is, and its tags.
-fn heading(
-    text: &str,
-    line: Range<usize>,
-    keywords: &[&str],
-) -> Option<(u8, Range<usize>, Vec<Tag>)> {
+/// A heading line read into its parts.
+struct Head {
+    level: u8,
+    /// The stars and the blanks after them.
+    stars: Range<usize>,
+    /// The TODO keyword, and whether it is a done one.
+    keyword: Option<(Range<usize>, bool)>,
+    /// The priority and `COMMENT`.
+    marks: Vec<Range<usize>>,
+    title: Range<usize>,
+    tags: Vec<Tag>,
+    /// The `:a:b:` the tags are written in.
+    tag_block: Option<Range<usize>>,
+}
+
+/// `* TODO [#A] COMMENT Title :a:b:` read into its parts.
+fn heading(text: &str, line: Range<usize>, keywords: &[(&str, bool)]) -> Option<Head> {
     let s = &text[line.clone()];
     if !is_heading(s) {
         return None;
@@ -204,9 +352,10 @@ fn heading(
             .trim_end_matches(|c: char| c == ':' || is_tag_char(c))
             .len();
     let block = &head[head.len() - run..];
-    let mut tags = Vec::new();
+    let (mut tags, mut tag_block) = (Vec::new(), None);
     if run > 1 && block.starts_with(':') && block.ends_with(':') {
         tags = tags_in(text, end - run..end, |c| c == ':');
+        tag_block = Some(end - run..end);
         end -= run;
     }
     // Then what opens the title, each a word of its own: a keyword, a priority, `COMMENT`.
@@ -219,22 +368,36 @@ fn heading(
         from..from + len
     };
     start = word(start).start;
-    if keywords.contains(&&text[word(start)]) {
+    let stars_at = line.start..start;
+    let mut keyword = None;
+    if let Some(&(_, done)) = keywords.iter().find(|(k, _)| *k == &text[word(start)]) {
+        keyword = Some((word(start), done));
         start = word(word(start).end).start;
     }
+    let mut marks = Vec::new();
     let w = &text[word(start)];
     if w.len() > 3
         && w.starts_with("[#")
         && w.ends_with(']')
         && w[2..w.len() - 1].bytes().all(|c| c.is_ascii_alphanumeric())
     {
+        marks.push(word(start));
         start = word(word(start).end).start;
     }
     if &text[word(start)] == "COMMENT" {
+        marks.push(word(start));
         start = word(word(start).end).start;
     }
     let title = start..start + text[start..end].trim_end().len();
-    Some((stars.min(u8::MAX as usize) as u8, title, tags))
+    Some(Head {
+        level: stars.min(u8::MAX as usize) as u8,
+        stars: stars_at,
+        keyword,
+        marks,
+        title,
+        tags,
+        tag_block,
+    })
 }
 
 /// A character a tag is written with: a letter, a digit, `_`, `@`, `#` or `%`.
@@ -264,12 +427,14 @@ fn tags_in(text: &str, at: Range<usize>, sep: impl Fn(char) -> bool) -> Vec<Tag>
     out
 }
 
-/// The links and `<<targets>>` of the prose at `at`, read left to right as org reads its
-/// objects: a `=verbatim=` or `~code~` run hides the links in it, as a link hides its markers.
+/// The links, `<<targets>>` and emphasis of the prose at `at`, read left to right as org reads
+/// its objects: a `=verbatim=` or `~code~` run hides the links in it, as a link hides its
+/// markers, where `*bold*`, `/italic/` and `+struck+` text is read on inside.
 fn inline(text: &str, at: Range<usize>, s: &mut Scan) {
     let b = text.as_bytes();
     let push = |link: OrgLink, s: &mut Scan| {
         let end = link.range.end;
+        s.link(text, &link);
         s.links.push(link);
         end
     };
@@ -278,11 +443,29 @@ fn inline(text: &str, at: Range<usize>, s: &mut Scan) {
         let after = match b[i] {
             b'[' => links::bracket(text, i, at.end).map(|l| push(l, s)),
             b'<' if b.get(i + 1) == Some(&b'<') => target(text, i, at.end).map(|(range, name)| {
+                s.span(range.start..range.start + 2, Style::Marker);
+                s.span(range.end - 2..range.end, Style::Marker);
                 s.targets.push((range.clone(), name));
                 range.end
             }),
             b'<' => links::angle(text, i, at.end).map(|l| push(l, s)),
-            b'=' | b'~' => verbatim(text, at.start, i, at.end),
+            c @ (b'=' | b'~' | b'*' | b'/' | b'+') => {
+                emphasis(text, at.start, i, at.end).map(|end| {
+                    let style = match c {
+                        b'*' => Style::Strong,
+                        b'/' => Style::Emphasis,
+                        b'+' => Style::Strikethrough,
+                        _ => Style::CodeInline,
+                    };
+                    s.span(i..i + 1, Style::Marker);
+                    s.span(i + 1..end - 1, style);
+                    s.span(end - 1..end, Style::Marker);
+                    match style {
+                        Style::CodeInline => end,
+                        _ => i + 1,
+                    }
+                })
+            }
             c if c.is_ascii_alphabetic()
                 && (i == at.start || !b[i - 1].is_ascii_alphanumeric()) =>
             {
@@ -302,11 +485,12 @@ fn target(text: &str, i: usize, end: usize) -> Option<(Range<usize>, String)> {
         .then(|| (i..i + name.len() + 4, name.to_string()))
 }
 
-/// Where the `=verbatim=` or `~code~` run opening at `i` ends, by org's rules for its markers:
+/// Where the `=verbatim=`, `~code~`, `*bold*`, `/italic/` or `+struck+` run opening at `i` ends,
+/// by org's rules for its markers:
 /// the opening one at the start of the line, after a space or after one of `-({'"`, and not
 /// before a space; the closing one the same character, not after a space, and before a space,
 /// the end of the line or one of `-.,;:!?')}["\`.
-fn verbatim(text: &str, line: usize, i: usize, end: usize) -> Option<usize> {
+fn emphasis(text: &str, line: usize, i: usize, end: usize) -> Option<usize> {
     let b = text.as_bytes();
     let pre = i == line || b[i - 1].is_ascii_whitespace() || b"-({'\"".contains(&b[i - 1]);
     if !pre || i + 2 >= end || b[i + 1].is_ascii_whitespace() {
@@ -333,6 +517,14 @@ mod tests {
             .headings
             .into_iter()
             .map(|h| (h.level, h.text))
+            .collect()
+    }
+
+    fn styled(text: &str) -> Vec<(&str, Style)> {
+        analyze(text)
+            .spans
+            .iter()
+            .map(|s| (&text[s.range.clone()], s.style))
             .collect()
     }
 
@@ -449,10 +641,9 @@ mod tests {
             targets(text).into_iter().map(|t| t.1).collect::<Vec<_>>(),
             ["h.org"]
         );
-        let spans: Vec<(&str, Style)> = a
-            .spans
-            .iter()
-            .map(|s| (&text[s.range.clone()], s.style))
+        let spans: Vec<(&str, Style)> = styled(text)
+            .into_iter()
+            .filter(|(_, style)| matches!(style, Style::CodeBlock | Style::Frontmatter))
             .collect();
         assert_eq!(spans.len(), 3);
         assert!(spans[0].0.starts_with("#+begin_src") && spans[0].0.ends_with("#+end_src"));
@@ -466,7 +657,73 @@ mod tests {
         // One that never closes is plain lines, and a heading ends the search for its end.
         let open = "#+begin_src\n[[file:a.org]]\n* Next\n#+end_src\n";
         assert_eq!(targets(open).len(), 1);
-        assert!(analyze(open).spans.is_empty());
+        assert!(
+            !analyze(open)
+                .spans
+                .iter()
+                .any(|s| s.style == Style::CodeBlock)
+        );
+    }
+
+    #[test]
+    fn a_heading_is_styled_as_a_notes() {
+        let text = "#+TODO: NEXT | DONE\n** NEXT [#A] Write *it* :work:\n* DONE Sent\n";
+        let spans = styled(text);
+        let has = |want: (&str, Style)| assert!(spans.contains(&want), "{want:?} in {spans:?}");
+        has(("** NEXT [#A] Write *it* :work:", Style::Heading(2)));
+        has(("** ", Style::Marker));
+        has(("NEXT", Style::TaskMarker { checked: false }));
+        has(("[#A]", Style::Marker));
+        has(("it", Style::Strong));
+        has(("work", Style::Tag));
+        has(("DONE", Style::Marker));
+        has(("#+TODO: NEXT | DONE", Style::Frontmatter));
+        let colons = spans.iter().filter(|s| *s == &(":", Style::Marker)).count();
+        assert_eq!(colons, 2);
+    }
+
+    #[test]
+    fn prose_is_styled_as_a_notes() {
+        let text = "- [X] done /now/ and +gone+ =v= ~c~\n  * [ ] open [[file:a.org][A]]\n\
+                    1) [[*H]] <https://x.org>\n# hidden\n: fixed\n#+begin_src sh\nls\n#+end_src\n\
+                    a/b/c and 10*3*2 stay plain, *not bold *\n";
+        let spans = styled(text);
+        let has = |want: (&str, Style)| assert!(spans.contains(&want), "{want:?} in {spans:?}");
+        has(("-", Style::ListMarker));
+        has(("[X]", Style::TaskMarker { checked: true }));
+        has(("now", Style::Emphasis));
+        has(("gone", Style::Strikethrough));
+        has(("v", Style::CodeInline));
+        has(("c", Style::CodeInline));
+        has(("*", Style::ListMarker));
+        has(("[ ]", Style::TaskMarker { checked: false }));
+        has(("[[file:a.org][A]]", Style::Link));
+        has(("[[file:a.org][", Style::Marker));
+        has(("1)", Style::ListMarker));
+        has(("[[*H]]", Style::Link));
+        has(("<https://x.org>", Style::Link));
+        has(("# hidden", Style::Marker));
+        has((" fixed", Style::CodeInline));
+        has(("#+begin_src sh", Style::Marker));
+        has(("#+end_src", Style::Marker));
+        let last = text.lines().last().unwrap();
+        let plain = spans
+            .iter()
+            .filter(|(s, _)| last.contains(*s) && s.len() > 1);
+        assert_eq!(plain.count(), 0, "{spans:?}");
+    }
+
+    #[test]
+    fn a_link_is_written_as_org_writes_one() {
+        assert_eq!(
+            link("file:a[1].org", Some("Title")),
+            r"[[file:a\[1\].org][Title]]"
+        );
+        assert_eq!(link("https://x.org", None), "[[https://x.org]]");
+        assert_eq!(link("x", Some(" ")), "[[x]]");
+        assert_eq!(link("x", Some("a]]b]")), "[[x][a]\u{200B}]b]\u{200B}]]");
+        let text = link("file:a.org", Some("see [1]"));
+        assert_eq!(targets(&text)[0].3.as_deref(), Some("see [1]\u{200B}"));
     }
 
     #[test]
@@ -479,6 +736,7 @@ mod tests {
             "[[file:X.org::*X][X]] [[X]] <https://X> https://X.org/X\n",
             "X =X= ~X~ <<X>> X\n",
             "#+begin_src X\nX\n#+end_src\n:X:\nX\n:END:\n",
+            "- [X] X *X* /X/ +X+\n  * [ ] X\n1) X\n# X\n: X\n#+X\n",
         ];
         for t in templates {
             for s in samples {

@@ -710,13 +710,17 @@ fn lineart_png() -> Vec<u8> {
 }
 
 /// An org file's fixture: TODO keywords set by the file, tags, a title, its three kinds of link
-/// and a source block and a drawer, which hold none.
+/// and a source block and a drawer, which hold none; then what its note look styles (emphasis,
+/// lists and checkboxes, a comment, a fixed-width line, a table).
 const OUTLINE_ORG: &str = "#+TITLE: Org outline\n#+FILETAGS: :org:\n#+TODO: TODO NEXT | DONE\n\n\
 The Outline, folds and links of an org file: [[file:Real.md][the real note]], \
 [[./Figures.md::*Figures]] and [[*Tasks]].\n\n\
 * Tasks :todo:\n** NEXT [#A] Read the figures\n** DONE Index this file\n\
 * Code\n#+begin_src python\ndef f():\n    return [[1]]\n#+end_src\n\
-* Drawers\n:PROPERTIES:\n:ID: 0f6c9e1c\n:END:\n<<here>> is where [[here]] lands.\n";
+* Drawers\n:PROPERTIES:\n:ID: 0f6c9e1c\n:END:\n<<here>> is where [[here]] lands.\n\
+* Look\nProse with *bold*, /italic/, +struck+, =verbatim=, ~code~ and _underline_, and \
+<https://orgmode.org>.\n- [X] a done box\n- [-] one under way\n- [ ] an open one\n\
+  + nested, and 1) counted\n# a comment\n: fixed width\n| a | b |\n|---+---|\n| 1 | 2 |\n";
 
 /// Print/export fixture covering headings, inline and display math, diagrams, long code lines,
 /// tables, local and web images, and local, external and heading links. Its script must neither
@@ -1802,7 +1806,7 @@ mod tests {
         // The org fixture reads as org: its headings, and its links but the one its code holds.
         let org = fs::read_to_string(vault.join("Notes-QC/Outline.org")).unwrap();
         let a = accent_core::org::analyze(&org);
-        assert_eq!((a.headings.len(), a.links.len()), (5, 4));
+        assert_eq!((a.headings.len(), a.links.len()), (6, 5));
 
         // The notebook drill's inputs read as notebooks and are written back as they were.
         for (rel, cells) in [

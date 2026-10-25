@@ -13,9 +13,9 @@ pub(super) struct OrgLink {
     /// The whole link, brackets included.
     pub range: Range<usize>,
     /// What it points at as written, escapes and all: `file:a.org::*H`, `https://…`, `Name`.
-    link: Range<usize>,
+    pub link: Range<usize>,
     /// The description of `[[link][description]]`.
-    desc: Option<Range<usize>>,
+    pub desc: Option<Range<usize>>,
 }
 
 /// The `[[link]]` or `[[link][description]]` opening at `i`, on a line ending at `end`. A bracket
@@ -202,6 +202,25 @@ fn escape(s: &str) -> String {
     }
     out.extend(repeat_n('\\', 2 * run));
     out
+}
+
+/// A link as org writes one (`org-link-make-string`): `[[target]]` or `[[target][description]]`,
+/// the target's brackets escaped, and a zero-width space put into a `]]` in the description and
+/// after a `]` ending it, either of which would close the link early.
+pub fn link(target: &str, desc: Option<&str>) -> String {
+    match desc.map(str::trim).filter(|d| !d.is_empty()) {
+        Some(desc) => {
+            let mut desc = desc.to_string();
+            while desc.contains("]]") {
+                desc = desc.replace("]]", "]\u{200B}]");
+            }
+            if desc.ends_with(']') {
+                desc.push('\u{200B}');
+            }
+            format!("[[{}][{desc}]]", escape(target))
+        }
+        None => format!("[[{}]]", escape(target)),
+    }
 }
 
 /// [`crate::markdown::rewrite_moved`] for an org file: a file link that would name another file
