@@ -238,9 +238,11 @@ impl Term {
         }
         match &self.shell {
             Shell::Local(_) => end(&self.key, &self.at().unwrap_or_default()),
-            Shell::Remote { kill, link, .. } => {
-                run_kill(kill.clone(), Some(ssh::control_path(link)))
-            }
+            Shell::Remote { at, link } => kill_remote(Orphan {
+                at: at.clone(),
+                ctl: ssh::control_path(link),
+                id: id(&self.key).to_string(),
+            }),
             // Nothing holds a program: its pty's hangup ends it as the tab goes. A console runs
             // nothing.
             Shell::Program(_) | Shell::Console => {}
@@ -360,12 +362,10 @@ impl Term {
 pub enum Shell {
     /// The user's own shell, in a directory on this machine.
     Local(PathBuf),
-    /// A shell held on a host by the server this build uploads there, attached over `ssh -t`:
-    /// see [`Shell::remote`].
+    /// A shell held on a host, attached over `ssh -t`: see [`Shell::remote`]. Its commands name
+    /// the server last made ready there ([`accent_api::link::prepared`]) as they run, never one
+    /// kept from before a reconnect, whose upload may have swept it.
     Remote {
-        argv: Vec<String>,
-        /// What ends it for good, run on this machine.
-        kill: Vec<String>,
         /// Where it was opened: the host, and the directory on it.
         at: ssh::Url,
         /// The address whose ssh master it rides, which [`start`] makes ready before attaching: a
@@ -422,8 +422,8 @@ impl Shell {
                 }
                 Some(argv)
             }
-            Shell::Remote { at, link, .. } => {
-                let server = ssh::server_path(&accent_api::link::server().ok()?.hash);
+            Shell::Remote { at, link } => {
+                let server = ssh::server_path(&accent_api::link::prepared(at).ok()?);
                 let command = match share {
                     true => ssh::share_cmd(&server, id, vault),
                     false => ssh::revoke_cmd(&server, id),
@@ -433,17 +433,11 @@ impl Shell {
         }
     }
 
-    /// The shell `key` names, held on the host `at` names and started in its path, riding the
-    /// master of `link`.
-    pub fn remote(at: ssh::Url, link: ssh::Url, key: &str) -> Result<Self, String> {
-        let server = ssh::server_path(&accent_api::link::server().map_err(|e| e.to_string())?.hash);
-        let ctl = ssh::control_path(&link);
-        Ok(Self::Remote {
-            argv: ssh::attach(&at, &ctl, &server, id(key)),
-            kill: ssh::run(&at, &ctl, &ssh::kill_cmd(&server, id(key))),
-            at,
-            link,
-        })
+    /// A shell held on the host `at` names and started in its path, riding the master of `link`;
+    /// refused where this machine has no server to upload.
+    pub fn remote(at: ssh::Url, link: ssh::Url) -> Result<Self, String> {
+        accent_api::link::server().map_err(|e| e.to_string())?;
+        Ok(Self::Remote { at, link })
     }
 
     /// Command to list held shells locally or through the host master. `None` without `accent-cli`.
@@ -455,8 +449,8 @@ impl Shell {
                 argv.push("held".to_string());
                 Some(argv)
             }
-            Shell::Remote { at, link, .. } => {
-                let server = ssh::server_path(&accent_api::link::server().ok()?.hash);
+            Shell::Remote { at, link } => {
+                let server = ssh::server_path(&accent_api::link::prepared(at).ok()?);
                 Some(ssh::run(
                     at,
                     &ssh::control_path(link),
@@ -475,8 +469,8 @@ impl Shell {
                 argv.extend(["clip".to_string(), id.to_string()]);
                 Some(argv)
             }
-            Shell::Remote { at, link, .. } => {
-                let server = ssh::server_path(&accent_api::link::server().ok()?.hash);
+            Shell::Remote { at, link } => {
+                let server = ssh::server_path(&accent_api::link::prepared(at).ok()?);
                 let ctl = ssh::control_path(link);
                 Some(ssh::run(at, &ctl, &ssh::clip_cmd(&server, id)))
             }
@@ -807,47 +801,20 @@ pub fn on_reconnect(term: &Rc<Term>, reconnect: impl Fn(&Rc<Term>) + 'static) {
 /// new tabs wait for two stable frames. A debugged program behind another tab starts at once, at
 /// VTE's default size, as the adapter is waiting for it.
 fn spawn(term: &Term) {
-    let (view, shell, id) = (&term.view, &term.shell, id(&term.key));
-    let (cwd, argv, env) = match (shell, cli()) {
-        (Shell::Local(cwd), Some(mut argv)) => {
-            argv.extend([
-                "attach".to_string(),
-                "--cwd".to_string(),
-                cwd.to_string_lossy().into_owned(),
-                "--owner".to_string(),
-                owner(),
-                id.to_string(),
-            ]);
-            (None, argv, Vec::new())
-        }
-        (Shell::Local(cwd), None) => (Some(cwd.clone()), vec![user_shell()], Vec::new()),
-        // ssh decides where it lands, and a cwd on this machine means nothing to it.
-        (Shell::Remote { argv, .. }, _) => (None, argv.clone(), Vec::new()),
-        (Shell::Program(program), _) => match &program.link {
-            None => (
-                Some(PathBuf::from(&program.cwd)),
-                program.args.clone(),
-                program
-                    .env
-                    .iter()
-                    .map(|(k, v)| format!("{k}={v}"))
-                    .collect(),
-            ),
-            // On the host, in its folder with its environment, over the vault's master.
-            Some(link) => {
-                let ctl = ssh::control_path(link);
-                let argv = ssh::program(link, &ctl, &program.cwd, &program.env, &program.args);
-                (None, argv, Vec::new())
-            }
-        },
-        (Shell::Console, _) => return,
-    };
-    let program = match shell {
+    let (view, shell, id) = (&term.view, term.shell.clone(), id(&term.key).to_string());
+    if let Shell::Console = shell {
+        return;
+    }
+    let program = match &shell {
         Shell::Program(program) => Some(program.clone()),
         _ => None,
     };
     let behind = program.is_some() && !term.page.is_selected();
     let run = move |view: &vte4::Terminal| {
+        // Made as it runs: a tab attached once first shown names the server on the host then.
+        let Some((cwd, argv, env)) = command(&shell, &id) else {
+            return;
+        };
         let named = argv.join(" ");
         let args: Vec<&str> = argv.iter().map(String::as_str).collect();
         // VTE adds these to the environment the tab would have anyway.
@@ -881,6 +848,49 @@ fn spawn(term: &Term) {
         true => run(view),
         false => when_laid_out(view, run),
     }
+}
+
+/// The working directory, command line and added environment that run `shell`, the held shell
+/// `id`; `None` for the console, which runs nothing.
+fn command(shell: &Shell, id: &str) -> Option<(Option<PathBuf>, Vec<String>, Vec<String>)> {
+    Some(match (shell, cli()) {
+        (Shell::Local(cwd), Some(mut argv)) => {
+            argv.extend([
+                "attach".to_string(),
+                "--cwd".to_string(),
+                cwd.to_string_lossy().into_owned(),
+                "--owner".to_string(),
+                owner(),
+                id.to_string(),
+            ]);
+            (None, argv, Vec::new())
+        }
+        (Shell::Local(cwd), None) => (Some(cwd.clone()), vec![user_shell()], Vec::new()),
+        // ssh decides where it lands, and a cwd on this machine means nothing to it.
+        (Shell::Remote { at, link }, _) => {
+            let server = ssh::server_path(&accent_api::link::prepared(at).ok()?);
+            let argv = ssh::attach(at, &ssh::control_path(link), &server, id);
+            (None, argv, Vec::new())
+        }
+        (Shell::Program(program), _) => match &program.link {
+            None => (
+                Some(PathBuf::from(&program.cwd)),
+                program.args.clone(),
+                program
+                    .env
+                    .iter()
+                    .map(|(k, v)| format!("{k}={v}"))
+                    .collect(),
+            ),
+            // On the host, in its folder with its environment, over the vault's master.
+            Some(link) => {
+                let ctl = ssh::control_path(link);
+                let argv = ssh::program(link, &ctl, &program.cwd, &program.env, &program.args);
+                (None, argv, Vec::new())
+            }
+        },
+        (Shell::Console, _) => return None,
+    })
 }
 
 /// Run `then` once `view` is mapped with a stable allocation, or immediately if already laid out.
@@ -1343,9 +1353,12 @@ fn host_cli(info: &str) -> Option<Vec<String>> {
 pub fn end(key: &str, at: &str) {
     if ssh::is_remote(at) {
         let url = ssh::parse(at).map_err(|e| e.to_string());
-        match url.and_then(|url| Shell::remote(url.clone(), accent_api::link::host(&url), key)) {
-            Ok(Shell::Remote { kill, link, .. }) => run_kill(kill, Some(ssh::control_path(&link))),
-            Ok(Shell::Local(_) | Shell::Program(_) | Shell::Console) => {}
+        match url {
+            Ok(url) => kill_remote(Orphan {
+                ctl: ssh::control_path(&accent_api::link::host(&url)),
+                at: url,
+                id: id(key).to_string(),
+            }),
             Err(e) => tracing::warn!("cannot end the shell at {at}: {e}"),
         }
         return;
@@ -1414,9 +1427,9 @@ fn owner() -> String {
 /// Run a shell kill off the main thread so Close Tab never waits on a holder or host.
 /// An empty argument vector means no holder owns the shell.
 ///
-/// Remote kills use master socket `over`. Failed disconnected kills are retained for
-/// [`end_orphans`] so they cannot leave unreachable shells running.
-fn run_kill(argv: Vec<String>, over: Option<PathBuf>) {
+/// A remote kill names its `orphan`, kept for [`end_orphans`] when it finds the link down so it
+/// cannot leave an unreachable shell running.
+fn run_kill(argv: Vec<String>, orphan: Option<Orphan>) {
     let Some((program, args)) = argv.split_first() else {
         return;
     };
@@ -1424,33 +1437,55 @@ fn run_kill(argv: Vec<String>, over: Option<PathBuf>) {
     command.args(args).stdin(std::process::Stdio::null());
     let _ = std::thread::Builder::new()
         .name("accent-kill".to_string())
-        .spawn(move || match (command.status(), over) {
+        .spawn(move || match (command.status(), orphan) {
             // ssh's own failure rather than the command's: the host never heard.
-            (Ok(status), Some(ctl)) if status.code() == Some(255) => {
-                tracing::debug!("ending a shell once {} is back", ctl.display());
-                let mut orphaned = ORPHANED.lock().unwrap_or_else(|e| e.into_inner());
-                orphaned.push((ctl, argv));
+            (Ok(status), Some(orphan)) if status.code() == Some(255) => {
+                tracing::debug!("ending a shell once {} is back", orphan.ctl.display());
+                ORPHANED
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(orphan);
             }
             (Ok(_), _) => {}
             (Err(e), _) => tracing::warn!("cannot end the shell: {e}"),
         });
 }
 
-/// The ends of remote shells that found the link down, by the master socket they go through.
-static ORPHANED: Mutex<Vec<(PathBuf, Vec<String>)>> = Mutex::new(Vec::new());
+/// A remote shell to end: held as `id` on the host `at` names, reached over the master `ctl`.
+struct Orphan {
+    at: ssh::Url,
+    ctl: PathBuf,
+    id: String,
+}
+
+/// End `orphan` with the server last made ready on its host ([`accent_api::link::prepared`]), its
+/// command made now rather than when the tab opened: a reconnect since may have put another
+/// build there and swept the one before.
+fn kill_remote(orphan: Orphan) {
+    match accent_api::link::prepared(&orphan.at) {
+        Ok(hash) => {
+            let command = ssh::kill_cmd(&ssh::server_path(&hash), &orphan.id);
+            run_kill(ssh::run(&orphan.at, &orphan.ctl, &command), Some(orphan));
+        }
+        Err(e) => tracing::warn!("cannot end the shell on {}: {e}", orphan.at.host),
+    }
+}
+
+/// The ends of remote shells that found the link down.
+static ORPHANED: Mutex<Vec<Orphan>> = Mutex::new(Vec::new());
 
 /// End the shells closed while the link through `ctl` was down, now that it is up again.
 pub fn end_orphans(ctl: &Path) {
-    let ends: Vec<Vec<String>> = {
+    let due: Vec<Orphan> = {
         let mut orphaned = ORPHANED.lock().unwrap_or_else(|e| e.into_inner());
         let (due, kept) = std::mem::take(&mut *orphaned)
             .into_iter()
-            .partition(|(over, _)| over == ctl);
+            .partition(|orphan| orphan.ctl == ctl);
         *orphaned = kept;
-        due.into_iter().map(|(_, argv)| argv).collect()
+        due
     };
-    for argv in ends {
-        run_kill(argv, Some(ctl.to_path_buf()));
+    for orphan in due {
+        kill_remote(orphan);
     }
 }
 
@@ -1598,8 +1633,6 @@ mod tests {
         let vault = ssh::parse("ssh://me@host/srv/vault").unwrap();
         let elsewhere = ssh::parse("ssh://other@host/srv/vault").unwrap();
         let remote = Shell::Remote {
-            argv: vec![],
-            kill: vec![],
             at,
             link: vault.clone(),
         };

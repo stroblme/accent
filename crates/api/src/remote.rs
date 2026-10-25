@@ -1096,7 +1096,7 @@ impl Remote {
         link::prepare(&self.url, &self.ctl, quiet, &|what, fraction| {
             self.step(what, fraction)
         })?;
-        self.spawn_server(&link::server()?.hash)?;
+        self.spawn_server(&link::prepared(&self.url)?)?;
         self.restore_forwards();
         Ok(())
     }

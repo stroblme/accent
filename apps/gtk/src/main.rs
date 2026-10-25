@@ -1187,7 +1187,7 @@ impl App {
     /// A shell on the host `at` names, in its path.
     fn open_remote_terminal(self: &Rc<Self>, at: ssh::Url) {
         let key = terminal::new_key();
-        match self.remote_shell(at, &key) {
+        match self.remote_shell(at) {
             Ok(shell) => self.open_shell(key, shell, Opened::Kept),
             Err(why) => self.cannot("open a terminal on the host", why),
         }
@@ -1224,12 +1224,12 @@ impl App {
     }
 
     /// Open held shell `key` on `at`, reusing the vault master on the same host or a host-specific master.
-    fn remote_shell(&self, at: ssh::Url, key: &str) -> Result<terminal::Shell, String> {
+    fn remote_shell(&self, at: ssh::Url) -> Result<terminal::Shell, String> {
         let link = match self.vault().and_then(|v| v.remote()) {
             Some(remote) if remote.url().authority() == at.authority() => remote.url().clone(),
             _ => accent_api::link::host(&at),
         };
-        terminal::Shell::remote(at, link, key)
+        terminal::Shell::remote(at, link)
     }
 
     /// Put back a shell the session remembers, in its own pane, where it last was: its directory,
@@ -1239,7 +1239,7 @@ impl App {
         let shell = match ssh::is_remote(at) {
             true => match ssh::parse(at)
                 .map_err(|e| e.to_string())
-                .and_then(|url| self.remote_shell(url, key))
+                .and_then(|url| self.remote_shell(url))
             {
                 Ok(shell) => shell,
                 Err(why) => return self.cannot("put back a shell on the host", why),

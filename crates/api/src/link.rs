@@ -179,11 +179,37 @@ pub fn prepare(url: &Url, ctl: &Path, quiet: bool, say: &dyn Fn(&str, Option<f64
             }
             answer => answer?,
         };
-        match missing {
-            None => Ok(()),
-            Some((build, xz)) => upload(url, ctl, &server.hash, build, xz, say),
+        if let Some((build, xz)) = missing {
+            upload(url, ctl, &server.hash, build, xz, say)?;
         }
+        made_ready(&url.authority(), &server.hash);
+        Ok(())
     })
+}
+
+/// Which server [`prepare`] last made ready on each host, by its [`Url::authority`].
+static PREPARED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+fn made_ready(authority: &str, hash: &str) {
+    let mut prepared = locked(&PREPARED);
+    prepared.retain(|(host, _)| host != authority);
+    prepared.push((authority.to_string(), hash.to_string()));
+}
+
+/// The hash of the server a command on `url`'s host runs ([`ssh::server_path`]): the one
+/// [`prepare`] last made ready there, over any master, rather than this machine's build as it is
+/// now, which a rebuild since has not put there and whose upload swept the one before; this
+/// build's before any prepare.
+pub fn prepared(url: &Url) -> Result<String> {
+    let authority = url.authority();
+    let made = locked(&PREPARED)
+        .iter()
+        .find(|(host, _)| *host == authority)
+        .map(|(_, hash)| hash.clone());
+    match made {
+        Some(hash) => Ok(hash),
+        None => Ok(server()?.hash),
+    }
 }
 
 /// Start the background master behind `ctl`, which is where a prompt can come up.
@@ -467,6 +493,20 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    /// Commands on a host name the server last made ready there, not this machine's build
+    /// as it is now: a rebuild since is not on the host until the next prepare puts it there.
+    #[test]
+    fn commands_name_the_server_last_prepared_over_their_master() {
+        let url = |address: &str| ssh::parse(address).unwrap();
+        let (a, b) = (url("ssh://a.test/vault"), url("ssh://b.test/vault"));
+        made_ready(&a.authority(), "0123456789abcdef");
+        made_ready(&b.authority(), "fedcba9876543210");
+        made_ready(&a.authority(), "00000000000000aa");
+        // Any path on the host: the servers are the login's, not a vault's.
+        assert_eq!(prepared(&url("ssh://a.test/")).unwrap(), "00000000000000aa");
+        assert_eq!(prepared(&b).unwrap(), "fedcba9876543210");
+    }
 
     #[test]
     fn a_server_upload_uses_only_a_matching_archive() {
