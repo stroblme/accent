@@ -363,7 +363,13 @@ fn accel_button(
         .build();
     button.add_css_class("flat");
     button.add_css_class("caption");
-    button.add_css_class(if clashes { "error" } else { "dim-label" });
+    // The label is dimmed, not the button, so its hover is every flat button's; AdwShortcutLabel
+    // dims its own "Set…".
+    if clashes {
+        button.add_css_class("error");
+    } else if shown.is_some() {
+        keys.add_css_class("dim-label");
+    }
     button.connect_clicked({
         let (rebind, action) = (rebind.clone(), action.to_string());
         move |_| rebind(&action)

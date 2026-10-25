@@ -1467,6 +1467,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   They sit off the scale on purpose: page gutters inside the clamp, not layout spacing.
 - A vertical `GtkSizeGroup` keeps the two header bars one height whatever the interface font, so the switcher and the tab bar line up; `.accent-lone-header` cancels the extra padding libadwaita gives a header alone in its toolbar view.
 - Every icon button in a header, the pane switcher's included, is centred rather than stretched, so it reads square at 34 × 34.
+- Buttons take libadwaita's metrics and style classes (`flat`, `suggested-action`, `pill`, `circular`, `opaque`) with no height, padding or radius of ours; the status bar's readouts (`.accent-bar-button`) and the comparison's link arrows (`.accent-strip-button`) are the compact exceptions.
+  A button in a row dims its label, never itself, so its hover is every flat button's; a CSS variable of ours is for a value that repeats, and none does yet (audit 2026-10-25).
 
 ## Chrome auto-hide
 
