@@ -7,6 +7,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -108,9 +109,29 @@ fn land(part: &Path, dest: &Path, replace: bool) -> Result<()> {
     landed.map_err(|e| cached(dest, e))
 }
 
+/// Create a `.part` beside `dest` that is this transfer's alone, `<dest>.<pid>-<n>.part`, claimed
+/// with `create_new`: a file already there, another transfer's or anyone's, is never written to.
+fn part_beside(dest: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    loop {
+        let mut part = dest.as_os_str().to_owned();
+        part.push(format!(
+            ".{}-{}.part",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let part = PathBuf::from(part);
+        match std::fs::File::create_new(&part) {
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            created => return created.map(|out| (part, out)),
+        }
+    }
+}
+
 /// Stream `child`'s stdout into `dest` in chunks, reporting bytes of `total`, until `stop`.
-/// Write a neighboring `.part` file and [`land`] it only when complete, preserving
-/// the last good copy on interruption, a stop included, and existing readers' open files.
+/// Write a `.part` of its own beside it ([`part_beside`]) and [`land`] it only when complete,
+/// preserving the last good copy on interruption, a stop included, and existing readers' open
+/// files.
 fn receive_from(
     mut child: Child,
     dest: &Path,
@@ -119,13 +140,17 @@ fn receive_from(
     progress: &dyn Fn(u64, u64),
     stop: &link::Stop,
 ) -> Result<()> {
-    let mut part = dest.as_os_str().to_owned();
-    part.push(".part");
-    let part = PathBuf::from(part);
+    let (part, mut out) = match part_beside(dest) {
+        Ok(created) => created,
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(cached(dest, e));
+        }
+    };
     let stdout = child.stdout.take();
     let (child, received) = stop.holding(child, || -> std::io::Result<()> {
         let mut stdout = stdout.ok_or_else(|| std::io::Error::other("ssh has no stdout"))?;
-        let mut out = std::fs::File::create(&part)?;
         let (mut buf, mut done) = (vec![0; CHUNK], 0);
         loop {
             let n = stdout.read(&mut buf)?;
@@ -1223,11 +1248,14 @@ mod tests {
     use std::path::Path;
     use std::time::Duration;
 
-    /// A download stopped mid-file leaves neither the file nor its `.part`.
+    /// A download stopped mid-file leaves neither the file nor its temporary, and a `.part` it
+    /// did not make as it was.
     #[test]
     fn a_stopped_download_leaves_nothing_behind() {
         use std::process::{Command, Stdio};
         let dir = tempfile::tempdir().unwrap();
+        let theirs = dir.path().join("a.pdf.part");
+        std::fs::write(&theirs, "theirs").unwrap();
         // A first chunk, then a host that sends nothing more: `exec`, as ssh is the child.
         let cat = Command::new("sh")
             .args(["-c", "echo first; exec sleep 30"])
@@ -1245,7 +1273,51 @@ mod tests {
             receive_from(cat, &dest, 1 << 20, true, &|_, _| (), &stop)
         });
         assert!(received.is_err());
-        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        assert_eq!(std::fs::read_to_string(&theirs).unwrap(), "theirs");
+    }
+
+    /// Downloads to one name at once each write a temporary of their own: the name gets one
+    /// whole copy, or with no Replace the first to land keeps it, and a `.part` that was there
+    /// already is left as it was.
+    #[test]
+    fn downloads_to_one_name_never_share_a_temporary() {
+        use std::process::{Command, Stdio};
+        let dir = tempfile::tempdir().unwrap();
+        let theirs = dir.path().join("a.pdf.part");
+        std::fs::write(&theirs, "theirs").unwrap();
+        // Half the bytes, a pause the other download writes into, then the rest.
+        let host = |half: &str| {
+            Command::new("sh")
+                .args(["-c", &format!("printf {half}; sleep 0.3; printf {half}")])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap()
+        };
+        let both = |dest: &Path, replace: bool| {
+            std::thread::scope(|s| {
+                let [a, b] = ["aaaa", "bbbb"].map(|half| {
+                    let (cat, stop) = (host(half), crate::link::Stop::default());
+                    s.spawn(move || receive_from(cat, dest, 8, replace, &|_, _| (), &stop))
+                });
+                [a.join().unwrap(), b.join().unwrap()]
+            })
+        };
+        let whole = |dest: &Path| {
+            let got = std::fs::read_to_string(dest).unwrap();
+            assert!(got == "aaaaaaaa" || got == "bbbbbbbb", "{got:?}");
+        };
+
+        let dest = dir.path().join("a.pdf");
+        assert!(both(&dest, true).iter().all(Result::is_ok));
+        whole(&dest);
+        let fresh = dir.path().join("b.pdf");
+        let landed = both(&fresh, false);
+        assert_eq!(landed.iter().filter(|r| r.is_ok()).count(), 1);
+        whole(&fresh);
+        assert_eq!(std::fs::read_to_string(&theirs).unwrap(), "theirs");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
     }
 
     /// A deleted file's cached copy goes with its stamp and the copy kept beside it, a deleted
