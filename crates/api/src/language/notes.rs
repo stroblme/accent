@@ -14,6 +14,7 @@ use accent_core::fuzzy;
 use accent_core::index::Index;
 use accent_core::markdown::{self, LinkKind};
 use accent_core::note::Syntax;
+use accent_core::org;
 use accent_core::path::{self, FileType, basename, parent_dir, stem};
 
 use super::{
@@ -81,6 +82,29 @@ pub(crate) fn context(head: &str) -> Option<(Trigger, usize, &str)> {
     }
     // Whitespace ends a tag, so the caret is no longer inside one.
     (!prefix.contains(char::is_whitespace)).then_some((Trigger::Tag, start, prefix))
+}
+
+/// [`context`] in an org file: `[[` opens a link to a file, and a `:` in the tags closing a
+/// heading or on the `#+FILETAGS:` line a tag, the start being past that colon. A run of tags
+/// opens with a colon after a blank, so `10:30` in a title is no tag.
+pub(crate) fn org_context(head: &str) -> Option<(Trigger, usize, &str)> {
+    if let Some(start) = head.rfind("[[") {
+        let prefix = &head[start + 2..];
+        if !prefix.contains(']') {
+            return Some((Trigger::Wiki, start, prefix));
+        }
+    }
+    let heading = head.starts_with('*') && head.trim_start_matches('*').starts_with([' ', '\t']);
+    let filetags = head
+        .get(..11)
+        .is_some_and(|k| k.eq_ignore_ascii_case("#+filetags:"));
+    let colon = head.rfind(':').filter(|_| heading || filetags)?;
+    let prefix = &head[colon + 1..];
+    let run = head[..colon].trim_end_matches(|c| c == ':' || org::is_tag_char(c));
+    (prefix.chars().all(org::is_tag_char)
+        && run.ends_with([' ', '\t'])
+        && head[run.len()..].starts_with(':'))
+    .then_some((Trigger::Tag, colon + 1, prefix))
 }
 
 /// The headings a wikilink can name, by their text: each once, in the order the note has them.
@@ -543,14 +567,13 @@ impl Notes {
     }
 
     fn completion(&self, rel: &str, pos: Pos) -> Result<Completions> {
-        // Nothing for org yet: its `[[` and tags are not a note's, and `#` opens every `#+KEY:`.
-        if Syntax::of(rel) == Syntax::Org {
-            return Ok(Completions::default());
-        }
         let text = self.text_of(rel)?;
         let Some(caret) = byte_of(&text, pos) else {
             return Ok(Completions::default());
         };
+        if Syntax::of(rel) == Syntax::Org {
+            return self.org_completion(rel, &text, caret, pos);
+        }
         let line_start = text[..caret].rfind('\n').map_or(0, |i| i + 1);
         let head = &text[line_start..caret];
         let Some((trigger, start, prefix)) = context(head) else {
@@ -768,6 +791,88 @@ impl Notes {
         }
     }
 
+    /// Org's completions ([`org_context`]): after `[[` a file, as org links one from this file's
+    /// folder, `[[file:<path>][<title>]]`, a note's or an org file's title its description; in a
+    /// heading's tags a tag org can spell, with the colon closing it.
+    fn org_completion(&self, rel: &str, text: &str, caret: usize, pos: Pos) -> Result<Completions> {
+        let line_start = text[..caret].rfind('\n').map_or(0, |i| i + 1);
+        let head = &text[line_start..caret];
+        let Some((trigger, start, prefix)) = org_context(head) else {
+            return Ok(Completions::default());
+        };
+        let mut replace = Range {
+            start: Pos {
+                line: pos.line,
+                character: head[..start].chars().count() as u32,
+            },
+            end: pos,
+        };
+        let index = locked(&self.index);
+        if trigger == Trigger::Tag {
+            let tags: Vec<(String, i64)> = index
+                .tags()?
+                .into_iter()
+                .filter(|(name, _)| name.chars().all(org::is_tag_char))
+                .collect();
+            let (hits, more) = tag_candidates(&tags, prefix);
+            let close = match text[caret..].starts_with(':') {
+                true => "",
+                false => ":",
+            };
+            return Ok(Completions {
+                items: hits
+                    .into_iter()
+                    .map(|name| Completion {
+                        insert: format!("{name}{close}"),
+                        label: name,
+                        kind: Kind::Tag,
+                        replace,
+                        ..empty_item()
+                    })
+                    .collect(),
+                incomplete: more,
+                pages: None,
+            });
+        }
+        // `[[*Heading]]` and a search name a place in a file, not a file to list.
+        if prefix.starts_with('*') || prefix.contains("::") {
+            return Ok(Completions::default());
+        }
+        // The `]]` `typing::pair` left after the caret: the link brings its own.
+        let eaten = text[caret..]
+            .chars()
+            .take(2)
+            .take_while(|c| *c == ']')
+            .count();
+        replace.end.character += eaten as u32;
+        let files = self.corpus(&index, false)?;
+        let query = prefix.strip_prefix("file:").unwrap_or(prefix);
+        let (hits, more) = path_candidates(&files.paths, query.trim_start_matches(['.', '/']));
+        let dir = parent_dir(rel);
+        let mut items = Vec::with_capacity(hits.len());
+        for hit in hits {
+            let path = path::relative(dir, &hit);
+            let title = match has_headings(&hit) {
+                true => index.get_file(&hit)?.and_then(|row| row.title),
+                false => None,
+            };
+            items.push(Completion {
+                label: basename(&hit).to_string(),
+                detail: Some(path.clone()),
+                filter: Some(format!("[[file:{path}")),
+                insert: org::link(&format!("file:{path}"), title.as_deref()),
+                kind: Kind::File,
+                replace,
+                ..empty_item()
+            });
+        }
+        Ok(Completions {
+            items,
+            incomplete: more,
+            pages: None,
+        })
+    }
+
     /// Complete headings or `^id` blocks while retaining the typed target.
     /// An empty target uses this note; PDF targets offer bookmark page anchors.
     /// Missing targets and other file types offer nothing.
@@ -952,10 +1057,11 @@ impl Language for Notes {
         self.publish(rel, &text);
         locked(&self.docs).insert(rel.to_string(), text);
         // One `[` offers nothing, and nor does a `(` outside a link; `context` is what decides,
-        // and it wants the second `[` or the `](` of a link's destination. Org has none yet.
+        // and it wants the second `[` or the `](` of a link's destination; in org, the second `[`
+        // or a `:` in a heading's tags (`org_context`).
         let completion_triggers = match Syntax::of(rel) {
             Syntax::Markdown => vec!['[', '#', '('],
-            Syntax::Org => Vec::new(),
+            Syntax::Org => vec!['[', ':'],
         };
         Ok(Support {
             completion_triggers,
@@ -1129,6 +1235,65 @@ mod tests {
         for head in ["# Heading", "##", "  #", "\t### "] {
             assert_eq!(context(head), None, "{head:?} is a heading marker");
         }
+    }
+
+    #[test]
+    fn org_context_finds_a_file_link_or_a_heading_tag() {
+        assert_eq!(org_context("see [[fi"), Some((Trigger::Wiki, 4, "fi")));
+        assert_eq!(org_context("[[a][b]] and"), None, "already closed");
+        assert_eq!(org_context("** Plan :"), Some((Trigger::Tag, 9, "")));
+        assert_eq!(org_context("* Plan :wo"), Some((Trigger::Tag, 8, "wo")));
+        assert_eq!(org_context("* Plan :a:b"), Some((Trigger::Tag, 10, "b")));
+        assert_eq!(org_context("#+filetags: :a:"), Some((Trigger::Tag, 15, "")));
+        for head in [
+            "#+FILETAGS:",
+            "* Meet at 10:30",
+            "Note: x",
+            "- item :x",
+            "*bold :x",
+        ] {
+            assert_eq!(org_context(head), None, "{head:?} holds no tag");
+        }
+    }
+
+    #[test]
+    fn org_completes_file_links_and_tags_as_org_writes_them() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::create_dir(vault.path().join("sub")).unwrap();
+        std::fs::write(vault.path().join("Plan.md"), "# The plan\n#work #a/b\n").unwrap();
+        std::fs::write(vault.path().join("pic.png"), "").unwrap();
+        let org = "* Notes :\n[[Pl]]\n[[pi\n";
+        std::fs::write(vault.path().join("sub/b.org"), org).unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let db = cache.path().join("i.db");
+        Index::open(&db)
+            .unwrap()
+            .reconcile(vault.path(), |_| {})
+            .unwrap();
+        let notes = Notes::open_at(
+            vault.path().to_path_buf(),
+            &db,
+            std::sync::mpsc::channel().0,
+            Arc::new(Ignored::new(vault.path().to_path_buf())),
+        )
+        .unwrap();
+        let ask = |line, character| {
+            let items = notes
+                .completion("sub/b.org", Pos { line, character })
+                .unwrap()
+                .items;
+            items
+                .into_iter()
+                .map(|i| (i.insert, i.replace.end.character))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ask(1, 4),
+            [("[[file:../Plan.md][The plan]]".to_string(), 6)],
+            "the `]]` after the caret goes"
+        );
+        assert_eq!(ask(2, 4), [("[[file:../pic.png]]".to_string(), 4)]);
+        assert_eq!(ask(0, 9), [("work:".to_string(), 9)], "`a/b` is no org tag");
     }
 
     #[test]

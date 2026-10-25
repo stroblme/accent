@@ -401,7 +401,7 @@ fn heading(text: &str, line: Range<usize>, keywords: &[(&str, bool)]) -> Option<
 }
 
 /// A character a tag is written with: a letter, a digit, `_`, `@`, `#` or `%`.
-fn is_tag_char(c: char) -> bool {
+pub fn is_tag_char(c: char) -> bool {
     c.is_alphanumeric() || matches!(c, '_' | '@' | '#' | '%')
 }
 
