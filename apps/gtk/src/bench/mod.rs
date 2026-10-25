@@ -218,7 +218,8 @@ use tags::bench_tags;
 ///   clicks/drag; root must list all three), `edited:<pdf>,<diagram>,<note>`
 ///   (edits keep previews), `pinwin:<a>,<b>,<c>` (move to loose-file window),
 ///   `apart:<rel>,…` (new-window actions; creates/removes `apart-drill.md`),
-///   `cycle:<a>,<b>,…` (25 s held Ctrl+Tab probe after XTEST `move 700 400; focus`),
+///   `cycle:[<w>x<h>:]<a>,<b>,…` (25 s held Ctrl+Tab probe after XTEST `move 700 400; focus`,
+///   the last of three or more split off to the right),
 ///   `back:<a>,<b>` (navigation across edits/reload), `loose:<rel_pdf>`
 ///   (loose-file readers/assets; creates/removes `loose-drill/`). Remote
 ///   pin-window/apart modes verify tabs cannot move off the host.

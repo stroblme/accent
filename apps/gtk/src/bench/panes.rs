@@ -37,7 +37,8 @@ pub(super) fn bench_panes(app: &Rc<App>, rels: &str) {
     });
 }
 
-/// Escape must clear both switcher cards if focus crossed a split with Ctrl held.
+/// Escape ends a chord held across a split where it began: the one card over the window goes,
+/// with its dimming, and the tab in front and the active pane are as they were.
 fn bench_cancel_split(app: &Rc<App>, rels: &str) {
     let Some((a, b)) = rels.split_once(',') else {
         return bench_quit(app);
@@ -56,34 +57,24 @@ fn bench_cancel_split(app: &Rc<App>, rels: &str) {
             app.split_page(&left, Side::Right, &page);
         }
         glib::timeout_add_local_once(Duration::from_millis(200), move || {
-            let panes = app.panes.borrow().clone();
-            for pane in &panes {
-                pane.step(true);
-                pane.switcher.show(
-                    &[crate::switcher::Entry {
-                        icon: None,
-                        name: "Note".to_string(),
-                        folder: String::new(),
-                    }],
-                    0,
-                );
-            }
-            let states = || {
-                panes
-                    .iter()
-                    .map(|pane| (pane.switcher.shown(), pane.switcher_dimmed()))
-                    .collect::<Vec<_>>()
-            };
-            let before = states();
-            println!("bench cancel_before {before:?}");
-            assert_eq!(before, [(true, true); 2]);
-            let cancelled = app.cancel_cycle();
-            println!("bench cancel_answer {cancelled}");
-            assert!(cancelled);
-            let after = states();
-            println!("bench cancel_after {after:?}");
-            assert_eq!(after, [(false, false); 2]);
-            bench_quit(&app);
+            let (front, active) = (app.tabs().selected_page(), app.pane());
+            app.cycle_tab(true);
+            glib::timeout_add_local_once(Duration::from_millis(400), move || {
+                let states = || (app.switcher.shown(), app.switcher.dimmed());
+                let before = states();
+                println!("bench cancel_before {before:?}");
+                assert_eq!(before, (true, true));
+                let cancelled = app.cancel_cycle();
+                println!("bench cancel_answer {cancelled}");
+                assert!(cancelled);
+                let after = states();
+                let stayed =
+                    app.tabs().selected_page() == front && Rc::ptr_eq(&app.pane(), &active);
+                println!("bench cancel_after {after:?} stayed={stayed}");
+                assert_eq!(after, (false, false));
+                assert!(stayed);
+                bench_quit(&app);
+            });
         });
     });
 }
@@ -786,6 +777,12 @@ async fn bench_step(app: &Rc<App>, action: &str) {
 
 /// See `ACCENT_BENCH_TABS=cycle:` above.
 pub(super) fn bench_cycle(app: &Rc<App>, rels: &str) {
+    // An optional `<w>x<h>:` first, the window's size.
+    let (size, rels) = match rels.split_once(':') {
+        Some((size, rels)) => (size.split_once('x'), rels),
+        None => (None, rels),
+    };
+    let size = size.and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)));
     let rels: Vec<String> = rels.split(',').map(str::to_string).collect();
     for rel in &rels {
         app.open_path(rel);
@@ -796,7 +793,21 @@ pub(super) fn bench_cycle(app: &Rc<App>, rels: &str) {
     };
     let app = app.clone();
     bench_layout_when(landed, move || {
-        // A shell in front, so the chords start where a terminal has the keyboard.
+        if let Some((w, h)) = size {
+            app.window.set_default_size(w, h);
+        }
+        // The last file split off to the right, so the chord's list spans two panes; a shell in
+        // front of the left one, so the chords start where a terminal has the keyboard.
+        let left = app.pane();
+        if let Some(page) = rels
+            .last()
+            .and_then(|rel| app.doc_for(rel))
+            .map(|d| d.page().clone())
+            && rels.len() > 2
+        {
+            app.split_page(&left, Side::Right, &page);
+            app.set_active_pane(&left);
+        }
         app.open_terminal();
         glib::spawn_future_local(async move {
             println!("bench cycle focus_window");
@@ -811,19 +822,18 @@ pub(super) fn bench_cycle(app: &Rc<App>, rels: &str) {
             let (mut last, mut since, mut aimed) = (String::new(), None, false);
             let started = Instant::now();
             while started.elapsed() < Duration::from_secs(25) {
-                let pane = app.pane();
-                let held = pane.cycling().is_some();
+                let held = app.cycle.borrow().is_some();
                 since = match held {
                     true => since.or_else(|| Some(Instant::now())),
                     false => None,
                 };
-                let state = bench_cycle_state(&app, &pane);
+                let state = bench_cycle_state(&app);
                 if state != last {
                     let ms = since.map_or(0, |t: Instant| t.elapsed().as_millis());
                     println!("bench cycle ms={ms} {state}");
                     last = state;
                 }
-                if !aimed && let Some((x, y)) = pane.switcher.row_centre(2, &app.window) {
+                if !aimed && let Some((x, y)) = app.switcher.row_centre(2, &app.window) {
                     println!("bench cycle aim row2={x:.0},{y:.0}");
                     aimed = true;
                 }
@@ -834,18 +844,22 @@ pub(super) fn bench_cycle(app: &Rc<App>, rels: &str) {
     });
 }
 
-/// Whether a chord is held, the card's rows with the lit one, the tab in front, the pane's order
-/// and who has the keyboard.
-fn bench_cycle_state(app: &Rc<App>, pane: &Pane) -> String {
-    let (rows, lit) = pane.switcher.rows();
-    let front = pane.tabs.selected_page().map(|p| p.title().to_string());
-    let order: Vec<String> = pane.recent().iter().map(|p| p.title().into()).collect();
+/// Whether a chord is held, the card's rows with the lit one, the tab in front of the active
+/// pane, the window's order and who has the keyboard.
+fn bench_cycle_state(app: &Rc<App>) -> String {
+    let (rows, lit) = app.switcher.rows();
+    let front = app.tabs().selected_page().map(|p| p.title().to_string());
+    let order: Vec<String> = app
+        .window_order()
+        .iter()
+        .map(|p| p.title().into())
+        .collect();
     let focus = gtk::prelude::GtkWindowExt::focus(&app.window).map(|w| w.type_().name());
     format!(
         "held={} card={} dim={} rows={rows:?} lit={lit:?} front={front:?} order={order:?} focus={focus:?}",
-        pane.cycling().is_some(),
-        pane.switcher.shown(),
-        pane.switcher_dimmed(),
+        app.cycle.borrow().is_some(),
+        app.switcher.shown(),
+        app.switcher.dimmed(),
     )
 }
 

@@ -103,7 +103,7 @@ pub(super) fn bench_present(app: &Rc<App>, rels: &str) {
 
             app.cycle_tab(true);
             glib::timeout_future(Duration::from_millis(600)).await;
-            let card = pane.switcher.widget();
+            let card = app.switcher.widget();
             let inside = card.compute_bounds(&app.window).is_some_and(|b| {
                 b.x() >= 0.0
                     && b.y() >= 0.0
@@ -112,7 +112,7 @@ pub(super) fn bench_present(app: &Rc<App>, rels: &str) {
             });
             println!(
                 "bench present {kind}_card shown={} card={} inside={inside} {}",
-                pane.switcher.shown(),
+                app.switcher.shown(),
                 drawn(&app, card),
                 screen(&app)
             );
@@ -123,7 +123,7 @@ pub(super) fn bench_present(app: &Rc<App>, rels: &str) {
             println!(
                 "bench present {kind}_escape used={used} presenting={} card={} back={} {}",
                 app.presenting.get().is_some(),
-                pane.switcher.shown(),
+                app.switcher.shown(),
                 pane.tabs.selected_page().as_ref() == Some(&page),
                 screen(&app)
             );
@@ -193,11 +193,10 @@ pub(super) fn bench_present(app: &Rc<App>, rels: &str) {
         let mut last = String::new();
         let started = Instant::now();
         while started.elapsed() < Duration::from_secs(6) {
-            let pane = app.pane();
             let state = format!(
                 "held={} card={} presenting={} {}",
-                pane.cycling().is_some(),
-                drawn(&app, pane.switcher.widget()),
+                app.cycle.borrow().is_some(),
+                drawn(&app, app.switcher.widget()),
                 app.presenting.get().is_some(),
                 screen(&app)
             );

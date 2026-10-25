@@ -8,10 +8,9 @@
 
 use crate::find;
 use crate::pdfview::Anchor;
-use crate::switcher::Switcher;
 use adw::prelude::*;
 use gtk::{gdk, gio, glib, graphene};
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -138,6 +137,20 @@ pub fn recent_order<T: Clone + PartialEq>(history: &[T], live: &[T]) -> Vec<T> {
         .cloned()
         .collect();
     order.extend(rest);
+    order
+}
+
+/// The window's tabs for the switcher: [`recent_order`] over every pane's, with `current`, the
+/// tab the reader is on, first even where a background pane selected another since.
+pub fn window_order<T: Clone + PartialEq>(
+    history: &[T],
+    live: &[T],
+    current: Option<&T>,
+) -> Vec<T> {
+    let mut order = recent_order(history, live);
+    if let Some(current) = current {
+        to_front(&mut order, current);
+    }
     order
 }
 
@@ -488,16 +501,11 @@ pub struct Pane {
     /// Highlight rectangle inside `hint`, keeping its coordinate widget fixed as the zone changes.
     shade: gtk::Box,
     pub drop: gtk::DropTarget,
-    /// Most-recent-first tab history, pruned against live pages on every read.
-    /// Transferred tabs leave automatically and enter their destination history on selection.
-    history: RefCell<Vec<adw::TabPage>>,
+    /// The window's most-recent-first tab history, shared by its panes and pruned against live
+    /// pages on every read. A tab leaves it when detached, and is put back when selected again.
+    history: Rc<RefCell<Vec<adw::TabPage>>>,
     /// MRU order before libadwaita selects a neighbour while a dragged tab leaves.
     transfer_order: RefCell<Option<Vec<adw::TabPage>>>,
-    /// How deep into `history` a held `Ctrl+Tab` has walked, `None` when no chord is in flight.
-    /// See [`Pane::step`].
-    cycling: Cell<Option<usize>>,
-    /// Pane-local switcher overlay listing `history` with `cycling` highlighted, leaving other panes clear.
-    pub switcher: Switcher,
     /// Back and forward across this pane's documents. See [`Nav`].
     pub nav: RefCell<Nav>,
     /// The preview tab, if this pane has one: the tab a single click in the sidebar or a followed
@@ -506,7 +514,8 @@ pub struct Pane {
 }
 
 impl Pane {
-    pub fn new(menu: &gio::Menu) -> Rc<Pane> {
+    /// A pane of the window whose tab history is `history`.
+    pub fn new(menu: &gio::Menu, history: Rc<RefCell<Vec<adw::TabPage>>>) -> Rc<Pane> {
         let tabs = adw::TabView::builder().hexpand(true).vexpand(true).build();
         tabs.set_menu_model(Some(menu));
         tabs.set_shortcuts(shortcuts());
@@ -543,9 +552,6 @@ impl Pane {
             .vexpand(true)
             .build();
         overlay.add_overlay(&hint);
-        let switcher = Switcher::new();
-        overlay.add_overlay(switcher.backdrop());
-        overlay.add_overlay(switcher.widget());
 
         let find = find::Bar::new();
         let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -564,20 +570,12 @@ impl Pane {
             hint,
             shade,
             drop,
-            history: RefCell::new(Vec::new()),
+            history,
             transfer_order: RefCell::new(None),
-            cycling: Cell::new(None),
-            switcher,
             nav: RefCell::new(Nav::default()),
             preview: RefCell::new(None),
         });
         pane.wire_preview();
-        let weak = Rc::downgrade(&pane);
-        pane.switcher.connect_pick(move |at| {
-            if let Some(pane) = weak.upgrade() {
-                pane.pick(at);
-            }
-        });
         pane
     }
 
@@ -585,7 +583,7 @@ impl Pane {
         self.column.upcast_ref()
     }
 
-    /// Overlay `widget` above tabs and below drag hints and the switcher for presentation.
+    /// Overlay `widget` above tabs and below drag hints for presentation.
     /// Transfer it from another pane if needed; other parents must release it first. Skip if already here.
     pub fn cover(&self, widget: &gtk::Widget) {
         if widget.parent().as_ref() == Some(self.overlay.upcast_ref()) {
@@ -602,18 +600,6 @@ impl Pane {
             f64::from(self.overlay.width()),
             f64::from(self.overlay.height()),
         )
-    }
-
-    #[cfg(feature = "bench")]
-    pub fn switcher_dimmed(&self) -> bool {
-        let mut child = self.overlay.first_child();
-        while let Some(widget) = child {
-            if widget.has_css_class("accent-switcher-backdrop") {
-                return widget.is_visible();
-            }
-            child = widget.next_sibling();
-        }
-        false
     }
 
     /// This pane's pages, in the order the bar shows them.
@@ -637,29 +623,9 @@ impl Pane {
         recent_order(&self.history.borrow(), &self.pages())
     }
 
-    /// Record selection of `page` and prune pages that have left the pane.
-    ///
-    /// Ctrl+Tab steps preserve the order they are walking. Other selections end cycling, so a
-    /// lost modifier release cannot leave the pane stuck in that state.
+    /// Record selection of `page`, at the front of the window's order.
     pub fn touch(&self, page: &adw::TabPage) {
-        if let Some(at) = self.cycling.get() {
-            if self.recent().get(at) == Some(page) {
-                return;
-            }
-            self.cycling.set(None);
-            self.switcher.hide();
-        }
-        let mut order = self.recent();
-        to_front(&mut order, page);
-        *self.history.borrow_mut() = order;
-    }
-
-    /// Whether `page` is where a held `Ctrl+Tab` has just stepped, as opposed to a tab picked any
-    /// other way.
-    pub fn stepping_to(&self, page: &adw::TabPage) -> bool {
-        self.cycling
-            .get()
-            .is_some_and(|at| self.recent().get(at) == Some(page))
+        to_front(&mut self.history.borrow_mut(), page);
     }
 
     /// Which tab to show once `page` goes: the most recently used one that is left.
@@ -681,55 +647,6 @@ impl Pane {
         recent_order(order.as_ref()?, &self.pages())
             .into_iter()
             .find(|p| p != page)
-    }
-
-    /// Step the fixed MRU order while Ctrl is held; Shift reverses direction.
-    /// [`Pane::switcher`] displays [`Pane::recent`] and highlights the cycling cursor.
-    pub fn step(&self, forward: bool) -> Option<adw::TabPage> {
-        let order = self.recent();
-        let at = cycle_to(order.len(), self.cycling.get().unwrap_or(0), forward);
-        self.cycling.set(Some(at));
-        order.get(at).cloned()
-    }
-
-    /// Where a held `Ctrl+Tab` has walked to in [`Pane::recent`], `None` with no chord in flight.
-    pub fn cycling(&self) -> Option<usize> {
-        self.cycling.get()
-    }
-
-    /// Finish cycling on Ctrl release and record the selected tab as most recent. No-op without a cycle.
-    pub fn end_cycle(&self) {
-        self.switcher.hide();
-        if self.cycling.take().is_none() {
-            return;
-        }
-        if let Some(page) = self.tabs.selected_page() {
-            self.touch(&page);
-        }
-    }
-
-    /// End the chord on the `at`th tab in [`Pane::recent`], as if Ctrl had come up there: a
-    /// click on the card's row. Stepped to rather than picked, so it does not fade in either.
-    pub fn pick(&self, at: usize) {
-        let Some(page) = self.recent().get(at).cloned() else {
-            return;
-        };
-        if self.cycling.get().is_none() {
-            return;
-        }
-        self.cycling.set(Some(at));
-        self.tabs.set_selected_page(&page);
-        self.end_cycle();
-    }
-
-    /// Escape while the chord is held: back to the tab it started from, the order as it was.
-    /// Says whether there was a chord to call off.
-    pub fn cancel_cycle(&self) -> bool {
-        let held = self.cycling.get().is_some();
-        if held {
-            self.pick(0);
-        }
-        held
     }
 
     // --- preview tabs ----------------------------------------------------------------------
@@ -1033,7 +950,7 @@ mod tests {
         assert_eq!(zone(0.0, 0.0, 0.0, 0.0), Zone::Here);
     }
 
-    /// What `Pane::step` does, over three tabs: one step of a chord that is not being held, so
+    /// What `App::cycle_tab` does, over three tabs: one step of a chord that is not being held, so
     /// the cursor starts at the selected tab each time.
     fn step<'a>(order: &[&'a str], forward: bool) -> Option<&'a str> {
         let order = recent_order(order, &["A", "B", "C"]);
@@ -1072,7 +989,7 @@ mod tests {
     }
 
     /// The reorder is deferred while Ctrl is held, so each press goes one tab deeper instead of
-    /// coming straight back — the whole of what `Pane::step` and `Pane::end_cycle` decide.
+    /// coming straight back — the whole of what `App::cycle_tab` and `App::end_cycle` decide.
     #[test]
     fn a_held_chord_walks_deeper_and_commits_once() {
         let live = ["A", "B", "C", "D"];
@@ -1193,6 +1110,26 @@ mod tests {
         assert_eq!(nav.back(caret("c.md", 1)), Some(page("p.pdf", 2)));
     }
 
+    /// The window's switcher lists every pane's tabs, the one the reader is on first even where
+    /// a background pane picked a tab of its own since (a sync deleting the note in front there).
+    #[test]
+    fn the_window_order_starts_where_the_reader_is() {
+        let live = ["A", "B", "C", "D"];
+        // B was selected last, in a background pane; the reader is on C.
+        assert_eq!(
+            window_order(&["B", "C", "A"], &live, Some(&"C")),
+            ["C", "B", "A", "D"]
+        );
+        // A tab gone since is not listed, and one never selected joins at the end.
+        assert_eq!(
+            window_order(&["Z", "A"], &live, Some(&"A")),
+            ["A", "B", "C", "D"]
+        );
+        // No tab in front (an empty window being filled): the order as it is.
+        assert_eq!(window_order(&["B"], &["A", "B"], None), ["B", "A"]);
+    }
+
+    /// Back after typing goes to where the reader was before, not to where the caret already is:
     /// Two tabs pinned besides the one asked about: a pinned tab goes no further right than the
     /// end of that group, and any other no further left, whatever moved it there.
     #[test]

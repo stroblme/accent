@@ -66,36 +66,72 @@ impl App {
         }
     }
 
-    /// Step through the active pane's MRU tabs with Ctrl+Tab or Ctrl+Shift+Tab.
-    ///
-    /// Pane-local cycling keeps focus within the split. Holding the chord shows a switcher;
-    /// a quick flip to the previous tab shows none.
+    /// Step through the window's MRU tabs with Ctrl+Tab or Ctrl+Shift+Tab, every pane's, the
+    /// order fixed at the first press. The release commits the tab landed on (`end_cycle`), so a
+    /// quick flip goes to the last tab used; holding the chord shows the switcher over the window.
     pub fn cycle_tab(self: &Rc<Self>, forward: bool) {
-        let pane = self.pane();
-        if let Some(page) = pane.step(forward) {
-            pane.tabs.set_selected_page(&page);
+        {
+            let mut cycle = self.cycle.borrow_mut();
+            let (order, at) = cycle.get_or_insert_with(|| (self.window_order(), 0));
+            *at = panes::cycle_to(order.len(), *at, forward);
         }
-        if pane.switcher.shown() {
-            return self.show_switcher(&pane);
+        if self.switcher.shown() {
+            return self.show_switcher();
         }
-        let (app, held) = (Rc::downgrade(self), Rc::downgrade(&pane));
-        pane.switcher.soon(move || {
-            if let (Some(app), Some(pane)) = (app.upgrade(), held.upgrade())
-                && pane.cycling().is_some()
+        let app = Rc::downgrade(self);
+        self.switcher.soon(move || {
+            if let Some(app) = app.upgrade()
+                && app.cycle.borrow().is_some()
             {
-                app.show_switcher(&pane);
+                app.show_switcher();
             }
         });
     }
 
-    /// Fill `pane`'s card with its tabs.
-    fn show_switcher(&self, pane: &Pane) {
-        let entries: Vec<switcher::Entry> = pane
-            .recent()
-            .iter()
-            .map(|page| self.switcher_entry(page))
-            .collect();
-        pane.switcher.show(&entries, pane.cycling().unwrap_or(0));
+    /// Every pane's tabs, most recently used first, the one the reader is on at the front.
+    pub(crate) fn window_order(&self) -> Vec<adw::TabPage> {
+        let live: Vec<adw::TabPage> = self.panes.borrow().iter().flat_map(|p| p.pages()).collect();
+        let current = self.pane().tabs.selected_page();
+        panes::window_order(&self.recent.borrow(), &live, current.as_ref())
+    }
+
+    /// Fill the card with the chord's tabs, the one it has walked to highlighted.
+    fn show_switcher(&self) {
+        let Some((order, at)) = self.cycle.borrow().clone() else {
+            return;
+        };
+        let mut entries: Vec<switcher::Entry> =
+            order.iter().map(|page| self.switcher_entry(page)).collect();
+        // Two tabs alike — two shells of one title — are told apart by their panes, numbered in
+        // reading order, where there is more than one.
+        let panes = self.reading_order();
+        for (i, page) in order.iter().enumerate() {
+            let alike =
+                |e: &switcher::Entry| e.name == entries[i].name && e.folder == entries[i].folder;
+            if entries.iter().filter(|e| alike(e)).count() < 2 || panes.len() < 2 {
+                continue;
+            }
+            if let Some(n) = panes.iter().position(|p| p.has(page)) {
+                entries[i].pane = Some(format!("Pane {}", n + 1));
+            }
+        }
+        self.switcher.show(&entries, at);
+    }
+
+    /// The window's panes top to bottom, then left to right.
+    fn reading_order(&self) -> Vec<Rc<Pane>> {
+        let mut panes = self.panes.borrow().clone();
+        let at = |p: &Rc<Pane>| {
+            p.widget()
+                .compute_point(&self.window, &graphene::Point::new(0.0, 0.0))
+                .map_or((0.0, 0.0), |at| (at.y(), at.x()))
+        };
+        panes.sort_by(|a, b| {
+            at(a)
+                .partial_cmp(&at(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        panes
     }
 
     /// A file by its file-type icon and its folder, as the file lists show it; a shell or a
@@ -109,34 +145,56 @@ impl App {
                     icon: Some(gio::ThemedIcon::new(doc::icon_for(&key)).upcast()),
                     name,
                     folder: accent_core::path::parent_dir(&key).to_string(),
+                    pane: None,
                 }
             }
             None => switcher::Entry {
                 icon: page.icon(),
                 name,
                 folder: String::new(),
+                pane: None,
             },
         }
     }
 
-    /// Finish every pane's cycle on Ctrl release or window deactivation.
-    /// Checking all panes prevents abandoned cycles after focus crosses a split.
-    pub fn end_cycle(&self) {
-        for pane in self.panes.borrow().iter() {
-            pane.end_cycle();
+    /// End the chord on Ctrl release, window deactivation or a click on the card: the tab it
+    /// landed on comes to the front of its pane with the keyboard. No-op without a chord.
+    pub fn end_cycle(self: &Rc<Self>) {
+        self.switcher.hide();
+        let Some((order, at)) = self.cycle.take() else {
+            return;
+        };
+        // Round to where it started, the tab in front: nothing to do.
+        let Some(page) = order
+            .get(at)
+            .filter(|page| at > 0 && self.pane_of(page).is_some())
+        else {
+            return;
+        };
+        self.reveal_page(page);
+        // `reveal_page` leaves a keyboard outside every pane where it is; the switcher's pick
+        // takes it to the tab, unless presentation's own focus has it.
+        if self.presenting.get().is_none()
+            && self.keyboard_pane().is_none()
+            && let Some(pane) = self.pane_of(page)
+        {
+            self.focus_document(&pane);
         }
     }
 
-    /// Escape with Ctrl still held: the chord goes back to the tab it started from. Says whether
-    /// a chord was in flight, which is then all the press does.
-    pub fn cancel_cycle(&self) -> bool {
-        // A copy: going back selects a tab, and the selection handlers reach the panes too.
-        let panes = self.panes.borrow().clone();
-        let mut cancelled = false;
-        for pane in panes {
-            cancelled |= pane.cancel_cycle();
+    /// End the chord on the `at`th tab of its order: a click on the card's row.
+    pub fn pick_cycle(self: &Rc<Self>, at: usize) {
+        if let Some((_, walked)) = self.cycle.borrow_mut().as_mut() {
+            *walked = at;
         }
-        cancelled
+        self.end_cycle();
+    }
+
+    /// Escape with Ctrl still held, or a click beside the card: the chord ends where it started.
+    /// Says whether a chord was in flight, which is then all the press does.
+    pub fn cancel_cycle(&self) -> bool {
+        self.switcher.hide();
+        self.cycle.take().is_some()
     }
 
     // --- back and forward ---------------------------------------------------------------------
@@ -345,7 +403,7 @@ impl App {
 
     /// Create an empty pane beside `at`; the caller must populate it because it has no detach event to close it.
     pub(crate) fn split_beside(self: &Rc<Self>, at: &Rc<Pane>, side: Side) -> Rc<Pane> {
-        let pane = Pane::new(&tab_menu());
+        let pane = Pane::new(&tab_menu(), self.recent.clone());
         wire_pane(self, &pane);
         self.panes.borrow_mut().push(pane.clone());
         panes::split(at, &pane, side);

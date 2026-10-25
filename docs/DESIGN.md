@@ -738,17 +738,17 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A shell, a comparison and a remote vault's file cannot be reopened elsewhere, so they go back to their window with a toast; so does a tab let go outside every window.
 - **Move to New Window** on the tab menu is the same move into a window built for it, with no vault (Window without a vault); the Files tree's **Open in New Window** opens a file in such a window and leaves it open wherever else it is.
   Neither is offered where the move above is refused: on a shell, a comparison or anything of a remote vault's.
-- **Select tabs by use, not position:** each pane keeps its tabs in most-recently-selected order; `Ctrl+Tab` steps along it and `Ctrl+Shift+Tab` back, and closing a tab falls back to the most recently used one left.
-  Per pane, because a window-wide order would move the keyboard across a split.
-- While Ctrl is held each Tab steps one deeper without reordering, so three presses are three tabs back; the release commits the tab landed on, and a press past the end comes round.
-  A selection from anywhere else ends the chord, so a lost release never strands the pane.
-- **A chord held 200 ms lists the pane's tabs** on a card centred over that pane, VS Code's overlay: most recently used first, a file by its file-type icon, its name and its folder dimmed, as the file lists show it, a shell or a comparison by its tab's own icon and title, and the tab the release will land on highlighted.
+- **Select tabs by use, not position:** the window keeps its tabs, every pane's, in most-recently-selected order; `Ctrl+Tab` steps along it and `Ctrl+Shift+Tab` back, across the splits as VS Code's does across its editor groups (user decision 2026-10-25), and closing a tab falls back to the most recently used one left in its pane.
+- While Ctrl is held each Tab moves the highlight one deeper, so three presses are three tabs back, and a press past the end comes round.
+  Nothing behind the card changes until the release, which brings the tab landed on to the front of its pane with the keyboard, as VS Code's list does: stepping past a tab in another pane leaves that pane as it was.
+  The window losing focus ends the chord as the release does, so a lost release never strands it.
+- **A chord held 200 ms lists the window's tabs** on a card centred over the whole window, dimmed behind it as a dialog dims it (user decision 2026-10-25): most recently used first, a file by its file-type icon, its name and its folder dimmed, as the file lists show it, a shell or a comparison by its tab's own icon and title, and the tab the release will land on highlighted.
+  The pane a tab is in is named (`Pane 2`, the panes counted top to bottom, then left to right) only where two rows would otherwise read the same, as two shells of one title do.
   A quick flip to the last note never shows it.
-  Ten rows at most, fewer where the pane is shorter, scrolled to keep the highlighted one on the card.
-  The card takes no keyboard, so the chord's keys stay the window's over a shell too: a click on a row ends the chord there, and Escape ends it back on the tab it started from.
-  Over its pane, not the window, so a split's other panes stay clear; a `.navigation-sidebar` list, the palette's rows, on the popover's surface (`switcher.rs`).
-  The document behind the card dims; the tab bar and other panes stay clear.
-- **Under F5 the chord steps through the presented pane's tabs**, each presented as F5 presents it — a note rendered, a PDF or a diagram fitted to a page, a source file, an image or a shell as it is — with the card over the presented document; Escape takes the chord back and leaves presentation on (Dismiss).
+  Ten rows at most, fewer where the window is shorter, scrolled to keep the highlighted one on the card.
+  The card takes no keyboard, so the chord's keys stay the window's over a shell too: a click on a row ends the chord there, and Escape or a click beside the card ends it where it began.
+  A floating `AdwDialog`'s surface, corners and dimming, its shadow and edge from the shade and border variables, drawn by hand over a `.navigation-sidebar` list, the palette's rows (`switcher.rs`): a real dialog takes the keyboard, which the chord's release has to reach.
+- **Under F5 the chord lists the window's tabs too**, and the release presents the one it lands on as F5 presents it — a note rendered, a PDF or a diagram fitted to a page, a source file, an image or a shell as it is — its pane becoming the one presented; Escape takes the chord back and leaves presentation on (Dismiss).
 - **A tab opened by browsing is a preview** (VS Code's idiom): a click on a tree row, a search hit, a tag, a backlink, an outline heading or a Git changed file, and a wikilink followed.
   A pane holds at most one and the next such open replaces it, so clicking down a list leaves one tab, not twenty.
   What the reader named is kept: the palette, Open File…, a drop, a rename, the command line, the session.
@@ -1813,7 +1813,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 ### Tabs and panes
 
 - Next / Previous Tab `Ctrl+Tab` / `Ctrl+Shift+Tab`, `Ctrl+PageUp` / `Ctrl+PageDown`, `Alt+1` to `Alt+9`; Split Right `Ctrl+\`, the other three sides from the menus and the palette; Move Tab Left / Right `Shift+Alt+Left` / `Shift+Alt+Right`, Up and Down from the menus and the palette; Move Divider Left / Right / Up / Down from the palette, unbound.
-- The first pair walk the pane's tabs in most-recently-used order (Tabs); the rest stay `AdwTabView`'s, stepping along the bar and picking by number being what it means by them.
+- The first pair walk the window's tabs in most-recently-used order (Tabs); the rest stay `AdwTabView`'s, stepping along the bar and picking by number being what it means by them.
 - `AdwTabView` gives up the two Tab chords and both Home / End pairs, whose capture-phase bindings took GtkSourceView built-ins from the never-bind list.
   The chords it keeps — `Ctrl+PageUp` / `PageDown`, `Ctrl+Shift+PageUp` / `PageDown`, `Alt+0` to `Alt+9` — are listed in `panes::CHORDS`, so the rebind dialog refuses them by name rather than let a command shadow the bar.
 - Next and Previous Tab and the four Move Tab actions are in a shell's reserved set, as Close Tab is: a tab chord must mean the same over every tab.
@@ -1930,7 +1930,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 ## Motion
 
 - Switches crossfade and new pages fade in, over 150 ms, easing out (`widgets::FADE_MS`): the sidebar's panes, a tab picked in the pane the reader is in (a newly opened one too), a PDF's pages on their first open, or the spinner that took their place once the open had taken 160 ms, the PDF's "Cannot Open" page, and the card a held `Ctrl+Tab` shows; a toast slides into the pile and out of it, and the toasts slide out of the status bar's way in presentation mode, over the same 150 ms.
-  Nothing else fades in: not a reload (a LaTeX build rewrites its PDF every few seconds), a restore, a tab landing in another pane, the tabs a held `Ctrl+Tab` steps through, or a layout change (F9, a split, the preview).
+  Nothing else fades in: not a reload (a LaTeX build rewrites its PDF every few seconds), a restore, a tab landing in another pane, or a layout change (F9, a split, the preview).
   All of it is libadwaita's and GTK's own animation, so `gtk-enable-animations` off stops it.
   The other timings we own are debounces, which keep the main loop free.
 - The document follows the caret and nothing else: GTK keeps the insert mark on screen by itself (arrows, typing, find, Go to Line, a search hit, every extra caret), a wheel scroll away from the caret stays put, and a dialog opening and closing over it puts nothing back.

@@ -189,9 +189,9 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
         move |tabs| {
             if let Some(page) = tabs.selected_page() {
                 // A tab picked in the pane the reader is in fades in. Not one put back by a
-                // restore or landing in another pane, and not each one a held `Ctrl+Tab` steps
-                // through: that one is on screen from its step on.
-                if Rc::ptr_eq(&app.pane(), &pane) && !app.restoring() && !pane.stepping_to(&page) {
+                // restore or landing in another pane.
+                let active = Rc::ptr_eq(&app.pane(), &pane);
+                if active && !app.restoring() {
                     crate::widgets::fade_in(&page.child());
                 }
                 // The tab being left is still the front of the MRU order until `touch` runs, and
@@ -497,6 +497,20 @@ pub fn wire_window(app: &Rc<App>) {
         gesture.set_state(gtk::EventSequenceState::Claimed);
     });
     app.statusbar.widget().add_controller(quiet);
+
+    // The `Ctrl+Tab` card: a row clicked ends the chord there, a click beside it where it began.
+    let weak = Rc::downgrade(app);
+    app.switcher.connect_pick(move |at| {
+        if let Some(app) = weak.upgrade() {
+            app.pick_cycle(at);
+        }
+    });
+    let weak = Rc::downgrade(app);
+    app.switcher.connect_dismiss(move || {
+        if let Some(app) = weak.upgrade() {
+            app.cancel_cycle();
+        }
+    });
 
     // Stop / Resume beside the indexing readout. Both are round trips on a remote vault, whose
     // walk runs on the host, so neither is made on the main loop.

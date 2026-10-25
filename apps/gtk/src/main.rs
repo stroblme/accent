@@ -269,6 +269,14 @@ struct App {
     panes: RefCell<Vec<Rc<Pane>>>,
     /// The pane a note opens into and the one the find bar and the preview follow.
     active_pane: RefCell<Rc<Pane>>,
+    /// Every pane's tabs, the one selected most recently first, shared with the panes
+    /// (`Pane::touch`): `Ctrl+Tab` walks the window's, a close falls back on its pane's.
+    recent: Rc<RefCell<Vec<adw::TabPage>>>,
+    /// The order a held `Ctrl+Tab` walks, fixed at its first press, and how far it has walked;
+    /// `None` with no chord in flight.
+    cycle: RefCell<Option<(Vec<adw::TabPage>, usize)>>,
+    /// The card listing [`Self::cycle`] over the window while the chord is held.
+    switcher: switcher::Switcher,
     title: adw::WindowTitle,
     toasts: Rc<toasts::Toasts>,
     /// Toast count for drills checking that repeated events do not duplicate messages.

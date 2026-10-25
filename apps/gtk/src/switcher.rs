@@ -1,7 +1,8 @@
-//! Show the most recently used tabs while Ctrl+Tab is held (DESIGN.md, Tabs).
+//! Show the window's most recently used tabs while Ctrl+Tab is held (DESIGN.md, Tabs).
 //!
-//! The pane owns the order and cursor; the window supplies tab details. The switcher never
-//! takes focus, so Tab and Ctrl release still reach the window even from a shell.
+//! A card centred over the whole window, dimmed behind it as a dialog dims it. The window owns
+//! the order and cursor (`App::cycle_tab`) and supplies tab details. The switcher never takes
+//! focus, so Tab and Ctrl release still reach the window even from a shell.
 
 use crate::widgets::{self, Debounce};
 use adw::prelude::*;
@@ -20,6 +21,8 @@ pub struct Entry {
     pub icon: Option<gio::Icon>,
     pub name: String,
     pub folder: String,
+    /// The pane it is in, named only where another row would read the same.
+    pub pane: Option<String>,
 }
 
 pub struct Switcher {
@@ -32,15 +35,16 @@ pub struct Switcher {
 
 impl Switcher {
     pub fn new() -> Switcher {
+        // Takes the pointer, as a dialog's dimming does: a click beside the card ends the chord
+        // where it started (`connect_dismiss`) rather than reaching the window behind.
         let backdrop = gtk::Box::builder()
             .hexpand(true)
             .vexpand(true)
-            .can_target(false)
             .visible(false)
             .css_classes(["accent-switcher-backdrop"])
             .build();
-        // `.navigation-sidebar` is the palette's row; `.accent-switcher` the popover's surface,
-        // opaque over the document (`build::install_chrome_css`).
+        // `.navigation-sidebar` is the palette's row; `.accent-switcher` a floating dialog's
+        // surface (`build::install_chrome_css`).
         let list = gtk::ListBox::builder()
             .halign(gtk::Align::Center)
             .valign(gtk::Align::Center)
@@ -68,8 +72,7 @@ impl Switcher {
         self.backdrop.upcast_ref()
     }
 
-    /// Whether the card is up: its own visibility, which `show` and `hide` set, rather than
-    /// whether it is on screen, which its pane decides too.
+    /// Whether the card is up.
     pub fn shown(&self) -> bool {
         self.list.get_visible()
     }
@@ -79,7 +82,7 @@ impl Switcher {
         self.soon.call_once(show);
     }
 
-    /// List `entries` with the one at `at` highlighted, as many as the pane has room for.
+    /// List `entries` with the one at `at` highlighted, as many as the window has room for.
     pub fn show(&self, entries: &[Entry], at: usize) {
         let Some(probe) = entries.first() else {
             return self.hide();
@@ -112,6 +115,13 @@ impl Switcher {
         }
     }
 
+    /// Call `dismiss` on a click beside the card.
+    pub fn connect_dismiss(&self, dismiss: impl Fn() + 'static) {
+        let click = gtk::GestureClick::new();
+        click.connect_pressed(move |_, _, _, _| dismiss());
+        self.backdrop.add_controller(click);
+    }
+
     /// Call `pick` with the entry a click on the card chose.
     pub fn connect_pick(&self, pick: impl Fn(usize) + 'static) {
         let first = self.first.clone();
@@ -122,7 +132,7 @@ impl Switcher {
         });
     }
 
-    /// How many rows the pane's height holds, at most [`ROWS`]: measured, the theme deciding how
+    /// How many rows the window's height holds, at most [`ROWS`]: measured, the theme deciding how
     /// tall a row and the card around it are. One at least, the highlighted one.
     fn fit(&self, probe: &Entry) -> usize {
         let room = self.list.parent().map_or(0, |pane| pane.height());
@@ -131,12 +141,18 @@ impl Switcher {
         let (_, card, _, _) = self.list.measure(gtk::Orientation::Vertical, -1);
         let (_, step, _, _) = row.measure(gtk::Orientation::Vertical, -1);
         self.list.remove(&row);
-        // Not laid out yet, which only a pane that has never been drawn is.
+        // Not laid out yet, which only a window that has never been drawn is.
         if room <= 0 || step <= 0 {
             return ROWS;
         }
         let more = usize::try_from((room - card) / step).unwrap_or(0);
         (1 + more).min(ROWS)
+    }
+
+    /// Whether the window behind the card is dimmed.
+    #[cfg(feature = "bench")]
+    pub fn dimmed(&self) -> bool {
+        self.backdrop.is_visible()
     }
 
     /// The names on the card and which row is highlighted, for `ACCENT_BENCH_TABS=cycle:`.
@@ -190,9 +206,14 @@ fn row(entry: &Entry) -> gtk::ListBoxRow {
             .max_width_chars(40)
             .build(),
     );
+    let folder = match (&entry.pane, entry.folder.is_empty()) {
+        (Some(pane), true) => pane.clone(),
+        (Some(pane), false) => format!("{} · {pane}", entry.folder),
+        (None, _) => entry.folder.clone(),
+    };
     line.append(
         &gtk::Label::builder()
-            .label(&entry.folder)
+            .label(&folder)
             .xalign(0.0)
             .hexpand(true)
             .ellipsize(pango::EllipsizeMode::Middle)

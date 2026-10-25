@@ -77,7 +77,8 @@ pub fn build_window(
         true => vault_name.clone(),
         false => format!("{vault_name} ({host})"),
     };
-    let first = Pane::new(&tab_menu());
+    let recent = Rc::new(RefCell::new(Vec::new()));
+    let first = Pane::new(&tab_menu(), recent.clone());
     // Hidden until something goes wrong with a connection, which for a local vault is never.
     let connection = adw::Banner::builder().button_label("Reconnect").build();
     // Hidden until the vault's worker is gone (`Event::WorkerGone`): only a new one, which
@@ -263,12 +264,18 @@ pub fn build_window(
     // otherwise be a stripe of the window's background.
     split.add_css_class("accent-flat");
 
+    // The card a held `Ctrl+Tab` shows, over the whole window as a dialog is.
+    let switcher = crate::switcher::Switcher::new();
+    let overlay = gtk::Overlay::builder().child(&split).build();
+    overlay.add_overlay(switcher.backdrop());
+    overlay.add_overlay(switcher.widget());
+
     let window = adw::ApplicationWindow::builder()
         .application(gtk_app)
         .title(&window_title)
         .default_width(1100)
         .default_height(760)
-        .content(&split)
+        .content(&overlay)
         .build();
 
     let app = Rc::new(App {
@@ -280,6 +287,9 @@ pub fn build_window(
         window: window.clone(),
         panes: RefCell::new(vec![first.clone()]),
         active_pane: RefCell::new(first.clone()),
+        recent,
+        cycle: RefCell::new(None),
+        switcher,
         title,
         toasts,
         #[cfg(feature = "bench")]
@@ -1342,10 +1352,11 @@ fn install_chrome_css() {
              .accent-strip-button {{ min-width: 0; min-height: 0; padding: 2px; \
                border-radius: 4px; }} \
              box.linked.osd {{ border-radius: 6px; }} \
-             .accent-switcher-backdrop {{ background-color: rgba(0, 0, 0, 0.34); }} \
-             .accent-switcher {{ background-color: var(--popover-bg-color); \
-               color: var(--popover-fg-color); border-radius: 12px; \
-               box-shadow: 0 1px 4px var(--shade-color), 0 0 0 1px var(--shade-color); }} \
+             .accent-switcher-backdrop {{ \
+               background-color: rgb(from var(--shade-color) r g b / calc(alpha * 2)); }} \
+             .accent-switcher {{ background-color: var(--dialog-bg-color); \
+               color: var(--dialog-fg-color); border-radius: 15px; padding: 6px; \
+               box-shadow: 0 0 14px 2px var(--shade-color), 0 0 0 1px var(--border-color); }} \
              .accent-statusbar {{ padding: 6px 12px; }} \
              .accent-toasts toast {{ margin: 0; }} \
              .accent-floating {{ background-color: color-mix(in srgb, var(--window-bg-color) 85%, \
