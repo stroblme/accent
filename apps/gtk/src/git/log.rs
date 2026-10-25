@@ -6,10 +6,6 @@ use accent_api::git::Sides;
 /// The width of one graph lane, in px.
 const LANE: i32 = 12;
 
-/// How far a commit the remote has and HEAD does not is faded. Enough to read as "this is not
-/// here yet" beside a commit that is, and not so far that the summary stops being legible.
-const NOT_PULLED_DIM: f64 = 0.55;
-
 /// How many of a commit's decorations get a label of their own; the rest are a `+N`.
 const SHOWN_REFS: usize = 3;
 
@@ -569,12 +565,9 @@ fn bind_log(item: &gtk::ListItem, panel: &Weak<Panel>) {
         line.prepend(&not_pulled);
         not_pulled
     });
-    // The text alone, so the graph the drawing area beside it paints stays at full strength and a
-    // lane still joins the rows above and below.
-    text.set_opacity(match waiting {
-        true => NOT_PULLED_DIM,
-        false => 1.0,
-    });
+    // The text alone, dimmed as "not here yet", so the graph the drawing area beside it paints
+    // stays at full strength and a lane still joins the rows above and below.
+    crate::widgets::set_class(&text, "dimmed", waiting);
     stack.set_tooltip_text(Some(&match waiting {
         true => format!("Not pulled yet\n\n{}", commit_tooltip(&row)),
         false => commit_tooltip(&row),
