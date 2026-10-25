@@ -628,6 +628,11 @@ impl Debug {
             });
     }
 
+    /// Whether the strip shows a session's controls rather than Start Debugging.
+    pub(super) fn in_session(&self) -> bool {
+        self.controls.session.get_visible()
+    }
+
     /// No session: nothing of one is left on screen, and while the tab in front can be debugged
     /// (`debuggable`) the strip offers Start Debugging over the breakpoints.
     pub(super) fn set_idle(&self, debuggable: bool) {
@@ -749,6 +754,8 @@ fn strip() -> (gtk::Box, Caption, Controls) {
         .action_name("win.debug-start")
         .focus_on_click(false)
         .margin_start(6)
+        // At its own height, as the icon buttons are, rather than stretched to a taller row.
+        .valign(gtk::Align::Center)
         .build();
     start.add_css_class("suggested-action");
     let (strip, state) = strip_of(&[

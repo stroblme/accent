@@ -56,6 +56,9 @@ impl App {
         if self.vault().is_none() {
             return self.needs_vault("select a Python environment");
         }
+        if self.debugger.running() {
+            return self.toast("Select a Python environment once the debug session ends");
+        }
         let Some(button) = self.sidebar.get().and_then(|s| s.python_button()) else {
             return self.toast("Open a Python file or notebook to select its environment");
         };

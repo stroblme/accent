@@ -19,8 +19,7 @@ pub struct Data {
 /// A flat menu button naming the chosen interpreter, as the Git pane's branch is, over a popover
 /// listing the choices, asked for afresh each time it opens: a venv made since is found.
 pub(super) struct Picker {
-    /// The row it stands in, over the strips, hidden until one is up.
-    pub(super) row: gtk::Box,
+    /// Beside the strip's buttons, hidden until a strip is up and while a debug session runs.
     pub(super) button: gtk::MenuButton,
     name: gtk::Label,
 }
@@ -63,21 +62,16 @@ impl Picker {
         let menu = gtk::Popover::builder().child(&content).build();
         // Regular weight, as the branch popover's rows (`install_chrome_css`).
         menu.add_css_class("python-environments");
+        // Level with the strip's buttons, at its 6 px inset, the caption under them hanging free.
         let button = gtk::MenuButton::builder()
-            .hexpand(true)
-            .halign(gtk::Align::Start)
+            .valign(gtk::Align::Start)
+            .margin_start(6)
+            .margin_top(6)
+            .visible(false)
             .child(&face)
             .popover(&menu)
             .build();
         button.add_css_class("flat");
-        // At the strips' 6 px inset, which the strip under it keeps between the two.
-        let row = gtk::Box::builder()
-            .margin_start(6)
-            .margin_end(6)
-            .margin_top(6)
-            .visible(false)
-            .build();
-        row.append(&button);
 
         // Only the last opening's answer is shown: a slow probe must not land over a later list.
         let asked = Rc::new(Cell::new(0u32));
@@ -103,7 +97,7 @@ impl Picker {
                 }
             }));
         });
-        Picker { row, button, name }
+        Picker { button, name }
     }
 
     /// Name `command`, the vault's choice, on the button.
