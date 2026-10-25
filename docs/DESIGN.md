@@ -1440,6 +1440,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - The only three colour sources in code are `AdwStyleManager`'s accent, `Widget::color()` (the resolved foreground) and `StyleManager::is_dark()`; the comparison's hues below are the one place that bends.
   A rendered PDF page or a recoloured image cannot read a CSS variable, so `theme.rs` hands the PDF renderer, the image loader and the diagram canvas the paper and ink, and stays the only file that writes a colour down.
 - GTK CSS uses `var(--accent-bg-color)`, `var(--view-bg-color)`, `var(--window-fg-color)` and friends: never `@named_colors` (libadwaita replaced them with variables), never a literal hex.
+  A translucent colour is `color-mix(in srgb, <colour> N%, transparent)`, as libadwaita writes its own, never `alpha()`; dim text and glyphs take `.dimmed` or `var(--dim-opacity)`, not an opacity of ours.
 - Editor tag colours are all derived (`highlight::restyle`): `link`, `wikilink`, `tag` and `image` take the accent in its standalone form, the colour the platform writes its own links in; `marker`, `frontmatter` and `listmarker` take the foreground at alpha 0.4, `quote` and `taskdone` at 0.6, each held above 2.8:1 against the page — 1.8:1 on Solarized, whose prose is only 4.1:1, so a quote stays a step above a marker there; `code` and `codeblock` get a foreground background at 0.07.
   No other colour is set anywhere.
 - Three things depart from the single accent, each where one colour cannot carry the information:
