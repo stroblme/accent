@@ -1046,7 +1046,7 @@ fn references_body(
         .margin_top(6)
         .margin_bottom(6)
         .build();
-    empty.add_css_class("dim-label");
+    empty.add_css_class("dimmed");
     stack.add_named(&empty, Some("empty"));
     let list = path_list(model, crate::references::reference_icon, on_reference);
     stack.add_named(&scroller(&list), Some("list"));

@@ -17,7 +17,7 @@ impl Section {
         let title = gtk::Label::builder().label(title).xalign(0.0).build();
         title.add_css_class("heading");
         let count = gtk::Label::builder().visible(false).build();
-        count.add_css_class("dim-label");
+        count.add_css_class("dimmed");
         let header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         header.append(&title);
         header.append(&count);

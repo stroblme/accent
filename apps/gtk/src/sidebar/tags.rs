@@ -78,7 +78,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
             let name = gtk::Label::builder().xalign(0.0).hexpand(true).build();
             name.set_ellipsize(pango::EllipsizeMode::End);
             let count = gtk::Label::builder().xalign(1.0).build();
-            count.add_css_class("dim-label");
+            count.add_css_class("dimmed");
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
             row.append(&name);
             row.append(&count);

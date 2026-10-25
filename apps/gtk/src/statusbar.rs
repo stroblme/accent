@@ -432,7 +432,7 @@ fn bar_button(child: &impl IsA<gtk::Widget>, action: Option<&str>, tooltip: &str
 fn label(numeric: bool) -> gtk::Label {
     let label = gtk::Label::new(None);
     label.add_css_class("caption");
-    label.add_css_class("dim-label");
+    label.add_css_class("dimmed");
     if numeric {
         label.add_css_class("numeric");
     }

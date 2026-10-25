@@ -161,7 +161,7 @@ impl Rows {
             .hexpand(true)
             .ellipsize(pango::EllipsizeMode::End)
             .build();
-        detail.add_css_class("dim-label");
+        detail.add_css_class("dimmed");
         let button = icon_button("document-edit-symbolic", "Edit Breakpoint");
         // The keyboard stays where it is, so a press is never taken for leaving an editor.
         button.set_focus_on_click(false);

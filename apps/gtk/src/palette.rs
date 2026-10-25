@@ -368,7 +368,7 @@ fn accel_button(
     if clashes {
         button.add_css_class("error");
     } else if shown.is_some() {
-        keys.add_css_class("dim-label");
+        keys.add_css_class("dimmed");
     }
     button.connect_clicked({
         let (rebind, action) = (rebind.clone(), action.to_string());
@@ -417,7 +417,7 @@ fn row_factory(
                 .xalign(0.0)
                 .hexpand(true)
                 .ellipsize(pango::EllipsizeMode::Middle)
-                .css_classes(["dim-label"])
+                .css_classes(["dimmed"])
                 .build();
             let slot = gtk::Box::builder().valign(gtk::Align::Center).build();
             row.append(&gtk::Image::new());
@@ -473,7 +473,7 @@ fn row_factory(
                     slot.append(
                         &gtk::Label::builder()
                             .label(what)
-                            .css_classes(["dim-label"])
+                            .css_classes(["dimmed"])
                             .build(),
                     );
                 }

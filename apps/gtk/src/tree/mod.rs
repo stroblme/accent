@@ -118,7 +118,7 @@ impl Tree {
         rebind(&self.view);
     }
 
-    /// Dim pending Cut rows and restore the rest using the ignored-row `dim-label` style.
+    /// Dim pending Cut rows and restore the rest using the ignored-row `dimmed` style.
     ///
     /// Rebind as [`set_ignored`](Self::set_ignored) does; splicing would collapse expanded folders.
     pub fn set_cut(&self, cut: HashSet<String>) {
@@ -1043,7 +1043,7 @@ fn bind_row(
         || ignored.borrow().has(&item.rel)
         || cut.borrow().contains(&item.rel);
     for widget in [icon.upcast_ref::<gtk::Widget>(), label.upcast_ref()] {
-        set_class(widget, "dim-label", dim);
+        set_class(widget, "dimmed", dim);
     }
     // The name alone, as VS Code tints it: the icon is the kind of file, not its state.
     let change = changed.borrow().get(&item.rel).copied();

@@ -220,7 +220,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 **Files**
 
 - The vault's name sits above the tree as a plain label with a folder icon: it is what the listing is of, and a root drop zone that stays on screen however deep the tree is scrolled.
-- A folder's expander arrow is drawn at Adwaita's `dim-label` opacity (`--dim-opacity`), whatever the row's own dim (user decision 2026-10-19): the folder's icon and name say what the row is, the arrow only that it opens.
+- A folder's expander arrow is drawn at Adwaita's `dimmed` opacity (`--dim-opacity`), whatever the row's own dim (user decision 2026-10-19): the folder's icon and name say what the row is, the arrow only that it opens.
 - Every folder is listed, the ones the index does not walk included (`node_modules`, a `.venv`, a cargo `target/`): a listing that silently leaves a folder out cannot be trusted.
   Those rows are read off the disk one level per expansion, stay out of the index and every query, and are dimmed, search not reaching them.
 - A dependency tree (`node_modules`, a `.venv`, a marked `target/`, Lean's `.lake`, gigabytes with Mathlib and no marker file) lists and opens but is never changed — no menu, marking, drag or drop: it is somebody else's.
@@ -677,7 +677,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 ### Status bar
 
 - A `GtkBox` as the editor column's `AdwToolbarView` bottom bar, so presentation mode takes it with the header and a hover over its strip brings it back there (Keyboard, Views).
-  `.caption` `.dim-label`, 6 px padding, `accent-flat`.
+  `.caption` `.dimmed`, 6 px padding, `accent-flat`.
 - At the start, what the window is busy with ("Indexing… 1200/42700 files", "Opening the document…"); at the end, the file's facts (the Info pane's Details has the rest).
   A scan still counting has no total, so it says "Indexing… 12345 files found".
   A label with nothing to say hides.
@@ -1382,7 +1382,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 - The status bar's progress text; never a modal, never a blocked window.
 - A background query whose answer replaces a list gets a `GtkProgressBar` across the top of that list, faded rather than hidden so nothing shifts, and only after 160 ms: a bar that appears and goes in one breath reads as a flash.
-  Between queries its place says what the answer holds — "12 results in 3 files", `+` on a number the cap may have cut — in `.caption` `.dim-label`.
+  Between queries its place says what the answer holds — "12 results in 3 files", `+` on a number the cap may have cut — in `.caption` `.dimmed`.
 - **A bar belongs to the surface it is about to fill**, which allows one more: a remote vault's first connection, across the top of the document column and inset from its edges as the tab bar insets its tabs, since that wait makes the whole column usable and can take seconds.
   It measures the upload of the server binary and pulses through the rest; a local vault's window never shows it.
 - Elsewhere a 16 px `AdwSpinner` beside the control that started the work, unless that would move the layout: a sync's spinner takes the Sync button's place at its size, so the branch row keeps its width.

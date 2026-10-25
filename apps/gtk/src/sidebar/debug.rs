@@ -210,7 +210,7 @@ fn row_factory(tree: &Tree, unwatch: Unwatch) -> gtk::SignalListItemFactory {
                 .xalign(0.0)
                 .ellipsize(pango::EllipsizeMode::Start)
                 .build();
-            detail.add_css_class("dim-label");
+            detail.add_css_class("dimmed");
             let remove = icon_button("window-close-symbolic", "Remove Expression");
             remove.set_hexpand(true);
             remove.set_halign(gtk::Align::End);
@@ -342,7 +342,7 @@ fn draw(item: &Item, line: &gtk::Box, name: &gtk::Label, detail: &gtk::Label) {
     );
     detail.set_visible(said.is_some());
     detail.set_text(said.as_deref().unwrap_or_default());
-    crate::widgets::set_class(line, "dim-label", outside);
+    crate::widgets::set_class(line, "dimmed", outside);
     line.set_tooltip_text(tooltip.as_deref());
 }
 
@@ -359,7 +359,7 @@ fn body(list: &impl IsA<gtk::Widget>, empty: &str) -> (gtk::Stack, gtk::Label) {
         .margin_top(6)
         .margin_bottom(6)
         .build();
-    line.add_css_class("dim-label");
+    line.add_css_class("dimmed");
     stack.add_named(&line, Some("empty"));
     stack.add_named(&scroller(list), Some("list"));
     (stack, line)
@@ -820,7 +820,7 @@ impl Caption {
         // Not dimmed with the words: what is at work should catch the eye, as Sync's does.
         let spinner = adw::Spinner::builder().visible(false).build();
         line.add_css_class("caption");
-        line.add_css_class("dim-label");
+        line.add_css_class("dimmed");
         // Centred, as the switcher's icons are, and as tall as the spinner with it or without,
         // so the sections under it stay put as it comes and goes.
         let root = gtk::Box::builder()

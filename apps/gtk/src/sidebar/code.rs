@@ -175,7 +175,7 @@ impl Code {
         }
         if tactic.is_some_and(<[String]>::is_empty) {
             let done = gtk::Label::builder().label("No goals").xalign(0.0).build();
-            done.add_css_class("dim-label");
+            done.add_css_class("dimmed");
             self.goal_labels.append(&done);
         }
         self.goals.set_count(tactic.map(<[String]>::len));

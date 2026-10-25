@@ -143,7 +143,7 @@ impl List {
                     .xalign(0.0)
                     .max_width_chars(16)
                     .ellipsize(pango::EllipsizeMode::End)
-                    .css_classes(["dim-label"])
+                    .css_classes(["dimmed"])
                     .build();
                 let text = gtk::Label::builder()
                     .xalign(0.0)
@@ -179,7 +179,7 @@ impl List {
                     item.set_selectable(!heading);
                     row.set_margin_top(if heading { 12 } else { 0 });
                     text.set_css_classes(match heading {
-                        true => &["heading", "dim-label"],
+                        true => &["heading", "dimmed"],
                         false => &[],
                     });
                 }

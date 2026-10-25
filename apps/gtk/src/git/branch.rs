@@ -115,7 +115,7 @@ fn remote_heading() -> gtk::ListBoxRow {
         .margin_start(17)
         .margin_top(6)
         .build();
-    for class in ["heading", "dim-label"] {
+    for class in ["heading", "dimmed"] {
         label.add_css_class(class);
     }
     gtk::ListBoxRow::builder()

@@ -931,7 +931,7 @@ fn short(oid: &str) -> String {
 fn file_line() -> gtk::Box {
     let icon = gtk::Image::new();
     let letter = gtk::Label::builder().width_chars(1).build();
-    for class in ["dim-label", "numeric", "monospace"] {
+    for class in ["dimmed", "numeric", "monospace"] {
         letter.add_css_class(class);
     }
     let name = gtk::Label::builder()
@@ -959,7 +959,7 @@ fn dir_label() -> gtk::Label {
         .hexpand(true)
         .ellipsize(pango::EllipsizeMode::Start)
         .build();
-    dir.add_css_class("dim-label");
+    dir.add_css_class("dimmed");
     dir
 }
 
@@ -1068,7 +1068,7 @@ fn build_branch_row() -> BranchRow {
         .build();
     branch.add_css_class("flat");
     let counts = gtk::Label::new(None);
-    counts.add_css_class("dim-label");
+    counts.add_css_class("dimmed");
     counts.add_css_class("numeric");
     // One button, both halves, and the counts inside it, which is the pane's whole answer to
     // "is there anything to pull": a background fetch keeps them current, so `↓2` inside the
@@ -1176,7 +1176,7 @@ fn build_message_box() -> MessageBox {
         .margin_top(9)
         .can_target(false)
         .build();
-    placeholder.add_css_class("dim-label");
+    placeholder.add_css_class("dimmed");
     let overlay = gtk::Overlay::builder().child(&message_scroller).build();
     overlay.add_overlay(&placeholder);
     // Nothing but the message box now, kept as its own container so the whole thing is hidden

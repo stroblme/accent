@@ -51,7 +51,7 @@ pub(super) fn form_dialog(
 
 pub(super) fn field(form: &gtk::Box, name: &str, value: &str) -> gtk::Entry {
     let label = gtk::Label::builder().label(name).xalign(0.0).build();
-    label.add_css_class("dim-label");
+    label.add_css_class("dimmed");
     let entry = gtk::Entry::builder().text(value).hexpand(true).build();
     label.set_mnemonic_widget(Some(&entry));
     form.append(&label);

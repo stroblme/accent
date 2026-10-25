@@ -218,7 +218,7 @@ fn row(entry: &Entry) -> gtk::ListBoxRow {
             .hexpand(true)
             .ellipsize(pango::EllipsizeMode::Middle)
             .max_width_chars(40)
-            .css_classes(["dim-label"])
+            .css_classes(["dimmed"])
             .build(),
     );
     gtk::ListBoxRow::builder().child(&line).build()

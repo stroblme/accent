@@ -395,7 +395,7 @@ impl Outputs {
                 .xalign(0.0)
                 .selectable(true)
                 .build();
-            label.add_css_class("dim-label");
+            label.add_css_class("dimmed");
             self.put(&label);
         }
     }
@@ -437,7 +437,7 @@ impl Outputs {
             .xalign(0.0)
             .wrap(true)
             .build();
-        label.add_css_class("dim-label");
+        label.add_css_class("dimmed");
         self.put(&label);
     }
 

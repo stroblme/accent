@@ -163,7 +163,7 @@ impl Bar {
         for button in &toggles {
             toggle_group.append(button);
         }
-        let matches = gtk::Label::builder().css_classes(["dim-label"]).build();
+        let matches = gtk::Label::builder().css_classes(["dimmed"]).build();
         // Up and down, not back and forward: the matches are places in a document that scrolls
         // vertically, which is the axis every other find bar names here (DESIGN.md, Iconography).
         let previous = gtk::Button::builder()
@@ -207,7 +207,7 @@ impl Bar {
             .input_purpose(gtk::InputPurpose::FreeForm)
             .hexpand(true)
             .build();
-        let lines = gtk::Label::builder().css_classes(["dim-label"]).build();
+        let lines = gtk::Label::builder().css_classes(["dimmed"]).build();
         let goto_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         goto_row.append(&line);
         goto_row.append(&lines);

@@ -1243,7 +1243,7 @@ pub(super) fn bench_git_branch(app: &Rc<App>) {
         let entry = find_widget(&root, &|w| w.is::<gtk::Entry>()).and_downcast::<gtk::Entry>();
         let label = find_widget(&root, &|w| {
             w.downcast_ref::<gtk::Label>()
-                .is_some_and(|l| l.has_css_class("dim-label"))
+                .is_some_and(|l| l.has_css_class("dimmed"))
         })
         .and_downcast::<gtk::Label>();
         let (Some(entry), Some(label)) = (entry, label) else {

@@ -1221,7 +1221,7 @@ fn name_preview(
         .xalign(0.0)
         .ellipsize(gtk::pango::EllipsizeMode::Middle)
         .build();
-    preview.add_css_class("dim-label");
+    preview.add_css_class("dimmed");
     let show = {
         let preview = preview.clone();
         move |e: &gtk::Entry| preview.set_label(&dest(&e.text()).unwrap_or_default())

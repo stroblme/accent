@@ -102,7 +102,7 @@ impl PdfTab {
                 content.append(
                     &gtk::Label::builder()
                         .label(format!("Page {}", page + 1))
-                        .css_classes(["caption", "dim-label"])
+                        .css_classes(["caption", "dimmed"])
                         .xalign(0.0)
                         .build(),
                 );

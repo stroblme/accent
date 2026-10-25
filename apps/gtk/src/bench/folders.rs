@@ -298,7 +298,7 @@ pub(super) fn drawn_rows(view: &gtk::ListView) -> Vec<(String, bool)> {
             let dim = expander
                 .child()
                 .and_then(|row| row.last_child())
-                .is_some_and(|label| label.has_css_class("dim-label"));
+                .is_some_and(|label| label.has_css_class("dimmed"));
             Some((tree::decode(row.as_ref()?)?.rel, dim))
         })
         .collect();
@@ -1091,7 +1091,7 @@ async fn move_through(app: &Rc<App>, dir: &str) -> Option<String> {
     let form = dialog.extra_child()?;
     let entry = find_widget(&form, &|w| w.is::<gtk::Entry>()).and_downcast::<gtk::Entry>()?;
     let line = || {
-        find_widget(&form, &|w| w.has_css_class("dim-label"))
+        find_widget(&form, &|w| w.has_css_class("dimmed"))
             .and_downcast::<gtk::Label>()
             .map(|l| l.label().to_string())
     };

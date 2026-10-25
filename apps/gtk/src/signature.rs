@@ -188,7 +188,7 @@ fn show(editor: &dyn Editor, sig: &Signature) {
     code.set_markup(&markup(sig));
     content.append(&code);
     if let Some(doc) = sig.doc.as_deref().filter(|d| !d.is_empty()) {
-        // Dimmed the way the hover dims its own source line, rather than through `dim-label`:
+        // Dimmed the way the hover dims its own source line, rather than through `dimmed`:
         // the two say the same thing beside the same code and should not say it in two greys.
         let quiet = gtk::Label::builder()
             .use_markup(true)

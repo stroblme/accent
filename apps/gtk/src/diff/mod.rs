@@ -102,7 +102,7 @@ pub fn header(title: &str, trailing: Option<&gtk::Widget>) -> gtk::Box {
         .ellipsize(gtk::pango::EllipsizeMode::Middle)
         .build();
     label.add_css_class("heading");
-    label.add_css_class("dim-label");
+    label.add_css_class("dimmed");
     let row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(6)

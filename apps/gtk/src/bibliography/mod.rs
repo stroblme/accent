@@ -49,7 +49,7 @@ impl Entries {
                 row.set_margin_bottom(6);
                 let text = gtk::Box::new(gtk::Orientation::Vertical, 0);
                 text.set_hexpand(true);
-                for classes in [&["heading"][..], &["dim-label"], &["caption", "dim-label"]] {
+                for classes in [&["heading"][..], &["dimmed"], &["caption", "dimmed"]] {
                     let label = gtk::Label::builder()
                         .xalign(0.0)
                         .ellipsize(pango::EllipsizeMode::End)
@@ -165,7 +165,7 @@ impl Entries {
             .margin_end(12)
             .margin_bottom(6)
             .build();
-        message.set_css_classes(&["caption", "dim-label", "numeric"]);
+        message.set_css_classes(&["caption", "dimmed", "numeric"]);
         root.append(&message);
         let this = Rc::new(Self {
             root,

@@ -214,7 +214,7 @@ fn recent_section(
             .label("No matching vaults")
             .margin_top(12)
             .margin_bottom(12)
-            .css_classes(["dim-label"])
+            .css_classes(["dimmed"])
             .build(),
     ));
 

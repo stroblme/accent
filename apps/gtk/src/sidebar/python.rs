@@ -192,7 +192,7 @@ fn note(text: &str) -> gtk::Label {
         .max_width_chars(36)
         .build();
     label.add_css_class("caption");
-    label.add_css_class("dim-label");
+    label.add_css_class("dimmed");
     label
 }
 

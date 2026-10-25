@@ -397,7 +397,7 @@ impl Panel {
             .xalign(0.0)
             .ellipsize(pango::EllipsizeMode::Middle)
             .build();
-        named.add_css_class("dim-label");
+        named.add_css_class("dimmed");
         let form = gtk::Box::new(gtk::Orientation::Vertical, 12);
         form.append(&entry);
         form.append(&named);

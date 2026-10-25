@@ -1221,7 +1221,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
                 .hexpand(true)
                 .ellipsize(pango::EllipsizeMode::Start)
                 .build();
-            dir.add_css_class("dim-label");
+            dir.add_css_class("dimmed");
             let head = gtk::Box::new(gtk::Orientation::Horizontal, 6);
             head.append(&gtk::Image::new());
             head.append(&name);
@@ -1233,7 +1233,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
                 .lines(2)
                 .ellipsize(pango::EllipsizeMode::End)
                 .build();
-            snippet.add_css_class("dim-label");
+            snippet.add_css_class("dimmed");
             // `.navigation-sidebar` gives its rows horizontal padding only, so a two-line row sits on
             // the top and bottom edges of its own selection pill. 6 is the scale's inside-a-group step
             // (DESIGN.md, Spacing).
@@ -1272,7 +1272,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
                 item.set_activatable(!heading);
                 item.set_selectable(!heading);
                 name.set_css_classes(match heading {
-                    true => &["heading", "dim-label"],
+                    true => &["heading", "dimmed"],
                     false => &["heading"],
                 });
                 // A tail row has no name, and no icon either: it continues the file above it.
@@ -1362,7 +1362,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
         .margin_end(12)
         .ellipsize(pango::EllipsizeMode::End)
         .build();
-    for class in ["caption", "dim-label", "numeric"] {
+    for class in ["caption", "dimmed", "numeric"] {
         count.add_css_class(class);
     }
     let slot = gtk::Stack::new();

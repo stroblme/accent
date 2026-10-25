@@ -362,7 +362,7 @@ fn commit_layout(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Box {
         .xalign(0.0)
         .ellipsize(pango::EllipsizeMode::End)
         .build();
-    for class in ["caption", "dim-label"] {
+    for class in ["caption", "dimmed"] {
         meta.add_css_class(class);
     }
 
@@ -402,7 +402,7 @@ fn refs_layout() -> gtk::Box {
 /// do not" in both places. Leading, where a dirty tab and the status bar put their dot.
 fn not_pulled_layout() -> gtk::Label {
     let not_pulled = gtk::Label::new(Some("↓"));
-    for class in ["caption", "dim-label", "numeric"] {
+    for class in ["caption", "dimmed", "numeric"] {
         not_pulled.add_css_class(class);
     }
     not_pulled
@@ -435,7 +435,7 @@ fn more_layout() -> gtk::Label {
         .margin_top(6)
         .margin_bottom(6)
         .build();
-    for class in ["caption", "dim-label"] {
+    for class in ["caption", "dimmed"] {
         more.add_css_class(class);
     }
     more
@@ -606,7 +606,7 @@ fn bind_refs(labels: &gtk::Box, refs: &[git::Ref]) {
             ),
             Some(_) => (
                 format!("+{}", refs.len() - SHOWN_REFS),
-                &["caption", "dim-label"],
+                &["caption", "dimmed"],
             ),
             None => (String::new(), &[]),
         };

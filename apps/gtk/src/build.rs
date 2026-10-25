@@ -1259,7 +1259,7 @@ thread_local! {
 // The Files tree's rows hand their padding to the expander inside, as libadwaita's own `sidebar`
 // rows do to their box, so the mark a Ctrl+click or a Shift+click puts on the expander has the
 // row's shape: it used to sit inside the grey of the open file's row, a pill within a pill.
-// Its arrow is drawn at Adwaita's `dim-label` opacity: the folder's icon and name say what the
+// Its arrow is drawn at Adwaita's `dimmed` opacity: the folder's icon and name say what the
 // row is, the arrow only that it opens (user decision 2026-10-19).
 //
 // The hover's popover takes the view's font, which libadwaita resets on a popover, as the text it

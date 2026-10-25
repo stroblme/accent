@@ -224,7 +224,7 @@ fn card(comments: &[pdf::Comment], pinned: bool) -> gtk::Widget {
             one.append(
                 &gtk::Label::builder()
                     .label(author)
-                    .css_classes(["caption", "dim-label"])
+                    .css_classes(["caption", "dimmed"])
                     .xalign(0.0)
                     .build(),
             );

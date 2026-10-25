@@ -227,7 +227,7 @@ impl Tab {
                     .label("(Result)")
                     .xalign(0.0)
                     .hexpand(true)
-                    .css_classes(["heading", "dim-label"])
+                    .css_classes(["heading", "dimmed"])
                     .build();
                 name.set_hexpand(false);
                 header.insert_child_after(&result, Some(&name));

@@ -58,7 +58,7 @@ impl Details {
                 .margin_top(if i == 0 { 0 } else { 12 })
                 .build();
             heading.add_css_class("heading");
-            heading.add_css_class("dim-label");
+            heading.add_css_class("dimmed");
             self.grid.attach(&heading, 0, row, 2, 1);
             row += 1;
             for fact in &group.facts {
@@ -67,7 +67,7 @@ impl Details {
                     .xalign(0.0)
                     .valign(gtk::Align::Start)
                     .build();
-                name.add_css_class("dim-label");
+                name.add_css_class("dimmed");
                 // Selectable, so a size or a title can be copied out.
                 let value = gtk::Label::builder()
                     .label(&fact.value)
