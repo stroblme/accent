@@ -177,6 +177,22 @@ pub fn run(app: &Rc<App>) {
         glib::timeout_future(Duration::from_millis(350)).await;
         // Long paths must not become the sidebar's minimum width.
         assert!(panel.chooser.measure(gtk::Orientation::Horizontal, -1).0 < 280);
+        // The file chooser's search filters its list by path.
+        panel.chooser.emit_by_name::<()>("activate", &[]);
+        glib::timeout_future(Duration::from_millis(200)).await;
+        let chooser = panel.chooser.clone().upcast::<gtk::Widget>();
+        let files = descendant::<gtk::ListView>(&chooser, |_| true).unwrap();
+        let all = files.model().unwrap().n_items();
+        assert!(all >= 3, "three bibliographies listed, got {all}");
+        let find = descendant::<gtk::SearchEntry>(&chooser, |_| true).unwrap();
+        find.set_text("copied");
+        glib::timeout_future(Duration::from_millis(400)).await;
+        let found = files.model().unwrap().n_items();
+        find.set_text("");
+        descendant::<gtk::Popover>(&chooser, |_| true)
+            .unwrap()
+            .popdown();
+        assert_eq!(found, 1, "searching the chooser narrows its list");
         let remove = descendant::<gtk::Button>(&panel.entries.view.clone().upcast(), |b| {
             b.tooltip_text().as_deref() == Some("Remove Reference")
         })
@@ -218,7 +234,7 @@ pub fn run(app: &Rc<App>) {
             "/tmp/accent-bibliography-narrow.png",
         );
         println!(
-            "bench bibliography row_delete=true source_only=true source_preserved=true undo=true sidebar_unchanged=true copy=true move=true stale_review_refused=true"
+            "bench bibliography row_delete=true source_only=true source_preserved=true undo=true sidebar_unchanged=true copy=true move=true stale_review_refused=true chooser_search=true"
         );
         app.window.application().unwrap().quit();
     });

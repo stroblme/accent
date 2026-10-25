@@ -286,6 +286,14 @@ impl Panel {
             .model(&files)
             .hexpand(true)
             .enable_search(true)
+            // The search filters by this expression and does nothing without one; any part of
+            // the path matches, its folders coming before the name.
+            .expression(gtk::PropertyExpression::new(
+                gtk::StringObject::static_type(),
+                None::<&gtk::Expression>,
+                "string",
+            ))
+            .search_match_mode(gtk::StringFilterMatchMode::Substring)
             .tooltip_text("Bibliography File")
             .factory(&crate::widgets::label_factory(
                 pango::EllipsizeMode::End,
