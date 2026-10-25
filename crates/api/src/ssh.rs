@@ -541,10 +541,16 @@ pub fn put_cmd(path: &str, size: u64, replace: bool) -> String {
 /// checked against the file's etag once every byte is there, not before the first is sent. The
 /// name is claimed with `set -C`, so a file already holding it is never written to or removed;
 /// a staged file cut short is removed, and a whole one left for the commit.
+///
+/// First it sweeps the folder of staged files a commit never reached (the link lost between the
+/// two): our own regular files only, links not followed, and only once an hour old, as no stage
+/// in flight is, `cat` writing it as the bytes arrive and the commit following at once.
 pub fn stage_cmd(path: &str, staged: &str, size: u64) -> String {
     let (path, staged) = (quote(path), quote(staged));
     format!(
         "p=$(readlink -f -- {path}) || p={path}; t=\"${{p%/*}}\"/{staged}; \
+         find \"${{p%/*}}\" -maxdepth 1 -name '.accent-up-*' -type f -user \"$(id -u)\" -mmin +60 \
+         -exec rm -f {{}} + 2>/dev/null; \
          (set -C; : > \"$t\") 2>/dev/null || {{ echo \"cannot write in ${{p%/*}}\" >&2; exit 1; }}; \
          trap 'rm -f \"$t\"' EXIT; trap 'exit 1' HUP INT TERM; \
          cat > \"$t\" || exit 1; \
@@ -1417,6 +1423,46 @@ mod tests {
         std::fs::remove_file(&theirs).unwrap();
         assert!(!stage(".accent-up-d", mine, mine.len() + 1, &|| ()));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    /// A stage first sweeps the staged uploads left in its folder by a commit that never came,
+    /// once they are an hour old: a fresh one, another window's in flight, stays, as does a link
+    /// named like one.
+    #[test]
+    fn a_stage_sweeps_stale_staged_uploads_beside_it() {
+        use std::process::Command;
+        let dir = tempfile::tempdir().unwrap();
+        let at = |name: &str| dir.path().join(name);
+        let hours_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+        for name in [".accent-up-old", ".accent-up-new", "keep.pdf"] {
+            std::fs::write(at(name), "x").unwrap();
+        }
+        for name in [".accent-up-old", "keep.pdf"] {
+            let file = std::fs::File::options().write(true).open(at(name)).unwrap();
+            file.set_modified(hours_ago).unwrap();
+        }
+        std::os::unix::fs::symlink(at("keep.pdf"), at(".accent-up-link")).unwrap();
+        let staged = Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "printf x | {{ {}; }}",
+                stage_cmd(&at("a.pdf").to_string_lossy(), ".accent-up-mine", 1)
+            ))
+            .status()
+            .unwrap();
+        assert!(staged.success());
+        let mut left: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        let kept = [
+            ".accent-up-link",
+            ".accent-up-mine",
+            ".accent-up-new",
+            "keep.pdf",
+        ];
+        assert_eq!(left, kept);
     }
 
     #[test]

@@ -183,7 +183,12 @@ fn a_remote_vault_connects_indexes_and_answers() {
     );
 
     // A write-back edited on the host while its bytes are on their way: the edit stays, and the
-    // window's bytes land beside it as the conflict copy rather than over it.
+    // window's bytes land beside it as the conflict copy rather than over it. Its stage sweeps
+    // away a staged upload whose commit never came, left there two hours ago.
+    on_host(
+        &url,
+        &format!("touch -d '2 hours ago' {p}/.accent-up-stale"),
+    );
     on_host(
         &url,
         &format!("head -c 16777216 /dev/urandom > {p}/race.pdf"),
@@ -194,7 +199,13 @@ fn a_remote_vault_connects_indexes_and_answers() {
     let pushed = std::thread::scope(|s| {
         let push = s.spawn(|| remote.push("race.pdf"));
         let t = Instant::now();
-        while !on_host(&url, &format!("ls -A {p}")).contains(".accent-up-") {
+        let staged = || {
+            let names = on_host(&url, &format!("ls -A {p}"));
+            names
+                .lines()
+                .any(|name| name.starts_with(".accent-up-") && name != ".accent-up-stale")
+        };
+        while !staged() {
             assert!(
                 !push.is_finished() && t.elapsed() < BUDGET,
                 "the write-back was never seen staged"
