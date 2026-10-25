@@ -254,6 +254,65 @@ pub(crate) fn reveal_on_hover(row: &impl IsA<gtk::Widget>) {
     row.connect_state_flags_changed(move |row, _| update(row));
 }
 
+/// The marker class on a list row that already opens a [`row_menu`].
+const MENU_ROW: &str = "accent-menu-row";
+
+/// Open a menu for a list row on a right-click, or on Menu or Shift+F10 while the row has the
+/// keyboard. `build` gets the row's child and answers the menu and the widget it hangs from, whose
+/// actions it resolves: a plain box, which GTK re-presents the menu from (States). Call it on the
+/// GTK list row, once it is there (bound, as for [`reveal_on_hover`]); a recycled row keeps the
+/// first `build`, which serves whatever it shows.
+pub(crate) fn row_menu(
+    row: &impl IsA<gtk::Widget>,
+    build: impl Fn(&gtk::Widget) -> Option<(gtk::Widget, gio::Menu)> + 'static,
+) {
+    let row = row.upcast_ref::<gtk::Widget>();
+    if row.has_css_class(MENU_ROW) {
+        return;
+    }
+    row.add_css_class(MENU_ROW);
+    let open = Rc::new(move |row: &gtk::Widget, at: Option<(f64, f64)>| {
+        let Some((host, menu)) = row.first_child().and_then(|child| build(&child)) else {
+            return;
+        };
+        // At the pointer, or under the whole row for the keyboard.
+        let anchor = match at.and_then(|(x, y)| {
+            row.compute_point(&host, &gtk::graphene::Point::new(x as f32, y as f32))
+        }) {
+            Some(p) => gdk::Rectangle::new(p.x() as i32, p.y() as i32, 1, 1),
+            None => gdk::Rectangle::new(0, 0, host.width(), host.height()),
+        };
+        popup_menu(&host, &menu, Some(anchor));
+    });
+    let click = gtk::GestureClick::builder()
+        .button(gdk::BUTTON_SECONDARY)
+        .propagation_phase(gtk::PropagationPhase::Capture)
+        .build();
+    let on_click = open.clone();
+    click.connect_pressed(move |gesture, _, x, y| {
+        // Claimed, so the list neither activates nor selects on the right button.
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        if let Some(row) = gesture.widget() {
+            on_click(&row, Some((x, y)));
+        }
+    });
+    row.add_controller(click);
+    let keys = gtk::EventControllerKey::new();
+    keys.connect_key_pressed(move |keys, key, _, state| {
+        use gdk::ModifierType as M;
+        let mods = state & (M::CONTROL_MASK | M::SHIFT_MASK | M::ALT_MASK | M::SUPER_MASK);
+        let shift = mods == M::SHIFT_MASK;
+        if key == gdk::Key::Menu || (key == gdk::Key::F10 && shift) {
+            if let Some(row) = keys.widget() {
+                open(&row, None);
+            }
+            return glib::Propagation::Stop;
+        }
+        glib::Propagation::Proceed
+    });
+    row.add_controller(keys);
+}
+
 /// The menu buttons under `revealer`.
 fn menus(revealer: &gtk::Revealer) -> Vec<gtk::MenuButton> {
     let mut found = Vec::new();

@@ -417,9 +417,14 @@ fn bind_change(item: &gtk::ListItem, weak: &Weak<Panel>) {
     // manager handing GTK null children, a `gtk_widget_insert_after: assertion 'GTK_IS_WIDGET'`
     // per row. An idle is past the manager's pass and costs one closure per bind.
     let list_row = stack.parent();
+    let (menu_item, menu_panel) = (item.downgrade(), weak.clone());
     glib::idle_add_local_once(move || {
         if let Some(list_row) = list_row {
             reveal_on_hover(&list_row);
+            // The list item is this row's for good, whatever it is bound to next.
+            crate::widgets::row_menu(&list_row, move |stack| {
+                change_menu(stack, &menu_item.upgrade()?, &menu_panel)
+            });
         }
     });
     // A header only titles its section and activating it does nothing, so it takes no hover
@@ -528,46 +533,101 @@ fn bind_change(item: &gtk::ListItem, weak: &Weak<Panel>) {
     }
 }
 
-/// Which of a row's [`actions()`] it shows: on a folder, none in Merge Conflicts, for the reason its
-/// header has no Stage All — a conflict is resolved one file at a time; on a file, none for a
-/// repository of its own; on a submodule none at all.
+/// Which of a row's [`actions()`] it shows ([`offered`]).
 fn fit(buttons: &gtk::Box, row: &Row) {
-    match row {
+    let offered = offered(row);
+    buttons.set_visible(offered.is_some());
+    let (Some(stage), Some(discard)) = (buttons.first_child(), buttons.last_child()) else {
+        return;
+    };
+    if let (Some(unstage), Some(on)) = (stage.next_sibling(), offered) {
+        stage.set_visible(on[0]);
+        unstage.set_visible(on[1]);
+        discard.set_visible(on[2]);
+    }
+}
+
+/// Which of Stage, Unstage and Discard a row offers, or `None` for no buttons at all: on a
+/// folder, none in Merge Conflicts, for the reason its header has no Stage All — a conflict is
+/// resolved one file at a time; on a file, none for a repository of its own; on a submodule none.
+/// Staging a conflicted file is how git is told it is resolved, so Stage is there for it too;
+/// unstaging one is not a thing the pane offers. Discard is for the working tree alone, and only
+/// where everything the row stands for can go ([`discardable`]).
+fn offered(row: &Row) -> Option<[bool; 3]> {
+    let (section, discardable) = match row {
         Row::Folder {
             section,
             discardable,
             ..
-        } => {
-            buttons.set_visible(*section != Section::Conflicts);
-            offer(buttons, *section, *discardable);
-        }
+        } if *section != Section::Conflicts => (*section, *discardable),
         Row::Entry {
             entry,
             section,
             key,
             ..
-        } => {
-            buttons.set_visible(!own_repository(&entry.path));
-            offer(buttons, *section, discardable(entry, key));
-        }
-        _ => buttons.set_visible(false),
-    }
+        } if !own_repository(&entry.path) => (*section, discardable(entry, key)),
+        _ => return None,
+    };
+    Some([
+        section != Section::Staged,
+        section == Section::Staged,
+        section == Section::Changes && discardable,
+    ])
 }
 
-/// Which of the [`actions()`] a file or folder row offers in `section`. Staging a conflicted file
-/// is how git is told it is resolved, so Stage is there for it too; unstaging one is not a thing
-/// the pane offers. Discard is for the working tree alone, and only where everything the row
-/// stands for can go ([`discardable`]).
-fn offer(actions: &gtk::Box, section: Section, discardable: bool) {
-    let Some(stage) = actions.first_child() else {
-        return;
-    };
-    let (unstage, discard) = (stage.next_sibling(), actions.last_child());
-    stage.set_visible(section != Section::Staged);
-    if let (Some(unstage), Some(discard)) = (unstage, discard) {
-        unstage.set_visible(section == Section::Staged);
-        discard.set_visible(section == Section::Changes && discardable);
+/// A file or folder row's right-click menu: Open, which a click on a file does, then the row's
+/// buttons, through a `change` action group put on the layout the row's stack shows, which the
+/// menu hangs from.
+fn change_menu(
+    stack: &gtk::Widget,
+    item: &gtk::ListItem,
+    panel: &Weak<Panel>,
+) -> Option<(gtk::Widget, gio::Menu)> {
+    let row = boxed::<Row>(item.item())?;
+    let host = stack
+        .clone()
+        .downcast::<gtk::Stack>()
+        .ok()?
+        .visible_child()?;
+    let on = offered(&row).unwrap_or_default();
+    let file = matches!(row, Row::Entry { .. });
+    let group = gio::SimpleActionGroup::new();
+    let menu = gio::Menu::new();
+    let mut section = gio::Menu::new();
+    for (label, name, shown, act) in [
+        ("Open", "open", file, None),
+        ("Stage", "stage", on[0], Some(Act::Stage)),
+        ("Unstage", "unstage", on[1], Some(Act::Unstage)),
+        ("Discard", "discard", on[2], Some(Act::Discard)),
+    ] {
+        if act.is_some() && name == "stage" && section.n_items() > 0 {
+            menu.append_section(None, &section);
+            section = gio::Menu::new();
+        }
+        if !shown {
+            continue;
+        }
+        let action = gio::SimpleAction::new(name, None);
+        let (row, panel) = (row.clone(), panel.clone());
+        action.connect_activate(move |_, _| {
+            if let Some(panel) = panel.upgrade() {
+                match act {
+                    Some(act) => panel.act(act, row.clone()),
+                    None => panel.activate(&row),
+                }
+            }
+        });
+        group.add_action(&action);
+        section.append(Some(label), Some(&format!("change.{name}")));
     }
+    if section.n_items() > 0 {
+        menu.append_section(None, &section);
+    }
+    if menu.n_items() == 0 {
+        return None;
+    }
+    host.insert_action_group("change", Some(&group));
+    Some((host, menu))
 }
 
 /// Whether Discard can restore `entry`. Untracked files outside the vault are unsupported

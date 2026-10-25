@@ -102,6 +102,10 @@ impl Entries {
                 glib::idle_add_local_once(move || {
                     if let Some(row) = list_row {
                         crate::widgets::reveal_on_hover(&row);
+                        // The More button's menu, whose `row` actions the row's box holds.
+                        crate::widgets::row_menu(&row, |child| {
+                            Some((child.clone(), menu(&ROW_ACTIONS, "row.")))
+                        });
                     }
                 });
                 let Some(value) = item.item().and_downcast::<glib::BoxedAnyObject>() else {
@@ -562,8 +566,8 @@ const ROW_ACTIONS: [&[(&str, &str)]; 4] = [
         ("Move to Bibliography…", "move"),
     ],
 ];
-/// A flat More button over `sections`, each item activating the action `prefix` + its name.
-fn menu_button(sections: &[&[(&str, &str)]], prefix: &str, tooltip: &str) -> gtk::MenuButton {
+/// A menu of `sections`, each item activating the action `prefix` + its name.
+fn menu(sections: &[&[(&str, &str)]], prefix: &str) -> gio::Menu {
     let menu = gio::Menu::new();
     for items in sections {
         let section = gio::Menu::new();
@@ -572,10 +576,14 @@ fn menu_button(sections: &[&[(&str, &str)]], prefix: &str, tooltip: &str) -> gtk
         }
         menu.append_section(None, &section);
     }
+    menu
+}
+/// A flat More button over [`menu`]`(sections, prefix)`.
+fn menu_button(sections: &[&[(&str, &str)]], prefix: &str, tooltip: &str) -> gtk::MenuButton {
     let button = gtk::MenuButton::builder()
         .icon_name("view-more-symbolic")
         .tooltip_text(tooltip)
-        .menu_model(&menu)
+        .menu_model(&menu(sections, prefix))
         .valign(gtk::Align::Center)
         .build();
     button.add_css_class("flat");
