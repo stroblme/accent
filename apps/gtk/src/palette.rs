@@ -205,6 +205,12 @@ fn rank(
     hits
 }
 
+/// Whether an Open Recent query names an opener, which then leads the vaults instead of
+/// following them.
+fn names_opener(query: &str, label: &str) -> bool {
+    !query.trim().is_empty() && !rank(&[label], &[], query, Corpus::Words).is_empty()
+}
+
 /// Rank declarations by name with Go to File's matcher, the index's order (a test's last, then
 /// the shorter name) breaking ties. `Type::name` and `Type.name` keep to a type's declarations,
 /// case aside, and rank by the member's name.
@@ -768,100 +774,103 @@ pub fn present(
             };
             empty.set_title(title);
             empty.set_description(Some(body));
-            let hits: Vec<Rc<Item>> =
-                match mode {
-                    // No corpus and no matching until the user actually types: the dialog is up in the
-                    // time one indexed query takes, not the 11 s a full vault walk took.
-                    Mode::Files if empty_query => {
-                        let ignored = &files.borrow().ignored;
-                        recent
+            let hits: Vec<Rc<Item>> = match mode {
+                // No corpus and no matching until the user actually types: the dialog is up in the
+                // time one indexed query takes, not the 11 s a full vault walk took.
+                Mode::Files if empty_query => {
+                    let ignored = &files.borrow().ignored;
+                    recent
+                        .iter()
+                        .take(MAX_RESULTS)
+                        .map(|rel| file_item(ignored, rel))
+                        .collect()
+                }
+                Mode::Files => {
+                    let files = files.borrow();
+                    let mut typed = typed.borrow_mut();
+                    let (paths, real, named, used) = &*typed.get_or_insert_with(|| {
+                        let (mut paths, real) = with_history(&files.paths, files.real, &mru);
+                        // Behind the paths, so a file leads an alias at the same score.
+                        let named = paths.len();
+                        if !files.aliases.is_empty() {
+                            let mut all = (*paths).clone();
+                            all.extend(files.aliases.iter().map(|(name, _)| name.clone()));
+                            paths = Rc::new(all);
+                        }
+                        let used = places(&paths, &mru);
+                        (paths, real, named, used)
+                    });
+                    let (real, named) = (*real, *named);
+                    rank(paths, used, query, Corpus::Paths)
+                        .into_iter()
+                        .map(|i| match i {
+                            i if i < real => file_item(&files.ignored, &paths[i]),
+                            i if i < named => Rc::new(Item::Missing(paths[i].clone())),
+                            i => Rc::new(Item::Alias {
+                                name: paths[i].clone(),
+                                rel: files.aliases[i - named].1.clone(),
+                            }),
+                        })
+                        .collect()
+                }
+                // Labels and tags are not paths, so they score better under the plain config.
+                Mode::Commands => rank(&command_text, &command_recent, query, Corpus::Words)
+                    .into_iter()
+                    .map(|i| commands.borrow()[i].clone())
+                    .collect(),
+                Mode::Tags => rank(&tags, &[], query, Corpus::Words)
+                    .into_iter()
+                    .map(|i| Rc::new(Item::Tag(tags[i].clone())))
+                    .collect(),
+                // Read the first time `@` is typed in the window, off the main loop and on the
+                // host for a remote vault: the refill that hands it over ranks the query typed
+                // by then.
+                Mode::Symbols => {
+                    let held = files.borrow().symbols.clone();
+                    match held {
+                        Some(symbols) if !empty_query => rank_symbols(&symbols, query),
+                        Some(_) => Vec::new(),
+                        None => {
+                            on_symbols();
+                            if !empty_query {
+                                return;
+                            }
+                            Vec::new()
+                        }
+                    }
+                }
+                // The two ways of opening a vault that is *not* in the list end the rows, and are
+                // never filtered out: one surface reaches every way of changing vault, and the
+                // picker is never the empty status page even in a window on the only vault known.
+                // One the query names leads instead, so Enter on "remote" opens it.
+                Mode::Vaults => {
+                    let vaults = vaults.borrow();
+                    // Read on every refresh rather than captured, so a rebind made from one of
+                    // these rows redraws with the accelerator it was just given.
+                    let (mut hits, rest): (Vec<Rc<Item>>, Vec<Rc<Item>>) = OPENERS
+                        .iter()
+                        .filter_map(|action| {
+                            commands.borrow().iter().find(|c| {
+                                    matches!(&***c, Item::Command { action: a, .. } if a == action)
+                                }).cloned()
+                        })
+                        .partition(|c| names_opener(query, c.text()));
+                    hits.extend(if empty_query {
+                        vaults
                             .iter()
                             .take(MAX_RESULTS)
-                            .map(|rel| file_item(ignored, rel))
-                            .collect()
-                    }
-                    Mode::Files => {
-                        let files = files.borrow();
-                        let mut typed = typed.borrow_mut();
-                        let (paths, real, named, used) = &*typed.get_or_insert_with(|| {
-                            let (mut paths, real) = with_history(&files.paths, files.real, &mru);
-                            // Behind the paths, so a file leads an alias at the same score.
-                            let named = paths.len();
-                            if !files.aliases.is_empty() {
-                                let mut all = (*paths).clone();
-                                all.extend(files.aliases.iter().map(|(name, _)| name.clone()));
-                                paths = Rc::new(all);
-                            }
-                            let used = places(&paths, &mru);
-                            (paths, real, named, used)
-                        });
-                        let (real, named) = (*real, *named);
-                        rank(paths, used, query, Corpus::Paths)
+                            .map(|key| Rc::new(Item::Vault(key.clone())))
+                            .collect::<Vec<_>>()
+                    } else {
+                        rank(&vaults, &vault_places.borrow(), query, Corpus::Paths)
                             .into_iter()
-                            .map(|i| match i {
-                                i if i < real => file_item(&files.ignored, &paths[i]),
-                                i if i < named => Rc::new(Item::Missing(paths[i].clone())),
-                                i => Rc::new(Item::Alias {
-                                    name: paths[i].clone(),
-                                    rel: files.aliases[i - named].1.clone(),
-                                }),
-                            })
-                            .collect()
-                    }
-                    // Labels and tags are not paths, so they score better under the plain config.
-                    Mode::Commands => rank(&command_text, &command_recent, query, Corpus::Words)
-                        .into_iter()
-                        .map(|i| commands.borrow()[i].clone())
-                        .collect(),
-                    Mode::Tags => rank(&tags, &[], query, Corpus::Words)
-                        .into_iter()
-                        .map(|i| Rc::new(Item::Tag(tags[i].clone())))
-                        .collect(),
-                    // Read the first time `@` is typed in the window, off the main loop and on the
-                    // host for a remote vault: the refill that hands it over ranks the query typed
-                    // by then.
-                    Mode::Symbols => {
-                        let held = files.borrow().symbols.clone();
-                        match held {
-                            Some(symbols) if !empty_query => rank_symbols(&symbols, query),
-                            Some(_) => Vec::new(),
-                            None => {
-                                on_symbols();
-                                if !empty_query {
-                                    return;
-                                }
-                                Vec::new()
-                            }
-                        }
-                    }
-                    // The two ways of opening a vault that is *not* in the list end the rows, and are
-                    // never filtered out: one surface reaches every way of changing vault, and the
-                    // picker is never the empty status page even in a window on the only vault known.
-                    Mode::Vaults => {
-                        let vaults = vaults.borrow();
-                        let mut hits: Vec<Rc<Item>> = if empty_query {
-                            vaults
-                                .iter()
-                                .take(MAX_RESULTS)
-                                .map(|key| Rc::new(Item::Vault(key.clone())))
-                                .collect()
-                        } else {
-                            rank(&vaults, &vault_places.borrow(), query, Corpus::Paths)
-                                .into_iter()
-                                .map(|i| Rc::new(Item::Vault(vaults[i].clone())))
-                                .collect()
-                        };
-                        // Read on every refresh rather than captured, so a rebind made from one of
-                        // these rows redraws with the accelerator it was just given.
-                        for action in OPENERS {
-                            let found = commands.borrow().iter().find(|c| {
-                            matches!(&***c, Item::Command { action: a, .. } if a == action)
-                        }).cloned();
-                            hits.extend(found);
-                        }
-                        hits
-                    }
-                };
+                            .map(|i| Rc::new(Item::Vault(vaults[i].clone())))
+                            .collect::<Vec<_>>()
+                    });
+                    hits.extend(rest);
+                    hits
+                }
+            };
 
             let hits = show(hits);
             tracing::debug!(
@@ -1149,6 +1158,14 @@ mod tests {
         // Every other key belongs to the entry, and an empty list has nothing to move.
         assert_eq!(step(gdk::Key::a, 0, 25), None);
         assert_eq!(step(gdk::Key::Down, 0, 0), None);
+    }
+
+    #[test]
+    fn a_query_naming_an_opener_puts_it_first() {
+        assert!(names_opener("remote", "Open Remote…"));
+        assert!(names_opener("open loc", "Open Local…"));
+        assert!(!names_opener("remote", "Open Local…"));
+        assert!(!names_opener("", "Open Local…"));
     }
 
     #[test]

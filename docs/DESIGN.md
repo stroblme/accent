@@ -785,7 +785,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - A typed query also ranks the files this window opened that the index does not list (a file outside the vault, one the index has let go of); one whose file has gone leaves the history.
 - Its file list is kept warm in the background, not fetched when the dialog opens: a palette that is not instant is not a palette.
   The list is read again as it opens all the same, and one that lands while the dialog is up, that one or the reconcile's, is ranked again under the query typed, the highlight staying on its row if that is still there: a note saved since, with a new link or alias, is in it on that opening, and a vault opened a moment ago fills it as the index does.
-- Open Recent is the same dialog over the recent vaults, read as the start screen reads them, ending with Open Local… and Open Remote…, so one surface reaches every way of changing vault and is never empty.
+- Open Recent is the same dialog over the recent vaults, read as the start screen reads them, ending with Open Local… and Open Remote…, so one surface reaches every way of changing vault and is never empty; a query that names one of the two puts it first, so typing "remote" and Enter opens Open Remote….
   The window's own vault is left out: picking it could only raise this window.
 
 ### Find bar
