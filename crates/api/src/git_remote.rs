@@ -19,19 +19,19 @@ pub struct RemoteGit {
     url: ssh::Url,
     link: ssh::Url,
     ctl: PathBuf,
-    server: String,
     ready: Arc<AtomicBool>,
     #[cfg(test)]
     command_for_test: Option<Vec<String>>,
 }
 
 impl RemoteGit {
+    /// Refused where this machine has no server to upload.
     pub fn new(url: ssh::Url) -> Result<Self> {
+        link::server()?;
         let (link, ctl) = Self::link_of(&url);
         Ok(Self {
             link,
             ctl,
-            server: ssh::server_path(&link::server()?.hash),
             url,
             ready: Arc::new(AtomicBool::new(false)),
             #[cfg(test)]
@@ -66,8 +66,11 @@ impl RemoteGit {
             link::prepare(&self.link, &self.ctl, true, &|_, _| ())?;
             self.ready.store(true, Ordering::Release);
         }
-        // Only a fixed command enters the remote shell; paths travel as JSON on stdin.
-        let argv = ssh::run(&self.link, &self.ctl, &format!("{} git-rpc", self.server));
+        // Only a fixed command enters the remote shell; paths travel as JSON on stdin. The server
+        // is the one last made ready on the host, which a reconnect since may have changed and
+        // whose upload swept the one before.
+        let server = ssh::server_path(&link::prepared(&self.link)?);
+        let argv = ssh::run(&self.link, &self.ctl, &format!("{server} git-rpc"));
         #[cfg(test)]
         let argv = self.command_for_test.clone().unwrap_or(argv);
         let mut child = link::command(&argv)
@@ -546,11 +549,12 @@ mod tests {
     #[test]
     fn remote_call_deadline_includes_a_blocked_request_write() {
         let link = ssh::parse("ssh://example.org/").unwrap();
+        // Prepared already, as `ready` says: no server build need be on this machine.
+        link::made_ready(&link.authority(), "0123456789abcdef");
         let remote = RemoteGit {
             url: link.clone(),
             link,
             ctl: PathBuf::new(),
-            server: String::new(),
             ready: Arc::new(AtomicBool::new(true)),
             command_for_test: Some(vec![
                 "python3".into(),

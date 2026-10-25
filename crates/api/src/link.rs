@@ -190,7 +190,7 @@ pub fn prepare(url: &Url, ctl: &Path, quiet: bool, say: &dyn Fn(&str, Option<f64
 /// Which server [`prepare`] last made ready on each host, by its [`Url::authority`].
 static PREPARED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
-fn made_ready(authority: &str, hash: &str) {
+pub(crate) fn made_ready(authority: &str, hash: &str) {
     let mut prepared = locked(&PREPARED);
     prepared.retain(|(host, _)| host != authority);
     prepared.push((authority.to_string(), hash.to_string()));
