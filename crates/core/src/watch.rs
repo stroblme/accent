@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use notify::RecursiveMode;
-use notify::event::{EventKind, ModifyKind, RenameMode};
+use notify::event::{DataChange, EventKind, ModifyKind, RenameMode};
+use notify::{Event, EventHandler, RecursiveMode};
 use notify_debouncer_full::{
     DebounceEventResult, Debouncer, FileIdCache, RecommendedCache, new_debouncer_opt,
 };
@@ -92,8 +92,48 @@ impl Polled {
 
 /// Stopping happens in `Debouncer::drop`.
 enum Backend {
-    Native(Debouncer<Native, RecommendedCache>),
-    Poll(Debouncer<notify::PollWatcher, RecommendedCache>),
+    Native(Debouncer<Kept<Native>, RecommendedCache>),
+    Poll(Debouncer<Kept<notify::PollWatcher>, RecommendedCache>),
+}
+
+/// A watcher whose creates reach the debouncer as writes. The debouncer takes a remove after a
+/// create in one window for a file that never was and drops both, but a create is also how a file
+/// replaced by a rename reaches it (a save of ours, and most editors'): a delete right after such
+/// a save went unheard. As a write, the remove after it stands, the last state of the path.
+struct Kept<W>(W);
+
+impl<W: notify::Watcher> notify::Watcher for Kept<W> {
+    fn new<F: EventHandler>(mut handler: F, config: notify::Config) -> notify::Result<Self> {
+        let written = move |result: notify::Result<Event>| {
+            handler.handle_event(result.map(|mut ev| {
+                if let EventKind::Create(_) = ev.kind {
+                    ev.kind = EventKind::Modify(ModifyKind::Data(DataChange::Any));
+                }
+                ev
+            }))
+        };
+        W::new(written, config).map(Kept)
+    }
+
+    fn watch(&mut self, path: &Path, mode: RecursiveMode) -> notify::Result<()> {
+        self.0.watch(path, mode)
+    }
+
+    fn unwatch(&mut self, path: &Path) -> notify::Result<()> {
+        self.0.unwatch(path)
+    }
+
+    fn paths_mut<'me>(&'me mut self) -> Box<dyn notify::PathsMut + 'me> {
+        self.0.paths_mut()
+    }
+
+    fn configure(&mut self, option: notify::Config) -> notify::Result<bool> {
+        self.0.configure(option)
+    }
+
+    fn kind() -> notify::WatcherKind {
+        W::kind()
+    }
 }
 
 /// Whether watching `dir_count` directories would take more than 80% of the inotify budget, which
@@ -145,7 +185,7 @@ impl Watcher {
         let polled = match over_budget(dirs.len() + 1) {
             true => Polled::OverBudget,
             false => {
-                let mut d = new_debouncer_opt::<_, Native, RecommendedCache>(
+                let mut d = new_debouncer_opt::<_, Kept<Native>, RecommendedCache>(
                     debounce,
                     tick,
                     handler(),
@@ -164,7 +204,7 @@ impl Watcher {
             }
         };
         let config = notify::Config::default().with_poll_interval(Duration::from_secs(2));
-        let mut d = new_debouncer_opt::<_, notify::PollWatcher, RecommendedCache>(
+        let mut d = new_debouncer_opt::<_, Kept<notify::PollWatcher>, RecommendedCache>(
             debounce,
             tick,
             handler(),
@@ -346,10 +386,10 @@ fn classify(ev: &notify::Event) -> Vec<VaultEvent> {
                 }
             })
             .collect(),
-        EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Metadata(_) | ModifyKind::Any) => live
-            .iter()
-            .map(|p| VaultEvent::Changed((*p).clone()))
-            .collect(),
+        // A create arrives as a write ([`Kept`]), so a write can be a conflict copy's arrival.
+        EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Metadata(_) | ModifyKind::Any) => {
+            live.iter().map(|p| appeared(p)).collect()
+        }
         // Access/Other: nothing the index cares about.
         _ => vec![],
     }
@@ -555,6 +595,26 @@ mod tests {
             note.exists(),
             "the note the watcher reported on is still there"
         );
+    }
+
+    /// A file saved by a rename and deleted inside one debounce window is reported gone: it
+    /// existed before the window, so the save's create and the delete are no file that never was.
+    #[test]
+    fn a_delete_right_after_a_save_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let note = root.join("Note.md");
+        std::fs::write(&note, "one").unwrap();
+        let (_w, rx) = start(&root);
+
+        crate::fs::write_note(&note, "two", None).unwrap();
+        std::fs::remove_file(&note).unwrap();
+
+        let events = drain(&rx, Duration::from_secs(5));
+        let last = events
+            .iter()
+            .rfind(|e| touches(std::slice::from_ref(e), "Note.md"));
+        assert_eq!(last, Some(&VaultEvent::Removed(note)), "{events:?}");
     }
 
     /// The watch set is a list, not a tree: a directory the walk skipped gets no watch, so its

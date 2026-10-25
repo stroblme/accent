@@ -65,13 +65,10 @@ pub(super) fn bench_answer(app: &Rc<App>, rel: &str) {
                 "restore" => "rm -f {}".to_string(),
                 _ => format!("printf '{case} theirs\\n' > {{}}"),
             };
-            // Typed first where the file goes: a clean tab closes with its file. And past the
-            // watcher's debounce, which drops a file made and removed inside one, as the last
-            // save's rename and the removal would be.
+            // Typed first where the file goes: a clean tab closes with its file.
             let typed = format!("{case} mine\n");
             if case == "restore" {
                 tab.buffer.insert(&mut tab.buffer.end_iter(), &typed);
-                glib::timeout_future(Duration::from_millis(600)).await;
             }
             let changed = crate::work::off_thread("bench", {
                 let (vault, rel) = (vault.clone(), rel.clone());
