@@ -570,6 +570,7 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value> {
         }
 
         "save" => answer(vault.save(&arg::<String>(p, 0)?, &arg::<String>(p, 1)?, arg(p, 2)?)),
+        "commit" => answer(vault.commit(&arg::<String>(p, 0)?, &arg::<String>(p, 1)?, arg(p, 2)?)),
         "create_note" => answer(vault.create_note(
             &arg::<String>(p, 0)?,
             arg::<Option<String>>(p, 1)?.as_deref(),

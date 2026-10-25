@@ -182,6 +182,38 @@ fn a_remote_vault_connects_indexes_and_answers() {
         "the cached copy differs"
     );
 
+    // A write-back edited on the host while its bytes are on their way: the edit stays, and the
+    // window's bytes land beside it as the conflict copy rather than over it.
+    on_host(
+        &url,
+        &format!("head -c 16777216 /dev/urandom > {p}/race.pdf"),
+    );
+    let cached = vault.fetch("race.pdf").unwrap();
+    let mine: Vec<u8> = (0..16 << 20).map(|i| (i % 253) as u8).collect();
+    std::fs::write(&cached, &mine).unwrap();
+    let pushed = std::thread::scope(|s| {
+        let push = s.spawn(|| remote.push("race.pdf"));
+        let t = Instant::now();
+        while !on_host(&url, &format!("ls -A {p}")).contains(".accent-up-") {
+            assert!(
+                !push.is_finished() && t.elapsed() < BUDGET,
+                "the write-back was never seen staged"
+            );
+        }
+        on_host(&url, &format!("printf 'host edit' > {p}/race.pdf"));
+        push.join().unwrap()
+    });
+    assert!(matches!(
+        pushed,
+        Ok(accent_api::remote::Pushed::Conflict(ref copy)) if copy == "race (edited).pdf"
+    ));
+    assert_eq!(on_host(&url, &format!("cat {p}/race.pdf")), "host edit");
+    assert_eq!(
+        vault.stat("race (edited).pdf").unwrap().map(|e| e.size),
+        Some(mine.len() as u64)
+    );
+    assert!(!on_host(&url, &format!("ls -A {p}")).contains(".accent-up-"));
+
     // A row dropped into another window's vault: walked where it is, then copied file by file
     // from one machine straight to the other, a name taken there kept unless replaced.
     on_host(

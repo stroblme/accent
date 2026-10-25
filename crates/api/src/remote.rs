@@ -178,6 +178,14 @@ fn receive_from(
     finished
 }
 
+/// A name for a write-back staged on the host ([`ssh::stage_cmd`]) that no other transfer's is,
+/// from this window or another machine: `RandomState` is keyed at random.
+fn staged_name() -> String {
+    use std::hash::BuildHasher;
+    let random = std::collections::hash_map::RandomState::new().hash_one(());
+    format!(".accent-up-{random:016x}")
+}
+
 /// Rename `from` to `to` unless something holds `to`, a dangling link included.
 #[cfg(target_os = "linux")]
 fn rename_new(from: &Path, to: &Path) -> std::io::Result<()> {
@@ -664,9 +672,10 @@ impl Remote {
     }
 
     /// Push local PDF edits back to the host. Unchanged copies need no round trip.
-    /// Check the fetched host etag before replacing; conflicts upload
+    /// Check the fetched host etag before streaming, and again on the host once every byte is
+    /// there ([`ssh::stage_cmd`], the server's `commit`); conflicts upload
     /// [beside](Self::push_beside) the original. After success, stamp both the
-    /// current host state and the bytes sent, preventing watcher refetches from
+    /// committed host state and the bytes sent, preventing watcher refetches from
     /// overwriting later local edits and keeping edits made during upload unsent.
     /// Return `NotFound` for a moved or deleted host file rather than recreating
     /// it under its old name; readers following a rename retry at the new path.
@@ -689,11 +698,21 @@ impl Remote {
         if Some(current) != stamped.map(|s| s.host) {
             return Ok(self.push_beside(&dest, rel));
         }
-        let copy = self.send(&dest, rel, true, &|_, _| (), &link::Stop::default())?;
-        if let Ok(Some(host)) = self.call::<Option<crate::Etag>>("stat", json!([rel])) {
-            let _ = stamp.set(&Stamped { host, copy });
+        let staged = staged_name();
+        let path = self.remote_path(rel);
+        let stage = |size| ssh::run(&self.url, &self.ctl, &ssh::stage_cmd(&path, &staged, size));
+        let copy = self.send(&dest, stage, &|_, _| (), &link::Stop::default())?;
+        match self.call("commit", json!([rel, staged, current])) {
+            Ok(host) => {
+                let _ = stamp.set(&Stamped { host, copy });
+                Ok(Pushed::Sent)
+            }
+            // Edited on the host while the bytes were on their way.
+            Err(Error::Core(accent_core::Error::ChangedOnDisk { .. })) => {
+                Ok(self.push_beside(&dest, rel))
+            }
+            Err(e) => Err(e),
         }
-        Ok(Pushed::Sent)
     }
 
     /// Move the cached file or folder, stamp and pending page edits from `from`
@@ -730,7 +749,8 @@ impl Remote {
     /// `.kept.pdf` copy and report it.
     fn push_beside(&self, dest: &Path, rel: &str) -> Pushed {
         let sent = self.free_edited_name(rel).and_then(|name| {
-            let copy = self.send(dest, &name, false, &|_, _| (), &link::Stop::default())?;
+            let put = |size| self.put_into(&name, size, false);
+            let copy = self.send(dest, put, &|_, _| (), &link::Stop::default())?;
             Ok((name, copy))
         });
         match sent {
@@ -789,31 +809,24 @@ impl Remote {
         progress: &dyn Fn(u64, u64),
         stop: &link::Stop,
     ) -> Result<()> {
-        self.send(local, rel, replace, progress, stop).map(|_| ())
+        let put = |size| self.put_into(rel, size, replace);
+        self.send(local, put, progress, stop).map(|_| ())
     }
 
-    /// Send a local file to host `rel`. With `replace`, require the destination
-    /// to remain present; without, require the name to be free, a taken one failing with
-    /// `AlreadyExists` ([`ssh::put_cmd`]). Return the etag of the bytes sent,
-    /// unaffected by a concurrent save replacing `local`.
+    /// Send a local file into the command line `put` gives for its size: an upload
+    /// ([`put_into`](Self::put_into)) or a staged write-back ([`ssh::stage_cmd`]). Return the
+    /// etag of the bytes sent, unaffected by a concurrent save replacing `local`.
     fn send(
         &self,
         local: &Path,
-        rel: &str,
-        replace: bool,
+        put: impl FnOnce(u64) -> Vec<String>,
         progress: &dyn Fn(u64, u64),
         stop: &link::Stop,
     ) -> Result<crate::Etag> {
         let unread = |e| accent_core::Error::io(local.display(), e);
         let file = std::fs::File::open(local).map_err(unread)?;
         let sent = crate::Etag::from_meta(&file.metadata().map_err(unread)?);
-        link::send(
-            &self.put_into(rel, sent.size, replace),
-            file,
-            sent.size,
-            progress,
-            stop,
-        )?;
+        link::send(&put(sent.size), file, sent.size, progress, stop)?;
         Ok(sent)
     }
 
@@ -837,7 +850,9 @@ impl Remote {
         Ok(())
     }
 
-    /// The command line that writes its stdin, `size` bytes of it, to `rel` on the host.
+    /// The command line that writes its stdin, `size` bytes of it, to `rel` on the host. With
+    /// `replace`, require the destination to remain present; without, require the name to be
+    /// free, a taken one failing with `AlreadyExists` ([`ssh::put_cmd`]).
     fn put_into(&self, rel: &str, size: u64, replace: bool) -> Vec<String> {
         let command = ssh::put_cmd(&self.remote_path(rel), size, replace);
         ssh::run(&self.url, &self.ctl, &command)

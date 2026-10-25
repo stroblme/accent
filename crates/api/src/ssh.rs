@@ -536,6 +536,24 @@ pub fn put_cmd(path: &str, size: u64, replace: bool) -> String {
     )
 }
 
+/// Write exactly `size` stdin bytes to `staged`, a name the caller picked, beside `path`'s
+/// target (following its links), for the server to land with [`crate::fs::commit`]: a write-back
+/// checked against the file's etag once every byte is there, not before the first is sent. The
+/// name is claimed with `set -C`, so a file already holding it is never written to or removed;
+/// a staged file cut short is removed, and a whole one left for the commit.
+pub fn stage_cmd(path: &str, staged: &str, size: u64) -> String {
+    let (path, staged) = (quote(path), quote(staged));
+    format!(
+        "p=$(readlink -f -- {path}) || p={path}; t=\"${{p%/*}}\"/{staged}; \
+         (set -C; : > \"$t\") 2>/dev/null || {{ echo \"cannot write in ${{p%/*}}\" >&2; exit 1; }}; \
+         trap 'rm -f \"$t\"' EXIT; trap 'exit 1' HUP INT TERM; \
+         cat > \"$t\" || exit 1; \
+         if [ \"$(wc -c < \"$t\")\" -ne {size} ]; then \
+         echo 'the upload was cut short' >&2; exit 1; fi; \
+         trap - EXIT"
+    )
+}
+
 /// The command that starts the headless server on a vault. `server` is a path expression from
 /// [`server_path`]; the root is a literal, so it is quoted.
 pub fn serve_cmd(server: &str, root: &Path) -> String {
@@ -1345,6 +1363,60 @@ mod tests {
         assert_eq!(put(&dangling, b"png", 3), taken);
         assert!(!dir.path().join("nowhere.png").exists());
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 4);
+    }
+
+    /// A write-back staged by the shell here, as the host's stages it, while the file it was sent
+    /// for is edited: the commit refuses it and the edit stays; one sent for the file as it is
+    /// lands. A staged name already taken is never written to, and a cut-short upload leaves
+    /// nothing beside the file.
+    #[test]
+    fn a_staged_upload_never_lands_over_an_edit_made_while_it_streamed() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a b.pdf");
+        std::fs::write(&file, "host v1").unwrap();
+        let stage = |staged: &str, bytes: &[u8], size: usize, meanwhile: &dyn Fn()| {
+            let mut sh = Command::new("sh")
+                .arg("-c")
+                .arg(stage_cmd(&file.to_string_lossy(), staged, size as u64))
+                .stdin(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut input = sh.stdin.take().unwrap();
+            let (first, rest) = bytes.split_at(bytes.len() / 2);
+            // A refused stage ends before reading, its pipe then failing the writes.
+            let _ = input.write_all(first);
+            meanwhile();
+            let _ = input.write_all(rest);
+            drop(input);
+            sh.wait_with_output().unwrap().status.success()
+        };
+        let read = || std::fs::read_to_string(&file).unwrap();
+        let mine = b"the window's edit";
+        let sent_for = crate::Etag::of(&file).unwrap();
+
+        let edit = || std::fs::write(&file, "host edit").unwrap();
+        assert!(stage(".accent-up-a", mine, mine.len(), &edit));
+        assert!(matches!(
+            crate::fs::commit(&file, ".accent-up-a", sent_for),
+            Err(accent_core::Error::ChangedOnDisk { .. })
+        ));
+        assert_eq!(read(), "host edit");
+
+        let now = crate::Etag::of(&file).unwrap();
+        assert!(stage(".accent-up-b", mine, mine.len(), &|| ()));
+        crate::fs::commit(&file, ".accent-up-b", now).unwrap();
+        assert_eq!(read().as_bytes(), mine);
+
+        let theirs = dir.path().join(".accent-up-c");
+        std::fs::write(&theirs, "theirs").unwrap();
+        assert!(!stage(".accent-up-c", mine, mine.len(), &|| ()));
+        assert_eq!(std::fs::read_to_string(&theirs).unwrap(), "theirs");
+        std::fs::remove_file(&theirs).unwrap();
+        assert!(!stage(".accent-up-d", mine, mine.len() + 1, &|| ()));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
     #[test]

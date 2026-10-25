@@ -218,28 +218,12 @@ pub fn write_bytes(path: &Path, bytes: &[u8], expected: Option<Etag>) -> Result<
     tmp.as_file().sync_all().map_err(failed)?;
 
     if let Some(m) = &existing {
-        // Neither is allowed to fail the save. exFAT, SMB and Android's FUSE `/sdcard` have no
-        // POSIX mode to set and answer `chmod` with EPERM or ENOTSUP; a note the user could open
-        // there must still be one they can save. chown likewise only works as root or when we
-        // already own the file, which on a single-user vault we do.
-        if let Err(e) = std::fs::set_permissions(tmp.path(), m.permissions()) {
-            tracing::debug!("{}: keeping the temp file's mode: {e}", canonical.display());
-        }
-        let _ = std::os::unix::fs::chown(tmp.path(), Some(m.uid()), Some(m.gid()));
+        keep_owner(tmp.path(), m, &canonical);
     }
 
     let _turn = turn(&canonical);
     if let Some(exp) = expected {
-        match std::fs::metadata(&canonical) {
-            Ok(m) if Etag::from_meta(&m) != exp => {
-                return Err(Error::ChangedOnDisk {
-                    current: Etag::from_meta(&m),
-                });
-            }
-            Ok(_) => {}
-            // Gone before the save: nothing is written over a file nobody has seen go.
-            Err(_) => return Err(Error::NotFound(path.display().to_string())),
-        }
+        unchanged(&canonical, path, exp)?;
     }
 
     // ponytail: no directory fsync after the rename. The rename itself is atomic, so a crash can
@@ -247,6 +231,59 @@ pub fn write_bytes(path: &Path, bytes: &[u8], expected: Option<Etag>) -> Result<
     // crash-consistency (as opposed to torn-write safety) ever matters.
     let file = tmp.persist(&canonical).map_err(|e| failed(e.error))?;
     Ok(Etag::from_meta(&file.metadata().map_err(failed)?))
+}
+
+/// Land `staged`, an upload streamed into an `.accent-` file beside `path`'s target, over that
+/// target if it still has `expected`'s etag, as [`write_bytes`] lands a save: an upload checked
+/// when it lands, not when it starts. `staged` is removed whatever the answer.
+pub fn commit(path: &Path, staged: &str, expected: Etag) -> Result<Etag> {
+    // A bare name of our own temporaries: nothing else is ever renamed or removed.
+    if !staged.starts_with(".accent-") || staged.contains('/') {
+        return Err(Error::Invalid(format!("{staged} is not a staged upload")));
+    }
+    let failed = |e| Error::io(path.display(), e);
+    let canonical = canonical_target(path).map_err(failed)?;
+    let tmp = canonical.with_file_name(staged);
+    let landed = (|| {
+        let file = std::fs::File::open(&tmp).map_err(failed)?;
+        file.sync_all().map_err(failed)?;
+        if let Ok(m) = std::fs::metadata(&canonical) {
+            keep_owner(&tmp, &m, &canonical);
+        }
+        let _turn = turn(&canonical);
+        unchanged(&canonical, path, expected)?;
+        std::fs::rename(&tmp, &canonical).map_err(failed)?;
+        Ok(Etag::from_meta(&file.metadata().map_err(failed)?))
+    })();
+    if landed.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    landed
+}
+
+/// Give `tmp` the mode and owner of `existing`, the file it is to replace.
+fn keep_owner(tmp: &Path, existing: &std::fs::Metadata, canonical: &Path) {
+    // Neither is allowed to fail the save. exFAT, SMB and Android's FUSE `/sdcard` have no
+    // POSIX mode to set and answer `chmod` with EPERM or ENOTSUP; a note the user could open
+    // there must still be one they can save. chown likewise only works as root or when we
+    // already own the file, which on a single-user vault we do.
+    if let Err(e) = std::fs::set_permissions(tmp, existing.permissions()) {
+        tracing::debug!("{}: keeping the temp file's mode: {e}", canonical.display());
+    }
+    let _ = std::os::unix::fs::chown(tmp, Some(existing.uid()), Some(existing.gid()));
+}
+
+/// Refuse unless the file at `canonical` still has `expected`'s etag. Called holding [`turn`],
+/// which the rename after it needs too.
+fn unchanged(canonical: &Path, path: &Path, expected: Etag) -> Result<()> {
+    match std::fs::metadata(canonical) {
+        Ok(m) if Etag::from_meta(&m) != expected => Err(Error::ChangedOnDisk {
+            current: Etag::from_meta(&m),
+        }),
+        Ok(_) => Ok(()),
+        // Gone before the save: nothing is written over a file nobody has seen go.
+        Err(_) => Err(Error::NotFound(path.display().to_string())),
+    }
 }
 
 /// Create a save temporary in `parent` with `existing`'s mode, or 0666 for a new file, subject
@@ -539,6 +576,47 @@ mod tests {
                 .sum::<usize>()
         });
         assert_eq!(landed, 1);
+    }
+
+    /// An upload staged beside a file lands over it, through its link and keeping its mode, only
+    /// while it has the etag the upload was sent for; refused, the staged bytes go and the file
+    /// stays as it is. Nothing but an `.accent-` file beside it is ever taken as staged.
+    #[test]
+    fn a_staged_upload_lands_only_over_the_file_it_was_sent_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let (real, link) = (dir.path().join("real.pdf"), dir.path().join("link.pdf"));
+        std::fs::write(&real, "old").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o640)).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let stage = |name: &str, bytes: &str| std::fs::write(dir.path().join(name), bytes).unwrap();
+        let sent_for = Etag::of(&real).unwrap();
+
+        stage(".accent-up-1", "new");
+        let landed = commit(&link, ".accent-up-1", sent_for).unwrap();
+        assert_eq!(landed, Etag::of(&real).unwrap());
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "new");
+        assert!(link.is_symlink());
+        let mode = std::fs::metadata(&real).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o640);
+
+        stage(".accent-up-2", "mine");
+        assert!(matches!(
+            commit(&link, ".accent-up-2", sent_for),
+            Err(Error::ChangedOnDisk { current }) if current == landed
+        ));
+        stage(".accent-up-3", "mine");
+        assert!(matches!(
+            commit(&dir.path().join("gone.pdf"), ".accent-up-3", landed),
+            Err(Error::NotFound(_))
+        ));
+        for name in ["link.pdf", "../real.pdf", ".accent-/../link.pdf"] {
+            assert!(matches!(
+                commit(&real, name, landed),
+                Err(Error::Invalid(_))
+            ));
+        }
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "new");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
     }
 
     #[test]
