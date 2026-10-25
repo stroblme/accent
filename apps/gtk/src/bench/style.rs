@@ -255,7 +255,7 @@ pub(super) fn bench_typing(app: &Rc<App>, arg: &str) {
             let (used, wall) = (cpu() - cpu0, t0.elapsed());
             // One full pass over the note as it now stands, which changes nothing.
             let pass = Instant::now();
-            crate::highlight::apply(&tab.buffer);
+            crate::highlight::apply(&tab.buffer, accent_core::note::Syntax::Markdown);
             println!(
                 "bench style_typing kb={kb} chars={} keys={TYPING_KEYS} wall_ms={} cpu_ms={} \
                  busy={:.2} idle={idle:.2} key_us={} pass_us={}",

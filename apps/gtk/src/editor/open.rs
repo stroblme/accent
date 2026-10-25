@@ -14,7 +14,7 @@ pub(crate) fn build(
     // First: a note's heading tags set an indent too, and have to outrank these.
     wrap::install(&buffer);
     match flavour {
-        Flavour::Note => highlight::install_tags(&buffer),
+        Flavour::Note(_) => highlight::install_tags(&buffer),
         Flavour::Csv(_) => highlight::install_csv_tags(&buffer),
         Flavour::Code => {}
     }
@@ -42,7 +42,7 @@ pub(crate) fn build(
     view.set_buffer(Some(&buffer));
     view.set_monospace(!flavour.is_note());
     view.add_css_class(match flavour {
-        Flavour::Note => "accent-doc",
+        Flavour::Note(_) => "accent-doc",
         _ => "accent-code",
     });
     view.set_widget_name(&next_view_name());
@@ -115,7 +115,7 @@ pub fn open(
     // `csv.lang` would colour numbers and strings underneath the column tags and fight them.
     let language = match flavour {
         Flavour::Code => guess_language(&path, &text.text),
-        Flavour::Note | Flavour::Csv(_) => None,
+        Flavour::Note(_) | Flavour::Csv(_) => None,
     };
     let (view, buffer) = build(flavour, language, &text.text);
     // Not valid UTF-8: what is on screen is lossy, so it must not be written back.

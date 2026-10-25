@@ -20,6 +20,7 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use accent_core::fs::{Digest, Etag};
+use accent_core::note::Syntax;
 use accent_core::notebook::{CellId, Edit, Kind, Notebook};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib, graphene};
@@ -647,7 +648,7 @@ impl NotebookTab {
             && let Some(editor) = view.editor()
             && view.kind == Kind::Markdown
         {
-            crate::editor::style_note(&editor.view, &editor.buffer);
+            crate::editor::style_note(&editor.view, &editor.buffer, Syntax::Markdown);
         }
         // Typing moves the caret without setting its mark.
         self.follow_caret(id);
@@ -776,7 +777,7 @@ impl NotebookTab {
             }
         }
         if view.kind == Kind::Markdown {
-            crate::editor::style_note(&editor.view, buffer);
+            crate::editor::style_note(&editor.view, buffer, Syntax::Markdown);
         }
         self.select(id);
         editor.view.grab_focus();
@@ -1406,7 +1407,7 @@ impl NotebookTab {
                 crate::editor::sync_scheme(&editor.buffer);
                 crate::editor::mute(&editor.buffer, &editor.occurrence);
                 if view.kind == Kind::Markdown {
-                    crate::editor::restyle_note(&editor.view, &editor.buffer);
+                    crate::editor::restyle_note(&editor.view, &editor.buffer, Syntax::Markdown);
                 }
             }
             view.outputs.restyle();

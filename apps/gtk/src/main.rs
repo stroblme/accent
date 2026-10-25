@@ -726,9 +726,9 @@ impl App {
                 });
             }
         }
-        // The preview is about notes. A source file, an image or a status page leaves it empty
-        // rather than showing the last note's, and F5 presents each as it is.
-        let note = doc.tab().filter(|t| t.flavour().is_note()).cloned();
+        // The preview is about markdown notes. An org file, a source file, an image or a status
+        // page leaves it empty rather than showing the last note's, and F5 presents each as it is.
+        let note = doc.tab().filter(|t| t.flavour().is_markdown()).cloned();
         self.refresh_references();
         self.sync_status();
         self.sync_outline();
@@ -977,8 +977,11 @@ impl App {
         let doc = self.active_doc();
         let (kind, facts) = match &doc {
             Some(Doc::Text(tab)) => match tab.flavour() {
-                editor::Flavour::Note => (
-                    Some("Markdown".to_string()),
+                editor::Flavour::Note(syntax) => (
+                    Some(match syntax {
+                        accent_core::note::Syntax::Markdown => "Markdown".to_string(),
+                        accent_core::note::Syntax::Org => "Org".to_string(),
+                    }),
                     Some(statusbar::words_label(tab.words())),
                 ),
                 // A code tab counts what is wrong with it instead: words are a prose fact.

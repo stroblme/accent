@@ -60,10 +60,9 @@
     <!-- GtkSourceView's LaTeX with its listings in the language they name, its Lean with Lean
          4's keywords, and its TypeScript JSX with a wrapped type parameter list read as one, each
          read ahead of the one GtkSourceView ships: `install_icons` puts this folder first on its
-         search path. Org is accent's own; GtkSourceView ships none. -->
+         search path. -->
     <file>language-specs/latex.lang</file>
     <file>language-specs/lean.lang</file>
-    <file>language-specs/org.lang</file>
     <file>language-specs/typescript-jsx.lang</file>
   </gresource>
 </gresources>

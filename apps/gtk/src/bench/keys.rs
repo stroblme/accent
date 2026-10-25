@@ -3,6 +3,7 @@
 use super::*;
 use crate::completion;
 use accent_api::{Completion, Kind, Pos, Range, TextEdit};
+use accent_core::note::Syntax;
 use vte4::TerminalExt as _;
 
 /// Drive word deletion, logical-line movement and multicaret semantics through binding signals
@@ -501,7 +502,7 @@ fn bench_table(view: &multicaret::View) {
     let buffer = view.buffer();
     let none = gdk::ModifierType::empty();
     let press = |step: &str, key| {
-        let answer = typing::on_key(view.upcast_ref(), key, none);
+        let answer = typing::on_key(view.upcast_ref(), Syntax::Markdown, key, none);
         let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), true);
         let at = editor::caret(&buffer);
         println!(
@@ -1037,7 +1038,7 @@ async fn bench_lines(view: &multicaret::View) {
     if let Some(source) = buffer.downcast_ref::<sourceview5::Buffer>() {
         crate::highlight::install_tags(source);
         source.set_text("---\na: b\n---\n\n```\nx\n\n```\n    y\nz");
-        crate::highlight::apply(source);
+        crate::highlight::apply(source, Syntax::Markdown);
     }
     buffer.select_range(&buffer.start_iter(), &buffer.end_iter());
     editor::toggle_task(view.upcast_ref());
@@ -1111,9 +1112,13 @@ fn bench_lines_of(app: &Rc<App>, tab: &Rc<Tab>, original: String) {
     // What a tab is worth here: the Indent Width preference.
     println!("bench list_indent_width {}", tab.view.tab_width());
     let lines: Vec<String> = original.lines().map(str::to_string).collect();
+    let syntax = match tab.flavour() {
+        editor::Flavour::Note(syntax) => syntax,
+        _ => Syntax::Markdown,
+    };
     let (mut asked, mut wrong) = (0, 0);
     for (n, line) in lines.iter().enumerate() {
-        let Some(typing::Continue::Insert(want)) = typing::continuation(line) else {
+        let Some(typing::Continue::Insert(want)) = typing::continuation(line, syntax) else {
             continue;
         };
         asked += 1;

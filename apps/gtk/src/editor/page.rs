@@ -1,7 +1,7 @@
 //! Document-page font, zoom, margins, column cap, line numbers, minimap
 //! and sticky block title.
 
-use super::{Flavour, Tab, line_end};
+use super::{Flavour, Syntax, Tab, line_end};
 use crate::{highlight, lang, platform, wrap};
 use adw::prelude::*;
 use gtk::{gdk, glib, graphene, pango};
@@ -298,7 +298,7 @@ pub(crate) fn install_font(
         gtk::style_context_remove_provider_for_display(&display, &old);
     }
     let family = match flavour {
-        Flavour::Note => match font.filter(|f| !f.is_empty()) {
+        Flavour::Note(_) => match font.filter(|f| !f.is_empty()) {
             Some(font) => Some(font.to_string()),
             None if zoom != 1.0 => Some(default_font()),
             None => None,
@@ -329,29 +329,30 @@ pub(crate) fn refont(view: &impl IsA<gtk::Widget>) {
     }
 }
 
-/// Style a note's text, a tab's or a notebook markdown cell's: the markdown tags, and the wrap of
+/// Style a note's text, a tab's or a notebook markdown cell's: the note's tags, and the wrap of
 /// the lines a fence took in or let go.
 pub(crate) fn style_note(
     view: &sourceview5::View,
     buffer: &sourceview5::Buffer,
+    syntax: Syntax,
 ) -> (accent_core::markdown::Analysis, highlight::Offsets) {
-    wrap::refence(view, || highlight::apply(buffer))
+    wrap::refence(view, || highlight::apply(buffer, syntax))
 }
 
 /// A note's tags in the theme's colours, and its heading markers hung outside the text's left
 /// edge in the view's margin.
-pub(crate) fn restyle_note(view: &sourceview5::View, buffer: &sourceview5::Buffer) {
+pub(crate) fn restyle_note(view: &sourceview5::View, buffer: &sourceview5::Buffer, syntax: Syntax) {
     highlight::restyle(buffer, view);
-    highlight::hang(buffer, view);
+    highlight::hang(buffer, view, syntax);
 }
 
 /// Measure again what is measured in the view's font, once a new one is in: a note's hung
 /// heading markers and every wrap indent.
 pub(crate) fn remeasure(view: &sourceview5::View, flavour: Flavour) {
-    if flavour.is_note()
+    if let Flavour::Note(syntax) = flavour
         && let Some(buffer) = view.buffer().downcast_ref::<sourceview5::Buffer>()
     {
-        highlight::hang(buffer, view);
+        highlight::hang(buffer, view, syntax);
     }
     wrap::measure(view);
 }
@@ -605,7 +606,7 @@ impl Tab {
         let (first, _) = self.view.line_at_y(self.view.visible_rect().y());
         let top = first.line();
         let line = match self.flavour {
-            Flavour::Note => self.sticky_note_line(first, top),
+            Flavour::Note(_) => self.sticky_note_line(first, top),
             Flavour::Code => {
                 lang::innermost(&self.lang.symbols(), top.max(0) as u32).map(|line| line as i32)
             }

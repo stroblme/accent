@@ -273,11 +273,13 @@ impl App {
         self.mode.get() == Mode::Split || self.presenting.get().is_some()
     }
 
-    /// Whether F5 shows `pane`'s tab as the rendered preview: a note's is, where a code tab is
-    /// presented as it is, having nothing to render.
+    /// Whether F5 shows `pane`'s tab as the rendered preview: a markdown note's is, where a code
+    /// tab or an org note is presented as it is, having nothing to render yet.
     pub(crate) fn presents_rendered(&self, pane: &Pane) -> bool {
         self.presenting.get().is_some()
-            && self.tab_of(pane).is_some_and(|tab| tab.flavour().is_note())
+            && self
+                .tab_of(pane)
+                .is_some_and(|tab| tab.flavour().is_markdown())
     }
 
     /// Present only the active document with F5.
@@ -566,8 +568,8 @@ impl App {
     }
 
     pub fn render(self: &Rc<Self>, tab: &Rc<Tab>) {
-        // A source file is no markdown, in Split as under F5.
-        if !self.shows_preview() || !tab.flavour().is_note() {
+        // A source file or an org note is no markdown, in Split as under F5.
+        if !self.shows_preview() || !tab.flavour().is_markdown() {
             return;
         }
         self.ensure_preview();

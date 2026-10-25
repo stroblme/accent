@@ -1,4 +1,5 @@
-//! Markdown typing helpers for lists, fences, pairs and tables, and a code tab's brackets.
+//! A note's typing helpers for lists, fences, pairs and tables, and a code tab's brackets. An org
+//! note continues its lists by org's rules and has no fences or tables yet.
 //!
 //! Pure functions inspect the current line so decisions can be tested without a display;
 //! `install` supplies widget integration. Re-parsing the whole note per key is unnecessary:
@@ -10,6 +11,7 @@
 
 use crate::editor::{caret, line_end, line_prefix};
 use accent_core::markdown::{TableKey, table_key};
+use accent_core::note::Syntax;
 use gtk::prelude::*;
 use gtk::{gdk, glib};
 
@@ -46,11 +48,13 @@ pub enum Pair {
 /// Continue `line` before the caret on Return, preserving indentation.
 ///
 /// Recognise bullet, numbered, task and quote markers. Tasks continue unchecked; numbers increment.
-pub fn continuation(line: &str) -> Option<Continue> {
+/// Org has no quote marker, and a `*` at the start of its line opens a heading.
+pub fn continuation(line: &str, syntax: Syntax) -> Option<Continue> {
     let indent = &line[..line.len() - line.trim_start_matches([' ', '\t']).len()];
     let rest = &line[indent.len()..];
+    let org = syntax == Syntax::Org;
 
-    if let Some(body) = rest.strip_prefix('>') {
+    if !org && let Some(body) = rest.strip_prefix('>') {
         let body = body.strip_prefix(' ').unwrap_or(body);
         return Some(match body.is_empty() {
             true => Continue::Unlist,
@@ -58,11 +62,14 @@ pub fn continuation(line: &str) -> Option<Continue> {
         });
     }
 
-    if let Some(bullet) = rest.chars().next().filter(|c| "-*+".contains(*c))
+    if let Some(bullet) = rest
+        .chars()
+        .next()
+        .filter(|c| "-*+".contains(*c) && !(org && *c == '*' && indent.is_empty()))
         && let Some(body) = rest[bullet.len_utf8()..].strip_prefix(' ')
     {
         // A task item keeps its brackets but never its tick.
-        if let Some(after) = task_body(body) {
+        if let Some(after) = task_body(body, syntax) {
             return Some(match after.is_empty() {
                 true => Continue::Unlist,
                 false => Continue::Insert(format!("{indent}{bullet} [ ] ")),
@@ -133,7 +140,7 @@ pub fn wrap_head(line: &str, tab_width: usize, markers: bool) -> (usize, &str) {
 /// Ghost text is suppressed here because there is no content to complete. [`continuation`]
 /// shares the same empty-marker rule used to end lists.
 pub fn marker_only(line: &str) -> bool {
-    match continuation(line) {
+    match continuation(line, Syntax::Markdown) {
         Some(Continue::Unlist) => true,
         Some(Continue::Insert(_)) => false,
         None => !line.is_empty() && line.trim_start_matches([' ', '\t']).is_empty(),
@@ -175,13 +182,18 @@ fn marker_width(rest: &str) -> usize {
     }
 }
 
-/// The text of a task item after its `[ ]`, or `None` when `body` does not start with one.
-fn task_body(body: &str) -> Option<&str> {
+/// The text of a task item after its `[ ]`, or `None` when `body` does not start with one: a
+/// note's box is open, `[/]` under way or done, org's `[-]` under way.
+fn task_body(body: &str, syntax: Syntax) -> Option<&str> {
     let rest = body.strip_prefix('[')?;
+    let under_way = match syntax {
+        Syntax::Markdown => '/',
+        Syntax::Org => '-',
+    };
     let tick = rest
         .chars()
         .next()
-        .filter(|c| matches!(c, ' ' | '/' | 'x' | 'X'))?;
+        .filter(|c| matches!(c, ' ' | 'x' | 'X') || *c == under_way)?;
     let rest = rest[tick.len_utf8()..].strip_prefix(']')?;
     Some(rest.strip_prefix(' ').unwrap_or(rest))
 }
@@ -255,6 +267,7 @@ fn opens_fence(line: &str) -> bool {
 /// keeps its key: a modifier here is a chord, not typing.
 pub fn on_key(
     view: &sourceview5::View,
+    syntax: Syntax,
     key: gdk::Key,
     state: gdk::ModifierType,
 ) -> glib::Propagation {
@@ -265,11 +278,14 @@ pub fn on_key(
     ) {
         return glib::Propagation::Proceed;
     }
+    let markdown = syntax == Syntax::Markdown;
     match key {
-        gdk::Key::Return | gdk::Key::KP_Enter => on_return(view),
+        gdk::Key::Return | gdk::Key::KP_Enter => on_return(view, syntax),
         gdk::Key::BackSpace => on_backspace(view),
-        gdk::Key::Tab | gdk::Key::KP_Tab => on_tab(view),
-        gdk::Key::ISO_Left_Tab if in_table(view, TableKey::BackTab) => glib::Propagation::Stop,
+        gdk::Key::Tab | gdk::Key::KP_Tab => on_tab(view, syntax),
+        gdk::Key::ISO_Left_Tab if markdown && in_table(view, TableKey::BackTab) => {
+            glib::Propagation::Stop
+        }
         _ => match key.to_unicode().filter(|c| !c.is_control()) {
             Some(ch) => on_char(view, ch),
             None => glib::Propagation::Proceed,
@@ -280,9 +296,10 @@ pub fn on_key(
 /// Indent a list, task, enumeration or quote with Tab from anywhere on its line.
 ///
 /// The marker's width aligns nested content with the parent's text and wraps. Insert at
-/// line start to preserve the caret's text position; other lines leave Tab to the view.
-fn on_tab(view: &sourceview5::View) -> glib::Propagation {
-    if in_table(view, TableKey::Tab) {
+/// line start to preserve the caret's text position; other lines leave Tab to the view, an org
+/// heading's too.
+fn on_tab(view: &sourceview5::View, syntax: Syntax) -> glib::Propagation {
+    if syntax == Syntax::Markdown && in_table(view, TableKey::Tab) {
         return glib::Propagation::Stop;
     }
     let buffer = view.buffer();
@@ -293,7 +310,8 @@ fn on_tab(view: &sourceview5::View) -> glib::Propagation {
     let mut start = at;
     start.set_line_offset(0);
     let line = buffer.text(&start, &line_end(&buffer, at.line()), true);
-    let Some(indent) = list_indent(&line) else {
+    let heading = syntax == Syntax::Org && line.starts_with('*');
+    let Some(indent) = list_indent(&line).filter(|_| !heading) else {
         return glib::Propagation::Proceed;
     };
     buffer.begin_user_action();
@@ -302,7 +320,7 @@ fn on_tab(view: &sourceview5::View) -> glib::Propagation {
     glib::Propagation::Stop
 }
 
-fn on_return(view: &sourceview5::View) -> glib::Propagation {
+fn on_return(view: &sourceview5::View, syntax: Syntax) -> glib::Propagation {
     let buffer = view.buffer();
     if buffer.has_selection() {
         return glib::Propagation::Proceed;
@@ -314,7 +332,8 @@ fn on_return(view: &sourceview5::View) -> glib::Propagation {
 
     // The fence rule runs before the code-block guard on purpose: by the time Return arrives the
     // opening line is usually already tagged as the block it opened.
-    if caret.ends_line() {
+    let markdown = syntax == Syntax::Markdown;
+    if markdown && caret.ends_line() {
         let rest = buffer.text(&caret, &buffer.end_iter(), true);
         if closes_fence(&line, &rest) {
             let indent: String = line
@@ -335,17 +354,18 @@ fn on_return(view: &sourceview5::View) -> glib::Propagation {
             return glib::Propagation::Stop;
         }
     }
-    let yaml = tagged(&buffer, &start, "frontmatter");
+    // An org drawer is tagged as front matter is, and holds no YAML.
+    let yaml = markdown && tagged(&buffer, &start, "frontmatter");
     if verbatim(&buffer, &start) && !yaml {
         return glib::Propagation::Proceed;
     }
-    if in_table(view, TableKey::Enter) {
+    if markdown && in_table(view, TableKey::Enter) {
         return glib::Propagation::Stop;
     }
 
     let next = match yaml {
         true => sequence_item(&line),
-        false => continuation(&line),
+        false => continuation(&line, syntax),
     };
     match next {
         Some(Continue::Insert(prefix)) => {
@@ -594,7 +614,7 @@ mod tests {
     use super::*;
 
     fn inserts(line: &str) -> String {
-        match continuation(line) {
+        match continuation(line, Syntax::Markdown) {
             Some(Continue::Insert(s)) => s,
             other => panic!("{line:?} gave {other:?}"),
         }
@@ -747,7 +767,11 @@ mod tests {
     #[test]
     fn an_empty_item_ends_the_list() {
         for line in ["- ", "1. ", "- [ ] ", "- [x]", "> ", "  * "] {
-            assert_eq!(continuation(line), Some(Continue::Unlist), "{line:?}");
+            assert_eq!(
+                continuation(line, Syntax::Markdown),
+                Some(Continue::Unlist),
+                "{line:?}"
+            );
         }
     }
 
@@ -761,7 +785,28 @@ mod tests {
             "#tag",
             "# Head",
         ] {
-            assert_eq!(continuation(line), None, "{line:?}");
+            assert_eq!(continuation(line, Syntax::Markdown), None, "{line:?}");
+        }
+    }
+
+    /// Org's lists carry on as a note's do, but for what org reads otherwise: a `*` at the start
+    /// of a line is a heading, `>` no quote, and `[-]` its box under way.
+    #[test]
+    fn an_org_list_carries_on_by_orgs_rules() {
+        let org = |line| continuation(line, Syntax::Org);
+        let inserts = |line| match org(line) {
+            Some(Continue::Insert(s)) => s,
+            other => panic!("{line:?} gave {other:?}"),
+        };
+        assert_eq!(inserts("- item"), "- ");
+        assert_eq!(inserts("+ item"), "+ ");
+        assert_eq!(inserts("  * item"), "  * ", "an indented star is a bullet");
+        assert_eq!(inserts("1) first"), "2) ");
+        assert_eq!(inserts("- [X] done"), "- [ ] ");
+        assert_eq!(inserts("- [-] doing"), "- [ ] ");
+        assert_eq!(org("- [ ] "), Some(Continue::Unlist));
+        for line in ["* Heading", "** TODO Task", "> quoted", "#+TITLE: x"] {
+            assert_eq!(org(line), None, "{line:?}");
         }
     }
 

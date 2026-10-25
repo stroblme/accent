@@ -1,7 +1,8 @@
-//! Paste a single address over selected note text as `[selection](address)`.
+//! Paste a single address over selected note text as `[selection](address)`, or org's
+//! `[[address][selection]]` in an org note.
 //! `Ctrl+Shift+V` bypasses this transformation (DESIGN.md, Editing).
 
-use super::{Flavour, Tab};
+use super::{Flavour, Syntax, Tab};
 use crate::multicaret;
 use gtk::prelude::*;
 use gtk::{gio, glib};
@@ -10,8 +11,10 @@ use gtk::{gio, glib};
 /// address, or `None` for ordinary paste in this `flavour`.
 pub(super) fn link(clipboard: &str, selection: &str, flavour: Flavour) -> Option<String> {
     let url = clipboard.trim();
-    (could_link(selection, flavour) && is_url(url))
-        .then(|| format!("[{}]({})", link_text(selection), destination(url)))
+    (could_link(selection, flavour) && is_url(url)).then(|| match flavour {
+        Flavour::Note(Syntax::Org) => accent_core::org::link(url, Some(selection)),
+        _ => format!("[{}]({})", link_text(selection), destination(url)),
+    })
 }
 
 /// Escape link-text brackets and trailing backslashes that could close
@@ -173,11 +176,11 @@ impl Tab {
 
 #[cfg(test)]
 mod tests {
-    use super::{Flavour, link};
+    use super::{Flavour, Syntax, link};
 
     #[test]
     fn a_url_pasted_over_prose_links_it() {
-        let note = Flavour::Note;
+        let note = Flavour::Note(Syntax::Markdown);
         let linked = |clip, sel| link(clip, sel, note);
         assert_eq!(
             linked(" https://example.org/a_(b)\n", "the page").as_deref(),
@@ -202,13 +205,18 @@ mod tests {
         assert_eq!(linked("https://a.org", "two\nlines"), None, "lines");
         assert_eq!(linked("https://a.org", "https://b.org"), None, "a url");
         assert_eq!(linked("https://a.org", "  "), None, "blank");
+        assert_eq!(
+            link("https://a.org/[x]", "the page", Flavour::Note(Syntax::Org)).as_deref(),
+            Some(r"[[https://a.org/\[x\]][the page]]"),
+            "org writes its own link"
+        );
     }
 
     /// A bracket in the selection or a parenthesis the address leaves open would end the link
     /// early: the text's are escaped, and such an address goes between `<` and `>`.
     #[test]
     fn a_link_is_written_so_it_reads_back_whole() {
-        let linked = |clip, sel| link(clip, sel, Flavour::Note).unwrap();
+        let linked = |clip, sel| link(clip, sel, Flavour::Note(Syntax::Markdown)).unwrap();
         let cases = [
             (
                 "https://a.org/x",

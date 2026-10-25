@@ -7,6 +7,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use accent_core::note::Syntax;
 use accent_drawio::{CellId, Rect, VAlign};
 use adw::prelude::*;
 use gtk::{gdk, glib, graphene, pango};
@@ -136,12 +137,12 @@ impl LabelEditor {
         let weak = editor.view.downgrade();
         editor.buffer.connect_changed(move |buffer| {
             if let Some(view) = weak.upgrade() {
-                editor::style_companion(Flavour::Note, buffer, &view);
+                editor::style_companion(Flavour::Note(Syntax::Markdown), buffer, &view);
             }
         });
         let (view, buffer) = (editor.view.clone(), editor.buffer.clone());
         editor.view.connect_realize(move |_| {
-            editor::restyle_companion(Flavour::Note, &buffer, &view);
+            editor::restyle_companion(Flavour::Note(Syntax::Markdown), &buffer, &view);
         });
         editor
             .buffer
@@ -185,7 +186,7 @@ impl LabelEditor {
             / f64::from(pango::SCALE);
         editor::install_font(
             &self.font,
-            Flavour::Note,
+            Flavour::Note(Syntax::Markdown),
             self.family.as_deref(),
             label_zoom(px, doc_pt),
             &self.view.widget_name(),

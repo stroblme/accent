@@ -1039,7 +1039,7 @@ impl App {
             Doc::Text(tab) => {
                 self.land_save(tab, false);
                 tab.leave_compare();
-                let note = tab.flavour().is_note() || tab.is_org();
+                let note = tab.flavour().is_note();
                 (Contents::Text(tab.for_disk(), note), tab.save.edits.get())
             }
             Doc::Diagram(diagram) => {

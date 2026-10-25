@@ -133,7 +133,7 @@ fn carets(
     Some(view.press(key, state))
 }
 
-/// Markdown typing helpers in a note, brackets and indentation in code.
+/// A note's typing helpers, by its syntax; brackets and indentation in code.
 fn helpers(
     view: &sourceview5::View,
     flavour: Flavour,
@@ -141,7 +141,7 @@ fn helpers(
     state: gdk::ModifierType,
 ) -> glib::Propagation {
     match flavour {
-        Flavour::Note => typing::on_key(view, key, state),
+        Flavour::Note(syntax) => typing::on_key(view, syntax, key, state),
         Flavour::Code => match typing::on_code_key(view, key, state) {
             glib::Propagation::Proceed => indent::on_key(view, key, state),
             stop => stop,

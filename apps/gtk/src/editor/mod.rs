@@ -11,6 +11,7 @@ use accent_api::{Diagnostic, Fold, Vault};
 use accent_core::Error as Core;
 use accent_core::fs::{self, Digest, Etag};
 use accent_core::markdown::Link;
+use accent_core::note::Syntax;
 use adw::prelude::*;
 use gtk::{gdk, gio, glib, pango};
 use sourceview5::prelude::*;
@@ -289,8 +290,9 @@ pub trait Saves: 'static {
 /// type; flavour controls rendering and Markdown-specific behavior.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Flavour {
-    /// A markdown note: our own styling spans, wikilink completion, spellcheck, a capped column.
-    Note,
+    /// A note, markdown or org: our own styling spans, link completion, spellcheck, a capped
+    /// column.
+    Note(Syntax),
     /// Anything else that is text: a GtkSourceView language, monospace, the full width.
     Code,
     /// A table, which is code that gets its columns coloured instead of a language: a CSV, its
@@ -300,7 +302,12 @@ pub enum Flavour {
 
 impl Flavour {
     pub fn is_note(self) -> bool {
-        self == Flavour::Note
+        matches!(self, Flavour::Note(_))
+    }
+
+    /// A markdown note: what only markdown has yet, the preview, print and export, Toggle Task.
+    pub fn is_markdown(self) -> bool {
+        self == Flavour::Note(Syntax::Markdown)
     }
 }
 
@@ -528,12 +535,6 @@ impl Tab {
         self.flavour
     }
 
-    /// An org file (`org.lang`): code to the editor, prose to the spell checker and the notes
-    /// layer.
-    pub fn is_org(&self) -> bool {
-        self.buffer.language().is_some_and(|l| l.id() == "org")
-    }
-
     /// Set committed text for git change bars, or clear with `None`. The Git
     /// pane supplies it because it already queries the repository.
     pub fn set_head(&self, head: Option<String>) {
@@ -759,7 +760,7 @@ impl Tab {
         matched(&self.buffer, &self.reveal_tag);
         match_style(&self.buffer, &self.find_tag);
         match self.flavour {
-            Flavour::Note => restyle_note(&self.view, &self.buffer),
+            Flavour::Note(syntax) => restyle_note(&self.view, &self.buffer, syntax),
             // The column hues are rotated from the accent, which the theme can change under us.
             Flavour::Csv(_) => highlight::restyle_csv(&self.buffer),
             Flavour::Code => {}
@@ -1027,9 +1028,8 @@ impl Tab {
     }
 
     pub fn set_spellcheck(&self, on: bool) {
-        // Prose only. A checker over identifiers and keywords is a wall of red squiggles; org's
-        // are `no-spell-check` in its language spec.
-        if self.flavour.is_note() || self.is_org() {
+        // Prose only. A checker over identifiers and keywords is a wall of red squiggles.
+        if self.flavour.is_note() {
             set_spelling(&self.spell, &self.buffer, &self.view, on);
         }
     }
@@ -1185,11 +1185,11 @@ impl Tab {
         let instant = self.buffer.char_count() <= INSTANT;
         if instant {
             self.reanalyse();
-        } else if self.flavour.is_note() {
+        } else if let Flavour::Note(syntax) = self.flavour {
             // Too long for a full pass inside a frame, so the line under the caret is styled now
             // and everything else waits: what a typist watches change is the line they are typing.
             let line = caret(&self.buffer).line();
-            highlight::apply_line(&self.buffer, line);
+            highlight::apply_line(&self.buffer, line, syntax);
         }
         // An end-of-line message is cut to the room its line leaves (`diagnostics::fit`), and
         // typing on that line takes some of it: the caret's line is measured again now, styled,
@@ -1229,8 +1229,8 @@ impl Tab {
     /// Code uses language-scheme highlighting and needs no corresponding pass.
     fn analyse_text(&self) {
         match self.flavour {
-            Flavour::Note => {
-                let (analysis, offsets) = style_note(&self.view, &self.buffer);
+            Flavour::Note(syntax) => {
+                let (analysis, offsets) = style_note(&self.view, &self.buffer, syntax);
                 *self.links.borrow_mut() = analysis
                     .links
                     .into_iter()

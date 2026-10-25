@@ -8,6 +8,7 @@
 use std::cell::{OnceCell, RefCell};
 use std::rc::Rc;
 
+use accent_core::note::Syntax;
 use accent_core::notebook::{Cell, CellId, Format, Kind, Output};
 use adw::prelude::*;
 use gtk::{gdk, gio};
@@ -149,7 +150,7 @@ impl CellView {
             .margin_bottom(6)
             .build();
         placeholder.add_css_class(match flavour(cell.kind()) {
-            Flavour::Note => "accent-doc",
+            Flavour::Note(_) => "accent-doc",
             _ => "accent-code",
         });
 
@@ -322,13 +323,13 @@ impl CellView {
         // Before any find tag, which paints over it.
         let occurrence = crate::editor::occurrence_tag(&buffer);
         let _ = self.paste_link.set(crate::editor::interact(&view, flavour));
-        if flavour == Flavour::Note {
-            crate::editor::style_note(&view, &buffer);
+        if flavour.is_note() {
+            crate::editor::style_note(&view, &buffer, Syntax::Markdown);
             // The tags' colours, and the markers' widths, are read off the view's own font and
             // colour, which it has once it is realised.
             view.connect_realize(|view| {
                 if let Some(buffer) = view.buffer().downcast_ref::<sourceview5::Buffer>() {
-                    crate::editor::restyle_note(view, buffer);
+                    crate::editor::restyle_note(view, buffer, Syntax::Markdown);
                 }
             });
         } else {
@@ -441,7 +442,7 @@ fn text_start(kind: Kind, gutter: i32) -> i32 {
 
 pub fn flavour(kind: Kind) -> Flavour {
     match kind {
-        Kind::Markdown => Flavour::Note,
+        Kind::Markdown => Flavour::Note(Syntax::Markdown),
         Kind::Code | Kind::Raw => Flavour::Code,
     }
 }

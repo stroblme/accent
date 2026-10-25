@@ -137,7 +137,7 @@ fn kind_group(doc: &Doc) -> Option<Group> {
             let lines = lines(&tab.buffer);
             let characters = tab.buffer.char_count();
             match tab.flavour() {
-                editor::Flavour::Note => (
+                editor::Flavour::Note(_) => (
                     "Note",
                     vec![
                         fact("Words", tab.words()),

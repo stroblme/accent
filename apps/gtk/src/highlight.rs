@@ -3,6 +3,7 @@
 use crate::theme;
 use accent_core::csv;
 use accent_core::markdown::{self, Span, Style};
+use accent_core::note::Syntax;
 use gtk::prelude::*;
 use gtk::{gdk, pango};
 use std::cell::{Cell, RefCell};
@@ -279,15 +280,15 @@ pub fn restyle(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
 /// Shared results avoid duplicate parsing and coordinate conversion for link consumers.
 /// Only changed ranges are tagged to avoid full relayout. Existing buffer tags remain the
 /// source of truth after edits, reloads and Undo; theme changes restyle tags without a pass.
-pub fn apply(buffer: &sourceview5::Buffer) -> (markdown::Analysis, Offsets) {
+pub fn apply(buffer: &sourceview5::Buffer, syntax: Syntax) -> (markdown::Analysis, Offsets) {
     let (start, end) = buffer.bounds();
     let text = buffer.text(&start, &end, true);
-    let analysis = markdown::analyze(&text);
+    let analysis = syntax.analyze(&text);
     let offsets = Offsets::new(&text);
     let mut wanted: HashMap<&str, Vec<Range<i32>>> = HashMap::new();
     for span in &analysis.spans {
         let range = offsets.char_of(span.range.start)..offsets.char_of(span.range.end);
-        for name in tags_of(&text, span) {
+        for name in tags_of(&text, span, syntax) {
             wanted.entry(name).or_default().push(range.clone());
         }
     }
@@ -422,7 +423,7 @@ pub fn mismatches(buffer: &sourceview5::Buffer) -> Vec<&'static str> {
     fresh.set_text(&text);
     let offsets = Offsets::new(&text);
     for span in &markdown::analyze(&text).spans {
-        tag_span(&fresh, &offsets, &text, span);
+        tag_span(&fresh, &offsets, &text, span, Syntax::Markdown);
     }
     let lookup = |buffer: &sourceview5::Buffer, name: &str| {
         let tag = buffer.tag_table().lookup(name).expect("an installed tag");
@@ -437,9 +438,9 @@ pub fn mismatches(buffer: &sourceview5::Buffer) -> Vec<&'static str> {
 
 /// Return span style tags and ATX hanging tags when visible markers remain.
 /// [`apply_line`] clipping may exclude markers; clipped body text must not receive heading hang.
-fn tags_of(text: &str, span: &Span) -> impl Iterator<Item = &'static str> {
+fn tags_of(text: &str, span: &Span, syntax: Syntax) -> impl Iterator<Item = &'static str> {
     let hang = match span.style {
-        Style::Heading(level) if is_atx(text, span.range.start) => {
+        Style::Heading(level) if is_atx(text, span.range.start, heading_mark(syntax)) => {
             Some(HANG_TAGS[usize::from(level.clamp(1, 6)) - 1])
         }
         _ => None,
@@ -448,10 +449,16 @@ fn tags_of(text: &str, span: &Span) -> impl Iterator<Item = &'static str> {
 }
 
 /// Tag one span with [`tags_of`] it, over whatever is there already.
-fn tag_span(buffer: &sourceview5::Buffer, offsets: &Offsets, text: &str, span: &Span) {
+fn tag_span(
+    buffer: &sourceview5::Buffer,
+    offsets: &Offsets,
+    text: &str,
+    span: &Span,
+    syntax: Syntax,
+) {
     let s = buffer.iter_at_offset(offsets.char_of(span.range.start));
     let e = buffer.iter_at_offset(offsets.char_of(span.range.end));
-    for name in tags_of(text, span) {
+    for name in tags_of(text, span, syntax) {
         buffer.apply_tag_by_name(name, &s, &e);
     }
 }
@@ -489,7 +496,7 @@ fn clipped(spans: &[Span], range: &Range<usize>) -> Vec<Span> {
 ///
 /// Parsing is cheaper than tag churn. Whole-document context keeps fence and frontmatter
 /// styling correct while only the edited line's tags change.
-pub fn apply_line(buffer: &sourceview5::Buffer, line: i32) {
+pub fn apply_line(buffer: &sourceview5::Buffer, line: i32, syntax: Syntax) {
     let (start, end) = buffer.bounds();
     let text = buffer.text(&start, &end, true);
     let Some(bytes) = usize::try_from(line)
@@ -498,7 +505,7 @@ pub fn apply_line(buffer: &sourceview5::Buffer, line: i32) {
     else {
         return;
     };
-    let analysis = markdown::analyze(&text);
+    let analysis = syntax.analyze(&text);
     let offsets = Offsets::new(&text);
     let s = buffer.iter_at_offset(offsets.char_of(bytes.start));
     let e = buffer.iter_at_offset(offsets.char_of(bytes.end));
@@ -506,16 +513,24 @@ pub fn apply_line(buffer: &sourceview5::Buffer, line: i32) {
         buffer.remove_tag_by_name(name, &s, &e);
     }
     for span in clipped(&analysis.spans, &bytes) {
-        tag_span(buffer, &offsets, &text, &span);
+        tag_span(buffer, &offsets, &text, &span, syntax);
     }
 }
 
-/// Whether an ATX heading at byte `start` has # markers followed by a space.
+/// What a heading opens with in `syntax`: markdown's `#`, org's `*`.
+fn heading_mark(syntax: Syntax) -> char {
+    match syntax {
+        Syntax::Markdown => '#',
+        Syntax::Org => '*',
+    }
+}
+
+/// Whether an ATX heading at byte `start` has `mark` markers followed by a space.
 /// Setext headings have no markers. Waiting for the space avoids shifting a typed bare #
 /// that may become a tag.
-fn is_atx(text: &str, start: usize) -> bool {
+fn is_atx(text: &str, start: usize, mark: char) -> bool {
     let rest = &text[start..];
-    let after = rest.trim_start_matches('#');
+    let after = rest.trim_start_matches(mark);
     after.len() < rest.len() && after.starts_with([' ', '\t'])
 }
 
@@ -524,7 +539,7 @@ fn is_atx(text: &str, start: usize) -> bool {
 /// Measure markers in the current font, heading scale and zoom. Negative Pango indent and
 /// a matching left margin align wrapped rows with the body column. The fixed 48 px gutter
 /// can clip level-five and level-six markers, shifting their text slightly right.
-pub fn hang(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
+pub fn hang(buffer: &sourceview5::Buffer, view: &sourceview5::View, syntax: Syntax) {
     let table = buffer.tag_table();
     let gutter = view.left_margin();
     for (level, scale) in HEADING_SCALES.iter().enumerate() {
@@ -534,7 +549,8 @@ pub fn hang(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
         // The layout inherits the view's font from its pango context, so whatever CSS says about
         // the document font and the zoom is already in it; the two attributes are exactly what
         // the matching `h{n}` tag adds on top of it.
-        let layout = view.create_pango_layout(Some(&format!("{} ", "#".repeat(level + 1))));
+        let marks = heading_mark(syntax).to_string().repeat(level + 1);
+        let layout = view.create_pango_layout(Some(&format!("{marks} ")));
         let attrs = pango::AttrList::new();
         attrs.insert(pango::AttrInt::new_weight(pango::Weight::Bold));
         attrs.insert(pango::AttrFloat::new_scale(*scale));
@@ -885,13 +901,15 @@ mod tests {
             .map(|s| s.range.start)
             .collect();
         assert_eq!(starts.len(), 2, "one ATX and one setext heading");
-        assert!(is_atx(text, starts[0]));
-        assert!(!is_atx(text, starts[1]));
+        assert!(is_atx(text, starts[0], '#'));
+        assert!(!is_atx(text, starts[1], '#'));
         // A heading is only a heading once the space is there; until then the line may still turn
         // into a tag, and a marker that hangs and un-hangs per keystroke is worse than one that waits.
-        assert!(!is_atx("#", 0));
-        assert!(!is_atx("#tag", 0));
-        assert!(is_atx("### Deep", 0));
+        assert!(!is_atx("#", 0, '#'));
+        assert!(!is_atx("#tag", 0, '#'));
+        assert!(is_atx("### Deep", 0, '#'));
+        // Org's stars hang as a note's `#` do.
+        assert!(is_atx("** Deep", 0, heading_mark(Syntax::Org)));
     }
 
     /// The span offsets we feed to the buffer must land on real character boundaries for a note

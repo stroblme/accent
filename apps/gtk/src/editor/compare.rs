@@ -1,6 +1,6 @@
 //! Tab-hosted comparisons and merges, with read-only companion columns.
 
-use super::{Alert, Flavour, Tab, build, line_numbers, refont, sync_scheme};
+use super::{Alert, Flavour, Syntax, Tab, build, line_numbers, refont, sync_scheme};
 use crate::{diff, fold, highlight, wrap};
 use adw::prelude::*;
 use gtk::glib;
@@ -113,16 +113,17 @@ fn line_text(at: &gtk::TextIter) -> String {
 /// Build an editable Markdown view for diagram labels without a tab
 /// (`diagram/label.rs`).
 pub fn overlay_view(text: &str) -> (sourceview5::View, sourceview5::Buffer) {
-    let (view, buffer) = build(Flavour::Note, None, text);
-    style_companion(Flavour::Note, &buffer, &view);
+    let note = Flavour::Note(Syntax::Markdown);
+    let (view, buffer) = build(note, None, text);
+    style_companion(note, &buffer, &view);
     (view, buffer)
 }
 
 /// Apply companion styling like [`Tab::analyse`], without tab-specific work.
 pub fn style_companion(flavour: Flavour, buffer: &sourceview5::Buffer, view: &sourceview5::View) {
     match flavour {
-        Flavour::Note => {
-            wrap::refence(view, || highlight::apply(buffer));
+        Flavour::Note(syntax) => {
+            wrap::refence(view, || highlight::apply(buffer, syntax));
         }
         Flavour::Csv(delim) => highlight::apply_csv(buffer, delim),
         Flavour::Code => {}
@@ -134,7 +135,7 @@ pub fn style_companion(flavour: Flavour, buffer: &sourceview5::Buffer, view: &so
 pub fn restyle_companion(flavour: Flavour, buffer: &sourceview5::Buffer, view: &sourceview5::View) {
     sync_scheme(buffer);
     match flavour {
-        Flavour::Note => highlight::restyle(buffer, view),
+        Flavour::Note(_) => highlight::restyle(buffer, view),
         Flavour::Csv(_) => highlight::restyle_csv(buffer),
         Flavour::Code => {}
     }
@@ -144,8 +145,8 @@ pub fn restyle_companion(flavour: Flavour, buffer: &sourceview5::Buffer, view: &
 /// Remeasure companion markers and wrap indent in its own font and margin
 /// ([`Tab::rehang`]).
 pub fn rehang_companion(flavour: Flavour, buffer: &sourceview5::Buffer, view: &sourceview5::View) {
-    if flavour.is_note() {
-        highlight::hang(buffer, view);
+    if let Flavour::Note(syntax) = flavour {
+        highlight::hang(buffer, view, syntax);
     }
     wrap::measure(view);
 }

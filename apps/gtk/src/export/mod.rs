@@ -20,12 +20,14 @@ pub enum Export {
 /// A printout's margin on every side, LibreOffice's default: GTK's own quarter inch crowds prose.
 const MARGIN_MM: f64 = 20.0;
 
-/// What `doc` can be printed and exported as, `None` where it cannot be: a note, a PDF and a
-/// diagram are the three (DESIGN.md, Preview and Diagram), a note only where WebKit can put it
-/// on paper.
+/// What `doc` can be printed and exported as, `None` where it cannot be: a markdown note, a PDF
+/// and a diagram are the three (DESIGN.md, Preview and Diagram), a note only where WebKit can put
+/// it on paper.
 pub fn printable(doc: &Doc) -> Option<Kind> {
     match doc {
-        Doc::Text(tab) if cfg!(feature = "webkit") && tab.flavour().is_note() => Some(Kind::Note),
+        Doc::Text(tab) if cfg!(feature = "webkit") && tab.flavour().is_markdown() => {
+            Some(Kind::Note)
+        }
         Doc::Pdf(_) => Some(Kind::Pdf),
         Doc::Diagram(_) => Some(Kind::Diagram),
         // Not printed yet; its kind is what puts Open as Text on its tab menu.
@@ -41,7 +43,7 @@ impl App {
     pub(crate) fn print(self: &Rc<Self>) {
         match self.menu_doc() {
             #[cfg(feature = "webkit")]
-            Some(Doc::Text(tab)) if tab.flavour().is_note() => self.print_note(tab),
+            Some(Doc::Text(tab)) if tab.flavour().is_markdown() => self.print_note(tab),
             Some(Doc::Pdf(pdf)) => pdf::export::print(self, &pdf),
             Some(Doc::Diagram(tab)) => diagram::export::print(self, &tab),
             _ => {}
@@ -65,8 +67,8 @@ impl App {
             Export::Svg => "Export as SVG",
         };
         let name = match (to, &doc) {
-            (Export::Pdf, Doc::Text(tab)) if tab.flavour().is_note() => format!("{stem}.pdf"),
-            (Export::Html, Doc::Text(tab)) if tab.flavour().is_note() => format!("{stem}.html"),
+            (Export::Pdf, Doc::Text(tab)) if tab.flavour().is_markdown() => format!("{stem}.pdf"),
+            (Export::Html, Doc::Text(tab)) if tab.flavour().is_markdown() => format!("{stem}.html"),
             (Export::Pdf, Doc::Pdf(_)) => format!("{stem} (exported).pdf"),
             (_, Doc::Diagram(tab)) => match diagram::export::offered_name(tab, to) {
                 Some(name) => name,

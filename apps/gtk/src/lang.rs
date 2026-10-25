@@ -10,6 +10,7 @@ use accent_api::debug::Evaluated;
 use accent_api::{
     CodeSymbol, Diagnostic, Kind, Pos, Range, Support, Symbol, SymbolKind, Task, Vault,
 };
+use accent_core::note::Syntax;
 use futures_channel::oneshot;
 use gtk::prelude::*;
 use gtk::{gdk, glib};
@@ -441,10 +442,11 @@ pub fn iter_at(buffer: &impl IsA<gtk::TextBuffer>, pos: Pos) -> gtk::TextIter {
     iter
 }
 
-/// LSP language ID from GtkSourceView, or markdown for locally styled notes.
+/// LSP language ID from GtkSourceView, or the note's syntax for locally styled notes.
 pub fn language_id(tab: &Tab) -> String {
     match tab.flavour() {
-        Flavour::Note => "markdown".to_string(),
+        Flavour::Note(Syntax::Markdown) => "markdown".to_string(),
+        Flavour::Note(Syntax::Org) => "org".to_string(),
         // No language at all is `text`, which is what the word suggestions are keyed on.
         _ => tab
             .buffer
@@ -772,7 +774,7 @@ async fn refresh(tab: Rc<Tab>, rest: Duration) {
 /// [`refresh`] for a note or an org file outside every vault: its headings and folds are read
 /// from its own text, off the main loop, as the notes provider reads them inside one.
 async fn outline_alone(tab: Rc<Tab>, rest: Duration) {
-    if !tab.flavour().is_note() && !tab.is_org() {
+    if !tab.flavour().is_note() {
         return;
     }
     pause(rest).await;

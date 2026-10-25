@@ -37,7 +37,7 @@ pub(crate) fn on_key(
             | gdk::ModifierType::ALT_MASK
             | gdk::ModifierType::META_MASK,
     ) || !view.is_editable()
-        || !opens_levels(&buffer)
+        || buffer.language().is_none()
         || buffer.has_selection()
     {
         return glib::Propagation::Proceed;
@@ -65,18 +65,12 @@ pub(super) fn below(view: &sourceview5::View, end: &gtk::TextIter) -> String {
     let indent = leading_indent(&line_prefix(&buffer, end)).to_string();
     let opens = buffer
         .downcast_ref::<sourceview5::Buffer>()
-        .filter(|source| opens_levels(source))
+        .filter(|source| source.language().is_some())
         .is_some_and(|source| opened(source, end).is_some());
     match opens {
         true => indent + &unit(view),
         false => indent,
     }
-}
-
-/// Whether the buffer's language is code whose openers open a level: any, but none and org,
-/// which is prose (a heading's `:tags:` ends in a `:`).
-fn opens_levels(buffer: &sourceview5::Buffer) -> bool {
-    buffer.language().is_some_and(|l| l.id() != "org")
 }
 
 /// One level deeper after an opener, the closer right after the caret going to a line of its own.

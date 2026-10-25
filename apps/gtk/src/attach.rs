@@ -1,5 +1,6 @@
 //! Store pasted or dropped images in the vault's `attachment_folder` and insert wikilink
-//! embeds at the paste or drop location. Vault writes also support remote attachments.
+//! embeds at the paste or drop location, or in an org note a `[[file:…]]` link to the image.
+//! Vault writes also support remote attachments.
 //!
 //! Only notes in the window's vault participate; other tabs and clipboard or drag content
 //! use GTK's normal paste and drop handling.
@@ -7,7 +8,8 @@
 use super::*;
 use accent_core::attachment;
 use accent_core::markdown::is_image;
-use accent_core::path::basename;
+use accent_core::note::Syntax;
+use accent_core::path::{basename, parent_dir, relative};
 
 /// What arrived: an image off the clipboard, or image files let go over the text.
 enum Incoming {
@@ -171,9 +173,15 @@ fn images(value: &glib::Value) -> Option<Vec<PathBuf>> {
 /// On failure, retain completed embeds and report the first error that stopped the batch.
 fn store(vault: &Vault, note: &str, incoming: Incoming) -> (Vec<String>, Option<String>) {
     let dir = attachment::folder(&vault.config().attachment_folder, note);
-    let embed = |rel: &str| {
-        let by_name = vault.resolve_link(basename(rel)).ok().flatten();
-        attachment::embed(rel, by_name.as_deref())
+    let embed = |rel: &str| match Syntax::of(note) {
+        // Org shows a file link without a description as the image, by its path from the note.
+        Syntax::Org => {
+            accent_core::org::link(&format!("file:{}", relative(parent_dir(note), rel)), None)
+        }
+        Syntax::Markdown => {
+            let by_name = vault.resolve_link(basename(rel)).ok().flatten();
+            attachment::embed(rel, by_name.as_deref())
+        }
     };
     let mut embeds = Vec::new();
     match incoming {

@@ -841,7 +841,7 @@ async fn parity_drill(app: &Rc<App>, marimo: &str) {
     let carets = tab.bench_view(0).is_some_and(|view| {
         crate::editor::typed_keys(
             &view,
-            editor::Flavour::Note,
+            editor::Flavour::Note(accent_core::note::Syntax::Markdown),
             gdk::Key::z,
             gdk::ModifierType::empty(),
         );

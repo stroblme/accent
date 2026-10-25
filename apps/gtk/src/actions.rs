@@ -172,7 +172,7 @@ impl App {
             },
             "toggle-comment" => self.with_view(editor::toggle_comment),
             "toggle-task" => {
-                if let Some(tab) = self.active().filter(|tab| tab.flavour().is_note()) {
+                if let Some(tab) = self.active().filter(|tab| tab.flavour().is_markdown()) {
                     editor::toggle_task(&tab.view);
                 }
             }
@@ -524,10 +524,10 @@ impl App {
         }
     }
 
-    /// Toggle Task means something only over a note: greyed elsewhere, where its chord goes on to
-    /// the focused widget.
+    /// Toggle Task means something only over a markdown note: greyed elsewhere, where its chord
+    /// goes on to the focused widget.
     pub(crate) fn sync_toggle_task(&self) {
-        let note = self.active().is_some_and(|tab| tab.flavour().is_note());
+        let note = self.active().is_some_and(|tab| tab.flavour().is_markdown());
         let action = self.window.lookup_action("toggle-task");
         if let Some(action) = action.and_downcast::<gio::SimpleAction>() {
             action.set_enabled(note);

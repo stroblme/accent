@@ -10,6 +10,7 @@ use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
 use accent_api::{Completion, Completions, Diagnostic, Pos, Vault};
+use accent_core::note::Syntax;
 use accent_core::notebook::{CellId, Format, Kind, Program};
 use gtk::glib;
 use gtk::prelude::*;
@@ -550,7 +551,7 @@ impl NotebookTab {
                 if !view.is_editable() {
                     return glib::Propagation::Proceed;
                 }
-                crate::editor::typed_keys(&view, Flavour::Note, key, state)
+                crate::editor::typed_keys(&view, Flavour::Note(Syntax::Markdown), key, state)
             });
             editor.view.add_controller(keys);
             self.follow_clicks(&editor.view);

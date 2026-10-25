@@ -4,6 +4,7 @@
 use super::*;
 use accent_api::Error;
 use accent_core::Error as Core;
+use accent_core::note::Syntax;
 
 /// Opening intent determines whether a tab replaces a preview or stays open.
 ///
@@ -66,7 +67,7 @@ impl App {
             self.drop_awaiting(&key, "not a text file");
         }
         match kind {
-            Kind::Note => self.open_text(&key, &path, Flavour::Note, how),
+            Kind::Note => self.open_text(&key, &path, Flavour::Note(Syntax::Markdown), how),
             Kind::Image => self.open_image(&key, &path, how),
             Kind::Pdf => self.open_pdf(&key, &path, how),
             Kind::Diagram => self.open_diagram(&key, &path, how),
@@ -638,7 +639,7 @@ impl App {
             return tab;
         }
         let flavour = match doc::kind_of(file) {
-            Kind::Note => Flavour::Note,
+            Kind::Note => Flavour::Note(Syntax::Markdown),
             _ => flavour_of(file),
         };
         let font = self.config.borrow().editor_font.clone();
@@ -1318,9 +1319,13 @@ fn reveal_label(tab: &Rc<crate::diagram::DiagramTab>, at: usize) {
     }
 }
 
-/// Choose text editor styling; a table uses column colours instead of csv.lang token colours. A
-/// TSV is read with tabs whatever its first line holds, where a CSV's delimiter is sniffed.
+/// Choose text editor styling: an org file is a note in org's syntax; a table uses column colours
+/// instead of csv.lang token colours. A TSV is read with tabs whatever its first line holds, where
+/// a CSV's delimiter is sniffed.
 fn flavour_of(key: &str) -> Flavour {
+    if accent_core::path::is_org(key) {
+        return Flavour::Note(Syntax::Org);
+    }
     match accent_core::path::file_type(key) {
         accent_core::path::FileType::Table => {
             let tsv = key

@@ -10,6 +10,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use accent_core::note::Syntax;
 use accent_core::notebook::output::{self as core, Form, Item, Output, Table};
 use accent_core::notebook::{Cell as NotebookCell, Kind};
 use adw::prelude::*;
@@ -401,11 +402,11 @@ impl Outputs {
     }
 
     fn markdown(&self, text: &str) {
-        let (view, buffer) = crate::editor::build(Flavour::Note, None, text);
+        let (view, buffer) = crate::editor::build(Flavour::Note(Syntax::Markdown), None, text);
         view.set_editable(false);
         view.set_cursor_visible(false);
         view.add_css_class("notebook-output");
-        highlight::apply(&buffer);
+        highlight::apply(&buffer, Syntax::Markdown);
         highlight::restyle(&buffer, &view);
         self.put(&view);
         self.keep(Part::Markdown(view, buffer));
