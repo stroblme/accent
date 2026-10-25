@@ -147,9 +147,8 @@ pub fn run(app: &Rc<App>) {
         })
         .expect("a delete button on the reference row");
         let actions = remove
-            .parent()
-            .unwrap()
-            .downcast::<gtk::Revealer>()
+            .ancestor(gtk::Revealer::static_type())
+            .and_downcast::<gtk::Revealer>()
             .unwrap();
         let row = actions.parent().unwrap().parent().unwrap();
         row.set_state_flags(gtk::StateFlags::PRELIGHT, false);
@@ -159,6 +158,45 @@ pub fn run(app: &Rc<App>) {
             !actions.reveals_child(),
             "leaving the row hides the delete action"
         );
+        // The row's copy button and menu act on its own reference; the header's menu on the file.
+        let copy = descendant::<gtk::Button>(&row, |b| {
+            b.tooltip_text().as_deref() == Some("Copy Citation Key")
+        })
+        .expect("a copy button on the reference row");
+        copy.emit_clicked();
+        let copied = app.window.clipboard().read_text_future().await.unwrap();
+        assert_eq!(copied.as_deref(), Some("lee_readout_2025"));
+        let has = |button: &gtk::MenuButton, action: &str| {
+            let menu = button.menu_model().unwrap();
+            (0..menu.n_items()).any(|i| {
+                let section = menu.item_link(i, "section").unwrap();
+                (0..section.n_items()).any(|j| {
+                    section
+                        .item_attribute_value(j, "action", None)
+                        .and_then(|v| v.get::<String>())
+                        .as_deref()
+                        == Some(action)
+                })
+            })
+        };
+        let more = descendant::<gtk::MenuButton>(&row, |_| true).unwrap();
+        assert!(has(&more, "row.edit") && has(&more, "row.download"));
+        let header = descendant::<gtk::MenuButton>(&panel.root.clone().upcast(), |b| {
+            b.tooltip_text().as_deref() == Some("Bibliography Actions")
+        })
+        .unwrap();
+        assert!(has(&header, "win.bib-check") && !has(&header, "win.bib-edit"));
+        remove.activate_action("row.edit", None).unwrap();
+        glib::timeout_future(Duration::from_millis(100)).await;
+        let dialog = app.window.visible_dialog().expect("edit reference");
+        assert!(
+            descendant::<gtk::Label>(&dialog.clone().upcast(), |l| l
+                .text()
+                .ends_with("· lee_readout_2025"))
+            .is_some(),
+            "the row menu edits its own reference"
+        );
+        dialog.close();
         remove.emit_clicked();
         glib::timeout_future(Duration::from_millis(100)).await;
         let dialog = app.window.visible_dialog().expect("removal review");
@@ -198,11 +236,9 @@ pub fn run(app: &Rc<App>) {
         })
         .unwrap();
         remove
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .parent()
+            .ancestor(gtk::Revealer::static_type())
+            .and_then(|r| r.parent())
+            .and_then(|r| r.parent())
             .unwrap()
             .set_state_flags(gtk::StateFlags::PRELIGHT, false);
         app.toasts.dismiss_all();
@@ -234,7 +270,7 @@ pub fn run(app: &Rc<App>) {
             "/tmp/accent-bibliography-narrow.png",
         );
         println!(
-            "bench bibliography row_delete=true source_only=true source_preserved=true undo=true sidebar_unchanged=true copy=true move=true stale_review_refused=true chooser_search=true"
+            "bench bibliography row_delete=true source_only=true source_preserved=true undo=true sidebar_unchanged=true copy=true move=true stale_review_refused=true chooser_search=true row_actions=true"
         );
         app.window.application().unwrap().quit();
     });

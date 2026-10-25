@@ -215,20 +215,61 @@ pub(crate) fn reveal_on_hover(row: &impl IsA<gtk::Widget>) {
     let mark = clicked.clone();
     press.connect_pressed(move |_, _, _, _| mark.set(true));
     row.add_controller(press);
-    row.connect_state_flags_changed(move |row, _| {
+    let update = Rc::new(move |row: &gtk::Widget| {
         let flags = row.state_flags();
         let hovered = flags.contains(gtk::StateFlags::PRELIGHT);
         let focused = flags.contains(gtk::StateFlags::FOCUS_WITHIN);
-        // Not on the focus leaving alone: moving it between the row and a button inside takes it
-        // off the row and puts it back, which a press does with the pointer still on the row.
-        if !hovered && !focused {
-            clicked.set(false);
+        let revealers = revealers(row);
+        // An open menu keeps the button it hangs from on screen, or it would close under the
+        // pointer that left the row for it; GTK does not count the menu's focus as the row's.
+        let open = revealers.iter().flat_map(menus).any(|m| m.is_active());
+        // Forget the press only once the focus stays away: GTK takes it off the row and puts it
+        // back when it moves between the row and a button inside, and when a menu closes.
+        if !hovered && !focused && !open {
+            let (row, clicked) = (row.downgrade(), clicked.clone());
+            glib::idle_add_local_once(move || {
+                let away = gtk::StateFlags::PRELIGHT | gtk::StateFlags::FOCUS_WITHIN;
+                if row
+                    .upgrade()
+                    .is_some_and(|row| !row.state_flags().intersects(away))
+                {
+                    clicked.set(false);
+                }
+            });
         }
-        let on = hovered || (focused && !clicked.get());
-        for revealer in revealers(row) {
+        let on = hovered || (focused && !clicked.get()) || open;
+        for revealer in revealers {
             revealer.set_reveal_child(on);
         }
     });
+    // A menu closing changes no state on the row, the pointer having left it already.
+    for menu in revealers(row).iter().flat_map(menus) {
+        let (row, update) = (row.downgrade(), update.clone());
+        menu.connect_active_notify(move |_| {
+            if let Some(row) = row.upgrade() {
+                update(&row);
+            }
+        });
+    }
+    row.connect_state_flags_changed(move |row, _| update(row));
+}
+
+/// The menu buttons under `revealer`.
+fn menus(revealer: &gtk::Revealer) -> Vec<gtk::MenuButton> {
+    let mut found = Vec::new();
+    let mut todo = vec![revealer.clone().upcast::<gtk::Widget>()];
+    while let Some(widget) = todo.pop() {
+        if let Ok(menu) = widget.clone().downcast::<gtk::MenuButton>() {
+            found.push(menu);
+            continue;
+        }
+        let mut child = widget.first_child();
+        while let Some(c) = child {
+            child = c.next_sibling();
+            todo.push(c);
+        }
+    }
+    found
 }
 
 /// Every [`hover_revealer`] under `row` — in a list row, one per layout its stack can show.

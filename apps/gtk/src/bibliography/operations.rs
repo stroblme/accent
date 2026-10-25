@@ -67,7 +67,11 @@ impl App {
             tab.view.grab_focus();
         } else {
             self.window.clipboard().set_text(&keys);
-            self.toast("Citation keys copied");
+            self.toast(if selected.len() == 1 {
+                "Citation key copied"
+            } else {
+                "Citation keys copied"
+            });
         }
     }
 

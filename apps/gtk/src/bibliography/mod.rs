@@ -58,22 +58,41 @@ impl Entries {
                     text.append(&label);
                 }
                 row.append(&text);
-                let remove = crate::widgets::icon_button("user-trash-symbolic", "Remove Reference");
-                let weak = weak.clone();
-                remove.connect_clicked(glib::clone!(
-                    #[weak]
-                    item,
-                    move |_| {
+                // Each button and menu item acts on whatever reference `item` holds when used.
+                let act = {
+                    let weak = weak.clone();
+                    let item = item.downgrade();
+                    move |name: &str| {
                         if let Some(app) = weak.upgrade()
                             && let Some(panel) = app.bibliography.get()
+                            && let Some(item) = item.upgrade()
                         {
-                            panel.remove(item.position());
+                            panel.row_action(item.position(), name);
                         }
                     }
-                ));
+                };
+                let group = gio::SimpleActionGroup::new();
+                for (_, name) in ROW_ACTIONS.into_iter().flatten() {
+                    let action = gio::SimpleAction::new(name, None);
+                    let act = act.clone();
+                    action.connect_activate(move |action, _| act(&action.name()));
+                    group.add_action(&action);
+                }
+                row.insert_action_group("row", Some(&group));
+                let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+                let copy = crate::widgets::icon_button("edit-copy-symbolic", "Copy Citation Key");
+                let more = menu_button(&ROW_ACTIONS, "row.", "Reference Actions");
+                let remove = crate::widgets::icon_button("user-trash-symbolic", "Remove Reference");
+                for (button, name) in [(&copy, "copy-keys"), (&remove, "remove")] {
+                    let act = act.clone();
+                    button.connect_clicked(move |_| act(name));
+                }
+                buttons.append(&copy);
+                buttons.append(&more);
+                buttons.append(&remove);
                 let actions = crate::widgets::hover_revealer();
                 actions.set_valign(gtk::Align::Center);
-                actions.set_child(Some(&remove));
+                actions.set_child(Some(&buttons));
                 row.append(&actions);
                 row
             },
@@ -331,9 +350,11 @@ impl Panel {
         let open = action_button("filetype-file-symbolic", "Open Bibliography", "bib-open");
         open.add_css_class("flat");
         bar.append(&open);
-        let more = menu();
-        more.add_css_class("flat");
-        bar.append(&more);
+        bar.append(&menu_button(
+            &FILE_ACTIONS,
+            "win.bib-",
+            "Bibliography Actions",
+        ));
         let add = action_button("list-add-symbolic", "Add Reference…", "bib-add");
         add.add_css_class("suggested-action");
         bar.append(&add);
@@ -385,28 +406,28 @@ impl Panel {
         ));
         panel
     }
-    fn remove(self: &Rc<Self>, row: u32) {
+    /// A row button or menu item: on the marked rows when this row is one of them, as a file
+    /// manager's menu acts, otherwise on this row alone.
+    fn row_action(self: &Rc<Self>, row: u32, name: &str) {
         let (Some(app), Some(path)) = (self.app.upgrade(), self.path()) else {
             return;
         };
         let Some(index) = self.entries.indices.borrow().get(row as usize).copied() else {
             return;
         };
-        let Some(before) = self
+        let selected = if self.entries.selection.is_selected(row) {
+            self.entries.selected()
+        } else {
+            vec![index]
+        };
+        // The rows' indices are into what the pane shows, which a source edit may have moved on.
+        let shown = self
             .entries
             .library
             .borrow()
             .as_ref()
-            .map(|bib| bib.source.clone())
-        else {
-            return;
-        };
-        app.with_tab(&path, Opened::Kept, "remove reference", move |app, tab| {
-            if tab.text() != before {
-                return app.toast("Bibliography changed; select the reference again");
-            }
-            edit::operate(app, tab, "remove", vec![index]);
-        });
+            .map(|bib| bib.source.clone());
+        app.run_bibliography(&path, name, selected, shown);
     }
     pub fn path(&self) -> Option<String> {
         self.files
@@ -508,34 +529,58 @@ fn action_button(icon: &str, label: &str, action: &str) -> gtk::Button {
         .valign(gtk::Align::Center)
         .build()
 }
-fn menu() -> gtk::MenuButton {
-    let menu = gio::Menu::new();
-    for (label, name) in [
-        ("Edit Reference…", "edit"),
+/// The header's More menu: what acts on the whole file.
+const FILE_ACTIONS: [&[(&str, &str)]; 3] = [
+    &[
         ("Check Bibliography…", "check"),
         ("Merge Duplicates…", "merge"),
+    ],
+    &[
+        ("Undo Bibliography Edit", "undo"),
+        ("Redo Bibliography Edit", "redo"),
+    ],
+    &[("New Bibliography…", "new")],
+];
+/// A reference row's More menu; Copy Citation Key and Remove Reference are its own buttons.
+const ROW_ACTIONS: [&[(&str, &str)]; 4] = [
+    &[
+        ("Edit Reference…", "edit"),
         ("Refresh Metadata…", "refresh"),
         ("Generate Citation Key…", "key"),
-        ("Copy Citation Keys", "copy-keys"),
+    ],
+    &[
         ("Insert Citation", "cite"),
         ("Find Citation Usages…", "usages"),
+    ],
+    &[
         ("Open Attached PDF", "pdf"),
         ("Attach PDF…", "attach"),
         ("Download PDF…", "download"),
+    ],
+    &[
         ("Copy to Bibliography…", "copy"),
         ("Move to Bibliography…", "move"),
-        ("Remove References…", "remove"),
-        ("Undo Bibliography Edit", "undo"),
-        ("Redo Bibliography Edit", "redo"),
-        ("New Bibliography…", "new"),
-    ] {
-        menu.append(Some(label), Some(&format!("win.bib-{name}")));
+    ],
+];
+/// A flat More button over `sections`, each item activating the action `prefix` + its name.
+fn menu_button(sections: &[&[(&str, &str)]], prefix: &str, tooltip: &str) -> gtk::MenuButton {
+    let menu = gio::Menu::new();
+    for items in sections {
+        let section = gio::Menu::new();
+        for (label, name) in *items {
+            section.append(Some(label), Some(&format!("{prefix}{name}")));
+        }
+        menu.append_section(None, &section);
     }
-    gtk::MenuButton::builder()
+    let button = gtk::MenuButton::builder()
         .icon_name("view-more-symbolic")
-        .tooltip_text("Bibliography Actions")
+        .tooltip_text(tooltip)
         .menu_model(&menu)
-        .build()
+        .valign(gtk::Align::Center)
+        .build();
+    button.add_css_class("flat");
+    button.update_property(&[gtk::accessible::Property::Label(tooltip)]);
+    button
 }
 
 impl App {
@@ -619,22 +664,33 @@ impl App {
         let Some((path, selected)) = self.bibliography_target() else {
             return self.new_bibliography();
         };
+        let shown = self.tab_for(&path).map(|t| t.text()).or_else(|| {
+            self.bibliography.get().and_then(|p| {
+                p.entries
+                    .library
+                    .borrow()
+                    .as_ref()
+                    .map(|b| b.source.clone())
+            })
+        });
+        self.run_bibliography(&path, name, selected, shown);
+    }
+    /// Run `name` on the entries `selected` of `path`, refused when the source no longer reads
+    /// as `shown`, the text those indices were taken from.
+    fn run_bibliography(
+        self: &Rc<Self>,
+        path: &str,
+        name: &str,
+        selected: Vec<usize>,
+        shown: Option<String>,
+    ) {
         match name {
-            "open" => self.open_bibliography(&path, None),
-            "add" => self.add_reference(&path),
-            "copy-keys" | "cite" => self.cite_references(&path, selected, name == "cite"),
+            "open" => self.open_bibliography(path, None),
+            "add" => self.add_reference(path),
+            "copy-keys" | "cite" => self.cite_references(path, selected, name == "cite"),
             _ => {
                 let name = name.to_string();
-                let shown = self.tab_for(&path).map(|t| t.text()).or_else(|| {
-                    self.bibliography.get().and_then(|p| {
-                        p.entries
-                            .library
-                            .borrow()
-                            .as_ref()
-                            .map(|b| b.source.clone())
-                    })
-                });
-                self.with_tab(&path, Opened::Kept, "edit bibliography", move |app, tab| {
+                self.with_tab(path, Opened::Kept, "edit bibliography", move |app, tab| {
                     if shown.as_ref().is_some_and(|text| *text != tab.text()) {
                         return app.toast("Bibliography changed; select the references again");
                     }
