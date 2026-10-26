@@ -12,7 +12,8 @@ impl Panel {
     pub(super) fn sync_state(&self) {
         let state = self.state.borrow();
         let branch = state.statuses.get(state.selected).map(|s| &s.branch);
-        self.sync.set_sensitive(branch.is_some());
+        self.sync
+            .set_sensitive(branch.is_some() && self.may(&self.sync));
         // A branch git has said nothing about has no upstream anyone knows of, so it is not
         // "Publish" either.
         let mut tip = branch

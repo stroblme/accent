@@ -270,7 +270,7 @@ fn header_layout(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Box {
     all.connect_clicked(glib::clone!(
         #[weak]
         item,
-        move |_| {
+        move |all| {
             let (
                 Some(panel),
                 Some(Row::Header {
@@ -281,9 +281,10 @@ fn header_layout(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Box {
                 return;
             };
             let paths = panel.section_paths(section, "");
+            let from = Some(all.clone().upcast());
             match section {
-                Section::Staged => panel.unstage(paths),
-                _ => panel.stage(paths),
+                Section::Staged => panel.unstage(paths, from),
+                _ => panel.stage(paths, from),
             }
         }
     ));
@@ -291,11 +292,16 @@ fn header_layout(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Box {
     // one question a folder row's Discard asks.
     let discard = icon_button("document-revert-symbolic", "Discard All");
     let weak = panel.clone();
-    discard.connect_clicked(move |_| {
+    discard.connect_clicked(move |discard| {
         if let Some(panel) = weak.upgrade() {
-            panel.discard(Some(""), panel.section_entries(Section::Changes, ""));
+            let entries = panel.section_entries(Section::Changes, "");
+            panel.discard(Some(""), entries, Some(discard.clone().upcast()));
         }
     });
+    if let Some(panel) = panel.upgrade() {
+        panel.actor(&all);
+        panel.actor(&discard);
+    }
     let header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     header.append(&title);
     header.append(&all);
@@ -364,12 +370,15 @@ fn action_buttons(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Box {
         button.connect_clicked(glib::clone!(
             #[weak]
             item,
-            move |_| {
+            move |button| {
                 if let (Some(panel), Some(row)) = (weak.upgrade(), boxed::<Row>(item.item())) {
-                    panel.act(act, row);
+                    panel.act(act, row, Some(button.clone().upcast()));
                 }
             }
         ));
+        if let Some(panel) = panel.upgrade() {
+            panel.actor(&button);
+        }
         actions.append(&button);
     }
     actions
@@ -384,9 +393,10 @@ fn buttons(revealer: Option<gtk::Widget>) -> Option<gtk::Box> {
 }
 
 impl Panel {
-    /// What one of a row's buttons does. A folder's buttons act on every entry of its section
-    /// under it, picked the way the section header's Stage All and Unstage All pick theirs.
-    fn act(self: &Rc<Self>, act: Act, row: Row) {
+    /// What one of a row's buttons does, `from` the button where it was one. A folder's buttons
+    /// act on every entry of its section under it, picked the way the section header's Stage All
+    /// and Unstage All pick theirs.
+    fn act(self: &Rc<Self>, act: Act, row: Row, from: Option<gtk::Widget>) {
         let (entries, folder) = match &row {
             Row::Entry { entry, .. } => (vec![entry.clone()], None),
             Row::Folder { path, section, .. } => (
@@ -396,9 +406,9 @@ impl Panel {
             _ => return,
         };
         match act {
-            Act::Stage => self.stage(entries.into_iter().map(|e| e.path).collect()),
-            Act::Unstage => self.unstage(entries.into_iter().map(|e| e.path).collect()),
-            Act::Discard => self.discard(folder, entries),
+            Act::Stage => self.stage(entries.into_iter().map(|e| e.path).collect(), from),
+            Act::Unstage => self.unstage(entries.into_iter().map(|e| e.path).collect(), from),
+            Act::Discard => self.discard(folder, entries, from),
         }
     }
 }
@@ -608,11 +618,14 @@ fn change_menu(
             continue;
         }
         let action = gio::SimpleAction::new(name, None);
+        // Stage, Unstage and Discard are the row's buttons, out of reach as those are while a
+        // command runs ([`Panel::hold`]); Open runs no git.
+        action.set_enabled(act.is_none() || panel.upgrade().is_some_and(|panel| !panel.held()));
         let (row, panel) = (row.clone(), panel.clone());
         action.connect_activate(move |_, _| {
             if let Some(panel) = panel.upgrade() {
                 match act {
-                    Some(act) => panel.act(act, row.clone()),
+                    Some(act) => panel.act(act, row.clone(), None),
                     None => panel.activate(&row),
                 }
             }

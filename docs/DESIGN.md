@@ -459,7 +459,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Picking away from such a repository cannot be spread so, every row having to go at once, so a row makes what most rows leave out — a commit's decorations, its not-pulled arrow and "side branched here", a file's folder — the first time it shows it, and only hides it after (`git::part`): a commit row is 8 widgets where it was 15, and the pick held the window up 23 ms where it held it 30 (medians, release, Xvfb, 2026-10-07, `ACCENT_BENCH_GIT=switch`'s `pick_ms`).
 - Beside the chooser, and only with it, Sync All: Sync's pull and push for every repository, one after another, carrying on past one that fails.
   One toast at the end names each that did not sync and why — git's own `error:` or `fatal:` line — and one stopped in a merge or a rebase is left alone and named with them.
-  Its spinner takes its place while it runs, as Sync's does.
+  It spins while it runs, as Sync does.
 - A branch row: a `GtkMenuButton` labelled with HEAD's branch, or `Detached at abc1234` (the status bar's string).
   Its popover lists the local branches, then under a dim Remote heading the remote-tracking branches no local branch shares a name with, then Create Branch… and Merge Branch…: the readout is every branch operation the pane offers.
 - Picking a row is `git switch`, a remote row `git switch --track`; whether it is safe is git's call, its first line coming back as a toast and the label returning to the real HEAD where git refuses.
@@ -484,6 +484,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A failed pull stops there and keeps its transcript.
 - On a remote vault git runs on the host, which finishes a command within its own bounds whatever the link does.
   A command whose link drops part way fails in the link's words and says the host may still finish it, and that the pane shows what it did once the link is back: the reconnect refreshes it, and so does what the host finishes later, which moves a ref the vault watches.
+- While a command runs (a stage, a discard, a commit, a sync, a branch switch) the control it was asked from shows a spinner in place of its icon or label, at its size, and keeps the keyboard; the pane's other actions are insensitive until git answers, so a press on a slow link is answered at once.
+  A branch operation spins the branch button, its popover having gone; one asked from the palette or a dialog spins nothing and holds the pane the same.
+  One command at a time: one asked meanwhile, from the palette, a comparison's hunk or the merge view, is refused with a toast rather than raced against the first for git's index lock, and the spinning control pressed again does nothing.
 - Sync's pull is a merge (`git pull --no-rebase`): it never rewrites a commit, and a conflict stops in the Merge Conflicts row.
   It merges even where the user's `pull.rebase` or `pull.ff = only` says otherwise, by the user's decision.
 - A failed background fetch interrupts nobody and says so on the Sync tooltip.
@@ -1390,8 +1393,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Between queries its place says what the answer holds — "12 results in 3 files", `+` on a number the cap may have cut — in `.caption` `.dimmed`.
 - **A bar belongs to the surface it is about to fill**, which allows one more: a remote vault's first connection, across the top of the document column and inset from its edges as the tab bar insets its tabs, since that wait makes the whole column usable and can take seconds.
   It measures the upload of the server binary and pulses through the rest; a local vault's window never shows it.
-- Elsewhere a 16 px `AdwSpinner` beside the control that started the work, unless that would move the layout: a sync's spinner takes the Sync button's place at its size, so the branch row keeps its width.
-  The status bar's branch, the same action, greys out meanwhile.
+- Elsewhere a 16 px `AdwSpinner` beside the control that started the work, unless that would move the layout: a Git command's spinner takes the place of its button's icon or label, at the button's size, so the row keeps its width (Git pane).
+  The status bar's branch, the same action as Sync, greys out while a sync runs.
 
 ## Typography
 

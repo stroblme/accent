@@ -202,6 +202,8 @@ pub struct Panel {
     banner: adw::Banner,
     names: gtk::StringList,
     chooser: gtk::DropDown,
+    /// The branch button, which a branch operation spins ([`Panel::hold`]): its popover has closed.
+    branch: gtk::MenuButton,
     /// What the branch button says, which is the branch HEAD is on or where it is detached.
     branch_label: gtk::Label,
     branch_menu: gtk::Popover,
@@ -212,13 +214,14 @@ pub struct Panel {
     branch_shown: RefCell<(git::Branches, Option<usize>)>,
     counts: gtk::Label,
     sync: gtk::Button,
-    /// The Sync button, or the spinner standing in for it while a sync runs.
-    sync_slot: gtk::Stack,
-    /// Sync All beside the repository chooser, likewise.
-    sync_all_slot: gtk::Stack,
+    /// Sync All beside the repository chooser.
+    sync_all: gtk::Button,
     message: gtk::TextView,
     placeholder: gtk::Label,
     commit: gtk::Button,
+    /// Commit's words, its own child rather than its label: a spinner takes their place while a
+    /// commit runs ([`spin`]), and `set_label` would put a new label over it.
+    commit_label: gtk::Label,
     /// The message box and its button, hidden together when there is nothing to commit.
     commit_box: gtk::Box,
     divider: gtk::Paned,
@@ -251,9 +254,11 @@ pub struct Panel {
     /// Set while the repository chooser's list is being filled, so the selection notify that
     /// follows is not read as the user picking a repository.
     syncing: Cell<bool>,
-    /// A sync is in flight. Not the same thing as `syncing` above, which is the chooser being
-    /// filled: this is the transfer [`Panel::sync_slot`] or [`Panel::sync_all_slot`] spins for.
-    sync_busy: Cell<bool>,
+    /// The control the running command was asked from, which spins until it answers.
+    acting: RefCell<Option<gtk::Widget>>,
+    /// The pane's buttons that run git, made so far: insensitive while a command runs, but for
+    /// the one it was asked from ([`Panel::hold`]). Weak, as rows make theirs as they need them.
+    actors: RefCell<Vec<glib::WeakRef<gtk::Widget>>>,
     /// The sync in flight has pulled and is pushing: raised by the worker between the two calls,
     /// so a closing window knows which half it has caught ([`Panel::busy`]), on a host as here.
     pushing: Arc<AtomicBool>,
@@ -273,8 +278,8 @@ pub struct Panel {
     /// A timer tick was skipped because the window did not have the focus. Run as soon as it
     /// does, so coming back to a window that has been aside for an hour is not another wait.
     missed_fetch: Cell<bool>,
-    /// How many commands [`Panel::command_then`] has running, the sync among them: what a
-    /// closing window waits for ([`Panel::busy`]).
+    /// How many commands [`Panel::run`] has running, which is one at most: what a closing window
+    /// waits for ([`Panel::busy`]).
     jobs: Cell<usize>,
     /// A close waiting for those commands to end ([`Panel::when_done`]), told whether they all
     /// went through.
@@ -363,6 +368,7 @@ impl Panel {
 
         let BranchRow {
             row: branch_row,
+            branch,
             label: branch_label,
             menu: branch_menu,
             list: branch_list,
@@ -370,8 +376,8 @@ impl Panel {
             merge,
             counts,
             sync,
-            sync_slot,
             commit,
+            commit_label,
         } = build_branch_row();
         let MessageBox {
             commit_box,
@@ -406,10 +412,9 @@ impl Panel {
             .valign(gtk::Align::Center)
             .build();
         sync_all.add_css_class("flat");
-        let sync_all_slot = spinner_slot(&sync_all);
         let repo_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         repo_row.append(&chooser);
-        repo_row.append(&sync_all_slot);
+        repo_row.append(&sync_all);
         // The chooser hides itself where there is one repository (`Panel::apply`), and the row
         // goes with it.
         chooser
@@ -466,17 +471,18 @@ impl Panel {
             banner,
             names,
             chooser,
+            branch,
             branch_label,
             branch_menu,
             branch_list,
             branch_shown: RefCell::new((git::Branches::default(), None)),
             counts,
             sync,
-            sync_slot,
-            sync_all_slot,
+            sync_all,
             message,
             placeholder,
             commit,
+            commit_label,
             commit_box,
             divider,
             changes,
@@ -492,7 +498,8 @@ impl Panel {
             watches: RefCell::new(Vec::new()),
             asked: Cell::new(0),
             syncing: Cell::new(false),
-            sync_busy: Cell::new(false),
+            acting: RefCell::new(None),
+            actors: RefCell::new(Vec::new()),
             pushing: Arc::default(),
             fetch_busy: Cell::new(false),
             fetch_lock: Arc::default(),
@@ -505,9 +512,13 @@ impl Panel {
             expanded: RefCell::new(None),
             expanded_at: Cell::new(None),
         });
+        // Sync and Commit are not among them: each has a rule of its own for when it is live,
+        // which a command running joins (`sync_state`, `sync_commit`).
+        panel.actor(&panel.branch);
+        panel.actor(&panel.sync_all);
         // Wiring comes after the `Rc` exists, so every closure can hold the panel weakly: they
         // all live in its own widget tree, and a strong capture there is a cycle.
-        panel.wire_header(&create, &merge, &sync_all);
+        panel.wire_header(&create, &merge);
         panel.wire_autofetch();
         panel.wire_commit();
         panel.wire_changes(&changes_view);
@@ -529,6 +540,7 @@ impl Panel {
     pub fn has_repos(&self) -> bool {
         !self.state.borrow().repos.is_empty()
     }
+
 
     /// How many rows the history list holds, and activating its last one. Only `ACCENT_BENCH_GIT`
     /// calls these: the headless image has no pointer, and the Load More row is only worth
@@ -596,9 +608,9 @@ impl Panel {
         }
     }
 
-    fn wire_header(self: &Rc<Self>, create: &gtk::Button, merge: &gtk::Button, all: &gtk::Button) {
+    fn wire_header(self: &Rc<Self>, create: &gtk::Button, merge: &gtk::Button) {
         on_click(self, &self.sync, |panel| panel.sync(None));
-        on_click(self, all, |panel| panel.sync_all());
+        on_click(self, &self.sync_all, |panel| panel.sync_all());
         on_click(self, create, |panel| panel.create_branch());
         on_click(self, merge, |panel| panel.merge_branch());
         // The popover gives its first row the keyboard, whose `:focus-within` then shows that
@@ -763,15 +775,19 @@ impl Panel {
             true => "Merge message (optional)",
             false => "Commit message",
         });
-        self.commit.set_label(match rebasing {
+        self.commit_label.set_label(match rebasing {
             true => "Continue",
             false => "Commit",
         });
         let under_way = merging || rebasing;
         let anything = under_way || self.to_commit().1;
         let unresolved = self.unresolved();
-        self.commit
-            .set_sensitive(anything && !unresolved && (under_way || !message.trim().is_empty()));
+        self.commit.set_sensitive(
+            anything
+                && !unresolved
+                && (under_way || !message.trim().is_empty())
+                && self.may(&self.commit),
+        );
         self.commit
             .set_tooltip_text(unresolved.then_some("Stage the resolved conflicts first"));
         // A clean tree has nothing to say, so the box goes — but never out from under a message
@@ -872,12 +888,7 @@ impl Panel {
             .banner
             .is_revealed()
             .then(|| self.banner.title().to_string());
-        let label = self
-            .commit
-            .label()
-            .map(|l| l.to_string())
-            .unwrap_or_default();
-        (title, label)
+        (title, self.commit_label.label().to_string())
     }
 
     /// Press the commit button, whatever it reads. `ACCENT_BENCH_GIT` and nothing else.
@@ -1000,6 +1011,7 @@ fn bind_file_line(row: &gtk::Box, icon: &str, letter: char, path: &str, dir: &st
 /// wiring wants. Split out of [`Panel::new`] for reading; the row it builds is the same one.
 struct BranchRow {
     row: gtk::Box,
+    branch: gtk::MenuButton,
     label: gtk::Label,
     menu: gtk::Popover,
     list: gtk::ListBox,
@@ -1007,8 +1019,8 @@ struct BranchRow {
     merge: gtk::Button,
     counts: gtk::Label,
     sync: gtk::Button,
-    sync_slot: gtk::Stack,
     commit: gtk::Button,
+    commit_label: gtk::Label,
 }
 
 /// The branch, the counts and the pane's two actions, on one line.
@@ -1083,17 +1095,19 @@ fn build_branch_row() -> BranchRow {
         .valign(gtk::Align::Center)
         .build();
     sync.add_css_class("flat");
-    let sync_slot = spinner_slot(&sync);
 
     let branch_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     branch_row.append(&branch);
-    branch_row.append(&sync_slot);
+    branch_row.append(&sync);
 
+    let commit_label = gtk::Label::new(Some("Commit"));
     let commit = gtk::Button::builder()
-        .label("Commit")
+        .child(&commit_label)
         .halign(gtk::Align::End)
         .sensitive(false)
         .build();
+    // A label of its own leaves the button without the padding GTK gives a text button.
+    commit.add_css_class("text-button");
     commit.add_css_class("suggested-action");
     // Commit sits in the branch row beside Sync rather than on a line of its own: the two are
     // the pane's actions, a row of its own cost 40 px of a column that also has to hold the
@@ -1104,6 +1118,7 @@ fn build_branch_row() -> BranchRow {
 
     BranchRow {
         row: branch_row,
+        branch,
         label: branch_label,
         menu: branch_menu,
         list: branch_list,
@@ -1111,25 +1126,39 @@ fn build_branch_row() -> BranchRow {
         merge,
         counts,
         sync,
-        sync_slot,
         commit,
+        commit_label,
     }
 }
 
-/// `button` in a stack with the spinner that stands where it was while its sync runs. A stack is
-/// as big as its biggest child, so the spinner keeps the button's footprint and the row does not
-/// move.
-fn spinner_slot(button: &gtk::Button) -> gtk::Stack {
-    let slot = gtk::Stack::new();
-    slot.add_named(button, Some("button"));
-    slot.add_named(
-        &adw::Spinner::builder()
-            .halign(gtk::Align::Center)
-            .valign(gtk::Align::Center)
-            .build(),
-        Some("spinner"),
-    );
-    slot
+/// Show a spinner in `button`, a `GtkButton` or a `GtkMenuButton`, in place of its face (its
+/// `child`: an icon, a label, a box), or the face again. The two share a stack made the first time
+/// round, which is as big as the bigger of them, so the button keeps its size and the row its
+/// layout; GTK's own icon or label child would be replaced, along with the class it gave the
+/// button, so the classes are put back.
+fn spin(button: &gtk::Widget, on: bool) {
+    let Some(face) = button.property::<Option<gtk::Widget>>("child") else {
+        return;
+    };
+    let slot = match face.clone().downcast::<gtk::Stack>() {
+        Ok(slot) if slot.child_by_name("spinner").is_some() => slot,
+        _ if !on => return,
+        _ => {
+            let classes = button.css_classes();
+            button.set_property("child", None::<gtk::Widget>);
+            let slot = gtk::Stack::new();
+            slot.add_named(&face, Some("face"));
+            let spinner = adw::Spinner::builder()
+                .halign(gtk::Align::Center)
+                .valign(gtk::Align::Center)
+                .build();
+            slot.add_named(&spinner, Some("spinner"));
+            button.set_property("child", &slot);
+            button.set_css_classes(&classes.iter().map(|c| c.as_str()).collect::<Vec<_>>());
+            slot
+        }
+    };
+    slot.set_visible_child_name(if on { "spinner" } else { "face" });
 }
 
 /// The commit message box: the container the panel hides and shows in one call, the view the

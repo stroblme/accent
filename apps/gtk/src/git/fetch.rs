@@ -11,8 +11,9 @@ impl Panel {
     /// network work for repositories not being viewed. Failures appear in the Sync tooltip
     /// rather than interrupting the user with notifications.
     pub(super) fn autofetch(self: &Rc<Self>) {
-        // Nor while a sync runs: its pull fetches anyway, and two fetches race for the same refs.
-        if self.fetch_busy.get() || self.sync_busy.get() {
+        // Nor while a command runs: a sync's pull fetches anyway, and two fetches race for the
+        // same refs.
+        if self.fetch_busy.get() || self.held() {
             return;
         }
         let Some(repo) = ({

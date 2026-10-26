@@ -43,26 +43,25 @@ impl RunningGit {
 
 impl Panel {
     /// Run a command on the selected repository off the main thread, report its result and
-    /// refresh. `what` completes `Cannot <what>: <why>`. `sync` shows the Sync spinner and
-    /// disables the status-bar branch through [`Hooks::syncing`].
+    /// refresh. `what` completes `Cannot <what>: <why>`; `from` is the control it was asked from,
+    /// which spins until it answers ([`Panel::hold`]).
     fn command(
         self: &Rc<Self>,
         what: String,
-        sync: bool,
+        from: Option<gtk::Widget>,
         on_err: Fail,
         job: impl FnOnce(&Source, &Repo) -> accent_api::Result<String> + Send + 'static,
     ) {
-        let spin = sync.then(|| self.sync_slot.clone());
-        self.command_then(what, spin, on_err, None, job, |_| ());
+        self.command_then(what, from, on_err, None, job, |_| ());
     }
 
     /// [`Panel::command`] with something to do back on the main thread once it worked, which only
-    /// the commit box needs: a widget cannot be touched from the worker the job runs on. A sync
-    /// names the slot of the button that asked for it, Sync or Sync All, as `spin`.
+    /// the commit box needs: a widget cannot be touched from the worker the job runs on. `roots`
+    /// are the repositories it runs git in, the selected one where `None`.
     fn command_then(
         self: &Rc<Self>,
         what: String,
-        spin: Option<gtk::Stack>,
+        from: Option<gtk::Widget>,
         on_err: Fail,
         roots: Option<Vec<PathBuf>>,
         job: impl FnOnce(&Source, &Repo) -> accent_api::Result<String> + Send + 'static,
@@ -75,37 +74,63 @@ impl Panel {
                 None => return,
             }
         };
-        if let Some(slot) = &spin {
-            slot.set_visible_child_name("spinner");
-            self.sync_busy.set(true);
+        let roots = roots.unwrap_or_else(|| vec![repo.root.clone()]);
+        self.run(
+            what,
+            from,
+            on_err,
+            roots,
+            move |vault| job(vault, &repo),
+            then,
+        );
+    }
+
+    /// The one way a command runs: one at a time, the pane held meanwhile ([`Panel::hold`]), and
+    /// `roots` stopped when the window closes. A Sync or a Sync All also disables the status bar's branch through
+    /// [`Hooks::syncing`].
+    fn run(
+        self: &Rc<Self>,
+        what: String,
+        from: Option<gtk::Widget>,
+        on_err: Fail,
+        roots: Vec<PathBuf>,
+        job: impl FnOnce(&Source) -> accent_api::Result<String> + Send + 'static,
+        then: impl FnOnce(&Rc<Panel>) + 'static,
+    ) {
+        if self.refused(&what, from.as_ref()) {
+            return;
+        }
+        let sync = from.as_ref().is_some_and(|from| {
+            from == self.sync.upcast_ref::<gtk::Widget>()
+                || from == self.sync_all.upcast_ref::<gtk::Widget>()
+        });
+        if sync {
             (self.hooks.syncing)(true);
         }
         self.jobs.set(self.jobs.get() + 1);
+        *self.acting.borrow_mut() = from;
+        self.hold();
         // The last window closing must not end the process under git (`Panel::stop`).
         let hold = self.hooks.window.application().map(|app| app.hold());
         let panel = self.clone();
         let vault = self.source();
-        let roots = if vault.is_remote() {
-            Vec::new()
-        } else {
-            roots.unwrap_or_else(|| vec![repo.root.clone()])
-        };
+        let roots = if vault.is_remote() { Vec::new() } else { roots };
         self.running_git.borrow_mut().start(&roots);
         let generation = self.source_generation.get();
         glib::spawn_future_local(async move {
-            let done = crate::work::off_thread("git", move || job(&vault, &repo)).await;
+            let done = crate::work::off_thread("git", move || job(&vault)).await;
             panel.running_git.borrow_mut().finish(&roots);
             panel.jobs.set(panel.jobs.get() - 1);
             drop(hold);
             if panel.gone.get() {
                 return;
             }
-            // The button comes back as `sync_state` last left it, which the refresh below
-            // brings up to date.
-            if let Some(slot) = &spin {
-                slot.set_visible_child_name("button");
-                panel.sync_busy.set(false);
-                panel.pushing.store(false, Ordering::Relaxed);
+            // Sync comes back as `sync_state` last left it, which the refresh below brings up to
+            // date.
+            panel.hold();
+            panel.acting.take();
+            panel.pushing.store(false, Ordering::Relaxed);
+            if sync {
                 (panel.hooks.syncing)(false);
             }
             // A close waiting for git: the last command to go through closes the window, and one
@@ -151,6 +176,87 @@ impl Panel {
         });
     }
 
+    /// Whether a command is running, which is one at a time.
+    pub(super) fn held(&self) -> bool {
+        self.jobs.get() > 0
+    }
+
+    /// What a branch operation spins: the branch button, its popover having gone.
+    fn on_branch(&self) -> Option<gtk::Widget> {
+        Some(self.branch.clone().upcast())
+    }
+
+    /// Whether `control` may be pressed as far as the command running goes: always while none
+    /// is, and then only where it is what the command was asked from.
+    pub(super) fn may(&self, control: &impl IsA<gtk::Widget>) -> bool {
+        !self.held() || self.acting.borrow().as_ref() == Some(control.upcast_ref())
+    }
+
+    /// Make `control` one of the pane's actions, insensitive while a command runs ([`Panel::hold`]).
+    pub(super) fn actor(&self, control: &impl IsA<gtk::Widget>) {
+        control.set_sensitive(self.may(control));
+        self.actors
+            .borrow_mut()
+            .push(control.upcast_ref().downgrade());
+    }
+
+    /// Put the pane's actions in step with the command running, if one is: the control it was
+    /// asked from shows a spinner and stays live, keeping the keyboard, which GTK takes off a
+    /// widget made insensitive; every other action is insensitive until git answers, so a press
+    /// on a slow link is answered at once and no second command races the first for git's lock.
+    fn hold(&self) {
+        if let Some(acting) = self.acting.borrow().as_ref() {
+            spin(acting, self.held());
+        }
+        let actors: Vec<gtk::Widget> = {
+            let mut actors = self.actors.borrow_mut();
+            actors.retain(|actor| actor.upgrade().is_some());
+            actors.iter().filter_map(glib::WeakRef::upgrade).collect()
+        };
+        for actor in actors {
+            actor.set_sensitive(self.may(&actor));
+        }
+        self.sync_state();
+        self.sync_commit();
+    }
+
+    /// The command running as the pane shows it: whether one is, whether the control it was
+    /// asked from spins and is live, and whether Sync, the branch button and Commit are.
+    /// `ACCENT_BENCH_GIT` and nothing else.
+    #[cfg(feature = "bench")]
+    pub fn held_hint(&self) -> String {
+        let acting = self.acting.borrow().clone();
+        let spins = acting.as_ref().is_some_and(|control| {
+            control
+                .property::<Option<gtk::Widget>>("child")
+                .and_downcast::<gtk::Stack>()
+                .is_some_and(|slot| slot.visible_child_name().as_deref() == Some("spinner"))
+        });
+        format!(
+            "held={} spins={spins} acting_live={} sync={} branch={} commit={}",
+            self.held(),
+            acting.is_some_and(|control| control.is_sensitive()),
+            self.sync.is_sensitive(),
+            self.branch.is_sensitive(),
+            self.commit.is_sensitive()
+        )
+    }
+
+    /// Whether a command has to be turned away because one is running. The control already
+    /// spinning, pressed again, is answered by its spinner; anything else, a palette command or a
+    /// comparison's hunk, says why nothing happens.
+    fn refused(&self, what: &str, from: Option<&gtk::Widget>) -> bool {
+        if !self.held() {
+            return false;
+        }
+        if from.is_none() || from != self.acting.borrow().as_ref() {
+            (self.hooks.toast)(&format!(
+                "Cannot {what}: another Git command is still running"
+            ));
+        }
+        true
+    }
+
     /// Whether closing the window now would cut git off while it rewrites the files: any command
     /// the pane has running, except a sync that has reached its push, which like a fetch is
     /// stopped instead ([`Panel::stop`]) (DESIGN.md, States).
@@ -158,9 +264,10 @@ impl Panel {
         self.jobs.get() > usize::from(self.pushing())
     }
 
-    /// Whether the sync in flight has pulled and is pushing.
+    /// Whether the sync in flight has pulled and is pushing: the flag goes down with every
+    /// command's end.
     pub fn pushing(&self) -> bool {
-        self.sync_busy.get() && self.pushing.load(Ordering::Relaxed)
+        self.pushing.load(Ordering::Relaxed)
     }
 
     /// Call `then` once the commands under way have ended, with whether they all went through,
@@ -227,7 +334,7 @@ impl Panel {
         // where it was written rather than make the user type it again.
         self.command_then(
             "commit".to_string(),
-            None,
+            Some(self.commit.clone().upcast()),
             Fail::Say,
             None,
             move |vault, repo| {
@@ -246,9 +353,9 @@ impl Panel {
     /// repository. The pane's selection follows, so the status bar's branch and the pane never
     /// end up talking about two different repositories.
     pub fn sync(self: &Rc<Self>, key: Option<&str>) {
-        // One at a time. The pane's button and the status bar's branch are out of reach for the
-        // duration, but the palette still names the action.
-        if self.sync_busy.get() {
+        // Before the pick below: a sync turned away must not move the pane to another repository.
+        let from: gtk::Widget = self.sync.clone().upcast();
+        if self.refused("sync", Some(&from)) {
             return;
         }
         let index = {
@@ -272,29 +379,31 @@ impl Panel {
             .map(|s| (s.branch.behind, s.branch.ahead))
             .unwrap_or_default();
         let (fetch_lock, pushing) = (self.fetch_lock.clone(), self.pushing.clone());
-        self.command("sync".to_string(), true, Fail::Say, move |vault, repo| {
-            // Behind a background fetch still running, which its pull would race for the refs.
-            let _fetched = fetch_lock.lock();
-            // Two calls, so the window can tell the halves apart. A close in the instant between
-            // the flag and git starting its push lets that push finish, as a host's always does.
-            let pulled = vault.git_pull(repo)?;
-            pushing.store(true, Ordering::Relaxed);
-            let pushed = vault.git_push(repo)?;
-            tracing::debug!("git sync: {pulled}\n{pushed}");
-            Ok(match moved {
-                (0, 0) => "Synced".to_string(),
-                (pulled, pushed) => format!("Synced · {pulled} pulled, {pushed} pushed"),
-            })
-        });
+        self.command(
+            "sync".to_string(),
+            Some(from),
+            Fail::Say,
+            move |vault, repo| {
+                // Behind a background fetch still running, which its pull would race for the refs.
+                let _fetched = fetch_lock.lock();
+                // Two calls, so the window can tell the halves apart. A close in the instant between
+                // the flag and git starting its push lets that push finish, as a host's always does.
+                let pulled = vault.git_pull(repo)?;
+                pushing.store(true, Ordering::Relaxed);
+                let pushed = vault.git_push(repo)?;
+                tracing::debug!("git sync: {pulled}\n{pushed}");
+                Ok(match moved {
+                    (0, 0) => "Synced".to_string(),
+                    (pulled, pushed) => format!("Synced · {pulled} pulled, {pushed} pushed"),
+                })
+            },
+        );
     }
 
     /// Pull and then push every repository, one after another, carrying on past one that fails,
     /// and name in one toast at the end each that did not sync and why. One stopped in a merge or
     /// a rebase is left alone and named with them: its pull would only be refused.
     pub fn sync_all(self: &Rc<Self>) {
-        if self.sync_busy.get() {
-            return;
-        }
         let repos: Vec<(Repo, Option<&str>)> = {
             let state = self.state.borrow();
             let stopped = |status: &Status| match (status.merging, status.rebasing) {
@@ -306,12 +415,12 @@ impl Panel {
             state.repos.iter().cloned().zip(statuses).collect()
         };
         let (fetch_lock, pushing) = (self.fetch_lock.clone(), self.pushing.clone());
-        let slot = Some(self.sync_all_slot.clone());
+        let from = Some(self.sync_all.clone().upcast());
         let what = "sync every repository".to_string();
         let roots = repos.iter().map(|(repo, _)| repo.root.clone()).collect();
         self.command_then(
             what,
-            slot,
+            from,
             Fail::Say,
             Some(roots),
             move |vault, _| {
@@ -361,7 +470,7 @@ impl Panel {
         let asked = branch.clone();
         self.command(
             format!("switch to {branch}"),
-            false,
+            self.on_branch(),
             Fail::Say,
             move |vault, repo| {
                 vault
@@ -377,7 +486,7 @@ impl Panel {
         let asked = remote.clone();
         self.command(
             format!("check out {remote}"),
-            false,
+            self.on_branch(),
             Fail::Say,
             move |vault, repo| {
                 vault
@@ -430,7 +539,7 @@ impl Panel {
             let asked = name.clone();
             panel.command(
                 format!("create {name}"),
-                false,
+                panel.on_branch(),
                 Fail::Say,
                 move |vault, repo| {
                     vault
@@ -456,7 +565,7 @@ impl Panel {
         };
         self.command(
             format!("delete {name}"),
-            false,
+            self.on_branch(),
             on_err,
             move |vault, repo| {
                 vault
@@ -593,7 +702,7 @@ impl Panel {
         let asked = branch.clone();
         self.command(
             format!("merge {branch}"),
-            false,
+            self.on_branch(),
             Fail::Say,
             move |vault, repo| {
                 vault.git_merge(repo, &asked).map(|merged| match merged {
@@ -629,7 +738,7 @@ impl Panel {
                 }
                 panel.command(
                     "abort the merge".to_string(),
-                    false,
+                    None,
                     Fail::Say,
                     |vault, repo| {
                         vault
@@ -650,7 +759,7 @@ impl Panel {
         }
         self.command(
             "continue the rebase".to_string(),
-            false,
+            Some(self.commit.clone().upcast()),
             Fail::Say,
             |vault, repo| {
                 vault.git_rebase_continue(repo).map(|rebase| match rebase {
@@ -681,7 +790,7 @@ impl Panel {
                 }
                 panel.command(
                     "abort the rebase".to_string(),
-                    false,
+                    None,
                     Fail::Say,
                     |vault, repo| {
                         vault
@@ -695,11 +804,11 @@ impl Panel {
 
     /// Check out a commit with detached HEAD. Git refuses unsafe worktree overwrites, so no
     /// separate confirmation is needed. Refresh the branch readouts afterward.
-    pub(super) fn detach(self: &Rc<Self>, oid: String) {
+    pub(super) fn detach(self: &Rc<Self>, oid: String, from: Option<gtk::Widget>) {
         let asked = oid.clone();
         self.command(
             format!("check out {}", short(&oid)),
-            false,
+            from,
             Fail::Say,
             move |vault, repo| {
                 vault
@@ -711,10 +820,10 @@ impl Panel {
 
     /// A repository of its own among `paths` is left out: `git add` would record it as an
     /// embedded gitlink, with no more than a warning on stderr.
-    pub(super) fn stage(self: &Rc<Self>, mut paths: Vec<String>) {
+    pub(super) fn stage(self: &Rc<Self>, mut paths: Vec<String>, from: Option<gtk::Widget>) {
         paths.retain(|path| !own_repository(path));
         let n = paths.len();
-        self.write("stage", paths, move |vault, repo, paths| {
+        self.write("stage", paths, from, move |vault, repo, paths| {
             vault
                 .git_stage(repo, paths)
                 .map(|()| format!("Staged {}", files(n)))
@@ -749,7 +858,7 @@ impl Panel {
             let job = move |vault: &Source, _: &Repo| {
                 vault.git_stage(&what.repo, &[what.rel]).map(|()| done)
             };
-            panel.command(format!("mark {name} resolved"), false, Fail::Say, job);
+            panel.command(format!("mark {name} resolved"), None, Fail::Say, job);
         };
         match left {
             0 => stage(),
@@ -764,9 +873,9 @@ impl Panel {
         }
     }
 
-    pub(super) fn unstage(self: &Rc<Self>, paths: Vec<String>) {
+    pub(super) fn unstage(self: &Rc<Self>, paths: Vec<String>, from: Option<gtk::Widget>) {
         let n = paths.len();
-        self.write("unstage", paths, move |vault, repo, paths| {
+        self.write("unstage", paths, from, move |vault, repo, paths| {
             vault
                 .git_unstage(repo, paths)
                 .map(|()| format!("Unstaged {}", files(n)))
@@ -786,7 +895,7 @@ impl Panel {
             false => ("stage the selected lines", "Staged the selected lines"),
             true => ("unstage the selected lines", "Unstaged the selected lines"),
         };
-        self.command(what.to_string(), false, Fail::Say, move |vault, _| {
+        self.command(what.to_string(), None, Fail::Say, move |vault, _| {
             vault
                 .git_stage_text(&repo, &rel, &text)
                 .map(|()| done.to_string())
@@ -798,12 +907,13 @@ impl Panel {
         self: &Rc<Self>,
         what: &'static str,
         paths: Vec<String>,
+        from: Option<gtk::Widget>,
         job: impl FnOnce(&Source, &Repo, &[String]) -> accent_api::Result<String> + Send + 'static,
     ) {
         if paths.is_empty() {
             return;
         }
-        self.command(what.to_string(), false, Fail::Say, move |vault, repo| {
+        self.command(what.to_string(), from, Fail::Say, move |vault, repo| {
             job(vault, repo, &paths)
         });
     }
@@ -841,7 +951,12 @@ impl Panel {
     /// folders handled together by [`Panel::trash_untracked`]. Remote vaults delete permanently;
     /// this confirmation states that and no second question is shown. A remote shell leaves
     /// untracked files for its host terminal.
-    pub(super) fn discard(self: &Rc<Self>, folder: Option<&str>, entries: Vec<Entry>) {
+    pub(super) fn discard(
+        self: &Rc<Self>,
+        folder: Option<&str>,
+        entries: Vec<Entry>,
+        from: Option<gtk::Widget>,
+    ) {
         let Some(repo) = ({
             let state = self.state.borrow();
             state.repos.get(state.selected).cloned()
@@ -896,7 +1011,7 @@ impl Panel {
                 panel.trash_untracked(repo, under, listed);
             }
             if !paths.is_empty() {
-                panel.write("discard", paths, move |vault, repo, paths| {
+                panel.write("discard", paths, from, move |vault, repo, paths| {
                     vault.git_discard(repo, paths).map(|()| done)
                 });
             }

@@ -456,18 +456,22 @@ fn commit_buttons(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Box {
         button.connect_clicked(glib::clone!(
             #[weak]
             item,
-            move |_| {
+            move |button| {
                 let (Some(panel), Some(LogItem::Commit(row))) =
                     (weak.upgrade(), boxed(item.item()))
                 else {
                     return;
                 };
                 match detach {
-                    true => panel.detach(row.commit.id.clone()),
+                    true => panel.detach(row.commit.id.clone(), Some(button.clone().upcast())),
                     false => panel.copy_id(&row.commit.id),
                 }
             }
         ));
+        // Copy runs no git, so it stays live while a command runs.
+        if let (true, Some(panel)) = (detach, panel.upgrade()) {
+            panel.actor(&button);
+        }
         actions.append(&button);
     }
     actions

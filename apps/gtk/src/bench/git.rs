@@ -192,7 +192,14 @@ fn bench_git_stage(app: &Rc<App>) {
             println!("bench git_step stage {staged}");
             let before = row(below);
             click(staged, "Stage");
+            // At once, before git has answered: the press is what the pane shows.
+            println!("bench git_held {}", git.held_hint());
+            if staged == "b.md" {
+                git.sync(None);
+                println!("bench git_refused {:?}", bench_said(&app));
+            }
             settle().await;
+            println!("bench git_held {}", git.held_hint());
             let kept = before.is_some() && before == row(below);
             println!("bench git_kept {below} {kept}");
         }
@@ -733,9 +740,13 @@ pub(super) fn bench_git_commit_focus(app: &Rc<App>) {
         let message = find_widget(&pane, &|w| {
             w.is::<gtk::TextView>() && w.has_css_class("card")
         });
+        // Its words are a label of its own, which a spinner takes the place of while it commits.
         let button = find_widget(&pane, &|w| {
-            w.downcast_ref::<gtk::Button>()
-                .is_some_and(|b| b.label().as_deref() == Some("Commit"))
+            w.downcast_ref::<gtk::Button>().is_some_and(|b| {
+                b.child()
+                    .and_downcast::<gtk::Label>()
+                    .is_some_and(|l| l.label() == "Commit")
+            })
         });
         let (Some(history), Some(scroller), Some(message), Some(button)) = (
             history,
@@ -1367,7 +1378,7 @@ async fn bench_branch_popover(app: &Rc<App>, git: &Rc<crate::git::Panel>) {
 }
 
 /// Sync All (`=syncall`): whether its button is on screen beside the repository chooser, then a
-/// click on it, the spinner standing in for it while it runs, and the one toast it ends with.
+/// click on it, the spinner in it while it runs, and the one toast it ends with.
 /// Point it at a vault of several repositories — one whose push goes through, one whose remote is
 /// unreachable and one stopped in a merge — and read each repository's `git status -sb` after it.
 pub(super) fn bench_git_sync_all(app: &Rc<App>) {
@@ -1395,11 +1406,7 @@ pub(super) fn bench_git_sync_all(app: &Rc<App>) {
         let said = app.toasted.get();
         button.emit_clicked();
         glib::timeout_future(Duration::from_millis(50)).await;
-        println!(
-            "bench git_sync_all spinning={} busy={}",
-            !button.is_mapped(),
-            git.busy()
-        );
+        println!("bench git_sync_all {} busy={}", git.held_hint(), git.busy());
         wait_for(|| !git.busy(), 60000).await;
         wait_for(|| app.toasted.get() > said, 5000).await;
         println!(
@@ -1408,7 +1415,7 @@ pub(super) fn bench_git_sync_all(app: &Rc<App>) {
         );
         // A second and a half for a screenshot of the toast.
         glib::timeout_future(Duration::from_millis(1500)).await;
-        println!("bench git_sync_all back={}", button.is_mapped());
+        println!("bench git_sync_all back {}", git.held_hint());
         let root = app.root();
         for dir in ["", "lib", "docs"] {
             let status = std::process::Command::new("git")
