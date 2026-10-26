@@ -740,6 +740,14 @@ fn org_headings_are_outlined_read_and_resolved() {
     assert_eq!(read[1], "goal\n** Sub\nsub\n");
     let (link, _) = c.call("resolve_link", json!({"target": "plan.org#Later"}));
     assert_eq!(link[0], r#"{"line":6,"path":"plan.org"}"#);
+    let (said, _) = c.call("list_dir", json!({}));
+    let rows: Value = serde_json::from_str(&said[0]).unwrap();
+    let plan = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["path"] == "plan.org");
+    assert_eq!(plan.unwrap()["title"], "Plan", "{rows}");
     let (said, _) = c.call("explore", json!({"query": "plan.org"}));
     let card = &said[0];
     for row in [

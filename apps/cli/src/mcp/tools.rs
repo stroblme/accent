@@ -611,7 +611,9 @@ impl Server {
                     if indexed {
                         row["modified"] = json!(modified(f.mtime_ns));
                     }
-                    if let Some(title) = f.title.filter(|_| f.kind == FileKind::Markdown) {
+                    // An org file's `#+TITLE:` is a title as a note's is.
+                    let titled = f.kind == FileKind::Markdown || path::is_org(&f.rel_path);
+                    if let Some(title) = f.title.filter(|_| titled) {
                         row["title"] = json!(title);
                     }
                     row["indexed"] = json!(indexed);
