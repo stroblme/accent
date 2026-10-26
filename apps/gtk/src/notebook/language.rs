@@ -596,7 +596,12 @@ impl NotebookTab {
     /// Ctrl+click in `view` is Go to Definition at the place clicked, as in a text tab: a code
     /// cell's name, a markdown cell's link.
     fn follow_clicks(self: &Rc<Self>, view: &sourceview5::View) {
-        let click = gtk::GestureClick::new();
+        // Claimed in the capture phase, before the view's own click and drag gestures see the
+        // press, as a text tab's is: they would start a selection that the release stretches
+        // from where the jump landed to wherever the pointer then is.
+        let click = gtk::GestureClick::builder()
+            .propagation_phase(gtk::PropagationPhase::Capture)
+            .build();
         let weak = Rc::downgrade(self);
         click.connect_pressed(move |gesture, _, x, y| {
             let ctrl = gesture
@@ -606,12 +611,16 @@ impl NotebookTab {
             let (true, Some(tab), Some(view)) = (ctrl, weak.upgrade(), view) else {
                 return;
             };
+            // Only a press on the text, the caret going there first.
             let (bx, by) =
                 view.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
-            if let Some(iter) = crate::fold::iter_at_location(&view, bx, by) {
-                view.buffer().place_cursor(&iter);
-            }
+            let Some(iter) = crate::fold::iter_at_location(&view, bx, by) else {
+                return;
+            };
+            view.buffer().place_cursor(&iter);
             gesture.set_state(gtk::EventSequenceState::Claimed);
+            // The view's own press would have taken the keyboard.
+            view.grab_focus();
             tab.lang.on_follow.emit(&tab);
         });
         view.add_controller(click);
