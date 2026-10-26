@@ -23,7 +23,7 @@ pub struct CellView {
     pub root: gtk::Box,
     /// The cell and its rail, where the pointer brings the buttons.
     pub row: gtk::Box,
-    /// The cell itself, outlined in the accent while selected.
+    /// The cell itself, outlined in the accent while selected and the keyboard is in it.
     pub card: gtk::Box,
     /// The room right of the cell where the buttons stand while they serve it ([`stand`]).
     pub rail: gtk::Box,
@@ -476,10 +476,12 @@ pub struct Tools {
 
 impl Tools {
     pub fn new(format: Format) -> Tools {
+        // None takes the keyboard from the cell it acts on, whose outline goes with it.
         let button = |icon: &str, action: &str| {
             let b = gtk::Button::builder()
                 .icon_name(icon)
                 .tooltip_text(crate::actions::label_of(action))
+                .focus_on_click(false)
                 .build();
             b.add_css_class("flat");
             b
@@ -495,6 +497,7 @@ impl Tools {
             .icon_name("view-more-symbolic")
             .tooltip_text("More")
             .menu_model(&cell_menu())
+            .focus_on_click(false)
             .build();
         more.add_css_class("flat");
         // A column beside the cell's top, so a cell covers nothing and is as tall as its text
@@ -626,7 +629,7 @@ pub fn install_css() {
     let provider = gtk::CssProvider::new();
     provider.load_from_string(
         ".notebook-cell { border: 1px solid transparent; border-radius: 9px; padding: 4px; } \
-         .notebook-cell.selected { border-color: var(--accent-bg-color); } \
+         .notebook-cell.selected:focus-within { border-color: var(--accent-bg-color); } \
          .notebook-tools button { min-height: 24px; min-width: 24px; padding: 5px; } \
          .notebook-execution { min-width: 8px; min-height: 8px; margin: 6px 0; \
            border: 1px solid transparent; border-radius: 50%; } \

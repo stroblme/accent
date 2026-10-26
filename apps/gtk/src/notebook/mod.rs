@@ -1348,6 +1348,20 @@ impl NotebookTab {
         motion.connect_enter(move |_, _, _| enter());
         motion.connect_leave(move |_| leave());
         self.tools.bar.add_controller(motion);
+        // A press on the buttons gives their cell the keyboard, as a press in it does, the view
+        // staying where it is.
+        let press = gtk::GestureClick::new();
+        press.set_propagation_phase(gtk::PropagationPhase::Capture);
+        press.connect_pressed(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move |_, _, _, _| {
+                if let Some((_, editor)) = tab.tools.cell.get().and_then(|id| tab.editor(id)) {
+                    editor.view.grab_focus();
+                }
+            }
+        ));
+        self.tools.bar.add_controller(press);
         act(&self.tools.up, |tab| tab.move_cell(false));
         act(&self.tools.down, |tab| tab.move_cell(true));
         act(&self.tools.delete, |tab| tab.delete());
@@ -1359,6 +1373,19 @@ impl NotebookTab {
                     && let Some(id) = tab.tools.cell.get()
                 {
                     tab.select(id);
+                }
+                // Closed, the menu hands the keyboard to its button once this is over; the cell
+                // takes it back.
+                if !more.is_active() {
+                    let weak = Rc::downgrade(&tab);
+                    glib::idle_add_local_once(move || {
+                        if let Some(tab) = weak.upgrade()
+                            && let Some((_, editor)) =
+                                tab.selected.get().and_then(|id| tab.editor(id))
+                        {
+                            editor.view.grab_focus();
+                        }
+                    });
                 }
             }
         ));
