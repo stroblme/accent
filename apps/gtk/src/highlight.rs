@@ -304,6 +304,10 @@ pub fn apply(buffer: &sourceview5::Buffer, syntax: Syntax) -> (markdown::Analysi
             wanted.entry(NO_SPELL).or_default().push(range);
         }
     }
+    for r in addresses(&text, syntax) {
+        let range = offsets.char_of(r.start)..offsets.char_of(r.end);
+        wanted.entry(NO_SPELL).or_default().push(range);
+    }
     let table = buffer.tag_table();
     let (names, tags): (Vec<&str>, Vec<gtk::TextTag>) = TAG_NAMES
         .iter()
@@ -437,6 +441,9 @@ pub fn mismatches(buffer: &sourceview5::Buffer) -> Vec<&'static str> {
     for span in &markdown::analyze(&text).spans {
         tag_span(&fresh, &offsets, &text, span, Syntax::Markdown);
     }
+    for r in addresses(&text, Syntax::Markdown) {
+        tag_bytes(&fresh, &offsets, NO_SPELL, r);
+    }
     let lookup = |buffer: &sourceview5::Buffer, name: &str| {
         let tag = buffer.tag_table().lookup(name).expect("an installed tag");
         merged(runs(buffer, &tag))
@@ -474,10 +481,15 @@ fn tag_span(
         buffer.apply_tag_by_name(name, &s, &e);
     }
     if let Some(r) = unchecked(text, span, syntax) {
-        let s = buffer.iter_at_offset(offsets.char_of(r.start));
-        let e = buffer.iter_at_offset(offsets.char_of(r.end));
-        buffer.apply_tag_by_name(NO_SPELL, &s, &e);
+        tag_bytes(buffer, offsets, NO_SPELL, r);
     }
+}
+
+/// Tag the bytes `range` of the text with the tag called `name`.
+fn tag_bytes(buffer: &sourceview5::Buffer, offsets: &Offsets, name: &str, range: Range<usize>) {
+    let s = buffer.iter_at_offset(offsets.char_of(range.start));
+    let e = buffer.iter_at_offset(offsets.char_of(range.end));
+    buffer.apply_tag_by_name(name, &s, &e);
 }
 
 /// What of `span` the spell checker passes over: code, math, markup and tags whole, and of a link
@@ -495,6 +507,16 @@ fn unchecked(text: &str, span: &Span, syntax: Syntax) -> Option<Range<usize>> {
         _ => return None,
     };
     Some(r.start + within.start..r.start + within.end)
+}
+
+/// The bare addresses in a markdown note's `text` ([`markdown::bare_urls`]), which the spell
+/// checker passes over as it does a link's target: pulldown-cmark reads no link in them, where
+/// org reads one, whose span [`unchecked`] covers.
+fn addresses(text: &str, syntax: Syntax) -> impl Iterator<Item = Range<usize>> + '_ {
+    (syntax == Syntax::Markdown)
+        .then(|| markdown::bare_urls(text))
+        .into_iter()
+        .flatten()
 }
 
 /// Where the target is in a link written as `link`: all of `[[target]]`, `<address>` or a bare
@@ -567,6 +589,14 @@ pub fn apply_line(buffer: &sourceview5::Buffer, line: i32, syntax: Syntax) {
     }
     for span in clipped(&analysis.spans, &bytes) {
         tag_span(buffer, &offsets, &text, &span, syntax);
+    }
+    for r in addresses(&text[bytes.clone()], syntax) {
+        tag_bytes(
+            buffer,
+            &offsets,
+            NO_SPELL,
+            bytes.start + r.start..bytes.start + r.end,
+        );
     }
 }
 
@@ -975,6 +1005,17 @@ mod tests {
             unchecked_in(org, Syntax::Org),
             ["[[*H]]", "[[file:a.org][", "https://x.org", "tag", "v"]
         );
+    }
+
+    /// A markdown note's bare addresses pass as a click finds them; org's are links already.
+    #[test]
+    fn a_bare_address_is_not_spell_checked() {
+        let text = "see https://e.org/wrdz, (mailto:a@b.org). not ftp://x or https://\n";
+        let found: Vec<&str> = addresses(text, Syntax::Markdown)
+            .map(|r| &text[r])
+            .collect();
+        assert_eq!(found, ["https://e.org/wrdz", "mailto:a@b.org"]);
+        assert_eq!(addresses(text, Syntax::Org).count(), 0);
     }
 
     /// Only a heading that carries its own `#` markers has anything to hang in the gutter.

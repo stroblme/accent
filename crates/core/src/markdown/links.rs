@@ -222,6 +222,29 @@ pub fn is_url(target: &str) -> bool {
     }
 }
 
+/// The bare `http://`, `https://` and `mailto:` addresses in `text`, as a click and the terminal
+/// find them: each runs to a blank, a quote, a backtick or an angle bracket, less the sentence
+/// punctuation it ends with, and holds more than its scheme. Found from each `:`, so a long text
+/// is read once.
+pub fn bare_urls(text: &str) -> impl Iterator<Item = Range<usize>> + '_ {
+    const SCHEMES: [&str; 3] = ["https://", "http://", "mailto:"];
+    let stop = |c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\'' | '`');
+    // Where the last address's run ended: what lies inside one starts none of its own.
+    let mut from = 0;
+    text.match_indices(':').filter_map(move |(colon, _)| {
+        let (start, scheme) = SCHEMES.iter().find_map(|scheme| {
+            let start = colon.checked_sub(scheme.find(':')?)?;
+            let found = start >= from && text.get(start..)?.starts_with(scheme);
+            found.then_some((start, scheme.len()))
+        })?;
+        let run = &text[start..];
+        let run = &run[..run.find(stop).unwrap_or(run.len())];
+        from = start + run.len().max(1);
+        let url = run.trim_end_matches(['.', ',', ':', ';', '!', '?', ')', ']', '}']);
+        (url.len() > scheme).then(|| start..start + url.len())
+    })
+}
+
 pub fn percent_decode(s: &str) -> String {
     if !s.contains('%') {
         return s.to_string();

@@ -225,28 +225,11 @@ fn line_around(at: &gtk::TextIter) -> (i32, String) {
     (start.offset(), start.slice(&end).to_string())
 }
 
-/// Find an `http://`, `https://` or `mailto:` URL covering byte `at`. Use the
-/// terminal's boundaries (`terminal::LINK`): stop at whitespace, quotes or
-/// angle brackets and trim sentence punctuation. Exclude `file:` paths
-/// from Ctrl-click desktop opening.
+/// Find the `http://`, `https://` or `mailto:` URL covering byte `at`, with the terminal's
+/// boundaries (`markdown::bare_urls`), which the spell checker passes over too. Exclude `file:`
+/// paths from Ctrl-click desktop opening.
 fn url_at(line: &str, at: usize) -> Option<Range<usize>> {
-    const SCHEMES: [&str; 3] = ["https://", "http://", "mailto:"];
-    let stop = |c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '\'' | '`');
-    let mut from = 0;
-    while let Some((start, scheme)) = SCHEMES
-        .iter()
-        .filter_map(|s| Some((from + line[from..].find(s)?, s.len())))
-        .min()
-    {
-        let run = &line[start..];
-        let run = &run[..run.find(stop).unwrap_or(run.len())];
-        let url = run.trim_end_matches(['.', ',', ':', ';', '!', '?', ')', ']', '}']);
-        if url.len() > scheme && (start..start + url.len()).contains(&at) {
-            return Some(start..start + url.len());
-        }
-        from = start + run.len().max(1);
-    }
-    None
+    accent_core::markdown::bare_urls(line).find(|url| url.contains(&at))
 }
 
 /// Find the identifier covering character `at`, using letters, digits and
