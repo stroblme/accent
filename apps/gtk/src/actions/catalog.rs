@@ -188,6 +188,8 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.git-merge", "Merge Branch…", &[]),
     ("win.git-merge-abort", "Abort Merge", &[]),
     ("win.git-delete-branch", "Delete Branch…", &[]),
+    // The palette's alone: a vault without a repository has no Git pane to put a button in.
+    ("win.git-init", "Initialize Git Repository", &[]),
     // The conflict block holding the caret (`conflict.rs`), unbound as VS Code leaves them: the
     // buttons over each block are the pointer's way.
     ("win.conflict-current", "Accept Current Change", &[]),

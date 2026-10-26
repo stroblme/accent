@@ -85,8 +85,9 @@ impl Panel {
         );
     }
 
-    /// The one way a command runs: one at a time, the pane held meanwhile ([`Panel::hold`]), and
-    /// `roots` stopped when the window closes. A Sync or a Sync All also disables the status bar's branch through
+    /// The one way a command runs, with a repository or before there is one ([`Panel::init`]):
+    /// one at a time, the pane held meanwhile ([`Panel::hold`]), and `roots` stopped when the
+    /// window closes. A Sync or a Sync All also disables the status bar's branch through
     /// [`Hooks::syncing`].
     fn run(
         self: &Rc<Self>,
@@ -171,8 +172,12 @@ impl Panel {
             }
             // Straight away, not through the debounce: the user asked for this and is watching
             // the row it moves. The debounce is there to fold a burst of watcher events into one
-            // query, and the `.git` write this just made will schedule one of those anyway.
-            panel.refresh(Depth::Everything);
+            // query, and the `.git` write this just made will schedule one of those anyway. A
+            // vault that had no repository looks for the one a `git init` made.
+            panel.refresh(match panel.has_repos() {
+                true => Depth::Everything,
+                false => Depth::Discover,
+            });
         });
     }
 
@@ -255,6 +260,28 @@ impl Panel {
             ));
         }
         true
+    }
+
+    /// Initialize Git Repository: `git init` at the vault's root, on the host for a remote vault.
+    /// The pane, which a vault without a repository hides, shows itself with the refresh after.
+    pub fn init(self: &Rc<Self>) {
+        let source = self.source();
+        let Source::Vault(vault) = source.as_ref() else {
+            return;
+        };
+        let vault = vault.clone();
+        self.run(
+            "initialize a Git repository".to_string(),
+            None,
+            Fail::Say,
+            Vec::new(),
+            move |_| {
+                vault
+                    .git_init()
+                    .map(|()| "Initialized a Git repository".to_string())
+            },
+            |_| (),
+        );
     }
 
     /// Whether closing the window now would cut git off while it rewrites the files: any command

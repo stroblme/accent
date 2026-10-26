@@ -385,6 +385,11 @@ impl Local {
         ));
         repos
     }
+
+    /// Make the vault root a repository ([`git::init`]), which the next [`Local::repos`] finds.
+    pub fn git_init(&self) -> Result<()> {
+        Ok(git::init(&self.root)?)
+    }
 }
 
 #[cfg(test)]

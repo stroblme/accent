@@ -56,15 +56,40 @@ pub(super) fn bench_git(app: &Rc<App>) {
 }
 
 /// Check Git pane visibility before and after `git init`: watcher discovery must reveal the pane
-/// when the first repository appears. Creates a repository; use a throwaway vault with no
-/// existing repository.
-pub(super) fn bench_git_init(app: &Rc<App>) {
+/// when the first repository appears. With `command` (`init:command`), Initialize Git Repository
+/// makes it instead, on a remote vault's host too, and a second run is refused. Creates a
+/// repository; use a throwaway vault with no existing repository.
+pub(super) fn bench_git_init(app: &Rc<App>, command: bool) {
     let app = app.clone();
     glib::spawn_future_local(async move {
         // The first refresh has to have landed, or the pane would be hidden for not having been
-        // asked yet rather than for having no repository.
+        // asked yet rather than for having no repository; a remote vault connects first.
+        wait_for(|| app.reconciled.get(), 60000).await;
         glib::timeout_future(Duration::from_millis(2500)).await;
         println!("bench git_pane {}", has_git_pane(&app));
+        if command {
+            let t = Instant::now();
+            let _ = WidgetExt::activate_action(&app.window, "win.git-init", None);
+            wait_for(|| has_git_pane(&app), 10000).await;
+            let said = find_widget(app.window.upcast_ref(), &|w| {
+                w.downcast_ref::<gtk::Label>()
+                    .is_some_and(|l| l.label() == "Initialized a Git repository")
+            });
+            println!(
+                "bench git_init pane={} ms={} said={}",
+                has_git_pane(&app),
+                t.elapsed().as_millis(),
+                said.is_some()
+            );
+            let greyed = app.git.get().is_some_and(|git| git.vault_in_repository());
+            let _ = WidgetExt::activate_action(&app.window, "win.git-init", None);
+            glib::timeout_future(Duration::from_millis(1500)).await;
+            println!(
+                "bench git_init again greyed={greyed} said={:?}",
+                bench_said(&app)
+            );
+            return bench_quit(&app);
+        }
         let status = std::process::Command::new("git")
             .args(["init", "-q"])
             .current_dir(app.root())

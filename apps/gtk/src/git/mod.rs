@@ -541,6 +541,13 @@ impl Panel {
         !self.state.borrow().repos.is_empty()
     }
 
+    /// Whether the vault's root is in a repository the pane knows of, which leaves Initialize Git
+    /// Repository nothing to do. A repository nested in the vault is not one.
+    pub fn vault_in_repository(&self) -> bool {
+        let root = self.source().key_root();
+        let state = self.state.borrow();
+        state.repos.iter().any(|repo| root.starts_with(&repo.root))
+    }
 
     /// How many rows the history list holds, and activating its last one. Only `ACCENT_BENCH_GIT`
     /// calls these: the headless image has no pointer, and the Load More row is only worth

@@ -493,7 +493,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The fetch and a Sync never run together, both writing the remote-tracking refs: the fetch skips a tick that lands on a Sync, and a Sync asked for mid-fetch waits for it, 8 s at most.
 - With no upstream the button's tooltip says Publish: it pushes the branch to its remote (the only one, or `origin`) and tracks it, instead of answering with git's "There is no tracking information".
 - There is no Refresh button: a save, a watcher event and a `.git` write each schedule one — a write, never a read, or the pane's own reads would re-trigger it forever.
-  A `git init` in a vault with no repository is such a write, so the pane shows itself unasked.
+  A `git init` in a vault with no repository is such a write, so the pane shows itself unasked; Initialize Git Repository in the palette runs it at the vault root, on the host for a remote vault, and looks for the repository at once.
 - The commit message box takes `Ctrl+Return` while it has the keyboard, although the chord is Insert Line Below: the editing chords are bound only while the keyboard is in a tab (Editing).
 - Commit commits what is staged, or `git commit -a` where nothing is (tracked changes in, untracked files out, as VS Code does with an empty index).
   Where every change is an untracked file, `-a` has nothing to take: Commit keeps the message and says Stage untracked files before committing, where git would only refuse.
@@ -1723,6 +1723,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 - Stage Hunk, Revert Hunk, Take Hunk and Keep Both Versions (unbound) are the buttons on the band of the comparison's hunk holding the caret; each says so in a toast when there is none.
 - Merge Branch…, Abort Merge and Delete Branch… (unbound) act on the repository the pane shows, the one whose conflicts it lists.
   Merge Branch… is also the branch popover's last button and puts the pane on screen; Abort Merge is the merge banner's Abort and says so when there is no merge to abort; Delete Branch… is the popover's trash buttons by keyboard and puts the pane on screen.
+- Initialize Git Repository (unbound) is the palette's alone, the pane not being there to hold a button in a vault without a repository; its row is greyed, saying why, where the vault root is in a repository already, and the call refuses it there too: a `git init` there would nest a second repository in the first.
 
 ### Notes
 

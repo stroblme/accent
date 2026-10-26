@@ -163,14 +163,16 @@ impl App {
         // Pruned before the config is borrowed for the rest: dropping a gone folder writes it.
         let vaults = start::recent_vaults(&self.config);
         let used = self.recent_commands.borrow();
-        // What the SyncTeX pair cannot run for over a LaTeX build without a SyncTeX file, and
-        // Invert Image Colours over an animation.
+        // What the SyncTeX pair cannot run for over a LaTeX build without a SyncTeX file, Invert
+        // Image Colours over an animation, and Initialize Git Repository in a repository.
         let (source, show) = self.synctex_missing(self.active_doc().as_ref());
         let animation = self.active_animation();
+        let repository = self.git.get().is_some_and(|git| git.vault_in_repository());
         let why = |action: &str| match action {
             "win.pdf-go-to-source" if source => Some(synctex::NO_SYNCTEX.to_string()),
             "win.show-in-pdf" if show => Some(synctex::NO_SYNCTEX.to_string()),
             "win.image-invert" if animation => Some(crate::look::ANIMATED.to_string()),
+            "win.git-init" if repository => Some("The vault is in a Git repository".to_string()),
             _ => None,
         };
         let config = self.config.borrow();

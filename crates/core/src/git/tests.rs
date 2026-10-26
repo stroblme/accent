@@ -768,6 +768,26 @@ fn discover_finds_the_toplevel_and_nested_repos() {
     assert!(discover(plain.path(), &[]).is_empty());
 }
 
+/// Initialize Git Repository: a folder in no repository becomes one, and a folder already in
+/// one, at its root or below it, is refused rather than given a second one nested in the first.
+#[test]
+fn init_makes_a_repository_only_where_there_is_none() {
+    if !have_git() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let vault = tmp.path().join("vault");
+    std::fs::create_dir_all(vault.join("sub")).unwrap();
+    super::init(&vault).unwrap();
+    assert_eq!(discover(&vault, &[]).len(), 1);
+    assert!(matches!(super::init(&vault), Err(Error::Git(_))));
+    assert!(matches!(
+        super::init(&vault.join("sub")),
+        Err(Error::Git(_))
+    ));
+    assert!(!vault.join("sub/.git").exists());
+}
+
 // -------------------------------------------------------- read and write
 
 #[test]

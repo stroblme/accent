@@ -528,6 +528,8 @@ methods! {
     // -------------------------------------------------------------------- git
     // The repositories belong to the machine the files are on, so every one of these runs there —
     // the `git` binary the user configured, with their hooks and their credential helper.
+    /// `git init` at the vault root, refused where the root is in a repository already.
+    git_init() -> ();
     git_status = git::status(repo: ref Repo) -> Status;
     git_untracked = git::untracked(repo: ref Repo, dir: ref str) -> Vec<String>;
     /// Fetch one page of history. The UI retains commits and computes

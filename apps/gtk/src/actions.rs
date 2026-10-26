@@ -369,6 +369,10 @@ impl App {
                     git.abort_merge();
                 }
             }
+            "git-init" => match (self.vault(), self.git.get()) {
+                (Some(_), Some(git)) => git.init(),
+                _ => self.needs_vault("initialize a Git repository"),
+            },
             // On screen for the reason Merge Branch… gives: the branch list is the pane's.
             "git-delete-branch" => {
                 self.show_pane("git");

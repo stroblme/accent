@@ -275,6 +275,18 @@ pub fn discover(vault_root: &Path, dirs: &[PathBuf]) -> Vec<Repo> {
     top.into_iter().chain(found).collect()
 }
 
+/// Make `root` a repository, as `git init` does, unless it is in one already: there `git init`
+/// would make a second repository nested in the first, or reinitialize it for nothing.
+pub fn init(root: &Path) -> Result<(), Error> {
+    if let Some(repo) = toplevel(root)? {
+        let at = repo.root.display();
+        return Err(Error::Git(format!(
+            "it is already in the repository at {at}"
+        )));
+    }
+    run(root, &["init", "--quiet"], false).map(drop)
+}
+
 fn repo(root: PathBuf, git_dir: PathBuf) -> Repo {
     let name = match root.file_name() {
         Some(name) => name.to_string_lossy().into_owned(),

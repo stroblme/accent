@@ -128,6 +128,7 @@ use tags::bench_tags;
 ///   `goto:<relA>,<relB>` (Go to File's keyboard, XTEST).
 /// - `ACCENT_BENCH_GIT=1`: Git pane rows, controls and refreshes. Modes:
 ///   `press:<path>` (hold for XTEST), `init` (discover a new repository),
+///   `init:command` (Initialize Git Repository, local or remote),
 ///   `close:<pull|push|fetch>` (close during work), `sync` (sync during fetch),
 ///   `focus` (row keyboard focus), `scroll` (stable scrolled rows), `commit`
 ///   (post-commit focus), `switch` (repository-switch races), `markers:<rel>`
@@ -838,7 +839,8 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             return match (arg.strip_prefix("press:"), arg.as_str()) {
                 (Some(path), _) => bench_git_press(&app, path),
-                (None, "init") => bench_git_init(&app),
+                (None, "init") => bench_git_init(&app, false),
+                (None, "init:command") => bench_git_init(&app, true),
                 (None, "sync") => bench_git_sync_over_fetch(&app),
                 (None, "rebase") => bench_git_rebase(&app),
                 (None, "focus") => bench_git_focus(&app),
