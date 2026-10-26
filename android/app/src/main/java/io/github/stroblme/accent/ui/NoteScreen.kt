@@ -560,6 +560,7 @@ private class Styling(
         is Style.Emphasis -> SpanStyle(fontStyle = FontStyle.Italic)
         is Style.Strong -> SpanStyle(fontWeight = FontWeight.Bold)
         is Style.Strikethrough -> SpanStyle(textDecoration = TextDecoration.LineThrough)
+        is Style.Underline -> SpanStyle(textDecoration = TextDecoration.Underline)
         is Style.CodeInline, is Style.CodeBlock, is Style.Math ->
             SpanStyle(fontFamily = FontFamily.Monospace, fontSize = 0.9.em)
         is Style.Link, is Style.WikiLink, is Style.Image -> SpanStyle(color = accent)

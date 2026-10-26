@@ -93,6 +93,7 @@ pub enum Style {
     Emphasis,
     Strong,
     Strikethrough,
+    Underline,
     CodeInline,
     CodeBlock,
     Link,

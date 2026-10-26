@@ -306,10 +306,17 @@ fn split<T: Copy>(out: &mut Vec<Bar<T>>, cols: Range<u32>, tone: T, per_row: u32
     }
 }
 
-/// Heading label without opening/closing ATX markers, or `None` for
+/// Heading label without opening/closing ATX markers or an org heading's stars, or `None` for
 /// empty content such as a setext underline.
 pub fn label(line: &str) -> Option<&str> {
-    let text = line.trim().trim_start_matches('#');
+    let line = line.trim();
+    // Stars and a space: a setext heading may open with `*emphasis*`.
+    let stars = line.trim_start_matches('*');
+    let line = match stars.starts_with([' ', '\t']) {
+        true => stars,
+        false => line,
+    };
+    let text = line.trim_start_matches('#');
     let closed = text.trim_end_matches('#');
     let text = match closed.ends_with(char::is_whitespace) {
         true => closed,
@@ -331,6 +338,8 @@ mod tests {
         assert_eq!(label("Setext title"), Some("Setext title"));
         assert_eq!(label("========"), None, "an underline has nothing to read");
         assert_eq!(label("##"), None);
+        assert_eq!(label("** Org heading"), Some("Org heading"));
+        assert_eq!(label("*Emphasised* title"), Some("*Emphasised* title"));
     }
 
     #[test]

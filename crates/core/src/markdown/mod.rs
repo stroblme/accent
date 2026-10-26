@@ -60,6 +60,8 @@ pub enum Style {
     Emphasis,
     Strong,
     Strikethrough,
+    /// Org's `_underline_`; markdown has none.
+    Underline,
     CodeInline,
     CodeBlock,
     Link,

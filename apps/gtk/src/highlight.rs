@@ -60,6 +60,7 @@ fn tag_name(style: Style) -> &'static str {
         Style::Emphasis => "em",
         Style::Strong => "strong",
         Style::Strikethrough => "strike",
+        Style::Underline => "underline",
         Style::CodeInline => "code",
         Style::CodeBlock => "codeblock",
         Style::Link => "link",
@@ -107,6 +108,7 @@ const TAG_NAMES: &[&str] = &[
     "em",
     "strong",
     "strike",
+    "underline",
     "code",
     "codeblock",
     "link",
@@ -153,6 +155,7 @@ pub fn install_tags(buffer: &sourceview5::Buffer) {
     tag("strong").set_weight(700);
     tag("em").set_style(pango::Style::Italic);
     tag("strike").set_strikethrough(true);
+    tag("underline").set_underline(pango::Underline::Single);
     let mono = crate::platform::monospace_family();
     for name in ["code", "codeblock", "math", "html", "frontmatter"] {
         tag(name).set_family(Some(&mono));
@@ -916,6 +919,7 @@ mod tests {
             Style::Emphasis,
             Style::Strong,
             Style::Strikethrough,
+            Style::Underline,
             Style::CodeInline,
             Style::CodeBlock,
             Style::Link,

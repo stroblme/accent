@@ -444,7 +444,7 @@ fn tags_in(text: &str, at: Range<usize>, sep: impl Fn(char) -> bool) -> Vec<Tag>
 
 /// The links, `<<targets>>` and emphasis of the prose at `at`, read left to right as org reads
 /// its objects: a `=verbatim=` or `~code~` run hides the links in it, as a link hides its
-/// markers, where `*bold*`, `/italic/` and `+struck+` text is read on inside.
+/// markers, where `*bold*`, `/italic/`, `_underlined_` and `+struck+` text is read on inside.
 fn inline(text: &str, at: Range<usize>, s: &mut Scan) {
     let b = text.as_bytes();
     let push = |link: OrgLink, s: &mut Scan| {
@@ -464,11 +464,12 @@ fn inline(text: &str, at: Range<usize>, s: &mut Scan) {
                 range.end
             }),
             b'<' => links::angle(text, i, at.end).map(|l| push(l, s)),
-            c @ (b'=' | b'~' | b'*' | b'/' | b'+') => {
-                emphasis(text, at.start, i, at.end).map(|end| {
+            c @ (b'=' | b'~' | b'*' | b'/' | b'_' | b'+') => emphasis(text, at.start, i, at.end)
+                .map(|end| {
                     let style = match c {
                         b'*' => Style::Strong,
                         b'/' => Style::Emphasis,
+                        b'_' => Style::Underline,
                         b'+' => Style::Strikethrough,
                         _ => Style::CodeInline,
                     };
@@ -479,8 +480,7 @@ fn inline(text: &str, at: Range<usize>, s: &mut Scan) {
                         Style::CodeInline => end,
                         _ => i + 1,
                     }
-                })
-            }
+                }),
             c if c.is_ascii_alphabetic()
                 && (i == at.start || !b[i - 1].is_ascii_alphanumeric()) =>
             {
@@ -500,8 +500,8 @@ fn target(text: &str, i: usize, end: usize) -> Option<(Range<usize>, String)> {
         .then(|| (i..i + name.len() + 4, name.to_string()))
 }
 
-/// Where the `=verbatim=`, `~code~`, `*bold*`, `/italic/` or `+struck+` run opening at `i` ends,
-/// by org's rules for its markers:
+/// Where the `=verbatim=`, `~code~`, `*bold*`, `/italic/`, `_underlined_` or `+struck+` run
+/// opening at `i` ends, by org's rules for its markers:
 /// the opening one at the start of the line, after a space or after one of `-({'"`, and not
 /// before a space; the closing one the same character, not after a space, and before a space,
 /// the end of the line or one of `-.,;:!?')}["\`.
@@ -699,9 +699,9 @@ mod tests {
 
     #[test]
     fn prose_is_styled_as_a_notes() {
-        let text = "- [X] done /now/ and +gone+ =v= ~c~\n  * [ ] open [[file:a.org][A]]\n\
+        let text = "- [X] done /now/ and +gone+ =v= ~c~ _under_\n  * [ ] open [[file:a.org][A]]\n\
                     1) [[*H]] <https://x.org>\n# hidden\n: fixed\n#+begin_src sh\nls\n#+end_src\n\
-                    a/b/c and 10*3*2 stay plain, *not bold *\n";
+                    a/b/c and 10*3*2 stay plain, *not bold *, snake_case_name\n";
         let spans = styled(text);
         let has = |want: (&str, Style)| assert!(spans.contains(&want), "{want:?} in {spans:?}");
         has(("-", Style::ListMarker));
@@ -710,6 +710,7 @@ mod tests {
         has(("gone", Style::Strikethrough));
         has(("v", Style::CodeInline));
         has(("c", Style::CodeInline));
+        has(("under", Style::Underline));
         has(("*", Style::ListMarker));
         has(("[ ]", Style::TaskMarker { checked: false }));
         has(("[[file:a.org][A]]", Style::Link));
@@ -751,7 +752,7 @@ mod tests {
             "[[file:X.org::*X][X]] [[X]] <https://X> https://X.org/X\n",
             "X =X= ~X~ <<X>> X\n",
             "#+begin_src X\nX\n#+end_src\n:X:\nX\n:END:\n",
-            "- [X] X *X* /X/ +X+\n  * [ ] X\n1) X\n# X\n: X\n#+X\n",
+            "- [X] X *X* /X/ _X_ +X+\n  * [ ] X\n1) X\n# X\n: X\n#+X\n",
         ];
         for t in templates {
             for s in samples {
