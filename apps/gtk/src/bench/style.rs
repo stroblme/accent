@@ -1002,7 +1002,7 @@ async fn bench_dangling(app: Rc<App>, tab: Rc<Tab>) {
 /// Wait for the New File a followed link offers and print its heading and the name it arrives
 /// with, then close it. Both the resolve and the vault's templates arrive from a worker, so the
 /// dialog is waited for rather than assumed. What cancelling it leaves is [`bench_close`]'s drill.
-async fn bench_new_file(app: &Rc<App>, case: &str) {
+pub(super) async fn bench_new_file(app: &Rc<App>, case: &str) {
     for _ in 0..40 {
         if app.window.visible_dialog().is_some() {
             break;

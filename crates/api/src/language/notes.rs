@@ -18,8 +18,8 @@ use accent_core::org;
 use accent_core::path::{self, FileType, basename, parent_dir, stem};
 
 use super::{
-    Completion, Completions, Diagnostic, Fold, Fut, Hover, Kind, Language, Location, PdfPages, Pos,
-    Range, Severity, Signature, Support, Symbol, byte_of, pos_of, range_of,
+    CodeAction, Completion, Completions, Diagnostic, Fold, Fut, Hover, Kind, Language, Location,
+    PdfPages, Pos, Range, Severity, Signature, Support, Symbol, byte_of, pos_of, range_of,
 };
 use crate::local::{Ignored, Listing};
 use crate::{Backlink, Event, Local, locked};
@@ -1016,6 +1016,42 @@ impl Notes {
         }])
     }
 
+    /// accent's one fix: a link over `range` that nothing answers to, as its hint says
+    /// ([`Self::diagnose`]), offers to create what it names, as following it does
+    /// ([`Self::definition`]).
+    fn code_actions(&self, rel: &str, range: Range) -> Result<Vec<CodeAction>> {
+        let text = self.text_of(rel)?;
+        let (Some(from), Some(to)) = (byte_of(&text, range.start), byte_of(&text, range.end))
+        else {
+            return Ok(Vec::new());
+        };
+        let a = Syntax::of(rel).analyze(&text);
+        let index = locked(&self.index);
+        let mut out: Vec<CodeAction> = Vec::new();
+        for link in a
+            .links
+            .iter()
+            .filter(|l| l.range.start <= to && from <= l.range.end)
+        {
+            let Some(asked) = checked_target(rel, link) else {
+                continue;
+            };
+            let path = path::linked_path(&asked);
+            let found = self.find(&index, &asked)?.or_else(|| self.unwalked(&asked));
+            if found.is_some() || out.iter().any(|a| a.new_file.as_ref() == Some(&path)) {
+                continue;
+            }
+            out.push(CodeAction {
+                title: format!("Create note {}", link.target),
+                kind: "quickfix".to_string(),
+                preferred: true,
+                raw: serde_json::Value::Null,
+                new_file: Some(path),
+            });
+        }
+        Ok(out)
+    }
+
     /// Check disk for a target in an unindexed tree such as ignored `build/`
     /// or `node_modules`, before offering New File ([`path::linked_path`]).
     /// Run beside the files, including on a remote host.
@@ -1129,6 +1165,16 @@ impl Language for Notes {
     fn folds(&self, rel: &str) -> Fut<'_, Vec<Fold>> {
         let rel = rel.to_string();
         Box::pin(async move { Ok(or_empty("folds", Notes::folds(self, &rel))) })
+    }
+
+    fn code_actions(&self, rel: &str, range: Range) -> Fut<'_, Vec<CodeAction>> {
+        let rel = rel.to_string();
+        Box::pin(async move {
+            Ok(or_empty(
+                "code actions",
+                Notes::code_actions(self, &rel, range),
+            ))
+        })
     }
 }
 

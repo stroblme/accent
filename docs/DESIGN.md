@@ -1265,6 +1265,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - The status bar counts them where a note counts words, and pressing the count takes the underlines, marks and line-end messages out of the text and back, the count and hover staying.
   Per tab, and not kept across a restart: a way past something in the way, not a preference.
 - On a note they are accent's own: a hint on a link the index cannot resolve, and a warning with the converter's reason over each formula the preview shows as source — a warning because pulldown-latex rejects some valid LaTeX.
+  Quick Fix on such a link, and the hover's Quick Fix… over its hint, offer Create note, which opens New File with the link's path typed in, as following the link does: one place that creates a note, with its templates and its folder.
 - **Quick Fix** lists what the server offers over the selection or at the caret, in a menu at the caret: its quick fixes first, the one it prefers on top, then its refactorings; source actions (Organize Imports) are not listed.
   The diagnostics there go to the server as it published them, which is how clangd finds its fixes.
 - Picking one applies its edit, resolved first where the server sent it without one, or runs its command (clangd's tweaks): each open document's part as one undo step, and files no tab holds written as a move's import updates are, gated on their etags, and named in a toast.

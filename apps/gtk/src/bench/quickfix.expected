@@ -17,3 +17,6 @@ bench quickfix cell_applied=2 cells=["b = 1 + 2", "a = oops"]
 bench quickfix cell_applied=3 cells=["b = 1 + 2", "A = OOPS"]
 bench quickfix cell_undone=3 cells=["b = 1 + 2", "a = oops"]
 bench quickfix cell_applied=4 cells=["b = 1 + 2", "a = oops"]
+bench quickfix note_hover ["Create note Nowhere"]
+bench quickfix note_menu Some(["Create note Nowhere"])
+bench follow create_note heading=Some("New File") typed=Some("Nowhere.md")

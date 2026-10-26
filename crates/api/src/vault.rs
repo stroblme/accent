@@ -1235,6 +1235,27 @@ mod tests {
         assert_eq!(items[0].message, "No note named Nope");
         assert_eq!(items[0].range.start.character, 17);
 
+        // Quick Fix offers to create what the dangling link names, and nothing over one that
+        // resolves.
+        let fixes = |range| rt.block_on(f.vault.code_actions("a.md", range)).unwrap();
+        let create = fixes(items[0].range);
+        let offered: Vec<_> = create
+            .iter()
+            .map(|a| (a.title.as_str(), a.new_file.as_deref()))
+            .collect();
+        assert_eq!(offered, [("Create note Nope", Some("Nope.md"))]);
+        let beta = Pos {
+            line: 0,
+            character: 8,
+        };
+        assert!(
+            fixes(Range {
+                start: beta,
+                end: beta
+            })
+            .is_empty()
+        );
+
         // A markdown link is judged by the path it names from the note's own folder.
         rt.block_on(f.vault.change_document(
             "a.md",

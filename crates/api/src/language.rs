@@ -251,6 +251,10 @@ pub struct CodeAction {
     pub preferred: bool,
     /// The action or command as the server sent it, handed back to apply it; opaque to the UI.
     pub raw: Value,
+    /// accent's own fix for a link to nothing: the file it names, which the window offers in New
+    /// File, the path typed in, as following the link does, rather than asking for edits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new_file: Option<String>,
 }
 
 /// What a code action changes, file by file.

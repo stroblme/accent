@@ -274,8 +274,9 @@ use tags::bench_tags;
 ///   search toggles, invalid patterns and replacement captures in a temporary note.
 /// - `ACCENT_BENCH_DIAG=<rel_code_file>`: diagnostic expansion and line-end
 ///   truncation. Writes the file; use a scratch vault.
-/// - `ACCENT_BENCH_QUICKFIX=<rel_c_file>`: Quick Fix's menu and each kind of code action,
-///   against `fake-lsp.py --actions` (`quickfix::bench_quickfix`). Writes files; a scratch vault.
+/// - `ACCENT_BENCH_QUICKFIX=<rel_c_file>,<ipynb>`: Quick Fix's menu and each kind of code
+///   action, against `fake-lsp.py --actions`, and a note's Create note fix
+///   (`quickfix::bench_quickfix`). Writes files; a scratch vault.
 /// - `ACCENT_BENCH_SEARCH=<query>[:<n>]`: result refresh after external writes;
 ///   `type:<query>`: ranked timing; `walk:<query>`: All/unindexed timing;
 ///   `more:<query>[:<n>]`: expanded per-file results; `click:`: wait for XTEST;

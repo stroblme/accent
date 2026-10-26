@@ -13,8 +13,8 @@ use crate::Result;
 
 use super::external::map::line_of;
 use super::{
-    Completion, Completions, Fold, Fut, Hover, Kind, Language, Listing, Location, Pos, Range,
-    Signature, Support, Symbol, latex,
+    ActionEdits, CodeAction, Completion, Completions, Fold, Fut, Hover, Kind, Language, Listing,
+    Location, Pos, Range, Signature, Support, Symbol, latex,
 };
 use crate::locked;
 
@@ -494,6 +494,21 @@ impl Language for Layered {
         match &self.primary {
             Some(p) => p.folds(rel),
             None => Box::pin(async { Ok(Vec::new()) }),
+        }
+    }
+
+    fn code_actions(&self, rel: &str, range: Range) -> Fut<'_, Vec<CodeAction>> {
+        match &self.primary {
+            Some(p) => p.code_actions(rel, range),
+            None => Box::pin(async { Ok(Vec::new()) }),
+        }
+    }
+
+    fn action_edits(&self, rel: &str, action: CodeAction) -> Fut<'_, ActionEdits> {
+        match &self.primary {
+            Some(p) => p.action_edits(rel, action),
+            // Nothing listed it: there is no primary to offer actions.
+            None => Box::pin(async { Ok(ActionEdits::default()) }),
         }
     }
 

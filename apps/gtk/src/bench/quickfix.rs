@@ -1,5 +1,5 @@
 //! Quick Fix against `build-aux/fake-lsp.py --actions`: the menu, and each kind of action applied,
-//! in a C file and in a notebook's code cell.
+//! in a C file and in a notebook's code cell; and a note's own fix for a link to nothing.
 
 use super::*;
 use accent_core::notebook::{self, Edit, Kind};
@@ -16,7 +16,7 @@ const OTHER: &str = "int other;\n";
 /// and is refused when picked again. The hover's fixes over `oops` follow.
 /// Then `<ipynb>`, `b = 1 + 2` and `a = oops` in two code cells, the same five rows picked in the
 /// second: the two inside it change it, the three reaching into the first cell and other files do
-/// nothing.
+/// nothing. Last, `link.md` links to a note that is not there, and its one fix opens New File.
 pub(super) fn bench_quickfix(app: &Rc<App>, arg: &str) {
     scratch_only(app, "ACCENT_BENCH_QUICKFIX");
     let Some((rel, ipynb)) = arg.split_once(',') else {
@@ -27,6 +27,7 @@ pub(super) fn bench_quickfix(app: &Rc<App>, arg: &str) {
     glib::spawn_future_local(async move {
         bench_fixes(&app, &rel).await;
         bench_cell_fixes(&app, &ipynb).await;
+        bench_note_fix(&app).await;
         bench_quit(&app);
     });
 }
@@ -193,6 +194,53 @@ async fn bench_cell_fixes(app: &Rc<App>, rel: &str) {
         }
         cell.clone().flush().await;
     }
+}
+
+/// Quick Fix on a link to a note that is not there offers to create it, and picking that opens
+/// New File with the path typed in, as following the link does.
+async fn bench_note_fix(app: &Rc<App>) {
+    let Some(vault) = app.vault().cloned() else {
+        return;
+    };
+    let rel = "link.md";
+    if let Err(e) = vault.save(rel, "See [[Nowhere]].\n", None) {
+        return println!("bench quickfix write_failed {rel} {e:?}");
+    }
+    app.open_path(rel);
+    let mut tab = None;
+    for _ in 0..300 {
+        tab = app
+            .open_tabs()
+            .into_iter()
+            .find(|tab| tab.rel() == rel && !tab.diagnostics().is_empty());
+        if tab.is_some() {
+            break;
+        }
+        glib::timeout_future(Duration::from_millis(100)).await;
+    }
+    let Some(tab) = tab else {
+        return println!("bench quickfix note_no_hint {rel}");
+    };
+    let on = accent_api::Pos {
+        line: 0,
+        character: 8,
+    };
+    let hover = crate::hover::fixes_at(tab.clone(), on).await;
+    let titles: Vec<String> = hover.into_iter().map(|a| a.title).collect();
+    println!("bench quickfix note_hover {titles:?}");
+    tab.view.grab_focus();
+    tab.buffer.place_cursor(&tab.buffer.iter_at_offset(8));
+    app.quick_fix();
+    let Some(menu) = shown_menu(&tab).await else {
+        return println!("bench quickfix note_no_menu");
+    };
+    let rows = menu.menu_model().map(|m| fileops::labels(&m));
+    println!("bench quickfix note_menu {rows:?}");
+    let _ = tab
+        .view
+        .activate_action("fix.apply", Some(&0u32.to_variant()));
+    menu.popdown();
+    super::style::bench_new_file(app, "create_note").await;
 }
 
 /// The Quick Fix menu once it is up on `tab`'s view.

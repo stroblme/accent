@@ -26,6 +26,7 @@ pub(super) fn actions_of(answer: Vec<Value>) -> Vec<CodeAction> {
             kind: text("kind").unwrap_or_default(),
             preferred: raw.get("isPreferred").and_then(Value::as_bool) == Some(true),
             raw,
+            new_file: None,
         });
     }
     out

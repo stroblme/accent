@@ -115,6 +115,12 @@ impl App {
     /// Apply `action`, picked in `editor`: resolved or run at its server first, then its edits
     /// made; in a notebook `cell`, only edits inside it.
     fn apply_fix(self: &Rc<Self>, editor: Rc<dyn Editor>, cell: bool, action: CodeAction) {
+        if let Some(path) = &action.new_file {
+            if let Some(ops) = self.ops() {
+                fileops::new_linked_note(ops, path);
+            }
+            return;
+        }
         let doc = editor.document();
         let Some(vault) = doc.vault() else {
             return;
@@ -283,6 +289,7 @@ mod tests {
             kind: kind.into(),
             preferred,
             raw: serde_json::Value::Null,
+            new_file: None,
         }
     }
 
