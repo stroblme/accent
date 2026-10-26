@@ -252,6 +252,7 @@ pub fn open(
     tab.wire_tools(&gap_code, &gap_markdown);
     tab.wire_building();
     tab.wire_keys(&host);
+    tab.wire_outside();
     crate::zoom::zoom_on_wheel(
         &tab.scroller,
         gtk::PropagationPhase::Capture,
@@ -960,6 +961,41 @@ impl NotebookTab {
         if self.view_of(Some(id)).is_some_and(|v| v.editor().is_none()) {
             self.focus_cell(id);
         }
+    }
+
+    /// A press in the notebook outside every cell, between, beside or below them, leaves the cells
+    /// ([`deselect`](Self::deselect)). The cell buttons are the cell's.
+    fn wire_outside(self: &Rc<Self>) {
+        self.column.set_focusable(true);
+        let click = gtk::GestureClick::new();
+        click.connect_pressed(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move |_, _, x, y| {
+                let Some(at) = tab.scroller.pick(x, y, gtk::PickFlags::DEFAULT) else {
+                    return;
+                };
+                let within = |w: &gtk::Widget| at == *w || at.is_ancestor(w);
+                let views = tab.views.borrow().clone();
+                if !within(tab.tools.bar.upcast_ref())
+                    && !views.iter().any(|v| within(v.card.upcast_ref()))
+                {
+                    tab.deselect();
+                }
+            }
+        ));
+        self.scroller.add_controller(click);
+    }
+
+    /// No cell selected, and the keyboard out of the one that was, in the notebook's column.
+    fn deselect(self: &Rc<Self>) {
+        let Some(view) = self.view_of(self.selected.take()) else {
+            return;
+        };
+        view.set_selected(false);
+        self.column.grab_focus();
+        self.place_soon();
+        self.on_select.emit(self);
     }
 
     /// Select cell `id` and give its editor the keyboard.
