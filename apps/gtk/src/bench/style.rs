@@ -729,6 +729,9 @@ pub(super) fn bench_follow(app: &Rc<App>, rel: &str) {
     if let Some(rel) = rel.strip_prefix("hover:") {
         return bench_hover(app, rel);
     }
+    if let Some(rel) = rel.strip_prefix("click:") {
+        return bench_follow_click(app, rel);
+    }
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
     glib::timeout_add_local_once(Duration::from_millis(400), move || {
@@ -769,6 +772,57 @@ pub(super) fn bench_follow(app: &Rc<App>, rel: &str) {
             tab.buffer.place_cursor(&caret);
             glib::spawn_future_local(bench_dangling(app, tab));
         });
+    });
+}
+
+/// Ctrl+click a link to a heading far down the same note through XTEST: `bench follow_click_aim
+/// <x> <y>` for `build-aux/xtest.py :N "move <x> <y>; focus; keydown ctrl; down; sleep 0.5; up;
+/// keyup ctrl"`. The jump lands while the button is still down, and the release must not select
+/// from the heading to wherever the pointer now is over the scrolled text.
+fn bench_follow_click(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(1000)).await;
+        let Some(tab) = app.active() else {
+            return bench_quit(&app);
+        };
+        let filler = "filler line\n".repeat(200);
+        tab.set_text(&format!(
+            "See [[#Target]] here.\n{filler}# Target\n{filler}"
+        ));
+        tab.buffer.place_cursor(&tab.buffer.start_iter());
+        tab.view
+            .scroll_to_iter(&mut tab.buffer.start_iter(), 0.0, false, 0.0, 0.0);
+        // The link table is filled by the analysis debounce, not by the edit.
+        glib::timeout_future(Duration::from_millis(800)).await;
+        let rect = tab.view.iter_location(&tab.buffer.iter_at_offset(8));
+        let (x, y) = tab.view.buffer_to_window_coords(
+            gtk::TextWindowType::Widget,
+            rect.x() + 2,
+            rect.y() + rect.height() / 2,
+        );
+        let point = graphene::Point::new(x as f32, y as f32);
+        let point = tab.view.compute_point(&app.window, &point).unwrap_or(point);
+        println!("bench follow_click_aim {:.0} {:.0}", point.x(), point.y());
+        let caret = || tab.buffer.iter_at_mark(&tab.buffer.get_insert()).line();
+        for _ in 0..100 {
+            glib::timeout_future(Duration::from_millis(100)).await;
+            if caret() != 0 {
+                break;
+            }
+        }
+        // Past the release and the scroll.
+        glib::timeout_future(Duration::from_millis(1500)).await;
+        let selected = tab
+            .buffer
+            .selection_bounds()
+            .map(|(a, b)| (a.line(), b.line()));
+        println!(
+            "bench follow click caret_line={} selected={selected:?}",
+            caret()
+        );
+        bench_quit(&app);
     });
 }
 

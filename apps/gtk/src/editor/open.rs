@@ -589,7 +589,12 @@ fn connect_view(tab: &Rc<Tab>) {
     ));
     tab.view.add_controller(focus);
 
-    let click = gtk::GestureClick::new();
+    // Claimed in the capture phase, before the view's own click and drag gestures see the press:
+    // they would start a selection at it, which the release, once the jump has scrolled the
+    // view, stretches from the destination to wherever the pointer then is.
+    let click = gtk::GestureClick::builder()
+        .propagation_phase(gtk::PropagationPhase::Capture)
+        .build();
     click.connect_pressed(glib::clone!(
         #[weak(rename_to = tab)]
         tab,
@@ -601,14 +606,18 @@ fn connect_view(tab: &Rc<Tab>) {
                 return;
             }
             // The caret goes where the pointer is first: Go to Definition asks about the caret,
-            // and a Ctrl+click means "this one", not "wherever I last typed".
+            // and a Ctrl+click means "this one", not "wherever I last typed". Only a press on
+            // the text: one on the gutter is the gutter's.
             let (bx, by) =
                 tab.view
                     .window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
-            if let Some(iter) = crate::fold::iter_at_location(&tab.view, bx, by) {
-                tab.buffer.place_cursor(&iter);
-            }
+            let Some(iter) = crate::fold::iter_at_location(&tab.view, bx, by) else {
+                return;
+            };
+            tab.buffer.place_cursor(&iter);
             gesture.set_state(gtk::EventSequenceState::Claimed);
+            // The view's own press would have taken the keyboard.
+            tab.view.grab_focus();
             tab.clear_follow();
             tab.on_follow.emit(&tab);
         }

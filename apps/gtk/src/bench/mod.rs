@@ -227,7 +227,8 @@ use tags::bench_tags;
 /// - `ACCENT_BENCH_SLOW_READ=<ms>`: delay text reads on workers to reproduce
 ///   double-clicks before tabs arrive in the `TABS=tree:` drill.
 /// - `ACCENT_BENCH_FOLLOW=<rel_note>`: Ctrl-hover, missing targets and anchors;
-///   `hover:<rel_note>`: XTEST hover size and wheel behavior.
+///   `hover:<rel_note>`: XTEST hover size and wheel behavior; `click:<rel_note>`: an XTEST
+///   Ctrl+click jump within the note leaves nothing selected.
 ///   Any text file can exercise URL underlines.
 /// - `ACCENT_BENCH_OUTLINE=<rel_note>,<rel_other>`: caret following and edits;
 ///   `hold:<rel_note>`: 20 s XTEST probe; `index:<rel_code>`: indexed symbols.
