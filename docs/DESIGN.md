@@ -554,8 +554,10 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 - `sourceview5::View` in an `AdwClampScrollable` in a `GtkScrolledWindow`: a plain `AdwClamp` makes GTK insert a `GtkViewport`, whose dead adjustments break the view's own scrolling to the caret.
 - **An org note looks as a markdown note does** (user decision 2026-10-24): its stars dimmed and hung in the margin as `#` are, a heading's open TODO keyword as written and a done one, its priority and `COMMENT` dimmed, its tags in the accent, `*bold*`, `/italic/`, `+struck+`, `=verbatim=` and `~code~` styled with their markers dimmed, a link in the accent with all but its description dimmed, lists and checkboxes (`[-]` an open box), `#+KEY:` lines and drawers as front matter, blocks as fenced code and `# ` comments dimmed.
-  It has no GtkSourceView language, as a markdown note has none: a source block is not coloured as its language and the spell checker reads it whole; `_underline_` stays plain, the look having no underline but a link's.
+  It has no GtkSourceView language, as a markdown note has none: a source block is not coloured as its language; `_underline_` stays plain, the look having no underline but a link's.
   Return carries its lists on as org writes them (`-`, `+`, an indented `*`, `1.`, `1)`, a box as `[ ]`), a `*` at the start of a line being a heading, which Tab leaves alone; it has no fences, tables or YAML sequences to continue.
+- **The spell checker reads a note's prose** and passes over the rest: code, math, HTML, the front matter (org's `#+KEY:` lines and drawers), tags, and a link's target, the text a link shows being prose.
+  The styling pass knows those spans already, so it tags them with GtkSourceView's `no-spell-check` class name, which libspelling skips, markdown and org alike.
 - A sticky block title over the top of the view pins the opening line of the block the first visible line is in, as VS Code pins a function signature, until that line is back on screen; the innermost block wins.
   A note's blocks are its headings and fenced blocks, both already tagged by the styling pass.
   A code tab's are the language layer's symbols, a source file's functions and types, each pinned at the line of its name rather than where the server's range starts, which may be a doc comment (`lang::innermost`); a CSV tab has none.

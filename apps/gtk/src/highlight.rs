@@ -83,6 +83,9 @@ pub const HEADING_TAGS: [&str; 6] = ["h1", "h2", "h3", "h4", "h5", "h6"];
 const HANG_TAGS: [&str; 6] = ["hang1", "hang2", "hang3", "hang4", "hang5", "hang6"];
 /// The fenced-block tag, for the same reason.
 pub const CODEBLOCK: &str = "codeblock";
+/// The tag libspelling passes over: GtkSourceView's name for its `no-spell-check` class, which a
+/// note, having no language, gets from the styling pass instead ([`unchecked`]).
+const NO_SPELL: &str = "gtksourceview:context-classes:no-spell-check";
 
 /// Heading scales indexed by level minus one, shared by tags and [`hang`] measurements.
 /// Levels five and six retain body scale.
@@ -118,6 +121,7 @@ const TAG_NAMES: &[&str] = &[
     "html",
     "frontmatter",
     "marker",
+    NO_SPELL,
 ];
 
 /// Install theme-independent tags idempotently after wrap::install so heading hangs win priority.
@@ -165,6 +169,7 @@ pub fn install_tags(buffer: &sourceview5::Buffer) {
     tag("task");
     tag("taskdone").set_strikethrough(true);
     tag("marker");
+    tag(NO_SPELL);
 }
 
 /// Minimum contrast for dim markup against the page.
@@ -290,6 +295,10 @@ pub fn apply(buffer: &sourceview5::Buffer, syntax: Syntax) -> (markdown::Analysi
         let range = offsets.char_of(span.range.start)..offsets.char_of(span.range.end);
         for name in tags_of(&text, span, syntax) {
             wanted.entry(name).or_default().push(range.clone());
+        }
+        if let Some(r) = unchecked(&text, span, syntax) {
+            let range = offsets.char_of(r.start)..offsets.char_of(r.end);
+            wanted.entry(NO_SPELL).or_default().push(range);
         }
     }
     let table = buffer.tag_table();
@@ -461,6 +470,47 @@ fn tag_span(
     for name in tags_of(text, span, syntax) {
         buffer.apply_tag_by_name(name, &s, &e);
     }
+    if let Some(r) = unchecked(text, span, syntax) {
+        let s = buffer.iter_at_offset(offsets.char_of(r.start));
+        let e = buffer.iter_at_offset(offsets.char_of(r.end));
+        buffer.apply_tag_by_name(NO_SPELL, &s, &e);
+    }
+}
+
+/// What of `span` the spell checker passes over: code, math, markup and tags whole, and of a link
+/// its target, the text it shows being prose.
+fn unchecked(text: &str, span: &Span, syntax: Syntax) -> Option<Range<usize>> {
+    let r = span.range.clone();
+    let within = match span.style {
+        Style::CodeInline
+        | Style::CodeBlock
+        | Style::Math
+        | Style::Html
+        | Style::Frontmatter
+        | Style::Tag => 0..r.len(),
+        Style::Link | Style::WikiLink | Style::Image => target(&text[r.clone()], syntax),
+        _ => return None,
+    };
+    Some(r.start + within.start..r.start + within.end)
+}
+
+/// Where the target is in a link written as `link`: all of `[[target]]`, `<address>` or a bare
+/// address, the head of `[[target|alias]]` (org's `[[target][description]]`), and the tail of
+/// `[text](target)` and `[text][label]`.
+fn target(link: &str, syntax: Syntax) -> Range<usize> {
+    let bare = link.strip_prefix('!').unwrap_or(link);
+    let alias = match syntax {
+        Syntax::Markdown => "|",
+        Syntax::Org => "][",
+    };
+    if bare.starts_with("[[") {
+        return 0..link.find(alias).map_or(link.len(), |at| at + alias.len());
+    }
+    if bare.starts_with('[') {
+        let at = link.find("](").or_else(|| link.find("]["));
+        return at.unwrap_or(link.len())..link.len();
+    }
+    0..link.len()
 }
 
 /// The bytes of `line` in `text`, its newline excluded, or `None` past the last line.
@@ -887,6 +937,40 @@ mod tests {
                 "{s:?} maps to an uninstalled tag"
             );
         }
+    }
+
+    /// The spell checker passes over code, math, tags and a link's target, never its text.
+    #[test]
+    fn a_links_text_is_spell_checked_and_its_target_is_not() {
+        let unchecked_in = |text: &'static str, syntax: Syntax| -> Vec<&'static str> {
+            let mut out: Vec<&str> = syntax
+                .analyze(text)
+                .spans
+                .iter()
+                .filter_map(|span| unchecked(text, span, syntax))
+                .map(|r| &text[r])
+                .collect();
+            out.sort();
+            out
+        };
+        let markdown = "[a text](a.md) [[Note|an alias]] [[Other]] ![an alt](i.png) `c` #tag $x$";
+        assert_eq!(
+            unchecked_in(markdown, Syntax::Markdown),
+            [
+                "#tag",
+                "$x$",
+                "[[Note|",
+                "[[Other]]",
+                "](a.md)",
+                "](i.png)",
+                "`c`"
+            ]
+        );
+        let org = "* H :tag:\n[[file:a.org][a text]] [[*H]] https://x.org =v=\n";
+        assert_eq!(
+            unchecked_in(org, Syntax::Org),
+            ["[[*H]]", "[[file:a.org][", "https://x.org", "tag", "v"]
+        );
     }
 
     /// Only a heading that carries its own `#` markers has anything to hang in the gutter.
