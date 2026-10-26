@@ -680,7 +680,7 @@ impl App {
         self.sync_info();
         self.sync_code_pane();
         let Some(doc) = self.active_doc() else {
-            self.title.set_subtitle(&self.host());
+            self.title.set_subtitle("");
             self.refresh_references();
             // The bar speaks for the tab in front, so with none it says nothing: the last
             // document's "Markdown · 2 words" used to stay under an empty document column,
@@ -712,17 +712,12 @@ impl App {
                 if doc::host_file_path(&key).is_none() {
                     self.file_used(&key);
                 }
-                let where_ = match doc.is_loose() {
+                // The title above names the host on a remote vault, so the path needs no more.
+                self.title.set_subtitle(&match doc.is_loose() {
                     true => doc::host_file_path(&key)
                         .map(str::to_string)
                         .unwrap_or_else(|| fileops::display_path(&self.root(), &key)),
                     false => key.clone(),
-                };
-                // On a remote vault the path alone is ambiguous — the same note path exists on
-                // this machine too — so the host is named with it, every time.
-                self.title.set_subtitle(&match self.host().is_empty() {
-                    true => where_,
-                    false => format!("{where_} — {}", self.host()),
                 });
             }
         }

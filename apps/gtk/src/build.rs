@@ -60,23 +60,23 @@ pub fn build_window(
         WindowKey::Loose(Loose::Terminal) => "Terminal".to_string(),
         WindowKey::Loose(Loose::Documents | Loose::Apart) => "Accent".to_string(),
     };
-    // A remote window says which machine it is on, under the vault's name. Nothing else in the
+    // A remote window says which machine it is on, beside the vault's name. Nothing else in the
     // chrome differs: it is the same vault, and the point is that it behaves like one.
     let host = vault
         .as_deref()
         .and_then(Vault::remote)
         .map(|r| r.url().host.clone())
         .unwrap_or_default();
-    let title = adw::WindowTitle::new(&vault_name, &host);
     // What the task manager and the window switcher show, which is the one place a window has to
     // be told apart from the others: the vault, and the machine it is on when that is not this
-    // one. Fixed for the life of the window — the header bar is where the open file is named —
-    // except a window of documents, which has no vault and takes the file in front's name
-    // (`App::sync_window_title`).
+    // one. The header's title says the same, the one source of both. Fixed for the life of the
+    // window — the subtitle is where the open file is named — except a window of documents, which
+    // has no vault and takes the file in front's name (`App::sync_window_title`).
     let window_title = match host.is_empty() {
-        true => vault_name.clone(),
+        true => vault_name,
         false => format!("{vault_name} ({host})"),
     };
+    let title = adw::WindowTitle::new(&window_title, "");
     let recent = Rc::new(RefCell::new(Vec::new()));
     let first = Pane::new(&tab_menu(), recent.clone());
     // Hidden until something goes wrong with a connection, which for a local vault is never.

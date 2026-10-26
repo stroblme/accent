@@ -198,12 +198,13 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 - Two, so the sidebar reaches the top of the window and the tab bar spans only the editor column.
 - Sidebar header: the start window controls and the pane switcher.
-- Main header: the sidebar toggle (always visible, so a hidden sidebar comes back without the keyboard), `AdwWindowTitle` with the vault name and the note path, the Drawing toggle while a PDF or a diagram is in front, the primary menu, the end window controls.
+- Main header: the sidebar toggle (always visible, so a hidden sidebar comes back without the keyboard), `AdwWindowTitle` with the window's own title and the note path, the Drawing toggle while a PDF or a diagram is in front, the primary menu, the end window controls.
   It takes the start window controls while the sidebar is hidden.
 - Undo and Redo sit left of the Drawing toggle while the PDF or the diagram in front has something for either to walk, tool in hand or not, as a pair with the empty one insensitive, so neither moves under the pointer.
 - Toggle Preview has no button, only its action, chord and palette entry: a window has only so many places for one.
 - A header carries the document's name, not its facts; those, and what the window is busy with, are the status bar's.
 - The window's own title is the vault name alone — `Notes (host)` on a remote vault — and does not follow the tab: it is what tells windows apart in the switcher and the task manager.
+  The header's title is the same string, made once, so the window says it is on a host where the switcher does; the subtitle's path then needs no host of its own.
   A window of documents with no vault has only its files to tell it apart, so it takes the name of the file in front, `Accent` while none is.
 
 ### Sidebar
