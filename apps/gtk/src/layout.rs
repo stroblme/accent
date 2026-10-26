@@ -694,9 +694,13 @@ impl App {
             let preview = self.preview.borrow();
             preview.as_ref().is_some_and(|p| p.widget() == &focus)
         };
+        // A notebook cell's editor, and whether its completion popup is up.
+        let cell = self.active_notebook().and_then(|nb| nb.popup_in(&focus));
         let surface = match editor {
             Some(tab) if tab.popup_shown() => return,
             Some(_) => Surface::Text,
+            None if cell == Some(true) => return,
+            None if cell == Some(false) => Surface::Text,
             None if self.pdfs().iter().any(|pdf| pdf.key_target() == focus) => Surface::Pdf,
             None if preview() => Surface::Preview,
             None => return,
@@ -740,6 +744,9 @@ impl App {
         if let Some(tab) = self.active() {
             tab.set_fade(true);
         }
+        if let Some(notebook) = self.active_notebook() {
+            notebook.set_fade(true);
+        }
     }
 
     /// Put back everything [`App::hide_chrome`] can have faded, at whatever level it was faded.
@@ -760,10 +767,13 @@ impl App {
         for tab in self.open_tabs() {
             tab.set_fade(false);
         }
+        for notebook in self.notebooks() {
+            notebook.set_fade(false);
+        }
     }
 
     /// What fades at Medium: both header bars, the status bar, every pane's tab bar, the
-    /// sidebar's panes and the minimaps.
+    /// sidebar's panes, the minimaps and the notebooks' cell buttons and add strips.
     fn chrome(&self) -> Vec<gtk::Widget> {
         let mut chrome: Vec<gtk::Widget> = vec![
             self.sidebar_header.clone().upcast(),
@@ -773,6 +783,7 @@ impl App {
         chrome.extend(self.panes.borrow().iter().map(|p| p.bar.clone().upcast()));
         chrome.extend(self.sidebar.get().map(|s| s.widget().clone()));
         chrome.extend(self.open_tabs().iter().map(|t| t.minimap().clone()));
+        chrome.extend(self.notebooks().iter().flat_map(|n| n.chrome()));
         chrome
     }
 

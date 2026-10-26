@@ -994,12 +994,26 @@ pub fn wire_window(app: &Rc<App>) {
         }
     ));
     app.window.add_controller(escape);
+    // But not from one cell of the notebook in front into another, which is a step through it as
+    // Down is through a note, or a chord's, Run Cell and Advance's or Insert Cell Below's.
+    let focused: RefCell<Option<glib::WeakRef<gtk::Widget>>> = RefCell::default();
     app.window.connect_notify_local(
         Some("focus-widget"),
         glib::clone!(
             #[weak]
             app,
-            move |_, _| app.show_chrome()
+            move |window, _| {
+                let now = gtk::prelude::GtkWindowExt::focus(window);
+                let was = focused.replace(now.as_ref().map(|w| w.downgrade()));
+                let in_cell = |w: Option<gtk::Widget>| {
+                    let notebook = app.active_notebook();
+                    w.zip(notebook)
+                        .is_some_and(|(w, nb)| nb.popup_in(&w).is_some())
+                };
+                if !(in_cell(was.and_then(|w| w.upgrade())) && in_cell(now)) {
+                    app.show_chrome();
+                }
+            }
         ),
     );
 

@@ -7,6 +7,7 @@
 mod cell;
 mod editing;
 mod find;
+mod focus;
 mod history;
 mod kernel;
 mod language;
@@ -119,6 +120,8 @@ pub struct NotebookTab {
     on_caret: TabHook,
     /// The code cells' document on the language layer, and their editors there (`language`).
     lang: language::State,
+    /// Focus mode's line fade over the cells (`focus`).
+    focus: focus::State,
 }
 
 /// A new tab of `tabs` showing `notebook` as it was read, at its etag and digest.
@@ -215,6 +218,7 @@ pub fn open(
         on_matches: Hook::default(),
         on_caret: Hook::default(),
         lang: language::State::default(),
+        focus: focus::State::default(),
     });
     tab.gutter.set(cell::count_width(&tab.scroller));
     overlay.add_overlay(&tab.tools.bar);
@@ -475,6 +479,7 @@ impl NotebookTab {
         };
         let editor = view.build_editor(&source, self.language.as_ref(), self.presenting.get());
         crate::editor::refont(&editor.view);
+        self.fade_from_selected(id, editor.view.upcast_ref());
         let weak = Rc::downgrade(self);
         let on = move |f: fn(&Rc<NotebookTab>, CellId)| {
             let weak = weak.clone();
@@ -527,7 +532,10 @@ impl NotebookTab {
             tab.follow_caret(id);
             tab.on_caret.emit(tab);
         });
-        let occurrences = on(|tab, id| tab.highlight_occurrences(id));
+        let occurrences = on(|tab, id| {
+            tab.highlight_occurrences(id);
+            tab.refade();
+        });
         buffer.connect_mark_set(move |buffer, _, mark| {
             if *mark == buffer.get_insert() {
                 follow();
@@ -653,6 +661,7 @@ impl NotebookTab {
         // Typing moves the caret without setting its mark.
         self.follow_caret(id);
         self.changed();
+        self.typed(id);
     }
 
     /// Bring the model's sources up to date with what was typed.
@@ -931,6 +940,7 @@ impl NotebookTab {
         self.shown.set(None);
         self.complete_in(id);
         self.place_soon();
+        self.refade();
         self.history.borrow_mut().seal();
         self.on_select.emit(self);
     }
@@ -1198,7 +1208,8 @@ impl NotebookTab {
                 }
             }
         }
-        *self.near.borrow_mut() = near;
+        let was = self.near.replace(near);
+        self.fade_near(&was);
     }
 
     /// The views of the cells within a screen above and below what shows, in order.

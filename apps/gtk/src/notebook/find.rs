@@ -189,6 +189,10 @@ impl NotebookTab {
             }
             let buffer = &editor.buffer;
             let tag = find_tag(buffer);
+            // Focus mode's fade leaves a line holding a match whole.
+            if let Some(view) = editor.view.downcast_ref::<multicaret::View>() {
+                view.set_find_tag(&tag);
+            }
             for m in mine {
                 buffer.apply_tag(
                     &tag,

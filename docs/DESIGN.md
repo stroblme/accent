@@ -1494,6 +1494,8 @@ How much fades is the Focus Mode preference, three levels in one combo row under
   The unit is the buffer line: a paragraph in prose, a line in code, and a blank line between two paragraphs counts as one.
 - In a comparison the column beside the editor fades with it, measured from the lines facing the editor's carets: those on the rows the carets are on, or the two either side of the blank facing an added line.
   Stepping through the changes keeps both columns' focus level.
+- A notebook fades as one text: its cells' lines in order, through the cells' borders, measured from the selected cell's carets, a cell's outputs fading with its last line.
+  Typing or stepping in a cell hides the chrome as in a note, the cell buttons and the add strip with it, and the keyboard going from one cell into another, by the arrows or a cell command, is a step through the notebook, not a focus change.
 - It hides on the first keystroke into the editor, and on any key that steps through the document the keyboard is in, moving through the text being attention on it: in an editor tab the caret keys (arrows, Home, End, Page Up, Page Down, alone or with Shift or Ctrl); in a PDF or the preview the same keys plus Space, and a PDF's `n` and `p`.
   Not with Alt or Super, which make a chord; not under a completion popup, whose arrows pick a row; not while presenting, which owns the chrome.
   The key is heard at the window, so one that a column of carets or a PDF uses up still counts.

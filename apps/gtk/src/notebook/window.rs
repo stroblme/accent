@@ -110,6 +110,12 @@ impl App {
                 app.sync_status();
             }
         }));
+        // Typing in a cell fades the chrome, as typing in a note does.
+        tab.connect_typed(on(|app, tab| {
+            if app.is_active_notebook(tab) {
+                app.hide_chrome();
+            }
+        }));
         tab.connect_starting(on(|app, tab| {
             if app.is_active_notebook(tab) {
                 app.sync_status();

@@ -379,6 +379,14 @@ impl CellView {
         )
     }
 
+    /// How many lines its text is, as a buffer counts them: what focus mode's fade counts in.
+    pub fn line_count(&self) -> i32 {
+        match self.editor() {
+            Some(editor) => editor.buffer.line_count(),
+            None => self.placeholder.label().split('\n').count() as i32,
+        }
+    }
+
     /// The model's text for a cell with no editor yet.
     pub fn set_source(&self, source: &str) {
         if self.editor().is_none() && self.placeholder.label() != source {
@@ -493,6 +501,8 @@ impl Tools {
         // and its outputs (user decision 2026-10-24).
         let bar = gtk::Box::new(gtk::Orientation::Vertical, 0);
         bar.add_css_class("notebook-tools");
+        // It goes with the chrome while the user types (`App::hide_chrome`).
+        bar.add_css_class("chrome-fade");
         bar.set_visible(false);
         bar.append(&status);
         for b in [&run, &up, &down, &delete] {
@@ -629,8 +639,9 @@ pub fn install_css() {
          .notebook-execution.stale-failed { border: 1px solid var(--error-color); } \
          .notebook-inserter { opacity: 0; } \
          .notebook-gap { min-height: 34px; } \
-         .notebook-inserter:hover, .notebook-inserter:focus-within, \
-         .notebook-gap .notebook-inserter { opacity: 1; } \
+         .notebook-inserter:not(.chrome-hidden):hover, \
+         .notebook-inserter:not(.chrome-hidden):focus-within, \
+         .notebook-gap .notebook-inserter:not(.chrome-hidden) { opacity: 1; } \
          .notebook-count { opacity: var(--dim-opacity); font-family: monospace; } \
          .notebook-outputs.stale { opacity: var(--dim-opacity); } \
          textview.notebook-source { border-radius: 6px; \
