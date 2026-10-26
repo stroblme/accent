@@ -14,6 +14,7 @@ mod language;
 mod near;
 mod outline;
 mod output;
+mod placeholder;
 mod selection;
 mod window;
 
@@ -1522,6 +1523,20 @@ impl NotebookTab {
         views
             .iter()
             .map(|v| (v.outputs.is_held(), tall(&v.outputs.widget)))
+            .collect()
+    }
+
+    /// Each cell's kind, whether its editor is built, and how tall its source asks to be at its
+    /// width: an editor's request, which its allocation can lag behind (ISSUES.md).
+    pub fn bench_sources(&self) -> Vec<(Kind, bool, i32)> {
+        let views = self.views.borrow();
+        views
+            .iter()
+            .map(|v| {
+                let (built, source) = v.source_widget();
+                let tall = source.measure(gtk::Orientation::Vertical, source.width()).1;
+                (v.kind, built, tall)
+            })
             .collect()
     }
 

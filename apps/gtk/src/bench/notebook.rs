@@ -514,9 +514,10 @@ async fn lazy_drill(app: &Rc<App>, rel: &str) {
         let Some(tab) = reopened(app, rel).await else {
             return;
         };
-        let (built, off, step, range, drift) = sweep(&tab).await;
+        let (built, off, step, range, drift, (code, markdown)) = sweep(&tab).await;
         println!(
             "bench notebook lazy sweep width={} built={built} off_px={off} \
+             code_off_px={code} markdown_off_px={markdown} \
              range_step_px={step:.0} range_px={range:.0} drift_px={drift:.0}",
             app.window.width()
         );
@@ -525,8 +526,11 @@ async fn lazy_drill(app: &Rc<App>, rel: &str) {
     // Placeholders as tall as their outputs at another zoom too, pictures scaled with the text.
     app.set_zoom(2.0);
     if let Some(tab) = reopened(app, rel).await {
-        let (built, off, ..) = sweep(&tab).await;
-        println!("bench notebook lazy sweep zoom=200 built={built} off_px={off}");
+        let (built, off, .., (code, markdown)) = sweep(&tab).await;
+        println!(
+            "bench notebook lazy sweep zoom=200 built={built} off_px={off} \
+             code_off_px={code} markdown_off_px={markdown}"
+        );
     }
     app.set_zoom(1.0);
 
@@ -656,9 +660,11 @@ async fn reopened(app: &Rc<App>, rel: &str) -> Option<Rc<NotebookTab>> {
 
 /// Scrolled from the top to the end a screen at a time: how many cells' outputs were built on the
 /// way, how far the most mistaken of their placeholders was, the most the scroll's range changed
-/// in a step and all told, and how far a cell in view moved other than with the scroll.
-async fn sweep(tab: &Rc<NotebookTab>) -> (usize, i32, f64, f64, f64) {
+/// in a step and all told, how far a cell in view moved other than with the scroll, and how far
+/// the most mistaken source placeholder of a code cell and of a markdown cell was.
+async fn sweep(tab: &Rc<NotebookTab>) -> (usize, i32, f64, f64, f64, (i32, i32)) {
     let (mut built, mut off, mut step, mut drift) = (0, 0, 0.0f64, 0.0f64);
+    let mut sources = (0, 0);
     let first = tab.bench_range().0;
     for _ in 0..500 {
         let (held, upper, top) = (
@@ -666,6 +672,7 @@ async fn sweep(tab: &Rc<NotebookTab>) -> (usize, i32, f64, f64, f64) {
             tab.bench_range().0,
             tab.bench_top_cell(),
         );
+        let placed = tab.bench_sources();
         let went = -tab.bench_scroll_by(1.0);
         if went < 1.0 {
             break;
@@ -677,6 +684,15 @@ async fn sweep(tab: &Rc<NotebookTab>) -> (usize, i32, f64, f64, f64) {
                 off = off.max((after - before).abs());
             }
         }
+        for ((kind, was, before), (_, now, after)) in placed.iter().zip(tab.bench_sources()) {
+            let worst = match kind {
+                accent_core::notebook::Kind::Markdown => &mut sources.1,
+                _ => &mut sources.0,
+            };
+            if !was && now {
+                *worst = (*worst).max((after - before).abs());
+            }
+        }
         step = step.max((tab.bench_range().0 - upper).abs());
         if let Some((n, y)) = top
             && let Some(now) = tab.bench_cell_y(n)
@@ -684,7 +700,8 @@ async fn sweep(tab: &Rc<NotebookTab>) -> (usize, i32, f64, f64, f64) {
             drift = drift.max((now - (y - went)).abs());
         }
     }
-    (built, off, step, (tab.bench_range().0 - first).abs(), drift)
+    let range = (tab.bench_range().0 - first).abs();
+    (built, off, step, range, drift, sources)
 }
 
 /// The process's resident size in MB.

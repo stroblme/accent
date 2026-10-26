@@ -14,6 +14,7 @@ use adw::prelude::*;
 use gtk::{gdk, gio};
 
 use super::output::Outputs;
+use super::placeholder::{Margins, Placeholder};
 use crate::editor::Flavour;
 
 pub struct CellView {
@@ -39,8 +40,8 @@ pub struct CellView {
     /// Last settled result while another request may still show Running.
     pub last_result: std::cell::Cell<Execution>,
     body: gtk::Box,
-    /// The source as plain text in the editor's font, holding the editor's place until it is built.
-    placeholder: gtk::Label,
+    /// The source laid out as the editor will lay it out, holding its place until it is built.
+    placeholder: Placeholder,
     editor: OnceCell<Editor>,
     /// The editor's paste that links a URL over a selection, which Paste as Plain Text holds back.
     paste_link: OnceCell<gtk::glib::SignalHandlerId>,
@@ -136,23 +137,16 @@ impl CellView {
             .build();
         count.add_css_class("notebook-count");
 
-        // A line for each line of the source, in the editor's font and margins, so the cell is
-        // about as tall before its editor is built as after. Not wrapped: a wrapping label is
-        // laid out several times over, and three hundred of them took longer than the editors.
-        let placeholder = gtk::Label::builder()
-            .label(cell.source())
-            .ellipsize(gtk::pango::EllipsizeMode::End)
-            .xalign(0.0)
-            .yalign(0.0)
-            .margin_start(text_start(cell.kind(), gutter))
-            .margin_end(MARGIN)
-            .margin_top(6)
-            .margin_bottom(6)
-            .build();
-        placeholder.add_css_class(match flavour(cell.kind()) {
-            Flavour::Note(_) => "accent-doc",
-            _ => "accent-code",
-        });
+        let placeholder = Placeholder::new(
+            cell.source(),
+            cell.kind(),
+            Margins {
+                left: text_start(cell.kind(), gutter),
+                right: MARGIN,
+                top: EDGE,
+                bottom: EDGE,
+            },
+        );
 
         let outputs = Outputs::new(cell, zoom.clone());
         let body = gtk::Box::new(gtk::Orientation::Vertical, 6);
@@ -211,7 +205,7 @@ impl CellView {
         }
         self.count.set_width_request(gutter);
         let start = text_start(self.kind, gutter);
-        self.placeholder.set_margin_start(start);
+        self.placeholder.set_left_margin(start);
         if let Some(editor) = self.editor() {
             editor.view.set_left_margin(start);
         }
@@ -298,6 +292,15 @@ impl CellView {
         self.editor.get()
     }
 
+    /// What holds the source, and whether it is the editor rather than the placeholder.
+    #[cfg(feature = "bench")]
+    pub fn source_widget(&self) -> (bool, gtk::Widget) {
+        match self.editor() {
+            Some(editor) => (true, editor.view.clone().upcast()),
+            None => (false, self.placeholder.clone().upcast()),
+        }
+    }
+
     /// Build the editor over `source` in the placeholder's place, a code cell coloured as
     /// `language`, read only while `presenting`.
     pub fn build_editor(
@@ -316,8 +319,8 @@ impl CellView {
         buffer.set_enable_undo(false);
         view.set_left_margin(text_start(self.kind, self.gutter.get()));
         view.set_right_margin(MARGIN);
-        view.set_top_margin(6);
-        view.set_bottom_margin(6);
+        view.set_top_margin(EDGE);
+        view.set_bottom_margin(EDGE);
         view.set_hexpand(true);
         view.set_editable(!presenting);
         // Before any find tag, which paints over it.
@@ -374,7 +377,7 @@ impl CellView {
 
     pub fn shows_source(&self, source: &str) -> bool {
         self.editor().map_or_else(
-            || self.placeholder.label() == source,
+            || self.placeholder.text() == source,
             |editor| editor.text() == source,
         )
     }
@@ -383,14 +386,14 @@ impl CellView {
     pub fn line_count(&self) -> i32 {
         match self.editor() {
             Some(editor) => editor.buffer.line_count(),
-            None => self.placeholder.label().split('\n').count() as i32,
+            None => self.placeholder.text().split('\n').count() as i32,
         }
     }
 
     /// The model's text for a cell with no editor yet.
     pub fn set_source(&self, source: &str) {
-        if self.editor().is_none() && self.placeholder.label() != source {
-            self.placeholder.set_label(source);
+        if self.editor().is_none() && self.placeholder.text() != source {
+            self.placeholder.set_text(source);
         }
     }
 
@@ -427,6 +430,8 @@ const RAIL: i32 = 34;
 pub const RAIL_ROOM: i32 = RAIL + SPACING;
 /// The margins of a cell's text inside its editor.
 const MARGIN: i32 = 8;
+/// The room above and below a cell's text inside its editor.
+const EDGE: i32 = 6;
 
 /// How wide the `[n]` column is: six characters of `widget`'s font set in monospace, as the
 /// count is, so `[9999]` fits.

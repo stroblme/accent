@@ -18,7 +18,7 @@ use std::ops::Range;
 use std::rc::Rc;
 
 /// Deepest supported wrap column.
-const COLUMNS: usize = 32;
+pub(crate) const COLUMNS: usize = 32;
 
 /// Maximum prefix read by [`retag`], enough to reach [`COLUMNS`] plus a marker.
 /// Bounding it avoids copying minified lines on each keystroke.

@@ -57,7 +57,7 @@ pub(crate) use lines::{
 #[cfg(feature = "bench")]
 pub(crate) use lines::{newline_below, paste_primary};
 pub use open::open;
-pub(crate) use open::{build, interact};
+pub(crate) use open::{LINE_SPACING, build, interact};
 #[cfg(feature = "webkit")]
 pub(crate) use page::COLUMN_FLOOR;
 pub use page::default_font;

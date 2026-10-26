@@ -2,6 +2,9 @@
 
 use super::*;
 
+/// The room above and below each line of an editor's text, in pixels.
+pub(crate) const LINE_SPACING: i32 = 2;
+
 /// Build a buffer/view over `text` for `flavour`, sharing rendering
 /// with read-only diff companions so both columns match.
 pub(crate) fn build(
@@ -74,8 +77,8 @@ pub(crate) fn build(
     }
     // Apostrophe-like page: generous side gutters, room to breathe at the ends. `set_page`,
     // called from `set_font` below, puts the zoomed values here.
-    view.set_pixels_above_lines(2);
-    view.set_pixels_below_lines(2);
+    view.set_pixels_above_lines(LINE_SPACING);
+    view.set_pixels_below_lines(LINE_SPACING);
     // Once the tab width is set, which the columns are counted in.
     wrap::follow(&view, flavour.is_note());
     (view, buffer)

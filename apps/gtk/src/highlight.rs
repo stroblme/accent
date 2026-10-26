@@ -90,7 +90,7 @@ const NO_SPELL: &str = "gtksourceview:context-classes:no-spell-check";
 
 /// Heading scales indexed by level minus one, shared by tags and [`hang`] measurements.
 /// Levels five and six retain body scale.
-const HEADING_SCALES: [f64; 6] = [1.6, 1.4, 1.2, 1.1, 1.0, 1.0];
+pub(crate) const HEADING_SCALES: [f64; 6] = [1.6, 1.4, 1.2, 1.1, 1.0, 1.0];
 
 const TAG_NAMES: &[&str] = &[
     "h1",
