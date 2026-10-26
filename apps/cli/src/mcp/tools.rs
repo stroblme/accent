@@ -7,7 +7,7 @@ use std::ops::Range;
 use accent_api::{Error, Etag, FileKind, Read, fs};
 use accent_core::note::Syntax;
 use accent_core::path::linked_path;
-use accent_core::{markdown, notebook, path};
+use accent_core::{markdown, notebook, org, path};
 use base64::Engine;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock};
@@ -101,7 +101,7 @@ struct PatchArgs {
     /// use `write_note` to replace a whole note.
     heading: Option<String>,
     /// Patch mode: replace section text, append after it, or prepend below its heading
-    /// (or below frontmatter for the whole note).
+    /// (or below frontmatter, or an org file's `#+KEYWORD:` lines, for the whole note).
     mode: Mode,
     /// Text to insert.
     content: String,
@@ -753,7 +753,7 @@ impl Server {
                 (None, Mode::Replace) => {
                     return Err("replace takes a heading: write_note writes a whole note".into());
                 }
-                (None, _) => body_start(&t.text)..t.text.len(),
+                (None, _) => body_start(&rel, &t.text)..t.text.len(),
             };
             let text = patched(&t.text, at, a.mode, &a.content);
             let etag = s
@@ -923,15 +923,18 @@ fn patched(text: &str, at: Range<usize>, mode: Mode, content: &str) -> String {
     format!("{}{lead}{new}{gap}{}", &text[..at.start], &text[at.end..])
 }
 
-/// Offset after frontmatter, which prepend must preserve.
-fn body_start(text: &str) -> usize {
-    markdown::analyze(text)
-        .spans
-        .iter()
-        .find(|s| matches!(s.style, markdown::Style::Frontmatter))
-        .map_or(0, |s| {
-            s.range.end + usize::from(text[s.range.end..].starts_with('\n'))
-        })
+/// Offset after frontmatter, or an org file's opening keyword lines, which prepend must preserve.
+fn body_start(rel: &str, text: &str) -> usize {
+    match Syntax::of(rel) {
+        Syntax::Org => org::body_start(text),
+        Syntax::Markdown => markdown::analyze(text)
+            .spans
+            .iter()
+            .find(|s| matches!(s.style, markdown::Style::Frontmatter))
+            .map_or(0, |s| {
+                s.range.end + usize::from(text[s.range.end..].starts_with('\n'))
+            }),
+    }
 }
 
 /// Parse an etag formatted by [`etag_string`].
@@ -982,7 +985,7 @@ mod tests {
     fn patch(text: &str, heading: Option<&str>, mode: Mode, content: &str) -> String {
         let at = match heading {
             Some(h) => section("note.md", text, h).unwrap(),
-            None => body_start(text)..text.len(),
+            None => body_start("note.md", text)..text.len(),
         };
         patched(text, at, mode, content)
     }
@@ -1017,5 +1020,17 @@ mod tests {
             "---\nk: v\n---\ntop\n# T\nbody\n"
         );
         assert_eq!(patch("body", None, Mode::Append, "more"), "body\nmore\n");
+    }
+
+    /// A prepend to a whole org file goes below the drawer and keyword lines opening it, and
+    /// above a block.
+    #[test]
+    fn an_org_prepend_goes_below_its_keyword_lines() {
+        let org = ":PROPERTIES:\n:ID: x\n:END:\n#+TITLE: T\n#+begin_quote\nq\n#+end_quote\n";
+        let at = body_start("plan.org", org)..org.len();
+        assert_eq!(
+            patched(org, at, Mode::Prepend, "top"),
+            ":PROPERTIES:\n:ID: x\n:END:\n#+TITLE: T\ntop\n#+begin_quote\nq\n#+end_quote\n"
+        );
     }
 }

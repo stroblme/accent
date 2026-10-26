@@ -180,6 +180,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   MCP returns a host-local `attach --existing --vault` command for a detached terminal; it never starts a replacement and is omitted while a terminal is attached elsewhere. Holder lifetime follows the host's login-session policy, so final logout can end shells on some hosts.
   `explore` ranks files and passages from the index, shows relevant source with line numbers, links, outlines and call paths, and can ask a language server for a `precise` call hierarchy.
   An org file's title (`list_dir`), outline, heading sections (`read_note`, `patch_note`) and anchors (`resolve_link`) are read as org writes them, through `note::Syntax` as the index reads them.
+  `patch_note`'s whole-file `prepend` goes below a note's frontmatter, or below the `#+KEYWORD:` lines and drawers opening an org file.
   An `.ipynb` read returns indexed cell sources by default, without a write etag; `read_note` with `view: "raw"` returns its editable JSON and etag for `write_note`.
   Return partial index or language-server answers with an explicit reason when a cold walk, missing server or timeout prevents a full answer.
   Keep reads under 1 MiB, pass etags as strings, and confine every given or returned path to the real vault root.

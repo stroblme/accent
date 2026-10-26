@@ -43,6 +43,21 @@ pub fn anchor_range(text: &str, anchor: &str) -> Option<Range<usize>> {
         .or_else(|| heading_for(&scan.analysis.headings, anchor).map(|h| h.range.clone()))
 }
 
+/// Where text put at the top of an org file goes: below the `#+KEYWORD:` lines and drawers
+/// opening it, as a note's goes below its frontmatter.
+pub fn body_start(text: &str) -> usize {
+    let lines = lines(text);
+    let mut i = 0;
+    while i < lines.len() {
+        match closed(text, &lines, i) {
+            Some((last, Style::Frontmatter)) => i = last + 1,
+            _ if keyword(text, lines[i].clone()).is_some() => i += 1,
+            _ => break,
+        }
+    }
+    lines.get(i).map_or(text.len(), |l| l.start)
+}
+
 fn scan(text: &str) -> Scan {
     let lines = lines(text);
     let keywords = keywords(text, &lines);
