@@ -14,7 +14,7 @@ use rmcp::schemars;
 use serde::Deserialize;
 
 use super::graph::{self, Seed};
-use super::{Shared, fail, locked};
+use super::{Shared, fail, is_page_marker, locked};
 
 /// Default answer budget and allowed bounds for a requested budget.
 const BUDGET: usize = 16_000;
@@ -406,13 +406,23 @@ fn passages(
     let mut masks: Vec<(&String, Vec<u32>)> = Vec::new();
     let mut held = vec![0usize; words.len()];
     for rel in candidates {
-        let Ok(Read::Text(t)) = s.vault.read_text(rel) else {
-            continue;
+        let pdf = path::file_type(rel) == FileType::Pdf;
+        let text = match pdf {
+            true => match s.pdf_text(rel) {
+                Ok(Some((text, _))) => text,
+                _ => continue,
+            },
+            false => match s.vault.read_text(rel) {
+                Ok(Read::Text(t)) => notebook::search_text(rel, &t.text).unwrap_or(t.text),
+                _ => continue,
+            },
         };
-        let text = notebook::search_text(rel, &t.text).unwrap_or(t.text);
         let lines: Vec<u32> = text
             .lines()
-            .map(|l| mask(&l.to_lowercase(), words))
+            .map(|l| match pdf && is_page_marker(l) {
+                true => 0,
+                false => mask(&l.to_lowercase(), words),
+            })
             .collect();
         let all = lines.iter().fold(0, |a, m| a | m);
         for (i, n) in held.iter_mut().enumerate() {
@@ -481,18 +491,39 @@ fn mask(line: &str, words: &[String]) -> u32 {
 fn card(s: &Shared, rel: &str, f: &Found, cap: usize, whole: bool) -> Result<String, String> {
     let mut out = format!("### `{rel}`");
     let max = if whole { LIST_WHOLE } else { LIST };
-    let raw = match s.vault.read_text(rel).map_err(fail)? {
-        Read::Text(t) => t.text,
-        Read::Binary { size } => {
-            out.push_str(&format!(" — binary, {size} bytes\n"));
-            backlinks(s, rel, &mut out, max)?;
-            return Ok(out + "\n");
+    let pdf = path::file_type(rel) == FileType::Pdf;
+    // What the index searches of a PDF or a notebook, rather than its file.
+    let (text, label) = match pdf {
+        true => match s.pdf_text(rel)? {
+            Some((text, pages)) => {
+                out.push_str(&format!(" — {}", count(pages, "page")));
+                (text, " indexed text")
+            }
+            None => {
+                out.push_str(" — PDF, no text indexed: scanned, or not read yet\n");
+                backlinks(s, rel, &mut out, max)?;
+                return Ok(out + "\n");
+            }
+        },
+        false => {
+            let raw = match s.vault.read_text(rel).map_err(fail)? {
+                Read::Text(t) => t.text,
+                Read::Binary { size } => {
+                    out.push_str(&format!(" — binary, {size} bytes\n"));
+                    backlinks(s, rel, &mut out, max)?;
+                    return Ok(out + "\n");
+                }
+                Read::TooLarge { size } => {
+                    return Ok(out + &format!(" — {size} bytes, too large\n\n"));
+                }
+            };
+            match notebook::search_text(rel, &raw) {
+                Some(source) => (source, " indexed source"),
+                None => (raw, ""),
+            }
         }
-        Read::TooLarge { size } => return Ok(out + &format!(" — {size} bytes, too large\n\n")),
     };
-    let source = notebook::search_text(rel, &raw);
-    let source_view = source.is_some();
-    let text = source.unwrap_or(raw);
+    let source_view = !label.is_empty();
     let note = path::file_type(rel) == FileType::Note;
     let analysis = note.then(|| markdown::analyze(&text));
     let starts: Vec<usize> = std::iter::once(0)
@@ -504,9 +535,15 @@ fn card(s: &Shared, rel: &str, f: &Found, cap: usize, whole: bool) -> Result<Str
     if let Some(title) = analysis.as_ref().and_then(|a| a.title.as_ref()) {
         out.push_str(&format!(" — {title}"));
     }
-    let label = if source_view { " indexed source" } else { "" };
     out.push_str(&format!(" ({}{label} lines)\n", starts.len()));
-    let mut heads = Vec::new();
+    // A PDF's sections are its pages.
+    let mut heads: Vec<usize> = match pdf {
+        true => (text.lines().enumerate())
+            .filter(|(_, l)| is_page_marker(l))
+            .map(|(i, _)| i + 1)
+            .collect(),
+        false => Vec::new(),
+    };
     if let Some(a) = &analysis {
         let tags: BTreeSet<&str> = a.tags.iter().map(|t| t.name.as_str()).collect();
         let mut shown: Vec<String> = tags.iter().take(max).map(|t| format!("#{t}")).collect();

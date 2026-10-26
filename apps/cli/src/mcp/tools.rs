@@ -14,7 +14,9 @@ use rmcp::{schemars, tool, tool_router};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{MAX_OUT, Server, answer, etag_string, explore, fail, image_type, line_at, locked};
+use super::{
+    MAX_OUT, Server, Shared, answer, etag_string, explore, fail, image_type, line_at, locked,
+};
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct SearchArgs {
@@ -343,7 +345,8 @@ impl Server {
 
     /// Read file text or one heading section, with an etag for writing. An `.ipynb` defaults to
     /// indexed cell sources without a write etag; `view: "raw"` returns editable JSON and its
-    /// etag. Images return image data and other binaries return their size.
+    /// etag. A PDF returns its indexed text, each page under a `--- page N ---` line, without
+    /// an etag. Images return image data and other binaries return their size.
     #[tool(annotations(read_only_hint = true))]
     async fn read_note(
         &self,
@@ -351,6 +354,12 @@ impl Server {
     ) -> Result<CallToolResult, String> {
         self.blocking(move |s| {
             let rel = s.inside(&a.path)?;
+            if path::file_type(&rel) == path::FileType::Pdf {
+                if a.heading.is_some() {
+                    return Err("heading is unavailable in a PDF's text".into());
+                }
+                return read_pdf(s, rel);
+            }
             match s.vault.read_text(&rel).map_err(fail)? {
                 Read::Text(t) => {
                     let default = match path::is_notebook(&rel) {
@@ -829,6 +838,33 @@ impl Server {
         })
         .await
     }
+}
+
+/// A PDF as `read_note` answers it: the text the index holds, by page, without an etag, as
+/// there is no writing it back.
+fn read_pdf(s: &Shared, rel: String) -> Result<CallToolResult, String> {
+    let Some(etag) = s.vault.stat(&rel).map_err(fail)? else {
+        return Err(format!("{rel}: no such file"));
+    };
+    let Some((text, pages)) = s.pdf_text(&rel)? else {
+        let mut out = answer(json!({"path": rel, "kind": "pdf", "size": etag.size}), None);
+        out.content.push(ContentBlock::text(format!(
+            "The index holds no text of {rel}: it is scanned, or its text is not read yet."
+        )));
+        return Ok(out);
+    };
+    if text.len() as u64 > MAX_OUT {
+        return Err(format!(
+            "{rel}'s text holds {} bytes, more than a read returns ({MAX_OUT}): explore or \
+             search_notes find its pages",
+            text.len()
+        ));
+    }
+    let head = json!({"path": rel, "kind": "pdf", "pages": pages});
+    Ok(CallToolResult::success(vec![
+        ContentBlock::text(head.to_string()),
+        ContentBlock::text(text),
+    ]))
 }
 
 /// File kind used by `list_dir`.

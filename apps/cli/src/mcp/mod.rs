@@ -226,6 +226,22 @@ impl Shared {
         }
     }
 
+    /// A PDF's text as the index holds it, each page under a [`page_marker`] line, and its number
+    /// of pages; `None` when the index holds none: a scanned PDF's, or one not read yet.
+    fn pdf_text(&self, rel: &str) -> Result<Option<(String, usize)>, String> {
+        let body = self.vault.indexed_text(rel).map_err(fail)?;
+        let Some(body) = body.filter(|b| !b.trim().is_empty()) else {
+            return Ok(None);
+        };
+        let mut text = String::new();
+        let mut pages = 0;
+        for page in body.split('\x0c') {
+            pages += 1;
+            text.push_str(&format!("{}\n{page}\n", page_marker(pages)));
+        }
+        Ok(Some((text, pages)))
+    }
+
     /// The 1-based line `byte` is on in each source note, and that line, each note read once:
     /// what a backlink or a highlight is quoted with.
     fn lines(&self, at: impl IntoIterator<Item = (String, usize)>) -> Vec<(String, usize, String)> {
@@ -293,6 +309,16 @@ fn line_at(text: &str, byte: usize) -> (usize, String) {
     let end = text[byte..].find('\n').map_or(text.len(), |n| byte + n);
     let line = text[..start].matches('\n').count() + 1;
     (line, text[start..end].trim().chars().take(200).collect())
+}
+
+/// The line a PDF's 1-based page `n` opens with in its text ([`Shared::pdf_text`]).
+fn page_marker(n: usize) -> String {
+    format!("--- page {n} ---")
+}
+
+/// Whether a line of a PDF's text is a [`page_marker`], no text of the PDF's own.
+fn is_page_marker(line: &str) -> bool {
+    line.starts_with("--- page ") && line.ends_with(" ---")
 }
 
 /// Encode etags as strings to preserve nanosecond timestamps in JavaScript clients.

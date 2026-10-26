@@ -983,7 +983,8 @@ fn text_pdf(pages: &[&str]) -> Vec<u8> {
 }
 
 /// A host's server reads PDFs with `pdftotext` when its `PATH` has one; without, it reads none and
-/// leaves them unread, so the next server on a `PATH` that has one does.
+/// leaves them unread, so the next server on a `PATH` that has one does. A read and `explore` give
+/// that text by page.
 #[test]
 fn pdf_pages_are_search_rows_once_pdftotext_is_on_the_path() {
     let path = std::env::var_os("PATH").unwrap_or_default();
@@ -1014,6 +1015,8 @@ fn pdf_pages_are_search_rows_once_pdftotext_is_on_the_path() {
     rows(&mut c);
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(rows(&mut c), json!([]));
+    let (read, error) = c.call("read_note", json!({"path": "paper.pdf"}));
+    assert!(!error && read[1].contains("no text"), "{read:?}");
     c.close();
 
     let bin = exe.parent().unwrap().as_os_str();
@@ -1031,5 +1034,21 @@ fn pdf_pages_are_search_rows_once_pdftotext_is_on_the_path() {
     assert_eq!(hits[0]["page"], 2, "{hits}");
     assert_eq!(hits[0]["line"], Value::Null, "{hits}");
     assert_eq!(hits[0]["snippet"], "the «quokka» count", "{hits}");
+
+    // Read and explored as its indexed text, each page under its marker.
+    let (read, error) = c.call("read_note", json!({"path": "paper.pdf"}));
+    assert!(!error, "{read:?}");
+    assert_eq!(read[0], r#"{"kind":"pdf","pages":2,"path":"paper.pdf"}"#);
+    assert_eq!(
+        read[1],
+        "--- page 1 ---\nintro\n--- page 2 ---\nthe quokka count\n"
+    );
+    let (said, error) = c.call("explore", json!({"query": "quokka"}));
+    assert!(!error, "{said:?}");
+    let card = &said[0];
+    assert!(
+        card.contains("3\t--- page 2 ---\n4\tthe quokka count\n") && !card.contains("2\tintro"),
+        "{card}"
+    );
     c.close();
 }
