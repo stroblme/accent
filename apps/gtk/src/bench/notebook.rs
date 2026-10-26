@@ -848,6 +848,12 @@ async fn parity_drill(app: &Rc<App>, marimo: &str) {
     act("win.toggle-comment");
     let comment = tab.bench_source(1).starts_with("# import numpy");
     tab.undo();
+    // A markdown cell's line goes in an HTML comment, as a note's does.
+    at_start(0);
+    act("win.toggle-comment");
+    let md_comment = tab.bench_source(0).starts_with("<!-- # Title -->\n");
+    tab.undo();
+    at_start(1);
     act("win.delete-line");
     let delete = tab.bench_source(1) == "x = np.zeros(3)";
     tab.undo();
@@ -867,9 +873,11 @@ async fn parity_drill(app: &Rc<App>, marimo: &str) {
     });
     tab.undo();
     println!(
-        "bench notebook parity keys duplicate={} comment={} delete={} undo={} carets={}",
+        "bench notebook parity keys duplicate={} comment={} md_comment={} delete={} undo={} \
+         carets={}",
         u8::from(duplicate),
         u8::from(comment),
+        u8::from(md_comment),
         u8::from(delete),
         u8::from(undo),
         u8::from(carets),

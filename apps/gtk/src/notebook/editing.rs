@@ -17,6 +17,12 @@ impl NotebookTab {
         Some(editor.view)
     }
 
+    /// What the selected cell edits as: a markdown cell as a note, the others as code.
+    pub fn editing_flavour(&self) -> Option<crate::editor::Flavour> {
+        let view = self.view_of(self.selected.get())?;
+        Some(super::cell::flavour(view.kind))
+    }
+
     /// Scroll Viewport: the notebook by `n` lines of the selected cell's text, the caret where it is.
     pub fn scroll_lines(self: &Rc<Self>, n: i32) {
         let Some(view) = self.editing_view() else {

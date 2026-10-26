@@ -1588,7 +1588,7 @@ The `Ctrl` chords for application and document commands use GTK's `<Primary>` mo
   Duplicate Line, Delete Line and Insert Line Below take every line a caret or its selection covers, once, a run of lines as a block.
   So does Toggle Comment, deciding once over all those lines whether the comment goes on or comes off, as VS Code does: a column half commented is commented whole.
   Cut and copy take each caret's selection joined by newlines top to bottom, or every caret's whole line where none has one.
-- **Toggle Comment in a note** writes its syntax's comment, a note having no GtkSourceView language to name one: markdown puts the lines in one `<!-- … -->` and takes it off lines that are one, and org puts `# ` before each line, a `#+KEY:` line being no comment; a code tab writes its language's, a line comment where it has one.
+- **Toggle Comment in a note** writes its syntax's comment, a note having no GtkSourceView language to name one: markdown puts the lines in one `<!-- … -->` and takes it off lines that are one, and org puts `# ` before each line, a `#+KEY:` line being no comment; a code tab writes its language's, a line comment where it has one. A notebook's markdown cell comments as a markdown note, its code cells by the notebook's language.
   The text between keeps its place, the caret included.
 - Overlapping selections, and a caret touching a selection, become one; two that only meet stay two.
   Undo and Redo put the carets and their selections back with the text.

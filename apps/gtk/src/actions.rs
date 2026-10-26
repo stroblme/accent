@@ -170,10 +170,15 @@ impl App {
                 Some(d) => d.duplicate(),
                 None => self.with_view(editor::duplicate_line),
             },
-            // A note comments as its syntax does; a notebook's cell by its language.
+            // A note comments as its syntax does; a notebook's markdown cell as a note, its other
+            // cells by their language.
             "toggle-comment" => match self.active() {
                 Some(tab) => editor::toggle_comment(&tab.view, tab.flavour()),
-                None => self.with_view(|view| editor::toggle_comment(view, Flavour::Code)),
+                None => {
+                    let cell = self.active_notebook().and_then(|n| n.editing_flavour());
+                    let flavour = cell.unwrap_or(Flavour::Code);
+                    self.with_view(|view| editor::toggle_comment(view, flavour));
+                }
             },
             "toggle-task" => {
                 if let Some(tab) = self.active().filter(|tab| tab.flavour().is_markdown()) {
