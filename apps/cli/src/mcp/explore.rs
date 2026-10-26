@@ -7,7 +7,8 @@ use std::ops::RangeInclusive;
 
 use accent_api::{CodeSymbol, Read};
 use accent_core::code;
-use accent_core::markdown::{self, LinkKind};
+use accent_core::markdown::LinkKind;
+use accent_core::note::Syntax;
 use accent_core::notebook;
 use accent_core::path::{self, FileType};
 use rmcp::schemars;
@@ -174,8 +175,8 @@ pub(super) fn explore(s: &Shared, a: &ExploreArgs) -> Result<String, String> {
         out.push_str("**Also relevant** (explore a path for its card)\n\n");
         for (rel, f) in rest {
             // Any other file's title is its name.
-            let title = match (&f.title, path::file_type(rel)) {
-                (Some(t), FileType::Note) => format!(" — {t}"),
+            let title = match &f.title {
+                Some(t) if outlined(rel) => format!(" — {t}"),
                 _ => String::new(),
             };
             let why = match (f.hits, f.near) {
@@ -525,7 +526,8 @@ fn card(s: &Shared, rel: &str, f: &Found, cap: usize, whole: bool) -> Result<Str
     };
     let source_view = !label.is_empty();
     let note = path::file_type(rel) == FileType::Note;
-    let analysis = note.then(|| markdown::analyze(&text));
+    let syntax = outlined(rel).then(|| Syntax::of(rel));
+    let analysis = syntax.map(|x| x.analyze(&text));
     let starts: Vec<usize> = std::iter::once(0)
         .chain(text.match_indices('\n').map(|(i, _)| i + 1))
         .filter(|&i| i < text.len() || i == 0)
@@ -554,8 +556,13 @@ fn card(s: &Shared, rel: &str, f: &Found, cap: usize, whole: bool) -> Result<Str
             out.push_str(&format!("Tags: {}\n", shown.join(" ")));
         }
         heads = a.headings.iter().map(|h| line_of(h.range.start)).collect();
+        let mark = if syntax == Some(Syntax::Org) {
+            "*"
+        } else {
+            "#"
+        };
         let outline = a.headings.iter().map(|h| {
-            let marks = "#".repeat(h.level as usize);
+            let marks = mark.repeat(h.level as usize);
             format!("{}  {marks} {}", line_of(h.range.start), h.text)
         });
         list(&mut out, "Outline", outline.collect(), max);
@@ -633,6 +640,11 @@ fn card(s: &Shared, rel: &str, f: &Found, cap: usize, whole: bool) -> Result<Str
     }
     out.push_str(&format!("{fence}\n\n"));
     Ok(out)
+}
+
+/// Whether `rel` has headings, tags and a title to read: a note or an org file.
+fn outlined(rel: &str) -> bool {
+    path::is_note(rel) || path::is_org(rel)
 }
 
 /// Return up to `max` notes linking to `rel`, with source lines.

@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use accent_api::{Error, Etag, FileKind, Read, fs};
+use accent_core::note::Syntax;
 use accent_core::path::linked_path;
 use accent_core::{markdown, notebook, path};
 use base64::Engine;
@@ -102,7 +103,7 @@ struct PatchArgs {
     /// Patch mode: replace section text, append after it, or prepend below its heading
     /// (or below frontmatter for the whole note).
     mode: Mode,
-    /// Markdown to insert.
+    /// Text to insert.
     content: String,
     /// Etag from `read_note`; omit to patch the current version.
     etag: Option<String>,
@@ -381,7 +382,7 @@ impl Server {
                         Some(_) if sources => {
                             return Err("heading is unavailable in notebook sources".into());
                         }
-                        Some(heading) => &text[section(&text, heading)?],
+                        Some(heading) => &text[section(&rel, &text, heading)?],
                         None => text.as_ref(),
                     };
                     if text.len() as u64 > MAX_OUT {
@@ -562,7 +563,7 @@ impl Server {
             };
             let line = anchor.and_then(|anchor| {
                 let text = s.text(&rel).ok()?.text;
-                let at = markdown::anchor_range(&text, anchor)?;
+                let at = Syntax::of(&rel).anchor_range(&text, anchor)?;
                 Some(line_at(&text, at.start).0)
             });
             Ok(answer(json!({"path": rel, "line": line}), partial))
@@ -746,7 +747,7 @@ impl Server {
                 return Err(changed(&rel, t.etag));
             }
             let at = match (&a.heading, a.mode) {
-                (Some(heading), _) => section(&t.text, heading)?,
+                (Some(heading), _) => section(&rel, &t.text, heading)?,
                 (None, Mode::Replace) => {
                     return Err("replace takes a heading: write_note writes a whole note".into());
                 }
@@ -962,15 +963,13 @@ fn unsaved(rel: &str, e: Error) -> String {
     }
 }
 
-/// Find the section byte range under `heading`, or available headings.
-fn section(text: &str, heading: &str) -> Result<Range<usize>, String> {
-    markdown::section(text, heading).ok_or_else(|| {
-        let headings: Vec<String> = markdown::analyze(text)
-            .headings
-            .into_iter()
-            .map(|h| h.text)
-            .collect();
-        format!("no heading {heading:?}; the headings are {headings:?}")
+/// Find the section byte range under `heading` in `rel`, read as its syntax writes headings, or
+/// the headings it has.
+fn section(rel: &str, text: &str, heading: &str) -> Result<Range<usize>, String> {
+    let headings = Syntax::of(rel).analyze(text).headings;
+    markdown::section_in(text, &headings, heading).ok_or_else(|| {
+        let names: Vec<&str> = headings.iter().map(|h| h.text.as_str()).collect();
+        format!("no heading {heading:?}; the headings are {names:?}")
     })
 }
 
@@ -980,7 +979,7 @@ mod tests {
 
     fn patch(text: &str, heading: Option<&str>, mode: Mode, content: &str) -> String {
         let at = match heading {
-            Some(h) => section(text, h).unwrap(),
+            Some(h) => section("note.md", text, h).unwrap(),
             None => body_start(text)..text.len(),
         };
         patched(text, at, mode, content)

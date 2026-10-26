@@ -21,7 +21,7 @@ pub(crate) use links::{Moved, path_key};
 pub use links::{
     Repaged, anchor_id, anchor_range, heading_for, is_image, is_url, link_key, path_keys,
     path_link_keys, pdf_anchor, percent_decode, percent_encode, repage_links, rewrite_moved,
-    section, section_end, slugs, strip_ext,
+    section, section_end, section_in, slugs, strip_ext,
 };
 pub use table::{TableEdit, TableKey, table_key};
 pub use task::toggle_task;

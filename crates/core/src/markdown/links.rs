@@ -138,14 +138,19 @@ pub(super) fn heading_named(texts: &[&str], anchor: &str) -> Option<usize> {
 /// the heading down to the next heading that is not below it, or to the end of the note. What an
 /// edit scoped to a heading replaces, appends to or prepends to.
 pub fn section(text: &str, anchor: &str) -> Option<Range<usize>> {
-    let headings = analyze(text).headings;
+    section_in(text, &analyze(text).headings, anchor)
+}
+
+/// [`section`] among `headings` found already: an org file's (`crate::note::Syntax::analyze`)
+/// as well as a note's.
+pub fn section_in(text: &str, headings: &[Heading], anchor: &str) -> Option<Range<usize>> {
     let texts: Vec<&str> = headings.iter().map(|h| h.text.as_str()).collect();
     let i = heading_named(&texts, anchor)?;
     let line_end = headings[i].range.end;
     let start = text[line_end..]
         .find('\n')
         .map_or(text.len(), |n| line_end + n + 1);
-    Some(start..section_end(&headings, i, text.len()))
+    Some(start..section_end(headings, i, text.len()))
 }
 
 /// Where the section `headings[i]` opens ends: at the next heading that is not below it, or at

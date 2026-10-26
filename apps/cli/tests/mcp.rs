@@ -723,6 +723,36 @@ fn explore_notebook_lines_match_searchable_cell_sources() {
     c.close();
 }
 
+/// An org file's outline, heading sections and anchors are read as org writes them.
+#[test]
+fn org_headings_are_outlined_read_and_resolved() {
+    let scratch = Scratch::new("org");
+    std::fs::write(
+        scratch.dir.join("vault/plan.org"),
+        "#+TITLE: Plan\n* TODO Goals :work:\ngoal\n** Sub\nsub\n* Later\nlater\n",
+    )
+    .unwrap();
+    let mut c = Client::start(&scratch, &[]);
+    c.initialize();
+
+    let (read, error) = c.call("read_note", json!({"path": "plan.org", "heading": "goals"}));
+    assert!(!error, "{read:?}");
+    assert_eq!(read[1], "goal\n** Sub\nsub\n");
+    let (link, _) = c.call("resolve_link", json!({"target": "plan.org#Later"}));
+    assert_eq!(link[0], r#"{"line":6,"path":"plan.org"}"#);
+    let (said, _) = c.call("explore", json!({"query": "plan.org"}));
+    let card = &said[0];
+    for row in [
+        "### `plan.org` — Plan (7 lines)",
+        "Tags: #work\n",
+        "Outline:\n  2  * Goals\n  4  ** Sub\n  6  * Later\n",
+        "```org\n",
+    ] {
+        assert!(card.contains(row), "{row:?} not in {card}");
+    }
+    c.close();
+}
+
 /// Explore shows named declarations, callers, callees, test reachability, paths, and file outlines.
 #[test]
 fn explore_follows_code_by_name() {
