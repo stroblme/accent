@@ -1237,7 +1237,10 @@ mod tests {
 
         // Quick Fix offers to create what the dangling link names, and nothing over one that
         // resolves.
-        let fixes = |range| rt.block_on(f.vault.code_actions("a.md", range)).unwrap();
+        let fixes = |range| {
+            rt.block_on(f.vault.code_actions("a.md", range, false))
+                .unwrap()
+        };
         let create = fixes(items[0].range);
         let offered: Vec<_> = create
             .iter()

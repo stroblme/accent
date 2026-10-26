@@ -1266,9 +1266,11 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Per tab, and not kept across a restart: a way past something in the way, not a preference.
 - On a note they are accent's own: a hint on a link the index cannot resolve, and a warning with the converter's reason over each formula the preview shows as source — a warning because pulldown-latex rejects some valid LaTeX.
   Quick Fix on such a link, and the hover's Quick Fix… over its hint, offer Create note, which opens New File with the link's path typed in, as following the link does: one place that creates a note, with its templates and its folder.
-- **Quick Fix** lists what the server offers over the selection or at the caret, in a menu at the caret: its quick fixes first, the one it prefers on top, then its refactorings; source actions (Organize Imports) are not listed.
+- **Quick Fix** lists what the server offers over the selection or at the caret, in a menu at the caret: its quick fixes first, the one it prefers on top, then its refactorings.
+  Source actions (Organize Imports, Fix All) are **Source Action…**'s, which asks the server for them alone (`context.only`), as VS Code does, and lists them in the same menu.
   The diagnostics there go to the server as it published them, which is how clangd finds its fixes.
 - Picking one applies its edit, resolved first where the server sent it without one, or runs its command (clangd's tweaks): each open document's part as one undo step, and files no tab holds written as a move's import updates are, gated on their etags, and named in a toast.
+  An action with both has its edit made first and its command run after, as LSP orders them, the command's edits a second undo step.
   A fix may create a file, as rust-analyzer's Extract module to file does: it is written new with the fix's text in it, on a local or a remote vault alike, and where a file is there already the whole fix is refused before anything is written, unless the server said to write over it or to leave it.
   A fix that would rename or delete a file, or change one outside the vault, is refused, and so is one whose file was typed in while the server answered.
   There is no lightbulb (user decision 2026-10-22): asking at every caret move would wait on Lean's check and cross a remote link each time.
@@ -1375,6 +1377,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - **Open in New Window follows Open** on a file row, and only a local vault's: a window with no vault opens a file by its path on this machine.
   On the tab menu it is **Move to New Window**, ending the moves before Pin Tab, since the tab leaves (Tabs).
 - **Reload** ends a folder row's first section, after Leave Out of Search (Sidebar, Files).
+- **A code tab's text menu** ends with Quick Fix… and Source Action…, asked at the caret the press put there; a note's ends with its spelling suggestions instead (Language servers).
 - **Print… and the exports are a section of the tab menu's own**, after Reveal in Sidebar, as they make something of the file rather than name it: a note has Print…, Export as PDF… and Export as HTML…, a PDF the first two, a diagram Print…, Export as PDF…, Export as PNG… and Export as SVG…, any other tab none, and a loose file as much as a vault's.
   They are on no tree menu; the primary menu lists them all, greyed where the tab in front cannot (Primary menu).
 - **Move to…** sits with Cut and Copy, on a row's menu and a marked set's: the dialog is a folder path in the vault's path field, from the vault root, opening on the folder the first path is in.
@@ -1769,6 +1772,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
   A bare `http(s)://` or `mailto:` URL under the caret opens in the browser from any text tab, ahead of the language server (a URL is not a symbol), and Ctrl+hover underlines it as it does a link.
 - Quick Fix `Alt+Return`, an editing chord: Lean's "Try this", clangd's fix-its and tweaks, rust-analyzer's fixes and assists (Language servers).
   VS Code's `Ctrl+.` is GtkTextView's emoji chooser here; Quick Fix takes `Alt+Return` in a notebook's cells too, Insert Cell Below moving to `Alt+B` (user decision 2026-10-22).
+- Source Action… is unbound, in the palette and in a code tab's right-click menu beside Quick Fix… (user decision 2026-10-26).
 - Fold / Unfold `Ctrl+Shift+[` / `Ctrl+Shift+]`, Fold All / Unfold All from the palette.
   Fold takes the innermost block holding the caret; the gutter chevron beside a block's first line is the same by pointer.
   A block shut over a column of carets brings each caret it hides out to the end of its header, those meeting there merging, and the column stays up, as in VS Code.

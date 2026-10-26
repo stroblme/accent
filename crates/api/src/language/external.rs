@@ -769,8 +769,14 @@ impl Language for External {
         })
     }
 
-    /// The context carries the diagnostics touching `range` as the server published them.
-    fn code_actions(&self, rel: &str, range: super::Range) -> Fut<'_, Vec<CodeAction>> {
+    /// The context carries the diagnostics touching `range` as the server published them, and
+    /// for `source` the one kind asked for, which the server may leave the others out for.
+    fn code_actions(
+        &self,
+        rel: &str,
+        range: super::Range,
+        source: bool,
+    ) -> Fut<'_, Vec<CodeAction>> {
         let rel = rel.to_string();
         Box::pin(async move {
             if !types::on(&self.caps.code_action_provider) {
@@ -797,10 +803,14 @@ impl Language for External {
                 let here: Vec<Value> = doc.diagnostics.iter().filter(touches).cloned().collect();
                 (from, to, here)
             };
+            let mut context = json!({"diagnostics": diagnostics, "triggerKind": 1});
+            if source {
+                context["only"] = json!(["source"]);
+            }
             let params = json!({
                 "textDocument": self.doc_id(&rel)?,
                 "range": {"start": from, "end": to},
-                "context": {"diagnostics": diagnostics, "triggerKind": 1},
+                "context": context,
             });
             let answer: Option<Vec<Value>> = self.ask("textDocument/codeAction", params).await?;
             Ok(actions::actions_of(answer.unwrap_or_default()))
@@ -809,7 +819,8 @@ impl Language for External {
 
     /// A bare command, or an action's command where it has no edit, is run, its edits being the
     /// ones it asks to apply meanwhile; an action sent without its edit is resolved first. A
-    /// command beside an edit is left out, logged: none of the servers probed sent both.
+    /// command beside an edit comes back as [`ActionEdits::then`], to be run once the edit is
+    /// made.
     fn action_edits(&self, _rel: &str, action: CodeAction) -> Fut<'_, ActionEdits> {
         Box::pin(async move {
             let run = |command: Value| async move {
@@ -819,6 +830,7 @@ impl Language for External {
                     .map_err(|e| Error::Language(format!("workspace/executeCommand: {e}")))
             };
             let mut raw = action.raw;
+            let mut then = None;
             let edits = if raw["command"].is_string() {
                 run(raw).await?
             } else {
@@ -832,9 +844,13 @@ impl Language for External {
                 }
                 match (raw.get("edit"), raw.get("command")) {
                     (Some(edit), command) => {
-                        if command.is_some() {
-                            tracing::debug!("{}: its command is left out", action.title);
-                        }
+                        then = command.map(|command| CodeAction {
+                            title: action.title.clone(),
+                            kind: action.kind.clone(),
+                            preferred: action.preferred,
+                            raw: command.clone(),
+                            new_file: None,
+                        });
                         let edit = serde_json::from_value(edit.clone());
                         vec![edit.map_err(|e| Error::Language(format!("its edit: {e}")))?]
                     }
@@ -846,9 +862,11 @@ impl Language for External {
                 .iter()
                 .map(|(rel, doc)| (rel.clone(), (doc.version, doc.text.clone())))
                 .collect();
-            actions::edits_of(edits, &open, &self.root, self.encoding, |rel| {
+            let mut out = actions::edits_of(edits, &open, &self.root, self.encoding, |rel| {
                 crate::fs::read_note(&Local::join(&self.root, rel).ok()?).ok()
-            })
+            })?;
+            out.then = then;
+            Ok(out)
         })
     }
 
@@ -1380,7 +1398,7 @@ mod tests {
         }
         let error = error.expect("clangd has to miss the ';'");
         let fixes = rt
-            .block_on(vault.code_actions("fix.c", error.range))
+            .block_on(vault.code_actions("fix.c", error.range, false))
             .unwrap();
         let fix = fixes
             .into_iter()
@@ -1409,7 +1427,7 @@ mod tests {
             end: star,
         };
         let swap = rt
-            .block_on(vault.code_actions("tweak.c", range))
+            .block_on(vault.code_actions("tweak.c", range, false))
             .unwrap()
             .into_iter()
             .find(|a| a.raw["command"]["command"] == "clangd.applyTweak")
@@ -1645,7 +1663,9 @@ mod tests {
             start: tactic,
             end: tactic,
         };
-        let actions = rt.block_on(vault.code_actions("T.lean", range)).unwrap();
+        let actions = rt
+            .block_on(vault.code_actions("T.lean", range, false))
+            .unwrap();
         let try_this = actions
             .into_iter()
             .find(|a| a.title.starts_with("Try this: exact"))

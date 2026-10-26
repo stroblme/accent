@@ -1169,6 +1169,11 @@ impl App {
         if tab.flavour().is_note() && self.vault().is_some() && !doc::is_loose_key(&tab.rel()) {
             self.wire_attachments(&tab);
         }
+        // A code tab's right-click menu holds its server's actions at the caret, which the press
+        // puts where it was; a note's holds its spelling.
+        if tab.flavour() == Flavour::Code {
+            tab.view.set_extra_menu(Some(&fixes::menu()));
+        }
         self.offer_show_in_pdf(&tab);
 
         // Nothing else watches a loose file: the vault's worker only reports on its own tree.

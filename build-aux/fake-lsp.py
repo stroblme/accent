@@ -16,7 +16,8 @@ rust-analyzer's and Lean's are; "Declare oops in other.c", an edit to a file no 
 "Declare oops in oops.h", a file it creates (rust-analyzer's "Extract module to file");
 "Upper-case the line", resolved for its edit (rust-analyzer's assists); and "Swap the operands", a
 command whose edit comes as its own `workspace/applyEdit` request, the command answered once that
-is (clangd's tweaks).
+is (clangd's tweaks). Asked for `source` actions alone, it offers "Add a header, then swap", an
+edit and a command in one action, the command run once the edit is made.
 
 `.` triggers it, `;` commits a row (its `allCommitCharacters`), and it can resolve: `alpha` is a
 snippet with a stop (`${1:x}`, as rust-analyzer fills arguments), `beta` one with a plain stop
@@ -83,6 +84,10 @@ def publish(uri):
 def actions(params):
     """The code actions at a request's range, in the order a server might list them."""
     uri, line = params["textDocument"]["uri"], params["range"]["start"]["line"]
+    if params["context"].get("only") == ["source"]:
+        return [{"title": "Add a header, then swap", "kind": "source.fixAll",
+                 "edit": {"changes": {uri: [{"range": TOP, "newText": "// fixed\n"}]}},
+                 "command": {"title": "Swap", "command": "fake.swap", "arguments": [uri]}}]
     other = "file://" + os.path.join(ROOT[0], "other.c")
     header = "file://" + os.path.join(ROOT[0], "oops.h")
     found = [d for d in params["context"]["diagnostics"] if d.get("code") == "fake"]

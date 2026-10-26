@@ -268,6 +268,9 @@ pub struct ActionEdits {
     /// Files it creates, with their text: written as new files ([`Vault::write_file`]), so one
     /// made there meanwhile is left alone.
     pub created: Vec<(String, String)>,
+    /// The action's command, as a bare one, applied once these edits are made: LSP runs an
+    /// action's edit first and then its command.
+    pub then: Option<CodeAction>,
 }
 
 /// A language-server call-hierarchy edge relative to the queried declaration.
@@ -422,8 +425,9 @@ pub(crate) trait Language: Send + Sync {
     fn goals(&self, _rel: &str, _pos: Pos) -> Fut<'_, Option<Goals>> {
         Box::pin(async { Ok(None) })
     }
-    /// What the server offers over `range`, the diagnostics there going along as it published them.
-    fn code_actions(&self, _rel: &str, _range: Range) -> Fut<'_, Vec<CodeAction>> {
+    /// What the server offers over `range`, the diagnostics there going along as it published
+    /// them: its source actions alone (Organize Imports) where `source` says so.
+    fn code_actions(&self, _rel: &str, _range: Range, _source: bool) -> Fut<'_, Vec<CodeAction>> {
         Box::pin(async { Ok(Vec::new()) })
     }
     /// Resolve or run `action` and say what it changes.
@@ -1439,8 +1443,9 @@ requests! {
     folds => folds() -> Vec<Fold>;
     /// The proof goals at a position, from a proof assistant's server ([`Support::goals`]).
     goals => goals(pos: Pos) -> Option<Goals>;
-    /// Quick fixes and refactorings over `range`: the selection's, or the caret's.
-    code_actions => code_actions(range: Range) -> Vec<CodeAction>;
+    /// Quick fixes and refactorings over `range`, the selection's or the caret's, or with `source`
+    /// the source actions there.
+    code_actions => code_actions(range: Range, source: bool) -> Vec<CodeAction>;
     /// What applying `action` changes, resolved or run at the server first where it must be.
     code_action_edits => action_edits(action: CodeAction) -> ActionEdits;
     /// Inline ghost text, or none. Queried on typing pauses, so dropping stale

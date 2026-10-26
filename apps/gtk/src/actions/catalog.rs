@@ -349,6 +349,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ),
     // `Ctrl+.`, VS Code's, is GtkTextView's emoji chooser (user decision 2026-10-22).
     ("win.quick-fix", "Quick Fix…", &["<Alt>Return"]),
+    ("win.source-action", "Source Action…", &[]),
     // GTK reports Shift+[ and Shift+] as brace keysyms on a US keyboard.
     ("win.fold", "Fold", &["<Primary>braceleft"]),
     ("win.unfold", "Unfold", &["<Primary>braceright"]),

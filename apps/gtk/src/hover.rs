@@ -225,7 +225,7 @@ pub(crate) async fn fixes_at(editor: Rc<dyn Editor>, pos: Pos) -> Vec<CodeAction
         end: to,
     };
     vault
-        .code_actions(&doc.key(), range)
+        .code_actions(&doc.key(), range, false)
         .await
         .unwrap_or_default()
 }

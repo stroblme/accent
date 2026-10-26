@@ -451,6 +451,7 @@ impl App {
                 }
             }
             "quick-fix" => self.quick_fix(),
+            "source-action" => self.source_action(),
             "fold" => self.with_active(Tab::fold_at_caret),
             "unfold" => self.with_active(Tab::unfold_at_caret),
             "fold-all" => self.with_active(Tab::fold_all),

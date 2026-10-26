@@ -1,5 +1,6 @@
-//! Quick Fix: what a language server offers over the selection or at the caret, in a menu at
-//! the caret, and the edits the one picked makes (DESIGN.md, Language servers).
+//! Quick Fix and Source Action…: what a language server offers over the selection or at the
+//! caret, in a menu at the caret, and the edits the one picked makes (DESIGN.md, Language
+//! servers).
 
 use super::*;
 use accent_api::{ActionEdits, CodeAction, Range, TextEdit};
@@ -9,10 +10,25 @@ impl App {
     /// Ask the server for its fixes and refactorings over the selection, or at the caret, of the
     /// text tab in front or the notebook's selected code cell, and list them in a menu there.
     pub fn quick_fix(self: &Rc<Self>) {
+        self.ask_actions(false);
+    }
+
+    /// [`quick_fix`](Self::quick_fix) for the server's source actions (Organize Imports) alone.
+    pub fn source_action(self: &Rc<Self>) {
+        self.ask_actions(true);
+    }
+
+    /// Ask for the code actions there, the `source` ones or the rest, and list them in a menu.
+    fn ask_actions(self: &Rc<Self>, source: bool) {
+        let kinds = if source {
+            "source actions"
+        } else {
+            "quick fixes"
+        };
         let (editor, cell, what): (Rc<dyn Editor>, bool, String) = match self.active_notebook() {
             Some(notebook) => match notebook.language_editor() {
                 Some(cell) => (cell, true, "this notebook".to_string()),
-                None => return self.toast("No quick fixes here"),
+                None => return self.toast(&format!("No {kinds} here")),
             },
             None => match self.active() {
                 Some(tab) => {
@@ -24,7 +40,7 @@ impl App {
         };
         let doc = editor.document();
         let Some(vault) = doc.vault() else {
-            return self.needs_vault("list quick fixes");
+            return self.needs_vault(&format!("list {kinds}"));
         };
         if let Some(server) = doc.support().and_then(|s| s.missing.clone()) {
             return self.toast(&format!(
@@ -55,7 +71,9 @@ impl App {
             else {
                 return;
             };
-            let found = vault.code_actions(&doc.key(), Range { start, end }).await;
+            let found = vault
+                .code_actions(&doc.key(), Range { start, end }, source)
+                .await;
             let Some(app) = weak.upgrade() else {
                 return;
             };
@@ -64,17 +82,28 @@ impl App {
                 return;
             }
             match found {
-                Ok(actions) => app.offer_fixes(&editor, cell, actions),
-                Err(e) => app.cannot("list quick fixes", e),
+                Ok(actions) => app.offer_fixes(&editor, cell, source, actions),
+                Err(e) => app.cannot(&format!("list {kinds}"), e),
             }
         });
     }
 
     /// The menu of `actions` at `editor`'s caret, in [`sections`]; picking one applies it.
-    fn offer_fixes(self: &Rc<Self>, editor: &Rc<dyn Editor>, cell: bool, actions: Vec<CodeAction>) {
-        let sections = sections(actions);
+    fn offer_fixes(
+        self: &Rc<Self>,
+        editor: &Rc<dyn Editor>,
+        cell: bool,
+        source: bool,
+        actions: Vec<CodeAction>,
+    ) {
+        let sections = sections(actions, source);
         if sections.iter().all(Vec::is_empty) {
-            return self.toast("No quick fixes here");
+            let kinds = if source {
+                "source actions"
+            } else {
+                "quick fixes"
+            };
+            return self.toast(&format!("No {kinds} here"));
         }
         let menu = gio::Menu::new();
         let listed: Vec<CodeAction> = sections.concat();
@@ -141,9 +170,9 @@ impl App {
     }
 
     /// Make `edits`: each open file's in its view as one undo step, all of them or none, then the
-    /// files it creates and those no tab holds on disk, gated on their etags. `asked` is the
-    /// version of `editor`'s document the server answered about; a notebook `cell` takes edits
-    /// inside it alone.
+    /// files it creates and those no tab holds on disk, gated on their etags, and then run the
+    /// action's command. `asked` is the version of `editor`'s document the server answered
+    /// about; a notebook `cell` takes edits inside it alone.
     fn make_edits(
         self: &Rc<Self>,
         editor: &Rc<dyn Editor>,
@@ -194,9 +223,18 @@ impl App {
         for (buffer, list) in open {
             apply_edits(&buffer, list);
         }
+        // LSP runs an action's command once its edit is made.
+        let then = {
+            let (app, editor, then) = (Rc::downgrade(self), editor.clone(), edits.then);
+            move || {
+                if let (Some(app), Some(then)) = (app.upgrade(), then) {
+                    app.apply_fix(editor, cell, then);
+                }
+            }
+        };
         let (files, created) = (edits.files, edits.created);
         let said = match (created.as_slice(), files.as_slice()) {
-            ([], []) => return,
+            ([], []) => return then(),
             ([(one, _)], []) => format!("Created {one}"),
             ([], [one]) => format!("Also changed {}", one.rel),
             (made, changed) => format!("Also changed {} other files", made.len() + changed.len()),
@@ -229,7 +267,10 @@ impl App {
                 return;
             };
             match done {
-                Ok(failed) if failed.is_empty() => app.toast(&said),
+                Ok(failed) if failed.is_empty() => {
+                    app.toast(&said);
+                    then();
+                }
                 Ok(failed) => {
                     for (what, why) in failed {
                         app.cannot(&what, why);
@@ -241,9 +282,21 @@ impl App {
     }
 }
 
+/// A code tab's right-click menu: Quick Fix and Source Action.
+pub(crate) fn menu() -> gio::Menu {
+    let section = gio::Menu::new();
+    for action in ["win.quick-fix", "win.source-action"] {
+        section.append(Some(actions::label_of(action)), Some(action));
+    }
+    let menu = gio::Menu::new();
+    menu.append_section(None, &section);
+    menu
+}
+
 /// The menu's sections: the quick fixes, the server's preferred ones first, then the refactorings
-/// and what has no kind. Source actions (Organize Imports) are not listed.
-fn sections(actions: Vec<CodeAction>) -> [Vec<CodeAction>; 2] {
+/// and what has no kind; or for `source` the source actions (Organize Imports) alone, which the
+/// others leave out.
+fn sections(actions: Vec<CodeAction>, source: bool) -> [Vec<CodeAction>; 2] {
     let is = |a: &CodeAction, kind: &str| {
         a.kind == kind
             || a.kind
@@ -252,7 +305,7 @@ fn sections(actions: Vec<CodeAction>) -> [Vec<CodeAction>; 2] {
     };
     let (mut fixes, rest): (Vec<_>, Vec<_>) = actions
         .into_iter()
-        .filter(|a| !is(a, "source"))
+        .filter(|a| is(a, "source") == source)
         .partition(|a| is(a, "quickfix"));
     fixes.sort_by_key(|a| !a.preferred);
     [fixes, rest]
@@ -294,18 +347,22 @@ mod tests {
     }
 
     #[test]
-    fn fixes_come_first_the_preferred_on_top_and_source_actions_stay_out() {
-        let [fixes, rest] = sections(vec![
+    fn fixes_come_first_the_preferred_on_top_and_source_actions_are_listed_alone() {
+        let actions = vec![
             action("Extract", "refactor.extract", false),
             action("Other fix", "quickfix", false),
             action("Organize Imports", "source.organizeImports", false),
             action("Swap", "", false),
             action("insert ';'", "quickfix", true),
             action("Not a fix", "quickfixes", false),
-        ]);
+        ];
         let titles = |list: &[CodeAction]| list.iter().map(|a| a.title.clone()).collect::<Vec<_>>();
+        let [fixes, rest] = sections(actions.clone(), false);
         assert_eq!(titles(&fixes), ["insert ';'", "Other fix"]);
         assert_eq!(titles(&rest), ["Extract", "Swap", "Not a fix"]);
+        let [none, source] = sections(actions, true);
+        assert!(none.is_empty());
+        assert_eq!(titles(&source), ["Organize Imports"]);
     }
 
     #[test]

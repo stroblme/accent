@@ -105,8 +105,8 @@ fn section(action: &str) -> Option<&'static str> {
         "merge-resolved" => "Git",
         _ if starts(&["git-", "conflict-", "hunk-"]) => "Git",
         "rename" | "trash" | "new-from-template" | "insert-template" => "Notes",
-        "follow-link" | "quick-fix" | "fold" | "unfold" | "fold-all" | "unfold-all"
-        | "lsp-restart-file" | "python-environment" => "Code",
+        "follow-link" | "quick-fix" | "source-action" | "fold" | "unfold" | "fold-all"
+        | "unfold-all" | "lsp-restart-file" | "python-environment" => "Code",
         _ if starts(&["debug-"]) => "Debugging",
         "view-mode" | "minimap" | "present" => "Views",
         "fullscreen" | "preferences" | "shortcuts" | "menu" | "about" => "Window",

@@ -1167,9 +1167,13 @@ impl Language for Notes {
         Box::pin(async move { Ok(or_empty("folds", Notes::folds(self, &rel))) })
     }
 
-    fn code_actions(&self, rel: &str, range: Range) -> Fut<'_, Vec<CodeAction>> {
+    /// No source actions: a note has nothing to organize.
+    fn code_actions(&self, rel: &str, range: Range, source: bool) -> Fut<'_, Vec<CodeAction>> {
         let rel = rel.to_string();
         Box::pin(async move {
+            if source {
+                return Ok(Vec::new());
+            }
             Ok(or_empty(
                 "code actions",
                 Notes::code_actions(self, &rel, range),

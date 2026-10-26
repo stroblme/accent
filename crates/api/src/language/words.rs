@@ -497,9 +497,9 @@ impl Language for Layered {
         }
     }
 
-    fn code_actions(&self, rel: &str, range: Range) -> Fut<'_, Vec<CodeAction>> {
+    fn code_actions(&self, rel: &str, range: Range, source: bool) -> Fut<'_, Vec<CodeAction>> {
         match &self.primary {
-            Some(p) => p.code_actions(rel, range),
+            Some(p) => p.code_actions(rel, range, source),
             None => Box::pin(async { Ok(Vec::new()) }),
         }
     }

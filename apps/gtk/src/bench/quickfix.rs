@@ -13,7 +13,9 @@ const OTHER: &str = "int other;\n";
 /// menu's rows. Then, a fresh menu each time, it picks each row: the preferred fix and the
 /// resolved refactoring and the command each change the text and are undone in one step, the
 /// fix reaching into `other.c` writes that file on disk, and the one creating `oops.h` makes it,
-/// and is refused when picked again. The hover's fixes over `oops` follow.
+/// and is refused when picked again. Source Action… lists its one action, whose edit is made and
+/// then its command run, and the right-click menu holds both commands. The hover's fixes over
+/// `oops` follow.
 /// Then `<ipynb>`, `b = 1 + 2` and `a = oops` in two code cells, the same five rows picked in the
 /// second: the two inside it change it, the three reaching into the first cell and other files do
 /// nothing. Last, `link.md` links to a note that is not there, and its one fix opens New File.
@@ -109,6 +111,37 @@ async fn bench_fixes(app: &Rc<App>, rel: &str) {
         }
         crate::lang::flush(tab.clone()).await;
     }
+    let before = tab.text();
+    app.source_action();
+    let Some(menu) = shown_menu(&tab).await else {
+        return println!("bench quickfix no_source_menu");
+    };
+    let rows = menu.menu_model().map(|m| fileops::labels(&m));
+    println!("bench quickfix source_menu {rows:?}");
+    let _ = tab
+        .view
+        .activate_action("fix.apply", Some(&0u32.to_variant()));
+    menu.popdown();
+    for _ in 0..50 {
+        if tab.text().contains("2 + 1") {
+            break;
+        }
+        glib::timeout_future(Duration::from_millis(100)).await;
+    }
+    println!("bench quickfix source_applied text={:?}", tab.text());
+    // The edit and the command's are a step each.
+    for _ in 0..2 {
+        tab.buffer.undo();
+    }
+    println!(
+        "bench quickfix source_undone={} text={:?}",
+        tab.text() == before,
+        tab.text()
+    );
+    crate::lang::flush(tab.clone()).await;
+    let context = tab.view.extra_menu().map(|m| fileops::labels(&m));
+    println!("bench quickfix context_menu {context:?}");
+
     let on = accent_api::Pos {
         line: 0,
         character: 9,
