@@ -2,7 +2,7 @@
 //! Line commands apply at every caret; plain-text middle-click paste avoids
 //! carrying buffer tags. Templates use snippet Tab stops.
 
-use super::{Tab, caret, indent, line_end};
+use super::{Flavour, Syntax, Tab, caret, indent, line_end};
 use crate::{comment, multicaret, typing};
 use accent_core::markdown;
 use gtk::prelude::*;
@@ -227,20 +227,56 @@ pub(crate) fn newline_below(view: &sourceview5::View) {
     view.scroll_mark_onscreen(&buffer.get_insert());
 }
 
-/// Toggle language comment markers in `text` via [`crate::comment`], since
-/// GtkSourceView metadata provides markers without a toggle. `None` means
-/// no markers. `on` forces line-comment state; otherwise infer it from
-/// whether all text is already commented.
-fn toggled(text: &str, language: &sourceview5::Language, on: Option<bool>) -> Option<String> {
-    if let Some(marker) = language.metadata("line-comment-start") {
-        let on = on.unwrap_or_else(|| !comment::commented(text, &marker));
-        return Some(comment::comment_lines(text, &marker, on));
+/// The comment Toggle Comment writes.
+enum Markers {
+    /// A marker before each line, and what a line opens with to count as commented.
+    Line { marker: String, test: String },
+    /// One comment around the lines.
+    Block { open: String, close: String },
+}
+
+impl Markers {
+    /// A note's comment, which has no GtkSourceView language to name one, or else the one the
+    /// code's language names, a line comment where it has both.
+    fn of(flavour: Flavour, buffer: &gtk::TextBuffer) -> Option<Markers> {
+        match flavour {
+            // Markdown has no line comment: one HTML comment goes round the lines.
+            Flavour::Note(Syntax::Markdown) => Some(Markers::Block {
+                open: "<!--".into(),
+                close: "-->".into(),
+            }),
+            // `#` and a space: a `#+KEY:` line is no comment, and must not lose its `#`.
+            Flavour::Note(Syntax::Org) => Some(Markers::Line {
+                marker: "#".into(),
+                test: "# ".into(),
+            }),
+            Flavour::Code | Flavour::Csv(_) => {
+                let language = buffer.downcast_ref::<sourceview5::Buffer>()?.language()?;
+                if let Some(marker) = language.metadata("line-comment-start") {
+                    return Some(Markers::Line {
+                        test: marker.to_string(),
+                        marker: marker.into(),
+                    });
+                }
+                Some(Markers::Block {
+                    open: language.metadata("block-comment-start")?.into(),
+                    close: language.metadata("block-comment-end")?.into(),
+                })
+            }
+        }
     }
-    let (open, close) = (
-        language.metadata("block-comment-start")?,
-        language.metadata("block-comment-end")?,
-    );
-    Some(comment::toggle_block(text, &open, &close))
+}
+
+/// Toggle `markers` in `text` via [`crate::comment`]. `on` forces line-comment state; otherwise
+/// infer it from whether all text is already commented.
+fn toggled(text: &str, markers: &Markers, on: Option<bool>) -> String {
+    match markers {
+        Markers::Line { marker, test } => {
+            let on = on.unwrap_or_else(|| !comment::commented(text, test));
+            comment::comment_lines(text, marker, on)
+        }
+        Markers::Block { open, close } => comment::toggle_block(text, open, close),
+    }
 }
 
 /// Toggle comments on whole lines, replacing only changed characters to
@@ -249,7 +285,7 @@ fn toggle_run(
     buffer: &gtk::TextBuffer,
     first: i32,
     last: i32,
-    language: &sourceview5::Language,
+    markers: &Markers,
     on: Option<bool>,
 ) {
     let Some(start) = buffer.iter_at_line(first) else {
@@ -257,9 +293,7 @@ fn toggle_run(
     };
     let end = line_end(buffer, last);
     let text = buffer.text(&start, &end, true);
-    let Some(toggled) = toggled(&text, language, on) else {
-        return;
-    };
+    let toggled = toggled(&text, markers, on);
     if toggled != text {
         splice(buffer, start, end, &text, &toggled);
     }
@@ -285,8 +319,9 @@ fn shared(old: &str, new: &str) -> (usize, usize) {
     (head, tail)
 }
 
-/// Replace `old` between `start` and `end` with `new`, touching only
-/// the differing middle ([`shared`]) to preserve marks in shared text.
+/// Replace `old` between `start` and `end` with `new`, touching only what differs to preserve
+/// marks in the text kept: the two ends where one holds the other whole, as a block comment put on
+/// or taken off does, else the differing middle ([`shared`]).
 fn splice(
     buffer: &gtk::TextBuffer,
     mut start: gtk::TextIter,
@@ -294,6 +329,26 @@ fn splice(
     old: &str,
     new: &str,
 ) {
+    let chars = |text: &str| text.chars().count() as i32;
+    let (from, to) = (start.offset(), end.offset());
+    // The end first, which leaves the start where it was.
+    if !old.is_empty()
+        && let Some(at) = new.find(old)
+    {
+        buffer.insert(&mut buffer.iter_at_offset(to), &new[at + old.len()..]);
+        buffer.insert(&mut buffer.iter_at_offset(from), &new[..at]);
+        return;
+    }
+    if !new.is_empty()
+        && let Some(at) = old.find(new)
+    {
+        let kept = from + chars(&old[..at]);
+        let (mut a, mut b) = (buffer.iter_at_offset(kept + chars(new)), end);
+        buffer.delete(&mut a, &mut b);
+        let (mut a, mut b) = (buffer.iter_at_offset(from), buffer.iter_at_offset(kept));
+        buffer.delete(&mut a, &mut b);
+        return;
+    }
     let (head, tail) = shared(old, new);
     let middle: String = new
         .chars()
@@ -306,45 +361,45 @@ fn splice(
     buffer.insert(&mut start, &middle);
 }
 
-/// Toggle selected or column-covered lines in one undo step. Retain the
-/// column and choose line-comment state once across all runs, so a mixed
-/// selection becomes fully commented (VS Code semantics).
-pub(crate) fn toggle_comment(view: &sourceview5::View) {
+/// Toggle selected or column-covered lines in one undo step, with the comment of a tab of
+/// `flavour` ([`Markers::of`]). Retain the column and choose line-comment state once across all
+/// runs, so a mixed selection becomes fully commented (VS Code semantics).
+pub(crate) fn toggle_comment(view: &sourceview5::View, flavour: Flavour) {
     if !view.is_editable() {
         return;
     }
     let buffer = view.buffer();
-    let Some(language) = buffer
-        .downcast_ref::<sourceview5::Buffer>()
-        .and_then(|buffer| buffer.language())
-    else {
+    let Some(markers) = Markers::of(flavour, &buffer) else {
         return;
     };
     if let Some(column) = column(view) {
         let runs = covered(column);
-        let on = language.metadata("line-comment-start").map(|marker| {
-            let text: Vec<String> = runs
-                .iter()
-                .filter_map(|&(first, last)| {
-                    let start = buffer.iter_at_line(first)?;
-                    Some(
-                        buffer
-                            .text(&start, &line_end(&buffer, last), true)
-                            .to_string(),
-                    )
-                })
-                .collect();
-            !comment::commented(&text.join("\n"), &marker)
-        });
+        let on = match &markers {
+            Markers::Line { test, .. } => {
+                let text: Vec<String> = runs
+                    .iter()
+                    .filter_map(|&(first, last)| {
+                        let start = buffer.iter_at_line(first)?;
+                        Some(
+                            buffer
+                                .text(&start, &line_end(&buffer, last), true)
+                                .to_string(),
+                        )
+                    })
+                    .collect();
+                Some(!comment::commented(&text.join("\n"), test))
+            }
+            Markers::Block { .. } => None,
+        };
         return column.each_block(&runs, |buffer, first, last| {
-            toggle_run(buffer, first, last, &language, on);
+            toggle_run(buffer, first, last, &markers, on);
             None
         });
     }
     let had_selection = buffer.has_selection();
     let (first, last) = selected_lines(&buffer);
     buffer.begin_user_action();
-    toggle_run(&buffer, first, last, &language, None);
+    toggle_run(&buffer, first, last, &markers, None);
     buffer.end_user_action();
     // The marker is not part of what was selected, so the lines are selected afresh rather than
     // left to the marks: toggling never adds or removes a line, so they are still these two.

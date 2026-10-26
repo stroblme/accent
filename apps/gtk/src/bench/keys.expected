@@ -74,6 +74,11 @@ bench lines_comment_column "    // a();\n    // b();\n    // c();" [(0, 1), (1, 
 bench lines_uncomment_column_carets true
 bench lines_uncomment_column "    a();\n    b();\n    c();" [(0, 1), (1, 1), (2, 1)]
 bench lines_comment_mixed_column "    // // x();\n    b();\n    // x();" [(0, 11), (2, 8)]
+bench lines_note_comment "<!-- one -->\ntwo" [(0, 6)]
+bench lines_note_uncomment "one\ntwo" [(0, 1)]
+bench lines_note_comment_lines "<!-- one\ntwo -->" [(0, 0)]
+bench lines_org_comment "# #+TITLE: x\n# # y" [(0, 0)]
+bench lines_org_uncomment "#+TITLE: x\n# y" [(0, 0)]
 bench lines_task "- [/] a\n\n- [ ] b" [(0, 6)]
 bench lines_task_selection Some("a\n\n- [ ] b")
 bench lines_task_undo "- [ ] a\n\nb" [(0, 6)]

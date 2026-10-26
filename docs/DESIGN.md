@@ -554,7 +554,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 - `sourceview5::View` in an `AdwClampScrollable` in a `GtkScrolledWindow`: a plain `AdwClamp` makes GTK insert a `GtkViewport`, whose dead adjustments break the view's own scrolling to the caret.
 - **An org note looks as a markdown note does** (user decision 2026-10-24): its stars dimmed and hung in the margin as `#` are, a heading's open TODO keyword as written and a done one, its priority and `COMMENT` dimmed, its tags in the accent, `*bold*`, `/italic/`, `+struck+`, `=verbatim=` and `~code~` styled with their markers dimmed, a link in the accent with all but its description dimmed, lists and checkboxes (`[-]` an open box), `#+KEY:` lines and drawers as front matter, blocks as fenced code and `# ` comments dimmed.
-  It has no GtkSourceView language, as a markdown note has none: a source block is not coloured as its language, Toggle Comment does nothing and the spell checker reads it whole; `_underline_` stays plain, the look having no underline but a link's.
+  It has no GtkSourceView language, as a markdown note has none: a source block is not coloured as its language and the spell checker reads it whole; `_underline_` stays plain, the look having no underline but a link's.
   Return carries its lists on as org writes them (`-`, `+`, an indented `*`, `1.`, `1)`, a box as `[ ]`), a `*` at the start of a line being a heading, which Tab leaves alone; it has no fences, tables or YAML sequences to continue.
 - A sticky block title over the top of the view pins the opening line of the block the first visible line is in, as VS Code pins a function signature, until that line is back on screen; the innermost block wins.
   A note's blocks are its headings and fenced blocks, both already tagged by the styling pass.
@@ -1578,6 +1578,8 @@ The `Ctrl` chords for application and document commands use GTK's `<Primary>` mo
   Duplicate Line, Delete Line and Insert Line Below take every line a caret or its selection covers, once, a run of lines as a block.
   So does Toggle Comment, deciding once over all those lines whether the comment goes on or comes off, as VS Code does: a column half commented is commented whole.
   Cut and copy take each caret's selection joined by newlines top to bottom, or every caret's whole line where none has one.
+- **Toggle Comment in a note** writes its syntax's comment, a note having no GtkSourceView language to name one: markdown puts the lines in one `<!-- … -->` and takes it off lines that are one, and org puts `# ` before each line, a `#+KEY:` line being no comment; a code tab writes its language's, a line comment where it has one.
+  The text between keeps its place, the caret included.
 - Overlapping selections, and a caret touching a selection, become one; two that only meet stay two.
   Undo and Redo put the carets and their selections back with the text.
   The other selections are painted in the primary's colour.

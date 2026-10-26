@@ -985,14 +985,14 @@ async fn bench_lines(view: &multicaret::View) {
     buffer.set_text(code);
     buffer.place_cursor(&buffer.iter_at_offset(6));
     for step in ["comment", "uncomment"] {
-        editor::toggle_comment(view.upcast_ref());
+        editor::toggle_comment(view.upcast_ref(), editor::Flavour::Code);
         show(step);
     }
     // A selection over the lines is put back over them whole, markers and all, rather than left
     // to the marks, which the marker would have pushed off the front of the first line.
     buffer.set_text(code);
     buffer.select_range(&buffer.iter_at_offset(4), &buffer.iter_at_offset(13));
-    editor::toggle_comment(view.upcast_ref());
+    editor::toggle_comment(view.upcast_ref(), editor::Flavour::Code);
     let selection = buffer
         .selection_bounds()
         .map(|(start, end)| (start.offset(), end.offset()));
@@ -1001,7 +1001,7 @@ async fn bench_lines(view: &multicaret::View) {
 
     column(view, code);
     for step in ["comment_column", "uncomment_column"] {
-        editor::toggle_comment(view.upcast_ref());
+        editor::toggle_comment(view.upcast_ref(), editor::Flavour::Code);
         println!("bench lines_{step}_carets {}", view.has_carets());
         show(step);
     }
@@ -1011,8 +1011,32 @@ async fn bench_lines(view: &multicaret::View) {
     buffer.set_text("    // x();\n    b();\n    x();");
     buffer.select_range(&at(&buffer, 0, 8), &at(&buffer, 0, 7));
     view.add_next_occurrence();
-    editor::toggle_comment(view.upcast_ref());
+    editor::toggle_comment(view.upcast_ref(), editor::Flavour::Code);
     show("comment_mixed_column");
+
+    // A note comments as its syntax does, having no language: markdown puts the lines in one
+    // `<!-- … -->` and takes it off, the caret staying on its text; org puts `# ` before each
+    // line, a `#+KEY:` line counting as no comment.
+    view.clear_carets();
+    if let Some(source) = buffer.downcast_ref::<sourceview5::Buffer>() {
+        source.set_language(None);
+    }
+    let markdown = editor::Flavour::Note(Syntax::Markdown);
+    buffer.set_text("one\ntwo");
+    buffer.place_cursor(&buffer.iter_at_offset(1));
+    for step in ["note_comment", "note_uncomment"] {
+        editor::toggle_comment(view.upcast_ref(), markdown);
+        show(step);
+    }
+    buffer.select_range(&buffer.iter_at_offset(1), &buffer.end_iter());
+    editor::toggle_comment(view.upcast_ref(), markdown);
+    show("note_comment_lines");
+    buffer.set_text("#+TITLE: x\n# y");
+    for step in ["org_comment", "org_uncomment"] {
+        buffer.select_range(&buffer.start_iter(), &buffer.end_iter());
+        editor::toggle_comment(view.upcast_ref(), editor::Flavour::Note(Syntax::Org));
+        show(step);
+    }
 
     // Toggle Task: a selection's lines a step each, its blank line passed over and the selection
     // still on its text; every caret's line, a blank one too. Each one undo step.
@@ -1071,7 +1095,7 @@ async fn bench_lines(view: &multicaret::View) {
         editor::duplicate_line as fn(&sourceview5::View),
         editor::delete_line,
         editor::newline_below,
-        editor::toggle_comment,
+        |view| editor::toggle_comment(view, editor::Flavour::Code),
         editor::toggle_task,
     ] {
         command(view.upcast_ref());

@@ -1,7 +1,7 @@
 //! Language-aware `Ctrl+/` comment toggling over plain strings.
 //!
-//! Markers come from GtkSourceView language metadata, keeping this logic independent of
-//! languages and text buffers.
+//! Markers come from GtkSourceView language metadata or a note's syntax (`editor/lines.rs`),
+//! keeping this logic independent of languages and text buffers.
 
 /// Whether all nonblank lines already carry `marker`, deciding one toggle direction for all carets.
 /// Partially commented selections are commented in full.
@@ -102,6 +102,18 @@ mod tests {
     fn a_direction_given_is_kept() {
         assert_eq!(comment_lines("# a\nb", "#", false), "a\nb");
         assert_eq!(comment_lines("# a", "#", true), "# # a");
+    }
+
+    /// Org's comment is `#` and a space, so a note tests for `# ` and writes `#`: a `#+KEY:` line
+    /// is not commented, and is commented whole.
+    #[test]
+    fn an_org_keyword_is_no_comment() {
+        let text = "#+TITLE: x\n# y";
+        assert!(!commented(text, "# "));
+        let on = comment_lines(text, "#", true);
+        assert_eq!(on, "# #+TITLE: x\n# # y");
+        assert!(commented(&on, "# "));
+        assert_eq!(comment_lines(&on, "#", false), text);
     }
 
     #[test]
