@@ -21,6 +21,7 @@ mod ignored;
 mod index;
 mod pdf_text;
 
+pub(crate) use files::applied;
 pub(crate) use ignored::{Ignored, Listing};
 pub(crate) use index::list_dir;
 

@@ -290,14 +290,14 @@ impl Client {
                 // `willRename` alone: asked before a move, answered with the imports it breaks.
                 // A command's own edits come back through `applyEdit` while it runs
                 // ([`Client::execute_command`]). `documentChanges` for the versions they carry,
-                // without file operations.
+                // and of the file operations only `create`, which a fix's edits are made into.
                 "workspace": {
                     "configuration": true,
                     "workspaceFolders": true,
                     "fileOperations": {"willRename": true},
                     "applyEdit": true,
                     "executeCommand": {},
-                    "workspaceEdit": {"documentChanges": true}
+                    "workspaceEdit": {"documentChanges": true, "resourceOperations": ["create"]}
                 },
                 "window": {"workDoneProgress": true}
             }

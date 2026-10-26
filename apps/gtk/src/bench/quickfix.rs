@@ -11,10 +11,11 @@ const OTHER: &str = "int other;\n";
 /// `ACCENT_BENCH_QUICKFIX=<rel>,<ipynb>` writes `<rel>` and `other.c` in a scratch vault under
 /// `/tmp`, opens `<rel>` with the caret on `oops` once its error is in, and prints the Quick Fix
 /// menu's rows. Then, a fresh menu each time, it picks each row: the preferred fix and the
-/// resolved refactoring and the command each change the text and are undone in one step, and the
-/// fix reaching into `other.c` writes that file on disk. The hover's fixes over `oops` follow.
-/// Then `<ipynb>`, `b = 1 + 2` and `a = oops` in two code cells, the same four rows picked in the
-/// second: the two inside it change it, the two reaching into the first cell and `other.c` do
+/// resolved refactoring and the command each change the text and are undone in one step, the
+/// fix reaching into `other.c` writes that file on disk, and the one creating `oops.h` makes it,
+/// and is refused when picked again. The hover's fixes over `oops` follow.
+/// Then `<ipynb>`, `b = 1 + 2` and `a = oops` in two code cells, the same five rows picked in the
+/// second: the two inside it change it, the three reaching into the first cell and other files do
 /// nothing.
 pub(super) fn bench_quickfix(app: &Rc<App>, arg: &str) {
     scratch_only(app, "ACCENT_BENCH_QUICKFIX");
@@ -55,7 +56,12 @@ async fn bench_fixes(app: &Rc<App>, rel: &str) {
         return println!("bench quickfix no_diagnostics {rel}");
     };
     tab.view.grab_focus();
-    for pick in 0..4u32 {
+    // The file-creating fix last a second time, with the file there.
+    for (n, pick) in [0u32, 1, 2, 3, 4, 2].into_iter().enumerate() {
+        if n == 5 {
+            app.toasts.dismiss_all();
+            glib::timeout_future(Duration::from_millis(500)).await;
+        }
         let mut caret = tab
             .buffer
             .iter_at_line(0)
@@ -70,21 +76,30 @@ async fn bench_fixes(app: &Rc<App>, rel: &str) {
             let rows = menu.menu_model().map(|m| fileops::labels(&m));
             println!("bench quickfix menu {rows:?}");
         }
-        let read_other = || std::fs::read_to_string(app.root().join("other.c")).unwrap_or_default();
+        let read_other = || {
+            let read = |rel| std::fs::read_to_string(app.root().join(rel)).unwrap_or_default();
+            (read("other.c"), read("oops.h"))
+        };
         let (before, other_before) = (tab.text(), read_other());
         let _ = tab
             .view
             .activate_action("fix.apply", Some(&pick.to_variant()));
         menu.popdown();
         for _ in 0..50 {
-            if tab.text() != before || read_other() != other_before {
+            let refused = n == 5 && super::compare::bench_toast(app).is_some();
+            if tab.text() != before || read_other() != other_before || refused {
                 break;
             }
             glib::timeout_future(Duration::from_millis(100)).await;
         }
-        let other = read_other();
+        if n == 5 {
+            let said = super::compare::bench_toast(app);
+            println!("bench quickfix again={pick} said={said:?}");
+            continue;
+        }
+        let (other, made) = read_other();
         println!(
-            "bench quickfix applied={pick} text={:?} other={other:?}",
+            "bench quickfix applied={pick} text={:?} other={other:?} made={made:?}",
             tab.text()
         );
         if tab.text() != before {
@@ -139,7 +154,7 @@ async fn bench_cell_fixes(app: &Rc<App>, rel: &str) {
     };
     let sources =
         |tab: &Rc<crate::notebook::NotebookTab>| [tab.bench_source(0), tab.bench_source(1)];
-    for pick in 0..4u32 {
+    for pick in 0..5u32 {
         tab.bench_select(1);
         let Some(cell) = tab.bench_language_editor(1) else {
             return println!("bench quickfix no_cell_editor");

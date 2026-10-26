@@ -1,16 +1,19 @@
-bench quickfix menu Some(["Replace oops with 0", "Declare oops in other.c", "Upper-case the line", "Swap the operands"])
-bench quickfix applied=0 text="int a = 0;\nint b = 1 + 2;\n" other="int other;\n"
+bench quickfix menu Some(["Replace oops with 0", "Declare oops in other.c", "Declare oops in oops.h", "Upper-case the line", "Swap the operands"])
+bench quickfix applied=0 text="int a = 0;\nint b = 1 + 2;\n" other="int other;\n" made=""
 bench quickfix undone=0 text="int a = oops;\nint b = 1 + 2;\n"
-bench quickfix applied=1 text="int a = oops;\nint b = 1 + 2;\n" other="int oops;\nint other;\n"
-bench quickfix applied=2 text="INT A = OOPS;\nint b = 1 + 2;\n" other="int oops;\nint other;\n"
-bench quickfix undone=2 text="int a = oops;\nint b = 1 + 2;\n"
-bench quickfix applied=3 text="int a = oops;\nint b = 2 + 1;\n" other="int oops;\nint other;\n"
+bench quickfix applied=1 text="int a = oops;\nint b = 1 + 2;\n" other="int oops;\nint other;\n" made=""
+bench quickfix applied=2 text="int a = oops;\nint b = 1 + 2;\n" other="int oops;\nint other;\n" made="int oops;\n"
+bench quickfix applied=3 text="INT A = OOPS;\nint b = 1 + 2;\n" other="int oops;\nint other;\n" made="int oops;\n"
 bench quickfix undone=3 text="int a = oops;\nint b = 1 + 2;\n"
-bench quickfix hover ["Declare oops in other.c", "Replace oops with 0", "Upper-case the line", "Swap the operands"]
-bench quickfix cell_menu Some(["Replace oops with 0", "Declare oops in other.c", "Upper-case the line", "Swap the operands"])
+bench quickfix applied=4 text="int a = oops;\nint b = 2 + 1;\n" other="int oops;\nint other;\n" made="int oops;\n"
+bench quickfix undone=4 text="int a = oops;\nint b = 1 + 2;\n"
+bench quickfix again=2 said=Some("Cannot apply the fix: it creates oops.h, which is there already")
+bench quickfix hover ["Declare oops in other.c", "Declare oops in oops.h", "Replace oops with 0", "Upper-case the line", "Swap the operands"]
+bench quickfix cell_menu Some(["Replace oops with 0", "Declare oops in other.c", "Declare oops in oops.h", "Upper-case the line", "Swap the operands"])
 bench quickfix cell_applied=0 cells=["b = 1 + 2", "a = 0"]
 bench quickfix cell_undone=0 cells=["b = 1 + 2", "a = oops"]
 bench quickfix cell_applied=1 cells=["b = 1 + 2", "a = oops"]
-bench quickfix cell_applied=2 cells=["b = 1 + 2", "A = OOPS"]
-bench quickfix cell_undone=2 cells=["b = 1 + 2", "a = oops"]
-bench quickfix cell_applied=3 cells=["b = 1 + 2", "a = oops"]
+bench quickfix cell_applied=2 cells=["b = 1 + 2", "a = oops"]
+bench quickfix cell_applied=3 cells=["b = 1 + 2", "A = OOPS"]
+bench quickfix cell_undone=3 cells=["b = 1 + 2", "a = oops"]
+bench quickfix cell_applied=4 cells=["b = 1 + 2", "a = oops"]

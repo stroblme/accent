@@ -135,8 +135,9 @@ impl App {
     }
 
     /// Make `edits`: each open file's in its view as one undo step, all of them or none, then the
-    /// files no tab holds on disk, gated on their etags. `asked` is the version of `editor`'s
-    /// document the server answered about; a notebook `cell` takes edits inside it alone.
+    /// files it creates and those no tab holds on disk, gated on their etags. `asked` is the
+    /// version of `editor`'s document the server answered about; a notebook `cell` takes edits
+    /// inside it alone.
     fn make_edits(
         self: &Rc<Self>,
         editor: &Rc<dyn Editor>,
@@ -146,7 +147,7 @@ impl App {
         edits: ActionEdits,
     ) {
         let beyond = || self.cannot("apply the fix", "it changes more than this cell");
-        if cell && !edits.files.is_empty() {
+        if cell && !(edits.files.is_empty() && edits.created.is_empty()) {
             return beyond();
         }
         let doc = editor.document();
@@ -187,26 +188,45 @@ impl App {
         for (buffer, list) in open {
             apply_edits(&buffer, list);
         }
-        if edits.files.is_empty() {
-            return;
-        }
-        let names: Vec<String> = edits.files.iter().map(|f| f.rel.clone()).collect();
+        let (files, created) = (edits.files, edits.created);
+        let said = match (created.as_slice(), files.as_slice()) {
+            ([], []) => return,
+            ([(one, _)], []) => format!("Created {one}"),
+            ([], [one]) => format!("Also changed {}", one.rel),
+            (made, changed) => format!("Also changed {} other files", made.len() + changed.len()),
+        };
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let files = edits.files;
-            let done =
-                work::attempt("change the other files", move || vault.edit_files(&files)).await;
+            let done = work::attempt("change the other files", move || {
+                // A file is made new, so one that appeared meanwhile is left as it is.
+                let mut failed: Vec<(String, String)> = created
+                    .iter()
+                    .filter_map(|(rel, text)| {
+                        let made = fileops::make_parents(&vault, rel).and_then(|()| {
+                            vault
+                                .write_file(rel, text.as_bytes())
+                                .map_err(|e| e.to_string())
+                        });
+                        Some((format!("create {rel}"), made.err()?))
+                    })
+                    .collect();
+                let changed = vault.edit_files(&files)?;
+                failed.extend(
+                    changed
+                        .into_iter()
+                        .map(|(rel, why)| (format!("change {rel}"), why)),
+                );
+                Ok::<_, accent_api::Error>(failed)
+            })
+            .await;
             let Some(app) = weak.upgrade() else {
                 return;
             };
             match done {
-                Ok(failed) if failed.is_empty() => app.toast(&match names.as_slice() {
-                    [one] => format!("Also changed {one}"),
-                    many => format!("Also changed {} other files", many.len()),
-                }),
+                Ok(failed) if failed.is_empty() => app.toast(&said),
                 Ok(failed) => {
-                    for (rel, why) in failed {
-                        app.cannot(&format!("change {rel}"), why);
+                    for (what, why) in failed {
+                        app.cannot(&what, why);
                     }
                 }
                 Err(message) => app.toast(&message),

@@ -261,6 +261,9 @@ pub struct ActionEdits {
     /// Files no document of the server holds: byte edits to their text on disk, by etag
     /// ([`Vault::edit_files`]).
     pub files: Vec<FileEdits>,
+    /// Files it creates, with their text: written as new files ([`Vault::write_file`]), so one
+    /// made there meanwhile is left alone.
+    pub created: Vec<(String, String)>,
 }
 
 /// A language-server call-hierarchy edge relative to the queried declaration.

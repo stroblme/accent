@@ -859,7 +859,7 @@ fn imports_by_path(rel: &str) -> bool {
 /// `text` with a language server's byte edits applied, back to front. Inserts at one place keep
 /// the order the server listed them in, as LSP has it; overlapping edits are refused rather than
 /// guessed at.
-fn applied(mut text: String, edits: &[(usize, usize, String)]) -> Result<String> {
+pub(crate) fn applied(mut text: String, edits: &[(usize, usize, String)]) -> Result<String> {
     let mut order: Vec<_> = edits.iter().enumerate().collect();
     order.sort_by_key(|(i, (start, ..))| std::cmp::Reverse((*start, *i)));
     let mut end = text.len();

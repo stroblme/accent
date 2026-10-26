@@ -402,8 +402,8 @@ pub struct CallHierarchyOutgoingCall {
 
 /// Edits to files, in the two shapes a server may send them: `changes`, keyed by URI, and
 /// `documentChanges`, which also carries create/rename/delete operations. rust-analyzer and Lean
-/// send the second whatever the client says; accent reads the text edits of both and says no
-/// resource operations are supported ([`WorkspaceEdit::has_file_operations`]).
+/// send the second whatever the client says; accent reads the text edits of both and says it
+/// supports one resource operation, `create` ([`WorkspaceEdit::file_operations`]).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct WorkspaceEdit {
@@ -450,12 +450,29 @@ impl WorkspaceEdit {
         changes.chain(documents).collect()
     }
 
-    /// Whether it creates, renames or deletes a file: a `documentChanges` entry with a `kind`.
-    pub fn has_file_operations(&self) -> bool {
+    /// What it creates, renames or deletes, in order: the `documentChanges` entries with a
+    /// `kind`.
+    pub fn file_operations(&self) -> impl Iterator<Item = &Value> {
         self.document_changes
             .iter()
-            .any(|c| c.get("kind").is_some())
+            .filter(|c| c.get("kind").is_some())
     }
+}
+
+/// A `documentChanges` entry that makes a file: `kind` is `create`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateFile {
+    pub uri: String,
+    pub options: Option<CreateFileOptions>,
+}
+
+/// What to do where the file is there already; neither said, the operation fails. `overwrite`
+/// wins over `ignore_if_exists`.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct CreateFileOptions {
+    pub overwrite: bool,
+    pub ignore_if_exists: bool,
 }
 
 // ------------------------------------------------------------------- diagnostics
@@ -620,7 +637,8 @@ mod tests {
             {"kind": "rename", "oldUri": "file:///b.rs", "newUri": "file:///c.rs"}
         ]}))
         .unwrap();
-        assert!(!changes.has_file_operations() && documents.has_file_operations());
+        assert_eq!(changes.file_operations().count(), 0);
+        assert_eq!(documents.file_operations().count(), 1);
         for (shape, version) in [(changes, None), (documents, Some(3))] {
             let edits = shape.text_edits();
             assert_eq!(edits.len(), 1, "the resource operation is left out");

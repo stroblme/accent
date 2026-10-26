@@ -1268,7 +1268,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - **Quick Fix** lists what the server offers over the selection or at the caret, in a menu at the caret: its quick fixes first, the one it prefers on top, then its refactorings; source actions (Organize Imports) are not listed.
   The diagnostics there go to the server as it published them, which is how clangd finds its fixes.
 - Picking one applies its edit, resolved first where the server sent it without one, or runs its command (clangd's tweaks): each open document's part as one undo step, and files no tab holds written as a move's import updates are, gated on their etags, and named in a toast.
-  A fix that would create, rename or delete a file, or change one outside the vault, is refused, and so is one whose file was typed in while the server answered.
+  A fix may create a file, as rust-analyzer's Extract module to file does: it is written new with the fix's text in it, on a local or a remote vault alike, and where a file is there already the whole fix is refused before anything is written, unless the server said to write over it or to leave it.
+  A fix that would rename or delete a file, or change one outside the vault, is refused, and so is one whose file was typed in while the server answered.
   There is no lightbulb (user decision 2026-10-22): asking at every caret move would wait on Lean's check and cross a remote link each time.
 - **Outline** and the Info pane's **References** section are the sidebar's; **folding** is the gutter chevrons.
 - **Checking**: while Lean checks a file, a bar in the change bars' column marks the lines it has still to check, as VS Code's Lean extension does, and shrinks as the check passes them until it is gone: `$/lean/fileProgress`'s ranges in progress, whole lines, those that touch made one.

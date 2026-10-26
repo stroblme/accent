@@ -13,6 +13,7 @@ With `--actions` it keeps what it is sent too, an error over each `oops`, and of
 actions `ACCENT_BENCH_QUICKFIX` applies, one of each shape a real server sends: "Replace oops with
 0", preferred and only for the diagnostic handed back (clangd's rule), its edit versioned as
 rust-analyzer's and Lean's are; "Declare oops in other.c", an edit to a file no tab holds;
+"Declare oops in oops.h", a file it creates (rust-analyzer's "Extract module to file");
 "Upper-case the line", resolved for its edit (rust-analyzer's assists); and "Swap the operands", a
 command whose edit comes as its own `workspace/applyEdit` request, the command answered once that
 is (clangd's tweaks).
@@ -83,9 +84,15 @@ def actions(params):
     """The code actions at a request's range, in the order a server might list them."""
     uri, line = params["textDocument"]["uri"], params["range"]["start"]["line"]
     other = "file://" + os.path.join(ROOT[0], "other.c")
+    header = "file://" + os.path.join(ROOT[0], "oops.h")
     found = [d for d in params["context"]["diagnostics"] if d.get("code") == "fake"]
     fixes = [{"title": "Declare oops in other.c", "kind": "quickfix",
               "edit": {"changes": {other: [{"range": TOP, "newText": "int oops;\n"}]}}},
+             {"title": "Declare oops in oops.h", "kind": "quickfix",
+              "edit": {"documentChanges": [
+                  {"kind": "create", "uri": header},
+                  {"textDocument": {"uri": header, "version": None},
+                   "edits": [{"range": TOP, "newText": "int oops;\n"}]}]}},
              {"title": "Replace oops with 0", "kind": "quickfix", "isPreferred": True,
               "edit": {"documentChanges": [{
                   "textDocument": {"uri": uri, "version": VERSIONS[uri]},
