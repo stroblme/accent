@@ -792,8 +792,10 @@ pub(super) fn bench_transfer(app: &Rc<App>, rel: &str) {
 /// `ACCENT_BENCH_CARRY=<local vault>`, launched on a remote vault: rows carried between this window
 /// and one opened on the local vault (`fileops::carry_in`), as a drop from the other window's tree
 /// hands them over — down and up, a second time onto the names now taken (Cancel, then Replace),
-/// and with Shift, the source going to the trash here and on the host behind Delete Permanently?.
-/// Writes `carry/`, `back/` and `two.md` on the host and `carry/`, `one.bin` in the local vault.
+/// and with Shift, the source going to the trash here and on the host behind Delete Permanently?;
+/// last, a folder whose walk takes a page per level, stopped from the line the walk puts up.
+/// Writes `carry/`, `back/`, `walk/` and `two.md` on the host and `carry/`, `one.bin` in the local
+/// vault.
 /// A real pointer drag between two windows needs a window manager: what the drag source and the
 /// drop targets answer is a real-session check.
 pub(super) fn bench_carry(app: &Rc<App>, local: &str) {
@@ -823,7 +825,7 @@ pub(super) fn bench_carry(app: &Rc<App>, local: &str) {
         let here = shell.app_for(&root).expect("the local window");
         let (here_ops, here_vault) = (here.ops().cloned().unwrap(), here.vault().cloned().unwrap());
 
-        for rel in ["carry", "back", "two.md"] {
+        for rel in ["carry", "back", "walk", "two.md"] {
             let _ = vault.delete(rel);
         }
         let big: Vec<u8> = (0..4 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
@@ -973,9 +975,30 @@ pub(super) fn bench_carry(app: &Rc<App>, local: &str) {
             vault.exists("carry/one.bin")
         );
 
-        for rel in ["carry", "back", "two.md"] {
+        // A walk of 60 levels, one page round trip each: its line and Stop are up from the start,
+        // and a Stop there ends the walk and copies nothing.
+        vault
+            .create_dir(&format!("walk{}", "/d".repeat(60)), true)
+            .unwrap();
+        let said = here.toasted.get();
+        let (t, stop) = (Instant::now(), here.statusbar.transfer_stop().clone());
+        carry(&here_ops, &ops, "walk", "", false);
+        until(|| stop.is_visible()).await;
+        let (line, pressed_ms) = (here.statusbar.progress_text(), t.elapsed().as_millis());
+        stop.emit_clicked();
+        until(|| here.toasted.get() > said).await;
+        println!(
+            "bench carry_walk_stop line={line:?} pressed_ms={pressed_ms} toast_ms={} toast={:?} \
+             landed={}",
+            t.elapsed().as_millis(),
+            here.toasts.shown().first(),
+            here_vault.root().join("walk").exists()
+        );
+
+        for rel in ["carry", "back", "walk", "two.md"] {
             let _ = vault.delete(rel);
         }
+        let _ = std::fs::remove_dir_all(here_vault.root().join("walk"));
         let _ = std::fs::remove_dir_all(here_vault.root().join("carry"));
         let _ = std::fs::remove_file(here_vault.root().join("one.bin"));
         bench_quit(&app);

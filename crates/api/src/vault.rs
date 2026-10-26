@@ -106,12 +106,15 @@ fn walk_copy_pages(
 }
 
 impl Vault {
-    /// The files carried by `rel`, paged on a remote host so no recursive walk holds one RPC.
-    pub fn list_tree(&self, rel: &str) -> Result<fs::Walked> {
+    /// The files carried by `rel`, paged on a remote host so no recursive walk holds one RPC, and
+    /// `stop` ends that walk between pages, failing it `Cancelled`; a local one, at the disk's
+    /// speed, runs to its end.
+    pub fn list_tree(&self, rel: &str, stop: &Stop) -> Result<fs::Walked> {
         match &self.backend {
             Backend::Local(v) => v.list_tree(rel),
-            Backend::Remote(r) => walk_copy_pages(|dir, after| {
-                r.call("copy_page", json!([rel, dir, after, COPY_PAGE]))
+            Backend::Remote(r) => walk_copy_pages(|dir, after| match stop.stopped() {
+                true => Err(accent_core::Error::Cancelled.into()),
+                false => r.call("copy_page", json!([rel, dir, after, COPY_PAGE])),
             }),
         }
     }
@@ -618,7 +621,7 @@ impl Vault {
     }
 
     /// [`upload`](Self::upload) with sent and total byte counts for remote uploads, which `stop`
-    /// cuts short. Local copies neither report progress nor stop.
+    /// cuts short, the file in flight landing nowhere. Local copies report no progress.
     pub fn upload_with(
         &self,
         local: &Path,
@@ -628,7 +631,7 @@ impl Vault {
         stop: &Stop,
     ) -> Result<()> {
         match &self.backend {
-            Backend::Local(v) => v.upload(local, rel, replace),
+            Backend::Local(v) => v.upload(local, rel, replace, &|| stop.stopped()),
             Backend::Remote(r) => r.upload_with(local, rel, replace, progress, stop),
         }
     }
@@ -669,8 +672,8 @@ impl Vault {
     /// Copy the file `rel` into the vault `to` at `to_rel`, its bytes going straight from one
     /// machine to the other: read here and written there, downloaded, uploaded, or piped from host
     /// to host through this machine. Over the file there when `replace`; otherwise only to a name
-    /// nothing holds, a taken one failing with `AlreadyExists`. `stop` cuts a copy over a link
-    /// short; one from disk to disk runs to its end.
+    /// nothing holds, a taken one failing with `AlreadyExists`. `stop` cuts the copy short, the
+    /// file in flight landing nowhere.
     pub fn copy_to(
         &self,
         rel: &str,
@@ -1022,7 +1025,7 @@ mod tests {
         a.write("F/x.md", "mine\n");
         a.write("F/sub/y.md", "y\n");
         b.write("x.md", "theirs\n");
-        let walked = a.vault.list_tree("F").unwrap();
+        let walked = a.vault.list_tree("F", &Stop::default()).unwrap();
         assert_eq!(walked.dirs, ["", "sub"]);
         assert_eq!(walked.files, ["sub/y.md", "x.md"]);
 

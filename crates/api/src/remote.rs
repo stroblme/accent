@@ -111,7 +111,7 @@ fn land(part: &Path, dest: &Path, replace: bool) -> Result<()> {
 
 /// Create a `.part` beside `dest` that is this transfer's alone, `<dest>.<pid>-<n>.part`, claimed
 /// with `create_new`: a file already there, another transfer's or anyone's, is never written to.
-fn part_beside(dest: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
+pub(crate) fn part_beside(dest: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     loop {
         let mut part = dest.as_os_str().to_owned();

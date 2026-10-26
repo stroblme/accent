@@ -212,7 +212,7 @@ impl Local {
                 copy_tree(&src, &dest, &root)
             }
             false => {
-                copy_file(&src, &dest).map_err(named)?;
+                copy_file(&src, &dest, &|| false).map_err(named)?;
                 Ok(())
             }
         };
@@ -225,12 +225,18 @@ impl Local {
     }
 
     /// [`Vault::upload`](crate::Vault::upload) here: over the file at `rel` when `replace`, else
-    /// only to a name nothing holds, as [`copy`](Self::copy) does.
-    pub fn upload(&self, local: &std::path::Path, rel: &str, replace: bool) -> Result<()> {
+    /// only to a name nothing holds, as [`copy`](Self::copy) does, until `stopped`.
+    pub fn upload(
+        &self,
+        local: &std::path::Path,
+        rel: &str,
+        replace: bool,
+        stopped: &dyn Fn() -> bool,
+    ) -> Result<()> {
         let dest = self.resolve(rel)?;
         match replace {
-            true => std::fs::copy(local, &dest).map(drop),
-            false => copy_file(local, &dest),
+            true => replace_file(local, &dest, stopped),
+            false => copy_file(local, &dest, stopped),
         }
         .map_err(|e| copy_error(local.display(), rel, e))?;
         Ok(())
@@ -926,31 +932,82 @@ fn copy_tree(
             std::fs::create_dir(&dest)?;
             copy_tree(&src, &dest, root)?;
         } else if kind.is_file() || (kind.is_symlink() && fs::links_inside(&src, root)) {
-            copy_file(&src, &dest)?;
+            copy_file(&src, &dest, &|| false)?;
         }
     }
     Ok(())
 }
 
+/// How much [`copy_chunks`] copies between asking whether to stop, so a large file's copy ends at
+/// most a chunk after the stop. Tests copy a few bytes at a time, to stop one part way.
+const CHUNK: u64 = if cfg!(test) { 4 } else { 16 * 1024 * 1024 };
+
 /// Copy the file `from` to `to`, a name nothing holds: `create_new` claims it and opens it in one
 /// step, so a file that appeared there meanwhile stays as it was. The mode goes along, under the
-/// umask. A copy cut short is removed rather than left torn.
-fn copy_file(from: &std::path::Path, to: &std::path::Path) -> io::Result<()> {
+/// umask. A copy cut short, by `stopped` too, is removed rather than left torn.
+fn copy_file(
+    from: &std::path::Path,
+    to: &std::path::Path,
+    stopped: &dyn Fn() -> bool,
+) -> io::Result<()> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    // Asked before opening: opening a FIFO would wait for a writer that never comes.
-    let meta = std::fs::metadata(from)?;
-    if !meta.is_file() {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a file"));
-    }
-    let mut src = std::fs::File::open(from)?;
-    let mut dest = std::fs::OpenOptions::new()
+    let (src, meta) = open_file(from)?;
+    let dest = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(meta.permissions().mode() & 0o777)
         .open(to)?;
-    io::copy(&mut src, &mut dest).map(drop).inspect_err(|_| {
+    copy_chunks(&src, &dest, stopped).inspect_err(|_| {
         let _ = std::fs::remove_file(to);
     })
+}
+
+/// Copy the file `from` over the file `to` as `std::fs::copy` does, through a link to what it
+/// names and with `from`'s mode, but into a `.part` beside it renamed over it once whole, as a
+/// download lands: a copy cut short, by `stopped` too, leaves `to` as it was.
+fn replace_file(
+    from: &std::path::Path,
+    to: &std::path::Path,
+    stopped: &dyn Fn() -> bool,
+) -> io::Result<()> {
+    let (src, meta) = open_file(from)?;
+    let to = to.canonicalize().unwrap_or_else(|_| to.to_path_buf());
+    let (part, out) = crate::remote::part_beside(&to)?;
+    copy_chunks(&src, &out, stopped)
+        .and_then(|()| out.set_permissions(meta.permissions()))
+        .and_then(|()| std::fs::rename(&part, &to))
+        .inspect_err(|_| {
+            let _ = std::fs::remove_file(&part);
+        })
+}
+
+/// `from` opened for a copy, once it is known to be a file: opening a FIFO would wait for a
+/// writer that never comes.
+fn open_file(from: &std::path::Path) -> io::Result<(std::fs::File, std::fs::Metadata)> {
+    let meta = std::fs::metadata(from)?;
+    if !meta.is_file() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a file"));
+    }
+    Ok((std::fs::File::open(from)?, meta))
+}
+
+/// Copy `src` into `dest` [`CHUNK`] bytes at a time, asking `stopped` before each. A chunk is
+/// std's `io::copy` between two files, one `copy_file_range` on Linux, which btrfs and XFS answer
+/// with a reflink for a range as for a whole file, so the copy still shares its extents.
+fn copy_chunks(
+    src: &std::fs::File,
+    mut dest: &std::fs::File,
+    stopped: &dyn Fn() -> bool,
+) -> io::Result<()> {
+    use std::io::Read;
+    loop {
+        if stopped() {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "stopped"));
+        }
+        if io::copy(&mut src.take(CHUNK), &mut dest)? == 0 {
+            return Ok(());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -969,6 +1026,31 @@ mod tests {
             "static const int x = 1;\n"
         );
         assert!(super::applied(text, &[edit(0, 5, "a"), edit(3, 7, "b")]).is_err());
+    }
+
+    /// A copy stopped a chunk in leaves nothing at a free name, and a file it was replacing as it
+    /// was, with no `.part` beside it.
+    #[test]
+    fn a_stopped_copy_leaves_no_file_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let (from, to) = (dir.path().join("big.bin"), dir.path().join("copy.bin"));
+        std::fs::write(&from, vec![7u8; 3 * super::CHUNK as usize]).unwrap();
+        // Asked before each chunk: stopped from the second asking on.
+        let one_chunk = || {
+            let asked = std::cell::Cell::new(0);
+            move || {
+                asked.set(asked.get() + 1);
+                asked.get() > 1
+            }
+        };
+        assert!(super::copy_file(&from, &to, &one_chunk()).is_err());
+        assert!(!to.exists());
+        std::fs::write(&to, "theirs").unwrap();
+        assert!(super::replace_file(&from, &to, &one_chunk()).is_err());
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "theirs");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+        super::replace_file(&from, &to, &|| false).unwrap();
+        assert_eq!(std::fs::read(&to).unwrap(), std::fs::read(&from).unwrap());
     }
 
     /// `a.md` links to `B.md`; renaming it to `C.md` must move the link with it.

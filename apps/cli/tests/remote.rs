@@ -231,7 +231,7 @@ fn a_remote_vault_connects_indexes_and_answers() {
         &url,
         &format!("mkdir -p {p}/tree/in && printf 'x\\n' > {p}/tree/in/x.md"),
     );
-    let walked = vault.list_tree("tree").unwrap();
+    let walked = vault.list_tree("tree", &link::Stop::default()).unwrap();
     assert_eq!(walked.dirs, ["", "in"]);
     assert_eq!(walked.files, ["in/x.md"]);
     let (none, stop) = (&|_, _| (), &link::Stop::default());

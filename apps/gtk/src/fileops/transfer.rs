@@ -5,6 +5,7 @@ use super::paths::{at_free_name, child_path, free_path, topmost};
 use super::{Ops, batch_to, trash_all};
 use crate::dialogs::confirm;
 use crate::statusbar::Bytes;
+use accent_api::Vault;
 use accent_api::link::Stop;
 use accent_core::fs::{Walked, walk_copy};
 use accent_core::path::basename;
@@ -316,53 +317,29 @@ type Carried = (String, String, bool, Carry<String>);
 /// the batch, as Upload Files… asks, and Cancel copies nothing; a folder already here takes what is
 /// carried into it. `moving` (Shift) then takes the originals out of `from`'s vault as its Delete
 /// does — to the trash, or on a host for good behind its question — the ones that all landed.
+/// The walks have the copy's line on the status bar, and its Stop, which copies nothing.
 pub fn carry_in(ops: &Rc<Ops>, from: &Rc<Ops>, rels: Vec<String>, dir: &str, moving: bool) {
     // What lands should be what the reader last saw there.
     (from.flush)(&rels);
     let marked: Vec<(String, bool)> = rels.into_iter().map(|rel| (rel, false)).collect();
     let rels: Vec<String> = topmost(&marked).into_iter().map(|(rel, _)| rel).collect();
     let (source, vault, dir) = (from.vault.clone(), ops.vault.clone(), dir.to_string());
+    let (verb, what) = carry_words(&source, &vault, moving);
+    let names: Vec<PathBuf> = rels.iter().map(PathBuf::from).collect();
+    let line = batch_line(verb, &names, &Arc::new(Count::default()));
+    let stop = Stop::default();
     let (ops, from) = (ops.clone(), from.clone());
     glib::spawn_future_local(async move {
         // Every walk and every taken name first, on the worker: each is a round trip on a host.
-        let walked = crate::work::off_thread("copy", move || {
-            let mut carried: Vec<Carried> = Vec::new();
-            let mut existing = Vec::new();
-            for rel in rels {
-                let to = child_path(&dir, basename(&rel));
-                let walked = source.list_tree(&rel).unwrap_or_else(|_| Walked {
-                    unread: vec![String::new()],
-                    ..Walked::default()
-                });
-                let is_dir = !walked.dirs.is_empty() || !walked.unread.is_empty();
-                // A name nothing holds here has nothing under it to take.
-                if vault.exists(&to) {
-                    let here = match is_dir {
-                        true => vault
-                            .list_tree(&to)?
-                            .files
-                            .into_iter()
-                            .collect::<HashSet<_>>(),
-                        false => HashSet::from([String::new()]),
-                    };
-                    existing.extend(walked.files.iter().filter(|file| here.contains(*file)).map(
-                        |file| match file.as_str() {
-                            "" => to.clone(),
-                            file => child_path(&to, file),
-                        },
-                    ));
-                }
-                let at = |file: &str| match file {
-                    "" => rel.clone(),
-                    file => child_path(&rel, file),
-                };
-                let carry = Carry::landing(walked, &to, at);
-                carried.push((rel, to, is_dir, carry));
-            }
-            Ok::<_, accent_api::Error>((carried, existing, dir))
-        })
-        .await;
-        let (carried, existing, dir) = match walked {
+        let walk = crate::work::off_thread("copy", {
+            let (stop, dir) = (stop.clone(), dir.clone());
+            move || walk_carried(&source, &vault, rels, &dir, &stop)
+        });
+        let walked = counting_on(&ops, line, &stop, walk).await;
+        if stop.stopped() {
+            return (ops.toast)(&stopped_message(what, 0, &[]));
+        }
+        let (carried, existing) = match walked {
             Some(Ok(plan)) => plan,
             Some(Err(error)) => return (ops.toast)(&format!("Cannot copy: {error}")),
             None => return (ops.toast)("Cannot copy"),
@@ -378,6 +355,58 @@ pub fn carry_in(ops: &Rc<Ops>, from: &Rc<Ops>, rels: Vec<String>, dir: &str, mov
     });
 }
 
+/// [`carry_in`]'s walks: what each of `rels` carries from `source` into `dir` of `vault`, and
+/// which of the paths it lands at are taken there. `stop` ends them, between pages on a host.
+fn walk_carried(
+    source: &Vault,
+    vault: &Vault,
+    rels: Vec<String>,
+    dir: &str,
+    stop: &Stop,
+) -> accent_api::Result<(Vec<Carried>, Vec<String>)> {
+    let mut carried: Vec<Carried> = Vec::new();
+    let mut existing = Vec::new();
+    for rel in rels {
+        if stop.stopped() {
+            break;
+        }
+        let to = child_path(dir, basename(&rel));
+        let walked = source.list_tree(&rel, stop).unwrap_or_else(|_| Walked {
+            unread: vec![String::new()],
+            ..Walked::default()
+        });
+        let is_dir = !walked.dirs.is_empty() || !walked.unread.is_empty();
+        // A name nothing holds here has nothing under it to take.
+        if vault.exists(&to) {
+            let here = match is_dir {
+                true => vault
+                    .list_tree(&to, stop)?
+                    .files
+                    .into_iter()
+                    .collect::<HashSet<_>>(),
+                false => HashSet::from([String::new()]),
+            };
+            existing.extend(
+                walked
+                    .files
+                    .iter()
+                    .filter(|file| here.contains(*file))
+                    .map(|file| match file.as_str() {
+                        "" => to.clone(),
+                        file => child_path(&to, file),
+                    }),
+            );
+        }
+        let at = |file: &str| match file {
+            "" => rel.clone(),
+            file => child_path(&rel, file),
+        };
+        let carry = Carry::landing(walked, &to, at);
+        carried.push((rel, to, is_dir, carry));
+    }
+    Ok((carried, existing))
+}
+
 /// [`carry_in`] once the names are settled: the copies on a worker, counted on the status bar in
 /// the words of the side that is remote, one toast, and with `moving` the originals that all
 /// landed taken out of `from`'s vault.
@@ -390,12 +419,7 @@ fn carry(
     moving: bool,
 ) {
     let (source, vault) = (from.vault.clone(), ops.vault.clone());
-    let (verb, what) = match (source.is_remote(), vault.is_remote()) {
-        (true, false) => ("Downloading", "Download"),
-        (false, true) => ("Uploading", "Upload"),
-        _ => ("Copying", "Copy"),
-    };
-    let what = if moving { "Move" } else { what };
+    let (verb, what) = carry_words(&source, &vault, moving);
     let count = Arc::new(Count::default());
     let total = carried.iter().map(|(.., carry)| carry.files.len()).sum();
     count.total.store(total, Ordering::Relaxed);
@@ -451,6 +475,17 @@ fn carry(
             trash_all(&from, whole);
         }
     });
+}
+
+/// What a carry from `source` into `vault` is called, in the words of the side that is remote:
+/// its status line's verb, and its toast's noun.
+fn carry_words(source: &Vault, vault: &Vault, moving: bool) -> (&'static str, &'static str) {
+    let (verb, what) = match (source.is_remote(), vault.is_remote()) {
+        (true, false) => ("Downloading", "Download"),
+        (false, true) => ("Uploading", "Upload"),
+        _ => ("Copying", "Copy"),
+    };
+    (verb, if moving { "Move" } else { what })
 }
 
 /// `rel` named from the folder `dir` a batch went into, which its toast has already said.
