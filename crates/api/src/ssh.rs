@@ -1250,8 +1250,14 @@ mod tests {
         let dir = scratch.path().join(SERVER_DIR);
         std::fs::create_dir_all(&dir).unwrap();
         let old = dir.join("accent-cli-old");
-        std::fs::copy("/bin/sleep", &old).unwrap();
-        let mut live = Command::new(&old).arg("30").spawn().unwrap();
+        // A shell waiting on a pipe stands in for a holder whatever its name: Ubuntu 26.04's
+        // `sleep` is uutils' multicall binary, which picks its utility by name and exits at once.
+        std::fs::copy("/bin/sh", &old).unwrap();
+        let mut live = Command::new(&old)
+            .args(["-c", "read line"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
         let command = install_server_cmd("0123456789abcdef", 3, false)
             .replace("$HOME", &quote(scratch.path().to_str().unwrap()));
         let install = || {
@@ -1265,6 +1271,7 @@ mod tests {
         };
         let installed = install();
         let retained = old.exists();
+        assert!(live.try_wait().unwrap().is_none(), "the stand-in exited");
         live.kill().unwrap();
         live.wait().unwrap();
         assert!(installed);
