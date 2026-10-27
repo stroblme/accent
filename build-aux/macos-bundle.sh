@@ -58,19 +58,26 @@ while [ -n "$todo" ]; do
 	f=$1
 	shift
 	todo=$*
-	# A module built as a library (Homebrew's SVG loader) is its own first entry in `otool -L`.
-	id=$(otool -D "$f" | tail -n +2)
-	case $id in '' | @*) ;; *) install_name_tool -id "@rpath/${f##*/}" "$f" ;; esac
-	for dep in $(otool -L "$f" | tail -n +2 | awk '{print $1}'); do
-		case $dep in /System/* | /usr/lib/* | @*) continue ;; esac
+	# A module built as a library (Homebrew's SVG loader) has an id of its own, which `otool -L`
+	# lists among what it loads.
+	case $(otool -D "$f" | tail -n +2) in '' | @*) ;; *) install_name_tool -id "@rpath/${f##*/}" "$f" ;; esac
+	self=$(otool -D "$f" | tail -n +2)
+	for dep in $(otool -L "$f" | awk -v self="$self" 'NR > 1 && $1 != self { print $1 }'); do
+		case $dep in /System/* | /usr/lib/*) continue ;; esac
 		name=${dep##*/}
 		if [ ! -e "$c/Frameworks/$name" ]; then
-			cp "$dep" "$c/Frameworks/"
+			# Homebrew links some libraries to their siblings by @rpath or @loader_path (libwebp's
+			# libsharpyuv, ICU's data): the prefix's library of that name, keg-only ones under opt/.
+			src=$dep
+			case $dep in @*) for src in "$prefix/lib/$name" "$prefix"/opt/*/lib/"$name"; do
+				[ -e "$src" ] && break
+			done ;; esac
+			cp "$src" "$c/Frameworks/"
 			chmod u+w "$c/Frameworks/$name"
 			install_name_tool -id "@rpath/$name" "$c/Frameworks/$name"
 			todo="$todo $c/Frameworks/$name"
 		fi
-		install_name_tool -change "$dep" "@rpath/$name" "$f"
+		[ "$dep" = "@rpath/$name" ] || install_name_tool -change "$dep" "@rpath/$name" "$f"
 	done
 	# A library's own rpath into the build machine (MacPorts' brotli has /opt/local/lib) would
 	# find the package manager's copy before ours wherever there is one.
