@@ -1135,6 +1135,7 @@ pub fn reveal(_window: &adw::ApplicationWindow, path: &Path, toast: impl Fn(&str
 /// Whether a launcher's error is the user saying no rather than something failing. GTK reports
 /// both ways of saying it in its own domain: the portal's chooser dismissed, and a cancelled call
 /// (the portal and the `FileManager1` fallback turn `G_IO_ERROR_CANCELLED` into the latter).
+#[cfg(not(target_os = "macos"))]
 fn declined(e: &glib::Error) -> bool {
     e.matches(gtk::DialogError::Dismissed) || e.matches(gtk::DialogError::Cancelled)
 }
@@ -1303,6 +1304,7 @@ fn folder_names(rows: Vec<FileRow>) -> Vec<String> {
 mod tests {
     use super::*;
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn a_dismissed_chooser_is_no_failure() {
         assert!(declined(&glib::Error::new(gtk::DialogError::Dismissed, "")));
