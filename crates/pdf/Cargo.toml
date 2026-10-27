@@ -1,0 +1,13 @@
+[package]
+name = "accent-pdf"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+# FlateDecode, the one filter of the objects read here: xref and object streams (`filter`).
+miniz_oxide = "0.9"
+# `memmem` for `startxref` at the end of a file and an `endstream` its `/Length` missed.
+memchr = "2"

@@ -1553,3 +1553,65 @@ fn line_groups_split_on_a_new_line() {
     assert_eq!(item_offset(&line_groups(&glyphs), 2), (1, 0));
     assert_eq!(line_groups(&[]), Vec::<Range<usize>>::new());
 }
+
+/// The PDF writer plan's corpus run, by hand: every PDF under `ACCENT_PDF_CORPUS` (never the
+/// user's vault) read by `accent-pdf`, against the pages pdfium counts. Encrypted files wait for
+/// the reader to decrypt, and a broken one for its repair through pdfium (the plan's D5), each
+/// listed; any other disagreement on a file pdfium opens fails.
+#[test]
+#[ignore = "ACCENT_PDF_CORPUS=<folder> cargo test -p accent-core --features pdf -- --ignored corpus"]
+fn the_corpus_reads_in_accent_pdf_as_pdfium_reads_it() {
+    fn pdfs(dir: &Path, out: &mut Vec<PathBuf>) {
+        for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let (path, kind) = (e.path(), e.file_type().unwrap());
+            match (kind.is_dir(), path.extension().is_some_and(|x| x == "pdf")) {
+                (true, _) => pdfs(&path, out),
+                (false, true) if kind.is_file() => out.push(path),
+                _ => {}
+            }
+        }
+    }
+    let root = PathBuf::from(std::env::var_os("ACCENT_PDF_CORPUS").expect("ACCENT_PDF_CORPUS"));
+    assert!(
+        !root.to_string_lossy().contains("Sync/Notes"),
+        "never the real vault"
+    );
+    if !available() {
+        return eprintln!("skipping: no libpdfium");
+    }
+    let mut found = Vec::new();
+    pdfs(&root, &mut found);
+    let (mut agree, mut encrypted, mut unread) = (0, 0, 0);
+    let (mut broken, mut wrong) = (Vec::new(), Vec::new());
+    for path in &found {
+        let Ok(pdfium) = PdfDoc::open(path).map(|doc| doc.page_count()) else {
+            unread += 1;
+            continue;
+        };
+        let file = std::fs::File::open(path).unwrap();
+        match accent_pdf::Pdf::open(file).and_then(|pdf| pdf.pages()) {
+            Ok(pages) if pages.len() == pdfium => agree += 1,
+            Err(accent_pdf::Error::Unsupported(what)) if what.contains("encrypted") => {
+                encrypted += 1
+            }
+            Err(accent_pdf::Error::Broken(why)) => {
+                broken.push(format!("{}: {why}", path.display()))
+            }
+            ours => wrong.push(format!(
+                "{}: pdfium {pdfium}, ours {ours:?}",
+                path.display()
+            )),
+        }
+    }
+    eprintln!(
+        "{} PDFs: {agree} agree, {encrypted} encrypted, {unread} pdfium cannot open, {} broken, \
+         {} differ",
+        found.len(),
+        broken.len(),
+        wrong.len()
+    );
+    for w in broken.iter().chain(&wrong) {
+        eprintln!("  {w}");
+    }
+    assert!(wrong.is_empty());
+}

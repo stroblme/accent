@@ -91,6 +91,7 @@ name = "accent-core"
 version = "2.0.0"
 dependencies = [
  "accent-drawio",
+ "accent-pdf",
  "anyhow",
  "blake3",
  "chrono",
@@ -172,6 +173,15 @@ dependencies = [
  "accent-core",
  "pkg-config",
  "roxmltree",
+ "thiserror",
+]
+
+[[package]]
+name = "accent-pdf"
+version = "2.0.0"
+dependencies = [
+ "memchr",
+ "miniz_oxide",
  "thiserror",
 ]
 

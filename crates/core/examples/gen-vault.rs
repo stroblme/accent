@@ -1730,6 +1730,37 @@ mod tests {
         let _ = fs::remove_file(&p);
     }
 
+    /// Every PDF the generator writes reads in accent's own reader with the pages pdfium counts.
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn every_pdf_reads_in_accent_pdf_as_pdfium_reads_it() {
+        if !accent_core::pdf::available() {
+            return eprintln!("skipping: no libpdfium");
+        }
+        fn pdfs(dir: &Path, out: &mut Vec<PathBuf>) {
+            for e in fs::read_dir(dir).unwrap().flatten() {
+                let (path, kind) = (e.path(), e.file_type().unwrap());
+                match (kind.is_dir(), path.extension().is_some_and(|x| x == "pdf")) {
+                    (true, _) => pdfs(&path, out),
+                    (false, true) if kind.is_file() => out.push(path),
+                    _ => {}
+                }
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let vault = tmp.path().join("testvault");
+        run(&vault, 20, 400, 7, false).unwrap();
+        let mut found = Vec::new();
+        pdfs(&vault, &mut found);
+        assert!(found.len() >= 4, "{found:?}");
+        for path in found {
+            let ours = accent_pdf::Pdf::open(fs::File::open(&path).unwrap());
+            let ours = ours.and_then(|pdf| pdf.pages()).map(|pages| pages.len());
+            let pdfium = accent_core::pdf::PdfDoc::open(&path).unwrap().page_count();
+            assert_eq!(ours.ok(), Some(pdfium), "{}", path.display());
+        }
+    }
+
     #[test]
     fn tiny_vault_is_generated_and_scans_as_expected() {
         let tmp = std::env::temp_dir().join(format!("accent-genvault-{}", std::process::id()));
