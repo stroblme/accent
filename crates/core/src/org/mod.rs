@@ -9,10 +9,12 @@
 //! styled as a note is: the content in its style, the syntax around it dimmed as [`Style::Marker`].
 
 mod links;
+mod search;
 mod table;
 mod task;
 
 pub use links::{link, path_link_keys, rewrite_moved};
+pub use search::{Search, file_line};
 pub use table::table_key;
 pub use task::toggle_task;
 
@@ -34,17 +36,53 @@ pub fn analyze(text: &str) -> Analysis {
     scan(text).analysis
 }
 
-/// Where an anchor lands: on the `<<target>>` it names, else on the heading, by its title as
-/// `[[*Title]]` and `[[file:x.org::*Title]]` write it or by its slug, as a note's
-/// `[t](x.org#title)` does.
+/// Where an anchor lands, read as `org-link-search` reads a link's search ([`Search`]): a match,
+/// the heading a custom ID names, or by name on the `<<target>>` it names, else on the heading, by
+/// its title as `[[*Title]]` and `[[file:x.org::*Title]]` write it or by its slug, as a note's
+/// `[t](x.org#title)` does. A file link's line is [`file_line`]'s.
 pub fn anchor_range(text: &str, anchor: &str) -> Option<Range<usize>> {
+    let name = match Search::of(anchor) {
+        Search::Name(name) => name,
+        Search::CustomId(id) => return custom_id(text, id),
+        search => return search.in_text(text),
+    };
     let scan = scan(text);
-    let anchor = anchor.trim();
     scan.targets
         .iter()
-        .find(|(_, name)| name.eq_ignore_ascii_case(anchor))
+        .find(|(_, target)| target.eq_ignore_ascii_case(name))
         .map(|(at, _)| at.clone())
-        .or_else(|| heading_for(&scan.analysis.headings, anchor).map(|h| h.range.clone()))
+        .or_else(|| heading_for(&scan.analysis.headings, name).map(|h| h.range.clone()))
+}
+
+/// The heading whose property drawer sets `CUSTOM_ID` to `id`, ignoring case as
+/// `org-find-property` does, or the file's top for a drawer before every heading.
+fn custom_id(text: &str, id: &str) -> Option<Range<usize>> {
+    let lines = lines(text);
+    let mut heading = 0..0;
+    let mut i = 0;
+    while i < lines.len() {
+        let line = &text[lines[i].clone()];
+        if is_heading(line) {
+            heading = lines[i].clone();
+        }
+        let Some((last, style)) = closed(text, &lines, i) else {
+            i += 1;
+            continue;
+        };
+        let properties =
+            style == Style::Frontmatter && line.trim().eq_ignore_ascii_case(":PROPERTIES:");
+        let set = |l: &Range<usize>| {
+            let s = text[l.clone()].trim();
+            s.get(..11)
+                .is_some_and(|key| key.eq_ignore_ascii_case(":CUSTOM_ID:"))
+                && s[11..].trim().eq_ignore_ascii_case(id)
+        };
+        if properties && lines[i + 1..last].iter().any(set) {
+            return Some(heading);
+        }
+        i = last + 1;
+    }
+    None
 }
 
 /// Where text put at the top of an org file goes: below the `#+KEYWORD:` lines and drawers

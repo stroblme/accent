@@ -867,11 +867,8 @@ impl App {
     pub fn no_heading(&self, tab: &Tab, anchor: &str) {
         tab.goto_pos(accent_api::Pos::default());
         let name = doc::file_name(&tab.rel()).to_string();
-        let what = match anchor.starts_with('^') {
-            true => "block",
-            false => "heading",
-        };
-        self.toast(&format!("No {what} {anchor} in {name}"));
+        let what = accent_core::note::looked_for(&tab.rel(), anchor);
+        self.toast(&format!("No {what} in {name}"));
     }
 
     /// Apply a PDF anchor immediately after opening its tab.

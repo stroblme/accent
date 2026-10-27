@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use accent_api::{Error, Etag, FileKind, Read, fs};
-use accent_core::note::Syntax;
+use accent_core::note::{self, Syntax};
 use accent_core::path::linked_path;
 use accent_core::{markdown, notebook, org, path};
 use base64::Engine;
@@ -563,7 +563,7 @@ impl Server {
             };
             let line = anchor.and_then(|anchor| {
                 let text = s.text(&rel).ok()?.text;
-                let at = Syntax::of(&rel).anchor_range(&text, anchor)?;
+                let at = note::anchor_range(&rel, &text, anchor)?;
                 Some(line_at(&text, at.start).0)
             });
             Ok(answer(json!({"path": rel, "line": line}), partial))

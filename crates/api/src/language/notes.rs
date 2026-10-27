@@ -13,7 +13,7 @@ use crate::Result;
 use accent_core::fuzzy;
 use accent_core::index::Index;
 use accent_core::markdown::{self, LinkKind};
-use accent_core::note::Syntax;
+use accent_core::note::{self, Syntax};
 use accent_core::org;
 use accent_core::path::{self, FileType, basename, parent_dir, stem};
 
@@ -1001,10 +1001,12 @@ impl Notes {
                 }
             }
         };
+        // An org file link's digits are a line of whatever file it names (`org-link-open-as-file`).
+        let lines = Syntax::of(rel) == Syntax::Org && link.kind == LinkKind::Markdown;
         let range = link
             .anchor
             .as_ref()
-            .and_then(|anchor| self.anchored(&target, anchor));
+            .and_then(|anchor| self.anchored(&target, anchor, lines));
         Ok(vec![Location {
             path: target,
             range: range.unwrap_or_default(),
@@ -1063,12 +1065,14 @@ impl Notes {
             .then_some(path)
     }
 
-    /// Where the heading or the block an anchor names sits in `rel`, if it is there at all.
-    fn anchored(&self, rel: &str, anchor: &str) -> Option<Range> {
+    /// Where the heading, the block or the org search an anchor names sits in `rel`, if it is
+    /// there at all ([`note::anchor_range`]); with `lines`, digits alone are a line
+    /// ([`org::file_line`]).
+    fn anchored(&self, rel: &str, anchor: &str, lines: bool) -> Option<Range> {
         let text = self.text_of(rel).ok()?;
-        Syntax::of(rel)
-            .anchor_range(&text, anchor)
-            .map(|r| range_of(&text, &r))
+        let line = lines.then(|| org::file_line(&text, anchor)).flatten();
+        let at = line.or_else(|| note::anchor_range(rel, &text, anchor))?;
+        Some(range_of(&text, &at))
     }
 
     fn symbols(&self, rel: &str) -> Result<Vec<Symbol>> {
@@ -1502,6 +1506,39 @@ mod tests {
                 ("[[Nowhere/Other]]", Some("Nowhere/Other.md, not created"))
             ]
         );
+    }
+
+    /// An org file link's `::2` is a line of any file, past the last one the last, as org's own
+    /// goes to the end; `[[2]]` into the org file itself names a heading.
+    #[test]
+    fn an_org_file_links_digits_are_a_line() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::write(vault.path().join("code.py"), "a\nb\nc\n").unwrap();
+        let org = "[[file:code.py::2]] [[file:code.py::99]]\n* 2\n[[2]]\n";
+        std::fs::write(vault.path().join("a.org"), org).unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let db = cache.path().join("i.db");
+        Index::open(&db)
+            .unwrap()
+            .reconcile(vault.path(), |_| {})
+            .unwrap();
+        let notes = Notes::open_at(
+            vault.path().to_path_buf(),
+            &db,
+            std::sync::mpsc::channel().0,
+            Arc::new(Ignored::new(vault.path().to_path_buf())),
+        )
+        .unwrap();
+        let landed = |line, character| {
+            let loc = notes
+                .definition("a.org", Pos { line, character })
+                .unwrap()
+                .remove(0);
+            (loc.path, loc.range.start.line, loc.anchor)
+        };
+        assert_eq!(landed(0, 3), ("code.py".into(), 1, None));
+        assert_eq!(landed(0, 23), ("code.py".into(), 2, None));
+        assert_eq!(landed(2, 2), ("a.org".into(), 1, None));
     }
 
     /// `#^id` goes to the block the id marks, from a wikilink or a markdown link, and one the

@@ -6,7 +6,7 @@ use super::{Tab, caret, line_end};
 use crate::{fold, lang, multicaret};
 use accent_api::Pos;
 use accent_api::language::pos_of;
-use accent_core::note::Syntax;
+use accent_core::note::{self, Syntax};
 use accent_core::search::{self, Options, Regex};
 use gtk::prelude::*;
 use gtk::{gdk, glib};
@@ -560,11 +560,12 @@ impl Tab {
         self.jump_to(&lang::iter_at(&self.buffer, pos), 0.25);
     }
 
-    /// Jump to a heading slug/text or `^id` block and report whether it exists.
-    /// Missing anchors leave the caret unchanged.
+    /// Jump to a heading slug/text, a `^id` block or an org search option's place
+    /// ([`note::anchor_range`]) and report whether it exists. Missing anchors leave the caret
+    /// unchanged.
     pub fn goto_heading(&self, anchor: &str) -> bool {
         let text = self.text();
-        let Some(at) = Syntax::of(&self.rel()).anchor_range(&text, anchor) else {
+        let Some(at) = note::anchor_range(&self.rel(), &text, anchor) else {
             return false;
         };
         self.goto_pos(pos_of(&text, at.start));
