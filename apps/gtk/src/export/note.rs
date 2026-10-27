@@ -5,8 +5,9 @@
 //! Print to File PDF output. PDF and diagram tabs use their own export modules.
 
 use super::*;
+use crate::assets;
 use crate::look::{self, Look, Served};
-use crate::preview::{self, Preview};
+use crate::preview::Preview;
 use std::sync::Mutex;
 use webkit6::prelude::*;
 
@@ -100,7 +101,7 @@ impl App {
                     .to_string();
                 let (resolve, css) = (
                     app.asset_resolver(),
-                    preview::paper_css(&app.config.borrow()),
+                    super::css::paper_css(&app.config.borrow()),
                 );
                 let note = tab.rel();
                 let web = app.web_images.borrow().clone();
@@ -109,7 +110,7 @@ impl App {
                 let write = move || {
                     let body = inline_images(&html, |uri| match drawn.get(uri) {
                         Some(diagram) => diagram.clone(),
-                        None => data_uri(&preview::asset(&*resolve, &note, uri)?),
+                        None => data_uri(&assets::asset(&*resolve, &note, uri)?),
                     });
                     accent_core::fs::write_bytes(
                         &dest,
@@ -251,7 +252,7 @@ fn data_uri(path: &Path) -> Option<String> {
 /// `None` where it cannot be: drawn here, on the main thread, the file fetched on a worker.
 async fn drawn_diagrams(
     html: &str,
-    resolve: &Arc<preview::Resolve>,
+    resolve: &Arc<assets::Resolve>,
     note: &str,
     web: &HashSet<String>,
 ) -> HashMap<String, Option<String>> {
@@ -262,14 +263,14 @@ async fn drawn_diagrams(
         .skip(1)
         .filter_map(|rest| rest.split('"').next())
         .map(|uri| uri.replace("&amp;", "&"))
-        .filter(|uri| preview::is_diagram(uri));
+        .filter(|uri| assets::is_diagram(uri));
     for uri in sources {
         let (resolve, note, at) = (resolve.clone(), note.to_string(), uri.clone());
         let found =
-            crate::work::off_thread("asset", move || preview::asset_of(&*resolve, &note, &at));
+            crate::work::off_thread("asset", move || assets::asset_of(&*resolve, &note, &at));
         let svg = match found.await.flatten() {
             Some((key, path)) => {
-                let page = preview::diagram_page(&uri);
+                let page = assets::diagram_page(&uri);
                 diagram::embed::svg(&path, page.as_deref(), web.contains(&key)).await
             }
             None => None,

@@ -15,9 +15,6 @@ pub fn idle_for() -> std::time::Duration {
     std::time::Duration::from_secs(5 * 60)
 }
 
-/// Resolve vault-relative assets to their key and local path, as the WebKit preview does.
-pub type Resolve = dyn Fn(&str) -> Option<(String, PathBuf)> + Send + Sync;
-
 type Keys = Rc<RefCell<HashSet<String>>>;
 
 pub struct Preview {

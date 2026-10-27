@@ -512,8 +512,8 @@ impl App {
     }
 
     /// Resolve preview assets through the vault to local files, downloading remote assets as needed.
-    /// Loose notes use their own folder through preview::resolve_asset.
-    pub(crate) fn asset_resolver(&self) -> Arc<preview::Resolve> {
+    /// Loose notes use their own folder through assets::resolve_asset.
+    pub(crate) fn asset_resolver(&self) -> Arc<crate::assets::Resolve> {
         let vault = self.vault().cloned();
         Arc::new(move |rel: &str| match &vault {
             // `fetch` refuses a `rel` that climbs out lexically, on either backend. What it
