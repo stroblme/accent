@@ -17,8 +17,10 @@ mod tags;
 mod widgets;
 
 pub use breakpoints::Row as BreakpointRow;
+pub use code::KernelState;
 #[cfg(feature = "bench")]
 pub use debug::Shown as DebugShown;
+pub use debug::Why as DebugWhy;
 pub use debug::{Data as DebugData, Watched};
 pub use details::{Fact, Group};
 pub use outline::{Line, above, outline_note};
@@ -422,19 +424,24 @@ impl Sidebar {
         self.code.set(key, goals, font);
     }
 
-    /// A debug session's state in the Code pane: the strip saying `line`, `why` in its tooltip,
-    /// and whether the program is `paused`. Running, Call Stack and Variables are cleared.
-    pub fn set_debug_state(&self, line: &str, why: Option<&str>, paused: bool) {
+    /// A debug session's state in the Code pane: whether the program is `paused`, the strip
+    /// saying `line` to a screen reader. Running, Call Stack and Variables are cleared.
+    pub fn set_debug_state(&self, line: &str, paused: bool) {
         if let Some(debug) = &self.code.debug {
-            debug.set_state(line, why, paused);
+            debug.set_state(line, paused);
             self.code.set_debugging(true);
         }
     }
 
-    /// The program's threads, and the one it paused on open on its calls.
-    pub fn set_debug_threads(&self, threads: &[Thread], paused: Option<(i64, Vec<Frame>)>) {
+    /// The program's threads, and the one it paused on open on its calls, saying `why` it paused.
+    pub fn set_debug_threads(
+        &self,
+        threads: &[Thread],
+        paused: Option<(i64, Vec<Frame>)>,
+        why: &DebugWhy,
+    ) {
         if let Some(debug) = &self.code.debug {
-            debug.set_threads(threads, paused);
+            debug.set_threads(threads, paused, why);
         }
     }
 
@@ -500,10 +507,10 @@ impl Sidebar {
         }
     }
 
-    /// The notebook in front's kernel in the Code pane: its strip saying `line`, `why` in its
-    /// tooltip, with a spinner while it is `busy` running cells, or put away (`None`).
-    pub fn set_kernel(&self, shown: Option<(&str, Option<&str>)>, busy: bool) {
-        self.code.set_kernel(shown, busy);
+    /// The notebook in front's kernel in the Code pane: its strip showing `shown`, or put away
+    /// (`None`).
+    pub fn set_kernel(&self, shown: Option<&KernelState>) {
+        self.code.set_kernel(shown);
     }
 
     #[cfg(feature = "bench")]

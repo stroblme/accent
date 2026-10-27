@@ -29,10 +29,8 @@ pub(super) struct Code {
     /// Whether the debugger's strip is up — a session runs, or the tab in front can be debugged —
     /// which keeps the sections' page up.
     debugging: Cell<bool>,
-    /// The notebook in front's kernel: Run All, Interrupt, Restart, Shut Down and Clear All
-    /// Outputs over what it is doing, up while it is in front and no debug session runs.
-    kernel: gtk::Box,
-    kernel_state: debug::Caption,
+    /// The notebook in front's kernel, up while it is in front and no debug session runs.
+    kernel: KernelStrip,
     /// The Python Environment dropdown, in a window with a vault: beside whichever strip is up,
     /// the same for a Python file and a notebook, and away while a debug session runs.
     python: Option<Picker>,
@@ -84,15 +82,8 @@ impl Code {
         if let Some(debug) = &debug {
             strips.append(&debug.strip);
         }
-        let (kernel, kernel_state) = debug::strip_of(&[
-            debug::strip_button("media-seek-forward-symbolic", "win.notebook-run-all").upcast(),
-            debug::strip_button("media-playback-stop-symbolic", "win.notebook-interrupt").upcast(),
-            debug::strip_button("view-refresh-symbolic", "win.notebook-restart").upcast(),
-            debug::strip_button("system-shutdown-symbolic", "win.notebook-shut-down").upcast(),
-            debug::strip_button("edit-clear-all-symbolic", "win.notebook-clear-all-outputs")
-                .upcast(),
-        ]);
-        strips.append(&kernel);
+        let kernel = KernelStrip::new();
+        strips.append(&kernel.root);
         let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
         page.append(&row);
         page.append(&sections.root);
@@ -116,7 +107,6 @@ impl Code {
             debug,
             debugging: Cell::new(false),
             kernel,
-            kernel_state,
             python,
             strips,
             goal_labels,
@@ -218,17 +208,16 @@ impl Code {
     /// `get_visible`, not `is_visible`: the strip's own flag, which a hidden sidebar does not
     /// clear, so a strip put away meanwhile is not left up for the sidebar's return.
     fn strip_up(&self) -> bool {
-        self.debugging.get() || self.kernel.get_visible()
+        self.debugging.get() || self.kernel.root.get_visible()
     }
 
-    /// The kernel's strip saying `line`, `why` in its tooltip, with a spinner while it is `busy`
-    /// running cells, or put away (`None`).
-    pub(super) fn set_kernel(&self, shown: Option<(&str, Option<&str>)>, busy: bool) {
-        if let Some((line, why)) = shown {
-            self.kernel_state.say(line, why, busy);
+    /// The kernel's strip showing `shown`, or put away (`None`).
+    pub(super) fn set_kernel(&self, shown: Option<&KernelState>) {
+        if let Some(state) = shown {
+            self.kernel.show(state);
         }
-        if self.kernel.get_visible() != shown.is_some() {
-            self.kernel.set_visible(shown.is_some());
+        if self.kernel.root.get_visible() != shown.is_some() {
+            self.kernel.root.set_visible(shown.is_some());
             self.pick_page();
         }
     }
@@ -246,10 +235,10 @@ impl Code {
         Some(python.button.clone())
     }
 
-    /// What the kernel's strip says, while it is up, for `ACCENT_BENCH_KERNEL`.
+    /// What the kernel's strip says and shows, while it is up, for `ACCENT_BENCH_KERNEL`.
     #[cfg(feature = "bench")]
     pub(super) fn kernel_line(&self) -> Option<String> {
-        self.kernel.is_visible().then(|| self.kernel_state.text())
+        self.kernel.root.is_visible().then(|| self.kernel.shown())
     }
 
     pub(super) fn section(&self, name: &str) -> Option<&Section> {
@@ -329,4 +318,96 @@ fn text(content: &str) -> gtk::Label {
         .wrap_mode(pango::WrapMode::WordChar)
         .selectable(true)
         .build()
+}
+
+/// The notebook in front's kernel, as its strip shows it.
+pub enum KernelState {
+    /// None runs: none was started, or it was shut down or ended.
+    Off,
+    /// Started, and not answered yet.
+    Starting,
+    /// Answered as `what` (`ipython 9.10.0 in python3`), with cells running or waiting for it
+    /// (`busy`) or not.
+    Up { what: String, busy: bool },
+}
+
+/// The kernel's strip, VS Code's notebook toolbar (user decision 2026-10-27): after a spinner
+/// while the kernel starts or runs cells, Run All, or Stop in its place meanwhile, then Restart
+/// Kernel and Clear All Outputs, flat icon buttons on the window's actions. Shut Down Kernel is
+/// the palette's, and Stop's while the kernel starts, there being nothing to interrupt yet.
+struct KernelStrip {
+    root: gtk::Box,
+    working: debug::Working,
+    run_all: gtk::Button,
+    /// Stop while cells run: Interrupt Kernel.
+    interrupt: gtk::Button,
+    /// Stop while the kernel starts: Shut Down Kernel.
+    cancel: gtk::Button,
+    restart: gtk::Button,
+}
+
+impl KernelStrip {
+    fn new() -> KernelStrip {
+        let stop = "media-playback-stop-symbolic";
+        let run_all = debug::strip_button("media-seek-forward-symbolic", "win.notebook-run-all");
+        let interrupt = debug::strip_button(stop, "win.notebook-interrupt");
+        let cancel = debug::strip_button(stop, "win.notebook-shut-down");
+        let restart = debug::strip_button("view-refresh-symbolic", "win.notebook-restart");
+        let root = debug::strip_of(&[
+            run_all.clone().upcast(),
+            interrupt.clone().upcast(),
+            cancel.clone().upcast(),
+            restart.clone().upcast(),
+            debug::strip_button("edit-clear-all-symbolic", "win.notebook-clear-all-outputs")
+                .upcast(),
+        ]);
+        let working = debug::Working::new(&root);
+        root.prepend(&working.slot);
+        KernelStrip {
+            root,
+            working,
+            run_all,
+            interrupt,
+            cancel,
+            restart,
+        }
+    }
+
+    /// Run All or Stop, the spinner while the kernel is at work, and the kernel that answered in
+    /// Restart Kernel's tooltip: it keeps its Python, which the dropdown may no longer name, until
+    /// it is restarted.
+    fn show(&self, state: &KernelState) {
+        let (said, working) = match state {
+            KernelState::Off => ("No kernel", false),
+            KernelState::Starting => ("Starting…", true),
+            KernelState::Up { busy: false, .. } => ("Idle", false),
+            KernelState::Up { busy: true, .. } => ("Busy", true),
+        };
+        self.cancel
+            .set_visible(matches!(state, KernelState::Starting));
+        self.interrupt
+            .set_visible(matches!(state, KernelState::Up { busy: true, .. }));
+        self.run_all
+            .set_visible(!self.cancel.get_visible() && !self.interrupt.get_visible());
+        let restart = crate::actions::label_of("win.notebook-restart");
+        let tooltip = match state {
+            KernelState::Up { what, .. } => format!("{restart} ({what})"),
+            _ => restart.to_string(),
+        };
+        self.restart.set_tooltip_text(Some(&tooltip));
+        self.working.say(said, working);
+    }
+
+    /// What it says, and which of Run All and the Stops it shows, for the drills.
+    #[cfg(feature = "bench")]
+    fn shown(&self) -> String {
+        let toggle = [
+            (&self.run_all, "run-all"),
+            (&self.interrupt, "interrupt"),
+            (&self.cancel, "shut-down"),
+        ];
+        let toggle = toggle.into_iter().find(|(button, _)| button.get_visible());
+        let name = toggle.map_or("none", |(_, name)| name);
+        format!("{} {name}", self.working.said())
+    }
 }

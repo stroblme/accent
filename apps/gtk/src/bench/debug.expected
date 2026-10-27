@@ -19,5 +19,5 @@ bench debug ended 0
 bench debug output total 42
 bench debug log total is 42
 bench debug program kept
-bench debug pane shown Not running
+bench debug pane shown Not running spinner=0
 bench debug pane shown behind the program

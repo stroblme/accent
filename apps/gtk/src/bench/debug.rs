@@ -104,7 +104,8 @@ pub(super) fn bench_debug(app: &Rc<App>, arg: &str) {
         let Some(at) = until(&app, "stopped", || paused_line(&tab)).await else {
             return;
         };
-        let state = shown(&app).0;
+        // As the paused thread's row in Call Stack says it.
+        let state = shown(&app).4;
         let why = state.strip_prefix("Paused on ").unwrap_or(&state);
         println!("bench debug stopped {rel}:{} {why}", at + 1);
         println!("bench debug_ms stopped {:.0}", ms_since(t));
@@ -305,7 +306,7 @@ pub(super) fn paused_line(tab: &Tab) -> Option<u32> {
         .map(|line| line as u32)
 }
 
-/// The strip's line, the calls and the values the Code pane shows.
+/// What the strip says, the calls and the values the Code pane shows, and why it paused.
 pub(super) fn shown(app: &App) -> sidebar::DebugShown {
     app.sidebar
         .get()

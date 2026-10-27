@@ -1,7 +1,8 @@
+bench kernel strip Starting… spinner=1 shut-down cell 1 run-greyed
 bench kernel cell 1 count=[1] outputs=stream:"hi\n"
 bench kernel status succeeded=1 edited=1 undone=1
 bench kernel status stale_running=1 stale_done=1
-bench kernel pane shown Idle
+bench kernel pane shown Idle spinner=0 run-all
 bench kernel cell 2 count=[3] outputs=execute_result:"2"
 bench kernel fit unfit=0
 bench kernel input prompt="name? " password=false
@@ -9,6 +10,7 @@ bench kernel cell 3 count=[4] outputs=stream:"hello ada\n"
 bench kernel interrupted cell 4 count=[5] outputs=error:KeyboardInterrupt
 bench kernel status edited_running=1 late_done=1
 bench kernel running dimmed=1 cell 4 count=[*] outputs=error:KeyboardInterrupt
+bench kernel strip Busy spinner=1 interrupt cell 4 stop cell 5 run-greyed
 bench kernel replaced dimmed=0 cell 4 count=[9] outputs=error:KeyboardInterrupt
 bench kernel run_all stops cell 5 count=[ ] outputs=0
 bench kernel status restart=1

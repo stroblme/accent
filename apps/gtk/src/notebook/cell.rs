@@ -460,15 +460,29 @@ pub fn flavour(kind: Kind) -> Flavour {
     }
 }
 
+/// Where a code cell stands with its notebook's kernel, which its run button follows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Turn {
+    /// Neither waiting nor running: Run Cell.
+    Free,
+    /// Waiting for the kernel to start or behind another run: Run Cell, greyed.
+    Waiting,
+    /// The run the kernel is on: Stop in Run Cell's place, which interrupts it.
+    Running,
+}
+
 /// The cell buttons, one column of them the notebook stands in the rail of the cell it serves:
-/// Run Cell beside a code cell of a notebook that runs, Move Cell Up, Move Cell Down, Delete Cell
-/// and a More menu with the rest.
+/// Run Cell beside a code cell of a notebook that runs, or Stop while the kernel runs that cell,
+/// Move Cell Up, Move Cell Down, Delete Cell and a More menu with the rest.
 pub struct Tools {
     pub bar: gtk::Box,
     pub run: gtk::Button,
+    pub stop: gtk::Button,
     status: gtk::Box,
     /// Whether the notebook's code cells run: an `.ipynb`'s, not marimo's.
     runs: bool,
+    /// Whether the cell it serves is a code cell that runs, which has Run Cell or Stop.
+    runnable: std::cell::Cell<bool>,
     pub up: gtk::Button,
     pub down: gtk::Button,
     pub delete: gtk::Button,
@@ -492,6 +506,7 @@ impl Tools {
             b
         };
         let run = button("media-playback-start-symbolic", "win.notebook-run-cell");
+        let stop = button("media-playback-stop-symbolic", "win.notebook-interrupt");
         let status = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         status.add_css_class("notebook-execution");
         status.set_halign(gtk::Align::Center);
@@ -513,15 +528,17 @@ impl Tools {
         bar.add_css_class("chrome-fade");
         bar.set_visible(false);
         bar.append(&status);
-        for b in [&run, &up, &down, &delete] {
+        for b in [&run, &stop, &up, &down, &delete] {
             bar.append(b);
         }
         bar.append(&more);
         Tools {
             bar,
             run,
+            stop,
             status,
             runs: format == Format::Ipynb,
+            runnable: std::cell::Cell::new(false),
             up,
             down,
             delete,
@@ -531,10 +548,11 @@ impl Tools {
         }
     }
 
-    /// Stand in `view`'s rail, or nowhere.
-    pub fn place(&self, view: Option<&CellView>) {
+    /// Stand in `view`'s rail, or nowhere, its cell where it stands with the kernel (`turn`).
+    pub fn place(&self, view: Option<&CellView>, turn: Turn) {
         let code = view.is_some_and(|v| v.kind == Kind::Code);
-        self.run.set_visible(self.runs && code);
+        self.runnable.set(self.runs && code);
+        self.show_turn(turn);
         self.status.set_visible(self.runs && code);
         if let Some(view) = view {
             self.show_execution(view.execution.get());
@@ -545,6 +563,14 @@ impl Tools {
         if let Some(overlay) = self.bar.parent() {
             overlay.queue_allocate();
         }
+    }
+
+    /// Run Cell, greyed while the cell waits, or Stop in its place while the kernel runs it.
+    pub fn show_turn(&self, turn: Turn) {
+        let runnable = self.runnable.get();
+        self.run.set_visible(runnable && turn != Turn::Running);
+        self.run.set_sensitive(turn != Turn::Waiting);
+        self.stop.set_visible(runnable && turn == Turn::Running);
     }
 
     pub fn show_execution(&self, state: Execution) {

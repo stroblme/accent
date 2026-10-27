@@ -69,6 +69,13 @@ pub(super) fn bench_kernel(app: &Rc<App>, rel: &str) {
         let t = Instant::now();
         tab.bench_select(0);
         act("win.newline-below");
+        // Its kernel starting, the strip offers to stop that, and the cell waits for it.
+        glib::timeout_future(Duration::from_millis(100)).await;
+        println!(
+            "bench kernel strip {} cell 1 {}",
+            strip(&app),
+            tab.bench_turn(0)
+        );
         if !done(&app, &tab, "cell 1").await {
             return;
         }
@@ -98,11 +105,10 @@ pub(super) fn bench_kernel(app: &Rc<App>, rel: &str) {
             u8::from(stale_done)
         );
         let code = app.sidebar.get().is_some_and(|s| s.has_pane("code"));
-        let line = app.sidebar.get().and_then(|s| s.kernel_line());
         println!(
             "bench kernel pane {} {}",
             if code { "shown" } else { "hidden" },
-            line.unwrap_or_default()
+            strip(&app)
         );
 
         tab.bench_select(1);
@@ -251,6 +257,15 @@ async fn interrupt(app: &Rc<App>, tab: &NotebookTab, n: usize, say: bool) -> boo
     glib::timeout_future(Duration::from_millis(1500)).await;
     if say {
         print_cell(tab, n, &stale(tab, n, "running"));
+        // Stop in Run All's place and in the running cell's, the cell behind it waiting.
+        println!(
+            "bench kernel strip {} cell {} {} cell {} {}",
+            strip(app),
+            n + 1,
+            tab.bench_turn(n),
+            n + 2,
+            tab.bench_turn(n + 1)
+        );
         // `ACCENT_BENCH_KERNEL_SHOT=<png>`: the window as the run has left it, for looking at.
         if let Ok(path) = std::env::var("ACCENT_BENCH_KERNEL_SHOT") {
             bench_pump();
@@ -259,6 +274,12 @@ async fn interrupt(app: &Rc<App>, tab: &NotebookTab, n: usize, say: bool) -> boo
     }
     let _ = WidgetExt::activate_action(&app.window, "win.notebook-interrupt", None);
     done(app, tab, "interrupt").await
+}
+
+/// What the Code pane's kernel strip says and which of Run All and Stop it shows.
+fn strip(app: &App) -> String {
+    let line = app.sidebar.get().and_then(|s| s.kernel_line());
+    line.unwrap_or_else(|| "hidden".to_string())
 }
 
 /// `bench kernel <said>cell <n+1> count=<label> outputs=<each>`, the outputs as the model holds

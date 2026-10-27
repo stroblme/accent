@@ -943,9 +943,12 @@ impl NotebookTab {
                 }
             });
         };
-        // Run Cell is the window's, whose vault the kernel runs where.
+        // Run Cell and Stop are the window's, whose vault the kernel runs where.
         act(&self.tools.run, |tab| {
             let _ = tab.scroller.activate_action("win.notebook-run-cell", None);
+        });
+        act(&self.tools.stop, |tab| {
+            let _ = tab.scroller.activate_action("win.notebook-interrupt", None);
         });
         // Over the bar, which reaches past a short cell's rail, the pointer is still on its cell.
         let motion = gtk::EventControllerMotion::new();
@@ -1063,7 +1066,10 @@ impl NotebookTab {
             false => self.view_of(id),
         };
         let tools = shown(self.hovered.get().or(self.selected.get()));
-        self.tools.place(tools.as_deref());
+        let turn = tools
+            .as_ref()
+            .map_or(cell::Turn::Free, |view| self.turn(view.id));
+        self.tools.place(tools.as_deref(), turn);
         let gap = shown(self.gap_cell.get());
         let target = gap.as_ref().map(|v| v.gap.clone().upcast::<gtk::Widget>());
         if self.gap.parent() != target {

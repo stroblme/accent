@@ -19,7 +19,8 @@ pub(super) struct Run {
     frame: Cell<Option<i64>>,
     /// Bumped each time the program moves on, so an answer about where it was is dropped.
     generation: Cell<u32>,
-    /// What the strip says while paused, and the exception's text in its tooltip.
+    /// Why the program paused, which the paused thread's row and the strip's description say,
+    /// and the exception's message.
     paused: RefCell<(String, Option<String>)>,
     /// Restart Debugging: start the program again once this session has ended.
     restart: Cell<bool>,
@@ -360,7 +361,8 @@ impl App {
                 app.sync_debug();
             }
             if let Some(sidebar) = app.sidebar.get() {
-                sidebar.set_debug_threads(&threads, Some((thread, frames.clone())));
+                let why = run.paused.borrow().clone();
+                sidebar.set_debug_threads(&threads, Some((thread, frames.clone())), &why);
             }
             if let Some(top) = frames.first() {
                 app.select_frame(top);
@@ -642,13 +644,13 @@ impl App {
             return sidebar.clear_debug(self.code_program().is_some());
         };
         let said = run.paused.borrow();
-        let (line, why) = match state {
-            State::Starting => ("Starting…", None),
-            State::Running => ("Running", None),
-            State::Paused { .. } => (said.0.as_str(), said.1.as_deref()),
-            State::Stopping => ("Stopping…", None),
+        let line = match state {
+            State::Starting => "Starting…",
+            State::Running => "Running",
+            State::Paused { .. } => said.0.as_str(),
+            State::Stopping => "Stopping…",
         };
-        sidebar.set_debug_state(line, why, paused);
+        sidebar.set_debug_state(line, paused);
     }
 
     /// The debugged program's tab, while it is open.

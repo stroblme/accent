@@ -13,7 +13,8 @@ use accent_core::notebook::{CellId, Edit, Format, Kind, Run};
 use serde_json::Value;
 
 use super::NotebookTab;
-use super::cell::Execution;
+use super::cell::{Execution, Turn};
+use crate::sidebar::KernelState;
 use crate::*;
 
 /// Kernel session numbers, unique in the process and so in any vault.
@@ -49,6 +50,23 @@ pub(super) fn queued_for_source(kernel: Option<&Kernel>, id: CellId, source: &st
             .values()
             .any(|job| job.cell == id && job.source == source)
     })
+}
+
+/// Where cell `id` stands with `kernel`: the first run not done is the one it is on, once it has
+/// started; the rest wait.
+fn turn_of(kernel: Option<&Kernel>, id: CellId) -> Turn {
+    let Some(kernel) = kernel else {
+        return Turn::Free;
+    };
+    let runs = kernel.runs.borrow();
+    let on = runs.values().next().map(|job| job.cell);
+    if on == Some(id) && kernel.info.borrow().is_some() {
+        Turn::Running
+    } else if runs.values().any(|job| job.cell == id) {
+        Turn::Waiting
+    } else {
+        Turn::Free
+    }
 }
 
 fn output_save_due(kernel: Option<&Kernel>) -> bool {
@@ -123,6 +141,51 @@ mod tests {
     }
 
     #[test]
+    fn only_the_run_the_kernel_is_on_can_be_stopped_from_its_cell() {
+        let notebook = accent_core::notebook::read("cells.ipynb", TWO_CELLS).unwrap();
+        let (a, b) = (notebook.cells()[0].id(), notebook.cells()[1].id());
+        let kernel = Kernel {
+            session: 1,
+            info: RefCell::default(),
+            runs: RefCell::default(),
+            outbox: RefCell::default(),
+            sending: Cell::new(false),
+            clear_next: RefCell::default(),
+            stale: RefCell::default(),
+            last_run: Cell::new(0),
+        };
+        assert_eq!(turn_of(None, a), Turn::Free);
+        assert_eq!(turn_of(Some(&kernel), a), Turn::Free);
+        for (run, cell) in [(1, a), (2, b)] {
+            let source = String::new();
+            kernel
+                .runs
+                .borrow_mut()
+                .insert(run, RunJob { cell, source });
+        }
+        // A kernel still starting runs nothing yet: every cell waits for it.
+        assert_eq!(turn_of(Some(&kernel), a), Turn::Waiting);
+        kernel.info.replace(Some(Info {
+            interpreter: "python3".into(),
+            implementation: "ipython".into(),
+            version: "9".into(),
+        }));
+        assert_eq!(turn_of(Some(&kernel), a), Turn::Running);
+        assert_eq!(turn_of(Some(&kernel), b), Turn::Waiting);
+        kernel.runs.borrow_mut().remove(&1);
+        assert_eq!(turn_of(Some(&kernel), a), Turn::Free);
+        assert_eq!(turn_of(Some(&kernel), b), Turn::Running);
+    }
+
+    /// Two empty code cells.
+    const TWO_CELLS: &str = r#"{"cells": [
+        {"cell_type": "code", "id": "a", "metadata": {}, "source": [], "outputs": [],
+         "execution_count": null},
+        {"cell_type": "code", "id": "b", "metadata": {}, "source": [], "outputs": [],
+         "execution_count": null}
+    ], "metadata": {}, "nbformat": 4, "nbformat_minor": 5}"#;
+
+    #[test]
     fn stream_updates_save_only_after_the_run_finishes() {
         let notebook =
             accent_core::notebook::read("cell.ipynb", accent_core::notebook::EMPTY_IPYNB).unwrap();
@@ -174,8 +237,6 @@ pub(super) struct Kernel {
 #[derive(Default)]
 pub(super) struct Hold {
     kernel: RefCell<Option<Rc<Kernel>>>,
-    /// Why the last kernel ended on its own, until another starts.
-    ended: RefCell<Option<String>>,
     /// The cells runs changed, each from its first output changed.
     dirty: RefCell<Vec<(CellId, usize)>>,
     /// A redraw is due at the end of this turn.
@@ -242,8 +303,10 @@ impl NotebookTab {
         self.kernel.kernel.borrow().clone()
     }
 
-    /// Cell `id`'s count as the model has it, or `[*]` while a run of it waits or runs.
+    /// Cell `id`'s count as the model has it, or `[*]` while a run of it waits or runs; and the
+    /// cell buttons' Run Cell or Stop, the run the kernel is on having changed with it.
     fn relabel(&self, id: CellId) {
+        self.show_turn();
         let Some(view) = self.view_of(Some(id)) else {
             return;
         };
@@ -437,28 +500,33 @@ impl NotebookTab {
         }
     }
 
-    /// The Code pane's caption for the kernel, and its tooltip.
-    fn kernel_said(&self) -> (String, Option<String>) {
+    /// Where cell `id` stands with the kernel.
+    pub(super) fn turn(&self, id: CellId) -> Turn {
+        turn_of(self.kernel().as_deref(), id)
+    }
+
+    /// The cell buttons' Run Cell, or Stop, as the cell they serve stands with the kernel.
+    fn show_turn(&self) {
+        if let Some(id) = self.tools.cell.get() {
+            self.tools.show_turn(self.turn(id));
+        }
+    }
+
+    /// The kernel as the Code pane's strip shows it.
+    fn kernel_state(&self) -> KernelState {
         let Some(kernel) = self.kernel() else {
-            let ended = self.kernel.ended.borrow().clone();
-            return match ended {
-                Some(why) => ("Ended".to_string(), Some(why)),
-                None => ("Not started".to_string(), None),
-            };
+            return KernelState::Off;
         };
         let info = kernel.info.borrow();
         let Some(info) = info.as_ref() else {
-            return ("Starting…".to_string(), None);
-        };
-        let line = match kernel.runs.borrow().is_empty() {
-            true => "Idle",
-            false => "Busy",
+            return KernelState::Starting;
         };
         let what = format!(
             "{} {} in {}",
             info.implementation, info.version, info.interpreter
         );
-        (line.to_string(), Some(what))
+        let busy = !kernel.runs.borrow().is_empty();
+        KernelState::Up { what, busy }
     }
 
     /// Bring `widget`, just added, into view once it is laid out, a margin inside, as a caret is
@@ -595,7 +663,6 @@ impl App {
             last_run: Cell::new(0),
         });
         tab.kernel.kernel.replace(Some(kernel.clone()));
-        tab.kernel.ended.replace(None);
         let start = Start {
             notebook: tab.key(),
         };
@@ -612,6 +679,8 @@ impl App {
             match (started, tab) {
                 (Ok(info), Some(tab)) => {
                     kernel.info.replace(Some(info));
+                    // Its first run is the one it is on now.
+                    tab.show_turn();
                     app.send_runs(&tab, &kernel);
                     app.sync_kernel();
                 }
@@ -819,7 +888,6 @@ impl App {
                 tab.save_soon();
                 if let Some(why) = error {
                     self.kernel_toast(&format!("The kernel ended: {why}"));
-                    tab.kernel.ended.replace(Some(why));
                 }
                 self.sync_kernel();
             }
@@ -857,7 +925,7 @@ impl App {
     }
 
     /// The kernel commands as the Code pane's notebook's kernel allows them, and the pane's
-    /// strip saying what it does, unless a debug session holds the pane.
+    /// strip showing what it does, unless a debug session holds the pane.
     pub(crate) fn sync_kernel(&self) {
         let tab = self.code_doc().and_then(|doc| doc.notebook().cloned());
         let kernel = tab.as_ref().and_then(|tab| tab.kernel());
@@ -877,14 +945,10 @@ impl App {
             }
         }
         if let Some(sidebar) = self.sidebar.get() {
-            let said = tab
+            let shown = tab
                 .filter(|_| !self.debugger.running())
-                .map(|tab| tab.kernel_said());
-            sidebar.set_kernel(
-                said.as_ref()
-                    .map(|(line, why)| (line.as_str(), why.as_deref())),
-                busy,
-            );
+                .map(|tab| tab.kernel_state());
+            sidebar.set_kernel(shown.as_ref());
         }
     }
 
@@ -899,6 +963,24 @@ impl NotebookTab {
     pub fn bench_execution(&self, n: usize) -> Option<String> {
         let view = self.views.borrow().get(n).cloned()?;
         Some(format!("{:?}", view.execution.get()))
+    }
+
+    /// What cell `n`'s run button offers with the cell buttons in its rail, as under the pointer:
+    /// `run`, `run-greyed` or `stop`. The buttons go back where they were.
+    pub fn bench_turn(&self, n: usize) -> &'static str {
+        let Some(view) = self.views.borrow().get(n).cloned() else {
+            return "missing";
+        };
+        self.tools.place(Some(&view), self.turn(view.id));
+        let (run, stop) = (&self.tools.run, &self.tools.stop);
+        let offered = match (stop.get_visible(), run.get_visible(), run.is_sensitive()) {
+            (true, ..) => "stop",
+            (false, true, true) => "run",
+            (false, true, false) => "run-greyed",
+            (false, false, _) => "none",
+        };
+        self.place();
+        offered
     }
 
     /// Cell `n`'s count label, its outputs as the model holds them, and how many its view shows.

@@ -42,13 +42,18 @@ pub type Watched = (String, Option<Result<Evaluated, String>>);
 /// What takes a watched expression out, for the trees whose rows can be watched expressions.
 type Unwatch = Option<Rc<dyn Fn(&str)>>;
 
-/// The strip's line, then the rows of Call Stack, Variables and Watch as a drill reads them.
+/// What the strip says to a screen reader, then the rows of Call Stack, Variables and Watch, and
+/// why the paused thread's row says it paused, as a drill reads them.
 #[cfg(feature = "bench")]
-pub type Shown = (String, Vec<String>, Vec<String>, Vec<String>);
+pub type Shown = (String, Vec<String>, Vec<String>, Vec<String>, String);
+
+/// Why a program paused, as the strip's state says it, and the exception's message.
+pub type Why = (String, Option<String>);
 
 /// A row of Call Stack, Variables or Watch.
 enum Item {
-    Thread(Thread),
+    /// A thread, and why it paused when it is the one the program paused on.
+    Thread(Thread, Option<Why>),
     Frame(Frame),
     Scope(Scope),
     Variable(Variable),
@@ -59,7 +64,7 @@ impl Item {
     /// What its children are listed by, for a row that has any.
     fn key(&self) -> Option<i64> {
         match self {
-            Item::Thread(thread) => Some(thread.id),
+            Item::Thread(thread, _) => Some(thread.id),
             Item::Frame(_) => None,
             Item::Scope(Scope { reference, .. })
             | Item::Variable(Variable { reference, .. })
@@ -284,13 +289,19 @@ fn row_factory(tree: &Tree, unwatch: Unwatch) -> gtk::SignalListItemFactory {
     )
 }
 
-/// A thread or a scope by its name; a call by its name, its file and line dimmed beside it and the
-/// whole row dimmed outside the vault; a value, and a watched expression's, as `name = value` in
-/// the editor's monospace, its type in the tooltip; an expression's error in the error colour,
-/// whole in the tooltip.
+/// A thread or a scope by its name, the paused thread's with why it paused dimmed beside it and
+/// the exception's message in the tooltip; a call by its name, its file and line dimmed beside it
+/// and the whole row dimmed outside the vault; a value, and a watched expression's, as
+/// `name = value` in the editor's monospace, its type in the tooltip; an expression's error in
+/// the error colour, whole in the tooltip.
 fn draw(item: &Item, line: &gtk::Box, name: &gtk::Label, detail: &gtk::Label) {
     let (text, said, outside, tooltip) = match item {
-        Item::Thread(thread) => (thread.name.clone(), None, false, None),
+        Item::Thread(thread, why) => (
+            thread.name.clone(),
+            why.as_ref().map(|(said, _)| said.clone()),
+            false,
+            why.as_ref().and_then(|(_, message)| message.clone()),
+        ),
         Item::Scope(scope) => (scope.name.clone(), None, false, None),
         Item::Frame(frame) => {
             let at = frame.path.as_deref().map(|path| {
@@ -373,9 +384,9 @@ fn tree_view(tree: &Tree, unwatch: Unwatch) -> gtk::ListView {
 }
 
 pub(super) struct Debug {
-    /// The controls, and the state line under them.
+    /// The controls, after a spinner while the program starts, runs or stops.
     pub(super) strip: gtk::Box,
-    state: Caption,
+    working: Working,
     controls: Controls,
     pub(super) stack: Section,
     stack_body: gtk::Stack,
@@ -402,7 +413,7 @@ pub(super) struct Debug {
 
 impl Debug {
     pub(super) fn new(data: Data) -> Debug {
-        let (strip, state, controls) = strip();
+        let (strip, working, controls) = strip();
 
         let frames = data.frames.clone();
         let calls = Tree::new(Rc::new(move |thread, list| {
@@ -480,7 +491,7 @@ impl Debug {
         }
         Debug {
             strip,
-            state,
+            working,
             controls,
             stack,
             stack_body,
@@ -502,15 +513,15 @@ impl Debug {
         }
     }
 
-    /// Show the session: the strip saying `line`, `why` in its tooltip, Continue or Pause as the
-    /// program is `paused` or not. Running, the program has nowhere to show.
-    pub(super) fn set_state(&self, line: &str, why: Option<&str>, paused: bool) {
+    /// Show the session: Continue or Pause as the program is `paused` or not, the strip saying
+    /// `line` to a screen reader. Running, the program has nowhere to show.
+    pub(super) fn set_state(&self, line: &str, paused: bool) {
         self.strip.set_visible(true);
         for section in self.sections() {
             section.root.set_visible(true);
         }
         // Starting, running or stopping, the program is at work until it pauses.
-        self.state.say(line, why, !paused);
+        self.working.say(line, !paused);
         self.controls.session.set_visible(true);
         self.controls.start.set_visible(false);
         self.controls.resume.set_visible(paused);
@@ -526,17 +537,26 @@ impl Debug {
         }
     }
 
-    /// The threads, and the paused one open on its calls.
-    pub(super) fn set_threads(&self, threads: &[Thread], paused: Option<(i64, Vec<Frame>)>) {
-        self.calls
-            .set(threads.iter().cloned().map(Item::Thread).collect());
+    /// The threads, and the paused one open on its calls, saying `why` it paused.
+    pub(super) fn set_threads(
+        &self,
+        threads: &[Thread],
+        paused: Option<(i64, Vec<Frame>)>,
+        why: &Why,
+    ) {
+        let on = paused.as_ref().map(|(thread, _)| *thread);
+        let rows = threads.iter().map(|thread| {
+            let said = (Some(thread.id) == on).then(|| why.clone());
+            Item::Thread(thread.clone(), said)
+        });
+        self.calls.set(rows.collect());
         self.stack.set_count(Some(threads.len()));
         self.stack_body.set_visible_child_name("list");
         if let Some((thread, frames)) = paused {
             self.calls
                 .fill(thread, frames.into_iter().map(Item::Frame).collect());
             self.calls
-                .expand(|item| matches!(item, Item::Thread(t) if t.id == thread));
+                .expand(|item| matches!(item, Item::Thread(t, _) if t.id == thread));
         }
     }
 
@@ -637,7 +657,7 @@ impl Debug {
     /// (`debuggable`) the strip offers Start Debugging over the breakpoints.
     pub(super) fn set_idle(&self, debuggable: bool) {
         self.strip.set_visible(debuggable);
-        self.state.say("Not running", None, false);
+        self.working.say("Not running", false);
         self.controls.session.set_visible(false);
         self.controls.start.set_visible(true);
         self.stack.root.set_visible(false);
@@ -649,8 +669,8 @@ impl Debug {
         self.answer.replace(None);
     }
 
-    /// The strip's line, the calls listed as `name file:line`, the values as `name=value` and the
-    /// watched expressions as their rows read.
+    /// What the strip says, the calls listed as `name file:line`, the values as `name=value`, the
+    /// watched expressions as their rows read, and why the paused thread's row says it paused.
     #[cfg(feature = "bench")]
     pub(super) fn shown(&self) -> Shown {
         let rows = |tree: &Tree, said: &dyn Fn(&Item) -> Option<String>| -> Vec<String> {
@@ -679,7 +699,12 @@ impl Debug {
             Item::Watch((expression, _)) => Some(expression.clone()),
             _ => None,
         });
-        (self.state.text(), calls, values, watched)
+        let why = rows(&self.calls, &|item| match item {
+            Item::Thread(_, Some((said, _))) => Some(said.clone()),
+            _ => None,
+        });
+        let why = why.into_iter().next().unwrap_or_default();
+        (self.working.said(), calls, values, watched, why)
     }
 
     #[cfg(feature = "bench")]
@@ -727,10 +752,10 @@ struct Controls {
 }
 
 /// The controls, flat icon buttons on the window's actions, which are enabled as the session's
-/// state allows: Continue or Pause, the steps, Restart and Stop, then the Debug Console, and
-/// Start Debugging in their place while no session runs; and under them what the program is
-/// doing.
-fn strip() -> (gtk::Box, Caption, Controls) {
+/// state allows: after a spinner while the program is at work, Continue or Pause, the steps,
+/// Restart and Stop, then the Debug Console, and Start Debugging in their place while no session
+/// runs.
+fn strip() -> (gtk::Box, Working, Controls) {
     let resume = strip_button("media-playback-start-symbolic", "win.debug-continue");
     let pause = strip_button("media-playback-pause-symbolic", "win.debug-pause");
     let session = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -758,18 +783,21 @@ fn strip() -> (gtk::Box, Caption, Controls) {
         .valign(gtk::Align::Center)
         .build();
     start.add_css_class("suggested-action");
-    let (strip, state) = strip_of(&[
+    let strip = strip_of(&[
         session.clone().upcast(),
         strip_button("dap-console-symbolic", "win.debug-console").upcast(),
         start.clone().upcast(),
     ]);
+    // With the session's controls: there is nothing at work without one.
+    let working = Working::new(&strip);
+    session.prepend(&working.slot);
     let controls = Controls {
         session,
         resume,
         pause,
         start,
     };
-    (strip, state, controls)
+    (strip, working, controls)
 }
 
 /// A strip's flat icon button on the window's `action`, named by its label. A press leaves the
@@ -781,72 +809,68 @@ pub(super) fn strip_button(icon: &str, action: &str) -> gtk::Button {
     button
 }
 
-/// A strip of `buttons` over a dim caption, hidden until it is shown: the debugger's, and the
-/// notebook kernel's.
-pub(super) fn strip_of(buttons: &[gtk::Widget]) -> (gtk::Box, Caption) {
+/// A strip of `buttons`, hidden until it is shown: the debugger's, and the notebook kernel's.
+pub(super) fn strip_of(buttons: &[gtk::Widget]) -> gtk::Box {
     // Centred, as the pane switcher's icons are in the header above.
-    let row = gtk::Box::builder().halign(gtk::Align::Center).build();
-    for button in buttons {
-        row.append(button);
-    }
-    let state = Caption::new();
     let strip = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(2)
+        .halign(gtk::Align::Center)
         .margin_start(6)
         .margin_end(6)
         .margin_top(6)
         .margin_bottom(6)
         .visible(false)
         .build();
-    strip.append(&row);
-    strip.append(&state.root);
-    (strip, state)
+    for button in buttons {
+        strip.append(button);
+    }
+    strip
 }
 
-/// A strip's dim caption: what the program or kernel does, beside a spinner while it works, the
-/// indicator the Git pane's Sync shows while it syncs.
-pub(super) struct Caption {
-    root: gtk::Box,
-    line: gtk::Label,
+/// A strip's spinner while its program or kernel is at work, the indicator the Git pane's Sync
+/// shows, in room of its own that stays while it is away, so the buttons beside it never move.
+/// What is going on is the strip's description, for a screen reader: there are no words on it.
+pub(super) struct Working {
+    /// The room, to put before the button that starts the work.
+    pub(super) slot: gtk::Box,
     spinner: adw::Spinner,
+    strip: gtk::Box,
+    #[cfg(feature = "bench")]
+    said: RefCell<String>,
 }
 
-impl Caption {
-    fn new() -> Caption {
-        let line = gtk::Label::builder()
-            .ellipsize(pango::EllipsizeMode::End)
-            .build();
-        // Not dimmed with the words: what is at work should catch the eye, as Sync's does.
+impl Working {
+    pub(super) fn new(strip: &gtk::Box) -> Working {
+        // Not dimmed: what is at work should catch the eye, as Sync's does.
         let spinner = adw::Spinner::builder().visible(false).build();
-        line.add_css_class("caption");
-        line.add_css_class("dimmed");
-        // Centred, as the switcher's icons are, and as tall as the spinner with it or without,
-        // so the sections under it stay put as it comes and goes.
-        let root = gtk::Box::builder()
-            .spacing(6)
-            .halign(gtk::Align::Center)
+        let slot = gtk::Box::builder()
+            .width_request(16)
             .height_request(16)
+            .valign(gtk::Align::Center)
+            .margin_end(6)
             .build();
-        root.append(&spinner);
-        root.append(&line);
-        Caption {
-            root,
-            line,
+        slot.append(&spinner);
+        Working {
+            slot,
             spinner,
+            strip: strip.clone(),
+            #[cfg(feature = "bench")]
+            said: RefCell::default(),
         }
     }
 
-    /// Say `line`, `why` in its tooltip, the spinner up while `working`.
-    pub(super) fn say(&self, line: &str, why: Option<&str>, working: bool) {
-        self.line.set_text(line);
-        self.line.set_tooltip_text(why);
+    /// Say `state` to a screen reader, the spinner up while `working`.
+    pub(super) fn say(&self, state: &str, working: bool) {
         self.spinner.set_visible(working);
+        self.strip
+            .update_property(&[gtk::accessible::Property::Description(state)]);
+        #[cfg(feature = "bench")]
+        self.said.replace(state.to_string());
     }
 
-    /// What it says, for the drills.
+    /// What it last said, and whether the spinner is up, for the drills.
     #[cfg(feature = "bench")]
-    pub(super) fn text(&self) -> String {
-        self.line.text().to_string()
+    pub(super) fn said(&self) -> String {
+        let spinning = u8::from(self.spinner.get_visible());
+        format!("{} spinner={spinning}", self.said.borrow())
     }
 }
