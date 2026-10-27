@@ -11,7 +11,7 @@ use std::rc::Rc;
 use accent_core::note::Syntax;
 use accent_core::notebook::{Cell, CellId, Format, Kind, Output};
 use adw::prelude::*;
-use gtk::{gdk, gio};
+use gtk::{gdk, gio, glib};
 
 use super::output::Outputs;
 use super::placeholder::{Margins, Placeholder};
@@ -43,6 +43,9 @@ pub struct CellView {
     /// The source laid out as the editor will lay it out, holding its place until it is built.
     placeholder: Placeholder,
     editor: OnceCell<Editor>,
+    /// The height a new editor is held at, its placeholder's, until its lines are laid out as
+    /// far ([`refit`](Self::refit)).
+    hold: Rc<std::cell::Cell<i32>>,
     /// The editor's paste that links a URL over a selection, which Paste as Plain Text holds back.
     paste_link: OnceCell<gtk::glib::SignalHandlerId>,
     /// A markdown cell's spell checker, made the first time it is turned on.
@@ -190,6 +193,7 @@ impl CellView {
             body,
             placeholder,
             editor: OnceCell::new(),
+            hold: Rc::default(),
             paste_link: OnceCell::new(),
             spell: RefCell::default(),
             outputs,
@@ -338,6 +342,22 @@ impl CellView {
         } else {
             view.add_css_class("notebook-source");
         }
+        // A text view lays out only the lines its allocation reaches as it is allocated, the rest
+        // in an idle after the frame is drawn, which asks for its height a frame or more late
+        // (ISSUES.md). Held at its placeholder's height, as tall as its text will be, it lays them
+        // all out in its first allocation, so the cell keeps its height as the editor takes its
+        // place. A placeholder taller than the text lets go of it a moment later.
+        let held = self.placeholder.height();
+        if held > 0 {
+            view.set_size_request(-1, held);
+            self.hold.set(held);
+            let (hold, weak) = (self.hold.clone(), view.downgrade());
+            glib::timeout_add_local_once(HOLD_AT_MOST, move || {
+                if let Some(view) = weak.upgrade().filter(|_| hold.replace(0) > 0) {
+                    view.set_size_request(-1, -1);
+                }
+            });
+        }
         self.body.prepend(&view);
         self.body.remove(&self.placeholder);
         let editor = Editor {
@@ -361,7 +381,17 @@ impl CellView {
     /// Ask again for the height of each text view whose request no longer matches what it was
     /// given: a text view re-wraps to a new width inside its own allocation, and GTK drops the
     /// resize it asks for there (ISSUES.md), so it would keep its old height until the next scroll.
+    /// A new editor held at its placeholder's height asks for its own once its lines are laid
+    /// out that far.
     pub fn refit(&self) {
+        let held = self.hold.get();
+        if let Some(editor) = self
+            .editor()
+            .filter(|e| held > 0 && laid_out_height(&e.view) >= held)
+        {
+            self.hold.set(0);
+            editor.view.set_size_request(-1, -1);
+        }
         for view in self.text_views() {
             let width = view.width();
             if width > 0 && view.measure(gtk::Orientation::Vertical, width).1 != view.height() {
@@ -412,6 +442,14 @@ impl CellView {
     }
 }
 
+/// How tall `view`'s lines are as it has laid them out so far, with its margins: its own height
+/// request, which a size request over it hides. Lines not laid out yet count as tall as they were
+/// last laid out, or not at all.
+fn laid_out_height(view: &sourceview5::View) -> i32 {
+    let (y, height) = view.line_yrange(&view.buffer().end_iter());
+    y + height + view.top_margin() + view.bottom_margin()
+}
+
 /// A code cell's `[n]`, `[ ]` for one never run; nothing for another kind.
 pub fn count_label(cell: &Cell) -> String {
     match (cell.kind(), cell.count()) {
@@ -432,6 +470,10 @@ pub const RAIL_ROOM: i32 = RAIL + SPACING;
 const MARGIN: i32 = 8;
 /// The room above and below a cell's text inside its editor.
 const EDGE: i32 = 6;
+/// How long a new editor is held at its placeholder's height at most, for a placeholder taller
+/// than its text: long enough for a busy machine to have laid out the rest, which `refit` lets
+/// go of at once.
+const HOLD_AT_MOST: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// How wide the `[n]` column is: six characters of `widget`'s font set in monospace, as the
 /// count is, so `[9999]` fits.
