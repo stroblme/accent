@@ -11,6 +11,7 @@ mod pdf_text;
 mod reconcile;
 mod schema;
 mod search;
+mod similar;
 mod symbols;
 
 use crate::walk::FileKind;

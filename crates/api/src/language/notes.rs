@@ -84,6 +84,67 @@ pub(crate) fn context(head: &str) -> Option<(Trigger, usize, &str)> {
     (!prefix.contains(char::is_whitespace)).then_some((Trigger::Tag, start, prefix))
 }
 
+/// Where the tag being typed at `caret` starts, when that is an item of the front matter's `tags:`
+/// list, read as `markdown::frontmatter` reads it, and whether the list is the flow kind
+/// (`tags: [a, b`), whose items a `,` ends. An item of the block kind (`- a` under a bare `tags:`)
+/// is one tag to its end, commas and all, as YAML reads it.
+fn front_tag(text: &str, caret: usize) -> Option<(usize, bool)> {
+    let body = text
+        .strip_prefix("---\n")
+        .or_else(|| text.strip_prefix("---\r\n"))?;
+    let lines: Vec<&str> = body[..caret.checked_sub(text.len() - body.len())?]
+        .split('\n')
+        .map(|l| l.trim_end_matches('\r'))
+        .collect();
+    let (head, above) = lines.split_last()?;
+    if above.iter().any(|l| matches!(l.trim_end(), "---" | "...")) {
+        return None;
+    }
+    let item = |at: usize| {
+        let lead = head[at..].len() - head[at..].trim_start().len();
+        let start = caret - head.len() + at + lead;
+        (!text[start..caret].starts_with(['"', '\''])).then_some(start)
+    };
+    if let Some(rest) = head.strip_prefix("tags:")
+        && let Some(open) = rest.trim_start().strip_prefix('[')
+    {
+        if open.contains(']') {
+            return None;
+        }
+        let at = head.len() - open.len() + open.rfind(',').map_or(0, |i| i + 1);
+        return item(at).map(|start| (start, true));
+    }
+    let dash = head.len() - head.trim_start().len();
+    let after = head[dash..].strip_prefix('-')?;
+    if !after.starts_with([' ', '\t']) {
+        return None;
+    }
+    // The key the list hangs off: the first line above that is no item of it.
+    let key = above
+        .iter()
+        .rev()
+        .find(|l| !l.starts_with([' ', '\t', '-']))?;
+    (key.trim_end() == "tags:")
+        .then(|| item(dash + 1))?
+        .map(|start| (start, false))
+}
+
+/// `name` as an item of a YAML list, quoted only where YAML would read it otherwise: a `,`, a
+/// bracket or a brace in a flow list, and anywhere a `: `, a ` #`, an indicator in front or a
+/// blank at either end.
+fn yaml_item(name: &str, flow: bool) -> String {
+    let plain = !name
+        .starts_with(|c: char| "-?:,[]{}#&*!|>'\"%@`".contains(c) || c.is_whitespace())
+        && !name.ends_with(char::is_whitespace)
+        && !name.contains(": ")
+        && !name.contains(" #")
+        && !(flow && name.contains([',', '[', ']', '{', '}']));
+    match plain && !name.is_empty() {
+        true => name.to_string(),
+        false => format!("\"{}\"", name.replace('\\', "\\\\").replace('"', "\\\"")),
+    }
+}
+
 /// [`context`] in an org file: `[[` opens a link to a file, and a `:` in the tags closing a
 /// heading or on the `#+FILETAGS:` line a tag, the start being past that colon. A run of tags
 /// opens with a colon after a blank, so `10:30` in a title is no tag.
@@ -380,9 +441,14 @@ pub(crate) struct Notes {
     events: Sender<Event>,
     /// What a link completion ranks, kept between keystrokes. See [`Notes::corpus`].
     corpora: Mutex<Corpora>,
+    /// The tags suggested for each note, kept until the index changes. See [`Notes::tags_for`].
+    suggested: Mutex<Suggested>,
     /// The files in the folders git ignores, which a link finds when the index does not.
     ignored: Arc<Ignored>,
 }
+
+/// Each note's suggested tags, as the index held them at its [`Index::data_version`].
+type Suggested = (i64, HashMap<String, Arc<Vec<String>>>);
 
 /// Completion paths: the first `named` entries are files, followed by ignored
 /// notes (`ignored`), missing linked notes (`missing`), then alias names.
@@ -419,6 +485,7 @@ impl Notes {
             docs: Mutex::new(HashMap::new()),
             events,
             corpora: Mutex::default(),
+            suggested: Mutex::default(),
             ignored,
         })
     }
@@ -433,6 +500,76 @@ impl Notes {
                 .listing(false)
                 .resolve(target)
                 .map(str::to_string),
+        })
+    }
+
+    /// Every tag a completion offers in the note at `rel`, which holds `text`: those the notes
+    /// most like it carry first ([`Index::similar_tags`]), less the ones it has already, then the
+    /// rest by use. The suggestions are worked out once a note until [`Index::data_version`]
+    /// changes, about 50 ms on a vault of 3600 notes, not at each keystroke.
+    fn tags_for(&self, index: &Index, rel: &str, text: &str) -> Result<Vec<(String, i64)>> {
+        let version = index.data_version()?;
+        let suggested = {
+            let mut cache = locked(&self.suggested);
+            if cache.0 != version {
+                *cache = (version, HashMap::new());
+            }
+            match cache.1.get(rel) {
+                Some(tags) => tags.clone(),
+                None => {
+                    let tags = Arc::new(index.similar_tags(rel, text)?);
+                    cache.1.insert(rel.to_string(), tags.clone());
+                    tags
+                }
+            }
+        };
+        let own: HashSet<String> = Syntax::of(rel)
+            .analyze(text)
+            .tags
+            .into_iter()
+            .map(|tag| tag.name)
+            .collect();
+        let mut tags = index.tags()?;
+        // A stable sort: the rest keep their order by use behind the suggestions.
+        tags.sort_by_cached_key(|(name, _)| {
+            suggested
+                .iter()
+                .position(|s| s == name)
+                .filter(|_| !own.contains(name))
+                .unwrap_or(usize::MAX)
+        });
+        Ok(tags)
+    }
+
+    /// [`front_tag`]'s completion: the tags [`Notes::tags_for`] offers, each written as the list
+    /// writes an item, with no `#`.
+    fn front_tags(&self, rel: &str, text: &str, caret: usize, pos: Pos) -> Result<Completions> {
+        let Some((start, flow)) = front_tag(text, caret) else {
+            return Ok(Completions::default());
+        };
+        let tags = self.tags_for(&locked(&self.index), rel, text)?;
+        let (hits, more) = tag_candidates(&tags, &text[start..caret]);
+        let line_start = text[..caret].rfind('\n').map_or(0, |i| i + 1);
+        let replace = Range {
+            start: Pos {
+                line: pos.line,
+                character: text[line_start..start].chars().count() as u32,
+            },
+            end: pos,
+        };
+        Ok(Completions {
+            items: hits
+                .into_iter()
+                .map(|name| Completion {
+                    insert: yaml_item(&name, flow),
+                    label: name,
+                    kind: Kind::Tag,
+                    replace,
+                    ..empty_item()
+                })
+                .collect(),
+            incomplete: more,
+            pages: None,
         })
     }
 
@@ -577,7 +714,7 @@ impl Notes {
         let line_start = text[..caret].rfind('\n').map_or(0, |i| i + 1);
         let head = &text[line_start..caret];
         let Some((trigger, start, prefix)) = context(head) else {
-            return Ok(Completions::default());
+            return self.front_tags(rel, &text, caret, pos);
         };
         let at = |byte: usize| Pos {
             line: pos.line,
@@ -771,7 +908,7 @@ impl Notes {
                 })
             }
             Trigger::Tag => {
-                let tags = locked(&self.index).tags()?;
+                let tags = self.tags_for(&locked(&self.index), rel, &text)?;
                 let (hits, more) = tag_candidates(&tags, prefix);
                 Ok(Completions {
                     items: hits
@@ -809,8 +946,8 @@ impl Notes {
         };
         let index = locked(&self.index);
         if trigger == Trigger::Tag {
-            let tags: Vec<(String, i64)> = index
-                .tags()?
+            let tags: Vec<(String, i64)> = self
+                .tags_for(&index, rel, text)?
                 .into_iter()
                 .filter(|(name, _)| name.chars().all(org::is_tag_char))
                 .collect();
@@ -1264,6 +1401,87 @@ fn preview(note: &str, rel: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tag is typed in the front matter's `tags:` list as one of its items, in either form; a
+    /// block item is one tag whatever commas it holds, as YAML reads it.
+    #[test]
+    fn a_front_matter_tag_is_an_item_of_the_tags_list() {
+        fn at(text: &str) -> Option<(&str, bool)> {
+            front_tag(text, text.len()).map(|(start, flow)| (&text[start..], flow))
+        }
+        assert_eq!(at("---\ntags: [a, b"), Some(("b", true)));
+        assert_eq!(at("---\ntags: [ab"), Some(("ab", true)));
+        assert_eq!(at("---\ntags: [a]"), None, "the list is closed");
+        assert_eq!(
+            at("---\ntags:\n  - a\n  - People/A, Peo"),
+            Some(("People/A, Peo", false))
+        );
+        assert_eq!(at("---\ntags:\n- a\n- b"), Some(("b", false)));
+        assert_eq!(at("---\naliases:\n  - b"), None, "another key's list");
+        assert_eq!(
+            at("---\ntags: [a]\n---\ntags: [b"),
+            None,
+            "past the front matter"
+        );
+        assert_eq!(at("tags: [b"), None, "no front matter");
+        assert_eq!(yaml_item("People/A", true), "People/A");
+        assert_eq!(yaml_item("a, b", true), "\"a, b\"");
+        assert_eq!(yaml_item("a, b", false), "a, b");
+    }
+
+    /// Tag completion lists the tags of the notes most like this one first, then the rest by use,
+    /// in the body and in the front matter's `tags:` list alike, where an item is written without
+    /// a `#`. A note like no other keeps the order by use.
+    #[test]
+    fn tag_completion_puts_the_tags_of_similar_notes_first() {
+        let vault = tempfile::tempdir().unwrap();
+        for (rel, text) in [
+            ("q1.md", "Transmon qubit readout drifted. #hardware"),
+            (
+                "q2.md",
+                "Transmon qubit coherence under flux noise. #hardware #lab",
+            ),
+            ("b1.md", "Sourdough bread wants a starter. #cooking"),
+            ("m1.md", "Budget meeting. #admin"),
+            ("m2.md", "Schedule meeting. #admin"),
+            ("m3.md", "Budget and schedule. #admin"),
+            (
+                "a.md",
+                "---\ntags: [lab, \n---\nThe transmon qubit lost coherence; see #\n",
+            ),
+            (
+                "c.md",
+                "---\ntags:\n  - lab\n  - \n---\nTransmon qubit readout and coherence.\n",
+            ),
+            ("d.md", "Zebra quokka #\n"),
+        ] {
+            std::fs::write(vault.path().join(rel), text).unwrap();
+        }
+        let cache = tempfile::tempdir().unwrap();
+        let db = cache.path().join("i.db");
+        Index::open(&db)
+            .unwrap()
+            .reconcile(vault.path(), |_| {})
+            .unwrap();
+        let notes = Notes::open_at(
+            vault.path().to_path_buf(),
+            &db,
+            std::sync::mpsc::channel().0,
+            Arc::new(Ignored::new(vault.path().to_path_buf())),
+        )
+        .unwrap();
+        let first = |rel: &str, line, character| {
+            let items = notes
+                .completion(rel, Pos { line, character })
+                .unwrap()
+                .items;
+            items.first().map(|i| i.insert.clone())
+        };
+        assert_eq!(first("a.md", 3, 40).as_deref(), Some("#hardware"));
+        assert_eq!(first("a.md", 1, 12).as_deref(), Some("hardware"));
+        assert_eq!(first("c.md", 3, 4).as_deref(), Some("hardware"));
+        assert_eq!(first("d.md", 0, 14).as_deref(), Some("#admin"));
+    }
 
     #[test]
     fn context_finds_a_wikilink_or_a_tag() {
