@@ -53,9 +53,6 @@ A Flatpak bundle is shipped with each [release](https://github.com/stroblme/acce
 flatpak install --user accent-<version>-x86_64.flatpak
 ```
 
-For macOS 15 or newer, each release also carries `Accent.app` as a disk image (`arm64` for Apple silicon, `x86_64` for Intel).
-Drag it into Applications. It has no Developer ID, so macOS refuses the first launch: open it anyway under System Settings › Privacy & Security. It renders no preview of a note and checks no spelling yet.
-
 For a native install into `~/.local` (GNOME 49 or newer: Fedora 43+, openSUSE Tumbleweed, Debian testing, Ubuntu 26.04+, Arch), go for the following:
 
 ```sh
@@ -73,6 +70,9 @@ make pdfium     	    # optional, for PDFs
 make all        	    # build the GTK app and accent-cli
 make install			# install the app user-wide
 ```
+
+For macOS 15 or newer, each release carries `Accent.app` as a disk image (`arm64` for Apple silicon, `x86_64` for Intel).
+Note that support for macOS is in a very early stage.
 
 If you run `accent` from a terminal, you can also provide a path to a file or folder to open it directly.
 
