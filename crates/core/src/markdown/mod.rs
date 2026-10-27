@@ -15,7 +15,7 @@ mod task;
 mod uri;
 
 pub use blocks::{BlockId, block_ids};
-pub use html::{math_errors, mathml, to_html};
+pub use html::{math_errors, mathml, to_html, to_html_file};
 /// What org's file links share with a markdown link's path (`crate::org`).
 pub(crate) use links::{Moved, path_key};
 pub use links::{

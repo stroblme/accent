@@ -191,7 +191,7 @@ pub fn anchor_id(text: &str, anchor: &str) -> Option<String> {
 }
 
 /// `scheme:` or `//host` — anything with an authority is not a vault path.
-fn is_external(dest: &str) -> bool {
+pub(super) fn is_external(dest: &str) -> bool {
     dest.starts_with("//") || scheme(dest).is_some()
 }
 

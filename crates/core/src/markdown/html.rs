@@ -3,11 +3,15 @@
 
 use super::blocks::block_ids;
 use super::frontmatter::scan_tags;
-use super::links::{heading_named, is_image, percent_decode, percent_encode, slugs, split_anchor};
+use super::links::{
+    heading_named, is_external, is_image, is_url, percent_decode, percent_encode, slugs,
+    split_anchor,
+};
 use super::options;
 use super::spans::list_marker;
 use super::task::in_progress;
 use crate::conflict::{self, Block};
+use crate::path::{parent_dir, resolve};
 use pulldown_cmark::{CowStr, Event, LinkType, Options, Parser, Tag as Cm, TagEnd};
 use pulldown_latex::{Event as LatexEvent, ParserError, Storage};
 use std::collections::HashMap;
@@ -146,8 +150,44 @@ pub fn math_errors(text: &str) -> Vec<(Range<usize>, String)> {
 /// independently with the whole note's [`definitions`], retaining source line numbers and
 /// cross-stretch reference links and footnotes.
 pub fn to_html(text: &str) -> String {
+    render(text, None)
+}
+
+/// The note at `note`, a vault path, as an exported file holds it, read outside the app: no line
+/// markers, a link into the vault as its text, a relative picture as an `accent://file/` address
+/// the app inlines, and no `<script>`. A mermaid fence stays its code block.
+pub fn to_html_file(text: &str, note: &str) -> String {
+    without_scripts(&render(text, Some(parent_dir(note))))
+}
+
+/// `html` without its `<script>` elements, found in any case. The writer escapes every `<` of
+/// text and code, so each one is the note's own HTML; one left open runs to the end, as it does
+/// in a browser.
+fn without_scripts(html: &str) -> String {
+    let lower = html.to_ascii_lowercase();
+    let mut out = String::with_capacity(html.len());
+    let (mut kept, mut from) = (0, 0);
+    while let Some(i) = lower[from..].find("<script").map(|i| from + i) {
+        from = i + "<script".len();
+        if !lower[from..].starts_with(|c: char| c == '>' || c == '/' || c.is_ascii_whitespace()) {
+            continue;
+        }
+        out.push_str(&html[kept..i]);
+        kept = lower[from..]
+            .find("</script")
+            .and_then(|j| lower[from + j..].find('>').map(|k| from + j + k + 1))
+            .unwrap_or(html.len());
+        from = kept;
+    }
+    out.push_str(&html[kept..]);
+    out
+}
+
+/// The preview's page of `text`, or with `export`, the note's directory, an exported file's.
+fn render<'a>(text: &'a str, export: Option<&'a str>) -> String {
     let mut page = Page {
         defs: definitions(text),
+        export,
         ..Page::default()
     };
     let mut at = 0;
@@ -162,7 +202,7 @@ pub fn to_html(text: &str) -> String {
 
 /// Every reference and footnote definition of a note with a conflict block, as written, each
 /// after a blank line; empty for any other note. A stretch parsed on its own knows only the
-/// definitions in it, so [`to_html`] parses each with these after it.
+/// definitions in it, so [`render`] parses each with these after it.
 fn definitions(text: &str) -> String {
     let Some(blank) = conflict::blank_markers(text) else {
         return String::new();
@@ -183,9 +223,11 @@ fn definitions(text: &str) -> String {
         .collect()
 }
 
-/// What [`to_html`] has gathered so far, a stretch of the note at a time.
+/// What [`render`] has gathered so far, a stretch of the note at a time.
 #[derive(Default)]
 struct Page<'a> {
+    /// The directory of the note being exported ([`to_html_file`]); `None` for the preview.
+    export: Option<&'a str>,
     evts: Vec<Event<'a>>,
     /// Each heading's place in `evts` and its text, gathered the way `analyze` gathers
     /// `Heading::text` — every text and code event inside, an embed's too — so the `id` is the
@@ -212,6 +254,20 @@ impl<'a> Page<'a> {
         self.newlines + 1
     }
 
+    /// The marker a block starting at byte `at` of the note opens with: its source line for the
+    /// preview to scroll by, and its block id, which an exported file keeps alone.
+    fn marker(&mut self, text: &str, at: usize, id: Option<&str>) -> Option<String> {
+        let id = id.map_or(String::new(), |id| format!(" id=\"^{id}\""));
+        match self.export {
+            None => Some(format!(
+                "<span data-line=\"{}\"{id}></span>",
+                self.line_at(text, at)
+            )),
+            Some(_) if id.is_empty() => None,
+            Some(_) => Some(format!("<span{id}></span>")),
+        }
+    }
+
     fn html(&mut self, html: String) {
         self.evts.push(Event::Html(html.into()));
     }
@@ -233,7 +289,8 @@ impl<'a> Page<'a> {
     fn tagged(&mut self, src: &'a str, r: Range<usize>, t: CowStr<'a>) {
         let shown = r.start..r.start + t.len();
         let mut tags = Vec::new();
-        if src.get(shown.clone()) == Some(&*t) {
+        // An exported file has no tag to go to.
+        if self.export.is_none() && src.get(shown.clone()) == Some(&*t) {
             scan_tags(src, &shown, &mut tags, &mut Vec::new());
         }
         if tags.is_empty() {
@@ -276,8 +333,10 @@ impl<'a> Page<'a> {
             let at = blocks.partition_point(|b| b.marker.start < r.start);
             blocks.get(at).filter(|b| r.contains(&b.marker.start))
         };
-        let mut link_wiki: Vec<bool> = Vec::new();
-        let mut image_wiki: Vec<bool> = Vec::new();
+        // Whether each open link and embed is ours to close rather than the parser's: with our
+        // `</a>` in the preview, with nothing in an exported file, which keeps only its text.
+        let mut link_ours: Vec<bool> = Vec::new();
+        let mut image_ours: Vec<bool> = Vec::new();
         let mut skip = 0usize;
         // The `[/]` the item being read opens with, and once its box is in, the bytes it covered.
         let mut doing: Option<Range<usize>> = None;
@@ -327,13 +386,10 @@ impl<'a> Page<'a> {
                 }
                 continue;
             }
-            let marker = is_block_start(&ev).then(|| {
-                let line = self.line_at(text, part.start + r.start);
-                let id = ids
-                    .get(&r.start)
-                    .map_or(String::new(), |id| format!(" id=\"^{id}\""));
-                Event::Html(format!("<span data-line=\"{line}\"{id}></span>").into())
-            });
+            let marker = is_block_start(&ev)
+                .then(|| self.marker(text, part.start + r.start, ids.get(&r.start).copied()))
+                .flatten()
+                .map(|m| Event::Html(m.into()));
             // The text a block's id ends goes on without it.
             let ev = match (ev, marker_in(&r)) {
                 (Event::Text(t), Some(b)) => {
@@ -348,27 +404,39 @@ impl<'a> Page<'a> {
                     ref dest_url,
                     ..
                 }) => {
-                    let (t, anchor) = split_anchor(dest_url);
-                    self.html(format!(
-                        "<a href=\"{}\" class=\"wikilink\">",
-                        open_href(t, anchor)
-                    ));
-                    link_wiki.push(true);
+                    if self.export.is_none() {
+                        let (t, anchor) = split_anchor(dest_url);
+                        self.html(format!(
+                            "<a href=\"{}\" class=\"wikilink\">",
+                            open_href(t, anchor)
+                        ));
+                    }
+                    link_ours.push(true);
+                }
+                // A link into the vault goes nowhere from an exported file: its text is left.
+                Event::Start(Cm::Link {
+                    ref dest_url,
+                    link_type,
+                    ..
+                }) if self.export.is_some()
+                    && !(dest_url.starts_with('#')
+                        || is_url(dest_url)
+                        || link_type == LinkType::Email) =>
+                {
+                    link_ours.push(true);
                 }
                 Event::Start(Cm::Link { ref dest_url, .. }) => {
                     if dest_url.starts_with('#') {
                         self.anchors.push(self.evts.len());
                     }
-                    link_wiki.push(false);
+                    link_ours.push(false);
                     self.evts.push(ev);
                 }
-                Event::End(TagEnd::Link) => {
-                    if link_wiki.pop().unwrap_or(false) {
-                        self.html("</a>".into());
-                    } else {
-                        self.evts.push(ev);
-                    }
-                }
+                Event::End(TagEnd::Link) => match link_ours.pop() {
+                    Some(true) if self.export.is_some() => {}
+                    Some(true) => self.html("</a>".into()),
+                    _ => self.evts.push(ev),
+                },
                 Event::Start(Cm::Image {
                     link_type: LinkType::WikiLink { .. },
                     ref dest_url,
@@ -380,34 +448,58 @@ impl<'a> Page<'a> {
                         skip = 1;
                     } else if crate::path::is_diagram(t) {
                         // A picture of the page the anchor names, which the app draws, inside
-                        // the link a click follows to that page.
+                        // the link a click follows to that page; an exported file has the
+                        // picture alone.
                         let page = anchor
                             .map_or_else(String::new, |a| format!("?page={}", percent_encode(a)));
-                        self.html(format!(
-                            "<a href=\"{}\" class=\"embed\"><img src=\"accent://file/{}{page}\"></a>",
-                            open_href(t, anchor),
-                            percent_encode(t)
-                        ));
+                        let img =
+                            format!("<img src=\"accent://file/{}{page}\">", percent_encode(t));
+                        self.html(match self.export {
+                            None => format!(
+                                "<a href=\"{}\" class=\"embed\">{img}</a>",
+                                open_href(t, anchor)
+                            ),
+                            Some(_) => img,
+                        });
                         skip = 1;
                     } else {
-                        self.html(format!(
-                            "<a href=\"{}\" class=\"embed\">",
-                            open_href(t, anchor)
-                        ));
-                        image_wiki.push(true);
+                        if self.export.is_none() {
+                            self.html(format!(
+                                "<a href=\"{}\" class=\"embed\">",
+                                open_href(t, anchor)
+                            ));
+                        }
+                        image_ours.push(true);
                     }
                 }
-                Event::Start(Cm::Image { .. }) => {
-                    image_wiki.push(false);
-                    self.evts.push(ev);
+                // An exported file is read away from the note's folder, so a picture beside it
+                // is fetched by its vault path.
+                Event::Start(Cm::Image {
+                    link_type,
+                    dest_url,
+                    title,
+                    id,
+                }) => {
+                    let dest_url = match self.export {
+                        Some(dir) if !is_external(&dest_url) => {
+                            let rel = resolve(dir, &percent_decode(&dest_url));
+                            format!("accent://file/{}", percent_encode(&rel)).into()
+                        }
+                        _ => dest_url,
+                    };
+                    image_ours.push(false);
+                    self.evts.push(Event::Start(Cm::Image {
+                        link_type,
+                        dest_url,
+                        title,
+                        id,
+                    }));
                 }
-                Event::End(TagEnd::Image) => {
-                    if image_wiki.pop().unwrap_or(false) {
-                        self.html("</a>".into());
-                    } else {
-                        self.evts.push(ev);
-                    }
-                }
+                Event::End(TagEnd::Image) => match image_ours.pop() {
+                    Some(true) if self.export.is_some() => {}
+                    Some(true) => self.html("</a>".into()),
+                    _ => self.evts.push(ev),
+                },
                 Event::InlineMath(ref src) | Event::DisplayMath(ref src) => {
                     let html = mathml(src, matches!(ev, Event::DisplayMath(_)));
                     // A typo must never blank a formula: without MathML the original event goes
@@ -440,7 +532,7 @@ impl<'a> Page<'a> {
                     self.tagged(src, r.end - shown.len()..r.end, shown.into());
                 }
                 Event::Text(t)
-                    if !in_code && !in_meta && link_wiki.is_empty() && image_wiki.is_empty() =>
+                    if !in_code && !in_meta && link_ours.is_empty() && image_ours.is_empty() =>
                 {
                     self.tagged(src, r, t)
                 }
@@ -466,11 +558,11 @@ impl<'a> Page<'a> {
         ];
         self.html("<div class=\"conflict\">\n".into());
         for (side, named, top, lines) in sides.into_iter().flatten() {
-            let line = self.line_at(text, top);
+            let marker = self.marker(text, top, None).unwrap_or_default();
             let label = esc_attr(conflict::label(text, named.clone()));
             self.html(format!(
                 "<div class=\"conflict-{side}\"><div class=\"conflict-label\">\
-                 <span data-line=\"{line}\"></span>{label}</div>\n"
+                 {marker}{label}</div>\n"
             ));
             self.markdown(text, lines);
             self.html("</div>\n".into());
@@ -821,6 +913,47 @@ mod tests {
         );
         assert_eq!(h.matches("class=\"footnote-definition\"").count(), 1, "{h}");
         assert!(!h.contains('['), "{h}");
+    }
+
+    /// An exported file stands outside the vault: no line markers, a vault link as its text, a
+    /// relative picture rooted at the vault, and none of the note's scripts.
+    #[test]
+    fn html_file_leaves_the_vault_behind() {
+        let src = "# Head\n\nSee [[N]], #tag, [x](y.md), ![[paper.pdf]], [h](#Head) and \
+                   [w](https://example.org). ^p\n\n\
+                   ![a](../img%201.png) ![b](https://example.org/b.png) ![[c.png]] \
+                   ![[d.drawio#P 2]]\n\n\
+                   <script>alert(1)</script>\n<div>kept</div>\n\n\
+                   In <SCRIPT src=x></Script>line, `<script>` shown\n\n\
+                   <<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> side\n";
+        let h = to_html_file(src, "a/b.md");
+        assert!(!h.contains("data-line"), "{h}");
+        assert!(
+            h.contains(
+                "<p><span id=\"^p\"></span>See N, #tag, x, paper.pdf, \
+                 <a href=\"#head\">h</a> and <a href=\"https://example.org\">w</a>.</p>"
+            ),
+            "{h}"
+        );
+        assert!(
+            h.contains(
+                "<p><img src=\"accent://file/img%201.png\" alt=\"a\" /> \
+                 <img src=\"https://example.org/b.png\" alt=\"b\" /> \
+                 <img src=\"accent://file/c.png\"> \
+                 <img src=\"accent://file/d.drawio?page=P%202\"></p>"
+            ),
+            "{h}"
+        );
+        assert!(!h.to_ascii_lowercase().contains("<script"), "{h}");
+        assert!(h.contains("<div>kept</div>"), "{h}");
+        assert!(
+            h.contains("<p>In line, <code>&lt;script&gt;</code> shown</p>"),
+            "{h}"
+        );
+        assert!(
+            h.contains("<div class=\"conflict-label\">HEAD</div>"),
+            "{h}"
+        );
     }
 
     /// The preview markers are tested on their own; strip them so the older assertions stay
