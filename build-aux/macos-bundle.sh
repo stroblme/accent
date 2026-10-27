@@ -90,9 +90,10 @@ cp "$schemas"/org.gtk.gtk4.*.gschema.xml "$schemas/org.gnome.desktop.interface.g
 	"$res/share/glib-2.0/schemas/"
 glib-compile-schemas "$res/share/glib-2.0/schemas"
 # The Adwaita icons without its full-colour raster sizes and cursors, which the app does not draw
-# (AppKit's cursors stand in); hicolor, GTK's fallback, with only the app's own icons.
+# (AppKit's cursors stand in); hicolor, GTK's fallback, with only the app's own icons. -L, as
+# Homebrew links each icon into its prefix as a relative symlink into the Cellar.
 for item in "$prefix/share/icons/Adwaita"/*; do
-	case ${item##*/} in cursors | [0-9]*x[0-9]*) ;; *) cp -R "$item" "$res/share/icons/Adwaita/" ;; esac
+	case ${item##*/} in cursors | [0-9]*x[0-9]*) ;; *) cp -RL "$item" "$res/share/icons/Adwaita/" ;; esac
 done
 cp "$prefix/share/icons/hicolor/index.theme" "$res/share/icons/hicolor/"
 cp "data/icons/hicolor/scalable/apps/$app_id.svg" "$res/share/icons/hicolor/scalable/apps/"
