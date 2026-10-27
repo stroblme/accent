@@ -44,7 +44,7 @@ pub(super) fn bench_panes(app: &Rc<App>, rels: &str) {
 /// one `shell` for a terminal, `diff` for a comparison), then real clicks through XTEST: into
 /// `first`, then into the middle of `rel`'s document. The pane clicked into has to be the active
 /// one with the keyboard, whatever its tab is; and a PDF's or a diagram's ring has to be inside
-/// the pane the split put it in, and follow its hub.
+/// the pane the split put it in, follow its hub, and open where the last one was dragged.
 fn bench_click(app: &Rc<App>, rels: &str) {
     let rels: Vec<String> = rels.split(',').map(str::to_string).collect();
     let Some((first, rels)) = rels.split_first() else {
@@ -67,6 +67,7 @@ fn bench_click(app: &Rc<App>, rels: &str) {
         };
         let click = |(x, y): (f32, f32)| format!("move {x} {y}; down; up");
         let mut failed = false;
+        let mut dragged = None;
         for rel in &rels {
             let Some(page) = bench_open_kind(&app, rel).await else {
                 return bench_quit(&app);
@@ -98,12 +99,20 @@ fn bench_click(app: &Rc<App>, rels: &str) {
                 };
                 let before = at();
                 let size = (pane.width(), pane.height());
-                println!("bench click {rel} ring={before:?} pane={size:?}");
+                let kept = dragged.is_none_or(|d| before == Some(d));
+                println!("bench click {rel} ring={before:?} pane={size:?} kept={kept}");
+                failed |= !kept;
+                // Left while there is room, else back right, so no drag runs into the edge.
+                let dx = match before.is_some_and(|(x, _)| x >= 80.0) {
+                    true => -80.0,
+                    false => 80.0,
+                };
                 let (x, y) = middle(&ring);
-                super::git::xtest(&format!("drag {x} {y} {} {}", x - 80.0, y + 20.0)).await;
+                super::git::xtest(&format!("drag {x} {y} {} {}", x + dx, y + 20.0)).await;
                 let moved = before.zip(at()).map(|(a, b)| (b.0 - a.0, b.1 - a.1));
                 println!("bench click {rel} ring_dragged={moved:?}");
-                failed |= moved != Some((-80.0, 20.0));
+                failed |= moved != Some((dx, 20.0));
+                dragged = at();
             }
             let on = |pane: &Rc<Pane>| {
                 let keyboard = app.keyboard_pane().is_some_and(|k| Rc::ptr_eq(&k, pane));

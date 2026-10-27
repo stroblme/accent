@@ -234,9 +234,9 @@ impl PdfRing {
         self.ring.set_visible(visible, at);
     }
 
-    /// Where the reader dragged the ring; see [`Ring::at`].
-    pub fn at(&self) -> Option<(f64, f64)> {
-        self.ring.at()
+    /// See [`Ring::connect_moved`].
+    pub fn connect_moved(&self, f: impl Fn((f64, f64)) + 'static) {
+        self.ring.connect_moved(f);
     }
 
     /// Show which tool is in hand, and its options.

@@ -260,8 +260,8 @@ impl DiagramRing {
         self.ring.set_visible(visible, at);
     }
 
-    pub fn at(&self) -> Option<(f64, f64)> {
-        self.ring.at()
+    pub fn connect_moved(&self, f: impl Fn((f64, f64)) + 'static) {
+        self.ring.connect_moved(f);
     }
 
     pub fn set_tool(&self, tool: Tool) {

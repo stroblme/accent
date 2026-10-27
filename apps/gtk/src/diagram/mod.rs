@@ -449,9 +449,9 @@ impl DiagramTab {
         self.ring.set_visible(true, at);
     }
 
-    /// Where the reader dragged the ring, for the next tab's to open at.
-    pub fn ring_at(&self) -> Option<(f64, f64)> {
-        self.ring.at()
+    /// Call `f` with where a drag puts the ring, for the next tab's to open at.
+    pub fn connect_ring_moved(&self, f: impl Fn((f64, f64)) + 'static) {
+        self.ring.connect_moved(f);
     }
 
     /// Enter presentation fitted and read-only, finishing label edits and clearing

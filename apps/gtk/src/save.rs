@@ -639,9 +639,6 @@ impl App {
         // and on a remote vault still goes up.
         if let Some(Doc::Pdf(pdf)) = self.doc_for_page(page) {
             pdf.flush_closing();
-            if let Some(at) = pdf.ring_at() {
-                self.ring_at.set(Some(at));
-            }
             crate::malloc::trim_soon();
         }
         // A diagram closing was asked about already (`wire.rs`), so a failure here is the

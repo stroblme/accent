@@ -5,7 +5,7 @@
 
 use adw::prelude::*;
 use gtk::{gdk, glib};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 /// The distance from the hub to a tool button, in pixels.
 const ORBIT: f64 = 54.0;
@@ -26,6 +26,8 @@ pub trait Tool: Copy + PartialEq + 'static {
     fn none() -> Self;
 }
 
+type OnMoved = RefCell<Option<Box<dyn Fn((f64, f64))>>>;
+
 /// A ring of tool buttons, and the hub that moves it.
 pub struct Ring<T: Tool> {
     root: RingBox,
@@ -33,9 +35,12 @@ pub struct Ring<T: Tool> {
     tool: Cell<T>,
     /// Where the ring's corner is in the pane, as it was last drawn or put.
     at: std::cell::Cell<(f64, f64)>,
-    /// Whether the reader moved the ring. Until then it sits in its default corner, wherever the
-    /// pane's size puts that.
+    /// Whether the ring stands where the reader put it, dragged here or given the place the window
+    /// last left a ring. Until then it sits in its default corner, wherever the pane's size puts
+    /// that: nothing in the window has been dragged yet.
     moved: std::cell::Cell<bool>,
+    /// Told where a drag takes the ring, so the window can give the next ring that place.
+    on_moved: OnMoved,
 }
 
 impl<T: Tool> Ring<T> {
@@ -84,6 +89,7 @@ impl<T: Tool> Ring<T> {
             tool: Cell::new(T::none()),
             at: std::cell::Cell::new((INSET, INSET)),
             moved: std::cell::Cell::new(false),
+            on_moved: RefCell::new(None),
         });
         ring.wire_drag(&hub);
         ring
@@ -124,6 +130,9 @@ impl<T: Tool> Ring<T> {
                 // as an offset from the press would leave the ring trailing the pointer by half.
                 let (x, y) = ring.at.get();
                 ring.move_to(x + dx, y + dy);
+                if let Some(f) = ring.on_moved.borrow().as_ref() {
+                    f(ring.at.get());
+                }
             }
         ));
         hub.add_controller(drag);
@@ -171,16 +180,16 @@ impl<T: Tool> Ring<T> {
         }
     }
 
-    /// Where the reader dragged the ring, so the next one opens there. `None` while they have
-    /// not moved it, which leaves the next one free to find its own corner.
-    pub fn at(&self) -> Option<(f64, f64)> {
-        self.moved.get().then(|| self.at.get())
+    /// Call `f` with where each step of a drag puts the ring.
+    pub fn connect_moved(&self, f: impl Fn((f64, f64)) + 'static) {
+        self.on_moved.replace(Some(Box::new(f)));
     }
 
-    /// Restore the ring's saved position once the reader has moved it; until then it takes its
-    /// corner as it is allocated.
+    /// Put the ring where the window last left one, this ring or another tab's; with no such
+    /// place it takes its corner as it is allocated.
     fn place(&self, remembered: Option<(f64, f64)>) {
-        if let Some((x, y)) = remembered.filter(|_| self.moved.get()) {
+        if let Some((x, y)) = remembered {
+            self.moved.set(true);
             self.move_to(x, y);
         }
     }

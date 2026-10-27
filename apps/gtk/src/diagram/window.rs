@@ -204,6 +204,13 @@ impl App {
             app.config.borrow_mut().diagram = tab.options();
             app.config_changed();
         }));
+        // Where the next ring opens, as a PDF's drag says.
+        let weak = Rc::downgrade(self);
+        tab.connect_ring_moved(move |at| {
+            if let Some(app) = weak.upgrade() {
+                app.ring_at.set(Some(at));
+            }
+        });
     }
 
     /// The Properties pane follows the tab in front: a diagram's own, or none.

@@ -146,6 +146,12 @@ impl App {
             self,
             move |_, tool, choice| app.pdf_choice(tool, choice)
         ));
+        // Wherever a ring is dragged is where the next one opens, in this tab or another.
+        pdf.connect_ring_moved(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |at| app.ring_at.set(Some(at))
+        ));
         pdf.connect_matches(glib::clone!(
             #[weak(rename_to = app)]
             self,
@@ -619,14 +625,9 @@ impl App {
         self.config_changed();
     }
 
-    /// Put the active PDF's tools where this window last had them, and take the position back
-    /// from whichever tab is losing them.
+    /// Put the active PDF's or diagram's tools where this window last left a ring.
     pub fn sync_drawing(&self) {
         if let Some(pdf) = self.active_pdf() {
-            // Whatever this tab's ring was dragged to is where the next one starts.
-            if let Some(at) = pdf.ring_at() {
-                self.ring_at.set(Some(at));
-            }
             // Presenting puts the tools away and the tool in hand down, so nothing draws on what
             // is presented; the window still knows they were out.
             let showing = self.drawing.get() && self.presenting.get().is_none();
@@ -638,9 +639,6 @@ impl App {
         }
         let diagram = self.active_diagram();
         if let Some(d) = &diagram {
-            if let Some(at) = d.ring_at() {
-                self.ring_at.set(Some(at));
-            }
             d.show_ring(d.ring_shown(), self.ring_at.get());
         }
         self.sync_export();

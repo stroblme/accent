@@ -754,9 +754,9 @@ impl PdfTab {
         self.ring.set_visible(showing, at);
     }
 
-    /// Where the reader has dragged the ring, so the next tab to show one puts it there.
-    pub fn ring_at(&self) -> Option<(f64, f64)> {
-        self.ring.at()
+    /// Call `f` with where a drag puts the ring, so the next tab to show one puts it there.
+    pub fn connect_ring_moved(&self, f: impl Fn((f64, f64)) + 'static) {
+        self.ring.connect_moved(f);
     }
 
     /// Whether the ring is out, for the drills.
