@@ -1627,7 +1627,7 @@ The `Ctrl` chords for application and document commands use GTK's `<Primary>` mo
 - Text on the clipboard wins over an image.
   A code tab's paste and drop, a loose note's, and a file dropped on a tab bar are unchanged.
 - **A table in a note lines up on Tab and Return**: in a GFM pipe table, a header row over a delimiter row of as many cells and not in code or front matter, either key pads every cell so each column is as wide as its widest cell, keeping the delimiter row's colons and redrawing its dashes to the width.
-  An org note's table is every line opening with `|`, not in a block or a drawer, its hlines (`|-`) redrawn to the widths with a `+` where two columns meet, as org draws them, and every column left aligned and one wide at least; a row added goes under the last, above an hline closing the table, as org's own Tab puts it.
+  An org note's table is every line opening with `|`, not in a block or a drawer, its hlines (`|-`) redrawn to the widths with a `+` where two columns meet, as org draws them, and a column one wide at least, right aligned where at least half its filled cells are numbers as org reads one (`org-table-number-regexp`, `org-table-number-fraction`) and left aligned otherwise; a row added goes under the last, above an hline closing the table, as org's own Tab puts it.
   Return leaves the caret where it was in its cell's text; in the last row it adds an empty row, and in an empty last row it takes that row away and leaves the table on a line of its own, as an empty list item ends a list.
 - Tab and Shift+Tab walk the cells, to the end of each one's text, and Tab in the last cell adds a row.
   Each key is one undo step with the padding it brought.

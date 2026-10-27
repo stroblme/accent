@@ -1,8 +1,11 @@
 //! An org table lined up on Tab and Return as a markdown note's pipe table is
 //! ([`crate::markdown::table_key`]): every line opening with `|` a row of it, one opening with
-//! `|-` an hline, redrawn to the columns' widths with `+` where they meet.
+//! `|-` an hline, redrawn to the columns' widths with `+` where they meet, and a column of numbers
+//! right aligned, as org's own Tab lines a table up (`org-table-align`).
 
-use crate::markdown::{Rules, Table, TableEdit, TableKey, split};
+use crate::markdown::{Align, Cell, Rules, Table, TableEdit, TableKey, split};
+use regex::Regex;
+use std::sync::LazyLock;
 
 /// Tab, Shift+Tab or Return at `column` of line `at` in an org table, or `None` off one.
 pub fn table_key(lines: &[&str], at: usize, column: usize, key: TableKey) -> Option<TableEdit> {
@@ -21,12 +24,53 @@ pub fn table_key(lines: &[&str], at: usize, column: usize, key: TableKey) -> Opt
         };
         Some((cells?, hline))
     });
+    let rows: Vec<(Vec<Cell>, bool)> = rows.collect::<Option<_>>()?;
+    let aligns = aligns(&rows);
     Table {
         lines: top..end,
-        rows: rows.collect::<Option<_>>()?,
-        rules: Rules::Hline,
+        rows,
+        rules: Rules::Hline(aligns),
     }
     .key(lines, at, column, key)
+}
+
+/// Each column's alignment: right where at least half of its filled cells, a header's too, are
+/// numbers (`org-table-number-fraction`), left otherwise.
+fn aligns(rows: &[(Vec<Cell>, bool)]) -> Vec<Align> {
+    let rows: Vec<&[Cell]> = rows
+        .iter()
+        .filter(|(_, hline)| !hline)
+        .map(|(c, _)| &c[..])
+        .collect();
+    let n = rows.iter().map(|cells| cells.len()).max().unwrap_or(0);
+    (0..n)
+        .map(|k| {
+            let filled = rows
+                .iter()
+                .filter_map(|cells| cells.get(k))
+                .filter(|c| !c.text.is_empty());
+            let (numbers, all) = filled.fold((0, 0), |(n, all), c| {
+                (n + usize::from(number(&c.text)), all + 1)
+            });
+            match 2 * numbers >= all {
+                true => Align::Right,
+                false => Align::None,
+            }
+        })
+        .collect()
+}
+
+/// Whether org reads a cell as a number: `org-table-number-regexp`'s default, which takes
+/// `12`, `2.4e-08`, `4.034+-0.02`, `>3.5` or `0x1F`, matched as Emacs does, ignoring case.
+fn number(cell: &str) -> bool {
+    static NUMBER: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(concat!(
+            r"(?i)^(?:[<>]?[-+^.0-9]*[0-9][-+^.0-9eEdDx()%:]*|[<>]?[-+]?0[xX][[:xdigit:].]+",
+            r"|[<>]?[-+]?[0-9]+#[0-9a-zA-Z.]+|nan|[-+u]?inf)$",
+        ))
+        .expect("a valid regex")
+    });
+    NUMBER.is_match(cell)
 }
 
 #[cfg(test)]
@@ -56,6 +100,17 @@ mod tests {
             "| a   | bb^ |   |\n|-----+----+---|\n| ccc | d  | e |"
         );
         assert_eq!(press("a | b", 0, 0, TableKey::Tab), None);
+    }
+
+    /// A column at least half of whose filled cells are numbers is right aligned, as org's own Tab
+    /// aligns it, the header counting as one of them.
+    #[test]
+    fn a_column_of_numbers_is_right_aligned() {
+        let table = "| Item | Qty | |\n|-\n| tea | 12 | 3 |\n| cake | 2.5e3 | xy |";
+        assert_eq!(
+            press(table, 2, 3, TableKey::Enter).unwrap(),
+            "| Item |   Qty |    |\n|------+-------+----|\n| t^ea  |    12 |  3 |\n| cake | 2.5e3 | xy |"
+        );
     }
 
     /// A row added past the last goes above an hline closing the table, and an empty last row

@@ -36,7 +36,7 @@ pub(crate) enum Align {
 /// A cell of a row: its text without the spaces around it, the column that text starts at, and
 /// the column of the pipe that ends the cell, or of the end of its text where none does.
 pub(crate) struct Cell {
-    text: String,
+    pub text: String,
     start: usize,
     end: usize,
 }
@@ -56,8 +56,8 @@ pub(crate) enum Rules {
     /// A delimiter row keeping each column's colons, a column three wide at least, as GFM asks.
     Delimiter(Vec<Align>),
     /// Org's hline, dashes with a `+` where two columns meet, a column one wide at least, as org
-    /// lays a table out.
-    Hline,
+    /// lays a table out, and each column's alignment as org sets it.
+    Hline(Vec<Align>),
 }
 
 /// Where the key leaves the caret.
@@ -159,7 +159,7 @@ impl Table {
                 content.push(Vec::new());
                 let below = match self.rules {
                     Rules::Delimiter(_) => order.len(),
-                    Rules::Hline => line_of(&order, last) + 1,
+                    Rules::Hline(_) => line_of(&order, last) + 1,
                 };
                 order.insert(below, Some(last + 1));
             }
@@ -168,7 +168,7 @@ impl Table {
 
         let (mut aligns, least) = match &self.rules {
             Rules::Delimiter(aligns) => (aligns.clone(), 3),
-            Rules::Hline => (Vec::new(), 1),
+            Rules::Hline(aligns) => (aligns.clone(), 1),
         };
         aligns.resize(n, Align::None);
         let widths: Vec<usize> = (0..n)
@@ -202,7 +202,7 @@ impl Table {
                     .collect();
                 lay(&rules)
             }
-            Rules::Hline => {
+            Rules::Hline(_) => {
                 let dashes: Vec<String> = widths.iter().map(|w| "-".repeat(w + 2)).collect();
                 (format!("{indent}|{}|", dashes.join("+")), lay(&[]).1)
             }
