@@ -53,6 +53,9 @@ A Flatpak bundle is shipped with each [release](https://github.com/stroblme/acce
 flatpak install --user accent-<version>-x86_64.flatpak
 ```
 
+For macOS 15 or newer, each release also carries `Accent.app` as a disk image (`arm64` for Apple silicon, `x86_64` for Intel).
+Drag it into Applications. It has no Developer ID, so macOS refuses the first launch: open it anyway under System Settings › Privacy & Security. It renders no preview of a note and checks no spelling yet.
+
 For a native install into `~/.local` (GNOME 49 or newer: Fedora 43+, openSUSE Tumbleweed, Debian testing, Ubuntu 26.04+, Arch), go for the following:
 
 ```sh

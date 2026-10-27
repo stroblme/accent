@@ -63,8 +63,62 @@ jobs:
           bundle: accent-${{ github.ref_name }}-x86_64.flatpak
           cache-key: flatpak-builder-${{ github.sha }}
 
+  # The static servers a remote vault uploads, for Accent.app to carry; macOS has no musl
+  # toolchain of its own. Not named accent-*, so the release below leaves them out.
+  server:
+    name: remote servers
+    needs: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      # The Makefile's own recipe for cargo-zigbuild and zig, without root.
+      - uses: astral-sh/setup-uv@v10.3.2
+      - run: |
+          uv tool install cargo-zigbuild
+          ln -s "$(uv tool dir)/cargo-zigbuild/bin/python-zig" "$(uv tool dir --bin)/zig"
+          uv tool dir --bin >> "$GITHUB_PATH"
+      - run: make server
+      - uses: actions/upload-artifact@v7
+        with:
+          name: servers
+          path: target/*-unknown-linux-musl/release/accent-cli*
+          if-no-files-found: error
+
+  # Homebrew's bottles are built for the runner's macOS, so that is the app's minimum
+  # (LSMinimumSystemVersion). macos-15-intel is the last Intel image GitHub offers.
+  dmg:
+    name: macOS app (${{ matrix.os }})
+    needs: [tests, server]
+    strategy:
+      matrix:
+        os: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      # tests.yml's list, plus what `build-aux/macos-bundle.sh` copies in: the SVG loader and
+      # rsvg-convert, GIO's TLS module, the icons and the interface schemas.
+      - run: |
+          brew install pkgconf gtk4 libadwaita gtksourceview5 vte3 libspelling libsoup \
+            librsvg glib-networking adwaita-icon-theme gsettings-desktop-schemas
+      - uses: dtolnay/rust-toolchain@stable
+      # Where `make server` leaves them, which is where the bundle script looks.
+      - uses: actions/download-artifact@v8
+        with:
+          name: servers
+          path: target
+      - run: make dmg VERSION="${GITHUB_REF_NAME#v}"
+      # dyld resolves every library at launch, so this fails on one the bundle lacks; `--help`
+      # exits before GTK opens a window.
+      - run: target/release/Accent.app/Contents/MacOS/accent --help
+      - uses: actions/upload-artifact@v7
+        with:
+          name: accent-${{ matrix.os }}
+          path: target/release/accent-*.dmg
+          if-no-files-found: error
+
   release:
-    needs: [apk, flatpak]
+    needs: [apk, flatpak, dmg]
     runs-on: ubuntu-latest
     permissions:
       contents: write

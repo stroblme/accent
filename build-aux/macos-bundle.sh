@@ -24,7 +24,9 @@ rm -rf "$app"
 mkdir -p "$c/MacOS" "$c/Frameworks" "$c/lib/accent" "$res/lib/gdk-pixbuf/loaders" \
 	"$res/lib/gio/modules" "$res/share/glib-2.0/schemas" "$res/share/icons/Adwaita" \
 	"$res/share/icons/hicolor/scalable/apps" "$res/share/icons/hicolor/symbolic/apps"
-sed "s/@VERSION@/$version/" data/Info.plist >"$c/Info.plist"
+# The package manager builds its libraries for the macOS it runs on, which is then the app's minimum.
+sed -e "s/@VERSION@/$version/" -e "s/@MINOS@/$(sw_vers -productVersion | cut -d. -f1).0/" \
+	data/Info.plist >"$c/Info.plist"
 cp "$bin/accent" "$bin/accent-cli" "$c/MacOS/"
 cp "$bin/accent.icns" "$res/"
 cp vendor/pdfium/libpdfium.dylib "$c/lib/accent/"
