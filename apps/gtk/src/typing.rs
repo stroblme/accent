@@ -1,17 +1,18 @@
 //! A note's typing helpers for lists, fences, pairs and tables, and a code tab's brackets. An org
-//! note continues its lists by org's rules and has no fences or tables yet.
+//! note continues its lists and lines up its tables by org's rules, and has no fences.
 //!
 //! Pure functions inspect the current line so decisions can be tested without a display;
 //! `install` supplies widget integration. Re-parsing the whole note per key is unnecessary:
-//! list markers are local, code fences are tagged, and `markdown::table_key` inspects nearby
-//! pipe-delimited lines.
+//! list markers are local, code fences are tagged, and `markdown::table_key` or `org::table_key`
+//! inspects nearby pipe-delimited lines.
 //!
 //! Each edit is one user action for Undo. `editor::keys` decides which presses reach
 //! [`on_key`], giving completion and multiple carets priority.
 
 use crate::editor::{caret, line_end, line_prefix};
-use accent_core::markdown::{TableKey, table_key};
+use accent_core::markdown::{self, TableKey};
 use accent_core::note::Syntax;
+use accent_core::org;
 use gtk::prelude::*;
 use gtk::{gdk, glib};
 
@@ -278,12 +279,11 @@ pub fn on_key(
     ) {
         return glib::Propagation::Proceed;
     }
-    let markdown = syntax == Syntax::Markdown;
     match key {
         gdk::Key::Return | gdk::Key::KP_Enter => on_return(view, syntax),
         gdk::Key::BackSpace => on_backspace(view),
         gdk::Key::Tab | gdk::Key::KP_Tab => on_tab(view, syntax),
-        gdk::Key::ISO_Left_Tab if markdown && in_table(view, TableKey::BackTab) => {
+        gdk::Key::ISO_Left_Tab if in_table(view, syntax, TableKey::BackTab) => {
             glib::Propagation::Stop
         }
         _ => match key.to_unicode().filter(|c| !c.is_control()) {
@@ -299,7 +299,7 @@ pub fn on_key(
 /// line start to preserve the caret's text position; other lines leave Tab to the view, an org
 /// heading's too.
 fn on_tab(view: &sourceview5::View, syntax: Syntax) -> glib::Propagation {
-    if syntax == Syntax::Markdown && in_table(view, TableKey::Tab) {
+    if in_table(view, syntax, TableKey::Tab) {
         return glib::Propagation::Stop;
     }
     let buffer = view.buffer();
@@ -359,7 +359,7 @@ fn on_return(view: &sourceview5::View, syntax: Syntax) -> glib::Propagation {
     if verbatim(&buffer, &start) && !yaml {
         return glib::Propagation::Proceed;
     }
-    if markdown && in_table(view, TableKey::Enter) {
+    if in_table(view, syntax, TableKey::Enter) {
         return glib::Propagation::Stop;
     }
 
@@ -513,10 +513,10 @@ fn apply(view: &sourceview5::View, pair: Pair) -> glib::Propagation {
     glib::Propagation::Stop
 }
 
-/// Handle Tab, Shift+Tab or Return in an unselected table through markdown::table_key.
-/// Realignment and row changes form one undo step; return whether handled.
+/// Handle Tab, Shift+Tab or Return in an unselected table through markdown::table_key or
+/// org::table_key. Realignment and row changes form one undo step; return whether handled.
 /// Multi-caret dispatch takes these keys first.
-fn in_table(view: &sourceview5::View, key: TableKey) -> bool {
+fn in_table(view: &sourceview5::View, syntax: Syntax, key: TableKey) -> bool {
     let buffer = view.buffer();
     let at = caret(&buffer);
     let mut start = at;
@@ -542,6 +542,10 @@ fn in_table(view: &sourceview5::View, key: TableKey) -> bool {
     let lines: Vec<String> = (first..=last).map(line_text).collect();
     let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
     let row = (at.line() - first) as usize;
+    let table_key = match syntax {
+        Syntax::Markdown => markdown::table_key,
+        Syntax::Org => org::table_key,
+    };
     let Some(edit) = table_key(&lines, row, at.line_offset() as usize, key) else {
         return false;
     };

@@ -7,28 +7,34 @@ use std::ops::Range;
 /// without a box gets `[ ]` behind its marker, and any other line, a blank one too, becomes
 /// `- [ ]` and itself. The indentation and any quote markers stay in front.
 pub fn toggle_task(line: &str) -> String {
-    let rest = line.trim_start_matches([' ', '\t', '>']);
+    toggle_box(line, &[' ', '\t', '>'], b'/', b'x')
+}
+
+/// [`toggle_task`] for a syntax that writes a task in progress as `[{doing}]` and a done one as
+/// `[{done}]`, keeping `lead` in front: org's `[-]` and `[X]`, which has no quote markers.
+pub(crate) fn toggle_box(line: &str, lead: &[char], doing: u8, done: u8) -> String {
+    let rest = line.trim_start_matches(lead);
     let head = &line[..line.len() - rest.len()];
     let Some(width) = marker(rest) else {
         return format!("{head}- [ ] {rest}");
     };
     let (marker, body) = rest.split_at(width);
-    let next = match tick(body) {
-        Some(b' ') => '/',
-        Some(b'/') => 'x',
-        Some(_) => ' ',
+    let next = match tick(body, doing) {
+        Some(b' ') => doing,
+        Some(t) if t == doing => done,
+        Some(_) => b' ',
         // `-` alone at the end of a line is an empty item, with no space after it yet.
         None if marker.trim_end() == marker => return format!("{head}{marker} [ ] {body}"),
         None => return format!("{head}{marker}[ ] {body}"),
     };
-    format!("{head}{marker}[{next}]{}", &body[3..])
+    format!("{head}{marker}[{}]{}", next as char, &body[3..])
 }
 
 /// The `[/]` of an in-progress task item whose list marker ends at `after` in `text`.
 pub(super) fn in_progress(text: &str, after: usize) -> Option<Range<usize>> {
     let body = &text[after..];
     let start = after + body.len() - body.trim_start_matches([' ', '\t']).len();
-    (tick(&text[start..]) == Some(b'/')).then_some(start..start + 3)
+    (tick(&text[start..], b'/') == Some(b'/')).then_some(start..start + 3)
 }
 
 /// The width of the list marker `rest` starts with, the whitespace after it included: `- `,
@@ -45,14 +51,14 @@ fn marker(rest: &str) -> Option<usize> {
     (space > 0 || after.is_empty()).then_some(head + space)
 }
 
-/// The tick of the box `body` starts with — ` `, `/`, `x` or `X` — where whitespace or the end
-/// of the line follows it, as GFM asks of a task's box.
-fn tick(body: &str) -> Option<u8> {
+/// The tick of the box `body` starts with — ` `, `doing`, `x` or `X` — where whitespace or the
+/// end of the line follows it, as GFM asks of a task's box.
+fn tick(body: &str, doing: u8) -> Option<u8> {
     match body.as_bytes() {
-        [b'[', tick @ (b' ' | b'/' | b'x' | b'X'), b']', rest @ ..]
-            if rest.first().is_none_or(u8::is_ascii_whitespace) =>
-        {
-            Some(*tick)
+        [b'[', tick, b']', rest @ ..] if matches!(tick, b' ' | b'x' | b'X') || *tick == doing => {
+            rest.first()
+                .is_none_or(u8::is_ascii_whitespace)
+                .then_some(*tick)
         }
         _ => None,
     }

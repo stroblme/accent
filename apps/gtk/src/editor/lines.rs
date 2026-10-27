@@ -4,7 +4,7 @@
 
 use super::{Flavour, Syntax, Tab, caret, indent, line_end};
 use crate::{comment, multicaret, typing};
-use accent_core::markdown;
+use accent_core::{markdown, org};
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use sourceview5::prelude::*;
@@ -409,30 +409,35 @@ pub(crate) fn toggle_comment(view: &sourceview5::View, flavour: Flavour) {
 }
 
 /// Toggle Task: each line a caret or the selection covers one step along
-/// [`markdown::toggle_task`], as one undo step. A blank line is passed over inside a run of
-/// several, so a selected list keeps its gaps, and so is a line of the front matter or a code
-/// block. The carets stay on their text, only the box being spliced in or changed.
-pub(crate) fn toggle_task(view: &sourceview5::View) {
+/// [`markdown::toggle_task`] or [`org::toggle_task`], as one undo step. A blank line is passed
+/// over inside a run of several, so a selected list keeps its gaps, and so is a line of the front
+/// matter or a code block. The carets stay on their text, only the box being spliced in or changed.
+pub(crate) fn toggle_task(view: &sourceview5::View, syntax: Syntax) {
     if !view.is_editable() {
         return;
     }
     if let Some(column) = column(view) {
         return column.each_block(&covered(column), |buffer, first, last| {
-            task_run(buffer, first, last);
+            task_run(buffer, first, last, syntax);
             None
         });
     }
     let buffer = view.buffer();
     let (first, last) = selected_lines(&buffer);
     buffer.begin_user_action();
-    task_run(&buffer, first, last);
+    task_run(&buffer, first, last, syntax);
     buffer.end_user_action();
 }
 
-/// [`toggle_task`] over the inclusive lines `first..=last`, passing over the front matter and
-/// code blocks as the styling pass tagged them from the note's spans: its first character, or the
-/// end of a blank line, is in one.
-fn task_run(buffer: &gtk::TextBuffer, first: i32, last: i32) {
+/// [`toggle_task`] over the inclusive lines `first..=last`. A markdown note's front matter and
+/// code blocks are passed over as the styling pass tagged them from its spans, where a line's
+/// first character, or the end of a blank line, is in one; an org note's lines are read from its
+/// text, which also holds the `#+TODO` keywords its headings step through.
+fn task_run(buffer: &gtk::TextBuffer, first: i32, last: i32, syntax: Syntax) {
+    let org = (syntax == Syntax::Org).then(|| {
+        let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), true);
+        org::toggle_task(&text, first as usize..last as usize + 1)
+    });
     for line in first..=last {
         let Some(start) = buffer.iter_at_line(line) else {
             return;
@@ -441,10 +446,16 @@ fn task_run(buffer: &gtk::TextBuffer, first: i32, last: i32) {
         let text = buffer.text(&start, &end, true);
         let mut head = start;
         head.forward_chars(text.chars().take_while(|c| c.is_whitespace()).count() as i32);
-        if (first < last && text.trim().is_empty()) || typing::verbatim(buffer, &head) {
+        if first < last && text.trim().is_empty() {
             continue;
         }
-        splice(buffer, start, end, &text, &markdown::toggle_task(&text));
+        let next = match &org {
+            Some(org) => org[(line - first) as usize].clone(),
+            None => (!typing::verbatim(buffer, &head)).then(|| markdown::toggle_task(&text)),
+        };
+        if let Some(next) = next {
+            splice(buffer, start, end, &text, &next);
+        }
     }
 }
 

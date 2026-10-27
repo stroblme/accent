@@ -86,6 +86,7 @@ bench lines_task_column "- [ ] a\n- [ ] \n- [ ] c" [(0, 7), (1, 6), (2, 0)]
 bench lines_task_column_undo "a\n\n- [x] c" [(0, 1), (1, 0), (2, 0)]
 bench lines_task_verbatim "---\na: b\n---\n\n```\nx\n\n```\n    y\n- [ ] z" [(0, 0)]
 bench lines_task_verbatim_carets "---\na: b\n---\n\n```\nx\n\n```\n    y\n- [ ] z" [(6, 0)]
+bench lines_task_org "#+TODO: NEXT | DONE\n* NEXT [#A] Plan :t:\n- [X] a\n#+begin_src sh\nx\n#+end_src\n- [ ] b" [(0, 0)]
 bench lines_shift_delete passed=true
 bench lines_shift_delete "ab\ncd\nef" [(0, 1), (1, 1), (2, 1)]
 bench lines_shift_delete_cut "" [(0, 0)]
@@ -120,6 +121,8 @@ bench table_back_tab "| a   |  bb |\n| :-- | --: |\n| ccc |   d |\n|     |     |
 bench table_enter_leaves "| a   |  bb |\n| :-- | --: |\n| ccc |   d |\n" (3, 0) Stop
 bench table_undo "| a   |  bb |\n| :-- | --: |\n| ccc |   d |\n|     |     |"
 bench table_not_a_table "a | b\nc | d" (0, 1) Proceed
+bench table_org_tab "| a   | bb |\n|-----+----|\n| ccc | d  |\n|-----+----|" (2, 9) Stop
+bench table_org_enter_adds_row "| a   | bb |\n|-----+----|\n| ccc | d  |\n|     |    |\n|-----+----|" (3, 2) Stop
 bench indent_colon "def f():  # x\n    " (1, 4) Stop
 bench indent_string "    x = \"(\"" (0, 11) Proceed
 bench indent_no_language "Notes:" (0, 6) Proceed

@@ -501,8 +501,8 @@ async fn bench_folds(view: &multicaret::View) {
 fn bench_table(view: &multicaret::View) {
     let buffer = view.buffer();
     let none = gdk::ModifierType::empty();
-    let press = |step: &str, key| {
-        let answer = typing::on_key(view.upcast_ref(), Syntax::Markdown, key, none);
+    let press = |step: &str, syntax, key| {
+        let answer = typing::on_key(view.upcast_ref(), syntax, key, none);
         let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), true);
         let at = editor::caret(&buffer);
         println!(
@@ -514,18 +514,25 @@ fn bench_table(view: &multicaret::View) {
     view.clear_carets();
     buffer.set_text("| a | bb |\n|:-|-:|\n| ccc | d |");
     buffer.place_cursor(&at(&buffer, 2, 3));
-    press("tab", gdk::Key::Tab);
-    press("tab_adds_row", gdk::Key::Tab);
-    press("back_tab", gdk::Key::ISO_Left_Tab);
+    let markdown = Syntax::Markdown;
+    press("tab", markdown, gdk::Key::Tab);
+    press("tab_adds_row", markdown, gdk::Key::Tab);
+    press("back_tab", markdown, gdk::Key::ISO_Left_Tab);
     buffer.place_cursor(&at(&buffer, 3, 2));
-    press("enter_leaves", gdk::Key::Return);
+    press("enter_leaves", markdown, gdk::Key::Return);
     buffer.undo();
     let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), true);
     println!("bench table_undo {text:?}");
     // A row of pipes with no delimiter row under its header is no table.
     buffer.set_text("a | b\nc | d");
     buffer.place_cursor(&at(&buffer, 0, 1));
-    press("not_a_table", gdk::Key::Tab);
+    press("not_a_table", markdown, gdk::Key::Tab);
+    // An org table is every line opening with a pipe, its hline redrawn to the widths, and Return
+    // in its last row adds one above an hline closing it.
+    buffer.set_text("| a | bb |\n|-\n| ccc | d |\n|-");
+    buffer.place_cursor(&at(&buffer, 2, 3));
+    press("org_tab", Syntax::Org, gdk::Key::Tab);
+    press("org_enter_adds_row", Syntax::Org, gdk::Key::Return);
 }
 
 /// A code tab's Return and closers through [`editor::indent_key`], as a press in a code tab
@@ -1043,7 +1050,7 @@ async fn bench_lines(view: &multicaret::View) {
     view.clear_carets();
     buffer.set_text("- [ ] a\n\nb");
     buffer.select_range(&at(&buffer, 0, 6), &buffer.end_iter());
-    editor::toggle_task(view.upcast_ref());
+    editor::toggle_task(view.upcast_ref(), Syntax::Markdown);
     let selection = buffer
         .selection_bounds()
         .map(|(start, end)| buffer.text(&start, &end, true).to_string());
@@ -1052,7 +1059,7 @@ async fn bench_lines(view: &multicaret::View) {
     buffer.undo();
     show("task_undo");
     column(view, "a\n\n- [x] c");
-    editor::toggle_task(view.upcast_ref());
+    editor::toggle_task(view.upcast_ref(), Syntax::Markdown);
     show("task_column");
     view.press(gdk::Key::z, crate::platform::PRIMARY_MODIFIER);
     show("task_column_undo");
@@ -1065,13 +1072,21 @@ async fn bench_lines(view: &multicaret::View) {
         crate::highlight::apply(source, Syntax::Markdown);
     }
     buffer.select_range(&buffer.start_iter(), &buffer.end_iter());
-    editor::toggle_task(view.upcast_ref());
+    editor::toggle_task(view.upcast_ref(), Syntax::Markdown);
     show("task_verbatim");
     for line in [1, 6] {
         buffer.place_cursor(&at(&buffer, line, 0));
-        editor::toggle_task(view.upcast_ref());
+        editor::toggle_task(view.upcast_ref(), Syntax::Markdown);
     }
     show("task_verbatim_carets");
+    // An org note's: a box along `[-]` and `[X]`, a heading's keyword along the file's `#+TODO`,
+    // its priority and tags kept, the `#+` lines and a block passed over, read from its text.
+    view.clear_carets();
+    buffer
+        .set_text("#+TODO: NEXT | DONE\n* [#A] Plan :t:\n- [-] a\n#+begin_src sh\nx\n#+end_src\nb");
+    buffer.select_range(&buffer.start_iter(), &buffer.end_iter());
+    editor::toggle_task(view.upcast_ref(), Syntax::Org);
+    show("task_org");
 
     // Shift+Delete is GTK's Cut binding, so the column leaves the press to it rather than deleting
     // a character at every caret, and answers the signal it emits with its own whole-line cut.
@@ -1096,7 +1111,7 @@ async fn bench_lines(view: &multicaret::View) {
         editor::delete_line,
         editor::newline_below,
         |view| editor::toggle_comment(view, editor::Flavour::Code),
-        editor::toggle_task,
+        |view| editor::toggle_task(view, Syntax::Markdown),
     ] {
         command(view.upcast_ref());
     }

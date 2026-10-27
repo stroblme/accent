@@ -1,6 +1,7 @@
-//! Edit GFM pipe tables with Tab and Enter, realigning columns after each change.
+//! Edit GFM pipe tables with Tab and Enter, realigning columns after each change, and org's
+//! through [`Table::key`] (`crate::org::table_key`).
 //!
-//! A table has a header, a delimiter row and optional body rows. Unescaped pipes split cells,
+//! A pipe table has a header, a delimiter row and optional body rows. Unescaped pipes split cells,
 //! including inside code. Columns use display widths (minimum three), while caret positions use
 //! character offsets.
 
@@ -25,7 +26,7 @@ pub struct TableEdit {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Align {
+pub(crate) enum Align {
     None,
     Left,
     Center,
@@ -34,10 +35,29 @@ enum Align {
 
 /// A cell of a row: its text without the spaces around it, the column that text starts at, and
 /// the column of the pipe that ends the cell, or of the end of its text where none does.
-struct Cell {
+pub(crate) struct Cell {
     text: String,
     start: usize,
     end: usize,
+}
+
+/// A table as a syntax reads it off its text, for a key to lay out.
+pub(crate) struct Table {
+    /// The lines of the text it spans.
+    pub lines: Range<usize>,
+    /// Each of those lines' cells, and whether it is a rule across the table, a delimiter row or
+    /// an org hline, rather than a row of text.
+    pub rows: Vec<(Vec<Cell>, bool)>,
+    pub rules: Rules,
+}
+
+/// How a table's rules are drawn.
+pub(crate) enum Rules {
+    /// A delimiter row keeping each column's colons, a column three wide at least, as GFM asks.
+    Delimiter(Vec<Align>),
+    /// Org's hline, dashes with a `+` where two columns meet, a column one wide at least, as org
+    /// lays a table out.
+    Hline,
 }
 
 /// Where the key leaves the caret.
@@ -56,115 +76,175 @@ enum Target {
 /// Tab moves between cells and adds a row after the last. Enter adds a row after the last filled
 /// row or exits from an empty final row. Returns `None` outside a table.
 pub fn table_key(lines: &[&str], at: usize, column: usize, key: TableKey) -> Option<TableEdit> {
-    let rows: Vec<Option<Vec<Cell>>> = lines.iter().map(|line| split(line)).collect();
+    let rows: Vec<Option<Vec<Cell>>> = lines.iter().map(|line| split(line, true)).collect();
     rows.get(at)?.as_ref()?;
     let top = (0..=at).rev().take_while(|&i| rows[i].is_some()).last()?;
     let end = (at..rows.len()).take_while(|&i| rows[i].is_some()).count() + at;
-    let (head, mut aligns) = (top..=at).find_map(|h| {
+    let (head, aligns) = (top..=at).find_map(|h| {
         let delimiter = rows.get(h + 1)?.as_ref()?;
         Some((h, aligns(rows[h].as_ref()?, delimiter)?))
     })?;
-    let indent: String = lines[head]
-        .chars()
-        .take_while(|c| c.is_whitespace())
-        .collect();
-    // The header, then the body rows: the rows that hold text, the delimiter row left out.
-    let mut content: Vec<Vec<String>> = (head..end)
-        .filter(|&i| i != head + 1)
-        .map(|i| {
-            rows[i]
-                .iter()
-                .flatten()
-                .map(|cell| cell.text.clone())
-                .collect()
-        })
-        .collect();
-    let cells = rows[at].as_ref()?;
-    let k = cells
-        .iter()
-        .position(|cell| column <= cell.end)
-        .unwrap_or(cells.len() - 1);
-    let offset = column
-        .saturating_sub(cells[k].start)
-        .min(cells[k].text.chars().count());
-    // The delimiter row walks as the header does.
-    let row = (at - head).saturating_sub(1);
-    let last = content.len() - 1;
-    let n = content.iter().map(Vec::len).max().unwrap_or(0);
-    let target = match key {
-        TableKey::Enter if row == last && row > 0 && content[row].iter().all(String::is_empty) => {
-            Target::Left
-        }
-        TableKey::Enter if row == last => Target::Added,
-        TableKey::Enter => Target::Stay,
-        TableKey::Tab if k + 1 < n => Target::Cell(row, k + 1),
-        TableKey::Tab if row < last => Target::Cell(row + 1, 0),
-        TableKey::Tab => Target::Added,
-        TableKey::BackTab if k > 0 => Target::Cell(row, k - 1),
-        TableKey::BackTab if row > 0 => Target::Cell(row - 1, n - 1),
-        TableKey::BackTab => Target::Cell(row, 0),
-    };
-    match target {
-        Target::Left => {
-            content.pop();
-        }
-        Target::Added => content.push(Vec::new()),
-        _ => {}
-    }
-
-    aligns.resize(n, Align::None);
-    let widths: Vec<usize> = (0..n)
-        .map(|k| {
-            content
-                .iter()
-                .filter_map(|row| row.get(k))
-                .map(|text| text.width())
-                .fold(3, usize::max)
-        })
-        .collect();
-    // A row laid out, and the character each of its cells' text starts at.
-    let lay = |cells: &[String]| {
-        let mut line = format!("{indent}|");
-        let mut starts = Vec::new();
-        for (k, (&width, &align)) in widths.iter().zip(&aligns).enumerate() {
-            let text = cells.get(k).map_or("", String::as_str);
-            let space = width - text.width();
-            let left = lead(space, align);
-            starts.push(line.chars().count() + 1 + left);
-            line += &format!(" {}{text}{} |", " ".repeat(left), " ".repeat(space - left));
-        }
-        (line, starts)
-    };
-    let rules: Vec<String> = widths
-        .iter()
-        .zip(&aligns)
-        .map(|(&w, &a)| rule(w, a))
-        .collect();
-    let mut laid: Vec<(String, Vec<usize>)> = content.iter().map(|cells| lay(cells)).collect();
-    laid.insert(1, lay(&rules));
-    let line_of = |row: usize| if row == 0 { 0 } else { row + 1 };
-    let length = |row: usize, k: usize| content[row].get(k).map_or(0, |text| text.chars().count());
-    let caret = match target {
-        Target::Stay if at == head + 1 => (1, laid[1].1[k] + offset.min(widths[k])),
-        Target::Stay => (line_of(row), laid[line_of(row)].1[k] + offset),
-        Target::Cell(row, k) => (line_of(row), laid[line_of(row)].1[k] + length(row, k)),
-        Target::Added => (laid.len() - 1, laid[laid.len() - 1].1[0]),
-        Target::Left => (laid.len(), 0),
-    };
-    let mut text: Vec<String> = laid.into_iter().map(|(line, _)| line).collect();
-    if matches!(target, Target::Left) {
-        text.push(String::new());
-    }
-    Some(TableEdit {
+    let rows = rows.into_iter().take(end).skip(head).flatten();
+    Table {
         lines: head..end,
-        text,
-        caret,
-    })
+        rows: rows.enumerate().map(|(i, cells)| (cells, i == 1)).collect(),
+        rules: Rules::Delimiter(aligns),
+    }
+    .key(lines, at, column, key)
+}
+
+impl Table {
+    /// [`table_key`] in this table, read off `lines`, `at` being one of its lines.
+    pub(crate) fn key(
+        self,
+        lines: &[&str],
+        at: usize,
+        column: usize,
+        key: TableKey,
+    ) -> Option<TableEdit> {
+        let indent: String = lines[self.lines.start]
+            .chars()
+            .take_while(|c| c.is_whitespace())
+            .collect();
+        // The rows that hold text, the rules left out, and each line's row among them, `None` for
+        // a rule.
+        let mut order: Vec<Option<usize>> = Vec::new();
+        let mut content: Vec<Vec<String>> = Vec::new();
+        for (cells, rule) in &self.rows {
+            order.push((!rule).then_some(content.len()));
+            if !rule {
+                content.push(cells.iter().map(|cell| cell.text.clone()).collect());
+            }
+        }
+        let at = at - self.lines.start;
+        let (cells, on_rule) = &self.rows[at];
+        let k = cells
+            .iter()
+            .position(|cell| column <= cell.end)
+            .unwrap_or(cells.len() - 1);
+        let offset = column
+            .saturating_sub(cells[k].start)
+            .min(cells[k].text.chars().count());
+        // A rule walks as the row above it does, or the one below where it opens the table.
+        let row = order[..=at].iter().flatten().count().saturating_sub(1);
+        let last = content.len().checked_sub(1)?;
+        let n = content.iter().map(Vec::len).max().unwrap_or(0);
+        let k = k.min(n - 1);
+        let target = match key {
+            TableKey::Enter
+                if row == last && row > 0 && content[row].iter().all(String::is_empty) =>
+            {
+                Target::Left
+            }
+            TableKey::Enter if row == last => Target::Added,
+            TableKey::Enter => Target::Stay,
+            TableKey::Tab if k + 1 < n => Target::Cell(row, k + 1),
+            TableKey::Tab if row < last => Target::Cell(row + 1, 0),
+            TableKey::Tab => Target::Added,
+            TableKey::BackTab if k > 0 => Target::Cell(row, k - 1),
+            TableKey::BackTab if row > 0 => Target::Cell(row - 1, n - 1),
+            TableKey::BackTab => Target::Cell(row, 0),
+        };
+        let line_of = |order: &[Option<usize>], row: usize| {
+            order.iter().position(|r| *r == Some(row)).unwrap_or(0)
+        };
+        match target {
+            Target::Left => {
+                content.pop();
+                order.retain(|r| *r != Some(last));
+            }
+            // At the end of a pipe table, past its delimiter row under a lone header; under the
+            // last row of an org table, above an hline closing it, as org's own Tab puts it.
+            Target::Added => {
+                content.push(Vec::new());
+                let below = match self.rules {
+                    Rules::Delimiter(_) => order.len(),
+                    Rules::Hline => line_of(&order, last) + 1,
+                };
+                order.insert(below, Some(last + 1));
+            }
+            _ => {}
+        }
+
+        let (mut aligns, least) = match &self.rules {
+            Rules::Delimiter(aligns) => (aligns.clone(), 3),
+            Rules::Hline => (Vec::new(), 1),
+        };
+        aligns.resize(n, Align::None);
+        let widths: Vec<usize> = (0..n)
+            .map(|k| {
+                content
+                    .iter()
+                    .filter_map(|row| row.get(k))
+                    .map(|text| text.width())
+                    .fold(least, usize::max)
+            })
+            .collect();
+        // A row laid out, and the character each of its cells' text starts at.
+        let lay = |cells: &[String]| {
+            let mut line = format!("{indent}|");
+            let mut starts = Vec::new();
+            for (k, (&width, &align)) in widths.iter().zip(&aligns).enumerate() {
+                let text = cells.get(k).map_or("", String::as_str);
+                let space = width - text.width();
+                let left = lead(space, align);
+                starts.push(line.chars().count() + 1 + left);
+                line += &format!(" {}{text}{} |", " ".repeat(left), " ".repeat(space - left));
+            }
+            (line, starts)
+        };
+        let drawn = match self.rules {
+            Rules::Delimiter(_) => {
+                let rules: Vec<String> = widths
+                    .iter()
+                    .zip(&aligns)
+                    .map(|(&w, &a)| rule(w, a))
+                    .collect();
+                lay(&rules)
+            }
+            Rules::Hline => {
+                let dashes: Vec<String> = widths.iter().map(|w| "-".repeat(w + 2)).collect();
+                (format!("{indent}|{}|", dashes.join("+")), lay(&[]).1)
+            }
+        };
+        let laid: Vec<(String, Vec<usize>)> = order
+            .iter()
+            .map(|row| match row {
+                Some(row) => lay(&content[*row]),
+                None => drawn.clone(),
+            })
+            .collect();
+        let length =
+            |row: usize, k: usize| content[row].get(k).map_or(0, |text| text.chars().count());
+        let caret = match target {
+            Target::Stay if *on_rule => (at, laid[at].1[k] + offset.min(widths[k])),
+            Target::Stay => (at, laid[at].1[k] + offset),
+            Target::Cell(row, k) => {
+                let line = line_of(&order, row);
+                (line, laid[line].1[k] + length(row, k))
+            }
+            Target::Added => {
+                let line = line_of(&order, last + 1);
+                (line, laid[line].1[0])
+            }
+            Target::Left => (laid.len(), 0),
+        };
+        let mut text: Vec<String> = laid.into_iter().map(|(line, _)| line).collect();
+        if matches!(target, Target::Left) {
+            text.push(String::new());
+        }
+        Some(TableEdit {
+            lines: self.lines,
+            text,
+            caret,
+        })
+    }
 }
 
 /// The cells of a table row, or `None` for a line with no pipe in it, which is no row. The pipes
-/// at either end of a row, where it has them, end no cell.
-fn split(line: &str) -> Option<Vec<Cell>> {
+/// at either end of a row, where it has them, end no cell, and with `escapes` neither does one
+/// after a backslash, as in GFM; org has no escaped pipe.
+pub(crate) fn split(line: &str, escapes: bool) -> Option<Vec<Cell>> {
     let chars: Vec<char> = line.chars().collect();
     let mut bars = Vec::new();
     let mut escaped = false;
@@ -172,7 +252,7 @@ fn split(line: &str) -> Option<Vec<Cell>> {
         if c == '|' && !escaped {
             bars.push(i);
         }
-        escaped = c == '\\' && !escaped;
+        escaped = escapes && c == '\\' && !escaped;
     }
     let first = chars.iter().position(|c| !c.is_whitespace())?;
     let last = chars.iter().rposition(|c| !c.is_whitespace())?;

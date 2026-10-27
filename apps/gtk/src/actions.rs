@@ -182,8 +182,10 @@ impl App {
                 }
             },
             "toggle-task" => {
-                if let Some(tab) = self.active().filter(|tab| tab.flavour().is_markdown()) {
-                    editor::toggle_task(&tab.view);
+                if let Some(tab) = self.active()
+                    && let Flavour::Note(syntax) = tab.flavour()
+                {
+                    editor::toggle_task(&tab.view, syntax);
                 }
             }
             // Not over a notebook, whose column never scrolls sideways.
@@ -539,10 +541,10 @@ impl App {
         }
     }
 
-    /// Toggle Task means something only over a markdown note: greyed elsewhere, where its chord
-    /// goes on to the focused widget.
+    /// Toggle Task means something only over a note, markdown or org: greyed elsewhere, where its
+    /// chord goes on to the focused widget.
     pub(crate) fn sync_toggle_task(&self) {
-        let note = self.active().is_some_and(|tab| tab.flavour().is_markdown());
+        let note = self.active().is_some_and(|tab| tab.flavour().is_note());
         let action = self.window.lookup_action("toggle-task");
         if let Some(action) = action.and_downcast::<gio::SimpleAction>() {
             action.set_enabled(note);

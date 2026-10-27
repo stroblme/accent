@@ -9,8 +9,12 @@
 //! styled as a note is: the content in its style, the syntax around it dimmed as [`Style::Marker`].
 
 mod links;
+mod table;
+mod task;
 
 pub use links::{link, path_link_keys, rewrite_moved};
+pub use table::table_key;
+pub use task::toggle_task;
 
 use crate::markdown::{Analysis, Heading, Span, Style, Tag, heading_for};
 use links::OrgLink;
@@ -249,11 +253,11 @@ fn trimmed(text: &str, line: Range<usize>) -> Range<usize> {
     start..line.start + s.trim_end().len()
 }
 
-/// The TODO keywords a heading may open with, each with whether it is a done one: every word of
-/// the file's `#+TODO`, `#+SEQ_TODO` and `#+TYP_TODO` lines, a fast-access key such as `(t)`
-/// dropped, the ones after a `|` done, or the last one of a line without `|`; org's own TODO and
-/// DONE when the file sets none.
-fn keywords<'a>(text: &'a str, lines: &[Range<usize>]) -> Vec<(&'a str, bool)> {
+/// The TODO keywords a heading may open with, each with whether it is a done one, a sequence
+/// per line of the file's `#+TODO`, `#+SEQ_TODO` and `#+TYP_TODO`: every word of the line, a
+/// fast-access key such as `(t)` dropped, the ones after a `|` done, or the last one of a line
+/// without `|`; org's own TODO and DONE when the file sets none.
+fn keywords<'a>(text: &'a str, lines: &[Range<usize>]) -> Vec<Vec<(&'a str, bool)>> {
     let mut out = Vec::new();
     for line in lines {
         let Some((key, value)) = keyword(text, line.clone()) else {
@@ -270,17 +274,19 @@ fn keywords<'a>(text: &'a str, lines: &[Range<usize>]) -> Vec<(&'a str, bool)> {
                 .collect();
             let bar = words.iter().position(|w| *w == "|");
             let done_from = bar.unwrap_or(words.len().saturating_sub(1));
-            out.extend(
-                words
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, w)| **w != "|")
-                    .map(|(i, w)| (*w, i >= done_from)),
-            );
+            let sequence: Vec<_> = words
+                .iter()
+                .enumerate()
+                .filter(|(_, w)| **w != "|")
+                .map(|(i, w)| (*w, i >= done_from))
+                .collect();
+            if !sequence.is_empty() {
+                out.push(sequence);
+            }
         }
     }
     if out.is_empty() {
-        out = vec![("TODO", false), ("DONE", true)];
+        out = vec![vec![("TODO", false), ("DONE", true)]];
     }
     out
 }
@@ -352,7 +358,7 @@ struct Head {
 }
 
 /// `* TODO [#A] COMMENT Title :a:b:` read into its parts.
-fn heading(text: &str, line: Range<usize>, keywords: &[(&str, bool)]) -> Option<Head> {
+fn heading(text: &str, line: Range<usize>, keywords: &[Vec<(&str, bool)>]) -> Option<Head> {
     let s = &text[line.clone()];
     if !is_heading(s) {
         return None;
@@ -385,7 +391,11 @@ fn heading(text: &str, line: Range<usize>, keywords: &[(&str, bool)]) -> Option<
     start = word(start).start;
     let stars_at = line.start..start;
     let mut keyword = None;
-    if let Some(&(_, done)) = keywords.iter().find(|(k, _)| *k == &text[word(start)]) {
+    if let Some(&(_, done)) = keywords
+        .iter()
+        .flatten()
+        .find(|(k, _)| *k == &text[word(start)])
+    {
         keyword = Some((word(start), done));
         start = word(word(start).end).start;
     }
