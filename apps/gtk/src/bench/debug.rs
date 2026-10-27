@@ -118,6 +118,11 @@ pub(super) fn bench_debug(app: &Rc<App>, arg: &str) {
             return;
         };
         println!("bench debug locals {}", locals.join(" "));
+        let painted = || Some(app.debugger.inline_values()).filter(|lines| !lines.is_empty());
+        let Some(painted) = until(&app, "inline", painted).await else {
+            return;
+        };
+        println!("bench debug inline {}", painted.join(" | "));
         let watched = || shown(&app).3.into_iter().find(|row| row.contains(" = "));
         let Some(watched) = until(&app, "watch", watched).await else {
             return;
@@ -205,6 +210,19 @@ pub(super) fn bench_debug(app: &Rc<App>, arg: &str) {
             return;
         };
         println!("bench debug step {rel}:{}", at + 1);
+        // Painted again where it stopped, up to that line.
+        let line = format!("{}:", at + 1);
+        let painted = || {
+            let painted = app.debugger.inline_values();
+            painted
+                .iter()
+                .any(|l| l.starts_with(&line))
+                .then_some(painted)
+        };
+        let Some(painted) = until(&app, "inline step", painted).await else {
+            return;
+        };
+        println!("bench debug inline {}", painted.join(" | "));
         println!("bench debug_ms step {:.0}", ms_since(t));
 
         let t = Instant::now();

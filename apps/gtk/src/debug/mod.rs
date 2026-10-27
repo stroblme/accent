@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 
 pub(crate) mod breakpoints;
 mod console;
+mod inline;
 mod line;
 mod run;
 
@@ -35,6 +36,8 @@ pub struct Debugger {
     run: RefCell<Option<Rc<Run>>>,
     /// The tab holding the paused line's mark.
     execution: RefCell<std::rc::Weak<Tab>>,
+    /// The values of the call selected, painted after the lines of its tab.
+    values: inline::Values,
     console: console::Console,
 }
 
@@ -86,6 +89,12 @@ impl Debugger {
 
     pub(crate) fn exceptions(&self) -> Vec<ExceptionFilter> {
         self.exceptions.borrow().clone()
+    }
+
+    /// The values painted after the lines, each `line:text`, for `ACCENT_BENCH_DEBUG`.
+    #[cfg(feature = "bench")]
+    pub(crate) fn inline_values(&self) -> Vec<String> {
+        self.values.shown()
     }
 
     /// Put a file's kept breakpoints on its newly opened tab.

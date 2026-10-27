@@ -832,6 +832,11 @@ impl Tab {
         self.diagnostics.shift(from, to, text);
     }
 
+    /// Whether a diagnostic's message is drawn at the end of `line`, taking the room it leaves.
+    pub(crate) fn has_message(&self, line: i32) -> bool {
+        self.diagnostics.messages().contains_key(&line)
+    }
+
     /// How many end-of-line messages the last paint put up. `ACCENT_BENCH_COMPARE=diag:` only.
     #[cfg(feature = "bench")]
     pub fn annotated(&self) -> usize {

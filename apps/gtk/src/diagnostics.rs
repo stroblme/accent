@@ -320,7 +320,7 @@ pub fn cuts(view: &sourceview5::View, shown: &Shown) -> Vec<(usize, usize)> {
 
 /// Truncate `text` to the remaining column width after `line`.
 /// GtkSourceView otherwise draws full-width messages and clips mid-glyph; hover and gutter retain the full message.
-fn fit(view: &sourceview5::View, line: i32, text: String) -> String {
+pub(crate) fn fit(view: &sourceview5::View, line: i32, text: String) -> String {
     let visible = view.visible_rect();
     // Not laid out yet: the tab lays its messages again once it has a width.
     if visible.width() == 0 {
@@ -369,7 +369,7 @@ fn ellipsize(text: String, room: i32, width: impl Fn(&str) -> i32) -> String {
 
 /// Whether text starting at `at` is hidden by [`crate::fold::hiding`].
 /// Fold headers remain visible and retain their messages.
-fn out_of_sight(at: &gtk::TextIter) -> bool {
+pub(crate) fn out_of_sight(at: &gtk::TextIter) -> bool {
     !crate::fold::hiding(&at.buffer(), at).is_empty()
 }
 

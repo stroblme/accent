@@ -404,6 +404,7 @@ impl App {
                 if shown(app, &run) {
                     tab.show_at(&lang::iter_at(&tab.buffer, pos), 0.25);
                     app.mark_execution(tab, pos.line);
+                    app.show_values(tab, &run, id, pos.line);
                 }
             };
             match self.tab_for(path) {
@@ -429,6 +430,38 @@ impl App {
             }
         });
         self.refill_watches();
+    }
+
+    /// The values of `frame`, the call selected, painted after the lines of `tab` up to `line`,
+    /// where it is paused: the variables of each scope cheap to list, as Variables lists them,
+    /// rather than an `evaluate` a name. Dropped once the program has moved on or another call
+    /// is selected.
+    fn show_values(self: &Rc<Self>, tab: &Rc<Tab>, run: &Rc<Run>, frame: i64, line: u32) {
+        let Some(vault) = self.vault().cloned() else {
+            return;
+        };
+        let (weak, tab, run) = (Rc::downgrade(self), Rc::downgrade(tab), run.clone());
+        let generation = run.generation.get();
+        glib::spawn_future_local(async move {
+            let scopes = vault.debug_scopes(run.id, frame).await;
+            let mut values = Vec::new();
+            for scope in crate::work::or_empty("listing the scopes", scopes) {
+                if scope.expensive {
+                    continue;
+                }
+                let listed = vault.debug_variables(run.id, scope.reference).await;
+                let listed = crate::work::or_empty("listing the variables", listed);
+                // A group the adapter lists, such as debugpy's "special variables", has no value.
+                let named = listed.into_iter().filter(|v| !v.value.is_empty());
+                values.extend(named.take(inline::MOST).map(|v| (v.name, v.value)));
+            }
+            if let (Some(app), Some(tab)) = (weak.upgrade(), tab.upgrade())
+                && app.current(&run, generation)
+                && run.frame.get() == Some(frame)
+            {
+                app.debugger.values.show(&tab, line, &values);
+            }
+        });
     }
 
     /// The Watch section: each expression evaluated in the call selected while the program is
@@ -567,6 +600,7 @@ impl App {
     }
 
     fn clear_execution(&self) {
+        self.debugger.values.clear();
         if let Some(tab) = self.debugger.execution.take().upgrade()
             && let Some(mark) = tab.execution.take()
         {
