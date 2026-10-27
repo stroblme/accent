@@ -6,6 +6,7 @@
 use super::{closed, heading, keywords};
 use crate::markdown::toggle_box;
 use std::ops::Range;
+use unicode_width::UnicodeWidthStr;
 
 /// Each of the lines `lines` of `text`, numbered from 0, one step on, or `None` for a line passed
 /// over as a markdown note's front matter and code blocks are: one in a block or a drawer, a
@@ -46,10 +47,10 @@ fn toggle(line: &str, keywords: &[Vec<(&str, bool)>]) -> String {
     let Some((at, _)) = head.keyword else {
         let (stars, rest) = line.split_at(head.stars.end);
         let first = keywords[0][0].0;
-        return match rest.trim().is_empty() {
+        return align_tags(match rest.trim().is_empty() {
             true => format!("{} {first}", stars.trim_end()),
             false => format!("{stars}{first} {rest}"),
-        };
+        });
     };
     let next = keywords
         .iter()
@@ -58,10 +59,23 @@ fn toggle(line: &str, keywords: &[Vec<(&str, bool)>]) -> String {
             Some(sequence.get(i + 1).map(|(k, _)| *k))
         })
         .flatten();
-    match next {
+    align_tags(match next {
         Some(next) => format!("{}{next}{}", &line[..at.start], &line[at.end..]),
         None => format!("{}{}", &line[..at.start], line[at.end..].trim_start()),
-    }
+    })
+}
+
+/// A heading with its tags where org's `C-c C-t` leaves them (`org-align-tags`, with org's
+/// defaults): ending at column 77 (`org-tags-column` -77), or one space after a title too long for
+/// that.
+fn align_tags(line: String) -> String {
+    let Some(tags) = heading(&line, 0..line.len(), &[]).and_then(|head| head.tag_block) else {
+        return line;
+    };
+    let title = line[..tags.start].trim_end_matches([' ', '\t']);
+    let column = 77usize.saturating_sub(line[tags.clone()].width());
+    let blank = column.saturating_sub(title.width()).max(1);
+    format!("{title}{}{}", " ".repeat(blank), &line[tags.start..])
 }
 
 #[cfg(test)]
@@ -89,11 +103,11 @@ mod tests {
         }
     }
 
-    /// Priority, `COMMENT`, a statistics cookie and the tags stay where they are written.
+    /// Priority, `COMMENT` and a statistics cookie stay where they are written.
     #[test]
     fn a_heading_steps_through_the_files_keywords() {
         let todo = "#+TODO: NEXT WAIT | DONE CANCELLED\n#+SEQ_TODO: IDEA\n";
-        let mut heading = "** [#A] COMMENT Plan [1/3] :work:".to_string();
+        let mut heading = "** [#A] COMMENT Plan [1/3]".to_string();
         let mut seen = Vec::new();
         for _ in 0..5 {
             heading = one(&format!("{todo}{heading}\n"), 2);
@@ -102,11 +116,11 @@ mod tests {
         assert_eq!(
             seen,
             [
-                "** NEXT [#A] COMMENT Plan [1/3] :work:",
-                "** WAIT [#A] COMMENT Plan [1/3] :work:",
-                "** DONE [#A] COMMENT Plan [1/3] :work:",
-                "** CANCELLED [#A] COMMENT Plan [1/3] :work:",
-                "** [#A] COMMENT Plan [1/3] :work:",
+                "** NEXT [#A] COMMENT Plan [1/3]",
+                "** WAIT [#A] COMMENT Plan [1/3]",
+                "** DONE [#A] COMMENT Plan [1/3]",
+                "** CANCELLED [#A] COMMENT Plan [1/3]",
+                "** [#A] COMMENT Plan [1/3]",
             ]
         );
         // The last keyword of its own sequence goes, rather than on to another's.
@@ -116,6 +130,21 @@ mod tests {
         }
         assert_eq!(one("* DONE", 0), "* ");
         assert_eq!(one("* ", 0), "* TODO");
+    }
+
+    /// The tags end at column 77, or follow a title too long for that after one space, wherever
+    /// they were, as org's `C-c C-t` aligns them.
+    #[test]
+    fn a_headings_tags_are_aligned_as_org_aligns_them() {
+        let toggled = one("* Plan :work:", 0);
+        assert_eq!(toggled, format!("* TODO Plan{}:work:", " ".repeat(60)));
+        assert_eq!(toggled.len(), 77);
+        assert_eq!(
+            one(&toggled, 0),
+            format!("* DONE Plan{}:work:", " ".repeat(60))
+        );
+        let long = format!("* {} :a:b:", "x".repeat(70));
+        assert_eq!(one(&long, 0), format!("* TODO {} :a:b:", "x".repeat(70)));
     }
 
     #[test]
