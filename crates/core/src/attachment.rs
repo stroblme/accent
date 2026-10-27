@@ -1,7 +1,8 @@
 //! Obsidian-compatible attachment paths and embeds, so both apps organise pasted images
 //! consistently.
 
-use crate::path::{basename, parent_dir, resolve};
+use crate::markdown::{is_image, strip_ext};
+use crate::path::{basename, is_diagram, is_note, parent_dir, resolve, stem};
 
 /// Resolve the `attachment_folder` setting for `note`: empty means beside the note, `./sub`
 /// means within its folder, and other paths start at the vault root. Paths cannot escape the vault.
@@ -45,6 +46,30 @@ pub fn embed(rel: &str, by_name: Option<&str>) -> String {
     }
 }
 
+/// The name a wikilink finds `rel` by: a note's without its extension, any other file's whole.
+pub fn link_name(rel: &str) -> String {
+    match is_note(rel) {
+        true => stem(rel),
+        false => basename(rel).to_string(),
+    }
+}
+
+/// A link to `rel` as a note writes one: an embed for what a note draws, an image or a diagram,
+/// a plain link otherwise. By [`link_name`] unless `by_name`, what that name resolves to, is
+/// another file; then by its path, a note's without its extension.
+pub fn wikilink(rel: &str, by_name: Option<&str>) -> String {
+    let name = match (by_name, is_note(rel)) {
+        (Some(other), true) if other != rel => strip_ext(rel),
+        (Some(other), false) if other != rel => rel.to_string(),
+        _ => link_name(rel),
+    };
+    let bang = match is_image(rel) || is_diagram(rel) {
+        true => "!",
+        false => "",
+    };
+    format!("{bang}[[{name}]]")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,5 +109,20 @@ mod tests {
         assert_eq!(embed("a/p.png", None), "![[p.png]]", "not indexed yet");
         assert_eq!(embed("a/p.png", Some("a/p.png")), "![[p.png]]");
         assert_eq!(embed("a/p.png", Some("p.png")), "![[a/p.png]]");
+    }
+
+    #[test]
+    fn a_link_embeds_what_a_note_draws_and_names_a_note_without_its_extension() {
+        assert_eq!(link_name("a/Plan.md"), "Plan");
+        assert_eq!(link_name("a/paper.pdf"), "paper.pdf");
+        assert_eq!(wikilink("a/Plan.md", Some("a/Plan.md")), "[[Plan]]");
+        assert_eq!(
+            wikilink("a/Plan.md", Some("Plan.md")),
+            "[[a/Plan]]",
+            "the name finds another"
+        );
+        assert_eq!(wikilink("a/paper.pdf", None), "[[paper.pdf]]");
+        assert_eq!(wikilink("a/p.png", None), "![[p.png]]");
+        assert_eq!(wikilink("flow.drawio", None), "![[flow.drawio]]");
     }
 }

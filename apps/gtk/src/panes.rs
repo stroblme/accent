@@ -539,6 +539,10 @@ pub struct Pane {
     hint: gtk::Box,
     /// Highlight rectangle inside `hint`, keeping its coordinate widget fixed as the zone changes.
     shade: gtk::Box,
+    /// Where a Files row dropped with Shift writes its reference, in the shade's place
+    /// (`refer.rs`), and the hint over the shade that Shift does so.
+    caret: gtk::Box,
+    tip: gtk::Label,
     pub drop: gtk::DropTarget,
     /// The window's most-recent-first tab history, shared by its panes and pruned against live
     /// pages on every read. A tab leaves it when detached, and is put back when selected again.
@@ -578,7 +582,13 @@ impl Pane {
             glib::Type::INVALID,
             gdk::DragAction::MOVE | gdk::DragAction::COPY,
         );
-        drop.set_types(&[adw::TabPage::static_type(), String::static_type()]);
+        // A file's row, then a marked set's and a folder's, which only a reference takes.
+        drop.set_types(&[
+            adw::TabPage::static_type(),
+            String::static_type(),
+            gtk::StringList::static_type(),
+            gtk::StringObject::static_type(),
+        ]);
         hint.add_controller(drop.clone());
 
         // Expanding of its own, not only through the tab view, which presentation mode hides
@@ -589,6 +599,23 @@ impl Pane {
             .vexpand(true)
             .build();
         overlay.add_overlay(&hint);
+        let caret = gtk::Box::builder()
+            .halign(gtk::Align::Start)
+            .valign(gtk::Align::Start)
+            .can_target(false)
+            .visible(false)
+            .build();
+        caret.add_css_class("accent-drop-bar");
+        overlay.add_overlay(&caret);
+        let tip = gtk::Label::builder()
+            .halign(gtk::Align::Center)
+            .valign(gtk::Align::Center)
+            .can_target(false)
+            .visible(false)
+            .build();
+        tip.add_css_class("osd");
+        tip.add_css_class("accent-drop-tip");
+        overlay.add_overlay(&tip);
 
         let find = find::Bar::new();
         let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -606,6 +633,8 @@ impl Pane {
             overlay,
             hint,
             shade,
+            caret,
+            tip,
             drop,
             history,
             transfer_order: RefCell::new(None),
@@ -794,7 +823,38 @@ impl Pane {
         self.hint.set_can_target(on);
         if !on {
             self.show_zone(None);
+            self.show_caret(None);
+            self.show_tip(None);
         }
+    }
+
+    /// Put the insertion caret at `at`, in the document area's coordinates, or take it away.
+    pub fn show_caret(&self, at: Option<graphene::Rect>) {
+        let Some(at) = at else {
+            self.caret.set_visible(false);
+            return;
+        };
+        self.caret.set_margin_start(at.x().max(0.0) as i32);
+        self.caret.set_margin_top(at.y().max(0.0) as i32);
+        self.caret
+            .set_size_request(at.width().max(2.0) as i32, at.height().max(1.0) as i32);
+        self.caret.set_visible(true);
+    }
+
+    /// Say `text` over the middle of the shade, or nothing.
+    pub fn show_tip(&self, text: Option<&str>) {
+        if let Some(text) = text {
+            self.tip.set_label(text);
+        }
+        self.tip.set_visible(text.is_some());
+    }
+
+    /// Whether the shade and the caret are up, and the hint shown: what
+    /// `ACCENT_BENCH_DROP=refer:` reads while it drags.
+    #[cfg(feature = "bench")]
+    pub fn drop_marks(&self) -> (bool, bool, Option<String>) {
+        let tip = self.tip.is_visible().then(|| self.tip.label().to_string());
+        (self.shade.is_visible(), self.caret.is_visible(), tip)
     }
 
     /// Light up the part of the pane a drop would land in, or nothing.

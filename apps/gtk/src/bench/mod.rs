@@ -36,6 +36,7 @@ mod pdf;
 mod present;
 mod preview;
 mod quickfix;
+mod refer;
 mod replace;
 mod scroll;
 mod search;
@@ -296,6 +297,8 @@ use tags::bench_tags;
 ///   Requires a scratch vault under `/tmp`.
 /// - `ACCENT_BENCH_DROP=out:<rel_file>,<rel_folder>`: what a row's drag offers other
 ///   applications, and XTEST drags of it the tree never takes as an import; moves the file.
+///   `refer:1`: XTEST drags of rows into a note, a code file, a shell and a PDF, with and
+///   without Shift (`refer::bench_refer`). Writes its files under `refer/`.
 /// - `ACCENT_BENCH_SCROLL=<rel_dir>`: list scroll retention during vault/git
 ///   changes. Creates a repository; requires a scratch vault under `/tmp`.
 /// - `ACCENT_BENCH_DIAGRAM=<rel>`: diagram edits/save, creating a sample if
@@ -684,6 +687,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         if let Some(arg) = drop {
             if let Some(arg) = arg.strip_prefix("out:") {
                 return bench_drag_out(&app, arg);
+            }
+            if let Some(arg) = arg.strip_prefix("refer:") {
+                return refer::bench_refer(&app, arg);
             }
             return bench_drop(&app, &arg);
         }

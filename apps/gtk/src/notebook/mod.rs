@@ -284,6 +284,19 @@ impl NotebookTab {
         self.path.borrow().clone()
     }
 
+    /// The kind of the cell whose editor is `view`, which a Files row dropped with Shift writes
+    /// a reference into (`refer.rs`).
+    pub fn cell_kind(&self, view: &gtk::Widget) -> Option<Kind> {
+        self.views
+            .borrow()
+            .iter()
+            .find(|cell| {
+                cell.editor()
+                    .is_some_and(|e| e.view.upcast_ref::<gtk::Widget>() == view)
+            })
+            .map(|cell| cell.kind)
+    }
+
     /// The widget the keys go to: the selected cell's editor, else the first.
     pub fn key_target(self: &Rc<Self>) -> gtk::Widget {
         let first = || self.views.borrow().first().map(|v| v.id);

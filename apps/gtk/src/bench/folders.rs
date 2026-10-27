@@ -258,7 +258,7 @@ fn row_colours(app: &App, tree: &tree::Tree, rels: &[String]) -> Vec<(String, St
 }
 
 /// The middle of `rel`'s row in window coordinates, which under Xvfb are the screen's.
-fn centre(app: &App, tree: &tree::Tree, rel: &str) -> Option<graphene::Point> {
+pub(super) fn centre(app: &App, tree: &tree::Tree, rel: &str) -> Option<graphene::Point> {
     tree::expanders(tree.view())
         .into_iter()
         .find(|expander| {

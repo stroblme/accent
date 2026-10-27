@@ -64,6 +64,7 @@ mod preview;
 mod python;
 mod recall;
 mod reconnect;
+mod refer;
 mod references;
 mod relink;
 mod replace;

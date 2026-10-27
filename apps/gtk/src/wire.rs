@@ -426,26 +426,48 @@ fn wire_pane_drops(app: &Rc<App>, pane: &Rc<Pane>) {
         move |target, x, y| {
             // A row from another window's tree names a file in that window's vault: no pane here
             // opens it.
-            if app.dragged_from().is_some() {
+            let drop = target.current_drop();
+            let Some(drop) = drop.filter(|_| app.dragged_from().is_none()) else {
                 pane.show_zone(None);
                 return gdk::DragAction::empty();
-            }
+            };
             let (w, h) = pane.size();
             let zone = panes::zone(x, y, w, h);
+            // Files rows over what takes a reference to them: with Shift a caret where it would
+            // go, in place of the shade; without, the shade and a hint that Shift writes one.
+            let reference = (zone == Zone::Here)
+                .then(|| app.reference_at(&pane, &drop, (x, y)))
+                .flatten();
+            let caret = reference
+                .as_ref()
+                .filter(|r| r.shift)
+                .and_then(|r| app.reference_caret(&pane, r, (x, y)));
+            pane.show_caret(caret);
+            pane.show_tip(
+                reference
+                    .as_ref()
+                    .filter(|_| caret.is_none())
+                    .map(|r| r.hint()),
+            );
             // A PDF from the tree over the middle of another PDF goes in between its pages: a
             // line there says where, in place of the shade.
-            let gap = (zone == Zone::Here)
+            let gap = (zone == Zone::Here && caret.is_none())
                 .then(|| app.pdf_drop(&pane, target, None, (x, y)))
                 .flatten()
                 .map(|(_, _, gap)| gap);
             app.show_pdf_drop(&pane, gap);
-            pane.show_zone(gap.is_none().then_some(zone));
-            // A tab moves, a path from the tree is only read; offer whichever the drag allows.
-            let offered = target
-                .current_drop()
-                .map(|drop| drop.actions())
-                .unwrap_or_else(gdk::DragAction::empty);
-            match offered.contains(gdk::DragAction::MOVE) {
+            // A folder or a marked set opens in no pane: only a reference takes one.
+            let tab = drop.formats().contains_type(adw::TabPage::static_type());
+            let opens = tab || refer::one_file(&drop).is_some();
+            pane.show_zone((opens && gap.is_none() && caret.is_none()).then_some(zone));
+            if !opens && caret.is_none() {
+                return gdk::DragAction::empty();
+            }
+            // A tab moves; a row is only read, so it asks for a copy, leaving the move to say
+            // Shift is held (`refer.rs`), which a compositor would otherwise pick for us.
+            let offered = drop.actions();
+            let copied = !tab && offered.contains(gdk::DragAction::COPY);
+            match !copied && offered.contains(gdk::DragAction::MOVE) {
                 true => gdk::DragAction::MOVE,
                 false => gdk::DragAction::COPY,
             }
@@ -458,6 +480,8 @@ fn wire_pane_drops(app: &Rc<App>, pane: &Rc<Pane>) {
         pane,
         move |_| {
             pane.show_zone(None);
+            pane.show_caret(None);
+            pane.show_tip(None);
             app.show_pdf_drop(&pane, None);
         }
     ));
@@ -514,6 +538,20 @@ fn wire_pane_drops(app: &Rc<App>, pane: &Rc<Pane>) {
             // sheet left up would swallow every click meant for the editor under it.
             app.set_drop_active(false);
             app.show_pdf_drop(&pane, None);
+            let reference = (zone == Zone::Here)
+                .then(|| target.current_drop())
+                .flatten()
+                .and_then(|drop| app.reference_at(&pane, &drop, (x, y)))
+                .filter(|r| r.shift);
+            if let Some(reference) = reference {
+                return app.refer(&pane, reference, (x, y));
+            }
+            // A folder's or a marked set's drag reads as their files' paths in a `String` too,
+            // which no pane opens or puts in between a PDF's pages.
+            let file = target.current_drop().and_then(|d| refer::one_file(&d));
+            if value.get::<adw::TabPage>().is_err() && file.is_none() {
+                return false;
+            }
             let into = (zone == Zone::Here)
                 .then(|| app.pdf_drop(&pane, target, Some(value), (x, y)))
                 .flatten();

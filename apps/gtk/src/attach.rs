@@ -19,14 +19,18 @@ enum Incoming {
 
 /// Where the embed goes: the selection a paste replaces, or the point a drop was let go at. Held
 /// as marks, so typing while the file is written does not move it.
-struct InsertAt {
+pub(crate) struct InsertAt {
     buffer: gtk::TextBuffer,
     from: gtk::TextMark,
     to: gtk::TextMark,
 }
 
 impl InsertAt {
-    fn new(buffer: &gtk::TextBuffer, from: &gtk::TextIter, to: &gtk::TextIter) -> InsertAt {
+    pub(crate) fn new(
+        buffer: &gtk::TextBuffer,
+        from: &gtk::TextIter,
+        to: &gtk::TextIter,
+    ) -> InsertAt {
         InsertAt {
             buffer: buffer.clone(),
             from: buffer.create_mark(None, from, true),
@@ -35,7 +39,7 @@ impl InsertAt {
     }
 
     /// Put `text` in as one undo step, with the caret after it.
-    fn fill(&self, text: &str) {
+    pub(crate) fn fill(&self, text: &str) {
         let (mut from, mut to) = (
             self.buffer.iter_at_mark(&self.from),
             self.buffer.iter_at_mark(&self.to),

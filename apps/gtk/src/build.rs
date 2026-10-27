@@ -1317,6 +1317,7 @@ fn install_chrome_css() {
              .dividers-hidden paned > separator {{ opacity: 0; }} \
              .accent-drop-zone {{ background-color: var(--accent-bg-color); opacity: 0.3; }} \
              .accent-drop-bar {{ background-color: var(--accent-bg-color); border-radius: 2px; }} \
+             .accent-drop-tip {{ padding: 6px 12px; border-radius: 9999px; }} \
              .accent-page-strip:drop(active) {{ box-shadow: none; }} \
              .file-tree > row {{ padding: 0; }} \
              .file-tree > row > treeexpander {{ padding: 0 8px; border-radius: 9px; }} \
