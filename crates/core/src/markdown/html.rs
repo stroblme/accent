@@ -200,6 +200,33 @@ fn render<'a>(text: &'a str, export: Option<&'a str>) -> String {
     page.finish()
 }
 
+/// The callout a quote starting at `src[at..]` opens: its type lowercased, its title, and the
+/// bytes of its `[!type]` line, newline included. `None` for a plain quote. A `+` or `-` fold
+/// marker is read past: a callout always shows open.
+fn callout(src: &str, at: usize) -> Option<(String, String, Range<usize>)> {
+    let line = src[at..].split('\n').next().unwrap_or_default();
+    let head = line.strip_prefix('>')?.trim_start_matches([' ', '\t']);
+    let (kind, rest) = head.strip_prefix("[!")?.split_once(']')?;
+    let named = kind.starts_with(|c: char| c.is_ascii_alphabetic())
+        && kind
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+    if !named {
+        return None;
+    }
+    let kind = kind.to_ascii_lowercase();
+    let title = match rest.strip_prefix(['+', '-']).unwrap_or(rest).trim() {
+        "" => {
+            let mut t = kind.clone();
+            t[..1].make_ascii_uppercase();
+            t
+        }
+        t => t.to_string(),
+    };
+    let start = at + line.len() - head.len();
+    Some((kind, title, start..(at + line.len() + 1).min(src.len())))
+}
+
 /// Every reference and footnote definition of a note with a conflict block, as written, each
 /// after a blank line; empty for any other note. A stretch parsed on its own knows only the
 /// definitions in it, so [`render`] parses each with these after it.
@@ -345,6 +372,8 @@ impl<'a> Page<'a> {
         // Where a text run is never a tag, as `analyze` reads them: code and the front matter.
         let mut in_code = false;
         let mut in_meta = false;
+        // The `[!type]` line of the callout being read, its newline included: its events go.
+        let mut header = 0..0;
 
         // The definitions go on after the stretch, where the parser finds them; nothing of them
         // is shown, their events all starting past its end.
@@ -360,7 +389,11 @@ impl<'a> Page<'a> {
                     .map(|(ev, r)| (ev.into_static(), r)),
             )
         };
-        for (ev, r) in events {
+        let mut events = events.peekable();
+        while let Some((ev, r)) = events.next() {
+            if header.contains(&r.start) && r.end <= header.end {
+                continue;
+            }
             match &ev {
                 Event::Start(Cm::Heading { .. }) => {
                     in_heading = true;
@@ -390,6 +423,24 @@ impl<'a> Page<'a> {
                 .then(|| self.marker(text, part.start + r.start, ids.get(&r.start).copied()))
                 .flatten()
                 .map(|m| Event::Html(m.into()));
+            // A callout's header is its quote's first paragraph line, which the title replaces,
+            // after the quote's marker.
+            if matches!(ev, Event::Start(Cm::BlockQuote(_)))
+                && let Some((kind, title, line)) = callout(src, r.start)
+                && let Some((Event::Start(Cm::Paragraph), p)) = events.peek()
+                && p.start == line.start
+            {
+                header = line;
+                self.html(format!(
+                    "<blockquote class=\"callout\" data-callout=\"{kind}\">\n"
+                ));
+                self.evts.extend(marker);
+                self.html(format!(
+                    "<p class=\"callout-title\">{}</p>\n",
+                    esc_attr(&title)
+                ));
+                continue;
+            }
             // The text a block's id ends goes on without it.
             let ev = match (ev, marker_in(&r)) {
                 (Event::Text(t), Some(b)) => {
@@ -954,6 +1005,37 @@ mod tests {
             h.contains("<div class=\"conflict-label\">HEAD</div>"),
             "{h}"
         );
+    }
+
+    /// A quote opening with `[!type]` is a callout: its type on the quote, its title first inside
+    /// and its header line gone. `[!x]` anywhere else is text.
+    #[test]
+    fn html_shows_a_callout() {
+        // The body goes on in the header's paragraph, which keeps its marker.
+        assert_eq!(
+            to_html("> [!Note]\n> Body.\n"),
+            "<blockquote class=\"callout\" data-callout=\"note\">\n\
+             <span data-line=\"1\"></span><p class=\"callout-title\">Note</p>\n\
+             <p><span data-line=\"1\"></span>Body.</p>\n</blockquote>\n"
+        );
+        // A header alone takes its paragraph along; a title is plain text past the fold marker.
+        assert_eq!(
+            bare("> [!tip]- Read *this* & that\n>\n> Body.\n"),
+            "<blockquote class=\"callout\" data-callout=\"tip\">\n\
+             <p class=\"callout-title\">Read *this* &amp; that</p>\n<p>Body.</p>\n</blockquote>\n"
+        );
+        let h = bare("- > > [!my-type]\n");
+        assert!(
+            h.contains(
+                "<blockquote>\n<blockquote class=\"callout\" data-callout=\"my-type\">\n\
+                 <p class=\"callout-title\">My-type</p>\n</blockquote>"
+            ),
+            "{h}"
+        );
+        for src in ["> a [!x]\n", "> a\n> [!x]\n", "[!x]\n", ">     [!x]\n"] {
+            let h = bare(src);
+            assert!(!h.contains("callout") && h.contains("[!x]"), "{h}");
+        }
     }
 
     /// The preview markers are tested on their own; strip them so the older assertions stay

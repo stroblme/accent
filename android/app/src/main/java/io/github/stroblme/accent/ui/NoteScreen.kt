@@ -447,6 +447,12 @@ ${if (diagrams(body)) mermaid(if (bg.dark()) "dark" else "neutral") else ""}
   pre, code { font-family: ui-monospace, monospace; font-size: 0.9em; }
   pre { overflow-x: auto; padding: 12px 0; }
   blockquote { margin: 1em 0; padding-left: 12px; border-left: 2px solid ${accent.css()}; }
+  /* A `> [!type]` callout, one look for every type; the tint is the desktop's code surface. */
+  blockquote.callout {
+    display: flow-root; padding: 0 12px; border-radius: 0 6px 6px 0;
+    background: ${fg.copy(alpha = 0.07f).rgba()};
+  }
+  .callout-title { margin: 0.75em 0; font-weight: 700; color: ${accent.css()}; }
   table { border-collapse: collapse; display: block; overflow-x: auto; }
   th, td { padding: 4px 10px 4px 0; text-align: left; }
   math[display="block"] { margin: 1.2em 0; }
