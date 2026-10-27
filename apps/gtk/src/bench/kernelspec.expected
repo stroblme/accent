@@ -1,0 +1,8 @@
+bench kernel spec face Fake Lang choices fakelang,fakelang2 picked=fakelang
+bench kernel spec cell 1 count=[1] outputs=stream:"hi\n"
+bench kernel spec on Fake Lang
+bench kernel spec interrupted cell 2 count=[2] outputs=stream:"sleeping\n",error:KeyboardInterrupt
+bench kernel spec picked Fake Lang 2 session=fakelang2
+bench kernel spec restarted cell 3 count=[1] outputs=stream:"two\n"
+bench kernel spec on Fake Lang 2
+bench kernel spec missing No nolang kernel toast "This notebook asks for the nokernel kernel, which is not installed"

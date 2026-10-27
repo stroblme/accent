@@ -173,6 +173,7 @@ pub(super) fn read(text: &str) -> Result<Notebook> {
         cells,
         language: language.to_string(),
         extension: extension.to_string(),
+        kernel: meta("/kernelspec/name").map(String::from),
         crlf: false,
     })
 }
@@ -523,7 +524,7 @@ mod tests {
             panic!("{} cells", nb.cells().len());
         };
         assert_eq!((cell.kind(), cell.source()), (Kind::Code, ""));
-        assert_eq!(nb.language(), "python");
+        assert_eq!((nb.language(), nb.kernel()), ("python", Some("python3")));
         assert_eq!(nb.to_text(), EMPTY);
     }
 

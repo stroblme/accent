@@ -43,6 +43,7 @@ impl App {
         let debuggable = self.code_program().is_some();
         sidebar.set_code_visible(self.code_doc().is_some() || running);
         self.sync_kernel();
+        self.name_kernel();
         if !running {
             sidebar.clear_debug(debuggable);
             self.refill_watches();

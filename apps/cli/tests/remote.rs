@@ -657,12 +657,17 @@ fn a_remote_vault_connects_indexes_and_answers() {
         eprintln!("no debugpy on {}: skipping the debugger", url.host);
     }
 
+    // The kernelspecs are the host's, read where its kernels run.
+    let specs = wait(vault.kernel_specs()).unwrap();
+    assert!(!specs.searched.is_empty());
+
     // A notebook's kernel runs on the host beside `serve` too, its news coming back as the
     // vault's events.
     if ipykernel.trim() == "yes" {
         let t = Instant::now();
         let start = kernel::Start {
             notebook: "k.ipynb".to_string(),
+            kernel: None,
         };
         wait(vault.kernel_start(1, &start)).unwrap();
         wait(vault.kernel_execute(1, 1, "print(1)".to_string())).unwrap();

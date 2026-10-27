@@ -60,6 +60,10 @@ impl App {
             (nb, text.etag, text.digest()),
         );
         self.wire_notebook(&tab);
+        let pick = self
+            .vault()
+            .and_then(|v| v.session().kernels.get(key).cloned());
+        tab.set_kernel_pick(pick);
         // A notebook inside the vault opens its code cells' program there; a loose one has none.
         tab.attach_language(self.vault().filter(|_| !doc::is_loose_key(key)).cloned());
         {

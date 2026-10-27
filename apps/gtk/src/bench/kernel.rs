@@ -37,6 +37,9 @@ const NOTEBOOK: &str = r#"{
 /// `bench kernel_ms …`; a step that never comes prints `bench kernel timeout <what>` and quits.
 pub(super) fn bench_kernel(app: &Rc<App>, rel: &str) {
     scratch_only(app, "ACCENT_BENCH_KERNEL");
+    if let Some(rel) = rel.strip_prefix("spec:") {
+        return bench_kernelspec(app, rel);
+    }
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
         if let Some(remote) = app.vault().and_then(|v| v.remote()).cloned() {
@@ -215,6 +218,198 @@ pub(super) fn bench_kernel(app: &Rc<App>, rel: &str) {
         }
         bench_quit(&app);
     });
+}
+
+/// Two kernelspecs of a language of their own, `fakelang`, which run ipykernel: the one the
+/// notebook names, under `setsid -w` so that only an `interrupt_request` reaches the kernel and
+/// SIGINT to the group ends it, and another with an `env` of its own.
+const SPECS: [(&str, &str); 2] = [
+    (
+        "fakelang",
+        r#"{"argv": ["setsid", "-w", "python3", "-m", "ipykernel_launcher", "-f",
+            "{connection_file}"], "display_name": "Fake Lang", "language": "fakelang",
+            "interrupt_mode": "message"}"#,
+    ),
+    (
+        "fakelang2",
+        r#"{"argv": ["python3", "-m", "ipykernel_launcher", "-f", "{connection_file}"],
+            "display_name": "Fake Lang 2", "language": "fakelang", "env": {"FAKE_KERNEL": "two"}}"#,
+    ),
+];
+
+/// A notebook naming the kernelspec `name` of `language`, its code cells `sources`.
+fn notebook_of(name: &str, language: &str, sources: &[&str]) -> String {
+    let cell = |source: &&str| {
+        serde_json::json!({"cell_type": "code", "execution_count": null, "metadata": {},
+            "outputs": [], "source": source})
+    };
+    let metadata = serde_json::json!({
+        "kernelspec": {"display_name": name, "language": language, "name": name},
+        "language_info": {"name": language},
+    });
+    let cells: Vec<serde_json::Value> = sources.iter().map(cell).collect();
+    let notebook = serde_json::json!({"cells": cells, "metadata": metadata, "nbformat": 4,
+        "nbformat_minor": 4});
+    serde_json::to_string_pretty(&notebook).unwrap_or_default()
+}
+
+/// `ACCENT_BENCH_KERNEL=spec:<rel>`: [`SPECS`] written into `JUPYTER_PATH`, a scratch folder
+/// under `/tmp`, and a notebook at `<rel>` naming the first, whose dropdown names it and lists
+/// both: a run, a message interrupt, the second picked, which a restart runs with its `env`; and
+/// a notebook naming a kernel that is not installed, which Run refuses. Prints `bench kernel
+/// spec …` lines; `ACCENT_BENCH_KERNEL_SHOT=<png>` adds a picture of the window, the Code
+/// pane in front, after the first run.
+fn bench_kernelspec(app: &Rc<App>, rel: &str) {
+    let jupyter = std::env::var("JUPYTER_PATH").unwrap_or_default();
+    if !jupyter.starts_with("/tmp/") || jupyter.contains(':') {
+        eprintln!(
+            "ACCENT_BENCH_KERNEL=spec: writes kernelspecs: set JUPYTER_PATH to one folder under /tmp"
+        );
+        std::process::exit(2);
+    }
+    for (name, json) in SPECS {
+        let at = Path::new(&jupyter).join("kernels").join(name);
+        let written = std::fs::create_dir_all(&at);
+        if written
+            .and_then(|()| std::fs::write(at.join("kernel.json"), json))
+            .is_err()
+        {
+            println!("bench kernel spec timeout kernelspec");
+            return bench_quit(app);
+        }
+    }
+    let (app, rel) = (app.clone(), rel.to_string());
+    let missing = format!("missing-{rel}");
+    glib::spawn_future_local(async move {
+        let Some(vault) = app.vault().cloned() else {
+            return bench_quit(&app);
+        };
+        let sources = [
+            "print(\"hi\")",
+            "print(\"sleeping\"); import time; time.sleep(30)",
+            "import os; print(os.environ.get(\"FAKE_KERNEL\"))",
+        ];
+        let notebooks = [
+            (rel.clone(), notebook_of("fakelang", "fakelang", &sources)),
+            (missing.clone(), notebook_of("nokernel", "nolang", &["1"])),
+        ];
+        let written = crate::work::off_thread("kernelspec drill", {
+            let vault = vault.clone();
+            move || {
+                let saved = notebooks
+                    .iter()
+                    .map(|(rel, text)| vault.save(rel, text, None));
+                saved.collect::<Result<Vec<_>, _>>().map(drop)
+            }
+        });
+        if !matches!(written.await, Some(Ok(()))) {
+            println!("bench kernel spec timeout write");
+            return bench_quit(&app);
+        }
+        let act = |action: &str| {
+            let _ = WidgetExt::activate_action(&app.window, action, None);
+        };
+        let face = |want: &'static str| {
+            let face = app.sidebar.get().and_then(|s| s.picker_face());
+            face.filter(|face| face == want)
+        };
+
+        app.open_path(&rel);
+        let opened = || app.doc_for(&rel).and_then(|d| d.notebook().cloned());
+        let Some(tab) = until(&app, "tab", opened).await else {
+            return;
+        };
+        let Some(named) = until(&app, "face", || face("Fake Lang")).await else {
+            return;
+        };
+        let (sent, listed) = futures_channel::oneshot::channel();
+        app.kernel_choices(Box::new(move |choices| {
+            let _ = sent.send(choices);
+        }));
+        let choices = match listed.await {
+            Ok(Ok(choices)) => {
+                let names: Vec<String> = choices.specs.into_iter().map(|s| s.name).collect();
+                let picked = choices.picked.unwrap_or_default();
+                format!("{} picked={picked}", names.join(","))
+            }
+            _ => "unlisted".to_string(),
+        };
+        println!("bench kernel spec face {named} choices {choices}");
+
+        tab.bench_select(0);
+        act("win.notebook-run-cell");
+        if !done(&app, &tab, "cell 1").await {
+            return;
+        }
+        print_cell(&tab, 0, "spec ");
+        println!("bench kernel spec on {}", kernel_of(&tab));
+        if let Ok(path) = std::env::var("ACCENT_BENCH_KERNEL_SHOT") {
+            app.show_pane("code");
+            glib::timeout_future(Duration::from_millis(300)).await;
+            bench_pump();
+            super::diagram::shoot(app.window.upcast_ref(), Path::new(&path));
+        }
+
+        // A message, as SIGINT to its group would end `setsid -w`, and the kernel with it.
+        tab.bench_select(1);
+        act("win.notebook-run-cell");
+        if !interrupt(&app, &tab, 1, false).await {
+            return;
+        }
+        print_cell(&tab, 1, "spec interrupted ");
+
+        app.pick_kernel("fakelang2".to_string());
+        let Some(named) = until(&app, "picked face", || face("Fake Lang 2")).await else {
+            return;
+        };
+        let kept = app.current_session().kernels.get(&rel).cloned();
+        let kept = kept.unwrap_or_default();
+        println!("bench kernel spec picked {named} session={kept}");
+        act("win.notebook-restart");
+        tab.bench_select(2);
+        act("win.notebook-run-cell");
+        if !done(&app, &tab, "cell 3").await {
+            return;
+        }
+        print_cell(&tab, 2, "spec restarted ");
+        println!("bench kernel spec on {}", kernel_of(&tab));
+        app.stop_kernel(&tab);
+
+        app.open_path(&missing);
+        let opened = || app.doc_for(&missing).and_then(|d| d.notebook().cloned());
+        let Some(other) = until(&app, "missing tab", opened).await else {
+            return;
+        };
+        let Some(named) = until(&app, "missing face", || face("No nolang kernel")).await else {
+            return;
+        };
+        other.bench_select(0);
+        act("win.notebook-run-cell");
+        // The kernel's toast, among any other, once no kernel is left starting.
+        let refused = || {
+            let said = app
+                .toasts
+                .shown()
+                .into_iter()
+                .rfind(|t| t.contains(" kernel"));
+            said.filter(|_| !other.kernel_runs())
+        };
+        let Some(said) = until(&app, "refusal", refused).await else {
+            return;
+        };
+        println!("bench kernel spec missing {named} toast {said:?}");
+        // The first kernel's shutdown, within its 2 s.
+        glib::timeout_future(Duration::from_millis(2500)).await;
+        bench_quit(&app);
+    });
+}
+
+/// What the tab's kernel answered as runs in, its implementation's version left out, which
+/// differs by machine.
+fn kernel_of(tab: &NotebookTab) -> String {
+    let what = tab.bench_kernel_what();
+    what.split_once(" in ")
+        .map_or(what.clone(), |(_, on)| on.to_string())
 }
 
 /// Wait until no run waits or runs, saying `what` timed out otherwise.

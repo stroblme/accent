@@ -1,6 +1,6 @@
 //! Python environments available to a vault's notebooks and source files.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -64,34 +64,11 @@ fn discover(
     let mut commands = Vec::new();
     commands.push(selected.clone());
     commands.push(vec!["python3".into()]);
-    let mut dirs = vec![root.to_path_buf()];
-    while let Some(dir) = dirs.pop() {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let Ok(kind) = entry.file_type() else {
-                continue;
-            };
-            if !kind.is_dir() {
-                continue;
-            }
-            let path = entry.path();
-            let name = entry.file_name();
-            if path.join("pyvenv.cfg").is_file() || name == ".venv" || name == "venv" {
-                let python = path.join("bin/python");
-                if python.symlink_metadata().is_ok() {
-                    let python = python.strip_prefix(root).unwrap_or(&python);
-                    commands.push(vec![python.to_string_lossy().into_owned()]);
-                }
-                continue;
-            }
-            if !matches!(
-                name.to_str(),
-                Some(".git" | ".trash" | "node_modules" | "target" | ".lake")
-            ) {
-                dirs.push(path);
-            }
+    for venv in venvs(root) {
+        let python = venv.join("bin/python");
+        if python.symlink_metadata().is_ok() {
+            let python = python.strip_prefix(root).unwrap_or(&python);
+            commands.push(vec![python.to_string_lossy().into_owned()]);
         }
     }
     commands.sort();
@@ -124,6 +101,33 @@ fn discover(
         selected,
         pyright_override,
     })
+}
+
+/// The virtual environments in the vault: a folder with a `pyvenv.cfg`, or named `.venv` or
+/// `venv`, outside the folders no environment is kept in.
+pub(crate) fn venvs(root: &Path) -> Vec<PathBuf> {
+    let (mut found, mut dirs) = (Vec::new(), vec![root.to_path_buf()]);
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let path = entry.path();
+            let name = entry.file_name();
+            if path.join("pyvenv.cfg").is_file() || name == ".venv" || name == "venv" {
+                found.push(path);
+            } else if !matches!(
+                name.to_str(),
+                Some(".git" | ".trash" | "node_modules" | "target" | ".lake")
+            ) {
+                dirs.push(path);
+            }
+        }
+    }
+    found
 }
 
 fn has_ipykernel(root: &Path, command: &[String]) -> bool {

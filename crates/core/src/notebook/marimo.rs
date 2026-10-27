@@ -149,6 +149,7 @@ pub(super) fn read(text: &str) -> Result<Notebook> {
         cells,
         language: "python".into(),
         extension: ".py".into(),
+        kernel: None,
         crlf: false,
     })
 }

@@ -229,10 +229,26 @@ impl Code {
         }
     }
 
-    /// The dropdown, while it is up beside a strip.
+    /// Name `kernel`, the kernel of the notebook in front, on the dropdown, which then lists
+    /// that notebook's language's kernelspecs; `None` names the vault's Python again.
+    pub(super) fn set_kernel_face(&self, kernel: Option<&str>) {
+        if let Some(python) = &self.python {
+            python.set_kernel(kernel);
+        }
+    }
+
+    /// The dropdown, while it is up beside a strip naming the vault's Python.
     pub(super) fn python_button(&self) -> Option<gtk::MenuButton> {
-        let python = self.python.as_ref().filter(|p| p.button.get_visible())?;
+        let shown = |p: &&Picker| p.button.get_visible() && p.is_python();
+        let python = self.python.as_ref().filter(shown)?;
         Some(python.button.clone())
+    }
+
+    /// What the dropdown names while it is up, for the drills.
+    #[cfg(feature = "bench")]
+    pub(super) fn picker_face(&self) -> Option<String> {
+        let python = self.python.as_ref().filter(|p| p.button.get_visible())?;
+        Some(python.face())
     }
 
     /// What the kernel's strip says and shows, while it is up, for `ACCENT_BENCH_KERNEL`.

@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex, Weak};
 use accent_jupyter::{Channel, Header, Incoming, Incomings, Kernel};
 use serde_json::{Value, json};
 
-use super::{Info, Kernels, News, Status};
+use super::{Info, Kernels, Launch, News, Status};
 use crate::{Error, Event, Result, locked};
 
 /// A running kernel and the runs it has been sent.
@@ -19,19 +19,19 @@ pub(super) struct Session {
     runs: Mutex<Runs>,
     /// Being stopped ([`Kernels`]' `stop`): its end is then no news of its own.
     pub(super) stopping: AtomicBool,
+    /// Interrupted with an `interrupt_request` on control rather than SIGINT.
+    message_interrupt: bool,
 }
 
-/// Start `argv` for `notebook`, in its folder, its sockets under `under`, and register it as
-/// `id`: answered once it answers.
+/// Start `launch` for `notebook`, in its folder, and register it as `id`: answered once it
+/// answers.
 pub(super) async fn start(
     kernels: Arc<Kernels>,
     id: u64,
     notebook: PathBuf,
-    argv: Vec<String>,
-    under: PathBuf,
-    host: bool,
-    interpreter: String,
+    launch: Launch,
 ) -> Result<Info> {
+    let (argv, under, host) = super::command(launch.argv, &launch.env, &notebook);
     let cwd = notebook.parent().unwrap_or(&kernels.root);
     if !host && let Err(e) = Kernel::sweep(&under) {
         tracing::debug!(
@@ -41,12 +41,20 @@ pub(super) async fn start(
     }
     // As jupyter_client launches one: ipykernel then ends itself once we are gone, a crash or a
     // kill included, rather than outliving us.
-    let parent = [("JPY_PARENT_PID".to_string(), std::process::id().to_string())];
-    let started = Kernel::start(&argv, cwd, &parent, &under).await;
-    let (kernel, incomings, info) = started.map_err(failed)?;
+    let parent = ("JPY_PARENT_PID".to_string(), std::process::id().to_string());
+    let env: Vec<(String, String)> = launch.env.into_iter().chain([parent]).collect();
+    let started = Kernel::start(&argv, cwd, &env, &under).await;
+    // A kernel that binds `tcp` whatever the connection file says is never reached.
+    let (kernel, incomings, info) = started.map_err(|e| match e {
+        accent_jupyter::Error::Timeout(_) if launch.kernelspec => Error::Language(format!(
+            "{e}: Accent reaches kernels over the ipc transport, which {} may not take",
+            launch.called
+        )),
+        e => failed(e),
+    })?;
     let text = |key: &str| info[key].as_str().unwrap_or_default().to_string();
     let info = Info {
-        interpreter,
+        interpreter: launch.called,
         implementation: text("implementation"),
         version: text("implementation_version"),
     };
@@ -54,6 +62,7 @@ pub(super) async fn start(
         kernel,
         runs: Mutex::default(),
         stopping: AtomicBool::new(false),
+        message_interrupt: launch.message_interrupt,
     });
     // A vault shut down meanwhile stopped only the kernels it held, so this one stops its own.
     if !kernels.register(id, &session) {
@@ -100,6 +109,12 @@ impl Session {
     }
 
     pub(super) fn interrupt(&self) -> Result<()> {
+        if self.message_interrupt {
+            let sent = self
+                .kernel
+                .send(Channel::Control, "interrupt_request", json!({}), None);
+            return sent.map(drop).map_err(failed);
+        }
         self.kernel
             .interrupt()
             .map_err(|e| Error::Language(format!("cannot interrupt the kernel: {e}")))

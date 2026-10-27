@@ -1,12 +1,14 @@
 //! Running a Jupyter notebook (`Vault::kernel_*`): the tab's kernel, the runs it was sent and
 //! what they leave in their cells, and the run commands. A run changes the model outside the
 //! history, being the kernel's and not an edit, and the cells it changed are drawn once per turn
-//! of the event pump; Clear Outputs is an edit.
+//! of the event pump; Clear Outputs is an edit. A notebook in another language than Python runs
+//! on a kernelspec of its language, which the Code pane's dropdown picks (user decision
+//! 2026-10-27).
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use accent_api::kernel::{Info, News, Start, Status};
+use accent_api::kernel::{self as kernels, Info, News, Spec, Specs, Start, Status};
 #[cfg(feature = "bench")]
 use accent_core::notebook::output::Output;
 use accent_core::notebook::{CellId, Edit, Format, Kind, Run};
@@ -14,7 +16,7 @@ use serde_json::Value;
 
 use super::NotebookTab;
 use super::cell::{Execution, Turn};
-use crate::sidebar::KernelState;
+use crate::sidebar::{KernelChoices, KernelState};
 use crate::*;
 
 /// Kernel session numbers, unique in the process and so in any vault.
@@ -241,6 +243,13 @@ pub(super) struct Hold {
     dirty: RefCell<Vec<(CellId, usize)>>,
     /// A redraw is due at the end of this turn.
     due: Cell<bool>,
+    /// The kernelspecs on the vault's machine as last listed, for a notebook in another language
+    /// than Python; `None` until they are, and `listing` while the dropdown's first listing is
+    /// under way.
+    specs: RefCell<Option<Specs>>,
+    listing: Cell<bool>,
+    /// The kernelspec the reader picked for the notebook, by name: the vault's session's.
+    pick: RefCell<Option<String>>,
 }
 
 impl NotebookTab {
@@ -291,6 +300,69 @@ impl NotebookTab {
             let state = view.last_result.get().stale();
             view.last_result.set(state);
             self.set_execution(view.id, state);
+        }
+    }
+
+    /// The kernelspec the reader picked for this notebook, by name, as the session keeps it.
+    pub(crate) fn kernel_pick(&self) -> Option<String> {
+        self.kernel.pick.borrow().clone()
+    }
+
+    pub(crate) fn set_kernel_pick(&self, name: Option<String>) {
+        self.kernel.pick.replace(name);
+    }
+
+    /// The kernelspec this notebook in another language than Python runs on, from the last
+    /// listing: the reader's pick, else the one it names, else the first of its language.
+    fn kernelspec(&self) -> Option<Spec> {
+        let specs = self.kernel.specs.borrow();
+        let model = self.model.borrow();
+        let pick = self.kernel.pick.borrow();
+        let found = &specs.as_ref()?.specs;
+        kernels::pick(found, model.language(), pick.as_deref(), model.kernel()).cloned()
+    }
+
+    /// What the dropdown names for a notebook in another language than Python: its kernelspec,
+    /// "No <language> kernel" once none is found, and the language until the listing answers.
+    /// `None` for a Python notebook, whose dropdown names the vault's Python.
+    fn kernel_face(&self) -> Option<String> {
+        if self.is_python() {
+            return None;
+        }
+        let language = self.model.borrow().language().to_string();
+        let listed = self.kernel.specs.borrow().is_some();
+        Some(match (self.kernelspec(), listed) {
+            (Some(spec), _) => spec.display_name,
+            (None, true) => format!("No {language} kernel"),
+            (None, false) => language,
+        })
+    }
+
+    /// The dropdown's list: the last listing's kernelspecs of the notebook's language.
+    fn kernel_choices(&self) -> KernelChoices {
+        let language = self.model.borrow().language().to_string();
+        let listed = self.kernel.specs.borrow().clone();
+        let Specs { specs, searched } = listed.unwrap_or(Specs {
+            specs: Vec::new(),
+            searched: Vec::new(),
+        });
+        KernelChoices {
+            specs: kernels::of_language(&specs, &language).cloned().collect(),
+            picked: self.kernelspec().map(|spec| spec.name),
+            language,
+            searched,
+        }
+    }
+
+    /// Why Run refuses this notebook while no kernelspec of its language is found: the kernel it
+    /// names, else its language.
+    fn missing_kernel(&self) -> String {
+        let model = self.model.borrow();
+        match model.kernel() {
+            Some(name) => {
+                format!("This notebook asks for the {name} kernel, which is not installed")
+            }
+            None => format!("No {} kernel is installed", model.language()),
         }
     }
 
@@ -650,7 +722,7 @@ impl App {
     }
 
     /// Start a kernel for `tab`; the runs it is given meanwhile wait for its answer.
-    fn start_kernel(self: &Rc<Self>, tab: &Rc<NotebookTab>, vault: &Vault) -> Rc<Kernel> {
+    fn start_kernel(self: &Rc<Self>, tab: &Rc<NotebookTab>, vault: &Arc<Vault>) -> Rc<Kernel> {
         tab.stale_execution();
         let kernel = Rc::new(Kernel {
             session: SESSIONS.fetch_add(1, Ordering::Relaxed) + 1,
@@ -663,19 +735,46 @@ impl App {
             last_run: Cell::new(0),
         });
         tab.kernel.kernel.replace(Some(kernel.clone()));
-        let start = Start {
-            notebook: tab.key(),
-        };
-        let started = vault.kernel_start(kernel.session, &start);
+        let (notebook, python) = (tab.key(), tab.is_python());
         let (app, weak) = (Rc::downgrade(self), Rc::downgrade(tab));
-        let starting = kernel.clone();
+        let (vault, starting) = (vault.clone(), kernel.clone());
         glib::spawn_future_local(async move {
-            let started = started.await;
-            let Some(app) = app.upgrade() else { return };
             let kernel = starting;
-            let tab = weak
-                .upgrade()
-                .filter(|tab| tab.kernel().is_some_and(|k| Rc::ptr_eq(&k, &kernel)));
+            let ours =
+                |tab: &Rc<NotebookTab>| tab.kernel().is_some_and(|k| Rc::ptr_eq(&k, &kernel));
+            // Another language's kernelspecs are looked for afresh, and the notebook is not run
+            // while none of its language is found (user decision 2026-10-27).
+            let spec = match python {
+                true => None,
+                false => {
+                    let listed = vault.kernel_specs().await;
+                    let (Some(app), Some(tab)) = (app.upgrade(), weak.upgrade().filter(ours))
+                    else {
+                        return;
+                    };
+                    let refused = match listed {
+                        Ok(specs) => {
+                            tab.kernel.specs.replace(Some(specs));
+                            tab.kernelspec().is_none().then(|| tab.missing_kernel())
+                        }
+                        Err(e) => Some(format!("Cannot list the kernels: {e}")),
+                    };
+                    if let Some(why) = refused {
+                        app.kernel_toast(&why);
+                        tab.kernel_over();
+                        app.sync_kernel();
+                        return;
+                    }
+                    tab.kernelspec().map(|spec| spec.name)
+                }
+            };
+            let start = Start {
+                notebook,
+                kernel: spec,
+            };
+            let started = vault.kernel_start(kernel.session, &start).await;
+            let Some(app) = app.upgrade() else { return };
+            let tab = weak.upgrade().filter(ours);
             match (started, tab) {
                 (Ok(info), Some(tab)) => {
                     kernel.info.replace(Some(info));
@@ -733,7 +832,8 @@ impl App {
         });
     }
 
-    /// Interrupt Kernel: SIGINT to what it runs, as Jupyter sends it.
+    /// Interrupt Kernel: SIGINT to what it runs, or an `interrupt_request` for a kernelspec that
+    /// asks for one, as Jupyter sends them.
     pub(crate) fn interrupt_kernel(&self, tab: &NotebookTab) {
         let (Some(vault), Some(kernel)) = (self.vault(), tab.kernel()) else {
             return;
@@ -945,11 +1045,79 @@ impl App {
             }
         }
         if let Some(sidebar) = self.sidebar.get() {
+            let face = tab.as_ref().and_then(|tab| tab.kernel_face());
+            sidebar.set_kernel_face(face.as_deref());
             let shown = tab
                 .filter(|_| !self.debugger.running())
                 .map(|tab| tab.kernel_state());
             sidebar.set_kernel(shown.as_ref());
         }
+    }
+
+    /// The Code pane's notebook, if one in another language than Python: its kernelspecs
+    /// listed once, so the dropdown can name its kernel.
+    pub(crate) fn name_kernel(self: &Rc<Self>) {
+        let Some(tab) = self.code_doc().and_then(|doc| doc.notebook().cloned()) else {
+            return;
+        };
+        let hold = &tab.kernel;
+        if tab.is_python() || hold.specs.borrow().is_some() || hold.listing.replace(true) {
+            return;
+        }
+        let weak = Rc::downgrade(&tab);
+        self.list_kernels(&tab, move |_| {
+            if let Some(tab) = weak.upgrade() {
+                tab.kernel.listing.set(false);
+            }
+        });
+    }
+
+    /// The dropdown's kernelspecs for the Code pane's notebook, listed afresh.
+    pub(crate) fn kernel_choices(
+        self: &Rc<Self>,
+        then: Box<dyn FnOnce(Result<KernelChoices, String>)>,
+    ) {
+        let Some(tab) = self.code_doc().and_then(|doc| doc.notebook().cloned()) else {
+            return;
+        };
+        let weak = Rc::downgrade(&tab);
+        self.list_kernels(&tab, move |listed| {
+            if let Some(tab) = weak.upgrade() {
+                then(listed.map(|()| tab.kernel_choices()));
+            }
+        });
+    }
+
+    /// Keep `name` as the Code pane's notebook's kernelspec, in the vault's session: a kernel
+    /// running keeps its own until restarted.
+    pub(crate) fn pick_kernel(self: &Rc<Self>, name: String) {
+        if let Some(tab) = self.code_doc().and_then(|doc| doc.notebook().cloned()) {
+            tab.set_kernel_pick(Some(name));
+            self.save_session_soon();
+            self.sync_kernel();
+        }
+    }
+
+    /// The kernelspecs on the vault's machine, kept for `tab`, the dropdown naming its kernel
+    /// from them; `then` once listed, or with why not.
+    fn list_kernels(
+        self: &Rc<Self>,
+        tab: &Rc<NotebookTab>,
+        then: impl FnOnce(Result<(), String>) + 'static,
+    ) {
+        let Some(vault) = self.vault() else {
+            return then(Err("the window has no vault".to_string()));
+        };
+        let listed = vault.kernel_specs();
+        let (app, weak) = (Rc::downgrade(self), Rc::downgrade(tab));
+        glib::spawn_future_local(async move {
+            let listed = listed.await.map_err(|e| e.to_string());
+            if let (Some(app), Some(tab), Ok(specs)) = (app.upgrade(), weak.upgrade(), &listed) {
+                tab.kernel.specs.replace(Some(specs.clone()));
+                app.sync_kernel();
+            }
+            then(listed.map(drop));
+        });
     }
 
     fn kernel_toast(&self, text: &str) {
@@ -960,6 +1128,15 @@ impl App {
 /// What `ACCENT_BENCH_KERNEL` reads.
 #[cfg(feature = "bench")]
 impl NotebookTab {
+    /// What the kernel answered as, as Restart Kernel's tooltip names it.
+    pub fn bench_kernel_what(&self) -> String {
+        match self.kernel_state() {
+            KernelState::Up { what, .. } => what,
+            KernelState::Starting => "starting".to_string(),
+            KernelState::Off => "off".to_string(),
+        }
+    }
+
     pub fn bench_execution(&self, n: usize) -> Option<String> {
         let view = self.views.borrow().get(n).cloned()?;
         Some(format!("{:?}", view.execution.get()))

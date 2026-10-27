@@ -570,6 +570,16 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
                 app,
                 move |command| app.pick_python(command)
             )),
+            kernels: Rc::new(glib::clone!(
+                #[weak]
+                app,
+                move |then| app.kernel_choices(then)
+            )),
+            pick_kernel: Rc::new(glib::clone!(
+                #[weak]
+                app,
+                move |name| app.pick_kernel(name)
+            )),
         },
     };
     let git = build_git(app, Arc::new(git::Source::Vault(vault.clone())));

@@ -68,9 +68,10 @@ pub struct Kernel {
 }
 
 impl Kernel {
-    /// Start `argv`, which takes `-f <connection file>` after it, in `cwd` with `env`, its
-    /// folder under `under`. Answered once it has answered `kernel_info` and its IOPub reaches
-    /// us, as jupyter_client's `wait_for_ready` waits, with that answer's content.
+    /// Start `argv`, the connection file's path in place of each `{connection_file}`, as a
+    /// kernelspec's `argv` holds it, in `cwd` with `env`, its folder under `under`. Answered once
+    /// it has answered `kernel_info` and its IOPub reaches us, as jupyter_client's
+    /// `wait_for_ready` waits, with that answer's content.
     pub async fn start(
         argv: &[String],
         cwd: &Path,
@@ -319,9 +320,7 @@ fn spawn(
         .write_all(info.to_string().as_bytes())?;
     let mut command = tokio::process::Command::new(exe);
     command
-        .args(args)
-        .arg("-f")
-        .arg(&file)
+        .args(fill(args, &file))
         .current_dir(cwd)
         .envs(env.iter().map(|(k, v)| (k, v)))
         .process_group(0)
@@ -344,6 +343,14 @@ fn spawn(
         );
     }
     command.spawn()
+}
+
+/// `argv` with `file` in place of `{connection_file}`, as jupyter_client fills a kernelspec's.
+fn fill(argv: &[String], file: &Path) -> Vec<String> {
+    let file = file.to_string_lossy();
+    argv.iter()
+        .map(|arg| arg.replace("{connection_file}", &file))
+        .collect()
 }
 
 /// A fresh folder under `under` that only the user can enter.
@@ -443,6 +450,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_connection_file_takes_its_placeholders_place() {
+        let argv = ["R", "-e", "IRkernel::main()", "--args", "{connection_file}"].map(String::from);
+        let file = Path::new("/run/k/kernel.json");
+        let filled = fill(&argv, file);
+        assert_eq!(filled[..4], argv[..4]);
+        assert_eq!(filled[4], "/run/k/kernel.json");
+        let joined = fill(&["--file={connection_file}".to_string()], file);
+        assert_eq!(joined, ["--file=/run/k/kernel.json"]);
+    }
+
+    #[test]
     fn a_start_reclaims_abandoned_kernel_folders_without_touching_live_ones() {
         let tmp = tempfile::tempdir().unwrap();
         let (live, live_lock) = folder(tmp.path()).unwrap();
@@ -522,7 +540,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ipython = tmp.path().join("ipython").to_string_lossy().into_owned();
         let env = [("IPYTHONDIR".to_string(), ipython)];
-        let argv = ["python3", "-m", "ipykernel_launcher"].map(String::from);
+        let argv = [
+            "python3",
+            "-m",
+            "ipykernel_launcher",
+            "-f",
+            "{connection_file}",
+        ];
+        let argv = argv.map(String::from);
         accent_lsp::runtime().block_on(async {
             let started = Kernel::start(&argv, tmp.path(), &env, tmp.path()).await;
             let (kernel, mut incomings, info) = started.unwrap();

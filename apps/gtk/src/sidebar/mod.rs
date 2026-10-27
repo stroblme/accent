@@ -25,7 +25,7 @@ pub use debug::{Data as DebugData, Watched};
 pub use details::{Fact, Group};
 pub use outline::{Line, above, outline_note};
 pub use ports::Data as PortsData;
-pub use python::Data as PythonData;
+pub use python::{Data as PythonData, KernelChoices};
 pub use search::{Answer, Data as SearchData, Query};
 pub use tags::Data as TagsData;
 
@@ -522,6 +522,17 @@ impl Sidebar {
     /// is the default configuration.
     pub fn set_python(&self, command: &[String]) {
         self.code.set_python(command);
+    }
+
+    /// Name `kernel`, the kernel of the notebook in front, on the Code pane's dropdown in the
+    /// vault's Python's place, or the Python again (`None`).
+    pub fn set_kernel_face(&self, kernel: Option<&str>) {
+        self.code.set_kernel_face(kernel);
+    }
+
+    #[cfg(feature = "bench")]
+    pub fn picker_face(&self) -> Option<String> {
+        self.code.picker_face()
     }
 
     /// The Python Environment dropdown of the Code pane's strip that is up, if one is.

@@ -198,6 +198,8 @@ pub struct Notebook {
     cells: Vec<Cell>,
     language: String,
     extension: String,
+    /// The kernelspec its metadata names (`kernelspec.name`), an `.ipynb`'s.
+    kernel: Option<String>,
     /// Whether every line of the file ended in CRLF, which the backends read as LF.
     crlf: bool,
     next: u64,
@@ -243,6 +245,12 @@ impl Notebook {
     /// The code cells' language as the notebook names it, such as `python`.
     pub fn language(&self) -> &str {
         &self.language
+    }
+
+    /// The kernelspec the notebook names, such as `ir`, which the window looks for among those
+    /// of its language: never written back (user decision 2026-10-27).
+    pub fn kernel(&self) -> Option<&str> {
+        self.kernel.as_deref()
     }
 
     /// The file extension of the code cells' language, such as `.py`, or empty when unknown.

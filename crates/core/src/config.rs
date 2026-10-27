@@ -538,6 +538,10 @@ pub struct Session {
     pub watches: Vec<String>,
     /// The exceptions the debug adapter last offered to stop at, as the reader set them.
     pub exceptions: Vec<ExceptionFilter>,
+    /// The kernelspec each notebook in another language than Python runs on, by vault-relative
+    /// path, where the reader picked one: kept here and never in the notebook (user decision
+    /// 2026-10-27). Entries are not pruned.
+    pub kernels: BTreeMap<String, String>,
 }
 
 /// A line a debugged program stops at, and what the reader set beside it: VS Code's conditional
@@ -602,6 +606,7 @@ impl Default for Session {
             breakpoints: BTreeMap::new(),
             watches: Vec::new(),
             exceptions: Vec::new(),
+            kernels: BTreeMap::new(),
         }
     }
 }
@@ -1709,6 +1714,7 @@ daily_dir = "Daily"
                 description: None,
                 on: true,
             }],
+            kernels: BTreeMap::from([("r.ipynb".to_string(), "ir".to_string())]),
         };
         with_xdg(&state, || {
             assert_eq!(Session::load(&vault).open, Vec::<String>::new());
@@ -1738,6 +1744,7 @@ daily_dir = "Daily"
             assert_eq!(back.breakpoints, s.breakpoints);
             assert_eq!(back.watches, s.watches);
             assert_eq!(back.exceptions, s.exceptions);
+            assert_eq!(back.kernels, s.kernels);
 
             // A terminal session's key is no path: it hashes as given, as an `ssh://` one does.
             let named = Path::new("terminal://dev");

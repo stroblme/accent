@@ -414,6 +414,16 @@ impl App {
             breakpoints: self.debugger.saved(self),
             watches: self.debugger.watches(),
             exceptions: self.debugger.exceptions(),
+            // Merged, as the PDFs' places are: a notebook closed earlier keeps its pick.
+            kernels: {
+                let mut picks = stored.kernels.clone();
+                for tab in self.notebooks() {
+                    if let Some(name) = tab.kernel_pick() {
+                        picks.insert(tab.key(), name);
+                    }
+                }
+                picks
+            },
         };
         match self.restored.get() {
             true => session,
@@ -1164,6 +1174,7 @@ fn unrestored(mut stored: Session, now: Session) -> Session {
     stored.terminals.extend(now.terminals);
     stored.compared.extend(now.compared);
     stored.breakpoints.extend(now.breakpoints);
+    stored.kernels.extend(now.kernels);
     for expression in now.watches {
         if !stored.watches.contains(&expression) {
             stored.watches.push(expression);

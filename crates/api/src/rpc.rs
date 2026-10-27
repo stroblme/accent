@@ -766,6 +766,25 @@ mod tests {
         assert!(ignored.is_empty());
     }
 
+    /// The host reads its own kernelspecs, a venv's in the vault among them.
+    #[test]
+    fn the_hosts_kernelspecs_cross_the_wire() {
+        let w = Wired::seeded(&|root| {
+            let at = root.join(".venv/share/jupyter/kernels/venvlang");
+            std::fs::create_dir_all(&at).unwrap();
+            let json = r#"{"argv": ["k", "{connection_file}"], "display_name": "Venv Lang",
+                "language": "venvlang", "interrupt_mode": "message"}"#;
+            std::fs::write(at.join("kernel.json"), json).unwrap();
+        });
+        let found: crate::kernel::Specs = w.client.call("kernel_specs", json!([])).unwrap();
+        let spec = found.specs.iter().find(|s| s.name == "venvlang").unwrap();
+        assert_eq!(
+            (spec.display_name.as_str(), spec.message_interrupt),
+            ("Venv Lang", true)
+        );
+        assert!(spec.dir.ends_with(".venv/share/jupyter/kernels/venvlang"));
+    }
+
     #[test]
     fn a_save_that_lost_the_race_comes_back_as_the_same_refusal() {
         let w = Wired::open();

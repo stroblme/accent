@@ -396,7 +396,9 @@ smoke: gtk-bench vault xvfb
 #
 # `ACCENT_BENCH_KERNEL` writes a Jupyter notebook and runs it on an ipykernel, held against
 # `kernel.expected`, and is skipped where `python3` has no ipykernel; under a scratch HOME too,
-# since IPython keeps its history in `~/.ipython`.
+# since IPython keeps its history in `~/.ipython`. `ACCENT_BENCH_KERNEL=spec:` runs notebooks of
+# another language on fake kernelspecs it writes into a scratch `JUPYTER_PATH`, which run
+# ipykernel, held against `kernelspec.expected`.
 #
 # `ACCENT_BENCH_NOTEBOOK_LSP` writes two notebooks whose code cells `fake-lsp.py --notebook`
 # answers, configured for the scratch vault, and is held against `notebook-lsp.expected`.
@@ -438,6 +440,10 @@ drills: gtk-bench xvfb
 		{ python3 -c "import ipykernel" 2>/dev/null || { echo "SKIPPED the kernel drill: no ipykernel"; exit 0; }; } && \
 		ACCENT_BENCH_KERNEL=run.ipynb timeout 90 $(TARGET_DIR)/accent "$$0/vault" >"$$0/kernel" && \
 		grep "^bench kernel " "$$0/kernel" | diff -u apps/gtk/src/bench/kernel.expected -' "$$xdg"
+	$(HEADLESS) sh -c 'export HOME="$$0/home" JUPYTER_PATH="$$0/jupyter" && mkdir "$$HOME" && \
+		{ python3 -c "import ipykernel" 2>/dev/null || { echo "SKIPPED the kernelspec drill: no ipykernel"; exit 0; }; } && \
+		ACCENT_BENCH_KERNEL=spec:spec.ipynb timeout 90 $(TARGET_DIR)/accent "$$0/vault" >"$$0/kernelspec" && \
+		grep "^bench kernel " "$$0/kernelspec" | diff -u apps/gtk/src/bench/kernelspec.expected -' "$$xdg"
 	$(HEADLESS) sh -c 'mkdir -p "$$XDG_CONFIG_HOME/accent" && \
 		printf "[vaults.\"%s\".lsp.servers]\npython3 = [\"python3\", \"%s\", \"--notebook\"]\n" "$$0" \
 			"$(CURDIR)/build-aux/fake-lsp.py" >"$$XDG_CONFIG_HOME/accent/config.toml" && \
