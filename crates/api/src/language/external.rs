@@ -1062,6 +1062,11 @@ mod tests {
     use crate::language::Severity;
     use serde_json::json;
 
+    /// Held by the tests that start a Python server, so one runs at a time: two jedis filling a
+    /// cold cache together read each other's half-written pickles, which pylsp answers with no
+    /// completions (parso, ISSUES.md).
+    static PYTHON: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn an_old_ghost_session_cannot_clear_its_successor() {
         let current = Arc::new(Mutex::new(1));
@@ -1449,6 +1454,7 @@ mod tests {
             eprintln!("pylsp is not the Python server here: skipping the end-to-end test");
             return;
         }
+        let _python = PYTHON.lock().unwrap_or_else(|e| e.into_inner());
         let root = tempfile::tempdir().unwrap();
         let cache = tempfile::tempdir().unwrap();
         let py = "import os\nos.\n";
@@ -1492,6 +1498,7 @@ mod tests {
             eprintln!("no Python server here: skipping the end-to-end test");
             return;
         }
+        let _python = PYTHON.lock().unwrap_or_else(|e| e.into_inner());
         let root = tempfile::tempdir().unwrap();
         let cache = tempfile::tempdir().unwrap();
         let (vault, _events) = crate::Vault::open_at(
