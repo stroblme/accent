@@ -5,9 +5,21 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+# `fixtures::encrypted_document`, for accent-core's tests: AES-encrypted files nothing installed
+# writes.
+fixtures = []
+
 [dependencies]
 thiserror.workspace = true
 # FlateDecode, the one filter of the objects read here: xref and object streams (`filter`).
 miniz_oxide = "0.9"
 # `memmem` for `startxref` at the end of a file and an `endstream` its `/Length` missed.
 memchr = "2"
+# The standard security handler (`crypt`): MD5 keys and RC4 for revisions 2–4, AES-128 for 4,
+# AES-256 and SHA-2 for 5 and 6. The generation `sha2` in the lock is of.
+md-5 = "0.11"
+sha2 = "0.11"
+aes = "0.9"
+cbc = { version = "0.2", features = ["alloc", "block-padding"] }
+rc4 = "0.2"

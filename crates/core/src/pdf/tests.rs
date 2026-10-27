@@ -713,6 +713,58 @@ fn pdfium_draws_an_ink_appended_through_accent_pdf() {
     assert!(red_pixels(appended).unwrap() > 300, "the line is drawn");
 }
 
+/// Encrypted files under the empty user password: ghostscript's RC4 (revisions 2 and 3, see
+/// `accent-pdf`'s tests) and AES-128 and AES-256 as `accent-pdf` builds them (revisions 4 and 6).
+fn encrypted() -> Vec<Vec<u8>> {
+    let mut all = vec![
+        include_bytes!("../../../pdf/fixtures/gs-rc4-40.pdf").to_vec(),
+        include_bytes!("../../../pdf/fixtures/gs-rc4-128-table.pdf").to_vec(),
+    ];
+    all.extend([4, 6].map(accent_pdf::fixtures::encrypted_document));
+    all
+}
+
+/// pdfium opens each encrypted file, and draws an `/Ink` appended to it, which `accent-pdf`
+/// encrypts as the file is.
+#[test]
+fn pdfium_draws_an_ink_appended_to_an_encrypted_file() {
+    if !available() {
+        return eprintln!("skipping: no libpdfium");
+    }
+    for (i, base) in encrypted().into_iter().enumerate() {
+        let appended = with_appended_ink(&base).unwrap();
+        let before = red_pixels(base).unwrap();
+        assert!(red_pixels(appended).unwrap() > before + 300, "file {i}");
+    }
+}
+
+/// What pdfium writes into an encrypted file stays encrypted, and `accent-pdf` reads it.
+#[test]
+fn accent_pdf_reads_what_pdfium_saves_encrypted() {
+    if !available() {
+        return eprintln!("skipping: no libpdfium");
+    }
+    let red = InkStyle {
+        width: 2.0,
+        rgba: [255, 0, 0, 255],
+        multiply: false,
+    };
+    for (i, base) in encrypted().into_iter().enumerate() {
+        let mut doc = PdfDoc::from_bytes(base).unwrap();
+        doc.add_ink(0, &[(20.0, 20.0), (60.0, 40.0)], red, 1.0)
+            .unwrap();
+        let saved = doc.save().unwrap();
+        assert!(
+            memchr::memmem::find(&saved, b"/Encrypt").is_some(),
+            "file {i}"
+        );
+        let pdf = accent_pdf::Pdf::open(std::sync::Arc::new(saved)).unwrap();
+        let page = pdf.get(pdf.pages().unwrap()[0]).unwrap();
+        let annots = page.as_dict().and_then(|p| p.get(b"Annots")).cloned();
+        assert!(annots.is_some(), "file {i}: the stroke's page lists it");
+    }
+}
+
 #[test]
 fn an_appended_page_is_the_size_of_the_last_one_and_takes_ink() {
     if !available() {
@@ -1681,12 +1733,11 @@ fn line_groups_split_on_a_new_line() {
     assert_eq!(line_groups(&[]), Vec::<Range<usize>>::new());
 }
 
-/// The PDF writer plan's corpus run, by hand: every PDF under `ACCENT_PDF_CORPUS` (never the
-/// user's vault) read by `accent-pdf`, against the pages pdfium counts, and each one that agrees
-/// given a red `/Ink` through `accent-pdf`'s update, which pdfium must draw and `accent-pdf` read
-/// back. Encrypted files wait
-/// for the reader to decrypt, and a broken one for its repair through pdfium (the plan's D5), each
-/// listed; any other disagreement on a file pdfium opens fails.
+/// The corpus run, by hand: every PDF under `ACCENT_PDF_CORPUS` (never the user's vault) read by
+/// `accent-pdf`, against the pages pdfium counts, and each one that agrees given a red `/Ink`
+/// through `accent-pdf`'s update, which pdfium must draw and `accent-pdf` read back. A file that
+/// needs a password is counted, and a broken one listed for its repair through pdfium; any other
+/// disagreement on a file pdfium opens fails.
 #[test]
 #[ignore = "ACCENT_PDF_CORPUS=<folder> cargo test -p accent-core --features pdf -- --ignored corpus"]
 fn the_corpus_reads_in_accent_pdf_as_pdfium_reads_it() {
@@ -1710,7 +1761,7 @@ fn the_corpus_reads_in_accent_pdf_as_pdfium_reads_it() {
     }
     let mut found = Vec::new();
     pdfs(&root, &mut found);
-    let (mut agree, mut encrypted, mut unread) = (0, 0, 0);
+    let (mut agree, mut locked, mut unread) = (0, 0, 0);
     let (mut broken, mut wrong) = (Vec::new(), Vec::new());
     for path in &found {
         let Ok(pdfium) = PdfDoc::open(path).map(|doc| doc.page_count()) else {
@@ -1738,9 +1789,7 @@ fn the_corpus_reads_in_accent_pdf_as_pdfium_reads_it() {
                     drawn => wrong.push(format!("{}: ink {drawn:?}", path.display())),
                 }
             }
-            Err(accent_pdf::Error::Unsupported(what)) if what.contains("encrypted") => {
-                encrypted += 1
-            }
+            Err(accent_pdf::Error::Unsupported(what)) if what.contains("password") => locked += 1,
             Err(accent_pdf::Error::Broken(why)) => {
                 broken.push(format!("{}: {why}", path.display()))
             }
@@ -1751,7 +1800,7 @@ fn the_corpus_reads_in_accent_pdf_as_pdfium_reads_it() {
         }
     }
     eprintln!(
-        "{} PDFs: {agree} agree, {encrypted} encrypted, {unread} pdfium cannot open, {} broken, \
+        "{} PDFs: {agree} agree, {locked} need a password, {unread} pdfium cannot open, {} broken, \
          {} differ",
         found.len(),
         broken.len(),

@@ -400,3 +400,100 @@ fn a_new_document_is_one_page_of_its_size() {
         .collect();
     assert_eq!(media, [0.0, 0.0, 595.0, 842.5]);
 }
+
+/// Ghostscript's encrypted files: `gs -sDEVICE=pdfwrite -sOwnerPassword=owner -sUserPassword=`
+/// writes revision 2 (RC4, 40 bits) with an xref stream and object streams, and with
+/// `-dEncryptionR=3 -dKeyLength=128 -dWriteObjStms=false -dWriteXRefStm=false` revision 3 (RC4,
+/// 128 bits) with a table. Ghostscript 10.08 writes no other revision.
+fn ghostscript() -> [Vec<u8>; 2] {
+    [
+        include_bytes!("../fixtures/gs-rc4-40.pdf").to_vec(),
+        include_bytes!("../fixtures/gs-rc4-128-table.pdf").to_vec(),
+    ]
+}
+
+/// The `/Producer` of the file's `/Info`, decrypted.
+fn producer(pdf: &Pdf) -> Vec<u8> {
+    let info = pdf.trailer().get(b"Info").and_then(Object::reference);
+    match pdf
+        .get(info.unwrap())
+        .unwrap()
+        .as_dict()
+        .unwrap()
+        .get(b"Producer")
+    {
+        Some(Object::String(s)) => s.clone(),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The first page's content, decrypted and decoded.
+fn content(pdf: &Pdf) -> Vec<u8> {
+    let page = pdf.pages().unwrap()[0];
+    let page = pdf.get(page).unwrap();
+    let contents = page
+        .as_dict()
+        .unwrap()
+        .get(b"Contents")
+        .and_then(Object::reference);
+    let Object::Stream(s) = pdf.get(contents.unwrap()).unwrap() else {
+        panic!("no content stream")
+    };
+    pdf.decode(&s).unwrap()
+}
+
+#[test]
+fn encrypted_files_read_under_the_empty_user_password() {
+    for bytes in ghostscript() {
+        let pdf = open(bytes).unwrap();
+        assert_eq!(pdf.pages().unwrap().len(), 1);
+        assert!(producer(&pdf).starts_with(b"GPL Ghostscript"));
+        assert!(memchr::memmem::find(&content(&pdf), b"Tf").is_some());
+    }
+    for r in [4, 6] {
+        let pdf = open(fixtures::encrypted_document(r)).unwrap();
+        assert_eq!(producer(&pdf), b"accent fixtures", "revision {r}");
+        assert_eq!(content(&pdf), b"BT /F1 24 Tf 20 40 Td (Hello) Tj ET");
+    }
+}
+
+/// What a session adds to an encrypted file is encrypted as the file is: nowhere in the clear,
+/// and read back through the file's own handler.
+#[test]
+fn an_update_to_an_encrypted_file_is_encrypted_too() {
+    let bases = ghostscript()
+        .into_iter()
+        .chain([4, 6].map(fixtures::encrypted_document));
+    for base in bases {
+        let pdf = open(base.clone()).unwrap();
+        let mut update = Update::new(&pdf);
+        let added = update.add(Object::String(b"a new comment".to_vec()));
+        let stream = Stream {
+            dict: Dict::default(),
+            raw: b"0 0 m 10 10 l S".to_vec(),
+        };
+        let drawn = update.add(Object::Stream(stream.clone()));
+        let bytes = [base, update.section()].concat();
+        assert_eq!(memchr::memmem::find(&bytes, b"a new comment"), None);
+        assert_eq!(memchr::memmem::find(&bytes, b"10 10 l"), None);
+        let after = open(bytes).unwrap();
+        assert_eq!(
+            after.get(added).unwrap(),
+            Object::String(b"a new comment".to_vec())
+        );
+        let Object::Stream(read) = after.get(drawn).unwrap() else {
+            panic!("no stream")
+        };
+        assert_eq!(read.raw, stream.raw);
+        assert_eq!(after.pages().unwrap().len(), 1);
+    }
+}
+
+#[test]
+fn a_file_that_needs_a_password_is_refused() {
+    let mut bytes = fixtures::encrypted_document(6);
+    // The first hex digit of `/U`: the empty password no longer opens it.
+    let at = memchr::memmem::find(&bytes, b"/U <").unwrap() + 4;
+    bytes[at] = if bytes[at] == b'0' { b'1' } else { b'0' };
+    assert!(matches!(open(bytes), Err(Error::Unsupported(_))));
+}

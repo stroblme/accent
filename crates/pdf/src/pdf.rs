@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+use crate::crypt::Crypt;
 use crate::objstm::ObjStm;
 use crate::xref::{self, Entry, Xref};
 use crate::{Dict, Error, Object, Ref, Result, Source, Stream};
@@ -18,22 +19,38 @@ pub struct Pdf {
     pub(crate) src: Arc<dyn Source>,
     pub(crate) xref: Xref,
     objstms: Mutex<HashMap<u32, Arc<ObjStm>>>,
+    /// The security handler of an encrypted file, and the `/Encrypt` dictionary's own number,
+    /// which it leaves alone.
+    pub(crate) crypt: Option<Crypt>,
+    encryption: Option<Ref>,
 }
 
 impl Pdf {
     /// Read the xref chain of `src`. Shared, because the document a session edits is this base
     /// with the session's update after it, which pdfium reads as one (`accent_core::pdf`).
-    /// An encrypted file is refused until the reader decrypts.
+    /// An encrypted file opens where its user password is empty, as pdfium opens it.
     pub fn open(src: Arc<dyn Source>) -> Result<Pdf> {
         let xref = xref::read(&*src)?;
-        if xref.trailer.get(b"Encrypt").is_some() {
-            return Err(Error::Unsupported("an encrypted file".into()));
-        }
-        Ok(Pdf {
+        let encrypt = xref.trailer.get(b"Encrypt").cloned();
+        let mut pdf = Pdf {
             src,
             xref,
             objstms: Mutex::default(),
-        })
+            crypt: None,
+            encryption: encrypt.as_ref().and_then(Object::reference),
+        };
+        if let Some(encrypt) = encrypt {
+            let dict = pdf.resolve(Some(&encrypt))?;
+            let id = match pdf.trailer().get(b"ID").and_then(Object::as_array) {
+                Some([Object::String(id), ..]) => id.clone(),
+                _ => Vec::new(),
+            };
+            let Some(dict) = dict.as_dict() else {
+                return Err(Error::Broken("/Encrypt is no dictionary".into()));
+            };
+            pdf.crypt = Some(Crypt::new(dict, &id)?);
+        }
+        Ok(pdf)
     }
 
     /// The newest trailer.
@@ -168,13 +185,20 @@ impl Pdf {
                 r.num, r.generation
             )));
         }
-        match (object, data) {
+        let mut object = match (object, data) {
             (Object::Stream(mut stream), Some(data)) => {
                 stream.raw = self.stream_data(&stream.dict, offset + data as u64, depth)?;
-                Ok(Object::Stream(stream))
+                Object::Stream(stream)
             }
-            (object, _) => Ok(object),
+            (object, _) => object,
+        };
+        // An object stream's members come out of it decrypted already.
+        if let Some(crypt) = &self.crypt
+            && self.encryption != Some(r)
+        {
+            crypt.decrypt(r, &mut object);
         }
+        Ok(object)
     }
 
     /// A stream's data from `start`: `/Length` bytes when `endstream` follows them, otherwise

@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 mod content;
+mod crypt;
 mod filter;
 mod lex;
 mod objstm;
@@ -15,6 +16,9 @@ mod source;
 mod update;
 mod write;
 mod xref;
+
+#[cfg(any(test, feature = "fixtures"))]
+pub mod fixtures;
 
 pub use content::{Content, form};
 pub use pdf::Pdf;

@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::crypt::Crypt;
 use crate::write;
 use crate::{Dict, Object, Pdf, Ref, Result};
 
@@ -33,6 +34,8 @@ pub struct Update {
     next: u32,
     /// The session's objects, each serialised once, when added or set.
     objects: BTreeMap<u32, (Ref, Object, Vec<u8>)>,
+    /// An encrypted base's handler: what the session writes is encrypted as the file is.
+    crypt: Option<Crypt>,
 }
 
 impl Update {
@@ -62,6 +65,7 @@ impl Update {
             trailer,
             next: u32::try_from(size).unwrap_or(0).max(highest).max(1),
             objects: BTreeMap::new(),
+            crypt: base.crypt.clone(),
         }
     }
 
@@ -79,7 +83,14 @@ impl Update {
     /// `r` replaced by `object` for the rest of the session.
     pub fn set(&mut self, r: Ref, object: Object) {
         let mut bytes = Vec::new();
-        write::indirect(&mut bytes, r, &object);
+        match &self.crypt {
+            Some(crypt) => {
+                let mut sealed = object.clone();
+                crypt.encrypt(r, &mut sealed);
+                write::indirect(&mut bytes, r, &sealed);
+            }
+            None => write::indirect(&mut bytes, r, &object),
+        }
         self.objects.insert(r.num, (r, object, bytes));
     }
 
