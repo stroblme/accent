@@ -1,11 +1,14 @@
 //! An org table lined up on Tab and Return as a markdown note's pipe table is
 //! ([`crate::markdown::table_key`]): every line opening with `|` a row of it, one opening with
-//! `|-` an hline, redrawn to the columns' widths with `+` where they meet, and a column of numbers
-//! right aligned, as org's own Tab lines a table up (`org-table-align`).
+//! `|-` an hline, redrawn to the columns' widths with `+` where they meet, a cell as wide as org
+//! shows it, and a column of numbers right aligned, as org's own Tab lines a table up
+//! (`org-table-align`).
 
+use super::links;
 use crate::markdown::{Align, Cell, Rules, Table, TableEdit, TableKey, split};
 use regex::Regex;
 use std::sync::LazyLock;
+use unicode_width::UnicodeWidthStr;
 
 /// Tab, Shift+Tab or Return at `column` of line `at` in an org table, or `None` off one.
 pub fn table_key(lines: &[&str], at: usize, column: usize, key: TableKey) -> Option<TableEdit> {
@@ -30,11 +33,34 @@ pub fn table_key(lines: &[&str], at: usize, column: usize, key: TableKey) -> Opt
         lines: top..end,
         rows,
         rules: Rules::Hline(aligns),
+        width: shown,
     }
     .key(lines, at, column, key)
 }
 
-/// Each column's alignment: right where at least half of its filled cells, a header's too, are
+/// A cell's width as org shows it (`org-string-width`, which takes org's link display into
+/// account): a described link `[[url][desc]]` as its description and `[[url]]` as its link, the
+/// rest of either hidden; everything else as written, emphasis markers too, which org shows.
+fn shown(cell: &str) -> usize {
+    let (mut width, mut i) = (0, 0);
+    while let Some(at) = cell[i..].find("[[").map(|at| i + at) {
+        width += cell[i..at].width();
+        match links::bracket(cell, at, cell.len()) {
+            Some(link) => {
+                width += cell[link.desc.unwrap_or(link.link)].width();
+                i = link.range.end;
+            }
+            None => {
+                width += 1;
+                i = at + 1;
+            }
+        }
+    }
+    width + cell[i..].width()
+}
+
+/// Each column's alignment: the first alignment cookie's in it, `<r>`, `<c>`, `<l>` or one with
+/// a width, `<l10>`; else right where at least half of its filled cells, a header's too, are
 /// numbers (`org-table-number-fraction`), left otherwise.
 fn aligns(rows: &[(Vec<Cell>, bool)]) -> Vec<Align> {
     let rows: Vec<&[Cell]> = rows
@@ -49,6 +75,9 @@ fn aligns(rows: &[(Vec<Cell>, bool)]) -> Vec<Align> {
                 .iter()
                 .filter_map(|cells| cells.get(k))
                 .filter(|c| !c.text.is_empty());
+            if let Some(align) = filled.clone().find_map(|c| cookie(&c.text)) {
+                return align;
+            }
             let (numbers, all) = filled.fold((0, 0), |(n, all), c| {
                 (n + usize::from(number(&c.text)), all + 1)
             });
@@ -58,6 +87,21 @@ fn aligns(rows: &[(Vec<Cell>, bool)]) -> Vec<Align> {
             }
         })
         .collect()
+}
+
+/// The alignment a cookie cell fixes: `<r>`, `<c>` or `<l>`, a width after it or none.
+fn cookie(cell: &str) -> Option<Align> {
+    let inner = cell.strip_prefix('<')?.strip_suffix('>')?;
+    let (align, width) = inner.split_at_checked(1)?;
+    if !width.bytes().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    match align {
+        "l" => Some(Align::Left),
+        "c" => Some(Align::Center),
+        "r" => Some(Align::Right),
+        _ => None,
+    }
 }
 
 /// Whether org reads a cell as a number: `org-table-number-regexp`'s default, which takes
@@ -110,6 +154,28 @@ mod tests {
         assert_eq!(
             press(table, 2, 3, TableKey::Enter).unwrap(),
             "| Item |   Qty |    |\n|------+-------+----|\n| t^ea  |    12 |  3 |\n| cake | 2.5e3 | xy |"
+        );
+    }
+
+    /// A cell is as wide as org shows it: a described link its description, `[[url]]` its link,
+    /// emphasis markers and all.
+    #[test]
+    fn a_link_is_as_wide_as_org_shows_it() {
+        let table = "| [[https://x.org][ab]] | *b* |\n| abcd | [[x]] |";
+        assert_eq!(
+            press(table, 0, 2, TableKey::Enter).unwrap(),
+            "| ^[[https://x.org][ab]]   | *b* |\n| abcd | [[x]]   |"
+        );
+    }
+
+    /// An alignment cookie, `<r>`, `<c>` or `<l>` with a width or none, aligns its column ahead
+    /// of its numbers.
+    #[test]
+    fn a_cookie_aligns_its_column() {
+        let table = "| <r> | <c> | <l5> |\n| a | b | 1 |\n| bb | dddd | 22 |";
+        assert_eq!(
+            press(table, 0, 2, TableKey::Enter).unwrap(),
+            "| ^<r> | <c>  | <l5> |\n|   a |  b   | 1    |\n|  bb | dddd | 22   |"
         );
     }
 

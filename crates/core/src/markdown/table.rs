@@ -49,6 +49,8 @@ pub(crate) struct Table {
     /// an org hline, rather than a row of text.
     pub rows: Vec<(Vec<Cell>, bool)>,
     pub rules: Rules,
+    /// How wide a cell's text shows, in columns: as written in a pipe table.
+    pub width: fn(&str) -> usize,
 }
 
 /// How a table's rules are drawn.
@@ -89,6 +91,7 @@ pub fn table_key(lines: &[&str], at: usize, column: usize, key: TableKey) -> Opt
         lines: head..end,
         rows: rows.enumerate().map(|(i, cells)| (cells, i == 1)).collect(),
         rules: Rules::Delimiter(aligns),
+        width: UnicodeWidthStr::width,
     }
     .key(lines, at, column, key)
 }
@@ -176,7 +179,7 @@ impl Table {
                 content
                     .iter()
                     .filter_map(|row| row.get(k))
-                    .map(|text| text.width())
+                    .map(|text| (self.width)(text))
                     .fold(least, usize::max)
             })
             .collect();
@@ -186,7 +189,7 @@ impl Table {
             let mut starts = Vec::new();
             for (k, (&width, &align)) in widths.iter().zip(&aligns).enumerate() {
                 let text = cells.get(k).map_or("", String::as_str);
-                let space = width - text.width();
+                let space = width - (self.width)(text);
                 let left = lead(space, align);
                 starts.push(line.chars().count() + 1 + left);
                 line += &format!(" {}{text}{} |", " ".repeat(left), " ".repeat(space - left));
