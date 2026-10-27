@@ -586,6 +586,133 @@ fn blank_pdf_is_one_page_of_the_size_it_was_asked_for() {
     );
 }
 
+/// `base` with a red line across its first page, from a tenth of the way across and a fifth up its
+/// visible box to as far from the other corner, as an `/Ink` with an appearance stream of its
+/// own, appended through `accent-pdf`: the shape the pen's strokes are to take once it writes them
+/// itself.
+fn with_appended_ink(base: &[u8]) -> accent_pdf::Result<Vec<u8>> {
+    use accent_pdf::{Content, Dict, Object, Update, form};
+    let pdf = accent_pdf::Pdf::open(std::sync::Arc::new(base.to_vec()))?;
+    let Some(&page) = pdf.pages()?.first() else {
+        return Err(accent_pdf::Error::Broken("no page".into()));
+    };
+    let visible = match pdf.inherited(page, b"CropBox")? {
+        Some(crop) => Some(crop),
+        None => pdf.inherited(page, b"MediaBox")?,
+    };
+    let visible = match visible {
+        Some(Object::Ref(r)) => Some(pdf.get(r)?),
+        visible => visible,
+    };
+    let edges: Vec<f32> = (visible
+        .as_ref()
+        .and_then(Object::as_array)
+        .unwrap_or_default())
+    .iter()
+    .map(|v| match v {
+        Object::Int(i) => *i as f32,
+        Object::Real(r) => *r as f32,
+        _ => 0.0,
+    })
+    .collect();
+    let [x0, y0, x1, y1] = edges[..] else {
+        return Err(accent_pdf::Error::Broken("no page box".into()));
+    };
+    let (w, h) = (x1 - x0, y1 - y0);
+    let (from, to) = ((x0 + w * 0.1, y0 + h * 0.2), (x0 + w * 0.9, y0 + h * 0.8));
+    let width = (w.abs().min(h.abs()) / 10.0).clamp(1.0, 4.0);
+    let real = |v: f32| Object::Real(f64::from(v));
+    let rect = [from.0 - width, from.1 - width, to.0 + width, to.1 + width];
+    let mut update = Update::new(&pdf);
+    let mut drawing = Content::default();
+    drawing
+        .stroke_rgb([1.0, 0.0, 0.0])
+        .width(width)
+        .cap(1)
+        .join(1);
+    drawing.move_to(from).line_to(to).stroke();
+    let appearance = update.add(Object::Stream(form(
+        rect,
+        drawing.finish(),
+        Dict::default(),
+    )));
+    let name = |n: &[u8]| Object::Name(n.to_vec());
+    let ink = update.add(Object::Dict(Dict(vec![
+        (b"Type".to_vec(), name(b"Annot")),
+        (b"Subtype".to_vec(), name(b"Ink")),
+        (b"Rect".to_vec(), Object::Array(rect.map(real).to_vec())),
+        (
+            b"InkList".to_vec(),
+            Object::Array(vec![Object::Array(
+                [from.0, from.1, to.0, to.1].map(real).to_vec(),
+            )]),
+        ),
+        (
+            b"C".to_vec(),
+            Object::Array([1.0, 0.0, 0.0].map(real).to_vec()),
+        ),
+        (
+            b"BS".to_vec(),
+            Object::Dict(Dict(vec![(b"W".to_vec(), real(width))])),
+        ),
+        (b"F".to_vec(), Object::Int(4)),
+        (b"P".to_vec(), Object::Ref(page)),
+        (
+            b"AP".to_vec(),
+            Object::Dict(Dict(vec![(b"N".to_vec(), Object::Ref(appearance))])),
+        ),
+    ])));
+    let Some(Object::Dict(mut dict)) = update.get(&pdf, page)?.as_dict().cloned().map(Object::Dict)
+    else {
+        return Err(accent_pdf::Error::Broken(
+            "a page that is no dictionary".into(),
+        ));
+    };
+    match dict.get(b"Annots").cloned() {
+        Some(Object::Ref(list)) => {
+            let mut annots = update
+                .get(&pdf, list)?
+                .as_array()
+                .unwrap_or_default()
+                .to_vec();
+            annots.push(Object::Ref(ink));
+            update.set(list, Object::Array(annots));
+        }
+        Some(Object::Array(mut annots)) => {
+            annots.push(Object::Ref(ink));
+            dict.set(b"Annots", Object::Array(annots));
+        }
+        _ => dict.set(b"Annots", Object::Array(vec![Object::Ref(ink)])),
+    }
+    update.set(page, Object::Dict(dict));
+    Ok([base, &update.section()].concat())
+}
+
+/// The red pixels of the first page as pdfium draws it.
+fn red_pixels(bytes: Vec<u8>) -> Result<usize> {
+    let img = PdfDoc::from_bytes(bytes)?.render_page(0, 1.0, Theme::Plain)?;
+    let pixels = img.data.as_chunks::<4>().0;
+    Ok(pixels
+        .iter()
+        .filter(|px| px[0] > 200 && px[1] < 100 && px[2] < 100)
+        .count())
+}
+
+#[test]
+fn pdfium_draws_an_ink_appended_through_accent_pdf() {
+    if !available() {
+        return eprintln!("skipping: no libpdfium");
+    }
+    let base = tiny_pdf(false);
+    let appended = with_appended_ink(&base).unwrap();
+    assert!(
+        appended.starts_with(&base),
+        "the file before the update is left as it was"
+    );
+    assert_eq!(red_pixels(base).unwrap(), 0);
+    assert!(red_pixels(appended).unwrap() > 300, "the line is drawn");
+}
+
 #[test]
 fn an_appended_page_is_the_size_of_the_last_one_and_takes_ink() {
     if !available() {
@@ -1555,8 +1682,10 @@ fn line_groups_split_on_a_new_line() {
 }
 
 /// The PDF writer plan's corpus run, by hand: every PDF under `ACCENT_PDF_CORPUS` (never the
-/// user's vault) read by `accent-pdf`, against the pages pdfium counts. Encrypted files wait for
-/// the reader to decrypt, and a broken one for its repair through pdfium (the plan's D5), each
+/// user's vault) read by `accent-pdf`, against the pages pdfium counts, and each one that agrees
+/// given a red `/Ink` through `accent-pdf`'s update, which pdfium must draw and `accent-pdf` read
+/// back. Encrypted files wait
+/// for the reader to decrypt, and a broken one for its repair through pdfium (the plan's D5), each
 /// listed; any other disagreement on a file pdfium opens fails.
 #[test]
 #[ignore = "ACCENT_PDF_CORPUS=<folder> cargo test -p accent-core --features pdf -- --ignored corpus"]
@@ -1589,8 +1718,26 @@ fn the_corpus_reads_in_accent_pdf_as_pdfium_reads_it() {
             continue;
         };
         let file = std::fs::File::open(path).unwrap();
-        match accent_pdf::Pdf::open(file).and_then(|pdf| pdf.pages()) {
-            Ok(pages) if pages.len() == pdfium => agree += 1,
+        match accent_pdf::Pdf::open(std::sync::Arc::new(file)).and_then(|pdf| pdf.pages()) {
+            Ok(pages) if pages.len() == pdfium => {
+                let base = std::fs::read(path).unwrap();
+                let red = |bytes| red_pixels(bytes).map_err(|e| e.to_string());
+                let ours = |bytes: &[u8]| {
+                    let pdf = accent_pdf::Pdf::open(std::sync::Arc::new(bytes.to_vec()));
+                    pdf.and_then(|pdf| pdf.pages())
+                        .map(|pages| pages.len())
+                        .ok()
+                };
+                let drawn = with_appended_ink(&base)
+                    .map_err(|e| e.to_string())
+                    .and_then(|appended| Ok((ours(&appended), red(base)?, red(appended)?)));
+                match drawn {
+                    Ok((reread, before, after)) if after > before && reread == Some(pdfium) => {
+                        agree += 1
+                    }
+                    drawn => wrong.push(format!("{}: ink {drawn:?}", path.display())),
+                }
+            }
             Err(accent_pdf::Error::Unsupported(what)) if what.contains("encrypted") => {
                 encrypted += 1
             }

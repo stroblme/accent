@@ -15,20 +15,22 @@ const OBJSTMS: usize = 64;
 const DEPTH: usize = 16;
 
 pub struct Pdf {
-    src: Box<dyn Source>,
-    xref: Xref,
+    pub(crate) src: Arc<dyn Source>,
+    pub(crate) xref: Xref,
     objstms: Mutex<HashMap<u32, Arc<ObjStm>>>,
 }
 
 impl Pdf {
-    /// Read the xref chain of `src`. An encrypted file is refused until the reader decrypts.
-    pub fn open(src: impl Source + 'static) -> Result<Pdf> {
-        let xref = xref::read(&src)?;
+    /// Read the xref chain of `src`. Shared, because the document a session edits is this base
+    /// with the session's update after it, which pdfium reads as one (`accent_core::pdf`).
+    /// An encrypted file is refused until the reader decrypts.
+    pub fn open(src: Arc<dyn Source>) -> Result<Pdf> {
+        let xref = xref::read(&*src)?;
         if xref.trailer.get(b"Encrypt").is_some() {
             return Err(Error::Unsupported("an encrypted file".into()));
         }
         Ok(Pdf {
-            src: Box::new(src),
+            src,
             xref,
             objstms: Mutex::default(),
         })

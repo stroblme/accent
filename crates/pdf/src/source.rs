@@ -4,12 +4,11 @@
 use std::fs::File;
 use std::io;
 use std::os::unix::fs::FileExt;
-use std::sync::Arc;
 
 /// Bytes read at an offset, never through a shared file position, which pdfium's reader of the
 /// same file moves.
 pub trait Source: Send + Sync {
-    /// The size in bytes. Not `len`, which on `Arc<[u8]>` would shadow the slice's own.
+    /// The size in bytes. Not `len`, which on `Vec<u8>` would shadow the vector's own.
     fn size(&self) -> u64;
 
     /// Read into `buf` from `at`; fewer bytes only at the end.
@@ -41,7 +40,7 @@ impl Source for File {
     }
 }
 
-impl Source for Arc<[u8]> {
+impl Source for Vec<u8> {
     fn size(&self) -> u64 {
         self.len() as u64
     }

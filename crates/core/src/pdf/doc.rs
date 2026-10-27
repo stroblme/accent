@@ -489,17 +489,7 @@ pub const A4: (f32, f32) = (595.28, 841.89);
 /// that embeds in its flow; New Drawing is where the other shapes are picked. Whatever the size,
 /// the result is a PDF every reader on the machine opens and our own pen draws on.
 pub fn blank_pdf(size: (f32, f32)) -> Result<Vec<u8>> {
-    let pdfium = pdfium()?;
-    let _guard = lock();
-    let mut doc = pdfium.create_new_pdf().map_err(refused("create pdf"))?;
-    doc.pages_mut()
-        .create_page_at_end(paper(size))
-        .map_err(refused("create page"))?;
-    let bytes = doc.save_to_bytes().map_err(refused("save new pdf"))?;
-    // Closed here rather than at the end of the function, so it happens under the lock like
-    // every other document this module drops.
-    drop(doc);
-    Ok(bytes)
+    Ok(accent_pdf::new_document(size))
 }
 
 /// A size in points as pdfium's page constructors want it.

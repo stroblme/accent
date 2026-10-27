@@ -113,10 +113,10 @@ impl Build {
         at
     }
 
-    fn end(&mut self, startxref: u64) -> Arc<[u8]> {
+    fn end(&mut self, startxref: u64) -> Vec<u8> {
         self.out
             .extend(format!("startxref\n{startxref}\n%%EOF\n").bytes());
-        Arc::from(self.out.clone())
+        self.out.clone()
     }
 }
 
@@ -128,7 +128,7 @@ fn page(text: &str) -> String {
 }
 
 /// A two-page file in a classic table.
-fn classic() -> Arc<[u8]> {
+fn classic() -> Vec<u8> {
     let mut b = Build::new();
     b.obj(1, CATALOG);
     b.obj(2, TWO_PAGES);
@@ -137,6 +137,10 @@ fn classic() -> Arc<[u8]> {
     b.stream(5, "", b"0 0 m 10 10 l S");
     let at = b.table("/Size 6/Root 1 0 R");
     b.end(at)
+}
+
+fn open(bytes: Vec<u8>) -> Result<Pdf> {
+    Pdf::open(Arc::new(bytes))
 }
 
 fn r(num: u32) -> Ref {
@@ -157,7 +161,7 @@ fn note(pdf: &Pdf, num: u32) -> Vec<u8> {
 
 #[test]
 fn a_classic_table_reads_its_pages_and_streams() {
-    let pdf = Pdf::open(classic()).unwrap();
+    let pdf = open(classic()).unwrap();
     assert!(!pdf.xref_is_stream());
     assert_eq!(pdf.pages().unwrap(), [r(3), r(4)]);
     assert_eq!(note(&pdf, 4), b"second");
@@ -173,8 +177,8 @@ fn a_classic_table_reads_its_pages_and_streams() {
     assert_eq!(pdf.get(r(99)).unwrap(), Object::Null);
 }
 
-#[test]
-fn an_xref_stream_finds_objects_in_object_streams() {
+/// The same two pages in an xref stream, their objects in an object stream.
+fn compressed() -> (Vec<u8>, u64) {
     let mut b = Build::new();
     b.stream(5, "", b"0 0 m 10 10 l S");
     let rows = b.objstm(
@@ -187,7 +191,13 @@ fn an_xref_stream_finds_objects_in_object_streams() {
         ],
     );
     let at = b.xref_stream(7, &rows, "/Root 1 0 R");
-    let pdf = Pdf::open(b.end(at)).unwrap();
+    (b.end(at), at)
+}
+
+#[test]
+fn an_xref_stream_finds_objects_in_object_streams() {
+    let (bytes, at) = compressed();
+    let pdf = open(bytes).unwrap();
     assert!(pdf.xref_is_stream());
     assert_eq!(pdf.startxref(), at);
     assert_eq!(pdf.pages().unwrap(), [r(3), r(4)]);
@@ -213,7 +223,7 @@ fn a_hybrid_file_reads_its_hidden_xref_stream() {
     let stm = hidden.xref_stream(8, &rows, "");
     std::mem::swap(&mut hidden.out, &mut b.out);
     let at = b.table(&format!("/Size 9/Root 1 0 R/XRefStm {stm}"));
-    let pdf = Pdf::open(b.end(at)).unwrap();
+    let pdf = open(b.end(at)).unwrap();
     assert!(!pdf.xref_is_stream());
     assert_eq!(pdf.pages().unwrap(), [r(3), r(4)]);
     assert_eq!(note(&pdf, 4), b"second");
@@ -236,7 +246,7 @@ fn the_newest_revision_wins() {
         b.pending[&4]
     );
     b.out.extend(section.bytes());
-    let pdf = Pdf::open(b.end(at)).unwrap();
+    let pdf = open(b.end(at)).unwrap();
     assert_eq!(pdf.startxref(), at);
     assert_eq!(note(&pdf, 4), b"second, edited");
     assert_eq!(note(&pdf, 3), b"first");
@@ -257,7 +267,7 @@ fn an_object_not_where_the_xref_puts_it_is_broken() {
     let four = b.pending[&4];
     b.pending.insert(3, four);
     let at = b.table("/Size 5/Root 1 0 R");
-    let pdf = Pdf::open(b.end(at)).unwrap();
+    let pdf = open(b.end(at)).unwrap();
     assert!(matches!(pdf.get(r(3)), Err(Error::Broken(_))));
 }
 
@@ -269,7 +279,7 @@ fn loops_are_errors_not_hangs() {
     let at = b.out.len() as u64;
     b.last = Some(at);
     b.table("/Size 2/Root 1 0 R");
-    assert!(matches!(Pdf::open(b.end(at)), Err(Error::Broken(_))));
+    assert!(matches!(open(b.end(at)), Err(Error::Broken(_))));
 
     // A page tree whose kid is its own parent.
     let mut b = Build::new();
@@ -277,7 +287,7 @@ fn loops_are_errors_not_hangs() {
     b.obj(2, "<</Type/Pages/Kids[3 0 R]/Count 5>>");
     b.obj(3, "<</Type/Pages/Kids[2 0 R]/Count 5>>");
     let at = b.table("/Size 4/Root 1 0 R");
-    let pdf = Pdf::open(b.end(at)).unwrap();
+    let pdf = open(b.end(at)).unwrap();
     assert!(matches!(pdf.pages(), Err(Error::Broken(_))));
     assert!(matches!(
         pdf.inherited(r(3), b"MediaBox"),
@@ -303,7 +313,7 @@ fn damaged_files_never_panic() {
     let at = b.xref_stream(7, &rows, "/Root 1 0 R");
     for whole in [classic(), b.end(at)] {
         let read = |bytes: Vec<u8>| {
-            if let Ok(pdf) = Pdf::open(Arc::<[u8]>::from(bytes)) {
+            if let Ok(pdf) = open(bytes) {
                 let _ = pdf.pages();
                 for num in 0..10 {
                     if let Ok(Object::Stream(s)) = pdf.get(r(num)) {
@@ -321,4 +331,72 @@ fn damaged_files_never_panic() {
             read(bytes);
         }
     }
+}
+
+/// A session's section after `base`: in the base's own xref style, `/Prev` naming the base's
+/// xref, the session's objects winning over the file's and new ones numbered past `/Size`; the
+/// same section however often it is asked for.
+fn round_trip(base: Vec<u8>, stream: bool) {
+    let pdf = open(base.clone()).unwrap();
+    let mut update = Update::new(&pdf);
+    update.set(
+        r(4),
+        Object::Dict(Dict(vec![
+            (b"Type".to_vec(), Object::Name(b"Page".to_vec())),
+            (b"Parent".to_vec(), Object::Ref(r(2))),
+            (
+                b"Note".to_vec(),
+                Object::String(b"edited (twice)\\".to_vec()),
+            ),
+        ])),
+    );
+    let data = Stream {
+        dict: Dict(vec![(b"Length".to_vec(), Object::Int(999))]),
+        raw: b"\x00\xffendstream\r\n".to_vec(),
+    };
+    let added = update.add(Object::Stream(data.clone()));
+    let size = pdf.trailer().get(b"Size").and_then(Object::as_int).unwrap();
+    assert_eq!(i64::from(added.num), size, "past the base's objects");
+    assert_eq!(update.section(), update.section());
+
+    let after = open([base, update.section()].concat()).unwrap();
+    assert_eq!(after.xref_is_stream(), stream);
+    let prev = after.trailer().get(b"Prev").and_then(Object::as_int);
+    assert_eq!(prev, Some(pdf.startxref() as i64));
+    assert_eq!(after.root().unwrap(), pdf.root().unwrap());
+    assert_eq!(note(&after, 4), b"edited (twice)\\");
+    assert_eq!(note(&after, 3), b"first");
+    assert_eq!(after.pages().unwrap(), [r(3), r(4)]);
+    let Object::Stream(read) = after.get(added).unwrap() else {
+        panic!("no stream")
+    };
+    assert_eq!(read.raw, data.raw);
+    assert_eq!(update.get(&pdf, r(4)).unwrap(), after.get(r(4)).unwrap());
+    assert_eq!(update.get(&pdf, r(3)).unwrap(), after.get(r(3)).unwrap());
+}
+
+#[test]
+fn a_section_after_a_table_round_trips() {
+    round_trip(classic(), false);
+}
+
+#[test]
+fn a_section_after_an_xref_stream_round_trips() {
+    round_trip(compressed().0, true);
+}
+
+#[test]
+fn a_new_document_is_one_page_of_its_size() {
+    let pdf = open(new_document((595.0, 842.5))).unwrap();
+    let pages = pdf.pages().unwrap();
+    assert_eq!(pages.len(), 1);
+    let media = pdf.inherited(pages[0], b"MediaBox").unwrap().unwrap();
+    let media: Vec<f64> = (media.as_array().unwrap().iter())
+        .map(|n| match n {
+            Object::Int(i) => *i as f64,
+            Object::Real(r) => *r,
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(media, [0.0, 0.0, 595.0, 842.5]);
 }

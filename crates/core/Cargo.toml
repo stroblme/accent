@@ -7,7 +7,7 @@ license.workspace = true
 
 [features]
 default = []
-pdf = ["dep:pdfium-render"]
+pdf = ["dep:pdfium-render", "dep:accent-pdf"]
 
 [dependencies]
 # A diagram's labels are what the index holds of it (`index::reconcile`), read through the model.
@@ -51,14 +51,13 @@ unicode-width = "0.2"
 # pdfium-render does not wrap (`/InkList` in `pdf::annot`, `FPDF_MovePages` in `pdf::pages`) reach
 # pdfium through it.
 pdfium-render = { version = "=0.9.3", optional = true, default-features = false, features = ["pdfium_latest", "thread_safe"] }
+# accent's own reader and writer of PDF objects: a new document is written by it, not pdfium.
+accent-pdf = { workspace = true, optional = true }
 
 [dev-dependencies]
 # The examples' own errors: repo tooling, which matches on none of them.
 anyhow.workspace = true
 tempfile.workspace = true
-# accent's own PDF reader, held against pdfium on every PDF the generated vault holds and on a
-# corpus by hand (`pdf::tests`) before any write goes through it.
-accent-pdf.workspace = true
 
 # Repo tooling, not a library target (see the example's own docs). `test = true` keeps its unit
 # tests in `cargo test`, which is where they were before it moved out of accent-cli.

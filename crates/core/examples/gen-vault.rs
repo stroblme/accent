@@ -1754,7 +1754,7 @@ mod tests {
         pdfs(&vault, &mut found);
         assert!(found.len() >= 4, "{found:?}");
         for path in found {
-            let ours = accent_pdf::Pdf::open(fs::File::open(&path).unwrap());
+            let ours = accent_pdf::Pdf::open(std::sync::Arc::new(fs::File::open(&path).unwrap()));
             let ours = ours.and_then(|pdf| pdf.pages()).map(|pages| pages.len());
             let pdfium = accent_core::pdf::PdfDoc::open(&path).unwrap().page_count();
             assert_eq!(ours.ok(), Some(pdfium), "{}", path.display());
