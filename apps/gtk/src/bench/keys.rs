@@ -495,6 +495,55 @@ async fn bench_folds(view: &multicaret::View) {
     crate::fold::unfold_all(&buffer);
 }
 
+/// A note's block of code coloured as the language it names, in the colour a code tab gives the
+/// same code, light and dark, and a fence that names none left alone.
+async fn bench_code_blocks(buffer: &gtk::TextBuffer) {
+    let Some(source) = buffer.downcast_ref::<sourceview5::Buffer>() else {
+        return;
+    };
+    let python = sourceview5::LanguageManager::default().language("python3");
+    let Some(python) = python else {
+        return;
+    };
+    source.set_text("```python\ndef f():\n    return 1\n```\n```\ndef g():\n```");
+    crate::highlight::apply(source, Syntax::Markdown);
+    let code = sourceview5::Buffer::with_language(&python);
+    code.set_text("def f():");
+    let colour = |buffer: &sourceview5::Buffer, line: i32| {
+        let at = buffer.iter_at_line(line)?;
+        let tags = at.tags().into_iter().rev();
+        tags.filter(|t| t.is_foreground_set())
+            .find_map(|t| t.foreground_rgba())
+    };
+    use accent_core::config::Theme;
+    let style = adw::StyleManager::default();
+    let mut seen = Vec::new();
+    for (theme, dark) in [(Theme::Light, false), (Theme::Dark, true)] {
+        crate::theme::apply(theme);
+        // libadwaita tells the theme's half after a turn of the main loop.
+        for _ in 0..40 {
+            if style.is_dark() == dark {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(50)).await;
+        }
+        editor::sync_scheme(&code);
+        code.ensure_highlight(&code.start_iter(), &code.end_iter());
+        crate::codeblocks::restyle(source);
+        seen.push(colour(source, 1));
+        let tab = colour(source, 1) == colour(&code, 0);
+        println!(
+            "bench code_block dark={} coloured={} as_code_tab={tab} plain={}",
+            style.is_dark(),
+            colour(source, 1).is_some(),
+            colour(source, 5).is_none()
+        );
+    }
+    crate::theme::apply(Theme::System);
+    crate::codeblocks::restyle(source);
+    println!("bench code_block themes_differ={}", seen[0] != seen[1]);
+}
+
 /// A note's Tab, Shift+Tab and Return in a table, through `typing::on_key` as a press in a note
 /// reaches it: the table lined up, the caret walking its cells, a row added past the last and an
 /// empty last row ending it, each one undo step. Prints the text and the caret's line and column.
@@ -1087,6 +1136,7 @@ async fn bench_lines(view: &multicaret::View) {
     buffer.select_range(&buffer.start_iter(), &buffer.end_iter());
     editor::toggle_task(view.upcast_ref(), Syntax::Org);
     show("task_org");
+    bench_code_blocks(&buffer).await;
 
     // Shift+Delete is GTK's Cut binding, so the column leaves the press to it rather than deleting
     // a character at every caret, and answers the signal it emits with its own whole-line cut.

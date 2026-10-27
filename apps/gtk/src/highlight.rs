@@ -281,6 +281,7 @@ pub fn restyle(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
     for name in ["code", "codeblock"] {
         set(name, &|t| t.set_background_rgba(Some(&theme::at(fg, 0.07))));
     }
+    crate::codeblocks::restyle(buffer);
 }
 
 /// Analyse the buffer, sync tags and return analysis plus its byte-to-character table.
@@ -317,6 +318,11 @@ pub fn apply(buffer: &sourceview5::Buffer, syntax: Syntax) -> (markdown::Analysi
     for ((name, tag), have) in names.into_iter().zip(&tags).zip(have) {
         sync_runs(buffer, tag, &have, wanted.remove(name).unwrap_or_default());
     }
+    let blocks = match analysis.spans.iter().any(|s| s.style == Style::CodeBlock) {
+        true => syntax.code_blocks(&text),
+        false => Vec::new(),
+    };
+    crate::codeblocks::apply(buffer, syntax, &text, &offsets, &blocks);
     (analysis, offsets)
 }
 
@@ -324,6 +330,14 @@ pub fn apply(buffer: &sourceview5::Buffer, syntax: Syntax) -> (markdown::Analysi
 /// Even redundant size-affecting tag changes trigger GTK relayout, so exact range differences matter.
 pub fn sync_tag(buffer: &sourceview5::Buffer, tag: &gtk::TextTag, want: Vec<Range<i32>>) {
     sync_runs(buffer, tag, &runs(buffer, tag), want);
+}
+
+/// [`sync_tag`] for several tags, where each lies now read in one walk over the buffer.
+pub fn sync_tags(buffer: &sourceview5::Buffer, wanted: Vec<(gtk::TextTag, Vec<Range<i32>>)>) {
+    let tags: Vec<gtk::TextTag> = wanted.iter().map(|(tag, _)| tag.clone()).collect();
+    for ((tag, want), have) in wanted.into_iter().zip(runs_of(buffer, &tags)) {
+        sync_runs(buffer, &tag, &have, want);
+    }
 }
 
 /// [`sync_tag`], told where `tag` lies now.

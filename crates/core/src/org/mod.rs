@@ -18,7 +18,7 @@ pub use search::{Search, file_line};
 pub use table::table_key;
 pub use task::toggle_task;
 
-use crate::markdown::{Analysis, Heading, Span, Style, Tag, heading_for};
+use crate::markdown::{Analysis, CodeBlock, Heading, Span, Style, Tag, heading_for};
 use links::OrgLink;
 use std::ops::Range;
 
@@ -83,6 +83,33 @@ fn custom_id(text: &str, id: &str) -> Option<Range<usize>> {
         i = last + 1;
     }
     None
+}
+
+/// Every `#+begin_src` block that names its language, `python` of `#+begin_src python :results
+/// output`, with its code: the lines between its first and its last.
+pub fn code_blocks(text: &str) -> Vec<CodeBlock> {
+    let lines = lines(text);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let Some((last, style)) = closed(text, &lines, i) else {
+            i += 1;
+            continue;
+        };
+        // `#+begin_` is where a block's line starts ([`closed`]); a drawer is no block.
+        let mut words = text[lines[i].clone()].trim()[8..].split_whitespace();
+        let src = style == Style::CodeBlock
+            && words.next().is_some_and(|w| w.eq_ignore_ascii_case("src"));
+        if let Some(lang) = words.next().filter(|_| src && last > i + 1) {
+            let code = lines[i + 1].start..lines[last].start;
+            out.push(CodeBlock {
+                lang: lang.to_string(),
+                code: vec![code],
+            });
+        }
+        i = last + 1;
+    }
+    out
 }
 
 /// Where text put at the top of an org file goes: below the `#+KEYWORD:` lines and drawers
@@ -574,6 +601,16 @@ fn emphasis(text: &str, line: usize, i: usize, end: usize) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::markdown::LinkKind;
+
+    #[test]
+    fn a_source_block_names_its_language() {
+        let text = "#+begin_src python :results output\nx = 1\n#+end_src\n#+BEGIN_SRC\nnone\n#+END_SRC\n#+begin_example\nz\n#+end_example\n";
+        let blocks: Vec<(String, Vec<&str>)> = code_blocks(text)
+            .into_iter()
+            .map(|b| (b.lang, b.code.into_iter().map(|r| &text[r]).collect()))
+            .collect();
+        assert_eq!(blocks, [("python".into(), vec!["x = 1\n"])]);
+    }
 
     fn headings(text: &str) -> Vec<(u8, String)> {
         analyze(text)

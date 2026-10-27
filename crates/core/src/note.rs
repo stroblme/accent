@@ -28,6 +28,14 @@ impl Syntax {
         }
     }
 
+    /// The blocks of code `text` names a language for ([`markdown::code_blocks`]).
+    pub fn code_blocks(self, text: &str) -> Vec<markdown::CodeBlock> {
+        match self {
+            Syntax::Markdown => markdown::code_blocks(text),
+            Syntax::Org => org::code_blocks(text),
+        }
+    }
+
     /// The text of a file a move took from `src_old` to `src_new` with its links pointing again
     /// at what they named, or `None` when none has to change ([`markdown::rewrite_moved`]).
     pub fn rewrite_moved(

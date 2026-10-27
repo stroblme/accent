@@ -121,6 +121,51 @@ pub struct Heading {
     pub text: String,
 }
 
+/// A block of code a note names its language for, which the editor colours as that language.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodeBlock {
+    /// The language as written: a fence's first word, a `#+begin_src` line's first argument.
+    pub lang: String,
+    /// The code, a range per run of it no container's marker breaks (a quote's `>`), in order.
+    pub code: Vec<Range<usize>>,
+}
+
+/// Every fenced block whose info string names a language, `python` of ```` ```python {.x} ````
+/// and `rust` of `~~~rust,ignore`, as the preview reads the fences.
+pub fn code_blocks(text: &str) -> Vec<CodeBlock> {
+    let mut out: Vec<CodeBlock> = Vec::new();
+    let mut open = false;
+    for (ev, r) in Parser::new_ext(text, options()).into_offset_iter() {
+        match ev {
+            Event::Start(Cm::CodeBlock(CodeBlockKind::Fenced(info))) => {
+                let mut words = info.split(|c: char| c.is_whitespace() || c == ',' || c == '{');
+                open = match words.next().filter(|l| !l.is_empty()) {
+                    Some(lang) => {
+                        out.push(CodeBlock {
+                            lang: lang.to_string(),
+                            code: Vec::new(),
+                        });
+                        true
+                    }
+                    None => false,
+                };
+            }
+            Event::End(TagEnd::CodeBlock) => open = false,
+            Event::Text(_) if open => {
+                if let Some(block) = out.last_mut() {
+                    match block.code.last_mut() {
+                        Some(last) if last.end == r.start => last.end = r.end,
+                        _ => block.code.push(r),
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out.retain(|block| !block.code.is_empty());
+    out
+}
+
 /// The one set of parser options, shared by [`analyze`] and [`to_html`] so the preview cannot
 /// disagree with the highlighting about what a note says.
 ///
@@ -342,6 +387,22 @@ pub(super) mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_fenced_block_names_its_language() {
+        let text = "```python {.x}\nx = 1\n```\n\n```\nplain\n```\n\n> ~~~rust,ignore\n> fn a() {}\n> ~~~\n";
+        let blocks: Vec<(String, Vec<&str>)> = code_blocks(text)
+            .into_iter()
+            .map(|b| (b.lang, b.code.into_iter().map(|r| &text[r]).collect()))
+            .collect();
+        assert_eq!(
+            blocks,
+            [
+                ("python".into(), vec!["x = 1\n"]),
+                ("rust".into(), vec!["fn a() {}\n"])
+            ]
+        );
+    }
 
     #[test]
     fn conflict_markers_are_not_read_as_markdown() {

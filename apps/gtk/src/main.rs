@@ -12,6 +12,7 @@ mod attach;
 mod bench;
 mod bibliography;
 mod build;
+mod codeblocks;
 mod comment;
 mod completion;
 mod conflict;
