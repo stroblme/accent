@@ -212,7 +212,9 @@ use tags::bench_tags;
 ///   build, or XTEST missing-data menu probe without SyncTeX),
 ///   `comments:<rel_path>` (tooltips, pinning, highlights and comment outline;
 ///   scratch generated `Attachments/comments.pdf`),
-///   `walk:<rel_path>` (comment-list loading/cancellation; hundreds of pages).
+///   `walk:<rel_path>` (comment-list loading/cancellation; hundreds of pages),
+///   `pen:<rel_path>[,stop]` (main-loop gaps under 24 XTEST pen strokes while the PDF text
+///   pass runs, or stopped; writes the file).
 /// - `ACCENT_BENCH_DRAWING=1`: New Drawing; `sketch:<rel_note>`: Insert Sketch.
 /// - `ACCENT_BENCH_TABS=<rel_note>,<rel_pdf>`: preview/tab close transitions.
 ///   Modes: `pin:<a>,<b>,<c>,<d>` then `pins` (save/restore one scratch session),
@@ -592,6 +594,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("walk:") {
                 return pdf::bench_pdf_walk(&app, rel);
+            }
+            if let Some(arg) = rel.strip_prefix("pen:") {
+                return pdf::bench_pdf_pen(&app, arg);
             }
             if let Some(rel) = rel.strip_prefix("synctex:") {
                 return synctex::bench_synctex(&app, rel);

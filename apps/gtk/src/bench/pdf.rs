@@ -352,6 +352,121 @@ pub(super) fn bench_pdf_strip(app: &Rc<App>, rel: &str) {
     });
 }
 
+/// The pen drawing 24 strokes on `rel` through XTEST, a motion every 10 ms, while the PDF text pass
+/// reads what the vault holds unread and each save of `rel` again (with `,stop` it is stopped
+/// first): how long the reading view went without a frame, and without a motion while the button
+/// was down, and how many strokes reached the file. A gap past 50 ms is a stroke drawn straight.
+pub(super) fn bench_pdf_pen(app: &Rc<App>, arg: &str) {
+    let (rel, stop) = match arg.strip_suffix(",stop") {
+        Some(rel) => (rel.to_string(), true),
+        None => (arg.to_string(), false),
+    };
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        let Some(pdf) = opened(&app, &rel).await else {
+            println!("bench pen no_tab");
+            return bench_quit(&app);
+        };
+        if stop && let Some(vault) = app.vault() {
+            let _ = vault.stop_pdf_text();
+        }
+        // The pass starts behind the walk.
+        for _ in 0..600 {
+            if app.reconciled.get() {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(100)).await;
+        }
+        app.pdf_mode(pdfview::Mode::Pen);
+        glib::timeout_future(Duration::from_secs(2)).await;
+        let inks = |pdf: &pdftab::PdfTab| {
+            let doc = accent_core::pdf::PdfDoc::open(pdf.path()).ok();
+            doc.map_or(0, |d| {
+                (0..d.page_count())
+                    .map(|p| d.inks(p).map_or(0, |i| i.len()))
+                    .sum()
+            })
+        };
+        let before = inks(&pdf);
+        let view = pdf.views()[0].clone();
+        let frames = Rc::new(RefCell::new(Vec::new()));
+        let tick = view.add_tick_callback({
+            let frames = frames.clone();
+            move |_, _| {
+                frames.borrow_mut().push(Instant::now());
+                glib::ControlFlow::Continue
+            }
+        });
+        // A motion with the button up ends a stroke's run of them.
+        let motions = Rc::new(RefCell::new(Vec::new()));
+        let motion = gtk::EventControllerMotion::new();
+        motion.connect_motion({
+            let motions = motions.clone();
+            move |m, _, _| {
+                let down = m
+                    .current_event_state()
+                    .contains(gdk::ModifierType::BUTTON1_MASK);
+                motions.borrow_mut().push(down.then(Instant::now));
+            }
+        });
+        view.add_controller(motion.clone());
+        let (sx, sy) = app.window.surface_transform();
+        let on_screen = |x: f64, y: f64| {
+            let p = graphene::Point::new(x as f32, y as f32);
+            let p = view.compute_point(&app.window, &p).unwrap_or(p);
+            (f64::from(p.x()) + sx, f64::from(p.y()) + sy)
+        };
+        let (w, h) = (f64::from(view.width()), f64::from(view.height()));
+        // Each stroke a wave across the middle of the view, 60 motions long.
+        let mut steps = Vec::new();
+        for k in 0..24 {
+            let y = h * (0.2 + 0.6 * f64::from(k % 12) / 12.0);
+            for i in 0..=60 {
+                let t = f64::from(i) / 60.0;
+                let (x, y) = on_screen(w * (0.2 + 0.6 * t), y + 12.0 * (t * 25.0).sin());
+                steps.push(format!("move {x:.0} {y:.0}"));
+                if i == 0 {
+                    steps.push("down".to_string());
+                }
+                steps.push("sleep 0.01".to_string());
+            }
+            steps.push("up; sleep 0.2".to_string());
+        }
+        let running = app.statusbar.pdf_text_control().is_visible();
+        super::git::xtest(&steps.join("; ")).await;
+        tick.remove();
+        view.remove_controller(&motion);
+        pdf.flush();
+        written(&app).await;
+        let gaps = |times: &[Option<Instant>]| {
+            let mut gaps: Vec<f64> = times
+                .windows(2)
+                .filter_map(|w| Some(w[1]?.duration_since(w[0]?).as_secs_f64() * 1e3))
+                .collect();
+            gaps.sort_by(f64::total_cmp);
+            let at = |q: f64| gaps.get((gaps.len() as f64 * q) as usize).copied();
+            format!(
+                "n={} p50_ms={:.0} p90_ms={:.0} p99_ms={:.0} max_ms={:.0} over50={}",
+                gaps.len(),
+                at(0.5).unwrap_or(0.0),
+                at(0.9).unwrap_or(0.0),
+                at(0.99).unwrap_or(0.0),
+                gaps.last().copied().unwrap_or(0.0),
+                gaps.iter().filter(|&&g| g > 50.0).count()
+            )
+        };
+        let frames: Vec<Option<Instant>> = frames.borrow().iter().copied().map(Some).collect();
+        println!(
+            "bench pen text_pass={running} rss_mb={} frames {} motions {} strokes=24 inked={}",
+            super::notebook::rss_mb(),
+            gaps(&frames),
+            gaps(&motions.borrow()),
+            inks(&pdf) - before
+        );
+        bench_quit(&app);
+    });
+}
+
 /// Every page renders however the reader gets to it. With the Outline pane up, both views of
 /// `rel` are scrolled for two seconds from each tenth of the document — past each other, or the
 /// reading view left where it jumped while the strip is browsed twenty pages on — then zoomed in

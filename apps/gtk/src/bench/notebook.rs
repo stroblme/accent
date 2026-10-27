@@ -705,7 +705,7 @@ async fn sweep(tab: &Rc<NotebookTab>) -> (usize, i32, f64, f64, f64, (i32, i32))
 }
 
 /// The process's resident size in MB.
-fn rss_mb() -> u64 {
+pub(super) fn rss_mb() -> u64 {
     std::fs::read_to_string("/proc/self/status")
         .ok()
         .and_then(|s| {

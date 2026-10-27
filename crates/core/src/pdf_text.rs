@@ -64,9 +64,16 @@ pub fn set_reader(exe: PathBuf) {
 
 /// The reading child, when [`CHILD`] names a PDF: each page's text to stdout, ended by a form feed
 /// as `pdftotext` ends it, then the exit code. `None` in any other process.
+///
+/// It sets its own limits before pdfium loads: set by the app between fork and exec (`pre_exec`),
+/// they made std fork the whole app for every PDF rather than spawn it, and the app's page tables
+/// were copied each time.
 #[cfg(feature = "pdf")]
 pub fn child() -> Option<u8> {
     let path = std::env::var_os(CHILD)?;
+    if capped().is_err() {
+        return Some(1);
+    }
     let written = crate::pdf::PdfDoc::open(&path)
         .and_then(|doc| write_pages(&doc, &mut std::io::stdout().lock()));
     Some(u8::from(written.is_err()))
@@ -169,6 +176,9 @@ pub fn read(with: &Extractor, path: &Path, stop: &(dyn Fn() -> bool + Sync)) -> 
             cmd.args(["-q", "-enc", "UTF-8", "-l", &MAX_PAGES.to_string()])
                 .arg(path)
                 .arg("-");
+            // SAFETY: `capped` makes only `setrlimit` calls, which are async-signal-safe. It
+            // makes std fork this process for each PDF, which `accent-cli serve` can afford.
+            unsafe { cmd.pre_exec(capped) };
             piped(cmd, path, stop, &mut text)?
         }
     }
@@ -185,8 +195,6 @@ fn piped(
     text: &mut Text,
 ) -> Result<()> {
     let exe = PathBuf::from(cmd.get_program());
-    // SAFETY: `capped` makes only `setrlimit` calls, which are async-signal-safe.
-    unsafe { cmd.pre_exec(capped) };
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -416,6 +424,42 @@ mod tests {
         let mut out = Vec::new();
         write_pages(&crate::pdf::PdfDoc::open(&path).unwrap(), &mut out).unwrap();
         assert_eq!(out, b"first\x0c\x0cthird\x0c");
+    }
+
+    /// The reading child sets its own limits, so the app can start it without a `pre_exec`: this
+    /// test binary run again under [`CHILD`] as the child, reading the PDF and saying its limits.
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn the_reading_child_limits_itself() {
+        if !crate::pdf::available() {
+            return eprintln!("skipping: no libpdfium");
+        }
+        if std::env::var_os(CHILD).is_some() {
+            let code = child();
+            let limit = |which| {
+                let mut l = libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
+                // SAFETY: a plain read of this process's limit into a value that outlives it.
+                unsafe { libc::getrlimit(which, &mut l) };
+                l.rlim_max
+            };
+            let (data, core) = (limit(libc::RLIMIT_DATA), limit(libc::RLIMIT_CORE));
+            return println!("\nlimits {data} {core} code {code:?}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(&dir, "two.pdf", &text_pdf(&["first", "second"]));
+        let this = "pdf_text::tests::the_reading_child_limits_itself";
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", this, "--nocapture"])
+            .env(CHILD, &path)
+            .output()
+            .unwrap();
+        let out = String::from_utf8_lossy(&out.stdout);
+        let limits = format!("limits {MEMORY} 0 code Some(0)");
+        assert!(out.contains("first\x0csecond\x0c"), "{out:?}");
+        assert!(out.contains(&limits), "{out:?}");
     }
 
     #[test]
