@@ -58,6 +58,9 @@ while [ -n "$todo" ]; do
 	f=$1
 	shift
 	todo=$*
+	# A module built as a library (Homebrew's SVG loader) is its own first entry in `otool -L`.
+	id=$(otool -D "$f" | tail -n +2)
+	case $id in '' | @*) ;; *) install_name_tool -id "@rpath/${f##*/}" "$f" ;; esac
 	for dep in $(otool -L "$f" | tail -n +2 | awk '{print $1}'); do
 		case $dep in /System/* | /usr/lib/* | @*) continue ;; esac
 		name=${dep##*/}
