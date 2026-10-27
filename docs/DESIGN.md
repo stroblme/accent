@@ -400,6 +400,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The first takes the keyboard; Enter commits them, as does the keyboard leaving them for anything else in the window, and Escape leaves the breakpoint as it was; a field left empty sets nothing, and all three empty make it a plain breakpoint again.
   Rows are changed in place, so an editor stays open while other breakpoints come and go.
   Above them is a checkbox for each exception the adapter offers to stop at (debugpy's Raised, Uncaught and User Uncaught Exceptions), its description in the tooltip: set as the adapter defaults it until the reader changes it, kept in the vault's session, and told to a running program at once.
+  Its check is drawn at 16 px on the breakpoints' glyph column, where Adwaita's 20 px stood out among the section's 16 px glyphs.
 
 **Properties**
 

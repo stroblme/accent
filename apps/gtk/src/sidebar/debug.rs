@@ -481,6 +481,8 @@ impl Debug {
         let (breakpoints_body, _) =
             body(&breakpoint_rows.list, "Click a line's gutter to stop there");
         let exception_rows = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        // Their checks on the breakpoints' 16 px glyphs (`install_chrome_css`).
+        exception_rows.add_css_class("exception-filters");
         let breakpoints_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
         breakpoints_page.append(&exception_rows);
         breakpoints_page.append(&breakpoints_body);

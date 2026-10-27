@@ -1354,6 +1354,9 @@ fn install_chrome_css() {
              .accent-bar-button {{ min-height: 0; padding: 0 6px; border-radius: 6px; }} \
              .accent-strip-button {{ min-width: 0; min-height: 0; padding: 2px; \
                border-radius: 4px; }} \
+             .exception-filters check {{ min-width: 12px; min-height: 12px; \
+               -gtk-icon-size: 12px; padding: 2px; border-radius: 5px; }} \
+             .exception-filters checkbutton {{ border-spacing: 6px; }} \
              box.linked.osd {{ border-radius: 6px; }} \
              .accent-switcher-backdrop {{ \
                background-color: rgb(from var(--shade-color) r g b / calc(alpha * 2)); }} \
