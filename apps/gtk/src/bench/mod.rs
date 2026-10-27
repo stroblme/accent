@@ -158,7 +158,9 @@ use tags::bench_tags;
 /// - `ACCENT_BENCH_PANES=<relA>,<relB>`: tab moves, a reveal across panes and divider
 ///   stepping; `shells:<rel>`: two shells in split panes ending, one with the keyboard;
 ///   `bar:<a>,<b>,<c>`: a closed pane's keyboard, on its find bar or in its last tab;
-///   `chords:<rel>`: the editing chords in the note, the tree and the find bar (XTEST).
+///   `chords:<rel>`: the editing chords in the note, the tree and the find bar (XTEST);
+///   `click:<first>,<rel>,…`: each `rel` split off beside `first` and clicked into, which has
+///   to activate its pane with the keyboard; a ring inside its pane (XTEST; `shell`, `diff`).
 /// - `ACCENT_BENCH_COMPARE=<rel_path>`: disk comparison alignment/focus.
 ///   Modes: `pads:<rel_path>` (paragraph padding), `lines:<rel_path>`
 ///   (line staging), `row:<repo_rel>`, `row:stale:<repo_rel>`,

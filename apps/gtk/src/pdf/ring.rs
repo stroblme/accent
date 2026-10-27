@@ -218,9 +218,15 @@ impl PdfRing {
         }
     }
 
-    /// The widget to hand to the overlay.
+    /// The ring's widget, for the drills.
+    #[cfg(feature = "bench")]
     pub fn widget(&self) -> &gtk::Widget {
         self.ring.widget()
+    }
+
+    /// Float the ring over the page; see [`Ring::attach`].
+    pub fn attach(&self, overlay: &gtk::Overlay) {
+        self.ring.attach(overlay);
     }
 
     /// Show or hide the ring, putting it where the window says when it comes out.

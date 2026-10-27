@@ -247,8 +247,13 @@ impl DiagramRing {
         diagram
     }
 
+    #[cfg(feature = "bench")]
     pub fn widget(&self) -> &gtk::Widget {
         self.ring.widget()
+    }
+
+    pub fn attach(&self, overlay: &gtk::Overlay) {
+        self.ring.attach(overlay);
     }
 
     pub fn set_visible(&self, visible: bool, at: Option<(f64, f64)>) {

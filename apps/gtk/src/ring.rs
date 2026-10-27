@@ -31,10 +31,10 @@ pub struct Ring<T: Tool> {
     root: RingBox,
     buttons: Vec<(T, gtk::ToggleButton)>,
     tool: Cell<T>,
-    /// Ring position in the pane, used for overlay margins.
+    /// Where the ring's corner is in the pane, as it was last drawn or put.
     at: std::cell::Cell<(f64, f64)>,
-    /// Whether the reader moved the ring. Otherwise place it in its default corner whenever shown,
-    /// after allocation provides the pane size.
+    /// Whether the reader moved the ring. Until then it sits in its default corner, wherever the
+    /// pane's size puts that.
     moved: std::cell::Cell<bool>,
 }
 
@@ -44,8 +44,6 @@ impl<T: Tool> Ring<T> {
         let root: RingBox = glib::Object::builder()
             .property("width-request", SIZE)
             .property("height-request", SIZE)
-            .property("halign", gtk::Align::Start)
-            .property("valign", gtk::Align::Start)
             .property("visible", false)
             .build();
 
@@ -106,7 +104,7 @@ impl<T: Tool> Ring<T> {
         button
     }
 
-    /// Dragging the hub moves the whole ring, which is an overlay child positioned by its margins.
+    /// Dragging the hub moves the whole ring, an overlay child the overlay places where `at` says.
     fn wire_drag(self: &std::rc::Rc<Self>, hub: &gtk::Button) {
         let drag = gtk::GestureDrag::new();
         // Capture, ahead of the hub's own click gesture: a `GtkButton` claims the sequence on the
@@ -131,23 +129,46 @@ impl<T: Tool> Ring<T> {
         hub.add_controller(drag);
     }
 
-    /// The widget to hand to the overlay.
+    /// The ring's widget.
     pub fn widget(&self) -> &gtk::Widget {
         self.root.upcast_ref()
     }
 
-    /// Put the ring's corner here, kept inside the pane so it cannot be dragged out of reach.
-    pub fn move_to(&self, x: f64, y: f64) {
-        let room = |extent: i32| f64::from((extent - SIZE).max(0));
-        let parent = self.root.parent();
-        let (w, h) = match &parent {
-            Some(p) => (room(p.width()), room(p.height())),
-            None => (f64::MAX, f64::MAX),
+    /// Float the ring over `overlay`'s child. The overlay places it at every allocation, so it
+    /// stays inside a pane resized under it, as a split halves one, rather than where the larger
+    /// pane had it, over the pane beside.
+    pub fn attach(self: &std::rc::Rc<Self>, overlay: &gtk::Overlay) {
+        overlay.add_overlay(&self.root);
+        let ring = std::rc::Rc::downgrade(self);
+        overlay.connect_get_child_position(move |overlay, child| {
+            let ring = ring.upgrade().filter(|ring| child == ring.widget())?;
+            let (x, y) = ring.inside(overlay.width(), overlay.height());
+            Some(gdk::Rectangle::new(x as i32, y as i32, SIZE, SIZE))
+        });
+    }
+
+    /// Where the ring's corner goes in a pane of this size: where the reader put it, or the top
+    /// right while they have not, kept inside either way so it cannot be dragged out of reach.
+    /// That corner avoids left-to-right reading and a drawing hand entering from the bottom right.
+    fn inside(&self, width: i32, height: i32) -> (f64, f64) {
+        let (x, y) = match self.moved.get() {
+            true => self.at.get(),
+            false => ((f64::from(width - SIZE) - INSET).max(INSET), INSET),
         };
-        let at = (x.clamp(0.0, w), y.clamp(0.0, h));
+        let room = |extent: i32| f64::from((extent - SIZE).max(0));
+        let at = (x.clamp(0.0, room(width)), y.clamp(0.0, room(height)));
+        // Kept, so a drag goes on from where the ring is drawn.
         self.at.set(at);
-        self.root.set_margin_start(at.0 as i32);
-        self.root.set_margin_top(at.1 as i32);
+        at
+    }
+
+    /// Put the ring's corner here.
+    pub fn move_to(&self, x: f64, y: f64) {
+        self.at.set((x, y));
+        if let Some(overlay) = self.root.parent() {
+            self.inside(overlay.width(), overlay.height());
+            overlay.queue_allocate();
+        }
     }
 
     /// Where the reader dragged the ring, so the next one opens there. `None` while they have
@@ -156,17 +177,12 @@ impl<T: Tool> Ring<T> {
         self.moved.get().then(|| self.at.get())
     }
 
-    /// Restore the ring's saved position or default to the top right.
-    /// That corner avoids left-to-right reading and a drawing hand entering from the bottom right.
+    /// Restore the ring's saved position once the reader has moved it; until then it takes its
+    /// corner as it is allocated.
     fn place(&self, remembered: Option<(f64, f64)>) {
-        let (x, y) = match remembered.filter(|_| self.moved.get()) {
-            Some(at) => at,
-            None => {
-                let width = self.root.parent().map_or(0.0, |p| f64::from(p.width()));
-                ((width - f64::from(SIZE) - INSET).max(INSET), INSET)
-            }
-        };
-        self.move_to(x, y);
+        if let Some((x, y)) = remembered.filter(|_| self.moved.get()) {
+            self.move_to(x, y);
+        }
     }
 
     /// Show or hide the ring, putting it where the window says when it comes out.

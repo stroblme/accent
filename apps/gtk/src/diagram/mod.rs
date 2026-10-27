@@ -57,8 +57,6 @@ pub struct DiagramTab {
     overlay: gtk::Overlay,
     view: DiagramView,
     ring: Rc<tools::DiagramRing>,
-    /// The frame callback waiting to put the ring out, while one is.
-    ring_tick: RefCell<Option<gtk::TickCallbackId>>,
     /// Properties content shown while this diagram is the active tab.
     props: Rc<props::Props>,
     /// The page thumbnails, and the buttons and the drag that edit the pages on them: what the
@@ -133,7 +131,7 @@ pub fn open(
     let ring = tools::DiagramRing::new();
     // Select is in hand from the start, and its button says so.
     ring.set_tool(Tool::Select);
-    overlay.add_overlay(ring.widget());
+    ring.attach(&overlay);
     let banner = adw::Banner::builder()
         .title("This diagram changed on disk")
         .button_label("Resolve…")
@@ -180,7 +178,6 @@ pub fn open(
         overlay,
         view,
         ring,
-        ring_tick: RefCell::new(None),
         props: props::Props::new(),
         strip,
         organize,
@@ -445,28 +442,11 @@ impl DiagramTab {
     /// Presentation hides it temporarily and restores the requested visibility afterwards.
     pub fn show_ring(&self, shown: bool, at: Option<(f64, f64)>) {
         self.ring_shown.set(shown);
-        // One waiting at a time: every tab switch asks again, and a ring put away before its
-        // first frame must stay away.
-        if let Some(tick) = self.ring_tick.take() {
-            tick.remove();
-        }
         if !shown || self.presenting.get().is_some() {
             self.ring.set_visible(false, at);
             return self.set_tool(Tool::Select);
         }
-        // The ring finds its corner from the canvas's width, which a tab that has only just
-        // opened does not have yet: it comes out on the first frame that has one.
-        let ring = Rc::downgrade(&self.ring);
-        let tick = self.overlay.add_tick_callback(move |overlay, _| {
-            if overlay.width() == 0 {
-                return glib::ControlFlow::Continue;
-            }
-            if let Some(ring) = ring.upgrade() {
-                ring.set_visible(true, at);
-            }
-            glib::ControlFlow::Break
-        });
-        self.ring_tick.replace(Some(tick));
+        self.ring.set_visible(true, at);
     }
 
     /// Where the reader dragged the ring, for the next tab's to open at.

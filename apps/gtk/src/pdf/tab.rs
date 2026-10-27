@@ -213,7 +213,7 @@ pub fn open(
     // an overlay and the ring is its one child.
     let ring = ring::PdfRing::new();
     let overlay = gtk::Overlay::builder().child(&scroller).build();
-    overlay.add_overlay(ring.widget());
+    ring.attach(&overlay);
     let host = gtk::Box::new(gtk::Orientation::Vertical, 0);
     host.append(&overlay);
     let stack = gtk::Stack::builder()

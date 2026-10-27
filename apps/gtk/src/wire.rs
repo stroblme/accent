@@ -362,6 +362,38 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
         }
     ));
     pane.bar.add_controller(press);
+    // So is a press anywhere in its document, whatever the tab is (DESIGN.md, Tabs). A note's
+    // view or a PDF takes the keyboard of itself, which the focus below hears, but an image or a
+    // status page takes none: the press makes the pane the active one, ahead of whatever it
+    // presses (a ring's tool acts on the active tab), and once it has landed the document takes
+    // the keyboard if nothing in the pane did. Capture phase and unclaimed, as above.
+    let press = gtk::GestureClick::builder()
+        .button(0)
+        .propagation_phase(gtk::PropagationPhase::Capture)
+        .build();
+    press.connect_pressed(glib::clone!(
+        #[weak]
+        app,
+        #[weak]
+        pane,
+        move |_, _, _, _| {
+            if app.set_active_pane(&pane) {
+                app.sync_active();
+            }
+            glib::idle_add_local_once(glib::clone!(
+                #[weak]
+                app,
+                #[weak]
+                pane,
+                move || {
+                    if !app.keyboard_pane().is_some_and(|k| Rc::ptr_eq(&k, &pane)) {
+                        app.focus_document(&pane);
+                    }
+                }
+            ));
+        }
+    ));
+    pane.tabs.add_controller(press);
     // Clicking into a pane's editor makes it the one a note opens into, the same as picking one
     // of its tabs does.
     let focus = gtk::EventControllerFocus::new();

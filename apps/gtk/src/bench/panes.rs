@@ -17,6 +17,9 @@ pub(super) fn bench_panes(app: &Rc<App>, rels: &str) {
     if let Some(rels) = rels.strip_prefix("cancel:") {
         return bench_cancel_split(app, rels);
     }
+    if let Some(rels) = rels.strip_prefix("click:") {
+        return bench_click(app, rels);
+    }
     let Some((a, b)) = rels.split_once(',') else {
         return bench_quit(app);
     };
@@ -35,6 +38,124 @@ pub(super) fn bench_panes(app: &Rc<App>, rels: &str) {
         bench_pane_at(&app, &page);
         bench_pane_step(&app, &page, 0);
     });
+}
+
+/// `ACCENT_BENCH_PANES=click:<first>,<rel>,…`: each `rel` split off right of `first` (either
+/// one `shell` for a terminal, `diff` for a comparison), then real clicks through XTEST: into
+/// `first`, then into the middle of `rel`'s document. The pane clicked into has to be the active
+/// one with the keyboard, whatever its tab is; and a PDF's or a diagram's ring has to be inside
+/// the pane the split put it in, and follow its hub.
+fn bench_click(app: &Rc<App>, rels: &str) {
+    let rels: Vec<String> = rels.split(',').map(str::to_string).collect();
+    let Some((first, rels)) = rels.split_first() else {
+        return bench_quit(app);
+    };
+    let (app, first, rels) = (app.clone(), first.clone(), rels.to_vec());
+    glib::spawn_future_local(async move {
+        if bench_open_kind(&app, &first).await.is_none() {
+            return bench_quit(&app);
+        }
+        super::git::xtest("move 700 400; focus").await;
+        // Screen coordinates of the middle of `widget`: the window sits at 0,0 with no window
+        // manager, its client-side shadow a margin in from the surface's corner.
+        let (sx, sy) = app.window.surface_transform();
+        let middle = |widget: &gtk::Widget| {
+            let at =
+                graphene::Point::new(widget.width() as f32 / 2.0, widget.height() as f32 / 2.0);
+            let at = widget.compute_point(&app.window, &at).unwrap_or(at);
+            (at.x() + sx as f32, at.y() + sy as f32)
+        };
+        let click = |(x, y): (f32, f32)| format!("move {x} {y}; down; up");
+        let mut failed = false;
+        for rel in &rels {
+            let Some(page) = bench_open_kind(&app, rel).await else {
+                return bench_quit(&app);
+            };
+            glib::timeout_future(Duration::from_millis(500)).await;
+            if app.active_pdf().is_some() {
+                app.set_drawing(true);
+            }
+            glib::timeout_future(Duration::from_millis(200)).await;
+            let left = app.pane();
+            app.split_page(&left, Side::Right, &page);
+            glib::timeout_future(Duration::from_millis(500)).await;
+            let Some(right) = app.pane_of(&page) else {
+                return bench_quit(&app);
+            };
+            // Where the ring is drawn, against the pane holding its tab; then its hub dragged.
+            let ring = find_widget(right.widget(), &|w| {
+                w.is::<crate::ring::RingBox>() && w.is_visible()
+            });
+            if let Some(ring) = ring {
+                let pane = right.widget();
+                let at = || {
+                    let r = ring.compute_bounds(pane)?;
+                    let inside = r.x() >= 0.0
+                        && r.y() >= 0.0
+                        && r.x() + r.width() <= pane.width() as f32
+                        && r.y() + r.height() <= pane.height() as f32;
+                    inside.then_some((r.x(), r.y()))
+                };
+                let before = at();
+                let size = (pane.width(), pane.height());
+                println!("bench click {rel} ring={before:?} pane={size:?}");
+                let (x, y) = middle(&ring);
+                super::git::xtest(&format!("drag {x} {y} {} {}", x - 80.0, y + 20.0)).await;
+                let moved = before.zip(at()).map(|(a, b)| (b.0 - a.0, b.1 - a.1));
+                println!("bench click {rel} ring_dragged={moved:?}");
+                failed |= moved != Some((-80.0, 20.0));
+            }
+            let on = |pane: &Rc<Pane>| {
+                let keyboard = app.keyboard_pane().is_some_and(|k| Rc::ptr_eq(&k, pane));
+                (Rc::ptr_eq(&app.pane(), pane), keyboard)
+            };
+            super::git::xtest(&click(middle(left.widget()))).await;
+            let before = on(&left);
+            super::git::xtest(&click(middle(right.widget()))).await;
+            let after = on(&right);
+            println!("bench click {first}->{rel} before={before:?} after={after:?}");
+            failed |= before != (true, true) || after != (true, true);
+            app.close_page(&page);
+            glib::timeout_future(Duration::from_millis(500)).await;
+        }
+        if failed {
+            std::process::exit(1);
+        }
+        bench_quit(&app);
+    });
+}
+
+/// Open `rel` in the active pane, `shell` a terminal and `diff` a comparison, once it is there.
+async fn bench_open_kind(app: &Rc<App>, rel: &str) -> Option<adw::TabPage> {
+    match rel {
+        "shell" => {
+            let before = app.terminals().len();
+            app.open_terminal();
+            while app.terminals().len() == before {
+                glib::timeout_future(Duration::from_millis(50)).await;
+            }
+            app.terminals().last().map(|t| t.page.clone())
+        }
+        "diff" => {
+            let (old, new) = ("one\ntwo\n", "one\nthree\n");
+            let diff = app.open_diff(
+                "diff:click",
+                "click.md",
+                "click",
+                ("old", old),
+                ("new", new),
+                false,
+            );
+            Some(diff.page.clone())
+        }
+        _ => {
+            app.open_path(rel);
+            while app.doc_for(rel).is_none() {
+                glib::timeout_future(Duration::from_millis(50)).await;
+            }
+            app.doc_for(rel).map(|doc| doc.page().clone())
+        }
+    }
 }
 
 /// Escape ends a chord held across a split where it began: the one card over the window goes,

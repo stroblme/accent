@@ -732,7 +732,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - A bar hides only while its pane is the window's only one and holds a single tab: with several panes the bar says which notes are where.
 - The active pane's selected tab keeps Adwaita's filled pill; every other pane's is drawn as an outline, so a split says which pane the keyboard and the next note go to.
   A bar of one tab has no pill either way, and a tab under the pointer takes the hover fill.
-- **The active pane is the one holding the keyboard**: a click into a pane's document or a press on its tab bar gives it the keyboard, as VS Code's editor groups do, and so does a tab moved there or a note open there opened again from another pane (from the sidebar the keyboard stays in the list).
+- **The active pane is the one holding the keyboard**: a click into a pane's document, whatever its tab shows (an image or a file that would not open as much as a note), or a press on its tab bar gives it the keyboard, as VS Code's editor groups do, and so does a tab moved there or a note open there opened again from another pane (from the sidebar the keyboard stays in the list).
   The press puts it in the document of the tab it brings to the front, or of the tab in front when the keyboard was outside the pane; the tab in front pressed again from within the pane keeps it on its label.
   A tab that comes to the front of another pane behind the reader's back — a sync deleting the note in front of it — leaves the keyboard and the active pane where they are.
   Close Tab, the splits, the title, the find bar and focus mode all go by it; `Ctrl+Tab` and Back and Forward reach every pane (below, and History).
@@ -958,7 +958,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Print gives that copy to `GtkPrintDialog`'s `print_file` as it is: the print system gets vector pages and does ranges and copies itself, through the portal where there is one.
   The copy waits in `~/.cache/accent/print/` while the dialog is up.
   Export as PDF… writes it where the chooser says (`paper (exported).pdf` unless renamed there), and refuses the PDF itself.
-- The drawing tools are a **ring**: Pen, Highlighter, Eraser, Line, Rectangle, Circle and Adjust orbiting a hub that floats over the page, opening in the top right (the page is read from the left, a hand comes in from the bottom right), dragged anywhere by the hub and kept where this window left it.
+- The drawing tools are a **ring**: Pen, Highlighter, Eraser, Line, Rectangle, Circle and Adjust orbiting a hub that floats over the page, opening in the top right (the page is read from the left, a hand comes in from the bottom right), dragged anywhere by the hub and kept where this window left it, inside its pane however a split or a resize shrinks that.
   The header's Drawing toggle opens and closes it.
   Its buttons are opaque discs, 36 px, in libadwaita's `.opaque` button colour with the foreground's alpha dropped from the mix, so the disc stays whole on a light theme too, and a shade under them: an `.osd` disc let the text under it through, and went into a dark page.
   Presentation puts it away and the tool in hand down, so nothing draws on a presented page, and brings it back as it was afterwards, the tool still down (Views).
