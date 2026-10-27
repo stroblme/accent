@@ -1581,12 +1581,26 @@ impl App {
         });
     }
 
-    /// Seed Search from selected text; without selection preserve its query, without falling back to the caret word.
+    /// Seed Search from the first line of the text selected in the focused widget, whatever it
+    /// is. Without a selection the box keeps its query: neither the caret's word nor a find bar's
+    /// query stands in.
     fn seed_search(&self) {
-        let Some(text) = self.active().and_then(|tab| tab.selected_search()) else {
+        let Some(sidebar) = self.sidebar.get() else {
             return;
         };
-        if let Some(sidebar) = self.sidebar.get() {
+        let Some(focus) = gtk::prelude::GtkWindowExt::focus(&self.window) else {
+            return;
+        };
+        if sidebar.holds_search(&focus) {
+            return;
+        }
+        let selected = widgets::selected_text(&focus).or_else(|| {
+            let docs = self.docs();
+            docs.iter()
+                .filter_map(Doc::pdf)
+                .find_map(|pdf| pdf.selection_in(&focus))
+        });
+        if let Some(text) = selected.as_deref().and_then(widgets::search_query) {
             sidebar.set_search_text(&text);
         }
     }

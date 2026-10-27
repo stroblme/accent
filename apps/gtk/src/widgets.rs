@@ -1,5 +1,5 @@
-//! Shared empty states, scrollers, label factories, progress pulses, search debounces and
-//! handler slots, keeping pane construction consistent.
+//! Shared empty states, scrollers, label factories, progress pulses, search debounces, handler
+//! slots and the focus's selected text, keeping pane construction consistent.
 
 use adw::prelude::*;
 use gtk::{gdk, gio, glib, pango};
@@ -123,6 +123,34 @@ pub(crate) fn row_text(item: &gtk::ListItem) -> Option<String> {
     item.item()
         .and_downcast::<gtk::StringObject>()
         .map(|s| s.string().to_string())
+}
+
+/// The text selected in `widget`, as Ctrl+Shift+F asks the focus for it: an entry's (the
+/// `GtkText` inside it), a text view's (an editor, a notebook cell, a diff) or a terminal's. A
+/// hidden entry's, a password's, is not offered.
+pub(crate) fn selected_text(widget: &gtk::Widget) -> Option<String> {
+    if let Some(editable) = widget.dynamic_cast_ref::<gtk::Editable>() {
+        if widget.is::<gtk::Text>() && !widget.property::<bool>("visibility") {
+            return None;
+        }
+        let (start, end) = editable.selection_bounds()?;
+        return Some(editable.chars(start, end).into());
+    }
+    if let Some(view) = widget.dynamic_cast_ref::<gtk::TextView>() {
+        let buffer = view.buffer();
+        let (start, end) = buffer.selection_bounds()?;
+        return Some(buffer.text(&start, &end, false).into());
+    }
+    use vte4::TerminalExt;
+    let terminal = widget.dynamic_cast_ref::<vte4::Terminal>()?;
+    terminal.text_selected(vte4::Format::Text).map(Into::into)
+}
+
+/// What a selection searches for in the one-line Search box: its first line, if that is not
+/// empty.
+pub(crate) fn search_query(selected: &str) -> Option<String> {
+    let first = selected.lines().next().unwrap_or_default();
+    (!first.is_empty()).then(|| first.to_string())
 }
 
 /// Show a menu on `host` at `anchor` and return its popover for close notifications.
@@ -519,5 +547,21 @@ impl<T> Hook<dyn Fn(&Rc<T>)> {
         if let Some(f) = self.get() {
             f(on);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_selection_searches_for_its_first_line() {
+        assert_eq!(
+            search_query("alpha beta\ngamma").as_deref(),
+            Some("alpha beta")
+        );
+        assert_eq!(search_query("alpha\r\n").as_deref(), Some("alpha"));
+        assert_eq!(search_query("\nalpha"), None);
+        assert_eq!(search_query(""), None);
     }
 }

@@ -378,13 +378,6 @@ impl Tab {
             .filter(|s| !s.is_empty() && !s.contains('\n'))
     }
 
-    /// First selection line for the single-line sidebar search box.
-    pub fn selected_search(&self) -> Option<String> {
-        let selected = self.selection_text()?;
-        let first = selected.lines().next().unwrap_or_default().to_string();
-        (!first.is_empty()).then_some(first)
-    }
-
     /// Step between matches. `from_current` starts at the selection start
     /// so refining the query keeps the current match visible.
     pub fn step(&self, forward: bool, from_current: bool) {

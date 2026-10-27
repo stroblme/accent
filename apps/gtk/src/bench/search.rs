@@ -601,8 +601,11 @@ fn bench_label(app: Rc<App>, query: String, ext: &'static str) {
 /// `ACCENT_BENCH_SEARCH=pdf:<word>` writes a three-page PDF that says `word` on its third page
 /// alone, waits for the PDF text pass to read it, searches for `word`, prints the rows, opens the
 /// first and prints the page the PDF shows and its find's count — expected `page=3 matches=1 of 1`
-/// — and, under `ACCENT_BENCH_SHOTS=<dir>`, saves the window as `pdf-hit.png` there. Writes a file
-/// into the vault and takes it away.
+/// — and, under `ACCENT_BENCH_SHOTS=<dir>`, saves the window as `pdf-hit.png` there. Then the real
+/// Ctrl+Shift+F, through XTEST, over a selection on the page (`pdf seeded "The third"`), over one
+/// in the find bar's box (`find seeded "names"`) and over that box with nothing selected,
+/// which leaves Search's query as it was though the page keeps its selection (`find kept "old
+/// query"`). Writes a file into the vault and takes it away.
 fn bench_pdf(app: Rc<App>, word: String) {
     let path = app.root().join(format!("{NOTE}.pdf"));
     let pages = [
@@ -673,6 +676,31 @@ fn bench_pdf(app: Rc<App>, word: String) {
                 "bench search pdf shot={}",
                 super::minimap::window_png(&app.window, &shot)
             );
+        }
+        if let (Some(tab), Some([query, _])) = (app.active_pdf(), sidebar.search_boxes()) {
+            super::git::xtest("move 700 400; focus").await;
+            let search = || super::git::xtest("key ctrl+shift+f");
+            let pause = || glib::timeout_future(Duration::from_millis(300));
+            tab.show_link(2, Some([0, 0, 0, 9]));
+            pause().await;
+            tab.views()[0].grab_focus();
+            search().await;
+            println!("bench search pdf seeded {:?}", query.text());
+            let _ = WidgetExt::activate_action(&app.window, "win.find", None);
+            let find = app.pane().find.query_box().clone();
+            find.set_text("names zebrafish");
+            pause().await;
+            find.select_region(0, 5);
+            pause().await;
+            search().await;
+            println!("bench search find seeded {:?}", query.text());
+            sidebar.set_search_text("old query");
+            find.grab_focus();
+            pause().await;
+            find.set_position(-1);
+            pause().await;
+            search().await;
+            println!("bench search find kept {:?}", query.text());
         }
         glib::timeout_future(SETTLE).await;
         bench_search_remove(&[path]);

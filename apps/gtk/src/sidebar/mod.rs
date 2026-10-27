@@ -898,6 +898,14 @@ impl Sidebar {
         }
     }
 
+    /// Whether `widget` is inside the Search pane's query or replace box: a selection there is
+    /// not one to search for, those boxes being where Ctrl+Shift+F puts it.
+    pub fn holds_search(&self, widget: &gtk::Widget) -> bool {
+        self.panes.as_ref().is_some_and(|panes| {
+            widget.is_ancestor(&panes.search_entry) || widget.is_ancestor(&panes.replace_entry)
+        })
+    }
+
     /// Flip the Search pane's All toggle, showing the pane first: the same thing clicking the
     /// button does, for the palette and for anyone who binds a chord to it.
     pub fn toggle_search_all(&self) {

@@ -21,6 +21,12 @@ impl PdfTab {
         self.view.clipboard().set_text(&text);
     }
 
+    /// The selected text, when `focus` is this tab's page view: the selection is the tab's, not
+    /// the widget's, so Ctrl+Shift+F asks here what [`crate::widgets::selected_text`] cannot.
+    pub fn selection_in(&self, focus: &gtk::Widget) -> Option<String> {
+        (focus == self.view.upcast_ref::<gtk::Widget>()).then(|| self.selected.borrow().clone())
+    }
+
     /// Copy selected text as one PDF wikilink per page. Pasting into a note creates indexed
     /// selection links that the viewer paints as highlights; no separate highlight store is
     /// needed. Join cross-page selections with newlines.
