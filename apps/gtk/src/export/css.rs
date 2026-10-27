@@ -5,6 +5,7 @@
 
 use crate::theme;
 use accent_core::config::Config;
+use gtk::prelude::*;
 use gtk::{gdk, pango};
 
 fn css_rgba(c: gdk::RGBA) -> String {
@@ -40,7 +41,29 @@ pub(crate) fn stylesheet(fg: gdk::RGBA, bg: &str, share: Option<f64>) -> String 
         _ => 11.0,
     };
     let accent = adw::StyleManager::default().accent_color_rgba();
-    theme_css(fg, bg, accent, &family, size, share)
+    let css = theme_css(fg, bg, accent, &family, size, share);
+    // A math font has TeX's proportions: Latin Modern Math's `x` is 0.43 em against about 0.52
+    // for the monospace prose, so at one font size a formula's letters read a fifth smaller.
+    // `font-size-adjust` scales whichever math font the page gets to the prose's x-height, as
+    // MathJax's `matchFontHeight` does; DejaVu Math TeX Gyre, the GNOME runtime's, is scaled by
+    // next to nothing.
+    match x_height(&family) {
+        Some(ex) => format!("{css}math {{ font-size-adjust: {ex:.3}; }}\n"),
+        None => css,
+    }
+}
+
+/// How tall `family`'s `x` is, in ems, from its ink at 100 px.
+fn x_height(family: &str) -> Option<f64> {
+    let mut font = pango::FontDescription::new();
+    font.set_family(family);
+    font.set_absolute_size(100.0 * f64::from(pango::SCALE));
+    let layout = pango::Layout::new(&gtk::Label::new(None).pango_context());
+    layout.set_font_description(Some(&font));
+    layout.set_text("x");
+    let (ink, _) = layout.extents();
+    let ex = f64::from(layout.baseline() - ink.y()) / f64::from(100 * pango::SCALE);
+    (ex > 0.0).then_some(ex)
 }
 
 /// The sheet a paper preview is given, for an export that carries it in the file: WebKit applies

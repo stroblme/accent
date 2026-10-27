@@ -1481,6 +1481,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - The preview stylesheet derives everything from three values: foreground, background, accent, a conflict block's tints being the editor's from the same foreground.
   WebKitGTK cannot see GTK's CSS variables, so it gets the background as a literal from `theme.rs`.
   One rule is not derived: a `$$` block gets `margin: 1.2em 0`, a heading's standing room, since a `<math display="block">` box carries none of a prose line's half-leading and two formulas would otherwise sit closer than two paragraphs.
+  A formula's letters stand as tall as the prose's: `font-size-adjust` on `math` is the prose font's x-height, measured through Pango, so the math font is scaled to it as MathJax's `matchFontHeight` does (2026-10-27). At one font size Latin Modern Math's `x` (0.43 em) read a fifth smaller than the monospace prose's (about 0.52 em); its capitals and digits, taller beside its `x` than the prose's are, now stand a little above the prose's. The page an export or Print writes carries the same rule.
 - A diagram is painted as a PDF page is, its colours moved onto the theme's paper and ink and left alone under Light (Diagram), the accent reaching only the selection; the file keeps the colours it was given.
   The Properties pane may put any colour into the document; none is a literal in code.
 - **`theme.rs` is the only file allowed to write a hex literal**, and one anywhere else is a bug the pre-flight grep catches.
