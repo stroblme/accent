@@ -180,8 +180,7 @@ const MERMAID: &str = concat!(
 window.__accentDraw = function () {
   var rgb = getComputedStyle(document.documentElement).backgroundColor.match(/\d+/g) || [255, 255, 255];
   var luma = (0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]) / 255;
-  // Kept where a print or an export can wait for the diagrams before taking the page.
-  window.__accentDrawn = accentDiagrams(luma < 0.5 ? 'dark' : 'neutral', function (fence, drawing) {
+  accentDiagrams(luma < 0.5 ? 'dark' : 'neutral', function (fence, drawing) {
     // The block's scroll-sync marker sits inside the fence and has to outlive it.
     var mark = fence.querySelector('[data-line]');
     if (mark) { fence.parentElement.insertBefore(mark, fence); }
@@ -444,8 +443,6 @@ struct Assets {
     /// How many times the file a path names changed under the page, which asks for it with `v=`
     /// that many ([`versioned`]).
     versions: RefCell<HashMap<String, u32>>,
-    /// A page for print or export ([`Preview::for_paper`]): white paper, images as their files.
-    paper: bool,
     /// The key of the note on the page: a loose one's images are read beside it
     /// ([`resolve_asset`]).
     note: RefCell<String>,
@@ -478,45 +475,18 @@ impl Preview {
         on_tag: impl Fn(&str) + 'static,
         on_invert: impl Fn(&str) + 'static,
     ) -> Preview {
-        Self::build(
-            Arc::new(resolve),
-            inverted,
-            web,
-            on_open,
-            on_tag,
-            on_invert,
-            false,
-        )
-    }
-
-    /// Build an unseen print/export preview: white paper, original images and neutral Mermaid diagrams.
-    /// Disable navigation so paper preparation cannot follow links.
-    pub fn for_paper(resolve: Arc<Resolve>, web: Keys) -> Preview {
-        Self::build(resolve, Rc::default(), web, |_| {}, |_| {}, |_| {}, true)
-    }
-
-    fn build(
-        resolve: Arc<Resolve>,
-        inverted: Keys,
-        web: Keys,
-        on_open: impl Fn(&str) + 'static,
-        on_tag: impl Fn(&str) + 'static,
-        on_invert: impl Fn(&str) + 'static,
-        paper: bool,
-    ) -> Preview {
         // `register_uri_scheme` asks only for `'static` and calls back on the main loop, so an `Rc`
         // would be enough to hold the resolver there — but every request hands it to a
         // `gio::spawn_blocking` worker, and crossing a thread needs `Send`. Hence `Arc`, and the
         // `Send + Sync` bound that an `Arc` of a shared closure requires.
         let assets = Rc::new(Assets {
-            resolve,
+            resolve: Arc::new(resolve),
             inverted,
             #[cfg(feature = "bench")]
             requests: Cell::new(0),
             served: RefCell::default(),
             animations: RefCell::default(),
             versions: RefCell::default(),
-            paper,
             note: RefCell::default(),
             web,
         });
@@ -670,14 +640,6 @@ impl Preview {
         });
     }
 
-    /// Why the page shows no note: the network filter could not be installed.
-    pub fn refused(&self) -> Option<String> {
-        match &*self.inner.gate.borrow() {
-            Gate::Shut(why) => Some(why.clone()),
-            _ => None,
-        }
-    }
-
     /// Scroll so the block containing source line `line` is visible.
     pub fn scroll_to_line(&self, line: u32) {
         if self.inner.loaded.get() {
@@ -756,6 +718,7 @@ impl Preview {
     }
 
     /// The web view, for a drill that reads the page itself.
+    #[cfg(feature = "bench")]
     pub fn view(&self) -> &webkit6::WebView {
         &self.inner.view
     }
@@ -782,13 +745,10 @@ impl Preview {
     fn apply_style(inner: &Inner) {
         // WebKit cannot resolve `var(--view-bg-color)`, so `theme` hands out the literal the
         // rest of the window resolves to under the current theme (DESIGN.md, Colour).
-        let (bg, fg) = match inner.assets.paper {
-            true => theme::paper(),
-            false => (
-                theme::view_bg(adw::StyleManager::default().is_dark()),
-                inner.view.color(),
-            ),
-        };
+        let (bg, fg) = (
+            theme::view_bg(adw::StyleManager::default().is_dark()),
+            inner.view.color(),
+        );
         // WebKit's zoom scales the floor's pixels but not a percentage of the view, so the share
         // carries the zoom itself, as the editor's column does.
         let share = inner
@@ -1165,10 +1125,7 @@ fn serve(assets: &Rc<Assets>, request: &webkit6::URISchemeRequest) {
     let page = diagram_page(&uri);
     // The look and the inverted set live on this thread; the worker gets a copy of each.
     let (resolve, request) = (assets.resolve.clone(), request.clone());
-    let look = match assets.paper {
-        true => Look::paper(),
-        false => Look::now(),
-    };
+    let look = Look::now();
     let inverted = assets.inverted.borrow().clone();
     let note = assets.note.borrow().clone();
     let assets = assets.clone();

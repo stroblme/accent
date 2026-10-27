@@ -1,6 +1,6 @@
 //! The preview of a build without WebKit (the `webkit` feature off): a status page where the
-//! rendered note would be, as a PDF tab without libpdfium is one, and every call the window
-//! makes of a preview answered with nothing.
+//! rendered note would be, as a PDF tab without libpdfium is one, with a button that opens the
+//! note in the browser instead, and every call the window makes of a preview answered with nothing.
 
 use accent_core::config::Config;
 use accent_core::search::Options;
@@ -30,10 +30,20 @@ impl Preview {
         _on_tag: impl Fn(&str) + 'static,
         _on_invert: impl Fn(&str) + 'static,
     ) -> Preview {
+        let open = gtk::Button::builder()
+            .label("Open in Browser")
+            .action_name("win.open-in-browser")
+            .halign(gtk::Align::Center)
+            .css_classes(["pill"])
+            .build();
         let page = adw::StatusPage::builder()
             .icon_name("x-office-document-symbolic")
             .title("Preview Is Not Available")
-            .description("This build of accent has no WebKitGTK, which renders notes.")
+            .description(
+                "This build of accent has no WebKitGTK, which renders notes. \
+                 Your browser can show the note instead.",
+            )
+            .child(&open)
             .build();
         Preview {
             widget: page.upcast(),

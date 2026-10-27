@@ -49,7 +49,6 @@ impl Look {
 
     /// The look of a printout or an export: every image as its file is, whatever the theme on
     /// screen and whatever the reader inverted.
-    #[cfg(feature = "webkit")]
     pub fn paper() -> Look {
         Look {
             theme: None,
@@ -216,8 +215,8 @@ fn rasterise(svg: &[u8], scale: i32, zoom: f64) -> Result<(gdk::Texture, (i32, i
     Ok((texture.upcast(), size.get()))
 }
 
-/// What the preview hands WebKit for an image: the file as it is, or new bytes of a type.
-#[cfg(feature = "webkit")]
+/// What the preview hands WebKit for an image, and an exported page holds: the file as it is, or
+/// new bytes of a type.
 pub enum Served {
     File,
     Bytes(glib::Bytes, &'static str),
@@ -225,7 +224,6 @@ pub enum Served {
 
 /// Serve preview images unchanged unless recolouring, EXIF correction or unsupported formats require PNG.
 /// Failures fall back to the original file.
-#[cfg(feature = "webkit")]
 pub fn serve(path: &Path, look: Look, inverted: bool) -> Served {
     if svg(path) {
         return match look
@@ -625,7 +623,6 @@ pub(crate) mod tests {
             );
         }
         // Paper shows every image as its file, inverted or not.
-        #[cfg(feature = "webkit")]
         for (document, inverted) in [(false, false), (true, false), (false, true), (true, true)] {
             assert_eq!(Look::paper().palette(document, inverted), None);
         }

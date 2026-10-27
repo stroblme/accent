@@ -6,8 +6,6 @@
 
 mod actions;
 mod askpass;
-// Until the browser export uses it in a build without WebKit too.
-#[cfg_attr(not(feature = "webkit"), allow(dead_code))]
 mod assets;
 mod attach;
 #[cfg(feature = "bench")]

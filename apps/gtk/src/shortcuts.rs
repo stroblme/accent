@@ -81,8 +81,8 @@ fn section(action: &str) -> Option<&'static str> {
     let starts = |prefixes: &[&str]| prefixes.iter().any(|p| name.starts_with(p));
     Some(match name {
         "save" | "save-as" | "open-file" | "new-file" | "new-folder" | "upload" | "print"
-        | "close-tab" | "new-window" | "open-local" | "open-remote" | "open-recent"
-        | "close-vault" | "reload-window" | "quit" => "Files",
+        | "open-in-browser" | "close-tab" | "new-window" | "open-local" | "open-remote"
+        | "open-recent" | "close-vault" | "reload-window" | "quit" => "Files",
         _ if starts(&["export-"]) => "Files",
         "find" | "find-next" | "find-previous" | "replace" | "replace-in-files" | "search-all"
         | "goto-line" => "Palette and find",

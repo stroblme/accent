@@ -31,6 +31,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.upload", "Upload Files…", &[]),
     // No chords: `Ctrl+P`, the HIG's Print, is the palette (DESIGN.md, Deviations).
     ("win.print", "Print…", &[]),
+    ("win.open-in-browser", "Open in Browser", &[]),
     ("win.export-pdf", "Export as PDF…", &[]),
     ("win.export-html", "Export as HTML…", &[]),
     ("win.export-png", "Export as PNG…", &[]),
@@ -682,7 +683,7 @@ mod tests {
         }
     }
 
-    /// A note is printed and exported three ways, a PDF two and a diagram four, right after Reveal
+    /// A note is printed and exported two ways, a PDF two and a diagram four, right after Reveal
     /// in Sidebar, a diagram's Show Grid after them; a shell, a comparison or any other tab is
     /// offered none.
     #[test]
@@ -704,10 +705,7 @@ mod tests {
             "win.rename",
             "win.trash",
         ];
-        assert_eq!(
-            after_reveal(Some(Kind::Note)),
-            [print, pdf, html, rename, trash]
-        );
+        assert_eq!(after_reveal(Some(Kind::Note)), [print, html, rename, trash]);
         assert_eq!(after_reveal(Some(Kind::Pdf)), [print, pdf, rename, trash]);
         let (png, svg, grid) = ("win.export-png", "win.export-svg", "win.diagram-grid");
         assert_eq!(

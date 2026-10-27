@@ -26,6 +26,7 @@ impl App {
             "save" => self.save(),
             "save-as" => self.save_as(),
             "print" => self.print(),
+            "open-in-browser" => self.browse(),
             "export-pdf" => self.export(Export::Pdf),
             "export-html" => self.export(Export::Html),
             "export-png" => self.export(Export::Png),
@@ -1037,7 +1038,7 @@ pub const PRINTS: [&str; 5] = [
 /// menu leaves sensitive.
 pub fn print_actions(kind: Option<Kind>) -> &'static [&'static str] {
     match kind {
-        Some(Kind::Note) => &["win.print", "win.export-pdf", "win.export-html"],
+        Some(Kind::Note) => &["win.print", "win.export-html"],
         Some(Kind::Pdf) => &["win.print", "win.export-pdf"],
         Some(Kind::Diagram) => &[
             "win.print",

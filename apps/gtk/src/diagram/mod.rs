@@ -5,7 +5,6 @@
 //! editing, `props` the Properties pane, `input` menus, keys and scrolling, and `strip` the page
 //! thumbnails the Outline pane shows.
 
-#[cfg(feature = "webkit")]
 pub mod embed;
 pub mod export;
 mod geometry;
