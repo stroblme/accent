@@ -204,6 +204,35 @@ pub fn write_note(path: &Path, text: &str, expected: Option<Etag>) -> Result<Eta
 /// Another process can still replace the file between check and rename; Linux offers no
 /// conditional replacement rename.
 pub fn write_bytes(path: &Path, bytes: &[u8], expected: Option<Etag>) -> Result<Etag> {
+    write_with(path, expected, |tmp| tmp.write_all(bytes))
+}
+
+/// A PDF saved as [`write_bytes`] saves one: the first `base_len` bytes of `base`, the file its
+/// document was read from, then `section`, the editing session's incremental update.
+///
+/// `base` is read at explicit offsets and its file offset never moves, so nothing else reading it
+/// is disturbed; on Linux the copy is `copy_file_range`, a reflink on btrfs and XFS. The file is
+/// still replaced whole, never appended to in place, so a crash leaves the old one.
+pub fn write_appended(
+    path: &Path,
+    base: &std::fs::File,
+    base_len: u64,
+    section: &[u8],
+    expected: Option<Etag>,
+) -> Result<Etag> {
+    write_with(path, expected, |tmp| {
+        copy_range(base, tmp, base_len)?;
+        tmp.write_all(section)
+    })
+}
+
+/// The body of every atomic save: `fill` writes the temp file, which is synced and renamed over
+/// `path` if it still has `expected`'s etag.
+fn write_with(
+    path: &Path,
+    expected: Option<Etag>,
+    fill: impl FnOnce(&mut std::fs::File) -> io::Result<()>,
+) -> Result<Etag> {
     let failed = |e| Error::io(path.display(), e);
     // Resolve symlinks first: writing through a link must replace the link *target*, otherwise the
     // rename below would silently turn a symlinked note into a regular file in the vault.
@@ -214,7 +243,7 @@ pub fn write_bytes(path: &Path, bytes: &[u8], expected: Option<Etag>) -> Result<
 
     let existing = std::fs::metadata(&canonical).ok();
     let mut tmp = temp_file(parent, existing.as_ref()).map_err(failed)?;
-    tmp.write_all(bytes).map_err(failed)?;
+    fill(tmp.as_file_mut()).map_err(failed)?;
     tmp.as_file().sync_all().map_err(failed)?;
 
     if let Some(m) = &existing {
@@ -231,6 +260,59 @@ pub fn write_bytes(path: &Path, bytes: &[u8], expected: Option<Etag>) -> Result<
     // crash-consistency (as opposed to torn-write safety) ever matters.
     let file = tmp.persist(&canonical).map_err(|e| failed(e.error))?;
     Ok(Etag::from_meta(&file.metadata().map_err(failed)?))
+}
+
+/// The first `len` bytes of `from` written at `to`'s position: in the kernel where it can,
+/// otherwise through [`copy_by_reads`]. `from`'s own offset is left where it was.
+fn copy_range(from: &std::fs::File, to: &mut std::fs::File, len: u64) -> io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        let mut at: libc::off64_t = 0;
+        while (at as u64) < len {
+            let rest = (len - at as u64).min(1 << 30) as usize;
+            // SAFETY: both descriptors are open files borrowed for the call; `at` is a live
+            // offset the kernel reads and advances in place of `from`'s own, and a null output
+            // offset writes at `to`'s position, which is what the section is written after.
+            let n = unsafe {
+                libc::copy_file_range(
+                    from.as_raw_fd(),
+                    &mut at,
+                    to.as_raw_fd(),
+                    std::ptr::null_mut(),
+                    rest,
+                    0,
+                )
+            };
+            match n {
+                0 => return Err(io::ErrorKind::UnexpectedEof.into()),
+                n if n > 0 => {}
+                // Another file system, or one that cannot: what is left goes by reads.
+                _ if at == 0 => return copy_by_reads(from, to, len),
+                _ => return Err(io::Error::last_os_error()),
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    copy_by_reads(from, to, len)
+}
+
+/// The first `len` bytes of `from` written at `to`'s position, read at explicit offsets (`pread`).
+fn copy_by_reads(from: &std::fs::File, to: &mut std::fs::File, len: u64) -> io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    let mut buf = vec![0; 1 << 20];
+    let mut at = 0;
+    while at < len {
+        let want = buf.len().min((len - at) as usize);
+        let n = from.read_at(&mut buf[..want], at)?;
+        if n == 0 {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
+        to.write_all(&buf[..n])?;
+        at += n as u64;
+    }
+    Ok(())
 }
 
 /// Land `staged`, an upload streamed into an `.accent-` file beside `path`'s target, over that
@@ -530,6 +612,43 @@ mod tests {
     fn for_disk_strips_and_restores_crlf() {
         assert_eq!(for_disk("a  \nb\t\n", true, true), "a\r\nb\r\n");
         assert_eq!(for_disk("a  \nb\t\n", false, false), "a  \nb\t\n");
+    }
+
+    /// An appended save is the base's first bytes and the section, read from the file the base
+    /// was opened as however often the path has been replaced since, leaving that file's offset
+    /// where it was; it is etag-gated like any save, and the reads that stand in for the kernel's
+    /// copy write the same bytes.
+    #[test]
+    fn an_appended_save_is_the_base_and_its_section() {
+        use std::io::{Seek, SeekFrom};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("paper.pdf");
+        std::fs::write(&path, "base bytes|old section").unwrap();
+        let first = Etag::of(&path).unwrap();
+        let mut base = std::fs::File::open(&path).unwrap();
+        base.seek(SeekFrom::Start(3)).unwrap();
+
+        let saved = write_appended(&path, &base, 10, b"+one", Some(first)).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"base bytes+one");
+        write_appended(&path, &base, 10, b"+two", Some(saved)).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"base bytes+two");
+        assert_eq!(
+            base.stream_position().unwrap(),
+            3,
+            "the base's offset stays"
+        );
+        let stale = write_appended(&path, &base, 10, b"+three", Some(saved));
+        assert!(
+            matches!(stale, Err(Error::ChangedOnDisk { .. })),
+            "{stale:?}"
+        );
+
+        let mut by_reads = tempfile::tempfile().unwrap();
+        copy_by_reads(&base, &mut by_reads, 10).unwrap();
+        by_reads.seek(SeekFrom::Start(0)).unwrap();
+        let mut copied = String::new();
+        by_reads.read_to_string(&mut copied).unwrap();
+        assert_eq!(copied, "base bytes");
     }
 
     #[test]

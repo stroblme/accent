@@ -21,6 +21,7 @@ const OWN: &[&[u8]] = &[
     b"DL",
 ];
 
+#[derive(Clone)]
 pub struct Update {
     /// The file before this session: its size, and whether a line end closes it.
     base_len: u64,
@@ -92,6 +93,11 @@ impl Update {
             None => write::indirect(&mut bytes, r, &object),
         }
         self.objects.insert(r.num, (r, object, bytes));
+    }
+
+    /// Whether the session has written nothing yet.
+    pub fn is_empty(&self) -> bool {
+        self.objects.is_empty()
     }
 
     /// `r` as the session has it: its own version, else the file's.
