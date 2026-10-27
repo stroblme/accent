@@ -95,7 +95,12 @@ jobs:
       # WebKitGTK is unavailable on macOS; this builds the native desktop dependencies.
       - run: brew install pkgconf gtk4 libadwaita gtksourceview5 vte3 libspelling libsoup
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
+      # `make clippy`'s third run, on the code only macOS compiles: warnings are errors, our
+      # crates' alone, as cargo caps every dependency's lints.
+      - run: cargo clippy -p accent --no-default-features --all-targets --locked -- -D warnings
       - run: cargo build -p accent --no-default-features --locked
       - run: cargo test -p accent-core --locked --no-fail-fast
 
