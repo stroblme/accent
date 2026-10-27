@@ -17,8 +17,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 - **Stack**: GTK4 + libadwaita in Rust on Linux and Kotlin + Compose on Android share one Rust core.
   The desktop links it directly; Android uses UniFFI.
-- **Two optional parts**: the `webkit` and `termprops` cargo features, on by default, hold what WebKitGTK 6.0 and VTE 0.78 bring (the preview and a note's print and export; a program's OSC 52 copy, the shell's commands and prompts), so accent builds where neither is packaged, as on macOS 12.
-  Without them the preview is a status page.
+- **Two optional parts**: the `webkit` and `termprops` cargo features, on by default, hold what WebKitGTK 6.0 and VTE 0.78 bring (the preview; a program's OSC 52 copy, the shell's commands and prompts), so accent builds where neither is packaged, as on macOS 12.
+  Without them the preview is a status page that opens the note in the browser; printing and export do not need WebKit.
 - **Crates**: `crates/core` has no UI types; `crates/api` exposes `Vault` for local and remote backends, JSON-RPC for `accent-cli`, and UniFFI behind the `android` feature.
   `crates/drawio` is independent; core reads diagram labels through it for indexing.
   `crates/math` (from formulary) lays out the MathML core writes in a math font the system HarfBuzz reads; only the desktop app links it.
@@ -161,7 +161,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - **Ink geometry** lives in the annotation's appearance stream, not in `/InkList` — every viewer renders the stream, and pdfium-render does not wrap `FPDFAnnot_AddInkStroke`.
 - **Recolouring**: `accent_core::recolour` decides the page and paper–ink remap for PDFs, document-like images, SVGs and diagrams, taking Preferences and per-file Invert into account.
   Both apps use these rules with their own decoders; the diagram canvas remaps its painted colours.
-- **Printing and export** reuse the renderers: WebKit paginates an unseen note preview, pdfium copies a PDF with note highlights, and cairo prints or exports the diagram canvas's render nodes to PDF, SVG or image.
+- **Printing and export** reuse the renderers: a note goes out as one self-contained HTML page, which the system browser prints, pdfium copies a PDF with note highlights, and cairo prints or exports the diagram canvas's render nodes to PDF, SVG or image.
   Exporting never changes the open PDF.
 - **Diagrams**: `crates/drawio` ports mxGraph's model, routing, shapes and label placement faithfully (the Apache-2.0 parts attributed file by file, with `LICENSE-APACHE` and `NOTICE`), keeps every attribute it does not interpret, and hands the app a UI-neutral display list — a file saved here opens in draw.io as it was, the port can be diffed against later draw.io releases, and Android can paint the same list.
   A formula in a label is typeset natively (`crates/math`), as draw.io's MathJax sets it, wherever the canvas draws.
@@ -610,6 +610,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 ### Preview
 
 - A read-only WebKitGTK 6 view, its stylesheet generated from `AdwStyleManager`; its images in the look their tabs have (Image).
+  A build without WebKit shows a status page in its place, whose Open in Browser button shows the note in the system browser.
 - Its page follows the editor's column rule (Typography): Column Width's share of the preview's own width over the same floor, gutters included, scaled by the zoom.
   Full-Width Preview, off by default, lets it fill the pane, for a note of wide tables (user decision 2026-10-14).
   Either preference restyles the page in place rather than loading a new one.
@@ -632,17 +633,17 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The note has to read as conflicted, and blanking the markers as the analysis does would run the two sides together as one text.
 - Each side is the markdown it holds: `to_html` cuts the note at the blocks and parses every stretch alone, so a fence or a list one side leaves open ends with its box, and every line marker is still the note's own line.
   Every stretch is parsed with the note's reference and footnote definitions after it, so a link or a footnote finds its definition across a block's edge.
-- **Print and export** — Print…, Export as PDF…, Export as HTML… — take the note as its tab holds it, unsaved edits and all, and put it on paper: Light's white page and dark text under Dark and Solarized too, links in the accent, images as their files are (no recolouring, no inversion), diagrams in mermaid's `neutral` theme.
+- **Print and export** — Print…, Export as HTML…, Open in Browser — take the note as its tab holds it, unsaved edits and all, and write it as one self-contained HTML page with paper's look: Light's white page and dark text under Dark and Solarized too, links in the accent, images as their files are (no recolouring, no inversion).
   A printout is paper, and a shared file is read away from the window and its theme.
-- On paper the note takes the page's width inside 20 mm margins, on the locale's paper; a code line wraps rather than running off the page; a heading never ends a page, and a code block, a table, an image, a diagram, a display formula or a conflict block is not cut where it fits on one.
-  The page is taken once its images, diagrams and fonts are in.
-  A web image stays blocked, as on screen.
-- Print… is WebKit's own print dialog, which paginates for the paper chosen there.
-  Export as PDF… is the same print sent to GTK's Print to File printer with no dialog, after the file chooser has asked where.
-- Export as HTML… writes one self-contained file: the preview's stylesheet in its head, the vault's images inside it as `data:` URIs, the diagrams as the SVG mermaid drew and a draw.io diagram as the SVG of its page, the formulas as MathML, and no script — the note's own `<script>` taken out and a `script-src 'none'` policy over whatever is left.
-  A link into the vault or to a tag means nothing outside the app, so it is left as its text; a link out of it and one to a heading of the same note are kept, and a web image still points at the web.
-- The chooser is this machine's, starting in the file's own folder on a local vault, and names the file after the note (`Note.pdf`, `Note.html`).
-  The status bar says the work while it runs ("Exporting Note.pdf…", "Printing Note.md…", the latter for as long as the dialog is up), and a toast says it is done ("Exported Note.pdf").
+- Core writes the page's body (`markdown::to_html_file`), the writer the preview and Android use; the window adds the stylesheet, the vault's images as `data:` URIs and a draw.io diagram as the SVG of its page, and leaves the formulas as MathML for the browser to lay out and a mermaid diagram as its code block.
+  It carries no script: the note's own `<script>` is taken out, and a policy over whatever is left runs none.
+  A link into the vault or to a tag means nothing outside the app, so it is left as its text; a link out of it and one to a heading of the same note are kept.
+- Print… opens the page in the system browser, whose print dialog prints it or saves it as a PDF, and a toast says where to go: "Opened in your browser — print from there."
+  accent lays out no paper of its own (user decision 2026-10-22); Open in Browser is the same, without the toast.
+  The page waits in `~/.cache/accent/browser/`, named after the note, and loads nothing from outside itself, so a web image stays blocked, as on screen.
+- On paper the note takes the page's width inside the browser's margins; a code line wraps rather than running off the page; a heading never ends a page, and a code block, a table, an image, a display formula or a conflict block is not cut where it fits on one.
+- Export as HTML… writes the page where this machine's chooser says, starting in the file's own folder on a local vault, named after the note (`Note.html`); there a web image still points at the web.
+  The status bar says the work while it runs ("Exporting Note.html…", "Opening Note.md in your browser…"), and a toast says it is done ("Exported Note.html").
 
 ### Terminal
 
@@ -698,7 +699,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A label with nothing to say hides.
 - The vault's own work wins the first slot, being what the reader waits on, and a PDF still opening comes under it, a source of its own, so an open that ends mid-walk shows the walk's line again at once; then a copy to or from a host ("Downloading a.pdf…", "Uploading 3 files…"), the latest one running, from start to toast, saying that it runs — and, for a batch of two files or more, how far by file, as indexing counts ("Copying Photos… 12/120 files", on a local vault too), a folder's total known once it has been walked, and for one file over the link how far by byte, as the connection bar counts the server's upload ("Downloading paper.pdf… 12.3/80.0 MB").
   That is Download…, a single upload, a row dragged in from another window, and the copy a PDF or image tab reads, whose "Opening the document…" waits for the bytes; a completion's, a preview's and Save As's copies stay silent, and a cached copy that is current moves nothing and says nothing.
-  A print or an export being made takes the same place, from the command to its toast ("Printing Note.md…", "Exporting Note.pdf…"); then "Indexing suggestions… 1200 files, sorting" (the ghost-text index, in `merl-rt`'s own words on how far it has got, shown as it sends them), a convenience that waits its turn: on a cold vault, whose own walk outlasts it, it shows only if merl is still at it once the walk is done.
+  A print or an export being made takes the same place, from the command to its toast ("Printing paper.pdf…", "Exporting Note.html…"); then "Indexing suggestions… 1200 files, sorting" (the ghost-text index, in `merl-rt`'s own words on how far it has got, shown as it sends them), a convenience that waits its turn: on a cold vault, whose own walk outlasts it, it shows only if merl is still at it once the walk is done.
   No language server's progress is shown but Lean's check of the tab in front ("Checking… line 12", the first line it has still to check, the gutter's bar marking the rest (Language servers), from `$/lean/fileProgress`, a new state at most every 100 ms: Lean says where it is a dozen times a line, and over an ssh link each is a message), which is what its goals wait on, and before it a server the tab in front, a notebook too, has waited on for a second to open its document, named by the program the vault's config or the built-in table gives ("Starting lake…"), until it answers or fails (user decision 2026-10-10): a cold `lake serve` can take a minute, and a fast handshake does not flash the line.
   Both come after the vault's work and the copies, before the suggestion index. rust-analyzer reports every `cargo check`, and that line would never settle.
   The reading of the PDFs' text (Architecture, PDF text) comes after them and before the suggestion index ("Indexing PDF text… 120/3400 files"), with a Stop of its own that ends it until the vault is opened again, the PDFs read so far staying searchable.
@@ -1038,7 +1039,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 ### Image
 
 - A `GtkPicture` in a scroller, fitted to the window until zoomed, the file decoded off the main loop by GDK's own decoders, and a JPEG, a WebP or a TIFF turned the way its EXIF says (`accent_core::orientation`), which they ignore, or for a TIFF only mirror.
-  WebKit draws no TIFF, and turns a JPEG and nothing else, so the preview and an exported page are served a TIFF, and any other turned image, as an upright PNG.
+  WebKit draws no TIFF, nor do most browsers, and turns a JPEG and nothing else, so the preview and an exported page are served a TIFF, and any other turned image, as an upright PNG.
   A TIFF is an image on the desktop only: Android has no decoder for one.
   An SVG is drawn at the display's scale, as `GtkPicture` draws one, and again when the window moves to a display of another; zoomed past 100 %, it is drawn again at the zoom once the zoom has been left alone for 300 ms, the drawing before enlarged meanwhile, up to 16 megapixels, past which a deeper zoom enlarges that without drawing it again.
   It is drawn once, recoloured or not, and held only as it is shown.
@@ -1380,7 +1381,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   On the tab menu it is **Move to New Window**, ending the moves before Pin Tab, since the tab leaves (Tabs).
 - **Reload** ends a folder row's first section, after Leave Out of Search (Sidebar, Files).
 - **A code tab's text menu** ends with Quick Fix… and Source Action…, asked at the caret the press put there; a note's ends with its spelling suggestions instead (Language servers).
-- **Print… and the exports are a section of the tab menu's own**, after Reveal in Sidebar, as they make something of the file rather than name it: a note has Print…, Export as PDF… and Export as HTML…, a PDF the first two, a diagram Print…, Export as PDF…, Export as PNG… and Export as SVG…, any other tab none, and a loose file as much as a vault's.
+- **Print… and the exports are a section of the tab menu's own**, after Reveal in Sidebar, as they make something of the file rather than name it: a note has Print… and Export as HTML…, a PDF Print… and Export as PDF…, a diagram Print…, Export as PDF…, Export as PNG… and Export as SVG…, any other tab none, and a loose file as much as a vault's.
   They are on no tree menu; the primary menu lists them all, greyed where the tab in front cannot (Primary menu).
 - **Move to…** sits with Cut and Copy, on a row's menu and a marked set's: the dialog is a folder path in the vault's path field, from the vault root, opening on the folder the first path is in.
   It is a drop onto a folder by another way, for a folder that is not on screen — one plan, a taken name refusing the whole batch — and a folder not there yet is made once any Update Links? question is answered, as Rename makes the folders a typed path names.
@@ -1538,8 +1539,9 @@ The `Ctrl` chords for application and document commands use GTK's `<Primary>` mo
 
 ### Files
 
-- Save `Ctrl+S`, Save As… `Ctrl+Shift+S`, Print…, Export as PDF…, Export as HTML…, Export as PNG… and Export as SVG… (unbound), New File `Ctrl+N`, New Folder `Ctrl+Shift+N`, Upload Files (unbound), Close Tab `Ctrl+W`, Open File `Ctrl+O`, Open Local `Ctrl+Shift+O`, Open Remote (unbound), Open Recent `Ctrl+R`, New Window (unbound), Reload Window (unbound), Close Vault (unbound), Quit `Ctrl+Q`.
-- Print… and the exports act on the tab the menu was opened on, else the tab in front (Preview, PDF, Diagram); over any tab but a note, a PDF or a diagram they do nothing, as Save As… does, and one a tab has no such file for (HTML for a PDF or a diagram, PNG and SVG for a note or a PDF) does nothing over it.
+- Save `Ctrl+S`, Save As… `Ctrl+Shift+S`, Print…, Open in Browser, Export as PDF…, Export as HTML…, Export as PNG… and Export as SVG… (unbound), New File `Ctrl+N`, New Folder `Ctrl+Shift+N`, Upload Files (unbound), Close Tab `Ctrl+W`, Open File `Ctrl+O`, Open Local `Ctrl+Shift+O`, Open Remote (unbound), Open Recent `Ctrl+R`, New Window (unbound), Reload Window (unbound), Close Vault (unbound), Quit `Ctrl+Q`.
+- Print… and the exports act on the tab the menu was opened on, else the tab in front (Preview, PDF, Diagram); over any tab but a note, a PDF or a diagram they do nothing, as Save As… does, and one a tab has no such file for (PDF, PNG and SVG for a note, HTML for a PDF or a diagram, PNG and SVG for a PDF) does nothing over it.
+  Open in Browser acts the same way on a note alone.
   Each is disabled where it would do nothing, so the primary menu greys it.
 - Open Local…, Open Remote…, Close Vault and Quit are `app.` actions, since each outlives the window that fired it; they still enter the palette's recently-run list.
 - **Reload Window** closes the window the way closing it does — every edit written or asked about, the session saved — and opens what it showed again: the same vault (a remote one connecting afresh), the same files from outside a vault, the same terminal session, with its tabs, panes and shells, at its size and maximized or fullscreen as it was.
