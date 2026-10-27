@@ -1214,7 +1214,7 @@ fn bench_lines_of(app: &Rc<App>, tab: &Rc<Tab>, original: String) {
 /// The completion popup over a list item in a real tab, through the key chain a press takes
 /// (`editor::keys`): Return with no row selected continues the list and puts the popup away,
 /// Down and Return accept the row instead, and a view taken off screen takes the popup with it.
-/// On a scratch vault: `popup_up true`, `popup_return Stop "- " up=false`,
+/// Over any note: `popup_up true`, `popup_return Stop "- " up=false`,
 /// `popup_selected_return Stop "- completion" up=false` and `popup_unmapped false`.
 fn bench_popup(app: &Rc<App>, tab: &Rc<Tab>, original: String) {
     // `set_text` is not an edit, so nothing here arms the autosave that would write it out.
@@ -1243,19 +1243,24 @@ fn bench_popup(app: &Rc<App>, tab: &Rc<Tab>, original: String) {
         commit: Vec::new(),
     };
     let (app, tab) = (app.clone(), tab.clone());
-    glib::timeout_add_local_once(Duration::from_millis(600), move || {
+    glib::spawn_future_local(async move {
+        glib::timeout_future(Duration::from_millis(600)).await;
         let Some(session) = completion::session(&tab) else {
             println!("bench popup_up no_session");
             return bench_lines_of(&app, &tab, original);
         };
         let none = gdk::ModifierType::empty();
-        let show = || {
+        let show = async || {
             tab.set_text(staged);
             tab.buffer.place_cursor(&tab.buffer.end_iter());
+            // The view measures the new lines at its next layout: until then the staged line
+            // sits where the old text's lines put it, under a long note off the bottom, and the
+            // popup is not shown for a place out of sight.
+            glib::timeout_future(Duration::from_millis(100)).await;
             session.show_items(vec![word.clone()]);
         };
         tab.view.grab_focus();
-        show();
+        show().await;
         println!("bench popup_up {}", tab.popup_shown());
         let answer = editor::press(&tab, gdk::Key::Return, none);
         println!(
@@ -1263,7 +1268,7 @@ fn bench_popup(app: &Rc<App>, tab: &Rc<Tab>, original: String) {
             caret_prefix(&tab),
             tab.popup_shown()
         );
-        show();
+        show().await;
         editor::press(&tab, gdk::Key::Down, none);
         let answer = editor::press(&tab, gdk::Key::Return, none);
         println!(
@@ -1271,7 +1276,7 @@ fn bench_popup(app: &Rc<App>, tab: &Rc<Tab>, original: String) {
             caret_prefix(&tab),
             tab.popup_shown()
         );
-        show();
+        show().await;
         tab.view.set_visible(false);
         println!("bench popup_unmapped {}", tab.popup_shown());
         tab.view.set_visible(true);
