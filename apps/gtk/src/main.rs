@@ -167,11 +167,16 @@ fn main() -> glib::ExitCode {
     if let Some(code) = askpass::maybe_run() {
         return code;
     }
-    // And this is the process that spawns it: a Sync over ssh points git's ssh back at this
-    // binary. Handed over rather than found, because the same code runs in `accent-cli serve`,
-    // whose binary has no askpass mode.
+    // The vault's PDF text pass spawns accent to read one PDF; that process only reads it.
+    if let Some(code) = accent_core::pdf_text::child() {
+        return glib::ExitCode::from(code);
+    }
+    // And this is the process that spawns both: a Sync over ssh points git's ssh back at this
+    // binary, and the pass its pdfium. Handed over rather than found, because the same code runs
+    // in `accent-cli serve`, whose binary has neither mode.
     if let Ok(exe) = std::env::current_exe() {
-        accent_core::git::set_askpass(exe);
+        accent_core::git::set_askpass(exe.clone());
+        accent_core::pdf_text::set_reader(exe);
     }
     // `--help` and the like are answered here, never reaching a running instance; so is a page
     // `accent-cli mcp` asks to have drawn.

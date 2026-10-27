@@ -1,5 +1,6 @@
-//! A PDF's text for the index, a page at a time: through pdfium where this build links it, and
-//! through poppler's `pdftotext` where it does not, which is a remote vault's static server.
+//! A PDF's text for the index, a page at a time: through pdfium where this build links it, in a
+//! child process where the app has named itself the reader ([`set_reader`]), and through poppler's
+//! `pdftotext` where it does not, which is a remote vault's static server.
 //!
 //! Both read the same shape: each page's text, its trailing whitespace trimmed, the pages joined by
 //! form feeds (U+000C), which is how `pdftotext` writes them and how the index finds a match's page.
@@ -7,9 +8,12 @@
 use std::ffi::OsStr;
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
+#[cfg(feature = "pdf")]
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -20,19 +24,63 @@ use crate::{Error, Result};
 /// each page costs a load.
 pub const MAX_PAGES: usize = 2000;
 
-/// How long `pdftotext` may spend on one file before it is given up on.
+/// How long a reading program may spend on one file before it is given up on.
 const DEADLINE: Duration = Duration::from_secs(60);
 
-/// How often a running `pdftotext` is checked for a stop or its deadline.
+/// How often a running reader is checked for a stop or its deadline.
 const TICK: Duration = Duration::from_millis(50);
+
+/// The most memory a reading program may take: a page of millions of glyphs costs pdfium hundreds
+/// of megabytes, and a damaged one may take all the machine has (2026-10-27).
+const MEMORY: u64 = 1 << 30;
+
+/// What makes a binary that answers [`child`] read the PDF it names.
+#[cfg(feature = "pdf")]
+const CHILD: &str = "ACCENT_PDF_TEXT";
+
+/// The program [`Extractor::Child`] runs, handed over at startup ([`set_reader`]).
+#[cfg(feature = "pdf")]
+static READER: OnceLock<PathBuf> = OnceLock::new();
 
 /// What reads a PDF's text on this machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Extractor {
+    /// pdfium in this process, where no program was named to read in a child.
     #[cfg(feature = "pdf")]
     Pdfium,
+    /// pdfium in a child: the program at this path, under [`CHILD`].
+    #[cfg(feature = "pdf")]
+    Child(PathBuf),
     /// The `pdftotext` program at this path.
     Pdftotext(PathBuf),
+}
+
+/// Read each PDF in a child process of `exe`, which calls [`child`] first thing: a PDF that runs
+/// pdfium past [`MEMORY`] or [`DEADLINE`] ends that child, not the app. Called once, at startup.
+#[cfg(feature = "pdf")]
+pub fn set_reader(exe: PathBuf) {
+    let _ = READER.set(exe);
+}
+
+/// The reading child, when [`CHILD`] names a PDF: each page's text to stdout, ended by a form feed
+/// as `pdftotext` ends it, then the exit code. `None` in any other process.
+#[cfg(feature = "pdf")]
+pub fn child() -> Option<u8> {
+    let path = std::env::var_os(CHILD)?;
+    let written = crate::pdf::PdfDoc::open(&path)
+        .and_then(|doc| write_pages(&doc, &mut std::io::stdout().lock()));
+    Some(u8::from(written.is_err()))
+}
+
+/// Each page's text, ended by a form feed; one of the page's own is written as a line break, or the
+/// reader would take it for the page's end.
+#[cfg(feature = "pdf")]
+fn write_pages(doc: &crate::pdf::PdfDoc, out: &mut impl std::io::Write) -> Result<()> {
+    for page in 0..doc.page_count().min(MAX_PAGES) {
+        let text = doc.page_plain_text(page).unwrap_or_default();
+        write!(out, "{}\x0c", text.replace('\x0c', "\n")).map_err(|e| Error::io("stdout", e))?;
+    }
+    out.flush().map_err(|e| Error::io("stdout", e))
 }
 
 /// One PDF's text as the index holds it: the pages read, joined by form feeds, at most
@@ -69,12 +117,15 @@ impl Text {
     }
 }
 
-/// The extractor this machine has: pdfium where this build links it and the library is found,
-/// otherwise a `pdftotext` on `PATH`, otherwise none.
+/// The extractor this machine has: pdfium where this build links it and the library is found, in
+/// a child where [`set_reader`] named one, otherwise a `pdftotext` on `PATH`, otherwise none.
 pub fn extractor() -> Option<Extractor> {
     #[cfg(feature = "pdf")]
     if crate::pdf::available() {
-        return Some(Extractor::Pdfium);
+        return Some(match READER.get() {
+            Some(exe) => Extractor::Child(exe.clone()),
+            None => Extractor::Pdfium,
+        });
     }
     pdftotext_on(&std::env::var_os("PATH")?)
 }
@@ -107,24 +158,36 @@ pub fn read(with: &Extractor, path: &Path, stop: &(dyn Fn() -> bool + Sync)) -> 
                 }
             }
         }
-        Extractor::Pdftotext(exe) => pdftotext(exe, path, stop, &mut text)?,
+        #[cfg(feature = "pdf")]
+        Extractor::Child(exe) => {
+            let mut cmd = Command::new(exe);
+            cmd.env(CHILD, path);
+            piped(cmd, path, stop, &mut text)?
+        }
+        Extractor::Pdftotext(exe) => {
+            let mut cmd = Command::new(exe);
+            cmd.args(["-q", "-enc", "UTF-8", "-l", &MAX_PAGES.to_string()])
+                .arg(path)
+                .arg("-");
+            piped(cmd, path, stop, &mut text)?
+        }
     }
     Ok(text)
 }
 
-/// The pages `pdftotext` writes for `path`, taken as each one ends in its form feed, the program
-/// killed on a stop, past its [`DEADLINE`] or once `text` wants no more. A page it had not finished
-/// is left out.
-fn pdftotext(
-    exe: &Path,
+/// The pages a reading program writes for `path`, taken as each one ends in its form feed, the
+/// program killed on a stop, past its [`DEADLINE`] or once `text` wants no more, and ended by the
+/// system past [`MEMORY`]. A page it had not finished is left out.
+fn piped(
+    mut cmd: Command,
     path: &Path,
     stop: &(dyn Fn() -> bool + Sync),
     text: &mut Text,
 ) -> Result<()> {
-    let mut child = Command::new(exe)
-        .args(["-q", "-enc", "UTF-8", "-l", &MAX_PAGES.to_string()])
-        .arg(path)
-        .arg("-")
+    let exe = PathBuf::from(cmd.get_program());
+    // SAFETY: `capped` makes only `setrlimit` calls, which are async-signal-safe.
+    unsafe { cmd.pre_exec(capped) };
+    let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -174,9 +237,32 @@ fn pdftotext(
     }
     if !status.success() && text.pages == 0 {
         return Err(Error::Pdf(format!(
-            "pdftotext cannot read {}: {status}",
+            "{} cannot read {}: {status}",
+            exe.display(),
             path.display()
         )));
+    }
+    Ok(())
+}
+
+/// A reading program's limits: [`MEMORY`] of data, and no core file, which a reader aborted for
+/// want of memory would otherwise write.
+fn capped() -> std::io::Result<()> {
+    let data = libc::rlimit {
+        rlim_cur: MEMORY as libc::rlim_t,
+        rlim_max: MEMORY as libc::rlim_t,
+    };
+    let core = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: plain calls on this process's own limits, with values that outlive them.
+    unsafe {
+        if libc::setrlimit(libc::RLIMIT_DATA, &data) != 0
+            || libc::setrlimit(libc::RLIMIT_CORE, &core) != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
     }
     Ok(())
 }
@@ -317,6 +403,19 @@ mod tests {
         let mut text = Text::default();
         text.push("one\r\ntwo\rthree\x0cfour pa\u{2}rameters  \n\n");
         assert_eq!(text.body, "one\ntwo\nthree\nfour parameters");
+    }
+
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn the_reading_child_ends_every_page_in_a_form_feed() {
+        if !crate::pdf::available() {
+            return eprintln!("skipping: no libpdfium");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(&dir, "three.pdf", &text_pdf(&["first", "", "third"]));
+        let mut out = Vec::new();
+        write_pages(&crate::pdf::PdfDoc::open(&path).unwrap(), &mut out).unwrap();
+        assert_eq!(out, b"first\x0c\x0cthird\x0c");
     }
 
     #[test]
