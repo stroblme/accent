@@ -130,6 +130,11 @@ fn theme_css(
          pre code {{ background: none; padding: 0; }}\n\
          blockquote {{ margin: 1em 0; padding-left: 12px; border-left: 3px solid {accent}; \
          color: {quote}; font-style: italic; }}\n\
+         /* A callout, of whichever type: a quote's bar over a faint tint, upright in the body\n\
+            colour, its title in the accent. A flow root, so its margins stay inside the tint. */\n\
+         blockquote.callout {{ display: flow-root; padding-right: 12px; border-radius: 0 6px 6px 0; \
+         background: {surface}; color: {text}; font-style: normal; }}\n\
+         .callout-title {{ color: {accent}; font-weight: 700; }}\n\
          hr {{ border: 0; border-top: 1px solid {rule}; margin: 24px 0; }}\n\
          table {{ border-collapse: collapse; }}\n\
          /* WebKit pads every cell with the table's cellpadding, 1px unless it says otherwise, as\n\
@@ -199,6 +204,10 @@ mod tests {
         );
         assert!(css.contains("a.tag { text-decoration: none; }"), "{css}");
         assert!(css.contains("border-left: 3px solid rgba(255, 0, 0, 1.00)"));
+        assert!(
+            css.contains(".callout-title { color: rgba(255, 0, 0, 1.00); font-weight: 700; }"),
+            "{css}"
+        );
     }
 
     /// A conflict block's boxes are the editor's tints of its sides, their captions the tints of
