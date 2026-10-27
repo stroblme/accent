@@ -314,6 +314,12 @@ impl PdfView {
         }
     }
 
+    /// The points of every stroke the pen has finished. Only `ACCENT_BENCH_PDF=pen:` reads it.
+    #[cfg(feature = "bench")]
+    pub fn drawn_points(&self) -> usize {
+        self.imp().drawn.get()
+    }
+
     /// The page a thumbnail strip frames. Only `ACCENT_BENCH_PDF` reads it.
     #[cfg(feature = "bench")]
     pub fn framed(&self) -> usize {
@@ -679,6 +685,9 @@ mod imp {
         /// How many tiles on screen the last frame showed other than sharp.
         #[cfg(feature = "bench")]
         pub unsharp: Cell<usize>,
+        /// The points of every stroke the pen has finished, as the gesture took them.
+        #[cfg(feature = "bench")]
+        pub drawn: Cell<usize>,
         pub page: Cell<usize>,
         pub shown: RefCell<std::ops::RangeInclusive<usize>>,
         /// The paper colour for the scheme in force, which costs a CSS parse to work out and is
@@ -739,6 +748,8 @@ mod imp {
                 unrendered: RefCell::new(Vec::new()),
                 #[cfg(feature = "bench")]
                 unsharp: Cell::new(0),
+                #[cfg(feature = "bench")]
+                drawn: Cell::new(0),
                 page: Cell::new(0),
                 shown: RefCell::new(0..=0),
                 paper: Cell::new(None),

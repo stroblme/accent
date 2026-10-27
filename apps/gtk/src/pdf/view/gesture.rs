@@ -2,8 +2,9 @@
 //! Choose tools by input device and handle stylus dots.
 
 use adw::prelude::*;
+use gtk::glib::translate::IntoGlib;
 use gtk::subclass::prelude::*;
-use gtk::{gdk, glib};
+use gtk::{gdk, glib, graphene};
 
 use super::PdfView;
 use crate::pdf::Span;
@@ -119,6 +120,13 @@ impl PdfView {
                             _ => return,
                         };
                         let at = obj.point_on(page, x + dx, y + dy);
+                        let merged: Vec<(f32, f32)> = match mode.shapes() {
+                            true => Vec::new(),
+                            false => merged(gesture, &obj)
+                                .into_iter()
+                                .map(|(x, y)| obj.point_on(page, x, y))
+                                .collect(),
+                        };
                         if let Some(stroke) = obj.imp().strokes.borrow_mut().last_mut()
                             && !stroke.done
                         {
@@ -131,6 +139,7 @@ impl PdfView {
                                     _ => at,
                                 });
                             } else {
+                                stroke.points.extend(merged);
                                 stroke.points.push(at);
                             }
                         }
@@ -170,6 +179,10 @@ impl PdfView {
                         _ => None,
                     };
                     drop(strokes);
+                    #[cfg(feature = "bench")]
+                    if let Some((_, points)) = &finished {
+                        obj.imp().drawn.set(obj.imp().drawn.get() + points.len());
+                    }
                     if let Some((page, points)) = finished
                         && let Some(f) = obj.imp().on_ink.borrow().as_ref()
                     {
@@ -473,6 +486,29 @@ impl PdfView {
         let page = page_at(&layout, f64::from(cy));
         Some((page, layout.to_page(page, cx, cy)?))
     }
+}
+
+/// The positions GDK merged into the motion `gesture` is handling, oldest first, in `view`'s
+/// coordinates. A frame's motions reach a gesture as the last of them, the earlier ones its
+/// history, in surface coordinates; a pen's too, which is all `GestureStylus::backlog` maps.
+fn merged(gesture: &gtk::GestureDrag, view: &PdfView) -> Vec<(f64, f64)> {
+    let event = gesture.current_event();
+    let event = event.filter(|e| e.event_type() == gdk::EventType::MotionNotify);
+    let (Some(event), Some(native)) = (event, view.native()) else {
+        return Vec::new();
+    };
+    let (sx, sy) = native.surface_transform();
+    let (x, y) = (gdk::AxisUse::X.into_glib(), gdk::AxisUse::Y.into_glib());
+    event
+        .history()
+        .iter()
+        .filter_map(|c| {
+            let (hx, hy) = (c.axes()[x as usize] - sx, c.axes()[y as usize] - sy);
+            let at = graphene::Point::new(hx as f32, hy as f32);
+            let at = native.compute_point(view, &at)?;
+            Some((f64::from(at.x()), f64::from(at.y())))
+        })
+        .collect()
 }
 
 /// Whether the seat has a stylus at all. Asked on the press rather than cached: a tablet can be

@@ -355,7 +355,8 @@ pub(super) fn bench_pdf_strip(app: &Rc<App>, rel: &str) {
 /// The pen drawing 24 strokes on `rel` through XTEST, a motion every 10 ms, while the PDF text pass
 /// reads what the vault holds unread and each save of `rel` again (with `,stop` it is stopped
 /// first): how long the reading view went without a frame, and without a motion while the button
-/// was down, and how many strokes reached the file. A gap past 50 ms is a stroke drawn straight.
+/// was down, and how many strokes reached the file with how many points each. A gap past 50 ms is
+/// a stroke drawn straight.
 pub(super) fn bench_pdf_pen(app: &Rc<App>, arg: &str) {
     let (rel, stop) = match arg.strip_suffix(",stop") {
         Some(rel) => (rel.to_string(), true),
@@ -379,16 +380,24 @@ pub(super) fn bench_pdf_pen(app: &Rc<App>, arg: &str) {
         }
         app.pdf_mode(pdfview::Mode::Pen);
         glib::timeout_future(Duration::from_secs(2)).await;
+        // The file's strokes and their points.
         let inks = |pdf: &pdftab::PdfTab| {
             let doc = accent_core::pdf::PdfDoc::open(pdf.path()).ok();
-            doc.map_or(0, |d| {
+            let inks = doc.map_or(Vec::new(), |d| {
                 (0..d.page_count())
-                    .map(|p| d.inks(p).map_or(0, |i| i.len()))
-                    .sum()
-            })
+                    .flat_map(|p| d.inks(p).unwrap_or_default())
+                    .collect()
+            });
+            let points = inks.iter().map(|i| i.points.len()).sum::<usize>();
+            (inks.len(), points)
         };
         let before = inks(&pdf);
         let view = pdf.views()[0].clone();
+        let taken = || {
+            view.downcast_ref::<pdfview::PdfView>()
+                .map_or(0, |v| v.drawn_points())
+        };
+        let taken_before = taken();
         let frames = Rc::new(RefCell::new(Vec::new()));
         let tick = view.add_tick_callback({
             let frames = frames.clone();
@@ -456,12 +465,16 @@ pub(super) fn bench_pdf_pen(app: &Rc<App>, arg: &str) {
             )
         };
         let frames: Vec<Option<Instant>> = frames.borrow().iter().copied().map(Some).collect();
+        let after = inks(&pdf);
+        let inked = after.0 - before.0;
         println!(
-            "bench pen text_pass={running} rss_mb={} frames {} motions {} strokes=24 inked={}",
+            "bench pen text_pass={running} rss_mb={} frames {} motions {} strokes=24 inked={inked} \
+             taken_per_stroke={} stored_per_stroke={}",
             super::notebook::rss_mb(),
             gaps(&frames),
             gaps(&motions.borrow()),
-            inks(&pdf) - before
+            (taken() - taken_before) / 24,
+            (after.1 - before.1) / inked.max(1)
         );
         bench_quit(&app);
     });
