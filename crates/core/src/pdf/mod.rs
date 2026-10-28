@@ -88,11 +88,13 @@ pub fn available() -> bool {
     pdfium().is_ok()
 }
 
-// Pdfium is not thread-safe; its authors recommend parallel *processes*, not threads. Note that
-// pdfium-render 0.9's `thread_safe` feature no longer serialises calls — since 0.9.0 it only adds
-// `Send`/`Sync` impls, contrary to its README — so two threads touching pdfium abort the process
-// with `free(): invalid size`. Every entry point below therefore holds this lock, closing a
-// document included.
+// Pdfium is not thread-safe; its authors recommend parallel *processes*, not threads. pdfium-render
+// 0.9.4's `thread_safe` puts each call behind a process-wide mutex of its own (0.9.0 to 0.9.3 only
+// added `Send`/`Sync`, and two threads touching pdfium aborted with `free(): invalid size`). One
+// call at a time is not one operation at a time, though: a tile is a page loaded, drawn and
+// closed, and pdfium's last error and pdfium-render's page cache are shared by every document. So
+// every entry point below still holds this lock for the whole operation, closing a document
+// included; the reader pdfium calls back into (`doc::Tail`) takes neither lock.
 //
 // ponytail: a global lock means page renders never overlap, so a background pre-render blocks the
 // visible one. That is the ceiling. Upgrade path when it bites: give each worker its own pdfium in
@@ -326,7 +328,7 @@ pub struct Outline {
 /// What a document says about itself: its information dictionary, each entry `None` where it
 /// says nothing, and the PDF version its header declares.
 ///
-/// No modification date: pdfium-render 0.9.3 asks pdfium for `ModificationDate` where the
+/// No modification date: pdfium-render (0.9.4) asks pdfium for `ModificationDate` where the
 /// dictionary's key is `ModDate`, so it never reads (ISSUES.md).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Info {

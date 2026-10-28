@@ -334,7 +334,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Nothing is computed while the section is out of sight.
 - No Created row: `statx`'s birth time is missing on the musl `accent-cli` a remote vault runs, and accent's own save (a new file renamed over the old), Syncthing and most editors replace the file, so where there is one it reads as the last save (user decision 2026-10-08).
   No git state, tag or backlink count either: the Git pane, Tags and References say those.
-  No PDF Modified: pdfium-render 0.9.3 asks for a key the dictionary does not have (ISSUES.md), and the file's own Modified is above it.
+  No PDF Modified: pdfium-render (0.9.4) asks for a key the dictionary does not have (ISSUES.md), and the file's own Modified is above it.
 - A shell's Details are one Terminal group (user decision 2026-10-09): Shell, the program its holder started; PID; Host, this machine's name or the host's; Directory; Running, the command line of what holds the foreground, left out at the prompt; and Started, an absolute date and time as Modified is, so nothing ticks.
   No size, scrollback or whether it is held (user decision 2026-10-13).
   Being all a shell shows, Details opens as one comes to the front, without touching the fold the session keeps, which the next file gets back (user decision 2026-10-09).

@@ -1952,14 +1952,14 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
-        "url": "https://static.crates.io/crates/pdfium-render/pdfium-render-0.9.3.crate",
-        "sha256": "826f8f64bc88cb15381cbb5aa245c1500632cd8a453b244bc2b0cbaff7098077",
-        "dest": "cargo/vendor/pdfium-render-0.9.3"
+        "url": "https://static.crates.io/crates/pdfium-render/pdfium-render-0.9.4.crate",
+        "sha256": "8948a803616a9e936b15a6637af2cd48c5fb8ae0fcdeb3c32eac3a540e255a19",
+        "dest": "cargo/vendor/pdfium-render-0.9.4"
     },
     {
         "type": "inline",
-        "contents": "{\"package\": \"826f8f64bc88cb15381cbb5aa245c1500632cd8a453b244bc2b0cbaff7098077\", \"files\": {}}",
-        "dest": "cargo/vendor/pdfium-render-0.9.3",
+        "contents": "{\"package\": \"8948a803616a9e936b15a6637af2cd48c5fb8ae0fcdeb3c32eac3a540e255a19\", \"files\": {}}",
+        "dest": "cargo/vendor/pdfium-render-0.9.4",
         "dest-filename": ".cargo-checksum.json"
     },
     {
