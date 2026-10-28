@@ -9,7 +9,7 @@ use accent_core::config::DrawingConfig;
 use accent_core::pdf::Theme;
 
 use super::Mode;
-use super::tools::{nearest, widths};
+use super::tools::{Hand, drag_of, nearest, widths};
 use crate::ring::{Ring, dot};
 
 /// Told which tool was in hand and what was picked for it.
@@ -59,6 +59,10 @@ pub struct PdfRing {
     config: RefCell<DrawingConfig>,
     /// The document's recolouring, which the swatches are painted through.
     theme: Rc<Cell<Theme>>,
+    /// The tool in hand, as the window has it.
+    tool: Cell<Mode>,
+    /// Whether the pen's eraser end is at the page, which the ring shows in place of the tool.
+    eraser: Cell<bool>,
     on_choice: RefCell<Option<OnChoice>>,
 }
 
@@ -82,13 +86,9 @@ impl PdfRing {
             .collect();
         let swatches: Vec<_> = (0..swatch_count)
             .map(|i| {
-                // As the page shows the ink, which on a recoloured page is not the colour the
-                // file is given: Solarized shows black as its blue-grey text.
                 let theme = theme.clone();
-                let colour = move |_: &gtk::DrawingArea| {
-                    let rgb = crate::theme::swatches()[i].unwrap_or_else(crate::theme::accent_rgb);
-                    crate::theme::rgba(super::view::shown(rgb, theme.get()), 1.0)
-                };
+                let colour =
+                    move |_: &gtk::DrawingArea| crate::theme::rgba(painted(i, theme.get()), 1.0);
                 let button = option(3 + i, dot(14.0, colour).upcast_ref());
                 let label = match i {
                     0 => "Accent Colour".to_string(),
@@ -116,6 +116,8 @@ impl PdfRing {
             erasers,
             config: RefCell::new(DrawingConfig::default()),
             theme,
+            tool: Cell::new(Mode::Select),
+            eraser: Cell::new(false),
             on_choice: RefCell::new(None),
         });
         ring.wire_options();
@@ -243,9 +245,55 @@ impl PdfRing {
 
     /// Show which tool is in hand, and its options.
     pub fn set_tool(&self, mode: Mode) {
-        self.ring.set_tool(mode);
+        self.tool.set(mode);
+        self.show_tool();
+    }
+
+    /// Show the eraser while the pen's eraser end is at the page, and the tool in hand again once
+    /// it is not. Nothing is picked: the window's tool and the config stay as they were.
+    pub fn set_eraser(&self, eraser: bool) {
+        self.eraser.set(eraser);
+        self.show_tool();
+    }
+
+    /// The tool the pen would use, by the end at the page (`tools::drag_of`): the eraser under any
+    /// tool in hand, the tool itself under its tip or with none in hand.
+    fn show_tool(&self) {
+        let tool = self.tool.get();
+        let pen = Hand::Pen {
+            eraser: self.eraser.get(),
+        };
+        self.ring.set_tool(drag_of(tool, pen, true).unwrap_or(tool));
         self.sync_options();
     }
+
+    /// The tool shown, which options show, and the swatches' colours as painted, for the drills.
+    #[cfg(feature = "bench")]
+    pub fn state(&self) -> String {
+        let shown =
+            |buttons: &[gtk::ToggleButton]| buttons.iter().filter(|b| b.is_visible()).count();
+        let painted: Vec<String> = (0..self.swatches.len())
+            .map(|i| {
+                let [r, g, b] = painted(i, self.theme.get());
+                format!("#{r:02x}{g:02x}{b:02x}")
+            })
+            .collect();
+        format!(
+            "shown={:?} widths={} swatches={} erasers={} painted={}",
+            self.ring.tool(),
+            shown(&self.widths),
+            shown(&self.swatches),
+            shown(&self.erasers),
+            painted.join(",")
+        )
+    }
+}
+
+/// Swatch `i` as a page recoloured by `theme` shows its ink, which on a recoloured page is not the
+/// colour the file is given: Solarized shows black as its blue-grey text.
+fn painted(i: usize, theme: Theme) -> [u8; 3] {
+    let rgb = crate::theme::swatches()[i].unwrap_or_else(crate::theme::accent_rgb);
+    super::view::shown(rgb, theme)
 }
 
 #[cfg(test)]

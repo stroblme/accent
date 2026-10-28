@@ -119,6 +119,11 @@ impl PdfTab {
             self,
             move |page, id, matrix| tab.ask(Request::Transform { page, id, matrix })
         ));
+        view.connect_eraser(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move |eraser| tab.ring.set_eraser(eraser)
+        ));
     }
 
     /// Wire render requests and page clicks shared by reading and thumbnail views. Selection,

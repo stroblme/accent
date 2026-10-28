@@ -780,6 +780,12 @@ impl PdfTab {
         self.ring.widget().is_visible()
     }
 
+    /// The ring itself, for the drills.
+    #[cfg(feature = "bench")]
+    pub fn ring(&self) -> &ring::PdfRing {
+        &self.ring
+    }
+
     /// What the status bar says while a pen is out, or nothing while one is not. The action's
     /// own label, so the readout, the ring's tooltip and the palette say one word between them.
     pub fn mode_label(&self) -> Option<&'static str> {

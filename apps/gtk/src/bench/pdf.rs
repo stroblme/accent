@@ -374,6 +374,71 @@ pub(super) fn bench_pdf_strip(app: &Rc<App>, rel: &str) {
     });
 }
 
+/// The drawing ring with the pen in hand: the tool and options it shows while the pen's eraser
+/// end is at the page and once its tip is back, told by hand since Xvfb has no stylus, the
+/// window's tool and the config untouched; then under Light, Dark and Solarized the swatches as
+/// painted and the pen's colour as written, with a picture of the ring for each in `$TMPDIR`.
+pub(super) fn bench_pdf_ring(app: &Rc<App>, rel: &str) {
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let Some(pdf) = opened(&app, &rel).await else {
+            println!("bench ring no_tab");
+            return bench_quit(&app);
+        };
+        app.pdf_mode(pdfview::Mode::Pen);
+        let view = pdf.views()[0].clone();
+        let Some(reader) = view.downcast_ref::<pdfview::PdfView>() else {
+            return bench_quit(&app);
+        };
+        let config = app.config.borrow().drawing.clone();
+        for eraser in [true, false] {
+            reader.bench_pen(eraser);
+            println!(
+                "bench ring eraser={eraser} {} tool={:?} mode={:?} config_kept={}",
+                pdf.ring().state(),
+                app.tool.get(),
+                pdf.mode(),
+                app.config.borrow().drawing == config
+            );
+        }
+        // The mouse moved over the page after the eraser end is another hand: the pen comes back.
+        reader.bench_pen(true);
+        let (sx, sy) = app.window.surface_transform();
+        let mut steps = Vec::new();
+        for f in [0.4, 0.5] {
+            let p = graphene::Point::new(view.width() as f32 * f, view.height() as f32 * f);
+            let p = view.compute_point(&app.window, &p).unwrap_or(p);
+            steps.push(format!(
+                "move {:.0} {:.0}",
+                f64::from(p.x()) + sx,
+                f64::from(p.y()) + sy
+            ));
+        }
+        super::git::xtest(&steps.join("; ")).await;
+        println!("bench ring mouse {}", pdf.ring().state());
+        let dir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
+        use accent_core::config::Theme;
+        for (name, theme) in [
+            ("light", Theme::Light),
+            ("dark", Theme::Dark),
+            ("solarized", Theme::Solarized),
+        ] {
+            crate::theme::apply(theme);
+            glib::timeout_future(Duration::from_millis(300)).await;
+            pdf.restyle();
+            style::bench_painted(&app.window, String::new).await;
+            let path = std::path::Path::new(&dir).join(format!("ring-{name}.png"));
+            let shot = super::diagram::shoot(pdf.ring().widget(), &path);
+            println!(
+                "bench ring theme={name} {} written={:?} pictured={shot}",
+                pdf.ring().state(),
+                reader.ink_style(pdfview::Mode::Pen).rgba,
+            );
+        }
+        bench_quit(&app);
+    });
+}
+
 /// The pen drawing 24 strokes on `rel` through XTEST, a motion every 10 ms, while the PDF text pass
 /// reads what the vault holds unread and each save of `rel` again (with `,stop` it is stopped
 /// first): how long the reading view went without a frame, and without a motion while the button

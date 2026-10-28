@@ -434,6 +434,11 @@ impl PdfView {
         *self.imp().on_erase.borrow_mut() = Some(Box::new(f));
     }
 
+    /// Called with whether the pen's eraser end came to the page, or another hand after it.
+    pub fn connect_eraser(&self, f: impl Fn(bool) + 'static) {
+        *self.imp().on_eraser.borrow_mut() = Some(Box::new(f));
+    }
+
     /// Called with a page, the id of a stroke on it and the map to move it by.
     pub fn connect_transform(&self, f: impl Fn(usize, u32, accent_core::pdf::Matrix) + 'static) {
         *self.imp().on_transform.borrow_mut() = Some(Box::new(f));
@@ -627,6 +632,8 @@ mod imp {
     /// it, and whether the same drag took one before it.
     type At = Box<dyn Fn(usize, u32, Option<super::Pass>, bool)>;
     type Transform = Box<dyn Fn(usize, u32, accent_core::pdf::Matrix)>;
+    /// Whether the pen's eraser end came to the page, or another hand after it.
+    type EraserEnd = Box<dyn Fn(bool)>;
     type Jump = Box<dyn FnOnce(&super::PdfView)>;
 
     #[derive(glib::Properties)]
@@ -695,6 +702,8 @@ mod imp {
         pub last_erase: RefCell<HashMap<usize, u64>>,
         /// Whether the pointer is the stylus's dot rather than the arrow a tool otherwise shows.
         pub dot: Cell<bool>,
+        /// Whether the last hand over the page was the pen's eraser end.
+        pub eraser: Cell<bool>,
         /// Where the pointer is over the view, until it leaves: what a Ctrl+wheel zooms around.
         pub over: Cell<Option<(f64, f64)>>,
         pub current_mark: Cell<Option<(usize, usize)>>,
@@ -735,6 +744,7 @@ mod imp {
         pub on_ink: RefCell<Option<Stroke>>,
         pub on_erase: RefCell<Option<At>>,
         pub on_transform: RefCell<Option<Transform>>,
+        pub on_eraser: RefCell<Option<EraserEnd>>,
         pub on_motion: RefCell<Option<Coords>>,
         pub on_page: RefCell<Option<Page>>,
         pub on_shown: RefCell<Option<Box<dyn Fn()>>>,
@@ -773,6 +783,7 @@ mod imp {
                 erases: Cell::new(0),
                 last_erase: RefCell::new(HashMap::new()),
                 dot: Cell::new(false),
+                eraser: Cell::new(false),
                 over: Cell::new(None),
                 current_mark: Cell::new(None),
                 jump: RefCell::new(None),
@@ -799,6 +810,7 @@ mod imp {
                 on_ink: RefCell::new(None),
                 on_erase: RefCell::new(None),
                 on_transform: RefCell::new(None),
+                on_eraser: RefCell::new(None),
                 on_motion: RefCell::new(None),
                 on_page: RefCell::new(None),
                 on_shown: RefCell::new(None),

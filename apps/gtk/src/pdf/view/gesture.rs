@@ -26,7 +26,9 @@ impl PdfView {
             obj,
             move |motion, x, y| {
                 obj.imp().over.set(Some((x, y)));
-                obj.show_dot(motion);
+                let hand = hand_of(motion);
+                obj.show_dot(hand);
+                obj.note_hand(hand);
                 let handler = obj.imp().on_motion.borrow();
                 if let Some(f) = handler.as_ref() {
                     f(&obj, x, y);
@@ -51,6 +53,7 @@ impl PdfView {
             move |gesture, x, y| {
                 obj.imp().drag_from.set(Some((x, y)));
                 obj.imp().held.set(false);
+                obj.note_hand(hand_of(gesture));
                 // A pen or an eraser claims the sequence at once, unlike a selection, which
                 // waits to see whether the pointer moves: a stroke that let the scrolled
                 // window have the first few pixels would scroll the page under the hand.
@@ -291,8 +294,8 @@ impl PdfView {
     /// Under a stylus with a tool in hand the pointer is a dot where the ink will go; under
     /// anything else it is the arrow a tool shows. Set only when that changes: a cursor per event
     /// of travel is what the link hover avoids too.
-    fn show_dot(&self, controller: &impl IsA<gtk::EventController>) {
-        let pen = matches!(hand_of(controller), Hand::Pen { .. });
+    fn show_dot(&self, hand: Hand) {
+        let pen = matches!(hand, Hand::Pen { .. });
         let dot = self.imp().mode.get() != Mode::Select && pen;
         if self.imp().dot.replace(dot) == dot {
             return;
@@ -301,6 +304,26 @@ impl PdfView {
             true => self.set_cursor(Some(&dot_cursor())),
             false => self.set_cursor_from_name(Some("default")),
         }
+    }
+
+    /// Tell the tab when the pen's eraser end comes to the page, and when another hand does after
+    /// it, so the ring shows the eraser while that end is in use. Its hover is enough: GTK hands a
+    /// widget no proximity events, but a stylus in the air moves the pointer with its tool, on
+    /// Wayland in the same frame as its proximity, before it touches.
+    fn note_hand(&self, hand: Hand) {
+        let eraser = hand == Hand::Pen { eraser: true };
+        if self.imp().eraser.replace(eraser) != eraser
+            && let Some(f) = self.imp().on_eraser.borrow().as_ref()
+        {
+            f(eraser);
+        }
+    }
+
+    /// As though the pen's eraser end, or its tip, had come to the page, which no stylus under
+    /// Xvfb can.
+    #[cfg(feature = "bench")]
+    pub fn bench_pen(&self, eraser: bool) {
+        self.note_hand(Hand::Pen { eraser });
     }
 
     /// The Adjust tool's press: a handle of the stroke already held, else whichever stroke is

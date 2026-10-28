@@ -218,7 +218,9 @@ use tags::bench_tags;
 ///   `pen:<rel_path>[,stop][,<n>]` (main-loop gaps under 24 XTEST pen strokes while the PDF text
 ///   pass runs, or stopped, onto `n` strokes put on the first page first; render-thread work per
 ///   stroke; the tools' strokes against the file through an erase, its Undo and a move; writes
-///   the file).
+///   the file),
+///   `ring:<rel_path>` (the ring under the pen's eraser end, told by hand, and its swatches
+///   under Light, Dark and Solarized, pictured into `$TMPDIR`).
 /// - `ACCENT_BENCH_DRAWING=1`: New Drawing; `sketch:<rel_note>`: Insert Sketch.
 /// - `ACCENT_BENCH_TABS=<rel_note>,<rel_pdf>`: preview/tab close transitions.
 ///   Modes: `pin:<a>,<b>,<c>,<d>` then `pins` (save/restore one scratch session),
@@ -607,6 +609,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(arg) = rel.strip_prefix("pen:") {
                 return pdf::bench_pdf_pen(&app, arg);
+            }
+            if let Some(rel) = rel.strip_prefix("ring:") {
+                return pdf::bench_pdf_ring(&app, rel);
             }
             if let Some(rel) = rel.strip_prefix("synctex:") {
                 return synctex::bench_synctex(&app, rel);
