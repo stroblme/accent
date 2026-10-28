@@ -490,7 +490,7 @@ impl PdfView {
     /// Apply page strokes only if their `erases` count includes this view's latest erase on the
     /// page. Older replies are stale relative to locally updated strokes; the erase sends a fresh
     /// list. An erase on another page does not hold this one's back: nothing would ask again.
-    /// Follow an adjusted selection by stroke ID or clear it if deleted.
+    /// Follow an adjusted selection, a stroke or a text, by its ID or clear it if deleted.
     pub fn set_inks(&self, page: usize, inks: Vec<NamedInk>, texts: Vec<NamedText>, erases: u64) {
         #[cfg(feature = "bench")]
         {
@@ -506,15 +506,14 @@ impl PdfView {
             if let Some(a) = adjust.as_ref()
                 && a.page == page
             {
-                let fresh = inks.iter().find(|(id, _)| *id == a.id);
-                *adjust = fresh.map(|(id, i)| Selected {
-                    page,
-                    id: *id,
-                    points: i.points.clone(),
-                    bounds: i.bounds,
-                    style: i.style,
+                let stroke = inks.iter().find(|(id, _)| *id == a.id);
+                let text = || texts.iter().find(|(id, _)| *id == a.id);
+                let fresh = (stroke.map(|i| Selected::stroke(page, i)))
+                    .or_else(|| text().map(|t| Selected::text(page, t)));
+                *adjust = fresh.map(|fresh| Selected {
                     handle: a.handle,
                     matrix: a.matrix,
+                    ..fresh
                 });
             }
         }

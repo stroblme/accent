@@ -9,7 +9,7 @@ use gtk::{gdk, glib, graphene};
 use super::PdfView;
 use crate::pdf::Span;
 use crate::pdf::geometry::page_at;
-use crate::pdf::protocol::{Pass, fresh_id};
+use crate::pdf::protocol::{NamedInk, Pass, fresh_id};
 use crate::pdf::tools::{
     ADJUST_RADIUS, HANDLE, Hand, Handle, Mode, Selected, Stroke, drag_matrix, drag_of, handle_at,
     rotate_handle, shape_of, snap, turn_matrix, width_of,
@@ -351,8 +351,8 @@ impl PdfView {
     }
 
     /// The Adjust tool's press: a handle of the stroke already held, its rotate handle first,
-    /// else whichever stroke is under the pointer, else nothing. Whether the press took hold of
-    /// anything.
+    /// else whichever stroke or text of ours is under the pointer, else nothing. A text has no
+    /// handles: anywhere on it is its middle. Whether the press took hold of anything.
     fn adjust_press(&self, x: f64, y: f64) -> bool {
         let Some((page, at)) = self.nearest_page_point(x, y) else {
             return false;
@@ -363,39 +363,35 @@ impl PdfView {
         if let Some(a) = adjust.as_mut() {
             // Measured on the held stroke's page: the ring may stand off its paper.
             let (rx, ry) = rotate_handle(a.bounds, scale);
-            let ring = (self.on_page(a.page, x, y))
-                .is_some_and(|(px, py)| (px - rx).hypot(py - ry) <= grip);
+            let ring = !a.typed
+                && (self.on_page(a.page, x, y))
+                    .is_some_and(|(px, py)| (px - rx).hypot(py - ry) <= grip);
             let held = match ring {
                 true => Some(Handle::Rotate),
                 false => (a.page == page)
                     .then(|| handle_at(a.bounds, at, grip))
-                    .flatten(),
+                    .flatten()
+                    .map(|h| if a.typed { Handle::Move } else { h }),
             };
             if let Some(handle) = held {
                 a.handle = Some(handle);
                 return true;
             }
         }
-        // The stroke under the pointer first, then the first whose box it is inside: a thin
-        // line wants the pointer on it, a circle's empty middle still belongs to the circle.
-        let inks = self.imp().inks.borrow();
-        let found = inks.get(&page).and_then(|inks| {
-            inks.iter()
-                .find(|(_, i)| accent_core::pdf::hit(&i.points, at, ADJUST_RADIUS))
-                .or_else(|| {
-                    inks.iter()
-                        .find(|(_, i)| handle_at(i.bounds, at, grip).is_some())
-                })
-        });
-        *adjust = found.map(|(id, i)| Selected {
-            page,
-            id: *id,
-            points: i.points.clone(),
-            bounds: i.bounds,
-            style: i.style,
-            handle: Some(Handle::Move),
-            matrix: accent_core::pdf::IDENTITY,
-        });
+        // The stroke under the pointer first, then a text of ours it is on, then the first
+        // stroke whose box it is inside: a thin line wants the pointer on it, a circle's empty
+        // middle still belongs to the circle.
+        let (inks, texts) = (self.imp().inks.borrow(), self.imp().texts.borrow());
+        let inks = inks.get(&page).map(Vec::as_slice).unwrap_or_default();
+        let texts = texts.get(&page).map(Vec::as_slice).unwrap_or_default();
+        let on = |i: &&NamedInk| accent_core::pdf::hit(&i.1.points, at, ADJUST_RADIUS);
+        let inside = |i: &&NamedInk| handle_at(i.1.bounds, at, grip).is_some();
+        *adjust = (inks.iter().find(on).map(|i| Selected::stroke(page, i)))
+            .or_else(|| {
+                let text = texts.iter().find(|(_, t)| t.bounds.contains(at));
+                text.map(|t| Selected::text(page, t))
+            })
+            .or_else(|| inks.iter().find(inside).map(|i| Selected::stroke(page, i)));
         let held = adjust.is_some();
         drop(adjust);
         self.queue_draw();
@@ -518,6 +514,22 @@ impl PdfView {
                     }),
                 ));
             }
+        }
+        // A text of ours goes whole, under either eraser, once the pass comes within reach of
+        // its box.
+        if let Some(list) = self.imp().texts.borrow_mut().get_mut(&page) {
+            list.retain(|(id, text)| {
+                let b = text.bounds;
+                let edge = [b.left, b.right, b.right, b.left, b.left];
+                let edge: Vec<(f32, f32)> = (edge.into_iter())
+                    .zip([b.top, b.top, b.bottom, b.bottom, b.top])
+                    .collect();
+                let hit = b.contains(at) || accent_core::pdf::swept(&edge, from, at, radius);
+                if hit {
+                    taken.push((*id, None));
+                }
+                !hit
+            });
         }
         if let Some(f) = self.imp().on_erase.borrow().as_ref() {
             for (id, pass) in taken {

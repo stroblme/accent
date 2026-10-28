@@ -271,26 +271,29 @@ impl imp::PdfView {
                         &[1.0; 4],
                         &[accent; 4],
                     );
-                    let (cx, cy) = ((l + r) / 2.0, (t + b) / 2.0);
-                    for (hx, hy) in [
-                        (l, t),
-                        (cx, t),
-                        (r, t),
-                        (l, cy),
-                        (r, cy),
-                        (l, b),
-                        (cx, b),
-                        (r, b),
-                    ] {
-                        let (x, y) = (hx - HANDLE / 2.0, hy - HANDLE / 2.0);
-                        let square = graphene::Rect::new(x, y, HANDLE, HANDLE);
-                        snapshot.append_color(&accent, &square);
+                    // A text only moves: its frame alone.
+                    if !a.typed {
+                        let (cx, cy) = ((l + r) / 2.0, (t + b) / 2.0);
+                        for (hx, hy) in [
+                            (l, t),
+                            (cx, t),
+                            (r, t),
+                            (l, cy),
+                            (r, cy),
+                            (l, b),
+                            (cx, b),
+                            (r, b),
+                        ] {
+                            let (x, y) = (hx - HANDLE / 2.0, hy - HANDLE / 2.0);
+                            let square = graphene::Rect::new(x, y, HANDLE, HANDLE);
+                            snapshot.append_color(&accent, &square);
+                        }
+                        // The rotate handle: the diagram's ring beyond the top-right corner.
+                        let ring = gsk::PathBuilder::new();
+                        let at = graphene::Point::new(r + ROTATE_GAP, t - ROTATE_GAP);
+                        ring.add_circle(&at, HANDLE / 2.0);
+                        snapshot.append_stroke(&ring.to_path(), &gsk::Stroke::new(1.5), &accent);
                     }
-                    // The rotate handle: the diagram's ring beyond the top-right corner.
-                    let ring = gsk::PathBuilder::new();
-                    let at = graphene::Point::new(r + ROTATE_GAP, t - ROTATE_GAP);
-                    ring.add_circle(&at, HANDLE / 2.0);
-                    snapshot.append_stroke(&ring.to_path(), &gsk::Stroke::new(1.5), &accent);
                 }
             }
             if let Some(page_marks) = marks.get(&index) {

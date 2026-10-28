@@ -301,7 +301,7 @@ pub fn drag_matrix(
     }
 }
 
-/// The stroke the Adjust tool has hold of, and the drag being applied to it.
+/// The stroke or the text of ours the Adjust tool has hold of, and the drag being applied to it.
 pub struct Selected {
     pub page: usize,
     /// The render thread's name for it, which follows it through a move.
@@ -309,10 +309,47 @@ pub struct Selected {
     pub points: Vec<(f32, f32)>,
     pub bounds: accent_core::pdf::Rect,
     pub style: accent_core::pdf::InkStyle,
+    /// A text, which only moves: no handles and no ring, its box all of it.
+    pub typed: bool,
     /// Where the hand is holding it, while it is.
     pub handle: Option<Handle>,
     /// What the drag so far amounts to, painted over the page until the hand lets go.
     pub matrix: accent_core::pdf::Matrix,
+}
+
+impl Selected {
+    /// A stroke of `page` taken hold of by its middle.
+    pub fn stroke(page: usize, (id, ink): &accent_core::pdf::NamedInk) -> Selected {
+        Selected {
+            page,
+            id: *id,
+            points: ink.points.clone(),
+            bounds: ink.bounds,
+            style: ink.style,
+            typed: false,
+            handle: Some(Handle::Move),
+            matrix: accent_core::pdf::IDENTITY,
+        }
+    }
+
+    /// A text of ours on `page` taken hold of: its box, and no path to draw a ghost along.
+    pub fn text(page: usize, (id, text): &accent_core::pdf::NamedText) -> Selected {
+        let [r, g, b] = text.typed.style.rgb;
+        Selected {
+            page,
+            id: *id,
+            points: Vec::new(),
+            bounds: text.bounds,
+            style: accent_core::pdf::InkStyle {
+                width: 0.0,
+                rgba: [r, g, b, 255],
+                multiply: false,
+            },
+            typed: true,
+            handle: Some(Handle::Move),
+            matrix: accent_core::pdf::IDENTITY,
+        }
+    }
 }
 
 /// A stroke as the widget holds it while it is being drawn.
