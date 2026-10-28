@@ -270,10 +270,15 @@ fn current(dir: &Path) -> Result<Meta> {
         && (meta.state == State::Running || now().saturating_sub(meta.started) > 10)
         && UnixStream::connect(&meta.socket).is_err()
     {
-        meta.state = State::Interrupted;
-        meta.finished = Some(now());
-        meta.error = Some("the job supervisor is gone".into());
-        save(dir, &meta)?;
+        // A supervisor that finishes its job saves the last state before it removes its socket,
+        // so the read above may predate that save: only a job unfinished after it is lost.
+        meta = metadata(dir)?;
+        if !meta.state.terminal() {
+            meta.state = State::Interrupted;
+            meta.finished = Some(now());
+            meta.error = Some("the job supervisor is gone".into());
+            save(dir, &meta)?;
+        }
     }
     Ok(meta)
 }
