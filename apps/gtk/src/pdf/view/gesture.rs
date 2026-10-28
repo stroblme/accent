@@ -12,7 +12,7 @@ use crate::pdf::geometry::page_at;
 use crate::pdf::protocol::{Pass, fresh_id};
 use crate::pdf::tools::{
     ADJUST_RADIUS, HANDLE, Hand, Handle, Mode, Selected, Stroke, drag_matrix, drag_of, handle_at,
-    mapped, shape_of, snap,
+    mapped, shape_of, snap, width_of,
 };
 
 impl PdfView {
@@ -396,7 +396,10 @@ impl PdfView {
         };
         let (radius, partial) = {
             let style = self.imp().style.borrow();
-            (style.eraser_radius, style.eraser_partial)
+            (
+                width_of(Mode::Eraser, style.eraser_radius),
+                style.eraser_partial,
+            )
         };
         // Hit-tested here, against the strokes the tab keeps for this page, rather than on the
         // render thread: that read and flattened every annotation on the page under the pdfium
@@ -406,7 +409,7 @@ impl PdfView {
         let mut taken = Vec::new();
         if let Some(list) = self.imp().inks.borrow_mut().get_mut(&page) {
             for (id, ink) in std::mem::take(list) {
-                // To the stroke's edge rather than its middle: a highlighter is 14 pt across.
+                // To the stroke's edge rather than its middle: a highlighter is 10.5 pt across.
                 let reach = radius + ink.style.width / 2.0;
                 if !accent_core::pdf::swept(&ink.points, from, at, reach) {
                     list.push((id, ink));

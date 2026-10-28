@@ -253,12 +253,12 @@ impl Default for DrawingConfig {
     fn default() -> Self {
         DrawingConfig {
             mouse: false,
-            pen_width: 2.0,
+            pen_width: 1.5,
             // A line of text, near enough.
-            highlighter_width: 14.0,
+            highlighter_width: 10.5,
             pen_color: None,
             highlighter_color: None,
-            eraser_radius: 4.0,
+            eraser_radius: 3.0,
             eraser_partial: false,
         }
     }

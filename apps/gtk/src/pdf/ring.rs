@@ -8,14 +8,8 @@ use std::rc::Rc;
 use accent_core::config::DrawingConfig;
 
 use super::Mode;
+use super::tools::{nearest, widths};
 use crate::ring::{Ring, dot};
-
-/// Three widths per tool, in page points — fine, the default, bold — and the eraser's reach.
-const WIDTHS: [(Mode, [f32; 3]); 3] = [
-    (Mode::Pen, [1.0, 2.0, 4.0]),
-    (Mode::Highlighter, [8.0, 14.0, 24.0]),
-    (Mode::Eraser, [4.0, 8.0, 16.0]),
-];
 
 /// Told which tool was in hand and what was picked for it.
 type OnChoice = Box<dyn Fn(Mode, Choice)>;
@@ -130,8 +124,7 @@ impl PdfRing {
                 self,
                 move |_| {
                     let tool = ring.ring.tool();
-                    let owner = tool.style_owner();
-                    if let Some((_, widths)) = WIDTHS.iter().find(|(m, _)| *m == owner) {
+                    if let Some(widths) = widths(tool) {
                         ring.choose(tool, Choice::Width(widths[i]));
                     }
                 }
@@ -181,10 +174,7 @@ impl PdfRing {
     fn sync_options(&self) {
         let tool = self.ring.tool().style_owner();
         let config = self.config.borrow();
-        let widths = match self.ring.tool() {
-            Mode::Select | Mode::Adjust => None,
-            _ => WIDTHS.iter().find(|(m, _)| *m == tool).map(|(_, w)| *w),
-        };
+        let widths = widths(self.ring.tool());
         let (width, colour) = match tool {
             Mode::Eraser => (config.eraser_radius, None),
             Mode::Highlighter => (config.highlighter_width, Some(config.highlighter_color)),
@@ -196,14 +186,8 @@ impl PdfRing {
                 button.set_active(wanted);
             }
         };
-        // The nearest of the three rather than an exact match: a hand-edited config, or one
-        // written before these three widths were, would otherwise show no width selected at all.
-        let nearest = widths.map(|w| {
-            let distance = |i: &usize| (w[*i] - width).abs();
-            (0..w.len())
-                .min_by(|a, b| distance(a).total_cmp(&distance(b)))
-                .unwrap_or(0)
-        });
+        // The nearest of the three, which is the one the tool draws at.
+        let nearest = widths.map(|w| nearest(w, width));
         for (i, button) in self.widths.iter().enumerate() {
             check(button, widths.is_some(), nearest == Some(i));
         }

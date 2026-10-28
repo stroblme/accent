@@ -983,7 +983,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - With a tool in hand the pointer is the plain arrow over the whole page, the I-beam inviting a selection that will not happen; under a stylus it is a small dot where the ink goes.
 - Pen draws `/Ink` at a uniform width in the accent; Highlighter draws it wide and translucent with a `Multiply` blend, darkening the text rather than covering it.
   The stroke is a curve through the points the pointer reported, those GDK merges into a frame's last motion included (`gdk::Event::history`, a pen's as a mouse's), thinned to a pixel apart at the zoom it was drawn at and ending where the pen lifted, so what lands stays within about a pixel of what the hand drew, however small or however zoomed (`pdf::thin`).
-- Eraser takes every whole stroke whose edge the pointer's path comes within 4 pt of, testing between reports as well as at them so a quick pass cannot step over a thin line; one drag is one Undo step.
+- Eraser takes every whole stroke whose edge the pointer's path comes within its reach of (3, 6 or 12 pt), testing between reports as well as at them so a quick pass cannot step over a thin line; one drag is one Undo step.
   Partial takes only what lies within reach and leaves the rest as strokes of their own in the same colour, width and opacity, drawn straight between flattened points (a spline would bow a rectangle's edges); a crumb under 1 pt goes.
   Another editor's stroke is cut along its `/InkList`, where it shows, its pieces drawn as ours; one without an `/InkList`, or whose paths differ in colour or width, is taken whole rather than redrawn wrong.
   Another editor's stroke leaves `/Annots` with its popup, its dictionary untouched in the file, so Undo puts both back where they were, as they were, appearance stream and dates included.
@@ -991,7 +991,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Adjust takes hold of any ink stroke, ours or another editor's: eight handles, the middle moving it, an edge stretching one axis, a corner scaling both alike; `Ctrl+Z` puts it back.
   Ours is drawn again along the moved path, its line keeping its width; another editor's keeps everything it carries, only its `/Rect` and `/InkList` moving, and every reader fits its appearance stream into the new `/Rect`, so it scales as a picture would, its line too.
 - A second orbit holds the tool's options: three widths, and for the pen, the shapes and the highlighter six swatches (the accent, four hues round the wheel by the CSV rule, and black); for the eraser, Whole Strokes (`edit-delete-symbolic`) and Partial (`edit-cut-symbolic`).
-  Each pick is kept in the config's `[drawing]`.
+  Each pick is kept in the config's `[drawing]`; a width there that is none of the three draws as the nearest of them.
 - With a tool in hand the other tools' icons dim to Adwaita's `--dim-opacity`, their discs staying opaque, so the options read as that tool's; a dimmed tool comes back under the pointer or the keyboard and still takes a click.
   A press between the ring's buttons reaches the page.
 - With a pen on the seat the mouse selects and only the pen draws, its eraser tip erasing under any tool; "Draw with the Mouse" in Preferences gives the mouse back.

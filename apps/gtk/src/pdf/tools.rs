@@ -110,6 +110,39 @@ pub fn drag_of(tool: Mode, hand: Hand, mouse_draws: bool) -> Option<Mode> {
     }
 }
 
+/// Three widths per style, in page points — fine, the default, bold: the pen's, which the shapes
+/// draw in too, the highlighter's, and the eraser's reach.
+const WIDTHS: [(Mode, [f32; 3]); 3] = [
+    (Mode::Pen, [0.75, 1.5, 3.0]),
+    (Mode::Highlighter, [6.0, 10.5, 18.0]),
+    (Mode::Eraser, [3.0, 6.0, 12.0]),
+];
+
+/// The three widths `tool` offers, by whose style it draws in; none for a tool without one.
+pub fn widths(tool: Mode) -> Option<[f32; 3]> {
+    match tool {
+        Mode::Select | Mode::Adjust => None,
+        _ => WIDTHS
+            .iter()
+            .find(|(m, _)| *m == tool.style_owner())
+            .map(|(_, w)| *w),
+    }
+}
+
+/// Which of `widths` is nearest to `stored`, so a hand-edited config, or one written before these
+/// three were, still means one of them.
+pub fn nearest(widths: [f32; 3], stored: f32) -> usize {
+    let distance = |i: &usize| (widths[*i] - stored).abs();
+    (0..widths.len())
+        .min_by(|a, b| distance(a).total_cmp(&distance(b)))
+        .unwrap_or(0)
+}
+
+/// The width `tool` draws at, or the eraser reaches, for the one the config holds.
+pub fn width_of(tool: Mode, stored: f32) -> f32 {
+    widths(tool).map_or(stored, |w| w[nearest(w, stored)])
+}
+
 /// How close to an axis, in degrees, a line has to be to snap onto it.
 const SNAP_DEG: f32 = 4.0;
 /// How near the pointer has to come to a stroke, in page points, for the Adjust tool to take it.
@@ -292,6 +325,28 @@ mod tests {
         assert_eq!(drag_of(Mode::Select, eraser, false), Some(Mode::Select));
         assert_eq!(drag_of(Mode::Pen, Hand::Mouse, true), Some(Mode::Pen));
         assert_eq!(drag_of(Mode::Pen, Hand::Mouse, false), Some(Mode::Select));
+    }
+
+    #[test]
+    fn a_stored_width_draws_as_the_nearest_of_three() {
+        // The widths before 2026-10-28, still in a config, land on their steps down.
+        assert_eq!(width_of(Mode::Pen, 2.0), 1.5);
+        assert_eq!(width_of(Mode::Line, 4.0), 3.0, "a shape draws in the pen's");
+        assert_eq!(width_of(Mode::Highlighter, 14.0), 10.5);
+        assert_eq!(width_of(Mode::Eraser, 4.0), 3.0);
+        assert_eq!(widths(Mode::Adjust), None);
+        let fresh = accent_core::config::DrawingConfig::default();
+        for (tool, width) in [
+            (Mode::Pen, fresh.pen_width),
+            (Mode::Highlighter, fresh.highlighter_width),
+            (Mode::Eraser, fresh.eraser_radius),
+        ] {
+            assert_eq!(
+                width_of(tool, width),
+                width,
+                "{tool:?}'s default is one of its three"
+            );
+        }
     }
 
     #[test]

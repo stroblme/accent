@@ -415,7 +415,7 @@ impl PdfView {
         };
         let [r, g, b] = colour.unwrap_or_else(theme::accent_rgb);
         accent_core::pdf::InkStyle {
-            width,
+            width: crate::pdf::tools::width_of(mode.style_owner(), width),
             rgba: [r, g, b, (alpha * 255.0) as u8],
             multiply,
         }
