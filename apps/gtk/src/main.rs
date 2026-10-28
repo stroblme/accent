@@ -13,6 +13,7 @@ mod bench;
 mod bibliography;
 mod build;
 mod codeblocks;
+mod commands;
 mod comment;
 mod completion;
 mod conflict;
@@ -1247,7 +1248,8 @@ impl App {
     }
 
     /// Put back a shell the session remembers, in its own pane, where it last was: its directory,
-    /// or home when that has gone since, and on a host the path it was opened at.
+    /// or home when that has gone since, and on a host the path it was opened at. One that ran a
+    /// command of the user's is taken up only if the command still runs.
     fn restore_shell(self: &Rc<Self>, key: &str, place: Option<&ShellPlace>) {
         let at = place.map_or("", |p| p.at.as_str());
         let shell = match ssh::is_remote(at) {
@@ -1264,7 +1266,10 @@ impl App {
                     .unwrap_or_else(glib::home_dir),
             ),
         };
-        self.open_shell(key.to_string(), shell, Opened::Restored);
+        let run = place
+            .and_then(|p| p.command.clone())
+            .map(terminal::Run::resume);
+        self.open_term(key.to_string(), shell, Opened::Restored, None, run);
     }
 
     /// Shared shell opener; restored shells use their saved pane without taking focus or replacing its active tab.
@@ -1280,6 +1285,19 @@ impl App {
         shell: terminal::Shell,
         how: Opened,
         at: Option<(Rc<Pane>, i32)>,
+    ) {
+        self.open_term(key, shell, how, at, None);
+    }
+
+    /// [`open_shell_at`](Self::open_shell_at) for a shell that may run one of the user's
+    /// commands, `run`, in place of its prompt.
+    fn open_term(
+        self: &Rc<Self>,
+        key: String,
+        shell: terminal::Shell,
+        how: Opened,
+        at: Option<(Rc<Pane>, i32)>,
+        run: Option<terminal::Run>,
     ) {
         use vte4::TerminalExt as _;
         // Said once per window, the first time a shell here could have been held and was not.
@@ -1301,7 +1319,7 @@ impl App {
             .vault()
             .filter(|vault| shell.shareable(vault.remote().map(|remote| remote.url())))
             .map(|vault| vault.root());
-        let term = terminal::open(&tabs, at, &shell, key, share_vault);
+        let term = terminal::open(&tabs, at, &shell, key, share_vault, run);
         // A new shell is part of the session, as a new tab is; a restored one is in it already.
         if how != Opened::Restored {
             self.save_session_soon();
@@ -1745,6 +1763,7 @@ impl App {
             }
         }
         if changed.shortcuts {
+            self.sync_commands();
             self.refresh_accels();
             self.sync_placeholder();
         }

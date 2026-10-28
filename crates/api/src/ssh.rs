@@ -392,13 +392,15 @@ pub fn run(url: &Url, ctl: &Path, command: &str) -> Vec<String> {
 /// is a [`server_path`] shell expression. Force a pty with `-t` for raw mode
 /// and sizing, and disable SSH escapes with `-e none` so `~.` reaches the shell.
 /// Allow prompts in the tab if its master is gone. Missing vault paths use
-/// the holder's login-home fallback.
-pub fn attach(url: &Url, ctl: &Path, server: &str, id: &str) -> Vec<String> {
+/// the holder's login-home fallback. `flags` go to `attach` before the id, each quoted: a
+/// command's `--run <line>`, or `--existing` to take one up only while it runs.
+pub fn attach(url: &Url, ctl: &Path, server: &str, id: &str, flags: &[String]) -> Vec<String> {
     let mut argv = base(url, ctl);
     argv.extend(["-t", "-e", "none"].map(String::from));
     argv.push(url.destination());
+    let flags: String = flags.iter().map(|f| format!("{} ", quote(f))).collect();
     argv.push(format!(
-        "{server} attach --cwd {} {}",
+        "{server} attach --cwd {} {flags}{}",
         quote(&url.path.to_string_lossy()),
         quote(id)
     ));
@@ -1051,7 +1053,7 @@ mod tests {
         let server = server_path("0123456789abcdef");
         let id = "89abcdef01234567";
         assert_eq!(
-            attach(&plain(), ctl(), &server, id),
+            attach(&plain(), ctl(), &server, id, &[]),
             words(&[
                 "ssh",
                 "-o",
@@ -1065,7 +1067,7 @@ mod tests {
         );
         let spaced = parse("ssh://me@box:2222/srv/my vault").expect("a spaced path parses");
         assert_eq!(
-            attach(&spaced, ctl(), &server, id),
+            attach(&spaced, ctl(), &server, id, &[]),
             words(&[
                 "ssh",
                 "-o",
@@ -1078,6 +1080,12 @@ mod tests {
                 "me@box",
                 &format!("{server} attach --cwd '/srv/my vault' '{id}'"),
             ])
+        );
+        // A command's line goes along quoted, for the host's login shell to read.
+        let flags = ["--run".to_string(), "make -j8".to_string()];
+        assert_eq!(
+            attach(&plain(), ctl(), &server, id, &flags).last().unwrap(),
+            &format!("{server} attach --cwd '/srv/vault' '--run' 'make -j8' '{id}'")
         );
         // Ending it is a one-shot command over the same master, which never prompts, and so is
         // taking the copy a program in it made.

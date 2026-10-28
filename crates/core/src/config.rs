@@ -463,6 +463,10 @@ pub struct DiagramPlace {
 pub struct ShellPlace {
     /// An absolute directory on this machine, or `ssh://[user@]host[:port]/path` on another.
     pub at: String,
+    /// The name of the user's command (`[[commands]]`) it ran, whose tab is put back only while
+    /// the command still runs: never started again.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 /// The Info pane's sections as the reader left them: which are open, and where each divider
@@ -1874,6 +1878,7 @@ daily_dir = "Daily"
                 "terminal:0123456789abcdef".to_string(),
                 ShellPlace {
                     at: "/home/me/src".to_string(),
+                    command: Some("Claude".to_string()),
                 },
             )]),
             pinned: vec!["b.md".to_string()],

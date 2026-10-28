@@ -48,6 +48,7 @@ mod symbols;
 mod synctex;
 mod tags;
 mod toasts;
+mod user_commands;
 
 pub(crate) use answer::{SLOW_RELOAD_MS, SLOW_WRITE_MS, hold};
 use answer::{bench_answer, bench_answer_doc, bench_answer_same};
@@ -110,6 +111,7 @@ use style::{
     bench_seam, bench_style, bench_theme, bench_typing, bench_wrap,
 };
 use tags::bench_tags;
+use user_commands::bench_commands;
 
 /// Install opt-in headless drills that print timings or state, then quit.
 /// Use a generated scratch vault and isolated state; drills may write files,
@@ -194,6 +196,9 @@ use tags::bench_tags;
 /// - `ACCENT_BENCH_HOLD=open` then `back`: shell persistence and close, using
 ///   one scratch state; `early`: shells closed before startup; `behind` then
 ///   `named`: a restored shell's tab behind another titled before it is shown.
+/// - `ACCENT_BENCH_COMMANDS=run`: the user's commands from Run Command and their shortcuts, through
+///   XTEST; `open` then `back`: on one scratch state, only a command still running comes back.
+///   Its shells are real: a scratch `HOME`, as for `HOLD`.
 /// - `ACCENT_BENCH_PDF=<rel_path>`: fit, save, rename and external reload.
 ///   Writes and moves the file; use a scratch multipage PDF. Modes:
 ///   `stale:<rel_path>` (remote conflicts), `failed:<rel_path>` (read-only
@@ -350,6 +355,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let shell_keys = std::env::var("ACCENT_BENCH_SHELL_KEYS").is_ok();
     let term = std::env::var("ACCENT_BENCH_TERM").is_ok();
     let hold = std::env::var("ACCENT_BENCH_HOLD").ok();
+    let user_commands = std::env::var("ACCENT_BENCH_COMMANDS").ok();
     let picture = std::env::var("ACCENT_BENCH_IMAGE").ok();
     let image_look = std::env::var("ACCENT_BENCH_IMAGE_LOOK").ok();
     let preview_look = std::env::var("ACCENT_BENCH_PREVIEW_LOOK").ok();
@@ -452,6 +458,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && !shell_keys
         && !term
         && hold.is_none()
+        && user_commands.is_none()
         && picture.is_none()
         && image_look.is_none()
         && preview_look.is_none()
@@ -805,6 +812,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(step) = hold {
             return bench_hold(&app, &step);
+        }
+        if let Some(step) = user_commands {
+            return bench_commands(&app, &step);
         }
         if let Some(arg) = picture {
             return bench_image(&app, &arg);

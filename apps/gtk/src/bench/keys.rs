@@ -1638,7 +1638,7 @@ fn bench_hold_named(app: &Rc<App>) {
 }
 
 /// How many shells `accent-cli held` lists, or why it could not say.
-fn bench_held() -> String {
+pub(super) fn bench_held() -> String {
     let Some(cli) = crate::terminal::cli() else {
         return "no-accent-cli".to_string();
     };

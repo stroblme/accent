@@ -148,7 +148,8 @@ impl Changed {
                 || old.word_suggestions != new.word_suggestions,
             // What a focused shell is left is part of the table.
             shortcuts: old.shortcuts != new.shortcuts
-                || old.forward_keys_to_terminal != new.forward_keys_to_terminal,
+                || old.forward_keys_to_terminal != new.forward_keys_to_terminal
+                || old.commands != new.commands,
         }
     }
 }

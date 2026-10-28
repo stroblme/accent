@@ -629,13 +629,22 @@ impl App {
     }
 
     /// Apply a shortcut override in every window; `None` restores [`ACTIONS`] defaults. Return effective bindings.
+    /// A user's command keeps its one chord in its own entry, and has none by default.
     pub fn rebind(&self, action: &str, accels: Option<Vec<String>>) -> Vec<String> {
         {
             let mut config = self.config.borrow_mut();
-            match accels {
-                Some(accels) => config.shortcuts.insert(action.to_string(), accels),
-                None => config.shortcuts.remove(action),
-            };
+            let at = crate::commands::index(action);
+            match (at.and_then(|i| config.commands.get_mut(i)), accels) {
+                (Some(command), accels) => {
+                    command.shortcut = accels.and_then(|accels| accels.into_iter().next())
+                }
+                (None, Some(accels)) => {
+                    config.shortcuts.insert(action.to_string(), accels);
+                }
+                (None, None) => {
+                    config.shortcuts.remove(action);
+                }
+            }
         }
         self.config_changed();
         accels_for(&self.config.borrow(), action)
@@ -644,6 +653,9 @@ impl App {
 
 /// Effective bindings: config override or defaults. An empty override leaves the action unbound but in the palette.
 pub fn accels_for(config: &Config, action: &str) -> Vec<String> {
+    if let Some(index) = crate::commands::index(action) {
+        return crate::commands::accels(config, index);
+    }
     if let Some(accels) = config.shortcuts.get(action) {
         return accels.clone();
     }
@@ -896,6 +908,7 @@ pub fn install_actions(app: &Rc<App>) {
             app.window.add_action(&action);
         }
     }
+    app.sync_commands();
     // The session's controls wait for a session, Print and the exports for a document, and
     // Toggle Task for a note.
     app.sync_debug();
@@ -1172,14 +1185,25 @@ impl Shell {
             false => Vec::new(),
         };
         let forward = config.forward_keys_to_terminal;
-        for (action, _, _) in ACTIONS {
-            let accels = accels_for(&config, action);
+        let commands = (0..config.commands.len()).map(crate::commands::action);
+        for action in ACTIONS
+            .iter()
+            .map(|(action, _, _)| action.to_string())
+            .chain(commands)
+        {
+            let accels = accels_for(&config, &action);
             let accels: Vec<&str> = accels
                 .iter()
                 .map(String::as_str)
-                .filter(|accel| installed(action, accel, keys, forward, &shadowed))
+                .filter(|accel| installed(&action, accel, keys, forward, &shadowed))
                 .collect();
-            gtk_app.set_accels_for_action(action, &accels);
+            gtk_app.set_accels_for_action(&action, &accels);
+        }
+        // A command taken out of the file takes its chord with it.
+        for action in gtk_app.list_action_descriptions() {
+            if crate::commands::index(&action).is_some_and(|i| i >= config.commands.len()) {
+                gtk_app.set_accels_for_action(&action, &[]);
+            }
         }
     }
 

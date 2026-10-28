@@ -191,6 +191,7 @@ impl App {
                     recent: used.iter().position(|a| a == action),
                     why: why(action),
                 })
+                .chain(crate::commands::items(&config, &used))
                 .collect(),
             tags: self.corpus.borrow().tags.clone(),
             // Filtered here rather than in the dialog: the window is the only thing that knows
@@ -390,7 +391,10 @@ impl App {
             terminals: self
                 .terminals()
                 .iter()
-                .filter_map(|t| Some((t.key(), ShellPlace { at: t.at()? })))
+                .filter_map(|t| {
+                    let (at, command) = (t.at()?, t.command_name());
+                    Some((t.key(), ShellPlace { at, command }))
+                })
                 .collect(),
             pinned: self
                 .pinned
@@ -1311,6 +1315,9 @@ mod tests {
     }
 
     fn place(at: &str) -> ShellPlace {
-        ShellPlace { at: at.into() }
+        ShellPlace {
+            at: at.into(),
+            command: None,
+        }
     }
 }

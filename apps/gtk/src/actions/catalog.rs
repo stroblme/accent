@@ -818,6 +818,11 @@ mod tests {
         for accel in accels_for(&config, "win.close-tab") {
             assert!(reserved("win.close-tab", &accel));
         }
+        // A user's command follows the general rule: its Control and Shift chord stays the
+        // window's in a shell, any other goes to the shell.
+        let command = crate::commands::action(0);
+        assert!(reserved(&command, "<Control><Shift>k"));
+        assert!(!reserved(&command, "<Alt>k"));
     }
 
     /// The chords DESIGN.md's never-bind list reserves, as they are spelled in an accelerator.

@@ -329,14 +329,21 @@ fn a_held_command_ends_with_its_status_and_is_not_run_again() {
     // Held open, as a tab's pty is: the end of input is a detach.
     let _input = ran.stdin.take();
     let mut seen = String::new();
-    ran.stdout.take().unwrap().read_to_string(&mut seen).unwrap();
+    ran.stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut seen)
+        .unwrap();
     assert!(seen.contains("ran-42"), "{seen:?}");
     assert_eq!(ran.wait().unwrap().code(), Some(3));
 
     let again = attach(&["--existing", "cmd-1"]).output().unwrap();
     assert_eq!(again.status.code(), Some(254));
     let listed = cli(&holder.tmp).arg("held").output().unwrap();
-    assert!(listed.stdout.is_empty(), "an ended command was started again");
+    assert!(
+        listed.stdout.is_empty(),
+        "an ended command was started again"
+    );
     holder.assert_gone();
 }
 

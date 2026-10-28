@@ -2,9 +2,11 @@
 //!
 //! Its rows are [`ACTIONS`] through [`accels_for`], the palette's command mode and `[shortcuts]`
 //! overrides included, so a rebind shows and an unbound command does not: the palette lists every
-//! command, bound or not, and is where they are rebound.
+//! command, bound or not, and is where they are rebound. The user's own commands (`[[commands]]`)
+//! follow under Terminal, as they open one.
 
 use crate::actions::{ACTIONS, accels_for};
+use crate::commands;
 use accent_api::Config;
 use adw::prelude::*;
 
@@ -119,7 +121,7 @@ fn section(action: &str) -> Option<&'static str> {
 }
 
 /// A heading and its rows, each a command's label and the chords that run it.
-type Section = (&'static str, Vec<(&'static str, Vec<String>)>);
+type Section = (&'static str, Vec<(String, Vec<String>)>);
 
 /// Each heading with its bound commands, in the table's order; a heading with none is left out.
 fn rows(config: &Config) -> Vec<Section> {
@@ -139,8 +141,13 @@ fn rows(config: &Config) -> Vec<Section> {
                     if let Some((_, lender)) = BORROWED.iter().find(|(a, _)| a == action) {
                         accels.extend(accels_for(config, lender));
                     }
-                    (*label, accels)
+                    (label.to_string(), accels)
                 })
+                .chain(
+                    (0..config.commands.len())
+                        .filter(|_| title == "Terminal")
+                        .map(|i| (config.commands[i].name.clone(), commands::accels(config, i))),
+                )
                 .filter(|(_, accels)| !accels.is_empty())
                 .collect();
             (!items.is_empty()).then_some((title, items))
@@ -163,7 +170,7 @@ pub fn present(window: &adw::ApplicationWindow, config: &Config) {
                 }
             }
             if !shown.is_empty() {
-                section.add(adw::ShortcutsItem::new(label, &shown.join(" ")));
+                section.add(adw::ShortcutsItem::new(&label, &shown.join(" ")));
             }
         }
         dialog.add(section);
@@ -179,7 +186,7 @@ mod tests {
     fn accels_of(rows: &[Section], label: &str) -> Option<Vec<String>> {
         rows.iter()
             .flat_map(|(_, items)| items)
-            .find(|(l, _)| *l == label)
+            .find(|(l, _)| l == label)
             .map(|(_, accels)| accels.clone())
     }
 
@@ -249,7 +256,25 @@ mod tests {
             .unwrap();
         assert_eq!(
             tab_menu.as_slice(),
-            [("Copy Name", vec!["<Control><Shift>m".to_string()])]
+            [(
+                "Copy Name".to_string(),
+                vec!["<Control><Shift>m".to_string()]
+            )]
         );
+
+        // A command of the user's with a shortcut is a Terminal row; one without is not listed.
+        let command = |name: &str, shortcut: Option<&str>| accent_core::config::CustomCommand {
+            name: name.into(),
+            run: "true".into(),
+            shortcut: shortcut.map(str::to_string),
+        };
+        config.commands = vec![
+            command("Claude", Some("<Control><Shift>k")),
+            command("Build", None),
+        ];
+        let shown = rows(&config);
+        let (_, terminal) = shown.iter().find(|(t, _)| *t == "Terminal").unwrap();
+        assert!(terminal.contains(&("Claude".to_string(), vec!["<Control><Shift>k".to_string()])));
+        assert_eq!(accels_of(&shown, "Build"), None);
     }
 }

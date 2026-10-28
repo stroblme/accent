@@ -8,7 +8,8 @@
 //! count; cycles retain the VTE pty and its attached process after a tab closes.
 //!
 //! `accent-cli` holds the shell; the tab runs `accent-cli attach`. Hangup detaches, Close Tab
-//! ends it explicitly ([`Term::kill`]), and [`sweep`] ends shells no saved session names.
+//! ends it explicitly ([`Term::kill`]), and [`sweep`] ends shells no saved session names. A
+//! user's command ([`Run`]) is such a shell running its command line in place of a prompt.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -57,6 +58,51 @@ pub struct Term {
     /// This vault's root on the shell's host, only when this held shell can be shared with it.
     share_vault: Option<PathBuf>,
     sharing: Cell<bool>,
+    /// The user's command the shell runs, if it runs one rather than a prompt.
+    run: Option<Run>,
+}
+
+/// One of the user's commands (`[[commands]]` in config.toml), which the held shell runs in
+/// place of its prompt and ends with (DESIGN.md, Terminal).
+pub struct Run {
+    /// Its name, which titles the tab.
+    pub name: String,
+    /// The command line, until the holder has been asked to start it. Every attach after that, a
+    /// reconnect's or a restored tab's, takes the command up only while it still runs: one that
+    /// has ended is not started again.
+    line: RefCell<Option<String>>,
+    /// Whether the last attach was such a take-up, so that one finding nothing closes the tab.
+    resumed: Cell<bool>,
+}
+
+impl Run {
+    /// `line` run under `name` in a new shell.
+    pub fn new(name: String, line: String) -> Run {
+        Run {
+            name,
+            line: RefCell::new(Some(line)),
+            resumed: Cell::new(false),
+        }
+    }
+
+    /// The command `name` a session remembers, taken up only if it still runs.
+    pub fn resume(name: String) -> Run {
+        Run {
+            name,
+            line: RefCell::new(None),
+            resumed: Cell::new(true),
+        }
+    }
+
+    /// What `attach` is given for it: `--run <line>` the first time, `--existing` after.
+    fn flags(&self) -> Vec<String> {
+        let line = self.line.take();
+        self.resumed.set(line.is_none());
+        match line {
+            Some(line) => vec!["--run".to_string(), line],
+            None => vec!["--existing".to_string()],
+        }
+    }
 }
 
 /// A focused shell's live working directory and machine for Git discovery.
@@ -117,6 +163,11 @@ impl Term {
 
     pub fn key(&self) -> String {
         self.key.clone()
+    }
+
+    /// The name of the user's command it runs, if it runs one.
+    pub fn command_name(&self) -> Option<String> {
+        self.run.as_ref().map(|run| run.name.clone())
     }
 
     /// Header subtitle from VTE's `user@host:dir`, falling back to the launch directory until first reported.
@@ -489,13 +540,15 @@ pub(crate) fn scroller(view: &vte4::Terminal) -> gtk::ScrolledWindow {
         .build()
 }
 
-/// Open a shell as a tab of `tabs`, at the end or at position `at`, and start it.
+/// Open a shell as a tab of `tabs`, at the end or at position `at`, and start it, running `run`
+/// in place of a prompt when given one.
 pub fn open(
     tabs: &adw::TabView,
     at: Option<i32>,
     shell: &Shell,
     key: String,
     share_vault: Option<PathBuf>,
+    run: Option<Run>,
 ) -> Rc<Term> {
     let view = vte4::Terminal::new();
     view.set_scrollback_lines(SCROLLBACK);
@@ -521,11 +574,12 @@ pub fn open(
         None => tabs.append(&scroller),
     };
     page.set_title(
-        match shell {
-            Shell::Local(_) => "Terminal".to_string(),
-            Shell::Remote { at, .. } => at.host.clone(),
-            Shell::Program(program) => program.title.clone(),
-            Shell::Console => "Debug Console".to_string(),
+        match (shell, &run) {
+            (_, Some(run)) => run.name.clone(),
+            (Shell::Local(_), None) => "Terminal".to_string(),
+            (Shell::Remote { at, .. }, None) => at.host.clone(),
+            (Shell::Program(program), None) => program.title.clone(),
+            (Shell::Console, None) => "Debug Console".to_string(),
         }
         .as_str(),
     );
@@ -539,15 +593,18 @@ pub fn open(
     }
 
     // Weak: the page owns this view by way of the scroller, so holding it here would be a ring.
-    view.connect_window_title_changed(glib::clone!(
-        #[weak(rename_to = title)]
-        page,
-        move |view| {
-            if let Some(text) = view.window_title().filter(|t| !t.is_empty()) {
-                title.set_title(&text);
+    // A command's tab keeps its name, whatever the program calls itself.
+    if run.is_none() {
+        view.connect_window_title_changed(glib::clone!(
+            #[weak(rename_to = title)]
+            page,
+            move |view| {
+                if let Some(text) = view.window_title().filter(|t| !t.is_empty()) {
+                    title.set_title(&text);
+                }
             }
-        }
-    ));
+        ));
+    }
 
     install_keys(&view, tabs);
     let term = Rc::new(Term {
@@ -563,6 +620,7 @@ pub fn open(
         waiting: RefCell::default(),
         share_vault,
         sharing: Cell::new(false),
+        run,
     });
     install_links(&term);
     take_copies(&term);
@@ -625,7 +683,10 @@ fn start(term: &Rc<Term>) {
 fn name_unshown(term: &Rc<Term>) {
     let weak = Rc::downgrade(term);
     glib::idle_add_local_once(move || {
-        let Some(term) = weak.upgrade().filter(|term| !term.view.is_mapped()) else {
+        let Some(term) = weak
+            .upgrade()
+            .filter(|term| !term.view.is_mapped() && term.run.is_none())
+        else {
             return;
         };
         let Some(argv) = term.shell.held() else {
@@ -799,20 +860,23 @@ pub fn on_reconnect(term: &Rc<Term>, reconnect: impl Fn(&Rc<Term>) + 'static) {
 /// Wait for [`when_laid_out`] before attaching: replay at VTE's default or unsettled size
 /// persists until the program redraws. Restored background tabs attach when first shown;
 /// new tabs wait for two stable frames. A debugged program behind another tab starts at once, at
-/// VTE's default size, as the adapter is waiting for it.
+/// VTE's default size, as the adapter is waiting for it, and so does a command taken up again, so
+/// that one which has ended closes its tab before anyone looks for it there.
 fn spawn(term: &Term) {
     let (view, shell, id) = (&term.view, term.shell.clone(), id(&term.key).to_string());
     if let Shell::Console = shell {
         return;
     }
+    let flags = term.run.as_ref().map(Run::flags).unwrap_or_default();
     let program = match &shell {
         Shell::Program(program) => Some(program.clone()),
         _ => None,
     };
-    let behind = program.is_some() && !term.page.is_selected();
+    let resumed = term.run.as_ref().is_some_and(|run| run.resumed.get());
+    let behind = (program.is_some() || resumed) && !term.page.is_selected();
     let run = move |view: &vte4::Terminal| {
         // Made as it runs: a tab attached once first shown names the server on the host then.
-        let Some((cwd, argv, env)) = command(&shell, &id) else {
+        let Some((cwd, argv, env)) = command(&shell, &id, &flags) else {
             return;
         };
         let named = argv.join(" ");
@@ -846,13 +910,18 @@ fn spawn(term: &Term) {
     };
     match behind {
         true => run(view),
-        false => when_laid_out(view, run),
+        false => when_laid_out(view, term.run.is_some(), run),
     }
 }
 
 /// The working directory, command line and added environment that run `shell`, the held shell
-/// `id`; `None` for the console, which runs nothing.
-fn command(shell: &Shell, id: &str) -> Option<(Option<PathBuf>, Vec<String>, Vec<String>)> {
+/// `id`, `flags` going to its `attach` ([`Run::flags`]); `None` for the console, which runs
+/// nothing.
+fn command(
+    shell: &Shell,
+    id: &str,
+    flags: &[String],
+) -> Option<(Option<PathBuf>, Vec<String>, Vec<String>)> {
     Some(match (shell, cli()) {
         (Shell::Local(cwd), Some(mut argv)) => {
             argv.extend([
@@ -861,15 +930,24 @@ fn command(shell: &Shell, id: &str) -> Option<(Option<PathBuf>, Vec<String>, Vec
                 cwd.to_string_lossy().into_owned(),
                 "--owner".to_string(),
                 owner(),
-                id.to_string(),
             ]);
+            argv.extend(flags.iter().cloned());
+            argv.push(id.to_string());
             (None, argv, Vec::new())
         }
-        (Shell::Local(cwd), None) => (Some(cwd.clone()), vec![user_shell()], Vec::new()),
+        // Unheld: a command runs as the holder would run it, and one to take up again is gone.
+        (Shell::Local(cwd), None) => match flags {
+            [_, line] => {
+                let argv = [user_shell().as_str(), "-l", "-i", "-c", line].map(str::to_string);
+                (Some(cwd.clone()), argv.to_vec(), Vec::new())
+            }
+            [_] => return None,
+            _ => (Some(cwd.clone()), vec![user_shell()], Vec::new()),
+        },
         // ssh decides where it lands, and a cwd on this machine means nothing to it.
         (Shell::Remote { at, link }, _) => {
             let server = ssh::server_path(&accent_api::link::prepared(at).ok()?);
-            let argv = ssh::attach(at, &ssh::control_path(link), &server, id);
+            let argv = ssh::attach(at, &ssh::control_path(link), &server, id, flags);
             (None, argv, Vec::new())
         }
         (Shell::Program(program), _) => match &program.link {
@@ -898,11 +976,21 @@ fn command(shell: &Shell, id: &str) -> Option<(Option<PathBuf>, Vec<String>, Vec
 /// Two equal-sized frames let restored split ratios settle before shell replay. GTK4 has no
 /// allocation signal, so mapped-only ticks detect stability without work on background tabs.
 /// The callback receives the view rather than capturing it, avoiding a reference cycle.
-fn when_laid_out(view: &vte4::Terminal, then: impl FnOnce(&vte4::Terminal) + 'static) {
+/// `eager` runs it at once should the view go off screen first, as a user's command's tab does
+/// when another is opened in front of it straight away: it has a command to start, not a prompt.
+fn when_laid_out(view: &vte4::Terminal, eager: bool, then: impl FnOnce(&vte4::Terminal) + 'static) {
     if view.is_mapped() && view.height() > 0 {
         return then(view);
     }
     let then = Rc::new(Cell::new(Some(then)));
+    if eager {
+        let then = then.clone();
+        view.connect_unmap(move |view| {
+            if let Some(then) = then.take() {
+                then(view);
+            }
+        });
+    }
     let wait = move |view: &vte4::Terminal| {
         let (then, last) = (then.clone(), Cell::new((0, 0)));
         view.add_tick_callback(move |view, _| {
@@ -967,6 +1055,8 @@ pub fn on_report(term: &Rc<Term>, changed: impl Fn(&Rc<Term>) + 'static) {
 ///
 /// Remote disconnects retain the tab for [`Term::reopen`]; local exit 255 is ordinary exit.
 /// Failed `accent-cli attach` tabs also remain so their error can be read. Ctrl+W closes either.
+/// A command's tab closes when it exits 0, or when taking it up again found it ended; any other
+/// end keeps it, saying how, as a debugged program's does.
 pub fn on_exit(
     term: &Rc<Term>,
     done: impl Fn(&Rc<Term>) + 'static,
@@ -981,13 +1071,7 @@ pub fn on_exit(
             // Kept, saying how it ended: its output is what was being debugged.
             Shell::Program(program) => {
                 term.ended.set(true);
-                // On a line of its own, after a blank one: a program that ended mid-line gets both.
-                let lead = match view.cursor_position().0 {
-                    0 => "\r\n",
-                    _ => "\r\n\r\n",
-                };
-                let line = exit_line(status, program.link.is_some());
-                view.feed(format!("{lead}{line}\r\n").as_bytes());
+                say_exit(view, &exit_line(status, program.link.is_some()));
             }
             Shell::Remote { at, .. } if link_lost(status) => {
                 term.lost.set(true);
@@ -998,6 +1082,14 @@ pub fn on_exit(
                 view.feed(line.as_bytes());
                 lost(&term);
             }
+            _ if let Some(run) = &term.run => {
+                term.ended.set(true);
+                let gone = run.resumed.get() && exited_with(status, ATTACH_FAILED);
+                match exited_with(status, 0) || gone {
+                    true => done(&term),
+                    false => say_exit(view, &exit_line(status, false)),
+                }
+            }
             _ => {
                 term.ended.set(true);
                 if !exited_with(status, ATTACH_FAILED) {
@@ -1006,6 +1098,16 @@ pub fn on_exit(
             }
         }
     });
+}
+
+/// Feed how a program ended on a line of its own, after a blank one: a program that ended mid-line
+/// gets both.
+fn say_exit(view: &vte4::Terminal, line: &str) {
+    let lead = match view.cursor_position().0 {
+        0 => "\r\n",
+        _ => "\r\n\r\n",
+    };
+    view.feed(format!("{lead}{line}\r\n").as_bytes());
 }
 
 /// Attach failure exit code for an unreachable holder or shell startup failure.
