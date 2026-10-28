@@ -550,6 +550,8 @@ pub fn start_events(app: &Rc<App>, events: Receiver<Event>) {
             let Some(app) = app.upgrade() else {
                 return;
             };
+            #[cfg(feature = "bench")]
+            crate::bench::heard(&event);
             app.on_event(event);
         }
     });

@@ -413,6 +413,8 @@ pub(super) fn bench_pdf_pen(app: &Rc<App>, arg: &str) {
         let taken = || reader.drawn_points();
         let taken_before = taken();
         let (heard_before, cpu_before) = (reader.inks_heard(0).0, render_cpu_ms());
+        let saves_before = pdf.saves();
+        listen(true);
         let frames = Rc::new(RefCell::new(Vec::new()));
         let tick = view.add_tick_callback({
             let frames = frames.clone();
@@ -464,6 +466,13 @@ pub(super) fn bench_pdf_pen(app: &Rc<App>, arg: &str) {
         written(&app).await;
         let heard = reader.inks_heard(0).0 - heard_before;
         let cpu = render_cpu_ms() - cpu_before;
+        // The watcher's news of the last save, and a text pass it set off, land after it.
+        glib::timeout_future(Duration::from_secs(2)).await;
+        println!(
+            "bench pen heard saves={} {}",
+            pdf.saves() - saves_before,
+            listen(false)
+        );
         let gaps = |times: &[Option<Instant>]| {
             let mut gaps: Vec<f64> = times
                 .windows(2)
@@ -572,6 +581,48 @@ pub(super) fn bench_pdf_pen(app: &Rc<App>, arg: &str) {
         println!("bench pen moved changed={}", filed() != file);
         bench_quit(&app);
     });
+}
+
+thread_local! {
+    /// What the window heard from the vault while a drill listened: see [`heard`].
+    static HEARD: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+}
+
+/// A vault event on its way to `App::on_event`, written down while a drill listens: a changed
+/// file by its path, a pass of the PDF text reader by its start, anything else by its kind.
+pub(crate) fn heard(event: &accent_api::Event) {
+    HEARD.with_borrow_mut(|heard| {
+        let Some(heard) = heard else {
+            return;
+        };
+        heard.push(match event {
+            accent_api::Event::FileChanged(rel) => format!("FileChanged({rel})"),
+            accent_api::Event::PdfText {
+                done: 0,
+                running: true,
+                ..
+            } => "PdfText(start)".to_string(),
+            other => {
+                let debug = format!("{other:?}");
+                debug
+                    .split(['(', ' ', '{'])
+                    .next()
+                    .unwrap_or_default()
+                    .to_string()
+            }
+        });
+    });
+}
+
+/// Start writing down what the window hears ([`heard`]), or stop and say how many of each.
+fn listen(on: bool) -> String {
+    let heard = HEARD.replace(on.then(Vec::new)).unwrap_or_default();
+    let mut counts = std::collections::BTreeMap::new();
+    for event in heard {
+        *counts.entry(event).or_insert(0) += 1;
+    }
+    let counts: Vec<String> = counts.iter().map(|(e, n)| format!("{e}={n}")).collect();
+    counts.join(" ")
 }
 
 /// `n` short strokes down the left edge of `path`'s first page, written into the file.

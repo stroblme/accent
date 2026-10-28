@@ -93,6 +93,7 @@ use panes::{
     bench_panes, bench_pin, bench_pin_window, bench_pins_restored, bench_reload, bench_tabs,
     bench_tree,
 };
+pub(crate) use pdf::heard;
 use pdf::{
     bench_drawing, bench_pdf, bench_pdf_bookmarks, bench_pdf_broken, bench_pdf_closed,
     bench_pdf_comments, bench_pdf_deep, bench_pdf_deleted, bench_pdf_dropped, bench_pdf_failed,

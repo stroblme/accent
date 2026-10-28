@@ -79,6 +79,8 @@ impl PdfTab {
                 self.on_history.emit(self);
             }
             Reply::Saved(etag) => {
+                #[cfg(feature = "bench")]
+                self.saves.set(self.saves.get() + 1);
                 self.saved.set(Some(etag));
                 self.on_saved.emit(self);
             }

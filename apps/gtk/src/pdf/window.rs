@@ -109,6 +109,7 @@ impl App {
             #[weak(rename_to = app)]
             self,
             move |pdf| {
+                app.pdf_saved(pdf);
                 app.synctex_written(pdf);
                 app.pages_saved(&pdf.key());
                 app.push_pdf(pdf);
@@ -265,6 +266,18 @@ impl App {
     /// The PDF in the active tab, for the actions that only mean something in one.
     pub fn active_pdf(&self) -> Option<Rc<pdftab::PdfTab>> {
         self.active_doc()?.pdf().cloned()
+    }
+
+    /// The render thread wrote `pdf`'s file: the vault hears it as its own write, so the watcher's
+    /// news of it reads as no change rather than as a file to read again.
+    fn pdf_saved(&self, pdf: &pdftab::PdfTab) {
+        let key = pdf.key();
+        if let (Some(vault), Some(etag)) = (self.vault(), pdf.saved.get())
+            && !doc::is_loose_key(&key)
+            && let Err(e) = vault.saved(&key, etag)
+        {
+            tracing::debug!("telling the vault of {key}'s save: {e}");
+        }
     }
 
     /// Upload a remote PDF's saved cache copy on a worker, one transfer at a time per tab.

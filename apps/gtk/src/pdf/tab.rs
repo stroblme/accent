@@ -86,6 +86,9 @@ pub struct PdfTab {
     /// How many times the render thread has answered an open, either way. Only drills read it.
     #[cfg(feature = "bench")]
     pub(super) opens: Cell<u32>,
+    /// How many writes the render thread has answered. Only drills read it.
+    #[cfg(feature = "bench")]
+    pub(super) saves: Cell<u32>,
     /// The zoom to restore when presentation mode ends.
     pub(super) presenting: Cell<Option<PdfZoom>>,
     pub(super) links: RefCell<std::collections::HashMap<usize, Vec<pdf::Link>>>,
@@ -281,6 +284,8 @@ pub fn open(
         reload_due: Cell::new(false),
         #[cfg(feature = "bench")]
         opens: Cell::new(0),
+        #[cfg(feature = "bench")]
+        saves: Cell::new(0),
         presenting: Cell::new(None),
         pending: Cell::new(Some(place)),
         pending_select: Cell::new(None),
@@ -572,6 +577,12 @@ impl PdfTab {
             .is_some_and(|name| name == "status");
         let said = up.then(|| self.status.description().unwrap_or_default().to_string());
         (said, self.opens.get())
+    }
+
+    /// How many writes of the file the render thread has answered. Only drills ask.
+    #[cfg(feature = "bench")]
+    pub fn saves(&self) -> u32 {
+        self.saves.get()
     }
 
     /// Reading and thumbnail views for drills to check that both moved with the tab.

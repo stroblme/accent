@@ -455,6 +455,28 @@ fn own_save_updates_the_index_without_a_file_changed_event() {
     );
 }
 
+/// A file the window wrote itself outside `save`, as a PDF's render thread writes one, told to
+/// the vault with the etag it left: the watcher's echo of it is no edit from outside either.
+#[test]
+fn a_write_told_as_saved_does_not_come_back_as_changed() {
+    let f = Fixture::open(VaultConfig::default());
+    f.write("paper.pdf", "%PDF-1.4 before");
+    assert!(f.wait(|e| matches!(e, Event::DirsChanged(_))).is_some());
+
+    let path = f.vault.root().join("paper.pdf");
+    let etag = fs::write_bytes(&path, b"%PDF-1.4 after", None).unwrap();
+    f.vault.saved("paper.pdf", etag).unwrap();
+    assert!(
+        wait_for(
+            &f.events,
+            |e| matches!(e, Event::FileChanged(p) if p == "paper.pdf"),
+            Duration::from_secs(2),
+        )
+        .is_none(),
+        "our own write came back as someone else's edit"
+    );
+}
+
 /// Verify two workers sharing an index still report each other's writes
 /// when rows are already current, while own saves stay quiet. Save different
 /// notes to avoid late echoes being mistaken for own writes. Requires inotify.

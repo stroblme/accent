@@ -591,6 +591,16 @@ impl Vault {
         }
     }
 
+    /// `rel` was written by this window outside [`save`](Self::save), a PDF drawn on, and left at
+    /// `etag`, so the watcher's news of it is no change from outside. A remote vault's file is
+    /// written here as a cached copy, which reaches the host by [`remote::Remote::push`].
+    pub fn saved(&self, rel: &str, etag: Etag) -> Result<()> {
+        match &self.backend {
+            Backend::Local(v) => v.saved(rel, etag),
+            Backend::Remote(_) => Ok(()),
+        }
+    }
+
     /// Return a local file for readers that require one, such as PDF and image viewers.
     /// Local vaults return the file itself; remote vaults fetch a cached copy over SSH.
     /// Both return `NotFound` for a missing file.

@@ -46,6 +46,17 @@ impl Local {
         Ok(etag)
     }
 
+    /// Tell the worker that `rel` was written by this vault outside [`save`](Self::save), and left
+    /// at `etag`: a PDF's render thread writes its own file. Its watcher echo is then ours.
+    pub fn saved(&self, rel: &str, etag: Etag) -> Result<()> {
+        self.resolve(rel)?;
+        self.post(Msg::Saved {
+            rel: rel.to_string(),
+            etag,
+        });
+        Ok(())
+    }
+
     /// Write `bytes` to a file nothing holds yet, an image pasted into a note, and tell the worker
     /// as [`save`](Self::save) does: an embed of it resolves at once, not a watcher debounce later.
     /// A name taken meanwhile fails with `AlreadyExists(rel)` and keeps what it holds.
