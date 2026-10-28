@@ -1464,6 +1464,15 @@ fn clamp(selected: usize, len: usize) -> usize {
     selected.min(len.saturating_sub(1))
 }
 
+/// Where the repository at `selected` in `known` is in `repos`, found by its git dir, so one
+/// discovered ahead of it does not move the chooser onto another; where it went, [`clamp`].
+fn reselect(selected: usize, known: &[Repo], repos: &[Repo]) -> usize {
+    known
+        .get(selected)
+        .and_then(|was| repos.iter().position(|repo| repo.git_dir == was.git_dir))
+        .unwrap_or_else(|| clamp(selected, repos.len()))
+}
+
 fn absolute(vault_root: &Path, key: &str) -> PathBuf {
     match Path::new(key).is_absolute() {
         true => PathBuf::from(key),
@@ -1667,6 +1676,16 @@ mod tests {
         let vault = Path::new("/v");
         assert_eq!(ignored_key(vault, &repo("/v"), "build/"), "build/");
         assert_eq!(ignored_key(vault, &repo("/v"), "a.log"), "a.log");
+    }
+
+    #[test]
+    fn the_chooser_keeps_its_repository_when_another_is_found_ahead_of_it() {
+        let (a, b, c) = (repo("/v"), repo("/v/b"), repo("/v/c"));
+        let known = [a.clone(), c.clone()];
+        assert_eq!(reselect(1, &known, &[a.clone(), b.clone(), c]), 2);
+        // `c` went: the index it had, as far as the list reaches.
+        assert_eq!(reselect(1, &known, &[a.clone(), b]), 1);
+        assert_eq!(reselect(1, &known, &[a]), 0);
     }
 
     #[test]

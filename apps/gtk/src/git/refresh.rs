@@ -198,7 +198,10 @@ impl Panel {
             self.syncing.set(true);
             let names: Vec<&str> = repos.iter().map(|r| r.name.as_str()).collect();
             self.names.splice(0, self.names.n_items(), &names);
-            let selected = clamp(self.state.borrow().selected, repos.len());
+            let selected = {
+                let state = self.state.borrow();
+                reselect(state.selected, &state.repos, &repos)
+            };
             self.state.borrow_mut().selected = selected;
             self.chooser.set_selected(selected as u32);
             self.syncing.set(false);

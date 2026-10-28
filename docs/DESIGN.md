@@ -469,6 +469,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 ### Git pane
 
 - One repository at a time, from a `GtkDropDown` that hides itself when there is only one and ellipsizes the name, which would otherwise set how narrow the sidebar can be dragged.
+  A repository found ahead of the picked one leaves the pick on it, told by its git dir; only the picked one going moves the pick, to the row that takes its place.
 - Picking one draws the whole pane at once from what it last held about that repository — its status, which every refresh reads for every repository, and its history's first page, branches and submodules from the last time it was picked — and the refresh the pick asks for replaces that once it lands.
   Every row on screen is the picked repository's own; one never picked before shows its history when that refresh lands.
   The changes and the history go into their lists ten rows at a time, the frames drawn in between (`git::Fill`): GTK makes a row's widgets for each of a list's first 200 items, which spliced at once held the window up 80-130 ms on a repository with 2 000 changes.

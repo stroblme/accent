@@ -180,7 +180,7 @@ pub(super) fn fetch(
             }
         })
         .collect();
-    let at = clamp(selected, against.len());
+    let at = reselect(selected, &known, against);
     // Everything below is about the repository itself rather than the working tree, so a save
     // does not pay for it: five to seven processes per keystroke were what this cost before.
     let head = (depth >= Depth::Everything)
