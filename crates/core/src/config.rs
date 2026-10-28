@@ -38,6 +38,15 @@ diagrams = true
 "win.find-next" = ["F3"]
 "win.about" = []
 
+[[commands]]
+name = "Claude"
+run = "claude"
+shortcut = "<Control><Shift>j"
+
+[[commands]]
+name = "Build"
+run = "make -j8"
+
 [search]
 exclude = ["Archive", "Code/vendor"]
 
@@ -176,6 +185,9 @@ pub struct Config {
     /// list means the action is deliberately unbound.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub shortcuts: BTreeMap<String, Vec<String>>,
+    /// The user's own commands, `[[commands]]` in the file, listed by Run Command in this order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<CustomCommand>,
     pub search: SearchConfig,
     pub drawing: DrawingConfig,
     pub diagram: DiagramConfig,
@@ -188,6 +200,19 @@ pub struct Config {
     /// Keyed by canonical vault path.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub vaults: BTreeMap<String, VaultConfig>,
+}
+
+/// A command line the user named, which Run Command and its shortcut run in a terminal tab of its
+/// own at the vault root (DESIGN.md, Terminal).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CustomCommand {
+    /// What Run Command lists it as and its tab is titled with.
+    pub name: String,
+    /// A shell command line, run by the user's login shell.
+    pub run: String,
+    /// One accelerator in GTK's syntax (`<Control><Shift>j`), as `[shortcuts]` writes them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shortcut: Option<String>,
 }
 
 /// User-defined search exclusions, combined with git ignores. `All` includes them, the file tree
@@ -325,6 +350,7 @@ impl Default for Config {
             focus_mode: FocusMode::default(),
             recolour: RecolourConfig::default(),
             shortcuts: BTreeMap::new(),
+            commands: Vec::new(),
             search: SearchConfig::default(),
             drawing: DrawingConfig::default(),
             diagram: DiagramConfig::default(),
@@ -960,6 +986,7 @@ fn unknown_keys(table: &toml::Table) -> Vec<String> {
     let top = names(Config {
         editor_font: Some(String::new()),
         shortcuts: one(),
+        commands: vec![CustomCommand::default()],
         lsp: LspConfig { servers: one() },
         debug: debug(),
         vaults: BTreeMap::from([(String::new(), vault.clone())]),
@@ -1251,6 +1278,13 @@ daily_template = "DailyNote.md"
         // the user says "no shortcut at all" rather than "fall back to the default".
         assert_eq!(c.shortcuts["win.find-next"], ["F3"]);
         assert!(c.shortcuts["win.about"].is_empty());
+        let claude = CustomCommand {
+            name: "Claude".into(),
+            run: "claude".into(),
+            shortcut: Some("<Control><Shift>j".into()),
+        };
+        assert_eq!(c.commands[0], claude);
+        assert_eq!(c.commands[1].shortcut, None);
         assert_eq!(c.search.exclude, ["Archive", "Code/vendor"]);
         assert!(!c.drawing.mouse);
         assert_eq!(c.drawing.pen_width, 2.0);
@@ -1276,6 +1310,7 @@ daily_template = "DailyNote.md"
         assert_eq!(again.debug_terminal, DebugTerminal::Down);
         assert_eq!(again.vaults["/home/me/Notes"].new_file_dir, "Inbox");
         assert_eq!(again.shortcuts, c.shortcuts);
+        assert_eq!(again.commands, c.commands);
         assert_eq!(again.search.exclude, c.search.exclude);
         assert_eq!(again.drawing, c.drawing);
         assert_eq!(again.diagram, c.diagram);
@@ -1290,6 +1325,7 @@ daily_template = "DailyNote.md"
         Config::default().write(&p).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
         assert!(!text.contains("[shortcuts]"), "{text}");
+        assert!(!text.contains("[[commands]]"), "{text}");
         assert!(!text.contains("[vaults"), "{text}");
         assert_eq!(Config::read(&p).unwrap(), Config::default());
         assert!(unknown_keys(&text.parse().unwrap()).is_empty());
