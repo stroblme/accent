@@ -456,6 +456,12 @@ impl Fade {
         }
     }
 
+    /// Stop wherever the fade is, the widget at `opacity` at once.
+    pub(crate) fn set(&self, opacity: f64) {
+        self.animation.pause();
+        self.widget.set_opacity(opacity);
+    }
+
     fn play(&self, from: f64, to: f64) {
         if to > 0.0 {
             self.widget.set_visible(true);
@@ -515,6 +521,8 @@ pub(crate) struct Pulse {
     bar: gtk::ProgressBar,
     /// Shared with the timer's own closure, so it can clear the slot when it stops itself.
     id: Rc<Cell<Option<glib::SourceId>>>,
+    /// The bar fading in on its first shown step, stopped by [`hide`](Self::hide).
+    fade: Rc<Fade>,
 }
 
 impl Drop for Pulse {
@@ -528,10 +536,11 @@ impl Pulse {
         Pulse {
             bar: bar.clone(),
             id: Rc::new(Cell::new(None)),
+            fade: Rc::new(Fade::new(bar)),
         }
     }
 
-    /// Pulse every `every`, showing the bar after `after` steps to suppress brief waits.
+    /// Pulse every `every`, fading the bar in after `after` steps to suppress brief waits.
     ///
     /// Use opacity to preserve layout. An active pulse is not restarted, so repeated messages
     /// cannot keep it permanently at the start of its cycle.
@@ -539,7 +548,7 @@ impl Pulse {
         if self.running() {
             return;
         }
-        let (bar, slot) = (self.bar.clone(), self.id.clone());
+        let (bar, slot, fade) = (self.bar.clone(), self.id.clone(), self.fade.clone());
         let mut steps = 0;
         self.id.set(Some(glib::timeout_add_local(every, move || {
             // The owner can outlive its window — a query still on a worker thread holds the search
@@ -551,17 +560,30 @@ impl Pulse {
             }
             steps += 1;
             if steps >= after {
-                bar.set_opacity(1.0);
+                fade.to(1.0);
                 bar.pulse();
             }
             glib::ControlFlow::Continue
         })));
     }
 
+    /// Stop pulsing, the bar left as it is: for a step that measures itself.
     pub(crate) fn stop(&self) {
         if let Some(id) = self.id.take() {
             id.remove();
         }
+    }
+
+    /// Fade the bar in, unless it is in or on its way.
+    pub(crate) fn show(&self) {
+        self.fade.to(1.0);
+    }
+
+    /// The wait is over: no pulse, and the bar gone at once, a fade still running stopped
+    /// rather than left to bring it back.
+    pub(crate) fn hide(&self) {
+        self.stop();
+        self.fade.set(0.0);
     }
 
     pub(crate) fn running(&self) -> bool {

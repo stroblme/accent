@@ -324,8 +324,9 @@ use user_commands::bench_commands;
 ///   (`notebook::bench_notebook`). Saves: a scratch vault under `/tmp`. `look:<ipynb>:<dir>`:
 ///   pictures of it under Light and Dark at two zooms, the add strip shown, into `<dir>`.
 /// - `ACCENT_BENCH_MOTION=<ipynb>,<folder>`: DESIGN.md's Motion sampled with animations on, then
-///   off: a notebook's cell buttons and add strips, a Files-tree folder's arrow
-///   and children and no turn while it scrolls (`motion::bench_motion`).
+///   off: a notebook's cell buttons, add strips, new cell and outputs, a Files-tree folder's arrow
+///   and children and no turn while it scrolls, a progress bar and a Git spinner
+///   (`motion::bench_motion`). Inserts a cell: a scratch vault under `/tmp`.
 /// - `ACCENT_BENCH_NOTEBOOK_LSP=<ipynb>,<marimo .py>`: notebooks it writes, their code cells
 ///   answered by `build-aux/fake-lsp.py --notebook` (`notebook_lsp::bench_notebook_lsp`). Saves:
 ///   a scratch vault under `/tmp`.

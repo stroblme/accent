@@ -1145,7 +1145,8 @@ fn build_branch_row() -> BranchRow {
 /// `child`: an icon, a label, a box), or the face again. The two share a stack made the first time
 /// round, which is as big as the bigger of them, so the button keeps its size and the row its
 /// layout; GTK's own icon or label child would be replaced, along with the class it gave the
-/// button, so the classes are put back.
+/// button, so the classes are put back. The spinner crossfades in once the command has taken
+/// [`SPIN_AFTER`], so a quick one does not blink the face, and out again (DESIGN.md, Loading).
 fn spin(button: &gtk::Widget, on: bool) {
     let Some(face) = button.property::<Option<gtk::Widget>>("child") else {
         return;
@@ -1156,7 +1157,10 @@ fn spin(button: &gtk::Widget, on: bool) {
         _ => {
             let classes = button.css_classes();
             button.set_property("child", None::<gtk::Widget>);
-            let slot = gtk::Stack::new();
+            let slot = gtk::Stack::builder()
+                .transition_type(gtk::StackTransitionType::Crossfade)
+                .transition_duration(crate::widgets::FADE_MS)
+                .build();
             slot.add_named(&face, Some("face"));
             let spinner = adw::Spinner::builder()
                 .halign(gtk::Align::Center)
@@ -1168,8 +1172,32 @@ fn spin(button: &gtk::Widget, on: bool) {
             slot
         }
     };
-    slot.set_visible_child_name(if on { "spinner" } else { "face" });
+    // The class says a spinner is wanted, there being nowhere else on a widget to keep that bit.
+    crate::widgets::set_class(&slot, SPINNING, on);
+    if !on {
+        slot.set_visible_child_name("face");
+        return;
+    }
+    let slot = slot.downgrade();
+    glib::timeout_add_local_once(SPIN_AFTER, move || {
+        if let Some(slot) = slot.upgrade().filter(|s| s.has_css_class(SPINNING)) {
+            slot.set_visible_child_name("spinner");
+        }
+    });
 }
+
+/// [`spin`], for `ACCENT_BENCH_MOTION` on a button of its own.
+#[cfg(feature = "bench")]
+pub(crate) fn bench_spin(button: &gtk::Widget, on: bool) {
+    spin(button, on);
+}
+
+/// How long a Git command runs before its button's spinner shows: a bar's delay (DESIGN.md,
+/// Loading).
+const SPIN_AFTER: Duration = Duration::from_millis(160);
+
+/// The class on a button's stack while a spinner is wanted there ([`spin`]).
+const SPINNING: &str = "accent-spinning";
 
 /// The commit message box: the container the panel hides and shows in one call, the view the
 /// message is typed into, and the placeholder laid over it. Split out of [`Panel::new`] for

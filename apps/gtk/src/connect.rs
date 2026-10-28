@@ -1,7 +1,7 @@
 //! Show connection progress over the document column while a remote vault opens.
 //!
 //! The bar belongs to the surface becoming usable; status-bar text still reports the step.
-//! It fades without changing the layout. Local vaults need no bar or reserved space.
+//! It fades in and goes without changing the layout. Local vaults need no bar or reserved space.
 
 use crate::widgets::Pulse;
 use gtk::prelude::*;
@@ -38,7 +38,7 @@ impl Bar {
 
     /// Show connection-step progress with `fraction`, or pulse when the duration is unknown.
     pub fn show(&self, fraction: Option<f64>) {
-        self.bar.set_opacity(1.0);
+        self.pulse.show();
         match fraction {
             Some(f) => {
                 self.pulse.stop();
@@ -52,8 +52,7 @@ impl Bar {
 
     /// The connection is over, however it ended.
     pub fn hide(&self) {
-        self.pulse.stop();
-        self.bar.set_opacity(0.0);
+        self.pulse.hide();
         self.bar.set_fraction(0.0);
     }
 }

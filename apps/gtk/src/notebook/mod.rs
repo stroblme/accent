@@ -78,6 +78,9 @@ pub struct NotebookTab {
     model: RefCell<Notebook>,
     /// A view per cell, in the model's order.
     views: RefCell<Vec<Rc<CellView>>>,
+    /// The next [`reconcile`](Self::reconcile) fades in the cells it makes: one added, split off
+    /// or converted, not one an open, a reload or the history brings (DESIGN.md, Motion).
+    fade_new: Cell<bool>,
     /// The code cells' language, from the notebook's own metadata.
     language: Option<sourceview5::Language>,
     /// How wide the code cells' `[n]` column is, where the markdown cells' markers hang.
@@ -196,6 +199,7 @@ pub fn open(
         layout_hook: RefCell::default(),
         model: RefCell::new(notebook),
         views: RefCell::default(),
+        fade_new: Cell::new(false),
         language,
         gutter: Cell::new(0),
         spellcheck: Cell::new(false),
@@ -370,7 +374,7 @@ impl NotebookTab {
     /// its source. A view the model still has is kept, its caret and its outputs with it.
     fn reconcile(self: &Rc<Self>) {
         let mut old = self.views.take();
-        let mut views = Vec::new();
+        let (mut views, mut new) = (Vec::new(), Vec::new());
         let cells: Vec<(CellId, Kind, String)> = self
             .model
             .borrow()
@@ -381,7 +385,11 @@ impl NotebookTab {
         for (id, kind, source) in cells {
             let view = match old.iter().position(|v| v.id == id && v.kind == kind) {
                 Some(i) => old.swap_remove(i),
-                None => self.build_view(id),
+                None => {
+                    let view = self.build_view(id);
+                    new.push(view.root.clone());
+                    view
+                }
             };
             if !view.shows_source(&source) {
                 match view.editor() {
@@ -405,6 +413,9 @@ impl NotebookTab {
             before = view.root.clone().upcast();
             view.set_presenting(self.presenting.get());
             view.set_selected(Some(view.id) == self.selected.get());
+        }
+        if self.fade_new.get() {
+            new.iter().for_each(crate::widgets::fade_in);
         }
         *self.views.borrow_mut() = views;
         if self.view_of(self.selected.get()).is_none() {
@@ -831,6 +842,14 @@ impl NotebookTab {
         true
     }
 
+    /// [`operate`](Self::operate) for an operation that makes cells, which fade in.
+    fn operate_new(self: &Rc<Self>, op: impl FnOnce(&mut Notebook) -> Option<Vec<Edit>>) -> bool {
+        self.fade_new.set(true);
+        let done = self.operate(op);
+        self.fade_new.set(false);
+        done
+    }
+
     /// The selected cell's place, if a cell is selected.
     fn selected_at(&self) -> Option<usize> {
         self.position_of(self.selected.get()?)
@@ -848,7 +867,7 @@ impl NotebookTab {
 
     fn insert_at(self: &Rc<Self>, at: usize, kind: Kind) {
         let mut new = None;
-        self.operate(|nb| {
+        self.operate_new(|nb| {
             let cell = nb.new_cell(kind, "")?;
             new = Some(cell.id());
             Some(nb.apply_all(vec![Edit::Insert { at, cell }]))
@@ -896,7 +915,7 @@ impl NotebookTab {
         let Some(id) = self.selected.get() else {
             return;
         };
-        if self.operate(|nb| nb.convert(id, kind)) {
+        if self.operate_new(|nb| nb.convert(id, kind)) {
             self.focus_cell(id);
         }
     }
@@ -917,7 +936,7 @@ impl NotebookTab {
             .map_or(text.len(), |(at, _)| at);
         let id = view.id;
         let mut new = None;
-        self.operate(|nb| {
+        self.operate_new(|nb| {
             let undo = nb.split(id, at)?;
             new = nb
                 .position(id)
@@ -1659,6 +1678,37 @@ impl NotebookTab {
             self.hover(id, false);
         }
         self.deselect();
+    }
+
+    /// Cell `n`'s whole view and its outputs.
+    pub fn bench_cell_parts(&self, n: usize) -> Option<[gtk::Widget; 2]> {
+        let view = self.views.borrow().get(n).cloned()?;
+        Some([
+            view.root.clone().upcast(),
+            view.outputs.widget.clone().upcast(),
+        ])
+    }
+
+    /// Cell `n`'s outputs put stale, as a run starting does, or back.
+    pub fn bench_set_stale(&self, n: usize, on: bool) {
+        if let Some(view) = self.views.borrow().get(n) {
+            view.outputs.set_stale(on);
+        }
+    }
+
+    /// The row `input()` asks in under cell `n`, which a run's end takes away.
+    pub fn bench_ask(&self, n: usize) -> Option<gtk::Widget> {
+        let view = self.views.borrow().get(n).cloned()?;
+        view.ask("name? ", false, |_| {}).parent()
+    }
+
+    /// Stop shown in Run Cell's place (`running`), or Run Cell in Stop's, as the kernel turns.
+    pub fn bench_turn_to(&self, running: bool) {
+        let turn = match running {
+            true => cell::Turn::Running,
+            false => cell::Turn::Free,
+        };
+        self.tools.show_turn(turn);
     }
 }
 

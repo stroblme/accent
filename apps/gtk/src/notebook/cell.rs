@@ -231,7 +231,7 @@ impl CellView {
 
     /// Ask for a line under the outputs, as `input()` does: `prompt` before an entry, its
     /// characters hidden for a `password`, and Return handing what was typed to `answer`, the
-    /// entry then kept, greyed, until the run ends ([`end_ask`](Self::end_ask)).
+    /// entry then kept, greyed, until the run ends ([`end_ask`](Self::end_ask)). It fades in.
     pub fn ask(
         &self,
         prompt: &str,
@@ -266,6 +266,7 @@ impl CellView {
         row.append(&label);
         row.append(&entry);
         self.body.append(&row);
+        crate::widgets::fade_in(&row);
         self.asking.replace(Some(row));
         entry
     }
@@ -541,6 +542,9 @@ pub struct Tools {
     pub rail: Rc<RefCell<Option<gtk::Widget>>>,
     /// The bar's fade in at each cell it comes to, and out where it was when it goes.
     fade: Fade,
+    /// Run Cell's and Stop's, each fading in as it takes the other's place.
+    run_fade: Fade,
+    stop_fade: Fade,
 }
 
 impl Tools {
@@ -582,7 +586,7 @@ impl Tools {
             bar.append(b);
         }
         bar.append(&more);
-        let fade = Fade::new(&bar);
+        let (fade, run_fade, stop_fade) = (Fade::new(&bar), Fade::new(&run), Fade::new(&stop));
         Tools {
             bar,
             run,
@@ -597,6 +601,8 @@ impl Tools {
             cell: std::cell::Cell::new(None),
             rail: Rc::default(),
             fade,
+            run_fade,
+            stop_fade,
         }
     }
 
@@ -607,7 +613,8 @@ impl Tools {
         if let Some(view) = view {
             let code = view.kind == Kind::Code;
             self.runnable.set(self.runs && code);
-            self.show_turn(turn);
+            // A new cell's face comes with the bar, not on its own.
+            self.set_turn(turn, self.cell.get() == Some(view.id));
             self.status.set_visible(self.runs && code);
             self.show_execution(view.execution.get());
         }
@@ -635,12 +642,28 @@ impl Tools {
         }
     }
 
-    /// Run Cell, greyed while the cell waits, or Stop in its place while the kernel runs it.
+    /// Run Cell, greyed while the cell waits, or Stop in its place while the kernel runs it,
+    /// fading in as it takes the other's place.
     pub fn show_turn(&self, turn: Turn) {
+        self.set_turn(turn, true);
+    }
+
+    fn set_turn(&self, turn: Turn, fade: bool) {
         let runnable = self.runnable.get();
-        self.run.set_visible(runnable && turn != Turn::Running);
+        let (run, stop) = (
+            runnable && turn != Turn::Running,
+            runnable && turn == Turn::Running,
+        );
+        let swapped = fade && (self.run.is_visible() && stop || self.stop.is_visible() && run);
+        self.run.set_visible(run);
+        self.stop.set_visible(stop);
+        if swapped {
+            match stop {
+                true => self.stop_fade.fade_in(),
+                false => self.run_fade.fade_in(),
+            }
+        }
         self.run.set_sensitive(turn != Turn::Waiting);
-        self.stop.set_visible(runnable && turn == Turn::Running);
     }
 
     pub fn show_execution(&self, state: Execution) {
@@ -717,7 +740,8 @@ fn cell_menu() -> gio::Menu {
 /// as the add buttons, Adwaita's 24 px and 5 px of padding above and below, which are put over it
 /// while the pointer is there: shown at once, since a widget put under a resting pointer is not
 /// hovered until the pointer moves. The strip over the first cell fades in and out on a hover
-/// (DESIGN.md, Motion), the gaps' one as it is moved into each gap (`NotebookTab::place`).
+/// (DESIGN.md, Motion), the gaps' one as it is moved into each gap (`NotebookTab::place`), and
+/// outputs going stale dim over the same time.
 pub fn install_css() {
     thread_local! {
         static DONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -756,7 +780,7 @@ pub fn install_css() {
          textview.notebook-stderr > text { background-color: \
            color-mix(in srgb, var(--error-color) 8%, transparent); }";
     provider.load_from_string(&format!(
-        "{rules} .notebook-inserter {{ transition: opacity {ms}ms {easing}; }}",
+        "{rules} .notebook-inserter, .notebook-outputs {{ transition: opacity {ms}ms {easing}; }}",
         ms = crate::widgets::FADE_MS,
         easing = crate::widgets::CSS_EASING,
     ));

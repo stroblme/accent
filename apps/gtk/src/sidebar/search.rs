@@ -473,8 +473,7 @@ struct Search {
     replace_row: gtk::Revealer,
     replace_entry: gtk::Entry,
     apply: gtk::Button,
-    progress: gtk::ProgressBar,
-    /// The timer stepping [`Search::progress`] while a query is on a worker thread.
+    /// The timer stepping the progress bar while a query is on a worker thread, and its fade.
     pulse: Pulse,
     /// What the rows on screen add up to ([`count_label`]), in the bar's place while it is not
     /// drawn.
@@ -541,10 +540,7 @@ impl Search {
             // which an empty or unparseable one used to do — blinked the bar off for a step in
             // the middle of a query that was still going.
             true => self.pulse.start(PULSE, SHOW_AFTER),
-            false => {
-                self.pulse.stop();
-                self.progress.set_opacity(0.0);
-            }
+            false => self.pulse.hide(),
         }
     }
 
@@ -1466,7 +1462,6 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen, dragging: &Rc<dyn Fn(bool)
         replace_row: replace_row.clone(),
         replace_entry: replace_entry.clone(),
         apply: apply.clone(),
-        progress: progress.clone(),
         pulse: Pulse::new(&progress),
         count,
         body: body.clone(),

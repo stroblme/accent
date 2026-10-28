@@ -1200,9 +1200,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Run refuses such a notebook while no kernelspec of its language is found, looked for afresh each time a kernel starts, and its toast names the kernel the notebook asks for ("This notebook asks for the ir kernel, which is not installed"), so ipykernel never runs another language's code.
   A kernel starts on the `ipc` transport, as ipykernel does (user decision 2026-10-27): one that takes only `tcp` is never reached, and its start says so once its minute is up.
 - Run Cell runs the selected cell, Run Cell and Advance then selects the next, adding a code cell after the last, and Run All runs every code cell in order: the kernel takes them in turn, and an error stops the rest, which keep what they had. A cell with no code is not run.
-- A cell waiting or running counts `[*]`; the outputs of its last run stay as it starts, dimmed, to be held against the new ones, until its first new output takes their place, and go at its end if none comes, an interrupt or the kernel ending included (user decision 2026-10-24); the new ones come in under it, a stream's text running on as it grows, drawn once per turn of the window's event pump, and it counts `[n]` when done.
+- A cell waiting or running counts `[*]`; the outputs of its last run stay as it starts, dimmed over the fade's 250 ms, to be held against the new ones, until its first new output takes their place, and go at its end if none comes, an interrupt or the kernel ending included (user decision 2026-10-24); the new ones come in under it, a stream's text running on as it grows, drawn once per turn of the window's event pump, and it counts `[n]` when done.
   Each new output fades in (user decision 2026-10-28; Motion): a stream, a picture once it is decoded, an error, a display, and every output of a rerun or after a `clear_output(wait=True)`, even one that says what the one before it said; more text on a stream and an updated display do not fade again, nor do outputs drawn as their cell comes into view.
-- `input()` asks under its cell: an entry with the prompt before it, a password's characters hidden, Return answering; in the notebook in front it takes the keyboard and is brought into view.
+- `input()` asks under its cell: an entry with the prompt before it, fading in, a password's characters hidden, Return answering; in the notebook in front it takes the keyboard and is brought into view.
 - Interrupt Kernel sends the kernel's process group SIGINT, as Jupyter does, or an `interrupt_request` on its control channel for a kernelspec whose `interrupt_mode` is `message`, and ipykernel drops the runs waiting behind the one it stops; Restart Kernel ends it and starts another, the cells keeping their outputs and counts; Shut Down Kernel ends it, and the next run starts a new one.
   Stop, on the kernel's strip and a running cell's buttons, is Interrupt Kernel, which keeps what the kernel holds, and Shut Down Kernel while the kernel starts (user decision 2026-10-27): stopping only the runs waiting is not offered, as the kernel holds them once sent and Jupyter takes none back.
 - A run is not an edit: it costs no undo step, marks the notebook changed and saves with it (user decision 2026-10-20), its cells' outputs and counts written as nbformat writes them and the notebook's metadata left as it was.
@@ -1467,10 +1467,11 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 - The status bar's progress text; never a modal, never a blocked window.
 - A background query whose answer replaces a list gets a `GtkProgressBar` across the top of that list, faded rather than hidden so nothing shifts, and only after 160 ms: a bar that appears and goes in one breath reads as a flash.
+  It fades in on its first step and goes at once when the answer comes, a fade still running stopped with it.
   Between queries its place says what the answer holds — "12 results in 3 files", `+` on a number the cap may have cut — in `.caption` `.dimmed`.
 - **A bar belongs to the surface it is about to fill**, which allows one more: a remote vault's first connection, across the top of the document column and inset from its edges as the tab bar insets its tabs, since that wait makes the whole column usable and can take seconds.
-  It measures the upload of the server binary and pulses through the rest; a local vault's window never shows it.
-- Elsewhere a 16 px `AdwSpinner` beside the control that started the work, unless that would move the layout: a Git command's spinner takes the place of its button's icon or label, at the button's size, so the row keeps its width (Git pane); the Code pane's strips keep the spinner's room while it is away (Sidebar, Code).
+  It measures the upload of the server binary and pulses through the rest, fading in as the connection starts; a local vault's window never shows it.
+- Elsewhere a 16 px `AdwSpinner` beside the control that started the work, unless that would move the layout: a Git command's spinner takes the place of its button's icon or label, at the button's size, so the row keeps its width (Git pane), crossfading in once the command has taken 160 ms and back out, so a quick command does not blink the button; the Code pane's strips keep the spinner's room while it is away (Sidebar, Code).
   The status bar's branch, the same action as Sync, greys out while a sync runs.
 
 ## Typography
@@ -2043,6 +2044,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 - Buttons a hover brings slide in where they take room (a list row's, Sidebar) and fade where they keep it or lie over something (a branch's trash, a page thumbnail's round buttons, a notebook's add strips); the Search pane's replace row and a folder field's list slide open.
   A folder the reader opens in the Files tree turns its arrow, one `go-down` turned a quarter back while closed, and fades in the rows its listing lands under it, so what opened reads as coming out of it; a section of the sidebar and a variable of the Debug pane turn theirs too.
   Only on the reader's toggle: a list binds its row widgets to other rows as it scrolls, so an arrow that turned on every change of its widget's state would spin under a scroll; and only the rows bound in the frame the listing lands, so a row scrolled to, a refill (Show Hidden, a change on disk) and the folders Reveal in Sidebar opens come at once, as a closing folder's rows go.
+  A cell added to a notebook — inserted, split off, converted, or past the last by Run Cell and Advance — fades in, and Stop and Run Cell fade in as each takes the other's place; a cell deleted or moved goes or moves at once, as do the cells Undo and Redo bring back, which walk back what was done rather than make anything (Notebook).
   A notebook's cell buttons fade in beside each cell they come to and fade out where they stood when they go, the one fade out besides a toast's and a revealer's: one shared column, faded by one animation that turns round where it is, so a pointer sweeping the cells starts no fade per cell (Notebook).
   Nothing else fades in: not a reload (a LaTeX build rewrites its PDF every few seconds), a restore, a tab landing in another pane, or a layout change (F9, a split).
 - Focus mode fades as the chrome's CSS transition does, over 250 ms of `ease`, its line fade and a notebook's outputs eased the same (Chrome auto-hide); Reveal in Sidebar's outline holds a second and fades over two.
@@ -2057,6 +2059,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 | Every fade, crossfade, slide and turn above, the toasts' lift over the status bar too | 250 ms | `widgets.rs::FADE_MS` |
 | Focus mode's fades: the chrome, the receding panes, the line fade, a notebook's outputs | 250 ms | `fade.rs::RAMP_MS` |
 | A PDF still opening shows a spinner | 160 ms | `pdf/tab.rs::OPENING` |
+| A Git command still running shows its button's spinner | 160 ms | `git/mod.rs::SPIN_AFTER` |
 | A held `Ctrl+Tab` shows its card | 200 ms | `switcher.rs::DELAY` |
 | End-of-line messages cut again after a width change | 150 ms | `editor/mod.rs::DEBOUNCE` |
 | Palette query | 50 ms | `palette.rs::DEBOUNCE` |

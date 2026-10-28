@@ -2,15 +2,20 @@
 //! with animations on and then off, the setting changed while the window runs, which every motion
 //! has to follow at once. A line says whether a value between a motion's ends was seen (`mid`)
 //! and where it ended.
-//! - The notebook: the cell buttons coming to a cell and going, and the add strips.
+//! - The notebook, whose second cell is code and whose fourth has an output: the cell buttons
+//!   coming to a cell and going, the add strips, Stop and Run Cell taking each other's place,
+//!   `input()`'s row, outputs going stale and a new cell, which it inserts: a scratch vault under
+//!   `/tmp`.
 //! - The Files tree's `<folder>`, holding a subfolder `d00` and a dot-named file: its arrow and the
 //!   children it opens onto, and no arrow turning nor row fading while it scrolls or Show Hidden
 //!   refills it.
+//! - A progress bar's first step and a stop inside its fade, and a Git button's spinner.
 
 use super::*;
 use gtk::gsk;
 
 pub(super) fn bench_motion(app: &Rc<App>, arg: &str) {
+    scratch_only(app, "ACCENT_BENCH_MOTION");
     let Some((ipynb, folder)) = arg.split_once(',') else {
         eprintln!("ACCENT_BENCH_MOTION=<ipynb>,<folder>");
         return bench_quit(app);
@@ -24,6 +29,7 @@ pub(super) fn bench_motion(app: &Rc<App>, arg: &str) {
             let said = if on { "on" } else { "off" };
             notebook(&app, &ipynb, said).await;
             tree(&app, &folder, said).await;
+            waits(said).await;
         }
         bench_quit(&app);
     });
@@ -143,7 +149,7 @@ async fn notebook(app: &Rc<App>, rel: &str, said: &str) {
         return println!("bench motion no_tab {rel}");
     };
     glib::timeout_future(Duration::from_millis(800)).await;
-    let [bar, .., head, gap] = tab.bench_motion_parts();
+    let [bar, run, stop, head, gap] = tab.bench_motion_parts();
     tab.bench_hover(Some(1));
     say(said, "buttons_in", sampled(400, || drawn(&bar)).await);
     tab.bench_hover(Some(3));
@@ -164,6 +170,27 @@ async fn notebook(app: &Rc<App>, rel: &str, said: &str) {
     for n in [0, 2] {
         tab.bench_gap(n);
         say(said, "strip_gap", sampled(400, || drawn(&gap)).await);
+    }
+
+    tab.bench_hover(Some(1));
+    glib::timeout_future(Duration::from_millis(400)).await;
+    tab.bench_turn_to(true);
+    say(said, "stop_in", sampled(400, || drawn(&stop)).await);
+    tab.bench_turn_to(false);
+    say(said, "run_in", sampled(400, || drawn(&run)).await);
+
+    if let Some(row) = tab.bench_ask(1) {
+        say(said, "input_in", sampled(400, || drawn(&row)).await);
+    }
+    if let Some([_, outputs]) = tab.bench_cell_parts(3) {
+        tab.bench_set_stale(3, true);
+        say(said, "stale", sampled(400, || drawn(&outputs)).await);
+        tab.bench_set_stale(3, false);
+    }
+    tab.bench_hover(None);
+    tab.insert(accent_core::notebook::Kind::Code, true);
+    if let Some([cell, _]) = tab.bench_cell_parts(tab.cell_count() - 1) {
+        say(said, "new_cell", sampled(400, || drawn(&cell)).await);
     }
 }
 
@@ -239,4 +266,43 @@ async fn tree(app: &Rc<App>, folder: &str, said: &str) {
     println!("bench motion {said} refill faded={faded}");
     tree.set_show_hidden(false);
     row.set_expanded(false);
+}
+
+/// A progress bar's first step and a stop inside its fade; a Git button's spinner for a command
+/// shorter than its delay and one longer.
+async fn waits(said: &str) {
+    let bar = gtk::ProgressBar::builder().opacity(0.0).build();
+    let button = gtk::Button::with_label("Stage");
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    column.append(&bar);
+    column.append(&button);
+    let window = gtk::Window::builder().child(&column).build();
+    window.present();
+    glib::timeout_future(Duration::from_millis(300)).await;
+    let pulse = crate::widgets::Pulse::new(&bar);
+    pulse.start(Duration::from_millis(80), 2);
+    say(said, "bar_in", sampled(500, || bar.opacity()).await);
+    pulse.hide();
+    pulse.start(Duration::from_millis(80), 2);
+    glib::timeout_future(Duration::from_millis(200)).await;
+    pulse.hide();
+    let back = ever(300, || bar.opacity() > 0.0).await;
+    println!("bench motion {said} bar_stopped back={back}");
+
+    let slot = || button.child().and_downcast::<gtk::Stack>();
+    let spinning = || slot().and_then(|s| s.visible_child_name()).as_deref() == Some("spinner");
+    crate::git::bench_spin(button.upcast_ref(), true);
+    glib::timeout_future(Duration::from_millis(60)).await;
+    crate::git::bench_spin(button.upcast_ref(), false);
+    let blinked = ever(400, spinning).await;
+    crate::git::bench_spin(button.upcast_ref(), true);
+    let early = spinning();
+    let crossfaded = ever(500, || slot().is_some_and(|s| s.is_transition_running())).await;
+    println!(
+        "bench motion {said} spinner quick_blinked={blinked} at_once={early} crossfaded={crossfaded} \
+         shown={}",
+        spinning()
+    );
+    crate::git::bench_spin(button.upcast_ref(), false);
+    window.destroy();
 }
