@@ -633,6 +633,26 @@ pub(super) fn bench_pdf_pen(app: &Rc<App>, arg: &str) {
         app.pdf_mode(pdfview::Mode::Eraser);
         glib::timeout_future(Duration::from_secs(2)).await;
         println!("bench pen named kept={}", held().0 == names);
+        // The page lists the render thread read and sent for what follows, and its CPU time,
+        // once it has gone quiet: the tiles and the lists of a step land after its save.
+        let spent = Cell::new((reader.lists_heard(), render_cpu_ms()));
+        let spent = async |step: &str| {
+            let mut last = (reader.lists_heard(), render_cpu_ms());
+            for _ in 0..40 {
+                glib::timeout_future(Duration::from_millis(500)).await;
+                let now = (reader.lists_heard(), render_cpu_ms());
+                if now.0 == last.0 && now.1 - last.1 < 5.0 {
+                    break;
+                }
+                last = now;
+            }
+            let (lists, cpu) = spent.replace((reader.lists_heard(), render_cpu_ms()));
+            println!(
+                "bench pen {step} lists={} render_cpu_ms={:.0}",
+                reader.lists_heard() - lists,
+                render_cpu_ms() - cpu
+            );
+        };
         let mut steps = Vec::new();
         for i in 0..=60 {
             let (x, y) = on_screen(w * 0.5, h * (0.1 + 0.8 * f64::from(i) / 60.0));
@@ -647,10 +667,12 @@ pub(super) fn bench_pdf_pen(app: &Rc<App>, arg: &str) {
         pdf.flush();
         written(&app).await;
         agree("erased");
+        spent("erased").await;
         let _ = WidgetExt::activate_action(&app.window, "win.pdf-undo", None);
         pdf.flush();
         written(&app).await;
         agree("undone");
+        spent("undone").await;
         // The first stroke, taken by where it starts and moved down.
         let file = filed();
         app.pdf_mode(pdfview::Mode::Adjust);

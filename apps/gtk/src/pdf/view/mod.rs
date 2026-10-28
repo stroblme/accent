@@ -330,6 +330,13 @@ impl PdfView {
         (self.imp().heard.get(), held)
     }
 
+    /// How many lists of a page the render thread has sent the tools. Only
+    /// `ACCENT_BENCH_PDF=pen:` reads it.
+    #[cfg(feature = "bench")]
+    pub fn lists_heard(&self) -> usize {
+        self.imp().lists.get()
+    }
+
     /// The page a thumbnail strip frames. Only `ACCENT_BENCH_PDF` reads it.
     #[cfg(feature = "bench")]
     pub fn framed(&self) -> usize {
@@ -450,7 +457,10 @@ impl PdfView {
     /// Follow an adjusted selection by stroke ID or clear it if deleted.
     pub fn set_inks(&self, page: usize, inks: Vec<NamedInk>, erases: u64) {
         #[cfg(feature = "bench")]
-        self.imp().heard.set(self.imp().heard.get() + inks.len());
+        {
+            self.imp().heard.set(self.imp().heard.get() + inks.len());
+            self.imp().lists.set(self.imp().lists.get() + 1);
+        }
         let latest = self.imp().last_erase.borrow().get(&page).copied();
         if erases < latest.unwrap_or(0) {
             return;
@@ -730,6 +740,9 @@ mod imp {
         /// How many strokes the render thread has listed for the tools, every list counted whole.
         #[cfg(feature = "bench")]
         pub heard: Cell<usize>,
+        /// How many lists of a page it has sent them, stale ones included.
+        #[cfg(feature = "bench")]
+        pub lists: Cell<usize>,
         pub page: Cell<usize>,
         pub shown: RefCell<std::ops::RangeInclusive<usize>>,
         /// The paper colour for the scheme in force, which costs a CSS parse to work out and is
@@ -798,6 +811,8 @@ mod imp {
                 drawn: Cell::new(0),
                 #[cfg(feature = "bench")]
                 heard: Cell::new(0),
+                #[cfg(feature = "bench")]
+                lists: Cell::new(0),
                 page: Cell::new(0),
                 shown: RefCell::new(0..=0),
                 paper: Cell::new(None),

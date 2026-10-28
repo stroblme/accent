@@ -5,6 +5,7 @@ use std::rc::Rc;
 
 use accent_core::pdf;
 use adw::prelude::*;
+use gtk::glib;
 
 use super::Anchor;
 use super::protocol::{Reply, Request};
@@ -63,13 +64,7 @@ impl PdfTab {
                     // on this page whether it is on screen or not: the Outline pane lists them
                     // all. An erase, a move or an Undo may take or put back another editor's
                     // stroke and its note.
-                    None => {
-                        self.links.borrow_mut().remove(&page);
-                        self.ask(Request::Links(page));
-                        if self.wants_inks() && self.view.visible_pages().contains(&page) {
-                            self.ask(Request::Inks(page));
-                        }
-                    }
+                    None => self.reread(page),
                 }
                 self.save_soon();
             }
@@ -224,6 +219,31 @@ impl PdfTab {
             f(self, edit, step);
         }
         self.save_soon();
+    }
+
+    /// Ask for `page`'s links, comments and, for a tool in hand, strokes again, once this turn of
+    /// the main loop is over: an Undo of a partial eraser drag across 24 strokes changes one page
+    /// 72 times, each change otherwise reading the whole page again on the render thread that
+    /// tiles wait behind. Its links go at once, so a click meanwhile follows none that moved.
+    pub(super) fn reread(self: &Rc<Self>, page: usize) {
+        self.links.borrow_mut().remove(&page);
+        let mut stale = self.stale.borrow_mut();
+        if stale.insert(page) && stale.len() == 1 {
+            let tab = Rc::downgrade(self);
+            glib::idle_add_local_once(move || {
+                let Some(tab) = tab.upgrade() else {
+                    return;
+                };
+                let pages = std::mem::take(&mut *tab.stale.borrow_mut());
+                let shown = tab.view.visible_pages();
+                for page in pages {
+                    tab.ask(Request::Links(page));
+                    if tab.wants_inks() && shown.contains(&page) {
+                        tab.ask(Request::Inks(page));
+                    }
+                }
+            });
+        }
     }
 
     /// The file was read, on opening or again: its pages are these.
