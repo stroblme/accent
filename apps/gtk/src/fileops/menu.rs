@@ -89,22 +89,28 @@ pub fn context_menu(
 }
 
 /// The menu of a row inside a dependency tree (`tree::Row::dependency`): only what reads it,
-/// since the tree is somebody else's to change.
+/// since the tree is somebody else's to change. The tree's `top` folder itself can also be
+/// renamed, moved or trashed, which takes the tree whole.
 pub fn dependency_menu(
     ops: &Rc<Ops>,
     host: &gtk::Widget,
     (rel, is_dir): (&str, bool),
+    top: bool,
     anchor: gdk::Rectangle,
 ) -> gtk::PopoverMenu {
     host.insert_action_group(GROUP, Some(&actions(ops)));
-    let menu = dependency_model(rel, is_dir, ops.vault.is_remote());
+    let menu = dependency_model(rel, is_dir, ops.vault.is_remote(), top);
     crate::widgets::popup_menu(host, &menu, Some(anchor))
 }
 
-/// [`dependency_menu`]'s items: Open or Reload, then [`elsewhere`].
-fn dependency_model(rel: &str, is_dir: bool, remote: bool) -> gio::Menu {
+/// [`dependency_menu`]'s items: Open or Reload, then [`elsewhere`]; on the `top` folder Rename,
+/// Move to… and Move to Trash where [`context_menu`] has them.
+fn dependency_model(rel: &str, is_dir: bool, remote: bool, top: bool) -> gio::Menu {
     let menu = gio::Menu::new();
     let open = gio::Menu::new();
+    if top {
+        open.append_item(&item(GROUP, "Rename", "rename-folder", rel));
+    }
     match is_dir {
         true => open.append_item(&item(GROUP, "Reload", "reload", rel)),
         false => {
@@ -115,7 +121,17 @@ fn dependency_model(rel: &str, is_dir: bool, remote: bool) -> gio::Menu {
         }
     }
     menu.append_section(None, &open);
+    if top {
+        let moves = gio::Menu::new();
+        moves.append_item(&many("Move to…", "move-to", &[(rel.to_string(), is_dir)]));
+        menu.append_section(None, &moves);
+    }
     menu.append_section(None, &elsewhere(rel, is_dir, remote));
+    if top {
+        let danger = gio::Menu::new();
+        danger.append_item(&item(GROUP, "Move to Trash", "trash", rel));
+        menu.append_section(None, &danger);
+    }
     menu
 }
 
@@ -340,11 +356,22 @@ mod tests {
 
     #[test]
     fn a_dependency_row_offers_only_what_reads_it() {
-        let menu = |rel, is_dir, remote| labels(dependency_model(rel, is_dir, remote).upcast_ref());
+        let menu =
+            |rel, is_dir, remote| labels(dependency_model(rel, is_dir, remote, false).upcast_ref());
         let paths = ["Copy Name", "Copy Relative Path", "Copy Absolute Path"];
         assert_eq!(
-            menu(".ruff_cache", true, false),
+            menu(".ruff_cache/0.6.9", true, false),
             [&["Reload"][..], &paths, &["Show in Files"]].concat()
+        );
+        // The tree's own folder goes whole: renamed, moved or trashed.
+        assert_eq!(
+            labels(dependency_model(".ruff_cache", true, false, true).upcast_ref()),
+            [
+                &["Rename", "Reload", "Move to…"][..],
+                &paths,
+                &["Show in Files", "Move to Trash"]
+            ]
+            .concat()
         );
         assert_eq!(
             menu("node_modules/a/index.js", false, false),

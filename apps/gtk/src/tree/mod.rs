@@ -321,6 +321,18 @@ impl Tree {
             .and_then(decode)
     }
 
+    /// Whether `row` is the top folder of a dependency tree, the one folder of it that may be
+    /// renamed, moved or trashed: the folder it is listed in is no dependency tree's.
+    pub fn dependency_top(&self, row: &Row) -> bool {
+        let parent = accent_core::path::parent_dir(&row.rel);
+        let inside = find_row(&self.model, parent)
+            .and_then(|row| row.item())
+            .as_ref()
+            .and_then(decode)
+            .is_some_and(|parent| parent.dependency);
+        row.dependency && row.is_dir() && !inside
+    }
+
     /// The row under a pointer position, for the context menu.
     pub fn row_at(&self, x: f64, y: f64) -> Option<Row> {
         row_at(&self.view, x, y)

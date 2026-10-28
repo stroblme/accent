@@ -1292,8 +1292,9 @@ pub fn wire_tree(app: &Rc<App>) {
                 return glib::Propagation::Stop;
             }
             // The same rule the pointer path follows: a row in a dependency tree is listed and
-            // opened, never changed.
-            if key == gdk::Key::Delete && row.as_ref().is_some_and(|row| row.dependency) {
+            // opened, never changed, but for the tree's own folder.
+            let fixed = |row: &tree::Row| row.dependency && !tree.dependency_top(row);
+            if key == gdk::Key::Delete && row.as_ref().is_some_and(fixed) {
                 return glib::Propagation::Proceed;
             }
             match key {
@@ -1383,8 +1384,9 @@ fn marks_under(tree: &tree::Tree, row: Option<&tree::Row>) -> Vec<(String, bool)
     Vec::new()
 }
 
-/// The menu for `row`: a dependency tree's row gets only what reads it, a marked row the marked
-/// set's, any other row and the vault root (`None`) the whole menu.
+/// The menu for `row`: a dependency tree's row gets only what reads it, and its top folder what
+/// moves the tree whole; a marked row the marked set's, any other row and the vault root (`None`)
+/// the whole menu.
 fn row_menu(
     ops: &Rc<fileops::Ops>,
     tree: &tree::Tree,
@@ -1396,7 +1398,8 @@ fn row_menu(
     let marked = marks_under(tree, row.as_ref());
     match row {
         Some(row) if row.dependency => {
-            fileops::dependency_menu(ops, tree.widget(), (&row.rel, row.is_dir()), anchor)
+            let top = tree.dependency_top(row);
+            fileops::dependency_menu(ops, tree.widget(), (&row.rel, row.is_dir()), top, anchor)
         }
         _ => fileops::context_menu(ops, tree.widget(), clicked(row), &marked, anchor),
     }

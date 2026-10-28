@@ -26,18 +26,20 @@ pub(super) fn bench_menu(app: &Rc<App>, rel: &str) {
         let row = tree.selected();
         println!("bench menu_row {:?}", row.as_ref().map(|row| &row.rel));
         // What the tree's menu here would hold: a row inside a dependency tree only what reads
-        // it (`wire::row_menu`), a gitignored one the whole of it.
+        // it, and its top folder what moves it whole (`wire::row_menu`), a gitignored one the
+        // whole of it.
         if let Some(row) = &row {
             let at = gdk::Rectangle::new(0, 0, 1, 1);
             let clicked = (row.rel.as_str(), row.is_dir());
+            let top = tree.dependency_top(row);
             let menu = match row.dependency {
-                true => fileops::dependency_menu(&ops, tree.widget(), clicked, at),
+                true => fileops::dependency_menu(&ops, tree.widget(), clicked, top, at),
                 false => fileops::context_menu(&ops, tree.widget(), Some(clicked), &[], at),
             };
             let items = menu.menu_model().map(|m| fileops::labels(&m));
             menu.popdown();
             println!(
-                "bench menu_items {} dir={} dependency={} {items:?}",
+                "bench menu_items {} dir={} dependency={} top={top} {items:?}",
                 row.rel,
                 row.is_dir(),
                 row.dependency,
