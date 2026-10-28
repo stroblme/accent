@@ -110,24 +110,34 @@ impl App {
 
     fn on_event(self: &Rc<Self>, event: Event) {
         // Anything that touched a file may have changed what git says about it. The pane
-        // debounces, so a burst of watcher events still costs one `git status` — and only a walk
-        // that found or lost directories is a reason to go looking for repositories again, which
-        // is a `git rev-parse` per indexed directory holding a `.git`.
-        let depth = match event {
-            Event::Reconciled(_) | Event::DirsChanged(_) => Some(git::Depth::Discover),
-            Event::FileChanged(_) | Event::FileRemoved(_) | Event::FileRenamed { .. } => {
-                Some(git::Depth::Status)
-            }
-            _ => None,
-        };
+        // debounces, so a burst of watcher events still costs one round of `git status`, asked
+        // only of the repositories holding the paths: a save outside all of them costs nothing.
+        // Looking for repositories again is a `git rev-parse` per indexed directory holding a
+        // `.git`, so only a walk asks for it, and a path that was a repository or held one going:
+        // a folder that comes with a repository in it is walked, and an empty one holds none.
+        let touched = matches!(
+            event,
+            Event::Reconciled(_)
+                | Event::DirsChanged(_)
+                | Event::FileChanged(_)
+                | Event::FileRemoved(_)
+                | Event::FileRenamed { .. }
+        );
         if let Some(panel) = self.bibliography.get()
             && panel.changed_by(&event)
         {
             panel.refresh();
         }
-        if let Some(depth) = depth {
+        if touched {
             if let Some(git) = self.git.get() {
-                git.schedule_refresh(depth);
+                match &event {
+                    Event::Reconciled(_) => git.schedule_refresh(git::Depth::Discover),
+                    Event::DirsChanged(dirs) => git.schedule_paths(dirs, false),
+                    Event::FileChanged(rel) => git.schedule_paths([rel], false),
+                    Event::FileRemoved(rel) => git.schedule_paths([rel], true),
+                    Event::FileRenamed { from, to } => git.schedule_paths([from, to], true),
+                    _ => {}
+                }
             }
             // The same events mean a note may have gained or lost a link into an open PDF.
             self.sync_pdf_links_soon();

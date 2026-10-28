@@ -3,12 +3,68 @@
 
 use super::*;
 
+/// What a refresh asks git: everything a [`Depth`] says of every repository, or the status alone
+/// of the repositories holding some paths that changed.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum Ask {
+    Every(Depth),
+    /// Absolute paths. A file outside every repository asks git nothing.
+    Paths(HashSet<PathBuf>),
+}
+
+impl From<Depth> for Ask {
+    fn from(depth: Depth) -> Ask {
+        Ask::Every(depth)
+    }
+}
+
+impl Ask {
+    /// `paths` changed, or with `gone` went: the status of their repositories, unless one of them
+    /// was a repository or held one, which leaves the repositories to be looked for again.
+    pub(super) fn changed(paths: HashSet<PathBuf>, gone: bool, repos: &[Repo]) -> Ask {
+        let lost = |repo: &Repo| paths.iter().any(|path| repo.root.starts_with(path));
+        match gone && repos.iter().any(lost) {
+            true => Ask::Every(Depth::Discover),
+            false => Ask::Paths(paths),
+        }
+    }
+
+    pub(super) fn depth(&self) -> Depth {
+        match self {
+            Ask::Every(depth) => *depth,
+            Ask::Paths(_) => Depth::Status,
+        }
+    }
+
+    /// Whether `repo`'s status is asked: for a path, the repository holding it and any that one
+    /// is nested in, whose status a submodule's change is part of.
+    pub(super) fn asks(&self, repo: &Repo) -> bool {
+        match self {
+            Ask::Every(_) => true,
+            Ask::Paths(paths) => paths.iter().any(|path| path.starts_with(&repo.root)),
+        }
+    }
+}
+
+/// `ask` added to what was asked already: the deeper of the two, and the paths of both unless
+/// either asks every repository.
+fn joined(asked: Option<Ask>, ask: Ask) -> Ask {
+    match (asked, ask) {
+        (None, ask) => ask,
+        (Some(Ask::Paths(mut a)), Ask::Paths(b)) => {
+            a.extend(b);
+            Ask::Paths(a)
+        }
+        (Some(a), b) => Ask::Every(a.depth().max(b.depth())),
+    }
+}
+
 /// Only one refresh per source runs at a time; a new focused shell starts without waiting for
 /// the old source's network call, whose late answer is ignored.
 #[derive(Default)]
 pub(super) struct RefreshGate {
     active: Option<u64>,
-    again: Option<Depth>,
+    again: Option<Ask>,
 }
 
 impl RefreshGate {
@@ -17,9 +73,9 @@ impl RefreshGate {
         self.again = None;
     }
 
-    fn begin(&mut self, generation: u64, depth: Depth) -> bool {
+    fn begin(&mut self, generation: u64, ask: &Ask) -> bool {
         if self.active == Some(generation) {
-            self.again = self.again.max(Some(depth));
+            self.again = Some(joined(self.again.take(), ask.clone()));
             return false;
         }
         self.active = Some(generation);
@@ -27,7 +83,7 @@ impl RefreshGate {
         true
     }
 
-    fn finish(&mut self, generation: u64) -> Option<Depth> {
+    fn finish(&mut self, generation: u64) -> Option<Ask> {
         if self.active != Some(generation) {
             return None;
         }
@@ -40,12 +96,30 @@ impl Panel {
     /// Ask git again, once, in [`DEBOUNCE`], for at least `depth`. Calling this ten times in a
     /// row is one query, and the deepest of the ten is what it asks for.
     pub fn schedule_refresh(self: &Rc<Self>, depth: Depth) {
-        self.pending_depth
-            .set(self.pending_depth.get().max(Some(depth)));
+        self.schedule(Ask::Every(depth));
+    }
+
+    /// [`Panel::schedule_refresh`] for `keys` (vault keys) having changed, or with `gone` gone:
+    /// only the repositories holding them are asked their status, so a save outside all of them
+    /// costs no git process. One of them that was a repository or held one is looked for again.
+    pub fn schedule_paths(
+        self: &Rc<Self>,
+        keys: impl IntoIterator<Item = impl AsRef<Path>>,
+        gone: bool,
+    ) {
+        let root = self.source().key_root();
+        let paths = keys.into_iter().map(|key| root.join(key)).collect();
+        let ask = Ask::changed(paths, gone, &self.state.borrow().repos);
+        self.schedule(ask);
+    }
+
+    fn schedule(self: &Rc<Self>, ask: Ask) {
+        self.pending_ask
+            .set(Some(joined(self.pending_ask.take(), ask)));
         let panel = self.clone();
         self.pending.call(move || {
-            let depth = panel.pending_depth.take().unwrap_or(Depth::Status);
-            panel.refresh(depth);
+            let ask = panel.pending_ask.take().unwrap_or(Depth::Status.into());
+            panel.refresh(ask);
         });
     }
 
@@ -61,11 +135,12 @@ impl Panel {
         self.schedule_refresh(Depth::Discover);
     }
 
-    /// Ask git what `depth` says the pane needs, off the main thread, and put the answers on
+    /// Ask git what `ask` says the pane needs, off the main thread, and put the answers on
     /// screen. Whatever it did not ask for, the pane keeps.
-    pub(super) fn refresh(self: &Rc<Self>, depth: Depth) {
+    pub(super) fn refresh(self: &Rc<Self>, ask: impl Into<Ask>) {
+        let ask = ask.into();
         let generation = self.source_generation.get();
-        if !self.refresh_gate.borrow_mut().begin(generation, depth) {
+        if !self.refresh_gate.borrow_mut().begin(generation, &ask) {
             return;
         }
         let vault = self.source();
@@ -79,17 +154,17 @@ impl Panel {
         let panel = self.clone();
         glib::spawn_future_local(async move {
             let fetched = crate::work::off_thread("git", move || {
-                fetch::fetch(&vault, selected, depth, known, rows)
+                fetch::fetch(&vault, selected, &ask, known, rows)
             })
             .await;
             let again = panel.refresh_gate.borrow_mut().finish(generation);
             if generation == panel.source_generation.get()
-                && let Some(fetched) = fetched
+                && let Some(Some(fetched)) = fetched
             {
                 panel.apply(fetched);
             }
-            if let Some(depth) = again {
-                panel.refresh(depth);
+            if let Some(ask) = again {
+                panel.refresh(ask);
             }
         });
     }
@@ -118,7 +193,10 @@ impl Panel {
         self.chooser.set_visible(repos.len() > 1);
 
         let selected = clamp(self.state.borrow().selected, repos.len());
-        let status_kept = fetched.statuses.get(selected).is_some_and(Option::is_none);
+        let status_kept = match fetched.selected_asked {
+            true => fetched.statuses.get(selected).is_some_and(Option::is_none),
+            false => self.state.borrow().status_kept,
+        };
         let statuses = {
             let state = self.state.borrow();
             merge_statuses(&repos, fetched.statuses, &state.repos, &state.statuses)
@@ -247,12 +325,72 @@ mod tests {
     #[test]
     fn new_source_starts_while_old_refresh_is_busy() {
         let mut gate = RefreshGate::default();
-        assert!(gate.begin(1, Depth::Discover));
-        assert!(!gate.begin(1, Depth::Status));
+        assert!(gate.begin(1, &Depth::Discover.into()));
+        assert!(!gate.begin(1, &Depth::Status.into()));
         gate.invalidate();
-        assert!(gate.begin(2, Depth::Discover));
+        assert!(gate.begin(2, &Depth::Discover.into()));
         assert_eq!(gate.finish(1), None);
         assert_eq!(gate.active, Some(2));
         assert_eq!(gate.finish(2), None);
+    }
+
+    fn paths(paths: &[&str]) -> HashSet<PathBuf> {
+        paths.iter().map(PathBuf::from).collect()
+    }
+
+    fn repo(root: &str) -> Repo {
+        Repo {
+            root: PathBuf::from(root),
+            git_dir: PathBuf::from(root).join(".git"),
+            name: "r".to_string(),
+        }
+    }
+
+    #[test]
+    fn a_change_asks_only_the_repositories_holding_it() {
+        let repos = [repo("/v/a"), repo("/v/a/inner"), repo("/v/b")];
+        let asked = |ask: &Ask| -> Vec<bool> { repos.iter().map(|r| ask.asks(r)).collect() };
+        // The innermost repository and the one it is nested in, which may have it as a submodule.
+        let ask = Ask::changed(paths(&["/v/a/inner/x.md"]), false, &repos);
+        assert_eq!(asked(&ask), [true, true, false]);
+        // A file at the root of a vault that is no repository, and a sibling sharing a prefix.
+        let ask = Ask::changed(paths(&["/v/test.pdf", "/v/bb/x.md"]), false, &repos);
+        assert_eq!(asked(&ask), [false, false, false]);
+        // A repository's own root, as a folder whose listing changed.
+        assert_eq!(
+            asked(&Ask::changed(paths(&["/v/b"]), false, &repos)),
+            [false, false, true]
+        );
+        assert!(asked(&Ask::Every(Depth::Status)).iter().all(|&a| a));
+    }
+
+    #[test]
+    fn a_repository_gone_is_looked_for_again() {
+        let repos = [repo("/v/a"), repo("/v/a/inner")];
+        let discover = Ask::Every(Depth::Discover);
+        assert_eq!(Ask::changed(paths(&["/v/a/inner"]), true, &repos), discover);
+        assert_eq!(Ask::changed(paths(&["/v"]), true, &repos), discover);
+        // A file going is a change of its repository's status, and a folder changing is no loss.
+        let file = paths(&["/v/a/x.md"]);
+        assert_eq!(Ask::changed(file.clone(), true, &repos), Ask::Paths(file));
+        let folder = paths(&["/v"]);
+        assert_eq!(
+            Ask::changed(folder.clone(), false, &repos),
+            Ask::Paths(folder)
+        );
+    }
+
+    #[test]
+    fn asks_join_into_the_deeper_and_the_paths_of_both() {
+        let (a, b) = (Ask::Paths(paths(&["/a"])), Ask::Paths(paths(&["/b"])));
+        assert_eq!(joined(Some(a.clone()), b), Ask::Paths(paths(&["/a", "/b"])));
+        assert_eq!(
+            joined(Some(a.clone()), Ask::Every(Depth::Status)),
+            Ask::Every(Depth::Status)
+        );
+        assert_eq!(
+            joined(Some(Ask::Every(Depth::Everything)), a),
+            Ask::Every(Depth::Everything)
+        );
     }
 }

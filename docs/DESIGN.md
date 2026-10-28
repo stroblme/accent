@@ -509,6 +509,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - With no upstream the button's tooltip says Publish: it pushes the branch to its remote (the only one, or `origin`) and tracks it, instead of answering with git's "There is no tracking information".
 - There is no Refresh button: a save, a watcher event and a `.git` write each schedule one — a write, never a read, or the pane's own reads would re-trigger it forever.
   A `git init` in a vault with no repository is such a write, so the pane shows itself unasked; Initialize Git Repository in the palette runs it at the vault root, on the host for a remote vault, and looks for the repository at once.
+  A save or a watcher event asks `git status` only of the repositories holding what changed, so a file outside every repository costs no git process: a vault of 37 nested repositories ran 37 statuses for each save of a PDF drawn on at its root.
+  The repositories are looked for again only after a walk, which a folder moved in with a repository in it gets, and when one goes, or a folder holding one.
 - The commit message box takes `Ctrl+Return` while it has the keyboard, although the chord is Insert Line Below: the editing chords are bound only while the keyboard is in a tab (Editing).
 - Commit commits what is staged, or `git commit -a` where nothing is (tracked changes in, untracked files out, as VS Code does with an empty index).
   Where every change is an untracked file, `-a` has nothing to take: Commit keeps the message and says Stage untracked files before committing, where git would only refuse.

@@ -260,7 +260,7 @@ impl App {
         // Our own writes go through the vault, which tells the watcher they were ours, so no
         // event comes back to say the working tree moved. The pane is told here instead.
         if let Some(git) = self.git.get() {
-            git.schedule_refresh(git::Depth::Status);
+            git.schedule_paths([tab.rel()], false);
         }
     }
 

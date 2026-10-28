@@ -1,5 +1,6 @@
 //! The worker's half: one refresh's reads, and the background fetch that keeps the counts true.
 
+use super::refresh::Ask;
 use super::*;
 
 /// Autofetch interval for the focused window, matching VS Code's default. Bounds network
@@ -118,8 +119,10 @@ pub(super) struct Fetched {
     /// How many commits the history was asked for: fewer back is all of it.
     pub(super) rows: usize,
     pub(super) repos: Option<Vec<Repo>>,
-    /// One per repository asked about, `None` where git did not answer.
+    /// One per repository, `None` where git did not answer or was not asked.
     pub(super) statuses: Vec<Option<Status>>,
+    /// Whether the selected repository's status was asked: one of some paths' may leave it out.
+    pub(super) selected_asked: bool,
     pub(super) commits: Option<Vec<Commit>>,
     pub(super) branches: Option<git::Branches>,
     pub(super) submodules: Option<Vec<Submodule>>,
@@ -128,16 +131,18 @@ pub(super) struct Fetched {
     pub(super) incoming: Option<HashSet<String>>,
 }
 
-/// Read what `depth` asks for. `known` is the repositories the pane already holds, which is what
-/// a refresh below [`Depth::Discover`] runs against rather than looking for them again, and `rows`
-/// how many commits of history the pane shows.
+/// Read what `ask` asks for, or nothing where it names paths no repository holds. `known` is the
+/// repositories the pane already holds, which is what a refresh below [`Depth::Discover`] runs
+/// against rather than looking for them again, and `rows` how many commits of history the pane
+/// shows.
 pub(super) fn fetch(
     vault: &Source,
     selected: usize,
-    depth: Depth,
+    ask: &Ask,
     known: Vec<Repo>,
     rows: usize,
-) -> Fetched {
+) -> Option<Fetched> {
+    let depth = ask.depth();
     // A refusal is not "there are no repositories": on `Err` the pane keeps the ones it had,
     // which is what a remote whose link dropped mid-refresh needs.
     let repos = match (depth >= Depth::Discover).then(|| vault.repos()) {
@@ -149,16 +154,29 @@ pub(super) fn fetch(
         None => None,
     };
     let against: &[Repo] = repos.as_deref().unwrap_or(&known);
+    // A save outside every repository asks git nothing, and leaves the pane as it is.
+    let asked: Vec<bool> = against.iter().map(|repo| ask.asks(repo)).collect();
+    if matches!(ask, Ask::Paths(_)) && !asked.contains(&true) {
+        return None;
+    }
     let statuses: Vec<Option<Status>> = against
         .iter()
-        .map(|repo| match vault.git_status(repo) {
-            Ok(status) => Some(status),
-            Err(e) => {
-                // A repository git will not talk about keeps the status it last had and raises no
-                // dialog: it may be mid-rebase, on a network mount, gone since discovery, or on a
-                // host too busy with its first index to answer within the deadline.
-                tracing::debug!("git status in {}: {e}", repo.root.display());
-                None
+        .zip(&asked)
+        .map(|(repo, &asked)| {
+            // One not asked keeps its status, as one git did not answer for does.
+            if !asked {
+                return None;
+            }
+            match vault.git_status(repo) {
+                Ok(status) => Some(status),
+                Err(e) => {
+                    // A repository git will not talk about keeps the status it last had and
+                    // raises no dialog: it may be mid-rebase, on a network mount, gone since
+                    // discovery, or on a host too busy with its first index to answer within the
+                    // deadline.
+                    tracing::debug!("git status in {}: {e}", repo.root.display());
+                    None
+                }
             }
         })
         .collect();
@@ -206,14 +224,15 @@ pub(super) fn fetch(
             .collect(),
         false => HashSet::new(),
     });
-    Fetched {
+    Some(Fetched {
         selected,
         rows,
         repos,
         statuses,
+        selected_asked: asked.get(at).copied().unwrap_or(true),
         commits,
         branches,
         submodules,
         incoming,
-    }
+    })
 }

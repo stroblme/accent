@@ -239,7 +239,7 @@ pub struct Panel {
     refresh_gate: RefCell<refresh::RefreshGate>,
     running_git: RefCell<actions::RunningGit>,
     /// What the debounced refresh has been asked for so far, taken when its timer fires.
-    pending_depth: Cell<Option<Depth>>,
+    pending_ask: Cell<Option<refresh::Ask>>,
     /// When [`Panel::rediscover`] last went looking, in `glib::monotonic_time` microseconds. It
     /// starts at the pane's creation, which the window follows with a discovery of its own, so a
     /// walk that is over within [`REDISCOVER`] asks for nothing more.
@@ -325,7 +325,7 @@ impl Panel {
         self.source_generation.set(self.source_generation.get() + 1);
         self.refresh_gate.borrow_mut().invalidate();
         self.pending.cancel();
-        self.pending_depth.take();
+        self.pending_ask.take();
         self.asked.set(self.asked.get() + 1);
         self.state.replace(State {
             head_moved: true,
@@ -493,7 +493,7 @@ impl Panel {
             pending: crate::widgets::Debounce::new(DEBOUNCE),
             refresh_gate: RefCell::new(refresh::RefreshGate::default()),
             running_git: RefCell::new(actions::RunningGit::default()),
-            pending_depth: Cell::new(None),
+            pending_ask: Cell::new(None),
             discovered: Cell::new(glib::monotonic_time()),
             watches: RefCell::new(Vec::new()),
             asked: Cell::new(0),
