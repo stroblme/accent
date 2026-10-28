@@ -291,13 +291,10 @@ impl Merge {
         true
     }
 
-    /// Toggle all unchanged runs while retaining the caret line's viewport
-    /// position ([`super::Compare::toggle_all`]).
+    /// Toggle all unchanged runs as [`super::Compare::toggle_all`] does.
     fn toggle_all(&self) {
         if !self.columns.opening() {
-            let top = || self.columns.top_line(MID);
-            self.columns
-                .hold(self.columns.caret_line(false).or_else(top));
+            self.columns.hold(self.columns.reading(MID));
         }
         if !self.unfold.is_active() {
             self.opened.borrow_mut().clear();

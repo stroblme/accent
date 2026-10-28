@@ -659,9 +659,11 @@ fn top(view: &gtk::TextView) -> String {
 /// changed every fortieth. Expected controls: `["Show All Unchanged Lines", "Stop Comparing"]`.
 /// Toggling opens all runs and then collapses them, including manually opened ones.
 ///
-/// Retain the top line across painted frames (`away=0/…`), or the caret line when selected
-/// (`strayed=0`). Repeat at file start, after divider resize ([`bench_resize`]) and after
-/// rereading longer blobs. Writes the note; use a scratch vault.
+/// Retain the first change on screen across painted frames (`change=Y->Y strayed=0`), or the
+/// caret line when selected (`strayed=0`), and the top line across a divider resize
+/// ([`bench_resize`]) and rereading longer blobs (`away=0/…`). Repeat at file start and with a
+/// run's button at the top of the view, the change under it on screen. Writes the note; use a
+/// scratch vault.
 pub(in crate::bench) fn bench_compare_unfold(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -742,6 +744,25 @@ pub(in crate::bench) fn bench_compare_unfold(app: &Rc<App>, rel: &str) {
                 "bench compare_unfold caret {unfold} caret={caret}->{} strayed={}",
                 caret_at(view),
                 strayed.get()
+            );
+        }
+        // A run's button at the top of the view, the caret on the last change, off screen, and
+        // the change under the button on screen: the run opens upwards from it, and shuts
+        // towards it again.
+        if let Some(last) = tab.buffer.iter_at_line(379) {
+            tab.buffer.place_cursor(&last);
+        }
+        scroll_to(&compare, 0.5).await;
+        let buttons = overlaid(view, "⋯");
+        if let Some((y, _)) = buttons.get(buttons.len() / 2) {
+            let adj = compare.vadjustment();
+            adj.set_value(adj.value() + f64::from(y - view.visible_rect().y()));
+            wait(500).await;
+        }
+        for on in [true, false] {
+            println!(
+                "bench compare_unfold button {}",
+                bench_unfold(&compare, &views, on).await
             );
         }
         println!(
@@ -825,20 +846,74 @@ fn both_columns(compare: &diff::Compare, view: &gtk::TextView) -> Option<[gtk::T
     Some([view.clone(), other])
 }
 
-/// Press (`on`) or let go of the toggle and say how the hidden runs moved, and the lines at the top
-/// of `views` (see [`painted`]).
+/// Press (`on`) or let go of the toggle and say how the hidden runs moved, the lines at the top
+/// of `views` (see [`painted`]), and where the first changed line on screen in the first of them
+/// was before and after and how far from there it was in any frame painted meanwhile
+/// (`strayed`): with no caret on screen, that line is what stays put.
 async fn bench_unfold(compare: &diff::Compare, views: &[gtk::TextView; 2], on: bool) -> String {
     let Some(toggle) = unfold_toggle(compare) else {
         return "toggle=none".to_string();
     };
     let hidden = compare.counts().2;
+    let view = &views[0];
+    let change = changed_on_screen(view).map(|at| view.buffer().create_mark(None, &at, true));
+    let y = |view: &gtk::TextView, mark: &gtk::TextMark| {
+        let at = view.buffer().iter_at_mark(mark);
+        view.iter_location(&at).y() - view.visible_rect().y()
+    };
+    let was = change.as_ref().map(|mark| y(view, mark));
+    let strayed = Rc::new(Cell::new(0));
+    let id = view
+        .frame_clock()
+        .zip(change.clone().zip(was))
+        .map(|(clock, (mark, was))| {
+            let (strayed, view) = (strayed.clone(), view.clone());
+            let id = clock.connect_after_paint(move |_| {
+                strayed.set(strayed.get().max((y(&view, &mark) - was).abs()))
+            });
+            (clock, id)
+        });
     let tops = painted(views, || toggle.set_active(on)).await;
+    if let Some((clock, id)) = id {
+        clock.disconnect(id);
+    }
+    let change = match (&change, was) {
+        (Some(mark), Some(was)) => {
+            let now = y(view, mark);
+            view.buffer().delete_mark(mark);
+            format!("change={was}->{now} strayed={}", strayed.get())
+        }
+        _ => "change=none".to_string(),
+    };
     let what = if on { "on" } else { "off" };
     format!(
-        "{what} hidden={hidden}->{} {tops} sensitive={}",
+        "{what} hidden={hidden}->{} {tops} {change} sensitive={}",
         compare.counts().2,
         toggle.is_sensitive()
     )
+}
+
+/// The start of the first line shown in `view` whose text says it was changed.
+fn changed_on_screen(view: &gtk::TextView) -> Option<gtk::TextIter> {
+    let seen = view.visible_rect();
+    let (mut at, _) = view.line_at_y(seen.y());
+    let end = view.line_at_y(seen.y() + seen.height()).0.offset();
+    while at.offset() <= end {
+        let mut eol = at;
+        eol.forward_to_line_end();
+        if view
+            .buffer()
+            .text(&at, &eol, true)
+            .to_lowercase()
+            .contains("changed")
+        {
+            return Some(at);
+        }
+        if !at.forward_visible_line() {
+            break;
+        }
+    }
+    None
 }
 
 /// The divider between the columns dragged 200 px, narrowing the column of the first of `views`,

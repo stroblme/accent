@@ -1052,16 +1052,11 @@ impl Compare {
     }
 
     /// Toggle all unchanged runs, including individually opened ones, except
-    /// the caret run. Preserve the caret's viewport position, or the top
-    /// line when the caret is offscreen ([`Compare::set_side`]).
+    /// the caret run, keeping what [`Columns::reading`] names where it is on screen.
     fn toggle_all(&self) {
         if !self.columns.opening() {
-            let top = || {
-                self.columns
-                    .top_line(self.editable.unwrap_or(Side::New).idx())
-            };
-            self.columns
-                .hold(self.columns.caret_line(false).or_else(top));
+            let column = self.editable.unwrap_or(Side::New).idx();
+            self.columns.hold(self.columns.reading(column));
         }
         if !self.unfold.is_active() {
             self.opened.borrow_mut().clear();

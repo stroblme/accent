@@ -438,6 +438,7 @@ impl Columns {
     pub(super) fn lay(&self, rows: Rows) {
         self.waiting.set(false);
         *self.rows.borrow_mut() = rows;
+        self.keep_shown();
         self.settling.set(SETTLE);
         self.relayout(false);
     }
@@ -476,6 +477,68 @@ impl Columns {
         (0..seen.height())
             .contains(&at)
             .then_some(Keep::Read(mine, n, at))
+    }
+
+    /// What Show All Unchanged Lines keeps where it is on screen: the caret's line, else the first
+    /// change in view, which the runs around it open and shut around, so the diff stays where it
+    /// is read, else the line at the top of `column`.
+    pub(super) fn reading(&self, column: usize) -> Option<Keep> {
+        self.caret_line(false)
+            .or_else(|| self.change_in_view(column))
+            .or_else(|| self.top_line(column))
+    }
+
+    /// The first changed row starting in view, as its line's text in `column` (the editor's where
+    /// there is one), else in the first column with a line there ([`Keep::Read`]): the column
+    /// held is the one that does not stray while the rows above it are laid.
+    fn change_in_view(&self, column: usize) -> Option<Keep> {
+        let (rows, grid) = (self.rows.borrow(), self.grid.borrow());
+        if grid.tops.len() != rows.changed.len() {
+            return None;
+        }
+        let seen = self.panes[0].view.visible_rect();
+        let from = grid.tops.partition_point(|&y| y < seen.y());
+        let to = grid.tops.partition_point(|&y| y < seen.y() + seen.height());
+        let r = (from..to).find(|&r| rows.changed[r])?;
+        let c = std::iter::once(column)
+            .chain(0..self.panes.len())
+            .find(|&c| rows.lines[c][r].is_some())?;
+        let n = rows.lines[c][r]?;
+        let (view, buffer) = (&self.panes[c].view, &self.panes[c].buffer);
+        let at = view.iter_location(&buffer.iter_at_line(n as i32 - 1)?).y();
+        let at = at - view.visible_rect().y();
+        (0..seen.height())
+            .contains(&at)
+            .then_some(Keep::Read(c, n, at))
+    }
+
+    /// A kept line the new rows hide gives way to the nearest line they show, the one above on a
+    /// tie, at the same place in the view; one below has the run's button above it, which then
+    /// takes that place.
+    fn keep_shown(&self) {
+        let (Some(Keep::Line(c, n, at)) | Some(Keep::Read(c, n, at))) = self.keep.get() else {
+            return;
+        };
+        let rows = self.rows.borrow();
+        let lines = &rows.lines[c];
+        let hidden = |r: usize| rows.hidden.iter().any(|(gap, _)| gap.contains(&r));
+        let Some(r) = lines.iter().position(|&line| line == Some(n)) else {
+            return;
+        };
+        if !hidden(r) {
+            return;
+        }
+        let shown = |r: usize| lines.get(r).copied().flatten().filter(|_| !hidden(r));
+        let near = (1..lines.len()).find_map(|d| {
+            let above = r.checked_sub(d).and_then(shown).map(|n| (n, at));
+            above.or_else(|| shown(r + d).map(|n| (n, at + GAP_PX)))
+        });
+        if let Some((n, at)) = near {
+            self.keep.set(Some(match self.keep.get() {
+                Some(Keep::Read(..)) => Keep::Read(c, n, at),
+                _ => Keep::Line(c, n, at),
+            }));
+        }
     }
 
     /// Hold the top line across width changes until rows settle, preventing
