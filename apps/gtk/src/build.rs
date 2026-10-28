@@ -1271,7 +1271,9 @@ thread_local! {
 // rows do to their box, so the mark a Ctrl+click or a Shift+click puts on the expander has the
 // row's shape: it used to sit inside the grey of the open file's row, a pill within a pill.
 // Its arrow is drawn at Adwaita's `dimmed` opacity: the folder's icon and name say what the
-// row is, the arrow only that it opens (user decision 2026-10-19).
+// row is, the arrow only that it opens (user decision 2026-10-19). The row Reveal in Sidebar went
+// to is outlined in the accent (`tree::Tree::flash`); every row holds that outline at no alpha,
+// so taking the class off fades it rather than cutting it.
 //
 // The hover's popover takes the view's font, which libadwaita resets on a popover, as the text it
 // is about has it.
@@ -1311,9 +1313,11 @@ fn install_chrome_css() {
                 ".chrome-fade, paned > separator {{ transition: opacity {ms}ms ease; }} \
                  scrolledwindow > undershoot {{ transition: box-shadow {ms}ms ease, \
                    background-image {ms}ms ease; }} \
-                 .accent-toasts {{ transition: transform {lift}ms ease-out; }} ",
+                 .accent-toasts {{ transition: transform {lift}ms ease-out; }} \
+                 .file-tree > row > treeexpander {{ transition: box-shadow {flash}ms ease-out; }} ",
                 ms = fade::RAMP_MS,
-                lift = crate::widgets::FADE_MS
+                lift = crate::widgets::FADE_MS,
+                flash = crate::tree::FLASH_FADE_MS
             ),
             false => String::new(),
         };
@@ -1336,6 +1340,10 @@ fn install_chrome_css() {
              .file-tree > row > treeexpander > expander {{ opacity: var(--dim-opacity); }} \
              .file-tree > row > treeexpander.accent-marked {{ \
                background-color: color-mix(in srgb, var(--accent-bg-color) 25%, transparent); }} \
+             .file-tree > row > treeexpander {{ \
+               box-shadow: inset 0 0 0 2px rgb(from var(--accent-color) r g b / 0); }} \
+             .file-tree > row > treeexpander.accent-revealed {{ \
+               box-shadow: inset 0 0 0 2px var(--accent-color); transition: none; }} \
              .file-tree label.git-modified {{ color: var(--accent-color); }} \
              .file-tree label.git-added {{ color: {added}; }} \
              .git-actions {{ opacity: 0; }} \

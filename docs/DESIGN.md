@@ -253,6 +253,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Colour Changed Files, on by default, is a preference (Preferences → Files); off, the names are plain and the dims unchanged.
 - The selection follows the open tab, and the open file's row is put back when the pointer leaves the list: GTK's single-click activation also selects on hover.
   Only among rows on screen: no folder opens and nothing scrolls, which is Reveal in Sidebar's job.
+- Reveal in Sidebar, from the tab menu or the palette, outlines the row it lands on in the accent for a second, which then fades over two (Motion), so the eye finds it in a long listing.
 - A change on disk or in git refills the tree in place: the open folders stay open and the list stays where it is.
   A row that goes while it has the keyboard hands it to the row now in its place, not to the window's first widget, which would scroll the list to its top (`widgets::set_model`).
 - Ctrl+click and Shift+click mark rows, the tree's only multiple selection, tinted with the accent across the row's whole shape: the selection is already the hover highlight and the open file.
@@ -2001,6 +2002,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
   Nothing else fades in: not a reload (a LaTeX build rewrites its PDF every few seconds), a restore, a tab landing in another pane, or a layout change (F9, a split, the preview).
   All of it is libadwaita's and GTK's own animation, so `gtk-enable-animations` off stops it.
   The other timings we own are debounces, which keep the main loop free.
+- Reveal in Sidebar's outline holds a second and fades over two, a CSS transition; with animations off it holds the three seconds and goes at once.
 - The document follows the caret and nothing else: GTK keeps the insert mark on screen by itself (arrows, typing, find, Go to Line, a search hit, every extra caret), a wheel scroll away from the caret stays put, and a dialog opening and closing over it puts nothing back.
 
 | Timer | Value | Where |
@@ -2021,6 +2023,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 | Outline row after a caret move | 100 ms | `editor/mod.rs::CURSOR` |
 | Autosave | 1 s idle | `editor/mod.rs::AUTOSAVE` |
 | Show in PDF's mark on the line of text | 1.5 s | `pdf/source.rs::MARK` |
+| Reveal in Sidebar's outline holds, then fades | 1 s, then 2 s | `tree/mod.rs::FLASH_HOLD`, `FLASH_FADE_MS` |
 
 ## Material 3 mapping
 

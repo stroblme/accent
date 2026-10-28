@@ -26,6 +26,12 @@ pub use listing::{changed_span, decode, dot_named};
 
 /// CSS class for Ctrl-click marked rows (`build::install_chrome_css`).
 const MARKED: &str = "accent-marked";
+/// CSS class outlining the row Reveal in Sidebar went to ([`Tree::flash`]).
+const REVEALED: &str = "accent-revealed";
+/// How long [`REVEALED`]'s outline holds before it fades.
+const FLASH_HOLD: Duration = Duration::from_secs(1);
+/// How long the outline takes to fade, the stylesheet's transition (`build::install_chrome_css`).
+pub const FLASH_FADE_MS: u64 = 2000;
 
 /// Marked paths and folder flags from Ctrl+click or Shift+click.
 ///
@@ -92,6 +98,10 @@ pub struct Tree {
     /// Context-menu target, temporarily taking precedence over
     /// [`active`](Self::active) ([`pin`](Self::pin)).
     pinned: Rc<RefCell<Option<String>>>,
+    /// The row [`flash`](Self::flash) outlines, shared with the factory as [`cut`](Self::cut) is.
+    revealed: Rc<RefCell<Option<String>>>,
+    /// Counts flashes, so only the last one's timer takes the outline off.
+    flashes: Rc<Cell<u32>>,
 }
 
 impl Tree {
@@ -340,6 +350,33 @@ impl Tree {
         select(&self.view, row.as_deref());
     }
 
+    /// Outline `rel`'s row in the accent for [`FLASH_HOLD`], then let the stylesheet fade it out
+    /// over [`FLASH_FADE_MS`]; with animations off it holds for both and goes.
+    pub fn flash(&self, rel: &str) {
+        *self.revealed.borrow_mut() = Some(rel.to_string());
+        redraw_revealed(&self.view, Some(rel));
+        let flash = self.flashes.get().wrapping_add(1);
+        self.flashes.set(flash);
+        let hold = match self.view.settings().is_gtk_enable_animations() {
+            true => FLASH_HOLD,
+            false => FLASH_HOLD + Duration::from_millis(FLASH_FADE_MS),
+        };
+        let (view, revealed, flashes) = (
+            self.view.downgrade(),
+            self.revealed.clone(),
+            self.flashes.clone(),
+        );
+        glib::timeout_add_local_once(hold, move || {
+            if flashes.get() != flash {
+                return;
+            }
+            revealed.take();
+            if let Some(view) = view.upgrade() {
+                redraw_revealed(&view, None);
+            }
+        });
+    }
+
     /// Expand ancestors, select `rel` and scroll to it. Return false for
     /// missing paths so callers can report failure.
     pub fn reveal(&self, rel: &str) -> bool {
@@ -570,6 +607,15 @@ fn redraw_marks(view: &gtk::ListView, marked: &Marks, start: Option<&str>) {
     }
 }
 
+/// Put [`REVEALED`] on the visible row of `rel` alone; the factory puts it on a recycled one.
+fn redraw_revealed(view: &gtk::ListView, rel: Option<&str>) {
+    for expander in expanders(view) {
+        let row = expander.list_row().and_then(|row| row.item());
+        let on = row.as_ref().and_then(decode).map(|row| row.rel);
+        set_class(&expander, REVEALED, rel.is_some() && on.as_deref() == rel);
+    }
+}
+
 /// Visible row widgets for reading or updating bound state, including drills.
 pub fn expanders(view: &gtk::ListView) -> Vec<gtk::TreeExpander> {
     let mut found = Vec::new();
@@ -717,6 +763,8 @@ pub fn build(
     let bind_changed = changed.clone();
     let bind_cut = cut.clone();
     let (bind_marked, bind_start) = (marked.clone(), start.clone());
+    let revealed: Rc<RefCell<Option<String>>> = Rc::default();
+    let bind_revealed = revealed.clone();
     let drag_marked = marked.clone();
     let row_moves = moves.clone();
     let row_imports = imports.clone();
@@ -765,6 +813,7 @@ pub fn build(
                 &bind_cut,
                 &bind_marked,
                 &bind_start,
+                &bind_revealed,
             )
         },
     );
@@ -831,6 +880,8 @@ pub fn build(
         start,
         active,
         pinned,
+        revealed,
+        flashes: Rc::default(),
     }
 }
 
@@ -1000,6 +1051,7 @@ fn drag_source(
 
 /// Bind `item` through widget lookups and setters only, keeping database
 /// access off the scroll/bind path.
+#[allow(clippy::too_many_arguments)]
 fn bind_row(
     expander: &gtk::TreeExpander,
     item: &gtk::ListItem,
@@ -1008,6 +1060,7 @@ fn bind_row(
     cut: &RefCell<HashSet<String>>,
     marked: &RefCell<Marks>,
     start: &RefCell<Option<String>>,
+    revealed: &RefCell<Option<String>>,
 ) {
     let Some(row) = item.item().and_downcast::<gtk::TreeListRow>() else {
         return;
@@ -1061,6 +1114,8 @@ fn bind_row(
         is_marked(&marked.borrow(), &item.rel)
             || start.borrow().as_deref() == Some(item.rel.as_str()),
     );
+    let on = revealed.borrow().as_deref() == Some(item.rel.as_str());
+    set_class(expander, REVEALED, on);
 }
 
 /// Handle marked-row selection before list activation.

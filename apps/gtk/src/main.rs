@@ -1654,14 +1654,15 @@ impl App {
         (!doc.is_transient() && !doc.is_loose()).then(|| doc.key())
     }
 
-    /// Show the open note where it lives: the Files pane, un-hidden if it was, scrolled to the row.
+    /// Show the open note where it lives: the Files pane, un-hidden if it was, scrolled to the row,
+    /// which is outlined for a moment so the eye finds it.
     fn reveal_in_sidebar(&self) {
         let Some(rel) = self.menu_rel() else { return };
         self.show_pane("files");
-        if let Some(tree) = self.tree.get()
-            && !tree.reveal(&rel)
-        {
-            self.toast(&format!("{rel} is not in the sidebar"));
+        let Some(tree) = self.tree.get() else { return };
+        match tree.reveal(&rel) {
+            true => tree.flash(&rel),
+            false => self.toast(&format!("{rel} is not in the sidebar")),
         }
     }
 
