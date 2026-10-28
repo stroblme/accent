@@ -6,6 +6,7 @@
 //! A cell's outputs are built as its editor is, once it nears the view: until then a placeholder
 //! as tall as they will be holds their place ([`Held`]). Pictures and formulas are drawn at the
 //! notebook's zoom, as its text is set ([`Figure`]).
+//! A right-click on an output offers Copy Output for it alone ([`copied`]).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -15,12 +16,12 @@ use accent_core::notebook::output::{self as core, Form, Item, Output, Table};
 use accent_core::notebook::{Cell as NotebookCell, Kind};
 use adw::prelude::*;
 use gtk::subclass::prelude::*;
-use gtk::{gdk, glib, pango};
+use gtk::{gdk, gio, glib, pango};
 use unicode_width::UnicodeWidthStr;
 
 use crate::editor::Flavour;
 use crate::math;
-use crate::{highlight, look, theme};
+use crate::{highlight, look, theme, widgets};
 
 /// What the drill counts of a notebook's outputs.
 #[cfg(feature = "bench")]
@@ -55,7 +56,8 @@ enum Part {
 /// the outputs it changed.
 pub struct Outputs {
     pub widget: gtk::Box,
-    slots: RefCell<Vec<Slot>>,
+    /// Shared with Copy Output's action and the right-click, which find the output there.
+    slots: Rc<RefCell<Vec<Slot>>>,
     /// What holds their place until they are built.
     held: RefCell<Option<Held>>,
     /// The notebook's zoom.
@@ -68,6 +70,17 @@ struct Slot {
     widgets: Vec<gtk::Widget>,
     parts: Vec<Part>,
     stream: Option<Stream>,
+    /// What Copy Output takes of it; `None` offers no Copy Output.
+    copy: Option<Copied>,
+}
+
+/// What Copy Output puts on the clipboard for one output.
+#[derive(Debug, PartialEq)]
+enum Copied {
+    /// The text it shows, without its colours.
+    Text(String),
+    /// Its picture, as an image: its slot's [`Part::Picture`].
+    Picture,
 }
 
 struct Stream {
@@ -90,9 +103,12 @@ impl Outputs {
         if let Some(held) = &held {
             widget.append(held);
         }
+        let slots = Rc::default();
+        widget.insert_action_group("output", Some(&copy_action(&widget, &slots)));
+        widget.add_controller(menu_click(&slots));
         Outputs {
             widget,
-            slots: RefCell::default(),
+            slots,
             held: RefCell::new(held),
             zoom,
         }
@@ -175,17 +191,21 @@ impl Outputs {
         if let [Output::Stream { stderr, text }] = tail {
             let mut slots = self.slots.borrow_mut();
             if from + 1 == slots.len()
+                && let Some(slot) = slots.last_mut()
                 && let Some(Stream {
                     raw,
                     stderr: previous,
                     view,
-                }) = slots[from].stream.as_mut()
+                }) = slot.stream.as_mut()
                 && previous == stderr
                 && let Some(more) = plain_append(raw, text)
             {
                 let mut end = view.buffer().end_iter();
                 view.buffer().insert(&mut end, more);
                 raw.push_str(&text[raw.len()..]);
+                if let Some(Copied::Text(copy)) = &mut slot.copy {
+                    copy.push_str(more);
+                }
                 return;
             }
         }
@@ -235,6 +255,12 @@ impl Outputs {
         self.slots.borrow().len()
     }
 
+    /// The first widget the `n`th output is drawn in.
+    #[cfg(feature = "bench")]
+    pub fn widget_of(&self, n: usize) -> Option<gtk::Widget> {
+        self.slots.borrow().get(n)?.widgets.first().cloned()
+    }
+
     #[cfg(feature = "bench")]
     pub fn counts(&self) -> Counts {
         let mut c = Counts::default();
@@ -259,7 +285,10 @@ impl Outputs {
     }
 
     fn add(&self, output: &Output) {
-        self.slots.borrow_mut().push(Slot::default());
+        self.slots.borrow_mut().push(Slot {
+            copy: copied(output),
+            ..Slot::default()
+        });
         match output {
             Output::Stream { stderr, text } => {
                 let view = self.text(&core::carriage(text), *stderr);
@@ -275,14 +304,9 @@ impl Outputs {
                 name,
                 value,
                 traceback,
-            } => match traceback.is_empty() {
-                true => {
-                    self.text(&format!("{name}: {value}"), true);
-                }
-                false => {
-                    self.text(&traceback.join("\n"), true);
-                }
-            },
+            } => {
+                self.text(&error_text(name, value, traceback), true);
+            }
             Output::Data { items, .. } => match core::pick(items) {
                 Some(Form::Picture { mime, data }) => self.picture(mime, data),
                 Some(Form::Table(table)) => self.table(&table),
@@ -296,6 +320,11 @@ impl Outputs {
                 }
                 None => self.placeholder(items),
             },
+        }
+        let slots = self.slots.borrow();
+        if let Some(slot) = slots.last().filter(|slot| slot.copy.is_some()) {
+            let menu = copy_menu(slots.len() - 1);
+            slot.widgets.iter().for_each(|w| offer_copy(w, &menu));
         }
     }
 
@@ -491,10 +520,7 @@ fn shape(output: &Output) -> Shape {
             name,
             value,
             traceback,
-        } => match traceback.is_empty() {
-            true => text_shape(&format!("{name}: {value}")),
-            false => text_shape(&traceback.join("\n")),
-        },
+        } => text_shape(&error_text(name, value, traceback)),
         Output::Data { items, .. } => match core::pick(items) {
             Some(Form::Picture { mime, data }) => picture_shape((mime, data)),
             Some(Form::Table(table)) => {
@@ -516,13 +542,166 @@ fn shape(output: &Output) -> Shape {
 
 /// Text as [`Outputs::text`] shows it, its escape sequences gone.
 fn text_shape(text: &str) -> Shape {
-    let (mut plain, _) = core::ansi(text);
-    plain.truncate(plain.trim_end_matches('\n').len());
     Shape {
-        text: Some(plain),
+        text: Some(plain(text)),
         picture: (0, 0),
         gaps: 0,
     }
+}
+
+/// `text` as [`Outputs::text`] shows it: its escape sequences gone, and its last line breaks.
+fn plain(text: &str) -> String {
+    let (mut plain, _) = core::ansi(text);
+    plain.truncate(plain.trim_end_matches('\n').len());
+    plain
+}
+
+/// What an error shows: its traceback, else its name and message.
+fn error_text(name: &str, value: &str, traceback: &[String]) -> String {
+    match traceback.is_empty() {
+        true => format!("{name}: {value}"),
+        false => traceback.join("\n"),
+    }
+}
+
+/// What Copy Output takes of `output` (user decision 2026-10-28): its picture, as an image, or
+/// the text it shows without its colours, a stream's carriage returns played out and a table's
+/// cells a tab apart; `None` for what only a script shows, which has no text to take.
+fn copied(output: &Output) -> Option<Copied> {
+    let text = match output {
+        Output::Stream { text, .. } => core::carriage(text),
+        Output::Error {
+            name,
+            value,
+            traceback,
+        } => error_text(name, value, traceback),
+        Output::Data { items, .. } => match core::pick(items)? {
+            Form::Picture { .. } => return Some(Copied::Picture),
+            Form::Table(table) => return Some(Copied::Text(table_text(&table))),
+            Form::Markdown(text) | Form::Latex(text) | Form::Text(text) => text.to_string(),
+            Form::Json(text) => text,
+        },
+    };
+    Some(Copied::Text(plain(&text)))
+}
+
+/// A table as text: a line a row, its cells a tab apart, a cell a span covers left empty, and
+/// its notes after it.
+fn table_text(table: &Table) -> String {
+    let mut rows = vec![vec![""; table.cols]; table.rows];
+    for cell in &table.cells {
+        if let Some(at) = rows.get_mut(cell.row).and_then(|row| row.get_mut(cell.col)) {
+            *at = &cell.text;
+        }
+    }
+    let lines = rows.iter().map(|row| row.join("\t"));
+    let lines: Vec<String> = lines.chain(table.notes.iter().cloned()).collect();
+    lines.join("\n")
+}
+
+/// The menu that copies the `n`th output: its own on a picture or a formula, a section of GTK's
+/// on a text view or a table's labels ([`offer_copy`]).
+fn copy_menu(n: usize) -> gio::Menu {
+    let item = gio::MenuItem::new(Some("Copy Output"), None);
+    item.set_action_and_target_value(Some("output.copy"), Some(&(n as u32).to_variant()));
+    let menu = gio::Menu::new();
+    menu.append_item(&item);
+    menu
+}
+
+/// Copy Output joins the menu GTK gives a text view, or a selectable label, of its own, so a
+/// right-click there has one menu: GTK's Copy for the selection, and this for the whole output.
+fn offer_copy(widget: &gtk::Widget, menu: &gio::Menu) {
+    if let Some(view) = widget.downcast_ref::<gtk::TextView>() {
+        return view.set_extra_menu(Some(menu));
+    }
+    if let Some(label) = widget
+        .downcast_ref::<gtk::Label>()
+        .filter(|l| l.is_selectable())
+    {
+        label.set_extra_menu(Some(menu));
+    }
+    let mut child = widget.first_child();
+    while let Some(c) = child {
+        offer_copy(&c, menu);
+        child = c.next_sibling();
+    }
+}
+
+/// A right-click on an output that has no menu of its own, a picture, a formula or the room
+/// around a table's cells, pops up [`copy_menu`] there. One with a menu of its own claims the
+/// press before it gets here.
+fn menu_click(slots: &Rc<RefCell<Vec<Slot>>>) -> gtk::GestureClick {
+    let click = gtk::GestureClick::builder()
+        .button(gdk::BUTTON_SECONDARY)
+        .build();
+    let slots = Rc::downgrade(slots);
+    click.connect_pressed(move |click, _, x, y| {
+        let (Some(outputs), Some(slots)) = (click.widget(), slots.upgrade()) else {
+            return;
+        };
+        let picked = outputs.pick(x, y, gtk::PickFlags::DEFAULT);
+        // The output's own widget, the one the box holds, that the press is in.
+        let hit = std::iter::successors(picked, |w| w.parent())
+            .find(|w| w.parent().as_ref() == Some(&outputs));
+        let n = slots.borrow().iter().position(|slot| {
+            slot.copy.is_some() && hit.as_ref().is_some_and(|hit| slot.widgets.contains(hit))
+        });
+        if let Some(n) = n {
+            click.set_state(gtk::EventSequenceState::Claimed);
+            let at = gdk::Rectangle::new(x as i32, y as i32, 1, 1);
+            widgets::popup_menu(&outputs, &copy_menu(n), Some(at));
+        }
+    });
+    click
+}
+
+/// `output.copy`, which puts the output its target counts to on the clipboard.
+fn copy_action(outputs: &gtk::Box, slots: &Rc<RefCell<Vec<Slot>>>) -> gio::SimpleActionGroup {
+    let copy = gio::SimpleAction::new("copy", Some(glib::VariantTy::UINT32));
+    let (outputs, slots) = (outputs.downgrade(), Rc::downgrade(slots));
+    copy.connect_activate(move |_, target| {
+        let n = target.and_then(u32::from_variant);
+        let (Some(outputs), Some(slots), Some(n)) = (outputs.upgrade(), slots.upgrade(), n) else {
+            return;
+        };
+        let slots = slots.borrow();
+        let Some(slot) = slots.get(n as usize) else {
+            return;
+        };
+        match &slot.copy {
+            Some(Copied::Text(text)) => outputs.clipboard().set_text(text),
+            Some(Copied::Picture) => {
+                let picture = slot.parts.iter().find_map(|part| match part {
+                    Part::Picture { bytes, svg, .. } => Some((bytes.to_vec(), *svg)),
+                    _ => None,
+                });
+                if let Some((bytes, svg)) = picture {
+                    copy_picture(&outputs, bytes, svg);
+                }
+            }
+            None => {}
+        }
+    });
+    let group = gio::SimpleActionGroup::new();
+    group.add_action(&copy);
+    group
+}
+
+/// Put a picture on the clipboard as its data is, not recoloured as it shows: decoded, or an SVG
+/// drawn at the display's scale, on a worker.
+fn copy_picture(outputs: &gtk::Box, bytes: Vec<u8>, svg: bool) {
+    let (clipboard, scale) = (outputs.clipboard(), outputs.scale_factor().max(1));
+    glib::spawn_future_local(async move {
+        let shown = crate::work::off_thread("notebook picture", move || {
+            look::show_bytes(&bytes, svg, look::Look::paper(), scale, 1.0).ok()
+        })
+        .await
+        .flatten();
+        if let Some((shown, _)) = shown {
+            clipboard.set_texture(&shown.texture);
+        }
+    });
 }
 
 /// A picture, of its own size.
@@ -986,6 +1165,46 @@ mod tests {
         assert_eq!(rows("aaa bbb ccc", 7), 2);
         assert_eq!(rows("abcdefghij", 4), 3);
         assert_eq!(rows("全角 全角", 4), 2);
+    }
+
+    #[test]
+    fn an_output_is_copied_as_the_text_it_shows_or_its_picture() {
+        let text = |text: &str| Some(Copied::Text(text.to_string()));
+        let stream = Output::Stream {
+            stderr: false,
+            text: "\u{1b}[31mred\u{1b}[0m\n50%\r100%\n".into(),
+        };
+        assert_eq!(copied(&stream), text("red\n100%"));
+        let error = Output::Error {
+            name: "ZeroDivisionError".into(),
+            value: "division by zero".into(),
+            traceback: vec![
+                "\u{1b}[0;31mZeroDivisionError\u{1b}[0m Traceback".into(),
+                "\u{1b}[0;31mZeroDivisionError\u{1b}[0m: division by zero".into(),
+            ],
+        };
+        assert_eq!(
+            copied(&error),
+            text("ZeroDivisionError Traceback\nZeroDivisionError: division by zero")
+        );
+        let data = |mime: &str, data: &str| Output::Data {
+            count: None,
+            items: vec![Item {
+                mime: mime.into(),
+                data: core::Data::Text(data.into()),
+            }],
+        };
+        assert_eq!(
+            copied(&data("image/svg+xml", "<svg/>")),
+            Some(Copied::Picture)
+        );
+        let html = "<table><thead><tr><th></th><th>a</th></tr></thead>\
+                    <tbody><tr><th>0</th><td>1</td></tr></tbody></table><p>1 rows × 1 columns</p>";
+        assert_eq!(
+            copied(&data("text/html", html)),
+            text("\ta\n0\t1\n1 rows × 1 columns")
+        );
+        assert_eq!(copied(&data("application/vnd.widget+json", "{}")), None);
     }
 
     #[test]

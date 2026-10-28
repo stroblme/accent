@@ -8,7 +8,8 @@ use accent_core::notebook::output::{Data, Output};
 const WAIT: Duration = Duration::from_secs(90);
 
 /// The notebook the drill writes and runs: a print, a result, `input()`, a sleep to interrupt,
-/// and a cell an interrupt leaves unrun.
+/// a cell an interrupt leaves unrun, and one of a stream that grows across two flushes, an
+/// 80 × 40 PNG and a traceback, for Copy Output.
 const NOTEBOOK: &str = r#"{
  "cells": [
   {"cell_type": "code", "execution_count": null, "id": "a1", "metadata": {}, "outputs": [],
@@ -20,7 +21,12 @@ const NOTEBOOK: &str = r#"{
   {"cell_type": "code", "execution_count": null, "id": "a4", "metadata": {}, "outputs": [],
    "source": ["import time; time.sleep(30)"]},
   {"cell_type": "code", "execution_count": null, "id": "a5", "metadata": {}, "outputs": [],
-   "source": ["print(\"after\")"]}
+   "source": ["print(\"after\")"]},
+  {"cell_type": "code", "execution_count": null, "id": "a6", "metadata": {}, "outputs": [],
+   "source": ["import base64, time\n", "from IPython.display import Image, display\n",
+    "print(\"one\", flush=True); time.sleep(0.5)\n", "print(\"two\", flush=True); time.sleep(0.5)\n",
+    "display(Image(base64.b64decode(\"iVBORw0KGgoAAAANSUhEUgAAAFAAAAAoCAIAAADmAupWAAAARElEQVR42u3PQQ0AAAgEoItiVKMaxRZ+ZKMAqZ5XIiwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsfGsBdbbBD06BAAwAAAAASUVORK5CYII=\")))\n",
+    "1/0"]}
  ],
  "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
   "language_info": {"name": "python"}},
@@ -32,8 +38,8 @@ const NOTEBOOK: &str = r#"{
 /// `ACCENT_BENCH_KERNEL=<rel>` writes [`NOTEBOOK`] at `<rel>` and runs it: Run Cell on
 /// Insert Line Below's chord, Run Cell and Advance, `input()` answered, an interrupt, Run All
 /// stopped by one, the last run's outputs dimmed until the new ones replace them, Restart, a run
-/// with no output clearing its cell, Clear Outputs and its undo, the save, and the tab closed
-/// with its kernel. It prints `bench kernel …` lines as the window shows each cell, timings on
+/// with no output clearing its cell, Copy Output on a right-click on each kind of output, Clear
+/// Outputs and its undo, the save, and the tab closed with its kernel. It prints `bench kernel …` lines as the window shows each cell, timings on
 /// `bench kernel_ms …`; a step that never comes prints `bench kernel timeout <what>` and quits.
 pub(super) fn bench_kernel(app: &Rc<App>, rel: &str) {
     scratch_only(app, "ACCENT_BENCH_KERNEL");
@@ -181,6 +187,16 @@ pub(super) fn bench_kernel(app: &Rc<App>, rel: &str) {
             return;
         }
         print_cell(&tab, 1, &stale(&tab, 1, "quiet"));
+
+        tab.bench_select(5);
+        act("win.notebook-run-cell");
+        if !done(&app, &tab, "outputs").await {
+            return;
+        }
+        print_cell(&tab, 5, "");
+        for (n, what) in ["stream", "picture", "error"].into_iter().enumerate() {
+            copy_output(&app, &tab, 5, n, what).await;
+        }
         tab.bench_select(0);
 
         act("win.notebook-clear-outputs");
@@ -524,6 +540,101 @@ fn describe(output: &Output) -> String {
 /// How many outputs cell `n`'s view shows.
 fn shown_outputs(tab: &NotebookTab, n: usize) -> usize {
     tab.bench_cell(n).map_or(0, |(_, _, shown)| shown)
+}
+
+/// Right-click output `i` of cell `n` through XTEST, pick Copy Output in the menus that open,
+/// and print `bench kernel copy <what> menus=<open> <held>`, what the clipboard then holds: a
+/// picture's size, a text, or for a traceback its last line and whether it keeps escapes the
+/// model's has.
+async fn copy_output(app: &Rc<App>, tab: &NotebookTab, n: usize, i: usize, what: &str) {
+    let clipboard = app.window.clipboard();
+    let _ = clipboard.set_content(None::<&gdk::ContentProvider>);
+    let Some(widget) = tab.bench_output_widget(n, i) else {
+        return println!("bench kernel copy {what} missing");
+    };
+    glib::timeout_future(Duration::from_millis(300)).await;
+    let middle = graphene::Point::new(widget.width() as f32 / 2.0, widget.height() as f32 / 2.0);
+    let at = widget.compute_point(&app.window, &middle).unwrap_or(middle);
+    super::git::xtest(&format!("move {} {}; down 3; up 3", at.x(), at.y())).await;
+    let menus = menus_up(app.window.upcast_ref());
+    let picked = menus.first().is_some_and(|menu| pick(menu, "Copy Output"));
+    menus.iter().for_each(|menu| menu.popdown());
+    let texture = gdk::Texture::static_type();
+    let has = || {
+        let formats = clipboard.formats();
+        (picked && (formats.contains_type(texture) || formats.contains_type(String::static_type())))
+            .then_some(())
+    };
+    let held = match until(app, "clipboard", has).await {
+        None => return,
+        Some(()) if clipboard.formats().contains_type(texture) => {
+            match clipboard.read_texture_future().await {
+                Ok(Some(t)) => format!("picture={}x{}", t.width(), t.height()),
+                _ => "picture unread".to_string(),
+            }
+        }
+        Some(()) => {
+            let text = clipboard.read_text_future().await.ok().flatten();
+            let text = text.map(|t| t.to_string()).unwrap_or_default();
+            match what {
+                "error" => {
+                    let model = tab.bench_cell(n).is_some_and(|(_, outputs, _)| {
+                        matches!(outputs.get(i), Some(Output::Error { traceback, .. })
+                            if traceback.iter().any(|line| line.contains('\u{1b}')))
+                    });
+                    format!(
+                        "last={:?} escapes model={} copied={}",
+                        text.lines().last().unwrap_or_default(),
+                        u8::from(model),
+                        u8::from(text.contains('\u{1b}'))
+                    )
+                }
+                _ => format!("text={text:?}"),
+            }
+        }
+    };
+    println!("bench kernel copy {what} menus={} {held}", menus.len());
+}
+
+/// The menus up in the window.
+fn menus_up(root: &gtk::Widget) -> Vec<gtk::PopoverMenu> {
+    let (mut found, mut todo) = (Vec::new(), vec![root.clone()]);
+    while let Some(widget) = todo.pop() {
+        if let Some(menu) = widget.downcast_ref::<gtk::PopoverMenu>()
+            && menu.is_visible()
+        {
+            found.push(menu.clone());
+        }
+        let mut child = widget.first_child();
+        while let Some(c) = child {
+            child = c.next_sibling();
+            todo.push(c);
+        }
+    }
+    found
+}
+
+/// Activate the item of `menu` that `label` names, from the menu as a click on it does: its
+/// action, with its target, looked for from where the menu is. Whether there was one.
+fn pick(menu: &gtk::PopoverMenu, label: &str) -> bool {
+    fn find(model: &gio::MenuModel, label: &str) -> Option<(String, Option<glib::Variant>)> {
+        (0..model.n_items()).find_map(|i| {
+            let section = model.item_link(i, gio::MENU_LINK_SECTION);
+            if let Some(hit) = section.and_then(|s| find(&s, label)) {
+                return Some(hit);
+            }
+            let string = |key| {
+                let value = model.item_attribute_value(i, key, Some(glib::VariantTy::STRING));
+                value.and_then(|v| v.get::<String>())
+            };
+            let target = model.item_attribute_value(i, gio::MENU_ATTRIBUTE_TARGET, None);
+            (string(gio::MENU_ATTRIBUTE_LABEL).as_deref() == Some(label))
+                .then(|| string(gio::MENU_ATTRIBUTE_ACTION).map(|action| (action, target)))
+                .flatten()
+        })
+    }
+    let found = menu.menu_model().and_then(|model| find(&model, label));
+    found.is_some_and(|(action, target)| menu.activate_action(&action, target.as_ref()).is_ok())
 }
 
 /// The cells of the notebook as saved, those counted, and their outputs; the file read as

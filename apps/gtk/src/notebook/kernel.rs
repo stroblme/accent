@@ -1169,6 +1169,18 @@ impl NotebookTab {
         Some((view.count_text(), outputs, view.outputs.shown()))
     }
 
+    /// The widget output `i` of cell `n` is drawn in, scrolled into view.
+    pub fn bench_output_widget(&self, n: usize, i: usize) -> Option<gtk::Widget> {
+        let widget = self.views.borrow().get(n)?.outputs.widget_of(i)?;
+        let bounds = widget.compute_bounds(&self.scroller)?;
+        let adjustment = self.scroller.vadjustment();
+        let page = adjustment.page_size() as f32;
+        if bounds.y() < 0.0 || bounds.y() + bounds.height() > page {
+            adjustment.set_value(adjustment.value() + f64::from(bounds.y()) - 40.0);
+        }
+        Some(widget)
+    }
+
     /// Whether cell `n`'s outputs are dimmed as the last run's.
     pub fn bench_stale(&self, n: usize) -> bool {
         self.views
