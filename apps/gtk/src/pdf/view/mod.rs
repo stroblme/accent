@@ -603,6 +603,7 @@ mod imp {
     /// it, and whether the same drag took one before it.
     type At = Box<dyn Fn(usize, u32, Option<super::Pass>, bool)>;
     type Transform = Box<dyn Fn(usize, u32, accent_core::pdf::Matrix)>;
+    type Jump = Box<dyn FnOnce(&super::PdfView)>;
 
     #[derive(glib::Properties)]
     #[properties(wrapper_type = super::PdfView)]
@@ -671,6 +672,9 @@ mod imp {
         /// Where the pointer is over the view, until it leaves: what a Ctrl+wheel zooms around.
         pub over: Cell<Option<(f64, f64)>>,
         pub current_mark: Cell<Option<(usize, usize)>>,
+        /// A jump asked for before the first layout, made by it. See
+        /// [`super::PdfView::after_layout`].
+        pub jump: RefCell<Option<Jump>>,
         /// The gap between pages a PDF dragged over the view would go into, where a line shows.
         pub drop_gap: Cell<Option<usize>>,
         /// What was asked for last, so an unchanged viewport does not re-ask on every frame.
@@ -741,6 +745,7 @@ mod imp {
                 dot: Cell::new(false),
                 over: Cell::new(None),
                 current_mark: Cell::new(None),
+                jump: RefCell::new(None),
                 drop_gap: Cell::new(None),
                 asked: RefCell::new(Vec::new()),
                 asked_for: Cell::new((0, Theme::Plain, 0)),

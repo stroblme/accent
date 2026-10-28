@@ -54,6 +54,9 @@ impl PdfView {
     /// Put the reader back where `anchor` says, or at the top of its page under
     /// [`PdfZoom::FitPage`]. See [`resume_at`].
     pub fn scroll_to(&self, anchor: Anchor) {
+        if self.after_layout(move |view| view.scroll_to(anchor)) {
+            return;
+        }
         let anchor = resume_at(self.imp().zoom.get(), anchor);
         let at = offset_of(&self.imp().layout.borrow(), anchor);
         let Some((x, y)) = at else {
@@ -69,6 +72,9 @@ impl PdfView {
 
     /// Scroll so `page` starts at the top of the viewport, `top` points down it if given.
     pub fn goto_page(&self, page: usize, top: Option<f32>) {
+        if self.after_layout(move |view| view.goto_page(page, top)) {
+            return;
+        }
         let scale = self.imp().layout.borrow().scale;
         let v = top.map_or(0.0, |top| top * scale);
         let layout = self.imp().layout.borrow().clone();
@@ -78,6 +84,17 @@ impl PdfView {
         if let Some(vadj) = self.vadjustment() {
             vadj.set_value(f64::from(rect.y + v));
         }
+    }
+
+    /// Hold `jump` for the first layout while there has been none, and say whether it was held:
+    /// the render thread's replies can land before the view has its size, and a jump made then
+    /// went nowhere, leaving the reader on page one. The last one asked for is the one made.
+    fn after_layout(&self, jump: impl FnOnce(&PdfView) + 'static) -> bool {
+        if !self.imp().layout.borrow().pages.is_empty() {
+            return false;
+        }
+        self.imp().jump.replace(Some(Box::new(jump)));
+        true
     }
 
     /// Scroll one adjustment step for bare arrow keys, which `GtkScrolledWindow` leaves unbound.
@@ -92,6 +109,9 @@ impl PdfView {
 
     /// Bring a rectangle of a page into view, for a search match.
     pub fn reveal(&self, page: usize, rect: accent_core::pdf::Rect) {
+        if self.after_layout(move |view| view.reveal(page, rect)) {
+            return;
+        }
         let layout = self.imp().layout.borrow().clone();
         let Some(page_rect) = layout.pages.get(page) else {
             return;
@@ -179,8 +199,7 @@ impl PdfView {
         if sizes.is_empty() {
             return;
         }
-        // Nothing to keep before the first layout: the offset is zero and page one is where the
-        // reader is anyway.
+        // Nothing to keep before the first layout, only a jump asked for before it to make.
         let anchor = (!self.imp().layout.borrow().pages.is_empty()).then(|| self.anchor());
         let scale = clamp_layout(fit_scale(&sizes, self.imp().zoom.get(), w as f32, h as f32));
         // Tiles waiting for a re-render at the scale being left are of a page nothing will paint
@@ -195,6 +214,8 @@ impl PdfView {
         self.imp().scroll.configure((width, height), viewport);
         if let Some(anchor) = anchor {
             self.scroll_to(anchor);
+        } else if let Some(jump) = self.imp().jump.take() {
+            jump(self);
         }
         self.queue_draw();
     }
