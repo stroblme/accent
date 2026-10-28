@@ -338,6 +338,12 @@ impl PdfView {
         (self.imp().heard.get(), held)
     }
 
+    /// The texts of ours the view holds of `page`. Only `ACCENT_BENCH_PDF=text:` asks.
+    #[cfg(feature = "bench")]
+    pub fn texts_heard(&self, page: usize) -> Option<Vec<NamedText>> {
+        self.imp().texts.borrow().get(&page).cloned()
+    }
+
     /// The page and box of the stroke the Adjust tool holds. Only `ACCENT_BENCH_PDF=pen:` asks.
     #[cfg(feature = "bench")]
     pub fn adjusted(&self) -> Option<(usize, accent_core::pdf::Rect)> {

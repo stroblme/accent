@@ -34,6 +34,7 @@ mod notebook_lsp;
 mod outline;
 mod panes;
 mod pdf;
+mod pdf_text;
 mod present;
 mod preview;
 mod quickfix;
@@ -226,7 +227,9 @@ use user_commands::bench_commands;
 ///   stroke; the tools' strokes against the file through an erase, its Undo, a move, a turn with
 ///   its Undo and Redo, and the file broken and mended; writes the file),
 ///   `ring:<rel_path>` (the ring under the pen's eraser end, told by hand, and its swatches
-///   under Light, Dark and Solarized, pictured into `$TMPDIR`).
+///   under Light, Dark and Solarized, pictured into `$TMPDIR`),
+///   `text:<rel_path>` (the Text tool through XTEST: text typed and finished each way, typed
+///   again, moved, erased and emptied, with Undo, against the file; writes the file).
 /// - `ACCENT_BENCH_DRAWING=1`: New Drawing; `file`: New File named `Blank.pdf`;
 ///   `sketch:<rel_note>`: Insert Sketch.
 /// - `ACCENT_BENCH_TABS=<rel_note>,<rel_pdf>`: preview/tab close transitions.
@@ -627,6 +630,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("ring:") {
                 return pdf::bench_pdf_ring(&app, rel);
+            }
+            if let Some(rel) = rel.strip_prefix("text:") {
+                return pdf_text::bench_pdf_text(&app, rel);
             }
             if let Some(rel) = rel.strip_prefix("synctex:") {
                 return synctex::bench_synctex(&app, rel);

@@ -1227,7 +1227,7 @@ pub(super) async fn opened(app: &Rc<App>, rel: &str) -> Option<Rc<pdftab::PdfTab
 
 /// Long enough for the tab's own save timer, and then for the upload a remote vault answers it
 /// with, so what the drill reads back is the file and not the plan.
-async fn written(app: &Rc<App>) {
+pub(super) async fn written(app: &Rc<App>) {
     glib::timeout_future(Duration::from_millis(1400)).await;
     if app.vault().is_some_and(|v| v.is_remote()) {
         glib::timeout_future(Duration::from_millis(2000)).await;

@@ -210,3 +210,22 @@ impl PdfTab {
         typing
     }
 }
+
+/// What the drills ask of the text being typed.
+#[cfg(feature = "bench")]
+impl PdfTab {
+    /// Where its editor stands over the page, how tall its text is laid out, how big that text
+    /// is and whether it holds the keyboard.
+    pub fn typing_at(&self) -> Option<(accent_drawio::Rect, f64, f64, bool)> {
+        let editor = self.typing.borrow().clone()?;
+        let (at, content, px) = editor.at();
+        Some((at, content, px, editor.has_focus()))
+    }
+
+    /// `text` typed into it, as keys would: XTEST types no more than ASCII.
+    pub fn type_text(&self, text: &str) {
+        if let Some(editor) = self.typing.borrow().as_ref() {
+            editor.type_text(text);
+        }
+    }
+}
