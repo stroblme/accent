@@ -522,16 +522,21 @@ async fn lazy_drill(app: &Rc<App>, rel: &str) {
             app.window.width()
         );
     }
-    resized(app, width, height).await;
-    // Placeholders as tall as their outputs at another zoom too, pictures scaled with the text.
+    // Placeholders as tall as their outputs at another zoom too, pictures scaled with the text,
+    // and their headings' marks wider than the room they hang in.
     app.set_zoom(2.0);
-    if let Some(tab) = reopened(app, rel).await {
-        let (built, off, .., (code, markdown)) = sweep(&tab).await;
-        println!(
-            "bench notebook lazy sweep zoom=200 built={built} off_px={off} \
-             code_off_px={code} markdown_off_px={markdown}"
-        );
+    for w in [width, NARROW] {
+        resized(app, w, height).await;
+        if let Some(tab) = reopened(app, rel).await {
+            let (built, off, .., (code, markdown)) = sweep(&tab).await;
+            println!(
+                "bench notebook lazy sweep zoom=200 width={} built={built} off_px={off} \
+                 code_off_px={code} markdown_off_px={markdown}",
+                app.window.width()
+            );
+        }
     }
+    resized(app, width, height).await;
     app.set_zoom(1.0);
 
     let Some(tab) = reopened(app, rel).await else {

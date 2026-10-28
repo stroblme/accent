@@ -2,7 +2,8 @@
 //! the width it is given, wrapped and spaced alike, so a cell is as tall before its editor is
 //! built as after and the scroll's range keeps still as editors are built near the view. A code
 //! cell's lines come out as tall as its editor's; a markdown cell's headings are set at their
-//! scale, its other styling not measured. Laid out a line at a time in Pango, once a width.
+//! scale, their marks hung in the margin as the editor hangs them, its other styling not measured.
+//! Laid out a line at a time in Pango, once a width.
 
 use std::cell::{Cell, RefCell};
 
@@ -64,18 +65,15 @@ impl Placeholder {
     }
 
     /// Lay the text out at `width` as its editor would, each line handed to `line` with where its
-    /// top is; the height it all takes.
-    fn lay_out(&self, width: i32, mut line: impl FnMut(&pango::Layout, i32)) -> i32 {
+    /// left edge and its top are; the height it all takes.
+    fn lay_out(&self, width: i32, mut line: impl FnMut(&pango::Layout, i32, i32)) -> i32 {
         let imp = self.imp();
         let margins = imp.margins.borrow();
         let markdown = imp.markdown.get();
         let layout = self.create_pango_layout(None);
         // A text view wraps a pixel short of its width, which it keeps for the cursor; with no
         // width given, nothing wraps.
-        if width > 0 {
-            let fit = (width - 1 - margins.left - margins.right).max(1);
-            layout.set_width(fit * pango::SCALE);
-        }
+        let fit = (width > 0).then(|| (width - 1 - margins.left - margins.right).max(1));
         layout.set_wrap(pango::WrapMode::WordChar);
         // GtkSourceView's tab stops: as wide as the tab width's spaces (`editor::build`).
         let space = self.create_pango_layout(Some(" ")).size().0;
@@ -88,33 +86,39 @@ impl Placeholder {
         layout.set_tabs(Some(&tabs));
         let mut top = margins.top;
         for text in imp.text.borrow().split('\n') {
-            // A heading's marks hang in the margin, its text set at the heading's scale.
-            let heading = markdown.then(|| heading(text)).flatten();
-            let (shown, indent) = match heading {
-                Some((level, rest)) => {
+            // How far the line starts left of the text's edge, and how far its wrapped rows hang.
+            let (out, hang) = match markdown.then(|| heading(text)).flatten() {
+                Some(level) => {
                     let attrs = pango::AttrList::new();
                     attrs.insert(pango::AttrInt::new_weight(pango::Weight::Bold));
                     attrs.insert(pango::AttrFloat::new_scale(
                         highlight::HEADING_SCALES[level - 1],
                     ));
                     layout.set_attributes(Some(&attrs));
-                    (rest, 0)
+                    // Its marks hang in the margin, its text set at the heading's scale; marks
+                    // wider than the margin, as they are at a zoom, push the text in
+                    // (`highlight::hang`).
+                    let marks = self.create_pango_layout(Some(&text[..=level]));
+                    marks.set_attributes(Some(&attrs));
+                    let out = marks.pixel_size().0.min(margins.left);
+                    (out, out)
                 }
                 None => {
                     layout.set_attributes(None);
                     // Wrapped rows hang behind the line's indent and marker (`wrap::retag`).
                     let column = typing::wrap_column(text, TAB_WIDTH, TAB_WIDTH, markdown);
                     let column = column.min(crate::wrap::COLUMNS) as i32;
-                    (
-                        text,
-                        (f64::from(column * space) / f64::from(pango::SCALE)).round() as i32,
-                    )
+                    let hang = f64::from(column * space) / f64::from(pango::SCALE);
+                    (0, hang.round() as i32)
                 }
             };
-            layout.set_indent(-indent * pango::SCALE);
-            layout.set_text(shown);
+            if let Some(fit) = fit {
+                layout.set_width((fit + out) * pango::SCALE);
+            }
+            layout.set_indent(-hang * pango::SCALE);
+            layout.set_text(text);
             top += LINE_SPACING;
-            line(&layout, top);
+            line(&layout, margins.left - out, top);
             // As a text view rounds a line's height.
             top += (layout.size().1 + pango::SCALE / 2) / pango::SCALE + LINE_SPACING;
         }
@@ -133,7 +137,7 @@ impl Placeholder {
         {
             return *height;
         }
-        let height = self.lay_out(width, |_, _| {});
+        let height = self.lay_out(width, |_, _, _| {});
         self.imp().measured.replace(Some((width, font, height)));
         height
     }
@@ -145,11 +149,10 @@ const TAB_WIDTH: usize = 4;
 /// The room above and below each line of an editor (`editor::build`).
 const LINE_SPACING: i32 = crate::editor::LINE_SPACING;
 
-/// An ATX heading's level and its text after the marks.
-fn heading(line: &str) -> Option<(usize, &str)> {
+/// An ATX heading's level: its marks, then a space.
+fn heading(line: &str) -> Option<usize> {
     let level = line.bytes().take_while(|&b| b == b'#').count();
-    let rest = line[level..].strip_prefix(' ')?;
-    (1..=6).contains(&level).then_some((level, rest))
+    (line[level..].starts_with(' ') && (1..=6).contains(&level)).then_some(level)
 }
 
 mod imp {
@@ -191,8 +194,8 @@ mod imp {
 
         fn snapshot(&self, snapshot: &gtk::Snapshot) {
             let obj = self.obj();
-            let (x, colour) = (self.margins.borrow().left, obj.color());
-            obj.lay_out(obj.width(), |layout, top| {
+            let colour = obj.color();
+            obj.lay_out(obj.width(), |layout, x, top| {
                 snapshot.save();
                 snapshot.translate(&graphene::Point::new(x as f32, top as f32));
                 snapshot.append_layout(layout, &colour);

@@ -333,11 +333,15 @@ impl CellView {
         if flavour.is_note() {
             crate::editor::style_note(&view, &buffer, Syntax::Markdown);
             // The tags' colours, and the markers' widths, are read off the view's own font and
-            // colour, which it has once it is realised.
+            // colour, which it has once it is realised: in the column, under the notebook's font
+            // rule, which GTK has yet to hand its Pango context (`editor::refont`). Measured in the
+            // font it was built in, a heading's marks hung short of their width at a zoom.
             view.connect_realize(|view| {
+                crate::editor::refont(view);
                 if let Some(buffer) = view.buffer().downcast_ref::<sourceview5::Buffer>() {
                     crate::editor::restyle_note(view, buffer, Syntax::Markdown);
                 }
+                crate::wrap::measure(view);
             });
         } else {
             view.add_css_class("notebook-source");
