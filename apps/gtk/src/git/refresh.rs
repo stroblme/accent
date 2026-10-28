@@ -124,11 +124,19 @@ impl Panel {
     }
 
     /// Look for repositories again, at most once per [`REDISCOVER`]. For the indexing progress,
-    /// which arrives many times a second: [`Panel::schedule_refresh`] restarts its timer on every
-    /// call, so passing each tick on would put the refresh off until the walk was over.
+    /// which arrives many times a second, and for `.git` writes: [`Panel::schedule_refresh`]
+    /// restarts its timer on every call, so passing each tick on would put the refresh off until
+    /// the walk was over. One asked too soon asks again a [`REDISCOVER`] later instead, unless a
+    /// look starts meanwhile: a `git init` just after a commit is found all the same.
     pub fn rediscover(self: &Rc<Self>) {
         let now = glib::monotonic_time();
         if now - self.discovered.get() < REDISCOVER.as_micros() as i64 {
+            let panel = Rc::downgrade(self);
+            self.rediscover_later.call_once(move || {
+                if let Some(panel) = panel.upgrade() {
+                    panel.rediscover();
+                }
+            });
             return;
         }
         self.discovered.set(now);
@@ -142,6 +150,11 @@ impl Panel {
         let generation = self.source_generation.get();
         if !self.refresh_gate.borrow_mut().begin(generation, &ask) {
             return;
+        }
+        // A look starting now answers every [`Panel::rediscover`] asked before it.
+        if ask.depth() == Depth::Discover {
+            self.discovered.set(glib::monotonic_time());
+            self.rediscover_later.cancel();
         }
         let vault = self.source();
         // As many commits as are shown, so the pages a Load More brought in outlive a history

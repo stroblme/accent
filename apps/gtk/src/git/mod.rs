@@ -240,10 +240,12 @@ pub struct Panel {
     running_git: RefCell<actions::RunningGit>,
     /// What the debounced refresh has been asked for so far, taken when its timer fires.
     pending_ask: Cell<Option<refresh::Ask>>,
-    /// When [`Panel::rediscover`] last went looking, in `glib::monotonic_time` microseconds. It
-    /// starts at the pane's creation, which the window follows with a discovery of its own, so a
-    /// walk that is over within [`REDISCOVER`] asks for nothing more.
+    /// When the pane last went looking for repositories, in `glib::monotonic_time` microseconds.
+    /// It starts at the pane's creation, which the window follows with a discovery of its own, so
+    /// a walk that is over within [`REDISCOVER`] asks for nothing more.
     discovered: Cell<i64>,
+    /// A [`Panel::rediscover`] asked within [`REDISCOVER`] of the last look, waiting its turn.
+    rediscover_later: crate::widgets::Debounce,
     /// The comparisons open right now, re-read whenever a refresh lands, a commit's excepted: a
     /// diff tab is not a snapshot. And what the session keeps of them ([`Panel::kept`]). Weak, so
     /// a closed one falls out on the next pass.
@@ -495,6 +497,7 @@ impl Panel {
             running_git: RefCell::new(actions::RunningGit::default()),
             pending_ask: Cell::new(None),
             discovered: Cell::new(glib::monotonic_time()),
+            rediscover_later: crate::widgets::Debounce::new(REDISCOVER),
             watches: RefCell::new(Vec::new()),
             asked: Cell::new(0),
             syncing: Cell::new(false),

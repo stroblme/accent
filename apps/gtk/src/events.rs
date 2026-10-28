@@ -373,14 +373,19 @@ impl App {
             // that it has one now — `git init` in a terminal, a clone into the vault root — and
             // the watcher reports that write like any other, `.git` being watched on purpose. So
             // that one goes looking for repositories instead, which is what makes the pane show
-            // itself with nothing to click. Not the deeper ask everywhere: discovery is a
-            // `git rev-parse` per indexed directory, and every commit would pay for it.
+            // itself with nothing to click. Where it has some, the write may still be a new
+            // repository's, a `git init` in one of its folders, so the pane looks as well, but
+            // throttled: discovery is a `git rev-parse` per indexed directory, and a burst of
+            // commits pays for it once.
             Event::GitChanged => {
                 if let Some(git) = self.git.get() {
-                    git.schedule_refresh(match git.has_repos() {
-                        true => git::Depth::Everything,
-                        false => git::Depth::Discover,
-                    });
+                    match git.has_repos() {
+                        true => {
+                            git.schedule_refresh(git::Depth::Everything);
+                            git.rediscover();
+                        }
+                        false => git.schedule_refresh(git::Depth::Discover),
+                    }
                 }
             }
             // A remote vault is still coming up. It reads as the same wait as indexing, because
