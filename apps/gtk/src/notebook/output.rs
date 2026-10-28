@@ -6,7 +6,8 @@
 //! A cell's outputs are built as its editor is, once it nears the view: until then a placeholder
 //! as tall as they will be holds their place ([`Held`]). Pictures and formulas are drawn at the
 //! notebook's zoom, as its text is set ([`Figure`]).
-//! A right-click on an output offers Copy Output for it alone ([`copied`]).
+//! A run's new output fades in ([`Outputs::show`]); a right-click on an output offers Copy Output
+//! for it alone ([`copied`]).
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -62,6 +63,11 @@ pub struct Outputs {
     held: RefCell<Option<Held>>,
     /// The notebook's zoom.
     zoom: Rc<Cell<f64>>,
+    /// Whether what is shown was cleared since it was drawn ([`mark_cleared`](Self::mark_cleared)).
+    cleared: Cell<bool>,
+    /// How many outputs have faded in.
+    #[cfg(feature = "bench")]
+    faded: Cell<usize>,
 }
 
 /// One output's widgets in the box, and its parts.
@@ -111,6 +117,9 @@ impl Outputs {
             slots,
             held: RefCell::new(held),
             zoom,
+            cleared: Cell::new(false),
+            #[cfg(feature = "bench")]
+            faded: Cell::new(0),
         }
     }
 
@@ -126,7 +135,7 @@ impl Outputs {
             }
             for part in &slot.parts {
                 if let Part::Picture { svg: true, .. } = part {
-                    show_picture(part);
+                    show_picture(part, false);
                 }
             }
         }
@@ -139,14 +148,29 @@ impl Outputs {
         };
         self.widget.remove(&held);
         match cell.kind() {
-            Kind::Code => cell.outputs().iter().for_each(|output| self.add(output)),
+            Kind::Code => cell
+                .outputs()
+                .iter()
+                .for_each(|output| self.add(output, false)),
             _ => {
                 for (mime, data) in pictures(cell.attachments()) {
                     self.slots.borrow_mut().push(Slot::default());
-                    self.picture(mime, data);
+                    self.picture(mime, data, false);
                 }
             }
         }
+    }
+
+    /// What is shown was cleared, as a run's first output takes the last run's place or
+    /// `clear_output` asks: what is drawn in its place next is new, and fades in.
+    pub fn mark_cleared(&self) {
+        self.cleared.set(true);
+    }
+
+    /// How many outputs have faded in.
+    #[cfg(feature = "bench")]
+    pub fn faded(&self) -> usize {
+        self.faded.get()
     }
 
     /// Dimmed while they are the last run's, a new run of their cell not having replaced them.
@@ -183,12 +207,14 @@ impl Outputs {
     }
 
     /// Show `tail` in place of the outputs from the `from`th on; while they are held, the
-    /// placeholder takes its shape.
+    /// placeholder takes its shape. An output new to the box fades in; one drawn again in the
+    /// place of the one it grew from, a stream with more text or a display updated, does not.
     pub fn show(&self, from: usize, tail: &[Output]) {
+        let cleared = self.cleared.take();
         if let Some(held) = self.held.borrow().as_ref() {
             return held.show(from, tail);
         }
-        if let [Output::Stream { stderr, text }] = tail {
+        if !cleared && let [Output::Stream { stderr, text }] = tail {
             let mut slots = self.slots.borrow_mut();
             if from + 1 == slots.len()
                 && let Some(slot) = slots.last_mut()
@@ -209,16 +235,16 @@ impl Outputs {
                 return;
             }
         }
-        let gone = {
+        let (gone, shown) = {
             let mut slots = self.slots.borrow_mut();
-            let from = from.min(slots.len());
-            slots.split_off(from)
+            let shown = slots.len();
+            (slots.split_off(from.min(shown)), shown)
         };
         for widget in gone.into_iter().flat_map(|slot| slot.widgets) {
             self.widget.remove(&widget);
         }
-        for output in tail {
-            self.add(output);
+        for (n, output) in tail.iter().enumerate() {
+            self.add(output, cleared || from + n >= shown);
         }
     }
 
@@ -284,7 +310,8 @@ impl Outputs {
         c
     }
 
-    fn add(&self, output: &Output) {
+    /// Draw `output` last, fading in when it is new (Motion: [`widgets::FADE_MS`]).
+    fn add(&self, output: &Output, fade: bool) {
         self.slots.borrow_mut().push(Slot {
             copy: copied(output),
             ..Slot::default()
@@ -308,7 +335,7 @@ impl Outputs {
                 self.text(&error_text(name, value, traceback), true);
             }
             Output::Data { items, .. } => match core::pick(items) {
-                Some(Form::Picture { mime, data }) => self.picture(mime, data),
+                Some(Form::Picture { mime, data }) => self.picture(mime, data, fade),
                 Some(Form::Table(table)) => self.table(&table),
                 Some(Form::Markdown(text)) => self.markdown(text),
                 Some(Form::Latex(tex)) => self.latex(tex),
@@ -325,6 +352,13 @@ impl Outputs {
         if let Some(slot) = slots.last().filter(|slot| slot.copy.is_some()) {
             let menu = copy_menu(slots.len() - 1);
             slot.widgets.iter().for_each(|w| offer_copy(w, &menu));
+        }
+        if let Some(slot) = slots.last().filter(|_| fade) {
+            #[cfg(feature = "bench")]
+            self.faded.set(self.faded.get() + 1);
+            // A picture fades in once it is decoded (`show_picture`).
+            let drawn = slot.widgets.iter().filter(|w| !w.is::<Figure>());
+            drawn.for_each(widgets::fade_in);
         }
     }
 
@@ -367,7 +401,7 @@ impl Outputs {
         view
     }
 
-    fn picture(&self, mime: &str, data: &str) {
+    fn picture(&self, mime: &str, data: &str, fade: bool) {
         let svg = mime == "image/svg+xml";
         let bytes = match svg {
             true => data.as_bytes().to_vec(),
@@ -385,7 +419,7 @@ impl Outputs {
             svg,
             recoloured: Rc::default(),
         };
-        show_picture(&part);
+        show_picture(&part, fade);
         self.keep(part);
     }
 
@@ -476,7 +510,7 @@ impl Outputs {
     pub fn restyle(&self) {
         for part in self.slots.borrow().iter().flat_map(|slot| &slot.parts) {
             match part {
-                Part::Picture { .. } => show_picture(part),
+                Part::Picture { .. } => show_picture(part, false),
                 Part::Ansi(view) => paint_ansi(view),
                 Part::Markdown(view, buffer) => {
                     crate::editor::sync_scheme(buffer);
@@ -1059,9 +1093,9 @@ mod figure {
     }
 }
 
-/// Decode and recolour a picture on a worker, then show it; a picture that is not one stays
-/// empty.
-fn show_picture(part: &Part) {
+/// Decode and recolour a picture on a worker, then show it, fading it in for a `fade`; a picture
+/// that is not one stays empty.
+fn show_picture(part: &Part, fade: bool) {
     let Part::Picture {
         picture,
         bytes,
@@ -1086,6 +1120,9 @@ fn show_picture(part: &Part) {
         };
         let paintable = shown.paintable();
         picture.set_own((paintable.intrinsic_width(), paintable.intrinsic_height()));
+        if fade {
+            widgets::fade_in(&picture);
+        }
         picture.set_paintable(&paintable);
         recoloured.set(changed);
     });

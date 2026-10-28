@@ -38,9 +38,11 @@ const NOTEBOOK: &str = r#"{
 /// `ACCENT_BENCH_KERNEL=<rel>` writes [`NOTEBOOK`] at `<rel>` and runs it: Run Cell on
 /// Insert Line Below's chord, Run Cell and Advance, `input()` answered, an interrupt, Run All
 /// stopped by one, the last run's outputs dimmed until the new ones replace them, Restart, a run
-/// with no output clearing its cell, Copy Output on a right-click on each kind of output, Clear
-/// Outputs and its undo, the save, and the tab closed with its kernel. It prints `bench kernel …` lines as the window shows each cell, timings on
-/// `bench kernel_ms …`; a step that never comes prints `bench kernel timeout <what>` and quits.
+/// with no output clearing its cell, new outputs fading in, Copy Output on a right-click on each
+/// kind of output, Clear Outputs and its undo, the save, and the tab closed with its kernel. It
+/// prints `bench kernel …` lines as the window shows each cell, timings on `bench kernel_ms …`
+/// and opacities on `bench kernel_fade …`; a step that never comes prints `bench kernel timeout
+/// <what>` and quits.
 pub(super) fn bench_kernel(app: &Rc<App>, rel: &str) {
     scratch_only(app, "ACCENT_BENCH_KERNEL");
     if let Some(rel) = rel.strip_prefix("spec:") {
@@ -113,6 +115,8 @@ pub(super) fn bench_kernel(app: &Rc<App>, rel: &str) {
             u8::from(stale_running),
             u8::from(stale_done)
         );
+        // The run's "hi" fades in as the first's did, the same text though it is.
+        println!("bench kernel faded cell 1 {}", tab.bench_faded(0).0);
         let code = app.sidebar.get().is_some_and(|s| s.has_pane("code"));
         println!(
             "bench kernel pane {} {}",
@@ -190,10 +194,25 @@ pub(super) fn bench_kernel(app: &Rc<App>, rel: &str) {
 
         tab.bench_select(5);
         act("win.notebook-run-cell");
+        // Each output's least opacity over the run's second and the picture's decoding, to look
+        // at: from 0 as it fades in, and 1 throughout with GTK's animations off.
+        let (mut least, t) = (Vec::<f64>::new(), Instant::now());
+        while t.elapsed() < Duration::from_secs(3) {
+            for (n, opacity) in tab.bench_faded(5).1.into_iter().enumerate() {
+                match least.get_mut(n) {
+                    Some(at) => *at = at.min(opacity),
+                    None => least.push(opacity),
+                }
+            }
+            glib::timeout_future(Duration::from_millis(10)).await;
+        }
+        println!("bench kernel_fade least {least:.2?}");
         if !done(&app, &tab, "outputs").await {
             return;
         }
         print_cell(&tab, 5, "");
+        // Three new outputs, the stream's second flush running on in the first.
+        println!("bench kernel faded cell 6 {}", tab.bench_faded(5).0);
         for (n, what) in ["stream", "picture", "error"].into_iter().enumerate() {
             copy_output(&app, &tab, 5, n, what).await;
         }

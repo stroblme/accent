@@ -1173,6 +1173,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A kernel starts on the `ipc` transport, as ipykernel does (user decision 2026-10-27): one that takes only `tcp` is never reached, and its start says so once its minute is up.
 - Run Cell runs the selected cell, Run Cell and Advance then selects the next, adding a code cell after the last, and Run All runs every code cell in order: the kernel takes them in turn, and an error stops the rest, which keep what they had. A cell with no code is not run.
 - A cell waiting or running counts `[*]`; the outputs of its last run stay as it starts, dimmed, to be held against the new ones, until its first new output takes their place, and go at its end if none comes, an interrupt or the kernel ending included (user decision 2026-10-24); the new ones come in under it, a stream's text running on as it grows, drawn once per turn of the window's event pump, and it counts `[n]` when done.
+  Each new output fades in (user decision 2026-10-28; Motion): a stream, a picture once it is decoded, an error, a display, and every output of a rerun or after a `clear_output(wait=True)`, even one that says what the one before it said; more text on a stream and an updated display do not fade again, nor do outputs drawn as their cell comes into view.
 - `input()` asks under its cell: an entry with the prompt before it, a password's characters hidden, Return answering; in the notebook in front it takes the keyboard and is brought into view.
 - Interrupt Kernel sends the kernel's process group SIGINT, as Jupyter does, or an `interrupt_request` on its control channel for a kernelspec whose `interrupt_mode` is `message`, and ipykernel drops the runs waiting behind the one it stops; Restart Kernel ends it and starts another, the cells keeping their outputs and counts; Shut Down Kernel ends it, and the next run starts a new one.
   Stop, on the kernel's strip and a running cell's buttons, is Interrupt Kernel, which keeps what the kernel holds, and Shut Down Kernel while the kernel starts (user decision 2026-10-27): stopping only the runs waiting is not offered, as the kernel holds them once sent and Jupyter takes none back.
@@ -2000,7 +2001,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 
 ## Motion
 
-- Switches crossfade and new pages fade in, over 150 ms, easing out (`widgets::FADE_MS`): the sidebar's panes, a tab picked in the pane the reader is in (a newly opened one too), a PDF's pages on their first open, or the spinner that took their place once the open had taken 160 ms, the PDF's "Cannot Open" page, and the card a held `Ctrl+Tab` shows; a toast slides into the pile and out of it, and the toasts slide out of the status bar's way in presentation mode, over the same 150 ms.
+- Switches crossfade and new pages fade in, over 150 ms, easing out (`widgets::FADE_MS`): the sidebar's panes, a tab picked in the pane the reader is in (a newly opened one too), a PDF's pages on their first open, or the spinner that took their place once the open had taken 160 ms, the PDF's "Cannot Open" page, the card a held `Ctrl+Tab` shows, and each new output of a notebook's run (Notebook); a toast slides into the pile and out of it, and the toasts slide out of the status bar's way in presentation mode, over the same 150 ms.
   Nothing else fades in: not a reload (a LaTeX build rewrites its PDF every few seconds), a restore, a tab landing in another pane, or a layout change (F9, a split, the preview).
   All of it is libadwaita's and GTK's own animation, so `gtk-enable-animations` off stops it.
   The other timings we own are debounces, which keep the main loop free.
@@ -2010,7 +2011,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 | Timer | Value | Where |
 |---|---|---|
 | Re-highlight after a keystroke | 150 ms | `editor/mod.rs::DEBOUNCE` |
-| A switch's crossfade, a page's fade in, a toast's slide in and out, the toasts' lift over the status bar | 150 ms | `widgets.rs::FADE_MS` |
+| A switch's crossfade, a page's fade in, a notebook output's fade in, a toast's slide in and out, the toasts' lift over the status bar | 150 ms | `widgets.rs::FADE_MS` |
 | A PDF still opening shows a spinner | 160 ms | `pdf/tab.rs::OPENING` |
 | A held `Ctrl+Tab` shows its card | 200 ms | `switcher.rs::DELAY` |
 | End-of-line messages cut again after a width change | 150 ms | `editor/mod.rs::DEBOUNCE` |

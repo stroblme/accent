@@ -457,6 +457,7 @@ impl NotebookTab {
     }
 
     /// Cell `id`'s outputs go and it counts `count`: as a run begins, and as it clears them.
+    /// What it shows next is new, and fades in.
     fn empty_run(self: &Rc<Self>, id: CellId, count: Option<u32>) {
         let run = Some(Run::new(count, Vec::new()));
         if self
@@ -465,6 +466,9 @@ impl NotebookTab {
             .apply(Edit::Outputs { id, run })
             .is_some()
         {
+            if let Some(view) = self.view_of(Some(id)) {
+                view.outputs.mark_cleared();
+            }
             self.ran(id, 0);
         }
     }
@@ -1167,6 +1171,15 @@ impl NotebookTab {
         let at = model.position(view.id)?;
         let outputs = model.cells()[at].outputs().to_vec();
         Some((view.count_text(), outputs, view.outputs.shown()))
+    }
+
+    /// How many of cell `n`'s outputs have faded in, and the opacity of each it shows.
+    pub fn bench_faded(&self, n: usize) -> (usize, Vec<f64>) {
+        let Some(view) = self.views.borrow().get(n).cloned() else {
+            return (0, Vec::new());
+        };
+        let shown = (0..view.outputs.shown()).filter_map(|i| view.outputs.widget_of(i));
+        (view.outputs.faded(), shown.map(|w| w.opacity()).collect())
     }
 
     /// The widget output `i` of cell `n` is drawn in, scrolled into view.

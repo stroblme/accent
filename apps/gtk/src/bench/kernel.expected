@@ -2,6 +2,7 @@ bench kernel strip Starting… spinner=1 shut-down cell 1 run-greyed
 bench kernel cell 1 count=[1] outputs=stream:"hi\n"
 bench kernel status succeeded=1 edited=1 undone=1
 bench kernel status stale_running=1 stale_done=1
+bench kernel faded cell 1 2
 bench kernel pane shown Idle spinner=0 run-all
 bench kernel cell 2 count=[3] outputs=execute_result:"2"
 bench kernel fit unfit=0
@@ -17,6 +18,7 @@ bench kernel status restart=1
 bench kernel restart cell 1 count=[1]
 bench kernel quiet dimmed=0 cell 2 count=[2] outputs=0
 bench kernel cell 6 count=[3] outputs=stream:"one\ntwo\n",display_data:"<IPython.core.display.Image object>",error:ZeroDivisionError
+bench kernel faded cell 6 3
 bench kernel copy stream menus=1 text="one\ntwo"
 bench kernel copy picture menus=1 picture=80x40
 bench kernel copy error menus=1 last="ZeroDivisionError: division by zero" escapes model=1 copied=0
