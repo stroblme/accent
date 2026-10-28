@@ -221,7 +221,8 @@ use tags::bench_tags;
 ///   the file),
 ///   `ring:<rel_path>` (the ring under the pen's eraser end, told by hand, and its swatches
 ///   under Light, Dark and Solarized, pictured into `$TMPDIR`).
-/// - `ACCENT_BENCH_DRAWING=1`: New Drawing; `sketch:<rel_note>`: Insert Sketch.
+/// - `ACCENT_BENCH_DRAWING=1`: New Drawing; `file`: New File named `Blank.pdf`;
+///   `sketch:<rel_note>`: Insert Sketch.
 /// - `ACCENT_BENCH_TABS=<rel_note>,<rel_pdf>`: preview/tab close transitions.
 ///   Modes: `pin:<a>,<b>,<c>,<d>` then `pins` (save/restore one scratch session),
 ///   `reload:<key>,…` (edits/size after Reload Window; vault, loose file,
@@ -624,7 +625,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         if let Some(arg) = drawing {
             return match arg.strip_prefix("sketch:") {
                 Some(rel) => bench_sketch(&app, rel),
-                None => bench_drawing(&app),
+                None => bench_drawing(&app, arg == "file"),
             };
         }
         if let Some(rel) = transfer {

@@ -1012,7 +1012,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A closed tab's write has no tab to move, and the toast names the copy.
 - A remote file deleted, on the host or here, takes its cached copy with it, so a file given its name afterwards opens as itself.
   Changes the copy held that had not reached the host go too, the delete winning as it does for the notes' page edits, and a toast says so: "paper.pdf was deleted on host before your changes reached it".
-- Insert Sketch puts a blank A4 page beside the note, embeds it and hands it the pen; New Drawing makes one where the tree says.
+- Insert Sketch puts a blank A4 page beside the note, embeds it and hands it the pen; New Drawing makes one where the tree says, and so does New File given a name ending `.pdf` (Keyboard, Notes).
   Both write through the vault, on the host for a remote one, off the main loop.
 - **The thumbnail strip organises pages:** dragging a thumbnail moves its page, an accent bar marks the destination gap, and the strip scrolls near an edge.
   The thumbnail under the pointer carries two round buttons, opaque as the ring's are: Delete Page (absent on a one-page document, which a PDF keeps) and Insert Page Here on the gap below.
@@ -1792,6 +1792,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 - The placeholders are strftime's — `{{date}}`, `{{time}}`, `{{date:%Y-%m-%d}}`, a signed day offset `{{date-1}}` / `{{date+3:%A}}`, `{{title}}`, `{{cursor}}`: one small mapping instead of a moment.js subset.
 - **Rename and New File are one rule**: both take the name as typed, read `/` as a path from the folder they were opened on, create the folders it names as New Folder would, and show the vault-relative destination in a dim line under the entry, the only place `../Archive/note.md` says where it lands.
 - New File with a name ending `.ipynb` writes the empty notebook nbformat writes, one empty Python code cell, rather than an empty file, so it opens as a notebook (user decision 2026-10-20: no command of its own; marimo is left out).
+- New File with a name ending `.pdf` offers New Drawing's page sizes under the name, shown once the name says PDF, and writes that blank page rather than an empty file, which no reader opens; it opens with the pen down, as a drawing does.
 - A dot-named name is taken like any other (`.gitignore`, `.config/init.lua`), and while Show Hidden Files is off the toast says the file is hidden, so it does not seem to vanish; only what the vault never lists is refused: `.git`, `.trash` and the temporaries.
 - **A typed path completes**: the folders under what the path names so far are listed under the entry as it is typed, and the folder button beside it shows the same list for an empty entry.
   Folders only: the last segment is a name being invented.

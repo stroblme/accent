@@ -122,7 +122,7 @@ pub struct Ops {
 /// Create a file in `dir` ("" for the vault root), optionally from a template.
 ///
 /// Use the name exactly as typed: only a `.md` name creates a note. Show the template picker
-/// only for markdown files.
+/// only for markdown files, and New Drawing's page sizes only for a PDF, which is made blank.
 ///
 /// A name containing `/` is relative to `dir`; create its folders as needed. Show the
 /// resulting destination below the entry.
@@ -171,11 +171,20 @@ fn new_file_with(ops: &Rc<Ops>, dir: &str, name: &str, templates: Vec<String>) {
         });
         form.append(&row);
     }
+    // An empty file is no PDF: one ending in `.pdf` is made a blank page of a size picked here.
+    let sizes = gtk::DropDown::from_strings(SIZES);
+    let sizes_row = labelled("Size", &sizes);
+    sizes_row.set_visible(is_pdf(name.trim()));
+    entry.connect_changed({
+        let row = sizes_row.clone();
+        move |e| row.set_visible(is_pdf(e.text().trim()))
+    });
+    form.append(&sizes_row);
 
     let dialog = name_dialog("New File", "Create", &form);
     let (ops, dir, window) = (ops.clone(), dir.to_string(), ops.window.clone());
-    let typed = entry.clone();
-    choose(&dialog, Some(&window), move |response| {
+    let (typed, parent) = (entry.clone(), window.clone());
+    choose(&dialog, Some(&parent), move |response| {
         if response != CONFIRM {
             return;
         }
@@ -183,6 +192,10 @@ fn new_file_with(ops: &Rc<Ops>, dir: &str, name: &str, templates: Vec<String>) {
             Ok(rel) => rel,
             Err(why) => return (ops.toast)(why),
         };
+        if is_pdf(&rel) {
+            let size = drawing_size(sizes.selected() as usize, (window.width(), window.height()));
+            return make_drawing(&ops, rel, size);
+        }
         let name = basename(&rel).to_string();
         // Read only where the picker is on screen, so a name that stopped being markdown after a
         // template was picked does not carry the leftover selection into a non-note file.
@@ -325,55 +338,60 @@ fn new_drawing_named(ops: &Rc<Ops>, dir: &str, current: &str) {
             Ok(rel) => drawing_path(rel),
             Err(why) => return (ops.toast)(why),
         };
-        let name = basename(&rel).to_string();
         // Read now rather than in the worker: the window is the main thread's.
         let size = drawing_size(
             picker.selected() as usize,
             (window.width(), window.height()),
         );
-        // The folders, the document and the write, on a worker: making a PDF is pdfium work
-        // behind the process-wide lock, which a render thread may be holding.
-        let vault = ops.vault.clone();
-        glib::spawn_future_local(async move {
-            let made = crate::work::off_thread("create", {
-                let (rel, name) = (rel.clone(), name.clone());
-                move || {
-                    let cannot = |e: String| format!("Cannot create {name}: {e}");
-                    // A name the vault cannot answer for is not taken as free: the write would
-                    // replace whatever is there.
-                    if vault
-                        .stat(&rel)
-                        .map_err(|e| cannot(e.to_string()))?
-                        .is_some()
-                    {
-                        return Err(cannot("it already exists".to_string()));
-                    }
-                    make_parents(&vault, &rel)?;
-                    let bytes =
-                        accent_core::pdf::blank_pdf(size).map_err(|e| cannot(e.to_string()))?;
-                    vault
-                        .write_file(&rel, &bytes)
-                        .map_err(|e| cannot(e.to_string()))
-                }
-            })
-            .await
-            .unwrap_or_else(|| Err(format!("Cannot create {name}")));
-            match made {
-                // The tab with the pen down is the report, unless the tree will not list the file.
-                Ok(()) => {
-                    (ops.draw)(&rel);
-                    if hidden_now(&ops, &rel) {
-                        (ops.toast)(&format!("Created {name}; {HIDDEN}"));
-                    }
-                }
-                Err(why) => (ops.toast)(&why),
-            }
-        });
+        make_drawing(&ops, rel, size);
     });
     focus_name(
         &entry,
         Some(renamed_part(current, false).chars().count() as i32),
     );
+}
+
+/// Write a blank one-page PDF `size` points across at `rel` and open it with the pen down: New
+/// Drawing, and New File on a name ending in `.pdf`.
+fn make_drawing(ops: &Rc<Ops>, rel: String, size: (f32, f32)) {
+    let name = basename(&rel).to_string();
+    // The folders, the document and the write, on a worker: each is a round trip on a remote
+    // vault.
+    let (ops, vault) = (ops.clone(), ops.vault.clone());
+    glib::spawn_future_local(async move {
+        let made = crate::work::off_thread("create", {
+            let (rel, name) = (rel.clone(), name.clone());
+            move || {
+                let cannot = |e: String| format!("Cannot create {name}: {e}");
+                // A name the vault cannot answer for is not taken as free: the write would
+                // replace whatever is there.
+                if vault
+                    .stat(&rel)
+                    .map_err(|e| cannot(e.to_string()))?
+                    .is_some()
+                {
+                    return Err(cannot("it already exists".to_string()));
+                }
+                make_parents(&vault, &rel)?;
+                let bytes = accent_core::pdf::blank_pdf(size).map_err(|e| cannot(e.to_string()))?;
+                vault
+                    .write_file(&rel, &bytes)
+                    .map_err(|e| cannot(e.to_string()))
+            }
+        })
+        .await
+        .unwrap_or_else(|| Err(format!("Cannot create {name}")));
+        match made {
+            // The tab with the pen down is the report, unless the tree will not list the file.
+            Ok(()) => {
+                (ops.draw)(&rel);
+                if hidden_now(&ops, &rel) {
+                    (ops.toast)(&format!("Created {name}; {HIDDEN}"));
+                }
+            }
+            Err(why) => (ops.toast)(&why),
+        }
+    });
 }
 
 /// The page shapes New Drawing offers, in the order the dropdown lists them.
@@ -395,10 +413,14 @@ fn drawing_size(at: usize, window: (i32, i32)) -> (f32, f32) {
 /// A drawing is a PDF whatever it is called: the extension is what opens it in a PDF tab here
 /// and in a reader everywhere else, so a typed name that leaves it out gains it.
 fn drawing_path(rel: String) -> String {
-    match file_type(&rel) == FileType::Pdf {
+    match is_pdf(&rel) {
         true => rel,
         false => format!("{rel}.pdf"),
     }
+}
+
+fn is_pdf(name: &str) -> bool {
+    file_type(name) == FileType::Pdf
 }
 
 /// What the dialog opens on: the first `Drawing N.pdf` the folder does not already hold, so

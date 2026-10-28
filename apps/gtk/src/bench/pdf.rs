@@ -1765,11 +1765,15 @@ pub(super) fn bench_pdf_renaming(app: &Rc<App>, rel: &str) {
 /// opened tab and active tool. Emit `response` directly because Xvfb cannot activate
 /// `AdwAlertDialog` buttons; this covers the handler and resulting document, not pointer
 /// interaction.
-pub(super) fn bench_drawing(app: &Rc<App>) {
+pub(super) fn bench_drawing(app: &Rc<App>, file: bool) {
     let app = app.clone();
     glib::spawn_future_local(async move {
         online(&app).await;
-        let _ = WidgetExt::activate_action(&app.window, "win.new-drawing", None);
+        let action = match file {
+            true => "win.new-file",
+            false => "win.new-drawing",
+        };
+        let _ = WidgetExt::activate_action(&app.window, action, None);
         for _ in 0..40 {
             if app.window.visible_dialog().is_some() {
                 break;
@@ -1785,15 +1789,25 @@ pub(super) fn bench_drawing(app: &Rc<App>) {
             return bench_quit(&app);
         };
         let form = dialog.extra_child();
-        let typed = form
+        let entry = form
             .as_ref()
             .and_then(|form| find_widget(form, &|w| w.is::<gtk::Entry>()))
-            .and_downcast::<gtk::Entry>()
-            .map(|entry| entry.text());
-        let sizes = form
-            .as_ref()
-            .and_then(|form| find_widget(form, &|w| w.is::<gtk::DropDown>()))
-            .and_downcast::<gtk::DropDown>();
+            .and_downcast::<gtk::Entry>();
+        // New File shows the sizes only once the name says PDF.
+        let shown = || {
+            let shown = |w: &gtk::Widget| {
+                w.is::<gtk::DropDown>() && w.parent().is_some_and(|row| row.is_visible())
+            };
+            form.as_ref()
+                .and_then(|form| find_widget(form, &shown))
+                .and_downcast::<gtk::DropDown>()
+        };
+        if file && let Some(entry) = &entry {
+            println!("bench drawing sizes_before_name={}", shown().is_some());
+            entry.set_text("Blank.pdf");
+        }
+        let typed = entry.map(|entry| entry.text());
+        let sizes = shown();
         let listed = sizes.as_ref().and_then(|d| d.model()).map(|m| m.n_items());
         println!(
             "bench drawing heading={:?} typed={typed:?} sizes={listed:?}",
