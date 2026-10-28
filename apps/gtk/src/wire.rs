@@ -575,6 +575,34 @@ fn wire_pane_drops(app: &Rc<App>, pane: &Rc<Pane>) {
     ));
 }
 
+/// A window showing No Note Open has no pane on screen to take a dragged tab: its placeholder
+/// takes one into the pane behind it, as that pane's middle would (`App::dropped`).
+///
+/// On the stack rather than the placeholder: the tab landing swaps the placeholder out, and a
+/// drop target unmapped during its drop finishes the drop a second time, which libadwaita takes
+/// as a second landing of the same tab.
+fn wire_empty_drop(app: &Rc<App>) {
+    let drop = gtk::DropTarget::new(adw::TabPage::static_type(), gdk::DragAction::MOVE);
+    drop.connect_accept(glib::clone!(
+        #[weak]
+        app,
+        #[upgrade_or]
+        false,
+        move |_, drop| {
+            app.content.visible_child_name().as_deref() == Some("empty")
+                && drop.formats().contains_type(adw::TabPage::static_type())
+        }
+    ));
+    drop.connect_drop(glib::clone!(
+        #[weak]
+        app,
+        #[upgrade_or]
+        false,
+        move |_, value, _, _| app.dropped(&app.pane(), Zone::Here, value)
+    ));
+    app.content.add_controller(drop);
+}
+
 pub fn wire_window(app: &Rc<App>) {
     // The bottom bar of an `AdwToolbarView` is a `GtkWindowHandle`, so a secondary press anywhere
     // in it asks the shell for the window menu — Restore / Minimize / Maximize / Close under a
@@ -586,6 +614,7 @@ pub fn wire_window(app: &Rc<App>) {
         gesture.set_state(gtk::EventSequenceState::Claimed);
     });
     app.statusbar.widget().add_controller(quiet);
+    wire_empty_drop(app);
 
     // The `Ctrl+Tab` card: a row clicked ends the chord there, a click beside it where it began.
     let weak = Rc::downgrade(app);

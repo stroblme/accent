@@ -779,7 +779,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - A restored window has an empty Back and Forward: a restore's selections are not places.
   A first opening, or a session without a layout, is one pane; a split's share is kept to 10–90 %.
 - A tab on a file outside the window's vault carries `document-open-symbolic` in its indicator slot, tooltipped Outside this vault, so saving it is never a surprise and it is plain why it has no backlinks.
-- A tab dragged into another window moves there, its buffer written first.
+- A tab dragged into another window moves there, its buffer written first; one showing No Note Open takes it anywhere on that page.
   One vault never having two windows, it arrives from another vault and is adopted as a file from outside a vault: it edits and saves, without index, backlinks or wikilink resolution.
   A shell, a comparison and a remote vault's file cannot be reopened elsewhere, so they go back to their window with a toast.
 - A tab let go outside every window moves to a window of its own, as Move to New Window moves it (below), wherever the compositor puts that window: GTK 4 places none at the pointer.
