@@ -1848,9 +1848,10 @@ type MenuStep<'a> = (&'static str, i32, Box<dyn Fn() + 'a>);
 /// What a secondary click does to the caret and the selection before its menu opens, and what the
 /// menu then acts on: the steps print `menu_ready <step> <x>,<y>` for an XTEST press there
 /// (`xtest.py :N "move X Y; down 3; up 3; sleep 0.6; key Escape"`), and the state a second
-/// later: the caret, the selection, how many carets, the spelling suggestions offered, and after
-/// `copy` what `Ctrl+C` put on the clipboard. The note's own text goes back at the end; the last
-/// step is a Ctrl+click on a wikilink, printing the tab it opened.
+/// later: the caret, the selection, how many carets, the spelling suggestions offered (none over
+/// a selection of more than the word, and a correction then written over the word selected), and
+/// after `copy` what `Ctrl+C` put on the clipboard. The note's own text goes back at the end; the
+/// last step is a Ctrl+click on a wikilink, printing the tab it opened.
 pub(super) fn bench_menu_caret(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     let app = app.clone();
@@ -1886,11 +1887,15 @@ pub(super) fn bench_menu_caret(app: &Rc<App>, rel: &str) {
         };
         let select = |from: i32, to: i32| buffer.select_range(&at(to), &at(from));
         let column = || tab.view.downcast_ref::<multicaret::View>().cloned();
-        let steps: [MenuStep; 5] = [
+        let steps: [MenuStep; 7] = [
             // On the selection: it stays, and so does the caret.
             ("inside", 2, Box::new(|| select(0, 5))),
             // Off it, on a misspelt word: the caret goes there and the menu is that word's.
             ("word", 37, Box::new(|| select(0, 5))),
+            // On a selection of more than that word: no suggestions, they are one word's.
+            ("words", 36, Box::new(|| select(33, 39))),
+            // On the misspelt word selected: its suggestions, one going over the selection.
+            ("selected", 37, Box::new(|| select(35, 39))),
             // With nothing selected, on another line: Copy is that line's.
             ("copy", 42, Box::new(|| buffer.place_cursor(&at(0)))),
             // A column of carets, clicked off every selection: one caret, at the click.
@@ -1931,6 +1936,12 @@ pub(super) fn bench_menu_caret(app: &Rc<App>, rel: &str) {
                  spelling={spelling:?} clipboard={clip:?} front={:?}",
                 app.active().map(|t| t.rel())
             );
+            if step == "selected" {
+                let word = "word".to_variant();
+                let done = tab.view.activate_action("spell.correct", Some(&word));
+                let line = tab.text().lines().nth(1).map(str::to_string);
+                println!("bench menu corrected {:?} {line:?}", done.is_ok());
+            }
         }
         tab.set_text(&own);
         bench_quit(&app);

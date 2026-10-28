@@ -1650,6 +1650,7 @@ The `Ctrl` chords for application and document commands use GTK's `<Primary>` mo
 - `Ctrl+X` and `Ctrl+C` with nothing selected take the caret's whole line with its newline, so the paste that follows opens a line instead of splicing into one.
   They are the widget's own chords refined, not bound here, so they stay on the never-bind list; the context menu's Cut and Copy do the same with nothing selected.
 - **A secondary click puts the caret where it lands** before the menu opens, as VS Code does, in every text view with a caret, a comparison's sides included: the menu's Cut and Copy with nothing selected take the clicked line, Paste goes there, and the spelling suggestions are the clicked word's.
+  They show, with Add to Dictionary and Ignore, only while nothing is selected or that word alone is, a suggestion then going over the selection (user decision 2026-10-28): a selection of more, or a column of carets, gets none, the menu being about the selection.
   One landing on a selection, any of a column's, moves nothing, the menu being about the selection; one landing off every selection ends a column of carets at the click.
 - A selection dragged within a note moves, the pointer saying so, and `Ctrl` held makes it a copy; one holding folded lines carries them too, every time, where GTK's own drag carried only what shows and left the rest behind on a move: a drag never takes away text it does not carry.
   A drag from anywhere else is a copy.

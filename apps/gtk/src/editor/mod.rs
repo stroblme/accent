@@ -33,6 +33,7 @@ mod open;
 mod page;
 mod paste;
 mod search;
+mod spelling;
 mod text;
 
 pub use banner::Alert;
@@ -71,6 +72,8 @@ pub(crate) use search::{
     match_style, mute, next_match, occurrence_tag, paint_occurrences, selected_occurrence,
     selected_ranges,
 };
+pub(crate) use spelling::set_spelling;
+pub use spelling::spell_adapter;
 pub(crate) use text::{caret, line_end, line_prefix};
 
 /// How long a long note waits after the last keystroke before it is re-analysed.
@@ -95,60 +98,6 @@ type FoundHook = crate::widgets::Hook<dyn Fn(bool)>;
 /// recreate deleted files. `fs::write_note` still enforces the final etag gate.
 pub fn may_save(modified: bool, disk_changed: bool) -> bool {
     !(modified && disk_changed)
-}
-
-/// Attach a spell checker and suggestion-menu action group to `buffer`
-/// and `view`, initially disabled.
-pub fn spell_adapter(
-    buffer: &sourceview5::Buffer,
-    view: &sourceview5::View,
-) -> libspelling::TextBufferAdapter {
-    let adapter = libspelling::TextBufferAdapter::new(buffer, &libspelling::Checker::default());
-    view.insert_action_group("spelling", Some(&adapter));
-    view.set_extra_menu(Some(&adapter.menu_model()));
-    // The suggestions are the caret's word's, and a secondary click puts the caret on the word
-    // clicked ([`caret_to_click`]): asked again at once rather than after the adapter's own pause
-    // on a caret move, so the menu opening on this press already holds them. The caret is put
-    // here too, whichever of the two presses runs first.
-    let click = gtk::GestureClick::builder()
-        .button(gdk::BUTTON_SECONDARY)
-        .propagation_phase(gtk::PropagationPhase::Capture)
-        .build();
-    let weak = adapter.downgrade();
-    click.connect_pressed(move |click, presses, x, y| {
-        if let (Some(view), Some(adapter)) = (
-            click.widget().and_downcast::<sourceview5::View>(),
-            weak.upgrade(),
-        ) && presses == 1
-        {
-            lines::place_at_click(&view, x, y);
-            adapter.update_corrections();
-        }
-    });
-    view.add_controller(click);
-    adapter
-}
-
-/// Turn spell checking on or off in a view of prose, its adapter kept in `slot` and made the
-/// first time it is turned on.
-pub(crate) fn set_spelling(
-    slot: &RefCell<Option<libspelling::TextBufferAdapter>>,
-    buffer: &sourceview5::Buffer,
-    view: &sourceview5::View,
-    on: bool,
-) {
-    // Cloned out first: the adapter is created inside the `else`, which borrows mutably.
-    let existing = slot.borrow().clone();
-    let adapter = match existing {
-        Some(adapter) => adapter,
-        None if !on => return,
-        None => {
-            let adapter = spell_adapter(buffer, view);
-            *slot.borrow_mut() = Some(adapter.clone());
-            adapter
-        }
-    };
-    adapter.set_enabled(on);
 }
 
 /// One in-flight save per tab, retaining its starting state and reply channel.
@@ -1022,13 +971,11 @@ impl Tab {
         }
     }
 
-    /// The spelling suggestions' menu, for `ACCENT_BENCH_KEYS=menu:`.
+    /// The text menu's own items, the spelling suggestions among them, for
+    /// `ACCENT_BENCH_KEYS=menu:`.
     #[cfg(feature = "bench")]
     pub fn spell_menu(&self) -> Option<gtk::gio::MenuModel> {
-        self.spell
-            .borrow()
-            .as_ref()
-            .map(|adapter| adapter.menu_model())
+        self.view.extra_menu()
     }
 
     pub fn set_spellcheck(&self, on: bool) {
