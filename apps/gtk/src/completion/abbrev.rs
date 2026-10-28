@@ -84,6 +84,13 @@ pub(super) fn typed(before: &str) -> Option<&str> {
     (!typed.contains(char::is_whitespace)).then_some(typed)
 }
 
+/// What of an abbreviation's name follows the caret in `after`: up to a blank or a backslash.
+pub(super) fn rest(after: &str) -> &str {
+    &after[..after
+        .find(|c: char| c.is_whitespace() || c == '\\')
+        .unwrap_or(after.len())]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,5 +121,9 @@ mod tests {
         assert_eq!(typed("\\al x"), None);
         // `\\` is the abbreviation for a backslash.
         assert_eq!(typed("\"\\\\"), Some("\\\\"));
+        // The name goes on past the caret to a blank or the next backslash.
+        assert_eq!(rest("pha x"), "pha");
+        assert_eq!(rest("o\\to"), "o");
+        assert_eq!(rest(""), "");
     }
 }

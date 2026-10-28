@@ -223,7 +223,7 @@ pub(super) fn completions_of(
             .filter_map(|raw| completion_of(raw, text, pos, enc, options))
             .collect(),
         incomplete,
-        pages: None,
+        ..Completions::default()
     }
 }
 

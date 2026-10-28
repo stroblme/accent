@@ -3,20 +3,21 @@
 use std::collections::HashSet;
 
 use accent_api::language::byte_of;
-use accent_api::{Completion, Pos, Range, TextEdit};
+use accent_api::{Completion, Completions, Pos, Range, TextEdit};
 use gtk::prelude::*;
 
 use crate::lang;
 
-/// Track the request position and characters typed there since the answer was requested.
+/// Track where the fragment being completed ended when the answer was asked for, and how much
+/// longer the typing since has made it (shorter, after a delete).
 ///
-/// Positions before the caret stay fixed; later ones shift. At the caret, range starts
-/// precede typed text and ends include it, so accepting replaces the growing prefix rather
-/// than duplicating it and still consumes trailing wikilink brackets.
+/// Positions before its end stay fixed; later ones shift. At its end, range starts precede
+/// typed text and ends include it, so accepting replaces the growing fragment rather than
+/// duplicating it and still consumes trailing wikilink brackets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Moved {
     pub at: Pos,
-    pub typed: u32,
+    pub typed: i32,
 }
 
 impl Moved {
@@ -45,19 +46,49 @@ impl Moved {
         match pos.line == self.at.line && after {
             true => Pos {
                 line: pos.line,
-                character: pos.character + self.typed,
+                character: pos.character.saturating_add_signed(self.typed),
             },
             false => pos,
         }
     }
 }
 
-/// Map the accepted range through subsequent typing, extending to at
-/// least the caret even when the server supplied a shorter end.
-pub(super) fn replaced(range: Range, moved: Moved, caret: Pos) -> Range {
+/// The fragment `answer` completes, asked for at `at`: the one it names, or from where its rows
+/// start to `at`. It holds `at` and stays on its line; one named elsewhere is `None`.
+pub(super) fn fragment(answer: &Completions, at: Pos) -> Option<Range> {
+    let starts = answer.items.iter().map(|i| i.replace.start);
+    let named = answer.fragment.unwrap_or(Range {
+        start: starts.filter(|s| s.line == at.line).min().unwrap_or(at),
+        end: at,
+    });
+    (named.start.line == at.line && named.end.line == at.line).then(|| Range {
+        start: named.start.min(at),
+        end: named.end.max(at),
+    })
+}
+
+/// Cut `answer`'s rows and fragment back to `at`, where it was asked on, wherever they end past
+/// it on its line: an answer to text typed past since read some of that typing there.
+pub(super) fn cut_at(answer: &mut Completions, at: Pos) {
+    let cut = |end: &mut Pos| {
+        if end.line == at.line && *end > at {
+            *end = at;
+        }
+    };
+    for item in &mut answer.items {
+        cut(&mut item.replace.end);
+    }
+    if let Some(fragment) = &mut answer.fragment {
+        cut(&mut fragment.end);
+    }
+}
+
+/// Map the accepted range through subsequent typing, extending to at least `to`, where the
+/// fragment ends now, even when the server supplied a shorter end.
+pub(super) fn replaced(range: Range, moved: Moved, to: Pos) -> Range {
     let (start, end) = (moved.start(range.start), moved.end(range.end));
-    match caret.line == end.line && caret > end {
-        true => Range { start, end: caret },
+    match to.line == end.line && to > end {
+        true => Range { start, end: to },
         false => Range { start, end },
     }
 }
@@ -231,6 +262,12 @@ mod tests {
             typed: 0,
         };
         assert_eq!(replaced(range(2, 4), still, at(5)), range(2, 5));
+        // `[[Deep|]]` with a letter of it deleted since, wherever the caret went: one shorter.
+        let shorter = Moved {
+            at: at(6),
+            typed: -1,
+        };
+        assert_eq!(replaced(range(0, 8), shorter, at(5)), range(0, 7));
         // Another line moves with nothing typed on this one.
         let other = Range {
             start: Pos {
@@ -250,6 +287,56 @@ mod tests {
             .start(other.start),
             other.start
         );
+    }
+
+    /// A fragment is the one the answer names, or the rows' start to where it was asked; either
+    /// way it holds that place, on its line.
+    #[test]
+    fn the_fragment_is_the_answers_or_from_the_rows_start_to_the_ask() {
+        let row = |start| Completion {
+            label: String::new(),
+            kind: accent_api::Kind::Text,
+            detail: None,
+            doc: None,
+            filter: None,
+            insert: String::new(),
+            is_snippet: false,
+            replace: range(start, 7),
+            extra_edits: Vec::new(),
+            resolve: None,
+            preselect: false,
+            commit: Vec::new(),
+        };
+        let answer = |fragment| Completions {
+            items: vec![row(4), row(2)],
+            fragment,
+            ..Completions::default()
+        };
+        assert_eq!(fragment(&answer(None), at(7)), Some(range(2, 7)));
+        // `[[De|ep]]` asked mid-link: its text, past the `[[`.
+        assert_eq!(
+            fragment(&answer(Some(range(2, 9))), at(4)),
+            Some(range(2, 9))
+        );
+        assert_eq!(
+            fragment(&answer(Some(range(2, 3))), at(5)),
+            Some(range(2, 5)),
+            "it holds the caret"
+        );
+        let elsewhere = Range {
+            start: Pos {
+                line: 0,
+                character: 0,
+            },
+            end: at(5),
+        };
+        assert_eq!(fragment(&answer(Some(elsewhere)), at(5)), None);
+        assert_eq!(fragment(&Completions::default(), at(5)), Some(range(5, 5)));
+        // Answered for text typed past: nothing is taken to end past where it was asked.
+        let mut past = answer(Some(range(2, 9)));
+        cut_at(&mut past, at(5));
+        assert_eq!(past.fragment, Some(range(2, 5)));
+        assert!(past.items.iter().all(|i| i.replace.end == at(5)));
     }
 
     fn edit(line: u32, text: &str) -> TextEdit {

@@ -84,6 +84,37 @@ pub(crate) fn context(head: &str) -> Option<(Trigger, usize, &str)> {
     (!prefix.contains(char::is_whitespace)).then_some((Trigger::Tag, start, prefix))
 }
 
+/// Where the fragment `context` finds before `caret` ends on `line`, past the caret over what is
+/// still of it: a link's target up to the `]]` closing it, a destination up to its `)`, a tag's
+/// own characters (`tag`). Read whole it has to start where it did, or it ends at the caret.
+fn fragment_end(
+    line: &str,
+    caret: usize,
+    context: fn(&str) -> Option<(Trigger, usize, &str)>,
+    tag: fn(char) -> bool,
+) -> usize {
+    let Some((trigger, start, _)) = context(&line[..caret]) else {
+        return caret;
+    };
+    let after = &line[caret..];
+    let rest = match trigger {
+        // A link no `]]` closes ends at the caret: what follows it is prose.
+        Trigger::Wiki | Trigger::Embed => after
+            .find(']')
+            .filter(|&i| after[i..].starts_with("]]"))
+            .unwrap_or(0),
+        Trigger::Anchor | Trigger::Path => after
+            .find(|c: char| c == ')' || c.is_whitespace())
+            .unwrap_or(after.len()),
+        Trigger::Tag => after.find(|c: char| !tag(c)).unwrap_or(after.len()),
+    };
+    let end = caret + rest;
+    match context(&line[..end]) {
+        Some((_, at, _)) if at == start => end,
+        _ => caret,
+    }
+}
+
 /// Where the tag being typed at `caret` starts, when that is an item of the front matter's `tags:`
 /// list, read as `markdown::frontmatter` reads it, and whether the list is the flow kind
 /// (`tags: [a, b`), whose items a `,` ends. An item of the block kind (`- a` under a bare `tags:`)
@@ -547,15 +578,26 @@ impl Notes {
         let Some((start, flow)) = front_tag(text, caret) else {
             return Ok(Completions::default());
         };
+        // The item goes on past the caret to the `,` or `]` ending it in a flow list, to the end of
+        // the line in a block one.
+        let after = &text[caret..text[caret..].find('\n').map_or(text.len(), |i| caret + i)];
+        let rest = match flow {
+            true => &after[..after.find([',', ']']).unwrap_or(after.len())],
+            false => after,
+        }
+        .trim_end();
         let tags = self.tags_for(&locked(&self.index), rel, text)?;
-        let (hits, more) = tag_candidates(&tags, &text[start..caret]);
+        let (hits, more) = tag_candidates(&tags, &text[start..caret + rest.len()]);
         let line_start = text[..caret].rfind('\n').map_or(0, |i| i + 1);
         let replace = Range {
             start: Pos {
                 line: pos.line,
                 character: text[line_start..start].chars().count() as u32,
             },
-            end: pos,
+            end: Pos {
+                line: pos.line,
+                character: pos.character + rest.chars().count() as u32,
+            },
         };
         Ok(Completions {
             items: hits
@@ -570,6 +612,7 @@ impl Notes {
                 .collect(),
             incomplete: more,
             pages: None,
+            fragment: Some(replace),
         })
     }
 
@@ -712,7 +755,10 @@ impl Notes {
             return self.org_completion(rel, &text, caret, pos);
         }
         let line_start = text[..caret].rfind('\n').map_or(0, |i| i + 1);
-        let head = &text[line_start..caret];
+        let line_end = text[caret..].find('\n').map_or(text.len(), |i| caret + i);
+        // The rows complete the whole fragment, what of it follows the caret too.
+        let line = &text[line_start..line_end];
+        let head = &line[..fragment_end(line, caret - line_start, context, markdown::is_tag_char)];
         let Some((trigger, start, prefix)) = context(head) else {
             return self.front_tags(rel, &text, caret, pos);
         };
@@ -722,21 +768,32 @@ impl Notes {
         };
         let mut replace = Range {
             start: at(start),
-            end: pos,
+            end: at(head.len()),
         };
+        // The `[[` or the `#` it opens with is not its text: a caret before that has left it.
+        let lead = match trigger {
+            Trigger::Wiki | Trigger::Embed => 2,
+            Trigger::Tag => 1,
+            Trigger::Anchor | Trigger::Path => 0,
+        };
+        let fragment = Some(Range {
+            start: at(start + lead),
+            end: replace.end,
+        });
 
         match trigger {
             Trigger::Wiki | Trigger::Embed => {
-                // `typing::pair` closed the `[` as it was typed, so the caret usually sits in
+                // `typing::pair` closed the `[` as it was typed, so the fragment usually ends in
                 // front of the `]]` it left. The inserted link brings its own, so they go too.
-                let eaten = text[caret..]
+                let eaten = line[head.len()..]
                     .chars()
                     .take(2)
                     .take_while(|c| *c == ']')
                     .count();
                 replace.end.character += eaten as u32;
                 if let Some((note, anchor)) = prefix.split_once('#') {
-                    return self.heading_links(rel, note, anchor.starts_with('^'), replace);
+                    let answer = self.heading_links(rel, note, anchor.starts_with('^'), replace)?;
+                    return Ok(Completions { fragment, ..answer });
                 }
 
                 let index = locked(&self.index);
@@ -815,6 +872,7 @@ impl Notes {
                     items,
                     incomplete: more,
                     pages: None,
+                    fragment,
                 })
             }
             Trigger::Anchor => {
@@ -841,6 +899,7 @@ impl Notes {
                 if prefix.starts_with('^') {
                     return Ok(Completions {
                         items: block_links(text, &format!("{dest}#"), "", replace),
+                        fragment,
                         ..Completions::default()
                     });
                 }
@@ -867,6 +926,7 @@ impl Notes {
                     items,
                     incomplete: false,
                     pages: None,
+                    fragment,
                 })
             }
             Trigger::Path => {
@@ -905,6 +965,7 @@ impl Notes {
                     items,
                     incomplete: more,
                     pages: None,
+                    fragment,
                 })
             }
             Trigger::Tag => {
@@ -923,6 +984,7 @@ impl Notes {
                         .collect(),
                     incomplete: more,
                     pages: None,
+                    fragment,
                 })
             }
         }
@@ -933,17 +995,30 @@ impl Notes {
     /// heading's tags a tag org can spell, with the colon closing it.
     fn org_completion(&self, rel: &str, text: &str, caret: usize, pos: Pos) -> Result<Completions> {
         let line_start = text[..caret].rfind('\n').map_or(0, |i| i + 1);
-        let head = &text[line_start..caret];
+        let line_end = text[caret..].find('\n').map_or(text.len(), |i| caret + i);
+        let line = &text[line_start..line_end];
+        let head = &line[..fragment_end(line, caret - line_start, org_context, org::is_tag_char)];
         let Some((trigger, start, prefix)) = org_context(head) else {
             return Ok(Completions::default());
         };
-        let mut replace = Range {
-            start: Pos {
-                line: pos.line,
-                character: head[..start].chars().count() as u32,
-            },
-            end: pos,
+        let at = |byte: usize| Pos {
+            line: pos.line,
+            character: head[..byte].chars().count() as u32,
         };
+        let mut replace = Range {
+            start: at(start),
+            end: at(head.len()),
+        };
+        // A link's text is past its `[[`; a tag's starts past its colon already.
+        let lead = match trigger {
+            Trigger::Wiki => 2,
+            _ => 0,
+        };
+        let fragment = Some(Range {
+            start: at(start + lead),
+            end: replace.end,
+        });
+        let after = &line[head.len()..];
         let index = locked(&self.index);
         if trigger == Trigger::Tag {
             let tags: Vec<(String, i64)> = self
@@ -952,7 +1027,7 @@ impl Notes {
                 .filter(|(name, _)| name.chars().all(org::is_tag_char))
                 .collect();
             let (hits, more) = tag_candidates(&tags, prefix);
-            let close = match text[caret..].starts_with(':') {
+            let close = match after.starts_with(':') {
                 true => "",
                 false => ":",
             };
@@ -969,18 +1044,15 @@ impl Notes {
                     .collect(),
                 incomplete: more,
                 pages: None,
+                fragment,
             });
         }
         // `[[*Heading]]` and a search name a place in a file, not a file to list.
         if prefix.starts_with('*') || prefix.contains("::") {
             return Ok(Completions::default());
         }
-        // The `]]` `typing::pair` left after the caret: the link brings its own.
-        let eaten = text[caret..]
-            .chars()
-            .take(2)
-            .take_while(|c| *c == ']')
-            .count();
+        // The `]]` `typing::pair` left after the link's text: the link brings its own.
+        let eaten = after.chars().take(2).take_while(|c| *c == ']').count();
         replace.end.character += eaten as u32;
         let files = self.corpus(&index, false)?;
         let query = prefix.strip_prefix("file:").unwrap_or(prefix);
@@ -1007,6 +1079,7 @@ impl Notes {
             items,
             incomplete: more,
             pages: None,
+            fragment,
         })
     }
 
@@ -1061,8 +1134,7 @@ impl Notes {
             .collect();
         Ok(Completions {
             items,
-            incomplete: false,
-            pages: None,
+            ..Completions::default()
         })
     }
 
@@ -1507,6 +1579,72 @@ mod tests {
         for head in ["# Heading", "##", "  #", "\t### "] {
             assert_eq!(context(head), None, "{head:?} is a heading marker");
         }
+    }
+
+    /// A fragment asked for in its middle runs on to its end: a link's target to its `]]`, a
+    /// destination to its `)`, a tag over its own characters. What follows a link nothing closes
+    /// is prose, and a tail that would open another fragment is not this one's.
+    #[test]
+    fn a_fragment_runs_past_the_caret_to_its_end() {
+        type Context = fn(&str) -> Option<(Trigger, usize, &str)>;
+        let whole = |line: &str, context: Context, tag: fn(char) -> bool| {
+            let caret = line.find('|').unwrap();
+            let line = line.replace('|', "");
+            line[..fragment_end(&line, caret, context, tag)].to_string()
+        };
+        let md = |line| whole(line, context, markdown::is_tag_char);
+        assert_eq!(md("see [[De|ep]] x"), "see [[Deep");
+        assert_eq!(md("[[No|te#Head]]"), "[[Note#Head");
+        assert_eq!(md("see [[De| and more"), "see [[De", "no `]]` closes it");
+        assert_eq!(md("[[De|x [[y]]"), "[[De", "the tail opens another link");
+        assert_eq!(md("[t](Oth|er.md#sec) x"), "[t](Other.md#sec");
+        assert_eq!(md("a #ta|g, b"), "a #tag");
+        assert_eq!(md("plain te|xt"), "plain te");
+        let org = |line| whole(line, org_context, org::is_tag_char);
+        assert_eq!(org("* Plan :wo|rk:"), "* Plan :work");
+        assert_eq!(org("[[file:a|b.org]]"), "[[file:ab.org");
+    }
+
+    /// Asked inside a fragment, the rows are what all of it completes and replace all of it, the
+    /// `]]` after it too; the fragment the answer names is its text, past its `[[` or its `#`.
+    #[test]
+    fn a_completion_asked_inside_a_fragment_takes_all_of_it() {
+        let vault = tempfile::tempdir().unwrap();
+        std::fs::write(vault.path().join("Deep.md"), "# Deep\n#deep-work\n").unwrap();
+        std::fs::write(vault.path().join("a.md"), "[[Deep]]\n#deep-wo\n").unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let db = cache.path().join("i.db");
+        Index::open(&db)
+            .unwrap()
+            .reconcile(vault.path(), |_| {})
+            .unwrap();
+        let notes = Notes::open_at(
+            vault.path().to_path_buf(),
+            &db,
+            std::sync::mpsc::channel().0,
+            Arc::new(Ignored::new(vault.path().to_path_buf())),
+        )
+        .unwrap();
+        let ask = |line, character| notes.completion("a.md", Pos { line, character }).unwrap();
+        let span = |start, end| Range {
+            start: Pos {
+                line: 0,
+                character: start,
+            },
+            end: Pos {
+                line: 0,
+                character: end,
+            },
+        };
+        let link = ask(0, 4);
+        let deep = link.items.iter().find(|i| i.insert == "[[Deep]]").unwrap();
+        assert_eq!(deep.replace, span(0, 8));
+        assert_eq!(link.fragment, Some(span(2, 6)));
+        let tag = ask(1, 3);
+        let line = |r: Range| (r.start.character, r.end.character);
+        assert!(tag.items.iter().any(|i| i.insert == "#deep-work"));
+        assert!(tag.items.iter().all(|i| line(i.replace) == (0, 8)));
+        assert_eq!(tag.fragment.map(line), Some((1, 8)));
     }
 
     #[test]

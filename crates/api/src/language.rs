@@ -169,6 +169,11 @@ pub struct Completions {
     /// them from its local copy ([`Vault::completion`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pages: Option<PdfPages>,
+    /// The text the rows complete, inside its delimiters (`De` of `[[De]]`, `ta` of `#ta`), past
+    /// the caret too: the popup stays while the caret is in it, and matches each row by all of it
+    /// from the row's start. `None` is from where the rows start to the caret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fragment: Option<Range>,
 }
 
 /// Deferred `[[paper.pdf#` completion for the side holding a readable PDF:
@@ -1503,7 +1508,10 @@ fn list_pages(r: &Remote, mut answer: Completions) -> Result<Completions> {
     match answer.pages.take() {
         Some(pages) => {
             let outline = notes::pdf_outline(&r.fetch(&pages.rel)?)?;
-            Ok(pages.answer(outline))
+            Ok(Completions {
+                fragment: answer.fragment,
+                ..pages.answer(outline)
+            })
         }
         None => Ok(answer),
     }

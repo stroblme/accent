@@ -228,7 +228,7 @@ impl Words {
                 })
                 .collect(),
             incomplete,
-            pages: None,
+            ..Completions::default()
         }
     }
 }

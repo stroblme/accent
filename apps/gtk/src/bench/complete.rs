@@ -8,6 +8,7 @@ use crate::lang::Editor as _;
 ///
 /// `note:` creates completion fixtures, narrows `[[` and `#c` suggestions, accepts
 /// with Down/Tab and undoes. Bracket completion must consume the existing `]]` exactly once.
+/// The caret then moves inside a `[[` link, which keeps the popup until it is past the `[[`.
 /// `code:` types `typed` (default `s.g`) into a blank line, creating a C fixture if
 /// absent. Print rows, selected documentation, accepted imports and undo results, then type it
 /// again and commit the first row with `;`.
@@ -78,6 +79,22 @@ async fn bench_complete_note(app: &Rc<App>, rel: &str) {
     bench_key(&tab, &session, "complete_link_tab", gdk::Key::Tab).await;
     tab.buffer.undo();
     println!("bench complete_link_undo {:?}", bench_line(&tab, 0));
+
+    // The caret moved inside the link, as a click or an arrow does, keeps the popup, narrowed by
+    // all of the link's text, a letter deleted there too; Tab replaces all of it. A caret past
+    // the `[[` has left it.
+    tab.set_text("");
+    bench_type(&tab, &session, "complete_inside_open", "[[complete-t").await;
+    bench_caret(&tab, &session, "complete_inside_moved", 4).await;
+    let mut at = tab.buffer.iter_at_offset(4);
+    tab.buffer.backspace(&mut at, true, true);
+    bench_caret(&tab, &session, "complete_inside_deleted", 3).await;
+    bench_key(&tab, &session, "complete_inside_down", gdk::Key::Down).await;
+    bench_key(&tab, &session, "complete_inside_tab", gdk::Key::Tab).await;
+    tab.set_text("");
+    bench_keys(&tab, "[[complete-t").await;
+    bench_settle(&session).await;
+    bench_caret(&tab, &session, "complete_inside_left", 1).await;
 
     tab.set_text("");
     bench_type(&tab, &session, "complete_tag_open", "#").await;
@@ -350,6 +367,26 @@ async fn bench_key(tab: &Rc<Tab>, session: &Rc<Session>, step: &str, key: gdk::K
         "bench {step} {answer:?} {:?} selected={:?} shown={}",
         bench_line(tab, line),
         bench_rows(session).1,
+        session.is_shown()
+    );
+}
+
+/// Put the caret at `offset` in the first line, as a click there does, and print the line with
+/// the caret as `|` and the rows then up.
+async fn bench_caret(tab: &Rc<Tab>, session: &Rc<Session>, step: &str, offset: usize) {
+    tab.buffer
+        .place_cursor(&tab.buffer.iter_at_offset(offset as i32));
+    bench_settle(session).await;
+    let line = bench_line(tab, 0);
+    let at = line
+        .char_indices()
+        .nth(offset)
+        .map_or(line.len(), |(i, _)| i);
+    println!(
+        "bench {step} \"{}|{}\" {:?} shown={}",
+        &line[..at],
+        &line[at..],
+        bench_rows(session).0,
         session.is_shown()
     );
 }

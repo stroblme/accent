@@ -6,7 +6,8 @@ use std::ops::Range;
 /// Characters a tag may follow (Obsidian: start of line, whitespace, or opening punctuation).
 const TAG_PREFIX: &str = "([{<,;:'\"*_~|";
 
-fn is_tag_char(c: char) -> bool {
+/// A character a `#tag` is written with: a letter, a digit, `_`, `-` or `/`.
+pub fn is_tag_char(c: char) -> bool {
     c.is_alphanumeric() || matches!(c, '_' | '-' | '/')
 }
 

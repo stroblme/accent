@@ -1,8 +1,9 @@
 //! Text completion through one [`Source`] interface.
 //!
-//! A [`Session`] holds an answer and its popup. [`Anchor`] marks track the request position.
-//! [`rank`] narrows complete answers locally; incomplete answers request updates per keystroke
-//! while the current list narrows. [`apply::Moved`] tracks each item's range through edits.
+//! A [`Session`] holds an answer and its popup. [`Anchor`] marks track the fragment it completes,
+//! which the caret may move about in. [`rank`] narrows complete answers locally by all of it;
+//! incomplete answers request updates per edit while the current list narrows. [`apply::Moved`]
+//! tracks each item's range through edits.
 //!
 //! The view retains focus. `editor::keys` offers arrows, Escape, and Return or Tab with a
 //! selected row to [`press`] first. Other keys continue normal typing or accept a selected
@@ -27,7 +28,7 @@ use gtk::prelude::*;
 use gtk::{gdk, glib};
 use sourceview5::prelude::*;
 
-use crate::editor::{Tab, caret, line_prefix};
+use crate::editor::{Tab, caret, line_end, line_prefix};
 use crate::lang::Editor;
 use crate::{hover, lang, multicaret};
 
@@ -69,46 +70,74 @@ pub(crate) trait Source {
     }
 }
 
-/// Left/right-gravity marks around the request caret. Their distance
-/// tracks later typing for range remapping; remove them with the answer.
+/// The fragment an answer completes ([`Completions::fragment`]), followed through the edits
+/// since by a left-gravity mark where it starts and a right-gravity one where it ends, so typing
+/// at either end joins it. Asked for, it is the caret alone until the answer lands ([`fit`]).
+///
+/// [`fit`]: Anchor::fit
 struct Anchor {
-    at: Pos,
-    left: gtk::TextMark,
-    right: gtk::TextMark,
+    /// Where it was when asked, in the coordinates of the answer's ranges.
+    asked: Range,
+    from: gtk::TextMark,
+    to: gtk::TextMark,
 }
 
 impl Anchor {
     fn new(buffer: &gtk::TextBuffer, caret: &gtk::TextIter) -> Anchor {
+        let at = lang::pos_of(caret);
         Anchor {
-            at: lang::pos_of(caret),
-            left: buffer.create_mark(None, caret, true),
-            right: buffer.create_mark(None, caret, false),
+            asked: Range { start: at, end: at },
+            from: buffer.create_mark(None, caret, true),
+            to: buffer.create_mark(None, caret, false),
         }
     }
 
-    /// Map subsequent typing, or `None` if the caret left the line, moved
-    /// before the request, or text under its marks was deleted.
-    fn moved(&self, buffer: &gtk::TextBuffer, caret: &gtk::TextIter) -> Option<apply::Moved> {
-        let (left, right) = (
-            buffer.iter_at_mark(&self.left),
-            buffer.iter_at_mark(&self.right),
-        );
-        let still = lang::pos_of(&left) == self.at
-            && right.line() == left.line()
-            && caret.line() == left.line()
-            && *caret >= left;
+    /// Take the fragment `answer` completes ([`apply::fragment`]), moved on by what was typed at
+    /// the caret while it was on its way.
+    fn fit(&mut self, buffer: &gtk::TextBuffer, answer: &Completions) {
+        let (Some(moved), Some(fragment)) =
+            (self.moved(buffer), apply::fragment(answer, self.asked.end))
+        else {
+            return;
+        };
+        buffer.move_mark(&self.from, &lang::iter_at(buffer, fragment.start));
+        buffer.move_mark(&self.to, &lang::iter_at(buffer, moved.end(fragment.end)));
+        self.asked = fragment;
+    }
+
+    /// Map the edits since, or `None` once the text before the fragment has changed or its end
+    /// has left its line.
+    fn moved(&self, buffer: &gtk::TextBuffer) -> Option<apply::Moved> {
+        let (from, to) = (self.from(buffer), self.to(buffer));
+        let asked = self.asked.end.character as i32 - self.asked.start.character as i32;
+        let still = lang::pos_of(&from) == self.asked.start && to.line() == from.line();
         still.then(|| apply::Moved {
-            at: self.at,
-            typed: (right.line_offset() - left.line_offset()) as u32,
+            at: self.asked.end,
+            typed: to.line_offset() - from.line_offset() - asked,
         })
+    }
+
+    /// Whether `caret` is in the fragment, at either end of it included.
+    fn holds(&self, buffer: &gtk::TextBuffer, caret: &gtk::TextIter) -> bool {
+        let from = self.from(buffer);
+        caret.line() == from.line() && from <= *caret && *caret <= self.to(buffer)
+    }
+
+    fn from(&self, buffer: &gtk::TextBuffer) -> gtk::TextIter {
+        buffer.iter_at_mark(&self.from)
+    }
+
+    /// Where the fragment ends now.
+    fn to(&self, buffer: &gtk::TextBuffer) -> gtk::TextIter {
+        buffer.iter_at_mark(&self.to)
     }
 }
 
 impl Drop for Anchor {
     fn drop(&mut self) {
-        if let Some(buffer) = self.left.buffer() {
-            buffer.delete_mark(&self.left);
-            buffer.delete_mark(&self.right);
+        if let Some(buffer) = self.from.buffer() {
+            buffer.delete_mark(&self.from);
+            buffer.delete_mark(&self.to);
         }
     }
 }
@@ -135,10 +164,12 @@ pub(crate) struct Session {
     shown: RefCell<Option<Shown>>,
     /// Request generation, rejecting stale answers and their row resolves.
     generation: Cell<u64>,
-    /// In-flight request and location. Replacement aborts it, cancelling
-    /// the server request.
+    /// In-flight request. Replacement aborts it, cancelling the server request.
     fetch: RefCell<Option<glib::JoinHandle<()>>>,
-    asked_at: Cell<Option<Pos>>,
+    /// The buffer's edits so far, and how many there had been at the last ask: a move alone
+    /// asks nothing again.
+    edits: Cell<u64>,
+    asked: Cell<Option<u64>>,
     /// The selected row's documentation being asked for.
     detail: RefCell<Option<glib::JoinHandle<()>>>,
     /// The session is editing the buffer itself, which opens nothing.
@@ -180,7 +211,8 @@ impl Session {
                 shown: RefCell::default(),
                 generation: Cell::new(0),
                 fetch: RefCell::default(),
-                asked_at: Cell::new(None),
+                edits: Cell::new(0),
+                asked: Cell::new(None),
                 detail: RefCell::default(),
                 muted: Cell::new(false),
                 accepting: RefCell::default(),
@@ -195,6 +227,11 @@ impl Session {
 
     fn watch(self: &Rc<Self>) {
         let view = &self.view;
+        view.buffer().connect_changed(glib::clone!(
+            #[weak(rename_to = me)]
+            self,
+            move |_| me.edits.set(me.edits.get() + 1)
+        ));
         view.buffer().connect_cursor_position_notify(glib::clone!(
             #[weak(rename_to = me)]
             self,
@@ -284,8 +321,8 @@ impl Session {
         let anchor = Anchor::new(&buffer, &caret(&buffer));
         let generation = self.generation.get().wrapping_add(1);
         self.generation.set(generation);
-        self.asked_at.set(Some(anchor.at));
-        let fetch = self.source.fetch(anchor.at, trigger);
+        self.asked.set(Some(self.edits.get()));
+        let fetch = self.source.fetch(anchor.asked.end, trigger);
         let me = Rc::downgrade(self);
         let handle = glib::spawn_future_local(async move {
             let answer = fetch.await;
@@ -298,10 +335,19 @@ impl Session {
         }
     }
 
-    fn land(self: &Rc<Self>, generation: u64, anchor: Anchor, answer: Completions) {
+    fn land(self: &Rc<Self>, generation: u64, mut anchor: Anchor, mut answer: Completions) {
         if generation != self.generation.get() {
             return;
         }
+        let buffer = self.view.buffer();
+        // Typed past while it was on its way: the provider read text holding some of that typing,
+        // how much is not known, so what it says lies past the ask is cut back to it, and asked
+        // again below.
+        let typed_past = anchor.moved(&buffer).is_some_and(|moved| moved.typed != 0);
+        if typed_past {
+            apply::cut_at(&mut answer, anchor.asked.end);
+        }
+        anchor.fit(&buffer, &answer);
         let incomplete = answer.incomplete;
         // Done, so let go of it rather than abort it: this is its own last step.
         drop(self.fetch.take());
@@ -322,10 +368,10 @@ impl Session {
             rows: Vec::new(),
         });
         self.refresh(selected);
-        // Typed past while it was on its way: a capped answer narrowed to the text now misses
-        // what the provider ranks first for it, so ask again, the narrowed rows up meanwhile.
-        let here = lang::pos_of(&caret(&self.view.buffer()));
-        if incomplete && self.shown.borrow().is_some() && self.asked_at.get() != Some(here) {
+        // A capped answer narrowed to the text now misses what the provider ranks first for it,
+        // and one cut back replaces less than it should: ask again, the narrowed rows up meanwhile.
+        let again = incomplete || typed_past;
+        if again && self.shown.borrow().is_some() && self.typed_since_asked() {
             self.ask(None);
         }
     }
@@ -353,17 +399,21 @@ impl Session {
     }
 
     fn moved(self: &Rc<Self>) {
-        let here = lang::pos_of(&caret(&self.view.buffer()));
         let short = self.shown.borrow().as_ref().is_some_and(|s| s.incomplete);
-        if short && self.asked_at.get() != Some(here) {
+        if short && self.typed_since_asked() {
             self.ask(None);
         }
         let selected = self.selected_label();
         self.refresh(selected);
     }
 
-    /// Filter the answer by subsequent typing, preserving `selected`, or
-    /// end completion when the caret leaves its prefix.
+    /// Whether the text has changed since the last ask.
+    fn typed_since_asked(&self) -> bool {
+        self.asked.get() != Some(self.edits.get())
+    }
+
+    /// Filter the answer by its whole fragment as it now reads, preserving `selected`, or end
+    /// completion once the caret has left the fragment.
     fn refresh(&self, selected: Option<String>) {
         let buffer = self.view.buffer();
         let caret = caret(&buffer);
@@ -371,14 +421,16 @@ impl Session {
         let Some(shown) = guard.as_mut() else {
             return;
         };
-        let Some(moved) = shown.anchor.moved(&buffer, &caret) else {
+        let moved = shown.anchor.moved(&buffer);
+        let Some(moved) = moved.filter(|_| shown.anchor.holds(&buffer, &caret)) else {
             drop(guard);
             return self.close();
         };
-        let here = lang::pos_of(&caret);
-        let line: Vec<char> = line_prefix(&buffer, &caret).chars().collect();
-        // What was typed since each distinct start, read once per start: an answer's items
-        // mostly share one.
+        let to = shown.anchor.to(&buffer);
+        let line: Vec<char> = line_prefix(&buffer, &to).chars().collect();
+        let to = lang::pos_of(&to);
+        // What is typed from each distinct start to the fragment's end, read once per start: an
+        // answer's items mostly share one.
         let mut typed: Vec<(Pos, String)> = Vec::new();
         let starts: Vec<Pos> = shown
             .items
@@ -387,7 +439,7 @@ impl Session {
             .collect();
         for start in &starts {
             if !typed.iter().any(|(s, _)| s == start) {
-                typed.push((*start, typed_since(&buffer, &line, *start, here)));
+                typed.push((*start, typed_since(&buffer, &line, *start, to)));
             }
         }
         let typed_at = |start: &Pos| {
@@ -492,7 +544,7 @@ impl Session {
             let shown = self.shown.borrow();
             let buffer = self.view.buffer();
             shown.as_ref().and_then(|s| {
-                let moved = s.anchor.moved(&buffer, &caret(&buffer))?;
+                let moved = s.anchor.moved(&buffer)?;
                 let first = s.rows.first()?;
                 Some(moved.start(s.items[*first].completion.replace.start))
             })
@@ -511,7 +563,7 @@ impl Session {
         if let Some(handle) = self.detail.take() {
             handle.abort();
         }
-        self.asked_at.set(None);
+        self.asked.set(None);
         self.shown.replace(None);
         self.preselected.set(false);
         self.put_away();
@@ -584,13 +636,13 @@ impl Session {
     /// typed since it was asked for; the session ends.
     fn take(&self, row: u32) -> Option<(Completion, Range, Vec<TextEdit>)> {
         let buffer = self.view.buffer();
-        let caret = caret(&buffer);
         let accepted = {
             let shown = self.shown.borrow();
             shown.as_ref().and_then(|shown| {
                 let item = &shown.items[*shown.rows.get(row as usize)?].completion;
-                let moved = shown.anchor.moved(&buffer, &caret)?;
-                let range = apply::replaced(item.replace, moved, lang::pos_of(&caret));
+                let moved = shown.anchor.moved(&buffer)?;
+                let to = lang::pos_of(&shown.anchor.to(&buffer));
+                let range = apply::replaced(item.replace, moved, to);
                 let extras = item.extra_edits.iter().map(|e| moved.edit(e)).collect();
                 Some((item.clone(), range, extras))
             })
@@ -768,15 +820,15 @@ impl Session {
     }
 }
 
-/// Read typing from `start` to `here` in the caret-line prefix `line`
+/// Read the text from `start` to `to`, the fragment's end, from `line`, its line up to there,
 /// when both positions share a line.
-fn typed_since(buffer: &gtk::TextBuffer, line: &[char], start: Pos, here: Pos) -> String {
-    if start.line == here.line {
+fn typed_since(buffer: &gtk::TextBuffer, line: &[char], start: Pos, to: Pos) -> String {
+    if start.line == to.line {
         let from = (start.character as usize).min(line.len());
         return line[from..].iter().collect();
     }
     let from = lang::iter_at(buffer, start);
-    let to = lang::iter_at(buffer, here);
+    let to = lang::iter_at(buffer, to);
     match from < to {
         true => buffer.text(&from, &to, true).to_string(),
         false => String::new(),
@@ -903,18 +955,38 @@ impl Source for TabSource {
 }
 
 /// Complete Lean backslash abbreviations locally ([`abbrev`]); the server
-/// has no answer for this input prefix.
+/// has no answer for this input prefix. The name runs on past the caret to its end, all of it
+/// matched and replaced, the backslash opening it being no part of the fragment.
 fn abbreviations(tab: &Tab, at: Pos) -> Option<Completions> {
     if lang::language_id(tab) != abbrev::LANGUAGE {
         return None;
     }
-    let before = line_prefix(&tab.buffer, &lang::iter_at(&tab.buffer, at));
+    let caret = lang::iter_at(&tab.buffer, at);
+    let before = line_prefix(&tab.buffer, &caret);
     let typed = abbrev::typed(&before)?;
-    let start = Pos {
+    let after = tab
+        .buffer
+        .text(&caret, &line_end(&tab.buffer, caret.line()), true);
+    let rest = abbrev::rest(&after);
+    let at_char = |character| Pos {
         line: at.line,
-        character: at.character - typed.chars().count() as u32,
+        character,
     };
-    Some(abbrev::rows(typed, Range { start, end: at }))
+    let start = at.character - typed.chars().count() as u32;
+    let end = at_char(at.character + rest.chars().count() as u32);
+    Some(Completions {
+        fragment: Some(Range {
+            start: at_char(start + 1),
+            end,
+        }),
+        ..abbrev::rows(
+            &format!("{typed}{rest}"),
+            Range {
+                start: at_char(start),
+                end,
+            },
+        )
+    })
 }
 
 /// Complete in `editor` through `source`, opening on what is typed there ([`typed`]), once there
