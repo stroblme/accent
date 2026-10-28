@@ -9,8 +9,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # The binaries report Cargo.toml's version, so the commit tagged sets it to the tag's
-  # (with Cargo.lock and a <release> in the metainfo).
+  # The binaries report Cargo.toml's version, so the commit tagged sets it to the tag's:
+  # `make release TAG=vX.Y.Z` makes that commit and the tag.
   version:
     name: tag matches Cargo.toml
     runs-on: ubuntu-latest

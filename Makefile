@@ -95,7 +95,7 @@ XVFB_ENV := DISPLAY=:$(DISPLAY_NUM) GDK_BACKEND=x11 GSK_RENDERER=cairo GTK_A11Y=
 .PHONY: all core gtk gtk-bench clean distclean install uninstall test test-pdf check fmt fmt-check \
         clippy doc run smoke drills xvfb vault validate icons flatpak cargo-sources pdfium server \
         help requirements install-requirements android android-check android-test android-tools apk apk-release \
-        pdfium-android bindings screenshots docs app dmg
+        pdfium-android bindings screenshots docs app dmg release
 
 ## all: build everything, core plus the desktop app
 all: core gtk
@@ -519,6 +519,18 @@ dmg: app
 	hdiutil create -volname Accent -srcfolder $(TARGET_DIR)/dmg -ov -format ULFO \
 		$(TARGET_DIR)/accent-$(VERSION)-macos-$(shell uname -m).dmg
 	rm -rf $(TARGET_DIR)/dmg
+
+## release: set the version to TAG=vX.Y.Z, commit it, tag it (NOTES="summary" optional) and push both, which starts the Release workflow
+release: VER = $(TAG:v%=%)
+release:
+	@echo '$(TAG)' | grep -Eqx 'v[0-9]+\.[0-9]+\.[0-9]+' || { echo 'usage: make release TAG=vX.Y.Z'; exit 1; }
+	@# ponytail: GNU sed; macOS's would need -i '' and a literal newline.
+	sed -i 's/^version = ".*"/version = "$(VER)"/' Cargo.toml
+	$(CARGO) update -w
+	sed -i 's|^\( *\)<releases>$$|&\n\1  <release version="$(VER)" date="'$$(date +%F)'"/>|' data/$(APP_ID).metainfo.xml
+	git commit -m "release: version $(VER)" Cargo.toml Cargo.lock data/$(APP_ID).metainfo.xml
+	git tag -a $(TAG) -m "accent $(VER)" $(if $(NOTES),-m "$(NOTES)")
+	git push origin HEAD $(TAG)
 
 ## install: install into ~/.local (no sudo), on macOS Accent.app into ~/Applications; override PREFIX for a system-wide install
 install: $(if $(DARWIN),app,all)
