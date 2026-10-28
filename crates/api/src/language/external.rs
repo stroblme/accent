@@ -1700,7 +1700,7 @@ mod tests {
         }
         let root = tempfile::tempdir().unwrap();
         let cache = tempfile::tempdir().unwrap();
-        let tex = "\\documentclass{article}\n\\begin{document}\n\\label{fig:abc}\n\\ref{fig:}\n\\cite{}\n\\ci\n\\bibliography{refs}\n\\input{}\n\\input{fig/}\n\\end{document}\n";
+        let tex = "\\documentclass{article}\n\\begin{document}\n\\label{fig:abc}\n\\ref{fig:}\n\\cite{}\n\\ci\n\\bibliography{refs}\n\\input{}\n\\input{fig/}\n\\cite{knuth}\n\\end{document}\n";
         std::fs::write(root.path().join("main.tex"), tex).unwrap();
         std::fs::create_dir(root.path().join("fig")).unwrap();
         for name in ["a.tex", "plot.pgf"] {
@@ -1758,6 +1758,22 @@ mod tests {
                 .map(|c| c.label)
                 .collect();
             assert!(keys.iter().any(|k| k == "knuth84"), "citations: {keys:?}");
+            // Asked inside a key, the fragment is all of it: `\cite{knu|th}`.
+            let inside = vault
+                .completion(
+                    "main.tex",
+                    Pos {
+                        line: 9,
+                        character: 9,
+                    },
+                    None,
+                )
+                .await
+                .unwrap();
+            let span = inside
+                .fragment
+                .map(|f| (f.start.character, f.end.character));
+            assert_eq!(span, Some((6, 11)), "{:?}", inside.items.first());
             // A command: texlab caps its answer at 50 and says so, which is what makes the
             // popup ask again as the name grows instead of narrowing a list that lacks `cite`.
             let after_backslash = vault

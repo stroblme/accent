@@ -95,11 +95,10 @@ impl Anchor {
     /// Take the fragment `answer` completes ([`apply::fragment`]), moved on by what was typed at
     /// the caret while it was on its way.
     fn fit(&mut self, buffer: &gtk::TextBuffer, answer: &Completions) {
-        let (Some(moved), Some(fragment)) =
-            (self.moved(buffer), apply::fragment(answer, self.asked.end))
-        else {
+        let Some(moved) = self.moved(buffer) else {
             return;
         };
+        let fragment = apply::fragment(answer, self.asked.end);
         buffer.move_mark(&self.from, &lang::iter_at(buffer, fragment.start));
         buffer.move_mark(&self.to, &lang::iter_at(buffer, moved.end(fragment.end)));
         self.asked = fragment;

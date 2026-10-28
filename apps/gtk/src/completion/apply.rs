@@ -53,18 +53,22 @@ impl Moved {
     }
 }
 
-/// The fragment `answer` completes, asked for at `at`: the one it names, or from where its rows
-/// start to `at`. It holds `at` and stays on its line; one named elsewhere is `None`.
-pub(super) fn fragment(answer: &Completions, at: Pos) -> Option<Range> {
+/// The fragment `answer` completes, asked for at `at`: the one it names on `at`'s line, or from
+/// where its rows start to `at` (a notebook cell's answer names one in the notebook's lines). It
+/// holds `at`.
+pub(super) fn fragment(answer: &Completions, at: Pos) -> Range {
     let starts = answer.items.iter().map(|i| i.replace.start);
-    let named = answer.fragment.unwrap_or(Range {
-        start: starts.filter(|s| s.line == at.line).min().unwrap_or(at),
-        end: at,
-    });
-    (named.start.line == at.line && named.end.line == at.line).then(|| Range {
+    let named = answer
+        .fragment
+        .filter(|f| f.start.line == at.line && f.end.line == at.line)
+        .unwrap_or(Range {
+            start: starts.filter(|s| s.line == at.line).min().unwrap_or(at),
+            end: at,
+        });
+    Range {
         start: named.start.min(at),
         end: named.end.max(at),
-    })
+    }
 }
 
 /// Cut `answer`'s rows and fragment back to `at`, where it was asked on, wherever they end past
@@ -289,8 +293,8 @@ mod tests {
         );
     }
 
-    /// A fragment is the one the answer names, or the rows' start to where it was asked; either
-    /// way it holds that place, on its line.
+    /// A fragment is the one the answer names on the line it was asked on, or the rows' start to
+    /// where it was asked; either way it holds that place.
     #[test]
     fn the_fragment_is_the_answers_or_from_the_rows_start_to_the_ask() {
         let row = |start| Completion {
@@ -312,15 +316,12 @@ mod tests {
             fragment,
             ..Completions::default()
         };
-        assert_eq!(fragment(&answer(None), at(7)), Some(range(2, 7)));
+        assert_eq!(fragment(&answer(None), at(7)), range(2, 7));
         // `[[De|ep]]` asked mid-link: its text, past the `[[`.
-        assert_eq!(
-            fragment(&answer(Some(range(2, 9))), at(4)),
-            Some(range(2, 9))
-        );
+        assert_eq!(fragment(&answer(Some(range(2, 9))), at(4)), range(2, 9));
         assert_eq!(
             fragment(&answer(Some(range(2, 3))), at(5)),
-            Some(range(2, 5)),
+            range(2, 5),
             "it holds the caret"
         );
         let elsewhere = Range {
@@ -330,8 +331,8 @@ mod tests {
             },
             end: at(5),
         };
-        assert_eq!(fragment(&answer(Some(elsewhere)), at(5)), None);
-        assert_eq!(fragment(&Completions::default(), at(5)), Some(range(5, 5)));
+        assert_eq!(fragment(&answer(Some(elsewhere)), at(5)), range(2, 5));
+        assert_eq!(fragment(&Completions::default(), at(5)), range(5, 5));
         // Answered for text typed past: nothing is taken to end past where it was asked.
         let mut past = answer(Some(range(2, 9)));
         cut_at(&mut past, at(5));

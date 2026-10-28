@@ -217,14 +217,33 @@ pub(super) fn completions_of(
         None => return Completions::default(),
     };
     items.sort_by_cached_key(sort_key);
+    let items: Vec<Completion> = items
+        .iter()
+        .filter_map(|raw| completion_of(raw, text, pos, enc, options))
+        .collect();
     Completions {
-        items: items
-            .iter()
-            .filter_map(|raw| completion_of(raw, text, pos, enc, options))
-            .collect(),
+        fragment: fragment_of(&items, pos),
+        items,
         incomplete,
         ..Completions::default()
     }
+}
+
+/// What the rows complete: from where they start to as far past the caret as every one of them
+/// replaces, the server's own reach of the word (an `InsertReplaceEdit`'s `replace`, or a
+/// `textEdit` running past the caret), so an answer asked inside a word covers the rest of it.
+/// A row with no edit of its own replaces up to the caret, and so ends it there.
+fn fragment_of(items: &[Completion], pos: Pos) -> Option<Range> {
+    let on_line = || {
+        items
+            .iter()
+            .map(|i| i.replace)
+            .filter(|r| r.start.line == pos.line && r.end.line == pos.line)
+    };
+    Some(Range {
+        start: on_line().map(|r| r.start).min()?.min(pos),
+        end: on_line().map(|r| r.end).min()?.max(pos),
+    })
 }
 
 /// Use the first inline-completion item because the UI shows one suggestion.
@@ -552,6 +571,28 @@ mod tests {
         assert_eq!(out[2].replace.start.character, 8);
         assert_eq!(out[2].replace.end, pos);
         assert!(out[2].resolve.is_some(), "kept for completionItem/resolve");
+        // `fo|ol`: a row with no edit replaces to the caret, so the fragment ends there.
+        assert_eq!(list.fragment.map(|f| f.end), Some(pos));
+    }
+
+    /// Asked inside a word, the fragment runs on to where every row's replacing range ends.
+    #[test]
+    fn a_fragment_reaches_as_far_as_every_row_replaces() {
+        let text = "let x = fool\n";
+        let pos = Pos {
+            line: 0,
+            character: 10,
+        };
+        let items = json!([
+            {"label": "foo",
+             "textEdit": {"newText": "foo", "insert": range(0, 8, 0, 10), "replace": range(0, 8, 0, 12)}},
+            {"label": "fool", "textEdit": {"range": range(0, 8, 0, 12), "newText": "fool"}},
+        ]);
+        let options = CompletionOptions::default();
+        let list = completions_of(parse(items), text, pos, Encoding::Utf16, &options);
+        let span = list.fragment.map(|f| (f.start.character, f.end.character));
+        assert_eq!(span, Some((8, 12)));
+        assert_eq!(fragment_of(&[], pos), None);
     }
 
     /// An item's own list wins, an empty one included, and the server's default covers the rest.
