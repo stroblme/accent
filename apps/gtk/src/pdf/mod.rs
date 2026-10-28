@@ -3,7 +3,8 @@
 //! `render` owns pdfium on a worker; `protocol` carries requests and replies. `view` paints
 //! cached tiles without calling pdfium; `geometry` lays them out and `cache` budgets them.
 //! `tab` owns reading state, with `input`, `reply` and `disk` handling input, results and files.
-//! `tools` and `ring` provide drawing geometry and options; `comment` shows annotations.
+//! `tools` and `ring` provide drawing geometry and options, `typed` the Text tool's editor;
+//! `comment` shows annotations.
 //! `drop` and the thumbnail strip (`crate::organize`) edit pages, `export` writes print/export
 //! copies, `source` supplies SyncTeX, and `window` integrates PDF tabs and commands with the app.
 //!
@@ -25,6 +26,7 @@ pub mod selection;
 mod source;
 pub mod tab;
 pub mod tools;
+mod typed;
 pub mod view;
 mod window;
 

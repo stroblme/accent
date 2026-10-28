@@ -63,7 +63,23 @@ impl PdfView {
                     return;
                 };
                 match mode {
-                    Mode::Select | Mode::Text => {}
+                    Mode::Select => {}
+                    // Typing into a box the tab opens, or into a text of ours under the press.
+                    Mode::Text => {
+                        let Some((page, _, _)) = obj.page_point(x, y) else {
+                            return;
+                        };
+                        gesture.set_state(gtk::EventSequenceState::Claimed);
+                        let at = obj.point_on(page, x, y);
+                        let texts = obj.imp().texts.borrow();
+                        let hit = (texts.get(&page).into_iter().flatten())
+                            .find(|(_, t)| t.bounds.contains(at))
+                            .cloned();
+                        drop(texts);
+                        if let Some(f) = obj.imp().on_type.borrow().as_ref() {
+                            f(page, at, hit);
+                        }
+                    }
                     mode if mode.draws() => {
                         let Some((page, _, _)) = obj.page_point(x, y) else {
                             return;
@@ -166,6 +182,9 @@ impl PdfView {
                 let mode = obj.imp().drag_mode.get();
                 if mode == Some(Mode::Adjust) {
                     return obj.adjust_release();
+                }
+                if mode == Some(Mode::Text) {
+                    return;
                 }
                 if let Some(mode) = mode.filter(|m| m.draws()) {
                     let mut strokes = obj.imp().strokes.borrow_mut();

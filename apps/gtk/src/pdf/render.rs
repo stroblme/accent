@@ -307,6 +307,46 @@ fn render_loop(
                 Request::Inks(page) => {
                     send(view, listed(&mut ink, &doc, page, *erases));
                 }
+                Request::Type {
+                    page,
+                    at,
+                    text,
+                    style,
+                } => {
+                    let before = doc.annotation_count(page).unwrap_or(0);
+                    match doc.add_text(page, at, &text, style) {
+                        Ok(area) => {
+                            ink.drew(page, before);
+                            ink.dirty = true;
+                            send(view, Reply::PageChanged(page, area, None));
+                        }
+                        Err(e) => tracing::warn!("typing on page {page}: {e:#}"),
+                    }
+                }
+                Request::Retype {
+                    page,
+                    id,
+                    text,
+                    style,
+                } => {
+                    ink.note(page, doc.annotation_count(page).unwrap_or(0));
+                    let typed = ink
+                        .index_of(page, id)
+                        .ok_or_else(|| anyhow!("text {id} is gone"))
+                        .and_then(|index| Ok((index, doc.retype(page, index, &text, style)?)));
+                    match typed {
+                        Ok((index, (was, area))) => {
+                            ink.retyped(page, index, was);
+                            ink.dirty = true;
+                            send(view, Reply::PageChanged(page, area, None));
+                        }
+                        // Gone, as an erase's stroke can be: the page's lists go back.
+                        Err(e) => {
+                            tracing::debug!("typing again on page {page}: {e:#}");
+                            send(view, listed(&mut ink, &doc, page, *erases));
+                        }
+                    }
+                }
                 Request::Transform { page, id, matrix } => {
                     ink.note(page, doc.annotation_count(page).unwrap_or(0));
                     let moved = ink
@@ -570,7 +610,13 @@ fn render_loop(
 /// Every stroke of `page` under its name, stamped with the erases counted so far ([`spawn`]).
 fn listed(ink: &mut Ink, doc: &PdfDoc, page: usize, erases: u64) -> Reply {
     let inks = ink.named(doc, page);
-    Reply::Inks { page, inks, erases }
+    let texts = ink.named_texts(doc, page);
+    Reply::Inks {
+        page,
+        inks,
+        texts,
+        erases,
+    }
 }
 
 /// The document with `highlights` in it, written to `dest`. Never onto `path`, the file this

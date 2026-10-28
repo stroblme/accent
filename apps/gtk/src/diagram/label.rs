@@ -1,4 +1,5 @@
-//! Edit labels as Markdown in the note editor overlaid on the cell.
+//! Edit text in an editor overlaid on a canvas: a diagram's labels as Markdown in the note
+//! editor over the cell, and text typed onto a PDF page as plain text where the page will set it.
 //!
 //! `accent_drawio::label` converts HTML to Markdown and back, sharing note styling,
 //! spellcheck and font. Editing drops per-run colours and sizes; the cell's font
@@ -23,20 +24,41 @@ const MIN_WIDTH: f64 = 160.0;
 /// is never shorter than one.
 const LINE_HEIGHT: f64 = 1.2;
 
-pub struct LabelEditor {
-    pub cell: CellId,
+/// What typed text is shown in: the face a PDF's Helvetica is, which fontconfig finds a match for
+/// (Nimbus Sans, Liberation Sans) where there is no Helvetica.
+const FACE: &str = "Helvetica";
+
+/// What the editor shows its text as.
+pub enum Look {
+    /// A diagram's label: Markdown styled as a note in the note font (`None` for the default),
+    /// zoomed to the label's size, spellchecked if asked, at least a word wide and a line tall.
+    Note {
+        font: Option<String>,
+        spellcheck: bool,
+    },
+    /// Text typed onto a PDF page: plain, refusing what Helvetica cannot set, in a face like it
+    /// at the text's size on screen, `ink` on `paper`, its lines and the room round them as the
+    /// page sets them (`accent_core::pdf::LEADING`, `PADDING`). The box grows with the text.
+    Plain { ink: [u8; 3], paper: [u8; 3] },
+}
+
+/// The editor of one piece of text, `target` naming what it edits: a diagram's cell, or a PDF's
+/// typed text.
+pub struct LabelEditor<T = CellId> {
+    pub target: T,
     /// Label position and font size in document units. Reposition the editor on
     /// scroll and zoom so editing continues as the canvas moves.
     pub place: Rect,
     pub font_size: f64,
+    look: Look,
     view: sourceview5::View,
     buffer: sourceview5::Buffer,
-    frame: gtk::ScrolledWindow,
+    /// What the layer holds: a label's view in a scroller, typed text's view itself.
+    frame: gtk::Widget,
     /// `GtkFixed` overlay supports negative offsets, letting offscreen labels clip
     /// instead of pinning to the viewport edge.
     layer: gtk::Fixed,
-    /// The note font preference, and the provider carrying it at the size last placed at.
-    family: Option<String>,
+    /// The provider carrying the font at the size last placed at.
     font: RefCell<Option<gtk::CssProvider>>,
     px: Cell<f64>,
     original: String,
@@ -72,22 +94,26 @@ pub fn label_box(rect: Rect, valign: VAlign, inside: bool) -> Rect {
     rect.translate(0.0, dy)
 }
 
-impl LabelEditor {
-    /// The editor for the label at `place` on the page (document units, its font `font_size`
-    /// points there), in `overlay`, holding `markdown`, all of it selected.
-    /// [`place_at`](Self::place_at) puts it on screen and [`focus`](Self::focus) gives it the
-    /// keyboard.
+impl<T: 'static> LabelEditor<T> {
+    /// The editor for the text at `place` on the page (document units, its font `font_size`
+    /// points there), in `overlay`, holding `text` as `look` shows it: a label all selected, to
+    /// type over, typed text with the caret at its end. [`place_at`](Self::place_at) puts it on
+    /// screen and [`focus`](Self::focus) gives it the keyboard.
     pub fn open(
         overlay: &gtk::Overlay,
-        cell: CellId,
-        markdown: &str,
+        target: T,
+        text: &str,
         place: Rect,
         font_size: f64,
-        font: Option<&str>,
-        spellcheck: bool,
-    ) -> Rc<LabelEditor> {
-        let (view, buffer) = editor::overlay_view(markdown);
-        // Lines as close as draw.io sets them, so a label that fits its shape fits the editor.
+        look: Look,
+    ) -> Rc<LabelEditor<T>> {
+        let note = matches!(look, Look::Note { .. });
+        let (view, buffer) = match note {
+            true => editor::overlay_view(text),
+            false => plain_view(text),
+        };
+        // Lines as close as draw.io sets them, so a label that fits its shape fits the editor;
+        // typed text's padding is its size's (`set_font`).
         view.set_left_margin(2);
         view.set_right_margin(2);
         view.set_top_margin(0);
@@ -96,13 +122,21 @@ impl LabelEditor {
         view.set_pixels_below_lines(0);
         view.set_widget_name(&editor::next_view_name());
         // No scrollbar: one would make the box as tall as its trough, past a short label. Text
-        // longer than the box still scrolls to the caret.
-        let frame = gtk::ScrolledWindow::builder()
-            .child(&view)
-            .hscrollbar_policy(gtk::PolicyType::Never)
-            .vscrollbar_policy(gtk::PolicyType::External)
-            .css_classes(["accent-label-editor", "view"])
-            .build();
+        // longer than the box still scrolls to the caret; typed text grows the box instead, and
+        // is never scrolled.
+        let frame: gtk::Widget = match note {
+            true => gtk::ScrolledWindow::builder()
+                .child(&view)
+                .hscrollbar_policy(gtk::PolicyType::Never)
+                .vscrollbar_policy(gtk::PolicyType::External)
+                .css_classes(["accent-label-editor", "view"])
+                .build()
+                .upcast(),
+            false => {
+                view.add_css_class("accent-label-editor");
+                view.clone().upcast()
+            }
+        };
         let layer = gtk::Fixed::builder()
             .halign(gtk::Align::Start)
             .valign(gtk::Align::Start)
@@ -116,20 +150,34 @@ impl LabelEditor {
         // sidebar, the header or the banner goes to them (checked with `Window::pick`).
         overlay.set_clip_overlay(&layer, true);
         let editor = Rc::new(LabelEditor {
-            cell,
+            target,
             place,
             font_size,
+            look,
             view,
             buffer,
             frame,
             layer,
-            family: font.map(str::to_string),
             font: RefCell::new(None),
             px: Cell::new(0.0),
-            original: markdown.to_string(),
+            original: text.to_string(),
             press: RefCell::new(None),
         });
-        if spellcheck {
+        if !note {
+            editor.buffer.place_cursor(&editor.buffer.end_iter());
+            // Weak: the buffer is the editor's.
+            let weak = Rc::downgrade(&editor);
+            editor.buffer.connect_changed(move |_| {
+                if let Some(editor) = weak.upgrade() {
+                    editor.fit();
+                }
+            });
+            return editor;
+        }
+        if let Look::Note {
+            spellcheck: true, ..
+        } = editor.look
+        {
             editor::spell_adapter(&editor.buffer, &editor.view).set_enabled(true);
         }
         // Styled as the note editor's companions are, on each change and in the theme's colours.
@@ -156,9 +204,14 @@ impl LabelEditor {
     }
 
     /// Position the editor at widget `at` with text size `px`, on open and on scroll
-    /// or zoom. Preserve focus and typed text while repositioning.
+    /// or zoom. Preserve focus and typed text while repositioning. Typed text is put at its
+    /// corner, never smaller than `at`, so none of the text it is typing again shows round it.
     pub fn place_at(&self, at: Rect, px: f64) {
-        let (x, y, w, h) = box_at(at, px);
+        let plain = matches!(self.look, Look::Plain { .. });
+        let (x, y, w, h) = match plain {
+            false => box_at(at, px),
+            true => (at.x, at.y, at.w, at.h),
+        };
         self.frame.set_size_request(w as i32, h as i32);
         self.layer.move_(&self.frame, x, y);
         // The font only when the zoom moved: it is a provider on the whole display, far too much
@@ -166,6 +219,26 @@ impl LabelEditor {
         if self.px.replace(px) != px {
             self.set_font(px);
         }
+        if plain {
+            self.fit();
+        }
+    }
+
+    /// Typed text's box: its widest line across, as it is shown, and never smaller than the text
+    /// it types again (`place`), so none of that shows round it. A text view asks for no more
+    /// width than its margins, and the `GtkFixed` it is in gives it no more than it asks for.
+    fn fit(&self) {
+        let scale = self.px.get() / self.font_size;
+        let text = self
+            .buffer
+            .text(&self.buffer.start_iter(), &self.buffer.end_iter(), false);
+        let (wide, _) = self.view.create_pango_layout(Some(&text)).pixel_size();
+        // A pixel more, for the caret at the end of the widest line.
+        let margins = self.view.left_margin() + self.view.right_margin() + 1;
+        let w = f64::from(wide + margins).max(self.place.w * scale);
+        let h = self.place.h * scale;
+        self.frame
+            .set_size_request(w.ceil() as i32, h.ceil() as i32);
     }
 
     /// Where the editor is on the canvas, its size, how tall its text is laid out and how big
@@ -179,27 +252,84 @@ impl LabelEditor {
         (at, f64::from(content), self.px.get())
     }
 
-    /// The note font, zoomed to `px` on screen.
+    /// The note font zoomed to `px` on screen, or typed text's face at `px`.
     fn set_font(&self, px: f64) {
-        let family = self.family.clone().unwrap_or_else(editor::default_font);
-        let doc_pt = f64::from(pango::FontDescription::from_string(&family).size())
-            / f64::from(pango::SCALE);
-        editor::install_font(
-            &self.font,
-            Flavour::Note(Syntax::Markdown),
-            self.family.as_deref(),
-            label_zoom(px, doc_pt),
-            &self.view.widget_name(),
+        let (ink, paper) = match &self.look {
+            Look::Note { font, .. } => {
+                let family = font.clone().unwrap_or_else(editor::default_font);
+                let doc_pt = f64::from(pango::FontDescription::from_string(&family).size())
+                    / f64::from(pango::SCALE);
+                editor::install_font(
+                    &self.font,
+                    Flavour::Note(Syntax::Markdown),
+                    font.as_deref(),
+                    label_zoom(px, doc_pt),
+                    &self.view.widget_name(),
+                );
+                editor::refont(&self.view);
+                return;
+            }
+            Look::Plain { ink, paper } => (*ink, *paper),
+        };
+        use accent_core::pdf::{BASELINE, LEADING, PADDING};
+        let (pad, leading) = (f64::from(PADDING) * px, f64::from(LEADING) * px);
+        // Each line's baseline where the page sets it, BASELINE sizes below the top of its line.
+        // A face is laid out by its own ascent and descent, half the leading left over above
+        // them (`line-height`), so the text goes down by what that leaves short, its box as tall.
+        let mut face = pango::FontDescription::from_string(FACE);
+        face.set_absolute_size(px * f64::from(pango::SCALE));
+        let metrics = self
+            .view
+            .pango_context()
+            .load_font(&face)
+            .map(|f| f.metrics(None));
+        let laid = metrics.map_or(f64::from(BASELINE) * px, |m| {
+            let (ascent, descent) = (f64::from(m.ascent()), f64::from(m.descent()));
+            let scale = f64::from(pango::SCALE);
+            (leading - (ascent + descent) / scale) / 2.0 + ascent / scale
+        });
+        let down = (f64::from(BASELINE) * px - laid).clamp(-pad, pad);
+        let margin = |by: f64| by.round() as i32;
+        self.view.set_left_margin(margin(pad));
+        self.view.set_right_margin(margin(pad));
+        self.view.set_top_margin(margin(pad + down));
+        self.view.set_bottom_margin(margin(pad - down));
+        let Some(display) = gdk::Display::default() else {
+            return;
+        };
+        if let Some(old) = self.font.take() {
+            gtk::style_context_remove_provider_for_display(&display, &old);
+        }
+        let rgb = |[r, g, b]: [u8; 3]| format!("rgb({r}, {g}, {b})");
+        let name = self.view.widget_name();
+        // The colour is the view's own node's, the background its text node's.
+        let provider = gtk::CssProvider::new();
+        provider.load_from_string(&format!(
+            "#{name} {{ font-family: {FACE}; font-size: {px}px; line-height: {leading}px; \
+             color: {}; }} #{name} > text {{ background-color: {}; }}",
+            rgb(ink),
+            rgb(paper)
+        ));
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
         );
+        self.font.replace(Some(provider));
         editor::refont(&self.view);
     }
 
-    /// The Markdown typed, or `None` when it is what the editor opened with.
+    /// The text typed, or `None` when it is what the editor opened with; typed text's without
+    /// the space and lines it ends in, which a page has no use for.
     pub fn changed(&self) -> Option<String> {
         let text = self
             .buffer
             .text(&self.buffer.start_iter(), &self.buffer.end_iter(), false)
             .to_string();
+        let text = match self.look {
+            Look::Note { .. } => text,
+            Look::Plain { .. } => text.trim_end().to_string(),
+        };
         (text != self.original).then_some(text)
     }
 
@@ -217,6 +347,18 @@ impl LabelEditor {
         &self.view
     }
 
+    /// Leave the editor showing what was typed, no longer typing: no caret, no keys, no clicks,
+    /// until it [closes](Self::close).
+    pub fn freeze(&self) {
+        if let Some((root, press)) = self.press.borrow_mut().take() {
+            root.remove_controller(&press);
+        }
+        self.view.set_editable(false);
+        self.view.set_cursor_visible(false);
+        self.view.set_can_target(false);
+        self.view.set_can_focus(false);
+    }
+
     /// Take the editor off the canvas and drop its font and its window-wide press handler.
     pub fn close(&self, overlay: &gtk::Overlay) {
         if let Some((root, press)) = self.press.borrow_mut().take() {
@@ -229,8 +371,58 @@ impl LabelEditor {
     }
 }
 
+/// A plain view of `text` that takes only what Helvetica can set: a paste of anything else keeps
+/// the rest of it.
+fn plain_view(text: &str) -> (sourceview5::View, sourceview5::Buffer) {
+    use accent_core::pdf::typeable;
+    use sourceview5::prelude::BufferExt;
+    let buffer = sourceview5::Buffer::new(None);
+    // No scheme, whose colours would be the text's and the box's.
+    buffer.set_style_scheme(None);
+    buffer.set_highlight_matching_brackets(false);
+    buffer.set_text(text);
+    buffer.connect_insert_text(|buffer, at, text| {
+        if text.chars().all(typeable) {
+            return;
+        }
+        buffer.stop_signal_emission_by_name("insert-text");
+        let kept: String = text.chars().filter(|&c| typeable(c)).collect();
+        if !kept.is_empty() {
+            buffer.insert(at, &kept);
+        }
+    });
+    (sourceview5::View::with_buffer(&buffer), buffer)
+}
+
+/// Finish the editor as the reader leaves it: at once on Escape, and through `later`, which
+/// finishes from an idle and only while this editor is still the one open, on a click anywhere
+/// outside it or the keyboard going elsewhere. Then it takes the keyboard.
+///
+/// From an idle rather than the handler: leaving is GTK moving the focus, and taking the editor
+/// off the canvas meanwhile left GTK walking up from a widget that was gone, over and over (the
+/// freeze).
+pub fn wire_finish<T: 'static>(
+    editor: &Rc<LabelEditor<T>>,
+    now: impl Fn() + 'static,
+    later: impl Fn() + Clone + 'static,
+) {
+    let focus = gtk::EventControllerFocus::new();
+    focus.connect_leave({
+        let later = later.clone();
+        move |_| later()
+    });
+    editor.view().add_controller(focus);
+    wire_keys(editor, now);
+    // Space that takes no keyboard moves no focus, so the press on it is heard on the window
+    // instead. Wired now that the editor is in place, and taken off again when it closes.
+    wire_press(editor, later);
+    // Only now: a focus controller hears the focus leave only if it saw it come in, so a
+    // click outside finishes the editor only when the grab comes after the wiring.
+    editor.focus();
+}
+
 /// The editor's own keys: Escape finishes, as leaving it does.
-pub fn wire_keys(editor: &Rc<LabelEditor>, finish: impl Fn() + 'static) {
+fn wire_keys<T: 'static>(editor: &Rc<LabelEditor<T>>, finish: impl Fn() + 'static) {
     let keys = gtk::EventControllerKey::new();
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);
     keys.connect_key_pressed(move |_, key, _, _| match key {
@@ -245,7 +437,7 @@ pub fn wire_keys(editor: &Rc<LabelEditor>, finish: impl Fn() + 'static) {
 
 /// Finish editing on clicks in non-focusable chrome, which emits no focus change.
 /// Capture the press anywhere in the window without claiming it so its action continues.
-pub fn wire_press(editor: &Rc<LabelEditor>, finish: impl Fn() + 'static) {
+fn wire_press<T: 'static>(editor: &Rc<LabelEditor<T>>, finish: impl Fn() + 'static) {
     let Some(root) = editor.frame.root() else {
         return;
     };
@@ -327,21 +519,14 @@ impl DiagramTab {
             place = r;
         }
         self.view.reveal(&place);
-        let editor = LabelEditor::open(
-            &self.overlay,
-            id,
-            &markdown,
-            place,
-            size,
-            self.font.borrow().as_deref(),
-            self.spellcheck.get(),
-        );
+        let look = Look::Note {
+            font: self.font.borrow().clone(),
+            spellcheck: self.spellcheck.get(),
+        };
+        let editor = LabelEditor::open(&self.overlay, id, &markdown, place, size, look);
         *self.label.borrow_mut() = Some(editor.clone());
         self.place_label();
-        // A click outside finishes the label, from an idle rather than the handler: leaving is
-        // GTK moving the focus, and taking the editor off the canvas meanwhile left GTK walking
-        // up from a widget that was gone, over and over (the freeze). Only the editor that left:
-        // another may have opened by the time the idle runs.
+        // Only the editor that left: another may have opened by the time the idle runs.
         let later = {
             let (tab, left) = (Rc::downgrade(self), Rc::downgrade(&editor));
             move || {
@@ -355,26 +540,12 @@ impl DiagramTab {
                 });
             }
         };
-        let focus = gtk::EventControllerFocus::new();
-        focus.connect_leave({
-            let later = later.clone();
-            move |_| later()
-        });
-        editor.view().add_controller(focus);
-        wire_keys(
-            &editor,
-            glib::clone!(
-                #[weak(rename_to = tab)]
-                self,
-                move || tab.finish_label()
-            ),
+        let now = glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move || tab.finish_label()
         );
-        // Space that takes no keyboard moves no focus, so the press on it is heard on the window
-        // instead. Wired now that the editor is in place, and taken off again when it closes.
-        wire_press(&editor, later);
-        // Only now: a focus controller hears the focus leave only if it saw it come in, so a
-        // click outside finishes the label only when the grab comes after the wiring.
-        editor.focus();
+        wire_finish(&editor, now, later);
     }
 
     /// Put the label editor back over its cell: where it opens, and again whenever the canvas
@@ -398,7 +569,7 @@ impl DiagramTab {
         let typed = editor.changed();
         editor.close(&self.overlay);
         if let Some(markdown) = typed {
-            let id = editor.cell.clone();
+            let id = editor.target.clone();
             self.edit(|e, page| e.set_label_markdown(page, &id, &markdown));
         }
         // Not when another label opened meanwhile: a double click on a second label finishes
@@ -436,7 +607,7 @@ impl DiagramTab {
     /// The cell whose label is being edited, if one is.
     #[cfg(feature = "bench")]
     pub fn editing_label(&self) -> Option<CellId> {
-        self.label.borrow().as_ref().map(|e| e.cell.clone())
+        self.label.borrow().as_ref().map(|e| e.target.clone())
     }
 
     /// Where the label editor sits on the canvas, how tall its text is laid out, how big that

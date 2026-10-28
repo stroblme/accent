@@ -24,7 +24,7 @@ pub use ink::{
 };
 pub use ledger::{Ink, NamedInk, NamedText, Walked, fresh_id};
 pub use text::{line_top, link_with_alias, same_quads, selection_link, selection_quads};
-pub use typed::{LEADING, PADDING, TextStyle, Typed, TypedText, typeable};
+pub use typed::{BASELINE, LEADING, PADDING, TextStyle, Typed, TypedText, typeable};
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};

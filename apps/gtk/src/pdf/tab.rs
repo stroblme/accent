@@ -26,6 +26,9 @@ pub const PAGE_ACTIONS: [&str; 3] = [
     "win.pdf-delete-page",
 ];
 
+/// The editor of a text typed onto the page.
+pub(super) type TextEditor = crate::diagram::label::LabelEditor<super::typed::Typing>;
+
 /// Where a document is being read, remembered per file in the session.
 pub use accent_core::config::PdfPlace as Place;
 
@@ -58,6 +61,12 @@ pub struct PdfTab {
     pub(super) host: gtk::Box,
     /// The drawing tools, floating over the page while the window says they are wanted.
     pub(super) ring: Rc<ring::PdfRing>,
+    /// What floats over the page: the ring, and the editor of a text being typed.
+    pub(super) overlay: gtk::Overlay,
+    pub(super) typing: RefCell<Option<Rc<TextEditor>>>,
+    /// The editor of a text just finished, kept until the page shows it, and whether the page's
+    /// change has been heard (`PdfTab::settle`).
+    pub(super) settling: RefCell<Option<(Rc<TextEditor>, bool)>>,
     /// The thumbnail scroller with the page buttons and the drop bar floating over it, which is
     /// what the Outline pane is handed. Built once to preserve its parent; rebuilding around the
     /// same widget would trigger a GTK reparenting critical.
@@ -259,6 +268,9 @@ pub fn open(
         thumbs: thumbs.clone(),
         host,
         ring: ring.clone(),
+        overlay: overlay.clone(),
+        typing: RefCell::default(),
+        settling: RefCell::default(),
         organize: crate::organize::Organize::new(
             &thumb_strip,
             &thumbs,
@@ -351,8 +363,19 @@ pub fn open(
     view.connect_zoom(glib::clone!(
         #[weak]
         tab,
-        move || tab.on_zoom.emit(&tab)
+        move || {
+            tab.place_text();
+            tab.on_zoom.emit(&tab);
+        }
     ));
+    // A text being typed rides the page as it scrolls.
+    for adjustment in [scroller.hadjustment(), scroller.vadjustment()] {
+        adjustment.connect_value_changed(glib::clone!(
+            #[weak]
+            tab,
+            move |_| tab.place_text()
+        ));
+    }
     tab.wire_strip(&thumbs);
     tab.organize.connect_edit(glib::clone!(
         #[weak]
@@ -722,6 +745,10 @@ impl PdfTab {
 
     /// Only the reading view: the thumbnail strip is a list of buttons, never a canvas.
     pub fn set_mode(self: &Rc<Self>, mode: pdfview::Mode) {
+        // A text being typed is typed before the Text tool goes.
+        if mode != pdfview::Mode::Text {
+            self.finish_text();
+        }
         // The ring is told whatever the window decided, even when the mode did not change: it may
         // be a freshly built one that has never been told anything.
         self.ring.set_tool(mode);

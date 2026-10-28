@@ -193,11 +193,12 @@ impl App {
             "delete-line" => self.with_view(editor::delete_line),
             "newline-below" => {
                 // A notebook in front runs the selected cell, as Jupyter's `Ctrl+Enter` does, and
-                // a diagram's label being edited takes `Ctrl+Return` as finishing it.
+                // a diagram's label or a PDF's text being typed takes `Ctrl+Return` as finishing it.
                 if let Some(notebook) = self.active_notebook() {
                     return self.run_selected(&notebook, false);
                 }
-                let committed = self.active_diagram().is_some_and(|d| d.commit_label());
+                let committed = self.active_diagram().is_some_and(|d| d.commit_label())
+                    || self.active_pdf().is_some_and(|p| p.commit_text());
                 if !committed && let Some(tab) = self.active() {
                     tab.newline_below();
                 }

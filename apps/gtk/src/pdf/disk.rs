@@ -26,6 +26,7 @@ impl PdfTab {
     /// Save on tab close while retaining the tab until completion, so `connect_saved` can upload
     /// a remote copy.
     pub fn flush_closing(self: &Rc<Self>) {
+        self.finish_text();
         let (tx, rx) = channel();
         self.ask(Request::Save(Some(tx)));
         let tab = self.clone();
@@ -45,6 +46,7 @@ impl PdfTab {
     // ponytail: up to a second of the main loop, and only on the way out. The thread answers as
     // soon as it finishes whatever tile it is on, so in practice this is a few milliseconds.
     pub fn flush_blocking(self: &Rc<Self>) {
+        self.finish_text();
         let (tx, rx) = channel();
         self.ask(Request::Save(Some(tx)));
         let _ = rx.recv_timeout(std::time::Duration::from_secs(1));

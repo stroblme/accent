@@ -38,8 +38,9 @@ pub const LEADING: f32 = 1.2;
 /// The room round the text inside its box, in font sizes.
 pub const PADDING: f32 = 0.2;
 /// How far below the top of its line a line's baseline is, in font sizes: where a line
-/// [`LEADING`] tall puts it for a Helvetica-like face, half the leading above the ascent.
-const BASELINE: f32 = 0.95;
+/// [`LEADING`] tall puts it for a Helvetica-like face, half the leading above the ascent, which
+/// leaves as much room above a capital as below the baseline.
+pub const BASELINE: f32 = 0.95;
 /// What the appearance stream and `/DA` call the font.
 const FONT: &[u8] = b"Helv";
 

@@ -54,6 +54,7 @@ impl PdfTab {
                 }
             }
             Reply::PageChanged(page, area, drawn) => {
+                self.page_heard(page);
                 // The reading view keeps painting what it has until the new render arrives; the
                 // strip has only a stand-in, which `refresh_page` drops, so it asks for another.
                 self.view.refresh_page(page, area);
@@ -68,7 +69,12 @@ impl PdfTab {
                 }
                 self.save_soon();
             }
-            Reply::Inks { page, inks, erases } => self.view.set_inks(page, inks, erases),
+            Reply::Inks {
+                page,
+                inks,
+                texts,
+                erases,
+            } => self.view.set_inks(page, inks, texts, erases),
             Reply::History { undo, redo } => {
                 self.history.set((undo, redo));
                 self.on_history.emit(self);

@@ -9,7 +9,7 @@ pub mod embed;
 pub mod export;
 mod geometry;
 mod input;
-mod label;
+pub mod label;
 mod layers;
 mod paint;
 mod props;

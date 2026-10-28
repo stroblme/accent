@@ -14,7 +14,7 @@ use super::cache::{TileKey, Want};
 /// index of the link each came from.
 pub type Highlights = HashMap<usize, Vec<(Vec<accent_core::pdf::Rect>, usize)>>;
 
-pub use accent_core::pdf::{NamedInk, fresh_id};
+pub use accent_core::pdf::{NamedInk, NamedText, fresh_id};
 
 /// One report of a partial eraser across a stroke: the line it moved along, its radius, and the
 /// names the widget gave the pieces it worked out would be left, in order.
@@ -70,12 +70,14 @@ pub enum Reply {
     Highlights(Highlights),
     /// An export finished: how many annotations it wrote, or why it could not.
     Exported(Result<usize, String>),
-    /// Every ink stroke of one page with its box and style, for the eraser to find and the
-    /// Adjust tool to take hold of, and how many erases the thread had answered when it read
-    /// them: a list read before an erase still on its way is of the page before it.
+    /// Every ink stroke of one page with its box and style, and every text of ours on it, for
+    /// the eraser to find, the Adjust tool to take hold of and the Text tool to type again, and
+    /// how many erases the thread had answered when it read them: a list read before an erase
+    /// still on its way is of the page before it.
     Inks {
         page: usize,
         inks: Vec<NamedInk>,
+        texts: Vec<NamedText>,
         erases: u64,
     },
     /// Whether there is anything for Undo to take back and for Redo to put back.
@@ -189,8 +191,22 @@ pub enum Request {
         joined: bool,
         partial: Option<Pass>,
     },
-    /// Every ink stroke of a page with its box and style, for the eraser and the Adjust tool.
+    /// Every ink stroke and text of ours of a page, for the eraser and the Adjust and Text tools.
     Inks(usize),
+    /// Text typed onto a page, its box's top-left corner at `at`, in that page's own points.
+    Type {
+        page: usize,
+        at: (f32, f32),
+        text: String,
+        style: pdf::TextStyle,
+    },
+    /// A text of ours, named by its id, typed again: it says `text` in `style` now.
+    Retype {
+        page: usize,
+        id: u32,
+        text: String,
+        style: pdf::TextStyle,
+    },
     /// Move or resize one stroke; it comes back at the end of the page's `/Annots`.
     Transform {
         page: usize,

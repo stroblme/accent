@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::cache::{Cache, TileKey, Want, texture};
 use super::geometry::{Layout, PT_TO_PX, PdfZoom, Span, stepped};
-use super::protocol::{Highlights, NamedInk, Pass, Reply};
+use super::protocol::{Highlights, NamedInk, NamedText, Pass, Reply};
 use super::tools::{Mode, Selected, Stroke};
 use crate::theme;
 
@@ -173,7 +173,15 @@ impl PdfView {
         // top can go. Here rather than when the stroke was sent: the render is what replaces it,
         // and dropping it any earlier is a gap the reader sees.
         self.settle_stroke(key.page as usize);
+        if let Some(f) = self.imp().on_tile.borrow().as_ref() {
+            f(key.page as usize);
+        }
         self.queue_draw();
+    }
+
+    /// Called with the page of every tile that lands.
+    pub fn connect_tile(&self, f: impl Fn(usize) + 'static) {
+        *self.imp().on_tile.borrow_mut() = Some(Box::new(f));
     }
 
     pub fn insert_lowres(&self, page: u32, theme: Theme, texture: gdk::MemoryTexture) {
@@ -442,6 +450,22 @@ impl PdfView {
         }
     }
 
+    /// How the Text tool sets a new text, from the preferences: the nearest of its three sizes,
+    /// and its colour, the accent where none was picked.
+    pub fn text_style(&self) -> accent_core::pdf::TextStyle {
+        let c = self.imp().style.borrow();
+        accent_core::pdf::TextStyle {
+            size: crate::pdf::tools::width_of(Mode::Text, c.text_size),
+            rgb: c.text_color.unwrap_or_else(theme::accent_rgb),
+        }
+    }
+
+    /// Called with where the Text tool pressed, a page and a point on it, and the text of ours
+    /// under it, if there is one.
+    pub fn connect_type(&self, f: impl Fn(usize, (f32, f32), Option<NamedText>) + 'static) {
+        *self.imp().on_type.borrow_mut() = Some(Box::new(f));
+    }
+
     /// Called with a finished stroke: the page and its points, in that page's own points.
     pub fn connect_ink(&self, f: impl Fn(usize, Vec<(f32, f32)>) + 'static) {
         *self.imp().on_ink.borrow_mut() = Some(Box::new(f));
@@ -467,7 +491,7 @@ impl PdfView {
     /// page. Older replies are stale relative to locally updated strokes; the erase sends a fresh
     /// list. An erase on another page does not hold this one's back: nothing would ask again.
     /// Follow an adjusted selection by stroke ID or clear it if deleted.
-    pub fn set_inks(&self, page: usize, inks: Vec<NamedInk>, erases: u64) {
+    pub fn set_inks(&self, page: usize, inks: Vec<NamedInk>, texts: Vec<NamedText>, erases: u64) {
         #[cfg(feature = "bench")]
         {
             self.imp().heard.set(self.imp().heard.get() + inks.len());
@@ -495,6 +519,7 @@ impl PdfView {
             }
         }
         self.imp().inks.borrow_mut().insert(page, inks);
+        self.imp().texts.borrow_mut().insert(page, texts);
         self.queue_draw();
     }
 
@@ -508,9 +533,10 @@ impl PdfView {
         }
     }
 
-    /// Forget every stroke the Adjust tool knew: the document changed under it.
+    /// Forget every stroke and text the tools knew: the document changed under them.
     pub fn clear_inks(&self) {
         self.imp().inks.borrow_mut().clear();
+        self.imp().texts.borrow_mut().clear();
         *self.imp().adjust.borrow_mut() = None;
         self.queue_draw();
     }
@@ -654,6 +680,8 @@ mod imp {
     /// it, and whether the same drag took one before it.
     type At = Box<dyn Fn(usize, u32, Option<super::Pass>, bool)>;
     type Transform = Box<dyn Fn(usize, u32, accent_core::pdf::Matrix)>;
+    /// Where the Text tool pressed, and the text of ours there.
+    type Type = Box<dyn Fn(usize, (f32, f32), Option<NamedText>)>;
     /// Whether the pen's eraser end came to the page, or another hand after it.
     type EraserEnd = Box<dyn Fn(bool)>;
     type Jump = Box<dyn FnOnce(&super::PdfView)>;
@@ -708,8 +736,10 @@ mod imp {
         // long as the strokes drawn inside one render — one or two in practice. It cannot leak:
         // a stroke with no render to replace it is one that still has to be painted.
         pub strokes: RefCell<Vec<super::Stroke>>,
-        /// What the eraser and the Adjust tool can find, per page they have been told about.
+        /// What the eraser and the Adjust tool can find, per page they have been told about, and
+        /// the texts of ours, which the Text tool types again too.
         pub inks: RefCell<HashMap<usize, Vec<NamedInk>>>,
+        pub texts: RefCell<HashMap<usize, Vec<NamedText>>>,
         pub adjust: RefCell<Option<super::Selected>>,
         /// Where the eraser was last reported in the drag under way, as a page and a point on
         /// it, so the next report tests the line between the two.
@@ -769,6 +799,8 @@ mod imp {
         pub on_ink: RefCell<Option<Stroke>>,
         pub on_erase: RefCell<Option<At>>,
         pub on_transform: RefCell<Option<Transform>>,
+        pub on_type: RefCell<Option<Type>>,
+        pub on_tile: RefCell<Option<Page>>,
         pub on_eraser: RefCell<Option<EraserEnd>>,
         pub on_motion: RefCell<Option<Coords>>,
         pub on_page: RefCell<Option<Page>>,
@@ -802,6 +834,7 @@ mod imp {
                 stale_tiles: RefCell::new(HashSet::new()),
                 strokes: RefCell::new(Vec::new()),
                 inks: RefCell::new(HashMap::new()),
+                texts: RefCell::new(HashMap::new()),
                 adjust: RefCell::new(None),
                 erasing: Cell::new(None),
                 erased: Cell::new(false),
@@ -837,6 +870,8 @@ mod imp {
                 on_ink: RefCell::new(None),
                 on_erase: RefCell::new(None),
                 on_transform: RefCell::new(None),
+                on_type: RefCell::new(None),
+                on_tile: RefCell::new(None),
                 on_eraser: RefCell::new(None),
                 on_motion: RefCell::new(None),
                 on_page: RefCell::new(None),
