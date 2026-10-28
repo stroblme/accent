@@ -305,6 +305,41 @@ fn a_gui_terminal_is_readable_only_while_shared_with_the_vault() {
     holder.assert_gone();
 }
 
+/// `attach --run` holds a login shell running the command line, which ends with it and says how;
+/// taken up again once it has ended, it is not started a second time.
+#[test]
+fn a_held_command_ends_with_its_status_and_is_not_run_again() {
+    let Some(mut holder) = Holder::start("run") else {
+        return;
+    };
+    // A scratch HOME, so the login shell reads no profile of the user's.
+    let attach = |args: &[&str]| {
+        let mut cmd = cli(&holder.tmp);
+        cmd.env("HOME", &holder.tmp)
+            .env("SHELL", "/bin/sh")
+            .args(["attach", "--owner", OWNER])
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped());
+        cmd
+    };
+    let mut ran = attach(&["--run", "echo ran-$((40+2)); exit 3", "cmd-1"])
+        .spawn()
+        .unwrap();
+    // Held open, as a tab's pty is: the end of input is a detach.
+    let _input = ran.stdin.take();
+    let mut seen = String::new();
+    ran.stdout.take().unwrap().read_to_string(&mut seen).unwrap();
+    assert!(seen.contains("ran-42"), "{seen:?}");
+    assert_eq!(ran.wait().unwrap().code(), Some(3));
+
+    let again = attach(&["--existing", "cmd-1"]).output().unwrap();
+    assert_eq!(again.status.code(), Some(254));
+    let listed = cli(&holder.tmp).arg("held").output().unwrap();
+    assert!(listed.stdout.is_empty(), "an ended command was started again");
+    holder.assert_gone();
+}
+
 #[test]
 fn attach_existing_rejects_missing_and_other_vault_shells_without_creating() {
     let Some(mut holder) = Holder::start("existing") else {

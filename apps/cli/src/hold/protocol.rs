@@ -91,8 +91,8 @@ pub fn parse_size(bytes: &[u8]) -> Option<(u16, u16)> {
 }
 
 /// What a terminal says when it attaches: which shell, and for one that has to be started, where,
-/// for whom and with which environment. `rows u16 | cols u16 | id \0 cwd \0 owner \0
-/// (KEY=VALUE \0)*`.
+/// for whom, with which environment and running what. `rows u16 | cols u16 | id \0 cwd \0
+/// owner \0 (KEY=VALUE \0)*`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hello {
     pub id: String,
@@ -102,7 +102,14 @@ pub struct Hello {
     pub rows: u16,
     pub cols: u16,
     pub env: Vec<(OsString, OsString)>,
+    /// A command line the shell runs in place of its prompt (`attach --run`). It travels as one
+    /// more environment entry, [`RUN`], so a holder that predates it starts a plain shell instead
+    /// of refusing the frame, and the socket keeps its version.
+    pub run: Option<String>,
 }
+
+/// The environment entry [`Hello::run`] travels as, taken out again before the shell starts.
+const RUN: &str = "ACCENT_RUN";
 
 impl Hello {
     pub fn encode(&self) -> Vec<u8> {
@@ -115,7 +122,15 @@ impl Hello {
             out.extend(part);
             out.push(0);
         }
-        for (key, value) in &self.env {
+        let run = self
+            .run
+            .as_ref()
+            .map(|run| (OsStr::new(RUN), OsStr::new(run)));
+        let env = self
+            .env
+            .iter()
+            .map(|(key, value)| (key.as_os_str(), value.as_os_str()));
+        for (key, value) in env.filter(|(key, _)| *key != RUN).chain(run) {
             out.extend(key.as_bytes());
             out.push(b'=');
             out.extend(value.as_bytes());
@@ -131,7 +146,7 @@ impl Hello {
         let id = String::from_utf8(parts.next()?.to_vec()).ok()?;
         let cwd = PathBuf::from(OsStr::from_bytes(parts.next()?));
         let owner = String::from_utf8(parts.next()?.to_vec()).ok()?;
-        let env = parts
+        let mut env: Vec<(OsString, OsString)> = parts
             .filter_map(|var| {
                 let eq = var.iter().position(|&b| b == b'=')?;
                 let (key, value) = (
@@ -141,6 +156,10 @@ impl Hello {
                 Some((key.to_owned(), value.to_owned()))
             })
             .collect();
+        let run = env
+            .iter()
+            .position(|(key, _)| key == RUN)
+            .map(|at| env.remove(at).1);
         Some(Hello {
             id,
             cwd,
@@ -148,6 +167,7 @@ impl Hello {
             rows,
             cols,
             env,
+            run: run.map(|run| run.to_string_lossy().into_owned()),
         })
     }
 }
@@ -189,8 +209,15 @@ mod tests {
                 ("SHELL".into(), "/bin/bash".into()),
                 ("LS_COLORS".into(), "di=01;34:ln=01;36".into()),
             ],
+            run: None,
         };
-        assert_eq!(Hello::decode(&hello.encode()), Some(hello));
+        assert_eq!(Hello::decode(&hello.encode()), Some(hello.clone()));
+        // A command rides along, and leaves the environment as it found it.
+        let run = Hello {
+            run: Some("make -j8 && echo 'a=b'".into()),
+            ..hello
+        };
+        assert_eq!(Hello::decode(&run.encode()), Some(run));
         assert_eq!(parse_size(&size(0, 80)), None);
     }
 }

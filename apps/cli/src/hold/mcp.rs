@@ -101,6 +101,7 @@ pub fn start(vault: &Path, relative: &str) -> io::Result<Value> {
         rows: 24,
         cols: 80,
         env: std::env::vars_os().collect(),
+        run: None,
     };
     let (tag, _) = request(&mut client::connect()?, CREATE, &hello.encode())?;
     if tag != ACK {

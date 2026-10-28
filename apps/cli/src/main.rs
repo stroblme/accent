@@ -10,7 +10,7 @@ use accent_core::index::{Phase, default_db_path};
 use accent_core::walk::{self, ScanOptions};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 #[derive(Parser)]
@@ -142,10 +142,11 @@ enum Cmd {
     /// terminal detaches. Exit with the shell status, 0 on detach, or 254 on failure
     /// (reserving 255 for SSH).
     Attach {
-        /// Attach only to an existing shell scoped to --vault; never start a replacement.
+        /// Attach only to an existing shell, one scoped to --vault or else started by --owner;
+        /// never start a replacement.
         #[arg(long)]
         existing: bool,
-        /// Host vault root required with --existing.
+        /// Host vault root whose MCP shells --existing may attach to.
         #[arg(long, requires = "existing")]
         vault: Option<PathBuf>,
         /// Starting directory for a new shell; defaults to the current directory.
@@ -154,6 +155,10 @@ enum Cmd {
         /// Owner shown by `held`; Accent passes its state directory for startup cleanup.
         #[arg(long, default_value = "")]
         owner: String,
+        /// A command line a new shell runs, as a login shell, in place of its prompt, ending
+        /// with it.
+        #[arg(long, conflicts_with = "existing")]
+        run: Option<String>,
         id: String,
     },
     /// End a held shell and its jobs. Pending attaches with this ID are cancelled.
@@ -305,14 +310,13 @@ fn main() -> Result<()> {
             vault,
             cwd,
             owner,
+            run,
             id,
-        } => {
-            if existing {
-                let vault = vault.ok_or_else(|| anyhow::anyhow!("--existing requires --vault"))?;
-                std::process::exit(hold::client::attach_existing(&id, &vault))
-            }
-            std::process::exit(hold::client::attach(&id, cwd, &owner))
-        }
+        } => std::process::exit(match (existing, vault) {
+            (true, Some(vault)) => hold::client::attach_vault(&id, &vault),
+            (true, None) => hold::client::attach_existing(&id, Path::new("/"), &owner),
+            (false, _) => hold::client::attach(&id, cwd, &owner, run),
+        }),
         Cmd::Kill { id } => hold::client::kill(&id)?,
         Cmd::Held => hold::client::held()?,
         Cmd::Share { id, vault } => hold::client::share(&id, &vault)?,

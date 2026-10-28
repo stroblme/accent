@@ -773,7 +773,9 @@ fn set_winsize(pty: &File, rows: u16, cols: u16) {
 
 /// Start the shell on the pty's slave end: `$SHELL` of the terminal's environment (else
 /// `/bin/sh`), with that environment and nothing else, in the terminal's directory (else `$HOME`,
-/// else `/`). Interactive and not a login shell, as VTE starts one.
+/// else `/`). Interactive and not a login shell, as VTE starts one; one given a command line
+/// (`attach --run`) runs it as a login shell, interactive still, so the profile's `PATH` and the
+/// rc file's aliases apply, and ends with it.
 fn spawn(hello: &Hello, slave: File) -> io::Result<Child> {
     let home = var(hello, "HOME").map(Path::new);
     let cwd = [Some(hello.cwd.as_path()), home]
@@ -782,6 +784,9 @@ fn spawn(hello: &Hello, slave: File) -> io::Result<Child> {
         .find(|dir| dir.is_dir())
         .unwrap_or(Path::new("/"));
     let mut cmd = Command::new(program(hello));
+    if let Some(run) = &hello.run {
+        cmd.args(["-l", "-i", "-c", run]);
+    }
     cmd.env_clear()
         .envs(hello.env.iter().map(|(key, value)| (key, value)))
         .current_dir(cwd)

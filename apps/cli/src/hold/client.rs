@@ -18,14 +18,15 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-/// Attach this terminal to shell `id`, starting the holder and shell in `cwd` for `owner` if needed.
-/// Returns the shell's exit status, 0 on takeover, or [`FAILED`] if attachment fails.
-pub fn attach(id: &str, cwd: Option<PathBuf>, owner: &str) -> i32 {
+/// Attach this terminal to shell `id`, starting the holder and shell in `cwd` for `owner` if needed,
+/// the shell running `run` in place of its prompt when given one. Returns the shell's exit status,
+/// 0 on takeover, or [`FAILED`] if attachment fails.
+pub fn attach(id: &str, cwd: Option<PathBuf>, owner: &str, run: Option<String>) -> i32 {
     // Absolute: the holder runs in `/`.
     let cwd = std::path::absolute(cwd.unwrap_or_else(|| ".".into())).unwrap_or_default();
     let winch = block_winch();
     let saved = raw();
-    let code = relay(id, &cwd, owner, winch, false);
+    let code = relay(id, &cwd, owner, run, winch, false);
     if let Some(saved) = saved {
         // SAFETY: `saved` is the mode `tcgetattr` gave for this descriptor.
         unsafe { libc::tcsetattr(0, libc::TCSANOW, &saved) };
@@ -34,7 +35,7 @@ pub fn attach(id: &str, cwd: Option<PathBuf>, owner: &str) -> i32 {
 }
 
 /// Attach only to a live terminal owned by or shared with this vault; never create a shell.
-pub fn attach_existing(id: &str, vault: &Path) -> i32 {
+pub fn attach_vault(id: &str, vault: &Path) -> i32 {
     let cwd = match vault.canonicalize() {
         Ok(path) => path,
         Err(e) => {
@@ -49,9 +50,15 @@ pub fn attach_existing(id: &str, vault: &Path) -> i32 {
             return FAILED;
         }
     };
+    attach_existing(id, &cwd, &owner)
+}
+
+/// Attach only to a live terminal `owner` started or was shared; never create a shell. The app
+/// takes up a command's shell so (`attach --run`): ended, it is not started again.
+pub fn attach_existing(id: &str, cwd: &Path, owner: &str) -> i32 {
     let winch = block_winch();
     let saved = raw();
-    let code = relay(id, &cwd, &owner, winch, true);
+    let code = relay(id, cwd, owner, None, winch, true);
     if let Some(saved) = saved {
         // SAFETY: `saved` is the mode `tcgetattr` gave for this descriptor.
         unsafe { libc::tcsetattr(0, libc::TCSANOW, &saved) };
@@ -120,7 +127,14 @@ pub(super) fn holder() -> io::Result<Option<UnixStream>> {
 
 /// Relay until shell exit or takeover. Reattach after an unexpected disconnect, restarting a
 /// crashed current holder if needed; never move a legacy session to another holder.
-fn relay(id: &str, cwd: &Path, owner: &str, winch: libc::sigset_t, existing: bool) -> i32 {
+fn relay(
+    id: &str,
+    cwd: &Path,
+    owner: &str,
+    run: Option<String>,
+    winch: libc::sigset_t,
+    existing: bool,
+) -> i32 {
     let legacy = if existing {
         None
     } else {
@@ -160,6 +174,7 @@ fn relay(id: &str, cwd: &Path, owner: &str, winch: libc::sigset_t, existing: boo
             rows,
             cols,
             env: std::env::vars_os().collect(),
+            run: run.clone(),
         };
         let tag = if existing { ATTACH_EXISTING } else { HELLO };
         if protocol::write_frame(&mut conn, tag, &hello.encode()).is_err() {
