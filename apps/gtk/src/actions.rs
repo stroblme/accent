@@ -633,10 +633,12 @@ impl App {
     pub fn rebind(&self, action: &str, accels: Option<Vec<String>>) -> Vec<String> {
         {
             let mut config = self.config.borrow_mut();
-            let at = crate::commands::index(action);
-            match (at.and_then(|i| config.commands.get_mut(i)), accels) {
-                (Some(command), accels) => {
-                    command.shortcut = accels.and_then(|accels| accels.into_iter().next())
+            // A command removed meanwhile (a hand edit with the palette open) has nothing to bind.
+            match (crate::commands::index(action), accels) {
+                (Some(i), accels) => {
+                    if let Some(command) = config.commands.get_mut(i) {
+                        command.shortcut = accels.and_then(|accels| accels.into_iter().next());
+                    }
                 }
                 (None, Some(accels)) => {
                     config.shortcuts.insert(action.to_string(), accels);
