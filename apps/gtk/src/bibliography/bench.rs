@@ -77,6 +77,16 @@ pub fn run(app: &Rc<App>) {
             .activate_action("win.bib-undo", None)
             .unwrap();
         assert_eq!(tab.text(), original);
+        // Any vault event refreshes the pane; one that left the file as it was keeps the rows,
+        // whose widgets cost a large bibliography a second of the main loop to build again.
+        glib::timeout_future(Duration::from_millis(250)).await;
+        let first = panel.entries.model.item(0);
+        panel.refresh();
+        assert_eq!(
+            panel.entries.model.item(0),
+            first,
+            "an unchanged bibliography keeps its rows"
+        );
 
         operations::transfer(
             &app,

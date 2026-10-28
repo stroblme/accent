@@ -186,6 +186,12 @@ impl Entries {
     }
     fn set(&self, result: Result<Library, String>) {
         match result {
+            // Every vault event refreshes the pane, and a save elsewhere — a PDF drawn on once a
+            // second — reads the file back unchanged. Rebuilding the rows of a large bibliography
+            // held the main loop for a second each time.
+            Ok(library)
+                if (self.library.borrow().as_ref()).is_some_and(|b| b.source == library.source) => {
+            }
             Ok(library) => {
                 let selected = self
                     .library
