@@ -73,6 +73,10 @@ pub(crate) fn paper_css(config: &Config) -> String {
     stylesheet(fg, bg, column(config).map(f64::from))
 }
 
+/// A `$$` formula's size against an inline one's (user decision 2026-10-28): a formula on a line
+/// of its own is read as a figure, and at the prose's cap height it looked small there.
+const DISPLAY_MATH: f64 = 1.15;
+
 /// The foreground at `alpha`, as CSS: the same colour the editor dims with.
 fn dim(c: gdk::RGBA, alpha: f32) -> String {
     css_rgba(crate::theme::at(c, alpha))
@@ -109,6 +113,7 @@ fn theme_css(
         || "none".to_string(),
         |share| format!("max({}px, {share:.1}%)", crate::editor::COLUMN_FLOOR),
     );
+    let gap = 1.2 / DISPLAY_MATH;
     format!(
         "html {{ background: {bg}; color: {text}; font-family: \"{family}\", sans-serif; \
          font-size: {pt}pt; }}\n\
@@ -141,9 +146,11 @@ fn theme_css(
          img {{ max-width: 100%; height: auto; }}\n\
          /* A display formula's box is its ink: unlike a line of prose it carries none of the\n\
             half-leading `line-height: 1.6` gives, so two of them would sit closer together than\n\
-            two paragraphs, and two in one paragraph would touch. 1.2em is what a heading takes\n\
-            above itself, and it is in `em` so it follows the document font. */\n\
-         math[display=\"block\"] {{ margin: 1.2em 0; }}\n\
+            two paragraphs, and two in one paragraph would touch. 1.2em of the prose is what a\n\
+            heading takes above itself, and it is in `em` so it follows the document font. A\n\
+            display formula is set larger than an inline one, and its margin is divided by as\n\
+            much so the gap stays the prose's. */\n\
+         math[display=\"block\"] {{ font-size: {DISPLAY_MATH}em; margin: {gap:.3}em 0; }}\n\
          /* Radicals and delimiters stretch only in a font with an OpenType MATH table, and the\n\
             runtime's `math` alias names none it ships: DejaVu is the GNOME runtime's. */\n\
          math {{ font-family: 'Latin Modern Math', 'STIX Two Math', 'DejaVu Math TeX Gyre', math; }}\n\
@@ -301,6 +308,16 @@ mod tests {
     fn theme_css_pads_cells_over_webkits_cellpadding() {
         let css = theme_css(FG, theme::view_bg(false), ACCENT, "Cantarell", 11.0, None);
         assert!(css.contains("padding: 6px 12px !important; }"), "{css}");
+    }
+
+    /// A display formula is larger than an inline one, with the prose's 1.2em still around it.
+    #[test]
+    fn theme_css_sets_a_display_formula_larger() {
+        let css = theme_css(FG, theme::view_bg(false), ACCENT, "Cantarell", 11.0, None);
+        assert!(
+            css.contains("math[display=\"block\"] { font-size: 1.15em; margin: 1.043em 0; }"),
+            "{css}"
+        );
     }
 
     /// A wide table scrolls on its own on screen, while on paper it is a table as any other.
