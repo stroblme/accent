@@ -10,6 +10,8 @@ mod gesture;
 mod paint;
 mod scroll;
 
+pub(crate) use paint::shown;
+
 use accent_core::pdf::Theme;
 use adw::prelude::*;
 use gtk::subclass::prelude::*;

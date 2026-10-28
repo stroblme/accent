@@ -2,10 +2,11 @@
 
 use adw::prelude::*;
 use gtk::glib;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use accent_core::config::DrawingConfig;
+use accent_core::pdf::Theme;
 
 use super::Mode;
 use super::tools::{nearest, widths};
@@ -56,6 +57,8 @@ pub struct PdfRing {
     swatches: Vec<gtk::ToggleButton>,
     erasers: Vec<gtk::ToggleButton>,
     config: RefCell<DrawingConfig>,
+    /// The document's recolouring, which the swatches are painted through.
+    theme: Rc<Cell<Theme>>,
     on_choice: RefCell<Option<OnChoice>>,
 }
 
@@ -63,6 +66,7 @@ impl PdfRing {
     /// Build the ring. It is hidden until the window says otherwise.
     pub fn new() -> Rc<PdfRing> {
         let ring = Ring::<Mode>::new();
+        let theme = Rc::new(Cell::new(Theme::Plain));
         // Nine slots outside the tools: the widths at the top, the colours after them.
         let swatch_count = crate::theme::swatches().len();
         let slots = 3 + swatch_count;
@@ -78,9 +82,12 @@ impl PdfRing {
             .collect();
         let swatches: Vec<_> = (0..swatch_count)
             .map(|i| {
-                let colour = move |_: &gtk::DrawingArea| match crate::theme::swatches()[i] {
-                    Some(rgb) => crate::theme::rgba(rgb, 1.0),
-                    None => crate::theme::accent(),
+                // As the page shows the ink, which on a recoloured page is not the colour the
+                // file is given: Solarized shows black as its blue-grey text.
+                let theme = theme.clone();
+                let colour = move |_: &gtk::DrawingArea| {
+                    let rgb = crate::theme::swatches()[i].unwrap_or_else(crate::theme::accent_rgb);
+                    crate::theme::rgba(super::view::shown(rgb, theme.get()), 1.0)
                 };
                 let button = option(3 + i, dot(14.0, colour).upcast_ref());
                 let label = match i {
@@ -108,6 +115,7 @@ impl PdfRing {
             swatches,
             erasers,
             config: RefCell::new(DrawingConfig::default()),
+            theme,
             on_choice: RefCell::new(None),
         });
         ring.wire_options();
@@ -199,6 +207,16 @@ impl PdfRing {
         let erasing = self.ring.tool() == Mode::Eraser;
         for (button, (partial, _, _)) in self.erasers.iter().zip(ERASERS) {
             check(button, erasing, erasing && config.eraser_partial == partial);
+        }
+    }
+
+    /// Paint the swatches as pages recoloured by `theme` show them.
+    pub fn set_theme(&self, theme: Theme) {
+        self.theme.set(theme);
+        for swatch in &self.swatches {
+            if let Some(dot) = swatch.child() {
+                dot.queue_draw();
+            }
         }
     }
 

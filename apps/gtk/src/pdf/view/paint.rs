@@ -362,14 +362,19 @@ fn stroke_path(stroke: &Stroke, rect: &PageRect, layout: &Layout) -> gsk::Path {
 /// pixel of it, laid over the page at its alpha, is what the remap of the two blended is.
 fn as_rendered(style: accent_core::pdf::InkStyle, theme: Theme) -> gdk::RGBA {
     let [r, g, b, a] = style.rgba;
-    let rgb = match theme {
+    theme::rgba(shown([r, g, b], theme), f32::from(a) / 255.0)
+}
+
+/// An opaque colour as a page in `theme` shows it: what the render's remap makes of it.
+pub(crate) fn shown(rgb: [u8; 3], theme: Theme) -> [u8; 3] {
+    match theme {
         Theme::Recolour { paper, ink } => {
-            let px = accent_core::recolour::recolour_pixel([r, g, b, 255], paper, ink);
-            [px[0], px[1], px[2]]
+            let [r, g, b, _] =
+                accent_core::recolour::recolour_pixel([rgb[0], rgb[1], rgb[2], 255], paper, ink);
+            [r, g, b]
         }
-        Theme::Plain => [r, g, b],
-    };
-    theme::rgba(rgb, f32::from(a) / 255.0)
+        Theme::Plain => rgb,
+    }
 }
 
 /// A `Multiply` stroke as the render leaves it: `page`, the page drawn so far, again inside the
@@ -431,5 +436,19 @@ pub(super) fn paper(theme: Theme) -> gdk::RGBA {
     match theme {
         Theme::Recolour { paper, .. } => crate::theme::rgba(paper, 1.0),
         Theme::Plain => gdk::RGBA::WHITE,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Theme, shown};
+
+    #[test]
+    fn a_colour_shows_as_the_page_remaps_it() {
+        let (paper, ink) = ([0, 43, 54], [131, 148, 150]);
+        let page = Theme::Recolour { paper, ink };
+        assert_eq!(shown([0, 0, 0], page), ink, "black is the page's ink");
+        assert_eq!(shown([255, 255, 255], page), paper);
+        assert_eq!(shown([0, 0, 0], Theme::Plain), [0, 0, 0]);
     }
 }

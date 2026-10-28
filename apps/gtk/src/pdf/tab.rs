@@ -491,6 +491,7 @@ impl PdfTab {
         }
         self.view.set_theme(theme);
         self.thumbs.set_theme(theme);
+        self.ring.set_theme(theme);
     }
 
     pub fn toggle_invert(&self) {
