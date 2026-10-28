@@ -258,6 +258,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pdf-line", "Line", &[]),
     ("win.pdf-rect", "Rectangle", &[]),
     ("win.pdf-circle", "Circle", &[]),
+    ("win.pdf-text", "Text", &[]),
     ("win.pdf-adjust", "Adjust", &[]),
     ("win.insert-sketch", "Insert Sketch", &[]),
     // A page put in before or after, taken out, or moved from the one being read. The thumbnail

@@ -258,6 +258,7 @@ impl App {
             "pdf-line" => self.pdf_mode(pdfview::Mode::Line),
             "pdf-rect" => self.pdf_mode(pdfview::Mode::Rect),
             "pdf-circle" => self.pdf_mode(pdfview::Mode::Circle),
+            "pdf-text" => self.pdf_mode(pdfview::Mode::Text),
             "pdf-adjust" => self.pdf_mode(pdfview::Mode::Adjust),
             "insert-sketch" => self.insert_sketch(),
             "pdf-add-page-before" => self.pdf_add_page(false),

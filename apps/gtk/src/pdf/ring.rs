@@ -22,6 +22,10 @@ const ERASERS: [(bool, &str, &str); 2] = [
     (true, "edit-cut-symbolic", "Erase Only What It Passes Over"),
 ];
 
+/// What the three width buttons are called, and for the text, which they size.
+const WIDTHS: [&str; 3] = ["Narrow Width", "Medium Width", "Wide Width"];
+const SIZES: [&str; 3] = ["Small Text", "Medium Text", "Large Text"];
+
 /// What an option button picks for the tool in hand.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Choice {
@@ -33,10 +37,12 @@ pub enum Choice {
 }
 
 impl Choice {
-    /// Write the choice for `tool` into the config. The shapes share the pen's style, and the
-    /// eraser's width is its reach.
+    /// Write the choice for `tool` into the config. The shapes share the pen's style, the
+    /// eraser's width is its reach and the text's its size.
     pub fn apply(self, tool: Mode, config: &mut DrawingConfig) {
         match (tool.style_owner(), self) {
+            (Mode::Text, Choice::Width(w)) => config.text_size = w,
+            (Mode::Text, Choice::Colour(c)) => config.text_color = c,
             (Mode::Eraser, Choice::Width(w)) => config.eraser_radius = w,
             (Mode::Eraser, Choice::Partial(p)) => config.eraser_partial = p,
             (Mode::Eraser, Choice::Colour(_)) | (_, Choice::Partial(_)) => {}
@@ -78,11 +84,7 @@ impl PdfRing {
         let widths: Vec<_> = [5.0, 8.0, 12.0]
             .into_iter()
             .enumerate()
-            .map(|(i, diameter)| {
-                let button = option(i, dot(diameter, |area| area.color()).upcast_ref());
-                button.set_tooltip_text(Some(["Narrow Width", "Medium Width", "Wide Width"][i]));
-                button
-            })
+            .map(|(i, diameter)| option(i, dot(diameter, |area| area.color()).upcast_ref()))
             .collect();
         let swatches: Vec<_> = (0..swatch_count)
             .map(|i| {
@@ -188,7 +190,12 @@ impl PdfRing {
         let (width, colour) = match tool {
             Mode::Eraser => (config.eraser_radius, None),
             Mode::Highlighter => (config.highlighter_width, Some(config.highlighter_color)),
+            Mode::Text => (config.text_size, Some(config.text_color)),
             _ => (config.pen_width, Some(config.pen_color)),
+        };
+        let names = match tool {
+            Mode::Text => SIZES,
+            _ => WIDTHS,
         };
         let check = |button: &gtk::ToggleButton, shown: bool, wanted: bool| {
             button.set_visible(shown);
@@ -200,6 +207,7 @@ impl PdfRing {
         let nearest = widths.map(|w| nearest(w, width));
         for (i, button) in self.widths.iter().enumerate() {
             check(button, widths.is_some(), nearest == Some(i));
+            button.set_tooltip_text(Some(names[i]));
         }
         let swatches = crate::theme::swatches();
         let shown = widths.is_some() && colour.is_some();
@@ -316,5 +324,12 @@ mod tests {
         assert!(!config.eraser_partial, "only the eraser has two ways");
         Choice::Partial(true).apply(Mode::Eraser, &mut config);
         assert!(config.eraser_partial);
+        Choice::Width(20.0).apply(Mode::Text, &mut config);
+        Choice::Colour(Some([4, 5, 6])).apply(Mode::Text, &mut config);
+        assert_eq!(
+            (config.text_size, config.text_color),
+            (20.0, Some([4, 5, 6]))
+        );
+        assert_eq!(config.pen_width, 4.0, "the text sizes nothing else");
     }
 }

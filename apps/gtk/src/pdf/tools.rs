@@ -18,6 +18,8 @@ pub enum Mode {
     Rect,
     /// A circle grown from the press outwards.
     Circle,
+    /// Type onto the page: a click opens a box there, or on a text of ours types it again.
+    Text,
     /// Take hold of a stroke: drag its middle to move it, an edge to stretch it, a corner to
     /// scale it.
     Adjust,
@@ -48,15 +50,16 @@ impl Mode {
             Mode::Line => "win.pdf-line",
             Mode::Rect => "win.pdf-rect",
             Mode::Circle => "win.pdf-circle",
+            Mode::Text => "win.pdf-text",
             Mode::Adjust => "win.pdf-adjust",
         })
     }
 
-    /// Whose width and colour a tool draws in: its own for the highlighter and the eraser, the
-    /// pen's for the pen and every shape.
+    /// Whose width and colour a tool draws in: its own for the highlighter, the eraser and the
+    /// text, whose width is its size, the pen's for the pen and every shape.
     pub fn style_owner(self) -> Mode {
         match self {
-            Mode::Highlighter | Mode::Eraser => self,
+            Mode::Highlighter | Mode::Eraser | Mode::Text => self,
             _ => Mode::Pen,
         }
     }
@@ -72,6 +75,7 @@ impl crate::ring::Tool for Mode {
         (Mode::Line, "tool-line-symbolic"),
         (Mode::Rect, "tool-rect-symbolic"),
         (Mode::Circle, "tool-circle-symbolic"),
+        (Mode::Text, "insert-text-symbolic"),
         (Mode::Adjust, "tool-adjust-symbolic"),
     ];
 
@@ -97,25 +101,27 @@ pub enum Hand {
 
 /// What a drag begun by `hand` does with `tool` in hand. A pen's tip draws and its eraser erases
 /// under any tool; a mouse draws only while it may (`mouse_draws`: no pen on the seat, or the
-/// preference), and selects otherwise. A finger is `None` under every tool: it never draws, and
-/// its drag is the scrolled window's to pan, a long press first making it a selection.
+/// preference), and selects otherwise, but always places text, which is typed anyway. A finger
+/// is `None` under every tool: it never draws, and its drag is the scrolled window's to pan, a
+/// long press first making it a selection.
 pub fn drag_of(tool: Mode, hand: Hand, mouse_draws: bool) -> Option<Mode> {
     match hand {
         Hand::Finger => None,
         _ if tool == Mode::Select => Some(Mode::Select),
         Hand::Pen { eraser: true } => Some(Mode::Eraser),
         Hand::Pen { eraser: false } => Some(tool),
-        Hand::Mouse if mouse_draws => Some(tool),
+        Hand::Mouse if mouse_draws || tool == Mode::Text => Some(tool),
         Hand::Mouse => Some(Mode::Select),
     }
 }
 
 /// Three widths per style, in page points — fine, the default, bold: the pen's, which the shapes
-/// draw in too, the highlighter's, and the eraser's reach.
-const WIDTHS: [(Mode, [f32; 3]); 3] = [
+/// draw in too, the highlighter's, the eraser's reach, and typed text's size.
+const WIDTHS: [(Mode, [f32; 3]); 4] = [
     (Mode::Pen, [0.75, 1.5, 3.0]),
     (Mode::Highlighter, [6.0, 10.5, 18.0]),
     (Mode::Eraser, [3.0, 6.0, 12.0]),
+    (Mode::Text, [10.0, 14.0, 20.0]),
 ];
 
 /// The three widths `tool` offers, by whose style it draws in; none for a tool without one.
@@ -345,6 +351,7 @@ mod tests {
         assert_eq!(drag_of(Mode::Select, eraser, false), Some(Mode::Select));
         assert_eq!(drag_of(Mode::Pen, Hand::Mouse, true), Some(Mode::Pen));
         assert_eq!(drag_of(Mode::Pen, Hand::Mouse, false), Some(Mode::Select));
+        assert_eq!(drag_of(Mode::Text, Hand::Mouse, false), Some(Mode::Text));
     }
 
     #[test]
@@ -360,6 +367,7 @@ mod tests {
             (Mode::Pen, fresh.pen_width),
             (Mode::Highlighter, fresh.highlighter_width),
             (Mode::Eraser, fresh.eraser_radius),
+            (Mode::Text, fresh.text_size),
         ] {
             assert_eq!(
                 width_of(tool, width),

@@ -398,12 +398,14 @@ impl PdfView {
         if mode != Mode::Adjust {
             self.clear_inks();
         }
-        // The plain pointer for all three, and never the I-beam the page otherwise shows: with a
+        // The plain pointer for every tool, and never the I-beam the page otherwise shows: with a
         // tool in hand a drag draws rather than selects, and a cursor that says "text" invites
-        // exactly the thing that will not happen. A stylus's next move puts its dot back.
+        // exactly the thing that will not happen — but under the Text tool, where a click types.
+        // A stylus's next move puts its dot back.
         self.imp().dot.set(false);
         self.set_cursor_from_name(match mode {
             Mode::Select => None,
+            Mode::Text => Some("text"),
             _ => Some("default"),
         });
     }

@@ -310,7 +310,7 @@ const OPTION: i32 = 24;
 mod tests {
     use super::{BUTTON, OPTION, OPTIONS, ORBIT, orbit};
 
-    /// The most tools the inner orbit holds a button apart; the PDF has seven.
+    /// The most tools the inner orbit holds a button apart; the PDF has eight.
     const TOOLS: usize = 9;
 
     #[test]

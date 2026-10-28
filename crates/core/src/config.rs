@@ -272,6 +272,11 @@ pub struct DrawingConfig {
     /// Whether the eraser takes only the part of a stroke it passes over, leaving the rest as
     /// strokes of their own, rather than the whole stroke.
     pub eraser_partial: bool,
+    /// The size typed text is set in, in points.
+    pub text_size: f32,
+    /// `None` is the accent, as for the pen.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_color: Option<[u8; 3]>,
 }
 
 impl Default for DrawingConfig {
@@ -285,6 +290,8 @@ impl Default for DrawingConfig {
             highlighter_color: None,
             eraser_radius: 3.0,
             eraser_partial: false,
+            text_size: 14.0,
+            text_color: None,
         }
     }
 }

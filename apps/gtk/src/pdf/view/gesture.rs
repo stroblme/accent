@@ -63,7 +63,7 @@ impl PdfView {
                     return;
                 };
                 match mode {
-                    Mode::Select => {}
+                    Mode::Select | Mode::Text => {}
                     mode if mode.draws() => {
                         let Some((page, _, _)) = obj.page_point(x, y) else {
                             return;
@@ -105,6 +105,7 @@ impl PdfView {
                     return;
                 };
                 match mode {
+                    Mode::Text => {}
                     Mode::Select => {
                         // A few pixels of travel is a click with a shaky hand, not a
                         // selection. And the strip selects nothing: a drag there moves the
@@ -303,9 +304,10 @@ impl PdfView {
         if self.imp().dot.replace(dot) == dot {
             return;
         }
-        match dot {
-            true => self.set_cursor(Some(&dot_cursor())),
-            false => self.set_cursor_from_name(Some("default")),
+        match (dot, self.imp().mode.get()) {
+            (true, _) => self.set_cursor(Some(&dot_cursor())),
+            (false, Mode::Text) => self.set_cursor_from_name(Some("text")),
+            (false, _) => self.set_cursor_from_name(Some("default")),
         }
     }
 
