@@ -166,6 +166,14 @@ impl App {
         self.relinks_of(key).borrow().saved
     }
 
+    /// Whether an upload of `key` starting now carries a page edit the host has not got yet,
+    /// which changes the text the host's index read of the file.
+    pub(crate) fn carries_pages(&self, key: &str) -> bool {
+        let relinks = self.relinks_of(key);
+        let relinks = relinks.borrow();
+        relinks.saved > relinks.landed
+    }
+
     /// An upload of `key` landed on the host carrying the page edits numbered below `carried`:
     /// their notes follow now.
     pub(crate) fn pages_landed(self: &Rc<Self>, key: &str, carried: u64) {

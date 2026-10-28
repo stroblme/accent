@@ -90,10 +90,18 @@ impl Local {
     }
 
     /// Land the upload staged beside `rel` ([`crate::ssh::stage_cmd`]) if `rel` still has the
-    /// etag the window sent it for ([`fs::commit`]), the commit of a remote write-back. The host's
-    /// watcher indexes it as it would a write by anyone else.
-    pub fn commit(&self, rel: &str, staged: &str, expected: Etag) -> Result<Etag> {
-        fs::commit(&self.resolve(rel)?, staged, expected).map_err(named(rel))
+    /// etag the window sent it for ([`fs::commit`]), the commit of a remote write-back, and tell
+    /// the worker as [`saved`](Self::saved) does: the host's watcher echo is then the vault's
+    /// own, no news for the window, and with `same_text`, ink drawn and no page edited, the index
+    /// keeps the text it read of it.
+    pub fn commit(&self, rel: &str, staged: &str, expected: Etag, same_text: bool) -> Result<Etag> {
+        let etag = fs::commit(&self.resolve(rel)?, staged, expected).map_err(named(rel))?;
+        self.post(Msg::Saved {
+            rel: rel.to_string(),
+            etag,
+            same_text,
+        });
+        Ok(etag)
     }
 
     /// Read any file as text, saying so when it is binary or too big to hold. What a tab opens

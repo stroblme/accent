@@ -679,7 +679,8 @@ impl Remote {
     /// overwriting later local edits and keeping edits made during upload unsent.
     /// Return `NotFound` for a moved or deleted host file rather than recreating
     /// it under its old name; readers following a rename retry at the new path.
-    pub fn push(&self, rel: &str) -> Result<Pushed> {
+    /// `same_text` when no page edit goes up with it, so the host's index keeps the text it read.
+    pub fn push(&self, rel: &str, same_text: bool) -> Result<Pushed> {
         let (Some(dest), Some(stamp)) = (
             ssh::cache_path(&self.url, rel),
             ssh::stamp_path(&self.url, rel),
@@ -702,7 +703,7 @@ impl Remote {
         let path = self.remote_path(rel);
         let stage = |size| ssh::run(&self.url, &self.ctl, &ssh::stage_cmd(&path, &staged, size));
         let copy = self.send(&dest, stage, &|_, _| (), &link::Stop::default())?;
-        match self.call("commit", json!([rel, staged, current])) {
+        match self.call("commit", json!([rel, staged, current, same_text])) {
             Ok(host) => {
                 let _ = stamp.set(&Stamped { host, copy });
                 Ok(Pushed::Sent)

@@ -197,7 +197,7 @@ fn a_remote_vault_connects_indexes_and_answers() {
     let mine: Vec<u8> = (0..16 << 20).map(|i| (i % 253) as u8).collect();
     std::fs::write(&cached, &mine).unwrap();
     let pushed = std::thread::scope(|s| {
-        let push = s.spawn(|| remote.push("race.pdf"));
+        let push = s.spawn(|| remote.push("race.pdf", true));
         let t = Instant::now();
         let staged = || {
             let names = on_host(&url, &format!("ls -A {p}"));
@@ -224,6 +224,32 @@ fn a_remote_vault_connects_indexes_and_answers() {
         Some(mine.len() as u64)
     );
     assert!(!on_host(&url, &format!("ls -A {p}")).contains(".accent-up-"));
+
+    // A write-back of a PDF drawn on is the vault's own write on the host: its watcher's news
+    // of it is no change for the window, while a write there by anyone else is.
+    vault.write_file("drawn.pdf", &bookmarked_pdf()).unwrap();
+    let cached = vault.fetch("drawn.pdf").unwrap();
+    let news = |change: &dyn Fn()| {
+        for _ in events.try_iter() {}
+        change();
+        let quiet = Instant::now() + Duration::from_secs(3);
+        while let Ok(event) = events.recv_timeout(quiet.saturating_duration_since(Instant::now())) {
+            if matches!(&event, Event::FileChanged(rel) if rel == "drawn.pdf") {
+                return true;
+            }
+        }
+        false
+    };
+    let drawn = || {
+        let mut bytes = std::fs::read(&cached).unwrap();
+        bytes.extend_from_slice(b"\n% drawn\n");
+        std::fs::write(&cached, &bytes).unwrap();
+        let pushed = remote.push("drawn.pdf", true);
+        assert!(matches!(pushed, Ok(accent_api::remote::Pushed::Sent)));
+    };
+    assert!(!news(&drawn), "the window heard of its own write-back");
+    let theirs = || drop(on_host(&url, &format!("echo theirs >> {p}/drawn.pdf")));
+    assert!(news(&theirs), "a write by someone else went unheard");
 
     // A row dropped into another window's vault: walked where it is, then copied file by file
     // from one machine straight to the other, a name taken there kept unless replaced.
