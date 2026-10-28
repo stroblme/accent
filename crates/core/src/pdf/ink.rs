@@ -70,12 +70,14 @@ pub enum Seg {
     Close,
 }
 
-/// A stroke taken off its page, and what [`PdfDoc::redraw_ink`](super::PdfDoc::redraw_ink) puts
-/// back.
+/// A stroke or a text taken off its page, and what
+/// [`PdfDoc::redraw_ink`](super::PdfDoc::redraw_ink) puts back.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Drawn {
     /// One of ours: what it drew, which is drawn again at the end of the page's `/Annots`.
     Ours { segs: Vec<Seg>, style: InkStyle },
+    /// A text of ours: what it said and where, which is typed again at the end of `/Annots`.
+    Text(super::Typed),
     /// Another editor's: the entries that left `/Annots` with it, its own at `index` and its
     /// popup's, each with the place it had. Only its own dictionary draws it as it was, so the
     /// same entries go back where they were; the dictionaries were never touched. `area` is the

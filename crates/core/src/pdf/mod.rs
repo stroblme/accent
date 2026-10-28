@@ -14,6 +14,7 @@ mod pages;
 #[cfg(test)]
 mod tests;
 mod text;
+mod typed;
 
 pub use crate::page_edit::PageEdit;
 pub use annot::{LinkHighlights, highlight_quads, link_annotations};
@@ -21,8 +22,9 @@ pub use doc::{A4, PdfDoc, blank_pdf};
 pub use ink::{
     Drawn, IDENTITY, Matrix, apply, catmull_rom, cut, hit, invert, rotation, swept, then, thin,
 };
-pub use ledger::{Ink, NamedInk, Walked, fresh_id};
+pub use ledger::{Ink, NamedInk, NamedText, Walked, fresh_id};
 pub use text::{line_top, link_with_alias, same_quads, selection_link, selection_quads};
+pub use typed::{LEADING, PADDING, TextStyle, Typed, TypedText, typeable};
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};

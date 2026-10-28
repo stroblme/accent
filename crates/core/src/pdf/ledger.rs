@@ -11,6 +11,9 @@ use crate::pdf::{self, PageEdit, PdfDoc};
 /// An ink stroke's stable ID and shape. Unlike its `/Annots` index, the ID survives earlier edits.
 pub type NamedInk = (u32, pdf::InkShape);
 
+/// A text of ours under its stable ID, as [`NamedInk`] names a stroke.
+pub type NamedText = (u32, pdf::TypedText);
+
 /// Allocate a process-wide stroke ID, including for eraser fragments not yet in the document.
 pub fn fresh_id() -> u32 {
     static NEXT: AtomicU32 = AtomicU32::new(1);
@@ -36,11 +39,18 @@ pub enum Step {
         id: u32,
         kept: Option<pdf::Drawn>,
     },
-    /// A stroke was moved or resized by `matrix`.
+    /// A stroke was moved or resized by `matrix`, or a text moved.
     Moved {
         page: usize,
         id: u32,
         matrix: pdf::Matrix,
+    },
+    /// A text of ours was typed again, in its place: `kept` is what it said before, and once
+    /// Undo has put that back, what Redo makes it say again.
+    Retyped {
+        page: usize,
+        id: u32,
+        kept: pdf::Typed,
     },
     /// A page was put in, taken out or moved. A delete, and an import, keep the pages they take
     /// out, which Undo and Redo put back. `id` names the step to whatever keeps something of its
@@ -192,11 +202,24 @@ impl Ink {
         self.record(Step::Moved { page, id, matrix }, false);
     }
 
+    /// The text at `index` was typed again; `was` is what it said before.
+    pub fn retyped(&mut self, page: usize, index: usize, was: pdf::Typed) {
+        let id = self.id_at(page, index).unwrap_or_else(fresh_id);
+        self.record(
+            Step::Retyped {
+                page,
+                id,
+                kept: was,
+            },
+            false,
+        );
+    }
+
     /// The stroke at `index` was taken off as `was` says, with another editor's popup. Its id.
     fn taken(&mut self, page: usize, index: usize, was: &pdf::Drawn) -> u32 {
         let id = self.id_at(page, index).unwrap_or_else(fresh_id);
         match was {
-            pdf::Drawn::Ours { .. } => {
+            pdf::Drawn::Ours { .. } | pdf::Drawn::Text(_) => {
                 self.removed(page, index);
             }
             pdf::Drawn::Foreign { entries, .. } => {
@@ -212,7 +235,7 @@ impl Ink {
     /// editor's where it was, with its popup, which has no name.
     fn put_back(&mut self, page: usize, id: u32, was: &pdf::Drawn) {
         match was {
-            pdf::Drawn::Ours { .. } => self.appended(page, id),
+            pdf::Drawn::Ours { .. } | pdf::Drawn::Text(_) => self.appended(page, id),
             pdf::Drawn::Foreign { index, entries, .. } => {
                 let slots = self.ids.entry(page).or_default();
                 for (at, _) in entries {
@@ -312,6 +335,16 @@ impl Ink {
             .collect()
     }
 
+    /// Every text of ours on `page`, each under the id the tools will name it by.
+    pub fn named_texts(&mut self, doc: &PdfDoc, page: usize) -> Vec<NamedText> {
+        self.note(page, doc.annotation_count(page).unwrap_or(0));
+        doc.texts(page)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|text| Some((self.id_at(page, text.index)?, text)))
+            .collect()
+    }
+
     /// The stroke at `index` of a noted `page` under its id, read alone: what a stroke just drawn
     /// hands the tools, rather than every stroke of its page read again.
     pub fn named_at(&mut self, doc: &PdfDoc, page: usize, index: usize) -> Option<NamedInk> {
@@ -376,6 +409,13 @@ impl Ink {
                 };
                 self.edit(doc, made, kept.as_deref_mut())?;
                 Ok(Walked::Pages(made, *id))
+            }
+            // Either way, what it says swaps with what was kept.
+            (Step::Retyped { page, id, kept }, _) => {
+                let index = self.locate(doc, *page, *id)?;
+                let (was, area) = doc.retype(*page, index, &kept.text, kept.style)?;
+                *kept = was;
+                Ok(Walked::Ink(*page, area))
             }
             (Step::Moved { page, id, matrix }, _) => {
                 let index = self.locate(doc, *page, *id)?;

@@ -1,7 +1,7 @@
-//! Appearance streams: the operators an annotation's drawing needs (ISO 32000-1 §8.4–8.5), and
-//! the form XObject that holds them.
+//! Appearance streams: the operators an annotation's drawing and its text need (ISO 32000-1
+//! §8.4–8.5, §9.3–9.4), and the form XObject that holds them.
 
-use crate::write::real;
+use crate::write::{real, string};
 use crate::{Dict, Object, Stream};
 
 /// A content stream, an operator at a time.
@@ -92,6 +92,35 @@ impl Content {
         self.0.push(b'/');
         self.0.extend(name);
         self.op(&[], " gs")
+    }
+
+    /// `BT`: a text object begins, its lines set from the origin.
+    pub fn begin_text(&mut self) -> &mut Self {
+        self.op(&[], "BT")
+    }
+
+    /// `ET`: the text object ends.
+    pub fn end_text(&mut self) -> &mut Self {
+        self.op(&[], "ET")
+    }
+
+    /// `Tf`: the font the resources name `name`, at `size`.
+    pub fn font(&mut self, name: &[u8], size: f32) -> &mut Self {
+        self.0.push(b'/');
+        self.0.extend(name);
+        self.0.push(b' ');
+        self.op(&[size], "Tf")
+    }
+
+    /// `Td`: the next line starts this far from where the last one did.
+    pub fn next_line(&mut self, (x, y): (f32, f32)) -> &mut Self {
+        self.op(&[x, y], "Td")
+    }
+
+    /// `Tj`: `text`, in the font's encoding, set from where the line is.
+    pub fn show(&mut self, text: &[u8]) -> &mut Self {
+        string(&mut self.0, text);
+        self.op(&[], " Tj")
     }
 
     pub fn finish(&mut self) -> Vec<u8> {

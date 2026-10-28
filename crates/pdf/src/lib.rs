@@ -9,6 +9,7 @@
 mod content;
 mod crypt;
 mod filter;
+mod font;
 mod lex;
 mod objstm;
 mod pdf;
@@ -21,6 +22,7 @@ mod xref;
 pub mod fixtures;
 
 pub use content::{Content, form};
+pub use font::{helvetica_width, winansi};
 pub use pdf::Pdf;
 pub use source::Source;
 pub use update::Update;

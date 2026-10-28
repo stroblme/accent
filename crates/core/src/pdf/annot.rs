@@ -13,6 +13,7 @@ use super::ink::{
     thin, transformed,
 };
 use super::text::{line_top, same_quads, selection_quads};
+use super::typed::Typed;
 use super::{
     Comment, Cut, Glyph, Highlight, InkShape, InkStyle, Matrix, PdfDoc, Rect, Shape, lock,
 };
@@ -257,11 +258,11 @@ impl PdfDoc {
         Ok(self.page(page)?.annotations().len())
     }
 
-    /// Take one `/Ink` annotation off a page by its index in `/Annots` — which is all an erase is,
-    /// and all its undo is — and say what box it left. One of ours goes, what it drew kept for
-    /// [`PdfDoc::redraw_ink`]; another editor's goes with its popup, both kept as they were for
-    /// the same to put back (see [`Drawn`]). Any other kind of annotation is refused, so an index
-    /// that has gone stale cannot take a link or a highlight.
+    /// Take one `/Ink` annotation or text of ours off a page by its index in `/Annots` — which is
+    /// all an erase is, and all its undo is — and say what box it left. One of ours goes, what it
+    /// drew or said kept for [`PdfDoc::redraw_ink`]; another editor's stroke goes with its popup,
+    /// both kept as they were for the same to put back (see [`Drawn`]). Any other kind of
+    /// annotation is refused, so an index that has gone stale cannot take a link or a highlight.
     pub fn take_ink(&mut self, page: usize, index: usize) -> Result<(Drawn, Rect)> {
         let taken = self.take(page, index)?;
         self.reopen()?;
@@ -269,10 +270,12 @@ impl PdfDoc {
     }
 
     /// Put back a stroke [`PdfDoc::take_ink`] took, and say what box it covers: one of ours drawn
-    /// again at the end of the page's `/Annots`, another editor's where it was.
+    /// again at the end of the page's `/Annots`, and a text of ours typed again there, another
+    /// editor's where it was.
     pub fn redraw_ink(&mut self, page: usize, drawn: &Drawn) -> Result<Rect> {
         match drawn {
             Drawn::Ours { segs, style } => self.drawn(page, segs, *style),
+            Drawn::Text(typed) => self.typed(page, typed, None),
             Drawn::Foreign { entries, area, .. } => {
                 let mut list = self.cos.annots(page)?;
                 for (at, entry) in entries {
@@ -397,8 +400,17 @@ impl PdfDoc {
     ///
     /// Our strokes are redrawn to preserve line width. External strokes keep their position and
     /// are resized through `/Rect`, preserving their appearance and `/InkList`; a turn, which no
-    /// `/Rect` can fit, turns their appearance as a picture (`Objects::turn`).
+    /// `/Rect` can fit, turns their appearance as a picture (`Objects::turn`). A text of ours
+    /// moves in its place, its corner where `m` takes it, set as it was.
     pub fn transform_ink(&mut self, page: usize, index: usize, m: Matrix) -> Result<(Rect, bool)> {
+        if let Ok((at, typed, was)) = self.typed_at(page, index) {
+            let moved = Typed {
+                at: apply(m, typed.at),
+                ..typed
+            };
+            let now = self.typed(page, &moved, Some(at))?;
+            return Ok((was.union(now), true));
+        }
         let read = self.read_at(page, index)?;
         if read.ours {
             let (_, was) = self.take(page, index)?;
@@ -428,9 +440,15 @@ impl PdfDoc {
             .ok_or_else(|| not_drawn(page, index))
     }
 
-    /// Take the `/Ink` annotation at `index` off a page, as [`PdfDoc::take_ink`] does, without
-    /// opening the document again, and say what box it left.
+    /// Take the `/Ink` annotation or the text of ours at `index` off a page, as
+    /// [`PdfDoc::take_ink`] does, without opening the document again, and say what box it left.
     fn take(&mut self, page: usize, index: usize) -> Result<(Drawn, Rect)> {
+        if let Ok((_, typed, bounds)) = self.typed_at(page, index) {
+            let mut entries = self.cos.annots(page)?;
+            entries.remove(index);
+            self.cos.set_annots(page, entries)?;
+            return Ok((Drawn::Text(typed), bounds));
+        }
         let read = self.read_at(page, index)?;
         let mut entries = self.cos.annots(page)?;
         if index >= entries.len() {
@@ -532,9 +550,9 @@ impl PdfDoc {
     }
 }
 
-/// What every stroke of ours is named by (`/NM`), followed by its object number: unique on its
-/// page, as the name must be, and ours to recognise.
-const OURS: &[u8] = b"accent-";
+/// What every stroke and text of ours is named by (`/NM`), followed by its object number: unique
+/// on its page, as the name must be, and ours to recognise.
+pub(super) const OURS: &[u8] = b"accent-";
 
 impl Objects {
     /// One stroke of ours, `segs` in top-left page points on a page `height` points tall, at the
@@ -625,12 +643,18 @@ impl Objects {
             (b"AP", Object::Dict(dict([(b"N", Object::Ref(appearance))]))),
         ]);
         let at = self.append_annot(page, annot)?;
+        self.name_ours(at)?;
+        Ok(bounds)
+    }
+
+    /// The annotation `at` named as ours, by [`OURS`] and its object number.
+    pub(super) fn name_ours(&mut self, at: accent_pdf::Ref) -> Result<()> {
         let mut named = self.dict(at)?;
         let mut nm = OURS.to_vec();
         nm.extend(at.num.to_string().bytes());
         named.set(b"NM", Object::String(nm));
         self.update.set(at, Object::Dict(named));
-        Ok(bounds)
+        Ok(())
     }
 
     /// One `/Highlight` over `h.quads` on a page `height` points tall, at the end of its page's
@@ -773,7 +797,7 @@ impl Objects {
     }
 
     /// A rectangle as the file writes one, `[x0 y0 x1 y1]` in its own space, normalised.
-    fn area(&self, o: &Object) -> Option<Rect> {
+    pub(super) fn area(&self, o: &Object) -> Option<Rect> {
         let [x0, y0, x1, y1] = <[f32; 4]>::try_from(numbers(&self.resolve(o).ok()?)?).ok()?;
         Some(Rect::from_corners((x0, y0), (x1, y1)))
     }
@@ -816,7 +840,7 @@ impl Objects {
 }
 
 /// `/F 4`: printed, as a mark on the page should be.
-const PRINT: i64 = 4;
+pub(super) const PRINT: i64 = 4;
 
 /// The numbers of an array, or `None` for anything else.
 fn numbers(o: &Object) -> Option<Vec<f32>> {

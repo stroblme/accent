@@ -78,7 +78,7 @@ fn name(out: &mut Vec<u8>, n: &[u8]) {
 }
 
 /// A literal `(…)` string, or a hex one for bytes that are not text.
-fn string(out: &mut Vec<u8>, s: &[u8]) {
+pub(crate) fn string(out: &mut Vec<u8>, s: &[u8]) {
     if s.iter()
         .any(|&b| !(b' '..=b'~').contains(&b) && !b"\n\r\t".contains(&b))
     {

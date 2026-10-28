@@ -150,3 +150,22 @@ pub(super) fn text(s: &str) -> Object {
         }
     }
 }
+
+/// A text string as [`text`] writes one: UTF-16BE after its byte order mark, else a character a
+/// byte. PDFDocEncoding differs from Latin-1, which the bytes are read as, only in 0x18–0x1F and
+/// 0x80–0xA0, which no text of ours holds.
+pub(super) fn decoded(s: &[u8]) -> String {
+    match s.strip_prefix(&[0xfe, 0xff]) {
+        Some(units) => {
+            let units = units
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&u| u16::from_be_bytes(u));
+            char::decode_utf16(units)
+                .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
+                .collect()
+        }
+        None => s.iter().map(|&b| char::from(b)).collect(),
+    }
+}
