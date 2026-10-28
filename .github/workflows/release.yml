@@ -9,7 +9,19 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # The binaries report Cargo.toml's version, so the commit tagged sets it to the tag's
+  # (with Cargo.lock and a <release> in the metainfo).
+  version:
+    name: tag matches Cargo.toml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml)
+          [ "$v" = "${GITHUB_REF_NAME#v}" ] || { echo "::error::Cargo.toml says $v, the tag $GITHUB_REF_NAME"; exit 1; }
+
   tests:
+    needs: version
     uses: ./.github/workflows/tests.yml
 
   apk:
