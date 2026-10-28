@@ -728,8 +728,8 @@ impl View {
         self.imp().ghost.borrow().clone()
     }
 
-    /// Animate line fade with the chrome transition; jump when animations
-    /// are disabled or the unrealized view lacks a frame clock.
+    /// Animate line fade with the chrome transition, eased as its CSS `ease`; jump when
+    /// animations are disabled or the unrealized view lacks a frame clock.
     pub fn set_fade(&self, on: bool) {
         let imp = self.imp();
         if imp.fade_on.replace(on) == on {
@@ -754,7 +754,8 @@ impl View {
             let to = if imp.fade_on.get() { 1.0 } else { 0.0 };
             let t = ((clock.frame_time() - start) as f32 / (crate::fade::RAMP_MS * 1000) as f32)
                 .min(1.0);
-            imp.fade.set(from + (to - from) * t);
+            imp.fade
+                .set(from + (to - from) * adw::Easing::Ease.ease(f64::from(t)) as f32);
             obj.queue_draw();
             if t < 1.0 {
                 return glib::ControlFlow::Continue;

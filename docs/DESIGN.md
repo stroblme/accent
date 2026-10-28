@@ -2035,17 +2035,22 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 
 ## Motion
 
-- Switches crossfade and new pages fade in, over 150 ms, easing out (`widgets::FADE_MS`): the sidebar's panes, a tab picked in the pane the reader is in (a newly opened one too), a PDF's pages on their first open, or the spinner that took their place once the open had taken 160 ms, the PDF's "Cannot Open" page, the card a held `Ctrl+Tab` shows, and each new output of a notebook's run (Notebook); a toast slides into the pile and out of it, and the toasts slide out of the status bar's way in presentation mode, over the same 150 ms.
+- Every fade, crossfade and slide takes 250 ms and eases out, libadwaita's ease-out cubic (`widgets::FADE_MS`, user decision 2026-10-28): GtkRevealer's own default, which a revealer keeps and a stack is set to, a stylesheet transition writing the easing out (`widgets::CSS_EASING`).
+  Switches crossfade and new pages fade in: the sidebar's panes, a tab picked in the pane the reader is in (a newly opened one too), a PDF's pages on their first open, or the spinner that took their place once the open had taken 160 ms, the PDF's "Cannot Open" page, the card a held `Ctrl+Tab` shows, and each new output of a notebook's run (Notebook).
+  A toast slides into the pile and out of it, and the toasts slide out of the status bar's way in presentation mode.
+- Buttons a hover brings slide in where they take room (a list row's, Sidebar) and fade where they keep it or lie over something (a branch's trash, a page thumbnail's round buttons); the Search pane's replace row and a folder field's list slide open.
   Nothing else fades in: not a reload (a LaTeX build rewrites its PDF every few seconds), a restore, a tab landing in another pane, or a layout change (F9, a split).
-  All of it is libadwaita's and GTK's own animation, so `gtk-enable-animations` off stops it.
+- Focus mode fades as the chrome's CSS transition does, over 250 ms of `ease`, its line fade and a notebook's outputs eased the same (Chrome auto-hide); Reveal in Sidebar's outline holds a second and fades over two.
+- `gtk-enable-animations` off stops all of it, read as each motion starts, so a change to it holds at once: libadwaita's and GTK's animations skip to their end, GTK runs no stylesheet transition, and our own ramps check it themselves; the outline then holds the three seconds and goes at once.
   The other timings we own are debounces, which keep the main loop free.
-- Reveal in Sidebar's outline holds a second and fades over two, a CSS transition; with animations off it holds the three seconds and goes at once.
+- Motion the platform owns keeps its own timing: GtkSearchBar, AdwBanner, AdwTabBar, AdwToolbarView (presentation mode's status bar coming up on a hover), AdwDialog, a popover.
 - The document follows the caret and nothing else: GTK keeps the insert mark on screen by itself (arrows, typing, find, Go to Line, a search hit, every extra caret), a wheel scroll away from the caret stays put, and a dialog opening and closing over it puts nothing back.
 
 | Timer | Value | Where |
 |---|---|---|
 | Re-highlight after a keystroke | 150 ms | `editor/mod.rs::DEBOUNCE` |
-| A switch's crossfade, a page's fade in, a notebook output's fade in, a toast's slide in and out, the toasts' lift over the status bar | 150 ms | `widgets.rs::FADE_MS` |
+| Every fade, crossfade and slide above, the toasts' lift over the status bar too | 250 ms | `widgets.rs::FADE_MS` |
+| Focus mode's fades: the chrome, the receding panes, the line fade, a notebook's outputs | 250 ms | `fade.rs::RAMP_MS` |
 | A PDF still opening shows a spinner | 160 ms | `pdf/tab.rs::OPENING` |
 | A held `Ctrl+Tab` shows its card | 200 ms | `switcher.rs::DELAY` |
 | End-of-line messages cut again after a width change | 150 ms | `editor/mod.rs::DEBOUNCE` |

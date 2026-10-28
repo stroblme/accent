@@ -73,7 +73,8 @@ impl NotebookTab {
                 }
             });
             let ramp = adw::TimedAnimation::new(&self.scroller, 0.0, 1.0, fade::RAMP_MS, target);
-            ramp.set_easing(adw::Easing::Linear);
+            // The chrome's CSS `ease`, as the editors' own ramps.
+            ramp.set_easing(adw::Easing::Ease);
             ramp
         });
         ramp.set_value_from(ramp.value());

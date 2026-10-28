@@ -1303,19 +1303,20 @@ fn install_chrome_css() {
         let Some(display) = gdk::Display::default() else {
             return;
         };
-        let fade = match gtk::Settings::for_display(&display).is_gtk_enable_animations() {
-            true => format!(
-                ".chrome-fade, paned > separator {{ transition: opacity {ms}ms ease; }} \
-                 scrolledwindow > undershoot {{ transition: box-shadow {ms}ms ease, \
-                   background-image {ms}ms ease; }} \
-                 .accent-toasts {{ transition: transform {lift}ms ease-out; }} \
-                 .file-tree > row > treeexpander {{ transition: box-shadow {flash}ms ease-out; }} ",
-                ms = fade::RAMP_MS,
-                lift = crate::widgets::FADE_MS,
-                flash = crate::tree::FLASH_FADE_MS
-            ),
-            false => String::new(),
-        };
+        // Written whatever `gtk-enable-animations` says: GTK runs no transition while it is off,
+        // reading it at each change, so they follow the setting as it changes (DESIGN.md, Motion).
+        let fade = format!(
+            ".chrome-fade, paned > separator {{ transition: opacity {ms}ms ease; }} \
+             scrolledwindow > undershoot {{ transition: box-shadow {ms}ms ease, \
+               background-image {ms}ms ease; }} \
+             .accent-toasts {{ transition: transform {lift}ms {easing}; }} \
+             .file-tree > row > treeexpander {{ transition: box-shadow {flash}ms ease-out; }} \
+             .git-actions {{ transition: opacity {lift}ms {easing}; }} ",
+            ms = fade::RAMP_MS,
+            lift = crate::widgets::FADE_MS,
+            easing = crate::widgets::CSS_EASING,
+            flash = crate::tree::FLASH_FADE_MS
+        );
         let provider = gtk::CssProvider::new();
         // The `tabbar.inline tabbox` pair: a tab bar under the header bar carries its tabs 6 px
         // higher, level with the sidebar's first row (the Git pane's Commit), its height kept so

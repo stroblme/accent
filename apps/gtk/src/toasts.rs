@@ -192,7 +192,6 @@ impl Toasts {
         );
         let revealer = gtk::Revealer::builder()
             .transition_type(gtk::RevealerTransitionType::SlideUp)
-            .transition_duration(crate::widgets::FADE_MS)
             .halign(gtk::Align::Center)
             .child(&toast)
             .build();

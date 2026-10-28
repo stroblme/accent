@@ -392,8 +392,13 @@ pub(crate) fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
     button
 }
 
-/// How long a switch crossfades and a page fades in (DESIGN.md, Motion).
-pub(crate) const FADE_MS: u32 = 150;
+/// How long a fade, a crossfade or a slide takes: GtkRevealer's own default, which the revealers
+/// keep and the stacks, whose own is 200 ms, are set to (DESIGN.md, Motion).
+pub(crate) const FADE_MS: u32 = 250;
+
+/// [`fade_in`]'s easing as a stylesheet writes it: libadwaita's ease-out cubic, which GtkRevealer
+/// and GtkStack ease with too.
+pub(crate) const CSS_EASING: &str = "cubic-bezier(0.33, 1, 0.68, 1)";
 
 /// Fade in over [`FADE_MS`] with libadwaita easing; finish immediately when animations
 /// are disabled or unmapped. Retain the animation until completion to avoid partial opacity.
