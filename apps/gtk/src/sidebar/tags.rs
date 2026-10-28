@@ -127,13 +127,15 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
     let files_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
     files_box.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     files_box.append(&heading);
-    files_box.append(&scroller(&path_list(&files, crate::doc::icon_for, {
+    let open_file = {
         let (on_open, showing) = (on_open.clone(), showing.clone());
         move |rel: &str| {
             let tag = showing.borrow().clone();
             on_open(rel, (!tag.is_empty()).then_some(Target::Tag(tag)));
         }
-    })));
+    };
+    let files_list = path_list(&files, crate::doc::icon_for, open_file, None);
+    files_box.append(&scroller(&files_list));
     files_box.set_visible(false);
 
     // A paned rather than a fixed height: the two lists share the section, and where the user

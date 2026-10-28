@@ -18,14 +18,15 @@ const NOTEBOOK: &str = "refer/book.ipynb";
 /// shell and a PDF in turn: with Shift the note gets a link (a marked set a link a line, as one
 /// undo step; a folder nothing), the code file the row's path from its folder, a markdown cell a
 /// link and a code cell a path, the shell the quoted absolute path typed at its prompt, and the
-/// PDF what a plain drop gives it, the row opened there. Writes its files into the vault; exits
-/// 1 on a wrong answer.
+/// PDF what a plain drop gives it, the row opened there. An Outline, a Search and a References
+/// row go into the note too: a link to the heading or the file with Shift, nothing without.
+/// Writes its files into the vault; exits 1 on a wrong answer.
 pub(super) fn bench_refer(app: &Rc<App>, _arg: &str) {
     let root = app.root();
     for (rel, text) in [
         (NOTE, "# Note\n\nSome text here.\n"),
         (CODE, "import os\n\nprint('hi')\n"),
-        (ROW, "# Target\n"),
+        (ROW, "# Target\n\nSee [[note]].\n"),
         (IMAGE, "not really a picture"),
         ("refer/sub/inner.md", "# Inner\n"),
         (PDF, "%PDF-1.4\n"),
@@ -141,6 +142,48 @@ pub(super) fn bench_refer(app: &Rc<App>, _arg: &str) {
             seen.began && !seen.caret && note() == before && front().as_deref() == Some(NOTE),
         );
 
+        // An Outline row: its heading, linked with Shift; nothing without, the note staying.
+        let Some(sidebar) = app.sidebar.get() else {
+            return bench_quit(&app);
+        };
+        let links = |link: &str| note().matches(link).count();
+        // Each pane once its crossfade is over, and its rows laid out where they will stay.
+        let shown = |pane: &str| {
+            sidebar.show_pane(pane);
+            glib::timeout_future(Duration::from_millis(800))
+        };
+        shown("outline").await;
+        until(|| label_at(&app, |t| t == "Note").is_some()).await;
+        let row = label_at(&app, |t| t == "Note").unwrap_or_default();
+        let before = note();
+        let seen = drag(&app, row, to, false).await;
+        println!("bench refer outline plain {seen:?}");
+        check(
+            "outline_plain",
+            seen.began && !seen.caret && note() == before && front().as_deref() == Some(NOTE),
+        );
+        let seen = drag(&app, row, to, true).await;
+        println!("bench refer outline shift {seen:?} text={:?}", note());
+        check("outline_shift", seen.caret && links("[[note#Note]]") == 1);
+
+        // A Search hit and a backlink in References: a link to the file each names.
+        shown("search").await;
+        sidebar.set_search_text("Target");
+        let hit = |t: &str| t == "target.md";
+        until(|| label_at(&app, hit).is_some()).await;
+        glib::timeout_future(Duration::from_millis(800)).await;
+        let before = links("[[target]]");
+        let seen = drag(&app, label_at(&app, hit).unwrap_or_default(), to, true).await;
+        println!("bench refer search {seen:?} text={:?}", note());
+        check("search_shift", links("[[target]]") == before + 1);
+        shown("info").await;
+        let backlink = |t: &str| t.starts_with(ROW) && t.contains(':');
+        until(|| label_at(&app, backlink).is_some()).await;
+        let seen = drag(&app, label_at(&app, backlink).unwrap_or_default(), to, true).await;
+        println!("bench refer references {seen:?} text={:?}", note());
+        check("references_shift", links("[[target]]") == before + 2);
+        shown("files").await;
+
         // A code file: the row's path from the file's folder, a folder's too.
         app.open_path(CODE);
         until(|| front().as_deref() == Some(CODE)).await;
@@ -234,6 +277,30 @@ async fn row_at(app: &Rc<App>, rel: &str) -> (f64, f64) {
     super::folders::centre(app, tree, rel).map_or((0.0, 0.0), |p| {
         (f64::from(p.x()) + sx, f64::from(p.y()) + sy)
     })
+}
+
+/// The middle on the screen of the sidebar's label whose text `pick` takes, among those on
+/// screen: an Outline, Search or References row's.
+fn label_at(app: &Rc<App>, pick: impl Fn(&str) -> bool) -> Option<(f64, f64)> {
+    let root = app.sidebar.get()?.widget().clone();
+    let mut todo = vec![root];
+    while let Some(w) = todo.pop() {
+        if let Some(label) = w.downcast_ref::<gtk::Label>()
+            && label.is_mapped()
+            && pick(&label.text())
+        {
+            let mid = graphene::Point::new(label.width() as f32 / 2.0, label.height() as f32 / 2.0);
+            let p = label.compute_point(&app.window, &mid)?;
+            let (sx, sy) = app.window.surface_transform();
+            return Some((f64::from(p.x()) + sx, f64::from(p.y()) + sy));
+        }
+        let mut child = w.first_child();
+        while let Some(c) = child {
+            child = c.next_sibling();
+            todo.push(c);
+        }
+    }
+    None
 }
 
 /// The vault's folder on the machine holding it, which a shell is given paths in.

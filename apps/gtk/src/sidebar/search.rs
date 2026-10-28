@@ -1199,15 +1199,29 @@ pub(super) struct Pane {
     pub(super) view: gtk::ListView,
 }
 
-pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
+/// The Search pane, opening a row through `on_open`; a file's row dragged into a pane with Shift
+/// writes a reference to it ([`crate::refer`]), `dragging` hearing the drag start and end.
+pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen, dragging: &Rc<dyn Fn(bool)>) -> Pane {
     // ponytail: rows are `glib::BoxedAnyObject`s wrapping a `Row` instead of a GObject with typed
     // properties, the same trade `tree.rs` documents. Define a real item type if the row ever
     // needs bindable state.
     let results = gio::ListStore::new::<glib::BoxedAnyObject>();
     let pages: Rc<RefCell<Pages>> = Rc::default();
+    // A heading names no file, and a tail row the rest of the one above it.
+    let drag = crate::refer::RowDrag {
+        of: Rc::new(|item| {
+            let boxed = item.item().and_downcast::<glib::BoxedAnyObject>()?;
+            let row: Ref<Row> = boxed.borrow();
+            (!row.rel_path.is_empty() && row.more.is_none()).then(|| crate::refer::Dragged {
+                rel: row.rel_path.clone(),
+                heading: None,
+            })
+        }),
+        dragging: dragging.clone(),
+    };
 
     let factory = crate::widgets::factory(
-        |_| {
+        move |item| {
             let name = gtk::Label::builder()
                 .xalign(0.0)
                 .ellipsize(pango::EllipsizeMode::Middle)
@@ -1242,6 +1256,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
             row.set_margin_bottom(6);
             row.append(&head);
             row.append(&snippet);
+            drag.attach(&row, item);
             row
         },
         {

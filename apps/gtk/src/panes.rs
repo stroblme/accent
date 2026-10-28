@@ -582,12 +582,14 @@ impl Pane {
             glib::Type::INVALID,
             gdk::DragAction::MOVE | gdk::DragAction::COPY,
         );
-        // A file's row, then a marked set's and a folder's, which only a reference takes.
+        // A file's row, then a marked set's and a folder's, and an Outline, Search or References
+        // row, which only a reference takes.
         drop.set_types(&[
             adw::TabPage::static_type(),
             String::static_type(),
             gtk::StringList::static_type(),
             gtk::StringObject::static_type(),
+            crate::refer::Dragged::static_type(),
         ]);
         hint.add_controller(drop.clone());
 

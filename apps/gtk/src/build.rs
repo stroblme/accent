@@ -960,6 +960,16 @@ fn adopt_sidebar(
                 }
             }
         ),
+        // As a drag out of the tree does: every window's drop sheets go up.
+        glib::clone!(
+            #[weak]
+            app,
+            move |on| {
+                if let Some(shell) = app.shell.upgrade() {
+                    shell.tree_drag(&app, on);
+                }
+            }
+        ),
     );
     // The switcher is the sidebar header's title widget rather than a top bar of its own, so the
     // sidebar spends no band on an empty header: the pane icons sit level with the collapse toggle

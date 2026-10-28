@@ -97,6 +97,8 @@ pub struct Sidebar {
     /// The list in `outline_bin` while it holds a document's outline as rows, kept to be refilled
     /// rather than rebuilt while that document is edited or read.
     outline_list: RefCell<Option<outline::List>>,
+    /// Told when an Outline, Search or References row starts and stops being dragged.
+    on_drag: Rc<dyn Fn(bool)>,
     /// The Code pane: what holds at the caret beyond the text, and its page, hidden until the
     /// window says the tab in front has something for it.
     code: code::Code,
@@ -159,14 +161,16 @@ impl Sidebar {
     /// Build Files, Search and Info from `vault`'s tree and index closures. `None` provides only
     /// file Details and Outline for a loose-file window. `on_open` receives the activated
     /// vault-relative path and optional location; `on_reference` receives a row with its line
-    /// number.
+    /// number; `on_drag` hears a row's drag as a reference start and end ([`crate::refer`]).
     pub fn new(
         vault: Option<(gtk::Widget, Data)>,
         git: Option<(gtk::Widget, gtk::Paned)>,
         on_open: impl Fn(&str, Option<Target>) + 'static,
         on_reference: impl Fn(&str) + 'static,
+        on_drag: impl Fn(bool) + 'static,
     ) -> Sidebar {
         let on_open: OnOpen = Rc::new(on_open);
+        let on_drag: Rc<dyn Fn(bool)> = Rc::new(on_drag);
         let stack = adw::ViewStack::builder()
             .vexpand(true)
             .enable_transitions(true)
@@ -184,7 +188,7 @@ impl Sidebar {
             python = Some(data.python);
             stack.add_titled_with_icon(&files, Some("files"), "Files", "folder-symbolic");
 
-            let search = search::pane(&Rc::new(data.search), &on_open);
+            let search = search::pane(&Rc::new(data.search), &on_open, &on_drag);
             stack.add_titled_with_icon(
                 &search.widget,
                 Some("search"),
@@ -194,7 +198,8 @@ impl Sidebar {
 
             let tags = tags::pane(&Rc::new(data.tags), &on_open);
             let references = gtk::StringList::new(&[]);
-            let (references_stack, references_empty) = references_body(&references, on_reference);
+            let (references_stack, references_empty) =
+                references_body(&references, on_reference, &on_drag);
             let info = info::Info::new(
                 Some((references_stack.upcast_ref(), &tags.widget)),
                 &details.root,
@@ -351,6 +356,7 @@ impl Sidebar {
             details,
             outline_bin,
             outline_list: RefCell::new(None),
+            on_drag,
             code,
             code_page,
             properties_bin,
@@ -779,7 +785,7 @@ impl Sidebar {
             .as_ref()
             .is_none_or(|list| list.key != key || list.below.as_ref() != below);
         if fresh {
-            let list = outline::List::new(key, below.cloned());
+            let list = outline::List::new(key, below.cloned(), &self.on_drag);
             self.outline_bin.set_child(Some(&list.root));
             *kept = Some(list);
         }
@@ -1060,6 +1066,7 @@ fn live(stack: &adw::ViewStack, info: &info::Info, name: &str) -> bool {
 fn references_body(
     model: &gtk::StringList,
     on_reference: impl Fn(&str) + 'static,
+    dragging: &Rc<dyn Fn(bool)>,
 ) -> (gtk::Stack, gtk::Label) {
     let stack = gtk::Stack::builder().vexpand(true).build();
     // The window sets the words to suit what the tab holds (`references::references_empty`).
@@ -1074,7 +1081,21 @@ fn references_body(
         .build();
     empty.add_css_class("dimmed");
     stack.add_named(&empty, Some("empty"));
-    let list = path_list(model, crate::references::reference_icon, on_reference);
+    // A row names the file a backlink or a use is in.
+    let drag = crate::refer::RowDrag {
+        of: Rc::new(|item| {
+            let row = item.item().and_downcast::<gtk::StringObject>()?.string();
+            let rel = crate::references::reference_target(&row)?.path;
+            Some(crate::refer::Dragged { rel, heading: None })
+        }),
+        dragging: dragging.clone(),
+    };
+    let list = path_list(
+        model,
+        crate::references::reference_icon,
+        on_reference,
+        Some(drag),
+    );
     stack.add_named(&scroller(&list), Some("list"));
     (stack, empty)
 }

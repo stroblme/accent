@@ -51,14 +51,16 @@ impl Section {
 }
 
 /// A `GtkListView` of plain strings — references and the files carrying a tag are the same row,
-/// led by the icon `icon` gives the row's text, as every file list's rows are.
+/// led by the icon `icon` gives the row's text, as every file list's rows are. With `drag` its
+/// rows drag as references ([`crate::refer`]).
 pub(super) fn path_list(
     model: &gtk::StringList,
     icon: fn(&str) -> &'static str,
     on_activate: impl Fn(&str) + 'static,
+    drag: Option<crate::refer::RowDrag>,
 ) -> gtk::ListView {
     let factory = crate::widgets::factory(
-        |_| {
+        move |item| {
             let label = gtk::Label::builder()
                 .xalign(0.0)
                 .ellipsize(pango::EllipsizeMode::Middle)
@@ -66,6 +68,9 @@ pub(super) fn path_list(
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
             row.append(&gtk::Image::new());
             row.append(&label);
+            if let Some(drag) = &drag {
+                drag.attach(&row, item);
+            }
             row
         },
         move |row: &gtk::Box, item| {

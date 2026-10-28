@@ -131,14 +131,17 @@ pub(super) struct List {
 }
 
 impl List {
-    pub(super) fn new(key: &str, below: Option<gtk::Widget>) -> List {
+    /// The outline of the document `key`, its rows dragged as references to it through
+    /// `dragging` ([`drag`]).
+    pub(super) fn new(key: &str, below: Option<gtk::Widget>, dragging: &Rc<dyn Fn(bool)>) -> List {
         let model = gtk::StringList::new(&[]);
         let rows: Rc<RefCell<Vec<Line>>> = Rc::default();
         let jump: Jump = Rc::new(RefCell::new(Rc::new(|_| {})));
         let followed = Rc::new(Cell::new(gtk::INVALID_LIST_POSITION));
+        let drag = drag(key, &rows, dragging);
 
         let factory = factory(
-            |_| {
+            move |item| {
                 let lead = gtk::Label::builder()
                     .xalign(0.0)
                     .max_width_chars(16)
@@ -153,6 +156,9 @@ impl List {
                 let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
                 row.append(&lead);
                 row.append(&text);
+                if let Some(drag) = &drag {
+                    drag.attach(&row, item);
+                }
                 row
             },
             {
@@ -317,6 +323,32 @@ impl List {
             .collect();
         (lines, self.view.clone())
     }
+}
+
+/// An Outline row dragged as a reference: a link to its heading where `key` is a note of the
+/// vault, to the document itself where it is anything else of the vault (a code symbol, a
+/// bookmark), and none from a group's title or a file outside it.
+fn drag(
+    key: &str,
+    rows: &Rc<RefCell<Vec<Line>>>,
+    dragging: &Rc<dyn Fn(bool)>,
+) -> Option<crate::refer::RowDrag> {
+    if crate::doc::is_loose_key(key) {
+        return None;
+    }
+    let (key, rows) = (key.to_string(), rows.clone());
+    let note = accent_core::path::is_note(&key);
+    Some(crate::refer::RowDrag {
+        of: Rc::new(move |item| {
+            let rows = rows.borrow();
+            let line = rows.get(item.position() as usize).filter(|l| l.level > 0)?;
+            Some(crate::refer::Dragged {
+                rel: key.clone(),
+                heading: note.then(|| line.text.clone()),
+            })
+        }),
+        dragging: dragging.clone(),
+    })
 }
 
 /// Put the selection on `row`, leaving it alone when it is already there.
