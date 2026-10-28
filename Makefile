@@ -410,9 +410,9 @@ smoke: gtk-bench vault xvfb
 # Skipped without libpdfium, which reads the text and shows the page.
 #
 # `ACCENT_BENCH_COMMANDS` runs the user's commands from Run Command and by their shortcuts, through
-# XTEST, and puts back after a restart only the one still running, held against
-# `commands.expected`. Its shells are real, so under a scratch HOME, running `true`, `false`,
-# `pwd` and `sleep`.
+# XTEST, puts back after a restart only the one still running, and adds, renames and removes one
+# in Preferences, held against `commands.expected`. Its shells are real, so under a scratch HOME,
+# running `true`, `false`, `pwd` and `sleep`.
 drills: gtk-bench xvfb
 	$(HEADLESS) ACCENT_BENCH_BIBLIOGRAPHY=1 timeout 90 $(TARGET_DIR)/accent "$$xdg/vault"
 	$(HEADLESS) ACCENT_BENCH_KEYS=1 timeout 60 $(TARGET_DIR)/accent "$$xdg/vault" >"$$xdg/keys" && \
@@ -467,6 +467,7 @@ drills: gtk-bench xvfb
 		ACCENT_BENCH_COMMANDS=run timeout 60 $(TARGET_DIR)/accent "$$0/vault" >"$$0/commands" && \
 		ACCENT_BENCH_COMMANDS=open timeout 60 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/commands" && \
 		sleep 3 && ACCENT_BENCH_COMMANDS=back timeout 60 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/commands" && \
+		ACCENT_BENCH_COMMANDS=prefs timeout 60 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/commands" && \
 		grep "^bench commands " "$$0/commands" | diff -u apps/gtk/src/bench/commands.expected -' "$$xdg"
 
 ## screenshots: regenerate docs/screenshot-1..5.png and data/screenshots (needs magick, htop, Xvfb, debugpy)

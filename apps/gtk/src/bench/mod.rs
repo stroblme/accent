@@ -197,8 +197,8 @@ use user_commands::bench_commands;
 ///   one scratch state; `early`: shells closed before startup; `behind` then
 ///   `named`: a restored shell's tab behind another titled before it is shown.
 /// - `ACCENT_BENCH_COMMANDS=run`: the user's commands from Run Command and their shortcuts, through
-///   XTEST; `open` then `back`: on one scratch state, only a command still running comes back.
-///   Its shells are real: a scratch `HOME`, as for `HOLD`.
+///   XTEST; `open` then `back`: on one scratch state, only a command still running comes back;
+///   `prefs`: Preferences → Commands. Its shells are real: a scratch `HOME`, as for `HOLD`.
 /// - `ACCENT_BENCH_PDF=<rel_path>`: fit, save, rename and external reload.
 ///   Writes and moves the file; use a scratch multipage PDF. Modes:
 ///   `stale:<rel_path>` (remote conflicts), `failed:<rel_path>` (read-only

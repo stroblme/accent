@@ -9,13 +9,16 @@ use vte4::TerminalExt as _;
 /// `=run`: Pass (`true`) picked in Run Command and by its chord from a shell closes its tab; Fail
 /// (`pwd; false`) by its chord keeps its tab at the vault root, saying how it ended. `=open`
 /// then `=back`, on one scratch state: Nap (`sleep 60`) and Quick (`sleep 3`) run, the app quits,
-/// and once Quick has ended the restart puts back Nap alone.
+/// and once Quick has ended the restart puts back Nap alone. `=prefs`: Preferences → Commands
+/// lists them, marks a chord New Terminal holds, adds, renames and removes one;
+/// `ACCENT_BENCH_COMMANDS_SHOT=<png>` pictures the group.
 pub(super) fn bench_commands(app: &Rc<App>, step: &str) {
     let (app, step) = (app.clone(), step.to_string());
     glib::spawn_future_local(async move {
         match step.as_str() {
             "open" => open(&app).await,
             "back" => back(&app).await,
+            "prefs" => prefs(&app).await,
             _ => run(&app).await,
         }
     });
@@ -168,6 +171,98 @@ async fn back(app: &Rc<App>) {
     println!(
         "bench commands back closed held={}",
         super::keys::bench_held()
+    );
+    bench_quit(app);
+}
+
+/// Every widget under `root` of type `T`, in order.
+fn all<T: IsA<gtk::Widget>>(root: &gtk::Widget) -> Vec<T> {
+    let mut found: Vec<T> = root.clone().downcast::<T>().into_iter().collect();
+    let mut child = root.first_child();
+    while let Some(widget) = child {
+        found.extend(all::<T>(&widget));
+        child = widget.next_sibling();
+    }
+    found
+}
+
+async fn prefs(app: &Rc<App>) {
+    set(
+        app,
+        vec![
+            command("Claude", "claude", Some("<Primary>j")),
+            command("Build", "make -j8", None),
+        ],
+    );
+    let _ = WidgetExt::activate_action(&app.window, "win.preferences", None);
+    glib::timeout_future(Duration::from_millis(800)).await;
+    let Some(dialog) = app.window.visible_dialog() else {
+        println!("bench commands prefs dialog=none");
+        return bench_quit(app);
+    };
+    let dialog: gtk::Widget = dialog.upcast();
+    let rows = || all::<adw::ExpanderRow>(&dialog);
+    let shown: Vec<(String, String)> = rows()
+        .iter()
+        .map(|r| (r.title().to_string(), r.subtitle().to_string()))
+        .collect();
+    let clash = rows().first().is_some_and(|row| {
+        all::<gtk::Button>(row.upcast_ref())
+            .iter()
+            .any(|b| b.has_css_class("error"))
+    });
+    println!("bench commands prefs rows={shown:?} clash={clash}");
+    if let Some(row) = rows().first() {
+        row.set_expanded(true);
+    }
+    glib::timeout_future(Duration::from_millis(300)).await;
+    // The group is near the end of the page.
+    for scroller in all::<gtk::ScrolledWindow>(&dialog) {
+        let at = scroller.vadjustment();
+        at.set_value(at.upper() - at.page_size());
+    }
+    glib::timeout_future(Duration::from_millis(300)).await;
+    if let Ok(png) = std::env::var("ACCENT_BENCH_COMMANDS_SHOT") {
+        let shot = super::minimap::window_png(&app.window, Path::new(&png));
+        println!("bench commands prefs shot={shot}");
+    }
+
+    let button = |root: &gtk::Widget, title: &str| {
+        all::<adw::ButtonRow>(root)
+            .into_iter()
+            .find(|b| b.title() == title)
+    };
+    if let Some(add) = button(&dialog, "Add Command") {
+        add.emit_by_name::<()>("activated", &[]);
+    }
+    glib::timeout_future(Duration::from_millis(300)).await;
+    let names = || -> Vec<String> {
+        let commands = app.config.borrow().commands.clone();
+        commands.into_iter().map(|c| c.name).collect()
+    };
+    let opened: Vec<bool> = rows().iter().map(|r| r.is_expanded()).collect();
+    println!("bench commands prefs added={:?} opened={opened:?}", names());
+    if let Some(row) = rows().get(2) {
+        let entry = all::<adw::EntryRow>(row.upcast_ref())
+            .into_iter()
+            .find(|e| e.title() == "Name");
+        if let Some(entry) = entry {
+            entry.set_text("Lint");
+        }
+        println!(
+            "bench commands prefs renamed={:?} title={}",
+            names(),
+            row.title()
+        );
+        if let Some(remove) = button(row.upcast_ref(), "Remove Command") {
+            remove.emit_by_name::<()>("activated", &[]);
+        }
+    }
+    glib::timeout_future(Duration::from_millis(300)).await;
+    println!(
+        "bench commands prefs removed={:?} rows={}",
+        names(),
+        rows().len()
     );
     bench_quit(app);
 }

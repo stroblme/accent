@@ -3,9 +3,11 @@
 //! Shared config, vault and `on_change` are supplied by the caller, avoiding a dependency
 //! on `App`.
 
-use accent_core::config::{Config, DebugTerminal, FocusMode, RecolourConfig, Theme, VaultConfig};
+use accent_core::config::{
+    Config, CustomCommand, DebugTerminal, FocusMode, RecolourConfig, Theme, VaultConfig,
+};
 use adw::prelude::*;
-use gtk::{gio, pango};
+use gtk::{gio, glib, pango};
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -155,6 +157,7 @@ fn fill(
     page.add(&git_group(config, &save));
     page.add(&pdf_group(config, &save));
     page.add(&terminal_group(config, &save));
+    page.add(&commands_group(config, &save));
     if let Some(root) = root {
         page.add(&vault_group(config, root, &save));
     }
@@ -642,6 +645,178 @@ fn terminal_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Pre
     group
 }
 
+// --------------------------------------------------------------------------------- commands
+
+/// The user's own commands (`[[commands]]`): a row each, its name over its command line, opening
+/// on the two, its shortcut and Remove; Add Command puts a new one at the end, opened.
+fn commands_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::PreferencesGroup {
+    let group = adw::PreferencesGroup::builder()
+        .title("Commands")
+        .description(
+            "Run from Run Command or a shortcut, each in a terminal of its own at the vault root",
+        )
+        .build();
+    command_rows(&group, &Rc::default(), config, save, None);
+    group
+}
+
+/// Change the commands, write them and draw their rows again, the one at the index opened.
+type Redo = dyn Fn(&dyn Fn(&mut Vec<CustomCommand>), Option<usize>);
+
+/// Put `group`'s rows in `shown` back from the config, the command at `open` opened: after an
+/// add, a removal or a new shortcut, so each row's index is the command's again. Weak: the rows'
+/// handlers hold what redraws them.
+fn command_rows(
+    group: &adw::PreferencesGroup,
+    shown: &Rc<RefCell<Vec<glib::WeakRef<gtk::Widget>>>>,
+    config: &Rc<RefCell<Config>>,
+    save: &Rc<dyn Fn()>,
+    open: Option<usize>,
+) {
+    for row in shown.borrow_mut().drain(..).filter_map(|row| row.upgrade()) {
+        group.remove(&row);
+    }
+    // What the rows' buttons do: change the config, write it and draw the rows again.
+    let redo: Rc<Redo> = Rc::new({
+        let (group, shown) = (group.downgrade(), shown.clone());
+        let (config, save) = (config.clone(), save.clone());
+        move |change, open| {
+            change(&mut config.borrow_mut().commands);
+            save();
+            if let Some(group) = group.upgrade() {
+                command_rows(&group, &shown, &config, &save, open);
+            }
+        }
+    });
+    let count = config.borrow().commands.len();
+    for i in 0..count {
+        let row = command_row(config, save, &redo, i);
+        row.set_expanded(open == Some(i));
+        group.add(&row);
+        shown
+            .borrow_mut()
+            .push(row.upcast_ref::<gtk::Widget>().downgrade());
+    }
+    let add = adw::ButtonRow::builder()
+        .title("Add Command")
+        .start_icon_name("list-add-symbolic")
+        .build();
+    add.connect_activated(move |_| {
+        let new = CustomCommand {
+            name: "New Command".to_string(),
+            ..CustomCommand::default()
+        };
+        redo(&|commands| commands.push(new.clone()), Some(count));
+    });
+    group.add(&add);
+    shown
+        .borrow_mut()
+        .push(add.upcast_ref::<gtk::Widget>().downgrade());
+}
+
+/// The command at `i`: its name and command line edited as typed, its shortcut recorded as the
+/// palette records one, refusing a chord in use by name, and a clash from a hand edit marked.
+fn command_row(
+    config: &Rc<RefCell<Config>>,
+    save: &Rc<dyn Fn()>,
+    redo: &Rc<Redo>,
+    i: usize,
+) -> adw::ExpanderRow {
+    let command = config.borrow().commands[i].clone();
+    // Names and command lines are plain text, not Pango markup.
+    let row = adw::ExpanderRow::builder()
+        .title(&command.name)
+        .subtitle(&command.run)
+        .subtitle_lines(1)
+        .use_markup(false)
+        .build();
+    type Field = fn(&mut CustomCommand) -> &mut String;
+    let fields: [(&str, &str, Field); 2] = [
+        ("Name", &command.name, |c| &mut c.name),
+        ("Command", &command.run, |c| &mut c.run),
+    ];
+    for (title, value, field) in fields {
+        let entry = adw::EntryRow::builder().title(title).text(value).build();
+        // ponytail: written on every keystroke, as the vault's folder rows are.
+        entry.connect_changed({
+            let (config, save, row) = (config.clone(), save.clone(), row.downgrade());
+            move |entry| {
+                let text = entry.text().to_string();
+                if let Some(command) = config.borrow_mut().commands.get_mut(i) {
+                    *field(command) = text.clone();
+                }
+                if let Some(row) = row.upgrade() {
+                    match title {
+                        "Name" => row.set_title(&text),
+                        _ => row.set_subtitle(&text),
+                    }
+                }
+                save();
+            }
+        });
+        row.add_row(&entry);
+    }
+
+    let action = crate::commands::action(i);
+    let accels = crate::commands::accels(&config.borrow(), i);
+    let taken = crate::commands::taken(&config.borrow(), Some(i));
+    let clashes = accels
+        .iter()
+        .filter(|accel| taken.iter().any(|(a, _)| a == *accel))
+        .cloned()
+        .collect();
+    let record: Rc<dyn Fn(&str)> = Rc::new({
+        let (config, redo, row) = (config.clone(), redo.clone(), row.downgrade());
+        move |_: &str| {
+            let Some(row) = row.upgrade() else {
+                return;
+            };
+            let name = config.borrow().commands.get(i).map(|c| c.name.clone());
+            let taken = crate::commands::taken(&config.borrow(), Some(i));
+            let redo = redo.clone();
+            crate::palette::capture_shortcut(
+                row.upcast_ref(),
+                &name.unwrap_or_default(),
+                taken,
+                move |chosen| {
+                    let chord = chosen.and_then(|accels| accels.into_iter().next());
+                    redo(
+                        &|commands| {
+                            if let Some(command) = commands.get_mut(i) {
+                                command.shortcut = chord.clone();
+                            }
+                        },
+                        Some(i),
+                    );
+                },
+            );
+        }
+    });
+    let shortcut = adw::ActionRow::builder().title("Shortcut").build();
+    shortcut.add_suffix(&crate::palette::accel_button(
+        &action, &accels, &clashes, &record,
+    ));
+    row.add_row(&shortcut);
+
+    let remove = adw::ButtonRow::builder().title("Remove Command").build();
+    remove.add_css_class("destructive-action");
+    remove.connect_activated({
+        let redo = redo.clone();
+        move |_| {
+            redo(
+                &|commands| {
+                    if i < commands.len() {
+                        commands.remove(i);
+                    }
+                },
+                None,
+            )
+        }
+    });
+    row.add_row(&remove);
+    row
+}
+
 // ------------------------------------------------------------------------------- this vault
 
 fn vault_group(
@@ -723,7 +898,8 @@ fn reset_group(
                 &dialog,
                 "Restore Default Preferences?",
                 "Theme, recolouring, fonts, editor options, every vault's folders and any \
-                 shortcuts you changed go back to their defaults. Your recent vaults are kept.",
+                 shortcuts you changed go back to their defaults. Your recent vaults and your \
+                 commands are kept.",
                 "Restore",
                 true,
                 move || {
@@ -733,8 +909,10 @@ fn reset_group(
                     {
                         let mut cfg = config.borrow_mut();
                         let keep = std::mem::take(&mut cfg.recent_vaults);
+                        let commands = std::mem::take(&mut cfg.commands);
                         *cfg = Config {
                             recent_vaults: keep,
+                            commands,
                             ..Config::default()
                         };
                     }

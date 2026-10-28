@@ -5,3 +5,7 @@ bench commands held=0
 bench commands open terminals=2 held=2
 bench commands back titles=["Nap"] held=1
 bench commands back closed held=0
+bench commands prefs rows=[("Claude", "claude"), ("Build", "make -j8")] clash=true
+bench commands prefs added=["Claude", "Build", "New Command"] opened=[false, false, true]
+bench commands prefs renamed=["Claude", "Build", "Lint"] title=Lint
+bench commands prefs removed=["Claude", "Build"] rows=2

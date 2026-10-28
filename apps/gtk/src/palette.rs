@@ -345,7 +345,7 @@ fn conflicts(items: &[Rc<Item>]) -> HashSet<String> {
 }
 
 /// Open rebinding from the accelerator button; command mode is also the shortcuts reference.
-fn accel_button(
+pub(crate) fn accel_button(
     action: &str,
     accels: &[String],
     conflicts: &HashSet<String>,
@@ -543,7 +543,7 @@ const RESERVED: &str = "Super, Alt+Tab, Ctrl+Alt and F1 belong to the desktop, a
 ///
 /// `on_done` is called with the accelerators to store: one chord, an empty list for "no shortcut",
 /// or `None` to go back to the built-in default. Cancelling calls nothing.
-fn capture_shortcut(
+pub(crate) fn capture_shortcut(
     parent: &gtk::Widget,
     label: &str,
     taken: Vec<(String, String)>,
