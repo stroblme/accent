@@ -789,7 +789,7 @@ impl Config {
         if on_disk.is_some() && on_disk != known() {
             return Ok(false);
         }
-        let text = toml::to_string_pretty(self).map_err(|e| unreadable(&path, e))?;
+        let text = edited(on_disk.as_deref(), self).map_err(|e| unreadable(&path, e))?;
         replace(&path, text.as_bytes())?;
         set_known(Some(text));
         Ok(true)
@@ -1042,6 +1042,119 @@ fn theirs(text: Option<&str>, known: Option<&str>, path: &Path) -> Result<Option
     }
 }
 
+/// `config` as the text of `config.toml`: `file`, the text on disk, with only the keys whose value
+/// `config` changed rewritten, added or removed, so the comments, order and formatting of the
+/// rest stay as the user wrote them, keys accent does not know included. No file yet (or one
+/// that does not read as a config), the whole config pretty-printed.
+fn edited(file: Option<&str>, config: &Config) -> std::result::Result<String, String> {
+    let pretty = toml::to_string_pretty(config).map_err(|e| e.to_string())?;
+    let table = |c: &Config| match toml::Value::try_from(c) {
+        Ok(toml::Value::Table(table)) => Some(table),
+        _ => None,
+    };
+    let base = file.and_then(|f| f.parse::<toml::Table>().ok()?.try_into::<Config>().ok());
+    let (Some(file), Some(was), Some(now)) = (file, base.as_ref().and_then(table), table(config))
+    else {
+        return Ok(pretty);
+    };
+    let mut doc: toml_edit::DocumentMut = file.parse().map_err(|e| format!("{e}"))?;
+    let fresh: toml_edit::DocumentMut = pretty.parse().map_err(|e| format!("{e}"))?;
+    update(doc.as_table_mut(), &was, &now, fresh.as_table());
+    Ok(doc.to_string())
+}
+
+/// Bring the table `doc` from `was` to `now`, both the config's values as it reads them, taking
+/// a changed or new key from `fresh`, the same table pretty-printed. A changed value keeps the
+/// comment and space around it; a key whose value did not change is left as written, or left out
+/// where the file left it out; a key the config does not hold goes, as it went from the whole
+/// file written anew (a retired `daily_*` key, say).
+fn update(
+    doc: &mut dyn toml_edit::TableLike,
+    was: &toml::Table,
+    now: &toml::Table,
+    fresh: &dyn toml_edit::TableLike,
+) {
+    let gone: Vec<String> = doc
+        .iter()
+        .map(|(key, _)| key.to_string())
+        .filter(|key| !now.contains_key(key))
+        .collect();
+    for key in gone {
+        doc.remove(&key);
+    }
+    let empty = toml::Table::new();
+    for (key, value) in now {
+        let before = was.get(key);
+        let Some(new) = fresh.get(key) else {
+            continue;
+        };
+        // Down into a table the file has, to prune it too, or into one it lacks that changed.
+        if let toml::Value::Table(now) = value
+            && doc
+                .get(key)
+                .map_or(before != Some(value), toml_edit::Item::is_table_like)
+        {
+            if doc.get(key).is_none() {
+                let mut table = toml_edit::Table::new();
+                table.set_implicit(true);
+                doc.insert(key, toml_edit::Item::Table(table));
+            }
+            let was = match before {
+                Some(toml::Value::Table(was)) => was,
+                _ => &empty,
+            };
+            let old = doc
+                .get_mut(key)
+                .and_then(toml_edit::Item::as_table_like_mut);
+            if let (Some(old), Some(new)) = (old, new.as_table_like()) {
+                update(old, was, now, new);
+            }
+            continue;
+        }
+        if before == Some(value) {
+            continue;
+        }
+        match doc.get_mut(key) {
+            Some(old) => {
+                let decor = old.as_value().map(|v| v.decor().clone());
+                *old = placed(new.clone());
+                if let (Some(decor), Some(value)) = (decor, old.as_value_mut()) {
+                    *value.decor_mut() = decor;
+                }
+            }
+            None => {
+                doc.insert(key, placed(new.clone()));
+            }
+        }
+    }
+}
+
+/// `item` with no place of its own in the document, so the tables in it are written after the
+/// table they now follow rather than where the pretty-printed config had them.
+fn placed(mut item: toml_edit::Item) -> toml_edit::Item {
+    fn unplace(item: &mut toml_edit::Item) {
+        match item {
+            toml_edit::Item::Table(table) => {
+                table.set_position(None);
+                for (_, item) in table.iter_mut() {
+                    unplace(item);
+                }
+            }
+            toml_edit::Item::ArrayOfTables(tables) => {
+                for table in tables.iter_mut() {
+                    table.set_position(None);
+                    for (_, item) in table.iter_mut() {
+                        unplace(item);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    unplace(&mut item);
+    item
+}
+
 /// Three-way merge of two configs that both moved on from `base`, as TOML values, key by key down
 /// through the tables: a key the file (`theirs`) changed takes the file's value, every other key
 /// keeps accent's. A key both changed differently is pushed to `lost` by its dotted path, `at`
@@ -1148,7 +1261,7 @@ pub fn vault_hash(root: &Path) -> String {
 ///
 /// Returns `None` when no retired key remains for `root`. A second TOML-table parse preserves
 /// keys Serde discards. Nothing is written here; the user adds the directive, and the next
-/// [`Config::save`] drops the old keys.
+/// [`Config::save`] drops the old keys, as it drops every key the config does not hold.
 pub fn daily_keys(root: &Path) -> Option<(String, Option<String>)> {
     let text = std::fs::read_to_string(config_path()).ok()?;
     retired_daily(&text.parse().ok()?, &vault_key(root))
@@ -1312,6 +1425,59 @@ daily_template = "DailyNote.md"
         assert_eq!(again.search.exclude, c.search.exclude);
         assert_eq!(again.drawing, c.drawing);
         assert_eq!(again.diagram, c.diagram);
+    }
+
+    /// accent's own write changes the keys it changed and nothing else: the user's comments,
+    /// order and spacing stay byte for byte, a key left out at its default stays left out.
+    #[test]
+    fn a_save_keeps_the_files_comments_order_and_spacing() {
+        let file = r#"# Mine, by hand.
+theme = "dark"    # easier on the eyes
+minimap   = false # for now
+
+# Chords I like
+[shortcuts]
+"win.save" = ["F2"]  # muscle memory
+
+[[commands]]
+# The agent
+name = "Claude"
+run = "claude"
+
+[drawing]
+pen_width = 2.0
+"#;
+        let read = |text: &str| -> Config { toml::from_str(text).unwrap() };
+        let mut c = read(file);
+        assert_eq!(edited(Some(file), &c).unwrap(), file, "nothing changed");
+
+        c.minimap = true;
+        let text = edited(Some(file), &c).unwrap();
+        assert_eq!(text, file.replace("minimap   = false", "minimap   = true"));
+
+        // A key added, a list emptied and a table that was not there: written, and only they.
+        c.line_numbers = true;
+        c.commands.clear();
+        c.recolour.pdfs = false;
+        let text = edited(Some(file), &c).unwrap();
+        assert_eq!(read(&text), c);
+        for kept in [
+            "# Mine, by hand.",
+            "# easier on the eyes",
+            "# muscle memory",
+        ] {
+            assert!(text.contains(kept), "{text}");
+        }
+        assert!(
+            !text.contains("[[commands]]") && !text.contains("spellcheck"),
+            "{text}"
+        );
+        assert!(text.contains("[recolour]\npdfs = false\n"), "{text}");
+        // No file yet: the whole config, as before.
+        assert_eq!(
+            edited(None, &c).unwrap(),
+            toml::to_string_pretty(&c).unwrap()
+        );
     }
 
     /// An empty map is left out rather than written as a bare `[shortcuts]` header, and reads

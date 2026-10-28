@@ -36,6 +36,9 @@ regex = "1"
 memchr = "2"
 blake3.workspace = true
 toml = "1"
+# Already in the lock through `proc-macro-crate`; edits config.toml in place, so accent's own
+# writes keep the user's comments, order and formatting (`Config::save`).
+toml_edit = { version = "0.25", default-features = false, features = ["parse", "display"] }
 # `std` for the clock: without it every deadline the word diff is given is ignored.
 similar = { version = "3", default-features = false, features = ["std", "text", "inline"] }
 chrono.workspace = true
