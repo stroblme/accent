@@ -150,8 +150,8 @@ fn current(store: &gio::ListStore) -> Vec<String> {
 /// Return the differing span of `old` and `new` as start, removed rows and inserted rows.
 ///
 /// Trim equal prefixes and suffixes to retain row objects, whose identity owns expanded
-/// children and scroll state. Equal listings return `None`.
-fn changed_span(old: &[String], new: &[String]) -> Option<(usize, usize, usize)> {
+/// children, scroll state and a list's row widgets. Equal listings return `None`.
+pub fn changed_span<T: PartialEq>(old: &[T], new: &[T]) -> Option<(usize, usize, usize)> {
     let head = old.iter().zip(new).take_while(|(a, b)| a == b).count();
     let tail = old[head..]
         .iter()
@@ -266,7 +266,7 @@ mod tests {
     fn changed_span_reports_nothing_when_the_listing_is_unchanged() {
         let same = rows(&["dNotes", "ma.md", "mb.md"]);
         assert_eq!(changed_span(&same, &same), None);
-        assert_eq!(changed_span(&[], &[]), None);
+        assert_eq!(changed_span::<String>(&[], &[]), None);
     }
 
     #[test]

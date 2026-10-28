@@ -1,6 +1,13 @@
 //! Exercise the real bibliography surfaces and save path in a scratch vault.
 use super::*;
 use accent_core::bib::Attachment;
+use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+use std::time::Instant;
+
+/// Rows the reference list built and bound, and reads of the pane's file.
+pub static SETUPS: AtomicUsize = AtomicUsize::new(0);
+pub static BINDS: AtomicUsize = AtomicUsize::new(0);
+pub static READS: AtomicUsize = AtomicUsize::new(0);
 
 pub fn run(app: &Rc<App>) {
     assert!(
@@ -14,6 +21,13 @@ pub fn run(app: &Rc<App>) {
                 break;
             }
             glib::timeout_future(Duration::from_millis(100)).await;
+        }
+        if let Some(rel) = std::env::var("ACCENT_BENCH_BIBLIOGRAPHY")
+            .ok()
+            .and_then(|v| v.strip_prefix("time:").map(str::to_string))
+        {
+            time(&app, &rel).await;
+            return app.window.application().unwrap().quit();
         }
         let vault = app.vault().unwrap().clone();
         vault.create_dir("library", true).unwrap();
@@ -63,6 +77,12 @@ pub fn run(app: &Rc<App>) {
         );
         assert_eq!(tab.text(), original);
         let after = bib.set_field(0, "year", "2025").unwrap();
+        let rows = || {
+            (0..4)
+                .map(|i| panel.entries.model.item(i))
+                .collect::<Vec<_>>()
+        };
+        let kept = rows();
         edit::apply(&tab, original, &after).unwrap();
         glib::timeout_future(Duration::from_millis(250)).await;
         {
@@ -70,6 +90,11 @@ pub fn run(app: &Rc<App>) {
             let shown = shown.as_ref().unwrap();
             assert_eq!(shown.value(&shown.entries[0], "year"), "2025");
         }
+        let now = rows();
+        assert!(
+            now[0] != kept[0] && now[1..] == kept[1..],
+            "an edited reference replaces its own row alone"
+        );
         panel.entries.view.grab_focus();
         panel
             .entries
@@ -77,8 +102,8 @@ pub fn run(app: &Rc<App>) {
             .activate_action("win.bib-undo", None)
             .unwrap();
         assert_eq!(tab.text(), original);
-        // Any vault event refreshes the pane; one that left the file as it was keeps the rows,
-        // whose widgets cost a large bibliography a second of the main loop to build again.
+        // A refresh that finds the file as it was keeps the rows, whose widgets cost a large
+        // bibliography a second of the main loop to build again.
         glib::timeout_future(Duration::from_millis(250)).await;
         let first = panel.entries.model.item(0);
         panel.refresh();
@@ -190,13 +215,21 @@ pub fn run(app: &Rc<App>) {
                 })
             })
         };
+        // A menu is built as it opens: a large bibliography's rows each built one up front.
         let more = descendant::<gtk::MenuButton>(&row, |_| true).unwrap();
+        assert!(more.menu_model().is_none(), "a row's menu waits to open");
+        row.set_state_flags(gtk::StateFlags::PRELIGHT, false);
+        more.popup();
         assert!(has(&more, "row.edit") && has(&more, "row.download"));
+        more.popdown();
+        row.unset_state_flags(gtk::StateFlags::PRELIGHT);
         let header = descendant::<gtk::MenuButton>(&panel.root.clone().upcast(), |b| {
             b.tooltip_text().as_deref() == Some("Bibliography Actions")
         })
         .unwrap();
+        header.popup();
         assert!(has(&header, "win.bib-check") && !has(&header, "win.bib-edit"));
+        header.popdown();
         remove.activate_action("row.edit", None).unwrap();
         glib::timeout_future(Duration::from_millis(100)).await;
         let dialog = app.window.visible_dialog().expect("edit reference");
@@ -328,8 +361,32 @@ pub fn run(app: &Rc<App>) {
         }
         let pdf = bib::attachment_path(&tab.rel(), &attached.expect("PDF attached").path).unwrap();
         assert!(vault.read(&pdf).unwrap().0.starts_with("%PDF-"));
+        // The pane reads its file again for a change made elsewhere to it, and for no other file.
+        panel.select("project/references.bib");
+        vault.write_file("note.md", b"# Note\n").unwrap();
+        app.open_path("note.md");
+        let note = wait_tab(&app, "note.md").await;
+        glib::timeout_future(Duration::from_millis(500)).await;
+        let reads = READS.load(Relaxed);
+        std::fs::write(app.root().join("note.md"), "# Note\n\nEdited elsewhere.\n").unwrap();
+        until(|| note.text().contains("Edited elsewhere")).await;
+        glib::timeout_future(Duration::from_millis(300)).await;
+        assert_eq!(
+            READS.load(Relaxed),
+            reads,
+            "another file's change reads nothing"
+        );
+        let path = app.root().join("project/references.bib");
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        text.push_str("@misc{elsewhere,title={Edited Elsewhere}}\n");
+        std::fs::write(&path, text).unwrap();
+        until(|| {
+            (panel.entries.library.borrow().as_ref())
+                .is_some_and(|b| b.source.contains("Edited Elsewhere"))
+        })
+        .await;
         println!(
-            "bench bibliography row_delete=true source_only=true source_preserved=true undo=true sidebar_unchanged=true copy=true move=true stale_review_refused=true chooser_search=true row_actions=true download_on_add=true"
+            "bench bibliography row_delete=true source_only=true source_preserved=true undo=true sidebar_unchanged=true copy=true move=true stale_review_refused=true chooser_search=true row_actions=true download_on_add=true own_events=true"
         );
         app.window.application().unwrap().quit();
     });
@@ -343,6 +400,68 @@ async fn wait_tab(app: &App, path: &str) -> Rc<Tab> {
         glib::timeout_future(Duration::from_millis(50)).await;
     }
     panic!("bibliography did not open")
+}
+/// Wait up to five seconds for `done`.
+async fn until(done: impl Fn() -> bool) {
+    for _ in 0..100 {
+        if done() {
+            return;
+        }
+        glib::timeout_future(Duration::from_millis(50)).await;
+    }
+    panic!("timed out")
+}
+
+/// `time:<rel>`: what a real change of the bibliography `rel` costs the main loop with the pane
+/// hidden, shown and hidden again: one reference edited, a search typed and cleared.
+async fn time(app: &Rc<App>, rel: &str) {
+    let panel = app.bibliography.get().unwrap();
+    // The drill runs the search itself, rather than the entry a delay later.
+    panel.entries.search.set_search_delay(u32::MAX);
+    app.show_pane("files");
+    app.open_path(rel);
+    let tab = wait_tab(app, rel).await;
+    glib::timeout_future(Duration::from_millis(500)).await;
+    for (round, pane) in ["files", "bibliography", "files"].into_iter().enumerate() {
+        app.show_pane(pane);
+        glib::timeout_future(Duration::from_millis(500)).await;
+        let before = tab.text();
+        let year = (1990 + round).to_string();
+        let after = Library::parse(&before)
+            .unwrap()
+            .set_field(1, "year", &year)
+            .unwrap();
+        edit::apply(&tab, &before, &after).unwrap();
+        panel.changed.cancel();
+        measure(&format!("edit pane={pane}"), || panel.refresh()).await;
+        panel.entries.search.set_text("key1");
+        measure(&format!("search pane={pane}"), || panel.entries.filter()).await;
+        measure(&format!("clear pane={pane}"), || {
+            panel.entries.search.set_text("")
+        })
+        .await;
+    }
+}
+
+/// Print the rows `change` built and bound, its own time and the time until the main loop is
+/// idle again, which includes dropping the rows it replaced.
+async fn measure(what: &str, change: impl FnOnce()) {
+    let (setups, binds) = (SETUPS.load(Relaxed), BINDS.load(Relaxed));
+    let start = Instant::now();
+    change();
+    let ran = start.elapsed();
+    let idle = Rc::new(Cell::new(None));
+    let done = idle.clone();
+    glib::idle_add_local_once(move || done.set(Some(start.elapsed())));
+    until(|| idle.get().is_some()).await;
+    println!(
+        "bench bibliography time {what} setups={} binds={} ran_ms={} idle_ms={}",
+        SETUPS.load(Relaxed) - setups,
+        BINDS.load(Relaxed) - binds,
+        ran.as_millis(),
+        idle.get().unwrap().as_millis()
+    );
+    glib::timeout_future(Duration::from_millis(300)).await;
 }
 fn shot(widget: &gtk::Widget, path: &str) {
     let paintable = gtk::WidgetPaintable::new(Some(widget));

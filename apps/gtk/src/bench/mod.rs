@@ -315,6 +315,8 @@ use tags::bench_tags;
 ///   answered by `build-aux/fake-lsp.py --notebook` (`notebook_lsp::bench_notebook_lsp`). Saves:
 ///   a scratch vault under `/tmp`.
 /// - `ACCENT_BENCH_BIBLIOGRAPHY=1`: source-preserving edits, undo, manual transfer and sidebar visibility.
+///   `time:<rel>`: rows built and main-loop time for an edit and a search of the bibliography
+///   `rel`, the pane hidden and shown. Edits it; a scratch vault under `/tmp`.
 /// - `ACCENT_BENCH_COLLAPSE=1`: responsive sidebar width and saved state.
 /// - `ACCENT_BENCH_LAYOUT=<a>,<b>,<c>,<d>[,shell]`: save split layout and
 ///   active tab; `1`: inspect restored layout without saving; `pick:<rel>`,

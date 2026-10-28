@@ -22,7 +22,7 @@ mod listing;
 pub use drag::dropped_paths;
 use drag::{Append, Carry, Import, Move, files_content, import_target, move_content, move_target};
 use listing::{Asked, ShowHidden, Watches, children_model, fill, watch_unindexed};
-pub use listing::{decode, dot_named};
+pub use listing::{changed_span, decode, dot_named};
 
 /// CSS class for Ctrl-click marked rows (`build::install_chrome_css`).
 const MARKED: &str = "accent-marked";

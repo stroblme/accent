@@ -11,6 +11,7 @@ use accent_core::bib::{self, Library};
 use adw::prelude::*;
 use gtk::{gio, glib, pango};
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 use std::time::Duration;
 
@@ -44,6 +45,8 @@ impl Entries {
         let weak = Rc::downgrade(app);
         let factory = crate::widgets::factory(
             move |item| {
+                #[cfg(feature = "bench")]
+                bench::SETUPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
                 row.set_margin_top(6);
                 row.set_margin_bottom(6);
@@ -97,6 +100,8 @@ impl Entries {
                 row
             },
             |row: &gtk::Box, item: &gtk::ListItem| {
+                #[cfg(feature = "bench")]
+                bench::BINDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 // As in Git, wire the GTK list row after the list manager finishes binding it.
                 let list_row = row.parent();
                 glib::idle_add_local_once(move || {
@@ -186,9 +191,7 @@ impl Entries {
     }
     fn set(&self, result: Result<Library, String>) {
         match result {
-            // Every vault event refreshes the pane, and a save elsewhere — a PDF drawn on once a
-            // second — reads the file back unchanged. Rebuilding the rows of a large bibliography
-            // held the main loop for a second each time.
+            // A walk, or a save that left the text as it was, reads the file back unchanged.
             Ok(library)
                 if (self.library.borrow().as_ref()).is_some_and(|b| b.source == library.source) => {
             }
@@ -261,11 +264,32 @@ impl Entries {
                     .to_lowercase()
                     .contains(q)
             }) {
-                rows.push(glib::BoxedAnyObject::new(row));
+                rows.push(row);
                 indices.push(i);
             }
         }
-        self.model.splice(0, self.model.n_items(), &rows);
+        // A row that stays keeps its object, and with it the widget the list built for it: an
+        // edited reference or a search typed rebuilt every row, a second of the main loop in a
+        // large bibliography. Rows of the same text take the old objects in order.
+        let shown: Vec<glib::BoxedAnyObject> = (0..self.model.n_items())
+            .filter_map(|i| self.model.item(i).and_downcast())
+            .collect();
+        let mut spare: HashMap<[String; 3], Vec<glib::BoxedAnyObject>> = HashMap::new();
+        for object in shown.iter().rev() {
+            let row = object.borrow::<[String; 3]>().clone();
+            spare.entry(row).or_default().push(object.clone());
+        }
+        let rows: Vec<glib::BoxedAnyObject> = rows
+            .into_iter()
+            .map(|row| {
+                (spare.get_mut(&row).and_then(Vec::pop))
+                    .unwrap_or_else(|| glib::BoxedAnyObject::new(row))
+            })
+            .collect();
+        if let Some((at, removed, added)) = crate::tree::changed_span(&shown, &rows) {
+            self.model
+                .splice(at as u32, removed as u32, &rows[at..at + added]);
+        }
         *self.indices.borrow_mut() = indices;
         for (row, &i) in self.indices.borrow().iter().enumerate() {
             if selected.contains(&bib.entries[i].key) {
@@ -444,6 +468,22 @@ impl Panel {
             .string(self.chooser.selected())
             .map(|s| s.to_string())
     }
+    /// Whether `event` can have changed the file the pane shows: a walk, or a change, removal or
+    /// rename of it or of a folder holding it (a trashed folder is one removal). Every other event
+    /// would read and parse it only to find it as it was.
+    pub fn changed_by(&self, event: &accent_api::Event) -> bool {
+        use accent_api::Event;
+        let Some(path) = self.path() else {
+            return false;
+        };
+        let names = |rel: &str| accent_core::path::is_under(&path, rel);
+        match event {
+            Event::Reconciled(_) => true,
+            Event::FileChanged(rel) | Event::FileRemoved(rel) => names(rel),
+            Event::FileRenamed { from, to } => names(from) || names(to),
+            _ => false,
+        }
+    }
     pub fn paths(&self) -> Vec<String> {
         (0..self.files.n_items())
             .filter_map(|i| self.files.string(i).map(|s| s.to_string()))
@@ -501,6 +541,8 @@ impl Panel {
         let (Some(app), Some(path)) = (self.app.upgrade(), self.path()) else {
             return;
         };
+        #[cfg(feature = "bench")]
+        bench::READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let generation = self.generation.get() + 1;
         self.generation.set(generation);
         if let Some(tab) = app.tab_for(&path) {
@@ -584,14 +626,23 @@ fn menu(sections: &[&[(&str, &str)]], prefix: &str) -> gio::Menu {
     }
     menu
 }
-/// A flat More button over [`menu`]`(sections, prefix)`.
-fn menu_button(sections: &[&[(&str, &str)]], prefix: &str, tooltip: &str) -> gtk::MenuButton {
+/// A flat More button over [`menu`]`(sections, prefix)`, its menu built as it first opens: every
+/// reference row has one, and building them up front was a third of a large list's rebuild.
+fn menu_button(
+    sections: &'static [&'static [(&'static str, &'static str)]],
+    prefix: &'static str,
+    tooltip: &str,
+) -> gtk::MenuButton {
     let button = gtk::MenuButton::builder()
         .icon_name("view-more-symbolic")
         .tooltip_text(tooltip)
-        .menu_model(&menu(sections, prefix))
         .valign(gtk::Align::Center)
         .build();
+    button.set_create_popup_func(move |button| {
+        if button.menu_model().is_none() {
+            button.set_menu_model(Some(&menu(sections, prefix)));
+        }
+    });
     button.add_css_class("flat");
     button.update_property(&[gtk::accessible::Property::Label(tooltip)]);
     button

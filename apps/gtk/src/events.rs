@@ -120,8 +120,8 @@ impl App {
             }
             _ => None,
         };
-        if depth.is_some()
-            && let Some(panel) = self.bibliography.get()
+        if let Some(panel) = self.bibliography.get()
+            && panel.changed_by(&event)
         {
             panel.refresh();
         }
