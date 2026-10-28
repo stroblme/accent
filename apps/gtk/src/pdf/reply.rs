@@ -78,10 +78,11 @@ impl PdfTab {
                 self.history.set((undo, redo));
                 self.on_history.emit(self);
             }
-            Reply::Saved(etag) => {
+            Reply::Saved { etag, paged } => {
                 #[cfg(feature = "bench")]
                 self.saves.set(self.saves.get() + 1);
                 self.saved.set(Some(etag));
+                self.saved_paged.set(paged);
                 self.on_saved.emit(self);
             }
             Reply::SaveFailed(why) => {

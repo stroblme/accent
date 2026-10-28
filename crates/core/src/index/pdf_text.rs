@@ -10,8 +10,9 @@ use super::Index;
 use super::reconcile::write_bodies;
 use crate::Result;
 use crate::pdf_text::Text;
+use crate::walk::FileKind;
 use rusqlite::{OptionalExtension, params};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// A PDF whose text a reader has claimed ([`Index::claim_pdfs`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,6 +102,39 @@ impl Index {
         Ok(())
     }
 
+    /// The PDF at `rel` was written without a change to its text, ink drawn on it: its row takes
+    /// the file's stat as it is now and keeps its text. A read claimed at the old stat would not
+    /// be written back ([`put_pdf_texts`](Self::put_pdf_texts)), so a claimed row is unread again.
+    /// `None` when the index holds no PDF there; otherwise whether its text is still to be read.
+    pub fn restat_pdf(&mut self, root: &Path, rel: &str) -> Result<Option<bool>> {
+        let Some(meta) = self.stat(root, rel)? else {
+            return Ok(None);
+        };
+        let tx = self.write_tx()?;
+        let unread = tx
+            .prepare_cached(
+                "UPDATE files SET canonical = ?2, dev = ?3, ino = ?4, mtime_ns = ?5, size = ?6,
+                        text_pages = CASE WHEN text_pages = -1 THEN NULL ELSE text_pages END
+                  WHERE rel_path = ?1 AND kind = ?7
+              RETURNING text_pages IS NULL",
+            )?
+            .query_row(
+                params![
+                    rel,
+                    meta.canonical.to_string_lossy(),
+                    meta.dev as i64,
+                    meta.ino as i64,
+                    meta.mtime_ns,
+                    meta.size as i64,
+                    FileKind::Pdf.as_i64(),
+                ],
+                |r| r.get(0),
+            )
+            .optional()?;
+        tx.commit()?;
+        Ok(unread)
+    }
+
     /// The text the index holds of `rel`, a PDF's pages joined by form feeds: what the Search
     /// pane lists the rest of a PDF's matches from, the file itself being no text to read.
     pub fn indexed_text(&self, rel: &str) -> Result<Option<String>> {
@@ -117,7 +151,7 @@ impl Index {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::walk::FileKind;
+    use crate::index::Change;
 
     fn text(body: &str, pages: usize) -> Text {
         Text {
@@ -222,6 +256,39 @@ mod tests {
         ix.put_pdf_texts(&[(claimed[0].clone(), text("new words", 1))], &[])
             .unwrap();
         assert_eq!(ix.search("new", 10, false).unwrap()[0].page, Some(1));
+    }
+
+    /// Ink drawn on a PDF leaves its text as it was: its row takes the file's new stat and keeps
+    /// the text, but a read under way, of the file at its claimed stat, is not written back and
+    /// is read again. A page edit's save is any other change: the text goes until it is read.
+    #[test]
+    fn a_pdf_drawn_on_keeps_its_text() {
+        let (vault, _cache, mut ix) = vault(&["paper.pdf", "busy.pdf"]);
+        let claimed = ix.claim_pdfs(16).unwrap();
+        let of = |rel: &str| claimed.iter().find(|p| p.rel_path == rel).unwrap().clone();
+        ix.put_pdf_texts(&[(of("paper.pdf"), text("giraffes graze", 1))], &[])
+            .unwrap();
+        let ink = |rel: &str| std::fs::write(vault.path().join(rel), b"%PDF-1.4\n% ink\n").unwrap();
+
+        ink("paper.pdf");
+        let unread = ix.restat_pdf(vault.path(), "paper.pdf").unwrap();
+        assert_eq!(unread, Some(false));
+        assert_eq!(ix.search("giraffes", 10, false).unwrap()[0].page, Some(1));
+        let echo = ix.update_file(vault.path(), "paper.pdf").unwrap();
+        assert_eq!(echo, Change::Unchanged, "the row has the file's stat");
+
+        ink("busy.pdf");
+        assert_eq!(ix.restat_pdf(vault.path(), "busy.pdf").unwrap(), Some(true));
+        ix.put_pdf_texts(&[(of("busy.pdf"), text("stale words", 1))], &[])
+            .unwrap();
+        assert!(ix.search("stale", 10, false).unwrap().is_empty());
+        assert_eq!(ix.unread_pdfs().unwrap(), 1);
+        assert_eq!(ix.restat_pdf(vault.path(), "note.md").unwrap(), None);
+
+        std::fs::write(vault.path().join("paper.pdf"), b"%PDF-1.4\n% a page more\n").unwrap();
+        ix.update_file(vault.path(), "paper.pdf").unwrap();
+        assert!(ix.search("giraffes", 10, false).unwrap().is_empty());
+        assert_eq!(pages(&ix, "paper.pdf"), None);
     }
 
     #[test]

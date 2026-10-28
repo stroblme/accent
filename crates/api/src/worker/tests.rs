@@ -465,7 +465,7 @@ fn a_write_told_as_saved_does_not_come_back_as_changed() {
 
     let path = f.vault.root().join("paper.pdf");
     let etag = fs::write_bytes(&path, b"%PDF-1.4 after", None).unwrap();
-    f.vault.saved("paper.pdf", etag).unwrap();
+    f.vault.saved("paper.pdf", etag, false).unwrap();
     assert!(
         wait_for(
             &f.events,
@@ -620,6 +620,7 @@ fn an_own_save_stays_quiet_behind_a_late_echo_of_another_change() {
     tx.send(Msg::Saved {
         rel: "Note.md".to_string(),
         etag,
+        same_text: false,
     })
     .unwrap();
     assert!(!changed(), "an own save came back behind another's echo");

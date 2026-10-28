@@ -44,6 +44,24 @@ pub(super) fn bench_pdf(app: &Rc<App>, rel: &str) {
     });
 }
 
+/// The pages exact search finds `text` on in `rel`, once they are `want` or after five seconds.
+async fn found_on(app: &Rc<App>, rel: &str, text: &str, want: &[u32]) -> Vec<u32> {
+    let mut pages = Vec::new();
+    for _ in 0..50 {
+        let found = (app.vault()).and_then(|v| v.grep(text, Default::default(), 50, false).ok());
+        let rows = found.map(|(rows, _)| rows).unwrap_or_default();
+        pages = (rows.iter())
+            .filter(|row| row.rel_path == rel)
+            .filter_map(|row| row.page)
+            .collect();
+        if pages == want {
+            break;
+        }
+        glib::timeout_future(Duration::from_millis(100)).await;
+    }
+    pages
+}
+
 /// Exercise move, insert-before, append and delete through the strip call and window actions,
 /// reopening disk after each, then Undo and Redo all four. A note links to pages 1–3 through
 /// highlights, jumps, markdown, HTML and reference definitions; report file/buffer link rewrites
@@ -74,6 +92,10 @@ pub(super) fn bench_pdf_pages(app: &Rc<App>, rel: &str) {
         pdf.edit_pages(accent_core::pdf::PageEdit::Move { from: 0, to: 2 });
         written(&app).await;
         println!("bench pages moved {} {}", pages_read(&pdf), links());
+        // A page edit changes the file's text, so the text pass reads it again: search finds the
+        // first page's words on the page it went to.
+        let found = found_on(&app, &rel, "Page 1", &[3]).await;
+        println!("bench pages moved_text page_1_on={found:?}");
         let _ = WidgetExt::activate_action(&app.window, "win.pdf-add-page-before", None);
         written(&app).await;
         println!("bench pages before {} {}", pages_read(&pdf), links());

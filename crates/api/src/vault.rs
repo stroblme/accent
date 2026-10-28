@@ -592,11 +592,12 @@ impl Vault {
     }
 
     /// `rel` was written by this window outside [`save`](Self::save), a PDF drawn on, and left at
-    /// `etag`, so the watcher's news of it is no change from outside. A remote vault's file is
-    /// written here as a cached copy, which reaches the host by [`remote::Remote::push`].
-    pub fn saved(&self, rel: &str, etag: Etag) -> Result<()> {
+    /// `etag`, so the watcher's news of it is no change from outside; `same_text` when the write
+    /// left its text as it was, which the index then keeps. A remote vault's file is written here
+    /// as a cached copy, which reaches the host by [`remote::Remote::push`].
+    pub fn saved(&self, rel: &str, etag: Etag, same_text: bool) -> Result<()> {
         match &self.backend {
-            Backend::Local(v) => v.saved(rel, etag),
+            Backend::Local(v) => v.saved(rel, etag, same_text),
             Backend::Remote(_) => Ok(()),
         }
     }

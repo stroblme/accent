@@ -140,6 +140,8 @@ pub struct PdfTab {
     /// The etag of the last write *this tab* made, so a watcher report of our own save is
     /// recognised and not answered with a reload. See [`PdfTab::refresh`].
     pub(super) saved: Cell<Option<accent_core::fs::Etag>>,
+    /// Whether that write carried a page edit, which changes the file's text where ink does not.
+    pub(super) saved_paged: Cell<bool>,
     /// Whether Undo, and then Redo, has anything to walk: what the header's two buttons show.
     pub(super) history: Cell<(bool, bool)>,
     pub(super) outline: RefCell<Vec<pdf::Outline>>,
@@ -309,6 +311,7 @@ pub fn open(
         failure_told: Cell::new(false),
         unsent: Cell::new(false),
         saved: Cell::new(None),
+        saved_paged: Cell::new(false),
         history: Cell::new((false, false)),
         outline: RefCell::new(Vec::new()),
         info: RefCell::default(),

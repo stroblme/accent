@@ -269,12 +269,14 @@ impl App {
     }
 
     /// The render thread wrote `pdf`'s file: the vault hears it as its own write, so the watcher's
-    /// news of it reads as no change rather than as a file to read again.
+    /// news of it reads as no change rather than as a file to read again, and keeps the text it
+    /// read of it unless a page edit went into the write.
     fn pdf_saved(&self, pdf: &pdftab::PdfTab) {
         let key = pdf.key();
+        let same_text = !pdf.saved_paged.get();
         if let (Some(vault), Some(etag)) = (self.vault(), pdf.saved.get())
             && !doc::is_loose_key(&key)
-            && let Err(e) = vault.saved(&key, etag)
+            && let Err(e) = vault.saved(&key, etag, same_text)
         {
             tracing::debug!("telling the vault of {key}'s save: {e}");
         }

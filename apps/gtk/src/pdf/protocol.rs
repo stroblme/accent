@@ -89,8 +89,12 @@ pub enum Reply {
     /// rather than have the page read again.
     PageChanged(usize, pdf::Rect, Option<NamedInk>),
     /// The file now on disk is ours, and this is its etag — which is how the tab tells its own
-    /// write from someone else's and does not reload over strokes drawn since.
-    Saved(accent_core::fs::Etag),
+    /// write from someone else's and does not reload over strokes drawn since — and whether it
+    /// carried a page edit, which changes the file's text where ink does not.
+    Saved {
+        etag: accent_core::fs::Etag,
+        paged: bool,
+    },
     /// The drawing could not be written, and why. A read-only file used to swallow every stroke
     /// silently until the tab closed.
     SaveFailed(String),

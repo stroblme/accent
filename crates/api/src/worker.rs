@@ -107,6 +107,9 @@ pub(crate) enum Msg {
     Saved {
         rel: String,
         etag: Etag,
+        /// The write left the file's text as it was, ink drawn on a PDF: the row takes the new
+        /// stat and keeps the text read of it. See [`Worker::restat`].
+        same_text: bool,
     },
     /// Git directories found by `repos()`. The index walk skips `.git`,
     /// so the watcher needs these paths explicitly.
@@ -260,7 +263,7 @@ impl Worker {
         // Before anything in the batch is taken in: an echo of an earlier change of the file, come
         // late, may be read ahead of the save, with the save already on disk.
         for msg in &batch {
-            if let Msg::Saved { rel, etag } = msg {
+            if let Msg::Saved { rel, etag, .. } = msg {
                 self.own.insert(rel.clone(), *etag);
             }
         }
@@ -400,6 +403,11 @@ impl Worker {
                         };
                     }
                 }
+                Msg::Saved {
+                    rel,
+                    same_text: true,
+                    ..
+                } => self.restat(&rel, &mut batched),
                 Msg::Saved { rel, .. } => self.update(&rel, true, &mut batched),
                 Msg::Fs(ev) => self.apply_linked(ev, &mut batched),
                 #[cfg(test)]
@@ -867,6 +875,16 @@ impl Worker {
                 }
             }
             Err(e) => self.fail(&format!("indexing {rel}"), e),
+        }
+    }
+
+    /// An own write of `rel` that left its text as it was: its row takes the new stat and keeps
+    /// the text, so the PDF text pass reads it again only where a read of it was under way. A
+    /// path the index holds no PDF at is indexed as any own write is.
+    fn restat(&mut self, rel: &str, b: &mut Batch) {
+        match self.index.restat_pdf(&self.root, rel) {
+            Ok(Some(unread)) => b.pdfs |= unread,
+            _ => self.update(rel, true, b),
         }
     }
 

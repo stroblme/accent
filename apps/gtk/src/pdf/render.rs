@@ -433,7 +433,14 @@ fn render_loop(
                         Ok(written) => {
                             etag = Some(written);
                             ink.dirty = false;
-                            send(view, Reply::Saved(written));
+                            let paged = std::mem::take(&mut ink.paged);
+                            send(
+                                view,
+                                Reply::Saved {
+                                    etag: written,
+                                    paged,
+                                },
+                            );
                         }
                         // Left dirty on purpose: the next stroke's save tries again, and the
                         // drawing is still in the document either way. A file that cannot be
@@ -481,7 +488,14 @@ fn render_loop(
                             _ => {
                                 let written = doc.save_to(&path, etag)?;
                                 etag = Some(written);
-                                send(view, Reply::Saved(written));
+                                let paged = std::mem::take(&mut ink.paged);
+                                send(
+                                    view,
+                                    Reply::Saved {
+                                        etag: written,
+                                        paged,
+                                    },
+                                );
                                 for (page, area) in pages {
                                     send(view, Reply::PageChanged(page, area, None));
                                 }

@@ -81,6 +81,9 @@ pub struct Ink {
     done: Vec<Vec<Step>>,
     undone: Vec<Vec<Step>>,
     pub dirty: bool,
+    /// Whether a page went in, came out or moved since the file was last written: what changes
+    /// its text, which ink never does. Set by every page edit; the writer clears it.
+    pub paged: bool,
 }
 
 impl Ink {
@@ -287,6 +290,7 @@ impl Ink {
 
     /// What the ledger knows of every page follows `edit` to the page's new number.
     fn follow(&mut self, edit: PageEdit) {
+        self.paged = true;
         self.ids = std::mem::take(&mut self.ids)
             .into_iter()
             .filter_map(|(page, slots)| Some((edit.map(page)?, slots)))
@@ -519,6 +523,7 @@ mod tests {
         ink.drew(0, before);
         assert_eq!(lines(&doc), [20, 50, 60]);
         assert_eq!(ink.history(), (true, false));
+        assert!(!ink.paged, "ink, erases and moves leave the text as it was");
         let _ = std::fs::remove_file(&path);
     }
 
@@ -531,6 +536,8 @@ mod tests {
         };
         let mut ink = Ink::default();
         let insert = ink.edit_pages(&mut doc, PageEdit::insert(1)).unwrap();
+        assert!(ink.paged, "a page edit changes the text");
+        ink.paged = false;
         let moved = ink
             .edit_pages(&mut doc, PageEdit::Move { from: 2, to: 0 })
             .unwrap();
@@ -538,6 +545,7 @@ mod tests {
 
         let undo = PageEdit::Move { from: 0, to: 2 };
         assert_eq!(ink.walk(&mut doc, false), [Walked::Pages(undo, moved)]);
+        assert!(ink.paged, "and so does its Undo");
         assert_eq!(page_texts(&doc), ["Hello accent", "", "Second page"]);
         let undo = PageEdit::delete(1);
         assert_eq!(ink.walk(&mut doc, false), [Walked::Pages(undo, insert)]);
