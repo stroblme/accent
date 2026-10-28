@@ -448,8 +448,8 @@ pub(super) fn bench_pdf_ring(app: &Rc<App>, rel: &str) {
 /// Then what the render thread did per stroke — its CPU time, and how many strokes it listed for
 /// the tools — and whether the strokes the view holds for the first page agree with the file's,
 /// under the same names a fresh list gives them, after the strokes, an eraser drag down the
-/// middle, its Undo, an Adjust drag of the first stroke, and the file broken under the tab and
-/// mended.
+/// middle, its Undo, an Adjust drag of the first stroke, a quarter turn of it by its ring with its
+/// Undo and Redo, and the file broken under the tab and mended.
 pub(super) fn bench_pdf_pen(app: &Rc<App>, arg: &str) {
     let mut parts = arg.split(',');
     let rel = parts.next().unwrap_or_default().to_string();
@@ -689,6 +689,50 @@ pub(super) fn bench_pdf_pen(app: &Rc<App>, arg: &str) {
         written(&app).await;
         agree("moved");
         println!("bench pen moved changed={}", filed() != file);
+        // The stroke Adjust holds turned a quarter clockwise by its ring, Shift held, then undone
+        // and made again: the one stroke taller than it is wide is that one.
+        let tall = || {
+            let doc = accent_core::pdf::PdfDoc::open(pdf.path()).ok();
+            let inks = doc.and_then(|d| d.inks(0).ok()).unwrap_or_default();
+            (inks.iter())
+                .filter(|i| i.bounds.height() > i.bounds.width())
+                .count()
+        };
+        let held = reader.adjusted();
+        if let Some(r) = held.and_then(|(page, b)| reader.widget_rect(page, &b)) {
+            let (l, t) = (f64::from(r.x()), f64::from(r.y()));
+            let (w, h) = (f64::from(r.width()), f64::from(r.height()));
+            let (cx, cy) = (l + w / 2.0, t + h / 2.0);
+            let (ox, oy) = (l + w + 12.0 - cx, t - 12.0 - cy);
+            let mut steps = vec!["keydown shift".to_string()];
+            for k in 0..=3 {
+                let (sin, cos) = (std::f64::consts::FRAC_PI_2 * f64::from(k) / 3.0).sin_cos();
+                let (x, y) = on_screen(cx + ox * cos - oy * sin, cy + ox * sin + oy * cos);
+                steps.push(format!("move {x:.0} {y:.0}"));
+                if k == 0 {
+                    steps.push("down".to_string());
+                }
+                steps.push("sleep 0.1".to_string());
+            }
+            steps.push("up; keyup shift".to_string());
+            super::git::xtest(&steps.join("; ")).await;
+        }
+        pdf.flush();
+        written(&app).await;
+        agree("turned");
+        let turned = tall();
+        let _ = WidgetExt::activate_action(&app.window, "win.pdf-undo", None);
+        pdf.flush();
+        written(&app).await;
+        let undone = tall();
+        let _ = WidgetExt::activate_action(&app.window, "win.pdf-redo", None);
+        pdf.flush();
+        written(&app).await;
+        println!(
+            "bench pen turned held={} tall={turned} undone={undone} redone={}",
+            held.is_some(),
+            tall()
+        );
         // The file broken under the tab and mended: the page erased on is listed again for the
         // tool in hand, by a render thread that opened it afresh.
         let whole = std::fs::read(pdf.path()).unwrap_or_default();

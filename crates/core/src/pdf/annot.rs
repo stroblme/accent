@@ -9,8 +9,8 @@ use pdfium_render::prelude::*;
 
 use super::cos::{Objects, dict, name, number, real, reals, text};
 use super::ink::{
-    Drawn, Seg, apply, catmull_rom, cut, flatten, points_of, polyline, segments_of, thin,
-    transformed,
+    Drawn, IDENTITY, Seg, apply, catmull_rom, cut, flatten, points_of, polyline, segments_of, then,
+    thin, transformed,
 };
 use super::text::{line_top, same_quads, selection_quads};
 use super::{
@@ -396,7 +396,8 @@ impl PdfDoc {
     /// its `/Annots` position stayed the same.
     ///
     /// Our strokes are redrawn to preserve line width. External strokes keep their position and
-    /// are resized through `/Rect`, preserving their appearance and `/InkList`.
+    /// are resized through `/Rect`, preserving their appearance and `/InkList`; a turn, which no
+    /// `/Rect` can fit, turns their appearance as a picture (`Objects::turn`).
     pub fn transform_ink(&mut self, page: usize, index: usize, m: Matrix) -> Result<(Rect, bool)> {
         let read = self.read_at(page, index)?;
         if read.ours {
@@ -405,14 +406,14 @@ impl PdfDoc {
             return Ok((was.union(now), false));
         }
         let was = read.bounds;
-        let now = Rect::from_corners(
-            apply(m, (was.left, was.top)),
-            apply(m, (was.right, was.bottom)),
-        );
         let strokes: Vec<Vec<(f32, f32)>> = (read.strokes.iter())
             .map(|stroke| stroke.iter().map(|&q| apply(m, q)).collect())
             .collect();
         let (_, height) = self.page_size(page)?;
+        let now = match m[1] == 0.0 && m[2] == 0.0 {
+            true => was.under(m),
+            false => (self.cos.turn(page, index, height, m)?).unwrap_or(was.under(m)),
+        };
         self.cos.place(page, index, height, now, &strokes)?;
         self.reopen()?;
         Ok((was.union(now), true))
@@ -698,6 +699,85 @@ impl Objects {
         self.append_annot(h.page, annot).map(drop)
     }
 
+    /// The appearance of the annotation at `index` of page `page`, on a page `height` points
+    /// tall, turned by `m` (top-left page points) as a picture is turned: each stream of its
+    /// `/AP` swapped for a copy whose `/Matrix` puts the form straight where `m` takes it, so the
+    /// `/Rect` round it has nothing left to fit (ISO 32000-1 §12.5.5). The box the turned
+    /// appearance covers, or `None` with no stream to turn, a reader drawing one from the
+    /// `/InkList`.
+    pub(super) fn turn(
+        &mut self,
+        page: usize,
+        index: usize,
+        height: f32,
+        m: Matrix,
+    ) -> Result<Option<Rect>> {
+        let Some(Object::Ref(at)) = self.annots(page)?.get(index).cloned() else {
+            return Err(Error::Pdf(format!(
+                "annotation {index} of page {page} is no object"
+            )));
+        };
+        let mut annot = self.dict(at)?;
+        let ap = annot.get(b"AP").map(|ap| self.resolve(ap)).transpose()?;
+        let (Some(mut ap), Some(rect)) = (
+            ap.and_then(|ap| ap.as_dict().cloned()),
+            annot.get(b"Rect").and_then(|r| self.area(r)),
+        ) else {
+            return Ok(None);
+        };
+        // In the file's space, y up: flipped into the page's, turned, and flipped back.
+        let flip = [1.0, 0.0, 0.0, -1.0, 0.0, height];
+        let turn = then(then(flip, m), flip);
+        let mut turned = None;
+        for key in [&b"N"[..], b"D", b"R"] {
+            let Some(&Object::Ref(r)) = ap.get(key) else {
+                continue;
+            };
+            let Object::Stream(mut stream) = self.get(r)? else {
+                continue;
+            };
+            let Some(bbox) = stream.dict.get(b"BBox").and_then(|b| self.area(b)) else {
+                continue;
+            };
+            let form = stream
+                .dict
+                .get(b"Matrix")
+                .and_then(|m| self.resolve(m).ok());
+            let form = form.and_then(|m| <[f32; 6]>::try_from(numbers(&m)?).ok());
+            let form = form.unwrap_or(IDENTITY);
+            // Algorithm 8.1: the form's box under its matrix, fitted into the `/Rect`.
+            let shown = bbox.under(form);
+            let scale = |extent: f32, into: f32| if extent > 0.0 { into / extent } else { 1.0 };
+            let fx = scale(shown.width(), rect.width());
+            let fy = scale(shown.height(), rect.height());
+            let fit = [
+                fx,
+                0.0,
+                0.0,
+                fy,
+                rect.left - fx * shown.left,
+                rect.top - fy * shown.top,
+            ];
+            let placed = then(then(form, fit), turn);
+            stream.dict.set(b"Matrix", reals(placed));
+            if key == b"N" {
+                turned = Some(bbox.under(placed));
+            }
+            ap.set(key, Object::Ref(self.update.add(Object::Stream(stream))));
+        }
+        annot.set(b"AP", Object::Dict(ap));
+        self.update.set(at, Object::Dict(annot));
+        let down =
+            |b: Rect| Rect::from_corners((b.left, height - b.top), (b.right, height - b.bottom));
+        Ok(turned.map(down))
+    }
+
+    /// A rectangle as the file writes one, `[x0 y0 x1 y1]` in its own space, normalised.
+    fn area(&self, o: &Object) -> Option<Rect> {
+        let [x0, y0, x1, y1] = <[f32; 4]>::try_from(numbers(&self.resolve(o).ok()?)?).ok()?;
+        Some(Rect::from_corners((x0, y0), (x1, y1)))
+    }
+
     /// The annotation at `index` of page `page` moved where `rect` and `strokes` say, in top-left
     /// page points on a page `height` points tall, and nothing else of it changed: its `/Rect`,
     /// which every reader fits its appearance stream into, and its `/InkList`, unless it has none.
@@ -737,6 +817,11 @@ impl Objects {
 
 /// `/F 4`: printed, as a mark on the page should be.
 const PRINT: i64 = 4;
+
+/// The numbers of an array, or `None` for anything else.
+fn numbers(o: &Object) -> Option<Vec<f32>> {
+    o.as_array()?.iter().map(number).collect()
+}
 
 /// One `/Ink` annotation as it was read off its page.
 struct Read {

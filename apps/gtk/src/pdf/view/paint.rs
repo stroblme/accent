@@ -9,7 +9,7 @@ use gtk::{gdk, graphene, gsk};
 use super::imp;
 use crate::pdf::cache::{TILE, TileKey, Want, reach, tiles_across, tiles_within};
 use crate::pdf::geometry::{Layout, PageRect, gap_middle, on_grid, page_at};
-use crate::pdf::tools::{HANDLE, Mode, Stroke, mapped};
+use crate::pdf::tools::{HANDLE, Handle, Mode, ROTATE_GAP, Stroke};
 use crate::theme;
 
 /// How thick the line a dropped PDF's pages would go in at is: the thumbnail strip's drop bar.
@@ -227,8 +227,9 @@ impl imp::PdfView {
                     snapshot.append_color(&colour, &layout.rect_of(rect, glyph));
                 }
             }
-            // The stroke the Adjust tool holds: its box with eight handles, and while the
-            // hand is on it, a ghost of the stroke where the drag has taken it.
+            // The stroke the Adjust tool holds: its box with eight handles and the ring that
+            // turns it, and while the hand is on it, a ghost of the stroke where the drag has
+            // taken it.
             if let Some(a) = adjust.as_ref().filter(|a| a.page == index) {
                 let point = |p: (f32, f32)| {
                     let (x, y) = accent_core::pdf::apply(a.matrix, p);
@@ -249,29 +250,47 @@ impl imp::PdfView {
                     ghost.set_line_join(gsk::LineJoin::Round);
                     snapshot.append_stroke(&builder.to_path(), &ghost, &colour);
                 }
-                let moved = mapped(a.bounds, a.matrix);
-                let frame = layout.rect_of(rect, &moved);
-                let (l, t) = (frame.x(), frame.y());
-                let (r, b) = (l + frame.width(), t + frame.height());
-                snapshot.append_border(
-                    &gsk::RoundedRect::from_rect(frame, 0.0),
-                    &[1.0; 4],
-                    &[accent; 4],
-                );
-                let (cx, cy) = ((l + r) / 2.0, (t + b) / 2.0);
-                for (hx, hy) in [
-                    (l, t),
-                    (cx, t),
-                    (r, t),
-                    (l, cy),
-                    (r, cy),
-                    (l, b),
-                    (cx, b),
-                    (r, b),
-                ] {
-                    let square =
-                        graphene::Rect::new(hx - HANDLE / 2.0, hy - HANDLE / 2.0, HANDLE, HANDLE);
-                    snapshot.append_color(&accent, &square);
+                // While it turns, its box turns with it and shows no handles, as a diagram's
+                // shape does.
+                if a.handle == Some(Handle::Rotate) {
+                    let [tl, tr, bl, br] = a.bounds.quad_corners().map(point);
+                    let builder = gsk::PathBuilder::new();
+                    builder.move_to(tl.x(), tl.y());
+                    for corner in [tr, br, bl] {
+                        builder.line_to(corner.x(), corner.y());
+                    }
+                    builder.close();
+                    snapshot.append_stroke(&builder.to_path(), &gsk::Stroke::new(1.0), &accent);
+                } else {
+                    let moved = a.bounds.under(a.matrix);
+                    let frame = layout.rect_of(rect, &moved);
+                    let (l, t) = (frame.x(), frame.y());
+                    let (r, b) = (l + frame.width(), t + frame.height());
+                    snapshot.append_border(
+                        &gsk::RoundedRect::from_rect(frame, 0.0),
+                        &[1.0; 4],
+                        &[accent; 4],
+                    );
+                    let (cx, cy) = ((l + r) / 2.0, (t + b) / 2.0);
+                    for (hx, hy) in [
+                        (l, t),
+                        (cx, t),
+                        (r, t),
+                        (l, cy),
+                        (r, cy),
+                        (l, b),
+                        (cx, b),
+                        (r, b),
+                    ] {
+                        let (x, y) = (hx - HANDLE / 2.0, hy - HANDLE / 2.0);
+                        let square = graphene::Rect::new(x, y, HANDLE, HANDLE);
+                        snapshot.append_color(&accent, &square);
+                    }
+                    // The rotate handle: the diagram's ring beyond the top-right corner.
+                    let ring = gsk::PathBuilder::new();
+                    let at = graphene::Point::new(r + ROTATE_GAP, t - ROTATE_GAP);
+                    ring.add_circle(&at, HANDLE / 2.0);
+                    snapshot.append_stroke(&ring.to_path(), &gsk::Stroke::new(1.5), &accent);
                 }
             }
             if let Some(page_marks) = marks.get(&index) {

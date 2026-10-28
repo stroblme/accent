@@ -15,6 +15,35 @@ pub fn apply(m: Matrix, (x, y): (f32, f32)) -> (f32, f32) {
     (m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5])
 }
 
+/// `m`, then `n`.
+pub fn then(m: Matrix, n: Matrix) -> Matrix {
+    let [a, b, c, d, e, f] = m;
+    let [p, q, r, s, t, u] = n;
+    [
+        a * p + b * r,
+        a * q + b * s,
+        c * p + d * r,
+        c * q + d * s,
+        e * p + f * r + t,
+        e * q + f * s + u,
+    ]
+}
+
+/// The map turning the page `degrees` clockwise as it is read about `centre`, in top-left page
+/// points.
+pub fn rotation(centre: (f32, f32), degrees: f32) -> Matrix {
+    let (sin, cos) = degrees.to_radians().sin_cos();
+    let (x, y) = centre;
+    [
+        cos,
+        sin,
+        -sin,
+        cos,
+        x - x * cos + y * sin,
+        y - x * sin - y * cos,
+    ]
+}
+
 /// The map that undoes `m`. Undefined for a map that flattens the plane, which no drag makes.
 pub fn invert(m: Matrix) -> Matrix {
     let [a, b, c, d, e, f] = m;

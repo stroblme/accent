@@ -18,7 +18,9 @@ mod text;
 pub use crate::page_edit::PageEdit;
 pub use annot::{LinkHighlights, highlight_quads, link_annotations};
 pub use doc::{A4, PdfDoc, blank_pdf};
-pub use ink::{Drawn, IDENTITY, Matrix, apply, catmull_rom, cut, hit, invert, swept, thin};
+pub use ink::{
+    Drawn, IDENTITY, Matrix, apply, catmull_rom, cut, hit, invert, rotation, swept, then, thin,
+};
 pub use ledger::{Ink, NamedInk, Walked, fresh_id};
 pub use text::{line_top, link_with_alias, same_quads, selection_link, selection_quads};
 
@@ -178,6 +180,18 @@ impl Rect {
 
     pub fn height(&self) -> f32 {
         self.bottom - self.top
+    }
+
+    /// The box round this one under `m`: exact for a map that keeps the axes, and round the
+    /// turned box for one that turns it.
+    pub fn under(self, m: Matrix) -> Rect {
+        let corners = self.quad_corners().map(|q| apply(m, q));
+        let at = |q: (f32, f32)| Rect::from_corners(q, q);
+        corners
+            .into_iter()
+            .map(at)
+            .reduce(Rect::union)
+            .unwrap_or(self)
     }
 
     /// The four corners in the Z-order a PDF `/QuadPoints` array expects:

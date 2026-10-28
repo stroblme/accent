@@ -1356,6 +1356,111 @@ fn a_foreign_stroke_moves_by_its_rect_alone() {
     assert_eq!(object(&doc.save().unwrap(), 4), object(&saved, 4));
 }
 
+/// A stroke of ours turned a quarter about its middle is drawn again along the turned path, its
+/// `/Rect` made again round it, in the file as in the document; Undo turns it back and Redo
+/// turns it again.
+#[test]
+fn a_turned_stroke_is_drawn_along_the_turned_path() {
+    let Some((dir, mut doc)) = open_tiny() else {
+        return;
+    };
+    let style = InkStyle {
+        width: 2.0,
+        rgba: [0, 0, 255, 255],
+        multiply: false,
+    };
+    let line = Shape::Line {
+        a: (20.0, 30.0),
+        b: (60.0, 30.0),
+    };
+    doc.add_shape(0, line, style).unwrap();
+    let mut ink = Ink::default();
+    let (id, _) = ink.named(&doc, 0).remove(0);
+    let m = rotation((40.0, 30.0), 90.0);
+    let at = ink.index_of(0, id).unwrap();
+    let (_, stayed) = doc.transform_ink(0, at, m).unwrap();
+    ink.moved(0, at, m, stayed);
+    let near = |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).abs() < 0.05 && (a.1 - b.1).abs() < 0.05;
+    let ends = |doc: &PdfDoc| {
+        let i = doc.inks(0).unwrap().remove(0);
+        (i.points[0], i.points[i.points.len() - 1], i.bounds)
+    };
+    // Clockwise as the page is read: the left end goes up.
+    let (first, last, b) = ends(&doc);
+    assert!(
+        near(first, (40.0, 10.0)) && near(last, (40.0, 50.0)),
+        "{first:?} {last:?}"
+    );
+    assert!(
+        near((b.left, b.top), (38.0, 8.0)) && near((b.right, b.bottom), (42.0, 52.0)),
+        "{b:?}"
+    );
+    let (first, last, _) = ends(&reopen(&dir, &doc));
+    assert!(
+        near(first, (40.0, 10.0)) && near(last, (40.0, 50.0)),
+        "saved turned"
+    );
+
+    ink.walk(&mut doc, false);
+    let (first, last, _) = ends(&doc);
+    assert!(
+        near(first, (20.0, 30.0)) && near(last, (60.0, 30.0)),
+        "{first:?} {last:?}"
+    );
+    ink.walk(&mut doc, true);
+    let (first, last, _) = ends(&doc);
+    assert!(
+        near(first, (40.0, 10.0)) && near(last, (40.0, 50.0)),
+        "{first:?} {last:?}"
+    );
+}
+
+/// Another editor's stroke turned with Adjust turns as a picture: its `/InkList` turned, its
+/// appearance a copy of its stream whose `/Matrix` puts the form where the turn does, its other
+/// keys and its old stream untouched. Its red and blue lines show turned, and Undo draws them
+/// where they were.
+#[test]
+fn a_foreign_stroke_turns_as_a_picture() {
+    let Some((_dir, mut doc)) = open_pdf(&foreign_ink_pdf(true)) else {
+        return;
+    };
+    let saved = doc.save().unwrap();
+    let mut ink = Ink::default();
+    let (id, before) = ink.named(&doc, 0).remove(0);
+    let b = before.bounds;
+    let m = rotation(((b.left + b.right) / 2.0, (b.top + b.bottom) / 2.0), 90.0);
+    let at = ink.index_of(0, id).unwrap();
+    let (_, stayed) = doc.transform_ink(0, at, m).unwrap();
+    ink.moved(0, at, m, stayed);
+    assert!(stayed);
+    let after = doc.inks(0).unwrap().remove(0);
+    let turned = before.points.iter().map(|&q| apply(m, q));
+    for (got, want) in after.points.iter().zip(turned) {
+        assert!((got.0 - want.0).abs() < 0.01 && (got.1 - want.1).abs() < 0.01);
+    }
+    let page = doc.render_page(0, 4.0, Theme::Plain).unwrap();
+    for (at, hue) in MARKS {
+        assert_eq!(hue_at(&page, apply(m, at)), Some(hue), "{at:?} turned");
+    }
+    assert_eq!(hue_at(&page, MARKS[0].0), None, "nothing left where it was");
+    let turned = doc.save().unwrap();
+    assert_eq!(object(&turned, 5), object(&saved, 5), "its own stream");
+    let keys = |file: &[u8]| {
+        let mut dict = object(file, 4).as_dict().unwrap().clone();
+        for key in [&b"Rect"[..], b"InkList", b"AP"] {
+            dict.remove(key);
+        }
+        dict
+    };
+    assert_eq!(keys(&turned), keys(&saved));
+
+    ink.walk(&mut doc, false);
+    let page = doc.render_page(0, 4.0, Theme::Plain).unwrap();
+    for (at, hue) in MARKS {
+        assert_eq!(hue_at(&page, at), Some(hue), "{at:?} back");
+    }
+}
+
 /// Another editor's stroke of one colour is cut along its `/InkList`, where it shows: each line
 /// the pass crossed is left as two pieces of ours in its colour and width, the original leaves
 /// with its popup, and Undo puts both back as they were.

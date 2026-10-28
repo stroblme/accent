@@ -12,7 +12,7 @@ use crate::pdf::geometry::page_at;
 use crate::pdf::protocol::{Pass, fresh_id};
 use crate::pdf::tools::{
     ADJUST_RADIUS, HANDLE, Hand, Handle, Mode, Selected, Stroke, drag_matrix, drag_of, handle_at,
-    mapped, shape_of, snap, width_of,
+    rotate_handle, shape_of, snap, turn_matrix, width_of,
 };
 
 impl PdfView {
@@ -148,7 +148,10 @@ impl PdfView {
                         }
                         obj.queue_draw();
                     }
-                    Mode::Adjust => obj.adjust_drag(dx, dy),
+                    Mode::Adjust => {
+                        let state = gesture.current_event_state();
+                        obj.adjust_drag(dx, dy, state.contains(gdk::ModifierType::SHIFT_MASK))
+                    }
                     _ => obj.erase_at(x + dx, y + dy),
                 }
             }
@@ -326,20 +329,31 @@ impl PdfView {
         self.note_hand(Hand::Pen { eraser });
     }
 
-    /// The Adjust tool's press: a handle of the stroke already held, else whichever stroke is
-    /// under the pointer, else nothing. Whether the press took hold of anything.
+    /// The Adjust tool's press: a handle of the stroke already held, its rotate handle first,
+    /// else whichever stroke is under the pointer, else nothing. Whether the press took hold of
+    /// anything.
     fn adjust_press(&self, x: f64, y: f64) -> bool {
         let Some((page, at)) = self.nearest_page_point(x, y) else {
             return false;
         };
-        let grip = HANDLE / self.imp().layout.borrow().scale;
+        let scale = self.imp().layout.borrow().scale;
+        let grip = HANDLE / scale;
         let mut adjust = self.imp().adjust.borrow_mut();
-        if let Some(a) = adjust.as_mut()
-            && a.page == page
-            && let Some(handle) = handle_at(a.bounds, at, grip)
-        {
-            a.handle = Some(handle);
-            return true;
+        if let Some(a) = adjust.as_mut() {
+            // Measured on the held stroke's page: the ring may stand off its paper.
+            let (rx, ry) = rotate_handle(a.bounds, scale);
+            let ring = (self.on_page(a.page, x, y))
+                .is_some_and(|(px, py)| (px - rx).hypot(py - ry) <= grip);
+            let held = match ring {
+                true => Some(Handle::Rotate),
+                false => (a.page == page)
+                    .then(|| handle_at(a.bounds, at, grip))
+                    .flatten(),
+            };
+            if let Some(handle) = held {
+                a.handle = Some(handle);
+                return true;
+            }
         }
         // The stroke under the pointer first, then the first whose box it is inside: a thin
         // line wants the pointer on it, a circle's empty middle still belongs to the circle.
@@ -367,14 +381,31 @@ impl PdfView {
         held
     }
 
-    fn adjust_drag(&self, dx: f64, dy: f64) {
+    /// The drag so far, `snap` (Shift) turning in steps of 15°.
+    fn adjust_drag(&self, dx: f64, dy: f64, snap: bool) {
         let scale = self.imp().layout.borrow().scale;
+        let from = self.imp().drag_from.get();
         if let Some(a) = self.imp().adjust.borrow_mut().as_mut()
             && let Some(handle) = a.handle
         {
-            a.matrix = drag_matrix(handle, a.bounds, dx as f32 / scale, dy as f32 / scale);
+            let (dx, dy) = (dx as f32 / scale, dy as f32 / scale);
+            a.matrix = match handle {
+                Handle::Rotate => {
+                    let from = from.and_then(|(x, y)| self.on_page(a.page, x, y));
+                    from.map_or(a.matrix, |p| {
+                        turn_matrix(a.bounds, p, (p.0 + dx, p.1 + dy), snap)
+                    })
+                }
+                _ => drag_matrix(handle, a.bounds, dx, dy),
+            };
         }
         self.queue_draw();
+    }
+
+    /// A point of the view in page `page`'s own points, wherever it is.
+    fn on_page(&self, page: usize, x: f64, y: f64) -> Option<(f32, f32)> {
+        let (cx, cy) = self.content_at(x, y);
+        self.imp().layout.borrow().to_page(page, cx, cy)
     }
 
     /// The hand let go: what the drag amounted to goes to the tab, and the selection keeps
@@ -395,7 +426,7 @@ impl PdfView {
                 .iter()
                 .map(|&p| accent_core::pdf::apply(m, p))
                 .collect();
-            a.bounds = mapped(a.bounds, m);
+            a.bounds = a.bounds.under(m);
             (a.page, a.id, m)
         };
         if let Some(f) = self.imp().on_transform.borrow().as_ref() {

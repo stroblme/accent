@@ -149,6 +149,9 @@ const SNAP_DEG: f32 = 4.0;
 pub(super) const ADJUST_RADIUS: f32 = 4.0;
 /// The side of an Adjust handle, in pixels.
 pub(super) const HANDLE: f32 = 8.0;
+/// How far beyond the box's top-right corner the rotate handle sits, in pixels, as the diagram's
+/// does (draw.io's `rotationHandleVSpacing`).
+pub(super) const ROTATE_GAP: f32 = 12.0;
 
 /// A line's end pulled onto the axis through its start when it is within [`SNAP_DEG`] of one.
 pub fn snap(a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
@@ -191,6 +194,8 @@ pub enum Handle {
     TopRight,
     BottomLeft,
     BottomRight,
+    /// The ring beyond the top-right corner, which turns the stroke about its middle.
+    Rotate,
 }
 
 /// Which part of `bounds` is under `at`: a corner within `grip` of it, else an edge, else the
@@ -213,6 +218,30 @@ pub fn handle_at(bounds: accent_core::pdf::Rect, at: (f32, f32), grip: f32) -> O
         (_, _, _, true) => Handle::Bottom,
         _ => Handle::Move,
     })
+}
+
+/// Where the rotate handle of a stroke with box `b` sits, in page points at `scale` pixels a point.
+pub fn rotate_handle(b: accent_core::pdf::Rect, scale: f32) -> (f32, f32) {
+    (b.right + ROTATE_GAP / scale, b.top - ROTATE_GAP / scale)
+}
+
+/// The turn a drag of the rotate handle of a stroke with box `b` from `from` to `to` (page
+/// points) gives it, about the box's middle: the bearing the pointer swept, to a tenth of a
+/// degree, or in steps of 15° with `snap`. The diagram's ring keeps draw.io's steps by how far
+/// out the pointer is (`diagram::geometry::rotation_to`); a stroke has no turn of its own to
+/// land back on, so it turns freely unless Shift says otherwise.
+pub fn turn_matrix(
+    b: accent_core::pdf::Rect,
+    from: (f32, f32),
+    to: (f32, f32),
+    snap: bool,
+) -> accent_core::pdf::Matrix {
+    let centre = ((b.left + b.right) / 2.0, (b.top + b.bottom) / 2.0);
+    // Clockwise from straight up, as the page is read.
+    let bearing = |(x, y): (f32, f32)| (x - centre.0).atan2(centre.1 - y).to_degrees();
+    let step = if snap { 15.0 } else { 0.1 };
+    let degrees = ((bearing(to) - bearing(from)) / step).round() * step;
+    accent_core::pdf::rotation(centre, degrees)
 }
 
 /// The map a drag of `handle` by `(dx, dy)` page points applies to a stroke with this box.
@@ -261,18 +290,9 @@ pub fn drag_matrix(
             let s = diagonal(-dx, -dy);
             about(s, s, b.right, b.bottom)
         }
+        // A turn is no drag by an offset: see `turn_matrix`.
+        Handle::Rotate => accent_core::pdf::IDENTITY,
     }
-}
-
-/// A box under a map, normalised. Exact for the axis-aligned maps a drag makes.
-pub(super) fn mapped(
-    r: accent_core::pdf::Rect,
-    m: accent_core::pdf::Matrix,
-) -> accent_core::pdf::Rect {
-    accent_core::pdf::Rect::from_corners(
-        accent_core::pdf::apply(m, (r.left, r.top)),
-        accent_core::pdf::apply(m, (r.right, r.bottom)),
-    )
 }
 
 /// The stroke the Adjust tool has hold of, and the drag being applied to it.
@@ -415,5 +435,33 @@ mod tests {
             drag_matrix(Handle::Bottom, flat, 0.0, 9.0),
             accent_core::pdf::IDENTITY
         );
+    }
+
+    /// The ring dragged a quarter round the middle turns the stroke a quarter clockwise, about
+    /// that middle; with Shift a little short of it still is a quarter.
+    #[test]
+    fn the_ring_turns_about_the_middle() {
+        use accent_core::pdf::{Rect, apply};
+        let b = Rect {
+            left: 10.0,
+            top: 20.0,
+            right: 50.0,
+            bottom: 60.0,
+        };
+        let near =
+            |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).abs() < 0.01 && (a.1 - b.1).abs() < 0.01;
+        // From straight above the middle (30, 40) to straight right of it.
+        let m = turn_matrix(b, (30.0, 0.0), (70.0, 40.0), false);
+        assert!(near(apply(m, (30.0, 20.0)), (50.0, 40.0)));
+        assert!(near(apply(m, (30.0, 40.0)), (30.0, 40.0)));
+        let short = turn_matrix(b, (30.0, 0.0), (70.0, 45.0), true);
+        assert!(near(apply(short, (30.0, 20.0)), (50.0, 40.0)));
+        assert!(!near(
+            apply(
+                turn_matrix(b, (30.0, 0.0), (70.0, 45.0), false),
+                (30.0, 20.0)
+            ),
+            (50.0, 40.0)
+        ));
     }
 }

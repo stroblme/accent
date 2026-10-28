@@ -330,6 +330,16 @@ impl PdfView {
         (self.imp().heard.get(), held)
     }
 
+    /// The page and box of the stroke the Adjust tool holds. Only `ACCENT_BENCH_PDF=pen:` asks.
+    #[cfg(feature = "bench")]
+    pub fn adjusted(&self) -> Option<(usize, accent_core::pdf::Rect)> {
+        self.imp()
+            .adjust
+            .borrow()
+            .as_ref()
+            .map(|a| (a.page, a.bounds))
+    }
+
     /// How many lists of a page the render thread has sent the tools. Only
     /// `ACCENT_BENCH_PDF=pen:` reads it.
     #[cfg(feature = "bench")]
