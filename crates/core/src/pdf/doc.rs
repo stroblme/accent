@@ -1,12 +1,19 @@
 //! The document: opening, page sizes, rendering, text, links, the outline, search and saving.
+//!
+//! pdfium reads the document and never writes it. An edit goes into the session's update
+//! ([`Objects`]), and pdfium is opened again over the file with that update after it ([`Tail`]),
+//! which is also what a save writes: the file's bytes as they were read, then one section.
 
 use std::collections::HashMap;
 use std::fs::File;
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
-use super::{annot, refused};
+use super::cos::Objects;
+use super::refused;
 use crate::{Error, Result};
+use accent_pdf::{Pdf, Ref, Source};
 use pdfium_render::prelude::*;
 
 use super::{
@@ -20,12 +27,17 @@ pub struct PdfDoc {
     // `Option` only so that `Drop` can close the document while still holding `CALLS`; it is
     // `Some` for the whole life of the value.
     doc: Option<PdfDocument<'static>>,
-    /// A second handle on the file pdfium reads the document from, and what that file looked
-    /// like when it was opened; `None` for a document read from bytes. See [`PdfDoc::intact`].
-    file: Option<(File, Etag)>,
-    /// Whether a render has left something of pdfium's own in the document that
-    /// [`PdfDoc::save`] has to keep out of the file (see [`PdfDoc::drawn`]).
-    stray: AtomicBool,
+    /// The file the document was read from, and what it looked like when it was opened; `None`
+    /// for a document read from bytes. See [`PdfDoc::intact`].
+    file: Option<(Arc<File>, Etag)>,
+    /// What the session's update follows: that file, or bytes — Android's, or a damaged file as
+    /// pdfium repaired it, which is then `repaired` and saved whole.
+    base: Arc<dyn Source>,
+    base_len: u64,
+    repaired: bool,
+    pub(super) cos: Objects,
+    /// The update as pdfium was last opened over it, which a save writes after the base.
+    section: Arc<Vec<u8>>,
 }
 
 impl Drop for PdfDoc {
@@ -35,28 +47,74 @@ impl Drop for PdfDoc {
     }
 }
 
+/// What pdfium reads: the base's first `base_len` bytes, then the session's section. The base is
+/// read at offsets (`pread`), so no file position is shared with anything else reading it.
+struct Tail {
+    base: Arc<dyn Source>,
+    base_len: u64,
+    section: Arc<Vec<u8>>,
+    at: u64,
+}
+
+impl Read for Tail {
+    /// As much of `buf` as there is: pdfium takes a short read of a block for the whole of it.
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let mut done = 0;
+        while done < buf.len() {
+            let n = match self.at.checked_sub(self.base_len) {
+                None => {
+                    let want = (buf.len() - done).min((self.base_len - self.at) as usize);
+                    self.base.read_at(self.at, &mut buf[done..done + want])?
+                }
+                Some(from) => {
+                    let rest = self.section.get(from as usize..).unwrap_or_default();
+                    let n = rest.len().min(buf.len() - done);
+                    buf[done..done + n].copy_from_slice(&rest[..n]);
+                    n
+                }
+            };
+            if n == 0 {
+                break;
+            }
+            self.at += n as u64;
+            done += n;
+        }
+        Ok(done)
+    }
+}
+
+impl Seek for Tail {
+    fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+        let len = self.base_len + self.section.len() as u64;
+        let at = match to {
+            SeekFrom::Start(at) => Some(at),
+            SeekFrom::End(by) => len.checked_add_signed(by),
+            SeekFrom::Current(by) => self.at.checked_add_signed(by),
+        };
+        self.at = at.ok_or(io::ErrorKind::InvalidInput)?;
+        Ok(self.at)
+    }
+}
+
+/// The objects of `base` and its pages, as `accent_pdf` reads them.
+fn objects_of(base: &Arc<dyn Source>) -> accent_pdf::Result<(Pdf, Vec<Ref>)> {
+    let pdf = Pdf::open(base.clone())?;
+    let pages = pdf.pages()?;
+    Ok((pdf, pages))
+}
+
 impl PdfDoc {
     pub fn open(path: impl AsRef<Path>) -> Result<PdfDoc> {
         let path = path.as_ref();
         PdfDoc::from_file(File::open(path).map_err(|e| Error::io(path.display(), e))?)
     }
 
-    /// A document read from a file already open, which pdfium reads as it needs it for as long as
+    /// A document read from a file already open, which is read as it is needed for as long as
     /// the document lives.
     pub(super) fn from_file(file: File) -> Result<PdfDoc> {
-        let pdfium = pdfium()?;
-        // The same open file, not the path again: a rename in between would hand back another.
-        let kept = file.try_clone().map_err(|e| Error::io("the pdf", e))?;
-        let read = Etag::from_meta(&kept.metadata().map_err(|e| Error::io("the pdf", e))?);
-        let _guard = lock();
-        let doc = pdfium
-            .load_pdf_from_reader(file, None)
-            .map_err(refused("open pdf"))?;
-        Ok(PdfDoc {
-            doc: Some(doc),
-            file: Some((kept, read)),
-            stray: AtomicBool::new(false),
-        })
+        let read = Etag::from_meta(&file.metadata().map_err(|e| Error::io("the pdf", e))?);
+        let file = Arc::new(file);
+        PdfDoc::over(file.clone(), Some((file, read)))
     }
 
     /// Whether the file this document is read from is still the one it was opened on.
@@ -73,19 +131,81 @@ impl PdfDoc {
     }
 
     /// A document read from bytes rather than a path: what Android gets from a `content://`
-    /// URI, where there is no file to open. pdfium takes ownership of the buffer and reads it
-    /// for as long as the document lives.
+    /// URI, where there is no file to open.
     pub fn from_bytes(bytes: Vec<u8>) -> Result<PdfDoc> {
+        PdfDoc::over(Arc::new(bytes), None)
+    }
+
+    /// The document `base` holds, read by pdfium and by `accent_pdf`.
+    ///
+    /// A file `accent_pdf` cannot read as pdfium does — an xref that does not parse, an object
+    /// that is not where the xref says, a page tree that loops or counts other pages — is nothing
+    /// to append to. pdfium, which repairs what it reads, writes it out once, before it
+    /// has rendered anything into it, and those bytes are the base: the first save writes them
+    /// whole, and the file saved is sound for the next session to append to.
+    fn over(base: Arc<dyn Source>, file: Option<(Arc<File>, Etag)>) -> Result<PdfDoc> {
+        let pdfium = pdfium()?;
+        let read = objects_of(&base);
+        let (doc, base, (pdf, pages), repaired) = {
+            let _guard = lock();
+            let tail = Tail {
+                base: base.clone(),
+                base_len: base.size(),
+                section: Arc::default(),
+                at: 0,
+            };
+            // Declared after the guard, so an early return closes it under the lock.
+            let doc = pdfium
+                .load_pdf_from_reader(tail, None)
+                .map_err(refused("open pdf"))?;
+            let count = doc.pages().len() as usize;
+            match read {
+                Ok((pdf, pages)) if pages.len() == count => (doc, base, (pdf, pages), false),
+                _ => {
+                    let bytes = doc.save_to_bytes().map_err(refused("repair pdf"))?;
+                    let repaired: Arc<dyn Source> = Arc::new(bytes);
+                    let read = objects_of(&repaired)?;
+                    (doc, repaired, read, true)
+                }
+            }
+        };
+        let mut made = PdfDoc {
+            doc: Some(doc),
+            file,
+            base_len: base.size(),
+            base,
+            repaired,
+            cos: Objects::new(pdf, pages),
+            section: Arc::default(),
+        };
+        if repaired {
+            made.reopen()?;
+        }
+        Ok(made)
+    }
+
+    /// pdfium opened again over the base and the session's update as it now stands: what every
+    /// edit ends in. Whatever pdfium generated into the document it closes goes with it.
+    pub(super) fn reopen(&mut self) -> Result<()> {
+        let section = Arc::new(match self.cos.update.is_empty() {
+            true => Vec::new(),
+            false => self.cos.update.section(),
+        });
+        let tail = Tail {
+            base: self.base.clone(),
+            base_len: self.base_len,
+            section: section.clone(),
+            at: 0,
+        };
         let pdfium = pdfium()?;
         let _guard = lock();
         let doc = pdfium
-            .load_pdf_from_byte_vec(bytes, None)
-            .map_err(refused("open pdf from bytes"))?;
-        Ok(PdfDoc {
-            doc: Some(doc),
-            file: None,
-            stray: AtomicBool::new(false),
-        })
+            .load_pdf_from_reader(tail, None)
+            .map_err(refused("read the edited pdf"))?;
+        // The document it replaces is closed here, under the lock.
+        self.doc = Some(doc);
+        self.section = section;
+        Ok(())
     }
 
     pub fn page_count(&self) -> usize {
@@ -95,10 +215,6 @@ impl PdfDoc {
 
     pub(super) fn doc(&self) -> &PdfDocument<'static> {
         self.doc.as_ref().expect("document is closed only in Drop")
-    }
-
-    pub(super) fn doc_mut(&mut self) -> &mut PdfDocument<'static> {
-        self.doc.as_mut().expect("document is closed only in Drop")
     }
 
     pub(super) fn page(&self, page: usize) -> Result<PdfPage<'_>> {
@@ -142,8 +258,8 @@ impl PdfDoc {
             let config = PdfRenderConfig::new()
                 .scale_page_by_factor(scale)
                 .render_annotations(true);
-            let bitmap = self
-                .drawn(&p, 0, || p.render_with_config(&config))
+            let bitmap = p
+                .render_with_config(&config)
                 .map_err(|e| Error::Pdf(format!("render page {page}: {e:?}")))?;
             (
                 bitmap.width() as u32,
@@ -200,10 +316,8 @@ impl PdfDoc {
                 .render_annotations(true);
             let mut bitmap = PdfBitmap::empty(w, h, PdfBitmapFormat::BGRA)
                 .map_err(|e| Error::Pdf(format!("tile bitmap {w}x{h}: {e:?}")))?;
-            self.drawn(&p, 0, || {
-                p.render_into_bitmap_with_config(&mut bitmap, &config)
-            })
-            .map_err(|e| Error::Pdf(format!("render tile of page {page}: {e:?}")))?;
+            p.render_into_bitmap_with_config(&mut bitmap, &config)
+                .map_err(|e| Error::Pdf(format!("render tile of page {page}: {e:?}")))?;
             (w as u32, h as u32, bitmap.as_rgba_bytes())
         };
         if let Theme::Recolour { paper, ink } = theme {
@@ -262,51 +376,37 @@ impl PdfDoc {
         Ok(out)
     }
 
-    /// Serialise the document with annotations.
-    ///
-    /// After rendering leaves pdfium-generated objects ([`PdfDoc::drawn`]), blank the
-    /// placeholder key and reload the first save before saving again. The second pass omits
-    /// unreferenced generated appearances and popups (ISSUES.md).
-    // ponytail: `FPDF_SaveAsCopy` rewrites the whole file under the global pdfium lock (80 to
-    // 140 ms for a 100 MB scanned PDF, 25 to 50 ms for a 6 MB one of 383 pages of text) and loses
-    // whatever incremental history the file had. `FPDF_INCREMENTAL` is no cheaper way out: pdfium
-    // keeps no record of what changed and appends every object it has parsed since the document
-    // was opened, so a document read through before a stroke is saved at twice its size, and
-    // grows by what was read again in every session that saves (measured 2026-09-30).
+    /// The document as it now stands, as the bytes of a file: the base as it was read, then the
+    /// session's section. What Android's `save_bytes` and a print copy hand on.
     pub fn save(&self) -> Result<Vec<u8>> {
-        let _guard = lock();
-        let mut bytes = self.doc().save_to_bytes().map_err(refused("save pdf"))?;
-        if !self.stray.load(Ordering::Relaxed) {
-            return Ok(bytes);
-        }
-        annot::blank_taken_back(&mut bytes);
-        let saved = pdfium()?
-            .load_pdf_from_byte_vec(bytes, None)
-            .map_err(refused("read the saved pdf"))?;
-        let bytes = saved.save_to_bytes().map_err(refused("save pdf"));
-        // Closed here, under the lock, like every other document.
-        drop(saved);
-        bytes
+        let mut bytes = self.base_bytes()?;
+        bytes.extend_from_slice(&self.section);
+        Ok(bytes)
     }
 
-    /// Render `p` through `draw` with its annotations, and take back what pdfium writes into the
-    /// document doing so, which is not ours to write: the appearance stream it generates, with
-    /// its key `PDFIUM_HasGeneratedAP`, for an annotation that has none — another reader's sticky
-    /// note, say — except the last `ours` of the page, which are ours and keep theirs. The
-    /// popup it makes anew for every annotation with a note stays, referred to by nothing; both
-    /// are for [`PdfDoc::save`] to leave out. The caller holds the lock.
-    pub(super) fn drawn<T>(&self, p: &PdfPage<'_>, ours: usize, draw: impl FnOnce() -> T) -> T {
-        let noted = !self.stray.load(Ordering::Relaxed)
-            && (p.annotations().iter()).any(|a| a.contents().is_some_and(|c| !c.is_empty()));
-        let count = p.annotations().len();
-        let bare: Vec<(usize, bool)> = (annot::bare(p).into_iter())
-            .filter(|&(index, _)| index + ours < count)
-            .collect();
-        let drawn = draw();
-        if annot::unbare(p, &bare) || noted {
-            self.stray.store(true, Ordering::Relaxed);
+    /// The base's bytes as they were read, which every save of the session starts with.
+    pub(super) fn base_bytes(&self) -> Result<Vec<u8>> {
+        let bytes =
+            (self.base.read_vec(0, self.base_len as usize)).map_err(|e| Error::io("the pdf", e))?;
+        match bytes.len() as u64 == self.base_len {
+            true => Ok(bytes),
+            false => Err(Error::Pdf(
+                "the pdf is shorter than when it was read".to_string(),
+            )),
         }
-        drawn
+    }
+
+    /// Write the document to `path` as [`crate::fs::write_bytes`] writes a file, gated on
+    /// `expected`: the file it was read from is copied as it is (a reflink where the file system
+    /// has them) and the section written after it, so every save of a session leaves one update
+    /// after the original bytes. A repaired file, or one read from bytes, is written whole.
+    pub fn save_to(&self, path: &Path, expected: Option<Etag>) -> Result<Etag> {
+        match (&self.file, self.repaired) {
+            (Some((file, _)), false) => {
+                crate::fs::write_appended(path, file, self.base_len, &self.section, expected)
+            }
+            _ => crate::fs::write_bytes(path, &self.save()?, expected),
+        }
     }
 
     /// List resolvable `/Link` annotations in document order.
@@ -490,9 +590,4 @@ pub const A4: (f32, f32) = (595.28, 841.89);
 /// the result is a PDF every reader on the machine opens and our own pen draws on.
 pub fn blank_pdf(size: (f32, f32)) -> Result<Vec<u8>> {
     Ok(accent_pdf::new_document(size))
-}
-
-/// A size in points as pdfium's page constructors want it.
-pub(super) fn paper((width, height): (f32, f32)) -> PdfPagePaperSize {
-    PdfPagePaperSize::from_points(PdfPoints::new(width), PdfPoints::new(height))
 }

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use accent_core::fs::{self, Etag};
+use accent_core::fs::Etag;
 use accent_core::pdf::{self, Ink, NamedInk, PdfDoc};
 
 use crate::ffi::convert::{
@@ -375,8 +375,7 @@ impl PdfSession {
                         .to_string(),
                 });
             };
-            let bytes = s.doc.save()?;
-            let etag = fs::write_bytes(&path, &bytes, s.etag)?;
+            let etag = s.doc.save_to(&path, s.etag)?;
             s.etag = Some(etag);
             s.ink.dirty = false;
             Ok(Some(etag))

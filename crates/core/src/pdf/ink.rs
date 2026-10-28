@@ -30,9 +30,10 @@ pub fn invert(m: Matrix) -> Matrix {
 }
 
 /// One segment of an appearance path, in top-left page points: what every ink writer hands
-/// `PdfDoc::put_ink`, and what `read_ink` gives back.
+/// `Objects::put_ink`, and what `read_ink` gives back. Public only for [`Drawn`]'s variants: the
+/// module is private and the type is not exported.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) enum Seg {
+pub enum Seg {
     Move((f32, f32)),
     Line((f32, f32)),
     /// Two control points, then the end.
@@ -40,29 +41,21 @@ pub(super) enum Seg {
     Close,
 }
 
-/// A stroke taken off its page, and what puts it back: one of ours is deleted, and
-/// [`PdfDoc::redraw_ink`](super::PdfDoc::redraw_ink) draws its path again; another editor's is
-/// hidden where it is, and [`PdfDoc::show_ink`](super::PdfDoc::show_ink) shows it again there.
+/// A stroke taken off its page, and what [`PdfDoc::redraw_ink`](super::PdfDoc::redraw_ink) puts
+/// back.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Drawn {
-    pub(super) segs: Vec<Seg>,
-    pub(super) style: InkStyle,
-    /// Hidden in place (`/F` Hidden) rather than deleted: nothing but its own dictionary draws
-    /// another editor's stroke as it was, appearance stream, popup and dates included, and pdfium
-    /// cannot put a dictionary back into `/Annots` once it has left.
-    pub(super) hidden: bool,
-}
-
-impl Drawn {
-    /// The same stroke along another path, drawn straight from point to point: a piece of it,
-    /// and one of ours.
-    pub(super) fn along(&self, points: &[(f32, f32)]) -> Drawn {
-        Drawn {
-            segs: polyline(points),
-            style: self.style,
-            hidden: false,
-        }
-    }
+pub enum Drawn {
+    /// One of ours: what it drew, which is drawn again at the end of the page's `/Annots`.
+    Ours { segs: Vec<Seg>, style: InkStyle },
+    /// Another editor's: the entries that left `/Annots` with it, its own at `index` and its
+    /// popup's, each with the place it had. Only its own dictionary draws it as it was, so the
+    /// same entries go back where they were; the dictionaries were never touched. `area` is the
+    /// box it covers.
+    Foreign {
+        index: usize,
+        entries: Vec<(usize, accent_pdf::Object)>,
+        area: super::Rect,
+    },
 }
 
 /// Straight lines through `points`, a lone point being a dot: a zero-length line, which the

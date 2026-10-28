@@ -298,7 +298,8 @@ fn a_copy_carries_the_highlights_and_leaves_the_document_alone() {
     assert_eq!(copy.highlights().unwrap().len(), 2);
     assert_eq!(copy.inks(0).unwrap().len(), 1);
     assert_eq!(doc.highlights().unwrap().len(), 1);
-    // Nothing to add is the document as it stands (not byte for byte: each save draws a new /ID).
+    // Nothing to add is the document as it stands.
+    assert_eq!(doc.copy_with_highlights(&[]).unwrap(), doc.save().unwrap());
     let plain = PdfDoc::from_bytes(doc.copy_with_highlights(&[]).unwrap()).unwrap();
     assert_eq!(plain.highlights().unwrap().len(), 1);
     assert_eq!(plain.inks(0).unwrap().len(), 1);
@@ -801,6 +802,192 @@ fn an_appended_page_is_the_size_of_the_last_one_and_takes_ink() {
     assert_eq!(reopened.inks(1).unwrap().len(), 1);
 }
 
+/// A save is the file as it was read with one section after it, however often the session saves:
+/// the second save's file still starts with the original bytes and holds one update, not two.
+#[test]
+fn a_save_appends_one_section_and_keeps_the_original_bytes() {
+    let Some((dir, mut doc)) = open_tiny() else {
+        return;
+    };
+    let path = dir.path().join("tiny.pdf");
+    let original = std::fs::read(&path).unwrap();
+    let read = crate::fs::Etag::of(&path).unwrap();
+    let pen = InkStyle {
+        width: 2.0,
+        rgba: [255, 0, 0, 255],
+        multiply: false,
+    };
+    let updates = |file: &[u8]| memchr::memmem::find_iter(file, b"%%EOF").count();
+
+    doc.add_ink(0, &[(20.0, 20.0), (60.0, 40.0)], pen, 1.0)
+        .unwrap();
+    let saved = doc.save_to(&path, Some(read)).unwrap();
+    doc.add_ink(0, &[(20.0, 60.0), (60.0, 80.0)], pen, 1.0)
+        .unwrap();
+    doc.save_to(&path, Some(saved)).unwrap();
+    let twice = std::fs::read(&path).unwrap();
+    assert!(twice.starts_with(&original), "the file as it was read");
+    assert_eq!(updates(&twice), updates(&original) + 1, "one section");
+    assert_eq!(PdfDoc::open(&path).unwrap().inks(0).unwrap().len(), 2);
+    // A save over a file that changed since is refused, as every save is.
+    assert!(matches!(
+        doc.save_to(&path, Some(saved)),
+        Err(Error::ChangedOnDisk { .. })
+    ));
+}
+
+/// Undo of a delete puts the page's own object back into the page tree, with no copy and no
+/// snapshot: its link into the document and the bookmarks naming it lead to it again, in the saved
+/// file too, whose update never wrote the page itself.
+#[test]
+fn a_deleted_page_comes_back_with_its_links_and_bookmark() {
+    let Some((dir, mut doc)) = open_tiny() else {
+        return;
+    };
+    let original = std::fs::read(dir.path().join("tiny.pdf")).unwrap();
+    let targets = |doc: &PdfDoc| {
+        let link = doc
+            .links(0)
+            .unwrap()
+            .into_iter()
+            .find_map(|l| match l.target {
+                LinkTarget::Page { page, .. } => Some(page),
+                LinkTarget::Uri(_) => None,
+            });
+        let marks: Vec<_> = doc.outline().unwrap().iter().map(|o| o.page).collect();
+        (link, marks)
+    };
+    let mut ink = Ink::default();
+    ink.edit_pages(&mut doc, PageEdit::delete(1)).unwrap();
+    assert_eq!(page_texts(&doc), ["Hello accent"]);
+    assert_eq!(targets(&doc), (None, vec![None, None]));
+
+    ink.walk(&mut doc, false);
+    let saved = doc.save().unwrap();
+    for doc in [&doc, &PdfDoc::from_bytes(saved.clone()).unwrap()] {
+        assert_eq!(page_texts(doc), ["Hello accent", "Second page"]);
+        assert_eq!(targets(doc), (Some(1), vec![Some(1), Some(1)]));
+    }
+    let page = accent_pdf::Ref {
+        num: 9,
+        generation: 0,
+    };
+    let pdf = accent_pdf::Pdf::open(std::sync::Arc::new(saved.clone())).unwrap();
+    assert_eq!(pdf.pages().unwrap()[1], page, "the page itself");
+    let section = &saved[original.len()..];
+    assert!(memchr::memmem::find(section, b"\n9 0 obj").is_none());
+}
+
+/// A file whose xref does not lead where it says is read through pdfium's repair once: the first
+/// save writes it whole, and a session on the saved file appends to it as to any other.
+#[test]
+fn a_broken_file_is_normalised_once() {
+    if !available() {
+        return eprintln!("skipping: no libpdfium");
+    }
+    // `startxref` ten bytes short of the table, which pdfium finds by scanning the file.
+    let good = String::from_utf8(tiny_pdf(false)).unwrap();
+    let (head, xref) = good.rsplit_once("startxref\n").unwrap();
+    let at: usize = xref.lines().next().unwrap().parse().unwrap();
+    let broken = format!("{head}startxref\n{}\n%%EOF\n", at - 10).into_bytes();
+    assert!(matches!(
+        accent_pdf::Pdf::open(std::sync::Arc::new(broken.clone())),
+        Err(accent_pdf::Error::Broken(_))
+    ));
+    let pen = InkStyle {
+        width: 2.0,
+        rgba: [255, 0, 0, 255],
+        multiply: false,
+    };
+    let (dir, mut doc) = open_pdf(&broken).unwrap();
+    let path = dir.path().join("tiny.pdf");
+    assert_eq!(page_texts(&doc), ["Hello accent", "Second page"]);
+    doc.add_ink(0, &[(20.0, 20.0), (60.0, 40.0)], pen, 1.0)
+        .unwrap();
+    doc.save_to(&path, None).unwrap();
+    let whole = std::fs::read(&path).unwrap();
+    assert!(!whole.starts_with(&broken), "written whole");
+    accent_pdf::Pdf::open(std::sync::Arc::new(whole.clone())).unwrap();
+
+    let mut doc = PdfDoc::open(&path).unwrap();
+    doc.add_ink(1, &[(20.0, 20.0), (60.0, 40.0)], pen, 1.0)
+        .unwrap();
+    doc.save_to(&path, None).unwrap();
+    let again = PdfDoc::open(&path).unwrap();
+    assert!(
+        std::fs::read(&path).unwrap().starts_with(&whole),
+        "appended"
+    );
+    assert_eq!(
+        (again.inks(0).unwrap().len(), again.inks(1).unwrap().len()),
+        (1, 1)
+    );
+}
+
+/// A stroke written before the strokes were named by pdfium: one path inside its `/Rect`, without
+/// an `/InkList`, a name or an author.
+fn unnamed_ink_pdf() -> Vec<u8> {
+    let stream = "0 0 1 RG 2 w 1 J 1 j 20 80 m 60 60 l S";
+    pdf_of(&[
+        "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]/Annots[4 0 R]>>".to_string(),
+        "<</Type/Annot/Subtype/Ink/Rect[17 57 63 83]/C[0 0 1]/F 4/AP<</N 5 0 R>>>>".to_string(),
+        format!(
+            "<</Type/XObject/Subtype/Form/BBox[17 57 63 83]/Length {}>>stream\n{stream}\nendstream",
+            stream.len()
+        ),
+    ])
+}
+
+/// Our strokes are ours by their `/NM`, `accent-` and their object number, though they carry an
+/// `/InkList` as another editor's do; one from before they were named is ours by its shape. Ours
+/// is drawn again where Adjust moves it, so it leaves its place in `/Annots`.
+#[test]
+fn our_stroke_is_ours_by_its_name() {
+    let Some((_dir, mut doc)) = open_tiny() else {
+        return;
+    };
+    let pen = InkStyle {
+        width: 2.0,
+        rgba: [0, 0, 255, 255],
+        multiply: false,
+    };
+    doc.add_ink(0, &[(20.0, 20.0), (60.0, 40.0)], pen, 1.0)
+        .unwrap();
+    let pdf = accent_pdf::Pdf::open(std::sync::Arc::new(doc.save().unwrap())).unwrap();
+    let page = pdf.get(pdf.pages().unwrap()[0]).unwrap();
+    let annots = page.as_dict().unwrap().get(b"Annots").unwrap().clone();
+    let annots = match annots {
+        accent_pdf::Object::Ref(list) => pdf.get(list).unwrap(),
+        direct => direct,
+    };
+    let stroke = annots
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .reference()
+        .unwrap();
+    let dict = pdf.get(stroke).unwrap().as_dict().unwrap().clone();
+    let name = format!("accent-{}", stroke.num).into_bytes();
+    assert_eq!(dict.get(b"NM"), Some(&accent_pdf::Object::String(name)));
+    assert!(dict.get(b"InkList").is_some());
+
+    let nudge = [1.0, 0.0, 0.0, 1.0, 5.0, 0.0];
+    let at = doc.inks(0).unwrap()[0].index;
+    assert!(
+        !doc.transform_ink(0, at, nudge).unwrap().1,
+        "ours, drawn again"
+    );
+    let (_old, mut old) = open_pdf(&unnamed_ink_pdf()).unwrap();
+    assert!(old.inks(0).unwrap()[0].cuttable);
+    assert!(
+        !old.transform_ink(0, 0, nudge).unwrap().1,
+        "ours from before"
+    );
+}
+
 /// Each page's text, trimmed, in the document's order.
 pub(super) fn page_texts(doc: &PdfDoc) -> Vec<String> {
     (0..doc.page_count())
@@ -1055,18 +1242,11 @@ fn ink_drawn_in_its_own_space_is_hit_where_it_shows() {
     assert!(!swept(&inks[0].points, (0.0, 75.0), (60.0, 75.0), 4.0));
 }
 
-/// The bytes of object `num` in a saved file: its dictionary, and its stream if it has one.
-fn object(file: &[u8], num: u32) -> &[u8] {
-    let head = format!("\n{num} 0 obj");
-    let start = (file.windows(head.len()))
-        .position(|w| w == head.as_bytes())
-        .unwrap_or_else(|| panic!("no object {num}"));
-    let end = start
-        + file[start..]
-            .windows(6)
-            .position(|w| w == b"endobj")
-            .unwrap();
-    &file[start..end]
+/// Object `num` of a saved file as its newest revision has it.
+fn object(file: &[u8], num: u32) -> accent_pdf::Object {
+    let pdf = accent_pdf::Pdf::open(std::sync::Arc::new(file.to_vec())).unwrap();
+    let r = accent_pdf::Ref { num, generation: 0 };
+    pdf.get(r).unwrap()
 }
 
 /// Which of red, green and blue stands out at a point of a page rendered at 4 px per point,
@@ -1082,10 +1262,10 @@ fn hue_at(page: &RgbaImage, (x, y): (f32, f32)) -> Option<usize> {
 /// origin, with the channel it is drawn in: red, then blue. Clear of where the two cross.
 const MARKS: [((f32, f32), usize); 2] = [((132.5, 62.5), 0), ((117.5, 57.5), 2)];
 
-/// Another editor's stroke erased is hidden where it is, and Undo shows it again as it was: its
-/// dictionary — popup, date and intent included — its appearance stream with its `/Matrix` and
-/// `/BBox`, and its popup are the bytes they were, and the page is drawn as it was. Redo hides
-/// it again.
+/// Another editor's stroke erased leaves `/Annots` with its popup, and Undo puts both back where
+/// they were, as they were: its dictionary — popup, date and intent included — its appearance
+/// stream with its `/Matrix` and `/BBox`, and its popup are the objects they were, and the page
+/// is drawn as it was. Redo takes them out again.
 #[test]
 fn a_foreign_stroke_erased_and_undone_is_the_same_stroke() {
     let Some((_dir, mut doc)) = open_pdf(&foreign_ink_pdf(true)) else {
@@ -1105,7 +1285,11 @@ fn a_foreign_stroke_erased_and_undone_is_the_same_stroke() {
     let (was, _) = doc.take_ink(0, at).unwrap();
     ink.erased(0, at, was, Vec::new(), false);
     assert!(doc.inks(0).unwrap().is_empty());
-    assert_eq!(doc.annotation_count(0).unwrap(), 2, "hidden, not deleted");
+    assert_eq!(
+        doc.annotation_count(0).unwrap(),
+        0,
+        "the stroke and its popup"
+    );
     let erased = doc.render_page(0, 4.0, Theme::Plain).unwrap();
     assert!(MARKS.iter().all(|&(at, _)| hue_at(&erased, at).is_none()));
 
@@ -1114,8 +1298,14 @@ fn a_foreign_stroke_erased_and_undone_is_the_same_stroke() {
     for num in [4, 5, 6] {
         assert_eq!(object(&again, num), object(&saved, num), "object {num}");
     }
+    let annots = |file: &[u8]| match object(file, 3).as_dict().unwrap().get(b"Annots") {
+        Some(&accent_pdf::Object::Ref(list)) => object(file, list.num),
+        list => list.cloned().unwrap(),
+    };
+    assert_eq!(annots(&again), annots(&saved), "where they were");
     let back = doc.render_page(0, 4.0, Theme::Plain).unwrap();
     assert!(back.data == drawn.data, "drawn as it was");
+    assert_eq!(ink.named(&doc, 0).remove(0).0, id, "under its name");
     ink.walk(&mut doc, true);
     assert!(doc.inks(0).unwrap().is_empty());
 }
@@ -1154,12 +1344,10 @@ fn a_foreign_stroke_moves_by_its_rect_alone() {
     let moved = doc.save().unwrap();
     assert_eq!(object(&moved, 5), object(&saved, 5));
     let keys = |file: &[u8]| {
-        let text = String::from_utf8_lossy(object(file, 4)).into_owned();
-        let rect = text.find("/Rect").unwrap();
-        let list = text.find("/InkList").unwrap();
-        let skip = |at: usize, end: &str| at + text[at..].find(end).unwrap() + end.len();
-        let (list_end, rect_end) = (skip(list, "]]"), skip(rect, "]"));
-        [&text[..list], &text[list_end..rect], &text[rect_end..]].concat()
+        let mut dict = object(file, 4).as_dict().unwrap().clone();
+        dict.remove(b"Rect");
+        dict.remove(b"InkList");
+        dict
     };
     assert_eq!(keys(&moved), keys(&saved));
     assert_ne!(object(&moved, 4), object(&saved, 4));
@@ -1169,8 +1357,8 @@ fn a_foreign_stroke_moves_by_its_rect_alone() {
 }
 
 /// Another editor's stroke of one colour is cut along its `/InkList`, where it shows: each line
-/// the pass crossed is left as two pieces of ours in its colour and width, the original is
-/// hidden, and Undo shows it again as it was.
+/// the pass crossed is left as two pieces of ours in its colour and width, the original leaves
+/// with its popup, and Undo puts both back as they were.
 #[test]
 fn a_foreign_stroke_is_cut_along_its_ink_list() {
     let Some((_dir, mut doc)) = open_pdf(&foreign_ink_pdf(false)) else {
@@ -1184,7 +1372,7 @@ fn a_foreign_stroke_is_cut_along_its_ink_list() {
     // Across both lines, between the marks and where they cross.
     let cut = doc.cut_ink(0, at, (100.0, 50.0), (150.0, 50.0), 2.0);
     let cut = cut.unwrap().expect("the pass crossed both lines");
-    assert!(cut.was.hidden);
+    assert!(matches!(cut.was, Drawn::Foreign { .. }));
     assert_eq!(cut.left.len(), 4);
     let left = cut.left.into_iter().map(|piece| (fresh_id(), piece));
     ink.erased(0, at, cut.was, left.collect(), false);
@@ -1203,52 +1391,8 @@ fn a_foreign_stroke_is_cut_along_its_ink_list() {
     }
 }
 
-/// When the history ends, a stroke of another editor's an erase hid goes for good, with its
-/// popup, and the saved file holds neither; one whose erase was taken back stays, and so does
-/// ours.
-#[test]
-fn a_purge_deletes_what_an_erase_hid_and_nothing_else() {
-    let Some((_dir, mut doc)) = open_pdf(&foreign_ink_pdf(true)) else {
-        return;
-    };
-    let style = InkStyle {
-        width: 2.0,
-        rgba: [0, 0, 255, 255],
-        multiply: false,
-    };
-    doc.add_ink(0, &[(20.0, 20.0), (60.0, 40.0)], style, 1.0)
-        .unwrap();
-    let mut ink = Ink::default();
-    let erase = |ink: &mut Ink, doc: &mut PdfDoc| {
-        let (id, _) = (ink.named(doc, 0).into_iter())
-            .find(|(_, shape)| shape.index == 0)
-            .unwrap();
-        let at = ink.index_of(0, id).unwrap();
-        let (was, _) = doc.take_ink(0, at).unwrap();
-        ink.erased(0, at, was, Vec::new(), false);
-    };
-    erase(&mut ink, &mut doc);
-    ink.walk(&mut doc, false);
-    ink.purge(&mut doc).unwrap();
-    assert_eq!(doc.annotation_count(0).unwrap(), 3, "shown again, so kept");
-    assert!(!ink.dirty);
-
-    erase(&mut ink, &mut doc);
-    ink.purge(&mut doc).unwrap();
-    assert!(ink.dirty);
-    assert_eq!(ink.history(), (false, false));
-    assert_eq!(
-        doc.annotation_count(0).unwrap(),
-        1,
-        "the stroke and its popup"
-    );
-    assert_eq!(doc.inks(0).unwrap()[0].style, style);
-    let saved = String::from_utf8_lossy(&doc.save().unwrap()).into_owned();
-    assert!(!saved.contains("two lines") && !saved.contains("/Popup"));
-}
-
-/// Rendering must not change saved annotations. Generated appearances, `PDFIUM_HasGeneratedAP`
-/// and unreferenced popup objects must be omitted while the saved file remains renderable.
+/// Rendering must not change saved annotations: what pdfium generates as it draws — appearance
+/// streams, `PDFIUM_HasGeneratedAP`, popups — stays out of the file, which pdfium never writes.
 #[test]
 fn renders_leave_nothing_in_a_save() {
     let Some((dir, doc)) = open_tiny_with(true) else {
@@ -1277,7 +1421,7 @@ fn renders_leave_nothing_in_a_save() {
 }
 
 /// Our own highlight has its appearance stream in the file at once, saved before anything has
-/// rendered it, and keeps it once something has.
+/// rendered it, and keeps it once something has: filled in its colour, multiplied onto the page.
 #[test]
 fn an_exported_highlight_is_saved_with_its_appearance() {
     let Some((_dir, mut doc)) = open_tiny() else {
@@ -1297,12 +1441,31 @@ fn an_exported_highlight_is_saved_with_its_appearance() {
     };
     doc.add_highlights(&[highlight]).unwrap();
     let ours = |file: Vec<u8>| {
-        let text = String::from_utf8_lossy(&file).into_owned();
-        let line = text
-            .lines()
-            .find(|l| l.contains("/Subtype/Highlight"))
+        let pdf = accent_pdf::Pdf::open(std::sync::Arc::new(file)).unwrap();
+        let page = pdf.get(pdf.pages().unwrap()[0]).unwrap();
+        let annots = match page.as_dict().unwrap().get(b"Annots").unwrap() {
+            accent_pdf::Object::Ref(list) => pdf.get(*list).unwrap(),
+            direct => direct.clone(),
+        };
+        let mark = annots
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .reference()
             .unwrap();
-        line.contains("/AP<<")
+        let mark = pdf.get(mark).unwrap().as_dict().unwrap().clone();
+        let Some(accent_pdf::Object::Dict(ap)) = mark.get(b"AP") else {
+            return false;
+        };
+        let Some(accent_pdf::Object::Ref(normal)) = ap.get(b"N") else {
+            return false;
+        };
+        let accent_pdf::Object::Stream(drawn) = pdf.get(*normal).unwrap() else {
+            return false;
+        };
+        let drawn = String::from_utf8(drawn.raw).unwrap();
+        drawn.contains("1 1 0 rg") && drawn.contains("\nf\n")
     };
     assert!(ours(doc.save().unwrap()));
     doc.render_tile(0, 2.0, 0, 0, 100, 100, Theme::Plain)
@@ -1735,7 +1898,9 @@ fn line_groups_split_on_a_new_line() {
 
 /// The corpus run, by hand: every PDF under `ACCENT_PDF_CORPUS` (never the user's vault) read by
 /// `accent-pdf`, against the pages pdfium counts, and each one that agrees given a red `/Ink`
-/// through `accent-pdf`'s update, which pdfium must draw and `accent-pdf` read back. A file that
+/// through `accent-pdf`'s update, which pdfium must draw and `accent-pdf` read back. Every PDF
+/// pdfium opens opens as a document too, a damaged one repaired, and takes a stroke that a save
+/// carries. A file that
 /// needs a password is counted, and a broken one listed for its repair through pdfium; any other
 /// disagreement on a file pdfium opens fails.
 #[test]
@@ -1763,11 +1928,31 @@ fn the_corpus_reads_in_accent_pdf_as_pdfium_reads_it() {
     pdfs(&root, &mut found);
     let (mut agree, mut locked, mut unread) = (0, 0, 0);
     let (mut broken, mut wrong) = (Vec::new(), Vec::new());
+    let red = InkStyle {
+        width: 2.0,
+        rgba: [255, 0, 0, 255],
+        multiply: false,
+    };
     for path in &found {
-        let Ok(pdfium) = PdfDoc::open(path).map(|doc| doc.page_count()) else {
+        let pdfium = {
+            let _guard = lock();
+            let doc = pdfium().unwrap().load_pdf_from_file(path, None);
+            doc.map(|doc| doc.pages().len() as usize)
+        };
+        let Ok(pdfium) = pdfium else {
             unread += 1;
             continue;
         };
+        let session = (|| -> Result<bool> {
+            let mut doc = PdfDoc::open(path)?;
+            let (had, (w, h)) = (doc.inks(0)?.len(), doc.page_size(0)?);
+            doc.add_ink(0, &[(w * 0.1, h * 0.2), (w * 0.9, h * 0.8)], red, 1.0)?;
+            let saved = PdfDoc::from_bytes(doc.save()?)?;
+            Ok(saved.page_count() == pdfium && saved.inks(0)?.len() == had + 1)
+        })();
+        if !matches!(session, Ok(true)) {
+            wrong.push(format!("{}: session {session:?}", path.display()));
+        }
         let file = std::fs::File::open(path).unwrap();
         match accent_pdf::Pdf::open(std::sync::Arc::new(file)).and_then(|pdf| pdf.pages()) {
             Ok(pages) if pages.len() == pdfium => {
@@ -1810,4 +1995,81 @@ fn the_corpus_reads_in_accent_pdf_as_pdfium_reads_it() {
         eprintln!("  {w}");
     }
     assert!(wrong.is_empty());
+}
+
+/// What a session costs, by hand, on `ACCENT_PDF_SPIKE` (one PDF, copied into `TMPDIR` first):
+/// the open and its parts, measured again warm, a stroke (written into the update and pdfium
+/// opened again), a reopen, the first tile after one against the same tile warm, a save, and the
+/// section it appends. Medians and p90 over 15 runs; run it in release.
+#[test]
+#[ignore = "ACCENT_PDF_SPIKE=<file.pdf> cargo test --release -p accent-core --features pdf -- --ignored spike --nocapture"]
+fn the_spike_times_a_session() {
+    let from = PathBuf::from(std::env::var_os("ACCENT_PDF_SPIKE").expect("ACCENT_PDF_SPIKE"));
+    assert!(
+        !from.to_string_lossy().contains("Sync/Notes"),
+        "never the real vault"
+    );
+    if !available() {
+        return eprintln!("skipping: no libpdfium");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("spike.pdf");
+    let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
+    let mut times: std::collections::BTreeMap<&str, Vec<f64>> = Default::default();
+    let mut section = 0;
+    let pen = InkStyle {
+        width: 2.0,
+        rgba: [255, 0, 0, 255],
+        multiply: false,
+    };
+    for _ in 0..15 {
+        std::fs::copy(&from, &path).unwrap();
+        let read = crate::fs::Etag::of(&path).unwrap();
+        let t = std::time::Instant::now();
+        let mut doc = PdfDoc::open(&path).unwrap();
+        times.entry("1 open").or_default().push(ms(t));
+        let t = std::time::Instant::now();
+        let file = std::fs::File::open(&path).unwrap();
+        let pdf = accent_pdf::Pdf::open(std::sync::Arc::new(file)).unwrap();
+        times.entry("2 open's xref").or_default().push(ms(t));
+        let t = std::time::Instant::now();
+        pdf.pages().unwrap();
+        times.entry("2 open's page tree").or_default().push(ms(t));
+        let t = std::time::Instant::now();
+        let file = std::fs::File::open(&path).unwrap();
+        let guard = lock();
+        drop(pdfium().unwrap().load_pdf_from_reader(file, None).unwrap());
+        drop(guard);
+        times.entry("2 open's pdfium").or_default().push(ms(t));
+        let t = std::time::Instant::now();
+        doc.page_sizes().unwrap();
+        times.entry("3 page sizes").or_default().push(ms(t));
+        doc.render_tile(0, 2.0, 0, 0, 512, 512, Theme::Plain)
+            .unwrap();
+        let t = std::time::Instant::now();
+        doc.render_tile(0, 2.0, 0, 0, 512, 512, Theme::Plain)
+            .unwrap();
+        times.entry("4 tile warm").or_default().push(ms(t));
+        let t = std::time::Instant::now();
+        doc.add_ink(0, &[(40.0, 40.0), (200.0, 120.0)], pen, 1.0)
+            .unwrap();
+        times.entry("5 stroke and reopen").or_default().push(ms(t));
+        let t = std::time::Instant::now();
+        doc.render_tile(0, 2.0, 0, 0, 512, 512, Theme::Plain)
+            .unwrap();
+        times.entry("6 tile after reopen").or_default().push(ms(t));
+        let t = std::time::Instant::now();
+        doc.reopen().unwrap();
+        times.entry("7 reopen").or_default().push(ms(t));
+        let t = std::time::Instant::now();
+        doc.save_to(&path, Some(read)).unwrap();
+        times.entry("8 save").or_default().push(ms(t));
+        section = std::fs::metadata(&path).unwrap().len() - std::fs::metadata(&from).unwrap().len();
+    }
+    eprintln!("{}: section {section} B", from.display());
+    for (what, mut all) in times {
+        all.sort_by(f64::total_cmp);
+        let p90 = all[(all.len() * 9 / 10).min(all.len() - 1)];
+        eprintln!("  {what:<22} {:>8.2} / {p90:>8.2} ms", all[all.len() / 2]);
+    }
 }

@@ -47,11 +47,10 @@ miniz_oxide = "0.9"
 # Already in the lock through `vt100`; a table cell's width in columns (`markdown::table`), a wide
 # character taking two.
 unicode-width = "0.2"
-# Held at 0.9.3: 0.9.4 makes `PdfiumLibraryBindingsAccessor` crate-private again, and the raw calls
-# pdfium-render does not wrap (`/InkList` in `pdf::annot`, `FPDF_MovePages` in `pdf::pages`) reach
-# pdfium through it.
+# Held at 0.9.3 until 0.9.4, which makes `PdfiumLibraryBindingsAccessor` crate-private again, is
+# tried: no raw call is left now that accent writes its PDFs itself (`accent-pdf`).
 pdfium-render = { version = "=0.9.3", optional = true, default-features = false, features = ["pdfium_latest", "thread_safe"] }
-# accent's own reader and writer of PDF objects: a new document is written by it, not pdfium.
+# accent's own reader and writer of PDF objects: every PDF write is its, pdfium only reading.
 accent-pdf = { workspace = true, optional = true }
 
 [dev-dependencies]

@@ -22,7 +22,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - **Crates**: `crates/core` has no UI types; `crates/api` exposes `Vault` for local and remote backends, JSON-RPC for `accent-cli`, and UniFFI behind the `android` feature.
   `crates/drawio` is independent; core reads diagram labels through it for indexing.
   `crates/math` (from formulary) lays out the MathML core writes in a math font the system HarfBuzz reads; only the desktop app links it.
-  `crates/pdf` reads a PDF's objects itself, lazily through its xref chain, and writes an editing session's objects as one incremental update after the file, in its own xref style, an encrypted file's encrypted as it is (the standard handler, RC4 and AES, under the empty user password pdfium opens it with), all in pure Rust: it is to take every PDF write from pdfium; so far it writes only a new blank document (Insert Sketch, New Drawing).
+  `crates/pdf` reads a PDF's objects itself, lazily through its xref chain, and writes an editing session's objects as one incremental update after the file, in its own xref style, an encrypted file's encrypted as it is (the standard handler, RC4 and AES, under the empty user password pdfium opens it with), all in pure Rust: every PDF write is its, pdfium only reading.
   Keep client bindings in the API façade.
 - **Errors**: one enum a layer, plain data that crosses a process whole: `accent_core::Error` (`NotFound` and `AlreadyExists` naming the vault path, `ChangedOnDisk` with the etag on disk, `NotMerged`, `Cancelled`, and a message variant per subsystem) and `accent_api::Error`, which holds a core error as it is beside what only a link or a language server meets (`Offline`, `Lost`, `Refused`, `Remote`, `UnknownMethod`, `Protocol`, `Language`, `NotYet`).
   Each reads as the end of "Cannot <what>: <why>", its context formatted where it is made, and callers match on the kind: a substring or an io kind read off a message matched one way locally and another over ssh.
@@ -155,15 +155,16 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   An org note's spans come from `org::analyze` in the same vocabulary, so it looks as a markdown note does (Editor).
 - **Syntax highlighting** is GtkSourceView's language specs and style scheme, not core spans — 180 languages for no code; syntect in core is the path the day Android needs code.
 - **No modes**: behaviour follows the file type, not a writing/coding switch — a mode is a setting to get wrong, and the file already says what it is.
-- **PDF engine**: pdfium-render in core over a libpdfium fetched by `make pdfium`, annotations written through its own API rather than `lopdf` — one BSD engine on both platforms with per-glyph text, and nothing new to vendor.
+- **PDF engine**: pdfium-render in core over a libpdfium fetched by `make pdfium` reads, renders and searches; `crates/pdf` writes (user decision 2026-10-20) — one BSD engine on both platforms with per-glyph text and nothing new to vendor, and none of the whole-file saves under its lock, nor what its renders write into a document, that writing through it cost.
+  An edit goes into the session's update and pdfium is opened again over the file and that update (`PdfDoc::reopen`: 0.7 ms on 515 pages of LaTeX, 7 ms on 2069), so what it renders is what a save writes; a file `crates/pdf` cannot read as pdfium does is taken as pdfium repairs it, and its first save writes it whole.
   Without libpdfium a PDF tab is a status page and the build still passes.
 - **SyncTeX** is read by a parser of our own in core (`accent_core::synctex`): texlab maps no position between a PDF and its sources, and the `synctex` tool and its library come with a TeX installation accent must not need.
   It reads what pdfTeX, XeTeX and LuaTeX write with `-synctex=1`, inflates a `.synctex.gz` with the `miniz_oxide` the diagrams already compile in, and parses a page's records only when that page is asked about.
 - **PDF highlights live in the notes**: an Obsidian-compatible `[[f.pdf#page=N&selection=a,b,c,d|quote]]` link, found through the index's `links` table and its `alias` column, with no annotation table of its own, and rewritten where the notes are (the host, on a remote vault) when a page edit moves its page; export to real `/Highlight` annotations is optional — rewriting the PDF per highlight is Syncthing conflicts and binary churn (Zotero's reasoning), and only what the notes hold survives an index rebuild.
-- **Ink geometry** lives in the annotation's appearance stream, not in `/InkList` — every viewer renders the stream, and pdfium-render does not wrap `FPDFAnnot_AddInkStroke`.
+- **Ink geometry** lives in the annotation's appearance stream, which every viewer renders, drawn in the page's own space, and in its `/InkList`, the flattened path another editor reshapes it by; a stroke is ours by its `/NM`, `accent-` and its object number.
 - **Recolouring**: `accent_core::recolour` decides the page and paper–ink remap for PDFs, document-like images, SVGs and diagrams, taking Preferences and per-file Invert into account.
   Both apps use these rules with their own decoders; the diagram canvas remaps its painted colours.
-- **Printing and export** reuse the renderers: a note goes out as one self-contained HTML page, which the system browser prints, pdfium copies a PDF with note highlights, and cairo prints or exports the diagram canvas's render nodes to PDF, SVG or image.
+- **Printing and export** reuse the renderers: a note goes out as one self-contained HTML page, which the system browser prints, a PDF goes out with note highlights in a copy of the session's update, and cairo prints or exports the diagram canvas's render nodes to PDF, SVG or image.
   Exporting never changes the open PDF.
 - **Diagrams**: `crates/drawio` ports mxGraph's model, routing, shapes and label placement faithfully (the Apache-2.0 parts attributed file by file, with `LICENSE-APACHE` and `NOTICE`), keeps every attribute it does not interpret, and hands the app a UI-neutral display list — a file saved here opens in draw.io as it was, the port can be diffed against later draw.io releases, and Android can paint the same list.
   A formula in a label is typeset natively (`crates/math`), as draw.io's MathJax sets it, wherever the canvas draws.
@@ -960,7 +961,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A link whose numbers no longer fit falls back to the text its alias quotes, then to the page.
 - Export Highlights writes them into the file as real `/Highlight` annotations in the accent, skipping quads it already has.
 - **Other readers' comments are read, never written.** pdfium paints their marks as it draws them, a highlight, an underline, a strike-out, a rectangle, a sticky note's icon and typed text (`/FreeText`) even without an appearance stream of their own, but never their popups, open or not.
-  The appearance pdfium writes into such a mark to paint it is taken out again after every render, so a save leaves the mark as it was read.
+  What pdfium generates into such a mark to paint it stays in pdfium, which never writes the file, so a save leaves the mark as it was read.
   What a mark says (`/Contents`) is the page's tooltip over it, under its author (`/T`), as in Evince; a click that was not a drag pins the same in a popover, where the text can be selected and copied, and `Escape` or a click elsewhere closes it.
   Every comment under the pointer shows, one above the other.
   A link and a note's highlight take the click first, nothing answers with a tool in hand, and typed text is not a comment: it is on the page already.
@@ -983,9 +984,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Eraser takes every whole stroke whose edge the pointer's path comes within 4 pt of, testing between reports as well as at them so a quick pass cannot step over a thin line; one drag is one Undo step.
   Partial takes only what lies within reach and leaves the rest as strokes of their own in the same colour, width and opacity, drawn straight between flattened points (a spline would bow a rectangle's edges); a crumb under 1 pt goes.
   Another editor's stroke is cut along its `/InkList`, where it shows, its pieces drawn as ours; one without an `/InkList`, or whose paths differ in colour or width, is taken whole rather than redrawn wrong.
-  Another editor's stroke is never deleted: an erase hides it where it is (`/F` Hidden), so Undo shows it again as it was, appearance stream, popup and dates included, which nothing pdfium offers could put back once its dictionary left `/Annots`.
-  The history ending, the tab or the window closing, deletes what it hid for good, with its popup, and writes the file again as a stroke does; a crash leaves it hidden.
-- Line, Rectangle and Circle are `/Ink` too, from press to release — a line snaps onto an axis within 7°, a circle grows from the press — because pdfium-render gives an appearance stream to nothing else.
+  Another editor's stroke leaves `/Annots` with its popup, its dictionary untouched in the file, so Undo puts both back where they were, as they were, appearance stream and dates included.
+- Line, Rectangle and Circle are `/Ink` too, from press to release — a line snaps onto an axis within 7°, a circle grows from the press — because the eraser, Adjust and every read here know ink alone.
 - Adjust takes hold of any ink stroke, ours or another editor's: eight handles, the middle moving it, an edge stretching one axis, a corner scaling both alike; `Ctrl+Z` puts it back.
   Ours is drawn again along the moved path, its line keeping its width; another editor's keeps everything it carries, only its `/Rect` and `/InkList` moving, and every reader fits its appearance stream into the new `/Rect`, so it scales as a picture would, its line too.
 - A second orbit holds the tool's options: three widths, and for the pen, the shapes and the highlighter six swatches (the accent, four hues round the wheel by the CSV rule, and black); for the eraser, Whole Strokes (`edit-delete-symbolic`) and Partial (`edit-cut-symbolic`).
@@ -1000,6 +1000,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - A stroke stays painted over the page until the re-rendered tile carries it, as that tile will show it, under the highlights and the selection.
   pdfium multiplies a highlighter onto the file's white paper and the page is recoloured after, so no colour laid over a recoloured page is that stroke: the page itself is painted again inside it, through the matrix that turns what is on screen into the recolouring of the file's pixel times the stroke (`recolour::multiplied`).
 - Ink and page edits are written into the file itself, atomically and gated on the etag the document was read at; the tab does not reload over its own write.
+  A save is the file's bytes as they were read, copied as a reflink where the file system has them, then the session's one incremental update (ISO 32000-1 §7.5.6), so a session's saves leave one section after the original bytes, history and signatures intact, and nothing is freed: a deleted page or stroke stays in the file, out of reach.
 - On a remote vault that file is the ssh cache copy, and each write goes up to the host behind it, a tab closed at once included.
   One the host will not take (a folder it may not write, a full disk) is said once, with Retry, and goes again with the next stroke, a reconnect, the next opening of the document, or a change of the host's file, which is then never fetched over it.
   A reconnect sends what the window's closed tabs left unsent too, and a window closed first leaves it to the document's next opening.
@@ -1017,17 +1018,15 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - **A PDF dropped onto the pages puts its pages in between the two under the pointer** (user decision 2026-10-07): a row from the Files tree over the middle of the pane, or a file from another application.
   While the drag rests there an accent line, the strip's drop bar, lies across that gap in place of the pane's drop shade; the pane's edges still split.
   One toast names what went in ("Inserted 3 pages from paper.pdf"), the tab is kept if it was a preview, as a drop's is, and the reader lands on the first of the pages, as on an added page.
-  The pages come as pdfium copies them: text, annotations and ink, but not their links to other pages, nor the other document's bookmarks, and a pop-up or a form widget is cut loose from its parent (ISSUES.md).
+  Each page comes with everything it uses — text, annotations, ink, pop-ups with the marks they belong to — and a link between two of the pages leads to the copy; the other document's bookmarks do not come, nor its structure tree, and a form widget is cut loose from its field.
   A file that will not open as a PDF is said in a toast; the document dropped onto itself is no such drop.
 - **A page edit is an Undo step**, in the one history the ink keeps, so Undo takes back strokes, adds, moves and deletes in the order they were made.
   A delete therefore asks nothing: Undo puts the page back.
-  Another PDF's pages are one step, kept as a delete keeps the document, so Undo takes them all out and Redo puts them back without reading that file again.
+  Another PDF's pages are one step, kept as a delete keeps its page, so Undo takes them all out and Redo puts them back without reading that file again.
 - A move reorders the page tree, so bookmarks and links into the page follow it.
   After an add the reader is on the new page — after an Undo of a delete, on the page put back; after a move or a delete, on the page they were reading, or the one that took its place.
-- A delete keeps the whole document as it stood (`PdfDoc::snapshot`) and its Undo swaps that back in, so the page comes back as itself: its text, annotations and ink, the links on it into the document, and the bookmarks, links and `\ref` targets elsewhere that name it, in the file it saves too.
-  Redo swaps back the document the Undo put aside. pdfium cannot hand back a page once it is gone, and its copy of one drops every reference to another page.
-  The snapshot is an unnamed file in the cache dir that goes with its step: a whole save and a file's worth of disk per delete in the history, no memory.
-  An Export Highlights made since the delete goes with its Undo and comes back with the Redo; the notes still hold the highlights, and Export Highlights writes them again.
+- The first page edit makes the page tree one node, each page given what it inherited; a delete takes the page out of that node's list and its Undo puts it back, so the page comes back as itself: its text, annotations and ink, the links on it into the document, and the bookmarks, links and `\ref` targets elsewhere that name it, in the file it saves too.
+  Redo takes it out again. An Export Highlights made since the delete is no part of it, and stays through its Undo and Redo.
 - Notes name pages by number, so a page edit rewrites every link into the document to its page's new number — a highlight's `page=N&selection=…`, a plain `page=N` jump, a markdown link's, a reference definition's and an HTML `href`'s alike — without a question, the edit being what was asked for, and one toast says how many links in how many notes.
   A note open in a tab is written out first and reloaded after, as a rename's are.
   A link into a deleted page is left as it is and counted: no page is where it was, and a neighbour would be a wrong link that looks right.

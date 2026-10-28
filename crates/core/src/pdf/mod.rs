@@ -1,10 +1,12 @@
-//! Shared PDF rendering, glyph geometry, selections and annotations through pdfium, with plain
-//! data for GTK, CLI and Android.
+//! Shared PDF rendering, glyph geometry, selections and annotations, with plain data for GTK,
+//! CLI and Android: pdfium reads and renders, `accent_pdf` writes every edit (`cos`).
 //!
-//! All [`Rect`]s use page points with a top-left origin and downward y. [`Rect::from_pdf`] and
-//! [`Rect::to_pdf`] convert pdfium's bottom-left coordinate space at the boundary.
+//! All [`Rect`]s use page points with a top-left origin and downward y. [`Rect::from_pdf`]
+//! converts pdfium's bottom-left coordinate space at the boundary, and the writers flip y as they
+//! write.
 
 mod annot;
+mod cos;
 mod doc;
 mod ink;
 pub mod ledger;
@@ -145,15 +147,6 @@ impl Rect {
             right: r.right().value,
             bottom: page_height - r.bottom().value,
         }
-    }
-
-    pub(super) fn to_pdf(self, page_height: f32) -> PdfRect {
-        PdfRect::new_from_values(
-            page_height - self.bottom,
-            self.left,
-            page_height - self.top,
-            self.right,
-        )
     }
 
     /// The same rectangle with `by` points of room on every side, which is the grip a hit test

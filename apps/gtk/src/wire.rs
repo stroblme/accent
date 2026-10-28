@@ -920,7 +920,7 @@ pub fn wire_window(app: &Rc<App>) {
             // The process ends when this returns, and a drawn-on PDF's write lives on the
             // render thread, so it is waited for rather than left to be killed.
             for pdf in app.pdfs() {
-                pdf.flush_blocking(true);
+                pdf.flush_blocking();
             }
             // The close is certain now: a fetch or a push still running is stopped, not waited for.
             if let Some(git) = app.git.get() {

@@ -42,8 +42,8 @@ pub enum Step {
         id: u32,
         matrix: pdf::Matrix,
     },
-    /// A page was put in, taken out or moved. A delete keeps the document from the other side of
-    /// it, which Undo and Redo swap in. `id` names the step to whatever keeps something of its
+    /// A page was put in, taken out or moved. A delete, and an import, keep the pages they take
+    /// out, which Undo and Redo put back. `id` names the step to whatever keeps something of its
     /// own about it: the window keeps the note links a delete left naming the page it took out.
     Paged {
         edit: PageEdit,
@@ -52,11 +52,13 @@ pub enum Step {
     },
 }
 
-/// Document and annotation IDs stored across a page deletion. Undo and Redo swap the whole
-/// document, preserving strokes and exported highlights on their respective sides of the edit.
+/// The pages a delete or an Undo of an import took out of the page tree, and the names of their
+/// annotations by the place of the page among them: the page objects stay in the file, so putting
+/// them back brings each page back as itself, its ink, links and bookmarks into it included.
+#[derive(Default)]
 pub struct Kept {
-    doc: PdfDoc,
-    ids: HashMap<usize, Vec<Option<u32>>>,
+    pages: Vec<accent_pdf::Ref>,
+    ids: Vec<(usize, Vec<Option<u32>>)>,
 }
 
 /// What one step of Undo or Redo changed.
@@ -158,8 +160,7 @@ impl Ink {
 
     /// The stroke at `index` was erased — `was` being what puts it back — and `left` drawn in its
     /// place under the names given: what a partial eraser leaves of it, nothing for a whole one.
-    /// Undo takes the pieces off and puts the stroke back as one step. Another editor's stroke
-    /// was only hidden, and keeps its place.
+    /// Undo takes the pieces off and puts the stroke back as one step.
     pub fn erased(
         &mut self,
         page: usize,
@@ -188,95 +189,99 @@ impl Ink {
         self.record(Step::Moved { page, id, matrix }, false);
     }
 
-    /// The stroke at `index` was taken off as `was` says: deleted, or hidden where it is. Its id.
+    /// The stroke at `index` was taken off as `was` says, with another editor's popup. Its id.
     fn taken(&mut self, page: usize, index: usize, was: &pdf::Drawn) -> u32 {
-        match was.hidden {
-            true => self.id_at(page, index).unwrap_or_else(fresh_id),
-            false => self.removed(page, index),
-        }
-    }
-
-    /// End the history and delete foreign strokes still hidden by this session, including
-    /// popups. Pre-existing hidden strokes are untouched. Clear IDs and history; the caller
-    /// saves the document.
-    pub fn purge(&mut self, doc: &mut PdfDoc) -> Result<()> {
-        let hidden: Vec<u32> = (self.done.iter().flatten())
-            .filter_map(|step| match step {
-                Step::Erased {
-                    id,
-                    kept: Some(was),
-                    ..
-                } if was.hidden => Some(*id),
-                _ => None,
-            })
-            .collect();
-        self.done.clear();
-        self.undone.clear();
-        // The names go as well: a popup goes with its stroke, and they did not mirror it.
-        for (page, slots) in std::mem::take(&mut self.ids) {
-            let doomed: Vec<usize> = (slots.iter().enumerate())
-                .filter(|(_, slot)| slot.is_some_and(|id| hidden.contains(&id)))
-                .map(|(index, _)| index)
-                .collect();
-            if !doomed.is_empty() {
-                doc.delete_inks(page, &doomed)?;
-                self.dirty = true;
+        let id = self.id_at(page, index).unwrap_or_else(fresh_id);
+        match was {
+            pdf::Drawn::Ours { .. } => {
+                self.removed(page, index);
+            }
+            pdf::Drawn::Foreign { entries, .. } => {
+                for (at, _) in entries.iter().rev() {
+                    self.removed(page, *at);
+                }
             }
         }
-        Ok(())
+        id
+    }
+
+    /// The stroke named `id` was put back as `was` says: ours at the end of `page`, another
+    /// editor's where it was, with its popup, which has no name.
+    fn put_back(&mut self, page: usize, id: u32, was: &pdf::Drawn) {
+        match was {
+            pdf::Drawn::Ours { .. } => self.appended(page, id),
+            pdf::Drawn::Foreign { index, entries, .. } => {
+                let slots = self.ids.entry(page).or_default();
+                for (at, _) in entries {
+                    let name = (at == index).then_some(id);
+                    slots.insert((*at).min(slots.len()), name);
+                }
+            }
+        }
     }
 
     /// Put a page in, take one out or move one, as a step of its own: Undo takes it back as it
-    /// takes back a stroke. A delete first keeps the whole document ([`PdfDoc::snapshot`]), so
-    /// its Undo brings the page back as itself, with its ink and with what points at it. Nothing
-    /// reaches the disk here: [`PdfDoc::save`] is the second half, as it is for ink. The step's
-    /// id, which Undo and Redo hand back with it.
+    /// takes back a stroke. A delete keeps the page it takes out of the page tree, so its Undo
+    /// puts back the page itself, with its ink and with what points at it. Nothing reaches the
+    /// disk here: [`PdfDoc::save_to`] is the second half, as it is for ink. The step's id, which
+    /// Undo and Redo hand back with it.
     pub fn edit_pages(&mut self, doc: &mut PdfDoc, edit: PageEdit) -> Result<u32> {
-        let kept = match edit {
-            PageEdit::Delete { .. } => Some(self.keep(doc)?),
-            PageEdit::Insert { .. } | PageEdit::Move { .. } => None,
-        };
-        self.edit(doc, edit)?;
+        let mut kept = matches!(edit, PageEdit::Delete { .. }).then(Box::<Kept>::default);
+        self.edit(doc, edit, kept.as_deref_mut())?;
         let id = fresh_id();
         self.record(Step::Paged { edit, kept, id }, false);
         Ok(id)
     }
 
-    /// Put every page of `source` in at `at`, after the last page for `None`, as one step. The
-    /// document is kept first, as for a delete, so Undo swaps it back in and Redo swaps the pages
-    /// back without reading `source` again. The edit the pages made, and the step's id.
+    /// Put every page of `source` in at `at`, after the last page for `None`, as one step. Undo
+    /// takes the pages out and keeps them, as it keeps a deleted page, so Redo puts them back
+    /// without reading `source` again. The edit the pages made, and the step's id.
     pub fn import_pages(
         &mut self,
         doc: &mut PdfDoc,
         at: Option<usize>,
         source: &PdfDoc,
     ) -> Result<(PageEdit, u32)> {
-        let kept = Some(self.keep(doc)?);
         let at = at.unwrap_or_else(|| doc.page_count());
         let count = doc.import_pages(source, at)?;
         let edit = PageEdit::Insert { at, count };
         self.follow(edit);
         let id = fresh_id();
+        let kept = Some(Box::default());
         self.record(Step::Paged { edit, kept, id }, false);
         Ok((edit, id))
     }
 
-    /// The document as it stands and the names of its annotations, for a step to swap back in.
-    fn keep(&self, doc: &PdfDoc) -> Result<Box<Kept>> {
-        Ok(Box::new(Kept {
-            doc: doc.snapshot()?,
-            ids: self.ids.clone(),
-        }))
-    }
-
-    /// Make one page edit, the pages put in being blank ones.
-    fn edit(&mut self, doc: &mut PdfDoc, edit: PageEdit) -> Result<()> {
-        match edit {
-            PageEdit::Insert { at, count } => (0..count).try_for_each(|_| doc.insert_page(at))?,
-            PageEdit::Delete { at, count } => (0..count).try_for_each(|_| doc.delete_page(at))?,
-            PageEdit::Move { from, to } => doc.move_page(from, to)?,
+    /// Make one page edit. With `kept`, the pages a delete takes out are kept there with the
+    /// names of their annotations, and an insert puts those back; without, the pages an insert
+    /// puts in are blank ones.
+    fn edit(&mut self, doc: &mut PdfDoc, edit: PageEdit, kept: Option<&mut Kept>) -> Result<()> {
+        match (edit, kept) {
+            (PageEdit::Delete { at, count }, Some(kept)) => {
+                kept.pages = doc.take_pages(at, count)?;
+                kept.ids = (0..count)
+                    .filter_map(|i| Some((i, self.ids.get(&(at + i))?.clone())))
+                    .collect();
+                self.follow(edit);
+            }
+            (PageEdit::Insert { at, .. }, Some(kept)) => {
+                doc.put_pages(at, &kept.pages)?;
+                self.follow(edit);
+                for (i, slots) in std::mem::take(&mut kept.ids) {
+                    self.ids.insert(at + i, slots);
+                }
+            }
+            (edit, _) => {
+                match edit {
+                    PageEdit::Insert { at, count } => {
+                        (0..count).try_for_each(|_| doc.insert_page(at))?
+                    }
+                    PageEdit::Delete { at, count } => doc.take_pages(at, count).map(drop)?,
+                    PageEdit::Move { from, to } => doc.move_page(from, to)?,
+                }
+                self.follow(edit);
+            }
         }
-        self.follow(edit);
         Ok(())
     }
 
@@ -347,10 +352,10 @@ impl Ink {
     }
 
     /// Make one step (`forwards`) or take it back: a stroke goes on or comes off the page or moves
-    /// by the map or by its inverse, or the pages are edited or edited back. A delete and its
-    /// Undo swap the document for the one kept from the other side of it. The page an insert put
-    /// in is blank again when its Undo takes it out, every step on it having been walked back
-    /// first, so a blank one is what Redo puts in.
+    /// by the map or by its inverse, or the pages are edited or edited back. A delete and the
+    /// Undo of an import keep the pages they take out, which their Undo and Redo put back. The
+    /// page a blank insert put in is blank again when its Undo takes it out, every step on it
+    /// having been walked back first, so a blank one is what Redo puts in.
     fn apply(&mut self, doc: &mut PdfDoc, step: &mut Step, forwards: bool) -> Result<Walked> {
         match (step, forwards) {
             (Step::Paged { edit, kept, id }, _) => {
@@ -358,13 +363,7 @@ impl Ink {
                     true => *edit,
                     false => edit.inverse(),
                 };
-                match kept {
-                    Some(kept) => {
-                        std::mem::swap(doc, &mut kept.doc);
-                        std::mem::swap(&mut self.ids, &mut kept.ids);
-                    }
-                    None => self.edit(doc, made)?,
-                }
+                self.edit(doc, made, kept.as_deref_mut())?;
                 Ok(Walked::Pages(made, *id))
             }
             (Step::Moved { page, id, matrix }, _) => {
@@ -385,12 +384,8 @@ impl Ink {
                 let drawn = kept
                     .as_ref()
                     .ok_or_else(|| Error::Pdf(format!("nothing kept of {id}")))?;
-                if drawn.hidden {
-                    let index = self.locate(doc, *page, *id)?;
-                    return Ok(Walked::Ink(*page, doc.show_ink(*page, index)?));
-                }
                 let area = doc.redraw_ink(*page, drawn)?;
-                self.appended(*page, *id);
+                self.put_back(*page, *id, drawn);
                 Ok(Walked::Ink(*page, area))
             }
             (Step::Drawn { page, id, kept }, false) | (Step::Erased { page, id, kept }, true) => {
@@ -681,7 +676,8 @@ mod tests {
         }
         assert_eq!(targets(&reopen(&dir, &doc)), before);
 
-        // An Export Highlights made since a delete goes with its Undo and comes back with Redo.
+        // An Export Highlights made since a delete is not the delete's: it stays through its
+        // Undo and Redo.
         ink.edit_pages(&mut doc, PageEdit::delete(1)).unwrap();
         let had = doc.annotation_count(0).unwrap();
         let quads = vec![pdf::Rect::from_corners((20.0, 30.0), (90.0, 50.0))];
@@ -694,7 +690,7 @@ mod tests {
         };
         doc.add_highlights(&[mark]).unwrap();
         ink.walk(&mut doc, false);
-        assert_eq!(doc.annotation_count(0).unwrap(), had);
+        assert_eq!(doc.annotation_count(0).unwrap(), had + 1);
         ink.walk(&mut doc, true);
         assert_eq!(doc.annotation_count(0).unwrap(), had + 1);
     }
