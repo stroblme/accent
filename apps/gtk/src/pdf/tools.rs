@@ -111,7 +111,7 @@ pub fn drag_of(tool: Mode, hand: Hand, mouse_draws: bool) -> Option<Mode> {
 }
 
 /// How close to an axis, in degrees, a line has to be to snap onto it.
-const SNAP_DEG: f32 = 7.0;
+const SNAP_DEG: f32 = 4.0;
 /// How near the pointer has to come to a stroke, in page points, for the Adjust tool to take it.
 pub(super) const ADJUST_RADIUS: f32 = 4.0;
 /// The side of an Adjust handle, in pixels.
@@ -295,10 +295,11 @@ mod tests {
     }
 
     #[test]
-    fn a_line_snaps_to_the_axis_within_seven_degrees() {
-        assert_eq!(snap((0.0, 0.0), (100.0, 10.0)), (100.0, 0.0));
-        assert_eq!(snap((0.0, 0.0), (100.0, 20.0)), (100.0, 20.0));
-        assert_eq!(snap((0.0, 0.0), (5.0, 100.0)), (0.0, 100.0));
+    fn a_line_snaps_to_the_axis_within_four_degrees() {
+        assert_eq!(snap((0.0, 0.0), (100.0, 6.0)), (100.0, 0.0));
+        assert_eq!(snap((0.0, 0.0), (100.0, 8.0)), (100.0, 8.0));
+        assert_eq!(snap((0.0, 0.0), (6.0, 100.0)), (0.0, 100.0));
+        assert_eq!(snap((0.0, 0.0), (8.0, 100.0)), (8.0, 100.0));
     }
 
     #[test]
