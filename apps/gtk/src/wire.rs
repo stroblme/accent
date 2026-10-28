@@ -1240,9 +1240,9 @@ pub fn wire_tree(app: &Rc<App>) {
             gesture.set_state(gtk::EventSequenceState::Claimed);
             // No row under the pointer is the vault root — the blank area below the last row, an
             // empty vault's page, the vault's name — and that gets a menu too: it is where a note
-            // is created in the vault root. A row inside a dependency tree gets none: nothing in
-            // that menu may happen inside somebody else's tree. A gitignored folder is the
-            // reader's own and gets the whole menu like any other row.
+            // is created in the vault root. A gitignored folder is the reader's own and gets the
+            // whole menu like any other row, a row inside a dependency tree only what reads it
+            // (`row_menu`).
             //
             // The press is in the coordinates of the host box the menu hangs off, and the row is
             // found in the list's, which move as it scrolls.
@@ -1250,16 +1250,9 @@ pub fn wire_tree(app: &Rc<App>) {
                 .widget()
                 .compute_point(tree.view(), &gtk::graphene::Point::new(x as f32, y as f32))
                 .and_then(|at| tree.row_at(at.x().into(), at.y().into()));
-            if row.as_ref().is_some_and(|row| row.dependency) {
-                return;
-            }
             let anchor = gdk::Rectangle::new(x as i32, y as i32, 1, 1);
-            // A right-click on a marked row is about the whole set; one anywhere else is the
-            // reader pointing at a single file, and forgets the marks the way a plain click does.
-            let marked = marks_under(tree, row.as_ref());
             if let Some(ops) = app.ops() {
-                let popover =
-                    fileops::context_menu(ops, tree.widget(), clicked(&row), &marked, anchor);
+                let popover = row_menu(ops, tree, &row, anchor);
                 pin_row(&app, &popover, row.as_ref().map(|row| row.rel.as_str()));
             }
         }
@@ -1289,9 +1282,8 @@ pub fn wire_tree(app: &Rc<App>) {
                 return glib::Propagation::Stop;
             }
             // The same rule the pointer path follows: a row in a dependency tree is listed and
-            // opened, never changed. Both keys stop here rather than falling through to the
-            // vault-root menu an empty selection would get.
-            if row.as_ref().is_some_and(|row| row.dependency) {
+            // opened, never changed.
+            if key == gdk::Key::Delete && row.as_ref().is_some_and(|row| row.dependency) {
                 return glib::Propagation::Proceed;
             }
             match key {
@@ -1316,14 +1308,7 @@ pub fn wire_tree(app: &Rc<App>) {
                     let Some(ops) = app.ops() else {
                         return glib::Propagation::Proceed;
                     };
-                    let marked = marks_under(tree, row.as_ref());
-                    let popover = fileops::context_menu(
-                        ops,
-                        tree.widget(),
-                        clicked(&row),
-                        &marked,
-                        row_anchor(tree.view(), tree.widget()),
-                    );
+                    let popover = row_menu(ops, tree, &row, row_anchor(tree.view(), tree.widget()));
                     pin_row(&app, &popover, row.as_ref().map(|row| row.rel.as_str()));
                 }
                 _ => return glib::Propagation::Proceed,
@@ -1386,6 +1371,25 @@ fn marks_under(tree: &tree::Tree, row: Option<&tree::Row>) -> Vec<(String, bool)
     }
     tree.clear_marks();
     Vec::new()
+}
+
+/// The menu for `row`: a dependency tree's row gets only what reads it, a marked row the marked
+/// set's, any other row and the vault root (`None`) the whole menu.
+fn row_menu(
+    ops: &Rc<fileops::Ops>,
+    tree: &tree::Tree,
+    row: &Option<tree::Row>,
+    anchor: gdk::Rectangle,
+) -> gtk::PopoverMenu {
+    // A right-click on a marked row is about the whole set; one anywhere else is the reader
+    // pointing at a single file, and forgets the marks the way a plain click does.
+    let marked = marks_under(tree, row.as_ref());
+    match row {
+        Some(row) if row.dependency => {
+            fileops::dependency_menu(ops, tree.widget(), (&row.rel, row.is_dir()), anchor)
+        }
+        _ => fileops::context_menu(ops, tree.widget(), clicked(row), &marked, anchor),
+    }
 }
 
 /// A tree row as the context menu wants it: its path, and whether it is a directory. `None` stays

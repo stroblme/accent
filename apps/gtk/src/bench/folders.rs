@@ -25,23 +25,17 @@ pub(super) fn bench_menu(app: &Rc<App>, rel: &str) {
         glib::timeout_future(Duration::from_millis(400)).await;
         let row = tree.selected();
         println!("bench menu_row {:?}", row.as_ref().map(|row| &row.rel));
-        // Whether the tree would open a menu here at all, and what it would hold: a row inside a
-        // dependency tree gets none (`wire::wire_tree`), a gitignored one the whole of it.
+        // What the tree's menu here would hold: a row inside a dependency tree only what reads
+        // it (`wire::row_menu`), a gitignored one the whole of it.
         if let Some(row) = &row {
             let at = gdk::Rectangle::new(0, 0, 1, 1);
-            let items = (!row.dependency).then(|| {
-                let menu = fileops::context_menu(
-                    &ops,
-                    tree.widget(),
-                    Some((&row.rel, row.is_dir())),
-                    &[],
-                    at,
-                );
-                let items = menu.menu_model().map(|m| fileops::labels(&m));
-                menu.popdown();
-                items
-            });
-            let items = items.flatten();
+            let clicked = (row.rel.as_str(), row.is_dir());
+            let menu = match row.dependency {
+                true => fileops::dependency_menu(&ops, tree.widget(), clicked, at),
+                false => fileops::context_menu(&ops, tree.widget(), Some(clicked), &[], at),
+            };
+            let items = menu.menu_model().map(|m| fileops::labels(&m));
+            menu.popdown();
             println!(
                 "bench menu_items {} dir={} dependency={} {items:?}",
                 row.rel,

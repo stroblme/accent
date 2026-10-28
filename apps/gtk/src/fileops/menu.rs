@@ -79,25 +79,61 @@ pub fn context_menu(
     // what reads its name out.
     menu.append_section(None, &clip_section(ops, Some((rel, is_dir)), dir));
     // Reading the name or the path out and leaving the app are neither edits nor deletions, so
-    // they get a section of their own between the two. The name first: it is the shortest of the
-    // three answers to "what is this file called", and the one a note's own prose wants.
-    let elsewhere = gio::Menu::new();
-    elsewhere.append_item(&item(GROUP, "Copy Name", "copy-name", rel));
-    elsewhere.append_item(&item(GROUP, "Copy Relative Path", "copy-rel", rel));
-    elsewhere.append_item(&item(GROUP, "Copy Absolute Path", "copy-abs", rel));
-    // Download… takes Show in Files' place when the file is on a host: no file manager here can
-    // show it, and a copy here is the only way to reach it with anything but accent.
-    if !ops.vault.is_remote() {
-        elsewhere.append_item(&item(GROUP, "Show in Files", "show", rel));
-    } else if !is_dir {
-        elsewhere.append_item(&item(GROUP, "Download…", "download", rel));
-    }
-    menu.append_section(None, &elsewhere);
+    // they get a section of their own between the two.
+    menu.append_section(None, &elsewhere(rel, is_dir, ops.vault.is_remote()));
     // Its own section, so the one destructive item is never next to Rename by accident.
     let danger = gio::Menu::new();
     danger.append_item(&item(GROUP, "Move to Trash", "trash", rel));
     menu.append_section(None, &danger);
     crate::widgets::popup_menu(host, &menu, Some(anchor))
+}
+
+/// The menu of a row inside a dependency tree (`tree::Row::dependency`): only what reads it,
+/// since the tree is somebody else's to change.
+pub fn dependency_menu(
+    ops: &Rc<Ops>,
+    host: &gtk::Widget,
+    (rel, is_dir): (&str, bool),
+    anchor: gdk::Rectangle,
+) -> gtk::PopoverMenu {
+    host.insert_action_group(GROUP, Some(&actions(ops)));
+    let menu = dependency_model(rel, is_dir, ops.vault.is_remote());
+    crate::widgets::popup_menu(host, &menu, Some(anchor))
+}
+
+/// [`dependency_menu`]'s items: Open or Reload, then [`elsewhere`].
+fn dependency_model(rel: &str, is_dir: bool, remote: bool) -> gio::Menu {
+    let menu = gio::Menu::new();
+    let open = gio::Menu::new();
+    match is_dir {
+        true => open.append_item(&item(GROUP, "Reload", "reload", rel)),
+        false => {
+            open.append_item(&item(GROUP, "Open", "open", rel));
+            if !remote {
+                open.append_item(&item(GROUP, "Open in New Window", "open-apart", rel));
+            }
+        }
+    }
+    menu.append_section(None, &open);
+    menu.append_section(None, &elsewhere(rel, is_dir, remote));
+    menu
+}
+
+/// Copy Name, the two Copy Paths and the way out of the app. The name first: it is the shortest
+/// of the three answers to "what is this file called", and the one a note's own prose wants.
+fn elsewhere(rel: &str, is_dir: bool, remote: bool) -> gio::Menu {
+    let section = gio::Menu::new();
+    section.append_item(&item(GROUP, "Copy Name", "copy-name", rel));
+    section.append_item(&item(GROUP, "Copy Relative Path", "copy-rel", rel));
+    section.append_item(&item(GROUP, "Copy Absolute Path", "copy-abs", rel));
+    // Download… takes Show in Files' place when the file is on a host: no file manager here can
+    // show it, and a copy here is the only way to reach it with anything but accent.
+    if !remote {
+        section.append_item(&item(GROUP, "Show in Files", "show", rel));
+    } else if !is_dir {
+        section.append_item(&item(GROUP, "Download…", "download", rel));
+    }
+    section
 }
 
 /// Multi-file menu containing only actions that apply to the whole marked set. `dir` is the
@@ -299,6 +335,29 @@ mod tests {
         assert_eq!(
             labels(marked_menu(&marked, "", false).upcast_ref()),
             ["Cut", "Copy", "Move to…", "Move to Trash"]
+        );
+    }
+
+    #[test]
+    fn a_dependency_row_offers_only_what_reads_it() {
+        let menu = |rel, is_dir, remote| labels(dependency_model(rel, is_dir, remote).upcast_ref());
+        let paths = ["Copy Name", "Copy Relative Path", "Copy Absolute Path"];
+        assert_eq!(
+            menu(".ruff_cache", true, false),
+            [&["Reload"][..], &paths, &["Show in Files"]].concat()
+        );
+        assert_eq!(
+            menu("node_modules/a/index.js", false, false),
+            [
+                &["Open", "Open in New Window"][..],
+                &paths,
+                &["Show in Files"]
+            ]
+            .concat()
+        );
+        assert_eq!(
+            menu(".venv/pyvenv.cfg", false, true),
+            [&["Open"][..], &paths, &["Download…"]].concat()
         );
     }
 }

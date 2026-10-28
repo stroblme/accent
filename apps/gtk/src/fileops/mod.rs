@@ -14,7 +14,7 @@ mod transfer;
 pub use clipboard::Clip;
 #[cfg(feature = "bench")]
 pub use menu::labels;
-pub use menu::{context_menu, row_dir};
+pub use menu::{context_menu, dependency_menu, row_dir};
 pub(crate) use paths::at_free_name;
 pub use paths::{move_dest, topmost};
 #[cfg(feature = "bench")]
