@@ -478,6 +478,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   It spins while it runs, as Sync does.
 - A branch row: a `GtkMenuButton` labelled with HEAD's branch, or `Detached at abc1234` (the status bar's string).
   Its popover lists the local branches, then under a dim Remote heading the remote-tracking branches no local branch shares a name with, then Create Branch… and Merge Branch…: the readout is every branch operation the pane offers.
+  Each list puts the branches HEAD was on most recently first, read off HEAD's reflog (`checkout: moving from X to Y`, the last time on Y, then on X), and the rest by their tip's commit date, newest first (user decision 2026-10-28): the branch left a moment ago is one row down, and one never checked out sorts by how fresh it is. Merge Branch… and Delete Branch… pick from the same order.
 - Picking a row is `git switch`, a remote row `git switch --track`; whether it is safe is git's call, its first line coming back as a toast and the label returning to the real HEAD where git refuses.
 - Every row but the checked-out one carries a trash button on hover: git refuses to delete HEAD's branch, and a control that cannot work is dead chrome.
   The popover opens with the keyboard on HEAD's row, as a dropdown opens on its selection, so no trash shows until the pointer or the keyboard reaches another row.

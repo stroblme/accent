@@ -1064,11 +1064,29 @@ fn parse_branches_splits_local_from_remote_and_drops_the_symbolic_ones() {
     let listed = parse_branches(
         b"refs/heads/main\0\0 \nrefs/heads/feature/x\0\0*\n\
           refs/remotes/origin/HEAD\0refs/remotes/origin/main\0 \nrefs/remotes/origin/main\0\0 \n",
+        b"",
     );
     assert_eq!(listed.local, ["main", "feature/x"]);
     assert_eq!(listed.remote, ["origin/main"], "origin/HEAD is a pointer");
     assert_eq!(listed.head.as_deref(), Some("feature/x"));
-    assert_eq!(parse_branches(b""), Branches::default());
+    assert_eq!(parse_branches(b"", b""), Branches::default());
+}
+
+#[test]
+fn branches_checked_out_recently_go_first_and_the_rest_keep_their_date_order() {
+    // `for-each-ref --sort=-committerdate`, newest tip first.
+    let refs = b"refs/heads/new\0\0 \nrefs/heads/main\0\0*\nrefs/heads/old\0\0 \n\
+                 refs/heads/topic\0\0 \nrefs/remotes/origin/x\0\0 \nrefs/remotes/origin/y\0\0 \n";
+    // HEAD's reflog, newest first: main from a detached commit, which topic was left for, topic
+    // from old, and much earlier origin/y detached from main. `new` was never checked out.
+    let reflog = b"checkout: moving from 1a2b3c4 to main\n\
+                   checkout: moving from topic to 1a2b3c4\n\
+                   checkout: moving from old to topic\n\
+                   checkout: moving from main to origin/y\n";
+    let listed = parse_branches(refs, reflog);
+    assert_eq!(listed.local, ["main", "topic", "old", "new"]);
+    assert_eq!(listed.remote, ["origin/y", "origin/x"]);
+    assert_eq!(listed.head.as_deref(), Some("main"));
 }
 
 /// `git branch -d` measures a branch with an upstream against that upstream, so a published branch
@@ -1138,7 +1156,11 @@ fn a_remote_only_branch_is_listed_and_tracking_it_checks_it_out() {
     let branch = status(&repo).unwrap().branch;
     assert_eq!(branch.head.as_deref(), Some("side"));
     assert_eq!(branch.upstream.as_deref(), Some("origin/side"));
-    assert_eq!(branches(&repo).unwrap().local, ["main", "side"]);
+    assert_eq!(
+        branches(&repo).unwrap().local,
+        ["side", "main"],
+        "the one checked out last first"
+    );
     assert!(
         track(&repo, "origin/side").is_err(),
         "the local branch exists now"

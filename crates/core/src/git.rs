@@ -724,7 +724,7 @@ pub fn show(repo: &Repo, rev: &str, path: &str) -> Result<Option<Blob>, Error> {
     }
 }
 
-/// A repository's branches, each list alphabetical as `git branch -a` would give it.
+/// A repository's branches, each list in the order [`branches`] gives.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Branches {
     pub local: Vec<String>,
@@ -736,26 +736,62 @@ pub struct Branches {
     pub head: Option<String>,
 }
 
-/// The repository's local and remote-tracking branches, in one `for-each-ref`.
+/// The repository's local and remote-tracking branches, in one `for-each-ref`: those HEAD was on
+/// most recently first, the rest by their tip's commit date, newest first.
 pub fn branches(repo: &Repo) -> Result<Branches, Error> {
     let out = run(
         &repo.root,
         &[
             "for-each-ref",
+            "--sort=-committerdate",
             "--format=%(refname)%00%(symref)%00%(HEAD)",
             "refs/heads/",
             "refs/remotes/",
         ],
         true,
     )?;
-    Ok(parse_branches(&out))
+    // A HEAD with no reflog, an unborn branch's, has no recent checkout to put first.
+    let reflog = run(
+        &repo.root,
+        &[
+            "reflog",
+            "show",
+            "--format=%gs",
+            "--grep-reflog=checkout: moving from ",
+            "HEAD",
+        ],
+        true,
+    );
+    Ok(parse_branches(&out, &reflog.unwrap_or_default()))
+}
+
+/// The names HEAD was on, most recent first, from its reflog's `checkout: moving from X to Y`
+/// subjects, newest first: each entry is the last time on `Y`, then on `X`, which also places the
+/// branch a repository started on. A detached HEAD's commit names no branch and matches none.
+fn recently_checked_out(reflog: &[u8]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for line in String::from_utf8_lossy(reflog).lines() {
+        let moved = line.strip_prefix("checkout: moving from ");
+        let Some((from, to)) = moved.and_then(|m| m.rsplit_once(" to ")) else {
+            continue;
+        };
+        for name in [to, from] {
+            if !names.iter().any(|n| n == name) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names
 }
 
 /// Parse `<refname> NUL <symref> NUL <HEAD>` lines. Whole ref names rather than `refname:short`,
 /// which is the only way a local branch called `origin/x` stays apart from the remote one. A
 /// symbolic ref — `origin/HEAD`, which a clone sets — names another branch rather than being one,
 /// so it goes. `%(HEAD)` is `*` on the branch HEAD is on and a space everywhere else.
-fn parse_branches(bytes: &[u8]) -> Branches {
+///
+/// The names in `reflog` ([`recently_checked_out`]) go first, in its order; the rest keep the
+/// lines' own.
+fn parse_branches(bytes: &[u8], reflog: &[u8]) -> Branches {
     let mut branches = Branches::default();
     for line in String::from_utf8_lossy(bytes).lines() {
         let mut fields = line.split('\0');
@@ -771,6 +807,11 @@ fn parse_branches(bytes: &[u8]) -> Branches {
             branches.remote.push(remote.to_string());
         }
     }
+    let recent = recently_checked_out(reflog);
+    let rank = |name: &String| recent.iter().position(|r| r == name).unwrap_or(usize::MAX);
+    // Stable, so the rest keep their order.
+    branches.local.sort_by_key(rank);
+    branches.remote.sort_by_key(rank);
     branches
 }
 
