@@ -1001,7 +1001,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Print gives that copy to `GtkPrintDialog`'s `print_file` as it is: the print system gets vector pages and does ranges and copies itself, through the portal where there is one.
   The copy waits in `~/.cache/accent/print/` while the dialog is up.
   Export as PDF… writes it where the chooser says (`paper (exported).pdf` unless renamed there), and refuses the PDF itself.
-- The drawing tools are a **ring**: Pen, Highlighter, Eraser, Line, Rectangle, Circle and Adjust orbiting a hub that floats over the page, opening in the top right (the page is read from the left, a hand comes in from the bottom right), dragged anywhere by the hub and kept where this window left it, inside its pane however a split or a resize shrinks that.
+- The drawing tools are a **ring**: Pen, Highlighter, Eraser, Line, Rectangle, Circle, Text and Adjust orbiting a hub that floats over the page, opening in the top right (the page is read from the left, a hand comes in from the bottom right), dragged anywhere by the hub and kept where this window left it, inside its pane however a split or a resize shrinks that.
   The header's Drawing toggle opens and closes it.
   Its buttons are opaque discs, 36 px, in libadwaita's `.opaque` button colour with the foreground's alpha dropped from the mix, so the disc stays whole on a light theme too, and a shade under them: an `.osd` disc let the text under it through, and went into a dark page.
   Presentation puts it away and the tool in hand down, so nothing draws on a presented page, and brings it back as it was afterwards, the tool still down (Views).
@@ -1012,12 +1012,20 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Partial takes only what lies within reach and leaves the rest as strokes of their own in the same colour, width and opacity, drawn straight between flattened points (a spline would bow a rectangle's edges); a crumb under 1 pt goes.
   Another editor's stroke is cut along its `/InkList`, where it shows, its pieces drawn as ours; one without an `/InkList`, or whose paths differ in colour or width, is taken whole rather than redrawn wrong.
   Another editor's stroke leaves `/Annots` with its popup, its dictionary untouched in the file, so Undo puts both back where they were, as they were, appearance stream and dates included.
+  A text of ours goes whole, under either eraser, once the pass comes within reach of its box.
 - Line, Rectangle and Circle are `/Ink` too, from press to release — a line snaps onto an axis within 4°, a circle grows from the press — because the eraser, Adjust and every read here know ink alone.
+- **Text types onto the page** (user decision 2026-10-27), for when no pen is at hand, as Firefox's PDF editor does: a click opens a box there, the diagram's label editor, plain, in a face like Helvetica at the text's size on screen, in its colour as the page shows it and with its lines and baselines where the page will set them.
+  Return starts a line, nothing wraps, and the box grows with the text; `Ctrl+Return`, `Escape` or a click elsewhere finishes it, that click opening no other, and a box left empty writes nothing.
+  A click on a text of ours opens it to type again, the box never smaller than the text was, so none of it shows round it; emptied, it is erased.
+  The box finished stays over the page until a tile carries what it typed, as a stroke does.
+  It is a `/FreeText` (ISO 32000-1 §12.5.6.6) with an appearance stream of ours, drawn alike by every reader: Helvetica, which every reader has, so nothing is embedded, in WinAnsi encoding — Latin-1, the euro and Windows-1252's quotes and dashes, anything else refused as it is typed — its text the `/Contents` and its size and colour the `/DA`, which is what Firefox and Acrobat edit it by.
+  Each text typed, typed again, moved or erased is one Undo step; it is not a comment, so neither the Outline pane nor a tooltip lists it, and another editor's typed text is theirs, which the tools leave alone.
 - Adjust takes hold of any ink stroke, ours or another editor's: eight handles, the middle moving it, an edge stretching one axis, a corner scaling both alike, and the diagram's ring beyond the top-right corner turning it about its middle, freely, or in steps of 15° with Shift; `Ctrl+Z` puts it back.
+  A text of ours it only moves, by anywhere on its box, which shows no handles and no ring: its size is the Text tool's, and an editor typing into a turned one would set it upright again.
   While it turns its box turns with it, without handles, as a diagram's shape does; let go, the turn is in the stroke itself, no angle kept beside it, and its box stands upright round it again.
   Ours is drawn again along the moved path, its line keeping its width; another editor's keeps everything it carries, only its `/Rect` and `/InkList` moving, and every reader fits its appearance stream into the new `/Rect`, so it scales as a picture would, its line too.
   A turn no `/Rect` can fit: another editor's turns as a picture, its appearance a copy of its stream whose `/Matrix` puts it where the turn does (ISO 32000-1 §12.5.5), the stream it had left in the file.
-- A second orbit holds the tool's options: three widths, and for the pen, the shapes and the highlighter six swatches (the accent, four hues round the wheel by the CSV rule, and black), each painted as the document's recolouring shows that ink, black as the theme's text on a recoloured page, while the stroke is written in the swatch's own colour; for the eraser, Whole Strokes (`edit-delete-symbolic`) and Partial (`edit-cut-symbolic`).
+- A second orbit holds the tool's options: three widths (for the text three sizes, 10, 14 and 20 pt), and for the pen, the shapes, the highlighter and the text six swatches (the accent, four hues round the wheel by the CSV rule, and black), each painted as the document's recolouring shows that ink, black as the theme's text on a recoloured page, while the stroke is written in the swatch's own colour; for the eraser, Whole Strokes (`edit-delete-symbolic`) and Partial (`edit-cut-symbolic`).
   Each pick is kept in the config's `[drawing]`; a width there that is none of the three draws as the nearest of them.
 - With a tool in hand the other tools' icons dim to Adwaita's `--dim-opacity`, their discs staying opaque, so the options read as that tool's; a dimmed tool comes back under the pointer or the keyboard and still takes a click.
   A press between the ring's buttons reaches the page.
@@ -1709,10 +1717,11 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
   Ctrl+click on a link follows it; anywhere else on a LaTeX build's page it is Go to Source.
 - Fit Width and Fit Height from the zoom readout's right-click and the palette; Invert PDF Colours from the palette, and over an image Invert Image Colours.
 - Drawing `Ctrl+Shift+I` opens the ring.
-  Pen, Highlighter, Eraser, Line, Rectangle, Circle and Adjust (unbound) are on the ring and in the palette, a tool picked from the palette bringing the ring out.
+  Pen, Highlighter, Eraser, Line, Rectangle, Circle, Text and Adjust (unbound) are on the ring and in the palette, a tool picked from the palette bringing the ring out.
+  `Ctrl+Return` finishes a text being typed, as it does a diagram's label; the text's own box keeps its own undo.
 - Copy Selection, Copy Link to Selection, Export Highlights, Insert Sketch, Add Page Before, Add Page After and Delete Page are in the palette and the page's menu, Move Page Up and Move Page Down in the palette, all unbound: the thumbnail strip is where pages are organised by pointer.
 - Go to Source (the page's menu) and Show in PDF (a `.tex` tab's menu) are in the palette too, unbound: Ctrl+click is Go to Source's pointer, and no free chord says either.
-- `Ctrl+Z` takes back the last stroke, erase, move or page edit of this session, tool in hand or not, and `Ctrl+Shift+Z` or `Ctrl+Y` makes it again, as in a note; `Escape` puts the pen down.
+- `Ctrl+Z` takes back the last stroke, text, erase, move or page edit of this session, tool in hand or not, and `Ctrl+Shift+Z` or `Ctrl+Y` makes it again, as in a note; `Escape` puts the pen down.
   They are the tab's own keys, like Copy, so an entry with the keyboard, the find bar's included, keeps its own undo.
   Undo PDF Edit and Redo PDF Edit are also the header's two buttons and palette commands.
 - Find and Go to Line keep their chords; over a PDF they search the document and go to a page.
