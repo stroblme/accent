@@ -255,10 +255,20 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
         #[upgrade_or]
         None,
         move |view| {
-            let aimed = app.shell.upgrade().and_then(|shell| shell.where_to_land());
-            // Let go on nothing of ours: back where it came from. A window per detached tab is a
-            // gesture one-window-per-vault has no answer for, and `None` is an error here.
-            Some(aimed.unwrap_or_else(|| view.clone()))
+            // `None` is an error here: a tab always lands somewhere.
+            let Some(shell) = app.shell.upgrade() else {
+                return Some(view.clone());
+            };
+            if let Some(aimed) = shell.where_to_land() {
+                return Some(aimed);
+            }
+            // Back where it came from. Let go outside every window, it moves on from there into a
+            // window of its own as Move to New Window takes it (`Shell::landed`); let go inside one
+            // on nothing that takes it, which X11 asks a window for too, it stays.
+            if !shell.pointer_inside() {
+                shell.apart.replace(Some(view.clone()));
+            }
+            Some(view.clone())
         }
     ));
     // Where a drag ends: the split the drop asked for, and the move into this window's

@@ -773,7 +773,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - A tab on a file outside the window's vault carries `document-open-symbolic` in its indicator slot, tooltipped Outside this vault, so saving it is never a surprise and it is plain why it has no backlinks.
 - A tab dragged into another window moves there, its buffer written first.
   One vault never having two windows, it arrives from another vault and is adopted as a file from outside a vault: it edits and saves, without index, backlinks or wikilink resolution.
-  A shell, a comparison and a remote vault's file cannot be reopened elsewhere, so they go back to their window with a toast; so does a tab let go outside every window.
+  A shell, a comparison and a remote vault's file cannot be reopened elsewhere, so they go back to their window with a toast.
+- A tab let go outside every window moves to a window of its own, as Move to New Window moves it (below), wherever the compositor puts that window: GTK 4 places none at the pointer.
+  A shell, a comparison or a remote vault's file goes back with the toast, and a tab let go inside a window on nothing that takes it stays where it was.
 - **Move to New Window** on the tab menu is the same move into a window built for it, with no vault (Window without a vault); the Files tree's **Open in New Window** opens a file in such a window and leaves it open wherever else it is.
   Neither is offered where the move above is refused: on a shell, a comparison or anything of a remote vault's.
 - **Select tabs by use, not position:** the window keeps its tabs, every pane's, in most-recently-selected order; `Ctrl+Tab` steps along it and `Ctrl+Shift+Tab` back, across the splits as VS Code's does across its editor groups (user decision 2026-10-25), and closing a tab falls back to the most recently used one left in its pane.

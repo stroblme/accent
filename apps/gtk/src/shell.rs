@@ -22,6 +22,9 @@ pub struct Shell {
     /// Where a dragged tab was let go, between our drop zone seeing it and libadwaita asking for
     /// somewhere to put it. See [`Landing`].
     pub landing: RefCell<Option<Landing>>,
+    /// The tab view a tab let go outside every window goes back to, between `create-window` and
+    /// its attaching there, which moves it on into a window of its own ([`Shell::landed`]).
+    pub apart: RefCell<Option<adw::TabView>>,
     /// The window a row is being dragged out of, while a drag from a tree is in flight: what tells
     /// every other window the row names a file in that window's vault (`App::dragged_from`).
     pub tree_drag: RefCell<Option<std::rc::Weak<App>>>,
@@ -705,6 +708,29 @@ impl Shell {
         });
     }
 
+    /// Whether the pointer is over one of the windows. A tab let go there on nothing that takes it
+    /// reaches `create-window` on X11, and goes back rather than apart. Asked of each window's
+    /// surface rather than of the surface under the pointer, which on X11 is the drag's icon; on
+    /// Wayland a surface the pointer is not over answers -1, -1.
+    pub fn pointer_inside(&self) -> bool {
+        let pointer = gdk::Display::default()
+            .and_then(|display| display.default_seat())
+            .and_then(|seat| seat.pointer());
+        let Some(pointer) = pointer else {
+            return false;
+        };
+        let windows = self.windows.borrow();
+        windows
+            .iter()
+            .filter_map(|app| app.window.surface())
+            .any(|surface| {
+                surface.device_position(&pointer).is_some_and(|(x, y, _)| {
+                    (0.0..f64::from(surface.width())).contains(&x)
+                        && (0.0..f64::from(surface.height())).contains(&y)
+                })
+            })
+    }
+
     /// The tab view a page let go over one of our drop zones belongs in, or `None` when the drop
     /// was nowhere of ours.
     pub fn where_to_land(&self) -> Option<adw::TabView> {
@@ -728,6 +754,17 @@ impl Shell {
     /// Defer to an idle because libadwaita is still handling the drag and selecting the page;
     /// reparenting its emitting pane immediately would violate GTK assertions.
     pub fn landed(self: &Rc<Self>, app: &Rc<App>, pane: &Rc<Pane>, page: &adw::TabPage) {
+        if self.apart.borrow().as_ref() == Some(&pane.tabs) {
+            self.apart.take();
+            let (shell, app, page) = (self.clone(), app.clone(), page.clone());
+            let gtk_app = app.window.application().and_downcast::<adw::Application>();
+            glib::idle_add_local_once(move || {
+                if let Some(gtk_app) = gtk_app {
+                    shell.move_apart(&gtk_app, &app, &page);
+                }
+            });
+            return;
+        }
         let zone = self
             .landing
             .borrow_mut()
