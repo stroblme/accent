@@ -30,7 +30,7 @@ use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 
 use crate::editor::{SaveState, Saves};
-use crate::widgets::{Debounce, Hook};
+use crate::widgets::{Debounce, Fade, Hook};
 use cell::{CellView, Editor, Tools};
 use history::{Change, History, Step};
 #[cfg(feature = "bench")]
@@ -50,8 +50,10 @@ pub struct NotebookTab {
     head: gtk::Box,
     /// The cell buttons, over the cell under the pointer, else the selected one.
     tools: Tools,
-    /// The add strip of the gaps between cells, and the cell whose gap is under the pointer.
+    /// The add strip of the gaps between cells, its fade in at each gap it comes to, and the cell
+    /// whose gap is under the pointer.
     gap: gtk::Box,
+    gap_fade: Fade,
     gap_cell: Cell<Option<CellId>>,
     /// The cell under the pointer.
     hovered: Cell<Option<CellId>>,
@@ -181,6 +183,7 @@ pub fn open(
         column,
         head,
         tools: Tools::new(notebook.format()),
+        gap_fade: Fade::new(&gap),
         gap,
         gap_cell: Cell::new(None),
         hovered: Cell::new(None),
@@ -1091,6 +1094,7 @@ impl NotebookTab {
             }
             if let Some(view) = gap {
                 view.gap.add_overlay(&self.gap);
+                self.gap_fade.fade_in();
             }
         }
     }
@@ -1630,6 +1634,31 @@ impl NotebookTab {
             && !self.tools.bar.is_visible()
             && self.gap.parent().is_none()
             && !self.head.is_visible()
+    }
+
+    /// What `ACCENT_BENCH_MOTION` samples: the cell buttons, Run Cell, Stop, the strip over the
+    /// first cell and the gaps' strip.
+    pub fn bench_motion_parts(&self) -> [gtk::Widget; 5] {
+        let t = &self.tools;
+        [
+            t.bar.clone().upcast(),
+            t.run.clone().upcast(),
+            t.stop.clone().upcast(),
+            self.head.clone().upcast(),
+            self.gap.clone().upcast(),
+        ]
+    }
+
+    /// The pointer onto cell `n`'s card, or off every cell with none selected.
+    pub fn bench_hover(self: &Rc<Self>, n: Option<usize>) {
+        let id = n.and_then(|n| self.views.borrow().get(n).map(|v| v.id));
+        if let Some(id) = id {
+            return self.hover(id, true);
+        }
+        if let Some(id) = self.hovered.get() {
+            self.hover(id, false);
+        }
+        self.deselect();
     }
 }
 

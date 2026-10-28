@@ -16,6 +16,7 @@ use gtk::{gdk, gio, glib};
 use super::output::Outputs;
 use super::placeholder::{Margins, Placeholder};
 use crate::editor::Flavour;
+use crate::widgets::Fade;
 
 pub struct CellView {
     pub id: CellId,
@@ -535,8 +536,11 @@ pub struct Tools {
     pub more: gtk::MenuButton,
     /// The cell it serves.
     pub cell: std::cell::Cell<Option<CellId>>,
-    /// That cell's rail, where the notebook's overlay stands the bar ([`stand`]).
+    /// That cell's rail, where the notebook's overlay stands the bar ([`stand`]); the one it
+    /// stood in while it fades out.
     pub rail: Rc<RefCell<Option<gtk::Widget>>>,
+    /// The bar's fade in at each cell it comes to, and out where it was when it goes.
+    fade: Fade,
 }
 
 impl Tools {
@@ -578,6 +582,7 @@ impl Tools {
             bar.append(b);
         }
         bar.append(&more);
+        let fade = Fade::new(&bar);
         Tools {
             bar,
             run,
@@ -591,21 +596,40 @@ impl Tools {
             more,
             cell: std::cell::Cell::new(None),
             rail: Rc::default(),
+            fade,
         }
     }
 
     /// Stand in `view`'s rail, or nowhere, its cell where it stands with the kernel (`turn`).
+    /// The bar fades in at a cell it comes to and out where it stood when it goes, as it was and
+    /// taking no clicks (DESIGN.md, Motion); out of a cell no longer there, it goes at once.
     pub fn place(&self, view: Option<&CellView>, turn: Turn) {
-        let code = view.is_some_and(|v| v.kind == Kind::Code);
-        self.runnable.set(self.runs && code);
-        self.show_turn(turn);
-        self.status.set_visible(self.runs && code);
         if let Some(view) = view {
+            let code = view.kind == Kind::Code;
+            self.runnable.set(self.runs && code);
+            self.show_turn(turn);
+            self.status.set_visible(self.runs && code);
             self.show_execution(view.execution.get());
         }
-        self.cell.set(view.map(|v| v.id));
-        self.rail.replace(view.map(|v| v.rail.clone().upcast()));
-        self.bar.set_visible(view.is_some());
+        let id = view.map(|v| v.id);
+        if self.cell.replace(id) != id {
+            let rail = self.rail.borrow().clone();
+            match view {
+                // Back to the cell it is leaving, turned round where it is.
+                Some(view) if rail.as_ref() == Some(view.rail.upcast_ref::<gtk::Widget>()) => {
+                    self.fade.to(1.0)
+                }
+                Some(view) => {
+                    self.rail.replace(Some(view.rail.clone().upcast()));
+                    self.fade.fade_in();
+                }
+                None if rail.as_ref().is_some_and(|rail| rail.root().is_some()) => {
+                    self.fade.to(0.0)
+                }
+                None => self.bar.set_visible(false),
+            }
+            self.bar.set_can_target(view.is_some());
+        }
         if let Some(overlay) = self.bar.parent() {
             overlay.queue_allocate();
         }
@@ -692,7 +716,8 @@ fn cell_menu() -> gio::Menu {
 /// sidebar button's 34 px square, as wide as a cell's rail. A cell's strip is as tall
 /// as the add buttons, Adwaita's 24 px and 5 px of padding above and below, which are put over it
 /// while the pointer is there: shown at once, since a widget put under a resting pointer is not
-/// hovered until the pointer moves.
+/// hovered until the pointer moves. The strip over the first cell fades in and out on a hover
+/// (DESIGN.md, Motion), the gaps' one as it is moved into each gap (`NotebookTab::place`).
 pub fn install_css() {
     thread_local! {
         static DONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -704,8 +729,8 @@ pub fn install_css() {
         return;
     };
     let provider = gtk::CssProvider::new();
-    provider.load_from_string(
-        ".notebook-cell { border: 1px solid transparent; border-radius: 9px; padding: 4px; } \
+    let rules = "\
+         .notebook-cell { border: 1px solid transparent; border-radius: 9px; padding: 4px; } \
          .notebook-cell.selected:focus-within { border-color: var(--accent-bg-color); } \
          .notebook-tools button { min-height: 24px; min-width: 24px; padding: 5px; } \
          .notebook-execution { min-width: 8px; min-height: 8px; margin: 6px 0; \
@@ -729,8 +754,12 @@ pub fn install_css() {
              color-mix(in srgb, currentColor var(--border-opacity), transparent); } \
          textview.notebook-output, textview.notebook-output > text { background: none; } \
          textview.notebook-stderr > text { background-color: \
-           color-mix(in srgb, var(--error-color) 8%, transparent); }",
-    );
+           color-mix(in srgb, var(--error-color) 8%, transparent); }";
+    provider.load_from_string(&format!(
+        "{rules} .notebook-inserter {{ transition: opacity {ms}ms {easing}; }}",
+        ms = crate::widgets::FADE_MS,
+        easing = crate::widgets::CSS_EASING,
+    ));
     gtk::style_context_add_provider_for_display(
         &display,
         &provider,

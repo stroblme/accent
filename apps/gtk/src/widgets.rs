@@ -1,5 +1,5 @@
-//! Shared empty states, scrollers, label factories, progress pulses, search debounces, handler
-//! slots and the focus's selected text, keeping pane construction consistent.
+//! Shared empty states, scrollers, label factories, fades, progress pulses, search debounces,
+//! handler slots and the focus's selected text, keeping pane construction consistent.
 
 use adw::prelude::*;
 use gtk::{gdk, gio, glib, pango};
@@ -409,6 +409,61 @@ pub(crate) fn fade_in(widget: &impl IsA<gtk::Widget>) {
     let kept = RefCell::new(Some(fade.clone()));
     fade.connect_done(move |_| drop(kept.take()));
     fade.play();
+}
+
+/// One fade of a widget's opacity, kept for a widget that comes and goes faster than it fades
+/// (the cell buttons under a pointer sweeping a notebook): each change turns it round from where
+/// it is, where [`fade_in`] would start one more animation per call. Faded out, it is hidden.
+pub(crate) struct Fade {
+    widget: gtk::Widget,
+    animation: adw::TimedAnimation,
+}
+
+impl Fade {
+    pub(crate) fn new(widget: &impl IsA<gtk::Widget>) -> Fade {
+        let widget = widget.upcast_ref::<gtk::Widget>().clone();
+        let target = adw::PropertyAnimationTarget::new(&widget, "opacity");
+        let animation = adw::TimedAnimation::new(&widget, 0.0, 1.0, FADE_MS, target);
+        animation.set_easing(adw::Easing::EaseOutCubic);
+        let weak = widget.downgrade();
+        animation.connect_done(move |animation| {
+            if animation.value_to() == 0.0
+                && let Some(widget) = weak.upgrade()
+            {
+                widget.set_visible(false);
+            }
+        });
+        Fade { widget, animation }
+    }
+
+    /// Show the widget and fade it in from nothing.
+    pub(crate) fn fade_in(&self) {
+        self.play(0.0, 1.0);
+    }
+
+    /// Fade towards `opacity` from wherever the widget is, unless on its way there already.
+    pub(crate) fn to(&self, opacity: f64) {
+        let at = match self.widget.is_visible() {
+            true => self.widget.opacity(),
+            false => 0.0,
+        };
+        let heading = match self.animation.state() {
+            adw::AnimationState::Playing => self.animation.value_to(),
+            _ => at,
+        };
+        if heading != opacity {
+            self.play(at, opacity);
+        }
+    }
+
+    fn play(&self, from: f64, to: f64) {
+        if to > 0.0 {
+            self.widget.set_visible(true);
+        }
+        self.animation.set_value_from(from);
+        self.animation.set_value_to(to);
+        self.animation.play();
+    }
 }
 
 /// Timed progress pulse because GTK4 has no indeterminate mode; cancel timers when work or its window ends.
