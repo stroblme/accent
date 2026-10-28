@@ -67,6 +67,7 @@ mod reconnect;
 mod refer;
 mod references;
 mod relink;
+mod rendered;
 mod replace;
 mod ring;
 mod save;
@@ -97,8 +98,8 @@ use accent_core::config::{FocusMode, Layout, PdfZoom, ShellPlace};
 use accent_core::index::Phase;
 use accent_core::markdown::LinkKind;
 use actions::{
-    ACTIONS, accels_for, install_actions, label_of, menu_button, mode_switcher, nav_action,
-    pane_rect, primary_menu, tab_menu,
+    ACTIONS, accels_for, install_actions, label_of, menu_button, nav_action, pane_rect,
+    primary_menu, tab_menu,
 };
 use adw::prelude::*;
 use build::{build_window, install_document_font};
@@ -106,7 +107,7 @@ use doc::{Doc, Kind};
 use editor::{Alert, Flavour, Prefs, Tab};
 use events::start_events;
 use gtk::{gdk, gio, glib, graphene};
-use layout::{Collapsed, Mode, Presenting};
+use layout::{Collapsed, Presenting};
 use open::Opened;
 use panes::{Held, Pane, Place, Side, Spot, Zone};
 use sourceview5::prelude::BufferExt;
@@ -345,8 +346,9 @@ struct App {
     ops: OnceCell<Rc<fileops::Ops>>,
     /// Built on idle once the window is up, so the first open of Preferences is quick too.
     preferences: OnceCell<settings::Preferences>,
-    /// Lazily created preview so text-only startup avoids a WebKit process. Release
-    /// after hidden idle and recreate on demand (`preview_idle`).
+    /// The presented note's preview, created on F5 so text-only startup avoids a WebKit
+    /// process. Release after hidden idle and recreate on demand (`preview_idle`). A note's
+    /// preview tab has its own (`rendered.rs`).
     preview: RefCell<Option<preview::Preview>>,
     /// The pending release of the preview, from when it went out of sight.
     preview_idle: widgets::Debounce,
@@ -369,7 +371,6 @@ struct App {
     /// bars belong to the panes and go with `content`.
     toolbar: adw::ToolbarView,
     header: adw::HeaderBar,
-    modes: gtk::ToggleButton,
     /// The header's Drawing toggle, shown only over a PDF.
     drawing_button: gtk::ToggleButton,
     /// Undo and Redo beside it, shown as a pair while either has something to walk.
@@ -383,10 +384,8 @@ struct App {
     /// which leaves each ring free to open in its own corner.
     ring_at: Cell<Option<(f64, f64)>>,
     menu: gtk::MenuButton,
-    paned: gtk::Paned,
     /// Swaps the pane tree for a placeholder while no note is open (DESIGN.md, States).
     content: gtk::Stack,
-    mode: Cell<Mode>,
     /// Document zoom, applied to every tab and to the preview, never to the chrome.
     zoom: Cell<f64>,
     /// `Some` while presenting, holding what to restore on the way out.
@@ -554,7 +553,7 @@ impl App {
     /// Retarget Find to the pane's document; hide it over shells because VTE owns their scrollback.
     fn retarget_find(&self, pane: &Pane) {
         pane.find.retarget(self.tab_of(pane));
-        if self.notebook_of(pane).is_some() {
+        if self.notebook_of(pane).is_some() || self.rendered_in(pane).is_some() {
             pane.find.research();
         }
         if self.shows_shell(pane) {
@@ -670,12 +669,13 @@ impl App {
             self.lay_out();
         }
         // The tools belong to the window, so they follow the tab in front, and so do SyncTeX's
-        // two commands, Invert Image Colours, Print, the exports and Toggle Task.
+        // two commands, Invert Image Colours, Print, the exports, Toggle Task and Toggle Preview.
         self.sync_drawing();
         self.sync_synctex(self.active_doc());
         self.sync_image_invert();
         self.sync_prints();
         self.sync_toggle_task();
+        self.sync_toggle_preview();
         // The tree's selection follows the tab in front, so the sidebar says which file is open
         // rather than which row the pointer last crossed. A diff, a terminal and a file from
         // outside the vault have no row to point at, and clear it.
@@ -697,7 +697,7 @@ impl App {
             // pane is the same: a closed PDF left its "No Bookmarks" page and its thumbnail
             // strip in the sidebar, and `sync_outline` already says "No Outline" for no
             // document at all. So are the progress slot, where a PDF closed while it was still
-            // opening left "Opening the document…", and Split view's preview, which kept the last
+            // opening left "Opening the document…", and the presented preview, which kept the last
             // note.
             self.sync_status();
             self.sync_outline();
@@ -1024,6 +1024,7 @@ impl App {
             ),
             Some(Doc::Image(_)) => (Some("Image".to_string()), None),
             Some(Doc::Terminal(_)) => (Some("Terminal".to_string()), None),
+            Some(Doc::Rendered(_)) => (Some("Preview".to_string()), None),
             Some(Doc::Status(_)) | Some(Doc::Diff(_)) | None => (None, None),
         };
         self.statusbar.set_kind(kind.as_deref());
@@ -1144,7 +1145,9 @@ impl App {
             self.show_image(&image, None);
         }
         // The images a note shows are served in the look, so a new one is a new page.
-        if self.preview.borrow().as_ref().is_some_and(|p| p.restyle()) {
+        let mut look = false;
+        self.each_preview(|p| look |= p.restyle());
+        if look {
             self.reshow_preview_images();
         }
     }
@@ -1754,9 +1757,7 @@ impl App {
             tab.set_column_width(config.column_width);
             tab.set_indent_width(config.indent_width);
         }
-        if let Some(preview) = self.preview.borrow().as_ref() {
-            preview.set_column(config);
-        }
+        self.each_preview(|p| p.set_column(config));
         if changed.font {
             for diff in self.diffs() {
                 diff.set_font(config.editor_font.as_deref(), self.zoom.get());

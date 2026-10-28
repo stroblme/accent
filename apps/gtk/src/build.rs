@@ -104,17 +104,7 @@ pub fn build_window(
     content.add_named(&placeholder, Some("empty"));
     content.set_visible_child_name("empty");
 
-    // Editor on the left, preview on the right; the mode decides which of the two is visible.
-    let paned = gtk::Paned::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .start_child(&content)
-        .resize_start_child(true)
-        .resize_end_child(true)
-        .shrink_start_child(false)
-        .shrink_end_child(false)
-        .build();
-
-    let toasts = crate::toasts::Toasts::new(&paned);
+    let toasts = crate::toasts::Toasts::new(&content);
 
     // Split headers, as GNOME Files and VS Code have them: the sidebar is a full-height column
     // with a header of its own, and the tab bar belongs to the editor column. The two header
@@ -161,10 +151,8 @@ pub fn build_window(
         .invert_boolean()
         .sync_create()
         .build();
-    let modes = mode_switcher();
-    // Toggle Preview keeps its action, its chord and its palette entry; what it loses is the
-    // header button, whose place the drawing tools take. The widget stays because the window
-    // still reads and writes its pressed state.
+    // Toggle Preview has its action, its chord and its palette entry, and no header button: that
+    // place is the drawing tools'.
     let drawing = gtk::ToggleButton::builder()
         .icon_name("document-edit-symbolic")
         .tooltip_text(label_of("win.pdf-draw"))
@@ -331,7 +319,6 @@ pub fn build_window(
         sidebar_header,
         toolbar,
         header,
-        modes,
         drawing_button: drawing.clone(),
         undo_button: undo,
         redo_button: redo,
@@ -339,9 +326,7 @@ pub fn build_window(
         tool: Cell::new(pdfview::Mode::Pen),
         ring_at: Cell::new(None),
         menu,
-        paned,
         content: content.clone(),
-        mode: Cell::new(Mode::Editor),
         zoom: Cell::new(1.0),
         presenting: Cell::new(None),
         collapsed: Cell::new(None),

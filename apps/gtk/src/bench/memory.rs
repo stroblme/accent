@@ -89,10 +89,14 @@ pub(super) fn bench_memory(app: &Rc<App>, arg: &str) {
             let Some(doc) = open(&app, &note).await else {
                 break;
             };
-            app.set_mode(Mode::Split);
+            app.toggle_preview();
             wait(1500).await;
-            app.set_mode(Mode::Editor);
-            let watch = watch(&doc);
+            app.toggle_preview();
+            // Its preview tab closes with it.
+            let mut watch = watch(&doc);
+            if let Some(rendered) = super::preview::shown(&app) {
+                watch.extend(self::watch(&Doc::Rendered(rendered)));
+            }
             drop(doc);
             close(&app, &note);
             wait(1000).await;
@@ -132,7 +136,7 @@ pub(super) fn bench_memory(app: &Rc<App>, arg: &str) {
             other.open_path(&app.root().join(&note).to_string_lossy());
             wait(800).await;
             // With its own preview, which is its own WebKit process.
-            other.set_mode(Mode::Split);
+            other.toggle_preview();
             wait(1500).await;
             let watch = vec![object("window", &other.window), rc("app", &other)];
             other.window.close();
@@ -147,7 +151,8 @@ pub(super) fn bench_memory(app: &Rc<App>, arg: &str) {
 
 /// `ACCENT_BENCH_WEBIDLE=<note>` checks WebKit process release after the drill's
 /// 2 s idle interval ([`crate::preview::idle_for`]). Print process PSS before/during/
-/// after split preview and compare rendered length and scroll when reopened, then open a
+/// after the note's preview tab is in front and compare rendered length and scroll when it is
+/// in front again, then open a
 /// diagram with formulas, which starts no web process. Writes `webidle.drawio`; use a scratch
 /// vault.
 pub(super) fn bench_webidle(app: &Rc<App>, note: &str) {
@@ -166,15 +171,15 @@ pub(super) fn bench_webidle(app: &Rc<App>, note: &str) {
         if let Some(at) = tab.buffer.iter_at_line(line) {
             tab.buffer.place_cursor(&at);
         }
-        app.set_mode(Mode::Split);
+        app.toggle_preview();
         wait(2500).await;
         let before = rendered(&app).await;
         println!("bench webidle split page={before} {}", webkit());
-        app.set_mode(Mode::Editor);
+        app.toggle_preview();
         wait(3000).await;
-        let kept = app.preview.borrow().is_some();
+        let kept = super::preview::shown(&app).is_some_and(|r| r.preview().is_some());
         println!("bench webidle hidden preview={kept} {}", webkit());
-        app.set_mode(Mode::Split);
+        app.toggle_preview();
         wait(2500).await;
         let after = rendered(&app).await;
         println!(
@@ -182,7 +187,7 @@ pub(super) fn bench_webidle(app: &Rc<App>, note: &str) {
             before == after,
             webkit()
         );
-        app.set_mode(Mode::Editor);
+        app.toggle_preview();
         wait(3000).await;
         println!("bench webidle idle {}", webkit());
         if !matches!(open(&app, "webidle.drawio").await, Some(Doc::Diagram(_))) {
@@ -197,8 +202,7 @@ pub(super) fn bench_webidle(app: &Rc<App>, note: &str) {
 
 /// The rendered note's length in characters and how far it is scrolled, as `length,scrollY`.
 async fn rendered(app: &Rc<App>) -> String {
-    let view = app.preview.borrow().as_ref().map(|p| p.view().clone());
-    let Some(view) = view else {
+    let Some(view) = super::preview::web_view(app) else {
         return "none".into();
     };
     let script = "document.body.innerText.length + ',' + Math.round(scrollY)";
@@ -303,6 +307,7 @@ fn watch(doc: &Doc) -> Watch {
         Doc::Terminal(term) => rc("tab", term),
         Doc::Diagram(diagram) => rc("tab", diagram),
         Doc::Notebook(notebook) => rc("tab", notebook),
+        Doc::Rendered(rendered) => rc("tab", rendered),
     });
     if let Doc::Pdf(pdf) = doc {
         watch.extend(pdf.views().iter().map(|view| object("pdfview", view)));

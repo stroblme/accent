@@ -51,12 +51,12 @@ pub(super) fn bench_tags(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// Show the note in the split view and click the marker's tag link there: the anchor's own
+/// Show the note's preview beside it and click the marker's tag link there: the anchor's own
 /// `click()`, which WebKit hands the preview's navigation policy as a pointer's click is.
 async fn click_marker(app: &Rc<App>) {
-    app.set_mode(Mode::Split);
+    super::preview::beside(app).await;
     glib::timeout_future(SETTLE).await;
-    let Some(view) = app.preview.borrow().as_ref().map(|p| p.view().clone()) else {
+    let Some(view) = super::preview::web_view(app) else {
         return println!("bench tags step=clicked preview=none");
     };
     let script = format!(

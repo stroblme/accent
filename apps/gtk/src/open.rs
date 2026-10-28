@@ -813,7 +813,12 @@ impl App {
         self.mark();
         let anchor = anchor.to_string();
         if target.is_empty() {
-            if let Some(rel) = self.active_key() {
+            // A preview tab's note is the current one there.
+            let rel = match self.active_doc() {
+                Some(Doc::Rendered(rendered)) => rendered.note().map(|note| note.rel()),
+                doc => doc.map(|doc| doc.key()),
+            };
+            if let Some(rel) = rel {
                 self.land_on(&rel, &anchor);
             }
             return;

@@ -149,18 +149,21 @@ pub(super) fn bench_present(app: &Rc<App>, rels: &str) {
             glib::timeout_future(Duration::from_millis(800)).await;
         }
 
-        // Split view: the preview leaves its place beside the panes for the presented one, and
-        // comes back to it with its divider where it was. One pane, so the divider has room to be
-        // off the middle in a window this size.
+        // The note's preview tab in a pane beside it: presenting the note hides that pane, and
+        // leaving brings both back with their divider where it was. Two panes only, so the
+        // divider has room to be off the middle in a window this size.
         if let Some(side) = page(&rels[3]) {
             app.close_page(&side);
         }
-        app.set_mode(Mode::Split);
         if let Some(note) = page(&rels[0]) {
             app.reveal_page(&note);
         }
+        glib::timeout_future(Duration::from_millis(300)).await;
+        super::preview::beside(&app).await;
         glib::timeout_future(Duration::from_millis(800)).await;
-        app.paned.set_position(app.paned.width() * 3 / 5);
+        if let Some(split) = left.widget().parent().and_downcast::<gtk::Paned>() {
+            split.set_position(split.width() * 3 / 5);
+        }
         app.focus_document(&left);
         glib::timeout_future(Duration::from_millis(500)).await;
         let before = layout(&app);

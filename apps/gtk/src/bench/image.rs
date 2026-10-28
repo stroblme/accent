@@ -347,7 +347,7 @@ pub(super) fn bench_preview_look(app: &Rc<App>, rel: &str) {
     let app = app.clone();
     glib::spawn_future_local(async move {
         glib::timeout_future(Duration::from_millis(400)).await;
-        app.set_mode(Mode::Split);
+        super::preview::beside(&app).await;
         if hold {
             return hold_preview(&app).await;
         }
@@ -355,8 +355,8 @@ pub(super) fn bench_preview_look(app: &Rc<App>, rel: &str) {
             return time_preview(&app).await;
         }
         preview_look(&app, "first").await;
-        if let Some(tab) = app.active() {
-            app.render(&tab);
+        if let Some(rendered) = super::preview::shown(&app) {
+            app.render_rendered(&rendered, true);
         }
         preview_look(&app, "rerender").await;
         for theme in [Theme::Light, Theme::Dark, Theme::Solarized] {
@@ -386,9 +386,14 @@ pub(super) fn bench_preview_look(app: &Rc<App>, rel: &str) {
     });
 }
 
+/// How many requests the preview tab's page has made.
+fn requests(app: &App) -> u32 {
+    super::preview::shown(app).map_or(0, |r| r.preview().as_ref().map_or(0, |p| p.requests()))
+}
+
 /// List preview image addresses, document bounds and loading status.
 pub(super) async fn page_images(app: &Rc<App>) -> Vec<(String, f64, f64, f64, f64, bool)> {
-    let Some(view) = app.preview.borrow().as_ref().map(|p| p.view().clone()) else {
+    let Some(view) = super::preview::web_view(app) else {
         return Vec::new();
     };
     let script = "JSON.stringify(Array.from(document.images).map(function (i) { \
@@ -411,11 +416,11 @@ async fn preview_look(app: &Rc<App>, when: &str) {
     // The render is asked for on an idle or after the cache is cleared, so the old page is still
     // up for a moment.
     glib::timeout_future(Duration::from_millis(300)).await;
-    let Some(view) = app.preview.borrow().as_ref().map(|p| p.view().clone()) else {
+    let Some(view) = super::preview::web_view(app) else {
         return println!("bench preview_look {when} no_preview");
     };
     let started = Instant::now();
-    let settled = || app.preview.borrow().as_ref().is_some_and(|p| p.settled());
+    let settled = || super::preview::settled(app);
     while started.elapsed() < Duration::from_secs(20)
         && (view.is_loading() || !settled() || page_images(app).await.iter().any(|i| !i.5))
     {
@@ -424,7 +429,7 @@ async fn preview_look(app: &Rc<App>, when: &str) {
     let ms = ms_since(started);
     // A frame for what arrived to be painted.
     glib::timeout_future(Duration::from_millis(200)).await;
-    let requests = app.preview.borrow().as_ref().map_or(0, |p| p.requests());
+    let requests = requests(app);
     let shot = view
         .snapshot_future(
             webkit6::SnapshotRegion::FullDocument,
@@ -498,7 +503,7 @@ fn change_preview(app: &Rc<App>, op: &'static str, arg: &str) {
         }
         app.open_path(&rel);
         glib::timeout_future(Duration::from_millis(400)).await;
-        app.set_mode(Mode::Split);
+        super::preview::beside(&app).await;
         preview_look(&app, "before").await;
         if let Err(e) = change_files(&app, op, &files) {
             println!("bench preview_look cannot_change {e}");
@@ -533,14 +538,15 @@ fn change_files(app: &Rc<App>, op: &str, rels: &[String]) -> Result<(), String> 
 
 /// See `=time:` on [`bench_preview_look`].
 async fn time_preview(app: &Rc<App>) {
-    let (Some(view), Some(tab)) = (
-        app.preview.borrow().as_ref().map(|p| p.view().clone()),
+    let (Some(view), Some(tab), Some(rendered)) = (
+        super::preview::web_view(app),
         app.active(),
+        super::preview::shown(app),
     ) else {
         println!("bench preview_look time no_preview");
         return bench_quit(app);
     };
-    let settled = || app.preview.borrow().as_ref().is_some_and(|p| p.settled());
+    let settled = || super::preview::settled(app);
     let bytes = tab.text().len();
     for _ in 0..5 {
         glib::timeout_future(Duration::from_millis(500)).await;
@@ -554,7 +560,7 @@ async fn time_preview(app: &Rc<App>) {
             }
         });
         let t = Instant::now();
-        app.render(&tab);
+        app.render_rendered(&rendered, true);
         let render = ms_since(t);
         while !settled() && t.elapsed() < Duration::from_secs(20) {
             glib::timeout_future(Duration::from_millis(5)).await;
@@ -569,7 +575,7 @@ async fn time_preview(app: &Rc<App>) {
         );
     }
     // The note and a word asked for at once: the word, asked for last, is what stays up.
-    if let Some(preview) = app.preview.borrow().as_ref() {
+    if let Some(preview) = rendered.preview().as_ref() {
         preview.render(&tab.rel(), &tab.text());
         preview.render(&tab.rel(), "latest");
     }
@@ -588,7 +594,7 @@ async fn time_preview(app: &Rc<App>) {
 /// See `=hold:` on [`bench_preview_look`].
 async fn hold_preview(app: &Rc<App>) {
     preview_look(app, "hold").await;
-    let Some(view) = app.preview.borrow().as_ref().map(|p| p.view().clone()) else {
+    let Some(view) = super::preview::web_view(app) else {
         return bench_quit(app);
     };
     let origin = view
@@ -611,7 +617,7 @@ async fn hold_preview(app: &Rc<App>) {
         inverted.sort();
         println!(
             "bench preview_look hold inverted={inverted:?} requests={}",
-            app.preview.borrow().as_ref().map_or(0, |p| p.requests())
+            requests(app)
         );
     }
     bench_quit(app);

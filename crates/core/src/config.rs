@@ -530,7 +530,6 @@ pub struct Session {
     pub sidebar_width: i32,
     pub info: InfoPane,
     pub code: CodePane,
-    pub view: String,
     /// Document zoom, 1.0 being the font as GNOME sets it.
     pub zoom: f64,
     /// Recently opened files, most recent first. The window records reads because filesystem
@@ -619,7 +618,6 @@ impl Default for Session {
             sidebar_width: 280,
             info: InfoPane::default(),
             code: CodePane::default(),
-            view: "editor".to_string(),
             zoom: 1.0,
             recent_files: Vec::new(),
             recent_commands: Vec::new(),
@@ -1687,7 +1685,6 @@ daily_dir = "Daily"
                 breakpoints: true,
                 dividers: vec![Some(0.4)],
             },
-            view: "preview".to_string(),
             zoom: 1.2,
             recent_files: vec!["Daily/2026-09-03.md".to_string()],
             recent_commands: vec!["win.save".to_string()],
@@ -1769,7 +1766,6 @@ daily_dir = "Daily"
             assert_eq!(back.sidebar_width, 320);
             assert_eq!(back.info, s.info);
             assert_eq!(back.code, s.code);
-            assert_eq!(back.view, "preview");
             assert_eq!(back.zoom, 1.2);
             assert_eq!(back.recent_files, s.recent_files);
             assert_eq!(back.recent_commands, s.recent_commands);
@@ -1794,8 +1790,9 @@ daily_dir = "Daily"
     }
 
     /// A state file from another version must still load: one written before `zoom` existed gets
-    /// the default, the `pane` every file written until now carries is simply dropped — which
-    /// sidebar pane was showing is no longer restored — and `recent_notes` is `recent_files`.
+    /// the default, the `pane` and `view` every file written until now carries are simply dropped
+    /// — which sidebar pane was showing, and the split preview, are no longer restored — and
+    /// `recent_notes` is `recent_files`.
     #[test]
     fn session_from_another_version_loads() {
         let tmp = tempfile::tempdir().unwrap();

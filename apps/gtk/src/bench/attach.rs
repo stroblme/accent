@@ -101,7 +101,8 @@ pub(super) fn bench_attach(app: &Rc<App>, arg: &str) {
         }
 
         app.open_path(&note);
-        app.set_mode(Mode::Split);
+        glib::timeout_future(Duration::from_millis(400)).await;
+        super::preview::beside(&app).await;
         println!("bench attach shot");
         glib::timeout_future(Duration::from_secs(5)).await;
         bench_quit(&app);

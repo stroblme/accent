@@ -655,6 +655,7 @@ impl App {
             Doc::Diagram(d) => d.key_target(),
             Doc::Notebook(n) => n.key_target(),
             Doc::Diff(d) => d.key_target(),
+            Doc::Rendered(r) => r.key_target(),
             doc @ (Doc::Image(_) | Doc::Status(_)) => doc.page().child(),
         })
     }

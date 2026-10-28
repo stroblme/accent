@@ -367,7 +367,6 @@ impl App {
                 .get()
                 .map(|sidebar| sidebar.code_saved())
                 .unwrap_or_default(),
-            view: self.mode.get().name().to_string(),
             zoom: self.zoom.get(),
             recent_files: self.recent_files.borrow().clone(),
             recent_commands: self.recent_commands.borrow().clone(),
@@ -726,7 +725,7 @@ impl App {
         self.restore(&self.stored_session());
     }
 
-    /// Put `session` back into this window: its tabs, panes, shells, sidebar, zoom and view. What
+    /// Put `session` back into this window: its tabs, panes, shells, sidebar and zoom. What
     /// a window restores from its state file, and what one reloaded without a state file is handed
     /// ([`App::reload`]).
     pub(crate) fn restore(self: &Rc<Self>, session: &Session) {
@@ -749,7 +748,6 @@ impl App {
             sidebar.restore_info(&session.info);
             sidebar.restore_code(&session.code);
         }
-        self.set_mode(Mode::from_name(&session.view));
         // Last, and merged rather than assigned: opening the tabs above ran `file_used` for each
         // of them, and the order they happened to restore in says nothing about how they were
         // used. Touching the stored list back to front puts it in front of those, and a note the
@@ -842,6 +840,14 @@ impl App {
                 self.restore_shell(key, session.terminals.get(key));
                 continue;
             }
+            // A note's preview tab opens once its note has, below.
+            if rendered::note_of(key).is_some() {
+                continue;
+            }
+            let previewed = restore
+                .placed
+                .iter()
+                .any(|p| p.tabs.contains(&rendered::key_of(key)));
             let asked = Asked {
                 app: Rc::downgrade(self),
                 restore: restore.clone(),
@@ -873,7 +879,10 @@ impl App {
             // At once rather than from `Asked`'s idle, so nothing a landing moves is painted before
             // it is put back. A note compared with the index comes back compared, and one merging
             // as a merge while git still lists it unmerged.
-            self.with_tab(key, Opened::Restored, "restore", move |app, _| {
+            self.with_tab(key, Opened::Restored, "restore", move |app, tab| {
+                if previewed {
+                    app.open_rendered(tab, Opened::Restored);
+                }
                 asked.landed.set(true);
                 app.put_back(&asked.restore);
                 if let (Some(what), Some(git)) = (compared, app.git.get()) {
@@ -882,9 +891,7 @@ impl App {
             });
         }
         // What is still on its way keeps its place; the rest has landed, or failed to open.
-        self.placing
-            .borrow_mut()
-            .retain(|key, _| self.awaiting.borrow().contains_key(key));
+        self.placing.borrow_mut().retain(|key, _| self.awaited(key));
         self.put_back(&restore);
         // A shell is back at once, where a note lands later: the one in front of the pane the
         // reader was in takes the keyboard, as a new one does.
@@ -974,10 +981,7 @@ impl App {
             {
                 pane.tabs.set_selected_page(doc.page());
             }
-            let waiting = leaf
-                .tabs
-                .iter()
-                .any(|key| self.awaiting.borrow().contains_key(key));
+            let waiting = leaf.tabs.iter().any(|key| self.awaited(key));
             if pane.tabs.n_pages() == 0 && !waiting {
                 self.close_pane(&pane);
             }
@@ -1001,6 +1005,13 @@ impl App {
             }
         }
         restore.selecting.set(false);
+    }
+
+    /// Whether the tab `key` is still on its way: its read, or its note's for a preview tab.
+    fn awaited(&self, key: &str) -> bool {
+        let awaiting = self.awaiting.borrow();
+        awaiting.contains_key(key)
+            || rendered::note_of(key).is_some_and(|n| awaiting.contains_key(n))
     }
 
     /// Whether current selections come from restoration rather than user navigation.

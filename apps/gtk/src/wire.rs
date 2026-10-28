@@ -6,10 +6,10 @@ use super::*;
 /// Everything one pane's tab view has to answer for. Called for the pane the window is built with
 /// and for every pane a split adds, so a new pane behaves exactly like the first one.
 pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
-    // While a note is presented there is no editor on screen, so find and go to line address the
-    // rendered preview instead. Closures rather than a back-reference, so `find.rs` never
-    // sees `App`, and each of them answers for *this* pane: the other pane's PDF must not decide
-    // whether this bar counts in pages.
+    // While a note is presented, or its preview tab is in front, there is no editor on screen, so
+    // find and go to line address the rendered preview instead. Closures rather than a
+    // back-reference, so `find.rs` never sees `App`, and each of them answers for *this* pane:
+    // the other pane's PDF must not decide whether this bar counts in pages.
     pane.find.wire(find::Wiring {
         presenting: Box::new(glib::clone!(
             #[weak]
@@ -22,6 +22,7 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
             // being presented.
             move || {
                 app.presents_rendered(&pane)
+                    || app.rendered_in(&pane).is_some()
                     || app.pdf_of(&pane).is_some()
                     || app.notebook_of(&pane).is_some()
             }
@@ -744,20 +745,6 @@ pub fn wire_window(app: &Rc<App>) {
         content.add_controller(stray);
     }
 
-    app.modes.connect_toggled(glib::clone!(
-        #[weak]
-        app,
-        move |button| {
-            let picked = if button.is_active() {
-                Mode::Split
-            } else {
-                Mode::Editor
-            };
-            if picked != app.mode.get() {
-                app.set_mode(picked);
-            }
-        }
-    ));
     app.sidebar_column.connect_visible_notify(glib::clone!(
         #[weak]
         app,
@@ -855,8 +842,6 @@ pub fn wire_window(app: &Rc<App>) {
             move |divider: &gtk::Paned| {
                 if divider == &app.split {
                     divider.set_position(Session::default().sidebar_width);
-                } else if divider == &app.paned {
-                    app.centre_handle();
                 } else if !app
                     .sidebar
                     .get()
@@ -1135,9 +1120,9 @@ pub fn wire_window(app: &Rc<App>) {
             for tab in app.open_tabs() {
                 tab.rehang();
             }
-            if let Some(preview) = app.preview.borrow().as_ref() {
-                preview.restyle();
-            }
+            app.each_preview(|p| {
+                p.restyle();
+            });
         }
     ));
 }

@@ -394,7 +394,7 @@ impl App {
             }
             "pane-outline" => self.show_pane("outline"),
             "pane-properties" => self.show_pane("properties"),
-            "view-mode" => self.set_mode(self.mode.get().next()),
+            "view-mode" => self.toggle_preview(),
             "follow-link" => self.go_to_definition(),
             "debug-toggle-breakpoint" => self.toggle_breakpoint_at_caret(),
             "debug-remove-breakpoints" => self.remove_all_breakpoints(),
@@ -589,7 +589,7 @@ impl App {
                 term.set_zoom(stepped(term.zoom()));
                 self.refresh_zoom();
             }
-            Some(Doc::Text(_)) | Some(Doc::Diff(_)) | Some(Doc::Notebook(_)) => {
+            Some(Doc::Text(_) | Doc::Diff(_) | Doc::Notebook(_) | Doc::Rendered(_)) => {
                 self.set_zoom(stepped(self.zoom.get()))
             }
             Some(Doc::Image(image)) => self.zoom_image(
@@ -1150,17 +1150,6 @@ pub fn pane_rect(pane: &Pane, root: &gtk::Widget) -> graphene::Rect {
     pane.widget()
         .compute_bounds(root)
         .unwrap_or_else(graphene::Rect::zero)
-}
-
-/// Use one toggle: pressed state and current-state icon distinguish the two states.
-pub fn mode_switcher() -> gtk::ToggleButton {
-    let button = gtk::ToggleButton::builder()
-        .icon_name(Mode::Editor.icon())
-        .tooltip_text(label_of("win.view-mode"))
-        .valign(gtk::Align::Center)
-        .build();
-    button.add_css_class("flat");
-    button
 }
 
 impl Shell {

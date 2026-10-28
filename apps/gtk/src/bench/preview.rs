@@ -9,7 +9,7 @@ const KEYS: usize = 12;
 const EVERY: Duration = Duration::from_millis(400);
 
 /// `ACCENT_BENCH_PREVIEW_LOOK=type:<rel_note>[,<word>]` types halfway down a scratch
-/// note in Split view and probes:
+/// note with its preview tab in a pane beside it ([`beside`]) and probes:
 ///
 /// - `cost`: total/per-render `web_cpu_ms`, median/worst `latency_ms`, and `shown` text.
 /// - `select`: retained scroll, selection and diagrams after typing; `min_scroll=0`
@@ -24,11 +24,9 @@ pub(super) fn bench_preview_type(app: &Rc<App>, arg: &str) {
     let (app, word) = (app.clone(), word.to_string());
     glib::spawn_future_local(async move {
         glib::timeout_future(Duration::from_millis(400)).await;
-        app.set_mode(Mode::Split);
-        let (Some(tab), Some(view)) = (
-            app.active(),
-            app.preview.borrow().as_ref().map(|p| p.view().clone()),
-        ) else {
+        beside(&app).await;
+        glib::timeout_future(Duration::from_millis(400)).await;
+        let (Some(tab), Some(view)) = (app.active(), web_view(&app)) else {
             println!("bench preview_type no_preview");
             return bench_quit(&app);
         };
@@ -98,7 +96,9 @@ pub(super) fn bench_preview_type(app: &Rc<App>, arg: &str) {
         );
 
         let readout = Rc::new(RefCell::new(String::new()));
-        if let Some(preview) = app.preview.borrow().as_ref() {
+        if let Some(rendered) = self::shown(&app)
+            && let Some(preview) = rendered.preview().as_ref()
+        {
             preview.connect_found(glib::clone!(
                 #[strong]
                 readout,
@@ -108,7 +108,9 @@ pub(super) fn bench_preview_type(app: &Rc<App>, arg: &str) {
         }
         glib::timeout_future(Duration::from_millis(500)).await;
         for _ in 0..2 {
-            if let Some(preview) = app.preview.borrow().as_ref() {
+            if let Some(rendered) = self::shown(&app)
+                && let Some(preview) = rendered.preview().as_ref()
+            {
                 preview.find_next();
             }
             glib::timeout_future(Duration::from_millis(200)).await;
@@ -178,8 +180,43 @@ const STATE: &str = "var s = getSelection(); \
     document.querySelectorAll('code.language-mermaid').length, kept])";
 
 /// Whether the preview's page is this render's, or the last one's once it landed.
-fn settled(app: &Rc<App>) -> bool {
-    app.preview.borrow().as_ref().is_some_and(|p| p.settled())
+pub(super) fn settled(app: &App) -> bool {
+    shown(app).is_some_and(|r| r.preview().as_ref().is_some_and(|p| p.settled()))
+}
+
+/// The preview tab a drill reads: the window's first.
+pub(super) fn shown(app: &App) -> Option<Rc<crate::rendered::Rendered>> {
+    app.rendereds().into_iter().next()
+}
+
+/// Its web view, once it has one.
+pub(super) fn web_view(app: &App) -> Option<webkit6::WebView> {
+    shown(app)?.preview().as_ref().map(|p| p.view().clone())
+}
+
+/// The active note's preview tab in a pane on its right and the note in front on the left, as
+/// both are read side by side; the note waited for while it is still opening.
+pub(super) async fn beside(app: &Rc<App>) {
+    let t = Instant::now();
+    while app.active().is_none() && t.elapsed() < Duration::from_secs(10) {
+        glib::timeout_future(Duration::from_millis(50)).await;
+    }
+    let Some(tab) = app.active() else {
+        return;
+    };
+    let rendered = app
+        .rendered_of(&tab)
+        .unwrap_or_else(|| app.open_rendered(&tab, Opened::Kept));
+    if let Some(pane) = app.pane_of(&tab.page)
+        && pane.has(&rendered.page)
+    {
+        app.split_page(&pane, Side::Right, &rendered.page);
+    }
+    // The keyboard too, which the split handed the preview on an idle.
+    app.reveal_page(&tab.page);
+    if let Some(pane) = app.pane_of(&tab.page) {
+        app.focus_document(&pane);
+    }
 }
 
 /// Wait for the page the preview is loading, and a second for its diagrams.

@@ -1,47 +1,6 @@
-//! Arrange editor, split, preview and presentation layouts with fading chrome.
+//! Arrange the presentation layout and the fading chrome, and render the notes' previews.
 
 use super::*;
-
-/// The two layouts to work in. Reading the rendered note alone is presentation mode, which is
-/// temporary and belongs to the window rather than here.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    Editor,
-    Split,
-}
-
-impl Mode {
-    pub fn next(self) -> Mode {
-        match self {
-            Mode::Editor => Mode::Split,
-            Mode::Split => Mode::Editor,
-        }
-    }
-
-    /// The icon that names this mode in the header toggle.
-    pub fn icon(self) -> &'static str {
-        match self {
-            Mode::Editor => "document-edit-symbolic",
-            Mode::Split => "view-dual-symbolic",
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Mode::Editor => "editor",
-            Mode::Split => "split",
-        }
-    }
-
-    /// Anything unrecognised is the editor: a hand-edited session file, or one written when
-    /// "preview" was still a mode, must not break the window.
-    pub fn from_name(name: &str) -> Mode {
-        match name {
-            "split" => Mode::Split,
-            _ => Mode::Editor,
-        }
-    }
-}
 
 /// Sidebar collapse width in sp: 280 px sidebar plus the 480 px column floor.
 /// Larger interface fonts collapse sooner because sidebar rows grow.
@@ -51,7 +10,6 @@ const COLLAPSE: f64 = 760.0;
 /// takes the chrome away, and fullscreen stays F11's job, so the two compose freely.
 #[derive(Clone, Copy)]
 pub struct Presenting {
-    mode: Mode,
     pub sidebar: bool,
 }
 
@@ -131,7 +89,7 @@ impl App {
     /// Put the sidebar up or down, or, while presenting, have leaving presentation do it.
     fn show_sidebar(&self, on: bool) {
         match self.presenting.get() {
-            Some(p) => self.presenting.set(Some(Presenting { sidebar: on, ..p })),
+            Some(_) => self.presenting.set(Some(Presenting { sidebar: on })),
             None => self.sidebar_column.set_visible(on),
         }
     }
@@ -154,23 +112,6 @@ impl App {
         }
     }
 
-    pub fn set_mode(self: &Rc<Self>, mode: Mode) {
-        // Leaving F5 sets the mode it began in again, which brings the preview back where its
-        // divider was rather than on screen anew.
-        let opened = mode == Mode::Split && self.mode.get() != Mode::Split;
-        self.mode.set(mode);
-        self.modes.set_icon_name(mode.icon());
-        // Setting `active` re-enters the toggled handler, which compares against `self.mode` and
-        // stops there, so this cannot loop.
-        self.modes.set_active(mode == Mode::Split);
-        self.show_chrome();
-        self.apply_layout();
-        if opened {
-            self.even_split();
-        }
-        self.save_session_soon();
-    }
-
     /// [`App::lay_out`], and the tab in front rendered wherever the preview shows.
     fn apply_layout(self: &Rc<Self>) {
         self.lay_out();
@@ -179,18 +120,17 @@ impl App {
         }
     }
 
-    /// Apply editor, split or presentation layout.
+    /// Apply the presentation layout, or take it away.
     ///
-    /// Split places preview beside the pane tree. Presentation keeps only the active pane,
-    /// without its tab bar. A note uses a preview overlay (`Pane::cover`) so find and Ctrl+Tab
-    /// stay pane-local; other documents, code among them, present themselves, fitting PDFs and
-    /// diagrams to a page.
+    /// Presentation keeps only the active pane, without its tab bar. A note uses a preview
+    /// overlay (`Pane::cover`) so find and Ctrl+Tab stay pane-local; other documents, code and a
+    /// note's preview tab among them, present themselves, fitting PDFs and diagrams to a page.
     /// [`App::sync_active`] reapplies layout when the active tab changes during presentation.
     pub(crate) fn lay_out(self: &Rc<Self>) {
         let presenting = self.presenting.get().is_some();
         let active = self.pane();
         let rendered = self.presents_rendered(&active);
-        if rendered || self.mode.get() == Mode::Split && !presenting {
+        if rendered {
             self.ensure_preview();
         }
         let panes = self.panes.borrow().clone();
@@ -204,24 +144,11 @@ impl App {
         }
         if let Some(preview) = self.preview.borrow().as_ref() {
             let widget = preview.widget();
-            let split = widget.parent().as_ref() == Some(self.paned.upcast_ref());
-            match presenting {
-                true => {
-                    if split {
-                        self.paned.set_end_child(gtk::Widget::NONE);
-                    }
-                    active.cover(widget);
-                }
-                // Back from the pane presented last, which may have closed since.
-                false if !split => {
-                    widget.unparent();
-                    self.paned.set_end_child(Some(widget));
-                }
-                false => {}
+            if rendered {
+                active.cover(widget);
             }
-            let shown = rendered || self.mode.get() == Mode::Split && !presenting;
-            widget.set_visible(shown);
-            match shown {
+            widget.set_visible(rendered);
+            match rendered {
                 true => self.preview_idle.cancel(),
                 false => self.preview_idle.call_once(glib::clone!(
                     #[weak(rename_to = app)]
@@ -243,34 +170,10 @@ impl App {
         }
     }
 
-    /// Centre the split when preview first appears.
-    /// An unallocated paned has no position, otherwise natural editor width can leave preview with no room.
-    fn even_split(self: &Rc<Self>) {
-        if self.centre_handle() {
-            return;
-        }
-        // No allocation yet, which is where a session restored straight into split mode lands.
-        glib::idle_add_local_once(glib::clone!(
-            #[weak(rename_to = app)]
-            self,
-            move || {
-                app.centre_handle();
-            }
-        ));
-    }
-
-    /// Centres the paned handle, or reports that there is no width to centre within yet.
-    pub fn centre_handle(&self) -> bool {
-        let width = self.paned.width();
-        if width > 0 {
-            self.paned.set_position(width / 2);
-        }
-        width > 0
-    }
-
-    /// Whether the rendered note is visible at all; nothing is rendered into a hidden preview.
+    /// Whether the presented note's preview is visible at all; nothing is rendered into a hidden
+    /// preview.
     fn shows_preview(&self) -> bool {
-        self.mode.get() == Mode::Split || self.presenting.get().is_some()
+        self.presenting.get().is_some()
     }
 
     /// Whether F5 shows `pane`'s tab as the rendered preview: a markdown note's is, where a code
@@ -292,7 +195,6 @@ impl App {
                 // first: the status bar is only unrevealed, and a hover shows it as it is.
                 self.show_chrome();
                 self.presenting.set(Some(Presenting {
-                    mode: self.mode.get(),
                     sidebar: self.sidebar_column.is_visible(),
                 }));
                 self.sidebar_column.set_visible(false);
@@ -330,8 +232,9 @@ impl App {
                 self.toolbar.set_reveal_top_bars(true);
                 self.toolbar.set_reveal_bottom_bars(true);
                 self.toolbar.set_extend_content_to_bottom_edge(false);
-                // Puts the layout back and, with presenting cleared, lets the chrome show again.
-                self.set_mode(before.mode);
+                // With presenting cleared the chrome may show again, and the layout goes back.
+                self.show_chrome();
+                self.apply_layout();
                 // A note presented rendered had its editor hidden, which took the keyboard away.
                 self.focus_document(&self.pane());
             }
@@ -442,22 +345,43 @@ impl App {
     /// Release a hidden preview after [`preview::idle_for`], ending its private web process.
     /// The next visible render rebuilds and scrolls to the caret. Showing cancels pending release.
     fn drop_preview(&self) {
-        let Some(preview) = self.preview.take() else {
-            return;
-        };
-        let widget = preview.widget();
-        match widget.parent() {
-            Some(parent) if parent == *self.paned.upcast_ref::<gtk::Widget>() => {
-                self.paned.set_end_child(gtk::Widget::NONE)
-            }
-            _ => widget.unparent(),
+        if let Some(preview) = self.preview.take() {
+            preview.widget().unparent();
         }
     }
 
+    /// The presented note's preview, built on first use.
     fn ensure_preview(self: &Rc<Self>) {
         if self.preview.borrow().is_some() {
             return;
         }
+        let preview = self.new_preview(
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |label| app.pane().find.set_matches_text(label)
+            ),
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move || {
+                    if let Some(tab) = app.active().filter(|_| app.shows_preview()) {
+                        app.render(&tab);
+                    }
+                }
+            ),
+        );
+        *self.preview.borrow_mut() = Some(preview);
+    }
+
+    /// A preview wired to the window: links, tags and images, the document zoom and column, and
+    /// the wheel's zoom. `found` takes its find readout, and `lost` renders the note again after
+    /// its web process ended.
+    pub(crate) fn new_preview(
+        self: &Rc<Self>,
+        found: impl Fn(&str) + 'static,
+        lost: impl Fn() + 'static,
+    ) -> preview::Preview {
         let resolve = self.asset_resolver();
         let preview = preview::Preview::new(
             move |rel: &str| resolve(rel),
@@ -479,7 +403,6 @@ impl App {
                 move |key: &str| app.invert_image(key)
             ),
         );
-        self.paned.set_end_child(Some(preview.widget()));
         preview.set_zoom(self.zoom.get());
         preview.set_column(&self.config.borrow());
         // The preview follows the document zoom, so the wheel over it has to reach the same
@@ -494,21 +417,9 @@ impl App {
                 move |out| app.set_zoom(stepped_zoom(app.zoom.get(), out))
             ),
         );
-        preview.connect_found(glib::clone!(
-            #[weak(rename_to = app)]
-            self,
-            move |label| app.pane().find.set_matches_text(label)
-        ));
-        preview.connect_lost(glib::clone!(
-            #[weak(rename_to = app)]
-            self,
-            move || {
-                if let Some(tab) = app.active().filter(|_| app.shows_preview()) {
-                    app.render(&tab);
-                }
-            }
-        ));
-        *self.preview.borrow_mut() = Some(preview);
+        preview.connect_found(found);
+        preview.connect_lost(lost);
+        preview
     }
 
     /// Resolve preview assets through the vault to local files, downloading remote assets as needed.
@@ -549,6 +460,15 @@ impl App {
         if forgot && let Some(tab) = self.active().filter(|_| self.shows_preview()) {
             self.render(&tab);
         }
+        for rendered in self.rendereds() {
+            let forgot = rendered
+                .preview()
+                .as_ref()
+                .is_some_and(|p| p.forget_image(rel));
+            if forgot {
+                self.render_rendered(&rendered, false);
+            }
+        }
     }
 
     /// Serve the preview's images again, after their look changed: WebKit keeps what it was
@@ -565,10 +485,25 @@ impl App {
                 }
             ));
         }
+        for rendered in self.rendereds() {
+            if let Some(preview) = rendered.preview().as_ref() {
+                let weak = Rc::downgrade(&rendered);
+                preview.forget_images(glib::clone!(
+                    #[weak(rename_to = app)]
+                    self,
+                    move || {
+                        if let Some(rendered) = weak.upgrade() {
+                            app.render_rendered(&rendered, true);
+                        }
+                    }
+                ));
+            }
+        }
     }
 
+    /// Render `tab` into the presented note's preview.
     pub fn render(self: &Rc<Self>, tab: &Rc<Tab>) {
-        // A source file or an org note is no markdown, in Split as under F5.
+        // A source file or an org note is no markdown, and is presented as it is.
         if !self.shows_preview() || !tab.flavour().is_markdown() {
             return;
         }
@@ -582,8 +517,10 @@ impl App {
     /// Debounce preview rendering and word counting together by [`RENDER`].
     ///
     /// Both consume current buffer text. A shared timer keeps counts current without copying
-    /// the entire buffer on each keystroke.
+    /// the entire buffer on each keystroke. A note's preview tab has a timer of its own, and is
+    /// rendered whether or not the note is the tab in front.
     pub fn queue_refresh(self: &Rc<Self>, tab: &Rc<Tab>) {
+        self.queue_rendered(tab);
         if !self.is_active(tab) {
             return;
         }
@@ -599,7 +536,8 @@ impl App {
         ));
     }
 
-    /// A pane's find bar addressing the rendered preview, which is what it does while presenting.
+    /// A pane's find bar addressing the rendered preview, which is what it does over a preview
+    /// tab and while presenting a note.
     pub fn preview_find(&self, pane: &Pane, op: find::PreviewOp) {
         // A PDF gets first refusal: it is what the user is looking at, and it counts its own
         // matches rather than letting the bar count them.
@@ -637,7 +575,11 @@ impl App {
             }
             return;
         }
-        let preview = self.preview.borrow();
+        let rendered = self.rendered_in(pane);
+        let preview = match &rendered {
+            Some(rendered) => rendered.preview(),
+            None => self.preview.borrow(),
+        };
         let Some(preview) = preview.as_ref() else {
             return;
         };
@@ -651,7 +593,12 @@ impl App {
         }
     }
 
+    /// Keep the previews showing `tab` at its caret: its preview tab, while that is on screen, and
+    /// the presented one.
     pub fn sync_scroll(&self, tab: &Rc<Tab>) {
+        if let Some(rendered) = self.rendered_of(tab) {
+            rendered.scroll_to_line(tab.cursor_line());
+        }
         if !self.shows_preview() {
             return;
         }
@@ -691,8 +638,9 @@ impl App {
             .into_iter()
             .find(|tab| tab.view.upcast_ref::<gtk::Widget>() == &focus);
         let preview = || {
-            let preview = self.preview.borrow();
-            preview.as_ref().is_some_and(|p| p.widget() == &focus)
+            let mut focused = false;
+            self.each_preview(|p| focused |= p.widget() == &focus);
+            focused
         };
         // A notebook cell's editor, and whether its completion popup is up.
         let cell = self.active_notebook().and_then(|nb| nb.popup_in(&focus));
@@ -736,8 +684,14 @@ impl App {
         // receding (`.dividers-hidden`).
         self.window.add_css_class("dividers-hidden");
         let active = self.pane();
+        // A pane showing the preview of the note being written is read alongside it.
+        let beside = |pane: &Pane| {
+            self.rendered_in(pane)
+                .zip(self.active())
+                .is_some_and(|(rendered, tab)| rendered.is_of(&tab))
+        };
         for pane in self.panes.borrow().iter() {
-            if !Rc::ptr_eq(pane, &active) {
+            if !Rc::ptr_eq(pane, &active) && !beside(pane) {
                 pane.widget().add_css_class("chrome-away");
             }
         }
@@ -806,7 +760,7 @@ pub enum Surface {
     /// An editor tab's text: a note, code or a CSV.
     Text,
     Pdf,
-    /// The rendered note beside the editor.
+    /// A rendered note: a preview tab, or a note presented.
     Preview,
 }
 

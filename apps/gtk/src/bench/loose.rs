@@ -44,7 +44,7 @@ pub(super) fn bench_loose(app: &Rc<App>, pdf: &str) {
                 "bench loose_outline pane={:?} rows={rows:?}",
                 panes::bench_outline(&apart)
             );
-            apart.set_mode(Mode::Split);
+            apart.toggle_preview();
             glib::timeout_future(Duration::from_millis(1500)).await;
             let root = format!("accent://file/{}/", dir.display());
             for (src, .., loaded) in image::page_images(&apart).await {

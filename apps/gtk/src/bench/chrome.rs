@@ -226,15 +226,14 @@ pub(super) fn bench_chrome_keys(app: &Rc<App>, rels: &str) {
             let list = tree.view().clone().upcast::<gtk::Widget>();
             bench_chrome_key(&app, &list, "tree", "Down").await;
         }
-        app.set_mode(Mode::Split);
+        super::preview::beside(&app).await;
         glib::timeout_future(Duration::from_millis(800)).await;
-        let preview = app.preview.borrow().as_ref().map(|p| p.widget().clone());
+        let preview = super::preview::web_view(&app).map(|view| view.upcast::<gtk::Widget>());
         if let Some(preview) = preview {
             for (case, chord) in [("preview_page", "Page_Down"), ("preview_space", "space")] {
                 bench_chrome_key(&app, &preview, case, chord).await;
             }
         }
-        app.set_mode(Mode::Editor);
         app.open_path(&pdf);
         glib::timeout_future(Duration::from_millis(1500)).await;
         if let Some(reader) = app.active_pdf().map(|pdf| pdf.key_target()) {

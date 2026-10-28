@@ -77,6 +77,8 @@ pub enum Doc {
     Diagram(Rc<crate::diagram::DiagramTab>),
     /// A Jupyter or marimo notebook.
     Notebook(Rc<crate::notebook::NotebookTab>),
+    /// A note's rendered preview, which goes with the note's own tab.
+    Rendered(Rc<crate::rendered::Rendered>),
 }
 
 impl Doc {
@@ -90,12 +92,14 @@ impl Doc {
             Doc::Terminal(t) => t.key(),
             Doc::Diagram(d) => d.key(),
             Doc::Notebook(n) => n.key(),
+            Doc::Rendered(r) => r.key(),
         }
     }
 
-    /// Whether the document has no file: diffs and shells cannot be renamed or recorded as recent notes.
+    /// Whether the document has no file: diffs, shells and previews cannot be renamed or recorded
+    /// as recent notes.
     pub fn is_transient(&self) -> bool {
-        matches!(self, Doc::Diff(_) | Doc::Terminal(_))
+        matches!(self, Doc::Diff(_) | Doc::Terminal(_) | Doc::Rendered(_))
     }
 
     /// Whether the session keeps it: a debugged program's terminal and the Debug Console are a
@@ -115,6 +119,7 @@ impl Doc {
             Doc::Terminal(t) => &t.page,
             Doc::Diagram(d) => &d.page,
             Doc::Notebook(n) => &n.page,
+            Doc::Rendered(r) => &r.page,
         }
     }
 
@@ -160,6 +165,13 @@ impl Doc {
         }
     }
 
+    pub fn rendered(&self) -> Option<&Rc<crate::rendered::Rendered>> {
+        match self {
+            Doc::Rendered(r) => Some(r),
+            _ => None,
+        }
+    }
+
     /// What the document keeps on the language layer: a text tab's file, a notebook's program.
     pub fn language_document(&self) -> Option<Rc<crate::lang::Document>> {
         match self {
@@ -182,8 +194,9 @@ impl Doc {
             Doc::Pdf(pdf) => pdf.retarget(root, key),
             Doc::Diagram(d) => d.retarget(root, key),
             Doc::Notebook(n) => n.retarget(root, key),
-            // Neither a diff nor a shell is a file, so a rename has nothing to point them at.
-            Doc::Diff(_) | Doc::Terminal(_) => {}
+            // Neither a diff nor a shell is a file, so a rename has nothing to point them at; a
+            // preview follows its note's tab, whose key it takes its own from.
+            Doc::Diff(_) | Doc::Terminal(_) | Doc::Rendered(_) => {}
             Doc::Image(v) | Doc::Status(v) => {
                 *v.key.borrow_mut() = key.to_string();
                 v.page.set_title(file_name(key));

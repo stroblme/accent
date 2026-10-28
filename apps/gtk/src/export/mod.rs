@@ -122,11 +122,16 @@ impl App {
         }
     }
 
-    /// The document the tab menu's items act on: the tab right-clicked, else the one in front.
+    /// The document the tab menu's items act on: the tab right-clicked, else the one in front; a
+    /// preview tab's note for a preview tab.
     fn menu_doc(&self) -> Option<Doc> {
-        match self.menu_page.borrow().clone() {
+        let doc = match self.menu_page.borrow().clone() {
             Some(page) => self.doc_for_page(&page),
             None => self.active_doc(),
+        };
+        match doc {
+            Some(Doc::Rendered(rendered)) => rendered.note().map(Doc::Text),
+            doc => doc,
         }
     }
 

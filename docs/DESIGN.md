@@ -631,6 +631,11 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 ### Preview
 
+- **A note's preview is a tab of its own** (user decision 2026-10-28): Toggle Preview (`Ctrl+M`) on a markdown note opens it right of the note in the note's bar, or brings it to the front where it is open, and on the preview goes back to the note, the keyboard going along; side by side is the preview dragged into another pane.
+  One a note, closed by its × or with the note, which a click down the Files tree no longer replaces once it has a preview (the note is kept, Tabs); over anything else Toggle Preview is greyed out.
+  Its icon is `x-office-presentation-symbolic`, in Adwaita and WhiteSur alike, and its title the note's file name; Print…, the exports and Open in Browser on it act on the note.
+  It follows the note's edits wherever it is, and the note's caret while the note is on screen too; a note changed behind it, as a sync changes it, leaves the page where it is being read.
+  A session puts it back beside its note; another window does not take it, a drag there sending it back with the toast a shell gets.
 - A read-only WebKitGTK 6 view, its stylesheet generated from `AdwStyleManager`; its images in the look their tabs have (Image).
   A build without WebKit shows a status page in its place, whose Open in Browser button shows the note in the system browser.
 - Its page follows the editor's column rule (Typography): Column Width's share of the preview's own width over the same floor, gutters included, scaled by the zoom.
@@ -644,7 +649,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - When WebKit's process dies under the preview — a crash, or past its memory limit — the view keeps its last frame and scrolls and follows nothing, so the note is rendered again at once, in a new process.
   Once until a page has loaded: a note that takes the process down as it loads waits for its next render.
 - A preview out of sight for five minutes is let go, and its web process ends with it, and WebKit's network process once no other view is left (116 and 20 MB PSS, measured 2026-10-05); showing it again builds another and renders the note at the caret, as any render does, a moment slower.
-  Five minutes, so turning Split view off and on again finds it there.
+  Five minutes, so going back and forth between a note and its preview finds it there; each preview tab on screen, and the note F5 presents, is a web process of its own.
 - A click on a link into the vault is followed as a link is; one out of it goes to the system when Go to Definition's would (`markdown::is_url`), and only on a click — a redirect the page makes on its own opens nothing.
 - A `#tag` is a link to the tag (`accent://tag/…`), drawn as the editor draws a tag, in the accent without a link's underline; a click shows the Info pane's Tags section with that tag picked, as the palette's tag does.
 - A task in progress, `[/]` opening a list item (Toggle Task, Editing), is drawn as a box of its own beside the open and done checkboxes: their size, half filled in the done box's accent (user decision 2026-10-24); a checkbox has no such state without a script, and GFM reads `[/]` as text.
@@ -744,7 +749,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 ### View modes
 
-- Editor / Split; Split is a `GtkPaned` of the two above.
+- One, the editor: a note's preview is a tab beside it (Preview), and F5 presents one document (Views).
 
 ### Tabs
 
@@ -759,7 +764,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A tab that comes to the front of another pane behind the reader's back — a sync deleting the note in front of it — leaves the keyboard and the active pane where they are.
   Close Tab, the splits, the title, the find bar and focus mode all go by it; `Ctrl+Tab` and Back and Forward reach every pane (below, and History).
 - A tab is titled with the file's whole name, `.md` included: a vault holds more than notes, and `todo` beside `todo.txt` should not be told apart by an icon.
-- The icon slot is the document's own — a PDF, an image, a shell, a comparison, a file that would not open — and empty for a note or a source file: file-type icons belong to the file lists (Iconography).
+- The icon slot is the document's own — a PDF, an image, a shell, a comparison, a note's preview, a file that would not open — and empty for a note or a source file: file-type icons belong to the file lists (Iconography).
 - A pane is split from the tab or tree menu, `win.split-*`, or by dropping a tab or a tree row on one of its four edges.
   A tab dropped on the middle of another pane moves to the end of its bar, taking the keyboard.
   A pane whose last tab closes or leaves closes with it; the window always keeps one.
@@ -1546,7 +1551,7 @@ How much fades is the Focus Mode preference, three levels in one combo row under
 - **Medium**, the default: the header bars, the tab bars, the status bar, the sidebar's panes and the minimap go to nothing, the tree being one pointer move away, and with the bars the undershoot line a scrolled window draws against a flat one, which would stay behind as a lone line across the column.
   The pane switcher rides in the sidebar header and goes with the top band, so the two columns stay in step.
 - **High**: Medium, plus every pane but the one being written in recedes to 0.3 (a PDF or a shell like a note), the dividers go — every paned handle, which would frame the receding panes — and the text in the focused view fades away from the carets, as in Apostrophe's focus mode.
-  The split preview stays crisp.
+  A pane showing the preview of the note being written stays crisp.
 - The fade: a line keeps `α(d) = F + (1 − F)·exp(−d²/2σ²)` of itself, `d` its distance in buffer lines from what the carets and the selection cover, σ = 2 and F = 0.3, the receding panes' floor.
   Neither is a preference.
   The unit is the buffer line: a paragraph in prose, a line in code, and a blank line between two paragraphs counts as one.
@@ -1861,10 +1866,10 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 
 ### Views
 
-- Toggle Preview `Ctrl+M` (Editor and Split), Toggle Minimap (unbound), Presentation `F5`, which is Continue while a debug session runs (Debugging).
+- Toggle Preview `Ctrl+M` (a note's preview tab and back, Preview), Toggle Minimap (unbound), Presentation `F5`, which is Continue while a debug session runs (Debugging).
 - Presentation hides the sidebar, the other panes, the tab bars and both header bars, and shows the note rendered.
   The presented pane stays where it is in the pane tree with the branches beside it hidden, so its find bar and its `Ctrl+Tab` card stay its own and every divider is where it was afterwards; the rendered note is the preview laid over the pane's tabs.
-  A tab that draws its own document — a source file, a PDF, a diagram, a notebook, an image, a diff, a terminal — is presented as it is; a PDF fits a whole page meanwhile and gets its zoom back afterwards.
+  A tab that draws its own document — a source file, a PDF, a diagram, a notebook, an image, a diff, a terminal, a note's preview tab — is presented as it is; a PDF fits a whole page meanwhile and gets its zoom back afterwards.
   A presented notebook is read only and runs nothing, its cell buttons and the strips that add cells put away.
   A diagram is a slide deck: each page is fitted as it is shown, Space, Page Down, Right and a wheel notch down go to the next and Shift+Space, Page Up, Left and a notch up to the one before, and leaving gives back its zoom, and its scroll if the page is the one it began on.
   The drawing ring goes away meanwhile, a PDF's and a diagram's alike, and the tool in hand is put down (a PDF back to reading, a diagram to select), a diagram's label being edited finished and its selection let go, so a click never draws on what is presented; leaving brings the ring back as it was, with no tool in hand.
@@ -2008,7 +2013,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 ## Motion
 
 - Switches crossfade and new pages fade in, over 150 ms, easing out (`widgets::FADE_MS`): the sidebar's panes, a tab picked in the pane the reader is in (a newly opened one too), a PDF's pages on their first open, or the spinner that took their place once the open had taken 160 ms, the PDF's "Cannot Open" page, the card a held `Ctrl+Tab` shows, and each new output of a notebook's run (Notebook); a toast slides into the pile and out of it, and the toasts slide out of the status bar's way in presentation mode, over the same 150 ms.
-  Nothing else fades in: not a reload (a LaTeX build rewrites its PDF every few seconds), a restore, a tab landing in another pane, or a layout change (F9, a split, the preview).
+  Nothing else fades in: not a reload (a LaTeX build rewrites its PDF every few seconds), a restore, a tab landing in another pane, or a layout change (F9, a split).
   All of it is libadwaita's and GTK's own animation, so `gtk-enable-animations` off stops it.
   The other timings we own are debounces, which keep the main loop free.
 - Reveal in Sidebar's outline holds a second and fades over two, a CSS transition; with animations off it holds the three seconds and goes at once.
