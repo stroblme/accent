@@ -33,6 +33,18 @@ const FLASH_HOLD: Duration = Duration::from_secs(1);
 /// How long the outline takes to fade, the stylesheet's transition (`build::install_chrome_css`).
 pub const FLASH_FADE_MS: u64 = 2000;
 
+/// The folder the reader opened, whose children fade in as they land under it until its listing
+/// is back: the rows the list binds as they land, so rows scrolled to later, a refill (Show
+/// Hidden, a change on disk) and Reveal in Sidebar's folders do not fade.
+#[derive(Default)]
+struct Opened {
+    folder: Option<String>,
+    /// Reveal in Sidebar is opening folders, which is not the reader opening them.
+    revealing: bool,
+}
+
+type Fresh = Rc<RefCell<Opened>>;
+
 /// Marked paths and folder flags from Ctrl+click or Shift+click.
 ///
 /// Folders represent their descendants, so [`fileops::topmost`](crate::fileops::topmost)
@@ -102,6 +114,7 @@ pub struct Tree {
     revealed: Rc<RefCell<Option<String>>>,
     /// Counts flashes, so only the last one's timer takes the outline off.
     flashes: Rc<Cell<u32>>,
+    opened: Fresh,
 }
 
 impl Tree {
@@ -393,10 +406,12 @@ impl Tree {
     /// missing paths so callers can report failure.
     pub fn reveal(&self, rel: &str) -> bool {
         for dir in ancestors(rel) {
-            match find_row(&self.model, dir) {
-                Some(row) => row.set_expanded(true),
-                None => return false,
-            }
+            let Some(row) = find_row(&self.model, dir) else {
+                return false;
+            };
+            self.opened.borrow_mut().revealing = true;
+            row.set_expanded(true);
+            self.opened.borrow_mut().revealing = false;
         }
         let Some(row) = find_row(&self.model, rel) else {
             return false;
@@ -783,22 +798,33 @@ pub fn build(
     let row_appends = appends.clone();
     let row_carries = carries.clone();
     let local: Option<Rc<Path>> = (!vault.is_remote()).then(|| vault.root().into());
+    let opened: Fresh = Rc::default();
+    let row_opened = opened.clone();
     // A folder's listing is kept for as long as the window is open, which is what makes binding
     // its row free, and it moves only when the vault says the folder changed. So each opening of
     // a folder lists it again: a dependency tree is watched by nothing, and a folder whose news
     // was missed — changed before its watch was in place, or with no watch to be had — would open
     // onto what it held the first time, however often it was opened.
     let relist: Rc<dyn Fn(&str)> = Rc::new({
-        let (vault, cache, asked, show_hidden) = (
+        let (vault, cache, asked, show_hidden, opened) = (
             vault.clone(),
             cache.clone(),
             asked.clone(),
             show_hidden.clone(),
+            opened.clone(),
         );
         move |rel| {
             let store = cache.borrow().get(rel).cloned();
             if let Some(store) = store {
-                fill(&store, &vault, &asked, &show_hidden, rel, None);
+                // What lands under the folder fades in until this listing is back (`Opened`).
+                let (opened, dir) = (opened.clone(), rel.to_string());
+                let landed: Rc<dyn Fn()> = Rc::new(move || {
+                    let mut opened = opened.borrow_mut();
+                    if opened.folder.as_deref() == Some(dir.as_str()) {
+                        opened.folder = None;
+                    }
+                });
+                fill(&store, &vault, &asked, &show_hidden, rel, Some(landed));
             }
         }
     });
@@ -806,6 +832,7 @@ pub fn build(
         move |_| {
             setup_row(
                 &relist,
+                &row_opened,
                 &root_label,
                 &drag_marked,
                 &dragging,
@@ -867,6 +894,29 @@ pub fn build(
     view.add_controller(move_target(&moves, &appends, &carries, blank));
     view.add_controller(import_target(&imports, &appends, blank));
 
+    // A listing that lands later than the folder opened, a remote one or one never listed.
+    model.connect_items_changed({
+        let (opened, view) = (opened.clone(), view.downgrade());
+        move |model, at, _, added| {
+            let folder = opened.borrow().folder.clone();
+            let (Some(folder), Some(view)) = (folder, view.upgrade()) else {
+                return;
+            };
+            let parent = model
+                .item(at)
+                .and_downcast::<gtk::TreeListRow>()
+                .and_then(|row| row.parent()?.item());
+            if added > 0
+                && parent
+                    .as_ref()
+                    .and_then(decode)
+                    .is_some_and(|p| p.rel == folder)
+            {
+                fade_rows(&view, at..at + added);
+            }
+        }
+    });
+
     let (body, landed) = body_stack(&view, &vault, root);
     // Populated straight from the index: the window must be up before the reconcile finishes.
     fill(root, &vault, &asked, &show_hidden, "", Some(landed.clone()));
@@ -894,6 +944,59 @@ pub fn build(
         pinned,
         revealed,
         flashes: Rc::default(),
+        opened,
+    }
+}
+
+/// Fade in the rows at `rows`, which just landed under the folder the reader opened and which
+/// `view` has bound already, as it binds rows when they land, before it maps them: hidden at once,
+/// each fades in once it is mapped, so a frame does not show it whole first.
+fn fade_rows(view: &gtk::ListView, rows: std::ops::Range<u32>) {
+    if !view.settings().is_gtk_enable_animations() {
+        return;
+    }
+    let landed: Vec<gtk::TreeExpander> = expanders(view)
+        .into_iter()
+        .filter(|e| {
+            e.list_row()
+                .is_some_and(|row| rows.contains(&row.position()))
+        })
+        .collect();
+    for expander in &landed {
+        expander.set_opacity(0.0);
+    }
+    let (landed, frames) = (RefCell::new(landed), Cell::new(0));
+    view.add_tick_callback(move |_, _| {
+        frames.set(frames.get() + 1);
+        let mut landed = landed.borrow_mut();
+        landed.retain(|expander| {
+            let mapped = expander.is_mapped();
+            if mapped {
+                crate::widgets::fade_in(expander);
+            }
+            !mapped
+        });
+        // One the list has not shown by then is shown whole.
+        if landed.is_empty() || frames.get() > 3 {
+            landed.iter().for_each(|expander| expander.set_opacity(1.0));
+            return glib::ControlFlow::Break;
+        }
+        glib::ControlFlow::Continue
+    });
+}
+
+/// The reader opened folder `rel`, `row` of the tree, whose row widget is `expander`: what is
+/// already listed of it has landed under it, the rest will as its listing comes back.
+fn opening(opened: &Fresh, row: &gtk::TreeListRow, rel: &str, expander: Option<gtk::TreeExpander>) {
+    if opened.borrow().revealing {
+        return;
+    }
+    opened.borrow_mut().folder = Some(rel.to_string());
+    let view = expander.and_then(|e| e.ancestor(gtk::ListView::static_type()));
+    let listed = row.children().map_or(0, |children| children.n_items());
+    if let Some(view) = view.and_downcast::<gtk::ListView>().filter(|_| listed > 0) {
+        let at = row.position() + 1;
+        fade_rows(&view, at..at + listed);
     }
 }
 
@@ -935,6 +1038,7 @@ fn tree_model(
 #[allow(clippy::too_many_arguments)]
 fn setup_row(
     relist: &Rc<dyn Fn(&str)>,
+    fresh: &Fresh,
     root_label: &str,
     marked: &Rc<RefCell<Marks>>,
     dragging: &Rc<dyn Fn(bool)>,
@@ -962,7 +1066,7 @@ fn setup_row(
     // The row this widget is bound to, and its handler: rows are recycled, so the handler
     // moves with the binding rather than piling up on every row the widget has shown.
     let opened: RefCell<Option<(gtk::TreeListRow, glib::SignalHandlerId)>> = RefCell::default();
-    let relist = relist.clone();
+    let (relist, fresh) = (relist.clone(), fresh.clone());
     expander.connect_list_row_notify(move |expander| {
         if let Some((row, handler)) = opened.borrow_mut().take() {
             row.disconnect(handler);
@@ -970,15 +1074,21 @@ fn setup_row(
         let Some(row) = expander.list_row() else {
             return;
         };
-        let relist = relist.clone();
+        let (relist, fresh, expander) = (relist.clone(), fresh.clone(), expander.downgrade());
         let handler = row.connect_expanded_notify(move |row| {
-            let item = row.item();
-            if let Some(item) = item.as_ref().and_then(decode).filter(|_| row.is_expanded()) {
+            let Some(item) = row.item().as_ref().and_then(decode) else {
+                return;
+            };
+            if row.is_expanded() {
+                opening(&fresh, row, &item.rel, expander.upgrade());
                 relist(&item.rel);
+            } else if fresh.borrow().folder.as_deref() == Some(item.rel.as_str()) {
+                fresh.borrow_mut().folder = None;
             }
         });
         *opened.borrow_mut() = Some((row, handler));
     });
+    crate::widgets::turn_arrows(&expander);
     let root_label = root_label.to_string();
     expander.connect_query_tooltip(move |expander, _, _, _, tooltip| {
         let row = expander.list_row().and_then(|row| row.item());

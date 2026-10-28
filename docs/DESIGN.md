@@ -238,6 +238,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A gitignored folder is the reader's own and gets the whole menu: being out of the index stops a file being searched, not edited, and opening one puts it in (Architecture, An opened file joins the index).
 - A gitignored folder is watched while the tree holds its listing, one level deep, by the vault's own watcher — on the host for a remote vault, the one place its files can be watched from — and what happens in it re-lists it and reaches nothing else (`Event::UnindexedChanged`); a dependency tree is not — 40 000 files is the tree that must not be watched — and is as fresh as its last expansion.
   Every opening of a folder lists it again, whatever watches it: news missed before a watch was in place is caught up by opening the folder, never lost for the window's life.
+  What an opening lands under the folder fades in, the rows already listed at once and the rest as its listing comes back; its arrow turns as it opens and closes (Motion).
   Reload on a folder's menu lists it and every folder open under it again, for a listing that has fallen behind the disk anyway; where the index holds the folder it also walks that folder, and only it (`Vault::rescan_dir`), since an indexed folder is listed out of the index, and search and links catch up with it.
   A gitignored folder is read off the disk and needs no walk.
   The folder of a document open on a file in either is watched the same way, that one level alone, so its tab follows an edit made outside accent as a note's does (`App::watch_folder_of`).
@@ -2040,6 +2041,8 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
   Switches crossfade and new pages fade in: the sidebar's panes, a tab picked in the pane the reader is in (a newly opened one too), a PDF's pages on their first open, or the spinner that took their place once the open had taken 160 ms, the PDF's "Cannot Open" page, the card a held `Ctrl+Tab` shows, and each new output of a notebook's run (Notebook).
   A toast slides into the pile and out of it, and the toasts slide out of the status bar's way in presentation mode.
 - Buttons a hover brings slide in where they take room (a list row's, Sidebar) and fade where they keep it or lie over something (a branch's trash, a page thumbnail's round buttons, a notebook's add strips); the Search pane's replace row and a folder field's list slide open.
+  A folder the reader opens in the Files tree turns its arrow, one `go-down` turned a quarter back while closed, and fades in the rows its listing lands under it, so what opened reads as coming out of it; a section of the sidebar and a variable of the Debug pane turn theirs too.
+  Only on the reader's toggle: a list binds its row widgets to other rows as it scrolls, so an arrow that turned on every change of its widget's state would spin under a scroll; and only the rows bound in the frame the listing lands, so a row scrolled to, a refill (Show Hidden, a change on disk) and the folders Reveal in Sidebar opens come at once, as a closing folder's rows go.
   A notebook's cell buttons fade in beside each cell they come to and fade out where they stood when they go, the one fade out besides a toast's and a revealer's: one shared column, faded by one animation that turns round where it is, so a pointer sweeping the cells starts no fade per cell (Notebook).
   Nothing else fades in: not a reload (a LaTeX build rewrites its PDF every few seconds), a restore, a tab landing in another pane, or a layout change (F9, a split).
 - Focus mode fades as the chrome's CSS transition does, over 250 ms of `ease`, its line fade and a notebook's outputs eased the same (Chrome auto-hide); Reveal in Sidebar's outline holds a second and fades over two.
@@ -2051,7 +2054,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 | Timer | Value | Where |
 |---|---|---|
 | Re-highlight after a keystroke | 150 ms | `editor/mod.rs::DEBOUNCE` |
-| Every fade, crossfade and slide above, the toasts' lift over the status bar too | 250 ms | `widgets.rs::FADE_MS` |
+| Every fade, crossfade, slide and turn above, the toasts' lift over the status bar too | 250 ms | `widgets.rs::FADE_MS` |
 | Focus mode's fades: the chrome, the receding panes, the line fade, a notebook's outputs | 250 ms | `fade.rs::RAMP_MS` |
 | A PDF still opening shows a spinner | 160 ms | `pdf/tab.rs::OPENING` |
 | A held `Ctrl+Tab` shows its card | 200 ms | `switcher.rs::DELAY` |

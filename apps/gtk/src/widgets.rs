@@ -466,6 +466,50 @@ impl Fade {
     }
 }
 
+/// The class on a tree expander while its arrow turns (`build::install_chrome_css`).
+const TURNING: &str = "accent-turning";
+
+/// Turn `expander`'s arrow as its row opens or closes, and only then: a list binds its row widgets
+/// to other rows as it scrolls, and an arrow that turned whenever its widget was bound to a row
+/// open where the last was closed would spin under the scroll. The arrow's transition is on while
+/// the class is, held twice the turn, the transition starting at the next frame.
+pub(crate) fn turn_arrows(expander: &gtk::TreeExpander) {
+    let bound: RefCell<Option<(gtk::TreeListRow, glib::SignalHandlerId)>> = RefCell::default();
+    let held: Rc<Cell<Option<glib::SourceId>>> = Rc::default();
+    fn settle(expander: &gtk::TreeExpander, held: &Cell<Option<glib::SourceId>>) {
+        if let Some(id) = held.take() {
+            id.remove();
+        }
+        expander.remove_css_class(TURNING);
+    }
+    expander.connect_list_row_notify(move |expander| {
+        if let Some((row, handler)) = bound.take() {
+            row.disconnect(handler);
+        }
+        settle(expander, &held);
+        let Some(row) = expander.list_row() else {
+            return;
+        };
+        let (weak, held) = (expander.downgrade(), held.clone());
+        let handler = row.connect_expanded_notify(move |_| {
+            let Some(expander) = weak.upgrade() else {
+                return;
+            };
+            settle(&expander, &held);
+            expander.add_css_class(TURNING);
+            let (weak, slot) = (expander.downgrade(), held.clone());
+            let turn = Duration::from_millis(u64::from(2 * FADE_MS));
+            held.set(Some(glib::timeout_add_local_once(turn, move || {
+                slot.take();
+                if let Some(expander) = weak.upgrade() {
+                    expander.remove_css_class(TURNING);
+                }
+            })));
+        });
+        bound.replace(Some((row, handler)));
+    });
+}
+
 /// Timed progress pulse because GTK4 has no indeterminate mode; cancel timers when work or its window ends.
 pub(crate) struct Pulse {
     bar: gtk::ProgressBar,

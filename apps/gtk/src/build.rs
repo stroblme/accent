@@ -1270,6 +1270,10 @@ thread_local! {
 // to is outlined in the accent (`tree::Tree::flash`); every row holds that outline at no alpha,
 // so taking the class off fades it rather than cutting it.
 //
+// An expander's arrow is one `go-down` turned a quarter back while closed, so opening it turns
+// the arrow rather than swapping icons: in a tree only while `widgets::turn_arrows` holds its
+// class on, since a recycled row widget changes state on every bind.
+//
 // The hover's popover takes the view's font, which libadwaita resets on a popover, as the text it
 // is about has it.
 /// Register embedded icons and GtkSourceView language specifications and style schemes.
@@ -1311,7 +1315,9 @@ fn install_chrome_css() {
                background-image {ms}ms ease; }} \
              .accent-toasts {{ transition: transform {lift}ms {easing}; }} \
              .file-tree > row > treeexpander {{ transition: box-shadow {flash}ms ease-out; }} \
-             .git-actions {{ transition: opacity {lift}ms {easing}; }} ",
+             .git-actions {{ transition: opacity {lift}ms {easing}; }} \
+             treeexpander.accent-turning > expander, expander-widget > box > title > expander {{ \
+               transition: -gtk-icon-transform {lift}ms {easing}; }} ",
             ms = fade::RAMP_MS,
             lift = crate::widgets::FADE_MS,
             easing = crate::widgets::CSS_EASING,
@@ -1421,9 +1427,10 @@ fn install_chrome_css() {
              popover.accent-completion .detail {{ margin-left: 12px; }} \
              popover.accent-completion .doc {{ margin: 3px 8px; }} \
              minimap {{ color: var(--view-fg-color); }} \
-             expander {{ -gtk-icon-source: -gtk-icontheme(\"go-next-symbolic\"); }} \
-             expander:dir(rtl) {{ -gtk-icon-source: -gtk-icontheme(\"go-previous-symbolic\"); }} \
-             expander:checked {{ -gtk-icon-source: -gtk-icontheme(\"go-down-symbolic\"); }} \
+             expander {{ -gtk-icon-source: -gtk-icontheme(\"go-down-symbolic\"); \
+               -gtk-icon-transform: rotate(-90deg); }} \
+             expander:dir(rtl) {{ -gtk-icon-transform: rotate(90deg); }} \
+             expander:checked {{ -gtk-icon-transform: none; }} \
              dropdown arrow {{ -gtk-icon-source: -gtk-icontheme(\"go-down-symbolic\"); }}",
             away = fade::FLOOR,
             added = crate::diff::css_tint(crate::diff::ADDED_HUE),

@@ -226,6 +226,7 @@ fn row_factory(tree: &Tree, unwatch: Unwatch) -> gtk::SignalListItemFactory {
             row.append(&remove);
             let expander = gtk::TreeExpander::new();
             expander.set_child(Some(&row));
+            crate::widgets::turn_arrows(&expander);
             if let Some(unwatch) = unwatch.clone() {
                 remove.connect_clicked(glib::clone!(
                     #[weak]
