@@ -1025,7 +1025,7 @@ impl App {
             move |tab| {
                 lang::changed(tab);
                 app.queue_refresh(tab);
-                if app.is_active(tab) {
+                if app.speaks_for(tab) {
                     app.sync_outline();
                 }
             }
@@ -1127,7 +1127,7 @@ impl App {
                         // The pinned title is drawn from the same symbols, so it is redrawn
                         // whether or not this tab is the one being looked at.
                         tab.update_sticky();
-                        if app.is_active(tab) {
+                        if app.speaks_for(tab) {
                             app.sync_outline();
                         }
                     }

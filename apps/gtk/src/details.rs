@@ -20,7 +20,7 @@ impl App {
         if let Some(Doc::Terminal(term)) = self.active_doc() {
             return sidebar.set_details(&[shell_group(term.facts())]);
         }
-        let Some(doc) = self.active_doc().filter(|doc| !doc.is_transient()) else {
+        let Some(doc) = self.side_doc().filter(|doc| !doc.is_transient()) else {
             return sidebar.set_details(&[]);
         };
         let etag = match &doc {

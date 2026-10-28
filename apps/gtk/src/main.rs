@@ -527,8 +527,8 @@ impl App {
         self.active_doc()?.tab().cloned()
     }
 
-    /// What the active tab is showing, for the background answers that must not land on a tab the
-    /// user has since moved away from.
+    /// What the active tab is showing, which the drills ask after.
+    #[cfg(feature = "bench")]
     fn active_key(&self) -> Option<String> {
         Some(self.active_doc()?.key())
     }
@@ -770,7 +770,7 @@ impl App {
         let Some(sidebar) = self.sidebar.get() else {
             return;
         };
-        let doc = self.active_doc();
+        let doc = self.side_doc();
         let key = doc.as_ref().map(Doc::key).unwrap_or_default();
         let file = doc.as_ref().is_some_and(|doc| !doc.is_transient());
         let shell = matches!(doc, Some(Doc::Terminal(_)));
@@ -793,7 +793,7 @@ impl App {
         let Some(sidebar) = self.sidebar.get() else {
             return;
         };
-        let Some(doc) = self.active_doc() else {
+        let Some(doc) = self.side_doc() else {
             return sidebar.set_outline(None);
         };
         // A PDF's outline is its bookmarks, with the page thumbnails under them.
@@ -916,9 +916,11 @@ impl App {
             &doc.key(),
             &rows,
             glib::clone!(
+                #[weak(rename_to = app)]
+                self,
                 #[weak]
                 tab,
-                move |at| tab.goto_pos(at)
+                move |at| app.outline_jump(&tab, at)
             ),
             None,
         );
@@ -948,7 +950,7 @@ impl App {
         if !self.sidebar_column.is_visible() || !sidebar.is_showing("outline") {
             return;
         }
-        let tab = match self.active_doc() {
+        let tab = match self.side_doc() {
             Some(Doc::Text(tab)) => tab,
             // Above the first bookmark the list goes back to its top, as above a note's first
             // heading.

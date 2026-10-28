@@ -20,7 +20,7 @@ impl App {
         let Some(sidebar) = self.sidebar.get() else {
             return;
         };
-        let doc = self.active_doc();
+        let doc = self.side_doc();
         let empty = references_empty(doc.as_ref());
         let code = matches!(&doc, Some(Doc::Text(tab)) if !tab.flavour().is_note());
         // Whatever code asks, the answer is backlinks; a code tab's says which once it lands.
@@ -69,7 +69,7 @@ impl App {
             let Some(app) = weak.upgrade() else { return };
             // The user may have moved on while we were asking; a stale answer must not replace
             // the rows the current tab put there.
-            if app.active_key().as_deref() != Some(&key) {
+            if app.side_doc().map(|doc| doc.key()).as_deref() != Some(&key) {
                 return;
             }
             if let Some(sidebar) = app.sidebar.get() {

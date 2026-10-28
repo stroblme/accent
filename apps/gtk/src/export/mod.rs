@@ -129,10 +129,7 @@ impl App {
             Some(page) => self.doc_for_page(&page),
             None => self.active_doc(),
         };
-        match doc {
-            Some(Doc::Rendered(rendered)) => rendered.note().map(Doc::Text),
-            doc => doc,
-        }
+        doc.and_then(rendered::note_for)
     }
 
     /// Run `work` while the status bar says `busy`, then say how it went: the toast it asks for,

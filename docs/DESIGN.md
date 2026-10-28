@@ -636,6 +636,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Its icon is `x-office-presentation-symbolic`, in Adwaita and WhiteSur alike, and its title the note's file name; Print…, the exports and Open in Browser on it act on the note.
   It follows the note's edits wherever it is, and the note's caret while the note is on screen too; a note changed behind it, as a sync changes it, leaves the page where it is being read.
   A session puts it back beside its note; another window does not take it, a drag there sending it back with the toast a shell gets.
+- **In front, it stands for its note in the sidebar** (user decision 2026-10-28): Info, Outline and References show the note's, and an Outline row scrolls the preview to its heading rather than moving the note's caret.
+  The Files tree and the window's subtitle still say what the tab is.
 - A read-only WebKitGTK 6 view, its stylesheet generated from `AdwStyleManager`; its images in the look their tabs have (Image).
   A build without WebKit shows a status page in its place, whose Open in Browser button shows the note in the system browser.
 - Its page follows the editor's column rule (Typography): Column Width's share of the preview's own width over the same floor, gutters included, scaled by the zoom.

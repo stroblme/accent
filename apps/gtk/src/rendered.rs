@@ -27,6 +27,15 @@ pub fn note_of(key: &str) -> Option<&str> {
     key.strip_prefix(PREFIX)
 }
 
+/// `doc`, or the note it renders for a preview tab: what stands for a preview tab where a file is
+/// asked for.
+pub fn note_for(doc: Doc) -> Option<Doc> {
+    match doc {
+        Doc::Rendered(rendered) => rendered.note().map(Doc::Text),
+        doc => Some(doc),
+    }
+}
+
 /// Where a note's preview tab goes in its pane, the note being at `note`: right of it, but past
 /// the `pinned` tabs at the start of the bar, being no pinned tab itself.
 pub fn beside(note: usize, pinned: usize) -> usize {
@@ -200,6 +209,29 @@ impl App {
         self.promote(&note.page);
         self.save_session_soon();
         rendered
+    }
+
+    /// The document the side panes speak for: the one in front, a preview tab's note for a
+    /// preview tab (user decision 2026-10-28), so Info, Outline and References read the same over
+    /// either.
+    pub(crate) fn side_doc(&self) -> Option<Doc> {
+        self.active_doc().and_then(note_for)
+    }
+
+    /// Whether the side panes speak for `tab`: it is in front, or its preview is.
+    pub(crate) fn speaks_for(&self, tab: &Rc<Tab>) -> bool {
+        self.side_doc()
+            .and_then(|doc| doc.tab().cloned())
+            .is_some_and(|side| Rc::ptr_eq(&side, tab))
+    }
+
+    /// Show `tab`'s Outline row at `at`: scrolled to in its preview while that is in front, else
+    /// at the caret in the note.
+    pub(crate) fn outline_jump(&self, tab: &Rc<Tab>, at: accent_api::Pos) {
+        match self.rendered_in(&self.pane()).filter(|r| r.is_of(tab)) {
+            Some(rendered) => rendered.scroll_to_line(at.line + 1),
+            None => tab.goto_pos(at),
+        }
     }
 
     /// Every preview tab of the window.
