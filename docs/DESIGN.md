@@ -996,6 +996,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - With a tool in hand the other tools' icons dim to Adwaita's `--dim-opacity`, their discs staying opaque, so the options read as that tool's; a dimmed tool comes back under the pointer or the keyboard and still takes a click.
   A press between the ring's buttons reaches the page.
 - With a pen on the seat the mouse selects and only the pen draws, its eraser tip erasing under any tool; "Draw with the Mouse" in Preferences gives the mouse back.
+  While its eraser end is at the page, hovering or touching, the ring shows the Eraser and its options in place of the tool in hand, which comes back with the tip; nothing is picked by it.
   A finger never draws, under any tool: its drag moves the page, kinetically, through the scrolled window's own touch drag, and two fingers pinch-zoom (Zoom), the pinch taking both touches as the second lands so a pan cannot cancel it.
   A finger held still for a long press (GTK's, half a second) and then dragged selects from where it was held, as on a phone; the scrolled window's own long press stops it panning that touch.
   A tap follows a link on its release, once it is known to be no pan.
