@@ -170,8 +170,10 @@ fn tooltip(tab: &Tab, mark: &sourceview5::Mark) -> String {
     lines.join("\n")
 }
 
-/// The paused line's wash, the warning's amber mixed with the resolved foreground.
+/// The glyphs in the foreground, and the paused line's wash, the warning's amber mixed with it.
 pub(crate) fn restyle(view: &sourceview5::View) {
+    let glyphs = KINDS.into_iter().flatten().map(|(category, _)| category);
+    crate::diagnostics::ink_icons(view, glyphs.chain([EXECUTION]));
     // 0 is the only safe priority: the binding hands the number to C as the pointer the
     // category's priority is written through, and 0 is that pointer's NULL.
     if let Some(attributes) = view.mark_attributes(EXECUTION, 0) {

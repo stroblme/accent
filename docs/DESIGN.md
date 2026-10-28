@@ -1952,6 +1952,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 - Every theme name the code asks for (`grep -rhoE '"[a-z0-9-]+-symbolic"' apps/gtk/src`) must exist in `/usr/share/icons/Adwaita/symbolic/`.
 - Where the theme has no glyph, the nearest name that says what the control does: the Git pane and Sync are `mail-send-receive-symbolic`, arrows leaving and arriving, its one network action (there is no git glyph); Outline is `view-list-bullet-symbolic`; a tab from outside the vault is `document-open-symbolic`, the action that put it there.
 - Diagnostics are `dialog-error-symbolic` and `dialog-warning-symbolic` in the gutter, the pair every desktop reads as those severities.
+  Every glyph in the marks column is the foreground, the parts a theme colours as an error or a warning (WhiteSur's) included, so it keeps the text's contrast on the page and on the paused line in every theme.
   A fold's chevron is `go-down-symbolic` open and `go-next-symbolic` shut, as the sidebar's disclosures are.
 - Where nothing fits, ship a glyph in the app `GResource` under the `io.github.stroblme.Accent` prefix, drawn on the 16 px symbolic grid with `fill="currentColor"` so it recolours with the theme.
   Never a coloured icon.

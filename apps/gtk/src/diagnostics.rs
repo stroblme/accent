@@ -15,7 +15,7 @@ use crate::debug::breakpoints;
 use crate::{highlight, lang};
 use accent_api::{Diagnostic, Pos, Severity};
 use gtk::prelude::*;
-use gtk::{gdk, pango};
+use gtk::{gdk, gdk_pixbuf, graphene, pango};
 use sourceview5::AnnotationStyle;
 use sourceview5::prelude::*;
 
@@ -77,6 +77,54 @@ pub fn restyle(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
     );
     set(INFO, crate::theme::at(fg, INFO_ALPHA));
     set(HINT, crate::theme::at(fg, HINT_ALPHA));
+    ink_icons(view, [MARK_ERROR, MARK_WARNING]);
+}
+
+/// Draw each category's gutter icon in `view`'s foreground. GtkSourceView draws an icon it looks
+/// up by name with no colours, so a symbolic one comes out in GTK's fallback grey whatever the
+/// theme (ISSUES.md): it is given a picture drawn here instead, the name staying for the next
+/// restyle to draw from. Each category has an icon; a view with no window yet waits for the map
+/// that restyles it.
+pub(crate) fn ink_icons<'a>(
+    view: &sourceview5::View,
+    categories: impl IntoIterator<Item = &'a str>,
+) {
+    let Some(renderer) = view.native().and_then(|native| native.renderer()) else {
+        return;
+    };
+    if !view.shows_line_marks() {
+        return;
+    }
+    // GtkSourceView's own icon size, a line's height less 2 (`measure_line_height`), in device
+    // pixels, so the picture is drawn 1:1.
+    let height = view.create_pango_layout(Some("QWERTY")).pixel_size().1;
+    let size = (height - 2) * view.scale_factor();
+    let theme = gtk::IconTheme::for_display(&view.display());
+    let fg = view.color();
+    for category in categories {
+        // 0: see `breakpoints::restyle`.
+        let Some(attributes) = view.mark_attributes(category, 0) else {
+            continue;
+        };
+        let name = attributes.icon_name();
+        let flags = gtk::IconLookupFlags::empty();
+        let icon = theme.lookup_icon(&name, &[], size, 1, view.direction(), flags);
+        // Its error, warning and success parts too, which some themes colour (WhiteSur's
+        // diagnostics): a mark is a foreground glyph (DESIGN.md, Iconography).
+        let snapshot = gtk::Snapshot::new();
+        icon.snapshot_symbolic(&snapshot, size.into(), size.into(), &[fg; 4]);
+        let Some(node) = snapshot.to_node() else {
+            continue;
+        };
+        let area = graphene::Rect::new(0.0, 0.0, size as f32, size as f32);
+        let mut pixels = gdk::TextureDownloader::new(&renderer.render_texture(&node, Some(&area)));
+        pixels.set_format(gdk::MemoryFormat::R8g8b8a8);
+        let (bytes, stride) = pixels.download_bytes();
+        let rgb = gdk_pixbuf::Colorspace::Rgb;
+        let picture =
+            gdk_pixbuf::Pixbuf::from_bytes(&bytes, rgb, true, 8, size, size, stride as i32);
+        attributes.set_pixbuf(&picture);
+    }
 }
 
 /// The end-of-line messages up, by line: each one's annotation and the whole text it was cut
