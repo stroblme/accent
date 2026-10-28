@@ -353,7 +353,7 @@ impl Renderer {
             };
             self.imp()
                 .icons
-                .replace(Some((look("go-down-symbolic"), look("go-next-symbolic"))));
+                .replace(Some((look("pan-down-symbolic"), look("pan-end-symbolic"))));
         }
         self.queue_draw();
     }

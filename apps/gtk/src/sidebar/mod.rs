@@ -47,10 +47,8 @@ use crate::widgets::{Debounce, scroller};
 /// Matches the delay used for PDF highlights.
 const INDEX_SETTLE: Duration = Duration::from_millis(300);
 
-/// Incoming/outgoing arrows for the Git pane. Use an icon name rendered as arrows in both
-/// Adwaita and WhiteSur; `network-transmit-receive` appears as a device in WhiteSur (DESIGN.md,
-/// Iconography).
-const GIT_ICON: &str = "mail-send-receive-symbolic";
+/// Arrows leaving and arriving: the pane is about what has gone out and what is still to come in.
+const GIT_ICON: &str = "network-transmit-receive-symbolic";
 /// Where in the file an activated row points, when it points at more than the file itself.
 #[derive(Clone)]
 pub enum Target {

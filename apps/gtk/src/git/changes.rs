@@ -229,12 +229,11 @@ fn turn(view: &gtk::ListView, item: glib::Object, path: &str, open: bool) {
     }
 }
 
-/// A folder row's chevron: the fold chevrons' pair rather than `pan-*`, for the reason the branch
-/// button gives.
+/// A folder row's chevron: libadwaita's expander pair.
 fn chevron_icon(open: bool) -> &'static str {
     match open {
-        true => "go-down-symbolic",
-        false => "go-next-symbolic",
+        true => "pan-down-symbolic",
+        false => "pan-end-symbolic",
     }
 }
 

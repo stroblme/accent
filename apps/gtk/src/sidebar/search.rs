@@ -1389,10 +1389,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen, dragging: &Rc<dyn Fn(bool)
     ));
 
     // `edit-find-replace-symbolic`, not a chevron: it names what the button reveals rather than
-    // which way a panel opens, and the chevron was invisible for the user who reported this. An
-    // icon theme may replace any Adwaita name with artwork of its own, and WhiteSur's
-    // `pan-down-symbolic` is written with single-quoted attributes, which GTK4's symbolic
-    // recolouring does not parse: the button drew nothing at all (DESIGN.md, Iconography).
+    // which way a panel opens (DESIGN.md, Iconography).
     let replace_toggle = gtk::ToggleButton::builder()
         .icon_name("edit-find-replace-symbolic")
         .tooltip_text("Toggle Replace")

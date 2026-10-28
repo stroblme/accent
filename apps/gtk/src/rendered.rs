@@ -14,7 +14,7 @@ use std::rc::Weak;
 /// by, and never a path.
 const PREFIX: &str = "preview:";
 
-/// The tab's icon, a presentation's: present in Adwaita and in WhiteSur.
+/// The tab's icon, a presentation's.
 const ICON: &str = "x-office-presentation-symbolic";
 
 /// The key of `note`'s preview tab.

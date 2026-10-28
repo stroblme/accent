@@ -569,7 +569,7 @@ pub(super) fn bench_git_focus(app: &Rc<App>) {
                 .and_downcast::<gtk::Stack>()
                 .and_then(|s| s.visible_child()?.first_child())
                 .and_downcast::<gtk::Image>();
-            let open = chevron.and_then(|c| c.icon_name()).as_deref() == Some("go-down-symbolic");
+            let open = chevron.and_then(|c| c.icon_name()).as_deref() == Some("pan-down-symbolic");
             format!(
                 "{}/{}",
                 if open { "open" } else { "shut" },

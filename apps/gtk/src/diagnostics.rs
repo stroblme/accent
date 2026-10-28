@@ -109,8 +109,8 @@ pub(crate) fn ink_icons<'a>(
         let name = attributes.icon_name();
         let flags = gtk::IconLookupFlags::empty();
         let icon = theme.lookup_icon(&name, &[], size, 1, view.direction(), flags);
-        // Its error, warning and success parts too, which some themes colour (WhiteSur's
-        // diagnostics): one glyph, one colour (DESIGN.md, Iconography).
+        // Its error, warning and success parts too, which a theme may colour: one glyph, one
+        // colour (DESIGN.md, Iconography).
         let snapshot = gtk::Snapshot::new();
         icon.snapshot_symbolic(&snapshot, size.into(), size.into(), &[colour; 4]);
         let Some(node) = snapshot.to_node() else {

@@ -70,9 +70,9 @@ const DEBOUNCE: Duration = Duration::from_millis(500);
 /// refresh, with a `git rev-parse` per directory carrying a `.git` on top.
 const REDISCOVER: Duration = Duration::from_secs(3);
 
-/// Sync arrows shared with the sidebar tab. Avoid `network-transmit-receive-symbolic`, which
-/// WhiteSur renders as a device rather than arrows.
-const SYNC_ICON: &str = "mail-send-receive-symbolic";
+/// Arrows going out and coming back, which is what a sync is: the name the sidebar gives the
+/// pane's own tab.
+const SYNC_ICON: &str = "network-transmit-receive-symbolic";
 
 /// How tall the commit message box may grow before it scrolls, in px: about eight lines at the
 /// default interface font. A commit message is a subject, a blank line and a body, so one line is
@@ -1051,10 +1051,7 @@ fn build_branch_row() -> BranchRow {
     let face = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     face.add_css_class("heading");
     face.append(&branch_label);
-    // `go-down-symbolic` rather than `pan-down-symbolic`: WhiteSur writes the latter with
-    // single-quoted attributes, which GTK 4's symbolic recolouring does not parse, and the
-    // chevron drew nothing (DESIGN.md, Iconography).
-    face.append(&gtk::Image::from_icon_name("go-down-symbolic"));
+    face.append(&gtk::Image::from_icon_name("pan-down-symbolic"));
 
     let branch_list = gtk::ListBox::builder()
         .selection_mode(gtk::SelectionMode::None)

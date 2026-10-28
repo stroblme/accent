@@ -56,8 +56,7 @@ impl Picker {
         let face = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         face.add_css_class("heading");
         face.append(&name);
-        // `go-down-symbolic` as the branch button's, for WhiteSur (`git::build_branch_row`).
-        face.append(&gtk::Image::from_icon_name("go-down-symbolic"));
+        face.append(&gtk::Image::from_icon_name("pan-down-symbolic"));
 
         let rows = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::None)

@@ -1237,9 +1237,8 @@ thread_local! {
 /// Focus mode uses opacity to preserve layout, focus and accessibility. Hidden bars remove
 /// scroller undershoots; High also dims dividers. `.accent-flat` matches document backgrounds.
 ///
-/// Use `go-*` disclosure icons because some themes supply `pan-*` SVGs GTK cannot recolour; a
-/// section header's gets a gap before its title, the `go-*` glyph filling the box `pan-*` left
-/// room in. A section header is drawn as a `navigation-sidebar` row, with libadwaita's row
+/// A section header's arrow gets a gap before its title, which `GtkExpander` sets flush against
+/// it. A section header is drawn as a `navigation-sidebar` row, with libadwaita's row
 /// geometry and hover and press tints, so it reads as one of the rows it heads. Other rules
 /// compact status buttons, outline inactive tabs and keep presentation backgrounds complete.
 ///
@@ -1270,7 +1269,7 @@ thread_local! {
 // to is outlined in the accent (`tree::Tree::flash`); every row holds that outline at no alpha,
 // so taking the class off fades it rather than cutting it.
 //
-// An expander's arrow is one `go-down` turned a quarter back while closed, so opening it turns
+// An expander's arrow is one `pan-down` turned a quarter back while closed, so opening it turns
 // the arrow rather than swapping icons: in a tree only while `widgets::turn_arrows` holds its
 // class on, since a recycled row widget changes state on every bind.
 //
@@ -1427,11 +1426,10 @@ fn install_chrome_css() {
              popover.accent-completion .detail {{ margin-left: 12px; }} \
              popover.accent-completion .doc {{ margin: 3px 8px; }} \
              minimap {{ color: var(--view-fg-color); }} \
-             expander {{ -gtk-icon-source: -gtk-icontheme(\"go-down-symbolic\"); \
+             expander {{ -gtk-icon-source: -gtk-icontheme(\"pan-down-symbolic\"); \
                -gtk-icon-transform: rotate(-90deg); }} \
              expander:dir(rtl) {{ -gtk-icon-transform: rotate(90deg); }} \
-             expander:checked {{ -gtk-icon-transform: none; }} \
-             dropdown arrow {{ -gtk-icon-source: -gtk-icontheme(\"go-down-symbolic\"); }}",
+             expander:checked {{ -gtk-icon-transform: none; }}",
             away = fade::FLOOR,
             added = crate::diff::css_tint(crate::diff::ADDED_HUE),
             inset = crate::completion::CONTENTS_PADDING,
