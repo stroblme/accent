@@ -154,7 +154,10 @@ impl Outputs {
                 .for_each(|output| self.add(output, false)),
             _ => {
                 for (mime, data) in pictures(cell.attachments()) {
-                    self.slots.borrow_mut().push(Slot::default());
+                    self.slots.borrow_mut().push(Slot {
+                        copy: Some(Copied::Picture),
+                        ..Slot::default()
+                    });
                     self.picture(mime, data, false);
                 }
             }
@@ -599,8 +602,9 @@ fn error_text(name: &str, value: &str, traceback: &[String]) -> String {
 }
 
 /// What Copy Output takes of `output` (user decision 2026-10-28): its picture, as an image, or
-/// the text it shows without its colours, a stream's carriage returns played out and a table's
-/// cells a tab apart; `None` for what only a script shows, which has no text to take.
+/// the text it shows without its colours, a stream's carriage returns played out, and a table as
+/// its own plain text, pandas' or polars', else its cells a tab apart; `None` for what only a
+/// script shows, which has no text to take.
 fn copied(output: &Output) -> Option<Copied> {
     let text = match output {
         Output::Stream { text, .. } => core::carriage(text),
@@ -611,7 +615,13 @@ fn copied(output: &Output) -> Option<Copied> {
         } => error_text(name, value, traceback),
         Output::Data { items, .. } => match core::pick(items)? {
             Form::Picture { .. } => return Some(Copied::Picture),
-            Form::Table(table) => return Some(Copied::Text(table_text(&table))),
+            Form::Table(table) => match items.iter().find(|i| i.mime == "text/plain") {
+                Some(Item {
+                    data: core::Data::Text(text),
+                    ..
+                }) => text.clone(),
+                _ => return Some(Copied::Text(table_text(&table))),
+            },
             Form::Markdown(text) | Form::Latex(text) | Form::Text(text) => text.to_string(),
             Form::Json(text) => text,
         },
@@ -1239,8 +1249,17 @@ mod tests {
                     <tbody><tr><th>0</th><td>1</td></tr></tbody></table><p>1 rows × 1 columns</p>";
         assert_eq!(
             copied(&data("text/html", html)),
-            text("\ta\n0\t1\n1 rows × 1 columns")
+            text("\ta\n0\t1\n1 rows × 1 columns"),
+            "a table with no plain text of its own"
         );
+        let mut frame = data("text/html", html);
+        if let Output::Data { items, .. } = &mut frame {
+            items.push(Item {
+                mime: "text/plain".into(),
+                data: core::Data::Text("   a\n0  1".into()),
+            });
+        }
+        assert_eq!(copied(&frame), text("   a\n0  1"), "pandas' own text");
         assert_eq!(copied(&data("application/vnd.widget+json", "{}")), None);
     }
 

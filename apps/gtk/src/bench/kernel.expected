@@ -17,11 +17,13 @@ bench kernel run_all stops cell 5 count=[ ] outputs=0
 bench kernel status restart=1
 bench kernel restart cell 1 count=[1]
 bench kernel quiet dimmed=0 cell 2 count=[2] outputs=0
-bench kernel cell 6 count=[3] outputs=stream:"one\ntwo\n",display_data:"<IPython.core.display.Image object>",error:ZeroDivisionError
-bench kernel faded cell 6 3
+bench kernel cell 6 count=[3] outputs=stream:"one\ntwo\n",display_data:"<IPython.core.display.Image object>",display_data:"   a\n0  1",error:ZeroDivisionError
+bench kernel faded cell 6 4
 bench kernel copy stream menus=1 text="one\ntwo"
 bench kernel copy picture menus=1 picture=80x40
+bench kernel copy table menus=1 text="   a\n0  1"
 bench kernel copy error menus=1 last="ZeroDivisionError: division by zero" escapes model=1 copied=0
+bench kernel copy attachment menus=1 picture=80x40
 bench kernel clear outputs=0 undo outputs=1
-bench kernel saved cells=6 counted=5 outputs=6
+bench kernel saved cells=7 counted=5 outputs=7
 bench kernel closed kernel_gone=true

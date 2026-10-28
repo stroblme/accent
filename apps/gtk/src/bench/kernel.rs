@@ -8,8 +8,9 @@ use accent_core::notebook::output::{Data, Output};
 const WAIT: Duration = Duration::from_secs(90);
 
 /// The notebook the drill writes and runs: a print, a result, `input()`, a sleep to interrupt,
-/// a cell an interrupt leaves unrun, and one of a stream that grows across two flushes, an
-/// 80 × 40 PNG and a traceback, for Copy Output.
+/// a cell an interrupt leaves unrun, one of a stream that grows across two flushes, an 80 × 40
+/// PNG, a table with a plain text of its own and a traceback, and a markdown cell with the PNG
+/// attached, for Copy Output.
 const NOTEBOOK: &str = r#"{
  "cells": [
   {"cell_type": "code", "execution_count": null, "id": "a1", "metadata": {}, "outputs": [],
@@ -26,7 +27,10 @@ const NOTEBOOK: &str = r#"{
    "source": ["import base64, time\n", "from IPython.display import Image, display\n",
     "print(\"one\", flush=True); time.sleep(0.5)\n", "print(\"two\", flush=True); time.sleep(0.5)\n",
     "display(Image(base64.b64decode(\"iVBORw0KGgoAAAANSUhEUgAAAFAAAAAoCAIAAADmAupWAAAARElEQVR42u3PQQ0AAAgEoItiVKMaxRZ+ZKMAqZ5XIiwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsfGsBdbbBD06BAAwAAAAASUVORK5CYII=\")))\n",
-    "1/0"]}
+    "display({\"text/html\": \"<table><thead><tr><th></th><th>a</th></tr></thead><tbody><tr><th>0</th><td>1</td></tr></tbody></table>\", \"text/plain\": \"   a\\n0  1\"}, raw=True)\n",
+    "1/0"]},
+  {"cell_type": "markdown", "id": "a7", "metadata": {}, "source": ["![dot](attachment:dot.png)"],
+   "attachments": {"dot.png": {"image/png": "iVBORw0KGgoAAAANSUhEUgAAAFAAAAAoCAIAAADmAupWAAAARElEQVR42u3PQQ0AAAgEoItiVKMaxRZ+ZKMAqZ5XIiwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsfGsBdbbBD06BAAwAAAAASUVORK5CYII="}}}
  ],
  "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
   "language_info": {"name": "python"}},
@@ -211,11 +215,15 @@ pub(super) fn bench_kernel(app: &Rc<App>, rel: &str) {
             return;
         }
         print_cell(&tab, 5, "");
-        // Three new outputs, the stream's second flush running on in the first.
+        // Four new outputs, the stream's second flush running on in the first.
         println!("bench kernel faded cell 6 {}", tab.bench_faded(5).0);
-        for (n, what) in ["stream", "picture", "error"].into_iter().enumerate() {
+        for (n, what) in ["stream", "picture", "table", "error"]
+            .into_iter()
+            .enumerate()
+        {
             copy_output(&app, &tab, 5, n, what).await;
         }
+        copy_output(&app, &tab, 6, 0, "attachment").await;
         tab.bench_select(0);
 
         act("win.notebook-clear-outputs");
@@ -570,6 +578,15 @@ async fn copy_output(app: &Rc<App>, tab: &NotebookTab, n: usize, i: usize, what:
     let _ = clipboard.set_content(None::<&gdk::ContentProvider>);
     let Some(widget) = tab.bench_output_widget(n, i) else {
         return println!("bench kernel copy {what} missing");
+    };
+    // A table's first named cell, a label with GTK's own menu.
+    let named = |w: &gtk::Widget| {
+        w.downcast_ref::<gtk::Label>()
+            .is_some_and(|l| !l.text().is_empty())
+    };
+    let widget = match widget.is::<gtk::ScrolledWindow>() {
+        true => find_widget(&widget, &named).unwrap_or(widget),
+        false => widget,
     };
     glib::timeout_future(Duration::from_millis(300)).await;
     let middle = graphene::Point::new(widget.width() as f32 / 2.0, widget.height() as f32 / 2.0);
