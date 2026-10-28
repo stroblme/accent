@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Adwaita with no draw-spaces colour, so an annotation without a severity takes the view's
+     foreground at half alpha (theme::scheme_id). -->
+<style-scheme id="accent-Adwaita" name="Adwaita (accent)" version="1.0" parent-scheme="Adwaita">
+  <style name="draw-spaces"/>
+</style-scheme>

@@ -1275,7 +1275,7 @@ thread_local! {
 //
 // The hover's popover takes the view's font, which libadwaita resets on a popover, as the text it
 // is about has it.
-/// Register embedded icons and GtkSourceView language specifications.
+/// Register embedded icons and GtkSourceView language specifications and style schemes.
 ///
 /// GResources make icons available before installation while retaining normal theme lookup
 /// for Adwaita names.
@@ -1291,6 +1291,8 @@ pub(crate) fn install_icons() {
         // once read.
         sourceview5::LanguageManager::default()
             .prepend_search_path("resource:///io/github/stroblme/Accent/language-specs/");
+        sourceview5::StyleSchemeManager::default()
+            .append_search_path("resource:///io/github/stroblme/Accent/styles/");
         let Some(display) = gdk::Display::default() else {
             return;
         };

@@ -315,12 +315,17 @@ fn rgb(hex: &str) -> [u8; 3] {
 
 /// Select GtkSourceView scheme, explicitly naming shipped Solarized variants.
 /// The widget reads scheme backgrounds rather than GTK CSS.
+///
+/// Each is ours (`data/styles`), GtkSourceView's own with its draw-spaces style emptied: an
+/// annotation without a severity, a debugged program's inline values, is drawn in that colour,
+/// faint in all but Solarized's dark half, and without it in the view's foreground at half alpha,
+/// VS Code's inline-value colour. Nothing of ours draws spaces.
 pub fn scheme_id(dark: bool) -> &'static str {
     match (CHOICE.get(), dark) {
-        (Theme::Solarized, true) => "solarized-dark",
-        (Theme::Solarized, false) => "solarized-light",
-        (_, true) => "Adwaita-dark",
-        (_, false) => "Adwaita",
+        (Theme::Solarized, true) => "accent-solarized-dark",
+        (Theme::Solarized, false) => "accent-solarized-light",
+        (_, true) => "accent-Adwaita-dark",
+        (_, false) => "accent-Adwaita",
     }
 }
 

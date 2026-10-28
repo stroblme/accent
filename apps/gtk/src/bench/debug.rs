@@ -41,7 +41,9 @@ const LOGGED: (u32, &str, &str) = (5, "Log Message", "total is {total}");
 /// line's `=`, the line a step over lands on, the session's exit code, the program's output in
 /// its tab, the logpoint's in the Debug Console, that tab kept, and the Code pane shown with the
 /// program's file in front and behind its tab. Timings go on `bench debug_ms …` lines; a step
-/// that never comes prints `bench debug timeout <what>` and quits.
+/// that never comes prints `bench debug timeout <what>` and quits. Under
+/// `ACCENT_BENCH_SHOTS=<dir>` it saves the window as `debug-inline.png` there once the inline
+/// values are painted.
 pub(super) fn bench_debug(app: &Rc<App>, arg: &str) {
     let place = arg
         .rsplit_once(':')
@@ -123,6 +125,15 @@ pub(super) fn bench_debug(app: &Rc<App>, arg: &str) {
             return;
         };
         println!("bench debug inline {}", painted.join(" | "));
+        // Their colour is the style scheme's, which no line printed here can show.
+        if let Ok(dir) = std::env::var("ACCENT_BENCH_SHOTS") {
+            glib::timeout_future(Duration::from_millis(600)).await;
+            let shot = Path::new(&dir).join("debug-inline.png");
+            println!(
+                "bench debug shot={}",
+                super::minimap::window_png(&app.window, &shot)
+            );
+        }
         let watched = || shown(&app).3.into_iter().find(|row| row.contains(" = "));
         let Some(watched) = until(&app, "watch", watched).await else {
             return;

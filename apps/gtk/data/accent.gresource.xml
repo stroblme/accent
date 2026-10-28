@@ -64,5 +64,10 @@
     <file>language-specs/latex.lang</file>
     <file>language-specs/lean.lang</file>
     <file>language-specs/typescript-jsx.lang</file>
+    <!-- GtkSourceView's four style schemes with no draw-spaces colour (`theme::scheme_id`). -->
+    <file>styles/accent-Adwaita.xml</file>
+    <file>styles/accent-Adwaita-dark.xml</file>
+    <file>styles/accent-solarized-light.xml</file>
+    <file>styles/accent-solarized-dark.xml</file>
   </gresource>
 </gresources>
