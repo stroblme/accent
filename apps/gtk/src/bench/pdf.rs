@@ -448,7 +448,8 @@ pub(super) fn bench_pdf_ring(app: &Rc<App>, rel: &str) {
 /// Then what the render thread did per stroke — its CPU time, and how many strokes it listed for
 /// the tools — and whether the strokes the view holds for the first page agree with the file's,
 /// under the same names a fresh list gives them, after the strokes, an eraser drag down the
-/// middle, its Undo and an Adjust drag of the first stroke.
+/// middle, its Undo, an Adjust drag of the first stroke, and the file broken under the tab and
+/// mended.
 pub(super) fn bench_pdf_pen(app: &Rc<App>, arg: &str) {
     let mut parts = arg.split(',');
     let rel = parts.next().unwrap_or_default().to_string();
@@ -666,6 +667,16 @@ pub(super) fn bench_pdf_pen(app: &Rc<App>, arg: &str) {
         written(&app).await;
         agree("moved");
         println!("bench pen moved changed={}", filed() != file);
+        // The file broken under the tab and mended: the page erased on is listed again for the
+        // tool in hand, by a render thread that opened it afresh.
+        let whole = std::fs::read(pdf.path()).unwrap_or_default();
+        let _ = std::fs::write(pdf.path(), b"");
+        let waited = until(|| pdf.waiting().0.map(drop)).await.is_some();
+        println!("bench pen broken waited={waited}");
+        let _ = std::fs::write(pdf.path(), &whole);
+        until(|| pdf.waiting().0.is_none().then_some(())).await;
+        glib::timeout_future(Duration::from_secs(2)).await;
+        agree("reopened");
         bench_quit(&app);
     });
 }

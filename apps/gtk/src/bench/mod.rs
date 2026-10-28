@@ -217,8 +217,8 @@ use tags::bench_tags;
 ///   `walk:<rel_path>` (comment-list loading/cancellation; hundreds of pages),
 ///   `pen:<rel_path>[,stop][,<n>]` (main-loop gaps under 24 XTEST pen strokes while the PDF text
 ///   pass runs, or stopped, onto `n` strokes put on the first page first; render-thread work per
-///   stroke; the tools' strokes against the file through an erase, its Undo and a move; writes
-///   the file),
+///   stroke; the tools' strokes against the file through an erase, its Undo, a move and the file
+///   broken and mended; writes the file),
 ///   `ring:<rel_path>` (the ring under the pen's eraser end, told by hand, and its swatches
 ///   under Light, Dark and Solarized, pictured into `$TMPDIR`).
 /// - `ACCENT_BENCH_DRAWING=1`: New Drawing; `file`: New File named `Blank.pdf`;

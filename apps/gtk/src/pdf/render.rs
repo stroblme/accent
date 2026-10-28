@@ -29,18 +29,23 @@ pub fn spawn(path: PathBuf, view: glib::SendWeakRef<PdfView>) -> Result<Sender<R
         .name("accent-pdf".to_string())
         .spawn(move || {
             let mut path = path;
+            // How many erases the tab has sent, answered or dropped, across every opening of the
+            // file: what a list of a page is stamped with, so the view can tell one read before
+            // its latest erase landed. The view counts every erase it sends and never starts
+            // again, so neither does this.
+            let mut erases: u64 = 0;
             loop {
                 match open(&path) {
                     Ok((doc, sizes)) => {
                         send(&view, Reply::Reloaded(sizes));
-                        match render_loop(doc, path, &rx, &view) {
+                        match render_loop(doc, path, &rx, &view, &mut erases) {
                             Some(left) => path = left,
                             None => return,
                         }
                     }
                     Err(why) => send(&view, Reply::Failed(why)),
                 }
-                if !wait(&rx, &mut path) {
+                if !wait(&rx, &mut path, &mut erases) {
                     return;
                 }
             }
@@ -61,12 +66,13 @@ fn open(path: &Path) -> Result<(PdfDoc, Vec<(f32, f32)>), String> {
 
 /// No document to answer from: drop every request until the tab asks for the file again, and
 /// say whether it did — false once the tab has gone. What is dropped answers itself: a save's
-/// or a copy's channel closing is what its waiter hears.
-fn wait(rx: &Receiver<Request>, path: &mut PathBuf) -> bool {
+/// or a copy's channel closing is what its waiter hears. An erase dropped is still counted.
+fn wait(rx: &Receiver<Request>, path: &mut PathBuf, erases: &mut u64) -> bool {
     while let Ok(request) = rx.recv() {
         match request {
             Request::Reload => return true,
             Request::Retarget(moved) => *path = moved,
+            Request::Erase { .. } => *erases += 1,
             _ => {}
         }
     }
@@ -102,12 +108,13 @@ fn page_sizes(doc: &PdfDoc) -> Vec<(f32, f32)> {
 ///
 /// Retain suspended batches because unchanged tile lists and queries may never be requested
 /// again. Return `None` when the tab closes, or the document path after a failed reload reports
-/// its error.
+/// its error. `erases` is [`spawn`]'s count, which goes on from opening to opening.
 fn render_loop(
     mut doc: PdfDoc,
     mut path: PathBuf,
     rx: &Receiver<Request>,
     view: &glib::SendWeakRef<PdfView>,
+    erases: &mut u64,
 ) -> Option<PathBuf> {
     // What the file looked like when this document was read. Every write from here updates it,
     // which is how the tab tells its own save from someone else's and does not reload over it.
@@ -117,9 +124,6 @@ fn render_loop(
     let mut ink = Ink::default();
     // What the tab was last told Undo and Redo have to walk, so it hears again only on a change.
     let mut told = (false, false);
-    // How many erases this thread has answered, taken or refused — what a list of a page is
-    // stamped with, so the widget can tell one read before its latest erase landed.
-    let mut erases: u64 = 0;
     // The pages whose text has already been read, for the highlights, the selections and the
     // exports that all want the same glyphs.
     let mut glyphs = Glyphs::new();
@@ -139,6 +143,10 @@ fn render_loop(
             let Some(current) = queue.pop() else {
                 break;
             };
+            // Counted however it ends, one refused below as well: the view counts what it sends.
+            if matches!(current, Request::Erase { .. }) {
+                *erases += 1;
+            }
             // Written into in place, as pdflatex writes its output: every page pdfium has not
             // read yet would come out blank, and be kept as rendered. Nothing more is read from
             // this document; the tab is told once, and has the file read again. A save still
@@ -297,8 +305,7 @@ fn render_loop(
                     }
                 }
                 Request::Inks(page) => {
-                    let inks = ink.named(&doc, page);
-                    send(view, Reply::Inks { page, inks, erases });
+                    send(view, listed(&mut ink, &doc, page, *erases));
                 }
                 Request::Transform { page, id, matrix } => {
                     ink.note(page, doc.annotation_count(page).unwrap_or(0));
@@ -315,8 +322,7 @@ fn render_loop(
                         // Gone or refused, as for an erase below: the page's list goes back.
                         Err(e) => {
                             tracing::debug!("moving a stroke on page {page}: {e:#}");
-                            let inks = ink.named(&doc, page);
-                            send(view, Reply::Inks { page, inks, erases });
+                            send(view, listed(&mut ink, &doc, page, *erases));
                         }
                     }
                 }
@@ -326,7 +332,6 @@ fn render_loop(
                     joined,
                     partial,
                 } => {
-                    erases += 1;
                     ink.note(page, doc.annotation_count(page).unwrap_or(0));
                     let erased = ink
                         .index_of(page, id)
@@ -361,8 +366,7 @@ fn render_loop(
                             ink.dirty = true;
                             send(view, Reply::PageChanged(page, cut.area, None));
                             if behind {
-                                let inks = ink.named(&doc, page);
-                                send(view, Reply::Inks { page, inks, erases });
+                                send(view, listed(&mut ink, &doc, page, *erases));
                             }
                         }
                         // Gone already — the list the eraser aimed at had not caught up with an
@@ -371,8 +375,7 @@ fn render_loop(
                         // again rather than at the next change.
                         Err(e) => {
                             tracing::debug!("erasing on page {page}: {e:#}");
-                            let inks = ink.named(&doc, page);
-                            send(view, Reply::Inks { page, inks, erases });
+                            send(view, listed(&mut ink, &doc, page, *erases));
                         }
                     }
                 }
@@ -564,6 +567,12 @@ fn render_loop(
     None
 }
 
+/// Every stroke of `page` under its name, stamped with the erases counted so far ([`spawn`]).
+fn listed(ink: &mut Ink, doc: &PdfDoc, page: usize, erases: u64) -> Reply {
+    let inks = ink.named(doc, page);
+    Reply::Inks { page, inks, erases }
+}
+
 /// The document with `highlights` in it, written to `dest`. Never onto `path`, the file this
 /// thread reads: the copy is what leaves that file as it is.
 fn copy(doc: &PdfDoc, highlights: &[pdf::Highlight], path: &Path, dest: &Path) -> Result<()> {
@@ -747,7 +756,9 @@ mod tests {
     }
 
     /// With no document to answer from, the thread lets everything go but a reload, which is
-    /// what it waits for — a save's waiter hearing its channel close — and follows a rename.
+    /// what it waits for — a save's waiter hearing its channel close — and follows a rename. An
+    /// erase it lets go still counts, or every list it sends after the file opens again would
+    /// be older than the view's last erase.
     #[test]
     fn a_thread_without_a_document_waits_for_a_reload() {
         let (tx, rx) = channel();
@@ -755,13 +766,21 @@ mod tests {
         tx.send(Request::Save(Some(ack))).unwrap();
         tx.send(Request::Retarget(PathBuf::from("moved.pdf")))
             .unwrap();
+        tx.send(Request::Erase {
+            page: 0,
+            id: 1,
+            joined: false,
+            partial: None,
+        })
+        .unwrap();
         tx.send(Request::Reload).unwrap();
-        let mut path = PathBuf::from("paper.pdf");
-        assert!(wait(&rx, &mut path));
+        let (mut path, mut erases) = (PathBuf::from("paper.pdf"), 1);
+        assert!(wait(&rx, &mut path, &mut erases));
         assert_eq!(path, PathBuf::from("moved.pdf"));
         assert!(acked.recv().is_err(), "the save's waiter is let go");
+        assert_eq!(erases, 2, "the erase it dropped is counted on");
         drop(tx);
-        assert!(!wait(&rx, &mut path), "the tab went away");
+        assert!(!wait(&rx, &mut path, &mut erases), "the tab went away");
     }
 
     /// The strip's batch is a detour for the reading view's, not its replacement: the reading
