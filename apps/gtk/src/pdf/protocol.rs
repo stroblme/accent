@@ -84,8 +84,10 @@ pub enum Reply {
         redo: bool,
     },
     /// Changed annotation area in page points. Invalidate only intersecting tiles so a small
-    /// stroke does not rerender the viewport.
-    PageChanged(usize, pdf::Rect),
+    /// stroke does not rerender the viewport. With the stroke just drawn under its id, which is
+    /// all that changed of the page's strokes, links and comments: the tools add it to their list
+    /// rather than have the page read again.
+    PageChanged(usize, pdf::Rect, Option<NamedInk>),
     /// The file now on disk is ours, and this is its etag — which is how the tab tells its own
     /// write from someone else's and does not reload over strokes drawn since.
     Saved(accent_core::fs::Etag),

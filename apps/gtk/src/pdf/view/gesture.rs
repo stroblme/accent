@@ -443,7 +443,9 @@ impl PdfView {
         }
         if let Some(f) = self.imp().on_erase.borrow().as_ref() {
             for (id, pass) in taken {
-                self.imp().erases.set(self.imp().erases.get() + 1);
+                let sent = self.imp().erases.get() + 1;
+                self.imp().erases.set(sent);
+                self.imp().last_erase.borrow_mut().insert(page, sent);
                 f(page, id, pass, self.imp().erased.replace(true));
             }
         }

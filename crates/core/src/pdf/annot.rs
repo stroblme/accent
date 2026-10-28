@@ -300,20 +300,43 @@ impl PdfDoc {
         Ok(p.annotations()
             .iter()
             .enumerate()
-            .filter_map(|(index, a)| {
-                let read = self.read(&p, &a, annots.get(index))?;
-                Some(InkShape {
-                    index,
-                    cuttable: read.cuttable,
-                    points: match read.ours || read.strokes.is_empty() {
-                        true => flatten(&read.segs),
-                        false => read.strokes.concat(),
-                    },
-                    bounds: read.bounds,
-                    style: read.style,
-                })
-            })
+            .filter_map(|(index, a)| self.shape(&p, &a, index, annots.get(index)))
             .collect())
+    }
+
+    /// The annotation at `index` of `page` as [`PdfDoc::inks`] lists it, read alone: a stroke
+    /// just drawn costs the same however many the page already carries. `None` if it is no
+    /// visible `/Ink` one.
+    pub fn ink_at(&self, page: usize, index: usize) -> Result<Option<InkShape>> {
+        let _guard = lock();
+        let p = self.page(page)?;
+        let annots = self.cos.annots(page).unwrap_or_default();
+        let Ok(a) = p.annotations().get(index as PdfPageAnnotationIndex) else {
+            return Ok(None);
+        };
+        Ok(self.shape(&p, &a, index, annots.get(index)))
+    }
+
+    /// The annotation `a`, at `index` of its page's `/Annots`, as the tools see a stroke. The
+    /// caller holds the lock.
+    fn shape(
+        &self,
+        p: &PdfPage<'_>,
+        a: &PdfPageAnnotation<'_>,
+        index: usize,
+        entry: Option<&Object>,
+    ) -> Option<InkShape> {
+        let read = self.read(p, a, entry)?;
+        Some(InkShape {
+            index,
+            cuttable: read.cuttable,
+            points: match read.ours || read.strokes.is_empty() {
+                true => flatten(&read.segs),
+                false => read.strokes.concat(),
+            },
+            bounds: read.bounds,
+            style: read.style,
+        })
     }
 
     /// Erase the painted stroke within `radius` of the path from `from` to `to`. Replace the

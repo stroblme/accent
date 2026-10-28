@@ -214,8 +214,10 @@ use tags::bench_tags;
 ///   `comments:<rel_path>` (tooltips, pinning, highlights and comment outline;
 ///   scratch generated `Attachments/comments.pdf`),
 ///   `walk:<rel_path>` (comment-list loading/cancellation; hundreds of pages),
-///   `pen:<rel_path>[,stop]` (main-loop gaps under 24 XTEST pen strokes while the PDF text
-///   pass runs, or stopped; writes the file).
+///   `pen:<rel_path>[,stop][,<n>]` (main-loop gaps under 24 XTEST pen strokes while the PDF text
+///   pass runs, or stopped, onto `n` strokes put on the first page first; render-thread work per
+///   stroke; the tools' strokes against the file through an erase, its Undo and a move; writes
+///   the file).
 /// - `ACCENT_BENCH_DRAWING=1`: New Drawing; `sketch:<rel_note>`: Insert Sketch.
 /// - `ACCENT_BENCH_TABS=<rel_note>,<rel_pdf>`: preview/tab close transitions.
 ///   Modes: `pin:<a>,<b>,<c>,<d>` then `pins` (save/restore one scratch session),

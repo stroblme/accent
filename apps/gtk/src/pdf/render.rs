@@ -278,7 +278,8 @@ fn render_loop(
                         Ok(area) => {
                             ink.drew(page, before);
                             ink.dirty = true;
-                            send(view, Reply::PageChanged(page, area));
+                            let drawn = ink.named_at(&doc, page, before);
+                            send(view, Reply::PageChanged(page, area, drawn));
                         }
                         Err(e) => tracing::warn!("drawing on page {page}: {e:#}"),
                     }
@@ -289,7 +290,8 @@ fn render_loop(
                         Ok(area) => {
                             ink.drew(page, before);
                             ink.dirty = true;
-                            send(view, Reply::PageChanged(page, area));
+                            let drawn = ink.named_at(&doc, page, before);
+                            send(view, Reply::PageChanged(page, area, drawn));
                         }
                         Err(e) => tracing::warn!("drawing on page {page}: {e:#}"),
                     }
@@ -308,7 +310,7 @@ fn render_loop(
                         Ok((index, (area, stayed))) => {
                             ink.moved(page, index, matrix, stayed);
                             ink.dirty = true;
-                            send(view, Reply::PageChanged(page, area));
+                            send(view, Reply::PageChanged(page, area, None));
                         }
                         // Gone or refused, as for an erase below: the page's list goes back.
                         Err(e) => {
@@ -357,7 +359,7 @@ fn render_loop(
                             let left = names.into_iter().zip(cut.left).collect();
                             ink.erased(page, index, cut.was, left, joined);
                             ink.dirty = true;
-                            send(view, Reply::PageChanged(page, cut.area));
+                            send(view, Reply::PageChanged(page, cut.area, None));
                             if behind {
                                 let inks = ink.named(&doc, page);
                                 send(view, Reply::Inks { page, inks, erases });
@@ -412,7 +414,7 @@ fn render_loop(
                         ink.dirty = true;
                         match walked {
                             pdf::Walked::Ink(page, area) => {
-                                send(view, Reply::PageChanged(page, area))
+                                send(view, Reply::PageChanged(page, area, None))
                             }
                             pdf::Walked::Pages(edit, step) => {
                                 repaged(&doc, &mut glyphs, view, edit, step)
@@ -481,7 +483,7 @@ fn render_loop(
                                 etag = Some(written);
                                 send(view, Reply::Saved(written));
                                 for (page, area) in pages {
-                                    send(view, Reply::PageChanged(page, area));
+                                    send(view, Reply::PageChanged(page, area, None));
                                 }
                                 Ok(added)
                             }

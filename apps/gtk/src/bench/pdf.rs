@@ -356,14 +356,30 @@ pub(super) fn bench_pdf_strip(app: &Rc<App>, rel: &str) {
 /// reads what the vault holds unread and each save of `rel` again (with `,stop` it is stopped
 /// first): how long the reading view went without a frame, and without a motion while the button
 /// was down, and how many strokes reached the file with how many points each. A gap past 50 ms is
-/// a stroke drawn straight.
+/// a stroke drawn straight. With `,<n>`, the first page gets `n` strokes down its left edge first.
+///
+/// Then what the render thread did per stroke — its CPU time, and how many strokes it listed for
+/// the tools — and whether the strokes the view holds for the first page agree with the file's,
+/// under the same names a fresh list gives them, after the strokes, an eraser drag down the
+/// middle, its Undo and an Adjust drag of the first stroke.
 pub(super) fn bench_pdf_pen(app: &Rc<App>, arg: &str) {
-    let (rel, stop) = match arg.strip_suffix(",stop") {
-        Some(rel) => (rel.to_string(), true),
-        None => (arg.to_string(), false),
-    };
+    let mut parts = arg.split(',');
+    let rel = parts.next().unwrap_or_default().to_string();
+    let (mut stop, mut fill) = (false, 0);
+    for part in parts {
+        match part {
+            "stop" => stop = true,
+            n => fill = n.parse().unwrap_or(0),
+        }
+    }
     let app = app.clone();
     glib::spawn_future_local(async move {
+        if fill > 0
+            && let Err(e) = fill_first_page(&app.root().join(&rel), fill)
+        {
+            println!("bench pen fill_failed {e:#}");
+            return bench_quit(&app);
+        }
         let Some(pdf) = opened(&app, &rel).await else {
             println!("bench pen no_tab");
             return bench_quit(&app);
@@ -393,11 +409,10 @@ pub(super) fn bench_pdf_pen(app: &Rc<App>, arg: &str) {
         };
         let before = inks(&pdf);
         let view = pdf.views()[0].clone();
-        let taken = || {
-            view.downcast_ref::<pdfview::PdfView>()
-                .map_or(0, |v| v.drawn_points())
-        };
+        let reader = view.downcast_ref::<pdfview::PdfView>().unwrap().clone();
+        let taken = || reader.drawn_points();
         let taken_before = taken();
+        let (heard_before, cpu_before) = (reader.inks_heard(0).0, render_cpu_ms());
         let frames = Rc::new(RefCell::new(Vec::new()));
         let tick = view.add_tick_callback({
             let frames = frames.clone();
@@ -447,6 +462,8 @@ pub(super) fn bench_pdf_pen(app: &Rc<App>, arg: &str) {
         view.remove_controller(&motion);
         pdf.flush();
         written(&app).await;
+        let heard = reader.inks_heard(0).0 - heard_before;
+        let cpu = render_cpu_ms() - cpu_before;
         let gaps = |times: &[Option<Instant>]| {
             let mut gaps: Vec<f64> = times
                 .windows(2)
@@ -476,8 +493,107 @@ pub(super) fn bench_pdf_pen(app: &Rc<App>, arg: &str) {
             (taken() - taken_before) / 24,
             (after.1 - before.1) / inked.max(1)
         );
+        println!(
+            "bench pen render strokes_before={} heard_per_stroke={} cpu_ms_per_stroke={:.1}",
+            before.0,
+            heard / 24,
+            cpu / 24.0
+        );
+        // The first page's strokes as the view holds them and as the file has them, each by its
+        // length and box, and the names the view holds.
+        let shapes = |inks: Vec<accent_core::pdf::InkShape>| {
+            let mut out: Vec<String> = (inks.iter())
+                .map(|i| {
+                    let b = i.bounds;
+                    let edges = [b.left, b.top, b.right, b.bottom].map(|e| (e * 10.0).round());
+                    format!("{}:{edges:?}", i.points.len())
+                })
+                .collect();
+            out.sort();
+            out
+        };
+        let held = || {
+            let (_, held) = reader.inks_heard(0);
+            let (names, inks): (std::collections::BTreeSet<u32>, Vec<_>) =
+                held.unwrap_or_default().into_iter().unzip();
+            (names, shapes(inks))
+        };
+        let filed = || {
+            let doc = accent_core::pdf::PdfDoc::open(pdf.path()).ok();
+            shapes(doc.and_then(|d| d.inks(0).ok()).unwrap_or_default())
+        };
+        let agree = |step: &str| {
+            let file = filed();
+            println!(
+                "bench pen {step} strokes={} agrees={}",
+                file.len(),
+                held().1 == file
+            );
+        };
+        agree("drawn");
+        // A fresh list, which the eraser's mode asks for, names the strokes as the view did.
+        let names = held().0;
+        app.pdf_mode(pdfview::Mode::Eraser);
+        glib::timeout_future(Duration::from_secs(2)).await;
+        println!("bench pen named kept={}", held().0 == names);
+        let mut steps = Vec::new();
+        for i in 0..=60 {
+            let (x, y) = on_screen(w * 0.5, h * (0.1 + 0.8 * f64::from(i) / 60.0));
+            steps.push(format!("move {x:.0} {y:.0}"));
+            if i == 0 {
+                steps.push("down".to_string());
+            }
+            steps.push("sleep 0.01".to_string());
+        }
+        steps.push("up".to_string());
+        super::git::xtest(&steps.join("; ")).await;
+        pdf.flush();
+        written(&app).await;
+        agree("erased");
+        let _ = WidgetExt::activate_action(&app.window, "win.pdf-undo", None);
+        pdf.flush();
+        written(&app).await;
+        agree("undone");
+        // The first stroke, taken by where it starts and moved down.
+        let file = filed();
+        app.pdf_mode(pdfview::Mode::Adjust);
+        glib::timeout_future(Duration::from_secs(2)).await;
+        let (x, y) = on_screen(w * 0.2, h * 0.2);
+        super::git::xtest(&format!(
+            "move {x:.0} {y:.0}; down; sleep 0.1; move {x:.0} {:.0}; sleep 0.1; \
+             move {x:.0} {:.0}; sleep 0.1; up",
+            y + 20.0,
+            y + 40.0
+        ))
+        .await;
+        pdf.flush();
+        written(&app).await;
+        agree("moved");
+        println!("bench pen moved changed={}", filed() != file);
         bench_quit(&app);
     });
+}
+
+/// `n` short strokes down the left edge of `path`'s first page, written into the file.
+fn fill_first_page(path: &std::path::Path, n: usize) -> anyhow::Result<()> {
+    use accent_core::pdf;
+    let mut doc = pdf::PdfDoc::open(path)?;
+    let (_, height) = doc.page_size(0)?;
+    let style = pdf::InkStyle {
+        width: 1.0,
+        rgba: [0, 0, 0, 255],
+        multiply: false,
+    };
+    for i in 0..n {
+        let y = 10.0 + (height - 20.0) * i as f32 / n as f32;
+        let line = pdf::Shape::Line {
+            a: (6.0, y),
+            b: (24.0, y),
+        };
+        doc.add_shape(0, line, style)?;
+    }
+    doc.save_to(path, None)?;
+    Ok(())
 }
 
 /// Every page renders however the reader gets to it. With the Outline pane up, both views of
@@ -1789,15 +1905,29 @@ pub(super) fn bench_pdf_walk(app: &Rc<App>, rel: &str) {
 
 /// How many PDF render threads this process runs.
 fn render_threads() -> usize {
+    render_tasks().len()
+}
+
+/// How long the PDF render threads have run on a CPU, in ms: `schedstat`'s first field is ns.
+fn render_cpu_ms() -> f64 {
+    let ran = |task: &std::path::PathBuf| {
+        let stat = std::fs::read_to_string(task.join("schedstat")).ok()?;
+        stat.split_whitespace().next()?.parse::<f64>().ok()
+    };
+    render_tasks().iter().filter_map(ran).sum::<f64>() / 1e6
+}
+
+/// The PDF render threads' entries under `/proc/self/task`.
+fn render_tasks() -> Vec<std::path::PathBuf> {
     std::fs::read_dir("/proc/self/task")
         .into_iter()
         .flatten()
         .flatten()
+        .map(|task| task.path())
         .filter(|task| {
-            std::fs::read_to_string(task.path().join("comm"))
-                .is_ok_and(|c| c.trim() == "accent-pdf")
+            std::fs::read_to_string(task.join("comm")).is_ok_and(|c| c.trim() == "accent-pdf")
         })
-        .count()
+        .collect()
 }
 
 /// Every label's text under `w`, the selectable ones marked `*`.

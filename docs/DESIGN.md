@@ -970,7 +970,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   An exported highlight's quote is its comment.
 - **Every comment is listed** in the Outline pane under the bookmarks: a Comments heading, a row for each page with any, which goes to the page, and under it each comment as its author, dim, before its first line.
   A click on one brings it into view and pins it, as a click on the page does.
-  The render thread reads the comments page by page from the moment the document opens, between tiles, so the list fills while the first screen paints (552 pages in 0.3 s); a page an export or a stroke changes is read again, and a reload or a page edit keeps the rows until their pages have been read again, so the list does not empty and fill under the reader.
+  The render thread reads the comments page by page from the moment the document opens, between tiles, so the list fills while the first screen paints (552 pages in 0.3 s); a page an export, an erase, a move or an Undo changes is read again (a stroke drawn adds no comment), and a reload or a page edit keeps the rows until their pages have been read again, so the list does not empty and fill under the reader.
 - **Print… and Export as PDF… hand on a copy**: the document as it now stands, its ink included (strokes not yet written too), with the notes' highlights written in as `/Highlight` annotations in the accent, as Export Highlights would write them.
   The file itself never changes and nothing is flattened, so what prints is what the tab shows.
   Print gives that copy to `GtkPrintDialog`'s `print_file` as it is: the print system gets vector pages and does ranges and copies itself, through the portal where there is one.
@@ -1001,6 +1001,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The pen is known by the event's device tool, since on Wayland a tablet's events come through a device whose source is a mouse.
 - A stroke stays painted over the page until the re-rendered tile carries it, as that tile will show it, under the highlights and the selection.
   pdfium multiplies a highlighter onto the file's white paper and the page is recoloured after, so no colour laid over a recoloured page is that stroke: the page itself is painted again inside it, through the matrix that turns what is on screen into the recolouring of the file's pixel times the stroke (`recolour::multiplied`).
+- The eraser and Adjust find strokes in a list per page on screen, read on the render thread. A stroke drawn comes back alone and joins it (0.1 ms, where reading again a page of 218 strokes took 12 ms a stroke); an erase, a move or an Undo has its page read again.
 - Ink and page edits are written into the file itself, atomically and gated on the etag the document was read at; the tab does not reload over its own write.
   A save is the file's bytes as they were read, copied as a reflink where the file system has them, then the session's one incremental update (ISO 32000-1 §7.5.6), so a session's saves leave one section after the original bytes, history and signatures intact, and nothing is freed: a deleted page or stroke stays in the file, out of reach.
 - On a remote vault that file is the ssh cache copy, and each write goes up to the host behind it, a tab closed at once included.

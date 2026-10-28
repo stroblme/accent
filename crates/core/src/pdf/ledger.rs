@@ -308,6 +308,13 @@ impl Ink {
             .collect()
     }
 
+    /// The stroke at `index` of a noted `page` under its id, read alone: what a stroke just drawn
+    /// hands the tools, rather than every stroke of its page read again.
+    pub fn named_at(&mut self, doc: &PdfDoc, page: usize, index: usize) -> Option<NamedInk> {
+        let shape = doc.ink_at(page, index).ok()??;
+        Some((self.id_at(page, index)?, shape))
+    }
+
     /// Walk the last gesture back (Undo), or the last one Undo took forward again (Redo), and
     /// say what each of its steps changed.
     ///
@@ -693,6 +700,26 @@ mod tests {
         assert_eq!(doc.annotation_count(0).unwrap(), had + 1);
         ink.walk(&mut doc, true);
         assert_eq!(doc.annotation_count(0).unwrap(), had + 1);
+    }
+
+    /// A stroke just drawn, read alone, is as reading its whole page lists it: the same name and
+    /// shape, after the page's link and a stroke already on it.
+    #[test]
+    fn a_stroke_read_alone_is_as_its_page_lists_it() {
+        let Some((_dir, mut doc)) = open_tiny() else {
+            return;
+        };
+        let mut ink = Ink::default();
+        let line = |y: f32| pdf::Shape::Line {
+            a: (20.0, y),
+            b: (80.0, y),
+        };
+        doc.add_shape(0, line(20.0), STYLE).unwrap();
+        let before = doc.annotation_count(0).unwrap();
+        doc.add_shape(0, line(40.0), STYLE).unwrap();
+        ink.drew(0, before);
+        let alone = ink.named_at(&doc, 0, before).unwrap();
+        assert_eq!(ink.named(&doc, 0).last(), Some(&alone));
     }
 
     const STYLE: pdf::InkStyle = pdf::InkStyle {

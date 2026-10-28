@@ -320,6 +320,14 @@ impl PdfView {
         self.imp().drawn.get()
     }
 
+    /// How many strokes the render thread has listed for the tools, and the list held of `page`.
+    /// Only `ACCENT_BENCH_PDF=pen:` reads them.
+    #[cfg(feature = "bench")]
+    pub fn inks_heard(&self, page: usize) -> (usize, Option<Vec<NamedInk>>) {
+        let held = self.imp().inks.borrow().get(&page).cloned();
+        (self.imp().heard.get(), held)
+    }
+
     /// The page a thumbnail strip frames. Only `ACCENT_BENCH_PDF` reads it.
     #[cfg(feature = "bench")]
     pub fn framed(&self) -> usize {
@@ -429,11 +437,15 @@ impl PdfView {
         *self.imp().on_transform.borrow_mut() = Some(Box::new(f));
     }
 
-    /// Apply page strokes only if their `erases` count includes this view's latest erase. Older
-    /// replies are stale relative to locally updated strokes; the erase sends a fresh list.
+    /// Apply page strokes only if their `erases` count includes this view's latest erase on the
+    /// page. Older replies are stale relative to locally updated strokes; the erase sends a fresh
+    /// list. An erase on another page does not hold this one's back: nothing would ask again.
     /// Follow an adjusted selection by stroke ID or clear it if deleted.
     pub fn set_inks(&self, page: usize, inks: Vec<NamedInk>, erases: u64) {
-        if erases < self.imp().erases.get() {
+        #[cfg(feature = "bench")]
+        self.imp().heard.set(self.imp().heard.get() + inks.len());
+        let latest = self.imp().last_erase.borrow().get(&page).copied();
+        if erases < latest.unwrap_or(0) {
             return;
         }
         {
@@ -455,6 +467,16 @@ impl PdfView {
         }
         self.imp().inks.borrow_mut().insert(page, inks);
         self.queue_draw();
+    }
+
+    /// A stroke just drawn joins its page's list, where one is held: a page without one is read
+    /// whole when the tools ask for it.
+    pub fn add_ink(&self, page: usize, ink: NamedInk) {
+        #[cfg(feature = "bench")]
+        self.imp().heard.set(self.imp().heard.get() + 1);
+        if let Some(list) = self.imp().inks.borrow_mut().get_mut(&page) {
+            list.push(ink);
+        }
     }
 
     /// Forget every stroke the Adjust tool knew: the document changed under it.
@@ -664,9 +686,11 @@ mod imp {
         /// Whether the drag under way has taken a stroke yet: every later one is part of the
         /// same step for Undo.
         pub erased: Cell<bool>,
-        /// How many erases this view has sent, which a list of a page has to have seen to be
-        /// current. See [`super::PdfView::set_inks`].
+        /// How many erases this view has sent.
         pub erases: Cell<u64>,
+        /// How many it had sent with the latest on each page, which a list of that page has to
+        /// have seen to be current. See [`super::PdfView::set_inks`].
+        pub last_erase: RefCell<HashMap<usize, u64>>,
         /// Whether the pointer is the stylus's dot rather than the arrow a tool otherwise shows.
         pub dot: Cell<bool>,
         /// Where the pointer is over the view, until it leaves: what a Ctrl+wheel zooms around.
@@ -692,6 +716,9 @@ mod imp {
         /// The points of every stroke the pen has finished, as the gesture took them.
         #[cfg(feature = "bench")]
         pub drawn: Cell<usize>,
+        /// How many strokes the render thread has listed for the tools, every list counted whole.
+        #[cfg(feature = "bench")]
+        pub heard: Cell<usize>,
         pub page: Cell<usize>,
         pub shown: RefCell<std::ops::RangeInclusive<usize>>,
         /// The paper colour for the scheme in force, which costs a CSS parse to work out and is
@@ -742,6 +769,7 @@ mod imp {
                 erasing: Cell::new(None),
                 erased: Cell::new(false),
                 erases: Cell::new(0),
+                last_erase: RefCell::new(HashMap::new()),
                 dot: Cell::new(false),
                 over: Cell::new(None),
                 current_mark: Cell::new(None),
@@ -755,6 +783,8 @@ mod imp {
                 unsharp: Cell::new(0),
                 #[cfg(feature = "bench")]
                 drawn: Cell::new(0),
+                #[cfg(feature = "bench")]
+                heard: Cell::new(0),
                 page: Cell::new(0),
                 shown: RefCell::new(0..=0),
                 paper: Cell::new(None),

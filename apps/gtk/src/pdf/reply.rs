@@ -52,17 +52,24 @@ impl PdfTab {
                     f(self, result);
                 }
             }
-            Reply::PageChanged(page, area) => {
+            Reply::PageChanged(page, area, drawn) => {
                 // The reading view keeps painting what it has until the new render arrives; the
                 // strip has only a stand-in, which `refresh_page` drops, so it asks for another.
                 self.view.refresh_page(page, area);
                 self.thumbs.queue_draw();
-                // An export writes each highlight's quote in, which is a comment from now on, on
-                // this page whether it is on screen or not: the Outline pane lists them all.
-                self.links.borrow_mut().remove(&page);
-                self.ask(Request::Links(page));
-                if self.wants_inks() {
-                    self.ask_inks();
+                match drawn {
+                    Some(ink) => self.view.add_ink(page, ink),
+                    // An export writes each highlight's quote in, which is a comment from now on,
+                    // on this page whether it is on screen or not: the Outline pane lists them
+                    // all. An erase, a move or an Undo may take or put back another editor's
+                    // stroke and its note.
+                    None => {
+                        self.links.borrow_mut().remove(&page);
+                        self.ask(Request::Links(page));
+                        if self.wants_inks() && self.view.visible_pages().contains(&page) {
+                            self.ask(Request::Inks(page));
+                        }
+                    }
                 }
                 self.save_soon();
             }
