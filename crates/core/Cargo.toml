@@ -50,7 +50,7 @@ unicode-width = "0.2"
 # Held at 0.9.3 until 0.9.4, which makes `PdfiumLibraryBindingsAccessor` crate-private again, is
 # tried: no raw call is left now that accent writes its PDFs itself (`accent-pdf`).
 pdfium-render = { version = "=0.9.3", optional = true, default-features = false, features = ["pdfium_latest", "thread_safe"] }
-# accent's own reader and writer of PDF objects: every PDF write is its, pdfium only reading.
+# accent's own reader and writer of PDF objects: it makes every PDF write, pdfium only reads.
 accent-pdf = { workspace = true, optional = true }
 
 [dev-dependencies]
