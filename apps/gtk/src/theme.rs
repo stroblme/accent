@@ -31,6 +31,16 @@ const VIEW_DARK_TEXT: &str = "#ebebeb";
 /// VTE discards alpha, so passing raw RGB would make terminal text darker than other widgets.
 const VIEW_LIGHT_TEXT: &str = "#333338";
 
+/// A diagnostic's gutter icon, an error's and a warning's: each theme's red and yellow in the form
+/// libadwaita gives a colour standing on the page, its OKLab lightness at most 0.5 on a light one
+/// and at least 0.85 on a dark one. Under Adwaita that is libadwaita's own `--error-color` and
+/// `--warning-color`; under Solarized it is made from its red and yellow, whose yellow is 2.3:1 on
+/// the paused line's light wash as it stands.
+const ERROR_WARNING_LIGHT: [&str; 2] = ["#c30000", "#905400"];
+const ERROR_WARNING_DARK: [&str; 2] = ["#ff938c", "#ffc252"];
+const SOLARIZED_ERROR_WARNING_LIGHT: [&str; 2] = ["#bd000f", "#855b00"];
+const SOLARIZED_ERROR_WARNING_DARK: [&str; 2] = ["#ff8f81", "#f5c75d"];
+
 /// Sixteen ANSI colours in standard order, followed by their bright variants.
 ///
 /// Ayu by Ivan Demchenko (MIT), from `mbadolato/iTerm2-Color-Schemes` (MIT). VTE's default blue
@@ -156,6 +166,17 @@ pub fn view_fg(dark: bool) -> &'static str {
 /// White paper and opaque precomposited ink for print/export, independent of screen theme.
 pub fn paper() -> (&'static str, gdk::RGBA) {
     (VIEW_LIGHT, rgba(rgb(VIEW_LIGHT_TEXT), 1.0))
+}
+
+/// The colours of an error's and a warning's gutter icon on that half of the theme.
+pub fn error_warning(dark: bool) -> [gdk::RGBA; 2] {
+    let pair = match (CHOICE.get(), dark) {
+        (Theme::Solarized, true) => SOLARIZED_ERROR_WARNING_DARK,
+        (Theme::Solarized, false) => SOLARIZED_ERROR_WARNING_LIGHT,
+        (_, true) => ERROR_WARNING_DARK,
+        (_, false) => ERROR_WARNING_LIGHT,
+    };
+    pair.map(|hex| rgba(rgb(hex), 1.0))
 }
 
 /// The sixteen ANSI colours for that theme.
@@ -434,6 +455,28 @@ mod tests {
             ));
             let ratio = contrast(LIGHT_TEXT, &format!("#{r:02x}{g:02x}{b:02x}"));
             assert!(ratio >= 3.0, "{ratio:.2}:1 at {}", tint.alpha());
+        }
+    }
+
+    /// A diagnostic's icon keeps 3:1 on its page and on the paused line's amber wash over it.
+    #[test]
+    fn error_and_warning_icons_read_on_the_page_and_the_paused_line() {
+        use crate::diff::{CHANGE_ALPHA, WARNING_HUE, tint};
+        for (pair, page, text) in [
+            (ERROR_WARNING_LIGHT, VIEW_LIGHT, VIEW_LIGHT_TEXT),
+            (ERROR_WARNING_DARK, VIEW_DARK, VIEW_DARK_TEXT),
+            (SOLARIZED_ERROR_WARNING_LIGHT, LIGHT_BASE, LIGHT_TEXT),
+            (SOLARIZED_ERROR_WARNING_DARK, DARK_BASE, DARK_TEXT),
+        ] {
+            let wash = tint(WARNING_HUE, rgba(rgb(text), 1.0), CHANGE_ALPHA);
+            let [r, g, b] = rgb_of(over(wash, rgba(rgb(page), 1.0)));
+            let paused = format!("#{r:02x}{g:02x}{b:02x}");
+            for colour in pair {
+                for behind in [page, &paused] {
+                    let ratio = contrast(colour, behind);
+                    assert!(ratio >= 3.0, "{colour} is {ratio:.2}:1 on {behind}");
+                }
+            }
         }
     }
 

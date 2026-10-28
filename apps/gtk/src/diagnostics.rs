@@ -60,8 +60,8 @@ pub fn install_tags(buffer: &sourceview5::Buffer) {
     }
 }
 
-/// Re-derive the underline colours from the resolved theme foreground. Called from `Tab::restyle`,
-/// which runs on the first map and again on every theme change.
+/// Re-derive the underline colours from the resolved theme foreground, and colour the gutter icons.
+/// Called from `Tab::restyle`, which runs on the first map and again on every theme change.
 pub fn restyle(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
     let fg = view.color();
     let table = buffer.tag_table();
@@ -77,17 +77,18 @@ pub fn restyle(buffer: &sourceview5::Buffer, view: &sourceview5::View) {
     );
     set(INFO, crate::theme::at(fg, INFO_ALPHA));
     set(HINT, crate::theme::at(fg, HINT_ALPHA));
-    ink_icons(view, [MARK_ERROR, MARK_WARNING]);
+    let [error, warning] = crate::theme::error_warning(adw::StyleManager::default().is_dark());
+    ink_icons(view, [(MARK_ERROR, error), (MARK_WARNING, warning)]);
 }
 
-/// Draw each category's gutter icon in `view`'s foreground. GtkSourceView draws an icon it looks
-/// up by name with no colours, so a symbolic one comes out in GTK's fallback grey whatever the
-/// theme (ISSUES.md): it is given a picture drawn here instead, the name staying for the next
-/// restyle to draw from. Each category has an icon; a view with no window yet waits for the map
-/// that restyles it.
+/// Draw each category's gutter icon in its colour. GtkSourceView draws an icon it looks up by name
+/// with no colours, so a symbolic one comes out in GTK's fallback grey whatever the theme
+/// (ISSUES.md): it is given a picture drawn here instead, the name staying for the next restyle to
+/// draw from. Each category has an icon; a view with no window yet waits for the map that restyles
+/// it.
 pub(crate) fn ink_icons<'a>(
     view: &sourceview5::View,
-    categories: impl IntoIterator<Item = &'a str>,
+    icons: impl IntoIterator<Item = (&'a str, gdk::RGBA)>,
 ) {
     let Some(renderer) = view.native().and_then(|native| native.renderer()) else {
         return;
@@ -100,8 +101,7 @@ pub(crate) fn ink_icons<'a>(
     let height = view.create_pango_layout(Some("QWERTY")).pixel_size().1;
     let size = (height - 2) * view.scale_factor();
     let theme = gtk::IconTheme::for_display(&view.display());
-    let fg = view.color();
-    for category in categories {
+    for (category, colour) in icons {
         // 0: see `breakpoints::restyle`.
         let Some(attributes) = view.mark_attributes(category, 0) else {
             continue;
@@ -110,9 +110,9 @@ pub(crate) fn ink_icons<'a>(
         let flags = gtk::IconLookupFlags::empty();
         let icon = theme.lookup_icon(&name, &[], size, 1, view.direction(), flags);
         // Its error, warning and success parts too, which some themes colour (WhiteSur's
-        // diagnostics): a mark is a foreground glyph (DESIGN.md, Iconography).
+        // diagnostics): one glyph, one colour (DESIGN.md, Iconography).
         let snapshot = gtk::Snapshot::new();
-        icon.snapshot_symbolic(&snapshot, size.into(), size.into(), &[fg; 4]);
+        icon.snapshot_symbolic(&snapshot, size.into(), size.into(), &[colour; 4]);
         let Some(node) = snapshot.to_node() else {
             continue;
         };
@@ -150,6 +150,7 @@ pub fn render(
     provider.remove_all();
 
     let mut lines: BTreeMap<i32, (AnnotationStyle, String, usize)> = BTreeMap::new();
+    let mut icons: BTreeMap<i32, &str> = BTreeMap::new();
     for item in items {
         let (from, mut to) = (
             lang::iter_at(buffer, item.range.start),
@@ -173,10 +174,11 @@ pub fn render(
         };
         let mut line_start = from;
         line_start.set_line_offset(0);
-        // A breakpoint's dot takes the line's cell: GtkSourceView draws the icons of all the marks
-        // on a line, one over another, whatever their priorities.
-        if !breakpoints::on_line(buffer, line_start.line()) {
-            buffer.create_source_mark(None, category, &line_start);
+        // One icon a line, the most severe: GtkSourceView draws the icons of all the marks on a
+        // line, one over another, whatever their priorities.
+        let icon = icons.entry(line_start.line()).or_insert(category);
+        if category == MARK_ERROR {
+            *icon = category;
         }
         // A line nothing on screen stands for has no row of its own to write on: every message
         // in a hidden run would be drawn at the one row that does, piling up under it. The
@@ -197,6 +199,14 @@ pub fn render(
                 }
                 shown.2 += 1;
             }
+        }
+    }
+    // A breakpoint's dot takes the line's cell from them, likewise.
+    for (line, category) in icons {
+        if !breakpoints::on_line(buffer, line)
+            && let Some(at) = buffer.iter_at_line(line)
+        {
+            buffer.create_source_mark(None, category, &at);
         }
     }
     let table = buffer.tag_table();
