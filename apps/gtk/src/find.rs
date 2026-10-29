@@ -23,10 +23,6 @@ pub const TOGGLES: [(&str, &str); 3] = [
     (".*", "Use Regular Expression"),
 ];
 
-/// Match Whole Word's tooltip over the rendered preview, where WebKit's find can only hold a match
-/// to the start of a word (`AT_WORD_STARTS`), so `foo` finds `food` there.
-const WORD_STARTS: &str = "Match Whole Word (word starts in the preview)";
-
 /// A flat text toggle, the look every query toggle has.
 pub fn toggle((label, tooltip): (&str, &str)) -> gtk::ToggleButton {
     let button = gtk::ToggleButton::builder()
@@ -451,20 +447,13 @@ impl Bar {
         options([case, word, regex])
     }
 
-    /// Apply supported case and whole-word options to preview or PDF search.
-    /// Preview whole-word means word starts. Disable unsupported regex without losing its saved state.
+    /// Grey Regular Expression out over a PDF, whose search is pdfium's and matches none, keeping
+    /// its state. A PDF is counted in pages; a buffer, a notebook and the preview are not.
     fn sync_toggles(&self) {
-        let presenting = self.presenting();
-        let notebook = self.notebook().is_some();
-        let [_, word, regex] = &self.toggles;
-        regex.set_sensitive(!presenting || notebook);
-        // A PDF is counted in pages; the preview, like a buffer, is not.
-        let preview = presenting && self.wiring.get().is_some_and(|w| (w.pages)().is_none());
-        word.set_tooltip_text(Some(match preview {
-            true => WORD_STARTS,
-            false => TOGGLES[1].1,
-        }));
-        if presenting && !notebook {
+        let pdf = self.presenting() && self.wiring.get().is_some_and(|w| (w.pages)().is_some());
+        let [_, _, regex] = &self.toggles;
+        regex.set_sensitive(!pdf);
+        if pdf {
             self.query.remove_css_class("error");
         }
     }
@@ -536,12 +525,14 @@ impl Bar {
     }
 
     /// The readout, said in the caller's own words: the PDF reader and the preview both count
-    /// their own matches and say "3 of 12", which the bar has no way to work out for them.
+    /// their own matches and say "3 of 12", which the bar has no way to work out for them. A
+    /// query that does not compile marks the box, as in a buffer.
     pub fn set_matches_text(&self, text: &str) {
         self.matches.set_text(text);
+        self.set_invalid(text == "Invalid pattern");
     }
 
-    /// Mark the query box as not compiling, for a notebook, which matches the query itself.
+    /// Mark the query box as not compiling.
     pub fn set_invalid(&self, on: bool) {
         match on {
             true => self.query.add_css_class("error"),
@@ -671,7 +662,7 @@ impl Bar {
     }
 
     /// The readout for `tab`, and the query box marked as the Search pane marks its own when the
-    /// query does not compile. Not while presenting, where the query is searched as written.
+    /// query does not compile. Not while presenting, where what is searched says so itself.
     fn show_matches(&self, tab: &Tab) {
         self.matches.set_text(&tab.matches_label());
         match tab.find_invalid() && !self.presenting() {

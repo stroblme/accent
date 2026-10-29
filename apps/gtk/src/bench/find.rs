@@ -72,9 +72,9 @@ const TEXT: &str = "Foo foo food foo_bar\nÄ foo(1) FOO(22)\n";
 /// and `invalid=true`. Replace All of `(\w+)\((\d+)\)` with `$2-$1` produces
 /// `Ä 1-foo 22-FOO` on the second line.
 ///
-/// In rendered preview, regex is unavailable. For `foo`, expect `preview_plain` 6,
-/// `preview_case` 4, `preview_word` 6 and `preview_case_word` 4; Whole Word matches word
-/// starts here. For `oo`, expect 6 plain, 5 by case and 0 at word starts.
+/// Over the rendered preview the toggles mean what they mean in a buffer, Regular Expression
+/// included: for `foo`, expect `preview_plain` 6, `preview_case` 4, `preview_word` 4 and
+/// `preview_case_word` 2; for `oo`, 6 plain, 5 by case and 0 as a whole word.
 ///
 /// With the generated vault's `Attachments/pages.pdf`, Whole Word instead matches entire
 /// words: `page` finds 5, or 0 by case; `Page` finds 5 by case; `Pag` finds 5, or 0 as a
@@ -129,7 +129,7 @@ fn bench_find_options(app: &Rc<App>, pdf: Option<&str>) {
                 app.set_presenting(true);
                 bar.open(Mode::Find);
             }),
-            // WebKit's first page load, which a find waits for.
+            // The page's first render, which a find waits for.
             Box::new(|_, _| {}),
             Box::new(|_, _| {}),
             Box::new(|_, bar| toggles("preview", bar)),
