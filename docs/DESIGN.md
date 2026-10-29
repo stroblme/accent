@@ -1512,7 +1512,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - A comparison's second pane is the exception and always numbers its lines.
 - Line numbers sit outside the 48 px page gutter, so turning them on shifts the page rather than crowding it.
   Every line is numbered, headings included: the number and the hanging `#` markers are a gutter apart and read as two margins.
-- They rest at 0.6 opacity and come back to the scheme's gutter grey while the pointer is anywhere in the gutter.
+- They rest at 0.6 opacity and come back to the scheme's gutter grey while the pointer is anywhere in the gutter, fading there and back (Motion).
 - The gutter's background is the view's, not the scheme's: Solarized gives line numbers a shade of their own, which would put them in a stripe against the one flat background.
 - A fold's chevron, like a diagnostic's icon and the line number, sits beside its line's first row, also where a comparison pads the line.
 - An ATX heading's `#` markers hang in the left gutter so its text, wrapped lines included, lands on the body column, as in Apostrophe.
@@ -2059,6 +2059,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
   Switches crossfade and new pages fade in: the sidebar's panes, a tab picked in the pane the reader is in (a newly opened one too), a PDF's pages on their first open, or the spinner that took their place once the open had taken 160 ms, the PDF's "Cannot Open" page, the card a held `Ctrl+Tab` shows, and each new output of a notebook's run (Notebook).
   A toast slides into the pile and out of it, and the toasts slide out of the status bar's way in presentation mode.
 - Buttons a hover brings slide in where they take room (a list row's, Sidebar) and fade where they keep it or lie over something (a branch's trash, a page thumbnail's round buttons, a notebook's add strips); the Search pane's replace row and a folder field's list slide open.
+  The line numbers brighten as the pointer comes into the gutter and dim again as it leaves, one fade that turns round where it is (Typography).
   A folder the reader opens in the Files tree turns its arrow, one `pan-down` turned a quarter back while closed, and fades in the rows its listing lands under it, so what opened reads as coming out of it; a section of the sidebar, a variable of the Debug pane and a folder of the Git pane's changes turn theirs too.
   Only on the reader's toggle: a list binds its row widgets to other rows as it scrolls, so an arrow that turned on every change of its widget's state would spin under a scroll; and only the rows bound in the frame the listing lands, so a row scrolled to, a refill (Show Hidden, a change on disk) and the folders Reveal in Sidebar opens come at once, as a closing folder's rows go.
   A cell added to a notebook — inserted, split off, converted, or past the last by Run Cell and Advance — fades in, and Stop and Run Cell fade in as each takes the other's place; a cell deleted or moved goes or moves at once, as do the cells Undo and Redo bring back, which walk back what was done rather than make anything (Notebook).

@@ -78,18 +78,22 @@ pub(super) fn line_numbers(
 
     // Gutter-wide rather than per line: the pointer anywhere in the column lifts every number at
     // once. GTK picks the renderer itself under the pointer, but the controller goes on its
-    // parent, whose `contains-pointer` covers the whole column, padding included.
+    // parent, whose `contains-pointer` covers the whole column, padding included. Faded as every
+    // hover reveal is (DESIGN.md, Motion), and only while shown: a fade shows what it fades in,
+    // and the numbers may be off.
+    let (fade, shown) = (crate::widgets::Fade::new(&renderer), renderer.clone());
+    let lift = Rc::new(move |opacity| {
+        if shown.is_visible() {
+            fade.to(opacity);
+        }
+    });
     let motion = gtk::EventControllerMotion::new();
     motion.connect_enter(glib::clone!(
-        #[weak]
-        renderer,
-        move |_, _, _| renderer.set_opacity(1.0)
+        #[strong]
+        lift,
+        move |_, _, _| lift(1.0)
     ));
-    motion.connect_leave(glib::clone!(
-        #[weak]
-        renderer,
-        move |_| renderer.set_opacity(DIM)
-    ));
+    motion.connect_leave(move |_| lift(DIM));
     gutter.add_controller(motion);
     renderer.upcast()
 }
