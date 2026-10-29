@@ -318,8 +318,7 @@ impl Panel {
             (counts, branch_model(name, &state.branches))
         };
         self.counts.set_text(&counts);
-        // Hidden rather than empty: the box spends its spacing on an empty label too, which made
-        // the Sync button wider than its icon and put the icon off its centre.
+        // Hidden rather than empty, which shows the arrows in its place (`build_branch_row`).
         self.counts.set_visible(!counts.is_empty());
         self.set_branches(&rows, at);
         self.sync_state();

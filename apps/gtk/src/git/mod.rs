@@ -862,7 +862,7 @@ impl Panel {
     }
 
     /// What the Sync button says it will do. `ACCENT_BENCH_GIT` and nothing else: the button is
-    /// otherwise a pair of arrows and a count, and a tooltip cannot be read from a screenshot.
+    /// otherwise its counts or a pair of arrows, and a tooltip cannot be read from a screenshot.
     #[cfg(feature = "bench")]
     pub fn sync_hint(&self) -> Option<String> {
         self.sync.tooltip_text().map(|t| t.to_string())
@@ -1085,7 +1085,7 @@ fn build_branch_row() -> BranchRow {
         .popover(&branch_menu)
         .build();
     branch.add_css_class("flat");
-    let counts = gtk::Label::new(None);
+    let counts = gtk::Label::builder().visible(false).build();
     counts.add_css_class("dimmed");
     counts.add_css_class("numeric");
     // One button, both halves, and the counts inside it, which is the pane's whole answer to
@@ -1093,11 +1093,19 @@ fn build_branch_row() -> BranchRow {
     // Sync button is what says a pull would bring something. Three buttons was also what
     // stopped the sidebar shrinking — the branch row measured 186 px of minimum width with
     // them and 105 with one.
-    let arrows = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    arrows.append(&counts);
-    arrows.append(&gtk::Image::from_icon_name(SYNC_ICON));
+    // The counts alone where there are any, the arrows only where there are none: beside a
+    // count they were clutter, and without one they keep the button from being blank.
+    let icon = gtk::Image::from_icon_name(SYNC_ICON);
+    counts
+        .bind_property("visible", &icon, "visible")
+        .invert_boolean()
+        .sync_create()
+        .build();
+    let sync_face = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    sync_face.append(&counts);
+    sync_face.append(&icon);
     let sync = gtk::Button::builder()
-        .child(&arrows)
+        .child(&sync_face)
         .valign(gtk::Align::Center)
         .build();
     sync.add_css_class("flat");

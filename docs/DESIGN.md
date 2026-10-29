@@ -503,7 +503,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Conflicts are the Merge Conflicts section's rows: a row opens the file as a merge (Merge), Stage marks it resolved, and nothing opens on its own.
   A working-tree comparison of a file that a merge, a pull or a rebase leaves unmerged becomes its merge with the refresh that lists it, told from the status: git refuses the index side of such a file.
 - Sync and Commit share a row, the pane's two actions: a row of its own costs 40 px the changes and the history need.
-  Sync carries the ahead and behind counts and `network-transmit-receive-symbolic`.
+  Sync carries the ahead and behind counts alone (`↑4 ↓2`), and `network-transmit-receive-symbolic` only where there are none, so it is never blank (user decision 2026-10-29): the arrows beside a count were clutter.
 - Sync pulls then pushes, both halves every time: the counts come from a background fetch (on opening the vault, on picking a repository, every five minutes while the window has focus), so they are a readout, not a decision.
   A failed pull stops there and keeps its transcript.
 - On a remote vault git runs on the host, which finishes a command within its own bounds whatever the link does.
