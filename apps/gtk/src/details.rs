@@ -185,6 +185,7 @@ fn kind_group(doc: &Doc) -> Option<Group> {
                 ("Application", info.creator),
                 ("Producer", info.producer),
                 ("Created", info.created.map(date_label)),
+                ("Modified", info.modified.map(date_label)),
                 ("PDF Version", info.version),
             ];
             facts.extend(

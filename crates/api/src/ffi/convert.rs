@@ -21,6 +21,7 @@ pub struct Info {
     pub creator: Option<String>,
     pub producer: Option<String>,
     pub created: Option<i64>,
+    pub modified: Option<i64>,
     pub version: Option<String>,
 }
 

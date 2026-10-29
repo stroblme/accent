@@ -159,6 +159,7 @@ suspend fun pdfDetails(pdf: PdfModel): DetailGroup {
         "Application" to info.creator,
         "Producer" to info.producer,
         "Created" to info.created?.let(::date),
+        "Modified" to info.modified?.let(::date),
         "PDF Version" to info.version,
     ).forEach { (name, value) -> if (value != null) facts += name to value }
     return DetailGroup("PDF", facts)

@@ -1,5 +1,6 @@
 //! Shared PDF rendering, glyph geometry, selections and annotations, with plain data for GTK,
-//! CLI and Android: pdfium reads and renders, `accent_pdf` writes every edit (`cos`).
+//! CLI and Android: pdfium renders and reads the text, `accent_pdf` reads the outline, links and
+//! information dictionary and writes every edit (`cos`).
 //!
 //! All [`Rect`]s use page points with a top-left origin and downward y. [`Rect::from_pdf`]
 //! converts pdfium's bottom-left coordinate space at the boundary, and the writers flip y as they
@@ -343,9 +344,6 @@ pub struct Outline {
 
 /// What a document says about itself: its information dictionary, each entry `None` where it
 /// says nothing, and the PDF version its header declares.
-///
-/// No modification date: pdfium-render (0.9.4) asks pdfium for `ModificationDate` where the
-/// dictionary's key is `ModDate`, so it never reads (ISSUES.md).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Info {
     pub title: Option<String>,
@@ -355,8 +353,9 @@ pub struct Info {
     /// The application that made the document; `producer` is what turned it into a PDF.
     pub creator: Option<String>,
     pub producer: Option<String>,
-    /// When the document was made, in seconds since the epoch.
+    /// When the document was made, and last changed, in seconds since the epoch.
     pub created: Option<i64>,
+    pub modified: Option<i64>,
     pub version: Option<String>,
 }
 

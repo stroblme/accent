@@ -1,10 +1,10 @@
 //! The document: opening, page sizes, rendering, text, links, the outline, search and saving.
 //!
-//! pdfium reads the document and never writes it. An edit goes into the session's update
+//! pdfium renders the document and reads its text, and never writes it; `accent_pdf` reads its
+//! links, outline and information dictionary. An edit goes into the session's update
 //! ([`Objects`]), and pdfium is opened again over the file with that update after it ([`Tail`]),
 //! which is also what a save writes: the file's bytes as they were read, then one section.
 
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
@@ -409,127 +409,91 @@ impl PdfDoc {
         }
     }
 
-    /// List resolvable `/Link` annotations in document order.
-    ///
-    /// Filter `annotations()` rather than using `PdfPage::links()`: its index is passed as an
-    /// `/Annots` start position, so preceding non-link annotations cause duplicate links.
-    pub fn links(&self, page: usize) -> Result<Vec<Link>> {
-        let _guard = lock();
-        let p = self.page(page)?;
-        let page_height = p.height().value;
-        // Destination tops are in the target page's coordinates, so resolving one costs a page
-        // load; a table of contents points at many pages, often repeatedly.
-        let mut heights: HashMap<usize, f32> = HashMap::new();
-        let mut out = Vec::new();
-        for a in p.annotations().iter() {
-            if a.annotation_type() != PdfPageAnnotationType::Link {
-                continue;
+    /// The document as `accent_pdf` reads it now: the file, with the session's update over it.
+    fn document(&self) -> accent_pdf::Document<'_> {
+        accent_pdf::Document::new(&self.cos.pdf, Some(&self.cos.update), &self.cos.pages)
+    }
+
+    /// What `read` makes of the document; where an object is not where the xref puts it, what
+    /// it makes of the document's bytes read through an xref rebuilt from them, as pdfium
+    /// repairs a file.
+    fn reading<T>(
+        &self,
+        read: impl Fn(&accent_pdf::Document) -> accent_pdf::Result<T>,
+    ) -> Result<T> {
+        match read(&self.document()) {
+            Err(accent_pdf::Error::Broken(_) | accent_pdf::Error::Syntax { .. }) => {
+                let pdf = Pdf::rebuilt(Arc::new(self.save()?))?;
+                Ok(read(&accent_pdf::Document::new(
+                    &pdf,
+                    None,
+                    &self.cos.pages,
+                ))?)
             }
-            let (Ok(bounds), Some(link)) = (
-                a.bounds(),
-                a.as_link_annotation().and_then(|l| l.link().ok()),
-            ) else {
-                continue;
-            };
-            // `destination()` already resolves a `/A` GoTo action, so it comes first.
-            let target = if let Some(dest) = link.destination() {
-                let Ok(target) = dest.page_index() else {
-                    continue;
-                };
-                let target = target as usize;
-                let top = dest.view_settings().ok().and_then(view_top).map(|y| {
-                    let height = *heights.entry(target).or_insert_with(|| {
-                        self.page(target).map_or(page_height, |p| p.height().value)
-                    });
-                    height - y
-                });
-                LinkTarget::Page { page: target, top }
-            } else if let Some(uri) = link
-                .action()
-                .and_then(|a| a.as_uri_action().and_then(|u| u.uri().ok()))
-            {
-                LinkTarget::Uri(uri)
-            } else {
-                continue;
-            };
-            out.push(Link {
-                rect: Rect::from_pdf(bounds, page_height),
-                target,
-            });
+            read => Ok(read?),
         }
-        Ok(out)
+    }
+
+    /// The `/Link` annotations of a page that lead to a page of the document or to a URI, in
+    /// `/Annots` order.
+    pub fn links(&self, page: usize) -> Result<Vec<Link>> {
+        let at = self.cos.page(page)?;
+        let links = self.reading(|doc| doc.links(at))?;
+        let (_, height) = self.page_size(page)?;
+        // A destination's top is in its own page's space, so the page it names gives its height.
+        let height_of = |page| self.page_size(page).map_or(height, |(_, h)| h);
+        Ok(links
+            .into_iter()
+            .map(|link| {
+                let [left, bottom, right, top] = link.rect;
+                Link {
+                    rect: Rect {
+                        left,
+                        top: height - top,
+                        right,
+                        bottom: height - bottom,
+                    },
+                    target: match link.target {
+                        accent_pdf::Target::Page(dest) => LinkTarget::Page {
+                            page: dest.page,
+                            top: dest.top.map(|y| height_of(dest.page) - y),
+                        },
+                        accent_pdf::Target::Uri(uri) => LinkTarget::Uri(uri),
+                    },
+                }
+            })
+            .collect())
     }
 
     /// The document outline (`/Outlines`), flattened depth-first.
-    ///
-    // ponytail: the walk is capped at `OUTLINE_MAX_DEPTH` levels and `OUTLINE_MAX_ENTRIES`
-    // entries, because a `/Outlines` tree whose `/Next` or `/First` chain loops back on itself is
-    // malformed but trivial to write, and would otherwise spin the worker forever. No real
-    // document comes near either cap. The upgrade path, if one ever does, is a visited set keyed
-    // by the raw `FPDF_BOOKMARK` handle, which pdfium-render keeps private today.
     pub fn outline(&self) -> Result<Vec<Outline>> {
-        let _guard = lock();
-        let mut out = Vec::new();
-        let Some(root) = self.doc().bookmarks().root() else {
-            return Ok(out);
-        };
-        // Pre-order: a node's sibling is pushed before its child, so the child pops first.
-        let mut stack = vec![(root, 0usize)];
-        while let Some((node, depth)) = stack.pop() {
-            if out.len() >= OUTLINE_MAX_ENTRIES {
-                break;
-            }
-            out.push(Outline {
-                depth,
-                title: node.title().unwrap_or_default(),
-                page: node
-                    .destination()
-                    .and_then(|d| d.page_index().ok())
-                    .map(|i| i as usize),
-            });
-            if let Some(sibling) = node.next_sibling() {
-                stack.push((sibling, depth));
-            }
-            if depth + 1 < OUTLINE_MAX_DEPTH
-                && let Some(child) = node.first_child()
-            {
-                stack.push((child, depth + 1));
-            }
-        }
-        Ok(out)
+        let outline = self.reading(|doc| doc.outline())?;
+        Ok(outline
+            .into_iter()
+            .map(|b| Outline {
+                depth: b.depth,
+                title: b.title,
+                page: b.page,
+            })
+            .collect())
     }
 
     /// What the document says about itself, blank entries left out (`Info`).
     pub fn info(&self) -> Info {
-        use PdfDocumentMetadataTagType as Tag;
-        let _guard = lock();
-        let doc = self.doc();
-        let tag = |kind| {
-            let value = doc.metadata().get(kind)?;
-            let value = value.value().trim();
-            (!value.is_empty()).then(|| value.to_string())
-        };
-        let version = match doc.version() {
-            PdfDocumentVersion::Pdf1_0 => Some("1.0"),
-            PdfDocumentVersion::Pdf1_1 => Some("1.1"),
-            PdfDocumentVersion::Pdf1_2 => Some("1.2"),
-            PdfDocumentVersion::Pdf1_3 => Some("1.3"),
-            PdfDocumentVersion::Pdf1_4 => Some("1.4"),
-            PdfDocumentVersion::Pdf1_5 => Some("1.5"),
-            PdfDocumentVersion::Pdf1_6 => Some("1.6"),
-            PdfDocumentVersion::Pdf1_7 => Some("1.7"),
-            PdfDocumentVersion::Pdf2_0 => Some("2.0"),
-            PdfDocumentVersion::Unset | PdfDocumentVersion::Other(_) => None,
-        };
+        let info = self.reading(|doc| doc.info()).unwrap_or_else(|e| {
+            tracing::debug!("reading the information dictionary: {e:#}");
+            Default::default()
+        });
         Info {
-            title: tag(Tag::Title),
-            author: tag(Tag::Author),
-            subject: tag(Tag::Subject),
-            keywords: tag(Tag::Keywords),
-            creator: tag(Tag::Creator),
-            producer: tag(Tag::Producer),
-            created: tag(Tag::CreationDate).as_deref().and_then(parse_date),
-            version: version.map(str::to_string),
+            title: info.title,
+            author: info.author,
+            subject: info.subject,
+            keywords: info.keywords,
+            creator: info.creator,
+            producer: info.producer,
+            created: info.created.as_deref().and_then(parse_date),
+            modified: info.modified.as_deref().and_then(parse_date),
+            version: info.version,
         }
     }
 
@@ -563,20 +527,6 @@ impl PdfDoc {
                     .collect()
             })
             .collect())
-    }
-}
-
-const OUTLINE_MAX_DEPTH: usize = 32;
-const OUTLINE_MAX_ENTRIES: usize = 10_000;
-
-/// The y a destination wants at the top of the window, in pdfium's bottom-left-origin points,
-/// for the view modes that carry one.
-fn view_top(view: PdfDestinationViewSettings) -> Option<f32> {
-    match view {
-        PdfDestinationViewSettings::SpecificCoordinatesAndZoom(_, y, _)
-        | PdfDestinationViewSettings::FitPageHorizontallyToWindow(y) => y.map(|y| y.value),
-        PdfDestinationViewSettings::FitPageToRectangle(r) => Some(r.top().value),
-        _ => None,
     }
 }
 

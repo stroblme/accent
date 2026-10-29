@@ -1,5 +1,7 @@
 use std::ops::Range;
 
+mod reads;
+
 use super::ink::{Seg, flatten, segments_of};
 use super::text::{item_offset, line_groups};
 use super::*;
