@@ -1,14 +1,18 @@
 //! Markdown analysis for styling spans, links, tags and headings, with shared preview rendering.
 //! All ranges are source byte offsets for GTK and Compose consumers.
 //!
-//! Helpers separate delimiter validation, link handling, frontmatter and HTML. `table` handles
-//! pipe-table layout and cell navigation for Tab and Enter; `uri` reads the preview's own
-//! addresses back for a click.
+//! Helpers separate delimiter validation, link handling, frontmatter and HTML. `page` cuts a
+//! note into the blocks its preview shows, which `html` writes out. `table` handles pipe-table
+//! layout and cell navigation for Tab and Enter; `uri` reads the preview's own addresses back
+//! for a click.
 
 mod blocks;
 mod frontmatter;
 mod html;
+#[cfg(test)]
+mod html_before;
 mod links;
+mod page;
 mod spans;
 mod table;
 mod task;
@@ -24,6 +28,7 @@ pub use links::{
     path_keys, path_link_keys, pdf_anchor, percent_decode, percent_encode, repage_links,
     rewrite_moved, section, section_end, section_in, slugs, strip_ext,
 };
+pub use page::{Block, Node, Side, page};
 /// What an org table shares with a pipe table's layout (`crate::org`).
 pub(crate) use table::{Align, Cell, Rules, Table, split};
 pub use table::{TableEdit, TableKey, table_key};

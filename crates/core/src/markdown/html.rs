@@ -1,20 +1,13 @@
-//! The preview pane's HTML: wikilinks and tags become `accent://` anchors, math becomes MathML,
-//! every block carries the source line it starts on, and a conflict block its sides in boxes.
+//! A page ([`page`]) as HTML: for the preview pane, wikilinks and tags become `accent://`
+//! anchors, math becomes MathML, every block carries the source line it starts on, and a
+//! conflict block its sides in boxes; for an exported file, what only the app can follow goes.
 
-use super::blocks::block_ids;
-use super::frontmatter::scan_tags;
-use super::links::{
-    heading_named, is_external, is_image, is_url, percent_decode, percent_encode, slugs,
-    split_anchor,
-};
+use super::links::{is_external, is_url, percent_decode, percent_encode};
 use super::options;
-use super::spans::list_marker;
-use super::task::in_progress;
-use crate::conflict::{self, Block};
+use super::page::{Block, Node, Side, page};
 use crate::path::{parent_dir, resolve};
-use pulldown_cmark::{CowStr, Event, LinkType, Options, Parser, Tag as Cm, TagEnd};
+use pulldown_cmark::{Event, LinkType, Parser, Tag as Cm, TagEnd};
 use pulldown_latex::{Event as LatexEvent, ParserError, Storage};
-use std::collections::HashMap;
 use std::error::Error;
 use std::ops::Range;
 
@@ -35,23 +28,6 @@ fn open_href(target: &str, anchor: Option<&str>) -> String {
         h.push_str(&esc_attr(a));
     }
     h
-}
-
-/// Blocks that carry a source-line marker. Everything the editor can put a cursor in starts at
-/// one of these, which is all the preview needs to scroll along.
-fn is_block_start(ev: &Event) -> bool {
-    matches!(
-        ev,
-        Event::Start(
-            Cm::Paragraph
-                | Cm::Heading { .. }
-                | Cm::Item
-                | Cm::BlockQuote(_)
-                | Cm::CodeBlock(_)
-                | Cm::Table(_)
-                | Cm::HtmlBlock
-        )
-    )
 }
 
 /// A formula's LaTeX as parser events, or why it does not parse: the one test of whether a
@@ -142,22 +118,26 @@ pub fn math_errors(text: &str) -> Vec<(Range<usize>, String)> {
 /// links. Tag classes distinguish their styling.
 ///
 /// Block `data-line` markers synchronise preview scrolling with the editor. Heading IDs use
-/// [`slugs`]; links naming heading text are rewritten to those IDs. [`block_ids`] appear as
-/// `^id` anchors on markers and are hidden from rendered text.
+/// [`slugs`](super::slugs); links naming heading text are rewritten to those IDs.
+/// [`block_ids`](super::block_ids) appear as `^id` anchors on markers and are hidden from
+/// rendered text.
 ///
 /// Render conflict sides in labelled `conflict-current`, `-base` and `-incoming` boxes without
-/// git markers, which markdown would otherwise misinterpret. Each stretch is parsed
-/// independently with the whole note's [`definitions`], retaining source line numbers and
-/// cross-stretch reference links and footnotes.
+/// git markers, which markdown would otherwise misinterpret ([`page`]).
 pub fn to_html(text: &str) -> String {
-    render(text, None)
+    write(&page(text), Mode::Preview)
 }
 
 /// The note at `note`, a vault path, as an exported file holds it, read outside the app: no line
 /// markers, a link into the vault as its text, a relative picture as an `accent://file/` address
 /// the app inlines, and no `<script>`. A mermaid fence stays its code block.
 pub fn to_html_file(text: &str, note: &str) -> String {
-    without_scripts(&render(text, Some(parent_dir(note))))
+    write(
+        &page(text),
+        Mode::File {
+            dir: parent_dir(note),
+        },
+    )
 }
 
 /// `html` without its `<script>` elements, found in any case. The writer escapes every `<` of
@@ -183,470 +163,184 @@ fn without_scripts(html: &str) -> String {
     out
 }
 
-/// The preview's page of `text`, or with `export`, the note's directory, an exported file's.
-fn render<'a>(text: &'a str, export: Option<&'a str>) -> String {
-    let mut page = Page {
-        defs: definitions(text),
-        export,
-        ..Page::default()
-    };
-    let mut at = 0;
-    for block in conflict::blocks(text) {
-        page.markdown(text, at..block.range.start);
-        page.conflict(text, &block);
-        at = block.range.end;
-    }
-    page.markdown(text, at..text.len());
-    page.finish()
+/// Who a page is written for.
+#[derive(Clone, Copy)]
+pub(crate) enum Mode<'a> {
+    /// The preview pane, in the app.
+    Preview,
+    /// An exported file of a note in the vault directory `dir`, read outside the app.
+    File { dir: &'a str },
 }
 
-/// The callout a quote starting at `src[at..]` opens: its type lowercased, its title, and the
-/// bytes of its `[!type]` line, newline included. `None` for a plain quote. A `+` or `-` fold
-/// marker is read past: a callout always shows open.
-fn callout(src: &str, at: usize) -> Option<(String, String, Range<usize>)> {
-    let line = src[at..].split('\n').next().unwrap_or_default();
-    let head = line.strip_prefix('>')?.trim_start_matches([' ', '\t']);
-    let (kind, rest) = head.strip_prefix("[!")?.split_once(']')?;
-    let named = kind.starts_with(|c: char| c.is_ascii_alphabetic())
-        && kind
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
-    if !named {
-        return None;
-    }
-    let kind = kind.to_ascii_lowercase();
-    let title = match rest.strip_prefix(['+', '-']).unwrap_or(rest).trim() {
-        "" => {
-            let mut t = kind.clone();
-            t[..1].make_ascii_uppercase();
-            t
+/// `blocks` as HTML for `mode`: each node as the event or HTML it stands for, all written by
+/// pulldown-cmark in one go, so footnote numbers and table state run on across blocks.
+pub(crate) fn write(blocks: &[Block], mode: Mode) -> String {
+    let mut events = Vec::new();
+    // Whether an exported file keeps each open markdown link, or only its text.
+    let mut kept = Vec::new();
+    for block in blocks {
+        for node in &block.nodes {
+            node_events(node, block.lines.start, mode, &mut kept, &mut events);
         }
-        t => t.to_string(),
-    };
-    let start = at + line.len() - head.len();
-    Some((kind, title, start..(at + line.len() + 1).min(src.len())))
+    }
+    let mut html = String::new();
+    pulldown_cmark::html::push_html(&mut html, events.into_iter());
+    match mode {
+        Mode::Preview => html,
+        Mode::File { .. } => without_scripts(&html),
+    }
 }
 
-/// Every reference and footnote definition of a note with a conflict block, as written, each
-/// after a blank line; empty for any other note. A stretch parsed on its own knows only the
-/// definitions in it, so [`render`] parses each with these after it.
-fn definitions(text: &str) -> String {
-    let Some(blank) = conflict::blank_markers(text) else {
-        return String::new();
-    };
-    let parser = Parser::new_ext(&blank, options());
-    let mut defs: Vec<Range<usize>> = parser
-        .reference_definitions()
-        .iter()
-        .map(|(_, d)| d.span.clone())
-        .collect();
-    defs.extend(
-        parser.into_offset_iter().filter_map(|(ev, r)| {
-            matches!(ev, Event::Start(Cm::FootnoteDefinition(_))).then_some(r)
-        }),
-    );
-    defs.into_iter()
-        .map(|r| format!("\n\n{}", &text[r]))
-        .collect()
-}
-
-/// What [`render`] has gathered so far, a stretch of the note at a time.
-#[derive(Default)]
-struct Page<'a> {
-    /// The directory of the note being exported ([`to_html_file`]); `None` for the preview.
-    export: Option<&'a str>,
-    evts: Vec<Event<'a>>,
-    /// Each heading's place in `evts` and its text, gathered the way `analyze` gathers
-    /// `Heading::text` — every text and code event inside, an embed's too — so the `id` is the
-    /// anchor the editor resolves.
-    headings: Vec<(usize, String)>,
-    /// The place in `evts` of each link to `#…` on the page itself.
-    anchors: Vec<usize>,
-    /// The note's [`definitions`], parsed after every stretch.
-    defs: String,
-    /// How far into the note the lines are counted, and the newlines up to there: block starts
-    /// arrive in source order, so one forward pass counts every marker's line.
-    counted: usize,
-    newlines: usize,
-}
-
-impl<'a> Page<'a> {
-    /// The 1-based line the byte `at` of the note is on.
-    fn line_at(&mut self, text: &str, at: usize) -> usize {
-        self.newlines += text[self.counted..at]
-            .bytes()
-            .filter(|b| *b == b'\n')
-            .count();
-        self.counted = at;
-        self.newlines + 1
-    }
-
-    /// The marker a block starting at byte `at` of the note opens with: its source line for the
-    /// preview to scroll by, and its block id, which an exported file keeps alone.
-    fn marker(&mut self, text: &str, at: usize, id: Option<&str>) -> Option<String> {
-        let id = id.map_or(String::new(), |id| format!(" id=\"^{id}\""));
-        match self.export {
-            None => Some(format!(
-                "<span data-line=\"{}\"{id}></span>",
-                self.line_at(text, at)
-            )),
-            Some(_) if id.is_empty() => None,
-            Some(_) => Some(format!("<span{id}></span>")),
-        }
-    }
-
-    fn html(&mut self, html: String) {
-        self.evts.push(Event::Html(html.into()));
-    }
-
-    /// Give the item being read the class GitHub gives a task, so the preview draws its box in
-    /// place of the bullet. The box is the first thing in its item, so the nearest item start is
-    /// its own.
-    fn task_item(&mut self) {
-        let item = |e: &Event| matches!(e, Event::Start(Cm::Item));
-        if let Some(li) = self.evts.iter().rposition(item) {
-            self.evts[li] = Event::Html("<li class=\"task-list-item\">".into());
-        }
-    }
-
-    /// A text run of `src` at `r`, its `#tag`s as `accent://tag/<tag>` links the app follows to
-    /// the tag. They are found in the source by the rule the index reads tags with, so a run the
-    /// parser rewrote (an escape, an entity) is left as it is; one whose block id was cut off its
-    /// end is still the source up to there.
-    fn tagged(&mut self, src: &'a str, r: Range<usize>, t: CowStr<'a>) {
-        let shown = r.start..r.start + t.len();
-        let mut tags = Vec::new();
-        // An exported file has no tag to go to.
-        if self.export.is_none() && src.get(shown.clone()) == Some(&*t) {
-            scan_tags(src, &shown, &mut tags, &mut Vec::new());
-        }
-        if tags.is_empty() {
-            return self.evts.push(Event::Text(t));
-        }
-        let mut at = shown.start;
-        for tag in tags {
-            if at < tag.range.start {
-                self.evts.push(Event::Text(src[at..tag.range.start].into()));
-            }
-            self.html(format!(
-                "<a href=\"accent://tag/{}\" class=\"tag\">",
-                percent_encode(&tag.name)
-            ));
-            self.evts.push(Event::Text(src[tag.range.clone()].into()));
-            self.html("</a>".into());
-            at = tag.range.end;
-        }
-        if at < shown.end {
-            self.evts.push(Event::Text(src[at..shown.end].into()));
-        }
-    }
-
-    /// The markdown of `text[part]`, parsed as a note of its own.
-    fn markdown(&mut self, text: &'a str, part: Range<usize>) {
-        let src = &text[part.clone()];
-        let mut opts = options();
-        // Front matter opens the note, never a stretch after a conflict block.
-        if part.start > 0 {
-            opts.remove(Options::ENABLE_YAML_STYLE_METADATA_BLOCKS);
-        }
-        let blocks = block_ids(src);
-        // Asked of every event, so indexed once: a block start's id (the first, if two name it),
-        // and the marker inside a text, found by halving, as `block_ids` gives them in order.
-        let mut ids = HashMap::new();
-        for b in &blocks {
-            ids.entry(b.start).or_insert(b.id.as_str());
-        }
-        let marker_in = |r: &Range<usize>| {
-            let at = blocks.partition_point(|b| b.marker.start < r.start);
-            blocks.get(at).filter(|b| r.contains(&b.marker.start))
-        };
-        // Whether each open link and embed is ours to close rather than the parser's: with our
-        // `</a>` in the preview, with nothing in an exported file, which keeps only its text.
-        let mut link_ours: Vec<bool> = Vec::new();
-        let mut image_ours: Vec<bool> = Vec::new();
-        let mut skip = 0usize;
-        // The `[/]` the item being read opens with, and once its box is in, the bytes it covered.
-        let mut doing: Option<Range<usize>> = None;
-        let mut dropped = 0..0;
-        let mut in_heading = false;
-        // Where a text run is never a tag, as `analyze` reads them: code and the front matter.
-        let mut in_code = false;
-        let mut in_meta = false;
-        // The `[!type]` line of the callout being read, its newline included: its events go.
-        let mut header = 0..0;
-
-        // The definitions go on after the stretch, where the parser finds them; nothing of them
-        // is shown, their events all starting past its end.
-        let joined;
-        let events: Box<dyn Iterator<Item = (Event<'a>, Range<usize>)>> = if self.defs.is_empty() {
-            Box::new(Parser::new_ext(src, opts).into_offset_iter())
-        } else {
-            joined = format!("{src}{}", self.defs);
-            Box::new(
-                Parser::new_ext(&joined, opts)
-                    .into_offset_iter()
-                    .filter(|(_, r)| r.start < src.len())
-                    .map(|(ev, r)| (ev.into_static(), r)),
-            )
-        };
-        let mut events = events.peekable();
-        while let Some((ev, r)) = events.next() {
-            if header.contains(&r.start) && r.end <= header.end {
-                continue;
-            }
-            match &ev {
-                Event::Start(Cm::Heading { .. }) => {
-                    in_heading = true;
-                    self.headings.push((self.evts.len(), String::new()));
-                }
-                Event::End(TagEnd::Heading(_)) => in_heading = false,
-                Event::Start(Cm::CodeBlock(_)) => in_code = true,
-                Event::End(TagEnd::CodeBlock) => in_code = false,
-                Event::Start(Cm::MetadataBlock(_)) => in_meta = true,
-                Event::End(TagEnd::MetadataBlock(_)) => in_meta = false,
-                Event::Text(t) | Event::Code(t) if in_heading => {
-                    if let Some((_, h)) = self.headings.last_mut() {
-                        h.push_str(t);
-                    }
-                }
-                _ => {}
-            }
-            if skip > 0 {
-                match ev {
-                    Event::Start(Cm::Image { .. }) => skip += 1,
-                    Event::End(TagEnd::Image) => skip -= 1,
-                    _ => {}
-                }
-                continue;
-            }
-            let marker = is_block_start(&ev)
-                .then(|| self.marker(text, part.start + r.start, ids.get(&r.start).copied()))
-                .flatten()
-                .map(|m| Event::Html(m.into()));
-            // A callout's header is its quote's first paragraph line, which the title replaces,
-            // after the quote's marker.
-            if matches!(ev, Event::Start(Cm::BlockQuote(_)))
-                && let Some((kind, title, line)) = callout(src, r.start)
-                && let Some((Event::Start(Cm::Paragraph), p)) = events.peek()
-                && p.start == line.start
-            {
-                header = line;
-                self.html(format!(
-                    "<blockquote class=\"callout\" data-callout=\"{kind}\">\n"
-                ));
-                self.evts.extend(marker);
-                self.html(format!(
-                    "<p class=\"callout-title\">{}</p>\n",
-                    esc_attr(&title)
-                ));
-                continue;
-            }
-            // The text a block's id ends goes on without it.
-            let ev = match (ev, marker_in(&r)) {
-                (Event::Text(t), Some(b)) => {
-                    let shown = t.strip_suffix(&src[b.marker.clone()]).unwrap_or(&t);
-                    Event::Text(shown.trim_end().to_string().into())
-                }
-                (ev, _) => ev,
-            };
-            match ev {
+/// The events `node` of a block starting on line `top` is written as for `mode`.
+fn node_events<'a>(
+    node: &Node<'a>,
+    top: u32,
+    mode: Mode,
+    kept: &mut Vec<bool>,
+    out: &mut Vec<Event<'a>>,
+) {
+    let html = |s: String| Event::Html(s.into());
+    let preview = matches!(mode, Mode::Preview);
+    match node {
+        Node::Event(ev) => match (ev, mode) {
+            // A link into the vault goes nowhere from an exported file: its text is left.
+            (
                 Event::Start(Cm::Link {
-                    link_type: LinkType::WikiLink { .. },
-                    ref dest_url,
-                    ..
-                }) => {
-                    if self.export.is_none() {
-                        let (t, anchor) = split_anchor(dest_url);
-                        self.html(format!(
-                            "<a href=\"{}\" class=\"wikilink\">",
-                            open_href(t, anchor)
-                        ));
-                    }
-                    link_ours.push(true);
-                }
-                // A link into the vault goes nowhere from an exported file: its text is left.
-                Event::Start(Cm::Link {
-                    ref dest_url,
+                    dest_url,
                     link_type,
                     ..
-                }) if self.export.is_some()
-                    && !(dest_url.starts_with('#')
-                        || is_url(dest_url)
-                        || link_type == LinkType::Email) =>
-                {
-                    link_ours.push(true);
+                }),
+                Mode::File { .. },
+            ) => {
+                let keep =
+                    dest_url.starts_with('#') || is_url(dest_url) || *link_type == LinkType::Email;
+                kept.push(keep);
+                if keep {
+                    out.push(ev.clone());
                 }
-                Event::Start(Cm::Link { ref dest_url, .. }) => {
-                    if dest_url.starts_with('#') {
-                        self.anchors.push(self.evts.len());
-                    }
-                    link_ours.push(false);
-                    self.evts.push(ev);
+            }
+            (Event::End(TagEnd::Link), Mode::File { .. }) => {
+                if kept.pop() != Some(false) {
+                    out.push(ev.clone());
                 }
-                Event::End(TagEnd::Link) => match link_ours.pop() {
-                    Some(true) if self.export.is_some() => {}
-                    Some(true) => self.html("</a>".into()),
-                    _ => self.evts.push(ev),
-                },
-                Event::Start(Cm::Image {
-                    link_type: LinkType::WikiLink { .. },
-                    ref dest_url,
-                    ..
-                }) => {
-                    let (t, anchor) = split_anchor(dest_url);
-                    if is_image(t) {
-                        self.html(format!("<img src=\"accent://file/{}\">", percent_encode(t)));
-                        skip = 1;
-                    } else if crate::path::is_diagram(t) {
-                        // A picture of the page the anchor names, which the app draws, inside
-                        // the link a click follows to that page; an exported file has the
-                        // picture alone.
-                        let page = anchor
-                            .map_or_else(String::new, |a| format!("?page={}", percent_encode(a)));
-                        let img =
-                            format!("<img src=\"accent://file/{}{page}\">", percent_encode(t));
-                        self.html(match self.export {
-                            None => format!(
-                                "<a href=\"{}\" class=\"embed\">{img}</a>",
-                                open_href(t, anchor)
-                            ),
-                            Some(_) => img,
-                        });
-                        skip = 1;
-                    } else {
-                        if self.export.is_none() {
-                            self.html(format!(
-                                "<a href=\"{}\" class=\"embed\">",
-                                open_href(t, anchor)
-                            ));
-                        }
-                        image_ours.push(true);
-                    }
-                }
-                // An exported file is read away from the note's folder, so a picture beside it
-                // is fetched by its vault path.
+            }
+            // An exported file is read away from the note's folder, so a picture beside it is
+            // fetched by its vault path.
+            (
                 Event::Start(Cm::Image {
                     link_type,
                     dest_url,
                     title,
                     id,
-                }) => {
-                    let dest_url = match self.export {
-                        Some(dir) if !is_external(&dest_url) => {
-                            let rel = resolve(dir, &percent_decode(&dest_url));
-                            format!("accent://file/{}", percent_encode(&rel)).into()
-                        }
-                        _ => dest_url,
-                    };
-                    image_ours.push(false);
-                    self.evts.push(Event::Start(Cm::Image {
-                        link_type,
-                        dest_url,
-                        title,
-                        id,
-                    }));
-                }
-                Event::End(TagEnd::Image) => match image_ours.pop() {
-                    Some(true) if self.export.is_some() => {}
-                    Some(true) => self.html("</a>".into()),
-                    _ => self.evts.push(ev),
-                },
-                Event::InlineMath(ref src) | Event::DisplayMath(ref src) => {
-                    let html = mathml(src, matches!(ev, Event::DisplayMath(_)));
-                    // A typo must never blank a formula: without MathML the original event goes
-                    // on and pulldown-cmark's `.math` span shows the source as the author wrote it.
-                    match html {
-                        Some(html) => self.html(html),
-                        None => self.evts.push(ev),
-                    }
-                }
-                Event::TaskListMarker(_) => {
-                    self.task_item();
-                    self.evts.push(ev);
-                }
-                Event::Start(Cm::Item) => {
-                    doing = list_marker(src, &r).and_then(|m| in_progress(src, m.end));
-                    self.evts.push(ev);
-                }
-                // `[/]` is three runs of text to pulldown-cmark: a box of its own takes the first
-                // one's place, and the other two and the space after them go, as the parser drops
-                // a task's own brackets.
-                Event::Text(_) if doing.as_ref().is_some_and(|d| d.start == r.start) => {
-                    dropped = doing.take().unwrap_or_default();
-                    self.task_item();
-                    self.html(IN_PROGRESS.into());
-                }
-                Event::Text(_) if dropped.contains(&r.start) => {}
-                Event::Text(t) if !dropped.is_empty() && dropped.end == r.start => {
-                    dropped = 0..0;
-                    let shown = t.trim_start().to_string();
-                    self.tagged(src, r.end - shown.len()..r.end, shown.into());
-                }
-                Event::Text(t)
-                    if !in_code && !in_meta && link_ours.is_empty() && image_ours.is_empty() =>
-                {
-                    self.tagged(src, r, t)
-                }
-                _ => self.evts.push(ev),
+                }),
+                Mode::File { dir },
+            ) if !is_external(dest_url) => {
+                let rel = resolve(dir, &percent_decode(dest_url));
+                out.push(Event::Start(Cm::Image {
+                    link_type: *link_type,
+                    dest_url: format!("accent://file/{}", percent_encode(&rel)).into(),
+                    title: title.clone(),
+                    id: id.clone(),
+                }));
             }
-            self.evts.extend(marker);
+            _ => out.push(ev.clone()),
+        },
+        // An exported file keeps a block's id alone.
+        Node::Line { at, id } => {
+            let id = id
+                .as_deref()
+                .map_or(String::new(), |id| format!(" id=\"{}\"", esc_attr(id)));
+            if preview {
+                out.push(html(format!(
+                    "<span data-line=\"{}\"{id}></span>",
+                    top + at
+                )));
+            } else if !id.is_empty() {
+                out.push(html(format!("<span{id}></span>")));
+            }
         }
-    }
-
-    /// A conflict block's sides top to bottom, each in its box under its marker's label. A box
-    /// starts where the marker above it is, so that is its caption's line; the incoming side is
-    /// named by the marker below it, the `>>>>>>>` line.
-    fn conflict(&mut self, text: &'a str, block: &Block) {
-        let m = block.markers();
-        let (split, end) = (&m[m.len() - 2], &m[m.len() - 1]);
-        let sides = [
-            Some(("current", &m[0], m[0].start, block.ours.clone())),
-            block
-                .base
-                .clone()
-                .map(|base| ("base", &m[1], m[1].start, base)),
-            Some(("incoming", end, split.start, block.theirs.clone())),
-        ];
-        self.html("<div class=\"conflict\">\n".into());
-        for (side, named, top, lines) in sides.into_iter().flatten() {
-            let marker = self.marker(text, top, None).unwrap_or_default();
-            let label = esc_attr(conflict::label(text, named.clone()));
-            self.html(format!(
+        // An exported file keeps a wikilink's and an embed's text alone.
+        Node::WikiLink { target, anchor } if preview => out.push(html(format!(
+            "<a href=\"{}\" class=\"wikilink\">",
+            open_href(target, anchor.as_deref())
+        ))),
+        Node::Embed { target, anchor } if preview => out.push(html(format!(
+            "<a href=\"{}\" class=\"embed\">",
+            open_href(target, anchor.as_deref())
+        ))),
+        Node::LinkEnd if preview => out.push(html("</a>".into())),
+        Node::WikiLink { .. } | Node::Embed { .. } | Node::LinkEnd => {}
+        // An exported file has no tag to go to.
+        Node::Tag { name, text } => {
+            if preview {
+                let href = format!("accent://tag/{}", percent_encode(name));
+                out.push(html(format!("<a href=\"{href}\" class=\"tag\">")));
+            }
+            out.push(Event::Text(text.clone()));
+            if preview {
+                out.push(html("</a>".into()));
+            }
+        }
+        Node::Image(target) => out.push(html(format!(
+            "<img src=\"accent://file/{}\">",
+            percent_encode(target)
+        ))),
+        // A picture of the page the anchor names, which the app draws, inside the link a click
+        // follows to that page; an exported file has the picture alone.
+        Node::Diagram { target, anchor } => {
+            let page = anchor
+                .as_deref()
+                .map_or_else(String::new, |a| format!("?page={}", percent_encode(a)));
+            let img = format!(
+                "<img src=\"accent://file/{}{page}\">",
+                percent_encode(target)
+            );
+            out.push(html(match preview {
+                true => format!(
+                    "<a href=\"{}\" class=\"embed\">{img}</a>",
+                    open_href(target, anchor.as_deref())
+                ),
+                false => img,
+            }));
+        }
+        Node::Math { mathml, .. } => out.push(html(mathml.clone())),
+        // GitHub's class for a task, for which the preview draws the box in place of the bullet.
+        Node::TaskItem => out.push(html("<li class=\"task-list-item\">".into())),
+        Node::TaskDoing => out.push(html(IN_PROGRESS.into())),
+        Node::Callout { kind } => out.push(html(format!(
+            "<blockquote class=\"callout\" data-callout=\"{kind}\">\n"
+        ))),
+        Node::CalloutTitle(title) => out.push(html(format!(
+            "<p class=\"callout-title\">{}</p>\n",
+            esc_attr(title)
+        ))),
+        Node::Underline => out.push(html("<u>".into())),
+        Node::UnderlineEnd => out.push(html("</u>".into())),
+        Node::Conflict => out.push(html("<div class=\"conflict\">\n".into())),
+        Node::Side { side, label, at } => {
+            let side = match side {
+                Side::Current => "current",
+                Side::Base => "base",
+                Side::Incoming => "incoming",
+            };
+            let marker = match preview {
+                true => format!("<span data-line=\"{}\"></span>", top + at),
+                false => String::new(),
+            };
+            out.push(html(format!(
                 "<div class=\"conflict-{side}\"><div class=\"conflict-label\">\
-                 {marker}{label}</div>\n"
-            ));
-            self.markdown(text, lines);
-            self.html("</div>\n".into());
+                 {marker}{}</div>\n",
+                esc_attr(label)
+            )));
         }
-        self.html("</div>\n".into());
-    }
-
-    fn finish(mut self) -> String {
-        let texts: Vec<&str> = self.headings.iter().map(|(_, h)| h.as_str()).collect();
-        let ids = slugs(texts.iter().copied());
-        // A link to a heading of the page goes to its `id`, which is all WebKit scrolls to, even
-        // when it names the heading by its text, as the editor lets it.
-        for at in &self.anchors {
-            if let Event::Start(Cm::Link { dest_url, .. }) = &mut self.evts[*at]
-                && let Some(i) = heading_named(&texts, &percent_decode(&dest_url[1..]))
-            {
-                *dest_url = format!("#{}", ids[i]).into();
-            }
-        }
-        for ((at, _), slug) in self.headings.iter().zip(ids) {
-            if let Event::Start(Cm::Heading { id, .. }) = &mut self.evts[*at] {
-                *id = Some(slug.into());
-            }
-        }
-        let mut out = String::new();
-        pulldown_cmark::html::push_html(&mut out, self.evts.into_iter());
-        out
+        Node::SideEnd | Node::ConflictEnd => out.push(html("</div>\n".into())),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::markdown::slugs;
 
     #[test]
     fn html_rewrites_wikilinks() {
