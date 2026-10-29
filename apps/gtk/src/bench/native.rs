@@ -1,4 +1,4 @@
-//! The native preview's drills (`ACCENT_PREVIEW=native`): what a note's page holds, and what
+//! The native preview's drills: what a note's page holds, and what
 //! rendering, patching and scrolling it cost.
 
 use super::*;
@@ -84,7 +84,7 @@ Their side
 [^one]: The footnote.
 "#;
 
-/// `ACCENT_BENCH_PREVIEW=render` (with `ACCENT_PREVIEW=native`): writes [`NOTE`] and shows its
+/// `ACCENT_BENCH_PREVIEW=render`: writes [`NOTE`] and shows its
 /// preview beside it, then prints each block's lines, the tags on its first character and its
 /// text, an object as `[label]`; where `scroll_to_line` puts chosen lines; where each link goes;
 /// what Copy writes for Select All; and the blocks kept and written after a one-character edit.

@@ -309,11 +309,10 @@ fn look_state(image: &doc::Viewer, rel: &str, theme: Theme, inverted: bool) {
     );
 }
 
-/// `ACCENT_BENCH_PREVIEW_LOOK=<rel_note>` prints image corner/centre pixels and request
-/// counts across repeated renders, themes and inversion. Print conflict classes,
-/// captions, heights and tints too. `ACCENT_BENCH_SHOTS=<dir>` saves page PNGs. Under
-/// `ACCENT_PREVIEW=native` each picture's pixels as drawn and the reads the pictures took, in
-/// place of requests; no conflicts or shots.
+/// `ACCENT_BENCH_PREVIEW_LOOK=<rel_note>` prints each picture's pixels as drawn and the reads
+/// the pictures took, across repeated renders, themes and inversion. Under
+/// `ACCENT_PREVIEW=webkit`, image corner/centre pixels and request counts, and conflict classes,
+/// captions, heights and tints too; `ACCENT_BENCH_SHOTS=<dir>` saves page PNGs.
 ///
 /// - `=hold:<rel_note>` reports image positions and waits 40 s for XTEST menu input,
 ///   printing inversion and requests every 2 s.

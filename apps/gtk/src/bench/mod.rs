@@ -194,8 +194,7 @@ use user_commands::bench_commands;
 /// - `ACCENT_BENCH_IMAGE_LOOK=<rel>,<rel>,…`: image classification/recolouring
 ///   across themes and inversion.
 /// - `ACCENT_BENCH_PREVIEW_LOOK=<rel_note>`: preview image themes and requests.
-/// - `ACCENT_BENCH_PREVIEW=render` with `ACCENT_PREVIEW=native`: the native preview's page of a
-///   note it writes, against `preview.expected`; `time:<rel>`: its render, patch and scroll
+/// - `ACCENT_BENCH_PREVIEW=render`: the native preview's page of a note it writes, against `preview.expected`; `time:<rel>`: its render, patch and scroll
 ///   costs (`native::bench_preview`).
 /// - `ACCENT_BENCH_TERM=1`: shell titles and saved terminal sessions.
 ///   `--terminal` uses a vault-less window; a vault launch opens a shell tab.

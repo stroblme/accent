@@ -482,7 +482,7 @@ drills: gtk-bench xvfb
 		sleep 3 && ACCENT_BENCH_COMMANDS=back timeout 60 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/commands" && \
 		ACCENT_BENCH_COMMANDS=prefs timeout 60 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/commands" && \
 		grep "^bench commands " "$$0/commands" | diff -u apps/gtk/src/bench/commands.expected -' "$$xdg"
-	$(HEADLESS) sh -c 'ACCENT_PREVIEW=native ACCENT_BENCH_PREVIEW=render timeout 60 \
+	$(HEADLESS) sh -c 'ACCENT_BENCH_PREVIEW=render timeout 60 \
 		$(TARGET_DIR)/accent "$$0/vault" >"$$0/preview" && \
 		grep "^bench preview " "$$0/preview" | diff -u apps/gtk/src/bench/preview.expected -' "$$xdg"
 

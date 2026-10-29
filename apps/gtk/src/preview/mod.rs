@@ -1,6 +1,6 @@
 //! A markdown note's rendered preview, one type over its two renderers while WebKit's is retired:
 //! the native one ([`native::Native`]), and WebKit's ([`crate::web::Preview`]) in a build with the
-//! `webkit` feature unless `ACCENT_PREVIEW=native` asks for the native one.
+//! `webkit` feature when `ACCENT_PREVIEW=webkit` asks for it.
 
 mod code;
 mod figure;
@@ -64,7 +64,7 @@ impl Preview {
         on_invert: impl Fn(&str) + 'static,
     ) -> Preview {
         #[cfg(feature = "webkit")]
-        if std::env::var_os("ACCENT_PREVIEW").is_none_or(|v| v != "native") {
+        if std::env::var_os("ACCENT_PREVIEW").is_some_and(|v| v == "webkit") {
             return Preview::Web(crate::web::Preview::new(
                 resolve, inverted, web, on_open, on_tag, on_invert,
             ));

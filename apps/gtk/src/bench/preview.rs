@@ -8,8 +8,8 @@ use webkit6::prelude::*;
 const KEYS: usize = 12;
 const EVERY: Duration = Duration::from_millis(400);
 
-/// `ACCENT_BENCH_PREVIEW_LOOK=type:<rel_note>[,<word>]` types halfway down a scratch
-/// note with its preview tab in a pane beside it ([`beside`]) and probes:
+/// `ACCENT_BENCH_PREVIEW_LOOK=type:<rel_note>[,<word>]`, under `ACCENT_PREVIEW=webkit`, types
+/// halfway down a scratch note with its preview tab in a pane beside it ([`beside`]) and probes:
 ///
 /// - `cost`: total/per-render `web_cpu_ms`, median/worst `latency_ms`, and `shown` text.
 /// - `select`: retained scroll, selection and diagrams after typing; `min_scroll=0`
