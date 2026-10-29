@@ -60,12 +60,16 @@ fun BrowseScreen(
     scanned: Long,
     front: String?,
     openTag: String?,
-    /** Whether a note or a PDF is in front, which is what Print… acts on. */
+    /** Whether a note or a PDF is in front, which is what Find and Print… act on. */
     printable: Boolean,
     onOpen: (rel: String, find: String?) -> Unit,
     onClose: () -> Unit,
 ) {
-    val palette = if (printable) Commands + Print else Commands
+    // Only what applies to the document in front: Find and Print… want a note or a PDF, Close
+    // Note a document.
+    val palette = Commands.filter {
+        (it !== Find || printable) && (it !== CloseNote || front != null)
+    } + listOfNotNull(Print.takeIf { printable })
     val pager = rememberPagerState(if (openTag != null) Mode.Tags.ordinal else 0) { Mode.entries.size }
     val scope = rememberCoroutineScope()
     // Which page the pager is nearest, which is what the field means and which chip is lit: both
@@ -595,13 +599,18 @@ private suspend fun pickable(command: Command, model: VaultModel, onClose: () ->
 }
 
 /** Open find for the front note or PDF, searching within that document. */
+val Find = Command("Find") { it.finding(true) }
+
+/** Close the document in front. */
+val CloseNote = Command("Close Note") { it.close() }
+
 val Commands = listOf(
     Command("New Note") { it.newNote(newName()) },
     NewFromTemplate,
     TodaysNote,
-    Command("Find") { it.finding(true) },
+    Find,
     Command("Reload Vault") { it.reloadVault() },
-    Command("Close Note") { it.close() },
+    CloseNote,
     Command("Close Vault") { it.closeVault() },
 )
 
