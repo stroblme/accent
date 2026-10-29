@@ -156,6 +156,42 @@ pub fn pick(items: &[Item]) -> Option<Form<'_>> {
     text("text/plain").map(Form::Text)
 }
 
+/// The TeX inside a `text/latex` output's delimiters, and whether it is set as a display.
+pub fn tex(latex: &str) -> (&str, bool) {
+    let t = latex.trim();
+    for (open, close, display) in [
+        ("$$", "$$", true),
+        ("\\[", "\\]", true),
+        ("$", "$", false),
+        ("\\(", "\\)", false),
+    ] {
+        if t.len() >= open.len() + close.len()
+            && let Some(inner) = t.strip_prefix(open).and_then(|t| t.strip_suffix(close))
+        {
+            return (inner.trim(), display);
+        }
+    }
+    (t, true)
+}
+
+/// The line naming what only a script could have shown, in the place of `items`.
+pub fn placeholder(items: &[Item]) -> String {
+    let mime = items
+        .iter()
+        .map(|i| i.mime.as_str())
+        .find(|m| *m != "text/plain")
+        .unwrap_or("an empty");
+    format!("A {mime} output, which only a script can show")
+}
+
+/// What an error shows: its traceback, else its name and message.
+pub fn error_text(name: &str, value: &str, traceback: &[String]) -> String {
+    match traceback.is_empty() {
+        true => format!("{name}: {value}"),
+        false => traceback.join("\n"),
+    }
+}
+
 /// Whether `data` is base64 as a notebook stores a picture: the standard alphabet, line breaks
 /// anywhere, `=` padding only at the end. A decoder that skips what it does not know would make
 /// a picture of anything.
@@ -525,6 +561,19 @@ mod tests {
         let bad = item("image/png", "iVBOR<w0KGgo=");
         assert_eq!(picked(&[bad, plain]), "x**2");
         assert_eq!(pick(&[script]), None);
+    }
+
+    #[test]
+    fn a_formula_is_read_inside_its_delimiters() {
+        assert_eq!(
+            tex("$\\displaystyle \\int x^{2}\\, dx$"),
+            ("\\displaystyle \\int x^{2}\\, dx", false)
+        );
+        assert_eq!(tex("$$x$$"), ("x", true));
+        assert_eq!(
+            tex("\\begin{equation}x\\end{equation}"),
+            ("\\begin{equation}x\\end{equation}", true)
+        );
     }
 
     #[test]

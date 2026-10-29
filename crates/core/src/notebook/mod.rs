@@ -7,6 +7,7 @@
 //! format's own style. Every change goes through [`Notebook::apply`], which answers the edit that
 //! undoes it, so one history can hold the cell operations and the typing in the cells alike.
 
+mod html;
 mod ipynb;
 mod marimo;
 pub mod output;

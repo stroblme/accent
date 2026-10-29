@@ -335,7 +335,7 @@ impl Outputs {
                 value,
                 traceback,
             } => {
-                self.text(&error_text(name, value, traceback), true);
+                self.text(&core::error_text(name, value, traceback), true);
             }
             Output::Data { items, .. } => match core::pick(items) {
                 Some(Form::Picture { mime, data }) => self.picture(mime, data, fade),
@@ -479,7 +479,7 @@ impl Outputs {
     }
 
     fn latex(&self, latex: &str) {
-        let (tex, display) = tex_of(latex);
+        let (tex, display) = core::tex(latex);
         match math::formula(&self.widget, tex, display, 16.0) {
             Some(formula) => {
                 let view = math::FormulaView::new(formula, self.zoom.clone());
@@ -494,13 +494,8 @@ impl Outputs {
     /// One line naming what only a script could have shown.
     fn placeholder(&self, items: &[Item]) {
         self.keep(Part::Placeholder);
-        let mime = items
-            .iter()
-            .map(|i| i.mime.as_str())
-            .find(|m| *m != "text/plain")
-            .unwrap_or("an empty");
         let label = gtk::Label::builder()
-            .label(format!("A {mime} output, which only a script can show"))
+            .label(core::placeholder(items))
             .xalign(0.0)
             .wrap(true)
             .build();
@@ -557,7 +552,7 @@ fn shape(output: &Output) -> Shape {
             name,
             value,
             traceback,
-        } => text_shape(&error_text(name, value, traceback)),
+        } => text_shape(&core::error_text(name, value, traceback)),
         Output::Data { items, .. } => match core::pick(items) {
             Some(Form::Picture { mime, data }) => picture_shape((mime, data)),
             Some(Form::Table(table)) => {
@@ -593,14 +588,6 @@ fn plain(text: &str) -> String {
     plain
 }
 
-/// What an error shows: its traceback, else its name and message.
-fn error_text(name: &str, value: &str, traceback: &[String]) -> String {
-    match traceback.is_empty() {
-        true => format!("{name}: {value}"),
-        false => traceback.join("\n"),
-    }
-}
-
 /// What Copy Output takes of `output` (user decision 2026-10-28): its picture, as an image, or
 /// the text it shows without its colours, a stream's carriage returns played out, and a table as
 /// its own plain text, pandas' or polars', else its cells a tab apart; `None` for what only a
@@ -612,7 +599,7 @@ fn copied(output: &Output) -> Option<Copied> {
             name,
             value,
             traceback,
-        } => error_text(name, value, traceback),
+        } => core::error_text(name, value, traceback),
         Output::Data { items, .. } => match core::pick(items)? {
             Form::Picture { .. } => return Some(Copied::Picture),
             Form::Table(table) => match items.iter().find(|i| i.mime == "text/plain") {
@@ -1138,24 +1125,6 @@ fn show_picture(part: &Part, fade: bool) {
     });
 }
 
-/// The TeX inside a `text/latex` output's delimiters, and whether it is set as a display.
-fn tex_of(latex: &str) -> (&str, bool) {
-    let t = latex.trim();
-    for (open, close, display) in [
-        ("$$", "$$", true),
-        ("\\[", "\\]", true),
-        ("$", "$", false),
-        ("\\(", "\\)", false),
-    ] {
-        if t.len() >= open.len() + close.len()
-            && let Some(inner) = t.strip_prefix(open).and_then(|t| t.strip_suffix(close))
-        {
-            return (inner.trim(), display);
-        }
-    }
-    (t, true)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1261,18 +1230,5 @@ mod tests {
         }
         assert_eq!(copied(&frame), text("   a\n0  1"), "pandas' own text");
         assert_eq!(copied(&data("application/vnd.widget+json", "{}")), None);
-    }
-
-    #[test]
-    fn a_formula_is_read_inside_its_delimiters() {
-        assert_eq!(
-            tex_of("$\\displaystyle \\int x^{2}\\, dx$"),
-            ("\\displaystyle \\int x^{2}\\, dx", false)
-        );
-        assert_eq!(tex_of("$$x$$"), ("x", true));
-        assert_eq!(
-            tex_of("\\begin{equation}x\\end{equation}"),
-            ("\\begin{equation}x\\end{equation}", true)
-        );
     }
 }
