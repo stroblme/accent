@@ -302,7 +302,29 @@ async fn find(rendered: &crate::rendered::Rendered, tab: &Tab) {
             selected(&buffer)
         );
         tab.buffer.undo();
+        glib::timeout_future(Duration::from_millis(1500)).await;
     }
+    // A word in a list item and in a table's cell: the cell's match counted where the table
+    // stands, selected and painted in its label.
+    let preview = rendered.preview();
+    let Some((preview, native)) = preview.as_ref().and_then(|p| Some((p, p.native()?))) else {
+        return;
+    };
+    let mut readouts = Vec::new();
+    preview.find("second", Options::default());
+    readouts.push(said.borrow().clone());
+    preview.find_next();
+    readouts.push(said.borrow().clone());
+    let cells = native.cells();
+    let cell = cells.iter().find(|(_, selected, _)| !selected.is_empty());
+    let painted = cells.iter().filter(|(.., painted)| *painted).count();
+    preview.find_next();
+    readouts.push(said.borrow().clone());
+    println!(
+        "bench preview find cells {readouts:?} selected={:?} painted={painted} page={:?}",
+        cell.map(|c| &c.1),
+        selected(&buffer)
+    );
 }
 
 /// What `buffer` has selected.

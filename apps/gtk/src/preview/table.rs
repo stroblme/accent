@@ -191,6 +191,12 @@ impl Table {
         table
     }
 
+    /// Its cells, row by row.
+    pub(super) fn labels(&self) -> Vec<gtk::Label> {
+        let cells = self.imp().cells.borrow();
+        cells.iter().map(|(label, _)| label.clone()).collect()
+    }
+
     fn set_width(&self, width: i32) {
         if self.imp().width.replace(width) != width {
             self.queue_resize();
@@ -205,9 +211,9 @@ impl Table {
 /// Each cell's markup, the text selected in it and whether matches are painted in it.
 #[cfg(feature = "bench")]
 pub(super) fn cells(page: &Page) -> Vec<(String, String, bool)> {
-    let labels = tables(page).flat_map(|t| t.imp().cells.borrow().clone());
+    let labels = tables(page).flat_map(|t| t.labels());
     labels
-        .map(|(label, _)| {
+        .map(|label| {
             let (start, end) = label.selection_bounds().unwrap_or_default();
             let text = label.text();
             let chars = text.chars().skip(start as usize);

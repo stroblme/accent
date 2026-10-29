@@ -156,12 +156,13 @@ pub(super) struct Find {
 /// Choose the next match from selection `at`, wrapping at both ends.
 /// Forward starts at the current start with `from_current`, otherwise
 /// after its end; backward chooses the last match before its start.
-pub(crate) fn next_match(
-    matches: &[Range<i32>],
-    at: Range<i32>,
+/// Places are characters, or whatever orders matches as the reader meets them.
+pub(crate) fn next_match<T: PartialOrd + Clone>(
+    matches: &[Range<T>],
+    at: Range<T>,
     forward: bool,
     from_current: bool,
-) -> Option<Range<i32>> {
+) -> Option<Range<T>> {
     let found = match (forward, from_current) {
         (true, true) => matches.iter().find(|m| m.start >= at.start),
         // Not the selection itself, which a match of no width at the caret would be.

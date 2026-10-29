@@ -93,3 +93,4 @@ bench preview edit kept=63 written=1
 bench preview code coloured=["print", "\"hi\""]
 bench preview find ["1 of 3", "2 of 3", "1 of 3", "1 of 2"] selected="side" painted=3
 bench preview find typed "1 of 2" selected="side"
+bench preview find cells ["1 of 2", "2 of 2", "1 of 2"] selected=Some("second") painted=1 page="second"

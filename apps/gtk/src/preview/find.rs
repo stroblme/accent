@@ -2,19 +2,39 @@
 //! `accent_core::search` over the page's text, the matches painted in the scheme's `search-match`
 //! look within a screen of the view and again as it scrolls, the current one selected. A render
 //! matches the page again once its text is all in, and where it wrote the selected match's block
-//! anew, the match at the mark it left is selected again. A table's cells are labels of their own,
-//! which this does not search.
+//! anew, the match at the mark it left is selected again. A table's cells are labels of their
+//! own: each is matched alone, its matches counted at the table's place in the text, painted by
+//! the label's attributes and the current one selected in the label.
 
 use super::native::Page;
+use super::table::Table;
 use crate::editor;
 use accent_core::search::{self, Options, Regex};
-use gtk::glib;
 use gtk::prelude::*;
+use gtk::{glib, pango};
 use std::cell::RefCell;
 use std::ops::Range;
 use std::rc::Rc;
 
 type Found = Box<dyn Fn(&str)>;
+
+/// Where a match starts or ends, in the order the page is read: a character of the page's text,
+/// or one of a table cell's, at the table's U+FFFC, `cell` counting the page's cells from 1.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct At {
+    offset: i32,
+    cell: usize,
+    char: i32,
+}
+
+impl At {
+    fn text(offset: i32) -> At {
+        At {
+            offset,
+            ..At::default()
+        }
+    }
+}
 
 pub(super) struct Find(Rc<Inner>);
 
@@ -37,8 +57,14 @@ struct State {
     /// The query compiled, or `None` while it is empty or does not compile.
     re: Option<Regex>,
     invalid: bool,
-    /// Where `re` matches in the page's text, in characters; out of date while `stale`.
-    matches: Vec<Range<i32>>,
+    /// Where `re` matches in the page's text and its cells; out of date while `stale`.
+    matches: Vec<Range<At>>,
+    /// The page's cells in order, and where each one's table stands in the text.
+    cells: Vec<(i32, gtk::Label)>,
+    /// The match selected in a cell, its characters: a cell's selection is the label's own.
+    selected: Option<(gtk::Label, Range<i32>)>,
+    /// The cells whose matches are painted.
+    painted: Vec<gtk::Label>,
     stale: bool,
     /// Whether the matches are painted: while the bar is up over the preview.
     highlight: bool,
@@ -173,58 +199,111 @@ impl Inner {
         if !state.stale {
             return;
         }
-        state.matches = match &state.re {
-            Some(re) => {
-                let (start, end) = self.page.buffer.bounds();
-                // A slice, which keeps a picture's or a table's U+FFFC: offsets stay the buffer's.
-                let text = self.page.buffer.slice(&start, &end, true);
-                (search::char_ranges(re, &text).into_iter())
-                    .map(|m| m.start as i32..m.end as i32)
-                    .collect()
-            }
-            None => Vec::new(),
-        };
         state.stale = false;
+        state.matches.clear();
+        state.cells.clear();
+        let Some(re) = state.re.clone() else {
+            return;
+        };
+        let buffer = &self.page.buffer;
+        let (start, end) = buffer.bounds();
+        // A slice, which keeps a picture's or a table's U+FFFC: offsets stay the buffer's.
+        let text = buffer.slice(&start, &end, true);
+        let mut matches: Vec<Range<At>> = (search::char_ranges(&re, &text).into_iter())
+            .map(|m| At::text(m.start as i32)..At::text(m.end as i32))
+            .collect();
+        let objects = text.chars().enumerate().filter(|(_, c)| *c == '\u{fffc}');
+        for (offset, _) in objects {
+            let offset = offset as i32;
+            let Some(anchor) = buffer.iter_at_offset(offset).child_anchor() else {
+                continue;
+            };
+            let tables = anchor
+                .widgets()
+                .into_iter()
+                .filter_map(|w| w.downcast::<Table>().ok());
+            for label in tables.flat_map(|t| t.labels()) {
+                state.cells.push((offset, label.clone()));
+                let cell = state.cells.len();
+                let at = |char: usize| At {
+                    offset,
+                    cell,
+                    char: char as i32,
+                };
+                let found = search::char_ranges(&re, &label.text());
+                matches.extend(found.into_iter().map(|m| at(m.start)..at(m.end)));
+            }
+        }
+        matches.sort_by_key(|m| m.start);
+        state.matches = matches;
+    }
+
+    /// The match the reader is at: the page's selection, else the cell match selected while its
+    /// label still holds it.
+    fn current(&self) -> Option<Range<At>> {
+        if let Some((start, end)) = self.page.buffer.selection_bounds() {
+            return Some(At::text(start.offset())..At::text(end.offset()));
+        }
+        let state = self.state.borrow();
+        let (label, chars) = state.selected.as_ref()?;
+        if label.selection_bounds() != Some((chars.start, chars.end)) {
+            return None;
+        }
+        let i = state.cells.iter().position(|(_, l)| l == label)?;
+        let at = |char| At {
+            offset: state.cells[i].0,
+            cell: i + 1,
+            char,
+        };
+        Some(at(chars.start)..at(chars.end))
     }
 
     /// Select the next match by [`editor::next_match`]'s rules, from the selection or else the
     /// top of the view, and bring it into view.
     fn step(&self, forward: bool, from_current: bool) {
         self.rematch();
-        let buffer = &self.page.buffer;
-        let at = match buffer.selection_bounds() {
-            Some((start, end)) => start.offset()..end.offset(),
-            None => {
-                let view = &self.page.view;
-                let top = view.line_at_y(view.visible_rect().y()).0.offset();
-                top..top
-            }
-        };
+        let at = self.current().unwrap_or_else(|| {
+            let view = &self.page.view;
+            let top = At::text(view.line_at_y(view.visible_rect().y()).0.offset());
+            top..top
+        });
         let found = editor::next_match(&self.state.borrow().matches, at, forward, from_current);
         if let Some(m) = found {
-            self.select(m);
+            self.select(&m);
             self.reveal();
         }
     }
 
-    fn select(&self, m: Range<i32>) {
+    fn select(&self, m: &Range<At>) {
         let buffer = &self.page.buffer;
-        let start = buffer.iter_at_offset(m.start);
-        buffer.select_range(&start, &buffer.iter_at_offset(m.end));
+        let start = buffer.iter_at_offset(m.start.offset);
+        let previous = self.state.borrow_mut().selected.take();
+        if let Some((label, _)) = previous {
+            label.select_region(0, 0);
+        }
+        match m.start.cell {
+            0 => buffer.select_range(&start, &buffer.iter_at_offset(m.end.offset)),
+            cell => {
+                buffer.place_cursor(&start);
+                let label = self.state.borrow().cells[cell - 1].1.clone();
+                label.select_region(m.start.char, m.end.char);
+                self.state.borrow_mut().selected = Some((label, m.start.char..m.end.char));
+            }
+        }
         buffer.move_mark(&self.mark, &start);
     }
 
     /// The page changed: where a render took the selection away with its block, the match at or
     /// after the mark it left is the one selected.
     fn keep(&self) {
-        if self.page.buffer.has_selection() {
+        self.rematch();
+        if self.current().is_some() {
             return;
         }
-        self.rematch();
-        let at = self.page.buffer.iter_at_mark(&self.mark).offset();
+        let at = At::text(self.page.buffer.iter_at_mark(&self.mark).offset());
         let found = editor::next_match(&self.state.borrow().matches, at..at, true, true);
         if let Some(m) = found {
-            self.select(m);
+            self.select(&m);
         }
     }
 
@@ -232,12 +311,22 @@ impl Inner {
     /// adjustment set at once and its upper bound widened, as `Page::jump` does.
     fn reveal(&self) {
         let view = &self.page.view;
-        let (Some(adjustment), Some((start, _))) =
-            (view.vadjustment(), self.page.buffer.selection_bounds())
-        else {
+        let (Some(adjustment), Some(m)) = (view.vadjustment(), self.current()) else {
             return;
         };
-        let (shown, at) = (view.visible_rect(), view.iter_location(&start));
+        let mut at = view.iter_location(&self.page.buffer.iter_at_offset(m.start.offset));
+        // In a cell, the label's own lines, once its table is laid out.
+        let label = m
+            .start
+            .cell
+            .checked_sub(1)
+            .map(|i| self.state.borrow().cells[i].1.clone());
+        if let Some(bounds) = label.and_then(|l| l.compute_bounds(view)) {
+            let (_, y) =
+                view.window_to_buffer_coords(gtk::TextWindowType::Widget, 0, bounds.y() as i32);
+            at = gtk::gdk::Rectangle::new(at.x(), y, at.width(), bounds.height() as i32);
+        }
+        let shown = view.visible_rect();
         let inside = at.y() >= shown.y() && at.y() + at.height() <= shown.y() + shown.height();
         if view.height() == 0 || inside {
             return;
@@ -262,6 +351,7 @@ impl Inner {
             return;
         };
         let mut wanted = Vec::new();
+        let mut cells: Vec<(usize, Vec<Range<i32>>)> = Vec::new();
         if self.state.borrow().highlight {
             editor::match_style(source, &self.tag);
             // Over every tag, code's included, as the editor's own find tag is.
@@ -273,15 +363,29 @@ impl Inner {
             to.forward_line();
             let to = to.offset();
             let state = self.state.borrow();
-            let first = state.matches.partition_point(|m| m.end < from);
-            wanted.extend(
-                (state.matches[first..].iter())
-                    .take_while(|m| m.start <= to)
-                    .filter(|m| !m.is_empty())
-                    .cloned(),
-            );
+            let first = state.matches.partition_point(|m| m.end < At::text(from));
+            let near = (state.matches[first..].iter())
+                .take_while(|m| m.start.offset <= to)
+                .filter(|m| !m.is_empty());
+            for m in near {
+                let chars = m.start.char..m.end.char;
+                match (m.start.cell, cells.last_mut()) {
+                    (0, _) => wanted.push(m.start.offset..m.end.offset),
+                    (cell, Some((last, ranges))) if *last == cell => ranges.push(chars),
+                    (cell, _) => cells.push((cell, vec![chars])),
+                }
+            }
         }
         crate::highlight::sync_tag(source, &self.tag, wanted);
+        let mut state = self.state.borrow_mut();
+        for label in state.painted.drain(..) {
+            label.set_attributes(None);
+        }
+        for (cell, ranges) in cells {
+            let label = state.cells[cell - 1].1.clone();
+            label.set_attributes(Some(&painted(&self.tag, &label.text(), &ranges)));
+            state.painted.push(label);
+        }
     }
 
     fn say(&self) {
@@ -303,13 +407,43 @@ impl Inner {
             }
         }
         self.rematch();
+        let at = self.current();
         let state = self.state.borrow();
-        let at = self.page.buffer.selection_bounds();
-        let at = at.map(|(start, end)| start.offset()..end.offset());
         let position = at.and_then(|at| state.matches.iter().position(|m| *m == at));
         let at = position.map_or(0, |i| i as u32 + 1);
         matches_label(at, state.matches.len() as u32)
     }
+}
+
+/// Characters `ranges` of a label's `text` in `look`'s colours, as attributes: a label has no tags.
+fn painted(look: &gtk::TextTag, text: &str, ranges: &[Range<i32>]) -> pango::AttrList {
+    let list = pango::AttrList::new();
+    let byte = |c: i32| {
+        text.char_indices()
+            .nth(c as usize)
+            .map_or(text.len(), |(b, _)| b) as u32
+    };
+    let channel = |v: f32| (v.clamp(0.0, 1.0) * 65535.0).round() as u16;
+    let background = look.background_rgba().filter(|_| look.is_background_set());
+    let foreground = look.foreground_rgba().filter(|_| look.is_foreground_set());
+    for range in ranges {
+        let add = |attribute: pango::Attribute| {
+            let mut attribute = attribute;
+            attribute.set_start_index(byte(range.start));
+            attribute.set_end_index(byte(range.end));
+            list.insert(attribute);
+        };
+        if let Some(c) = background {
+            let (r, g, b) = (channel(c.red()), channel(c.green()), channel(c.blue()));
+            add(pango::AttrColor::new_background(r, g, b).into());
+            add(pango::AttrInt::new_background_alpha(channel(c.alpha()).max(1)).into());
+        }
+        if let Some(c) = foreground {
+            let (r, g, b) = (channel(c.red()), channel(c.green()), channel(c.blue()));
+            add(pango::AttrColor::new_foreground(r, g, b).into());
+        }
+    }
+    list
 }
 
 /// Match `at` (1-based, 0 for none selected) of `total`: "3 of 12", "12 matches", "No results".
