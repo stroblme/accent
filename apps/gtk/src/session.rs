@@ -461,7 +461,7 @@ impl App {
         match named {
             Some(name) => {
                 self.save_session();
-                self.toast(&format!("Saved the session as {name}"));
+                self.toast(&format!("Saved session as {name}"));
             }
             None => self.save_session_dialog(),
         }
@@ -495,7 +495,7 @@ impl App {
     fn save_session_as(self: &Rc<Self>, name: &str) {
         let key = terminal::session_key(name);
         if terminal::session_name(&key).is_none() {
-            return self.toast("A session name cannot be empty or hold a /");
+            return self.toast("Enter a session name without /");
         }
         let taken = self.shell.upgrade().and_then(|shell| shell.app_for(&key));
         if taken.is_some_and(|app| !Rc::ptr_eq(&app, self)) {
@@ -513,9 +513,9 @@ impl App {
             .filter(|id| !mine.contains(*id))
             .count();
         let body = match ending {
-            0 => "This window takes its place.".to_string(),
-            1 => "Its shell ends, and this window takes its place.".to_string(),
-            n => format!("Its {n} shells end, and this window takes its place."),
+            0 => "Replace the saved session with this window.".to_string(),
+            1 => "End its running shell and replace the session with this window.".to_string(),
+            n => format!("End its {n} running shells and replace the session with this window."),
         };
         let name = name.to_string();
         dialogs::confirm(
@@ -552,7 +552,7 @@ impl App {
             self.window.set_title(Some(name));
         }
         self.save_session();
-        self.toast(&format!("Saved the session as {name}"));
+        self.toast(&format!("Saved session as {name}"));
     }
 
     /// Remember this window by `key` from now on, and offer in its menu what that key can do: the
@@ -593,13 +593,13 @@ impl App {
             return;
         };
         let body = match self.terminals().len() {
-            0 => "It leaves the recent list.".to_string(),
-            1 => "Its shell ends, and it leaves the recent list.".to_string(),
-            n => format!("Its {n} shells end, and it leaves the recent list."),
+            0 => "Remove this session from Recents.".to_string(),
+            1 => "End its running shell and remove the session from Recents.".to_string(),
+            n => format!("End its {n} running shells and remove the session from Recents."),
         };
         dialogs::confirm(
             &self.window,
-            &format!("Close the session {name}?"),
+            &format!("Close session {name}?"),
             &body,
             "Close Session",
             true,
@@ -784,12 +784,12 @@ impl App {
         let (icon, title, body) = match waiting {
             0 if self.key.borrow().is_terminal() => (
                 "utilities-terminal-symbolic",
-                "No Shell Open".to_string(),
+                "No Terminal Open".to_string(),
                 empty_hint(&self.config.borrow(), true, palette::accel_label),
             ),
             0 => (
                 "text-x-generic-symbolic",
-                "No Note Open".to_string(),
+                "No File Open".to_string(),
                 empty_hint(&self.config.borrow(), false, palette::accel_label),
             ),
             1 => (
@@ -1220,9 +1220,9 @@ fn empty_hint(config: &Config, terminal: bool, label: impl Fn(&str) -> Option<St
         (true, Some(chord)) => format!("Press {chord} to open one."),
         (true, None) => "Open one from the main menu.".to_string(),
         (false, Some(chord)) => {
-            format!("Pick one in the sidebar, or press {chord} to go to a file.")
+            format!("Open a file from the sidebar or press {chord}.")
         }
-        (false, None) => "Pick one in the sidebar.".to_string(),
+        (false, None) => "Open a file from the sidebar.".to_string(),
     }
 }
 
@@ -1252,7 +1252,7 @@ mod tests {
         config.shortcuts.insert(files, vec![]);
         assert_eq!(
             empty_hint(&config, false, label),
-            "Pick one in the sidebar."
+            "Open a file from the sidebar."
         );
         config.shortcuts.insert("win.terminal".into(), vec![]);
         assert_eq!(

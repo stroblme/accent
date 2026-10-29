@@ -250,7 +250,7 @@ fn fill_kernels(
     if choices.specs.is_empty() {
         let language = &choices.language;
         notes.append(&note(&format!(
-            "No {language} kernel was found: install one, then open this list again"
+            "No {language} kernel found. Install one and reopen this list"
         )));
         let searched = choices.searched.join(", ");
         return notes.append(&note(&format!("Kernels are read from {searched}")));
@@ -271,7 +271,7 @@ fn fill_kernels(
             button.grab_focus();
         }
     }
-    notes.append(&note("A running kernel keeps its own until restarted"));
+    notes.append(&note("Restart the kernel to use the selected environment"));
 }
 
 /// A row of the popover, `label` and a check mark when `chosen`.

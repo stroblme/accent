@@ -42,7 +42,7 @@ pub struct NotebookTab {
     key: RefCell<String>,
     path: RefCell<PathBuf>,
     pub page: adw::TabPage,
-    /// "This notebook changed on disk", while the tab holds edits the file does not.
+    /// "This notebook changed outside Accent", while the tab holds edits the file does not.
     banner: adw::Banner,
     scroller: gtk::ScrolledWindow,
     /// The cells, under the strip that adds one at the top.
@@ -165,7 +165,7 @@ pub fn open(
         .hscrollbar_policy(gtk::PolicyType::Never)
         .build();
     let banner = adw::Banner::builder()
-        .title("This notebook changed on disk")
+        .title("This notebook changed outside Accent")
         .button_label("Resolve…")
         .build();
     let host = gtk::Box::new(gtk::Orientation::Vertical, 0);

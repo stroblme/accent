@@ -479,8 +479,10 @@ impl Debug {
         let watch = Section::new("Watch", &watch_body(&watched, &data));
 
         let breakpoint_rows = Rows::new(data.breakpoint.clone(), data.edit.clone());
-        let (breakpoints_body, _) =
-            body(&breakpoint_rows.list, "Click a line's gutter to stop there");
+        let (breakpoints_body, _) = body(
+            &breakpoint_rows.list,
+            "Click beside a line number to add a breakpoint",
+        );
         let exception_rows = gtk::Box::new(gtk::Orientation::Vertical, 0);
         // Their checks on the breakpoints' 16 px glyphs (`install_chrome_css`).
         exception_rows.add_css_class("exception-filters");

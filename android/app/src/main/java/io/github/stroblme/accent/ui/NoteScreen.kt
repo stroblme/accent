@@ -113,7 +113,7 @@ fun NoteScreen(model: VaultModel, open: Open, chrome: Chrome, onTag: (String) ->
 @Composable
 private fun ConflictBanner(conflict: String, onMine: () -> Unit, onTheirs: () -> Unit) {
     Column(Modifier.fillMaxWidth().padding(horizontal = Gutter, vertical = 8.dp)) {
-        Text("Sync found another version of this note.", style = MaterialTheme.typography.bodyMedium)
+        Text("This note has a sync conflict.", style = MaterialTheme.typography.bodyMedium)
         Row {
             TextButton(onClick = onMine) { Text("Keep mine") }
             TextButton(onClick = onTheirs) { Text("Keep theirs") }
@@ -126,7 +126,7 @@ private fun ConflictBanner(conflict: String, onMine: () -> Unit, onTheirs: () ->
 private fun ChangedBanner(onKeep: () -> Unit, onReload: () -> Unit) {
     Column(Modifier.fillMaxWidth().padding(horizontal = Gutter, vertical = 8.dp)) {
         Text(
-            "This note changed on disk. Saving is paused until you choose a version.",
+            "This note changed outside Accent. Choose a version to resume saving.",
             style = MaterialTheme.typography.bodyMedium,
         )
         Row {
@@ -142,9 +142,9 @@ private fun ChangedBanner(onKeep: () -> Unit, onReload: () -> Unit) {
 private fun LeaveDialog(name: String, onAnswer: (Boolean?) -> Unit) {
     AlertDialog(
         onDismissRequest = { onAnswer(null) },
-        title = { Text("Unsaved edits") },
+        title = { Text("Unsaved changes") },
         text = {
-            Text("\"$name\" changed on disk while you were editing. Your edits have not been saved.")
+            Text("\"$name\" changed outside Accent. Your changes have not been saved.")
         },
         confirmButton = {
             Column(horizontalAlignment = Alignment.End) {
@@ -161,8 +161,8 @@ private fun LeaveDialog(name: String, onAnswer: (Boolean?) -> Unit) {
 private fun UnsavedDialog(why: String, onAnswer: (Boolean?) -> Unit) {
     AlertDialog(
         onDismissRequest = { onAnswer(null) },
-        title = { Text("Unsaved edits") },
-        text = { Text("$why. Your edits have not been saved.") },
+        title = { Text("Unsaved changes") },
+        text = { Text("$why. Your changes have not been saved.") },
         confirmButton = { TextButton(onClick = { onAnswer(null) }) { Text("Stay") } },
         dismissButton = {
             TextButton(onClick = { onAnswer(false) }) { Text("Leave without saving") }

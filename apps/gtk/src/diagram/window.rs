@@ -420,7 +420,7 @@ impl App {
                 editor::Landing::Failed(e) if report && e.is_offline() => {
                     app.show_offline();
                     if explicit {
-                        app.toast("Not connected. Changes were not saved");
+                        app.toast("Disconnected. Changes have not been saved");
                     }
                 }
                 editor::Landing::Failed(e) if report => app.cannot("save", e),
@@ -557,7 +557,7 @@ impl App {
                     Ok(Some(texture)) => {
                         let bytes = texture.save_to_png_bytes();
                         if bytes.len() > MAX_IMAGE {
-                            return app.toast("Pictures over 2 MiB are not embedded");
+                            return app.toast("Choose an image no larger than 2 MiB");
                         }
                         let size = (f64::from(texture.width()), f64::from(texture.height()));
                         tab.add_image("image/png", &bytes, size);
@@ -624,7 +624,7 @@ impl App {
                 Err(why) => return app.toast(&why),
             };
             if bytes.len() > MAX_IMAGE {
-                return app.toast("Pictures over 2 MiB are not embedded");
+                return app.toast("Choose an image no larger than 2 MiB");
             }
             let size = match gdk::Texture::from_bytes(&glib::Bytes::from(&bytes)) {
                 Ok(t) => (f64::from(t.width()), f64::from(t.height())),

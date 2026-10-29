@@ -575,7 +575,7 @@ fn wire_pane_drops(app: &Rc<App>, pane: &Rc<Pane>) {
     ));
 }
 
-/// A window showing No Note Open has no pane on screen to take a dragged tab: its placeholder
+/// A window showing No File Open has no pane on screen to take a dragged tab: its placeholder
 /// takes one into the pane behind it, as that pane's middle would (`App::dropped`).
 ///
 /// On the stack rather than the placeholder: the tab landing swaps the placeholder out, and a

@@ -309,7 +309,7 @@ impl Shell {
                     .and_then(|window| self.app_at(&window));
                 if let Some(app) = app {
                     app.toast(
-                        "config.toml does not parse. Changes made here are kept and written once it does",
+                        "Cannot read config.toml. Fix the file to save your preference changes",
                     );
                 }
             }
@@ -543,7 +543,7 @@ impl Shell {
         dialogs::confirm(
             over,
             &format!("Remove session {name}?"),
-            "Its shells end now.",
+            "This ends its running shells.",
             "Remove",
             true,
             move || {
@@ -1011,24 +1011,24 @@ pub fn movable(app: &App, doc: &Doc) -> bool {
 fn written_out(from: &Rc<App>, doc: &Doc) -> Result<PathBuf, String> {
     let key = doc.key();
     if !movable(from, doc) {
-        return Err("This tab cannot move between windows.".to_string());
+        return Err("This tab cannot be moved to another window".to_string());
     }
     if let Some(tab) = doc.tab().filter(|tab| tab.save.modified.get())
         && let Err(e) = from.flush_tab(tab)
     {
-        return Err(format!("Save failed: {e}"));
+        return Err(format!("Cannot save: {e}"));
     }
     // A notebook the same way.
     if let Doc::Notebook(n) = doc
         && let Err(e) = from.flush_notebook(n)
     {
-        return Err(format!("Save failed: {e}"));
+        return Err(format!("Cannot save: {e}"));
     }
     // A diagram the same way, a label still being typed going into its cell first.
     if let Doc::Diagram(d) = doc {
         d.finish_label();
         if let Err(e) = from.flush_diagram(d) {
-            return Err(format!("Save failed: {e}"));
+            return Err(format!("Cannot save: {e}"));
         }
     }
     Ok(match doc::is_loose_key(&key) {

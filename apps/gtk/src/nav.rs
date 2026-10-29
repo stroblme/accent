@@ -459,7 +459,7 @@ impl App {
             return;
         };
         if Rc::ptr_eq(&from, at) && at.tabs.n_pages() <= 1 {
-            return self.toast("This pane has only one note.");
+            return self.toast("This pane has only one tab");
         }
         self.select_survivor(page);
         let pane = self.split_beside(at, side);

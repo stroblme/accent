@@ -30,13 +30,13 @@ pub enum Alert {
 impl Alert {
     fn title(self) -> &'static str {
         match self {
-            Alert::Compare => "This file changed on disk",
-            Alert::Restore => "This file was deleted on disk",
-            Alert::Conflict => "A sync conflict copy of this file exists",
-            Alert::ReadOnly => "This file is not valid UTF-8 and is shown read-only",
-            Alert::Installed => "This file belongs to an installed package and is shown read-only",
-            Alert::Host => "This file is on the remote host and is shown read-only",
-            Alert::Unread => "This notebook opens as text",
+            Alert::Compare => "This file changed outside Accent",
+            Alert::Restore => "This file was deleted",
+            Alert::Conflict => "This file has a sync conflict",
+            Alert::ReadOnly => "Read-only: this file is not valid UTF-8",
+            Alert::Installed => "Read-only: this file belongs to an installed package",
+            Alert::Host => "Read-only: this file is on the remote host",
+            Alert::Unread => "Cannot read this notebook. Showing as text",
         }
     }
 

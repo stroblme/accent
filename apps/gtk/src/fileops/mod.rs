@@ -160,7 +160,7 @@ fn new_file_with(ops: &Rc<Ops>, dir: &str, name: &str, templates: Vec<String>) {
     let picker = template_picker(&templates);
     if let Some(picker) = &picker {
         picker.set_tooltip_text(Some(
-            "Fills the file's content. New from Template uses the template's target.",
+            "Use the template's content. Choose New from Template to use its destination too.",
         ));
         let row = labelled("Template content", picker);
         // A prefilled name may already say the file will be markdown, and nothing has changed yet.
@@ -631,7 +631,7 @@ fn path_dialog(
 /// stem links may still resolve without rewrites.
 fn confirm_demote(ops: &Rc<Ops>, from: &str, to: &str) {
     let body = format!(
-        "Links to {} keep pointing at it, but it opens as plain text: its own links and tags are no longer read.",
+        "{} will open as plain text. Links to this file will work, but its links and tags will no longer be indexed.",
         basename(to)
     );
     let (ops, from, to, window) = (
@@ -643,7 +643,7 @@ fn confirm_demote(ops: &Rc<Ops>, from: &str, to: &str) {
     // Not destructive: nothing is lost, the note simply stops being read as one.
     confirm(
         &window,
-        "No Longer a Note?",
+        "Change File Type?",
         &body,
         "Rename",
         false,
@@ -737,7 +737,7 @@ fn plan(ops: &Rc<Ops>, moves: Vec<(String, String)>, verb: &'static str) {
     // would go through in silence and break every wikilink pointing at the note. Rename and a
     // dropped row both land here, which is why the check sits at the top rather than in either.
     if !(ops.reconciled)() {
-        return (ops.toast)("Cannot rename yet: the vault is still being indexed");
+        return (ops.toast)("Wait for indexing to finish before renaming");
     }
     // Every unsaved buffer is written out first: the links are read off the disk, and so is
     // what a language server answers about the imports — positions in the file, not the tab.

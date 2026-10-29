@@ -637,7 +637,7 @@ impl Panel {
     pub fn delete_other_branch(self: &Rc<Self>) {
         let others = self.other_branches();
         if others.is_empty() {
-            return (self.hooks.toast)("There is no other branch to delete");
+            return (self.hooks.toast)("No other branches to delete");
         }
         let labels: Vec<&str> = others.iter().map(String::as_str).collect();
         let picker = gtk::DropDown::from_strings(&labels);
@@ -645,7 +645,7 @@ impl Panel {
         form.append(&dialogs::labelled("Branch", &picker));
         let dialog = dialogs::alert(
             "Delete Branch",
-            "A branch that is not fully merged asks again before it goes.",
+            "Select a branch to delete. Unmerged branches require confirmation.",
             &[
                 ("cancel", "Cancel", adw::ResponseAppearance::Default),
                 ("delete", "Delete", adw::ResponseAppearance::Destructive),
@@ -703,7 +703,7 @@ impl Panel {
         };
         let others = self.other_branches();
         if others.is_empty() {
-            return (self.hooks.toast)("There is no other branch to merge");
+            return (self.hooks.toast)("No other branches to merge");
         }
         let labels: Vec<&str> = others.iter().map(String::as_str).collect();
         let picker = gtk::DropDown::from_strings(&labels);
@@ -1139,15 +1139,15 @@ fn discard_body(
     };
     if !folder {
         return match (untracked, trash) {
-            (0, _) => format!("{what} goes back to what the index holds.{undone}"),
+            (0, _) => format!("{what} returns to its staged version.{undone}"),
             (_, true) => format!("{what} is not tracked, so it moves to the trash."),
             (_, false) => format!("{what} is not tracked, so it is deleted permanently.{undone}"),
         };
     }
     let back = match tracked {
         0 => None,
-        1 => Some("1 file goes back to what the index holds".to_string()),
-        n => Some(format!("{n} files go back to what the index holds")),
+        1 => Some("1 file returns to its staged version".to_string()),
+        n => Some(format!("{n} files return to their staged versions")),
     };
     let trashed = match (untracked, trash) {
         (0, _) => None,
@@ -1163,8 +1163,8 @@ fn discard_body(
         .join(" and ");
     let kept = match kept {
         0 => String::new(),
-        1 => " 1 repository of its own is left as it is.".to_string(),
-        n => format!(" {n} repositories of their own are left as they are."),
+        1 => " 1 nested repository is unchanged.".to_string(),
+        n => format!(" {n} nested repositories are unchanged."),
     };
     match what {
         "" => format!("{parts}.{kept}{undone}"),
@@ -1271,7 +1271,7 @@ mod tests {
     fn a_folder_discard_says_how_many_files_go_where() {
         assert_eq!(
             discard_body("a.md", false, 1, 0, 0, true),
-            "a.md goes back to what the index holds. This cannot be undone."
+            "a.md returns to its staged version. This cannot be undone."
         );
         assert_eq!(
             discard_body("new.md", false, 0, 1, 0, true),
@@ -1279,7 +1279,7 @@ mod tests {
         );
         assert_eq!(
             discard_body("src", true, 3, 1, 0, true),
-            "In src, 3 files go back to what the index holds and 1 untracked file moves to the \
+            "In src, 3 files return to their staged versions and 1 untracked file moves to the \
              trash. This cannot be undone."
         );
         assert_eq!(
@@ -1288,12 +1288,12 @@ mod tests {
         );
         assert_eq!(
             discard_body("", true, 3, 2, 0, true),
-            "3 files go back to what the index holds and 2 untracked files move to the trash. \
+            "3 files return to their staged versions and 2 untracked files move to the trash. \
              This cannot be undone."
         );
         assert_eq!(
             discard_body("", true, 0, 2, 1, true),
-            "2 untracked files move to the trash. 1 repository of its own is left as it is."
+            "2 untracked files move to the trash. 1 nested repository is unchanged."
         );
     }
 
@@ -1311,7 +1311,7 @@ mod tests {
         );
         assert_eq!(
             discard_body("", true, 3, 2, 0, false),
-            "3 files go back to what the index holds and 2 untracked files are deleted \
+            "3 files return to their staged versions and 2 untracked files are deleted \
              permanently. This cannot be undone."
         );
         assert_eq!(

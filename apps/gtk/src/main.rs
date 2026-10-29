@@ -864,7 +864,7 @@ impl App {
                 .map(|(level, text, at)| (sidebar::Line::new(level, text), at))
                 .collect();
             if rows.is_empty() {
-                let body = "Add a heading to a markdown cell to help navigate this notebook.";
+                let body = "Add headings to Markdown cells to build an outline.";
                 let none = sidebar::outline_note("No Headings", body);
                 return sidebar.set_outline(Some(&none));
             }
@@ -900,12 +900,9 @@ impl App {
                 ),
                 None if tab.flavour().is_note() => (
                     "No Headings",
-                    "Add a heading to help navigate this note.".to_string(),
+                    "Add headings to build an outline.".to_string(),
                 ),
-                None => (
-                    "No Symbols",
-                    "Nothing in this file has a name to list.".to_string(),
-                ),
+                None => ("No Symbols", "No symbols found in this file.".to_string()),
             };
             return sidebar.set_outline(Some(&sidebar::outline_note(title, &body)));
         }
@@ -1307,8 +1304,8 @@ impl App {
             && !self.told_unheld.replace(true)
         {
             self.toast(match Path::new("/.flatpak-info").exists() {
-                true => "Host commands are not allowed; shells run sandboxed and will not persist",
-                false => "accent-cli is not installed; shells will not persist",
+                true => "Host access unavailable. Terminals will not persist",
+                false => "Install accent-cli to keep terminals running after Accent exits",
             });
         }
         let (tabs, at) = match at {

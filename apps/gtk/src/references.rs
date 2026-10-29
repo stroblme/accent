@@ -375,12 +375,12 @@ pub fn reference_icon(row: &str) -> &'static str {
 /// Empty-state text distinguishing file backlinks from text-symbol references.
 fn references_empty(doc: Option<&Doc>) -> &'static str {
     match doc {
-        Some(doc) if is_dependency(doc) => "Nothing refers to the symbol under the caret.",
+        Some(doc) if is_dependency(doc) => "No references to this symbol.",
         Some(doc) if doc.is_transient() || doc.is_loose() => {
             "Open a file from this vault to see what links to it."
         }
         Some(Doc::Text(tab)) if !tab.flavour().is_note() => {
-            "Nothing refers to the symbol under the caret, and no note links to this file."
+            "No references to this symbol or backlinks to this file."
         }
         Some(_) => "No notes link to this file yet.",
         // Nothing open at all.

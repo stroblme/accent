@@ -31,12 +31,12 @@ const FIELDS: [(&str, &str, Setting); 3] = [
     ),
     (
         "Hit Count",
-        "Stop only on the hits this names, as 5, >= 5 or % 5",
+        "Stop on matching hits, such as 5, >= 5 or % 5",
         |b| &mut b.hit_condition,
     ),
     (
         "Log Message",
-        "Print this to the Debug Console instead of stopping; {expressions} are evaluated",
+        "Log to the Debug Console without stopping. Use {expressions} for values",
         |b| &mut b.log_message,
     ),
 ];

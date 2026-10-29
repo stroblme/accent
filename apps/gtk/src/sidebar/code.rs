@@ -97,7 +97,7 @@ impl Code {
             &status_page(
                 ICON,
                 "Checking…",
-                "Goals show once the check reaches the caret",
+                "Goals appear when checking reaches the caret",
             ),
             Some("checking"),
         );

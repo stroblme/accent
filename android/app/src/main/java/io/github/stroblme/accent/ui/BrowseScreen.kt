@@ -231,7 +231,7 @@ fun BrowseScreen(
                         onBack = { tag = null },
                     ) { onOpen(it, null) }
                     failed != null -> Quiet(failed)
-                    all?.isEmpty() == true -> Quiet("No tags yet. Add a #tag to a note to see it here.")
+                    all?.isEmpty() == true -> Quiet("No tags. Add a #tag to a note.")
                     all != null -> Tags(all, placesIn(all)) {
                         tag = it
                         query = ""
@@ -253,9 +253,9 @@ fun BrowseScreen(
                 val links = linked?.getOrNull()
                 val failed = linked.failed("Cannot list the links")
                 when {
-                    to == null -> Quiet("Open a file from this vault to see what links to it.")
+                    to == null -> Quiet("Open a vault file to see its backlinks.")
                     failed != null -> Quiet(failed)
-                    links?.isEmpty() == true -> Quiet("No notes link to ${title(to)} yet.")
+                    links?.isEmpty() == true -> Quiet("No backlinks to ${title(to)}.")
                     else -> Notes("Links to ${title(to)}", links, placesIn(links)) {
                         model.openBacklink(it, from = to)
                         onClose()
@@ -366,7 +366,7 @@ fun BrowseScreen(
             onValue = { query = it },
             placeholder = when (mode) {
                 Mode.Search -> "Search"
-                Mode.Files -> "Go to a file"
+                Mode.Files -> "Find a file"
                 Mode.Tags -> tag?.let { "Filter #${it.name}" } ?: "Find a tag"
                 Mode.Backlinks -> "Filter backlinks"
                 Mode.Command -> if (picking != null) "Find a template" else "Run a command"
@@ -458,17 +458,17 @@ private const val SLOW_MS = 200L
 /** Status shown while indexing is running or paused with incomplete results. */
 internal fun readingLine(indexing: Boolean, paused: Boolean, scanned: Long): String? = when {
     indexing && scanned > 0 ->
-        "Reading your vault… %,d files read. More may appear.".format(scanned)
-    indexing -> "Reading your vault… More files may appear."
-    paused -> "Reading paused. Results may be incomplete."
+        "Indexing… %,d files. Results may be incomplete.".format(scanned)
+    indexing -> "Indexing… Results may be incomplete."
+    paused -> "Indexing paused. Results may be incomplete."
     else -> null
 }
 
 /** What a query that matched nothing says: nothing yet, while [readingLine] has a line. */
 internal fun nothingFound(indexing: Boolean, paused: Boolean): String = when {
-    indexing -> "Nothing found yet. Your vault is still being read."
-    paused -> "Nothing found in the files read so far."
-    else -> "Nothing found."
+    indexing -> "No results yet. Indexing is in progress."
+    paused -> "No results in indexed files."
+    else -> "No results."
 }
 
 /** A line over the lists about all of them, in the muted colour. */

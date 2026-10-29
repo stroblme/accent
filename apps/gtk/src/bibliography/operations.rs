@@ -8,7 +8,7 @@ impl App {
             return self.needs_vault("create a bibliography");
         };
         let form = dialogs::form();
-        let path = field(&form, "Vault-relative Path", "references.bib");
+        let path = field(&form, "Path Relative to Vault", "references.bib");
         let app = self.clone();
         form_dialog(self, "New Bibliography", "Create", &form, move || {
             let path = path.text().to_string();
@@ -36,7 +36,7 @@ impl App {
 
     pub(super) fn cite_references(self: &Rc<Self>, path: &str, selected: Vec<usize>, insert: bool) {
         if selected.is_empty() {
-            return self.toast("Select references in Bibliography first");
+            return self.toast("Select references in the Bibliography pane");
         }
         let library = self
             .tab_for(path)
@@ -68,9 +68,9 @@ impl App {
         } else {
             self.window.clipboard().set_text(&keys);
             self.toast(if selected.len() == 1 {
-                "Citation key copied"
+                "Copied citation key"
             } else {
-                "Citation keys copied"
+                "Copied citation keys"
             });
         }
     }
@@ -172,7 +172,7 @@ impl App {
             match found {
                 Ok(used) if used.is_empty() => {
                     if tab.text() != before {
-                        return app.toast("Bibliography changed; review the operation again");
+                        return app.toast("Bibliography changed. Review your changes again");
                     }
                     review(&app, &tab, &format!("Change {old} to {new}"), before, after);
                 }
@@ -274,7 +274,7 @@ async fn saved(app: &Rc<App>, tab: &Rc<Tab>) -> Result<(), String> {
     }
     if tab.save.modified.get() || tab.save.disk_changed.get() {
         return Err(format!(
-            "Could not save {}; resolve its banner first",
+            "Cannot save {}. Resolve the file warning first",
             tab.rel()
         ));
     }
@@ -303,7 +303,7 @@ pub(super) async fn transfer(
         .cloned()
         .ok_or("Open a vault to transfer references")?;
     if source.text() != bib.source || source.save.disk_changed.get() {
-        return Err("Source changed; select the references again".into());
+        return Err("Source bibliography changed. Select the references again".into());
     }
     let remainder = moving
         .then(|| bib.move_remainder(selected))
@@ -400,9 +400,9 @@ pub(super) async fn transfer(
         // The destination is durable before source removal; dependency records stay in the source.
         apply(source, &bib.source, &after)
             .map_err(|why| format!("Copied references; source retained: {why}"))?;
-        saved(app, source)
-            .await
-            .map_err(|why| format!("Destination saved; source removal is still unsaved: {why}"))?;
+        saved(app, source).await.map_err(|why| {
+            format!("Destination saved. Cannot save removal from the source: {why}")
+        })?;
     }
     if let Some(panel) = app.bibliography.get() {
         panel.refresh();

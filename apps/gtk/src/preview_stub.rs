@@ -38,11 +38,8 @@ impl Preview {
             .build();
         let page = adw::StatusPage::builder()
             .icon_name("x-office-document-symbolic")
-            .title("Preview Is Not Available")
-            .description(
-                "This build of accent has no WebKitGTK, which renders notes. \
-                 Your browser can show the note instead.",
-            )
+            .title("Preview Unavailable")
+            .description("Open this note in your browser to preview it.")
             .child(&open)
             .build();
         Preview {

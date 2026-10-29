@@ -127,8 +127,8 @@ impl Toasts {
     /// Put `toast` on top of the pile.
     pub fn add(self: &Rc<Self>, toast: Toast) {
         let announcement = match &toast.button {
-            Some((label, _)) => format!("A toast appeared: {}, has a button: {label}", toast.title),
-            None => format!("A toast appeared: {}", toast.title),
+            Some((label, _)) => format!("{}. Action: {label}", toast.title),
+            None => toast.title.clone(),
         };
         let up = self.draw(toast.title, toast.button, toast.timeout);
         let gone = push(&mut self.up.borrow_mut(), toast.key, up.clone());

@@ -198,7 +198,7 @@ impl App {
             e if e.is_offline() => {
                 self.show_offline();
                 if explicit {
-                    self.toast("Not connected. Changes were not saved");
+                    self.toast("Disconnected. Changes have not been saved");
                 }
             }
             e => self.cannot("save", e),
@@ -468,8 +468,8 @@ impl App {
         // Compare rather than Reload: reloading threw the buffer away on one click, and the
         // resolver shows both sides and now lets them be merged by hand.
         let dialog = dialogs::alert(
-            "File Changed on Disk",
-            &format!("{} was modified elsewhere since you opened it.", tab.rel()),
+            "File Changed Outside Accent",
+            &format!("{} changed outside Accent.", tab.rel()),
             &[
                 ("cancel", "Cancel", adw::ResponseAppearance::Default),
                 ("compare", "Compare", adw::ResponseAppearance::Default),
@@ -559,7 +559,7 @@ impl App {
         let dialog = dialogs::alert(
             &format!("{kind} Changed on Disk"),
             &format!(
-                "{} changed on disk. Reload to discard your edits, or overwrite the disk version.",
+                "{} changed outside Accent. Reload to discard your edits, or overwrite the saved version.",
                 doc::file_name(key)
             ),
             &[
@@ -597,7 +597,7 @@ impl App {
     ) {
         let body = match error {
             Error::Core(Core::ChangedOnDisk { .. }) => {
-                format!("{rel} changed on disk, so your edits could not be saved.")
+                format!("{rel} changed outside Accent. Your changes have not been saved.")
             }
             e => format!("{rel} could not be saved: {e}"),
         };
@@ -720,7 +720,7 @@ impl App {
                         Some(conflict) => app.resolve_conflict(&rel, conflict),
                         None => {
                             tab.clear_alert(Alert::Conflict);
-                            app.toast("The conflict copy is gone");
+                            app.toast("The other version is no longer available");
                         }
                     }
                 });
@@ -1001,9 +1001,9 @@ impl App {
                 fileops::Taken::Folder => app.cannot(&format!("save as {name}"), "it is a folder"),
                 fileops::Taken::File => {
                     let open = app.doc_for(&to);
-                    let mut body = format!("{to} already exists, and saving replaces it.");
+                    let mut body = format!("{to} already exists. Saving will replace it.");
                     if open.is_some() {
-                        body.push_str(" It is open in a tab, which closes without saving.");
+                        body.push_str(" Its open tab will close without saving.");
                     }
                     let weak = Rc::downgrade(&app);
                     dialogs::confirm(

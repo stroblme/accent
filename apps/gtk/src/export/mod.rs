@@ -41,7 +41,7 @@ impl App {
     pub(crate) fn print(self: &Rc<Self>) {
         match self.menu_doc() {
             Some(Doc::Text(tab)) if tab.flavour().is_markdown() => {
-                self.open_in_browser(tab, Some("Opened in your browser — print from there."))
+                self.open_in_browser(tab, Some("Opened in your browser. Print from there"))
             }
             Some(Doc::Pdf(pdf)) => pdf::export::print(self, &pdf),
             Some(Doc::Diagram(tab)) => diagram::export::print(self, &tab),

@@ -126,7 +126,9 @@ pub(super) async fn pdf_urls(
         }
     }
     if urls.is_empty() {
-        return Err("No downloadable PDF found. Supply a direct PDF URL or attach a file downloaded in your browser.".into());
+        return Err(
+            "No PDF found. Enter a direct PDF URL or attach a file from your browser.".into(),
+        );
     }
     Ok(urls)
 }
@@ -135,10 +137,14 @@ pub(super) async fn pdf(urls: &[String], cancel: &gio::Cancellable) -> Result<Ve
     let session = session();
     let mut error = "No PDF URL".to_string();
     for url in urls {
-        match get(&session,url,"application/pdf",100<<20,cancel).await {
-            Ok(bytes) if bytes.windows(5).take(1024).any(|w|w==b"%PDF-")=>return Ok(bytes),
-            Ok(_)=>error="The server returned a webpage rather than a PDF; attach a browser download instead".into(),
-            Err(why)=>error=why,
+        match get(&session, url, "application/pdf", 100 << 20, cancel).await {
+            Ok(bytes) if bytes.windows(5).take(1024).any(|w| w == b"%PDF-") => return Ok(bytes),
+            Ok(_) => {
+                error =
+                    "The server returned a web page. Download the PDF in your browser and attach it"
+                        .into()
+            }
+            Err(why) => error = why,
         }
         if cancel.is_cancelled() {
             break;
@@ -230,7 +236,7 @@ mod tests {
                         pdf(std::slice::from_ref(&url), &cancel)
                             .await
                             .unwrap_err()
-                            .contains("webpage")
+                            .contains("web page")
                     );
                     assert!(
                         get(&session(), &url, "*/*", 3, &cancel)

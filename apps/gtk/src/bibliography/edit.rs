@@ -65,12 +65,10 @@ pub(super) fn apply(tab: &Rc<Tab>, before: &str, after: &str) -> Result<(), Stri
         return Err("This file is read-only".into());
     }
     if tab.save.disk_changed.get() {
-        return Err("Resolve the file’s external change before editing references".into());
+        return Err("Resolve the file change before editing references".into());
     }
     if tab.text() != before {
-        return Err(
-            "The bibliography changed while this operation was open; review it again".into(),
-        );
+        return Err("Bibliography changed. Review your changes again".into());
     }
     Library::parse(after).map_err(|e| e.to_string())?;
     if before == after {
@@ -213,11 +211,11 @@ pub(super) fn operate(app: &Rc<App>, tab: &Rc<Tab>, name: &str, selected: Vec<us
         return merge(app, tab, bib);
     }
     if selected.is_empty() {
-        return app.toast("Select one or more references first");
+        return app.toast("Select one or more references");
     }
     let i = selected[0];
     if i >= bib.entries.len() {
-        return app.toast("The bibliography changed; select the references again");
+        return app.toast("Bibliography changed. Select the references again");
     }
     match name {
         "edit" => edit(app, tab, i),
@@ -261,7 +259,11 @@ fn key(app: &Rc<App>, tab: &Rc<Tab>, bib: Library, index: usize) {
         &bib.generate_key(index, &default_pattern)
             .unwrap_or_default(),
     );
-    let notice=gtk::Label::builder().label("Existing keys stay unchanged until applied. Citation usages are checked before renaming.").wrap(true).xalign(0.0).build();
+    let notice = gtk::Label::builder()
+        .label("Changes apply after review. Citation usages are checked before renaming.")
+        .wrap(true)
+        .xalign(0.0)
+        .build();
     form.append(&notice);
     let b = bib.clone();
     pattern.connect_changed(glib::clone!(
@@ -349,7 +351,7 @@ fn check(app: &Rc<App>, tab: &Rc<Tab>, bib: Library) {
             Some(Ok((issues, cleaned))) => {
                 let form = dialogs::form();
                 let text = if issues.is_empty() {
-                    "No problems found".into()
+                    "No issues found".into()
                 } else {
                     issues.join("\n")
                 };
@@ -361,7 +363,7 @@ fn check(app: &Rc<App>, tab: &Rc<Tab>, bib: Library) {
                         .xalign(0.0)
                         .build(),
                 );
-                form.append(&gtk::Label::builder().label("Review Cleanup normalizes DOI resolver URLs. Missing fields and attachments can be corrected in Edit Reference.").wrap(true).xalign(0.0).build());
+                form.append(&gtk::Label::builder().label("Review Cleanup standardises DOI URLs. Use Edit Reference to fix missing fields and attachments.").wrap(true).xalign(0.0).build());
                 let target = tab.clone();
                 let parent = app.clone();
                 form_dialog(
@@ -424,7 +426,7 @@ fn merge(app: &Rc<App>, tab: &Rc<Tab>, bib: Library) {
 
 fn merge_pair(app: &Rc<App>, tab: &Rc<Tab>, bib: Library, (keep, remove): (usize, usize)) {
     let form = dialogs::form();
-    form.append(&gtk::Label::builder().label(format!("Keep {} and merge {} into it. Choose fields to replace. Attachments from both entries are retained.",bib.entries[keep].key,bib.entries[remove].key)).wrap(true).xalign(0.0).build());
+    form.append(&gtk::Label::builder().label(format!("Keep {} and merge {} into it. Choose fields to replace. Both entries’ attachments are kept.",bib.entries[keep].key,bib.entries[remove].key)).wrap(true).xalign(0.0).build());
     let mut fields = Vec::new();
     for f in &bib.entries[remove].fields {
         if f.name == "file" {
@@ -503,7 +505,7 @@ fn open_pdf(app: &Rc<App>, tab: &Tab, bib: &Library, i: usize) {
         Err(e) => return app.cannot("open attachment", e),
     };
     let Some(file) = files.first() else {
-        return app.toast("No attachment; use Attach PDF or Download PDF");
+        return app.toast("No PDF attached. Use Attach PDF or Download PDF");
     };
     match bib::attachment_path(&tab.rel(), &file.path) {
         Ok(path) => app.open_path(&path),

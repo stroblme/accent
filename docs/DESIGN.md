@@ -790,7 +790,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - A restored window has an empty Back and Forward: a restore's selections are not places.
   A first opening, or a session without a layout, is one pane; a split's share is kept to 10–90 %.
 - A tab on a file outside the window's vault carries `document-open-symbolic` in its indicator slot, tooltipped Outside this vault, so saving it is never a surprise and it is plain why it has no backlinks.
-- A tab dragged into another window moves there, its buffer written first; one showing No Note Open takes it anywhere on that page.
+- A tab dragged into another window moves there, its buffer written first; one showing No File Open takes it anywhere on that page.
   One vault never having two windows, it arrives from another vault and is adopted as a file from outside a vault: it edits and saves, without index, backlinks or wikilink resolution.
   A shell, a comparison and a remote vault's file cannot be reopened elsewhere, so they go back to their window with a toast.
 - A tab let go outside every window moves to a window of its own, as Move to New Window moves it (below), wherever the compositor puts that window: GTK 4 places none at the pointer.
@@ -934,14 +934,14 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - There are two unnamed ones at most, one per kind, and the launch that builds one decides its kind for good: `accent --terminal` goes to the terminal window and a file from outside the open vaults to the documents window, so a PDF opened from Files never lands among the shells.
   What is opened in either by hand stays there without changing its kind, and a closed one is built again by the next launch of its kind.
   Open in New Window and Move to New Window are the exception to "at most": each builds a window of its own for the one file, which no launch joins (user decision 2026-09-30).
-- Closing an unnamed window ends its shells, nothing being able to take them up; an empty shells window says No Shell Open.
+- Closing an unnamed window ends its shells, nothing being able to take them up; an empty shells window says No Terminal Open.
 - Everything that needs the vault says so instead of failing quietly.
 
 ### Preferences
 
 - `AdwPreferencesDialog` of `AdwPreferencesGroup` / `AdwSwitchRow`, an `AdwComboRow` each for the theme, the focus mode (its subtitle saying what the level fades) and the Debug Terminal (Terminal), and a destructive `AdwButtonRow` for Restore Defaults.
 - A click outside it closes it, as one outside the palette does (Palette).
-- Recolour to the Theme holds a switch each for Images, PDFs and Diagrams, all on (user decision 2026-10-09).
+- Match Colours to Theme holds a switch each for Images, PDFs and Diagrams, all on (user decision 2026-10-09).
   A kind switched off shows its files as they are, and its Invert command recolours one file onto the theme's paper and ink instead (PDF, Image, Diagram).
   Images covers the images a note shows too, Diagrams the canvas and a note's embeds; a switch redoes for those files what a theme change does.
 - Editor holds Full-Width Preview under Column Width, off, since the preview's page follows that width (Preview).
@@ -1526,6 +1526,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Header capitalisation for buttons, menu items, tab titles and tooltips; sentence capitalisation for messages and descriptions.
   An ellipsis (…) only when the label needs further input before acting.
   No OK / Yes / No: the affirmative button carries its verb, such as Save or Discard.
+- Keep UI copy short and direct. Toasts state the outcome without a trailing full stop; descriptions use full sentences where needed.
+  Errors name the action and cause, with a recovery step when available. Keep data-loss warnings explicit.
+  Use “changed outside Accent” for external edits, “changes” for unsaved work and “indexing” for vault progress on both platforms.
 
 ## Colour
 
@@ -2006,7 +2009,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
   A stop during the scan writes nothing, since a partial scan would read every file it had not reached as deleted.
   The pause is not saved: the index is a diff of the disk, so opening the vault again is the resume.
   Closing the window stops a walk the same way, on a host too, so a close never waits for a first index; it is no pause, and the next open carries on by itself.
-- A toast for a thing that happened and is over ("Saved", "Moved to Trash"); a banner for a state that persists and needs a decision ("This file changed on disk", "A sync conflict copy of this file exists"); an `AdwAlertDialog` only for a choice that can lose data: overwrite, discard, delete permanently. <https://developer.gnome.org/hig/patterns/feedback/toasts.html> · <https://developer.gnome.org/hig/patterns/feedback/banners.html> · <https://developer.gnome.org/hig/patterns/feedback/dialogs.html>
+- A toast for a thing that happened and is over ("Saved", "Moved to Trash"); a banner for a state that persists and needs a decision ("This file changed outside Accent", "This file has a sync conflict"); an `AdwAlertDialog` only for a choice that can lose data: overwrite, discard, delete permanently. <https://developer.gnome.org/hig/patterns/feedback/toasts.html> · <https://developer.gnome.org/hig/patterns/feedback/banners.html> · <https://developer.gnome.org/hig/patterns/feedback/dialogs.html>
 - Toasts stack at the bottom centre, the newest on top, three at most, a fourth taking the oldest away: `AdwToastOverlay` shows one and queues the rest, so a newer toast waited behind every older one.
   Each goes on its own timeout, held while the pointer is over it or it has the keyboard; Escape takes the newest away, and what is on screen is all the history there is.
   A toast may carry a key, and a newer one under the same key takes its place.
@@ -2023,7 +2026,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
   Its button, Reconnect Now, is the one attempt that may ask.
 - A first connection that failed and an outage past ten minutes keep a plain Reconnect under the last reason: neither comes back by itself.
   So does a refusal from the host — `serve` refusing a root that is not a folder ("cannot open the vault on host: /srv/x is not a folder") — which is not a dropped link and stops the countdown.
-- While a remote window's stored tabs wait for the host, the document column says how many ("Waiting for host", "3 tabs will open when it answers.") and the tree says its files will appear when the host responds, rather than No Note Open and No Files Yet; a window closed before its host answered leaves the stored session as it found it.
+- While a remote window's stored tabs wait for the host, the document column says how many ("Waiting for host", "3 tabs will open when it answers.") and the tree says its files will appear when the host responds, rather than No File Open and No Files Yet; a window closed before its host answered leaves the stored session as it found it.
   A window without a vault has no banner: its remote tabs say for themselves when the link went, and come back on a key press.
 - A file that will not open as text — binary (a NUL byte, the test `grep` and `git` use) or over the 16 MiB cap — gets an `AdwStatusPage` in its own tab, not a dialog or a toast: the file is what failed, so the failure stays with it.
   Anything waiting for it to become a tab (a comparison, a jump to a match) is told in a toast ("Cannot compare notes.png: binary file"), the status page answering only the open.

@@ -611,7 +611,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         // Not asked, no walk will say it is over either.
         if (!was.paused && !was.indexing) runCatching { v.rescan() }.onFailure {
             if (vault === v) _state.update { s -> s.walkOver() }
-            fail("Cannot read the vault again", it)
+            fail("Cannot refresh the vault", it)
         }
         // An open note may have been changed by Syncthing while the app was away.
         _state.value.note?.let { onChanged(it.rel) }
@@ -638,7 +638,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(indexing = true, paused = false) }
         runCatching { v.resumeIndexing() }.onFailure {
             if (vault === v) _state.update { s -> s.walkOver() }
-            fail("Cannot resume reading the vault", it)
+            fail("Cannot resume indexing", it)
         }
     }
 
@@ -990,7 +990,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
             if (!shown.holds(ticket) || vault !== v) return@launch
             made.onSuccess { rel ->
                 // The file changed since the list was read; nothing was made.
-                if (rel == null) return@onSuccess said("This template no longer has a destination")
+                if (rel == null) return@onSuccess said("This template has no destination")
                 leave { show(rel, ticket) }
             }.onFailure { fail("Cannot create this note", it) }
         }
@@ -1022,8 +1022,8 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
                 takeTheirs({ v.adoptConflict(open.rel, conflict) }, { v.delete(conflict) })
             }
             when (taken) {
-                is Theirs.Failed -> return@leave fail("Cannot take the other copy", taken.why)
-                is Theirs.CopyKept -> fail("Took the other copy, but cannot remove it", taken.why)
+                is Theirs.Failed -> return@leave fail("Cannot use the other version", taken.why)
+                is Theirs.CopyKept -> fail("Other version applied. Cannot remove the conflict copy", taken.why)
                 Theirs.Taken -> {}
             }
             show(open.rel, ticket, back = open.back)
@@ -1041,7 +1041,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         val done = withContext(Dispatchers.IO) { runCatching { v.delete(conflict) } }
         done.onSuccess {
             _state.update { s -> s.withNote { it.copy(conflicts = it.conflicts - conflict) } }
-        }.onFailure { fail("Cannot remove the other copy", it) }
+        }.onFailure { fail("Cannot remove the conflict copy", it) }
     }
 
     private fun onConflict(original: String) = _state.update { s ->

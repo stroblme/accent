@@ -69,6 +69,7 @@ import io.github.stroblme.accent.OpenPdf
 import io.github.stroblme.accent.PdfModel
 import io.github.stroblme.accent.PdfPlace
 import io.github.stroblme.accent.VaultModel
+import io.github.stroblme.accent.failure
 import io.github.stroblme.accent.ffi.Comment
 import io.github.stroblme.accent.ffi.Glyph
 import io.github.stroblme.accent.ffi.InkStyle
@@ -97,7 +98,7 @@ fun PdfScreen(model: VaultModel, pdf: OpenPdf, indexing: Boolean, chrome: Chrome
     LaunchedEffect(path) {
         runCatching { PdfModel.open(path) }
             .onSuccess { doc = it }
-            .onFailure { failed = it.message ?: "This file could not be opened." }
+            .onFailure { failed = it.message ?: "Cannot open this PDF" }
     }
     DisposableEffect(path) { onDispose { doc?.close() } }
     // Asked again whenever a walk ends, which is when a link written elsewhere reaches the index.
@@ -114,7 +115,7 @@ fun PdfScreen(model: VaultModel, pdf: OpenPdf, indexing: Boolean, chrome: Chrome
         try {
             open.printCopy(notes, (accent.rgb() shl 8) or 0xFFu)
                 .onSuccess { printPdf(context, File(path).name.removeSuffix(".pdf"), it, open.pageCount) }
-                .onFailure { model.said("This PDF could not be printed") }
+                .onFailure { model.said(failure("Cannot print this PDF", it)) }
         } finally {
             model.printing(false)
         }
@@ -155,7 +156,7 @@ fun LoosePdfScreen(uri: Uri) {
             }
             PdfModel.of(bytes)
         }.onSuccess { doc = it }
-            .onFailure { failed = it.message ?: "This file could not be opened." }
+            .onFailure { failed = it.message ?: "Cannot open this PDF" }
     }
     DisposableEffect(uri) { onDispose { doc?.close() } }
     // The name the app that handed the file over gives it: what the bar shows, and what a copied
@@ -259,7 +260,7 @@ private fun Reader(
         if (!doc.dirty) return@LaunchedEffect
         delay(INK_SAVE_MS)
         onSave(doc).onFailure {
-            snackbar.showSnackbar(it.message ?: "This file could not be saved.")
+            snackbar.showSnackbar(failure("Cannot save this PDF", it))
         }
     }
 
@@ -1367,7 +1368,7 @@ private const val TAP_SLOP = 12f
 /** Open an allowed document URL through [launchUri]; say why a rejected scheme goes nowhere. */
 private fun leave(context: Context, uri: String, onSay: (String) -> Unit) {
     val target = Uri.parse(uri)
-    if (target.scheme?.lowercase() !in OUTWARD) return onSay("This type of link can't be opened")
+    if (target.scheme?.lowercase() !in OUTWARD) return onSay("This link type is not supported")
     launchUri(context, uri, onSay)
 }
 

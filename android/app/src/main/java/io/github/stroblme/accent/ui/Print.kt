@@ -57,7 +57,7 @@ suspend fun printNote(context: Context, model: VaultModel, rel: String, text: St
     }
     if (ready == null) {
         view.destroy()
-        return model.said("The note took too long to prepare for printing")
+        return model.said("Print preparation timed out. Try again")
     }
     val name = title(rel)
     context.getSystemService(PrintManager::class.java)

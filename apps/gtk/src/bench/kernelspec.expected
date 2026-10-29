@@ -5,4 +5,4 @@ bench kernel spec interrupted cell 2 count=[2] outputs=stream:"sleeping\n",error
 bench kernel spec picked Fake Lang 2 session=fakelang2
 bench kernel spec restarted cell 3 count=[1] outputs=stream:"two\n"
 bench kernel spec on Fake Lang 2
-bench kernel spec missing No nolang kernel toast "This notebook asks for the nokernel kernel, which is not installed"
+bench kernel spec missing No nolang kernel toast "The nokernel kernel required by this notebook is not installed"

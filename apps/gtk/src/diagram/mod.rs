@@ -46,9 +46,9 @@ pub struct DiagramTab {
     key: RefCell<String>,
     path: RefCell<PathBuf>,
     pub page: adw::TabPage,
-    /// "This diagram changed on disk", while the tab holds edits the file does not.
+    /// "This diagram changed outside Accent", while the tab holds edits the file does not.
     banner: adw::Banner,
-    /// "This diagram links images from the web", while it does and the reader has not said Load.
+    /// "This diagram contains web images", while it does and the reader has not said Load.
     web_banner: adw::Banner,
     /// Permission to download web images, granted here or restored from the window's
     /// `web_images` session state.
@@ -134,11 +134,11 @@ pub fn open(
     ring.set_tool(Tool::Select);
     ring.attach(&overlay);
     let banner = adw::Banner::builder()
-        .title("This diagram changed on disk")
+        .title("This diagram changed outside Accent")
         .button_label("Resolve…")
         .build();
     let web_banner = adw::Banner::builder()
-        .title("This diagram links images from the web")
+        .title("This diagram contains web images")
         .button_label("Load")
         .build();
     let host = gtk::Box::new(gtk::Orientation::Vertical, 0);

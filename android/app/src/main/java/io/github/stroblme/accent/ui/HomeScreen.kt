@@ -156,8 +156,7 @@ private fun GoneBanner(onReopen: () -> Unit) {
     Column(Modifier.fillMaxWidth().windowInsetsPadding(clear)) {
         Column(Modifier.padding(horizontal = Gutter, vertical = 8.dp)) {
             Text(
-                "This vault is no longer read. Changes made elsewhere will not show until it " +
-                    "reopens.",
+                "Vault updates have stopped. Reopen to see changes made elsewhere.",
                 style = MaterialTheme.typography.bodyMedium,
             )
             TextButton(onClick = onReopen) { Text("Reopen") }
@@ -207,9 +206,10 @@ private fun Empty(
     ) {
         Text(
             when {
-                opening || indexing -> "Reading your vault…"
-                paused -> "Reading paused"
-                else -> "Nothing open"
+                opening -> "Opening vault…"
+                indexing -> "Indexing vault…"
+                paused -> "Indexing paused"
+                else -> "No file open"
             },
             style = MaterialTheme.typography.headlineSmall,
         )
@@ -218,18 +218,18 @@ private fun Empty(
             when {
                 // Ahead of the lines below, which are about a walk still running: a stopped one
                 // may have read nothing at all.
-                paused && ready -> "You can browse files read so far."
-                paused -> "No files read yet. Resume to continue."
+                paused && ready -> "Indexed files are available in Browse."
+                paused -> "No files indexed. Resume to continue."
                 // A first walk of a large vault takes minutes over shared storage, so it says how
                 // far it has got. Nothing can be opened while it is still finding the files;
                 // once it starts reading them, what it has read is already there to open — which
                 // is [ready], and is the same moment the Browse button turns up.
-                !ready && scanned > 0 -> "Found %,d files so far.".format(scanned)
-                !ready -> "Looking through your files…"
-                indexing && scanned > 0 -> "%,d files read. You can start now.".format(scanned)
+                !ready && scanned > 0 -> "%,d files found".format(scanned)
+                !ready -> "Looking for files…"
+                indexing && scanned > 0 -> "%,d files indexed. Ready to browse.".format(scanned)
                 // A walk over an index that already has files: the rescan a resume starts.
-                indexing -> "Reading your files…"
-                else -> "Your notes are ready to browse."
+                indexing -> "Indexing files…"
+                else -> "Open a file from Browse."
             },
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,

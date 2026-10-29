@@ -55,7 +55,7 @@ pub(super) fn pane(data: &Rc<Data>) -> (gtk::Widget, Rc<dyn Fn()>) {
         &status_page(
             ICON,
             "No Forwarded Ports",
-            "A forward makes a port on one machine reachable on the other.",
+            "Forward a port to connect services between machines.",
         ),
         Some("empty"),
     );

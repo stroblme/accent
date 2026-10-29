@@ -237,7 +237,7 @@ impl App {
                 return self.open_status(
                     key,
                     "Binary File",
-                    &format!("{} is not text, so there is nothing to edit.", human(size)),
+                    &format!("This file cannot be edited as text ({}).", human(size)),
                     how,
                 );
             }

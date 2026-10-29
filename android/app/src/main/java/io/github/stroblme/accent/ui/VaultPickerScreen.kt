@@ -53,7 +53,7 @@ fun VaultPickerScreen(model: VaultModel) {
             Text("Accent", style = MaterialTheme.typography.headlineSmall)
             Spacer(Modifier.height(8.dp))
             Text(
-                "Choose the folder that holds your notes.",
+                "Choose your notes folder.",
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -61,8 +61,8 @@ fun VaultPickerScreen(model: VaultModel) {
 
             if (!granted) {
                 Text(
-                    "To read notes in place, Accent needs access to all files. " +
-                        "It doesn't upload your notes.",
+                    "Accent needs access to all files to read and edit your notes. " +
+                        "Accent does not upload your notes.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

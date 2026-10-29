@@ -13,16 +13,16 @@ class ReadingTest {
     @Test
     fun `the line is up exactly while a list may be missing files`() {
         assertEquals(
-            "Reading your vault… 120 files read. More may appear.",
+            "Indexing… 120 files. Results may be incomplete.",
             readingLine(indexing = true, paused = false, scanned = 120),
         )
         // The rescan's scan, which counts nothing it could show.
         assertEquals(
-            "Reading your vault… More files may appear.",
+            "Indexing… Results may be incomplete.",
             readingLine(indexing = true, paused = false, scanned = 0),
         )
         assertEquals(
-            "Reading paused. Results may be incomplete.",
+            "Indexing paused. Results may be incomplete.",
             readingLine(indexing = false, paused = true, scanned = 0),
         )
         assertNull(readingLine(indexing = false, paused = false, scanned = 0))

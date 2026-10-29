@@ -360,7 +360,7 @@ impl NotebookTab {
         let model = self.model.borrow();
         match model.kernel() {
             Some(name) => {
-                format!("This notebook asks for the {name} kernel, which is not installed")
+                format!("The {name} kernel required by this notebook is not installed")
             }
             None => format!("No {} kernel is installed", model.language()),
         }
@@ -1018,7 +1018,7 @@ impl App {
                 if let Err(e) = answered.await
                     && let Some(app) = app.upgrade()
                 {
-                    app.kernel_toast(&format!("Cannot answer the input: {e}"));
+                    app.kernel_toast(&format!("Cannot send input to the kernel: {e}"));
                 }
             });
         });

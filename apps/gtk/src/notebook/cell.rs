@@ -95,8 +95,8 @@ impl Execution {
             Execution::Running => "Running",
             Execution::Succeeded => "Succeeded",
             Execution::Failed => "Failed",
-            Execution::StaleSucceeded => "Previous run succeeded; result may be stale",
-            Execution::StaleFailed => "Previous run failed; result may be stale",
+            Execution::StaleSucceeded => "Previous run succeeded. Output may be out of date",
+            Execution::StaleFailed => "Previous run failed. Output may be out of date",
         }
     }
 

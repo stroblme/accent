@@ -757,7 +757,7 @@ impl App {
                 let name = name.to_string();
                 self.with_tab(path, Opened::Kept, "edit bibliography", move |app, tab| {
                     if shown.as_ref().is_some_and(|text| *text != tab.text()) {
-                        return app.toast("Bibliography changed; select the references again");
+                        return app.toast("Bibliography changed. Select the references again");
                     }
                     edit::operate(app, tab, &name, selected);
                 });

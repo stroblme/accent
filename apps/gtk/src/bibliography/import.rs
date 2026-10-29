@@ -15,7 +15,7 @@ impl App {
             .build();
         form.append(
             &gtk::Label::builder()
-                .label("Or paste BibTeX / write a new entry")
+                .label("Paste BibTeX or create an entry")
                 .xalign(0.0)
                 .build(),
         );
@@ -110,7 +110,7 @@ impl App {
                     .find(|e| bib::doi(&destination.value(e, "doi")).as_ref() == Some(&doi))
             {
                 app.toast(&format!(
-                    "Already in this bibliography: {}. Use Refresh Metadata or Download PDF.",
+                    "{} is already in this bibliography. Use Refresh Metadata or Download PDF.",
                     existing.key
                 ));
                 return;
@@ -176,7 +176,7 @@ impl App {
     pub(super) fn refresh_reference(self: &Rc<Self>, tab: &Rc<Tab>, bib: Library, index: usize) {
         let doi = bib.value(&bib.entries[index], "doi");
         let Some(doi) = bib::doi(&doi) else {
-            return self.toast("Add a valid DOI to this reference first");
+            return self.toast("Add a valid DOI to this reference");
         };
         let app = self.clone();
         let tab = tab.clone();
@@ -238,7 +238,7 @@ impl App {
                         }
                     }
                     if target.text() != bib.source {
-                        return Err("Bibliography changed; refresh again".into());
+                        return Err("Bibliography changed. Refresh again".into());
                     }
                     review(
                         &parent,
@@ -255,18 +255,14 @@ impl App {
 
     pub(super) fn download_reference(self: &Rc<Self>, tab: &Rc<Tab>, bib: Library, index: usize) {
         let form = dialogs::form();
-        let url = field(&form, "PDF URL (optional; otherwise look up the DOI)", "");
+        let url = field(&form, "PDF URL (optional, uses DOI if empty)", "");
         let email = field(
             &form,
-            "Unpaywall Email (optional, sent to Unpaywall for open-access lookup)",
+            "Unpaywall Email (optional, shared for open-access lookup)",
             &self.config.borrow().bibliography_unpaywall_email,
         );
         let key = bib.entries[index].key.clone();
-        let path = field(
-            &form,
-            "PDF Path Relative to This Bibliography",
-            &pdf_path(&key),
-        );
+        let path = field(&form, "PDF Path Relative to Bibliography", &pdf_path(&key));
         form.append(&gtk::Label::builder().label("The reference is kept if downloading fails. A login page is not saved as a PDF. Existing attachments are never overwritten.").wrap(true).xalign(0.0).build());
         let parent = self.clone();
         let target = tab.clone();
@@ -302,7 +298,7 @@ impl App {
     ) -> Result<(), String> {
         let dest = bib::attachment_path(&tab.rel(), &rel).map_err(|e| e.to_string())?;
         if url.is_empty() && doi.is_none() {
-            return Err("Supply a PDF URL or add a DOI to the reference".into());
+            return Err("Enter a PDF URL or add a DOI to the reference".into());
         }
         let Some(vault) = self.vault().cloned() else {
             return Err("Open a vault to download attachments".into());
@@ -351,9 +347,9 @@ impl App {
 
     pub(super) fn attach_reference(self: &Rc<Self>, tab: &Rc<Tab>, bib: Library, index: usize) {
         let form = dialogs::form();
-        let path = field(&form, "PDF Path Relative to This Bibliography", "");
+        let path = field(&form, "PDF Path Relative to Bibliography", "");
         let local = Rc::new(RefCell::new(None::<std::path::PathBuf>));
-        let choose = gtk::Button::with_label("Choose PDF from This Computer…");
+        let choose = gtk::Button::with_label("Choose PDF…");
         form.append(&choose);
         let selected = gtk::Label::builder().wrap(true).xalign(0.0).build();
         form.append(&selected);

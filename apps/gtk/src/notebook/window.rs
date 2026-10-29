@@ -277,7 +277,7 @@ impl App {
                 editor::Landing::Failed(e) if report && e.is_offline() => {
                     app.show_offline();
                     if explicit {
-                        app.toast("Not connected. Changes were not saved");
+                        app.toast("Disconnected. Changes have not been saved");
                     }
                 }
                 editor::Landing::Failed(e) if report => app.cannot("save", e),

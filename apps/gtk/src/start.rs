@@ -147,7 +147,7 @@ pub fn present(
             let status = adw::StatusPage::builder()
                 .icon_name(crate::APP_ID)
                 .title("Accent")
-                .description("Open a folder of Markdown notes to get started.")
+                .description("Open a folder to start working.")
                 .child(&column)
                 .build();
             toolbar.set_content(Some(&status));
@@ -825,9 +825,7 @@ fn address(host: &str, path: &str, home: Option<&str>) -> Result<String, String>
         true => match home {
             Some(home) => format!("{}{}", home.trim_end_matches('/'), &path[1..]),
             None => {
-                return Err(
-                    "The host has not answered. Enter the full path instead of ~.".to_string(),
-                );
+                return Err("Host unavailable. Enter an absolute path instead of ~.".to_string());
             }
         },
     };

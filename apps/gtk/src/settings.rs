@@ -22,16 +22,20 @@ const THEMES: [(Theme, &str); 4] = [
 
 /// The focus mode levels, in the order the combo row lists them, each with what it fades.
 const FOCUS_MODES: [(FocusMode, &str, &str); 3] = [
-    (FocusMode::None, "None", "Nothing fades while you type"),
+    (
+        FocusMode::None,
+        "None",
+        "Keep the interface visible while typing",
+    ),
     (
         FocusMode::Medium,
         "Medium",
-        "The bars and the sidebar fade while you type",
+        "Fade toolbars and sidebar while typing",
     ),
     (
         FocusMode::High,
         "High",
-        "The text away from the caret and the other panes fade too",
+        "Also dim surrounding text and other panes",
     ),
 ];
 
@@ -211,7 +215,7 @@ fn appearance_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::P
     let names: Vec<&str> = THEMES.iter().map(|(_, name)| *name).collect();
     let row = adw::ComboRow::builder()
         .title("Theme")
-        .subtitle("Solarized follows the system light and dark setting")
+        .subtitle("Solarized follows system appearance")
         .model(&gtk::StringList::new(&names))
         .selected(index_of(chosen))
         .build();
@@ -255,13 +259,13 @@ fn appearance_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::P
 /// they are, and its Invert command recolours one of them instead.
 fn recolour_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder()
-        .title("Recolour to the Theme")
+        .title("Match Colours to Theme")
         .build();
     type Switch = fn(&mut RecolourConfig) -> &mut bool;
     let rows: [(&str, Option<&str>, Switch); 3] = [
         (
             "Images",
-            Some("Scans, plots and screenshots; photos stay as they are"),
+            Some("Scans, plots and screenshots. Photos keep their colours"),
             |k| &mut k.images,
         ),
         ("PDFs", None, |k| &mut k.pdfs),
@@ -329,7 +333,7 @@ fn editor_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Prefe
     // does; the tooltip is what keeps it discoverable (DESIGN.md, Iconography).
     let reset = gtk::Button::builder()
         .icon_name("document-revert-symbolic")
-        .tooltip_text("Reset to the System Font")
+        .tooltip_text("Use System Font")
         .valign(gtk::Align::Center)
         .sensitive(chosen.is_some())
         .build();
@@ -390,7 +394,7 @@ fn editor_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Prefe
     // would stop meaning anything.
     let width = adw::SpinRow::with_range(30.0, 100.0, 5.0);
     width.set_title("Column Width");
-    width.set_subtitle("Width of the document column, as a percentage of the editor");
+    width.set_subtitle("Document width as a percentage of the editor");
     width.set_value(f64::from(config.borrow().column_width));
     width.connect_value_notify({
         let (config, save) = (config.clone(), save.clone());
@@ -403,7 +407,7 @@ fn editor_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Prefe
 
     let full = adw::SwitchRow::builder()
         .title("Full-Width Preview")
-        .subtitle("Let the preview use its whole width instead of the column width")
+        .subtitle("Use the full preview width")
         .active(config.borrow().full_width_preview)
         .build();
     full.connect_active_notify({
@@ -419,7 +423,7 @@ fn editor_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Prefe
     // screen, and a language whose house style is three of them is not ours to rule out.
     let indent = adw::SpinRow::with_range(1.0, 16.0, 1.0);
     indent.set_title("Indent Width");
-    indent.set_subtitle("Number of columns per indent");
+    indent.set_subtitle("Columns per indent");
     indent.set_value(f64::from(config.borrow().indent_width));
     indent.connect_value_notify({
         let (config, save) = (config.clone(), save.clone());
@@ -446,7 +450,7 @@ fn editor_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Prefe
 
     let words = adw::SwitchRow::builder()
         .title("Word Suggestions")
-        .subtitle("Offer words from the document and the dictionary as you type")
+        .subtitle("Suggest words from the document and dictionary")
         .active(config.borrow().word_suggestions)
         .build();
     words.connect_active_notify({
@@ -460,7 +464,7 @@ fn editor_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Prefe
 
     let ghost = adw::SwitchRow::builder()
         .title("Ghost Text")
-        .subtitle("Suggest the rest of a line from your vault; press Tab to accept")
+        .subtitle("Complete lines using your vault. Press Tab to accept")
         .active(config.borrow().ghost_text)
         .build();
     ghost.connect_active_notify({
@@ -488,7 +492,7 @@ fn editor_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Prefe
 
     let minimap = adw::SwitchRow::builder()
         .title("Minimap")
-        .subtitle("Show a code map beside the document instead of the scrollbar")
+        .subtitle("Replace the scrollbar with a document overview")
         .active(config.borrow().minimap)
         .build();
     minimap.connect_active_notify({
@@ -525,7 +529,7 @@ fn files_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Prefer
     // palette toggles the same value.
     let hidden = adw::SwitchRow::builder()
         .title("Show Hidden Files")
-        .subtitle("Include files and folders whose names begin with a dot")
+        .subtitle("Show files and folders with names starting with a dot")
         .active(config.borrow().show_hidden)
         .build();
     hidden.connect_active_notify({
@@ -539,7 +543,7 @@ fn files_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Prefer
 
     let tint = adw::SwitchRow::builder()
         .title("Colour Changed Files")
-        .subtitle("Modified files and their folders in the accent colour, new ones in green")
+        .subtitle("Use the accent colour for changes and green for new files")
         .active(config.borrow().git_tint)
         .build();
     tint.connect_active_notify({
@@ -561,7 +565,7 @@ fn git_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Preferen
 
     let tree = adw::SwitchRow::builder()
         .title("Group Changes by Folder")
-        .subtitle("Show changed files by folder in the Git pane")
+        .subtitle("Organise changes by folder in the Git pane")
         .active(config.borrow().git_tree)
         .build();
     tree.connect_active_notify({
@@ -606,7 +610,7 @@ fn terminal_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Pre
     // Off, a focused shell leaves the window a small reserved set of chords (`actions::kept`).
     let forward = adw::SwitchRow::builder()
         .title("Forward All Keys")
-        .subtitle("Only copy, paste and Ctrl+Page Up and Down between tabs stay with accent")
+        .subtitle("Send all keys except copy, paste and Ctrl+Page Up/Down")
         .active(config.borrow().forward_keys_to_terminal)
         .build();
     forward.connect_active_notify({
@@ -622,7 +626,7 @@ fn terminal_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Pre
     let names: Vec<&str> = DEBUG_TERMINALS.iter().map(|(_, name)| *name).collect();
     let place = adw::ComboRow::builder()
         .title("Debug Terminal")
-        .subtitle("Where a debugged program's terminal and the Debug Console open")
+        .subtitle("Pane for the debug terminal and console")
         .model(&gtk::StringList::new(&names))
         .selected(
             DEBUG_TERMINALS
@@ -653,7 +657,7 @@ fn commands_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Pre
     let group = adw::PreferencesGroup::builder()
         .title("Commands")
         .description(
-            "Run from Run Command or a shortcut, each in a terminal of its own at the vault root",
+            "Run from the command palette or a shortcut in a new terminal at the vault root",
         )
         .build();
     command_rows(&group, &Rc::default(), config, save, None);
@@ -838,7 +842,7 @@ fn vault_group(
     ));
     group.add(&entry_row(
         "New Files Folder",
-        Some("Empty means the vault root"),
+        Some("Leave empty to use the vault root"),
         &vault.new_file_dir,
         config,
         root,
@@ -848,7 +852,7 @@ fn vault_group(
     // Kept as typed but for spaces at the ends: `/` is the vault root and `./` the note's folder.
     group.add(&entry_row(
         "Attachments Folder",
-        Some("Where pasted and dropped images go. Leave empty for the note's folder; use ./name for a subfolder beside it"),
+        Some("Folder for pasted and dropped images. Leave empty for the note's folder, or use ./name for a subfolder"),
         &vault.attachment_folder,
         config,
         root,
@@ -897,9 +901,8 @@ fn reset_group(
             crate::dialogs::confirm(
                 &dialog,
                 "Restore Default Preferences?",
-                "Theme, recolouring, fonts, editor options, every vault's folders and any \
-                 shortcuts you changed go back to their defaults. Your recent vaults and your \
-                 commands are kept.",
+                "Reset appearance, editor settings, vault folders and shortcuts. \
+                 Recent vaults and custom commands are kept.",
                 "Restore",
                 true,
                 move || {

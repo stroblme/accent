@@ -1076,7 +1076,7 @@ impl PdfTab {
                 )
             }
             false => (
-                "PDF Support Is Not Available",
+                "PDF Support Unavailable",
                 format!(
                     "libpdfium was not found in {}.",
                     pdf::library_dir().display()
