@@ -8,10 +8,11 @@ mod web;
 
 use crate::{App, Opened, Tab, dialogs, work};
 use accent_core::bib::{self, Library};
+use accent_core::walk::FileKind;
 use adw::prelude::*;
 use gtk::{gio, glib, pango};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::rc::{Rc, Weak};
 use std::time::Duration;
 
@@ -321,6 +322,10 @@ pub struct Panel {
     single: gtk::Label,
     entries: Rc<Entries>,
     generation: Cell<u64>,
+    /// The folders [`follow`](Self::follow) is listing again, and the generation of its newest
+    /// listing, which covers them all: an older one landing later is dropped.
+    relisting: RefCell<BTreeSet<String>>,
+    listing: Cell<u64>,
     changing: Cell<bool>,
     changed: crate::widgets::Debounce,
 }
@@ -402,6 +407,8 @@ impl Panel {
             single,
             entries,
             generation: Cell::new(0),
+            relisting: RefCell::default(),
+            listing: Cell::new(0),
             changing: Cell::new(false),
             changed: crate::widgets::Debounce::new(Duration::from_millis(150)),
         });
@@ -483,6 +490,69 @@ impl Panel {
             Event::FileRenamed { from, to } => names(from) || names(to),
             _ => false,
         }
+    }
+    /// Keep the file list in step with a `.bib` created, deleted or moved outside accent. A new
+    /// file reaches the window only as its folder having changed (`DirsChanged`), so those folders
+    /// are listed again off the main thread for their `.bib` files; a removal or a rename drops
+    /// what it took at once, a folder's whole subtree included.
+    pub fn follow(self: &Rc<Self>, event: &accent_api::Event) {
+        use accent_api::Event;
+        match event {
+            Event::FileRemoved(rel) | Event::FileRenamed { from: rel, .. } => {
+                let mut paths = self.paths();
+                paths.retain(|p| !accent_core::path::is_under(p, rel));
+                self.files(&paths);
+            }
+            Event::DirsChanged(dirs) => self.relist(dirs),
+            _ => {}
+        }
+    }
+    /// List `dirs` again, with any still being listed, and put their `.bib` files in place of
+    /// the ones the list has there. A folder that cannot be listed keeps what it had.
+    fn relist(self: &Rc<Self>, dirs: &[String]) {
+        let Some(vault) = self.app.upgrade().and_then(|app| app.vault().cloned()) else {
+            return;
+        };
+        let dirs: Vec<String> = {
+            let mut relisting = self.relisting.borrow_mut();
+            relisting.extend(dirs.iter().cloned());
+            relisting.iter().cloned().collect()
+        };
+        let listing = self.listing.get() + 1;
+        self.listing.set(listing);
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let listed = work::off_thread("list bibliographies", move || {
+                let mut listed = Vec::new();
+                for dir in dirs {
+                    let Ok(rows) = vault.list_dir(&dir) else {
+                        continue;
+                    };
+                    // What the index holds: not a gitignored folder's.
+                    let bibs: Vec<String> = (rows.into_iter())
+                        .filter(|r| r.id != 0 && r.kind != FileKind::Dir && is_bib(&r.rel_path))
+                        .map(|r| r.rel_path)
+                        .collect();
+                    listed.push((dir, bibs));
+                }
+                listed
+            })
+            .await;
+            let Some(panel) = weak.upgrade().filter(|p| p.listing.get() == listing) else {
+                return;
+            };
+            panel.relisting.borrow_mut().clear();
+            // Nor what search leaves out, which the corpus leaves out too (`refresh_corpus`).
+            let app = panel.app.upgrade();
+            let tree = app.as_ref().and_then(|app| app.tree.get());
+            let ignored = |p: &String| tree.is_some_and(|t| t.is_ignored(p));
+            let mut paths = panel.paths();
+            for (dir, bibs) in listed.unwrap_or_default() {
+                paths.retain(|p| accent_core::path::parent_dir(p) != dir);
+                paths.extend(bibs.into_iter().filter(|p| !ignored(p)));
+            }
+            panel.files(&paths);
+        });
     }
     pub fn paths(&self) -> Vec<String> {
         (0..self.files.n_items())

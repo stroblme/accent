@@ -385,8 +385,21 @@ pub fn run(app: &Rc<App>) {
                 .is_some_and(|b| b.source.contains("Edited Elsewhere"))
         })
         .await;
+        // A `.bib` made outside accent joins the chooser, though the vault tells of it only as
+        // its folder having changed; deleted, or its folder moved out of the vault, it goes.
+        let listed = |rel: &str| panel.paths().iter().any(|p| p == rel);
+        let made = app.root().join("project/made.bib");
+        std::fs::write(&made, "@misc{made,title={Made Elsewhere}}\n").unwrap();
+        until(|| listed("project/made.bib")).await;
+        std::fs::remove_file(&made).unwrap();
+        until(|| !listed("project/made.bib")).await;
+        std::fs::create_dir(app.root().join("refs")).unwrap();
+        std::fs::write(app.root().join("refs/one.bib"), "@misc{one,title={One}}\n").unwrap();
+        until(|| listed("refs/one.bib")).await;
+        std::fs::rename(app.root().join("refs"), app.root().with_file_name("refs")).unwrap();
+        until(|| !listed("refs/one.bib")).await;
         println!(
-            "bench bibliography row_delete=true source_only=true source_preserved=true undo=true sidebar_unchanged=true copy=true move=true stale_review_refused=true chooser_search=true row_actions=true download_on_add=true own_events=true"
+            "bench bibliography row_delete=true source_only=true source_preserved=true undo=true sidebar_unchanged=true copy=true move=true stale_review_refused=true chooser_search=true row_actions=true download_on_add=true own_events=true outside_files=true"
         );
         app.window.application().unwrap().quit();
     });

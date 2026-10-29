@@ -123,10 +123,11 @@ impl App {
                 | Event::FileRemoved(_)
                 | Event::FileRenamed { .. }
         );
-        if let Some(panel) = self.bibliography.get()
-            && panel.changed_by(&event)
-        {
-            panel.refresh();
+        if let Some(panel) = self.bibliography.get() {
+            panel.follow(&event);
+            if panel.changed_by(&event) {
+                panel.refresh();
+            }
         }
         if touched {
             if let Some(git) = self.git.get() {

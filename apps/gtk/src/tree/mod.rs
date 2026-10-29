@@ -162,6 +162,12 @@ impl Tree {
             .collect()
     }
 
+    /// Whether `rel` is left out of search, git's ignores and `[search] exclude` together: what
+    /// the index marks ignored and the corpus leaves out.
+    pub fn is_ignored(&self, rel: &str) -> bool {
+        self.ignored.borrow().has(rel)
+    }
+
     /// Whether `rel` is drawn marked: marked itself, or inside a marked folder.
     pub fn is_marked(&self, rel: &str) -> bool {
         is_marked(&self.marked.borrow(), rel)
