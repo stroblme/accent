@@ -1,13 +1,17 @@
 //! Files-tree drills for menus, marked rows, folders, external drops and Move to….
 
 use super::files::until;
+use super::git::xtest;
 use super::*;
 
-/// Open a row menu, emit pointer leave and verify its anchor highlight stays. Mark another row
-/// and inspect classes and multi-file menu actions. Emitting the motion-controller leave models
-/// the popover grab under Xvfb; visual placement and real Ctrl-modifier handling need pointer
-/// checks.
+/// Open a row menu over another row than the selected one and verify it selects its row while
+/// up and gives the selection back after. Mark another row and inspect classes and multi-file
+/// menu actions. Visual placement and real Ctrl-modifier handling need pointer checks; `hover:`
+/// drives the pointer ([`bench_hover`]).
 pub(super) fn bench_menu(app: &Rc<App>, rel: &str) {
+    if let Some(rel) = rel.strip_prefix("hover:") {
+        return bench_hover(app, rel);
+    }
     let Some(ops) = app.ops().cloned() else {
         return bench_quit(app);
     };
@@ -46,11 +50,17 @@ pub(super) fn bench_menu(app: &Rc<App>, rel: &str) {
             );
         }
 
+        // The menu over `rel` while the selection is on the row above it, as on the open file.
+        let model = tree.model();
+        let above = tree::find_row(model, &rel)
+            .and_then(|row| model.item(row.position().checked_sub(1)?))
+            .and_downcast::<gtk::TreeListRow>()
+            .and_then(|row| tree::decode(&row.item()?));
+        tree.set_active(above.as_ref().map(|row| row.rel.as_str()));
         let at = gdk::Rectangle::new(0, 0, 1, 1);
         let popover = fileops::context_menu(&ops, tree.widget(), Some((&rel, false)), &[], at);
         // What `wire_tree` does with the popover it was handed.
         tree.pin(Some(&rel));
-        leave(tree.view());
         println!(
             "bench menu_open selected={:?}",
             tree.selected().map(|row| row.rel)
@@ -58,10 +68,10 @@ pub(super) fn bench_menu(app: &Rc<App>, rel: &str) {
 
         popover.popdown();
         tree.pin(None);
-        leave(tree.view());
         println!(
-            "bench menu_closed selected={:?}",
-            tree.selected().map(|row| row.rel)
+            "bench menu_closed selected={:?} before={:?}",
+            tree.selected().map(|row| row.rel),
+            above.map(|row| row.rel)
         );
 
         // The marked half: this row and one more, the menu over one of them, and the rows drawn
@@ -216,6 +226,179 @@ pub(super) fn bench_menu_press(app: &Rc<App>, rel: &str) {
     });
 }
 
+/// `hover:<rel_file>`: the Files tree under the real pointer and keys (XTEST). Makes `b.md`,
+/// `c.md` and `folder/inner.md` beside `rel`, a file in the vault root, opens `rel` and prints a
+/// line a step: hovering `b.md` leaves `rel` selected, painted apart from the hovered row and a
+/// plain one; a click on `folder` opens it, the selection staying; a right-click on `c.md`
+/// selects it while its menu is up, its Copy Name names it, and `rel` is selected again after; a
+/// click on `b.md` opens and selects it; F2 renames the selected row; drags of `c.md` onto its
+/// own row and onto `folder` open nothing, the second moving it; Ctrl+clicks mark; Delete in the
+/// list trashes the selected row; Reveal in Sidebar outlines the open file's.
+fn bench_hover(app: &Rc<App>, rel: &str) {
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let root = app.root();
+        for name in ["b.md", "c.md", "folder/inner.md"] {
+            let path = root.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "# Note\n").unwrap();
+        }
+        let tree = app.tree.get().expect("a tree");
+        app.open_path(&rel);
+        until(|| centre(&app, tree, "c.md").is_some() && app.tab_for(&rel).is_some()).await;
+        glib::timeout_future(Duration::from_millis(800)).await;
+        let selected = || tree.selected().map(|row| row.rel);
+        let (sx, sy) = app.window.surface_transform();
+        let at = |rel: &str| {
+            let p = centre(&app, tree, rel).expect("the row on screen");
+            format!("{} {}", f64::from(p.x()) + sx, f64::from(p.y()) + sy)
+        };
+        println!("bench hover open selected={:?}", selected());
+
+        xtest(&format!("move {}; focus; sleep 0.3", at("b.md"))).await;
+        let colours = row_colours(&app, tree, &[rel.clone(), "b.md".into(), "c.md".into()]);
+        let paint = |r: &str| colours.iter().find(|(x, _)| x == r).map(|(_, c)| c.clone());
+        let apart = paint(&rel) != paint("b.md")
+            && paint("b.md") != paint("c.md")
+            && paint(&rel) != paint("c.md");
+        println!(
+            "bench hover over=b.md selected={:?} apart={apart} {colours:?}",
+            selected()
+        );
+
+        let docs = app.docs().len();
+        xtest(&format!("move {}; down; up", at("folder"))).await;
+        let open = tree::find_row(tree.model(), "folder").is_some_and(|r| r.is_expanded());
+        println!(
+            "bench hover folder expanded={open} selected={:?} opened={}",
+            selected(),
+            app.docs().len() - docs
+        );
+
+        xtest(&format!("move {}; down 3; up 3", at("c.md"))).await;
+        let menu = find_widget(tree.widget(), &|w| {
+            w.is::<gtk::PopoverMenu>() && w.is_visible()
+        })
+        .and_downcast::<gtk::PopoverMenu>();
+        println!(
+            "bench hover menu up={} selected={:?}",
+            menu.is_some(),
+            selected()
+        );
+        let item = menu.as_ref().and_then(|menu| {
+            let label = find_widget(menu.upcast_ref(), &|w| {
+                w.downcast_ref::<gtk::Label>()
+                    .is_some_and(|l| l.label() == "Copy Name")
+            })?;
+            let middle =
+                graphene::Point::new(label.width() as f32 / 2.0, label.height() as f32 / 2.0);
+            let p = label.compute_point(menu, &middle)?;
+            let popup = menu.surface()?.downcast::<gdk::Popup>().ok()?;
+            let (dx, dy) = menu.surface_transform();
+            let x = f64::from(popup.position_x()) + sx + dx + f64::from(p.x());
+            let y = f64::from(popup.position_y()) + sy + dy + f64::from(p.y());
+            Some(format!("{x} {y}"))
+        });
+        if let Some(item) = item {
+            xtest(&format!("move {item}; down; up")).await;
+        }
+        let copied = app
+            .window
+            .clipboard()
+            .read_text_future()
+            .await
+            .ok()
+            .flatten();
+        println!(
+            "bench hover menu_closed copied={copied:?} selected={:?}",
+            selected()
+        );
+
+        xtest(&format!("move {}; down; up", at("b.md"))).await;
+        until(|| app.active().is_some_and(|tab| tab.rel() == "b.md")).await;
+        println!(
+            "bench hover click_file active={:?} selected={:?}",
+            app.active().map(|tab| tab.rel()),
+            selected()
+        );
+
+        xtest("key F2").await;
+        let dialog = app
+            .window
+            .visible_dialog()
+            .and_downcast::<adw::AlertDialog>();
+        let renaming = dialog.as_ref().and_then(|d| {
+            let entry = find_widget(&d.extra_child()?, &|w| w.is::<gtk::Editable>())?;
+            Some(entry.downcast::<gtk::Editable>().ok()?.text().to_string())
+        });
+        println!("bench hover f2 renaming={renaming:?}");
+        if let Some(dialog) = dialog {
+            dialog.force_close();
+        }
+        glib::timeout_future(Duration::from_millis(300)).await;
+
+        // A drag onto its own row and one onto the folder: neither opens the row it began on.
+        let point = |rel: &str| {
+            let p = centre(&app, tree, rel).expect("the row on screen");
+            (f64::from(p.x()) + sx, f64::from(p.y()) + sy)
+        };
+        let docs = app.docs().len();
+        let (from, to) = (point("c.md"), point("folder"));
+        let (began, ..) = drag_row(&app, from, from, "c.md").await;
+        let (onto, ..) = drag_row(&app, from, to, "folder").await;
+        until(|| root.join("folder/c.md").exists()).await;
+        println!(
+            "bench hover drag began={began},{onto} moved={} opened={} selected={:?}",
+            root.join("folder/c.md").exists(),
+            app.docs().len() - docs,
+            selected()
+        );
+
+        xtest(&format!(
+            "keydown ctrl; move {}; down; up; move {}; down; up; keyup ctrl",
+            at(&rel),
+            at("b.md")
+        ))
+        .await;
+        println!("bench hover marks {:?}", tree.marked());
+        tree.clear_marks();
+
+        tree.view().grab_focus();
+        xtest("key Delete").await;
+        until(|| !root.join("b.md").exists()).await;
+        glib::timeout_future(Duration::from_millis(500)).await;
+        println!(
+            "bench hover delete gone={} active={:?} selected={:?}",
+            !root.join("b.md").exists(),
+            app.active().map(|tab| tab.rel()),
+            selected()
+        );
+
+        let _ = WidgetExt::activate_action(&app.window, "win.reveal-in-sidebar", None);
+        glib::timeout_future(Duration::from_millis(300)).await;
+        let outlined: Vec<String> = tree::expanders(tree.view())
+            .into_iter()
+            .filter(|e| e.has_css_class("accent-revealed"))
+            .filter_map(|e| Some(tree::decode(&e.list_row()?.item()?)?.rel))
+            .collect();
+        println!(
+            "bench hover reveal outlined={outlined:?} selected={:?}",
+            selected()
+        );
+
+        // A double click keeps the file it opens, and toggles a folder once.
+        xtest(&format!("move {}; down; up; down; up", at("folder/c.md"))).await;
+        until(|| app.active().is_some_and(|tab| tab.rel() == "folder/c.md")).await;
+        let kept = app
+            .tab_for("folder/c.md")
+            .is_some_and(|tab| app.pane().preview().is_none_or(|page| page != tab.page));
+        xtest(&format!("move {}; down; up; down; up", at("folder"))).await;
+        let open = tree::find_row(tree.model(), "folder").is_some_and(|r| r.is_expanded());
+        println!("bench hover double kept={kept} folder_expanded={open}");
+        bench_quit(&app);
+    });
+}
+
 /// The colour each of `rels`' rows is painted in on screen at its left end, clear of its icon and
 /// name: whether a mark shows, which the style class alone does not say.
 fn row_colours(app: &App, tree: &tree::Tree, rels: &[String]) -> Vec<(String, String)> {
@@ -270,19 +453,6 @@ pub(super) fn centre(app: &App, tree: &tree::Tree, rel: &str) -> Option<graphene
             );
             expander.compute_point(&app.window, &middle)
         })
-}
-
-/// The pointer leaving the list, as the popover's own grab sends it.
-fn leave(view: &gtk::ListView) {
-    let controllers = view.observe_controllers();
-    for i in 0..controllers.n_items() {
-        if let Some(motion) = controllers
-            .item(i)
-            .and_downcast::<gtk::EventControllerMotion>()
-        {
-            motion.emit_by_name::<()>("leave", &[]);
-        }
-    }
 }
 
 /// Every row the list has a widget bound to, as its path and whether its label is dimmed.

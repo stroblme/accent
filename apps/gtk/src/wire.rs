@@ -1371,10 +1371,10 @@ pub fn written_at(rel: &str, etag: &Etag) -> String {
     }
 }
 
-/// Pin the tree highlight to the row beneath `popover` until its menu closes.
+/// Select the row beneath `popover` until its menu closes, then the row selected before.
 ///
-/// A popover takes the pointer, which otherwise restores the open-file highlight and loses
-/// the menu's target. `None` means blank space and pins no row.
+/// A right-click selects nothing by itself, so the menu's target would otherwise be unlit.
+/// `None` means blank space and pins no row.
 fn pin_row(app: &Rc<App>, popover: &gtk::PopoverMenu, rel: Option<&str>) {
     let Some(tree) = app.tree.get() else { return };
     tree.pin(rel);

@@ -102,14 +102,15 @@ pub struct Tree {
     /// factory so recycled rows restore marks, as with [`cut`](Self::cut).
     marked: Rc<RefCell<Marks>>,
     /// Shift range anchor, temporarily marked while Shift hovers an otherwise
-    /// unmarked list ([`track_pointer`]).
+    /// unmarked list ([`track_shift`]).
     start: Start,
-    /// Open-file highlight, restored on pointer leave after temporary hover
-    /// selection (`build`).
+    /// The open file's row, which the selection follows (`set_active`).
     active: Rc<RefCell<Option<String>>>,
-    /// Context-menu target, temporarily taking precedence over
-    /// [`active`](Self::active) ([`pin`](Self::pin)).
+    /// Context-menu target, holding the selection while its menu is open ([`pin`](Self::pin)).
     pinned: Rc<RefCell<Option<String>>>,
+    /// The row selected again once the menu lets go: the one selected before it, or the file
+    /// opened while it was up.
+    unpinned: RefCell<Option<String>>,
     /// The row [`flash`](Self::flash) outlines, shared with the factory as [`cut`](Self::cut) is.
     revealed: Rc<RefCell<Option<String>>>,
     /// Counts flashes, so only the last one's timer takes the outline off.
@@ -362,23 +363,28 @@ impl Tree {
     /// explicitly moves it.
     pub fn set_active(&self, rel: Option<&str>) {
         *self.active.borrow_mut() = rel.map(str::to_string);
-        // Remembered but not applied while a menu holds the highlight: a note opening behind the
-        // popover must not take the lit row out from under it either.
-        if self.pinned.borrow().is_none() {
-            select(&self.view, rel);
+        // Selected once the menu lets go, not while it is up: a note opening behind the popover
+        // must not take the lit row out from under it.
+        match self.pinned.borrow().is_some() {
+            true => *self.unpinned.borrow_mut() = rel.map(str::to_string),
+            false => select(&self.view, rel),
         }
     }
 
-    /// Pin highlight to context-menu row `rel`; `None` restores the open-file highlight.
-    ///
-    /// Hover selection sees a popover as pointer leave. Pinning keeps the highlight on the menu's
-    /// target instead of reverting while the menu is open.
+    /// Select context-menu row `rel` while its menu is open, a right-click selecting nothing by
+    /// itself; `None` selects again the row selected before, so the keys act where they did.
     pub fn pin(&self, rel: Option<&str>) {
-        *self.pinned.borrow_mut() = rel.map(str::to_string);
-        let row = rel
-            .map(str::to_string)
-            .or_else(|| self.active.borrow().clone());
-        select(&self.view, row.as_deref());
+        let was = self.pinned.replace(rel.map(str::to_string));
+        match rel {
+            Some(rel) => {
+                if was.is_none() {
+                    *self.unpinned.borrow_mut() = self.selected().map(|row| row.rel);
+                }
+                select(&self.view, Some(rel));
+            }
+            None if was.is_some() => select(&self.view, self.unpinned.take().as_deref()),
+            None => {}
+        }
     }
 
     /// Outline `rel`'s row in the accent for [`FLASH_HOLD`], then let the stylesheet fade it out
@@ -680,8 +686,7 @@ fn rebind(view: &gtk::ListView) {
     view.set_factory(factory.as_ref());
 }
 
-/// Select `rel` or clear selection, skipping unchanged state so pointer
-/// hover remains responsive.
+/// Select `rel` or clear selection, skipping an unchanged one.
 fn select(view: &gtk::ListView, rel: Option<&str>) {
     let Some(selection) = view.model().and_downcast::<gtk::SingleSelection>() else {
         return;
@@ -870,9 +875,6 @@ pub fn build(
     crate::widgets::set_model(&view, &selection);
     view.add_css_class("navigation-sidebar");
     view.add_css_class("file-tree");
-    // One click opens, as GNOME's own sidebars do. A folder still toggles rather than opening,
-    // so a click never costs anything you did not ask for.
-    view.set_single_click_activate(true);
     // Where a Shift+click's range starts: the last row clicked without Shift.
     let anchor = Rc::new(RefCell::new(None::<String>));
     let active = Rc::new(RefCell::new(None::<String>));
@@ -888,7 +890,8 @@ pub fn build(
     ));
     click_opens(&view, &marked, on_activate);
     let pinned = Rc::new(RefCell::new(None::<String>));
-    track_pointer(&view, &model, &marked, &start, &anchor, &active, &pinned);
+    track_shift(&view, &model, &marked, &start, &anchor, &active);
+    keep_selected(&view, &model, &active, &pinned);
     // The blank area below the last row is the vault root, the same place a right-click there
     // creates in. A drop that landed on a row is that row's own business — its target has already
     // accepted or refused it — so this one has to answer for the blank area alone, or a refusal
@@ -948,6 +951,7 @@ pub fn build(
         start,
         active,
         pinned,
+        unpinned: RefCell::default(),
         revealed,
         flashes: Rc::default(),
         opened,
@@ -1246,9 +1250,11 @@ fn bind_row(
     set_class(expander, REVEALED, on);
 }
 
-/// Handle marked-row selection before list activation.
+/// Open a row on a plain click and handle marked-row selection, ahead of the list's own click.
 ///
-/// Ctrl toggles marks; Shift replaces with the anchor range, or adds with Ctrl. Context
+/// A click opens a file or toggles a folder on its release, once it is not a drag, and leaves
+/// the selection on the open file: the list's own click would select the row, so it is claimed
+/// from it. Ctrl toggles marks; Shift replaces with the anchor range, or adds with Ctrl. Context
 /// menus, Delete and drags act on the set. Capture claiming prevents opening or toggling
 /// rows; plain clicks and blank-area clicks clear marks. Dependency rows cannot be marked
 /// because batch operations must not edit them.
@@ -1265,8 +1271,10 @@ fn marking(
         .button(gdk::BUTTON_PRIMARY)
         .propagation_phase(gtk::PropagationPhase::Capture)
         .build();
+    // The row a plain press landed on, which its release opens.
+    let pressed: Rc<RefCell<Option<String>>> = Rc::default();
     marking.connect_pressed({
-        let (marked, start, anchor, active, cache, model, on_activate) = (
+        let (marked, start, anchor, active, cache, model, on_activate, pressed) = (
             marked.clone(),
             start.clone(),
             anchor.clone(),
@@ -1274,6 +1282,7 @@ fn marking(
             cache.clone(),
             model.clone(),
             on_activate.clone(),
+            pressed.clone(),
         );
         move |gesture, presses, x, y| {
             let Some(view) = gesture.widget().and_downcast::<gtk::ListView>() else {
@@ -1282,14 +1291,21 @@ fn marking(
             let held = gesture.current_event_state();
             let ctrl = held.contains(crate::platform::PRIMARY_MODIFIER);
             let shift = held.contains(gdk::ModifierType::SHIFT_MASK);
-            // The second press of a double click on a file, which the list does not activate
-            // again: the first one opened it as a preview, and this keeps it.
+            let plain = (!ctrl && !shift).then(|| row_at(&view, x, y)).flatten();
+            *pressed.borrow_mut() = plain
+                .as_ref()
+                .filter(|_| presses == 1)
+                .map(|r| r.rel.clone());
+            // The second press of a double click, which the list would activate again: the first
+            // one opened a file as a preview, and this keeps it; a folder it toggled stays so.
             if presses == 2
-                && !ctrl
-                && !shift
-                && let Some(row) = row_at(&view, x, y).filter(|row| !row.is_dir())
+                && let Some(row) = plain
             {
-                return on_activate(row.kind, &row.rel, true);
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                if !row.is_dir() {
+                    on_activate(row.kind, &row.rel, true);
+                }
+                return;
             }
             let row = row_at(&view, x, y).filter(|row| !row.dependency);
             let mut marks = marked.borrow_mut();
@@ -1308,7 +1324,7 @@ fn marking(
                     gesture.set_state(gtk::EventSequenceState::Claimed);
                 }
                 // A press on a marked row may start a drag that carries the set, so the marks
-                // stay until it turns out to be a click, which the list activates.
+                // stay until it turns out to be a click, which opens the row on its release.
                 Some(row) if is_marked(&marks, &row.rel) => {
                     *anchor.borrow_mut() = Some(row.rel);
                     return;
@@ -1325,70 +1341,80 @@ fn marking(
             redraw_marks(&view, &marks, None);
         }
     });
+    marking.connect_released({
+        let (marked, model, on_activate) = (marked.clone(), model.clone(), on_activate.clone());
+        move |gesture, presses, x, y| {
+            let Some(rel) = pressed.take().filter(|_| presses == 1) else {
+                return;
+            };
+            let Some(view) = gesture.widget().and_downcast::<gtk::ListView>() else {
+                return;
+            };
+            if row_at(&view, x, y).is_some_and(|row| row.rel == rel)
+                && let Some(row) = find_row(&model, &rel)
+            {
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                open_row(&view, &marked, &*on_activate, &row);
+            }
+        }
+    });
     marking
 }
 
-/// A row activated: a folder toggles, a file is handed to `on_activate`.
+/// A row activated from the keyboard opens as a clicked one does ([`open_row`]).
 fn click_opens(
     view: &gtk::ListView,
     marked: &Rc<RefCell<Marks>>,
     on_activate: Rc<impl Fn(char, &str, bool) + 'static>,
 ) {
-    let activate_marked = marked.clone();
+    let marked = marked.clone();
     view.connect_activate(move |view, pos| {
-        // A plain click on a marked row lets the marks go, as one anywhere else already has.
-        {
-            let mut marks = activate_marked.borrow_mut();
-            if !marks.is_empty() {
-                marks.clear();
-                redraw_marks(view, &marks, None);
-            }
-        }
-        let Some(row) = view
-            .model()
-            .and_then(|m| m.item(pos))
-            .and_downcast::<gtk::TreeListRow>()
-        else {
-            return;
-        };
-        let Some(item) = row.item().as_ref().and_then(decode) else {
-            return;
-        };
-        if item.is_dir() {
-            row.set_expanded(!row.is_expanded());
-        } else {
-            on_activate(item.kind, &item.rel, false);
+        let row = view.model().and_then(|m| m.item(pos));
+        if let Some(row) = row.and_downcast::<gtk::TreeListRow>() {
+            open_row(view, &marked, &*on_activate, &row);
         }
     });
 }
 
-/// Restore open-file highlighting on pointer leave and show the Shift range anchor.
-///
-/// GTK's single-click mode also selects on hover. Reset that temporary selection so a row
-/// never activated cannot remain highlighted as the open file.
-fn track_pointer(
+/// A row opened: a folder toggles, a file is handed to `on_activate`. A plain click on a marked
+/// row lets the marks go, as one anywhere else already has.
+fn open_row(
+    view: &gtk::ListView,
+    marked: &RefCell<Marks>,
+    on_activate: &impl Fn(char, &str, bool),
+    row: &gtk::TreeListRow,
+) {
+    {
+        let mut marks = marked.borrow_mut();
+        if !marks.is_empty() {
+            marks.clear();
+            redraw_marks(view, &marks, None);
+        }
+    }
+    let Some(item) = row.item().as_ref().and_then(decode) else {
+        return;
+    };
+    if item.is_dir() {
+        row.set_expanded(!row.is_expanded());
+    } else {
+        on_activate(item.kind, &item.rel, false);
+    }
+}
+
+/// Show the Shift range anchor while Shift is held over the list.
+fn track_shift(
     view: &gtk::ListView,
     model: &gtk::TreeListModel,
     marked: &Rc<RefCell<Marks>>,
     start: &Start,
     anchor: &Rc<RefCell<Option<String>>>,
     active: &Rc<RefCell<Option<String>>>,
-    pinned: &Rc<RefCell<Option<String>>>,
 ) {
-    // Where the highlight belongs when nothing is pointing at a row: the row a context menu is
-    // open over while there is one, and otherwise the open file.
-    let highlight = {
-        let (active, pinned) = (active.clone(), pinned.clone());
-        move |view: &gtk::ListView| {
-            let row = pinned.borrow().clone().or_else(|| active.borrow().clone());
-            select(view, row.as_deref());
-        }
-    };
     // Holding Shift over the list draws the row a Shift+click would range from marked, while
-    // nothing is: the selection that shows the open file moves with the pointer, so that row
-    // would otherwise be lit by nothing while the pointer is on its way to the other end. Shown as
-    // the pointer moves rather than on the key itself, so a capital typed with the pointer resting
-    // on the list lights nothing; `Tree::hide_start` takes it down when the key is let go.
+    // nothing is: it need not be the selected row, the last click being where a range starts.
+    // Shown as the pointer moves rather than on the key itself, so a capital typed with the
+    // pointer resting on the list lights nothing; `Tree::hide_start` takes it down when the key
+    // is let go.
     let show_start = {
         let (marked, start, anchor, active, model) = (
             marked.clone(),
@@ -1427,39 +1453,33 @@ fn track_pointer(
         let show_start = show_start.clone();
         move |motion, _, _| show_start(motion, held(motion))
     });
-    motion.connect_leave({
-        let highlight = highlight.clone();
-        move |controller| {
-            let Some(view) = controller.widget().and_downcast::<gtk::ListView>() else {
-                return;
-            };
-            show_start(controller, false);
-            highlight(&view);
-        }
-    });
-    // The listing lands from a worker thread and expanding a folder inserts rows, so the open
-    // file's row often is not there — or not there yet — at the moment the tab changed. Re-applied
-    // whenever the model changes, but never while the pointer is in the list: the selection is
-    // the hover highlight too, and a reindex must not pull it out from under the row being
-    // pointed at. The controller weakly: its own handlers hold the model, through `show_start`,
-    // and a strong one here would be a ring keeping the model, and the vault its listings ask,
-    // alive after the window has closed.
-    model.connect_items_changed({
-        let motion = motion.downgrade();
-        move |_, _, _, _| {
-            let Some(motion) = motion.upgrade() else {
-                return;
-            };
-            if motion.contains_pointer() {
-                return;
-            }
-            let Some(view) = motion.widget().and_downcast::<gtk::ListView>() else {
-                return;
-            };
-            highlight(&view);
-        }
-    });
+    motion.connect_leave(move |motion| show_start(motion, false));
     view.add_controller(motion);
+}
+
+/// Select the open file's row, or a menu's while one is up, whenever the model changes with
+/// nothing selected: the listing lands from a worker thread and expanding a folder inserts rows,
+/// so the row often is not there — or not there yet — at the moment the tab changed. A row the
+/// keys moved the selection to keeps it. The view weakly: the model holds this handler, and a
+/// strong one would be a ring keeping the model, and the vault its listings ask, alive after the
+/// window has closed.
+fn keep_selected(
+    view: &gtk::ListView,
+    model: &gtk::TreeListModel,
+    active: &Rc<RefCell<Option<String>>>,
+    pinned: &Rc<RefCell<Option<String>>>,
+) {
+    let (view, active, pinned) = (view.downgrade(), active.clone(), pinned.clone());
+    model.connect_items_changed(move |_, _, _, _| {
+        let Some(view) = view.upgrade() else {
+            return;
+        };
+        let selection = view.model().and_downcast::<gtk::SingleSelection>();
+        if selection.is_some_and(|s| s.selected() == gtk::INVALID_LIST_POSITION) {
+            let row = pinned.borrow().clone().or_else(|| active.borrow().clone());
+            select(&view, row.as_deref());
+        }
+    });
 }
 
 /// Show the tree or its empty/loading state according to the root listing.

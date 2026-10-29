@@ -279,7 +279,9 @@ use user_commands::bench_commands;
 /// - `ACCENT_BENCH_SAVE_AS=<rel_file>`: note/diagram/PDF/image Save As and errors.
 /// - `ACCENT_BENCH_MENU=<rel_file>`: tree context menus and modifier selections;
 ///   `press:<rel_file>`: hold for XTEST Ctrl/Shift clicks, for example
-///   `build-aux/xtest.py :99 "move X Y; keydown ctrl; down; up; keyup ctrl"`.
+///   `build-aux/xtest.py :99 "move X Y; keydown ctrl; down; up; keyup ctrl"`;
+///   `hover:<rel_file>`: hover, clicks, the menu, F2, a drag, Delete and Reveal through XTEST,
+///   `rel_file` in the root of a scratch vault it adds three files to (`folders::bench_hover`).
 /// - `ACCENT_BENCH_TAGS=<rel_note>`: tag-list updates after edits.
 /// - `ACCENT_BENCH_INFO=<rel>[,<rel>…]`: per-file Info sections; `terminal`
 ///   opens a shell instead.

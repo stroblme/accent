@@ -255,14 +255,16 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The tints follow every git refresh, local or remote, off the same answer the ignored rows' dim comes from (`App::on_git_changed`).
   The dim is its own signal and stays as it was: a changed dotfile is both.
   Colour Changed Files, on by default, is a preference (Preferences → Files); off, the names are plain and the dims unchanged.
-- The selection follows the open tab, and the open file's row is put back when the pointer leaves the list: GTK's single-click activation also selects on hover.
+- **The selection is the open file's row** and follows the open tab; hovering another row lights it with Adwaita's hover background and leaves the selection where it is, as in GNOME's sidebars, VS Code and Obsidian (user decision 2026-10-29).
+  A click opens a file or toggles a folder on its release, once it is not a drag, without selecting the row: the tree does it itself, GTK's single-click activation selecting on hover.
+  The arrow keys move the selection, and Delete, F2 and Menu act on the selected row.
   Only among rows on screen: no folder opens and nothing scrolls, which is Reveal in Sidebar's job.
 - Reveal in Sidebar, from the tab menu or the palette, outlines the row it lands on in the accent for a second, which then fades over two (Motion), so the eye finds it in a long listing.
 - A change on disk or in git refills the tree in place: the open folders stay open and the list stays where it is.
   A row that goes while it has the keyboard hands it to the row now in its place, not to the window's first widget, which would scroll the list to its top (`widgets::set_model`).
-- Ctrl+click and Shift+click mark rows, the tree's only multiple selection, tinted with the accent across the row's whole shape: the selection is already the hover highlight and the open file.
+- Ctrl+click and Shift+click mark rows, the tree's only multiple selection, tinted with the accent across the row's whole shape: the selection is already the open file.
   Shift+click marks the rows on screen from the last click without Shift, else from the open file's row, and replaces the marks; Shift+Ctrl+click adds the range; a Ctrl+click marks the row clicked alone.
-  While Shift is held over the list with nothing marked, the row a range would start from is drawn marked as the pointer moves, since the selection moves with the pointer and leaves it unlit; a capital typed with the pointer resting on the list lights nothing (user decision 2026-09-29: the Shift anchor only, Ctrl adding nothing).
+  While Shift is held over the list with nothing marked, the row a range would start from is drawn marked as the pointer moves, since it need not be the selected row; a capital typed with the pointer resting on the list lights nothing (user decision 2026-09-29: the Shift anchor only, Ctrl adding nothing).
   A shut folder in a range is marked whole, and a Ctrl+click on a row inside it takes that row alone out.
   Neither click opens or toggles anything; a plain click (once it is not a drag) and Escape let the set go.
   A row the index does not hold is never marked.
@@ -1461,7 +1463,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - **Move to…** sits with Cut and Copy, on a row's menu and a marked set's: the dialog is a folder path in the vault's path field, from the vault root, opening on the folder the first path is in.
   It is a drop onto a folder by another way, for a folder that is not on screen — one plan, a taken name refusing the whole batch — and a folder not there yet is made once any Update Links? question is answered, as Rename makes the folders a typed path names.
   A folder moved into itself is refused, and what is already there stays; Rename is still the one path's move from the keyboard.
-- **A tree menu pins the highlight** to its row until it closes: the popover taking the pointer is a leave to the list, which would otherwise light the open file instead.
+- **A tree menu selects its row** until it closes, a right-click selecting nothing by itself; the row selected before, the open file's, is selected again after, so the keys act where they did.
 - A popover parented by hand is unparented **from an idle**, never from `closed`: `closed` comes inside the item's own `clicked`, and unparenting there silently drops the item's action.
 - **A menu gives the keyboard back** on `closed`, before the item's action, to the widget that had it: GTK otherwise hands it to a widget above the menu's host, where no document's keys reach, and a diagram's `Ctrl+Z` after its menu's Paste did nothing.
   A press that opens a canvas's menu gives the canvas the keyboard, as any other press on it does.
