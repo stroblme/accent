@@ -335,12 +335,10 @@ const ASKED: [&str; 3] = ["p0, p1", "(p0 + p1) / 2", "one[0] / sum(one)"];
 
 /// Scene 5: Solarized, a Python program paused in its third call to `fidelity`, the Code pane
 /// open on the calls and the locals, the Debug Console over the program's own terminal to its
-/// right, the code's minimap beside it.
+/// right.
 async fn scene_debug(app: &Rc<App>, shot: &Shot) {
     crate::theme::apply(Theme::Solarized);
     app.restyle_all();
-    app.config.borrow_mut().minimap = true;
-    app.config_changed();
     // Code beside two terminals, in a 1000 px window.
     app.set_zoom(0.8);
     open_all(app, &[PROGRAM]).await;
