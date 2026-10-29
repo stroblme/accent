@@ -1196,6 +1196,21 @@ impl App {
         );
     }
 
+    /// Open in Terminal on a folder row: a shell in the vault's folder `rel`, on the host for a
+    /// remote vault, as New Terminal opens one at the root.
+    fn open_terminal_in(self: &Rc<Self>, rel: &str) {
+        let Some(vault) = self.vault() else { return };
+        let dir = vault.root().join(rel);
+        match vault.remote() {
+            Some(remote) => {
+                let mut at = remote.url().clone();
+                at.path = dir;
+                self.open_remote_terminal(at);
+            }
+            None => self.open_terminal_at(Some(dir)),
+        }
+    }
+
     /// A shell on the host `at` names, in its path.
     fn open_remote_terminal(self: &Rc<Self>, at: ssh::Url) {
         let key = terminal::new_key();

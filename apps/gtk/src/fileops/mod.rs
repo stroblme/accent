@@ -108,6 +108,8 @@ pub struct Ops {
     /// Reload on a folder: list it and every folder open under it again, and bring the index up
     /// to date where it holds the folder.
     pub relist: Box<dyn Fn(&str)>,
+    /// Open in Terminal on a folder: a new shell there, on the host for a remote vault.
+    pub terminal: Box<dyn Fn(&str)>,
     /// Dim these tree rows and undim the rest: what a Cut is waiting to move. Cleared with an
     /// empty slice by the paste that answers it.
     pub cut: Box<dyn Fn(&[String])>,

@@ -42,6 +42,10 @@ pub fn context_menu(
             menu.append_item(&item(GROUP, "Open in New Window", "open-apart", rel));
         }
     }
+    // A folder opens as a shell there, where a file has Open.
+    if let Some((rel, true)) = row {
+        menu.append_item(&item(GROUP, "Open in Terminal", "terminal", rel));
+    }
     // Everything that puts something in a folder shares one target, so a right-click anywhere in
     // the tree can create: in the folder clicked, beside the file clicked, or in the vault root.
     let dir = row_dir(row);
@@ -103,11 +107,14 @@ pub fn dependency_menu(
     crate::widgets::popup_menu(host, &menu, Some(anchor))
 }
 
-/// [`dependency_menu`]'s items: Open or Reload, then [`elsewhere`]; on the `top` folder Rename,
-/// Move to… and Move to Trash where [`context_menu`] has them.
+/// [`dependency_menu`]'s items: Open, or Open in Terminal and Reload, then [`elsewhere`]; on the
+/// `top` folder Rename, Move to… and Move to Trash where [`context_menu`] has them.
 fn dependency_model(rel: &str, is_dir: bool, remote: bool, top: bool) -> gio::Menu {
     let menu = gio::Menu::new();
     let open = gio::Menu::new();
+    if is_dir {
+        open.append_item(&item(GROUP, "Open in Terminal", "terminal", rel));
+    }
     if top {
         open.append_item(&item(GROUP, "Rename", "rename-folder", rel));
     }
@@ -270,6 +277,7 @@ fn actions(ops: &Rc<Ops>) -> gio::SimpleActionGroup {
     add("open", Box::new(|ops, rel| (ops.open)(rel, &[])));
     add("open-apart", Box::new(|ops, rel| (ops.apart)(rel)));
     add("reload", Box::new(|ops, dir| (ops.relist)(dir)));
+    add("terminal", Box::new(|ops, dir| (ops.terminal)(dir)));
     add("new-file", Box::new(new_file));
     add("new-folder", Box::new(new_folder));
     add("new-drawing", Box::new(new_drawing));
@@ -361,13 +369,18 @@ mod tests {
         let paths = ["Copy Name", "Copy Relative Path", "Copy Absolute Path"];
         assert_eq!(
             menu(".ruff_cache/0.6.9", true, false),
-            [&["Reload"][..], &paths, &["Show in Files"]].concat()
+            [
+                &["Open in Terminal", "Reload"][..],
+                &paths,
+                &["Show in Files"]
+            ]
+            .concat()
         );
         // The tree's own folder goes whole: renamed, moved or trashed.
         assert_eq!(
             labels(dependency_model(".ruff_cache", true, false, true).upcast_ref()),
             [
-                &["Rename", "Reload", "Move to…"][..],
+                &["Open in Terminal", "Rename", "Reload", "Move to…"][..],
                 &paths,
                 &["Show in Files", "Move to Trash"]
             ]

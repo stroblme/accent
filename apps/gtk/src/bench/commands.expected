@@ -1,6 +1,7 @@
 bench commands palette opened=["Pass"] closed=true used=Some("win.command-0")
 bench commands shortcut opened=["Fail"] ended=true said=Some("[Exited with code 1]") at_root=true
 bench commands from_shell opened=["Pass"] closed=true left=1
+bench commands folder first=Some("Open in Terminal") opened=true pwd=true focused=true
 bench commands held=0
 bench commands open terminals=2 held=2
 bench commands back titles=["Nap"] held=1

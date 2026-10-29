@@ -125,10 +125,42 @@ async fn run(app: &Rc<App>) {
         titles(&opened),
         left()
     );
+    folder_terminal(app).await;
     let _ = WidgetExt::activate_action(&app.window, "win.close-tab", None);
     glib::timeout_future(Duration::from_millis(500)).await;
     println!("bench commands held={}", super::keys::bench_held());
     bench_quit(app);
+}
+
+/// Open in Terminal, first on a folder row's menu and run through the menu's own action: a shell
+/// of its own that starts in that folder and takes the keyboard. Its tab is closed again.
+async fn folder_terminal(app: &Rc<App>) {
+    let (Some(ops), Some(tree)) = (app.ops().cloned(), app.tree.get()) else {
+        return println!("bench commands folder no tree");
+    };
+    let dir = "Some folder";
+    std::fs::create_dir_all(app.root().join(dir)).unwrap();
+    let at = gdk::Rectangle::new(0, 0, 1, 1);
+    let menu = fileops::context_menu(&ops, tree.widget(), Some((dir, true)), &[], at);
+    let first = menu
+        .menu_model()
+        .and_then(|m| fileops::labels(&m).into_iter().next());
+    menu.popdown();
+    let before: Vec<String> = app.terminals().iter().map(|t| t.key()).collect();
+    let _ = WidgetExt::activate_action(tree.widget(), "fileops.terminal", Some(&dir.to_variant()));
+    let new = || (app.terminals().into_iter()).find(|t| !before.contains(&t.key()));
+    let (opened, term) = (until(|| new().is_some(), 5000).await, new());
+    let mut pwd = false;
+    if let Some(term) = &term {
+        until(|| !text(term).trim().is_empty(), 5000).await;
+        term.view.feed_child(b"pwd\n");
+        let path = app.root().join(dir).display().to_string();
+        pwd = until(|| text(term).lines().any(|l| l.trim_end() == path), 5000).await;
+    }
+    let focused = term.as_ref().is_some_and(|t| t.view.has_focus());
+    println!("bench commands folder first={first:?} opened={opened} pwd={pwd} focused={focused}");
+    let _ = WidgetExt::activate_action(&app.window, "win.close-tab", None);
+    until(|| new().is_none(), 5000).await;
 }
 
 async fn open(app: &Rc<App>) {

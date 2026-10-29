@@ -1060,6 +1060,7 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
     let unmark = Rc::downgrade(app);
     let apart = Rc::downgrade(app);
     let relist = Rc::downgrade(app);
+    let terminal = Rc::downgrade(app);
     Rc::new(fileops::Ops {
         vault: vault.clone(),
         window: app.window.clone(),
@@ -1159,6 +1160,11 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
                     app.toast(&why);
                 }
             });
+        }),
+        terminal: Box::new(move |dir| {
+            if let Some(app) = terminal.upgrade() {
+                app.open_terminal_in(dir);
+            }
         }),
         cut: Box::new(move |rels| {
             let Some(app) = cut.upgrade() else { return };

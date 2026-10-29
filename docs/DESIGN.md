@@ -233,7 +233,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - A folder's expander arrow is drawn at Adwaita's `dimmed` opacity (`--dim-opacity`), whatever the row's own dim (user decision 2026-10-19): the folder's icon and name say what the row is, the arrow only that it opens.
 - Every folder is listed, the ones the index does not walk included (`node_modules`, a `.venv`, a cargo `target/`): a listing that silently leaves a folder out cannot be trusted.
   Those rows are read off the disk one level per expansion, stay out of the index and every query, and are dimmed, search not reaching them.
-- A dependency tree (`node_modules`, a `.venv`, a marked `target/`, Lean's `.lake`, gigabytes with Mathlib and no marker file) lists and opens but is never changed — its menu holds only what reads it (Open, Open in New Window or Reload, Copy Name, the paths, Show in Files or Download…), and it takes no marking, drag or drop: it is somebody else's.
+- A dependency tree (`node_modules`, a `.venv`, a marked `target/`, Lean's `.lake`, gigabytes with Mathlib and no marker file) lists and opens but is never changed — its menu holds only what reads it (Open and Open in New Window, or Open in Terminal and Reload, Copy Name, the paths, Show in Files or Download…), and it takes no marking, drag or drop: it is somebody else's.
   Its top folder, the `node_modules` or `.ruff_cache` itself, adds Rename, Move to… and Move to Trash, and Delete trashes it: a cache or an environment is cleared or moved whole, never a file in it (user decision 2026-10-28).
   A gitignored folder is the reader's own and gets the whole menu: being out of the index stops a file being searched, not edited, and opening one puts it in (Architecture, An opened file joins the index).
 - A gitignored folder is watched while the tree holds its listing, one level deep, by the vault's own watcher — on the host for a remote vault, the one place its files can be watched from — and what happens in it re-lists it and reaches nothing else (`Event::UnindexedChanged`); a dependency tree is not — 40 000 files is the tree that must not be watched — and is as fresh as its last expansion.
@@ -683,7 +683,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 - A `vte4::Terminal` in a tab, not a panel: it splits, drags between panes and takes the tab menu, and a shell at the bottom of the window is a pane split downwards.
   It does not move into another window: a running shell is handed back with a toast (Tabs).
-- `Ctrl+J` opens one at the vault root, `$HOME` without a vault; `Ctrl+W` closes it like any tab.
+- `Ctrl+J` opens one at the vault root, `$HOME` without a vault, and Open in Terminal on a folder's row in that folder; `Ctrl+W` closes it like any tab.
 - Every shell is held by `accent-cli hold` (Architecture) and reached through `accent-cli attach <id>` in the tab's pty, `ssh -t` on a host: Close Tab ends the shell, closing the window only lets go of it, and a vault or terminal session opened again attaches to the same shell with its screen replayed.
   A shell put back behind another tab attaches once it is first shown, so the replay is drawn at the size it will have; until then its tab is titled with the title the shell last set, which the holder keeps, read with one `held` listing off the main thread (about 12 ms a tab, 2026-10-19), so a bar of restored shells says what each runs without a click.
 - The tab key is `terminal:<16 hex>`, the holder's id; the shell's directory (OSC 7, else where it started) goes into the session, so a shell the holder lost (a reboot) starts again there.
@@ -1448,6 +1448,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - **Rename and Move to Trash are on the tab menu too**, acting on the page right-clicked, and only where it holds a file of this vault; on a shell, a comparison or a loose file they are absent rather than refusing.
 - **Open in New Window follows Open** on a file row, and only a local vault's: a window with no vault opens a file by its path on this machine.
   On the tab menu it is **Move to New Window**, ending the moves before Pin Tab, since the tab leaves (Tabs).
+- **Open in Terminal begins a folder row's menu**, where a file's has Open: a shell in that folder, as `Ctrl+J` opens one at the vault root — on the host for a remote vault, the host's in the Flatpak (Terminal).
 - **Reload** ends a folder row's first section, after Leave Out of Search (Sidebar, Files).
 - **A code tab's text menu** ends with Quick Fix… and Source Action…, asked at the caret the press put there; a note's ends with its spelling suggestions instead (Language servers).
 - **Print… and the exports are a section of the tab menu's own**, after Reveal in Sidebar, as they make something of the file rather than name it: a note has Print… and Export as HTML…, a PDF Print… and Export as PDF…, a diagram Print…, Export as PDF…, Export as PNG… and Export as SVG…, any other tab none, and a loose file as much as a vault's.
