@@ -378,10 +378,6 @@ async fn scene_debug(app: &Rc<App>, shot: &Shot) {
         println!("bench shot no_debug_terminals");
         std::process::exit(1);
     };
-    until("output", 10_000, || {
-        super::debug::text(&program).contains("q1  0.9270")
-    })
-    .await;
 
     // The code keeps its pane, the console goes to its right and the program's tab below that.
     let code = pane_of(app, PROGRAM);
@@ -393,6 +389,13 @@ async fn scene_debug(app: &Rc<App>, shot: &Shot) {
     glib::timeout_future(Duration::from_millis(300)).await;
     divide(&code, 0.55);
     divide(&right, 0.5);
+    // Only now that its tab is on screen: VTE keeps what a terminal behind another tab is sent and
+    // puts it on that terminal's screen once it is shown, so the lines printed meanwhile
+    // are not in its text before.
+    until("output", 10_000, || {
+        super::debug::text(&program).contains("q1  0.9270")
+    })
+    .await;
 
     // Typed at the console in front with the keyboard, as a reader brings it forward.
     let _ = WidgetExt::activate_action(&app.window, "win.debug-console", None);
