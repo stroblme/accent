@@ -408,15 +408,17 @@ mod imp {
             let Some((open, shut)) = icons.as_ref() else {
                 return;
             };
+            // A line inside a fold has no height, which only its cell says: in a wrapping view the
+            // first row's height is measured at the line's start, which GTK places on the next
+            // line shown, so the chevron of a header folded inside another would land there.
+            let (_, cell) = lines.line_yrange(line, sourceview5::GutterRendererAlignmentMode::Cell);
+            if cell <= 0 {
+                return;
+            }
             // Beside the line's first row, as its number and a diagnostic's mark are: the cell
             // also holds the blank a comparison pads a line with, above or below it.
             let (y, height) =
                 lines.line_yrange(line, sourceview5::GutterRendererAlignmentMode::First);
-            // A line inside a fold has no height. Drawing on it would stack every hidden chevron
-            // on the header's own row.
-            if height <= 0 {
-                return;
-            }
             let icon = match super::is_folded(&lines.buffer(), line as i32) {
                 true => shut,
                 false => open,
