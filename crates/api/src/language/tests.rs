@@ -421,10 +421,12 @@ fn a_server_started_for_calls_is_waited_for_then_stopped_when_idle() {
     };
     let (vault, _events) =
         Local::open_at(root.path(), &cache.path().join("index.db"), cfg).unwrap();
+    // `idle` no shorter than `starting`: its clock runs from the question, so a start slowed by a
+    // loaded machine would otherwise be stopped before it answers.
     let waits = Waits {
         starting: Duration::from_secs(5),
         asking: Duration::from_millis(500),
-        idle: Duration::from_secs(2),
+        idle: Duration::from_secs(5),
     };
 
     // Refused four times, a second at `AGAIN` apiece.
@@ -445,7 +447,7 @@ fn a_server_started_for_calls_is_waited_for_then_stopped_when_idle() {
         .find_map(|cell| cell.get().cloned())
         .expect("the server is kept");
 
-    std::thread::sleep(Duration::from_millis(2_500));
+    std::thread::sleep(Duration::from_millis(5_500));
     assert!(locked(&vault.lang.sessions).is_empty(), "idle, so stopped");
     let stopped = Instant::now() + Duration::from_secs(3);
     while !session.is_dead() && Instant::now() < stopped {

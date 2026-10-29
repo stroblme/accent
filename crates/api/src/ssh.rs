@@ -1260,7 +1260,15 @@ mod tests {
         let old = dir.join("accent-cli-old");
         // A shell waiting on a pipe stands in for a holder whatever its name: Ubuntu 26.04's
         // `sleep` is uutils' multicall binary, which picks its utility by name and exits at once.
-        std::fs::copy("/bin/sh", &old).unwrap();
+        // Copied by `cp`, not `std::fs::copy`: a child another test thread forks meanwhile would
+        // hold this process's write descriptor until it execs, and running the copy then fails
+        // with ETXTBSY.
+        let copied = Command::new("cp")
+            .arg("/bin/sh")
+            .arg(&old)
+            .status()
+            .unwrap();
+        assert!(copied.success());
         let mut live = Command::new(&old)
             .args(["-c", "read line"])
             .stdin(Stdio::piped())
