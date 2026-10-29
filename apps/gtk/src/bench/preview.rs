@@ -181,7 +181,12 @@ const STATE: &str = "var s = getSelection(); \
 
 /// Whether the preview's page is this render's, or the last one's once it landed.
 pub(super) fn settled(app: &App) -> bool {
-    shown(app).is_some_and(|r| r.preview().as_ref().is_some_and(|p| p.settled()))
+    shown(app).is_some_and(|r| {
+        r.preview()
+            .as_ref()
+            .and_then(|p| p.web())
+            .is_some_and(|p| p.settled())
+    })
 }
 
 /// The preview tab a drill reads: the window's first.
@@ -191,7 +196,11 @@ pub(super) fn shown(app: &App) -> Option<Rc<crate::rendered::Rendered>> {
 
 /// Its web view, once it has one.
 pub(super) fn web_view(app: &App) -> Option<webkit6::WebView> {
-    shown(app)?.preview().as_ref().map(|p| p.view().clone())
+    shown(app)?
+        .preview()
+        .as_ref()?
+        .web()
+        .map(|p| p.view().clone())
 }
 
 /// The active note's preview tab in a pane on its right and the note in front on the left, as

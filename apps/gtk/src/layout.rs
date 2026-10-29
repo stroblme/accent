@@ -325,7 +325,7 @@ impl App {
             // A note is presented rendered, code in its own view.
             Some(Doc::Text(_)) if self.presents_rendered(&self.pane()) => {
                 match self.preview.borrow().as_ref() {
-                    Some(preview) => preview.widget().clone(),
+                    Some(preview) => preview.focus_target().clone(),
                     None => return,
                 }
             }
@@ -637,7 +637,7 @@ impl App {
             .find(|tab| tab.view.upcast_ref::<gtk::Widget>() == &focus);
         let preview = || {
             let mut focused = false;
-            self.each_preview(|p| focused |= p.widget() == &focus);
+            self.each_preview(|p| focused |= p.focus_target() == &focus);
             focused
         };
         // A notebook cell's editor, and whether its completion popup is up.

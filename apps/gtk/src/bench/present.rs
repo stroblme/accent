@@ -343,7 +343,12 @@ async fn position(app: &Rc<App>) -> String {
     if let Some(pdf) = app.active_pdf() {
         return pdf.page_label().unwrap_or_default();
     }
-    let view = app.preview.borrow().as_ref().map(|p| p.view().clone());
+    let view = app
+        .preview
+        .borrow()
+        .as_ref()
+        .and_then(|p| p.web())
+        .map(|p| p.view().clone());
     let Some(view) = view else {
         return "none".into();
     };

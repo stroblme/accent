@@ -228,7 +228,8 @@ pub(super) fn bench_chrome_keys(app: &Rc<App>, rels: &str) {
         }
         super::preview::beside(&app).await;
         glib::timeout_future(Duration::from_millis(800)).await;
-        let preview = super::preview::web_view(&app).map(|view| view.upcast::<gtk::Widget>());
+        let preview = super::preview::shown(&app)
+            .and_then(|r| r.preview().as_ref().map(|p| p.focus_target().clone()));
         if let Some(preview) = preview {
             for (case, chord) in [("preview_page", "Page_Down"), ("preview_space", "space")] {
                 bench_chrome_key(&app, &preview, case, chord).await;

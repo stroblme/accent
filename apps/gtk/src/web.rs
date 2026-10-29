@@ -38,16 +38,6 @@ fn find_options(options: Options) -> webkit6::FindOptions {
 /// WebKit's own guard against a query that matches the whole page; the counter says "500+" past it.
 const FIND_LIMIT: u32 = 500;
 
-/// Idle lifetime for unused WebKit views and their 60–120 MB processes.
-/// Keep short toggles and successive formulas warm; ACCENT_BENCH_WEBIDLE uses two seconds.
-pub fn idle_for() -> std::time::Duration {
-    #[cfg(feature = "bench")]
-    if std::env::var_os("ACCENT_BENCH_WEBIDLE").is_some() {
-        return std::time::Duration::from_secs(2);
-    }
-    std::time::Duration::from_secs(5 * 60)
-}
-
 /// Preview-console tracing target, selectable through RUST_LOG=accent::preview=debug.
 const PREVIEW: &str = "accent::preview";
 

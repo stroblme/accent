@@ -82,7 +82,7 @@ impl Rendered {
     /// What takes the keyboard: the page, which scrolls with the reading keys.
     pub fn key_target(&self) -> gtk::Widget {
         match self.preview.borrow().as_ref() {
-            Some(preview) => preview.widget().clone(),
+            Some(preview) => preview.focus_target().clone(),
             None => self.frame.clone().upcast(),
         }
     }

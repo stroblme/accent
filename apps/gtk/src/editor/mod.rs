@@ -63,8 +63,8 @@ pub(crate) use page::COLUMN_FLOOR;
 pub use page::default_font;
 use page::{GUTTER, line_numbers};
 pub(crate) use page::{
-    font_css, install_font, next_view_name, refont, remeasure, restyle_note, set_margins,
-    style_note,
+    column_max, font_css, install_font, next_view_name, refont, remeasure, restyle_note,
+    set_margins, style_note,
 };
 pub(crate) use paste::paste_verbatim;
 use search::matched;

@@ -388,7 +388,12 @@ pub(super) fn bench_preview_look(app: &Rc<App>, rel: &str) {
 
 /// How many requests the preview tab's page has made.
 fn requests(app: &App) -> u32 {
-    super::preview::shown(app).map_or(0, |r| r.preview().as_ref().map_or(0, |p| p.requests()))
+    super::preview::shown(app).map_or(0, |r| {
+        r.preview()
+            .as_ref()
+            .and_then(|p| p.web())
+            .map_or(0, |p| p.requests())
+    })
 }
 
 /// List preview image addresses, document bounds and loading status.

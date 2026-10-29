@@ -57,10 +57,6 @@ mod panes;
 mod pathfield;
 mod pdf;
 mod platform;
-#[cfg(feature = "webkit")]
-mod preview;
-#[cfg(not(feature = "webkit"))]
-#[path = "preview_stub.rs"]
 mod preview;
 mod python;
 mod recall;
@@ -88,6 +84,8 @@ mod theme;
 mod toasts;
 mod tree;
 mod typing;
+#[cfg(feature = "webkit")]
+mod web;
 mod widgets;
 mod wire;
 mod work;

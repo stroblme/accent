@@ -26,7 +26,7 @@ const DIM: f64 = 0.6;
 ///
 /// Scale the cap with zoom so it eventually fills a narrow editor, while the floor retains
 /// a readable line width.
-fn column_max(available: i32, percent: u32, zoom: f64) -> i32 {
+pub(crate) fn column_max(available: i32, percent: u32, zoom: f64) -> i32 {
     let wanted = f64::from(available) * f64::from(percent) / 100.0;
     (wanted.max(f64::from(COLUMN_FLOOR)) * zoom).round() as i32
 }
