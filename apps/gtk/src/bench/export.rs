@@ -4,11 +4,13 @@ use super::*;
 use accent_core::pdf::{InkStyle, PdfDoc};
 use std::path::Path;
 
-/// `pdf:<rel_pdf>`: see [`bench_export_pdf`]; `note:<rel_note>`: see [`bench_export_note`].
+/// `pdf:<rel_pdf>`: see [`bench_export_pdf`]; `note:<rel_note>` and `notebook:<rel_notebook>`:
+/// see [`bench_export_html`].
 pub(super) fn bench_export(app: &Rc<App>, arg: &str) {
     match arg.split_once(':') {
         Some(("pdf", rel)) => bench_export_pdf(app, rel),
-        Some(("note", rel)) => bench_export_note(app, rel),
+        Some(("note", rel)) => bench_export_html(app, rel, "export_html"),
+        Some(("notebook", rel)) => bench_export_html(app, rel, "export_notebook"),
         _ => {
             println!("bench export unknown {arg:?}");
             bench_quit(app);
@@ -136,22 +138,25 @@ async fn bench_print_dialog(app: &Rc<App>, pdf: &Rc<pdftab::PdfTab>, file: &Path
     );
 }
 
-/// Export a note as HTML into `$TMPDIR` and read it back: its pictures inlined, its formulas,
-/// and nothing of the app or of a script left in it.
-fn bench_export_note(app: &Rc<App>, rel: &str) {
+/// Export a note or a notebook as HTML into `$TMPDIR` and read it back, printed as `name`: its
+/// pictures inlined, its tables and formulas, and nothing of the app or of a script left in it.
+fn bench_export_html(app: &Rc<App>, rel: &str, name: &'static str) {
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
-        let mut tab = None;
+        let mut paper = None;
         for _ in 0..100 {
-            tab = app.active().filter(|tab| tab.rel() == rel);
-            if tab.is_some() {
+            paper = app
+                .doc_for(&rel)
+                .as_ref()
+                .and_then(crate::export::Paper::of);
+            if paper.is_some() {
                 break;
             }
             glib::timeout_future(Duration::from_millis(100)).await;
         }
-        let Some(tab) = tab else {
-            println!("bench export_note no_tab");
+        let Some(paper) = paper else {
+            println!("bench {name} no_tab");
             return bench_quit(&app);
         };
         let stem = Path::new(&rel)
@@ -161,18 +166,19 @@ fn bench_export_note(app: &Rc<App>, rel: &str) {
             .into_owned();
         let html_path = std::env::temp_dir().join(format!("{stem}.html"));
         let _ = std::fs::remove_file(&html_path);
-        app.html_to(tab, html_path.clone());
+        app.html_to(paper, html_path.clone());
         let said = toast(&app, &format!("Exported {stem}.html"))
             .await
             .or_else(|| bench_said(&app));
         let html = std::fs::read_to_string(&html_path).unwrap_or_default();
         println!(
-            "bench export_html accent_refs={} data_images={} web_images={} svg={} math={} \
+            "bench {name} accent_refs={} data_images={} web_images={} svg={} tables={} math={} \
              script={} csp={} said={said:?}",
             html.matches("accent:").count(),
             html.matches("src=\"data:").count(),
             html.matches("src=\"https:").count(),
             html.matches("<svg").count(),
+            html.matches("<table").count(),
             html.matches("<math").count(),
             html.matches("<script").count(),
             html.contains("script-src 'none'"),

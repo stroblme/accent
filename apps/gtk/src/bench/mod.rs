@@ -273,7 +273,7 @@ use user_commands::bench_commands;
 ///   `same:<rel_note>`: etag-only change during typing; `doc:<rel_ipynb>,<rel_drawio>`: a
 ///   notebook's and a diagram's reloads on a slow host (`answer::bench_answer_doc`).
 /// - `ACCENT_BENCH_EXPORT=pdf:<rel_pdf>`: annotated export and print copy;
-///   `note:<rel_note>`: PDF/HTML export and print dialog. Outputs use `$TMPDIR`.
+///   `note:<rel_note>`, `notebook:<rel_notebook>`: HTML export. Outputs use `$TMPDIR`.
 /// - `ACCENT_BENCH_SAVE_AS=<rel_file>`: note/diagram/PDF/image Save As and errors.
 /// - `ACCENT_BENCH_MENU=<rel_file>`: tree context menus and modifier selections;
 ///   `press:<rel_file>`: hold for XTEST Ctrl/Shift clicks, for example

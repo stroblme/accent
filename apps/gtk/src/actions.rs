@@ -1057,7 +1057,7 @@ pub const PRINTS: [&str; 5] = [
 /// menu leaves sensitive.
 pub fn print_actions(kind: Option<Kind>) -> &'static [&'static str] {
     match kind {
-        Some(Kind::Note) => &["win.print", "win.export-html"],
+        Some(Kind::Note | Kind::Notebook) => &["win.print", "win.export-html"],
         Some(Kind::Pdf) => &["win.print", "win.export-pdf"],
         Some(Kind::Diagram) => &[
             "win.print",

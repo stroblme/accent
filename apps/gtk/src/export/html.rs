@@ -1,10 +1,45 @@
-//! A note as one self-contained HTML page (DESIGN.md, Preview): core writes the body, this puts in
-//! its pictures and the paper stylesheet. Export as HTML… writes it where the chooser says;
-//! Print… and Open in Browser hand it to the system browser, whose print dialog prints it.
+//! A note or a notebook as one self-contained HTML page (DESIGN.md, Preview and Notebook): core
+//! writes the body, this puts in its pictures and the paper stylesheet. Export as HTML… writes it
+//! where the chooser says; Print… and Open in Browser hand it to the system browser, whose print
+//! dialog prints it.
 
 use super::*;
 use crate::assets;
 use crate::look::{self, Look, Served};
+use accent_core::notebook::Notebook;
+
+/// What a page is made of, as its tab holds it now, unsaved edits and all, and where it is.
+pub(crate) struct Paper {
+    rel: String,
+    body: Body,
+}
+
+enum Body {
+    Note(String),
+    Notebook(Box<Notebook>),
+}
+
+impl Paper {
+    /// `doc` as Print… and the exports take it: a markdown note or a notebook, `None` for any
+    /// other tab.
+    pub(crate) fn of(doc: &Doc) -> Option<Paper> {
+        let body = match doc {
+            Doc::Text(tab) if tab.flavour().is_markdown() => Body::Note(tab.text()),
+            Doc::Notebook(nb) => Body::Notebook(Box::new(nb.snapshot())),
+            _ => return None,
+        };
+        let rel = doc.key();
+        Some(Paper { rel, body })
+    }
+
+    /// The page's body, as core writes it.
+    fn body(self) -> String {
+        match self.body {
+            Body::Note(text) => accent_core::markdown::to_html_file(&text, &self.rel),
+            Body::Notebook(nb) => nb.to_html_file(&self.rel),
+        }
+    }
+}
 
 /// What a page is for, which sets the policy in its head.
 #[derive(Clone, Copy)]
@@ -26,32 +61,32 @@ impl Csp {
 }
 
 impl App {
-    /// Export as HTML… for a note, once the chooser has answered: its page written to `dest`.
-    pub(crate) fn html_to(self: &Rc<Self>, tab: Rc<Tab>, dest: PathBuf) {
+    /// Export as HTML…, once the chooser has answered: the page of `paper` written to `dest`.
+    pub(crate) fn html_to(self: &Rc<Self>, paper: Paper, dest: PathBuf) {
         let name = dest_name(&dest);
         let app = self.clone();
         self.busy_with(
             format!("Exporting {name}…"),
             format!("export {name}"),
             async move {
-                let html = page(&app, &tab.rel(), tab.text(), Csp::File).await?;
+                let html = page(&app, paper, Csp::File).await?;
                 written(dest, html).await?;
                 Ok(Some(format!("Exported {name}")))
             },
         );
     }
 
-    /// Print… and Open in Browser for a note: its page written to the cache and opened in the
+    /// Print… and Open in Browser: the page of `paper` written to the cache and opened in the
     /// system browser, then `said` in a toast.
-    pub(crate) fn open_in_browser(self: &Rc<Self>, tab: Rc<Tab>, said: Option<&'static str>) {
-        let rel = tab.rel();
+    pub(crate) fn open_in_browser(self: &Rc<Self>, paper: Paper, said: Option<&'static str>) {
+        let rel = paper.rel.clone();
         let name = doc::file_name(&rel).to_string();
         let app = self.clone();
         self.busy_with(
             format!("Opening {name} in your browser…"),
             format!("open {name} in your browser"),
             async move {
-                let html = page(&app, &rel, tab.text(), Csp::Browser).await?;
+                let html = page(&app, paper, Csp::Browser).await?;
                 let file = browser_file(&rel);
                 written(file.clone(), html).await?;
                 launch(&app.window, &file).await?;
@@ -61,33 +96,29 @@ impl App {
     }
 }
 
-/// `text`, the note at `rel`, as one page: core writes the body on a worker, its diagrams are drawn
-/// here on the main thread, and a worker fetches its pictures into it.
-pub(crate) async fn page(
-    app: &Rc<App>,
-    rel: &str,
-    text: String,
-    csp: Csp,
-) -> Result<String, String> {
+/// `paper` as one page: core writes the body on a worker, its diagrams are drawn here on the main
+/// thread, and a worker fetches its pictures into it.
+pub(crate) async fn page(app: &Rc<App>, paper: Paper, csp: Csp) -> Result<String, String> {
     let stopped = || "the worker stopped".to_string();
-    let note = rel.to_string();
-    let body = crate::work::off_thread("export", move || {
-        accent_core::markdown::to_html_file(&text, &note)
-    })
-    .await
-    .ok_or_else(stopped)?;
-    let (resolve, css) = (app.asset_resolver(), css::paper_css(&app.config.borrow()));
+    let rel = paper.rel.clone();
+    let mut css = css::paper_css(&app.config.borrow());
+    if let Body::Notebook(_) = paper.body {
+        css.push_str(&css::notebook_css());
+    }
+    let body = crate::work::off_thread("export", move || paper.body())
+        .await
+        .ok_or_else(stopped)?;
+    let resolve = app.asset_resolver();
     let web = app.web_images.borrow().clone();
-    let drawn = drawn_diagrams(&body, &resolve, rel, &web).await;
-    let title = Path::new(doc::file_name(rel))
+    let drawn = drawn_diagrams(&body, &resolve, &rel, &web).await;
+    let title = Path::new(doc::file_name(&rel))
         .file_stem()
         .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
-    let note = rel.to_string();
     // Fetching a picture is a round trip on a remote vault, and the page may hold many.
     crate::work::off_thread("export", move || {
         let body = inline_images(&body, |uri| match drawn.get(uri) {
             Some(diagram) => diagram.clone(),
-            None => data_uri(&assets::asset(&*resolve, &note, uri)?),
+            None => data_uri(&assets::asset(&*resolve, &rel, uri)?),
         });
         document(&title, &css, &body, csp)
     })

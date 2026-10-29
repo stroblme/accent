@@ -1238,6 +1238,13 @@ impl NotebookTab {
         self.model.borrow().to_text()
     }
 
+    /// The notebook as the tab holds it now, what was typed included: what Print… and Export as
+    /// HTML… put on paper.
+    pub fn snapshot(&self) -> Notebook {
+        self.sync_model();
+        self.model.borrow().clone()
+    }
+
     /// A write landed: the tab is clean at `etag`.
     pub fn mark_clean(&self, etag: Etag) {
         self.save.etag.set(Some(etag));

@@ -168,6 +168,12 @@ pub fn paper() -> (&'static str, gdk::RGBA) {
     (VIEW_LIGHT, rgba(rgb(VIEW_LIGHT_TEXT), 1.0))
 }
 
+/// The sixteen ANSI colours on [`paper`]: the light terminal's, whatever the theme, as Solarized's
+/// are not for white paper.
+pub fn paper_palette() -> &'static [&'static str; 16] {
+    &AYU_LIGHT_ANSI
+}
+
 /// The colours of an error's and a warning's gutter icon on that half of the theme.
 pub fn error_warning(dark: bool) -> [gdk::RGBA; 2] {
     let pair = match (CHOICE.get(), dark) {

@@ -73,6 +73,36 @@ pub(crate) fn paper_css(config: &Config) -> String {
     stylesheet(fg, bg, column(config).map(f64::from))
 }
 
+/// What a notebook's page adds to [`paper_css`] for the cells core's `Notebook::to_html_file`
+/// writes: laid out as the tab lays them, a code cell's `[n]` in a column of its own beside its
+/// code and outputs, an output's colours from [`theme::paper_palette`].
+pub(crate) fn notebook_css() -> String {
+    let palette = theme::paper_palette();
+    let ansi: String = palette
+        .iter()
+        .enumerate()
+        .map(|(n, hex)| format!(".ansi-{n} {{ color: {hex}; }}\n"))
+        .collect();
+    // The tab tints stderr with the theme's red; paper's is the palette's.
+    let stderr = gdk::RGBA::parse(palette[1]).map_or_else(|_| "none".into(), |red| dim(red, 0.08));
+    format!(
+        "/* A cell without a count keeps the column, so every cell's text starts in one place. */\n\
+         .nb-cell {{ display: flex; gap: 12px; margin: 1em 0; }}\n\
+         .nb-count {{ flex: 0 0 4em; text-align: right; font-family: monospace; \
+         font-size: 0.92em; padding-top: 12px; opacity: 0.55; }}\n\
+         .nb-body {{ flex: 1; min-width: 0; }}\n\
+         .nb-body > :first-child {{ margin-top: 0; }}\n\
+         .nb-body > :last-child {{ margin-bottom: 0; }}\n\
+         .nb-output {{ margin-top: 6px; }}\n\
+         .nb-output pre {{ background: none; padding: 0; margin: 0; }}\n\
+         .nb-output pre.nb-stderr {{ background: {stderr}; padding: 4px 6px; }}\n\
+         .nb-output td {{ text-align: right; }}\n\
+         .nb-placeholder, .nb-table-note {{ opacity: 0.55; margin: 0.4em 0; }}\n\
+         .ansi-bold {{ font-weight: 700; }}\n\
+         {ansi}"
+    )
+}
+
 /// A `$$` formula's size against an inline one's (user decision 2026-10-28): a formula on a line
 /// of its own is read as a figure, and at the prose's cap height it looked small there.
 const DISPLAY_MATH: f64 = 1.15;

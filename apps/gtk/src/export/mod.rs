@@ -1,13 +1,15 @@
 //! Print… and Export as… for whichever tab the menu acts on, and what their kinds share.
 //!
-//! A note goes out as its HTML page ([`html`]): Export as HTML… writes it, and Print… opens it in
-//! the system browser, whose print dialog prints it. PDF and diagram tabs use their own export
-//! modules.
+//! A note or a notebook goes out as its HTML page ([`html`]): Export as HTML… writes it, and
+//! Print… opens it in the system browser, whose print dialog prints it. PDF and diagram tabs use
+//! their own export modules.
 
 use super::*;
 
 pub(crate) mod css;
 mod html;
+
+pub(crate) use html::Paper;
 
 /// What an export writes.
 #[derive(Clone, Copy)]
@@ -21,45 +23,45 @@ pub enum Export {
 /// A printout's margin on every side, LibreOffice's default: GTK's own quarter inch crowds prose.
 const MARGIN_MM: f64 = 20.0;
 
-/// What `doc` can be printed and exported as, `None` where it cannot be: a markdown note, a PDF
-/// and a diagram are the three (DESIGN.md, Preview and Diagram).
+/// What `doc` can be printed and exported as, `None` where it cannot be: a markdown note, a
+/// notebook, a PDF and a diagram are the four (DESIGN.md, Preview, Notebook, PDF and Diagram).
 pub fn printable(doc: &Doc) -> Option<Kind> {
     match doc {
         Doc::Text(tab) if tab.flavour().is_markdown() => Some(Kind::Note),
         Doc::Pdf(_) => Some(Kind::Pdf),
         Doc::Diagram(_) => Some(Kind::Diagram),
-        // Not printed yet; its kind is what puts Open as Text on its tab menu.
         Doc::Notebook(_) => Some(Kind::Notebook),
         _ => None,
     }
 }
 
 impl App {
-    /// Print…: the tab right-clicked, else the one in front. A note opens in the system browser,
-    /// which prints it, a PDF and a diagram go through their tabs' print dialogs; any other tab
-    /// does nothing, as Save As does.
+    /// Print…: the tab right-clicked, else the one in front. A note or a notebook opens in the
+    /// system browser, which prints it, a PDF and a diagram go through their tabs' print dialogs;
+    /// any other tab does nothing, as Save As does.
     pub(crate) fn print(self: &Rc<Self>) {
         match self.menu_doc() {
-            Some(Doc::Text(tab)) if tab.flavour().is_markdown() => {
-                self.open_in_browser(tab, Some("Opened in your browser. Print from there"))
-            }
             Some(Doc::Pdf(pdf)) => pdf::export::print(self, &pdf),
             Some(Doc::Diagram(tab)) => diagram::export::print(self, &tab),
-            _ => {}
+            doc => {
+                if let Some(paper) = doc.as_ref().and_then(Paper::of) {
+                    self.open_in_browser(paper, Some("Opened in your browser. Print from there"))
+                }
+            }
         }
     }
 
-    /// Open in Browser: the note the menu acts on, as Print… opens it; any other tab does nothing.
+    /// Open in Browser: the note or notebook the menu acts on, as Print… opens it; any other tab
+    /// does nothing.
     pub(crate) fn browse(self: &Rc<Self>) {
-        if let Some(Doc::Text(tab)) = self.menu_doc()
-            && tab.flavour().is_markdown()
-        {
-            self.open_in_browser(tab, None);
+        if let Some(paper) = self.menu_doc().as_ref().and_then(Paper::of) {
+            self.open_in_browser(paper, None);
         }
     }
 
     /// Choose a local destination and export the supported format.
-    /// Notes support HTML, PDFs PDF, and diagrams PDF/PNG/SVG; other kinds cannot export.
+    /// Notes and notebooks support HTML, PDFs PDF, and diagrams PDF/PNG/SVG; other kinds cannot
+    /// export.
     pub(crate) fn export(self: &Rc<Self>, to: Export) {
         let Some(doc) = self.menu_doc().filter(|doc| printable(doc).is_some()) else {
             return;
@@ -75,7 +77,7 @@ impl App {
             Export::Svg => "Export as SVG",
         };
         let name = match (to, &doc) {
-            (Export::Html, Doc::Text(tab)) if tab.flavour().is_markdown() => format!("{stem}.html"),
+            (Export::Html, Doc::Text(_) | Doc::Notebook(_)) => format!("{stem}.html"),
             (Export::Pdf, Doc::Pdf(_)) => format!("{stem} (exported).pdf"),
             (_, Doc::Diagram(tab)) => match diagram::export::offered_name(tab, to) {
                 Some(name) => name,
@@ -102,9 +104,13 @@ impl App {
                 return;
             };
             match (doc, to) {
-                (Doc::Text(tab), Export::Html) => app.html_to(tab, dest),
                 (Doc::Pdf(pdf), _) => pdf::export::export_to(&app, &pdf, dest),
                 (Doc::Diagram(tab), to) => diagram::export::export_to(&app, &tab, to, dest),
+                (doc, Export::Html) => {
+                    if let Some(paper) = Paper::of(&doc) {
+                        app.html_to(paper, dest)
+                    }
+                }
                 _ => {}
             }
         });
