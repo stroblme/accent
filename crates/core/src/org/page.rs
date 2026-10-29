@@ -2,12 +2,13 @@
 //! ([`crate::markdown::page`]), so the preview, an export and Android write it alike. Read line
 //! by line as [`super::analyze`] reads the file, the subset accent shows: headings with their
 //! TODO keyword and tags, paragraphs, lists with their boxes, description lists, tables, blocks
-//! of code, examples and quotes, footnotes, and in prose emphasis, links, pictures, formulas and
-//! `<<targets>>`.
+//! of code, examples and quotes, footnotes, and in prose emphasis, links, pictures, formulas,
+//! `<<targets>>` and sub- and superscripts in braces (`H_{2}O`, as org's `^:{}` has them, so
+//! `snake_case` stays as written).
 //!
-//! What org's own export leaves out is not shown: `#+KEY:` lines (`#+TITLE` too: a markdown
-//! note's front matter is no heading either), drawers, comments, export and comment blocks, a
-//! heading's priority and its `COMMENT`.
+//! What org's own export leaves out by default is not shown: `#+KEY:` lines (`#+TITLE` too: a
+//! markdown note's front matter is no heading either), drawers, comments, export and comment
+//! blocks, a heading's priority, and a heading marked `COMMENT` with its section.
 
 use super::links::OrgLink;
 use super::table::{aligns, cookie};
@@ -186,10 +187,7 @@ impl<'a> Page<'a> {
         let span = |a: usize, b: usize| lines[a].start..lines[b].end;
         match self.kind(lines, i) {
             Kind::Blank | Kind::Hidden => i + 1,
-            Kind::Heading => {
-                self.heading(lines, i);
-                i + 1
-            }
+            Kind::Heading => self.heading(lines, i),
             Kind::Closed(last, Style::CodeBlock) => {
                 let words: Vec<&str> = text[lines[i].clone()].trim()[8..]
                     .split_whitespace()
@@ -288,13 +286,25 @@ impl<'a> Page<'a> {
     }
 
     /// A heading: its TODO keyword, its title and its tags, as links to the tag's notes; a
-    /// property drawer under it gives it its `CUSTOM_ID`.
-    fn heading(&mut self, lines: &[Range<usize>], i: usize) {
+    /// property drawer under it gives it its `CUSTOM_ID`. The index of the line after it, or
+    /// after its whole section for one marked `COMMENT`, which org's export leaves out.
+    fn heading(&mut self, lines: &[Range<usize>], i: usize) -> usize {
         let text = self.text;
         let line = lines[i].clone();
         let Some(head) = heading(text, line.clone(), &self.keywords) else {
-            return;
+            return i + 1;
         };
+        if head.marks.iter().any(|m| &text[m.clone()] == "COMMENT") {
+            let stars = |j: usize| {
+                text[lines[j].clone()]
+                    .bytes()
+                    .take_while(|&c| c == b'*')
+                    .count()
+            };
+            return (i + 1..lines.len())
+                .find(|&j| is_heading(&text[lines[j].clone()]) && stars(j) <= stars(i))
+                .unwrap_or(lines.len());
+        }
         let level =
             HeadingLevel::try_from(usize::from(head.level).min(6)).unwrap_or(HeadingLevel::H6);
         self.headings
@@ -319,18 +329,28 @@ impl<'a> Page<'a> {
             }
         }
         self.inline(head.title);
-        for tag in head.tags {
+        // The tags as written, `:a:b:`, as a note's `#tag` is: each a link, the colons text.
+        if let Some(block) = head.tag_block {
+            let mut at = block.start;
             self.push(Node::Event(Event::Text(" ".into())), line.clone());
-            let shown = text[tag.range.clone()].into();
-            self.push(
-                Node::Tag {
-                    name: tag.name,
-                    text: shown,
-                },
-                tag.range,
-            );
+            for tag in head.tags {
+                let colons = text[at..tag.range.start].into();
+                self.push(Node::Event(Event::Text(colons)), line.clone());
+                let shown = text[tag.range.clone()].into();
+                self.push(
+                    Node::Tag {
+                        name: tag.name,
+                        text: shown,
+                    },
+                    tag.range.clone(),
+                );
+                at = tag.range.end;
+            }
+            let last = text[at..block.end].into();
+            self.push(Node::Event(Event::Text(last)), line.clone());
         }
         self.close(TagEnd::Heading(level), line);
+        i + 1
     }
 
     /// A block of code: each line of `body` less the indentation they share, and less the comma
@@ -927,7 +947,7 @@ mod tests {
     const ORG: &str = "#+TITLE: Fixture
 #+FILETAGS: :f:
 #+TODO: TODO NEXT | DONE
-* NEXT [#A] COMMENT Plan :work:urgent:
+* NEXT [#A] Plan :work:urgent:
 :PROPERTIES:
 :CUSTOM_ID: plan-id
 :END:
@@ -969,6 +989,9 @@ Terms:
 Note.[fn:1]
 
 [fn:1] The footnote.
+* COMMENT Draft
+Left out.
+** Under it
 * DONE Shipped
 ";
 
@@ -990,8 +1013,8 @@ Note.[fn:1]
         let h = bare(ORG);
         for want in [
             "<h1 id=\"plan\"><span id=\"plan-id\"></span><span class=\"todo\">NEXT</span> Plan \
-             <a href=\"accent://tag/work\" class=\"tag\">work</a> \
-             <a href=\"accent://tag/urgent\" class=\"tag\">urgent</a></h1>",
+             :<a href=\"accent://tag/work\" class=\"tag\">work</a>:\
+             <a href=\"accent://tag/urgent\" class=\"tag\">urgent</a>:</h1>",
             "<p>Some <strong>bold</strong>, <em>it</em>, <u>under</u>, <del>gone</del>, \
              <code>verb</code>, <code>code</code>, x<sup>2</sup> and H<sub>2</sub>O.\n",
             "<a href=\"sub/a.org#Intro\">the intro</a>",
@@ -1023,6 +1046,9 @@ Note.[fn:1]
         }
         for hidden in [
             "Fixture",
+            "Draft",
+            "Left out",
+            "Under it",
             "FILETAGS",
             "PROPERTIES",
             "[#A]",
@@ -1046,6 +1072,17 @@ Note.[fn:1]
         );
     }
 
+    /// An anchor names the `id` its element has on the page, a target's before a heading's.
+    #[test]
+    fn an_anchor_is_its_id_on_the_page() {
+        let h = to_html(ORG);
+        for (anchor, id) in [("Plan", "plan"), ("#plan-id", "plan-id"), ("HERE", "here")] {
+            assert_eq!(super::super::anchor_id(ORG, anchor).as_deref(), Some(id));
+            assert!(h.contains(&format!("id=\"{id}\"")), "{id}");
+        }
+        assert_eq!(super::super::anchor_id(ORG, "missing"), None);
+    }
+
     /// Every block is the bytes and lines of an element, on character boundaries whatever the
     /// text, with each line marker on its element's first line.
     #[test]
@@ -1059,7 +1096,7 @@ Note.[fn:1]
                 .to_string()
         };
         let heads: Vec<String> = blocks.iter().map(first).collect();
-        assert_eq!(heads[0], "* NEXT [#A] COMMENT Plan :work:urgent:");
+        assert_eq!(heads[0], "* NEXT [#A] Plan :work:urgent:");
         assert_eq!(blocks[0].lines, 4..5);
         assert!(heads.contains(&"| <r>  |     |".to_string()), "{heads:?}");
         for (s, sample) in [("é", 0), ("中", 1), ("🎉", 2)] {

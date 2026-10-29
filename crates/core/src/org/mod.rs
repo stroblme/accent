@@ -20,7 +20,7 @@ pub use search::{Search, file_line};
 pub use table::table_key;
 pub use task::toggle_task;
 
-use crate::markdown::{Analysis, CodeBlock, Heading, Span, Style, Tag, heading_for};
+use crate::markdown::{Analysis, CodeBlock, Heading, Span, Style, Tag, heading_for, slugs};
 use links::OrgLink;
 use std::ops::Range;
 
@@ -54,6 +54,30 @@ pub fn anchor_range(text: &str, anchor: &str) -> Option<Range<usize>> {
         .find(|(_, target)| target.eq_ignore_ascii_case(name))
         .map(|(at, _)| at.clone())
         .or_else(|| heading_for(&scan.analysis.headings, name).map(|h| h.range.clone()))
+}
+
+/// The `id` [`page`] gives what `anchor` names, as [`anchor_range`] finds it: a `<<target>>`'s
+/// name, a heading's custom ID, else a heading's slug ([`crate::markdown::anchor_id`]'s for a note).
+pub fn anchor_id(text: &str, anchor: &str) -> Option<String> {
+    let name = match Search::of(anchor) {
+        Search::Name(name) => name,
+        Search::CustomId(id) => return custom_id(text, id).map(|_| id.to_string()),
+        Search::Regex(_) => return None,
+    };
+    let scan = scan(text);
+    if let Some((_, target)) = scan
+        .targets
+        .iter()
+        .find(|(_, t)| t.eq_ignore_ascii_case(name))
+    {
+        return Some(target.clone());
+    }
+    let headings = &scan.analysis.headings;
+    let named = heading_for(headings, name)?;
+    let i = headings.iter().position(|h| h.range == named.range)?;
+    slugs(headings.iter().map(|h| h.text.as_str()))
+        .into_iter()
+        .nth(i)
 }
 
 /// The heading whose property drawer sets `CUSTOM_ID` to `id`, ignoring case as

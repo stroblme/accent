@@ -52,6 +52,14 @@ impl Syntax {
         }
     }
 
+    /// The `id` `text`'s page gives what `anchor` names ([`markdown::anchor_id`]).
+    pub fn anchor_id(self, text: &str, anchor: &str) -> Option<String> {
+        match self {
+            Syntax::Markdown => markdown::anchor_id(text, anchor),
+            Syntax::Org => org::anchor_id(text, anchor),
+        }
+    }
+
     /// The blocks of code `text` names a language for ([`markdown::code_blocks`]).
     pub fn code_blocks(self, text: &str) -> Vec<markdown::CodeBlock> {
         match self {
