@@ -290,11 +290,11 @@ impl App {
         true
     }
 
-    /// Disable insertion when all layers are hidden or locked and clear any active
-    /// insert tool, matching draw.io (`EditorUi.updateActionStates`).
+    /// Offer insertion over a diagram alone, disabled when all its layers are hidden or locked,
+    /// and clear any active insert tool, matching draw.io (`EditorUi.updateActionStates`).
     pub(crate) fn sync_diagram_tools(&self) {
         let diagram = self.active_diagram();
-        let open = diagram.as_ref().is_none_or(|d| d.can_insert());
+        let open = diagram.as_ref().is_some_and(|d| d.can_insert());
         let inserts = [
             Tool::Rect,
             Tool::Ellipse,

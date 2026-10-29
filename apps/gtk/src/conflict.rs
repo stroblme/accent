@@ -357,6 +357,11 @@ impl Conflicts {
         self.find();
     }
 
+    /// Whether the last find saw a block, which the conflict commands need.
+    pub fn any(&self) -> bool {
+        !self.starts.borrow().is_empty()
+    }
+
     /// Put the caret on the start of the next block after it, or the one before it with
     /// `forward` false, going round at the ends, and scroll there. `false` when there is none.
     pub fn step(&self, forward: bool) -> bool {

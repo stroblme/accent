@@ -165,24 +165,37 @@ pub fn build_window(
     // pair while one is in hand with something to walk (`App::sync_history`). A click fires the
     // action rather than the button being one of its actionables, which would tie the button's
     // sensitivity to the action — and the actions stay enabled, so a key pressed while the
-    // render thread is busy still queues its step. A click leaves the keyboard on the page,
-    // where `Ctrl+Z` is.
-    let history = |icon: &str, action: &'static str| {
+    // render thread is busy still queues its step. Of a PDF's, a diagram's and a notebook's, the
+    // one enabled is the tab in front's (`App::sync_applicable`). A click leaves the keyboard on
+    // the page, where `Ctrl+Z` is.
+    let history = |icon: &str, actions: [&'static str; 3]| {
         let button = gtk::Button::builder()
             .icon_name(icon)
-            .tooltip_text(label_of(action))
+            .tooltip_text(label_of(actions[0]))
             .valign(gtk::Align::Center)
             .focus_on_click(false)
             .visible(false)
             .build();
         button.connect_clicked(move |button| {
-            let _ = button.activate_action(action, None);
+            let Some(window) = button.root().and_downcast::<gtk::ApplicationWindow>() else {
+                return;
+            };
+            let mut walks = actions.iter().filter_map(|a| window.lookup_action(&a[4..]));
+            if let Some(action) = walks.find(|action| action.is_enabled()) {
+                action.activate(None);
+            }
         });
         button
     };
     let (undo, redo) = (
-        history("edit-undo-symbolic", "win.pdf-undo"),
-        history("edit-redo-symbolic", "win.pdf-redo"),
+        history(
+            "edit-undo-symbolic",
+            ["win.pdf-undo", "win.diagram-undo", "win.notebook-undo"],
+        ),
+        history(
+            "edit-redo-symbolic",
+            ["win.pdf-redo", "win.diagram-redo", "win.notebook-redo"],
+        ),
     );
     let menu = menu_button(key);
     header.pack_end(&menu);

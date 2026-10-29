@@ -65,6 +65,13 @@ impl App {
         }
     }
 
+    /// Whether Start Debugging has a program to run, the Code pane's or the last one, and no
+    /// session runs.
+    pub(crate) fn can_debug(&self) -> bool {
+        !self.debugger.running()
+            && (self.code_program().is_some() || self.debugger.last.borrow().is_some())
+    }
+
     /// The Code pane's file and its language, where Start Debugging can run it.
     pub(crate) fn code_program(&self) -> Option<(String, String)> {
         match self.code_doc()? {
@@ -671,6 +678,8 @@ impl App {
                 action.set_enabled(on);
             }
         }
+        // Start Debugging and Select Python Environment wait for no session.
+        self.sync_applicable();
         let Some(sidebar) = self.sidebar.get() else {
             return;
         };

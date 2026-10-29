@@ -670,13 +670,10 @@ impl App {
             self.lay_out();
         }
         // The tools belong to the window, so they follow the tab in front, and so do SyncTeX's
-        // two commands, Invert Image Colours, Print, the exports, Toggle Task and Toggle Preview.
+        // two commands and Invert Image Colours.
         self.sync_drawing();
         self.sync_synctex(self.active_doc());
         self.sync_image_invert();
-        self.sync_prints();
-        self.sync_toggle_task();
-        self.sync_toggle_preview();
         // The tree's selection follows the tab in front, so the sidebar says which file is open
         // rather than which row the pointer last crossed. A diff, a terminal and a file from
         // outside the vault have no row to point at, and clear it.
@@ -703,6 +700,7 @@ impl App {
             self.sync_status();
             self.sync_outline();
             self.sync_properties();
+            self.sync_applicable();
             self.sync_opening();
             self.refresh_zoom();
             self.clear_preview();
@@ -738,6 +736,9 @@ impl App {
         self.sync_status();
         self.sync_outline();
         self.sync_properties();
+        // Every command as it applies to the tab now in front, after the Code and Properties
+        // panes, which some act on or show.
+        self.sync_applicable();
         self.sync_opening();
         self.refresh_zoom();
         match note {
@@ -1566,6 +1567,8 @@ impl App {
     /// What follows every git refresh, whether or not the exclusion set moved with it.
     fn after_git_changed(self: &Rc<Self>, git: &Rc<git::Panel>) {
         self.sync_branch();
+        // A repository found, or a merge begun or ended, changes what the git commands can do.
+        self.sync_applicable();
         // Only when HEAD actually moved: every open tab costs a `git show`, and a refresh that
         // merely noticed an edit is telling us about the very buffer the marks came from.
         if git.head_changed() {

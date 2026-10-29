@@ -5,10 +5,133 @@ use crate::export::Export;
 use accent_api::debug::Step;
 use accent_core::conflict::Take;
 
+mod applies;
 mod catalog;
+pub use applies::Front;
 pub use catalog::ACTIONS;
 
+/// The sidebar's panes by name, for [`applies::Context::sidebar`].
+const PANES: [&str; 7] = [
+    "files",
+    "search",
+    "info",
+    "git",
+    "outline",
+    "properties",
+    "bibliography",
+];
+
+/// What `doc` is to the rules of [`applies`].
+fn front_of(doc: &Doc) -> Front {
+    match doc {
+        Doc::Text(tab) => match tab.flavour() {
+            flavour if flavour.is_note() => Front::Note {
+                markdown: flavour.is_markdown(),
+            },
+            _ => Front::Code,
+        },
+        Doc::Pdf(_) => Front::Pdf,
+        Doc::Image(_) => Front::Image,
+        Doc::Diagram(_) => Front::Diagram,
+        Doc::Notebook(_) => Front::Notebook,
+        Doc::Terminal(_) => Front::Terminal,
+        Doc::Diff(_) => Front::Diff,
+        Doc::Rendered(_) => Front::Preview,
+        Doc::Status(_) => Front::Status,
+    }
+}
+
 impl App {
+    /// What decides which commands apply: the tab the tab menu was opened on, else the tab in
+    /// front, and the window around it.
+    fn applies_context(&self) -> applies::Context {
+        let page = self
+            .menu_page
+            .borrow()
+            .clone()
+            .or_else(|| self.tabs().selected_page());
+        let doc = page.as_ref().and_then(|page| self.doc_for_page(page));
+        let tab = doc.as_ref().and_then(Doc::tab);
+        let (key, git, sidebar) = (self.key.borrow(), self.git.get(), self.sidebar.get());
+        let running = self.debugger.running();
+        applies::Context {
+            front: doc.as_ref().map(front_of),
+            file: doc
+                .as_ref()
+                .filter(|doc| !doc.is_transient())
+                .map(|doc| match doc.is_loose() {
+                    true => applies::File::Loose,
+                    false => applies::File::Vault,
+                }),
+            vault: self.vault().map(|vault| vault.is_remote()),
+            shells: key.is_terminal(),
+            session: matches!(*key, shell::WindowKey::Terminal(_)),
+            pinned: page.as_ref().is_some_and(|page| self.is_pinned(page)),
+            movable: doc.as_ref().is_some_and(|doc| shell::movable(self, doc)),
+            panes: self.panes.borrow().len(),
+            sidebar: PANES
+                .into_iter()
+                .filter(|name| sidebar.is_some_and(|s| s.has_pane(name)))
+                .collect(),
+            repository: git.is_some_and(|git| git.has_repos()),
+            merging: git.is_some_and(|git| git.merging()),
+            conflicts: tab.is_some_and(|tab| tab.conflicts().any()),
+            comparing: tab.is_some_and(|tab| tab.comparison().is_some()),
+            merge: tab.is_some_and(|tab| tab.merging().is_some()),
+            kernel: self.code_doc().is_some_and(|doc| doc.notebook().is_some()),
+            bibliography: tab.is_some_and(|tab| bibliography::is_bib(&tab.rel()))
+                || self
+                    .bibliography
+                    .get()
+                    .is_some_and(|panel| panel.path().is_some()),
+            debuggable: self.can_debug(),
+            breakable: tab.is_some_and(|tab| {
+                doc::host_file_path(&tab.rel()).is_none()
+                    && accent_api::debug::debuggable(&lang::language_id(tab))
+            }),
+            breakpoints: !self.debugger.saved(self).is_empty(),
+            python: self.vault().is_some()
+                && !running
+                && sidebar.and_then(|s| s.python_button()).is_some(),
+            shared: doc
+                .as_ref()
+                .and_then(Doc::terminal)
+                .and_then(|t| t.share_state()),
+        }
+    }
+
+    /// Enable each command as it applies ([`applies::applies`]), but those whose own sync
+    /// enables them: a menu greys the rest, Run Command leaves them out, and their chords go on
+    /// to the focused widget.
+    pub(crate) fn sync_applicable(&self) {
+        let cx = self.applies_context();
+        for (full, _, _) in ACTIONS {
+            let Some(name) = full.strip_prefix("win.") else {
+                continue;
+            };
+            if applies::OWN_SYNC.contains(full) {
+                continue;
+            }
+            let action = self.window.lookup_action(name);
+            if let Some(action) = action.and_downcast::<gio::SimpleAction>() {
+                action.set_enabled(applies::applies(full, &cx));
+            }
+        }
+    }
+
+    /// Whether Run Command lists an action, once [`sync_applicable`](Self::sync_applicable) has
+    /// run: an enabled window action, or an application action that applies to this window.
+    pub(crate) fn listed(&self) -> impl Fn(&str) -> bool + '_ {
+        let cx = self.applies_context();
+        move |action| match action.strip_prefix("win.") {
+            Some(name) => self
+                .window
+                .lookup_action(name)
+                .is_some_and(|a| a.is_enabled()),
+            None => applies::applies(action, &cx),
+        }
+    }
+
     fn run_action(self: &Rc<Self>, name: &str) {
         if let Some(name) = name.strip_prefix("bib-") {
             self.bibliography_action(name);
@@ -60,15 +183,10 @@ impl App {
             }
             // The one way to upload into the vault root: the tree has no row for it, so the
             // folder's own context menu cannot offer it and this reads the selection the way
-            // New Folder does.
+            // New Folder does. A remote vault's alone (`applies`).
             "upload" => {
-                if let Some(ops) = self.need_ops("upload files") {
-                    match ops.vault.is_remote() {
-                        true => fileops::upload(ops, &self.selected_dir().unwrap_or_default()),
-                        // Listed for every vault, because the palette shows all of ACTIONS, so
-                        // the local one says why nothing opened rather than doing nothing.
-                        false => self.toast("This vault is already on this machine"),
-                    }
+                if let Some(ops) = self.ops() {
+                    fileops::upload(ops, &self.selected_dir().unwrap_or_default());
                 }
             }
             "terminal" => self.open_terminal(),
@@ -90,7 +208,7 @@ impl App {
             },
             "terminal-share" | "terminal-revoke" => {
                 let Some(Doc::Terminal(term)) = self.active_doc() else {
-                    return self.toast("Select a held terminal in a vault to share it with MCP");
+                    return;
                 };
                 let share = name == "terminal-share";
                 let app = Rc::downgrade(self);
@@ -107,6 +225,8 @@ impl App {
                             term.ask(move |_| {
                                 if let Some(app) = app.upgrade() {
                                     app.sync_details();
+                                    // Share gives way to Revoke, and the other way round.
+                                    app.sync_applicable();
                                 }
                             });
                         }
@@ -230,15 +350,8 @@ impl App {
             "pdf-invert" => self.with_pdf(|pdf| pdf.toggle_invert()),
             "image-invert" => self.with_image(|image| self.invert_image(&image.key())),
             "pdf-copy" => self.with_pdf(|pdf| pdf.copy_selection()),
-            // The header's Undo and Redo fire these over a diagram too.
-            "pdf-undo" => match self.active_diagram() {
-                Some(d) => d.undo(),
-                None => self.with_pdf(|pdf| pdf.undo()),
-            },
-            "pdf-redo" => match self.active_diagram() {
-                Some(d) => d.redo(),
-                None => self.with_pdf(|pdf| pdf.redo()),
-            },
+            "pdf-undo" => self.with_pdf(|pdf| pdf.undo()),
+            "pdf-redo" => self.with_pdf(|pdf| pdf.redo()),
             "pdf-copy-link" => self.with_pdf(|pdf| pdf.copy_link()),
             "pdf-next-page" => self.with_pdf(|pdf| pdf.next_page()),
             "pdf-previous-page" => self.with_pdf(|pdf| pdf.previous_page()),
@@ -540,16 +653,6 @@ impl App {
         }
         if let Some(view) = self.active_notebook().and_then(|n| n.editing_view()) {
             f(&view);
-        }
-    }
-
-    /// Toggle Task means something only over a note, markdown or org: greyed elsewhere, where its
-    /// chord goes on to the focused widget.
-    pub(crate) fn sync_toggle_task(&self) {
-        let note = self.active().is_some_and(|tab| tab.flavour().is_note());
-        let action = self.window.lookup_action("toggle-task");
-        if let Some(action) = action.and_downcast::<gio::SimpleAction>() {
-            action.set_enabled(note);
         }
     }
 
@@ -913,11 +1016,9 @@ pub fn install_actions(app: &Rc<App>) {
         }
     }
     app.sync_commands();
-    // The session's controls wait for a session, Print and the exports for a document, and
-    // Toggle Task for a note.
+    // The session's controls wait for a session, and the rest for what they act on.
     app.sync_debug();
-    app.sync_prints();
-    app.sync_toggle_task();
+    app.sync_applicable();
 
     app.captured
         .set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -1012,7 +1113,7 @@ pub fn menu_button(key: &crate::shell::WindowKey) -> gtk::MenuButton {
 /// another key: a window of shells saved under a name gains Close Session there and then.
 ///
 /// Print… and Export As follow the files, every format listed and greyed where the tab in front
-/// cannot do it (`App::sync_prints`); not in a window of shells, where a document is the exception.
+/// cannot do it (`App::sync_applicable`); not in a window of shells, where a document is the exception.
 pub fn primary_menu(key: &crate::shell::WindowKey) -> gio::Menu {
     let menu = gio::Menu::new();
     let section = |actions: Vec<&str>| {

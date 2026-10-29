@@ -1,8 +1,8 @@
 //! One palette for commands, files, symbols, tags and vaults.
 //!
 //! Callers choose the initial mode; `>`, `#` and `@` switch modes while typing. Command rows
-//! list every command, bound or not, its accelerator a button that rebinds it; Keyboard
-//! Shortcuts (`shortcuts.rs`) lists the bound ones.
+//! list every command that applies to the window as it stands, bound or not, its accelerator a
+//! button that rebinds it; Keyboard Shortcuts (`shortcuts.rs`) lists the bound ones.
 //!
 //! File mode opens immediately with recently opened and modified files, matching the full
 //! list only after typing. Debouncing prevents a full match being queued for every character.
@@ -52,6 +52,9 @@ pub enum Item {
         recent: Option<usize>,
         /// Reason a disabled action is greyed out, shown in its row.
         why: Option<String>,
+        /// Whether command mode lists it: it applies to the window as it stands, or says `why`
+        /// not. One left out still holds its chords, which a rebind may not take.
+        listed: bool,
     },
     /// A tag to filter by.
     Tag(String),
@@ -650,18 +653,26 @@ pub fn present(
     // Behind a cell because a rebind rewrites one row's accelerators without closing the dialog.
     let commands: Rc<RefCell<Vec<Rc<Item>>>> =
         Rc::new(RefCell::new(commands.into_iter().map(Rc::new).collect()));
-    let command_text: Rc<Vec<String>> = Rc::new(
+    // Where in `commands` the listed ones are, which alone are ranked.
+    let shown: Rc<Vec<usize>> = Rc::new(
         commands
             .borrow()
             .iter()
-            .map(|c| c.text().to_string())
+            .enumerate()
+            .filter(|(_, c)| matches!(&***c, Item::Command { listed: true, .. }))
+            .map(|(i, _)| i)
+            .collect(),
+    );
+    let command_text: Rc<Vec<String>> = Rc::new(
+        shown
+            .iter()
+            .map(|&i| commands.borrow()[i].text().to_string())
             .collect(),
     );
     let command_recent: Rc<Vec<Option<usize>>> = Rc::new(
-        commands
-            .borrow()
+        shown
             .iter()
-            .map(|c| match &**c {
+            .map(|&i| match &*commands.borrow()[i] {
                 Item::Command { recent, .. } => *recent,
                 _ => None,
             })
@@ -757,8 +768,9 @@ pub fn present(
         let (recent, files, tags) = (recent.clone(), files.clone(), tags.clone());
         let (mru, typed) = (mru.clone(), typed.clone());
         let (vaults, vault_places) = (vaults.clone(), vault_places.clone());
-        let (commands, command_text, command_recent) = (
+        let (commands, shown, command_text, command_recent) = (
             commands.clone(),
+            shown.clone(),
             command_text.clone(),
             command_recent.clone(),
         );
@@ -817,7 +829,7 @@ pub fn present(
                 // Labels and tags are not paths, so they score better under the plain config.
                 Mode::Commands => rank(&command_text, &command_recent, query, Corpus::Words)
                     .into_iter()
-                    .map(|i| commands.borrow()[i].clone())
+                    .map(|i| commands.borrow()[shown[i]].clone())
                     .collect(),
                 Mode::Tags => rank(&tags, &[], query, Corpus::Words)
                     .into_iter()
@@ -927,10 +939,14 @@ pub fn present(
                 let action = action.to_string();
                 move |chosen| {
                     let accels = on_rebind(&action, chosen);
-                    let (label, recent, why) = match &*commands.borrow()[index] {
+                    let (label, recent, why, listed) = match &*commands.borrow()[index] {
                         Item::Command {
-                            label, recent, why, ..
-                        } => (label.clone(), *recent, why.clone()),
+                            label,
+                            recent,
+                            why,
+                            listed,
+                            ..
+                        } => (label.clone(), *recent, why.clone(), *listed),
                         _ => return,
                     };
                     commands.borrow_mut()[index] = Rc::new(Item::Command {
@@ -939,6 +955,7 @@ pub fn present(
                         accels,
                         recent,
                         why,
+                        listed,
                     });
                     *clashes.borrow_mut() = conflicts(&commands.borrow());
                     let selected = selection.selected();
@@ -1300,6 +1317,7 @@ mod tests {
             accels: accels.iter().map(|a| a.to_string()).collect(),
             recent: None,
             why: None,
+            listed: true,
         })
     }
 

@@ -134,20 +134,6 @@ impl App {
         }
     }
 
-    /// Grey Toggle Preview out where it has nothing to do: over anything but a markdown note or
-    /// a preview tab.
-    pub(crate) fn sync_toggle_preview(&self) {
-        let can = match self.active_doc() {
-            Some(Doc::Text(tab)) => tab.flavour().is_markdown(),
-            Some(Doc::Rendered(_)) => true,
-            _ => false,
-        };
-        let action = self.window.lookup_action("view-mode");
-        if let Some(action) = action.and_downcast::<gio::SimpleAction>() {
-            action.set_enabled(can);
-        }
-    }
-
     /// Open `note`'s preview tab right of the note, keeping the note, which a click down the
     /// Files tree would otherwise replace and take its preview with it. A restored one goes where
     /// the session put it ([`App::tabs_for`]).

@@ -25,6 +25,7 @@ mod image;
 mod info;
 mod kernel;
 mod keys;
+mod listed;
 mod loose;
 mod memory;
 mod minimap;
@@ -244,7 +245,8 @@ use user_commands::bench_commands;
 ///   the last of three or more split off to the right),
 ///   `back:<a>,<b>` (navigation across edits/reload), `loose:<rel_pdf>`
 ///   (loose-file readers/assets; creates/removes `loose-drill/`), `toggle:<a>,<b>`
-///   (XTEST `Ctrl+M` between `a` and its preview tab, `toggle::bench_toggle`). Remote
+///   (XTEST `Ctrl+M` between `a` and its preview tab, `toggle::bench_toggle`), `commands`
+///   (Run Command's rows over a note and a PDF it writes, `listed::bench_listed`). Remote
 ///   pin-window/apart modes verify tabs cannot move off the host.
 /// - `ACCENT_BENCH_SLOW_READ=<ms>`: delay text reads on workers to reproduce
 ///   double-clicks before tabs arrive in the `TABS=tree:` drill.
@@ -761,6 +763,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if rels == "pins" {
                 return bench_pins_restored(&app);
+            }
+            if rels == "commands" {
+                return listed::bench_listed(&app);
             }
             if let Some(rels) = rels.strip_prefix("pinwin:") {
                 return bench_pin_window(&app, rels);

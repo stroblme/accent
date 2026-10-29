@@ -394,6 +394,10 @@ smoke: gtk-bench vault xvfb
 # the Files tree, a pane beside or a tab looked at, leaves another tab in front or the keyboard
 # outside it.
 #
+# `ACCENT_BENCH_TABS=commands` opens Run Command over a note and a PDF it writes, and exits 1 where
+# one lists a command of the other's or leaves out one of its own. Skipped without libpdfium, which
+# opens the PDF.
+#
 # `ACCENT_BENCH_DEBUG` debugs a small Python program with debugpy, held against `debug.expected`,
 # and is skipped where `python3` has no debugpy. Its program runs in a terminal tab, so under a
 # scratch HOME.
@@ -429,6 +433,8 @@ drills: gtk-bench xvfb
 	$(HEADLESS) sh -c 'echo "# Alpha" >"$$0/alpha.md" && echo "# Beta" >"$$0/beta.md" && \
 		ACCENT_BENCH_TABS=toggle:alpha.md,beta.md exec timeout 90 $(TARGET_DIR)/accent "$$0"' \
 		"$$xdg/vault"
+	$(HEADLESS) sh -c '{ test -e "$(PDFIUM_LIB)" || { echo "SKIPPED the Run Command drill: no libpdfium"; exit 0; }; } && \
+		ACCENT_BENCH_TABS=commands exec timeout 60 $(TARGET_DIR)/accent "$$0"' "$$xdg/vault"
 	$(HEADLESS) sh -c 'echo "# Note" >"$$0/note.md" && mkdir -p "$$XDG_CONFIG_HOME/accent" && \
 		printf "[vaults.\"%s\".lsp.servers]\nc = [\"python3\", \"%s\"]\n" "$$0" "$(CURDIR)/build-aux/fake-lsp.py" \
 			>"$$XDG_CONFIG_HOME/accent/config.toml" && \

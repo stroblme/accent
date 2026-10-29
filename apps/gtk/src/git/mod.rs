@@ -743,7 +743,7 @@ impl Panel {
     }
 
     /// Whether the selected repository is part way through a merge.
-    fn merging(&self) -> bool {
+    pub(crate) fn merging(&self) -> bool {
         let state = self.state.borrow();
         state
             .statuses

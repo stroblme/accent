@@ -487,12 +487,13 @@ impl App {
         });
     }
 
-    /// Grey out Invert Image Colours over an animation, which is never recoloured, once the image
-    /// in front has been read.
+    /// Offer Invert Image Colours over an image alone, greyed over an animation, which is never
+    /// recoloured, once the image in front has been read.
     pub(crate) fn sync_image_invert(&self) {
+        let image = matches!(self.active_doc(), Some(Doc::Image(_)));
         let action = self.window.lookup_action("image-invert");
         if let Some(action) = action.and_downcast::<gio::SimpleAction>() {
-            action.set_enabled(!self.active_animation());
+            action.set_enabled(image && !self.active_animation());
         }
     }
 

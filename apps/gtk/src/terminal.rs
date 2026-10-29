@@ -360,7 +360,7 @@ impl Term {
         self.view.paste_clipboard();
     }
 
-    fn share_state(&self) -> Option<bool> {
+    pub(crate) fn share_state(&self) -> Option<bool> {
         self.share_vault
             .as_ref()
             .filter(|_| !self.lost.get() && !self.ended.get())

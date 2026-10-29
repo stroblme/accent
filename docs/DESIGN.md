@@ -463,7 +463,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 ### Bibliography
 
 - BibTeX and BibLaTeX files remain authoritative. The shared core parses source ranges and changes only edited fields, preserving comments, custom fields, protected capitals, string expressions and unrelated whitespace. Malformed files remain editable in the source editor; structured edits wait for a valid parse.
-- The pane selects one `.bib` by vault-relative path, with a plain name for a single file and a searchable dropdown for several. The selected name ellipsizes to the sidebar width; the tooltip and dropdown list retain the full path. A `.bib` tab selects its file without switching the sidebar. The palette always offers New Bibliography and Add Reference.
+- The pane selects one `.bib` by vault-relative path, with a plain name for a single file and a searchable dropdown for several. The selected name ellipsizes to the sidebar width; the tooltip and dropdown list retain the full path. A `.bib` tab selects its file without switching the sidebar. The palette always offers New Bibliography and Add Reference in a vault's window, and the other bibliography commands while a bibliography is selected or in front.
   The list follows a `.bib` made, deleted or moved outside accent: a new file reaches the window only as its folder having changed, so those folders are listed again off the main thread for their `.bib` files alone, and a removal drops what it took at once.
 - Bibliography files always open in the ordinary source editor; the rendered list lives only in the sidebar. Activating a reference reveals its source, and Edit Reference opens its fields. Sidebar changes use the same buffer, undo history, autosave and external-change banner.
 - The pane follows Git’s 6 px outer margins and 12 px group spacing. Search and the icon buttons share one row: Open and More are flat, Add uses the same suggested-action styling as Commit. Reference rows use Search’s navigation-sidebar styling, with heading titles, dim author/year text and dim caption keys. Each row reveals flat Copy Citation Key, Reference Actions and Remove Reference buttons on hover or keyboard focus, using the same revealer as Git, which an open menu keeps on screen; a right-click on the row, or Menu or Shift+F10 on it, opens the same Reference Actions menu. Remove reviews removal of that entry and retains its attachments; the Reference Actions menu holds what acts on one reference — editing, metadata, its key, citing, usages, its PDF, copying and moving — on the marked rows when the row is one of them, as a file manager's menu does. The header's More menu holds only what acts on the whole file: Check, Merge Duplicates, Undo, Redo and New Bibliography; the palette keeps every action for the selection.
@@ -847,6 +847,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Its file list is kept warm in the background, not fetched when the dialog opens: a palette that is not instant is not a palette.
   The list is read again as it opens all the same, and one that lands while the dialog is up, that one or the reconcile's, is ranked again under the query typed, the highlight staying on its row if that is still there: a note saved since, with a new link or alias, is in it on that opening, and a vault opened a moment ago fills it as the index does.
 - Command mode lists the user's own commands (Terminal) by name after the table's commands, each with its shortcut, rebound from its row as any command is (Keyboard, Rebinding).
+- **Command mode lists only what applies** to the window as it stands, read afresh as it opens: what the tab in front can take (Export as PDF… over a PDF, not over a note), the vault, its repository, a debug session and a kernel (`actions::applies`).
+  Every other action is disabled, so a menu greys it and its chord goes on to the focused widget.
+  Go to Source and Show in PDF without SyncTeX data, Invert Image Colours over an animation and Initialize Git Repository in a repository stay listed, greyed and saying why.
 - Open Recent is the same dialog over the recent vaults, read as the start screen reads them, ending with Open Local… and Open Remote…, so one surface reaches every way of changing vault and is never empty; a query that names one of the two puts it first, so typing "remote" and Enter opens Open Remote….
   The window's own vault is left out: picking it could only raise this window.
 
@@ -1146,7 +1149,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - A label whose object asks for placeholders (`placeholders="1"`) shows `%name%` as the attribute of that name on it or the nearest object above it, and `%id%`, `%page%`, `%pagenumber%` and `%pagecount%` (either with `+ n` or `- n`), `%date%`, `%time%`, `%timestamp%` and `%date{mask}%` as draw.io fills them in, when the page is drawn; the dates are written as US English writes them, as draw.io does in an English browser.
   The label editor and search see what is written.
 - Selection follows draw.io: the outermost group first, one level further in on each click after; nothing on a locked or hidden layer, and a layer locked or hidden under the selection lets go of what was on it.
-  New shapes, arrows and pastes go into the current layer (Properties), or while it is locked or hidden into the topmost layer that is neither; on a page with none the ring's insert tools are greyed, and so are their palette commands, as draw.io greys Insert, a tool in hand being put down.
+  New shapes, arrows and pastes go into the current layer (Properties), or while it is locked or hidden into the topmost layer that is neither; on a page with none the ring's insert tools are greyed and their palette commands left out, as draw.io greys Insert, a tool in hand being put down.
   Ctrl+click adds a cell or takes it away; a band over empty page takes what it wholly covers, Ctrl adding it to the selection; a drag moves the selection on the page's grid (Alt for free, and always free on a page with its grid off), its `gridSize` halved as the page is zoomed in while a half is still 8 px on screen and doubled as it is zoomed out while under 4 px, so a dense drawing is placed finely zoomed in; the grid is drawn while a move, a resize or a drawing is under way, and at all times with Show Grid on (the tab menu and the palette; a preference in the config's `[diagram]` for every diagram, never written to the file, and not drawn on a page presented): draw.io's lines at that step, every fourth strong, in the ink that reads on the page's paper; an arrow moved without its shapes lets go of them.
 - A single shape carries eight accent handles, each edge resizing on its own, and a ring beyond its top-right corner turns it in draw.io's steps (15° near the ring, 5° a little out, whole degrees further, tenths with Alt), as the Properties pane's Rotation row does.
   A turned shape's handles turn with it, and it is resized in its own frame, the side not held staying put.
@@ -1884,7 +1887,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 
 - Start Debugging `Ctrl+F5`, Toggle Breakpoint `Ctrl+F9`, Remove All Breakpoints and Add to Watch (unbound).
 - While a session runs, VS Code's keys (user decision 2026-10-17): Continue `F5`, Stop Debugging `Shift+F5`, Restart Debugging `Ctrl+Shift+F5`, Pause `F6`, Step Over `F10`, Step Into `F11`, Step Out `Shift+F11`.
-  They are the Code pane's strip and the palette's as well, each doing nothing while the session cannot take it.
+  They are the Code pane's strip and the palette's as well, each greyed on the strip and out of the palette while the session cannot take it.
 - Outside a session the seven mean nothing, so `F5` presents, `F10` opens the primary menu, `F11` goes fullscreen and `F6` is GtkPaned's (Widget chords).
   While one runs, Presentation, Primary Menu and Fullscreen give their chords up and keep their palette entries; `F5` continues in presentation too, and `Esc` still leaves it.
 - The window hears them ahead of whatever has the keyboard, so they step from the Files tree, the editor and a focused shell alike: the program's own terminal gives them up, as VS Code's terminal skips its debug commands, and Forward All Keys hands them to the shell with the rest.
@@ -1932,7 +1935,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 
 - Fullscreen `F11`, Preferences `Ctrl+comma`, Keyboard Shortcuts `Ctrl+?`, Primary Menu `F10`, About accent (unbound); `F11` and `F10` are Step Into and Step Over while a debug session runs (Debugging).
 - **Keyboard Shortcuts** is libadwaita's shortcuts dialog over this table as it stands (`shortcuts.rs`): every bound command under this chapter's headings, a rebound one with its new chord, an unbound one left out, and the keys a PDF, a diagram's canvas or a notebook answers itself beside their commands (a presented diagram's paging aside), Duplicate Selection, Group and Run Cell with the chords they borrow.
-  The palette's command mode lists every command, bound or not, and is where one is rebound.
+  The palette's command mode lists every command that applies to the window as it stands, bound or not, and is where one is rebound.
 
 ### Tab menu
 
@@ -1964,7 +1967,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 - The table is the set of defaults.
   The accelerator beside a command in the palette is a button, its keys drawn as the shortcuts dialog draws them (`AdwShortcutLabel`): clicking it asks for a new chord, Backspace unbinds the command, Restore Default puts the default back.
 - Overrides live in `[shortcuts]` in `config.toml`, keyed by full action name (`"win.save" = ["<Control>s"]`), only what the user changed being written, so the table keeps deciding the rest.
-  An empty list is deliberately unbound, and an unbound action still lists in the palette, so nothing becomes unreachable.
+  An empty list is deliberately unbound, and an unbound action still lists in the palette wherever it applies, so nothing becomes unreachable.
 - A chord in use is refused by naming the command that holds it; a clash from a hand edit is marked on both rows.
 - A user's command (Terminal) is `win.command-<i>`, in the file's order, unbound unless its entry names a `shortcut`; rebound from the palette or Preferences → Commands, its one chord is written to that entry, not to `[shortcuts]`, and Restore Default leaves it unbound.
 - The never-bind list is shown in the rebind dialog, not enforced: the desktop and the widget keep those chords whatever is stored.

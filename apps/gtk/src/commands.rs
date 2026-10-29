@@ -46,6 +46,7 @@ pub fn items(config: &Config, used: &[String]) -> Vec<palette::Item> {
             accels: accels(config, i),
             recent: used.iter().position(|a| *a == action(i)),
             why: None,
+            listed: true,
         })
         .collect()
 }
