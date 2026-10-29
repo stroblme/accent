@@ -133,6 +133,7 @@ pub fn pane(
         .vexpand(true)
         .child(&view)
         .build();
+    crate::widgets::smooth_wheel(&scroller);
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let header = header(title, None);
     root.append(&header);

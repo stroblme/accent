@@ -24,11 +24,73 @@ pub(crate) fn status_page(icon: &str, title: &str, description: &str) -> adw::St
 
 /// Height-filling list scroller without horizontal scrolling; rows ellipsize instead.
 pub(crate) fn scroller(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
-    gtk::ScrolledWindow::builder()
+    let scroller = gtk::ScrolledWindow::builder()
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Never)
         .child(child)
-        .build()
+        .build();
+    smooth_wheel(&scroller);
+    scroller
+}
+
+/// How long a wheel notch takes to scroll: GTK's own easing of a page key or a scrollbar press
+/// (`ANIMATION_DURATION` in `gtkscrolledwindow.c`), so the wheel and the keys move alike.
+const WHEEL_MS: u32 = 200;
+
+/// Ease each mouse-wheel notch on `scroller` over [`WHEEL_MS`] instead of GTK's jump, notches in
+/// quick succession adding up to one target; call it once the scroller has its child.
+///
+/// GTK 4 moves a wheel notch's whole step at once. Only the wheel is eased: a touchpad's pixel
+/// deltas already scroll smoothly, Shift scrolls sideways and Control zooms, all left to GTK.
+/// On the child in bubble phase, so a scroller inside takes its own wheel first, and at an edge
+/// the wheel goes on to GTK, for its overshoot and for any scroller around this one.
+pub(crate) fn smooth_wheel(scroller: &gtk::ScrolledWindow) {
+    let Some(child) = scroller.child() else {
+        return;
+    };
+    // The adjustment is read at each step: a comparison's columns are given a shared one later.
+    // ponytail: one animation per scroller, so a wheel crossing from one column to the other
+    // within a notch's 200 ms has both easing the shared adjustment until the first ends.
+    let weak = scroller.downgrade();
+    let target = adw::CallbackAnimationTarget::new(glib::clone!(
+        #[weak]
+        scroller,
+        move |value| scroller.vadjustment().set_value(value)
+    ));
+    let animation = adw::TimedAnimation::new(scroller, 0.0, 0.0, WHEEL_MS, target);
+    animation.set_easing(adw::Easing::EaseOutCubic);
+    let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+    wheel.connect_scroll(move |wheel, _, dy| {
+        let left = gdk::ModifierType::SHIFT_MASK
+            | gdk::ModifierType::CONTROL_MASK
+            | crate::platform::PRIMARY_MODIFIER;
+        let Some(adj) = weak.upgrade().map(|scroller| scroller.vadjustment()) else {
+            return glib::Propagation::Proceed;
+        };
+        if wheel.unit() != gdk::ScrollUnit::Wheel || wheel.current_event_state().intersects(left) {
+            return glib::Propagation::Proceed;
+        }
+        let from = match animation.state() {
+            adw::AnimationState::Playing => animation.value_to(),
+            _ => adj.value(),
+        };
+        let to = wheel_target(from, dy, adj.lower(), adj.upper(), adj.page_size());
+        if to == adj.value() {
+            return glib::Propagation::Proceed;
+        }
+        animation.set_value_from(adj.value());
+        animation.set_value_to(to);
+        animation.play();
+        glib::Propagation::Stop
+    });
+    child.add_controller(wheel);
+}
+
+/// Where `dy` notches from `from` land: GTK's step of `page^(2/3)` a notch, kept in range.
+fn wheel_target(from: f64, dy: f64, lower: f64, upper: f64, page: f64) -> f64 {
+    (from + dy * page.powf(2.0 / 3.0))
+        .min(upper - page)
+        .max(lower)
 }
 
 /// Set `view`'s model while preserving scroll when its focused row disappears.
@@ -679,6 +741,16 @@ impl<T> Hook<dyn Fn(&Rc<T>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wheel_notch_lands_a_step_on_and_stays_in_range() {
+        // A 1000 px page steps 100 px a notch, as GTK's does.
+        assert!((wheel_target(0.0, 1.0, 0.0, 5000.0, 1000.0) - 100.0).abs() < 1e-9);
+        assert_eq!(wheel_target(3950.0, 1.0, 0.0, 5000.0, 1000.0), 4000.0);
+        assert_eq!(wheel_target(50.0, -1.0, 0.0, 5000.0, 1000.0), 0.0);
+        // Shorter than its page: nowhere to go.
+        assert_eq!(wheel_target(0.0, 1.0, 0.0, 500.0, 1000.0), 0.0);
+    }
 
     #[test]
     fn a_selection_searches_for_its_first_line() {

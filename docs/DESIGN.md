@@ -2059,6 +2059,9 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 - Focus mode fades as the chrome's CSS transition does, over 250 ms of `ease`, its line fade and a notebook's outputs eased the same (Chrome auto-hide); Reveal in Sidebar's outline holds a second and fades over two.
 - `gtk-enable-animations` off stops all of it, read as each motion starts, so a change to it holds at once: libadwaita's and GTK's animations skip to their end, GTK runs no stylesheet transition, and our own ramps check it themselves; the outline then holds the three seconds and goes at once.
   The other timings we own are debounces, which keep the main loop free.
+- A mouse wheel's notch eases over 200 ms, ease-out cubic, as GTK eases a page key or a scrollbar press (`widgets::smooth_wheel`): GTK moves a notch's whole step at once, which reads as a stutter over text.
+  Notches in quick succession add up to one target; a touchpad, Shift's sideways scroll and Control's zoom stay GTK's.
+  In the editor, a notebook, a comparison, a PDF and the sidebar's lists.
 - Motion the platform owns keeps its own timing: GtkSearchBar, AdwBanner, AdwTabBar, AdwToolbarView (presentation mode's status bar coming up on a hover), AdwDialog, a popover.
 - The document follows the caret and nothing else: GTK keeps the insert mark on screen by itself (arrows, typing, find, Go to Line, a search hit, every extra caret), a wheel scroll away from the caret stays put, and a dialog opening and closing over it puts nothing back.
 
@@ -2067,6 +2070,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 | Re-highlight after a keystroke | 150 ms | `editor/mod.rs::DEBOUNCE` |
 | Every fade, crossfade, slide and turn above, the toasts' lift over the status bar too | 250 ms | `widgets.rs::FADE_MS` |
 | Focus mode's fades: the chrome, the receding panes, the line fade, a notebook's outputs | 250 ms | `fade.rs::RAMP_MS` |
+| A wheel notch's scroll | 200 ms | `widgets.rs::WHEEL_MS` |
 | A PDF still opening shows a spinner | 160 ms | `pdf/tab.rs::OPENING` |
 | A Git command still running shows its button's spinner | 160 ms | `git/mod.rs::SPIN_AFTER` |
 | A held `Ctrl+Tab` shows its card | 200 ms | `switcher.rs::DELAY` |

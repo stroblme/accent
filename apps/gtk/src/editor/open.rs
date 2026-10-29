@@ -345,6 +345,7 @@ fn frame(view: &sourceview5::View) -> Frame {
         .vexpand(true)
         .child(&clamp)
         .build();
+    crate::widgets::smooth_wheel(&scroller);
 
     // How the column learns the editor's width. The view being the scrollable child, the
     // horizontal adjustment now reports the *column's* width rather than the scroller's, so

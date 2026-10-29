@@ -223,6 +223,7 @@ pub fn open(
         .vexpand(true)
         .child(&view)
         .build();
+    crate::widgets::smooth_wheel(&scroller);
     let status = adw::StatusPage::builder()
         .icon_name("x-office-document-symbolic")
         .build();

@@ -244,6 +244,7 @@ pub fn open(
         .child(&clamp)
         .build();
     tab.scroller.set_child(Some(&viewport));
+    crate::widgets::smooth_wheel(&tab.scroller);
     add_code.connect_clicked(glib::clone!(
         #[weak]
         tab,
