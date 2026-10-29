@@ -198,6 +198,11 @@ impl Native {
                 formula::resize(&page);
             }
         ));
+        page.view.on_follow(glib::clone!(
+            #[weak]
+            page,
+            move |href| page.follow(href)
+        ));
         page.view.on_copy(glib::clone!(
             #[weak]
             page,
@@ -386,6 +391,7 @@ impl Page {
             editor::sync_scheme(source);
         }
         code::restyle(self);
+        table::restyle(self);
         figure::restyle(self)
     }
 
@@ -811,6 +817,11 @@ impl Native {
     /// one's.
     pub fn formulas(&self) -> Vec<(String, bool, f32)> {
         formula::probe(&self.page)
+    }
+
+    /// Each table cell's markup, the text selected in it and whether find painted it.
+    pub fn cells(&self) -> Vec<(String, String, bool)> {
+        table::cells(&self.page)
     }
 
     pub fn text_length(&self) -> i32 {

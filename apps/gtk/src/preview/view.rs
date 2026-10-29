@@ -3,6 +3,7 @@
 //! code block, the bar beside a quote, a callout's box and a rule. Copy writes each picture,
 //! formula and table back as the markdown it came from.
 
+use super::text::Href;
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{gdk, glib, graphene, gsk};
@@ -31,6 +32,8 @@ pub struct Decor {
 type Copy = Box<dyn Fn() -> Option<String>>;
 /// Told the view's new width.
 type Width = Box<dyn Fn(i32)>;
+/// Follows a link.
+type Follow = Box<dyn Fn(&Href)>;
 
 /// The bar beside a quote or a callout, and the rounding of a code block's and a callout's box.
 const BAR: f32 = 3.0;
@@ -57,6 +60,17 @@ impl PreviewView {
     /// What Copy writes for the selection in place of GTK's text, `None` for GTK's own.
     pub(super) fn on_copy(&self, copy: impl Fn() -> Option<String> + 'static) {
         *self.imp().copy.borrow_mut() = Some(Box::new(copy));
+    }
+
+    /// What follows a link in a table's cell, which is a label of its own.
+    pub(super) fn on_follow(&self, follow: impl Fn(&Href) + 'static) {
+        *self.imp().follow.borrow_mut() = Some(Box::new(follow));
+    }
+
+    pub(super) fn follow(&self, href: &Href) {
+        if let Some(follow) = self.imp().follow.borrow().as_ref() {
+            follow(href);
+        }
     }
 
     /// Told the view's width on an idle after an allocation that changed it, when a table can
@@ -151,6 +165,7 @@ mod imp {
         pub decor: RefCell<Option<Decor>>,
         pub copy: RefCell<Option<Copy>>,
         pub on_width: RefCell<Option<Width>>,
+        pub(super) follow: RefCell<Option<Follow>>,
         pub width: Cell<i32>,
     }
 

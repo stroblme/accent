@@ -619,6 +619,7 @@ pub(super) fn write(
         image: None,
         meta: false,
         rows: None,
+        depth: 0,
         align: Vec::new(),
         html: None,
         code: None,
@@ -662,7 +663,9 @@ pub(super) struct Writer<'a> {
     /// A markdown image being read: its destination and alt text.
     image: Option<(String, String)>,
     meta: bool,
-    rows: Option<Vec<Vec<String>>>,
+    rows: Option<Vec<Vec<table::Cell>>>,
+    /// How many tags were open where the table started: those after are a cell's own styles.
+    depth: usize,
     align: Vec<Alignment>,
     html: Option<String>,
     code: Option<(String, i32)>,
@@ -685,12 +688,13 @@ impl Writer<'_> {
     }
 
     pub fn text(&mut self, text: &str) {
-        if let Some(cell) = self.rows.as_mut().and_then(|r| r.last_mut()?.last_mut()) {
-            cell.push_str(text);
-            return;
-        }
         if let Some((_, alt)) = &mut self.image {
             alt.push_str(text);
+            return;
+        }
+        if let Some(cell) = self.rows.as_mut().and_then(|r| r.last_mut()?.last_mut()) {
+            let open = self.tags.get(self.depth..).unwrap_or_default();
+            cell.text(&self.page.tags, open, text);
             return;
         }
         if self.meta || text.is_empty() {
@@ -740,18 +744,29 @@ impl Writer<'_> {
         self.newline();
     }
 
-    /// Whether the writer is inside a table cell, whose content is plain text.
+    /// Whether the writer is inside a table cell, which holds text alone.
     pub fn in_cell(&self) -> bool {
         self.rows.is_some()
     }
 
+    /// The table cell being written.
+    fn cell(&mut self) -> Option<&mut table::Cell> {
+        self.rows.as_mut()?.last_mut()?.last_mut()
+    }
+
     pub fn open_link(&mut self, href: Href) {
+        if let Some(cell) = self.cell() {
+            cell.open_link(href.clone());
+        }
         self.links.push((self.offset(), href));
         let page = self.page;
         self.push(&page.tags.link);
     }
 
     pub fn close_link(&mut self) {
+        if let Some(cell) = self.cell() {
+            cell.close_link();
+        }
         self.pop();
         if let Some((start, href)) = self.links.pop()
             && start < self.offset()
@@ -856,12 +871,18 @@ impl Writer<'_> {
             Node::LinkEnd => self.close_link(),
             Node::Tag { name, text } => {
                 let start = self.offset();
+                if let Some(cell) = self.cell() {
+                    cell.open_link(Href::Tag(name.clone()));
+                }
                 self.push(&tags.hashtag);
                 self.text(text);
                 self.pop();
-                if !self.in_cell() {
-                    let range = start..self.offset();
-                    self.facts.links.push((range, Href::Tag(name.clone())));
+                match self.cell() {
+                    Some(cell) => cell.close_link(),
+                    None => {
+                        let range = start..self.offset();
+                        self.facts.links.push((range, Href::Tag(name.clone())));
+                    }
                 }
             }
             Node::Image(target) => figure::image(self, target),
@@ -955,6 +976,7 @@ impl Writer<'_> {
             Event::Start(Cm::Item) => self.item(false),
             Event::Start(Cm::Table(align)) => {
                 self.rows = Some(Vec::new());
+                self.depth = self.tags.len();
                 self.align = align.clone();
             }
             Event::Start(Cm::TableHead | Cm::TableRow) => {
@@ -964,7 +986,7 @@ impl Writer<'_> {
             }
             Event::Start(Cm::TableCell) => {
                 if let Some(row) = self.rows.as_mut().and_then(|r| r.last_mut()) {
-                    row.push(String::new());
+                    row.push(table::Cell::default());
                 }
             }
             Event::Start(Cm::FootnoteDefinition(label)) => {

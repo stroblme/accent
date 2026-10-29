@@ -45,7 +45,7 @@ graph TD; A-->B
 | Name | Value | Note |
 |---|---|---|
 | a | 1 | first |
-| b | 2 | second |
+| **b** | `2` | [second](https://example.org/2), [[Other note]] and #celltag |
 
 ---
 
@@ -198,6 +198,9 @@ async fn render(app: &Rc<App>) {
         for line in copied.lines().take_while(|l| !l.starts_with("Filler")) {
             println!("bench preview copy {line:?}");
         }
+        for (markup, ..) in native.cells() {
+            println!("bench preview cell {markup:?}");
+        }
     }
     // Where a line of the note puts the page: the heading, a nested item, inside the code, the
     // table, the conflict's incoming side, and the first line.
@@ -211,7 +214,7 @@ async fn render(app: &Rc<App>) {
         "## Lists",
         "  - nested",
         "print(",
-        "| b | 2",
+        "| **b**",
         "Their side",
         "---",
     ] {
