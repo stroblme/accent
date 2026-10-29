@@ -197,7 +197,7 @@ The shared architecture is in [DESIGN.md](DESIGN.md).
   Stop the service when the walk ends or pauses; no notification permission is required for the service to run.
 - **PDF rules**: use the shared core for highlights, links and annotation data; Compose handles gestures and drawing.
 - **Recents are Android-local** (`Recents.kt`, `SharedPreferences`); vault, note and command history is kept separately from desktop window sessions.
-- **The rendered view is a `WebView`** over the core's `markdown::to_html`, with the desktop's `accent://` scheme and generated CSS — it is the only thing on the platform that draws MathML.
+- **The rendered view is a `WebView`** over the core's `to_html` for the note's syntax (`note::Syntax`, an `.org` file's org, its styling spans too), with the desktop's `accent://` scheme and generated CSS — it is the only thing on the platform that draws MathML.
 - **Mermaid**: serve the shared bootstrap (`vendor/mermaid/bootstrap.js`) and library at `accent://app/`, enabling JavaScript only for notes with Mermaid fences.
   A fresh Content-Security-Policy nonce allows only app scripts; keep the JavaScript interface, file access and network access off, and allow requests only for vault images and the app assets.
   Use Mermaid's strict security level so labels are sanitized and click handlers are dropped.
