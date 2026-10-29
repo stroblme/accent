@@ -56,6 +56,14 @@ pub(super) fn bench_tags(app: &Rc<App>, rel: &str) {
 async fn click_marker(app: &Rc<App>) {
     super::preview::beside(app).await;
     glib::timeout_future(SETTLE).await;
+    let native = super::preview::shown(app).and_then(|r| {
+        let preview = r.preview();
+        preview.as_ref()?.native().map(|n| n.follow_tag(MARKER))
+    });
+    if let Some(found) = native {
+        println!("bench tags link={found}");
+        return glib::timeout_future(Duration::from_millis(300)).await;
+    }
     let Some(view) = super::preview::web_view(app) else {
         return println!("bench tags step=clicked preview=none");
     };

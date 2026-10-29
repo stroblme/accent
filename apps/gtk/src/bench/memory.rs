@@ -202,6 +202,14 @@ pub(super) fn bench_webidle(app: &Rc<App>, note: &str) {
 
 /// The rendered note's length in characters and how far it is scrolled, as `length,scrollY`.
 async fn rendered(app: &Rc<App>) -> String {
+    let native = super::preview::shown(app).and_then(|r| {
+        let preview = r.preview();
+        let n = preview.as_ref()?.native()?;
+        Some(format!("{},{}", n.text_length(), n.scroll_y().round()))
+    });
+    if let Some(native) = native {
+        return native;
+    }
     let Some(view) = super::preview::web_view(app) else {
         return "none".into();
     };
@@ -315,6 +323,12 @@ fn watch(doc: &Doc) -> Watch {
     if let Doc::Text(tab) = doc {
         watch.push(object("view", &tab.view));
         watch.push(object("buffer", &tab.buffer));
+    }
+    if let Doc::Rendered(rendered) = doc
+        && let Some(native) = rendered.preview().as_ref().and_then(|p| p.native())
+    {
+        watch.push(object("preview view", native.focus_target()));
+        watch.push(object("preview buffer", &native.buffer()));
     }
     watch
 }
