@@ -879,7 +879,6 @@ impl Writer<'_> {
                 self.push(if *done { &tags.done } else { &tags.todo });
                 self.text(text);
                 self.pop();
-                self.text(" ");
             }
             Node::Anchor(name) => self.facts.ids.push((name.clone(), self.offset())),
             Node::Conflict | Node::ConflictEnd => self.newline(),
