@@ -47,8 +47,9 @@ use crate::widgets::{Debounce, scroller};
 /// Matches the delay used for PDF highlights.
 const INDEX_SETTLE: Duration = Duration::from_millis(300);
 
-/// Arrows leaving and arriving: the pane is about what has gone out and what is still to come in.
-const GIT_ICON: &str = "network-transmit-receive-symbolic";
+/// A branch, shipped (tabler's `git-branch`): the theme has no git glyph, and its
+/// `network-transmit-receive`, which Sync keeps, reads like Port Forwarding's `network-wired`.
+const GIT_ICON: &str = "scm-branch-symbolic";
 /// Where in the file an activated row points, when it points at more than the file itself.
 #[derive(Clone)]
 pub enum Target {

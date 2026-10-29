@@ -70,8 +70,7 @@ const DEBOUNCE: Duration = Duration::from_millis(500);
 /// refresh, with a `git rev-parse` per directory carrying a `.git` on top.
 const REDISCOVER: Duration = Duration::from_secs(3);
 
-/// Arrows going out and coming back, which is what a sync is: the name the sidebar gives the
-/// pane's own tab.
+/// Arrows going out and coming back, which is what a sync is.
 const SYNC_ICON: &str = "network-transmit-receive-symbolic";
 
 /// How tall the commit message box may grow before it scrolls, in px: about eight lines at the
