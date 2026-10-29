@@ -729,9 +729,9 @@ impl App {
                 });
             }
         }
-        // The preview is about markdown notes. An org file, a source file, an image or a status
-        // page leaves it empty rather than showing the last note's, and F5 presents each as it is.
-        let note = doc.tab().filter(|t| t.flavour().is_markdown()).cloned();
+        // The preview is about notes. A source file, an image or a status page leaves it empty
+        // rather than showing the last note's, and F5 presents each as it is.
+        let note = doc.tab().filter(|t| t.flavour().is_note()).cloned();
         self.refresh_references();
         self.sync_status();
         self.sync_outline();

@@ -23,11 +23,12 @@ pub enum Export {
 /// A printout's margin on every side, LibreOffice's default: GTK's own quarter inch crowds prose.
 const MARGIN_MM: f64 = 20.0;
 
-/// What `doc` can be printed and exported as, `None` where it cannot be: a markdown note, a
-/// notebook, a PDF and a diagram are the four (DESIGN.md, Preview, Notebook, PDF and Diagram).
+/// What `doc` can be printed and exported as, `None` where it cannot be: a note, markdown or
+/// org, a notebook, a PDF and a diagram are the four (DESIGN.md, Preview, Notebook, PDF and
+/// Diagram).
 pub fn printable(doc: &Doc) -> Option<Kind> {
     match doc {
-        Doc::Text(tab) if tab.flavour().is_markdown() => Some(Kind::Note),
+        Doc::Text(tab) if tab.flavour().is_note() => Some(Kind::Note),
         Doc::Pdf(_) => Some(Kind::Pdf),
         Doc::Diagram(_) => Some(Kind::Diagram),
         Doc::Notebook(_) => Some(Kind::Notebook),

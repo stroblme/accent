@@ -5,7 +5,9 @@
 
 use super::*;
 use crate::assets;
+use crate::editor::Flavour;
 use crate::look::{self, Look, Served};
+use accent_core::note::Syntax;
 use accent_core::notebook::Notebook;
 
 /// What a page is made of, as its tab holds it now, unsaved edits and all, and where it is.
@@ -15,16 +17,19 @@ pub(crate) struct Paper {
 }
 
 enum Body {
-    Note(String),
+    Note(Syntax, String),
     Notebook(Box<Notebook>),
 }
 
 impl Paper {
-    /// `doc` as Print… and the exports take it: a markdown note or a notebook, `None` for any
-    /// other tab.
+    /// `doc` as Print… and the exports take it: a note, markdown or org, or a notebook, `None`
+    /// for any other tab.
     pub(crate) fn of(doc: &Doc) -> Option<Paper> {
         let body = match doc {
-            Doc::Text(tab) if tab.flavour().is_markdown() => Body::Note(tab.text()),
+            Doc::Text(tab) => match tab.flavour() {
+                Flavour::Note(syntax) => Body::Note(syntax, tab.text()),
+                _ => return None,
+            },
             Doc::Notebook(nb) => Body::Notebook(Box::new(nb.snapshot())),
             _ => return None,
         };
@@ -35,7 +40,7 @@ impl Paper {
     /// The page's body, as core writes it.
     fn body(self) -> String {
         match self.body {
-            Body::Note(text) => accent_core::markdown::to_html_file(&text, &self.rel),
+            Body::Note(syntax, text) => syntax.to_html_file(&text, &self.rel),
             Body::Notebook(nb) => nb.to_html_file(&self.rel),
         }
     }

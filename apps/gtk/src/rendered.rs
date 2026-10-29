@@ -114,11 +114,11 @@ impl Drop for Rendered {
 }
 
 impl App {
-    /// Toggle Preview: from a markdown note to its preview tab, opened right of it first if it is
-    /// not open, and from a preview tab back to its note, the keyboard going along either way.
+    /// Toggle Preview: from a note to its preview tab, opened right of it first if it is not open,
+    /// and from a preview tab back to its note, the keyboard going along either way.
     pub(crate) fn toggle_preview(self: &Rc<Self>) {
         let page = match self.active_doc() {
-            Some(Doc::Text(tab)) if tab.flavour().is_markdown() => match self.rendered_of(&tab) {
+            Some(Doc::Text(tab)) if tab.flavour().is_note() => match self.rendered_of(&tab) {
                 Some(rendered) => rendered.page.clone(),
                 None => self.open_rendered(&tab, Opened::Kept).page.clone(),
             },

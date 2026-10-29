@@ -173,6 +173,8 @@ fn theme_css(
          a {{ color: {accent}; text-decoration: underline; }}\n\
          /* A tag is drawn as the editor draws one: in the accent, not underlined. */\n\
          a.tag {{ text-decoration: none; }}\n\
+         /* An org heading's done keyword, faded as the editor fades a done task. */\n\
+         span.done {{ color: {quote}; }}\n\
          img {{ max-width: 100%; height: auto; }}\n\
          /* A display formula's box is its ink: unlike a line of prose it carries none of the\n\
             half-leading `line-height: 1.6` gives, so two of them would sit closer together than\n\

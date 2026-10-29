@@ -1,4 +1,4 @@
-//! Read-only WebKitGTK markdown preview fed by `markdown::to_html`.
+//! Read-only WebKitGTK preview of a note, fed by `note::Syntax::to_html`.
 //!
 //! Synced notes are untrusted: an ephemeral network session, disabled page JavaScript,
 //! load-denying filter and vault-only `accent:` scheme restrict their access.
@@ -12,6 +12,7 @@ use crate::look::{self, Look, Served};
 use crate::theme;
 use accent_core::config::Config;
 use accent_core::markdown::{self, Click, accent_file, base_uri};
+use accent_core::note::Syntax;
 use accent_core::search::Options;
 use gtk::{gdk, gio, glib};
 use std::borrow::Cow;
@@ -623,9 +624,10 @@ impl Preview {
         // The page up is not this render's: a scroll asked for meanwhile waits for it.
         self.inner.loaded.set(false);
         let (rel, text) = (rel.to_string(), text.to_string());
+        let syntax = Syntax::of(&rel);
         let inner = Rc::downgrade(&self.inner);
         glib::spawn_future_local(async move {
-            let body = crate::work::off_thread("preview", move || markdown::to_html(&text)).await;
+            let body = crate::work::off_thread("preview", move || syntax.to_html(&text)).await;
             let Some((inner, body)) = inner
                 .upgrade()
                 .zip(body)

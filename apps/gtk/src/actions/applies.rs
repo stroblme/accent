@@ -8,7 +8,7 @@ use crate::doc::Kind;
 /// The document the commands act on: the tab the tab menu was opened on, else the tab in front.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Front {
-    /// A markdown or org note.
+    /// A markdown or org note, and which: Insert Sketch writes markdown's embed.
     Note {
         markdown: bool,
     },
@@ -118,7 +118,7 @@ pub fn applies(action: &str, cx: &Context) -> bool {
     let vault = cx.vault.is_some();
     let remote = cx.vault == Some(true);
     let printable = match front {
-        Some(Note { markdown: true } | Preview) => Some(Kind::Note),
+        Some(Note { .. } | Preview) => Some(Kind::Note),
         Some(Notebook) => Some(Kind::Notebook),
         Some(Pdf) => Some(Kind::Pdf),
         Some(Diagram) => Some(Kind::Diagram),
@@ -127,7 +127,7 @@ pub fn applies(action: &str, cx: &Context) -> bool {
     match action {
         a if OWN_SYNC.contains(&a) => true,
         a if PRINTS.contains(&a) => print_actions(printable).contains(&a),
-        "win.open-in-browser" => markdown || notebook || preview,
+        "win.open-in-browser" => note || notebook || preview,
 
         // The vault's files and what is made in them.
         "win.new-file"
@@ -187,7 +187,7 @@ pub fn applies(action: &str, cx: &Context) -> bool {
         "win.toggle-task" => note,
         "win.toggle-wrap" | "win.fold" | "win.unfold" | "win.fold-all" | "win.unfold-all"
         | "win.minimap" => text,
-        "win.view-mode" => markdown || preview,
+        "win.view-mode" => note || preview,
         "win.insert-template" => note && vault,
         "win.insert-sketch" => markdown && cx.file == Some(File::Vault),
         "win.zoom-in" | "win.zoom-out" | "win.zoom-reset" => {
@@ -289,6 +289,20 @@ mod tests {
         for action in ["win.palette-files", "win.preferences", "win.terminal"] {
             assert!(note.contains(&action) && pdf.contains(&action));
         }
+        // An org note previews, prints and exports as a markdown one does.
+        let org = listed(&vault_file(Front::Note { markdown: false }));
+        for action in [
+            "win.view-mode",
+            "win.export-html",
+            "win.print",
+            "win.open-in-browser",
+        ] {
+            assert!(
+                org.contains(&action),
+                "{action} is not listed over an org note"
+            );
+        }
+        assert!(!org.contains(&"win.insert-sketch"));
     }
 
     /// Without a vault what could only say "Open a local folder" is gone, and a remote vault's

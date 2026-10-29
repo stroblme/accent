@@ -253,7 +253,7 @@ impl Flavour {
         matches!(self, Flavour::Note(_))
     }
 
-    /// A markdown note: what only markdown has yet, the preview, print and export.
+    /// A markdown note: what only markdown has, Insert Sketch's `![[…]]` embed.
     pub fn is_markdown(self) -> bool {
         self == Flavour::Note(Syntax::Markdown)
     }

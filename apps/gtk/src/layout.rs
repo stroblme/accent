@@ -176,13 +176,11 @@ impl App {
         self.presenting.get().is_some()
     }
 
-    /// Whether F5 shows `pane`'s tab as the rendered preview: a markdown note's is, where a code
-    /// tab or an org note is presented as it is, having nothing to render yet.
+    /// Whether F5 shows `pane`'s tab as the rendered preview: a note's is, where a code tab is
+    /// presented as it is, having nothing to render.
     pub(crate) fn presents_rendered(&self, pane: &Pane) -> bool {
         self.presenting.get().is_some()
-            && self
-                .tab_of(pane)
-                .is_some_and(|tab| tab.flavour().is_markdown())
+            && self.tab_of(pane).is_some_and(|tab| tab.flavour().is_note())
     }
 
     /// Present only the active document with F5.
@@ -503,8 +501,8 @@ impl App {
 
     /// Render `tab` into the presented note's preview.
     pub fn render(self: &Rc<Self>, tab: &Rc<Tab>) {
-        // A source file or an org note is no markdown, and is presented as it is.
-        if !self.shows_preview() || !tab.flavour().is_markdown() {
+        // A source file is no note, and is presented as it is.
+        if !self.shows_preview() || !tab.flavour().is_note() {
             return;
         }
         self.ensure_preview();
