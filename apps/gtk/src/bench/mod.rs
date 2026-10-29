@@ -30,6 +30,7 @@ mod loose;
 mod memory;
 mod minimap;
 mod motion;
+mod native;
 mod notebook;
 mod notebook_lsp;
 mod outline;
@@ -193,6 +194,9 @@ use user_commands::bench_commands;
 /// - `ACCENT_BENCH_IMAGE_LOOK=<rel>,<rel>,…`: image classification/recolouring
 ///   across themes and inversion.
 /// - `ACCENT_BENCH_PREVIEW_LOOK=<rel_note>`: preview image themes and requests.
+/// - `ACCENT_BENCH_PREVIEW=render` with `ACCENT_PREVIEW=native`: the native preview's page of a
+///   note it writes, against `preview.expected`; `time:<rel>`: its render, patch and scroll
+///   costs (`native::bench_preview`).
 /// - `ACCENT_BENCH_TERM=1`: shell titles and saved terminal sessions.
 ///   `--terminal` uses a vault-less window; a vault launch opens a shell tab.
 ///   Use scratch `TMPDIR` so it cannot join the user's running holder.
@@ -355,6 +359,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         scratch_only(app, "ACCENT_BENCH_BIBLIOGRAPHY");
         crate::bibliography::bench::run(app);
         return;
+    }
+    if let Ok(arg) = std::env::var("ACCENT_BENCH_PREVIEW") {
+        return native::bench_preview(app, &arg);
     }
     let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
     let minimap = std::env::var("ACCENT_BENCH_MINIMAP").ok();
