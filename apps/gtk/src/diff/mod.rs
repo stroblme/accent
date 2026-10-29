@@ -9,7 +9,7 @@ use accent_core::diff::{self, DiffLine, Op, Row};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::ops::{Range, RangeInclusive};
 use std::rc::{Rc, Weak};
 
@@ -227,6 +227,49 @@ fn hunk_lines(
     })
 }
 
+/// The runs to hide, each with the key it opens by, its first line on `keyed`: every unchanged
+/// run of `gaps` less the lines `opened` keeps shown, in parts of three rows or more.
+fn shut(
+    lines: &[DiffLine],
+    rows: &[Row],
+    gaps: Vec<Range<usize>>,
+    keyed: Side,
+    opened: &BTreeSet<usize>,
+) -> Vec<(Range<usize>, usize)> {
+    let mut runs = Vec::new();
+    for gap in gaps {
+        // Every row of a run is unchanged, so its lines follow one another on either side.
+        let first = (keyed.of(&rows[gap.start]))
+            .and_then(|i| keyed.number(&lines[i]))
+            .unwrap_or(0);
+        let mut kept = vec![false; gap.len()];
+        for n in opened.range(first..first + gap.len()) {
+            kept[n - first] = true;
+        }
+        for part in diff::gaps_of(&kept, 0) {
+            let run = gap.start + part.start..gap.start + part.end;
+            runs.push((run, first + part.start));
+        }
+    }
+    runs
+}
+
+/// The lines on `keyed` to keep shown once a change made for the reader is laid: those of the
+/// unchanged runs whose line on the side that stayed was shown before it ([`Compare::was_shown`]).
+fn kept_open(
+    lines: &[DiffLine],
+    rows: &[Row],
+    gaps: &[Range<usize>],
+    keyed: Side,
+    (stayed, shown): &(Side, HashSet<usize>),
+) -> BTreeSet<usize> {
+    let number = |side: Side, r: usize| side.of(&rows[r]).and_then(|i| side.number(&lines[i]));
+    (gaps.iter().flat_map(Range::clone))
+        .filter(|&r| number(*stayed, r).is_some_and(|n| shown.contains(&n)))
+        .filter_map(|r| number(keyed, r))
+        .collect()
+}
+
 /// The diff of two texts, as a lay reads it: see [`Compare::lay`].
 struct Diffed {
     lines: Vec<DiffLine>,
@@ -362,9 +405,15 @@ pub struct Compare {
     lays: Cell<u64>,
     /// The row ranges hidden right now, each with the key it can be opened by.
     hidden: RefCell<Vec<(Range<usize>, usize)>>,
-    /// Explicitly opened peer-side lines, stable across editor changes.
-    /// Keep any run containing one open after splits or merges.
-    opened: RefCell<HashSet<usize>>,
+    /// Peer-side lines kept shown inside the unchanged runs, stable across editor changes: those
+    /// of a run the reader opened and those [`Compare::was_shown`] keeps. A run hides only its
+    /// other lines, so an opened run stays open as edits split it or join it to another.
+    opened: RefCell<BTreeSet<usize>>,
+    /// One side's lines shown before a change to the other made for the reader — lines staged,
+    /// unstaged or reverted, a hunk taken, a side read again — which the next lay keeps shown:
+    /// the hunks such a change makes unchanged go, and the runs either side would join over them,
+    /// to open whole around the caret or shut over the lines just worked on.
+    was_shown: RefCell<Option<(Side, HashSet<usize>)>>,
     /// Show All Unchanged Lines, in the title row: while it is down nothing is hidden.
     unfold: gtk::ToggleButton,
     handlers: RefCell<Vec<(glib::Object, glib::SignalHandlerId)>>,
@@ -432,7 +481,8 @@ impl Compare {
             asked: Cell::new(None),
             lays: Cell::new(0),
             hidden: RefCell::new(Vec::new()),
-            opened: RefCell::new(HashSet::new()),
+            opened: RefCell::default(),
+            was_shown: RefCell::default(),
             unfold,
             handlers: RefCell::new(Vec::new()),
             offered: RefCell::new(Vec::new()),
@@ -563,6 +613,7 @@ impl Compare {
             let top = self.columns.top_line(side.other().idx());
             self.columns.keep.set(top);
         }
+        let shown = self.shown(side.other());
         let (pane, starts) = (self.pane(side), line_starts(&old));
         let buffer = &pane.buffer;
         // The hidden runs first, which the refresh below lays again anyway: every edit has
@@ -591,6 +642,7 @@ impl Compare {
         buffer.end_irreversible_action();
         debug_assert_eq!(self.text(side), text);
         editor::style_companion(pane.flavour, &pane.buffer, &pane.view);
+        self.was_shown.replace(Some(shown));
         // Diffed here, not on a worker however long the texts: the next re-read keeps its line by
         // these rows, the Git pane reading both sides of a staged change one after the other.
         self.diff_here(self.text(Side::Old), self.text(Side::New));
@@ -935,47 +987,33 @@ impl Compare {
         let mut hidden = Vec::new();
         let gaps = diff::gaps(&lines, &rows, CONTEXT);
         self.unfold.set_sensitive(!gaps.is_empty());
-        let all = self.unfold.is_active();
-        for gap in gaps {
-            // Show All Unchanged Lines is down.
-            if all {
-                continue;
-            }
-            let number = |r: usize| {
-                keyed
-                    .of(&rows[r])
-                    .and_then(|i| keyed.number(&lines[i]))
-                    .unwrap_or(0)
-            };
-            let (key, last) = (number(gap.start), number(gap.end - 1));
-            // What the user opened stays open: the part of it on either side of a line they
-            // changed since, and whatever it has since merged with.
-            if self
-                .opened
-                .borrow()
-                .iter()
-                .any(|k| (key..=last).contains(k))
-            {
-                continue;
-            }
+        if let Some(shown) = self.was_shown.take() {
+            *self.opened.borrow_mut() = kept_open(&lines, &rows, &gaps, keyed, &shown);
+        }
+        // Show All Unchanged Lines is down.
+        let runs = match self.unfold.is_active() {
+            true => Vec::new(),
+            false => shut(&lines, &rows, gaps, keyed, &self.opened.borrow()),
+        };
+        for (run, key) in runs {
             // Nothing hides under the caret: a run that just became equal around it stays open
             // until the caret has moved on.
             if let Some((side, at)) = caret {
-                let (from, to) = span(side, &gap);
+                let (from, to) = span(side, &run);
                 if at >= from && at < to {
                     continue;
                 }
             }
             for side in [Side::Old, Side::New] {
                 let buffer = &self.pane(side).buffer;
-                let (from, to) = span(side, &gap);
+                let (from, to) = span(side, &run);
                 buffer.apply_tag_by_name(
                     TAG_GAP,
                     &buffer.iter_at_offset(from),
                     &buffer.iter_at_offset(to),
                 );
             }
-            hidden.push((gap, key));
+            hidden.push((run, key));
         }
 
         // Each connector joins a hunk's lines on the left to its lines on the right, and its
@@ -1073,6 +1111,7 @@ impl Compare {
         };
         let (start, end, new_end) = differing(&self.text(mine), text);
         let insert: String = text.chars().skip(start).take(new_end - start).collect();
+        let shown = self.shown(mine.other());
         let buffer = &self.pane(mine).buffer;
         buffer.begin_user_action();
         let (mut a, mut b) = (
@@ -1082,7 +1121,25 @@ impl Compare {
         buffer.delete(&mut a, &mut b);
         buffer.insert(&mut a, &insert);
         buffer.end_user_action();
+        // Once the edit is whole: the editor lays the comparison again as each half goes in.
+        self.was_shown.replace(Some(shown));
         self.refresh();
+    }
+
+    /// The lines of `side` shown now, outside every hidden run, for [`Compare::was_shown`].
+    fn shown(&self, side: Side) -> (Side, HashSet<usize>) {
+        let (lines, rows) = (self.lines.borrow(), self.rows.borrow());
+        let mut hidden = vec![false; rows.len()];
+        for (run, _) in self.hidden.borrow().iter() {
+            if let Some(run) = hidden.get_mut(run.clone()) {
+                run.fill(true);
+            }
+        }
+        let shown = (rows.iter().zip(hidden))
+            .filter(|(_, hidden)| !hidden)
+            .filter_map(|(row, _)| side.number(&lines[side.of(row)?]))
+            .collect();
+        (side, shown)
     }
 
     /// Clear diff tints, emphasis and hidden tags on `side`, retaining padding.
@@ -1247,6 +1304,7 @@ impl Compare {
             }
             text.pop();
         }
+        let shown = self.shown(theirs);
         let buffer = &self.pane(mine).buffer;
         buffer.begin_user_action();
         let (mut a, mut b) = (buffer.iter_at_offset(from), buffer.iter_at_offset(to));
@@ -1257,6 +1315,7 @@ impl Compare {
         }
         buffer.insert(&mut a, &text);
         buffer.end_user_action();
+        self.was_shown.replace(Some(shown));
         self.refresh();
     }
 }
@@ -1338,5 +1397,39 @@ mod tests {
             (Side::Old, 2..=3, new.to_string()),
             "nothing of the hunk is left on the editor's side"
         );
+    }
+
+    #[test]
+    fn staging_a_hunk_leaves_the_runs_either_side_of_it_shut_as_they_were() {
+        // The index on the left, keying the runs, and the working tree on the right: lines added
+        // under 30, which renumbers the index once staged, and 70 changed.
+        let index: String = (1..=100).map(|i| format!("{i}\n")).collect();
+        let added = index.replace("\n30\n", "\n30\nnew\nnew\n");
+        let work = added.replace("\n70\n", "\nseventy\n");
+        let laid = |index: &str, opened: &BTreeSet<usize>| {
+            let lines = diff::lines(index, &work);
+            let rows = diff::align(&lines);
+            let gaps = diff::gaps(&lines, &rows, CONTEXT);
+            let runs = shut(&lines, &rows, gaps.clone(), Side::Old, opened);
+            // Each run as the working tree numbers its lines, which staging leaves be.
+            let tree = |r: usize| Side::New.number(&lines[rows[r].new.unwrap()]).unwrap();
+            let hidden: Vec<_> = (runs.iter())
+                .map(|(run, _)| tree(run.start)..=tree(run.end - 1))
+                .collect();
+            (lines, rows, gaps, hidden)
+        };
+        let (_, _, _, before) = laid(&index, &BTreeSet::new());
+        assert_eq!(before, [1..=27, 36..=68, 76..=102]);
+        let shown = (1..=102).filter(|n| !before.iter().any(|run| run.contains(n)));
+        let shown = (Side::New, shown.collect());
+
+        let (lines, rows, gaps, joined) = laid(&added, &BTreeSet::new());
+        assert_eq!(
+            joined,
+            [1..=68, 76..=102],
+            "the first two join over the staged lines"
+        );
+        let opened = kept_open(&lines, &rows, &gaps, Side::Old, &shown);
+        assert_eq!(laid(&added, &opened).3, before);
     }
 }
