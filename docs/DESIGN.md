@@ -17,8 +17,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 - **Stack**: GTK4 + libadwaita in Rust on Linux and Kotlin + Compose on Android share one Rust core.
   The desktop links it directly; Android uses UniFFI.
-- **Two optional parts**: the `webkit` and `termprops` cargo features, on by default, hold what WebKitGTK 6.0 and VTE 0.78 bring (the preview; a program's OSC 52 copy, the shell's commands and prompts), so accent builds where neither is packaged, as on macOS 12.
-  Without them the preview is a status page that opens the note in the browser; printing and export do not need WebKit.
+- **Two optional parts**: the `webkit` and `termprops` cargo features, on by default, hold what WebKitGTK 6.0 and VTE 0.78 bring (WebKit's preview, kept behind `ACCENT_PREVIEW=webkit` until it goes; a program's OSC 52 copy, the shell's commands and prompts), so accent builds where neither is packaged, as on macOS 12.
+  The preview is accent's own with or without them (Preview); printing and export do not need WebKit.
 - **Crates**: `crates/core` has no UI types; `crates/api` exposes `Vault` for local and remote backends, JSON-RPC for `accent-cli`, and UniFFI behind the `android` feature.
   `crates/drawio` is independent; core reads diagram labels through it for indexing.
   `crates/math` (from formulary) lays out the MathML core writes in a math font the system HarfBuzz reads; only the desktop app links it.
@@ -59,8 +59,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The etag is checked right before the rename, the saves of one file in the process taking turns at the two; a write by another process between them is the one still lost, Linux having no rename that replaces only the file checked.
 - **A new file** takes the mode a new note gets from the umask, not a temp file's 0600 — an image or a drawing nobody else on a shared vault could open.
 - **Syncthing**: `*.sync-conflict-*` files are never notes and get the resolve UI; symlinks dedup by `(dev, ino)`, loops and in-vault targets are rejected — conflict copies reach every device, and a vault links external directories in on purpose.
-- **Symlinks out of the vault** are followed by every reader, but what leaves the app is held to the real root: the preview's WebView is served nothing a link takes outside it, nor is an agent over MCP, and a rewrite across the vault — Replace All, a move's or a page edit's link updates — writes no file a link takes outside it and reports it unwritten.
-  Nothing on disk tells `code -> ~/proj`, linked in on purpose, from `keys -> ~/.ssh` in a shared or cloned vault; the user reading either in their own editor leaks nothing, a WebView or a rewrite nobody aimed at the file could.
+- **Symlinks out of the vault** are followed by every reader, but what leaves the app is held to the real root: the preview reads nothing a link takes outside it, nor is an agent over MCP, and a rewrite across the vault — Replace All, a move's or a page edit's link updates — writes no file a link takes outside it and reports it unwritten.
+  Nothing on disk tells `code -> ~/proj`, linked in on purpose, from `keys -> ~/.ssh` in a shared or cloned vault; the user reading either in their own editor leaks nothing, an exported page or a rewrite nobody aimed at the file could.
 - **A walk stays among documents**: a link into a system tree (`/proc`, `/sys`) or a FUSE mount (gvfs, the document portal, sshfs) is not followed, a linked-in tree is walked on its own filesystem, and a pipe, a socket or a device is never listed — gvfs shows a remote host's links as folders, which no loop check tells from folders (a build tree's `var/run -> /run` once walked a host's `/sys` without end), and reading a pipe waits for a writer.
   A vault that is itself on a FUSE mount is walked as any other.
 - **Watch set**: one non-recursive inotify watch per directory the walk kept, plus each gitignored folder the file tree lists — a recursive watch re-adds every skipped tree, and the walk's own directory opens overflow `max_queued_events` into a rescan that loops.
@@ -650,29 +650,38 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A session puts it back beside its note; another window does not take it, a drag there sending it back with the toast a shell gets.
 - **In front, it stands for its note in the sidebar** (user decision 2026-10-28): Info, Outline and References show the note's, and an Outline row scrolls the preview to its heading rather than moving the note's caret.
   The Files tree and the window's subtitle still say what the tab is.
-- A read-only WebKitGTK 6 view, its stylesheet generated from `AdwStyleManager`; its images in the look their tabs have (Image).
-  A build without WebKit shows a status page in its place, whose Open in Browser button shows the note in the system browser.
+- **Accent draws it itself** (user decision 2026-10-20): one read-only text view on the editor's page — its font, gutters, zoom and column — over the blocks core cuts the note into (`note::Syntax::page`), the blocks Print… and the exports write as HTML.
+  Each block is tagged text in the look the stylesheet gives a printed page, in the editor's colours (Colour): headings, emphasis, lists with their boxes, quotes and callouts, footnotes, a conflict's sides; a line is 1.6 times the font's size, as the stylesheet's, Pango's line height being a share of the font's height (1.16 em in DejaVu Sans Mono) which the tags make up for.
+  A picture, a diagram, a formula and a task's box stand in the text where the note has them, a table is the one widget, and what no tag draws — a code block's padded box, a quote's bar, a callout's tint, a rule — is painted under the text.
+  WebKit's preview stays behind `ACCENT_PREVIEW=webkit` in a build with WebKit until it goes.
+- Code blocks, fences and org src blocks alike, are coloured as the editor colours them.
+  A mermaid fence shows its source under a dim "Mermaid diagram" caption: drawing one is deferred (user decision 2026-10-22).
+- A note's raw HTML is unwrapped (user decision 2026-10-22): its tags are dropped and their text shown, a `<p>` or a `<div>` breaking the paragraph; `<b>`, `<i>`, `<u>`, `<sub>`, `<sup>`, `<kbd>` and `<br>` style or break the text, `<img>` is a picture, `<iframe>` and `<video>` a link to their source, and a comment, `<style>` and `<script>` show nothing.
+  A `<details>` block is always open, its summary a bold line: GtkTextView cannot hide text safely.
+- A table's cells wrap, ruled and padded as the stylesheet's, each column aligned as its delimiter row says and the header bold; a cell holds the prose's inline styles, and a link, a wikilink or a tag in one is followed as on the page.
+- Its text is one selection across blocks, and Copy writes a formula, a picture, a table and a task's box as the markdown they came from.
+  Its menu is Copy and Select All, and Invert Image Colours over a picture (Image).
+  Page Up, Page Down, the arrows, Home and End scroll it, and Space and Shift+Space page.
 - Its page follows the editor's column rule (Typography): Column Width's share of the preview's own width over the same floor, gutters included, scaled by the zoom.
   Full-Width Preview, off by default, lets it fill the pane, for a note of wide tables (user decision 2026-10-14).
   Either preference restyles the page in place rather than loading a new one.
   A table wider than the page scrolls sideways on its own, once its cells have wrapped as far as they can; the page never does.
-- An edit is rendered 300 ms after the last key by replacing only the blocks it changed, so the reading position, a selection, the find's place and a drawn diagram stay wherever their block did not change (a 217 KB note: 88 ms of web-process CPU a render as a new page, 31 ms so, measured 2026-10-09).
-  Another note, a new look, and an edit that adds a note's first diagram or takes its last away load a new page.
+- An edit is rendered 300 ms after the last key by replacing only the blocks it changed, so the reading position, a selection, the find's place and a picture stay wherever their block did not change (the 207 KB bench note: 8–14 ms of the main thread an edit, about 100 ms as a new page, measured 2026-10-29).
+  Another note goes in from the top by batches of 8 ms, so the window keeps drawing meanwhile; a new look recolours the page in place.
 - A block's `^id` is not shown: its block carries it as its anchor, so `[text](#^id)` scrolls there as `[text](#slug)` does to a heading.
-  A link naming the heading by its text, `[text](#My%20Section)`, is pointed at its slug and scrolls there too, as the editor resolves it — WebKit's own fragment scroll, with no Back entry, like every same-page link.
-- When WebKit's process dies under the preview — a crash, or past its memory limit — the view keeps its last frame and scrolls and follows nothing, so the note is rendered again at once, in a new process.
-  Once until a page has loaded: a note that takes the process down as it loads waits for its next render.
-- A preview out of sight for five minutes is let go, and its web process ends with it, and WebKit's network process once no other view is left (116 and 20 MB PSS, measured 2026-10-05); showing it again builds another and renders the note at the caret, as any render does, a moment slower.
-  Five minutes, so going back and forth between a note and its preview finds it there; each preview tab on screen, and the note F5 presents, is a web process of its own.
-- A click on a link into the vault is followed as a link is; one out of it goes to the system when Go to Definition's would (`markdown::is_url`), and only on a click — a redirect the page makes on its own opens nothing.
-- A `#tag` is a link to the tag (`accent://tag/…`), drawn as the editor draws a tag, in the accent without a link's underline; a click shows the Info pane's Tags section with that tag picked, as the palette's tag does.
+  A link naming the heading by its text, `[text](#My%20Section)`, is pointed at its slug and scrolls there too, as the editor resolves it — with no Back entry, like every same-page link.
+  A jump — such a link, an Outline row, the note's caret beside it — lands at once, not eased.
+- A preview out of sight for five minutes is let go, its text and pictures with it; showing it again builds another and renders the note at the caret, as any render does, a moment slower.
+  Five minutes, so going back and forth between a note and its preview finds it there.
+- A click on a link into the vault is followed as a link is; one out of it goes to the system when Go to Definition's would (`markdown::is_url`); either only on a release that selected nothing.
+- A `#tag` is a link to the tag, drawn as the editor draws a tag, in the accent without a link's underline; a click shows the Info pane's Tags section with that tag picked, as the palette's tag does.
 - A task in progress, `[/]` opening a list item (Toggle Task, Editing), is drawn as a box of its own beside the open and done checkboxes: their size, half filled in the done box's accent (user decision 2026-10-24); a checkbox has no such state without a script, and GFM reads `[/]` as text.
   Printouts, the HTML export and Android's rendered note draw it too.
 - A quote whose first line is `[!type]`, Obsidian's callout (`> [!note] Title`), shows under a bold title in the accent — the title written after it as plain text, else the type's name — on a faint tint, its text upright in the body colour; one look for every type, and always open, a `+` or `-` fold marker read past (user decision 2026-10-27).
   Printouts, the HTML export and Android's rendered note draw it too, and a page without the stylesheet still shows a quote.
 - A conflict block (Editor) shows as its sides, one box each and no marker: current, a diff3 base, incoming, in the editor's tints (`conflict::tints`), each under its marker's label — `HEAD`, the branch — in the marker line's stronger tint, laid on the page as the editor lays that line, so the two panes agree.
   The note has to read as conflicted, and blanking the markers as the analysis does would run the two sides together as one text.
-- Each side is the markdown it holds: `to_html` cuts the note at the blocks and parses every stretch alone, so a fence or a list one side leaves open ends with its box, and every line marker is still the note's own line.
+- Each side is the markdown it holds: core cuts the note at the blocks and parses every stretch alone, so a fence or a list one side leaves open ends with its box, and every line marker is still the note's own line.
   Every stretch is parsed with the note's reference and footnote definitions after it, so a link or a footnote finds its definition across a block's edge.
 - **Print and export** — Print…, Export as HTML…, Open in Browser — take the note as its tab holds it, unsaved edits and all, and write it as one self-contained HTML page with paper's look: Light's white page and dark text under Dark and Solarized too, links in the accent, images as their files are (no recolouring, no inversion).
   A printout is paper, and a shared file is read away from the window and its theme.
@@ -863,18 +872,18 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   `Ctrl+F` and its neighbours open the bar of the pane the reader is in.
 - Over a shell the bar goes and the chord opens nothing: vte keeps its own scrollback.
 - F5 keeps the presented pane where it is, so its bar stays its own over the rendered note.
-- **A query is searched as it is typed** and its first match shown, everywhere alike: in a buffer the first from the caret, over a PDF the first on or after the page being read, wrapping round (or the page of the match shown while it is still on screen, so typing on does not move on from it), over a notebook the first from the selected cell's caret, through the cells in order, in the rendered preview the first from the top (WebKit's).
+- **A query is searched as it is typed** and its first match shown, everywhere alike: in a buffer the first from the caret, over a PDF the first on or after the page being read, wrapping round (or the page of the match shown while it is still on screen, so typing on does not move on from it), over a notebook the first from the selected cell's caret, through the cells in order, in the rendered preview the first from the selection or the top of the view.
   A long PDF's pages are searched in the background, so its count grows ("1 of 3", then "1 of 57").
   A page edit searches the PDF again without moving the reader, and the next step goes from the page being read.
 - Enter steps to the next match and Shift+Enter to the previous, in every bar.
-- The readout says "3 of 12" in the buffer, a notebook, a PDF and the rendered preview alike; past WebKit's 500-match ceiling the preview's total is a floor and no position is claimed.
-- Beside the query sit the Search pane's Match Case, Match Whole Word and Regular Expression toggles, the same text buttons in the same `.linked` group, and a buffer and a notebook's cells are matched by the Search pane's own matcher (`accent_core::search`): the whole text at once, a cell at a time in a notebook, so `^` is the start of the note or the cell and a pattern may run across lines, a whole word ends where `\b` says (`_` is a word character), and under Regular Expression a replacement's `$1` names a group, as Replace All in Files writes it.
+- The readout says "3 of 12" in the buffer, a notebook, a PDF and the rendered preview alike.
+- Beside the query sit the Search pane's Match Case, Match Whole Word and Regular Expression toggles, the same text buttons in the same `.linked` group, and a buffer, a notebook's cells and the rendered preview are matched by the Search pane's own matcher (`accent_core::search`): the whole text at once, a cell at a time in a notebook, so `^` is the start of the note or the cell and a pattern may run across lines, a whole word ends where `\b` says (`_` is a word character), and under Regular Expression a replacement's `$1` names a group, as Replace All in Files writes it.
   Each bar keeps its own toggles, apart from the Search pane's and the other pane's bar.
 - A query that does not compile marks the box as the Search pane marks its own, and the readout says "Invalid pattern".
-- Over a PDF, Match Case and Match Whole Word are pdfium's own and mean what they mean in a buffer.
-  Over the rendered preview Match Case is WebKit's, and Match Whole Word is a match at the start of a word, the nearest WebKit's find has, so `foo` finds `food` there; its tooltip says so while the preview is searched.
-  Regular Expression is insensitive over both, keeping its state, neither engine matching one.
-  A toggle searches again over either, as over a buffer; a remote vault's PDF is searched in the copy on this machine, so nothing crosses the link.
+- Over a PDF, Match Case and Match Whole Word are pdfium's own and mean what they mean in a buffer; Regular Expression is insensitive there, keeping its state, pdfium matching none.
+  A toggle searches again over it, as over a buffer; a remote vault's PDF is searched in the copy on this machine, so nothing crosses the link.
+- Over the rendered preview the page's text is searched as a buffer is, a table's cells each alone and counted where the table stands; the matches within a screen of the view are painted and painted again as it scrolls, the current one is the selection, in its cell for a cell's, and a step scrolls an unseen match a third of the way down.
+  An edit beside it keeps the match selected.
 - Over a notebook the bar searches its cells' sources, not their outputs, as Search does: a step selects the match's cell and scrolls the match into view, the keyboard staying in the bar.
   Replace takes one match, one Undo step, and Replace All every match in every cell as one step through the notebook's model (user decision 2026-10-20).
   Go to Line is Go to Cell there ("of 14 cells").
@@ -901,7 +910,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - A row names its vault as the tree names a folder, the folder over its path; a remote one shows the address it was opened by (`me@host:/srv/vault`) under `remote-server-symbolic`.
   A terminal session is a row too, its name over "Terminal session" under `utilities-terminal-symbolic`, until its state file is gone.
 - There is only ever one start screen: a second New Window presents it again.
-  Opening a vault gives it a window of its own; Close Vault takes the current window away, releasing its vault, worker and WebKit process.
+  Opening a vault gives it a window of its own; Close Vault takes the current window away, releasing its vault and worker.
 - **Open Remote…** asks for a host and a path in an `AdwAlertDialog`: the hosts from `~/.ssh/config` sit in a menu beside the host field, the one a vault was last opened on first and the never-used ones in the config's order after them, and the path field completes against the host and takes `~` for the login's home.
 - That completion dials out before Connect is pressed, so it must never surprise: one attempt per dialog, made only once the keyboard is in the path field and a host is named; `BatchMode=yes`, so it never raises a prompt; a failure offers and says nothing; a five-second deadline, since a field that goes quiet is worse than one that never completes; and a control socket of its own, never an open vault's.
 - `~` is resolved from the home the host reports, so no address carries a tilde into the config, the cache or a socket name; until the host has answered, the form says so and Connect stays off.
@@ -1103,7 +1112,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 ### Image
 
 - A `GtkPicture` in a scroller, fitted to the window until zoomed, the file decoded off the main loop by GDK's own decoders, and a JPEG, a WebP or a TIFF turned the way its EXIF says (`accent_core::orientation`), which they ignore, or for a TIFF only mirror.
-  WebKit draws no TIFF, nor do most browsers, and turns a JPEG and nothing else, so the preview and an exported page are served a TIFF, and any other turned image, as an upright PNG.
+  A browser draws no TIFF and turns a JPEG and nothing else, so an exported page carries a TIFF, and any other turned image, as an upright PNG.
   A TIFF is an image on the desktop only: Android has no decoder for one.
   An SVG is drawn at the display's scale, as `GtkPicture` draws one, and again when the window moves to a display of another; zoomed past 100 %, it is drawn again at the zoom once the zoom has been left alone for 300 ms, the drawing before enlarged meanwhile, up to 16 megapixels, past which a deeper zoom enlarges that without drawing it again.
   It is drawn once, recoloured or not, and held only as it is shown.
@@ -1116,9 +1125,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A page that is not the window's own fills the image's transparent parts with its paper, so a drawing on nothing reads as a page.
   It lasts until the app quits and is written nowhere.
 - A theme change, or the Images switch, recolours the texture already decoded, the file read again only when it changes on disk; an SVG is drawn again from its file.
-- The preview shows an image as its tab would: the app's `accent:` scheme serves the recoloured bytes (a PNG, or the SVG with its filter), so the page carries no script or class for it.
-  An embedded diagram is served the same way, as the SVG of its page (Diagram).
-  WebKit keeps what it was served across renders, by address: a new look clears its memory cache and loads the note again, and an inversion, or a change, a removal or a rename on disk of an image it was served, renders the note naming that image at an address of its own (`figure.png?v=2`), so it alone is asked for again.
+- The preview shows an image as its tab would: read through the vault on a worker, at the file's size up to the column's width, recoloured as above, and read again when the file changes on disk; an animation shows its first frame.
+  An embedded diagram is drawn the same way, as the SVG of its page (Diagram).
   Its menu over an image ends with Invert Image Colours, the same toggle as the palette's.
 
 ### Diagram
@@ -1141,9 +1149,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Once given, each picture is downloaded once, over libsoup, into the cache (`~/.cache/accent/web-images`, named by a digest of its address), and drawn from there by the canvas, an export, a printout and a note's embed of the diagram, offline too; a picture this machine cannot fetch says so in a toast and stays its box.
   A remote vault's diagram is no different: the picture comes from the web to this machine, not through the host.
 - A note embeds a diagram as `![[x.drawio]]`, its first page, or `![[x.drawio#Page name]]`, the page of that name as the Outline lists it.
-  The preview shows it as the SVG Export as SVG… writes, its drawing in the file's own colours, served as an SVG image is (Image): recoloured onto the theme's paper and ink unless Diagrams is switched off, inverted by Invert Image Colours, and as the file is in a printout or an export of the note.
+  The preview shows it as the SVG Export as SVG… writes, its drawing in the file's own colours, drawn as an SVG image is (Image): recoloured onto the theme's paper and ink unless Diagrams is switched off, inverted by Invert Image Colours, and as the file is in a printout or an export of the note.
   A click follows it as the link `[[x.drawio#Page name]]`, which opens the diagram on that page, or where it was left with a toast saying it has no such page; an embed naming none shows as a broken image.
-  It is drawn on the main thread, the file read on a worker (fetched first on a remote vault, as an image is); the drawing is kept by file and page until the file changes, which the preview serves again.
+  It is drawn on the main thread, the file read on a worker (fetched first on a remote vault, as an image is); the drawing is kept by file and page until the file changes, which the preview draws again.
 - Shapes are mxGraph's own and those of draw.io's General palette (rectangle, ellipse, rhombus and its `double=1`, triangle, hexagon, cloud, cylinder, process, document, cube, callout, swimlane with its footer and separator, and the rest), each met by edges on its own perimeter (a lifeline's or a bus line's beside its line) and offering its own connection points, which follow the shape as it is drawn once draw.io has flipped it (`legacyAnchorPoints=0`); a shape, a picture too, faces its `direction`, is mirrored by `flipH`/`flipV` and turned by its rotation as draw.io composes them; a label with `boundedLbl=1` keeps clear of a shape's lid, wave or sides, a callout's of its tail.
   Any other shape, a stencil above all, is its box dashed, with its label: stencils are XML programs of their own, and draw.io's packs of them are not shipped.
 - Arrows are routed by mxGraph's edge styles, from a port's cell where they name one (`sourcePort`), leaving by the sides `portConstraint` allows and from `routingCenterX`/`routingCenterY`; they are drawn straight, rounded, curved or as cubics through their control points (`bezier=1`), a flex arrow rounded or curved too, with every head draw.io registers, its ER and mermaid ones included.
@@ -1561,11 +1569,11 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
     The editor gutter's change bars take the same two, green for an added line and a red wedge where lines went, and the accent for a rewritten one, which the Files tree's changed names take too, the green mixed in CSS from the same hue (`diff::css_tint`) and the accent in its standalone form, being text; beside them a line Lean has still to check takes the accent at half alpha (user decision 2026-10-10), so where a rewritten line is being checked the two bars read as two.
     On Solarized's light page a conflict's incoming side is Solarized's own blue instead, a little stronger (`theme::incoming_on`): the cream cancels a light wash of the derived blue into grey, and the base00 ink keeps 3:1 on both of its tints.
     A diagnostic's gutter icon takes an error's or a warning's colour of its own, per theme (`theme::error_warning`, user decision 2026-10-28): the theme's red and yellow in the form libadwaita gives a colour standing on the page, which under Adwaita is its `--error-color` and `--warning-color` written down, as its view background is; Solarized's yellow as it stands is 2.3:1 on the paused line's light wash. Each holds 4.3:1 or more on its page and on that wash.
-- The preview stylesheet derives everything from three values: foreground, background, accent, a conflict block's tints being the editor's from the same foreground.
-  WebKitGTK cannot see GTK's CSS variables, so it gets the background as a literal from `theme.rs`.
-  One rule is not derived: a `$$` block gets 1.2 em of the prose above and below, a heading's standing room, since a `<math display="block">` box carries none of a prose line's half-leading and two formulas would otherwise sit closer than two paragraphs.
+- The preview's tags, and the stylesheet of a page Print… or an export writes, derive everything from three values: foreground, background, accent, a conflict block's tints being the editor's from the same foreground.
+  Neither a text tag nor a browser sees GTK's CSS variables, so both get the background as a literal from `theme.rs`.
+  One rule is not derived: a `$$` block gets 1.2 em of the prose above and below, a heading's standing room, since a `<math display="block">` box carries none of a prose line's half-leading and two formulas would otherwise sit closer than two paragraphs; two in a row share one, as a browser collapses the margins.
   A `$$` block is set 1.15 times an inline formula's size, being read as a figure on a line of its own (user decision 2026-10-28); the page an export or Print writes is the same.
-  A formula's capitals stand as tall as the prose's: `font-size-adjust: cap-height` on `math` is the prose font's cap height, measured through Pango, so whichever math font the page gets is scaled to it (user decision 2026-10-27). At one font size Latin Modern Math's capitals (0.68 em) were a little shorter than the monospace prose's (about 0.73 em) and its `x` (0.43 em) a fifth shorter; matching the `x` instead, as MathJax's `matchFontHeight` does, made the capitals stand out. Its lowercase stays a little short of the prose's. The page an export or Print writes carries the same rule, which WebKitGTK, Firefox and Chromium all read.
+  A formula's capitals stand as tall as the prose's: `font-size-adjust: cap-height` on `math` is the prose font's cap height, measured through Pango, so whichever math font the page gets is scaled to it (user decision 2026-10-27). At one font size Latin Modern Math's capitals (0.68 em) were a little shorter than the monospace prose's (about 0.73 em) and its `x` (0.43 em) a fifth shorter; matching the `x` instead, as MathJax's `matchFontHeight` does, made the capitals stand out. Its lowercase stays a little short of the prose's. The page an export or Print writes carries the same rule, which WebKitGTK, Firefox and Chromium all read, and the preview lays its formulas out at that size itself (`crates/math`), from the MathML core writes; one that does not parse shows its source.
 - A diagram is painted as a PDF page is, its colours moved onto the theme's paper and ink and left alone under Light (Diagram), the accent reaching only the selection; the file keeps the colours it was given.
   The Properties pane may put any colour into the document; none is a literal in code.
 - **`theme.rs` is the only file allowed to write a hex literal**, and one anywhere else is a bug the pre-flight grep catches.
@@ -1638,7 +1646,7 @@ The `Ctrl` chords for application and document commands use GTK's `<Primary>` mo
 - **Reload Window** closes the window the way closing it does — every edit written or asked about, the session saved — and opens what it showed again: the same vault (a remote one connecting afresh), the same files from outside a vault, the same terminal session, with its tabs, panes and shells, at its size and maximized or fullscreen as it was.
   The shells are detached rather than ended, an unnamed window's too, and taken up again.
   A close given up at a question leaves the window as it was.
-  It is a new window, since the vault, its worker and its WebKit process go with the old one; GTK 4 cannot place a window, so where it appears is the compositor's to say.
+  It is a new window, since the vault and its worker go with the old one; GTK 4 cannot place a window, so where it appears is the compositor's to say.
 - **Save As…** is Rename's dialog with Save as its verb, so it names a path in the vault: the tab's content is written there and the tab follows it, while the original keeps what was last written to it (a PDF's strokes are written first, then the file copied; an image is copied as it is).
   A file already there asks Replace, saying so when a tab has it open, which then closes unsaved; a folder is refused; a new extension reopens the tab as what the file now is.
   A note's relative paths — markdown links, reference definitions, HTML `src`/`href` — are pointed back at what they named from the copy's folder, where the index is (the host, on a remote vault), in the tab's text, unsaved edits and all, and the tab reloads what was written, as a rename's notes do; a wikilink resolves by name and stays as written.
@@ -1649,7 +1657,7 @@ The `Ctrl` chords for application and document commands use GTK's `<Primary>` mo
 - Commands `Ctrl+P` (also `Ctrl+Shift+P`), Go to File `Ctrl+E`, Go to Symbol… and Filter by Tag… (unbound), Find `Ctrl+F`, Replace `Ctrl+H`, Replace in Files `Ctrl+Shift+H`, Search Ignored Files (unbound), Find Next / Previous `F3` / `Shift+F3` (`Enter` / `Shift+Enter` in the query box), Go to Line `Ctrl+G`.
 - Find, Replace, Find Next / Previous and Go to Line act on the focused pane's own bar.
   Replace over a selection starts in the replacement box, the selection being the query already.
-- Search `Ctrl+Shift+F` and Replace in Files `Ctrl+Shift+H` do the same in the Search pane: the text selected in whatever has the keyboard — an editor, a find bar's box, a notebook cell, a diff, a PDF page, a terminal — is the query, its first line, as the box holds one line (user decision 2026-10-27). With nothing selected there the query stays as it was: neither the caret's word nor a find bar's query stands in, and the Search pane's own boxes are where the query goes, not where it comes from. The preview's selection is not asked (WebKit answers only through script, a round trip later). The box that takes the keyboard has all it holds selected, so what is typed next replaces it.
+- Search `Ctrl+Shift+F` and Replace in Files `Ctrl+Shift+H` do the same in the Search pane: the text selected in whatever has the keyboard — an editor, a find bar's box, a notebook cell, a diff, a PDF page, the preview, a terminal — is the query, its first line, as the box holds one line (user decision 2026-10-27). With nothing selected there the query stays as it was: neither the caret's word nor a find bar's query stands in, and the Search pane's own boxes are where the query goes, not where it comes from. The box that takes the keyboard has all it holds selected, so what is typed next replaces it.
 - `Up` / `Down` in a query or replacement box, the find bar's or the Search pane's, walk back through the ones used earlier in this run and forward again to what was being typed, as a shell does; each kind of box shares one list, not saved.
 - Search Ignored Files is the Search pane's `All` button by another route.
 - Typed first in the palette, `>` runs a command, `#` filters by tag and `@` goes to a symbol (Palette); Filter by Tag… and Go to Symbol… open it in the last two, for a reader who would rather bind them than type them.
@@ -2119,7 +2127,7 @@ MOBILE_DESIGN.md says what to build; this says what each desktop surface became.
 | `AdwHeaderBar` | the `DocumentBar` row lying over the document |
 | Sidebar panes and the palette | the Browse panel: Search, Files, Tags, Backlinks and Command chips over a `HorizontalPager` |
 | `sourceview5::View` in `AdwClampScrollable` | `BasicTextField(TextFieldState)` styled from the same core spans |
-| WebKitGTK preview | `WebView` over the same `markdown::to_html` output |
+| The native preview | `WebView` over `markdown::to_html`, the same blocks written as HTML |
 | `AdwTabView` + `AdwTabBar` | none: one document at a time |
 | `AdwStatusPage` | a centred `Column`: icon, `headlineSmall`, `bodyMedium`, one `FilledTonalButton` |
 | The toasts / `AdwBanner` / `AdwAlertDialog` | `Snackbar` / an inline row above the content / `AlertDialog` |
