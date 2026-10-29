@@ -11,7 +11,7 @@ use super::Keys;
 use super::find::Find;
 use super::text::{self, Facts, Href, Ink, Tags};
 use super::view::{Decor, PreviewView};
-use super::{code, figure, table};
+use super::{code, figure, formula, table};
 use crate::editor::{self, Flavour};
 use accent_core::config::Config;
 use accent_core::markdown::{self, Block, Click, Node};
@@ -195,6 +195,7 @@ impl Native {
             move |_| {
                 table::set_width(&page);
                 figure::resize(&page);
+                formula::resize(&page);
             }
         ));
         page.view.on_copy(glib::clone!(
@@ -358,6 +359,7 @@ impl Page {
         self.set_clamp();
         table::set_width(self);
         figure::resize(self);
+        formula::resize(self);
     }
 
     fn restyle(&self) -> bool {
@@ -803,6 +805,12 @@ impl Native {
     /// The pictures on the page, and how many reads they took.
     pub fn figures(&self) -> (Vec<figure::Probe>, u32) {
         (figure::probe(&self.page), figure::reads(&self.page))
+    }
+
+    /// Each formula's TeX, whether it is a display one, and its size as drawn against an inline
+    /// one's.
+    pub fn formulas(&self) -> Vec<(String, bool, f32)> {
+        formula::probe(&self.page)
     }
 
     pub fn text_length(&self) -> i32 {

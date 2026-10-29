@@ -185,6 +185,9 @@ async fn render(app: &Rc<App>) {
                 f.uri, f.key, f.loaded, f.size.0, f.size.1
             );
         }
+        for (tex, display, size) in native.formulas() {
+            println!("bench preview formula {tex:?} display={display} size={size:.2}");
+        }
         for (text, route) in native.links() {
             println!("bench preview link {text:?} {route}");
         }

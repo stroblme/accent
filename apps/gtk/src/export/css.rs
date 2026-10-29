@@ -54,7 +54,7 @@ pub(crate) fn stylesheet(fg: gdk::RGBA, bg: &str, share: Option<f64>) -> String 
 }
 
 /// How tall `family`'s `H` is, in ems, from its ink at 100 px.
-fn cap_height(family: &str) -> Option<f64> {
+pub(crate) fn cap_height(family: &str) -> Option<f64> {
     let mut font = pango::FontDescription::new();
     font.set_family(family);
     font.set_absolute_size(100.0 * f64::from(pango::SCALE));

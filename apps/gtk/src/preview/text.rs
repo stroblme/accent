@@ -156,7 +156,8 @@ impl Tags {
         self.dd.set_left_margin(gutter + em(1.4));
         self.rule.set_pixels_above_lines(12);
         self.rule.set_pixels_below_lines(12);
-        self.display.set_pixels_above_lines(em(1.2));
+        // 1.2em above, less the gap the block before leaves, as a browser collapses the two.
+        self.display.set_pixels_above_lines(em(0.4));
         self.display.set_pixels_below_lines(em(1.2));
         self.sub.set_rise(-em(0.3) * pango::SCALE);
         self.sup.set_rise(em(0.4) * pango::SCALE);
@@ -865,7 +866,11 @@ impl Writer<'_> {
             }
             Node::Image(target) => figure::image(self, target),
             Node::Diagram { target, anchor } => figure::diagram(self, target, anchor.as_deref()),
-            Node::Math { tex, display, .. } => formula::insert(self, tex, *display),
+            Node::Math {
+                tex,
+                display,
+                mathml,
+            } => formula::insert(self, tex, mathml, *display),
             Node::TaskItem => self.item(true),
             Node::TaskDoing => self.task(Task::Doing),
             Node::Callout { .. } => self.push(&tags.callout),

@@ -128,6 +128,44 @@ pub fn formula(
     display: bool,
     size: f32,
 ) -> Option<Rc<Layout>> {
+    lay_out(widget, tex, display, size, || {
+        accent_core::markdown::mathml(tex, display)
+    })
+}
+
+/// [`formula`] from the MathML core already wrote for `tex`, as a note's page carries it, so its
+/// TeX is not read a second time.
+pub fn formula_of(
+    widget: &impl IsA<gtk::Widget>,
+    tex: &str,
+    mathml: &str,
+    display: bool,
+    size: f32,
+) -> Option<Rc<Layout>> {
+    lay_out(widget, tex, display, size, || Some(mathml.to_string()))
+}
+
+/// How tall the math font's capitals are, in ems: an upright `H`'s ink, what an inline formula is
+/// scaled by to stand as tall as the prose's capitals.
+pub fn cap_height(widget: &impl IsA<gtk::Widget>) -> f32 {
+    thread_local! {
+        static CAP: OnceCell<f32> = const { OnceCell::new() };
+    }
+    CAP.with(|cap| {
+        *cap.get_or_init(|| {
+            formula(widget, "\\mathrm{H}", false, 100.0).map_or(0.7, |f| f.ascent / 100.0)
+        })
+    })
+}
+
+/// [`formula`] laid out from the MathML `mathml` makes, unless it is kept.
+fn lay_out(
+    widget: &impl IsA<gtk::Widget>,
+    tex: &str,
+    display: bool,
+    size: f32,
+    mathml: impl FnOnce() -> Option<String>,
+) -> Option<Rc<Layout>> {
     let key = (tex.to_string(), display, size.to_bits());
     if let Some(kept) = FORMULAS.with_borrow(|laid| laid.get(&key).cloned()) {
         return kept;
@@ -135,7 +173,7 @@ pub fn formula(
     let fonts = fonts(widget.as_ref());
     // A panic here would abort the app from inside a GTK callback: the source is shown instead.
     let laid = catch_unwind(AssertUnwindSafe(|| {
-        let root = accent_math::parse(&accent_core::markdown::mathml(tex, display)?)
+        let root = accent_math::parse(&mathml()?)
             .inspect_err(|e| tracing::debug!("{tex:?}: {e}"))
             .ok()?;
         if !root.warnings.is_empty() {
@@ -162,6 +200,31 @@ pub fn paint(
     ink: &gdk::RGBA,
     colour: impl Fn(Color) -> gdk::RGBA,
 ) {
+    draw(snapshot, formula, origin, scale, ink, colour, false);
+}
+
+/// [`paint`] with each rule on whole pixels of the snapshot, so a fraction bar is one row of
+/// pixels, not two grey ones, where `origin` is on a whole pixel too.
+pub fn paint_snapped(
+    snapshot: &gtk::Snapshot,
+    formula: &Layout,
+    origin: (f32, f32),
+    scale: f32,
+    ink: &gdk::RGBA,
+    colour: impl Fn(Color) -> gdk::RGBA,
+) {
+    draw(snapshot, formula, origin, scale, ink, colour, true);
+}
+
+fn draw(
+    snapshot: &gtk::Snapshot,
+    formula: &Layout,
+    origin: (f32, f32),
+    scale: f32,
+    ink: &gdk::RGBA,
+    colour: impl Fn(Color) -> gdk::RGBA,
+    snap: bool,
+) {
     let Some(fonts) = FONTS.with(|fonts| fonts.get().cloned()) else {
         return;
     };
@@ -177,6 +240,10 @@ pub fn paint(
                     false => (w, h.max(1.0)),
                 };
                 let (x, y) = (origin.0 + x * scale, origin.1 + y * scale);
+                let (x, y, w, h) = match snap {
+                    true => (x.round(), y.round(), w.round().max(1.0), h.round().max(1.0)),
+                    false => (x, y, w, h),
+                };
                 snapshot.append_color(&rgba(color), &graphene::Rect::new(x, y, w, h));
                 1
             }
