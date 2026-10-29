@@ -256,7 +256,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The dim is its own signal and stays as it was: a changed dotfile is both.
   Colour Changed Files, on by default, is a preference (Preferences → Files); off, the names are plain and the dims unchanged.
 - **The selection is the open file's row** and follows the open tab; hovering another row lights it with Adwaita's hover background and leaves the selection where it is, as in GNOME's sidebars, VS Code and Obsidian (user decision 2026-10-29).
-  A click opens a file or toggles a folder on its release, once it is not a drag, without selecting the row: the tree does it itself, GTK's single-click activation selecting on hover.
+  A click opens a file or toggles a folder on its release, once it is not a drag: the tree does it itself, GTK's single-click activation selecting on hover.
+  The row clicked takes the selection, a folder's too as in VS Code, until another is clicked or the tab in front changes (user decision 2026-10-29).
   The arrow keys move the selection, and Delete, F2 and Menu act on the selected row.
   Only among rows on screen: no folder opens and nothing scrolls, which is Reveal in Sidebar's job.
 - Reveal in Sidebar, from the tab menu or the palette, outlines the row it lands on in the accent for a second, which then fades over two (Motion), so the eye finds it in a long listing.

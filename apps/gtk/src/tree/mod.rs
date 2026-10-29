@@ -1252,9 +1252,9 @@ fn bind_row(
 
 /// Open a row on a plain click and handle marked-row selection, ahead of the list's own click.
 ///
-/// A click opens a file or toggles a folder on its release, once it is not a drag, and leaves
-/// the selection on the open file: the list's own click would select the row, so it is claimed
-/// from it. Ctrl toggles marks; Shift replaces with the anchor range, or adds with Ctrl. Context
+/// A click opens a file or toggles a folder on its release, once it is not a drag, and selects
+/// the row; the list's own click is claimed from it, the tree doing all a click does. Ctrl
+/// toggles marks; Shift replaces with the anchor range, or adds with Ctrl. Context
 /// menus, Delete and drags act on the set. Capture claiming prevents opening or toggling
 /// rows; plain clicks and blank-area clicks clear marks. Dependency rows cannot be marked
 /// because batch operations must not edit them.
@@ -1355,6 +1355,10 @@ fn marking(
             {
                 gesture.set_state(gtk::EventSequenceState::Claimed);
                 open_row(&view, &marked, &*on_activate, &row);
+                // The row clicked is what the keys act on next, a folder's too as in VS Code
+                // (user decision 2026-10-29), until the tab in front changes; a file already in
+                // front opens no tab that would select it.
+                select(&view, Some(&rel));
             }
         }
     });

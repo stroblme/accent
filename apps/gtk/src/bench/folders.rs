@@ -227,11 +227,13 @@ pub(super) fn bench_menu_press(app: &Rc<App>, rel: &str) {
 }
 
 /// `hover:<rel_file>`: the Files tree under the real pointer and keys (XTEST). Makes `b.md`,
-/// `c.md` and `folder/inner.md` beside `rel`, a file in the vault root, opens `rel` and prints a
-/// line a step: hovering `b.md` leaves `rel` selected, painted apart from the hovered row and a
-/// plain one; a click on `folder` opens it, the selection staying; a right-click on `c.md`
-/// selects it while its menu is up, its Copy Name names it, and `rel` is selected again after; a
-/// click on `b.md` opens and selects it; F2 renames the selected row; drags of `c.md` onto its
+/// `c.md` and `folder/inner.md` beside `rel`, a file in the vault root, opens `b.md` and `rel`
+/// and prints a line a step: hovering `b.md` leaves `rel` selected, painted apart from the
+/// hovered row and a plain one; a click on `folder` opens and selects it, F2 then renaming it,
+/// and the next tab gives the selection to `b.md`, as a click on `b.md`, in front, does after
+/// `folder` is clicked again; a right-click on `c.md` selects it while its
+/// menu is up, its Copy Name names it, and `b.md` is selected again after; a click on `b.md`
+/// opens and selects it; F2 renames the selected row; drags of `c.md` onto its
 /// own row and onto `folder` open nothing, the second moving it; Ctrl+clicks mark; Delete in the
 /// list trashes the selected row; Reveal in Sidebar outlines the open file's.
 fn bench_hover(app: &Rc<App>, rel: &str) {
@@ -244,6 +246,7 @@ fn bench_hover(app: &Rc<App>, rel: &str) {
             std::fs::write(&path, "# Note\n").unwrap();
         }
         let tree = app.tree.get().expect("a tree");
+        app.open_path("b.md");
         app.open_path(&rel);
         until(|| centre(&app, tree, "c.md").is_some() && app.tab_for(&rel).is_some()).await;
         glib::timeout_future(Duration::from_millis(800)).await;
@@ -273,6 +276,43 @@ fn bench_hover(app: &Rc<App>, rel: &str) {
             "bench hover folder expanded={open} selected={:?} opened={}",
             selected(),
             app.docs().len() - docs
+        );
+        // What F2 names in its dialog, which is then closed.
+        let renaming = || {
+            let dialog = app
+                .window
+                .visible_dialog()
+                .and_downcast::<adw::AlertDialog>();
+            let text = dialog.as_ref().and_then(|d| {
+                let entry = find_widget(&d.extra_child()?, &|w| w.is::<gtk::Editable>())?;
+                Some(entry.downcast::<gtk::Editable>().ok()?.text().to_string())
+            });
+            if let Some(dialog) = dialog {
+                dialog.force_close();
+            }
+            text
+        };
+        xtest("key F2").await;
+        println!("bench hover folder_f2 renaming={:?}", renaming());
+        glib::timeout_future(Duration::from_millis(300)).await;
+        xtest("key ctrl+Tab").await;
+        until(|| app.active().is_some_and(|tab| tab.rel() == "b.md")).await;
+        println!(
+            "bench hover next_tab active={:?} selected={:?}",
+            app.active().map(|tab| tab.rel()),
+            selected()
+        );
+        // Shut and open again, apart enough not to be a double click, then the file in front.
+        xtest(&format!(
+            "move {}; down; up; sleep 0.8; down; up",
+            at("folder")
+        ))
+        .await;
+        let folder = selected();
+        xtest(&format!("move {}; down; up", at("b.md"))).await;
+        println!(
+            "bench hover reclick folder={folder:?} file={:?}",
+            selected()
         );
 
         xtest(&format!("move {}; down 3; up 3", at("c.md"))).await;
@@ -323,18 +363,7 @@ fn bench_hover(app: &Rc<App>, rel: &str) {
         );
 
         xtest("key F2").await;
-        let dialog = app
-            .window
-            .visible_dialog()
-            .and_downcast::<adw::AlertDialog>();
-        let renaming = dialog.as_ref().and_then(|d| {
-            let entry = find_widget(&d.extra_child()?, &|w| w.is::<gtk::Editable>())?;
-            Some(entry.downcast::<gtk::Editable>().ok()?.text().to_string())
-        });
-        println!("bench hover f2 renaming={renaming:?}");
-        if let Some(dialog) = dialog {
-            dialog.force_close();
-        }
+        println!("bench hover f2 renaming={:?}", renaming());
         glib::timeout_future(Duration::from_millis(300)).await;
 
         // A drag onto its own row and one onto the folder: neither opens the row it began on.
