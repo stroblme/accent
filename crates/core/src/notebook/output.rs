@@ -176,12 +176,14 @@ pub fn tex(latex: &str) -> (&str, bool) {
 
 /// The line naming what only a script could have shown, in the place of `items`.
 pub fn placeholder(items: &[Item]) -> String {
-    let mime = items
+    match items
         .iter()
         .map(|i| i.mime.as_str())
         .find(|m| *m != "text/plain")
-        .unwrap_or("an empty");
-    format!("A {mime} output, which only a script can show")
+    {
+        Some(mime) => format!("A {mime} output, which only a script can show"),
+        None => "An empty output".into(),
+    }
 }
 
 /// What an error shows: its traceback, else its name and message.
