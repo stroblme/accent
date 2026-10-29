@@ -294,12 +294,13 @@ async fn time(app: &Rc<App>, rel: &str) {
         .await;
         ms_since(t)
     };
-    // Another note first, so the note goes in whole.
+    // Another note first, so the note goes in whole; and time for the note's editor tab to have
+    // measured and coloured its own text, which shares the main thread.
     if let Some(n) = native() {
         n.render("other.md", "");
     }
     landed().await;
-    glib::timeout_future(Duration::from_millis(300)).await;
+    glib::timeout_future(Duration::from_secs(5)).await;
     let (beat, sched) = (Beat::start(), schedstat());
     if let Some(n) = native() {
         n.render(rel, &text);
