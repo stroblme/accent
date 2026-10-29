@@ -654,9 +654,7 @@ fn terminal_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Pre
 /// The user's own commands (`[[commands]]`): a row each, its name over its command line, opening
 /// on the two, its shortcut and Remove; Add Command puts a new one at the end, opened.
 fn commands_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::PreferencesGroup {
-    let group = adw::PreferencesGroup::builder()
-        .title("Commands")
-        .build();
+    let group = adw::PreferencesGroup::builder().title("Commands").build();
     command_rows(&group, &Rc::default(), config, save, None);
     group
 }
