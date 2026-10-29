@@ -2,6 +2,7 @@
 //! rendering, patching and scrolling it cost.
 
 use super::*;
+use accent_core::search::Options;
 
 /// The note [`bench_preview`] writes into the vault: one of each thing the page draws.
 const NOTE: &str = "preview-drill.md";
@@ -240,6 +241,83 @@ async fn render(app: &Rc<App>) {
             println!("bench preview edit kept={kept} written={written}");
         }
         tab.buffer.undo();
+    }
+    glib::timeout_future(Duration::from_millis(1500)).await;
+    find(&rendered, &tab).await;
+}
+
+/// Find from the page's top: the readout after a search, a step each way and Match Whole Word,
+/// what the search selected and how many matches it painted; then the readout and the selection
+/// after a key typed into the block of the match selected, which a render writes anew.
+async fn find(rendered: &crate::rendered::Rendered, tab: &Tab) {
+    rendered.scroll_to_line(1);
+    glib::timeout_future(Duration::from_millis(300)).await;
+    let said = Rc::new(RefCell::new(String::new()));
+    let buffer = {
+        let preview = rendered.preview();
+        let Some((preview, native)) = preview.as_ref().and_then(|p| Some((p, p.native()?))) else {
+            return;
+        };
+        preview.connect_found(glib::clone!(
+            #[strong]
+            said,
+            move |label| *said.borrow_mut() = label.to_string()
+        ));
+        let buffer = native.buffer();
+        let mut readouts = Vec::new();
+        preview.find("side", Options::default());
+        readouts.push(said.borrow().clone());
+        let (selected, painted) = (selected(&buffer), tagged(&buffer, |n| n == "find").len());
+        preview.find_next();
+        readouts.push(said.borrow().clone());
+        preview.find_previous();
+        readouts.push(said.borrow().clone());
+        let word = Options {
+            word: true,
+            ..Options::default()
+        };
+        preview.find("side", word);
+        readouts.push(said.borrow().clone());
+        println!("bench preview find {readouts:?} selected={selected:?} painted={painted}");
+        buffer
+    };
+    let text = tab.text();
+    if let Some(at) = text.find("Our side") {
+        let mut iter = tab.buffer.iter_at_offset(text[..at].chars().count() as i32);
+        tab.buffer.insert(&mut iter, "x");
+        glib::timeout_future(Duration::from_millis(1500)).await;
+        println!(
+            "bench preview find typed {:?} selected={:?}",
+            said.borrow(),
+            selected(&buffer)
+        );
+        tab.buffer.undo();
+    }
+}
+
+/// What `buffer` has selected.
+fn selected(buffer: &gtk::TextBuffer) -> String {
+    let selection = buffer.selection_bounds();
+    selection.map_or_else(String::new, |(s, e)| buffer.slice(&s, &e, true).to_string())
+}
+
+/// The text of each run of `buffer` under a tag whose name `named` takes.
+fn tagged(buffer: &gtk::TextBuffer, named: impl Fn(&str) -> bool) -> Vec<String> {
+    let (mut out, mut start, mut at) = (Vec::new(), None, buffer.start_iter());
+    loop {
+        let on = (at.tags().iter()).any(|t| t.name().is_some_and(|n| named(&n)));
+        match (on, start) {
+            (true, None) => start = Some(at),
+            (false, Some(s)) => {
+                out.push(buffer.slice(&s, &at, true).to_string());
+                start = None;
+            }
+            _ => {}
+        }
+        if at.is_end() {
+            return out;
+        }
+        at.forward_to_tag_toggle(None::<&gtk::TextTag>);
     }
 }
 

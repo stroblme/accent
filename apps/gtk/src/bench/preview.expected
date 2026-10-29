@@ -81,3 +81,5 @@ bench preview scroll line=39 top="￼"
 bench preview scroll line=68 top="Their side"
 bench preview scroll line=1 top="\nPreview drill"
 bench preview edit kept=63 written=1
+bench preview find ["1 of 3", "2 of 3", "1 of 3", "1 of 2"] selected="side" painted=3
+bench preview find typed "1 of 2" selected="side"

@@ -9,6 +9,7 @@
 use crate::assets::{Resolve, diagram_page, resolve_asset};
 use crate::export::css::{column, stylesheet};
 use crate::look::{self, Look, Served};
+use crate::preview::find::matches_label;
 use crate::theme;
 use accent_core::config::Config;
 use accent_core::markdown::{self, Click, accent_file, base_uri};
@@ -351,7 +352,11 @@ impl Inner {
 
     fn say(&self) {
         let label = match self.query.borrow().as_deref() {
-            Some(text) if !text.is_empty() => matches_label(self.at.get(), self.total.get()),
+            Some(text) if !text.is_empty() => match self.total.get() {
+                // Past WebKit's own ceiling the total is a floor, so no position is claimed.
+                n if n >= FIND_LIMIT => format!("{n}+ matches"),
+                n => matches_label(self.at.get(), n),
+            },
             // Nothing asked is not "No results"; the editor's readout is blank there too.
             _ => String::new(),
         };
@@ -400,17 +405,6 @@ fn stepped(at: u32, total: u32, forward: bool) -> u32 {
         (total, true) => at % total + 1,
         (total, false) if at <= 1 => total,
         (_, false) => at - 1,
-    }
-}
-
-/// Format 1-based match `at` and total, with 0 for no selection.
-/// Totals reaching [`FIND_LIMIT`] are lower bounds, so use capped wording rather than false exact positions.
-fn matches_label(at: u32, total: u32) -> String {
-    match (at, total) {
-        (_, 0) => "No results".to_string(),
-        (_, n) if n >= FIND_LIMIT => format!("{n}+ matches"),
-        (0, n) => format!("{n} matches"),
-        (at, n) => format!("{at} of {n}"),
     }
 }
 
@@ -1241,17 +1235,6 @@ fn document(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn matches_label_says_where_the_reader_is() {
-        assert_eq!(matches_label(0, 0), "No results");
-        assert_eq!(matches_label(1, 1), "1 of 1");
-        assert_eq!(matches_label(3, 12), "3 of 12");
-        // Before WebKit has answered, or after a step with nothing to step through.
-        assert_eq!(matches_label(0, 12), "12 matches");
-        // Past WebKit's own ceiling the total is a floor, so no position is claimed.
-        assert_eq!(matches_label(1, FIND_LIMIT), "500+ matches");
-    }
 
     #[test]
     fn stepping_wraps_at_both_ends() {

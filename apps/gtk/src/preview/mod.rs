@@ -4,7 +4,7 @@
 
 mod code;
 mod figure;
-mod find;
+pub(crate) mod find;
 mod formula;
 mod native;
 mod table;

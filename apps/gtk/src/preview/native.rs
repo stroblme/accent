@@ -217,8 +217,8 @@ impl Native {
         page.restyle();
         Native {
             root: overlay.upcast(),
+            find: Find::new(&page),
             page,
-            find: Find::default(),
         }
     }
 
