@@ -31,6 +31,58 @@ impl Pdf {
     /// An encrypted file opens where its user password is empty, as pdfium opens it.
     pub fn open(src: Arc<dyn Source>) -> Result<Pdf> {
         let xref = xref::read(&*src)?;
+        Pdf::over(src, xref)
+    }
+
+    /// `src` read through an xref made again from its objects ([`xref::scan`]), as pdfium and
+    /// other readers repair a file whose own xref does not read: to read what a damaged file says.
+    /// Nothing may be appended to it, since an update names the file's own xref, which this is
+    /// not.
+    ///
+    // ponytail: the whole file is read into memory to be scanned, once, and only for a file
+    // whose xref is damaged.
+    pub fn rebuilt(src: Arc<dyn Source>) -> Result<Pdf> {
+        let scan = xref::scan(&src.read_vec(0, src.size() as usize)?);
+        let xref = Xref {
+            entries: scan.entries,
+            trailer: scan.trailer.unwrap_or_default(),
+            startxref: 0,
+            stream: false,
+        };
+        let mut pdf = Pdf::over(src, xref)?;
+        let mut members = Vec::new();
+        for stream in scan.objstms {
+            let Ok(stm) = pdf.objstm(stream, 0) else {
+                continue;
+            };
+            for (index, num) in (0..).zip(stm.numbers()) {
+                // An object of the file's own is newer than one packed with others before it.
+                let entry = Entry::InStream { stream, index };
+                if let std::collections::hash_map::Entry::Vacant(slot) = pdf.xref.entries.entry(num)
+                {
+                    slot.insert(entry);
+                    members.push(Ref { num, generation: 0 });
+                }
+            }
+        }
+        // A file cut short has lost its trailer: its last catalog stands in for it.
+        if pdf.trailer().get(b"Root").is_none() {
+            let catalog = |r: &Ref| {
+                let object = pdf.get(*r).ok()?;
+                let kind = object.as_dict()?.get(b"Type")?.as_name()?;
+                (kind == b"Catalog").then_some(*r)
+            };
+            let root =
+                (scan.catalogs.last().copied()).or_else(|| members.iter().rev().find_map(catalog));
+            if let Some(root) = root {
+                pdf.xref.trailer.set(b"Root", Object::Ref(root));
+            }
+        }
+        Ok(pdf)
+    }
+
+    /// The file `src` over the xref read of it, its security handler set up.
+    fn over(src: Arc<dyn Source>, xref: Xref) -> Result<Pdf> {
         let encrypt = xref.trailer.get(b"Encrypt").cloned();
         let mut pdf = Pdf {
             src,
@@ -56,6 +108,14 @@ impl Pdf {
     /// The newest trailer.
     pub fn trailer(&self) -> &Dict {
         &self.xref.trailer
+    }
+
+    /// The version the header declares, `%PDF-1.0` to `%PDF-2.0`, within the first 1024 bytes as
+    /// pdfium looks for it.
+    pub fn version(&self) -> Option<String> {
+        let head = self.src.read_vec(0, 1024).ok()?;
+        let at = memchr::memmem::find(&head, b"%PDF-")? + 5;
+        known_version(head.get(at..at + 3)?)
     }
 
     /// Where the newest xref section starts.
@@ -261,5 +321,24 @@ impl Pdf {
         }
         cache.insert(num, stm.clone());
         Ok(stm)
+    }
+}
+
+/// What `read` makes of the file `src`, through its own xref, or through one rebuilt from its
+/// objects where that is damaged ([`Pdf::rebuilt`]): for whatever only reads a file.
+pub fn read<T>(src: Arc<dyn Source>, read: impl Fn(&Pdf) -> Result<T>) -> Result<T> {
+    match Pdf::open(src.clone()).and_then(|pdf| read(&pdf)) {
+        Err(Error::Broken(_) | Error::Syntax { .. }) => read(&Pdf::rebuilt(src)?),
+        done => done,
+    }
+}
+
+/// `1.0` to `1.7`, or `2.0`: the versions there are.
+pub(crate) fn known_version(v: &[u8]) -> Option<String> {
+    match v {
+        [major @ b'1', b'.', minor @ b'0'..=b'7'] | [major @ b'2', b'.', minor @ b'0'] => {
+            Some(format!("{}.{}", char::from(*major), char::from(*minor)))
+        }
+        _ => None,
     }
 }

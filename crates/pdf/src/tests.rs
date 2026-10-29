@@ -313,6 +313,9 @@ fn damaged_files_never_panic() {
     let at = b.xref_stream(7, &rows, "/Root 1 0 R");
     for whole in [classic(), b.end(at)] {
         let read = |bytes: Vec<u8>| {
+            if let Ok(pdf) = Pdf::rebuilt(Arc::new(bytes.clone())) {
+                let _ = outline_of(&pdf);
+            }
             if let Ok(pdf) = open(bytes) {
                 let _ = pdf.pages();
                 for num in 0..10 {
@@ -496,4 +499,158 @@ fn a_file_that_needs_a_password_is_refused() {
     let at = memchr::memmem::find(&bytes, b"/U <").unwrap() + 4;
     bytes[at] = if bytes[at] == b'0' { b'1' } else { b'0' };
     assert!(matches!(open(bytes), Err(Error::Unsupported(_))));
+}
+
+#[test]
+fn text_strings_read_in_each_encoding() {
+    assert_eq!(text_string(b"\x80 caf\xe9 \x18"), "• café ˘");
+    let utf16 = b"\xfe\xff\x00G\x00r\x00\xfc\x00\x1b\x00d\x00e\x00\x1b\x00\xdf\x00e";
+    assert_eq!(text_string(utf16), "Grüße");
+    assert_eq!(text_string(b"\xff\xfeA\x00\xac\x20"), "A€");
+    assert_eq!(text_string("\u{feff}Grüße".as_bytes()), "Grüße");
+}
+
+/// Two pages under an outline that loops back on itself, named destinations old and new, links
+/// of every kind on the first page, and an information dictionary.
+fn outlined(b: &mut Build) {
+    b.obj(
+        1,
+        "<</Type/Catalog/Pages 2 0 R/Outlines 10 0 R/Names<</Dests 20 0 R>>\
+         /Dests<</old[4 0 R/Fit]>>/URI<</Base(https://example.org/)>>>>",
+    );
+    b.obj(2, TWO_PAGES);
+    b.obj(
+        3,
+        "<</Type/Page/Parent 2 0 R/Annots[30 0 R 31 0 R 32 0 R 33 0 R]>>",
+    );
+    b.obj(4, "<</Type/Page/Parent 2 0 R>>");
+    b.obj(10, "<</Type/Outlines/First 11 0 R/Last 13 0 R>>");
+    b.obj(
+        11,
+        "<</Title(One\\nline)/Dest[3 0 R/XYZ 0 70 0]/Next 12 0 R/First 14 0 R>>",
+    );
+    b.obj(
+        14,
+        "<</Title<FEFF004700720075006E0064>/Dest(chap)/Parent 11 0 R>>",
+    );
+    b.obj(12, "<</Title(\\200Old)/A<</S/GoTo/D/old>>/Next 13 0 R>>");
+    b.obj(
+        13,
+        "<</Title(Remote)/A<</S/GoToR/F(other.pdf)/D[0/Fit]>>/Next 11 0 R>>",
+    );
+    b.obj(20, "<</Kids[21 0 R]>>");
+    b.obj(21, "<</Limits[(a)(z)]/Names[(chap)[4 0 R/FitH 50]]>>");
+    b.obj(
+        30,
+        "<</Subtype/Link/Rect[100 80 10 20]/A<</S/URI/URI(page.html)>>>>",
+    );
+    b.obj(
+        31,
+        "<</Subtype/Link/Rect[0 0 10 10]/Dest[4 0 R/FitR 0 0 50 60]>>",
+    );
+    b.obj(
+        32,
+        "<</Subtype/Link/Rect[0 0 5 5]/Dest(gone)/A<</S/URI/URI(https://x)>>>>",
+    );
+    b.obj(33, "<</Subtype/Link/Rect[0 0 5 5]/Dest[99 0 R/Fit]>>");
+    b.obj(
+        40,
+        "<</Title( Hello )/Author()/ModDate(D:20261029120000Z)>>",
+    );
+}
+
+fn outline_of(pdf: &Pdf) -> Result<Vec<(usize, String, Option<usize>)>> {
+    let doc = Document::new(pdf, None, &pdf.pages()?);
+    let marks = doc.outline()?.into_iter();
+    Ok(marks.map(|b| (b.depth, b.title, b.page)).collect())
+}
+
+fn expected_outline() -> Vec<(usize, String, Option<usize>)> {
+    vec![
+        (0, "One line".to_string(), Some(0)),
+        (1, "Grund".to_string(), Some(1)),
+        (0, "•Old".to_string(), Some(1)),
+        (0, "Remote".to_string(), None),
+    ]
+}
+
+/// The outline, depth first and cut where it loops; where each entry and link leads, by an
+/// explicit, a named or an old-style destination or a GoTo action, another file's leading
+/// nowhere; and what the information dictionary says.
+#[test]
+fn a_document_reads_its_outline_links_and_information() {
+    let mut b = Build::new();
+    outlined(&mut b);
+    let at = b.table("/Size 41/Root 1 0 R/Info 40 0 R");
+    let pdf = open(b.end(at)).unwrap();
+    assert_eq!(outline_of(&pdf).unwrap(), expected_outline());
+
+    let pages = pdf.pages().unwrap();
+    let doc = Document::new(&pdf, None, &pages);
+    let page = |page, top| Target::Page(Dest { page, top });
+    let links: Vec<_> = (doc.links(pages[0]).unwrap().into_iter())
+        .map(|l| (l.rect, l.target))
+        .collect();
+    let uri = |u: &str| Target::Uri(u.to_string());
+    assert_eq!(
+        links,
+        [
+            (
+                [10.0, 20.0, 100.0, 80.0],
+                uri("https://example.org/page.html")
+            ),
+            ([0.0, 0.0, 10.0, 10.0], page(1, Some(60.0))),
+            ([0.0, 0.0, 5.0, 5.0], uri("https://x")),
+        ]
+    );
+    let info = doc.info().unwrap();
+    assert_eq!(info.title.as_deref(), Some("Hello"));
+    assert_eq!((info.author, info.created), (None, None));
+    assert_eq!(info.modified.as_deref(), Some("D:20261029120000Z"));
+    assert_eq!(info.version.as_deref(), Some("1.7"));
+}
+
+/// A damaged file reads through an xref rebuilt from its objects: every offset wrong, the xref's
+/// own included or not, the end cut off with its xref and trailer, and the same cut through an
+/// xref stream, whose catalog sits in an object stream.
+#[test]
+fn a_damaged_xref_is_rebuilt_from_the_objects() {
+    let mut b = Build::new();
+    outlined(&mut b);
+    let at = b.table("/Size 41/Root 1 0 R/Info 40 0 R");
+    let whole = b.end(at);
+    let header = b"%PDF-1.7\n".len();
+    let shifted = [&whole[..header], b"%junk\n", &whole[header..]].concat();
+    let end = format!("startxref\n{at}\n%%EOF\n");
+    let found = format!("startxref\n{}\n%%EOF\n", at + 6);
+    let xref_found = [&shifted[..shifted.len() - end.len()], found.as_bytes()].concat();
+    let cut = whole[..at as usize].to_vec();
+
+    let mut b = Build::new();
+    let rows = b.objstm(
+        50,
+        &[
+            (1, "<</Type/Catalog/Pages 2 0 R/Outlines 10 0 R>>"),
+            (2, TWO_PAGES),
+            (3, "<</Type/Page/Parent 2 0 R>>"),
+            (4, "<</Type/Page/Parent 2 0 R>>"),
+            (10, "<</First 11 0 R>>"),
+            (11, "<</Title(Packed)/Dest[4 0 R/Fit]>>"),
+        ],
+    );
+    let at = b.xref_stream(51, &rows, "/Root 1 0 R");
+    let packed = b.end(at)[..at as usize].to_vec();
+
+    for damaged in [shifted, xref_found, cut] {
+        assert!(
+            open(damaged.clone())
+                .and_then(|pdf| outline_of(&pdf))
+                .is_err()
+        );
+        let read = read(Arc::new(damaged), outline_of).unwrap();
+        assert_eq!(read, expected_outline());
+    }
+    assert!(open(packed.clone()).is_err());
+    let read = read(Arc::new(packed), outline_of).unwrap();
+    assert_eq!(read, [(0, "Packed".to_string(), Some(1))]);
 }

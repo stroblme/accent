@@ -271,3 +271,117 @@ fn stream_entries(dict: &Dict, data: &[u8]) -> Result<Vec<(u32, Entry)>> {
     }
     Ok(entries)
 }
+
+/// What a file holds, found by reading it through rather than by its xref: see `Pdf::rebuilt`.
+pub(crate) struct Scan {
+    /// Each object's place, the last of a number winning, as the newest revision's does.
+    pub entries: HashMap<u32, Entry>,
+    /// The last trailer that names a catalog, an xref stream's dictionary standing for one; the
+    /// last of any, else.
+    pub trailer: Option<Dict>,
+    /// The object streams, whose members the xref names too.
+    pub objstms: Vec<u32>,
+    /// The objects whose `/Type` is `/Catalog`, in the order the file holds them.
+    pub catalogs: Vec<crate::Ref>,
+}
+
+/// Every `N G obj` and `trailer` in `data`, a whole file. A stream is skipped to its
+/// `endstream`, so a file kept inside one is not taken for this one.
+pub(crate) fn scan(data: &[u8]) -> Scan {
+    let mut found = Scan {
+        entries: HashMap::new(),
+        trailer: None,
+        objstms: Vec::new(),
+        catalogs: Vec::new(),
+    };
+    let mut trailers = Vec::new();
+    let (objs, ends) = (
+        memchr::memmem::Finder::new(b"obj"),
+        memchr::memmem::Finder::new(b"endstream"),
+    );
+    let trailer_at =
+        |from: usize| memchr::memmem::find(&data[from..], b"trailer").map(|i| from + i);
+    let mut next_trailer = trailer_at(0);
+    let mut at = 0;
+    while at < data.len() {
+        let next_obj = objs.find(&data[at..]).map(|i| at + i);
+        if let Some(t) = next_trailer.filter(|&t| next_obj.is_none_or(|o| t < o)) {
+            let mut lex = Lexer::new(data, t, true);
+            if lex.keyword(b"trailer").is_ok()
+                && let Ok(Object::Dict(dict)) = lex.object()
+            {
+                trailers.push(dict);
+            }
+            at = t + b"trailer".len();
+            next_trailer = trailer_at(at);
+            continue;
+        }
+        let Some(o) = next_obj else {
+            break;
+        };
+        at = o + 3;
+        let Some(start) = header(data, o) else {
+            continue;
+        };
+        let mut lex = Lexer::new(data, start, true);
+        let Ok((r, object, stream)) = lex.indirect() else {
+            continue;
+        };
+        at = at.max(lex.pos);
+        found.entries.insert(
+            r.num,
+            Entry::InFile {
+                offset: start as u64,
+                generation: r.generation,
+            },
+        );
+        if let Some(dict) = object.as_dict() {
+            match dict.get(b"Type").and_then(Object::as_name) {
+                Some(b"ObjStm") => found.objstms.push(r.num),
+                Some(b"XRef") => trailers.push(dict.clone()),
+                Some(b"Catalog") => found.catalogs.push(r),
+                _ => {}
+            }
+        }
+        if let Some(data_at) = stream {
+            at = ends
+                .find(&data[data_at..])
+                .map_or(data.len(), |i| data_at + i);
+        }
+        while next_trailer.is_some_and(|t| t < at) {
+            next_trailer = trailer_at(at);
+        }
+    }
+    let named = trailers.iter().rposition(|t| t.get(b"Root").is_some());
+    found.trailer = named
+        .or(trailers.len().checked_sub(1))
+        .map(|i| trailers.swap_remove(i));
+    found
+}
+
+/// Where the `N G` before the `obj` at `at` starts: two numbers, whitespace between them and
+/// before `obj`, after the start of the file or a non-number.
+fn header(data: &[u8], at: usize) -> Option<usize> {
+    let regular = |b: u8| !b"\0\t\n\x0c\r ()<>[]{}/%".contains(&b);
+    if data.get(at + 3).is_some_and(|&b| regular(b)) {
+        return None;
+    }
+    let mut i = at;
+    for _ in 0..2 {
+        let white = data[..i]
+            .iter()
+            .rev()
+            .take_while(|b| b.is_ascii_whitespace() || **b == 0);
+        i -= white.count();
+        let digits = data[..i]
+            .iter()
+            .rev()
+            .take_while(|b| b.is_ascii_digit())
+            .count();
+        if digits == 0 || i == at {
+            return None;
+        }
+        i -= digits;
+    }
+    (i == 0 || !regular(data[i - 1])).then_some(i)
+}

@@ -207,7 +207,12 @@ impl<'a> Lexer<'a> {
                 b'/' => {
                     let key = self.name()?;
                     let value = self.object_in(depth + 1)?;
-                    pairs.push((key, value));
+                    // A key a damaged file repeats keeps its first place and takes its last
+                    // value, as pdfium reads it: both then see the same `/Annots`, the same title.
+                    match pairs.iter_mut().find(|(k, _)| *k == key) {
+                        Some((_, slot)) => *slot = value,
+                        None => pairs.push((key, value)),
+                    }
                 }
                 _ => return Err(Stop::Bad(self.pos, "expected a name")),
             }
@@ -414,6 +419,19 @@ mod tests {
         });
         let dict = parse(b"<</A 1 %comment\n/B<</C null>>>>");
         assert_eq!(dict.as_dict().unwrap().get(b"A"), Some(&Object::Int(1)));
+        let repeated = parse(b"<</A 1/B 2/A 3>>");
+        let pairs = |d: &Dict| {
+            d.0.iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            pairs(repeated.as_dict().unwrap()),
+            [
+                (b"A".to_vec(), Object::Int(3)),
+                (b"B".to_vec(), Object::Int(2))
+            ]
+        );
         // A number last in a buffer that is all there is, as in an object stream, is no reference.
         assert_eq!(parse(b"7 0"), Object::Int(7));
     }

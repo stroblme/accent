@@ -1,6 +1,7 @@
-//! accent's own PDF object layer: a lazy reader over a file's revisions ([`Pdf`]) and the
-//! incremental update a session appends to one ([`Update`]), which are to take every PDF write
-//! from pdfium, leaving it to render and read text (DESIGN.md, Architecture, Crates).
+//! accent's own PDF object layer: a lazy reader over a file's revisions ([`Pdf`]), what a
+//! document says of itself and where its links lead ([`Document`]), and the incremental update a
+//! session appends to a file ([`Update`]). It makes every PDF write, leaving pdfium to render and
+//! read text (DESIGN.md, Architecture, Crates).
 //!
 //! Pure Rust and free of `unsafe`, so it is tested on its own and builds for the musl host.
 
@@ -8,12 +9,14 @@
 
 mod content;
 mod crypt;
+mod document;
 mod filter;
 mod font;
 mod lex;
 mod objstm;
 mod pdf;
 mod source;
+mod text;
 mod update;
 mod write;
 mod xref;
@@ -22,9 +25,11 @@ mod xref;
 pub mod fixtures;
 
 pub use content::{Content, form};
+pub use document::{Bookmark, Dest, Document, Info, Link, Target};
 pub use font::{helvetica_width, winansi};
-pub use pdf::Pdf;
+pub use pdf::{Pdf, read};
 pub use source::Source;
+pub use text::text_string;
 pub use update::Update;
 pub use write::new_document;
 
@@ -94,7 +99,7 @@ impl Object {
 pub struct Dict(pub Vec<(Vec<u8>, Object)>);
 
 impl Dict {
-    /// The value of `key`; the first, should a damaged file repeat it.
+    /// The value of `key`.
     pub fn get(&self, key: &[u8]) -> Option<&Object> {
         self.0.iter().find(|(k, _)| k == key).map(|(_, v)| v)
     }

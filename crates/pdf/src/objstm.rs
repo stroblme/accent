@@ -38,6 +38,11 @@ impl ObjStm {
         Ok(ObjStm { index, data })
     }
 
+    /// The numbers of the objects it holds, in order.
+    pub fn numbers(&self) -> impl Iterator<Item = u32> {
+        self.index.iter().map(|&(num, _)| num)
+    }
+
     /// Object `num`, the `i`th of the stream.
     pub fn get(&self, i: usize, num: u32) -> Result<Object> {
         match self.index.get(i) {
