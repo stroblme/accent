@@ -230,11 +230,11 @@ pub enum Shape {
     Circle { centre: (f32, f32), radius: f32 },
 }
 
-/// One `/Ink` annotation as the Adjust tool sees it: its place in `/Annots`, its path flattened
-/// to a polyline, its `/Rect`, and how it is drawn.
+/// One `/Ink` annotation as the Adjust tool sees it: its object, its path flattened to a
+/// polyline, its `/Rect`, and how it is drawn.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InkShape {
-    pub index: usize,
+    pub at: accent_pdf::Ref,
     pub points: Vec<(f32, f32)>,
     pub bounds: Rect,
     pub style: InkStyle,
@@ -245,12 +245,12 @@ pub struct InkShape {
     pub cuttable: bool,
 }
 
-/// What a cut did to one stroke: what it drew, the pieces drawn in its place, and how much of the
-/// page that changed.
+/// What a cut did to one stroke: what it drew, the objects of the pieces drawn in its place, and
+/// how much of the page that changed.
 #[derive(Debug, Clone)]
 pub struct Cut {
     pub was: Drawn,
-    pub left: Vec<Drawn>,
+    pub left: Vec<accent_pdf::Ref>,
     pub area: Rect,
 }
 

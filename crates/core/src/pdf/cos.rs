@@ -102,14 +102,39 @@ impl Objects {
         Ok(())
     }
 
-    /// `annot` added to the end of page `page`'s `/Annots`, with `/P` naming the page.
-    pub(super) fn append_annot(&mut self, page: usize, mut annot: Dict) -> Result<Ref> {
+    /// `annot` at the end of page `page`'s `/Annots`, with `/P` naming the page: added, or written
+    /// over the annotation `into`, which keeps its object and moves there.
+    pub(super) fn append_annot(
+        &mut self,
+        page: usize,
+        mut annot: Dict,
+        into: Option<Ref>,
+    ) -> Result<Ref> {
         annot.set(b"P", Object::Ref(self.page(page)?));
-        let at = self.update.add(Object::Dict(annot));
-        let mut entries = self.annots(page)?;
-        entries.push(Object::Ref(at));
-        self.set_annots(page, entries)?;
+        let at = match into {
+            Some(at) => {
+                self.update.set(at, Object::Dict(annot));
+                at
+            }
+            None => self.update.add(Object::Dict(annot)),
+        };
+        self.put_last(page, at)?;
         Ok(at)
+    }
+
+    /// The annotation `at` at the end of page `page`'s `/Annots`: moved there, or put back.
+    pub(super) fn put_last(&mut self, page: usize, at: Ref) -> Result<()> {
+        let mut entries = self.annots(page)?;
+        entries.retain(|e| *e != Object::Ref(at));
+        entries.push(Object::Ref(at));
+        self.set_annots(page, entries)
+    }
+
+    /// Where the annotation `at` sits in page `page`'s `/Annots`, which is pdfium's index for it.
+    pub(super) fn index_of(&self, page: usize, at: Ref) -> Result<usize> {
+        let entries = self.annots(page)?;
+        (entries.iter().position(|e| *e == Object::Ref(at)))
+            .ok_or_else(|| Error::Pdf(format!("object {} is not on page {page}", at.num)))
     }
 }
 

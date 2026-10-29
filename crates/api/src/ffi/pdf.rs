@@ -272,9 +272,8 @@ impl PdfSession {
         self.with(|s| {
             let page = page as usize;
             let points: Vec<(f32, f32)> = points.into_iter().map(Into::into).collect();
-            let before = s.doc.annotation_count(page)?;
-            let area = s.doc.add_ink(page, &points, style.into(), scale)?;
-            s.ink.drew(page, before);
+            let (area, at) = s.doc.add_ink(page, &points, style.into(), scale)?;
+            s.ink.drew(page, at);
             s.ink.dirty = true;
             s.inks.remove(&page);
             Ok(area)
@@ -302,17 +301,14 @@ impl PdfSession {
                 .find(|(_, shape)| {
                     pdf::swept(&shape.points, a, b, radius + shape.style.width / 2.0)
                 })
-                .map(|(id, shape)| (*id, shape.cuttable));
-            let Some((id, cuttable)) = hit else {
-                return Ok(None);
-            };
-            let Some(index) = s.ink.index_of(page, id) else {
+                .map(|(_, shape)| (shape.at, shape.cuttable));
+            let Some((at, cuttable)) = hit else {
                 return Ok(None);
             };
             // A stroke another editor drew in a space of its own is taken whole rather than cut
             // into the wrong place; see `InkShape::cuttable`.
             let cut = match partial && cuttable {
-                true => s.doc.cut_ink(page, index, a, b, radius)?,
+                true => s.doc.cut_ink(page, at, a, b, radius)?,
                 false => None,
             };
             let area = match cut {
@@ -323,12 +319,12 @@ impl PdfSession {
                         .into_iter()
                         .map(|piece| (pdf::fresh_id(), piece))
                         .collect();
-                    s.ink.erased(page, index, cut.was, left, joined);
+                    s.ink.erased(page, at, cut.was, left, joined);
                     area
                 }
                 None => {
-                    let (was, area) = s.doc.take_ink(page, index)?;
-                    s.ink.erased(page, index, was, Vec::new(), joined);
+                    let (was, area) = s.doc.take_ink(page, at)?;
+                    s.ink.erased(page, at, was, Vec::new(), joined);
                     area
                 }
             };

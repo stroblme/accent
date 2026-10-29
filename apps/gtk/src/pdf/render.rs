@@ -280,30 +280,24 @@ fn render_loop(
                     points,
                     style,
                     scale,
-                } => {
-                    let before = doc.annotation_count(page).unwrap_or(0);
-                    match doc.add_ink(page, &points, style, scale) {
-                        Ok(area) => {
-                            ink.drew(page, before);
-                            ink.dirty = true;
-                            let drawn = ink.named_at(&doc, page, before);
-                            send(view, Reply::PageChanged(page, area, drawn));
-                        }
-                        Err(e) => tracing::warn!("drawing on page {page}: {e:#}"),
+                } => match doc.add_ink(page, &points, style, scale) {
+                    Ok((area, at)) => {
+                        ink.drew(page, at);
+                        ink.dirty = true;
+                        let drawn = ink.named_at(&doc, page, at);
+                        send(view, Reply::PageChanged(page, area, drawn));
                     }
-                }
-                Request::Shape { page, shape, style } => {
-                    let before = doc.annotation_count(page).unwrap_or(0);
-                    match doc.add_shape(page, shape, style) {
-                        Ok(area) => {
-                            ink.drew(page, before);
-                            ink.dirty = true;
-                            let drawn = ink.named_at(&doc, page, before);
-                            send(view, Reply::PageChanged(page, area, drawn));
-                        }
-                        Err(e) => tracing::warn!("drawing on page {page}: {e:#}"),
+                    Err(e) => tracing::warn!("drawing on page {page}: {e:#}"),
+                },
+                Request::Shape { page, shape, style } => match doc.add_shape(page, shape, style) {
+                    Ok((area, at)) => {
+                        ink.drew(page, at);
+                        ink.dirty = true;
+                        let drawn = ink.named_at(&doc, page, at);
+                        send(view, Reply::PageChanged(page, area, drawn));
                     }
-                }
+                    Err(e) => tracing::warn!("drawing on page {page}: {e:#}"),
+                },
                 Request::Inks(page) => {
                     send(view, listed(&mut ink, &doc, page, *erases));
                 }
@@ -312,31 +306,27 @@ fn render_loop(
                     at,
                     text,
                     style,
-                } => {
-                    let before = doc.annotation_count(page).unwrap_or(0);
-                    match doc.add_text(page, at, &text, style) {
-                        Ok(area) => {
-                            ink.drew(page, before);
-                            ink.dirty = true;
-                            send(view, Reply::PageChanged(page, area, None));
-                        }
-                        Err(e) => tracing::warn!("typing on page {page}: {e:#}"),
+                } => match doc.add_text(page, at, &text, style) {
+                    Ok((area, typed)) => {
+                        ink.drew(page, typed);
+                        ink.dirty = true;
+                        send(view, Reply::PageChanged(page, area, None));
                     }
-                }
+                    Err(e) => tracing::warn!("typing on page {page}: {e:#}"),
+                },
                 Request::Retype {
                     page,
                     id,
                     text,
                     style,
                 } => {
-                    ink.note(page, doc.annotation_count(page).unwrap_or(0));
                     let typed = ink
-                        .index_of(page, id)
+                        .at(id)
                         .ok_or_else(|| anyhow!("text {id} is gone"))
-                        .and_then(|index| Ok((index, doc.retype(page, index, &text, style)?)));
+                        .and_then(|at| Ok((at, doc.retype(page, at, &text, style)?)));
                     match typed {
-                        Ok((index, (was, area))) => {
-                            ink.retyped(page, index, was);
+                        Ok((at, (was, area))) => {
+                            ink.retyped(page, at, was);
                             ink.dirty = true;
                             send(view, Reply::PageChanged(page, area, None));
                         }
@@ -348,14 +338,13 @@ fn render_loop(
                     }
                 }
                 Request::Transform { page, id, matrix } => {
-                    ink.note(page, doc.annotation_count(page).unwrap_or(0));
                     let moved = ink
-                        .index_of(page, id)
+                        .at(id)
                         .ok_or_else(|| anyhow!("stroke {id} is gone"))
-                        .and_then(|index| Ok((index, doc.transform_ink(page, index, matrix)?)));
+                        .and_then(|at| Ok((at, doc.transform_ink(page, at, matrix)?)));
                     match moved {
-                        Ok((index, (area, stayed))) => {
-                            ink.moved(page, index, matrix, stayed);
+                        Ok((at, area)) => {
+                            ink.moved(page, at, matrix);
                             ink.dirty = true;
                             send(view, Reply::PageChanged(page, area, None));
                         }
@@ -372,26 +361,25 @@ fn render_loop(
                     joined,
                     partial,
                 } => {
-                    ink.note(page, doc.annotation_count(page).unwrap_or(0));
                     let erased = ink
-                        .index_of(page, id)
+                        .at(id)
                         .ok_or_else(|| anyhow!("stroke {id} is gone"))
-                        .and_then(|index| {
+                        .and_then(|at| {
                             let cut = match &partial {
                                 None => {
-                                    let (was, area) = doc.take_ink(page, index)?;
+                                    let (was, area) = doc.take_ink(page, at)?;
                                     let left = Vec::new();
                                     Some(pdf::Cut { was, left, area })
                                 }
                                 Some(pass) => {
-                                    doc.cut_ink(page, index, pass.from, pass.to, pass.radius)?
+                                    doc.cut_ink(page, at, pass.from, pass.to, pass.radius)?
                                 }
                             };
                             let missed = || anyhow!("the pass missed stroke {id}");
-                            cut.map(|cut| (index, cut)).ok_or_else(missed)
+                            cut.map(|cut| (at, cut)).ok_or_else(missed)
                         });
                     match erased {
-                        Ok((index, cut)) => {
+                        Ok((at, cut)) => {
                             // The pieces keep the names the widget gave them when it cut the
                             // stroke the same way. When it did not, its list was behind the page,
                             // and it hears the page again.
@@ -402,7 +390,7 @@ fn render_loop(
                                 true => cut.left.iter().map(|_| fresh_id()).collect(),
                             };
                             let left = names.into_iter().zip(cut.left).collect();
-                            ink.erased(page, index, cut.was, left, joined);
+                            ink.erased(page, at, cut.was, left, joined);
                             ink.dirty = true;
                             send(view, Reply::PageChanged(page, cut.area, None));
                             if behind {

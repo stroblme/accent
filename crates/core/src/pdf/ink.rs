@@ -3,7 +3,7 @@
 //! Pure, and here rather than in the widget so Android draws the same curve through the same
 //! functions.
 
-use super::{InkStyle, Shape};
+use super::Shape;
 
 /// An affine map `[a, b, c, d, e, f]` in the PDF convention: `x' = a·x + c·y + e`,
 /// `y' = b·x + d·y + f`.
@@ -59,10 +59,9 @@ pub fn invert(m: Matrix) -> Matrix {
 }
 
 /// One segment of an appearance path, in top-left page points: what every ink writer hands
-/// `Objects::put_ink`, and what `read_ink` gives back. Public only for [`Drawn`]'s variants: the
-/// module is private and the type is not exported.
+/// `Objects::put_ink`, and what `read_ink` gives back.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Seg {
+pub(super) enum Seg {
     Move((f32, f32)),
     Line((f32, f32)),
     /// Two control points, then the end.
@@ -74,16 +73,16 @@ pub enum Seg {
 /// [`PdfDoc::redraw_ink`](super::PdfDoc::redraw_ink) puts back.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Drawn {
-    /// One of ours: what it drew, which is drawn again at the end of the page's `/Annots`.
-    Ours { segs: Vec<Seg>, style: InkStyle },
-    /// A text of ours: what it said and where, which is typed again at the end of `/Annots`.
-    Text(super::Typed),
-    /// Another editor's: the entries that left `/Annots` with it, its own at `index` and its
-    /// popup's, each with the place it had. Only its own dictionary draws it as it was, so the
-    /// same entries go back where they were; the dictionaries were never touched. `area` is the
-    /// box it covers.
+    /// One of ours, a stroke or a text: its object, untouched in the file, which goes back onto
+    /// the end of the page's `/Annots`, and the box it covers.
+    Ours {
+        at: accent_pdf::Ref,
+        area: super::Rect,
+    },
+    /// Another editor's: the entries that left `/Annots` with it, its own and its popup's, each
+    /// with the place it had. Only its own dictionary draws it as it was, so the same entries go
+    /// back where they were; the dictionaries were never touched. `area` is the box it covers.
     Foreign {
-        index: usize,
         entries: Vec<(usize, accent_pdf::Object)>,
         area: super::Rect,
     },

@@ -344,7 +344,7 @@ fn ink_round_trips_through_save() {
 
     // Erasing takes the whole stroke and leaves what was there before.
     let mut back = back;
-    back.take_ink(0, strokes[0].index).unwrap();
+    back.take_ink(0, strokes[0].at).unwrap();
     assert_eq!(back.annotation_count(0).unwrap(), before);
     assert!(back.inks(0).unwrap().is_empty());
 }
@@ -449,18 +449,22 @@ fn transform_ink_moves_the_bounds_and_undoes_itself() {
     doc.add_shape(0, line, style).unwrap();
     let before = doc.inks(0).unwrap().remove(0);
     let m = [1.0, 0.0, 0.0, 1.0, 10.0, 5.0];
-    doc.transform_ink(0, before.index, m).unwrap();
+    doc.transform_ink(0, before.at, m).unwrap();
     let inks = doc.inks(0).unwrap();
     assert_eq!(inks.len(), 1);
     let moved = &inks[0];
-    assert_eq!(moved.index, doc.annotation_count(0).unwrap() - 1);
+    let last = doc.annotation_count(0).unwrap() - 1;
+    assert_eq!(
+        (moved.at, doc.cos.index_of(0, moved.at).unwrap()),
+        (before.at, last)
+    );
     let near = |a: f32, b: f32| (a - b).abs() < 0.05;
     assert!(near(moved.bounds.left, before.bounds.left + 10.0));
     assert!(near(moved.bounds.top, before.bounds.top + 5.0));
     assert!(near(moved.points[0].0, 30.0) && near(moved.points[0].1, 25.0));
     assert_eq!(moved.style, style);
 
-    doc.transform_ink(0, moved.index, invert(m)).unwrap();
+    doc.transform_ink(0, moved.at, invert(m)).unwrap();
     let back = doc.inks(0).unwrap().remove(0);
     assert!(near(back.bounds.left, before.bounds.left) && near(back.bounds.top, before.bounds.top));
     assert!(
@@ -789,7 +793,7 @@ fn an_appended_page_is_the_size_of_the_last_one_and_takes_ink() {
         rgba: [0, 0, 0, 255],
         multiply: false,
     };
-    let area = doc
+    let (area, _) = doc
         .add_ink(1, &[(10.0, 10.0), (100.0, 120.0)], style, 1.0)
         .unwrap();
     assert!(area.width() > 0.0 && area.height() > 0.0, "{area:?}");
@@ -942,7 +946,7 @@ fn unnamed_ink_pdf() -> Vec<u8> {
 
 /// Our strokes are ours by their `/NM`, `accent-` and their object number, though they carry an
 /// `/InkList` as another editor's do; one from before they were named is ours by its shape. Ours
-/// is drawn again where Adjust moves it, so it leaves its place in `/Annots`.
+/// is drawn again where Adjust moves it, into its own object, under our name.
 #[test]
 fn our_stroke_is_ours_by_its_name() {
     let Some((_dir, mut doc)) = open_tiny() else {
@@ -974,18 +978,19 @@ fn our_stroke_is_ours_by_its_name() {
     assert_eq!(dict.get(b"NM"), Some(&accent_pdf::Object::String(name)));
     assert!(dict.get(b"InkList").is_some());
 
-    let nudge = [1.0, 0.0, 0.0, 1.0, 5.0, 0.0];
-    let at = doc.inks(0).unwrap()[0].index;
-    assert!(
-        !doc.transform_ink(0, at, nudge).unwrap().1,
-        "ours, drawn again"
-    );
+    // Another editor's would keep its dictionary, and gain no name.
+    let drawn_again = |doc: &mut PdfDoc| {
+        let at = doc.inks(0).unwrap()[0].at;
+        doc.transform_ink(0, at, [1.0, 0.0, 0.0, 1.0, 5.0, 0.0])
+            .unwrap();
+        let name = format!("accent-{}", at.num).into_bytes();
+        let named = doc.cos.dict(at).unwrap().get(b"NM").cloned();
+        (doc.inks(0).unwrap()[0].at == at) && named == Some(accent_pdf::Object::String(name))
+    };
+    assert!(drawn_again(&mut doc), "ours, drawn again");
     let (_old, mut old) = open_pdf(&unnamed_ink_pdf()).unwrap();
     assert!(old.inks(0).unwrap()[0].cuttable);
-    assert!(
-        !old.transform_ink(0, 0, nudge).unwrap().1,
-        "ours from before"
-    );
+    assert!(drawn_again(&mut old), "ours from before");
 }
 
 /// Each page's text, trimmed, in the document's order.
@@ -1202,7 +1207,7 @@ fn a_cut_line_comes_back_in_two() {
     let drawn = doc.inks(0).unwrap().remove(0);
     assert!(drawn.cuttable);
     // Down across x = 100 with a 4 pt eraser: it reaches the line's edge 1 pt further out.
-    let cut = doc.cut_ink(0, drawn.index, (100.0, 20.0), (100.0, 80.0), 4.0);
+    let cut = doc.cut_ink(0, drawn.at, (100.0, 20.0), (100.0, 80.0), 4.0);
     let cut = cut.unwrap().expect("the pass crossed the line");
     assert_eq!(cut.left.len(), 2);
     let inks = doc.inks(0).unwrap();
@@ -1216,7 +1221,7 @@ fn a_cut_line_comes_back_in_two() {
     assert!((ends[1].0 - 105.0).abs() < 0.01 && (ends[1].1 - 180.0).abs() < 0.01);
     assert!(inks.iter().all(|i| i.style == style), "{inks:?}");
     // A pass that misses touches nothing.
-    let at = inks[0].index;
+    let at = inks[0].at;
     assert!(
         doc.cut_ink(0, at, (0.0, 0.0), (10.0, 0.0), 4.0)
             .unwrap()
@@ -1281,7 +1286,7 @@ fn a_foreign_stroke_erased_and_undone_is_the_same_stroke() {
     let mut ink = Ink::default();
     let (id, shape) = ink.named(&doc, 0).remove(0);
     assert!(!shape.cuttable, "its paths differ in colour");
-    let at = ink.index_of(0, id).unwrap();
+    let at = ink.at(id).unwrap();
     let (was, _) = doc.take_ink(0, at).unwrap();
     ink.erased(0, at, was, Vec::new(), false);
     assert!(doc.inks(0).unwrap().is_empty());
@@ -1324,14 +1329,15 @@ fn a_foreign_stroke_moves_by_its_rect_alone() {
     let m = [0.5, 0.0, 0.0, 0.5, 60.0, 20.0];
     let mut ink = Ink::default();
     let (id, before) = ink.named(&doc, 0).remove(0);
-    let at = ink.index_of(0, id).unwrap();
-    let (_, stayed) = doc.transform_ink(0, at, m).unwrap();
-    ink.moved(0, at, m, stayed);
-    assert!(stayed);
+    let at = ink.at(id).unwrap();
+    let place = doc.cos.index_of(0, at).unwrap();
+    doc.transform_ink(0, at, m).unwrap();
+    ink.moved(0, at, m);
+    assert_eq!(doc.cos.index_of(0, at).unwrap(), place, "in its place");
     assert_eq!(doc.annotation_count(0).unwrap(), 2);
     let after = doc.inks(0).unwrap().remove(0);
     let moved: Vec<(f32, f32)> = before.points.iter().map(|&q| apply(m, q)).collect();
-    assert_eq!((after.index, after.points), (at, moved));
+    assert_eq!((after.at, after.points), (at, moved));
     let want = Rect::from_corners((110.0, 35.0), (135.0, 60.0));
     assert_eq!(after.bounds, want);
 
@@ -1377,9 +1383,9 @@ fn a_turned_stroke_is_drawn_along_the_turned_path() {
     let mut ink = Ink::default();
     let (id, _) = ink.named(&doc, 0).remove(0);
     let m = rotation((40.0, 30.0), 90.0);
-    let at = ink.index_of(0, id).unwrap();
-    let (_, stayed) = doc.transform_ink(0, at, m).unwrap();
-    ink.moved(0, at, m, stayed);
+    let at = ink.at(id).unwrap();
+    doc.transform_ink(0, at, m).unwrap();
+    ink.moved(0, at, m);
     let near = |a: (f32, f32), b: (f32, f32)| (a.0 - b.0).abs() < 0.05 && (a.1 - b.1).abs() < 0.05;
     let ends = |doc: &PdfDoc| {
         let i = doc.inks(0).unwrap().remove(0);
@@ -1429,10 +1435,11 @@ fn a_foreign_stroke_turns_as_a_picture() {
     let (id, before) = ink.named(&doc, 0).remove(0);
     let b = before.bounds;
     let m = rotation(((b.left + b.right) / 2.0, (b.top + b.bottom) / 2.0), 90.0);
-    let at = ink.index_of(0, id).unwrap();
-    let (_, stayed) = doc.transform_ink(0, at, m).unwrap();
-    ink.moved(0, at, m, stayed);
-    assert!(stayed);
+    let at = ink.at(id).unwrap();
+    let place = doc.cos.index_of(0, at).unwrap();
+    doc.transform_ink(0, at, m).unwrap();
+    ink.moved(0, at, m);
+    assert_eq!(doc.cos.index_of(0, at).unwrap(), place, "in its place");
     let after = doc.inks(0).unwrap().remove(0);
     let turned = before.points.iter().map(|&q| apply(m, q));
     for (got, want) in after.points.iter().zip(turned) {
@@ -1473,7 +1480,7 @@ fn a_foreign_stroke_is_cut_along_its_ink_list() {
     let mut ink = Ink::default();
     let (id, shape) = ink.named(&doc, 0).remove(0);
     assert!(shape.cuttable);
-    let at = ink.index_of(0, id).unwrap();
+    let at = ink.at(id).unwrap();
     // Across both lines, between the marks and where they cross.
     let cut = doc.cut_ink(0, at, (100.0, 50.0), (150.0, 50.0), 2.0);
     let cut = cut.unwrap().expect("the pass crossed both lines");
@@ -1590,13 +1597,13 @@ fn a_foreign_stroke_of_two_colours_is_not_cut() {
     assert!(!inks[0].cuttable);
     // Straight across both lines where they show, which a cuttable stroke would lose pieces to.
     assert!(swept(&inks[0].points, (100.0, 50.0), (150.0, 50.0), 4.0));
-    let cut = doc.cut_ink(0, inks[0].index, (100.0, 50.0), (150.0, 50.0), 4.0);
+    let cut = doc.cut_ink(0, inks[0].at, (100.0, 50.0), (150.0, 50.0), 4.0);
     assert!(cut.unwrap().is_none());
     assert_eq!(doc.annotation_count(0).unwrap(), 2);
 }
 
-/// What `take_ink` keeps is enough for `redraw_ink` to draw the same stroke again, which is what
-/// an erase, and the undo of one, both come down to.
+/// What `take_ink` keeps is enough for `redraw_ink` to put the same stroke back, which is what an
+/// erase, and the undo of one, both come down to.
 #[test]
 fn a_taken_stroke_draws_again_as_it_was() {
     // With the fixture's highlight, which sits at index 0 ahead of the link.
@@ -1612,7 +1619,7 @@ fn a_taken_stroke_draws_again_as_it_was() {
     doc.add_ink(0, &[(20.0, 20.0), (60.0, 40.0), (100.0, 20.0)], style, 1.0)
         .unwrap();
     let drawn = doc.inks(0).unwrap().remove(0);
-    let (kept, area) = doc.take_ink(0, drawn.index).unwrap();
+    let (kept, area) = doc.take_ink(0, drawn.at).unwrap();
     assert_eq!(doc.annotation_count(0).unwrap(), before);
     assert!(doc.inks(0).unwrap().is_empty());
     let near = |a: Rect, b: Rect| {
@@ -1629,13 +1636,19 @@ fn a_taken_stroke_draws_again_as_it_was() {
 
     doc.redraw_ink(0, &kept).unwrap();
     let back = doc.inks(0).unwrap().remove(0);
-    assert_eq!(back.index, before, "drawn again at the end");
+    let place = doc.cos.index_of(0, back.at).unwrap();
+    assert_eq!(
+        (back.at, place),
+        (drawn.at, before),
+        "the same object, at the end"
+    );
     assert_eq!(back.style, drawn.style);
     assert!(near(back.bounds, drawn.bounds), "{:?}", back.bounds);
     assert_eq!(back.points.len(), drawn.points.len());
 
     // Only a drawn path can be taken: the highlight is refused, and still there.
-    assert!(doc.take_ink(0, 0).is_err());
+    let highlight = doc.cos.annots(0).unwrap()[0].reference().unwrap();
+    assert!(doc.take_ink(0, highlight).is_err());
     assert_eq!(doc.annotation_count(0).unwrap(), before + 1);
 }
 

@@ -25,10 +25,10 @@ pub struct Typed {
     pub style: TextStyle,
 }
 
-/// A text of ours as the tools see it: its place in `/Annots`, what it is, and its `/Rect`.
+/// A text of ours as the tools see it: its object, what it is, and its `/Rect`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypedText {
-    pub index: usize,
+    pub at: Ref,
     pub typed: Typed,
     pub bounds: Rect,
 }
@@ -77,69 +77,72 @@ fn width(line: &str, size: f32) -> f32 {
 
 impl PdfDoc {
     /// `text` typed onto `page` with its box's top-left corner at `at`, as a `/FreeText` at the
-    /// end of the page's `/Annots`, what Helvetica cannot set left out; the box it covers.
+    /// end of the page's `/Annots`, what Helvetica cannot set left out; the box it covers, and its
+    /// object.
     pub fn add_text(
         &mut self,
         page: usize,
         at: (f32, f32),
         text: &str,
         style: TextStyle,
-    ) -> Result<Rect> {
+    ) -> Result<(Rect, Ref)> {
         let text = text.chars().filter(|&c| typeable(c)).collect();
         self.typed(page, &Typed { at, text, style }, None)
     }
 
-    /// The text of ours at `index` of `page` made to say `text` in `style`, where it is and in its
+    /// The text of ours `at` on `page` made to say `text` in `style`, where it is and in its
     /// place in `/Annots`: what it was, and the box it covered and now covers.
     pub fn retype(
         &mut self,
         page: usize,
-        index: usize,
+        at: Ref,
         text: &str,
         style: TextStyle,
     ) -> Result<(Typed, Rect)> {
-        let (at, was, bounds) = self.typed_at(page, index)?;
+        let (was, bounds) = self.typed_at(page, at)?;
         let text = text.chars().filter(|&c| typeable(c)).collect();
         let now = Typed {
             text,
             style,
             ..was.clone()
         };
-        let area = self.typed(page, &now, Some(at))?;
+        let (area, _) = self.typed(page, &now, Some(at))?;
         Ok((was, bounds.union(area)))
     }
 
     /// Every text of ours on `page`, in `/Annots` order.
     pub fn texts(&self, page: usize) -> Result<Vec<TypedText>> {
         let (_, height) = self.page_size(page)?;
-        Ok((self.cos.annots(page)?.iter().enumerate())
-            .filter_map(|(index, entry)| {
-                let (_, typed, bounds) = self.cos.typed(entry, height)?;
-                Some(TypedText {
-                    index,
-                    typed,
-                    bounds,
-                })
+        Ok((self.cos.annots(page)?.iter())
+            .filter_map(|entry| {
+                let (at, typed, bounds) = self.cos.typed(entry, height)?;
+                Some(TypedText { at, typed, bounds })
             })
             .collect())
     }
 
-    /// The text of ours at `index` of `page`: its object, what it is, and its `/Rect`. Refused
-    /// for anything else, so an index gone stale cannot retype another editor's.
-    pub(super) fn typed_at(&self, page: usize, index: usize) -> Result<(Ref, Typed, Rect)> {
+    /// The text of ours `at` on `page`: what it is, and its `/Rect`. Refused for anything else, so
+    /// a stroke cannot be retyped, nor a text that left the page.
+    pub(super) fn typed_at(&self, page: usize, at: Ref) -> Result<(Typed, Rect)> {
         let (_, height) = self.page_size(page)?;
-        let entry = self.cos.annots(page)?.get(index).cloned();
-        (entry.and_then(|entry| self.cos.typed(&entry, height)))
-            .ok_or_else(|| Error::Pdf(format!("annotation {index} of page {page} is no text")))
+        self.cos.index_of(page, at)?;
+        let (_, typed, bounds) = (self.cos.typed(&Object::Ref(at), height))
+            .ok_or_else(|| Error::Pdf(format!("object {} of page {page} is no text", at.num)))?;
+        Ok((typed, bounds))
     }
 
     /// `typed` written onto `page`, into the annotation `into` or a new one, the document opened
-    /// again; the box it covers.
-    pub(super) fn typed(&mut self, page: usize, typed: &Typed, into: Option<Ref>) -> Result<Rect> {
+    /// again; the box it covers, and its object.
+    pub(super) fn typed(
+        &mut self,
+        page: usize,
+        typed: &Typed,
+        into: Option<Ref>,
+    ) -> Result<(Rect, Ref)> {
         let (_, height) = self.page_size(page)?;
-        let area = self.cos.put_text(page, height, typed, into)?;
+        let written = self.cos.put_text(page, height, typed, into)?;
         self.reopen()?;
-        Ok(area)
+        Ok(written)
     }
 }
 
@@ -147,7 +150,7 @@ impl Objects {
     /// `typed` as a `/FreeText` of ours on page `page`, `height` points tall: written over the
     /// annotation `into`, keeping what else it carries but the rich text an editor may have
     /// added, which would contradict it; or for `None` added at the end of the page's `/Annots`.
-    /// The box it covers.
+    /// The box it covers, and its object.
     ///
     /// The appearance draws in the page's own space, its `/BBox` being the `/Rect`, as an ink
     /// stroke's does; `/DA` says the font, size and colour, which an editor sets it again in.
@@ -157,7 +160,7 @@ impl Objects {
         height: f32,
         typed: &Typed,
         into: Option<Ref>,
-    ) -> Result<Rect> {
+    ) -> Result<(Rect, Ref)> {
         let bounds = typed.bounds();
         let rect = [
             bounds.left,
@@ -210,9 +213,9 @@ impl Objects {
             (b"AP", Object::Dict(dict([(b"N", Object::Ref(appearance))]))),
         ];
         let Some(at) = into else {
-            let at = self.append_annot(page, dict(written))?;
+            let at = self.append_annot(page, dict(written), None)?;
             self.name_ours(at)?;
-            return Ok(bounds);
+            return Ok((bounds, at));
         };
         let mut annot = self.dict(at)?;
         for (key, value) in written {
@@ -221,7 +224,7 @@ impl Objects {
         annot.remove(b"RC");
         annot.remove(b"DS");
         self.update.set(at, Object::Dict(annot));
-        Ok(bounds)
+        Ok((bounds, at))
     }
 
     /// The annotation `entry` names as a text of ours, on a page `height` points tall: its
@@ -301,7 +304,7 @@ mod tests {
         let Some((dir, mut doc)) = open_tiny() else {
             return;
         };
-        let area = doc
+        let (area, at) = doc
             .add_text(1, (110.0, 4.0), "Grüße → 5 €\nzwei", RED)
             .unwrap();
         let typed = Typed {
@@ -315,7 +318,8 @@ mod tests {
             let texts = doc.texts(1).unwrap();
             assert_eq!(texts.len(), 1);
             // After the page's link.
-            assert_eq!((texts[0].index, &texts[0].typed), (1, &typed));
+            assert_eq!((texts[0].at, &texts[0].typed), (at, &typed));
+            assert_eq!(doc.cos.index_of(1, at).unwrap(), 1);
             assert!((texts[0].bounds.right - area.right).abs() < 1e-3);
             assert!(doc.inks(1).unwrap().is_empty(), "no stroke");
             assert!(doc.comments(1).unwrap().is_empty(), "no comment");
@@ -339,17 +343,18 @@ mod tests {
             let texts = doc.texts(1).unwrap().into_iter();
             texts.map(|t| (t.typed.text, t.typed.at.0 as i32)).collect()
         };
-        let before = doc.annotation_count(1).unwrap();
-        doc.add_text(1, (20.0, 10.0), "one", RED).unwrap();
-        ink.drew(1, before);
+        let (_, at) = doc.add_text(1, (20.0, 10.0), "one", RED).unwrap();
+        ink.drew(1, at);
         let id = ink.named_texts(&doc, 1)[0].0;
-        let at = ink.index_of(1, id).unwrap();
+        assert_eq!(ink.at(id), Some(at));
         let (was, _) = doc.retype(1, at, "two", RED).unwrap();
         ink.retyped(1, at, was);
         let right = [1.0, 0.0, 0.0, 1.0, 30.0, 0.0];
-        let (_, stayed) = doc.transform_ink(1, at, right).unwrap();
-        ink.moved(1, at, right, stayed);
-        assert!(stayed, "a text moves in its place");
+        let place = doc.cos.index_of(1, at).unwrap();
+        doc.transform_ink(1, at, right).unwrap();
+        ink.moved(1, at, right);
+        let place_now = doc.cos.index_of(1, at).unwrap();
+        assert_eq!(place_now, place, "a text moves in its place");
         let (gone, _) = doc.take_ink(1, at).unwrap();
         ink.erased(1, at, gone, Vec::new(), false);
         assert!(said(&doc).is_empty());

@@ -612,7 +612,8 @@ fn stylus_attached() -> bool {
 }
 
 /// A piece a partial eraser leaves of `ink`: its style along `points`, as the render thread will
-/// draw it. The place in `/Annots` is the parent's and means nothing here; ids name strokes now.
+/// draw it. The object is the parent's until the render thread draws it; names are what the
+/// tools go by.
 fn piece_of(
     ink: &accent_core::pdf::InkShape,
     points: Vec<(f32, f32)>,
@@ -624,7 +625,7 @@ fn piece_of(
         .unwrap_or(ink.bounds)
         .grow(ink.style.width / 2.0 + 1.0);
     accent_core::pdf::InkShape {
-        index: ink.index,
+        at: ink.at,
         points,
         bounds,
         style: ink.style,
