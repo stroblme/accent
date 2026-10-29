@@ -30,7 +30,7 @@ import kotlin.coroutines.resume
  * Use a hidden WebView so the reader's scroll position and marks remain intact.
  */
 suspend fun printNote(context: Context, model: VaultModel, rel: String, text: String, accent: Color) {
-    val html = page(toHtml(text), InkLight, PageLight, accent)
+    val html = page(toHtml(text, rel), InkLight, PageLight, accent)
     val view = WebView(context)
     view.settings.javaScriptEnabled = diagrams(html)
     view.settings.allowFileAccess = false

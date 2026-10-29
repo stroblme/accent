@@ -1,7 +1,8 @@
 //! Core Markdown analysis and rendering for Android. Convert output byte
-//! ranges to Kotlin UTF-16 units.
+//! ranges to Kotlin UTF-16 units. A note's path picks its syntax, an `.org` file's org.
 
 use accent_core::markdown::{self, Click};
+use accent_core::note::Syntax;
 
 use crate::ffi::convert::{Analysis, Heading, Link, PdfAnchor, Span, Tag, Utf16};
 
@@ -16,18 +17,18 @@ pub fn pdf_anchor(anchor: String) -> Option<PdfAnchor> {
     })
 }
 
-/// Resolve a heading or block anchor to the ID rendered in this note's HTML.
+/// Resolve a heading or block anchor to the ID rendered in the HTML of the note at `rel`.
 #[uniffi::export]
-pub fn anchor_id(text: String, anchor: String) -> Option<String> {
-    markdown::anchor_id(&text, &anchor)
+pub fn anchor_id(text: String, anchor: String, rel: String) -> Option<String> {
+    Syntax::of(&rel).anchor_id(&text, &anchor)
 }
 
 /// Render the desktop-compatible HTML fragment: `accent://open/…` links,
 /// `accent://tag/…` tags, `accent://file/…` embeds, MathML, block `data-line`
 /// markers and heading slugs.
 #[uniffi::export]
-pub fn to_html(text: String) -> String {
-    markdown::to_html(&text)
+pub fn to_html(text: String, rel: String) -> String {
+    Syntax::of(&rel).to_html(&text)
 }
 
 /// Where a click on a link in a rendered note goes, from the page loaded at `page`
@@ -49,10 +50,11 @@ pub fn base_uri(rel: String) -> String {
     markdown::base_uri(&rel)
 }
 
-/// The note's styling spans, links, tags and headings, with every range in UTF-16 code units.
+/// The styling spans, links, tags and headings of the note at `rel`, with every range in UTF-16
+/// code units.
 #[uniffi::export]
-pub fn analyze_utf16(text: String) -> Analysis {
-    let a = markdown::analyze(&text);
+pub fn analyze_utf16(text: String, rel: String) -> Analysis {
+    let a = Syntax::of(&rel).analyze(&text);
     let map = Utf16::new(&text);
     Analysis {
         spans: a
@@ -105,7 +107,7 @@ mod tests {
     #[test]
     fn a_heading_after_an_emoji_is_measured_in_utf16_units() {
         let text = "é🙂\n\n# Heading\n";
-        let a = analyze_utf16(text.to_string());
+        let a = analyze_utf16(text.to_string(), "n.md".into());
         let heading = a
             .spans
             .iter()
@@ -117,7 +119,7 @@ mod tests {
         assert_eq!(a.title.as_deref(), Some("Heading"));
 
         // And the same string with nothing above ASCII in it is unchanged by the conversion.
-        let plain = analyze_utf16("# Heading\n".to_string());
+        let plain = analyze_utf16("# Heading\n".to_string(), "n.md".into());
         let h = plain
             .spans
             .iter()
@@ -130,7 +132,7 @@ mod tests {
     /// spans say and the view opens what the target names.
     #[test]
     fn a_wikilink_after_an_emoji_keeps_its_target_and_moves_its_range() {
-        let a = analyze_utf16("🙂 [[Other Note|alias]]\n".to_string());
+        let a = analyze_utf16("🙂 [[Other Note|alias]]\n".to_string(), "n.md".into());
         let link = a.links.first().expect("no link");
         assert_eq!(link.target, "Other Note");
         assert_eq!(link.alias.as_deref(), Some("alias"));
@@ -153,17 +155,25 @@ mod tests {
     #[test]
     fn a_note_anchor_resolves_to_the_rendered_id() {
         let note = "# Intro\n# Intro\nParagraph ^Block\n".to_string();
-        let html = to_html(note.clone());
+        let html = to_html(note.clone(), "n.md".into());
         for (anchor, id) in [("intro-1", "intro-1"), ("^block", "^Block")] {
-            assert_eq!(anchor_id(note.clone(), anchor.into()).as_deref(), Some(id));
+            let found = anchor_id(note.clone(), anchor.into(), "n.md".into());
+            assert_eq!(found.as_deref(), Some(id));
             assert!(html.contains(&format!("id=\"{id}\"")), "{html}");
         }
     }
 
+    /// An org file renders and reads as org, by its path.
     #[test]
     fn the_html_is_the_fragment_the_preview_gets() {
-        let html = to_html("# Title\n\n[[Note]]\n".to_string());
+        let html = to_html("# Title\n\n[[Note]]\n".to_string(), "n.md".into());
         assert!(html.contains("accent://open/Note"), "{html}");
         assert!(html.contains("data-line="), "{html}");
+        let org = "* Title\n".to_string();
+        let html = to_html(org.clone(), "n.org".into());
+        assert!(html.contains("<h1 id=\"title\">"), "{html}");
+        assert_eq!(analyze_utf16(org.clone(), "n.org".into()).headings.len(), 1);
+        let id = anchor_id(org, "Title".into(), "n.org".into());
+        assert_eq!(id.as_deref(), Some("title"));
     }
 }

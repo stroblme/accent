@@ -125,9 +125,9 @@ internal fun noteCounts(text: String): Triple<Int, Int, Int> {
     return Triple(words, characters, lines)
 }
 
-fun noteDetails(text: String): DetailGroup {
+fun noteDetails(text: String, rel: String): DetailGroup {
     val (words, characters, lines) = noteCounts(text)
-    val links = analyzeUtf16(text).links.size
+    val links = analyzeUtf16(text, rel).links.size
     return DetailGroup("Note", listOf(
         "Words" to words.toString(),
         "Characters" to characters.toString(),

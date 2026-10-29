@@ -97,7 +97,7 @@ fun NoteScreen(model: VaultModel, open: Open, chrome: Chrome, onTag: (String) ->
             // than have it lie across the line being typed — outside the scroll, or the caret
             // could be brought into view underneath it.
             if (editing) {
-                Box(Modifier.padding(top = bar)) { Editor(model) }
+                Box(Modifier.padding(top = bar)) { Editor(model, open.rel) }
             } else {
                 Rendered(model, open, chrome, onTag)
             }
@@ -106,7 +106,7 @@ fun NoteScreen(model: VaultModel, open: Open, chrome: Chrome, onTag: (String) ->
     if (details) DetailsSheet(onDismiss = { details = false }) {
         val text = model.buffer.text.toString()
         val stat = model.stat(open.rel)
-        fileDetails(stat, context) + withContext(Dispatchers.Default) { noteDetails(text) }
+        fileDetails(stat, context) + withContext(Dispatchers.Default) { noteDetails(text, open.rel) }
     }
 }
 
@@ -190,8 +190,8 @@ private fun Rendered(model: VaultModel, open: Open, chrome: Chrome, onTag: (Stri
     // screen — indexing progress, a snackbar, a search — must not reload the WebView, because a
     // reload is a scroll back to the top and a fling cut off mid-throw.
     val text = model.buffer.text
-    val html = remember(text, colors) {
-        page(toHtml(text.toString()), colors.onSurface, colors.surface, colors.primary)
+    val html = remember(text, colors, open.rel) {
+        page(toHtml(text.toString(), open.rel), colors.onSurface, colors.surface, colors.primary)
     }
     // The view, and the page it has finished loading. Both are held here rather than read from
     // inside the client, which is built once and would keep whichever note was open then.
@@ -463,6 +463,8 @@ ${if (diagrams(body)) mermaid(if (bg.dark()) "dark" else "neutral") else ""}
     border: 2px solid ${accent.css()}; border-radius: 3px; opacity: 0.5;
     background: linear-gradient(to right, ${accent.css()} 50%, transparent 50%);
   }
+  /* An org heading's done keyword, faded as the desktop fades it. */
+  span.done { opacity: 0.6; }
   .conflict { margin: 1em 0; border-radius: 6px; overflow: auto; }
   .conflict > div { display: flow-root; padding: 0 12px; }
   .conflict-label { margin: 0 -12px; padding: 2px 12px; font-size: 0.85em; font-weight: 700; }
@@ -512,11 +514,11 @@ document.addEventListener('DOMContentLoaded', function () {
 
 // ------------------------------------------------------------------------------------ writing
 
-/** Edit [VaultModel.buffer] with core styling spans while keeping Markdown markup visible. */
+/** Edit [VaultModel.buffer] with core styling spans, in the syntax of [rel], keeping the markup visible. */
 @Composable
-private fun Editor(model: VaultModel) {
+private fun Editor(model: VaultModel, rel: String) {
     val colors = MaterialTheme.colorScheme
-    val styling = remember(colors) { Styling(colors.onSurface, colors.primary, colors.onSurfaceVariant) }
+    val styling = remember(colors, rel) { Styling(colors.onSurface, colors.primary, colors.onSurfaceVariant, rel) }
 
     BasicTextField(
         state = model.buffer,
@@ -535,13 +537,14 @@ private class Styling(
     private val fg: Color,
     private val accent: Color,
     private val muted: Color,
+    private val rel: String,
 ) : OutputTransformation {
     private var last: Pair<String, List<Span>>? = null
 
     override fun TextFieldBuffer.transformOutput() {
         val text = asCharSequence().toString()
         val spans = last?.takeIf { it.first == text }?.second
-            ?: runCatching { analyzeUtf16(text).spans }.getOrNull()?.also { last = text to it }
+            ?: runCatching { analyzeUtf16(text, rel).spans }.getOrNull()?.also { last = text to it }
             ?: return
         for (span in spans) {
             val style = styleOf(span.style) ?: continue

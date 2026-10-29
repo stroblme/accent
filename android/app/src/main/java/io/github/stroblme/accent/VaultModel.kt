@@ -688,7 +688,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
                         Open(
                             rel, it.text, it.etag,
                             conflicts = conflicts, find = find, scroll = scroll, back = back,
-                            anchor = anchor?.let { name -> anchorId(it.text, name) },
+                            anchor = anchor?.let { name -> anchorId(it.text, name, rel) },
                         )
                     }
                 }
