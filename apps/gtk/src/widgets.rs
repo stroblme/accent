@@ -593,8 +593,9 @@ impl Fade {
     }
 }
 
-/// The class on a tree expander while its arrow turns (`build::install_chrome_css`).
-const TURNING: &str = "accent-turning";
+/// The class on a tree expander, or on the Git pane's chevron, while its arrow turns
+/// (`build::install_chrome_css`).
+pub(crate) const TURNING: &str = "accent-turning";
 
 /// Turn `expander`'s arrow as its row opens or closes, and only then: a list binds its row widgets
 /// to other rows as it scrolls, and an arrow that turned whenever its widget was bound to a row

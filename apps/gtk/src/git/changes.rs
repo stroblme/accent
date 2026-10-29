@@ -222,18 +222,25 @@ fn turn(view: &gtk::ListView, item: glib::Object, path: &str, open: bool) {
         .visible_child()
         .and_then(|folder| folder.first_child());
     if let Some(chevron) = chevron.and_downcast::<gtk::Image>() {
-        chevron.set_icon_name(Some(chevron_icon(open)));
+        point(&chevron, open, true);
     }
     if let Row::Folder { open: shown, .. } = &mut *item.borrow_mut::<Row>() {
         *shown = open;
     }
 }
 
-/// A folder row's chevron: libadwaita's expander pair.
-fn chevron_icon(open: bool) -> &'static str {
+/// Point a folder row's chevron open or closed. It turns as a tree expander's arrow does
+/// (DESIGN.md, Motion) where the reader folds or unfolds the row (`turned`), and points at once
+/// where the row is bound: a list binds its row widgets to other rows as it scrolls. The class
+/// stays on until the next bind takes it off, the only other change of the chevron's state.
+fn point(chevron: &gtk::Image, open: bool, turned: bool) {
+    match turned {
+        true => chevron.add_css_class(crate::widgets::TURNING),
+        false => chevron.remove_css_class(crate::widgets::TURNING),
+    }
     match open {
-        true => "pan-down-symbolic",
-        false => "pan-end-symbolic",
+        true => chevron.set_state_flags(gtk::StateFlags::CHECKED, false),
+        false => chevron.unset_state_flags(gtk::StateFlags::CHECKED),
     }
 }
 
@@ -312,8 +319,10 @@ fn header_layout(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Box {
 /// one — the same icon the Files tree gives a directory — and the label carries whatever segments
 /// this row adds to the one above it.
 fn folder_layout(item: &gtk::ListItem, panel: &Weak<Panel>) -> gtk::Box {
-    let chevron = gtk::Image::new();
+    // One `pan-down` the stylesheet turns a quarter back while closed, as a tree expander's.
+    let chevron = gtk::Image::from_icon_name("pan-down-symbolic");
     chevron.add_css_class("dimmed");
+    chevron.add_css_class("accent-chevron");
     let folder_name = gtk::Label::builder()
         .xalign(0.0)
         .hexpand(true)
@@ -487,7 +496,7 @@ fn bind_change(item: &gtk::ListItem, weak: &Weak<Panel>) {
             else {
                 return;
             };
-            chevron.set_icon_name(Some(chevron_icon(open)));
+            point(&chevron, open, false);
             text.set_text(&label);
             folder.set_margin_start(depth as i32 * INDENT);
             stack.set_tooltip_text(Some(&path));

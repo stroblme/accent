@@ -1277,7 +1277,9 @@ thread_local! {
 //
 // An expander's arrow is one `pan-down` turned a quarter back while closed, so opening it turns
 // the arrow rather than swapping icons: in a tree only while `widgets::turn_arrows` holds its
-// class on, since a recycled row widget changes state on every bind.
+// class on, since a recycled row widget changes state on every bind. The Git pane's folder rows
+// draw their chevron as an image (`accent-chevron`) turned the same way, its `:checked` and the
+// class set by `git::changes::point`.
 //
 // The hover's popover takes the view's font, which libadwaita resets on a popover, as the text it
 // is about has it.
@@ -1321,7 +1323,8 @@ fn install_chrome_css() {
              .accent-toasts {{ transition: transform {lift}ms {easing}; }} \
              .file-tree > row > treeexpander {{ transition: box-shadow {flash}ms ease-out; }} \
              .git-actions {{ transition: opacity {lift}ms {easing}; }} \
-             treeexpander.accent-turning > expander, expander-widget > box > title > expander {{ \
+             treeexpander.accent-turning > expander, image.accent-chevron.accent-turning, \
+             expander-widget > box > title > expander {{ \
                transition: -gtk-icon-transform {lift}ms {easing}; }} ",
             ms = fade::RAMP_MS,
             lift = crate::widgets::FADE_MS,
@@ -1432,10 +1435,11 @@ fn install_chrome_css() {
              popover.accent-completion .detail {{ margin-left: 12px; }} \
              popover.accent-completion .doc {{ margin: 3px 8px; }} \
              minimap {{ color: var(--view-fg-color); }} \
-             expander {{ -gtk-icon-source: -gtk-icontheme(\"pan-down-symbolic\"); \
-               -gtk-icon-transform: rotate(-90deg); }} \
-             expander:dir(rtl) {{ -gtk-icon-transform: rotate(90deg); }} \
-             expander:checked {{ -gtk-icon-transform: none; }}",
+             expander {{ -gtk-icon-source: -gtk-icontheme(\"pan-down-symbolic\"); }} \
+             expander, image.accent-chevron {{ -gtk-icon-transform: rotate(-90deg); }} \
+             expander:dir(rtl), image.accent-chevron:dir(rtl) {{ \
+               -gtk-icon-transform: rotate(90deg); }} \
+             expander:checked, image.accent-chevron:checked {{ -gtk-icon-transform: none; }}",
             away = fade::FLOOR,
             added = crate::diff::css_tint(crate::diff::ADDED_HUE),
             inset = crate::completion::CONTENTS_PADDING,
