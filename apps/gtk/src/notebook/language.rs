@@ -214,6 +214,7 @@ impl Source for CellSource {
                         .into_iter()
                         .filter_map(|item| into_cell(item, &lines))
                         .collect();
+                    answer.fragment = answer.fragment.and_then(|f| in_cell(f, &lines));
                     answer
                 }
                 Err(e) => {
@@ -264,18 +265,23 @@ impl Source for CellSource {
 /// it replaces is outside the cell, and the edits it makes elsewhere, an import at the top of
 /// another cell, left out (user decision 2026-10-20).
 fn into_cell(mut item: Completion, lines: &Range<u32>) -> Option<Completion> {
-    let inside =
-        |r: &accent_api::Range| lines.contains(&r.start.line) && lines.contains(&r.end.line);
-    if !inside(&item.replace) {
-        return None;
-    }
-    let up = |line| line - lines.start;
-    item.replace = moved(item.replace, up);
-    item.extra_edits.retain(|e| inside(&e.range));
-    for edit in &mut item.extra_edits {
-        edit.range = moved(edit.range, up);
-    }
+    item.replace = in_cell(item.replace, lines)?;
+    item.extra_edits
+        .retain_mut(|edit| match in_cell(edit.range, lines) {
+            Some(range) => {
+                edit.range = range;
+                true
+            }
+            None => false,
+        });
     Some(item)
+}
+
+/// `range`, of the document's lines, in those of the cell at `lines`: `None` where it is not all
+/// in the cell.
+fn in_cell(range: accent_api::Range, lines: &Range<u32>) -> Option<accent_api::Range> {
+    (lines.contains(&range.start.line) && lines.contains(&range.end.line))
+        .then(|| moved(range, |line| line - lines.start))
 }
 
 /// `item` of the cell at `lines` in the document's lines, as the server is asked about it.
@@ -930,6 +936,12 @@ mod tests {
             "the import into another cell is gone"
         );
         assert!(into_cell(item(range(1, 0, 1, 1), vec![]), &lines).is_none());
+        // The fragment the answer completes goes with its rows.
+        assert_eq!(
+            in_cell(range(2, 8, 2, 12), &lines),
+            Some(range(0, 8, 0, 12))
+        );
+        assert_eq!(in_cell(range(1, 0, 2, 1), &lines), None);
         let back = out_of_cell(kept, &lines);
         assert_eq!(back.replace, range(2, 8, 2, 12));
     }
