@@ -243,6 +243,11 @@ async fn render(app: &Rc<App>) {
         tab.buffer.undo();
     }
     glib::timeout_future(Duration::from_millis(1500)).await;
+    // The fences coloured as the editor colours them: the text under each code tag.
+    if let Some(native) = rendered.preview().as_ref().and_then(|p| p.native()) {
+        let coloured = tagged(&native.buffer(), |n| n.starts_with("code:"));
+        println!("bench preview code coloured={coloured:?}");
+    }
     find(&rendered, &tab).await;
 }
 

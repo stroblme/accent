@@ -8,7 +8,8 @@
 //! A block is highlighted again only when its code changes, the runs being kept by its language and
 //! its code, and a pass highlights for [`BUDGET`] at most, the blocks nearest the caret first: the
 //! rest are highlighted in idle time and coloured by one more pass. A theme change copies the
-//! looks again, GtkSourceView restyling its own tags in place.
+//! looks again, GtkSourceView restyling its own tags in place. The native preview colours its code
+//! blocks with the same runs and tags (`preview/code.rs`).
 
 use crate::highlight::Offsets;
 use accent_core::markdown::CodeBlock;
@@ -29,7 +30,7 @@ const KEPT: usize = 512;
 const BUDGET: Duration = Duration::from_millis(8);
 
 /// A block's runs: a range of its code, in characters, and the note tag that colours it.
-type Runs = Rc<Vec<(Range<i32>, String)>>;
+pub type Runs = Rc<Vec<(Range<i32>, String)>>;
 
 #[derive(Default)]
 struct State {
@@ -69,17 +70,11 @@ pub fn apply(
     let mut later = Vec::new();
     let mut wanted: HashMap<String, Vec<Range<i32>>> = HashMap::new();
     for block in nearest {
-        let Some(language) = STATE.with_borrow_mut(|state| state.language(&block.lang)) else {
+        let Some(language) = language(&block.lang) else {
             continue;
         };
         let code: String = block.code.iter().map(|r| &text[r.clone()]).collect();
-        let key = key(&language, &code);
-        let runs = STATE.with_borrow_mut(|state| match state.runs.get(&key) {
-            Some(runs) => Some(runs.clone()),
-            None if started.elapsed() < BUDGET => Some(state.highlight(&language, &code, key)),
-            None => None,
-        });
-        let Some(runs) = runs else {
+        let Some(runs) = runs(&language, &code, started.elapsed() < BUDGET) else {
             later.push((language, code));
             continue;
         };
@@ -113,12 +108,7 @@ pub fn apply(
             let tag = match table.lookup(name) {
                 Some(tag) => tag,
                 None if want.is_empty() => continue,
-                None => {
-                    let tag = gtk::TextTag::new(Some(name));
-                    mirror(look, &tag);
-                    table.add(&tag);
-                    tag
-                }
+                None => made(&table, name, look),
             };
             tags.push((tag, want));
         }
@@ -130,43 +120,77 @@ pub fn apply(
     }
 }
 
-/// Highlight `blocks` in idle time, [`BUDGET`] a turn, and style `buffer` again once they all are:
-/// one job a buffer, whose last pass sets off another for whatever is still not highlighted.
+/// Highlight `blocks` in idle time and style `buffer` again once they all are: one job a buffer,
+/// whose last pass sets off another for whatever is still not highlighted.
 fn highlight_later(
     buffer: &sourceview5::Buffer,
     syntax: Syntax,
-    mut blocks: Vec<(sourceview5::Language, String)>,
+    blocks: Vec<(sourceview5::Language, String)>,
 ) {
     let address = buffer.as_ptr() as usize;
     if !STATE.with_borrow_mut(|state| state.pending.insert(address)) {
         return;
     }
     let buffer = buffer.downgrade();
+    later(blocks, move || {
+        STATE.with_borrow_mut(|state| state.pending.remove(&address));
+        if let Some(buffer) = buffer.upgrade() {
+            crate::highlight::apply(&buffer, syntax);
+        }
+    });
+}
+
+/// The runs of `code` in `language`: the ones kept, or else highlighted now if `now`.
+pub fn runs(language: &sourceview5::Language, code: &str, now: bool) -> Option<Runs> {
+    let key = key(language, code);
+    STATE.with_borrow_mut(|state| match state.runs.get(&key) {
+        Some(runs) => Some(runs.clone()),
+        None if now => Some(state.highlight(language, code, key)),
+        None => None,
+    })
+}
+
+/// Highlight `blocks` in idle time, [`BUDGET`] a turn, then call `then`.
+pub fn later(mut blocks: Vec<(sourceview5::Language, String)>, then: impl FnOnce() + 'static) {
+    let mut then = Some(then);
     glib::idle_add_local(move || {
         let started = Instant::now();
         while started.elapsed() < BUDGET
             && let Some((language, code)) = blocks.pop()
         {
-            let key = key(&language, &code);
-            STATE.with_borrow_mut(|state| {
-                if !state.runs.contains_key(&key) {
-                    state.highlight(&language, &code, key);
-                }
-            });
+            runs(&language, &code, true);
         }
         if !blocks.is_empty() {
             return glib::ControlFlow::Continue;
         }
-        STATE.with_borrow_mut(|state| state.pending.remove(&address));
-        if let Some(buffer) = buffer.upgrade() {
-            crate::highlight::apply(&buffer, syntax);
+        if let Some(then) = then.take() {
+            then();
         }
         glib::ControlFlow::Break
     });
 }
 
+/// `table`'s tag for the look run name `name` stands for, made with that look the first time.
+pub fn tag(table: &gtk::TextTagTable, name: &str) -> Option<gtk::TextTag> {
+    if let Some(tag) = table.lookup(name) {
+        return Some(tag);
+    }
+    STATE.with_borrow(|state| {
+        let (_, look) = state.looks.iter().find(|(n, _)| n == name)?;
+        Some(made(table, name, look))
+    })
+}
+
+/// A tag named `name` in `table` with the look of `look`.
+fn made(table: &gtk::TextTagTable, name: &str, look: &gtk::TextTag) -> gtk::TextTag {
+    let tag = gtk::TextTag::new(Some(name));
+    mirror(look, &tag);
+    table.add(&tag);
+    tag
+}
+
 /// Give `buffer`'s code tags the looks of the theme now in force.
-pub fn restyle(buffer: &sourceview5::Buffer) {
+pub fn restyle(buffer: &impl IsA<gtk::TextBuffer>) {
     let table = buffer.tag_table();
     STATE.with_borrow(|state| {
         state.hidden.values().for_each(crate::editor::sync_scheme);
@@ -178,16 +202,17 @@ pub fn restyle(buffer: &sourceview5::Buffer) {
     });
 }
 
-impl State {
-    /// [`language`], asked once a name: guessing from an extension reads content types.
-    fn language(&mut self, name: &str) -> Option<sourceview5::Language> {
-        let name = name.to_ascii_lowercase();
-        self.languages
-            .entry(name)
-            .or_insert_with_key(|name| language(name))
+/// [`lookup`], asked once a name: guessing from an extension reads content types.
+pub fn language(name: &str) -> Option<sourceview5::Language> {
+    let name = name.to_ascii_lowercase();
+    STATE.with_borrow_mut(|state| {
+        (state.languages.entry(name))
+            .or_insert_with_key(|name| lookup(name))
             .clone()
-    }
+    })
+}
 
+impl State {
     /// The runs of `code` in `language`, highlighted now and kept by `key`.
     fn highlight(
         &mut self,
@@ -243,7 +268,7 @@ fn key(language: &sourceview5::Language, code: &str) -> (String, u64) {
 /// The GtkSourceView language a block names, as a code tab would colour a file of it: by its id
 /// (`rust`, `c`), by a name blocks give it that is no id (`python`, `bash`), or as a file's
 /// extension (`py`, `rs`, `ts`). `name` is in lower case.
-fn language(name: &str) -> Option<sourceview5::Language> {
+fn lookup(name: &str) -> Option<sourceview5::Language> {
     let id = match name {
         "python" => "python3",
         "bash" | "shell" | "zsh" => "sh",
