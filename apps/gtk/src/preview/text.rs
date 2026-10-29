@@ -8,7 +8,7 @@ use accent_core::markdown::{Node, Side};
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{gdk, glib, graphene, gsk, pango};
-use pulldown_cmark::{CodeBlockKind, Event, Tag as Cm, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, Tag as Cm, TagEnd};
 use std::cell::Cell;
 use std::ops::Range;
 use std::rc::Rc;
@@ -618,6 +618,7 @@ pub(super) fn write(
         image: None,
         meta: false,
         rows: None,
+        align: Vec::new(),
         html: None,
         code: None,
         line_start: true,
@@ -661,6 +662,7 @@ pub(super) struct Writer<'a> {
     image: Option<(String, String)>,
     meta: bool,
     rows: Option<Vec<Vec<String>>>,
+    align: Vec<Alignment>,
     html: Option<String>,
     code: Option<(String, i32)>,
     line_start: bool,
@@ -742,13 +744,13 @@ impl Writer<'_> {
         self.rows.is_some()
     }
 
-    fn open_link(&mut self, href: Href) {
+    pub fn open_link(&mut self, href: Href) {
         self.links.push((self.offset(), href));
         let page = self.page;
         self.push(&page.tags.link);
     }
 
-    fn close_link(&mut self) {
+    pub fn close_link(&mut self) {
         self.pop();
         if let Some((start, href)) = self.links.pop()
             && start < self.offset()
@@ -946,7 +948,10 @@ impl Writer<'_> {
                 self.lists.push(*first);
             }
             Event::Start(Cm::Item) => self.item(false),
-            Event::Start(Cm::Table(_)) => self.rows = Some(Vec::new()),
+            Event::Start(Cm::Table(align)) => {
+                self.rows = Some(Vec::new());
+                self.align = align.clone();
+            }
             Event::Start(Cm::TableHead | Cm::TableRow) => {
                 if let Some(rows) = &mut self.rows {
                     rows.push(Vec::new());
@@ -1017,7 +1022,8 @@ impl Writer<'_> {
             }
             Event::End(TagEnd::Table) => {
                 if let Some(rows) = self.rows.take() {
-                    table::insert(self, rows);
+                    let align = std::mem::take(&mut self.align);
+                    table::insert(self, rows, &align);
                 }
             }
             Event::End(TagEnd::MetadataBlock(_)) => self.meta = false,

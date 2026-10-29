@@ -11,6 +11,9 @@ mod table;
 mod text;
 mod view;
 
+#[cfg(feature = "bench")]
+pub use figure::Probe;
+
 use accent_core::config::Config;
 use accent_core::search::Options;
 use std::cell::RefCell;

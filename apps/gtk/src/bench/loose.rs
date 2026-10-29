@@ -47,7 +47,7 @@ pub(super) fn bench_loose(app: &Rc<App>, pdf: &str) {
             apart.toggle_preview();
             glib::timeout_future(Duration::from_millis(1500)).await;
             let root = format!("accent://file/{}/", dir.display());
-            for (src, .., loaded) in image::page_images(&apart).await {
+            for (src, loaded) in image::preview_pictures(&apart).await {
                 println!(
                     "bench loose_preview {} loaded={loaded}",
                     src.replace(&root, "…/")

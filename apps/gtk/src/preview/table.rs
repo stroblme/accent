@@ -1,12 +1,15 @@
 //! Tables in the page, the one child widget: wrapping cells in a grid that scrolls sideways once
-//! its words no longer fit the column. Stage 2 P4 adds borders, alignment, links in cells and
-//! their markup.
+//! its words no longer fit the column, ruled and padded as the stylesheet's `th` and `td`, each
+//! column aligned as its delimiter row says, the header bold and, unaligned, centred as a
+//! browser centres a `th`; a cell's text in the middle of its row. A cell's text is plain and
+//! selectable; Copy over the page writes the table's markdown.
 
 use super::native::Page;
 use super::text::{Object, Writer};
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
-use gtk::{glib, pango};
+use gtk::{gdk, glib, pango};
+use pulldown_cmark::Alignment;
 use std::cell::Cell;
 
 glib::wrapper! {
@@ -17,12 +20,13 @@ glib::wrapper! {
         @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
 }
 
-/// `rows` (the header first) at the writer, on a line of its own.
-pub(super) fn insert(w: &mut Writer, rows: Vec<Vec<String>>) {
+/// `rows` (the header first) at the writer, on a line of its own, column `i` aligned as `align[i]`
+/// says.
+pub(super) fn insert(w: &mut Writer, rows: Vec<Vec<String>>, align: &[Alignment]) {
     let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
     let label = format!("table {}x{columns}", rows.len());
     let object = Object::new(label, w.source.trim_end().to_string());
-    let table = Table::new(&rows, w.page.text_width());
+    let table = Table::new(&rows, align, w.page.text_width());
     w.widget(&table, object);
 }
 
@@ -39,23 +43,27 @@ pub(super) fn set_width(page: &Page) {
 }
 
 impl Table {
-    fn new(rows: &[Vec<String>], width: i32) -> Table {
-        let grid = gtk::Grid::builder()
-            .column_spacing(18)
-            .row_spacing(4)
-            .build();
+    fn new(rows: &[Vec<String>], align: &[Alignment], width: i32) -> Table {
+        install_css();
+        let grid = gtk::Grid::builder().css_classes(["accent-table"]).build();
         for (r, row) in rows.iter().enumerate() {
             for (c, cell) in row.iter().enumerate() {
+                let (xalign, justify) = match align.get(c) {
+                    Some(Alignment::Center) => (0.5, gtk::Justification::Center),
+                    Some(Alignment::Right) => (1.0, gtk::Justification::Right),
+                    Some(Alignment::None) | None if r == 0 => (0.5, gtk::Justification::Center),
+                    _ => (0.0, gtk::Justification::Left),
+                };
                 let label = gtk::Label::builder()
                     .label(cell.trim())
                     .wrap(true)
                     .wrap_mode(pango::WrapMode::Word)
-                    .xalign(0.0)
-                    .yalign(0.0)
+                    .xalign(xalign)
+                    .justify(justify)
                     .selectable(true)
                     .build();
                 if r == 0 {
-                    label.add_css_class("heading");
+                    label.add_css_class("th");
                 }
                 grid.attach(&label, c as i32, r as i32, 1, 1);
             }
@@ -79,6 +87,33 @@ impl Table {
     fn scroller(&self) -> Option<gtk::ScrolledWindow> {
         self.first_child().and_downcast()
     }
+}
+
+/// The rules and padding of the stylesheet's `th, td`, in the text's colour and the page's
+/// font, so a theme or a zoom changes them with the text: once per display.
+fn install_css() {
+    thread_local! {
+        static DONE: Cell<bool> = const { Cell::new(false) };
+    }
+    let Some(display) = gdk::Display::default() else {
+        return;
+    };
+    if DONE.replace(true) {
+        return;
+    }
+    let rule = "1px solid alpha(currentColor, 0.15)";
+    let provider = gtk::CssProvider::new();
+    provider.load_from_string(&format!(
+        "grid.accent-table {{ border-top: {rule}; border-left: {rule}; }} \
+         grid.accent-table > label {{ padding: 0.4em 0.8em; line-height: 1.6; \
+           border-right: {rule}; border-bottom: {rule}; }} \
+         grid.accent-table > label.th {{ font-weight: 700; }}"
+    ));
+    gtk::style_context_add_provider_for_display(
+        &display,
+        &provider,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
 }
 
 mod imp {

@@ -93,18 +93,19 @@ pub(super) struct Page {
     pub ink: Rc<Ink>,
     /// The prose's size in pixels at the zoom.
     pub px: Cell<f64>,
+    pub figures: figure::Figures,
     on_open: Box<dyn Fn(&str)>,
     on_tag: Box<dyn Fn(&str)>,
     clamp: adw::ClampScrollable,
     scroller: gtk::ScrolledWindow,
-    zoom: Cell<f64>,
+    pub zoom: Cell<f64>,
     /// The share of the view in percent, `None` under Full-Width Preview.
     column: Cell<Option<u32>>,
     font: RefCell<Option<gtk::CssProvider>>,
     rises: RefCell<HashMap<i32, gtk::TextTag>>,
     shown: RefCell<Vec<Shown>>,
     /// The note and the text last asked for, which an unchanged render skips (refresh T6).
-    note: RefCell<(String, Rc<str>)>,
+    pub note: RefCell<(String, Rc<str>)>,
     /// The latest render's number: an older one's worker answer, or batch, is dropped.
     generation: Cell<u64>,
     /// Whether the latest render is all in; a scroll asked before waits in `pending`.
@@ -125,15 +126,14 @@ pub struct Native {
 }
 
 impl Native {
-    /// See [`super::Preview::new`]. Pictures (stage 2 P4) take the resolver, the image keys and
-    /// Invert Image Colours into the page.
+    /// See [`super::Preview::new`].
     pub fn new(
-        _resolve: impl Fn(&str) -> Option<(String, PathBuf)> + Send + Sync + 'static,
-        _inverted: Keys,
-        _web: Keys,
+        resolve: impl Fn(&str) -> Option<(String, PathBuf)> + Send + Sync + 'static,
+        inverted: Keys,
+        web: Keys,
         on_open: impl Fn(&str) + 'static,
         on_tag: impl Fn(&str) + 'static,
-        _on_invert: impl Fn(&str) + 'static,
+        on_invert: impl Fn(&str) + 'static,
     ) -> Native {
         let view = PreviewView::new();
         view.add_css_class("accent-doc");
@@ -159,12 +159,14 @@ impl Native {
         let overlay = gtk::Overlay::builder().child(&scroller).build();
         overlay.add_overlay(&width);
 
+        let figures = figure::Figures::new(&view, resolve, inverted, web, on_invert);
         let page = Rc::new(Page {
             tags: Tags::new(&buffer.tag_table()),
             view,
             buffer,
             ink: Rc::default(),
             px: Cell::new(font_px(1.0)),
+            figures,
             on_open: Box::new(on_open),
             on_tag: Box::new(on_tag),
             clamp,
@@ -190,7 +192,10 @@ impl Native {
         page.view.on_width(glib::clone!(
             #[weak]
             page,
-            move |_| table::set_width(&page)
+            move |_| {
+                table::set_width(&page);
+                figure::resize(&page);
+            }
         ));
         page.view.on_copy(glib::clone!(
             #[weak]
@@ -352,6 +357,7 @@ impl Page {
         self.tags.resize(self.px.get(), self.view.left_margin());
         self.set_clamp();
         table::set_width(self);
+        figure::resize(self);
     }
 
     fn restyle(&self) -> bool {
@@ -792,6 +798,11 @@ impl Native {
 
     pub fn buffer(&self) -> gtk::TextBuffer {
         self.page.buffer.clone()
+    }
+
+    /// The pictures on the page, and how many reads they took.
+    pub fn figures(&self) -> (Vec<figure::Probe>, u32) {
+        (figure::probe(&self.page), figure::reads(&self.page))
     }
 
     pub fn text_length(&self) -> i32 {

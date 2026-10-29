@@ -18,14 +18,17 @@ bench preview block=16 lines=51-52 tags=["prose", "void"] text="\n"
 bench preview block=17 lines=53-54 tags=["gap", "prose"] text="H2O and Ctrl\u{2028}next line\n"
 bench preview block=18 lines=55-58 tags=["prose", "summary"] text="▾ More\nInside details \n"
 bench preview block=19 lines=59-60 tags=["prose", "void"] text="\n"
-bench preview block=20 lines=61-62 tags=["figure", "gap", "prose"] text="[picture.png]\n"
+bench preview block=20 lines=61-62 tags=["gap", "prose"] text="[image preview-drill.png] [diagram preview-drill.drawio]\n"
 bench preview block=21 lines=63-64 tags=["gap", "prose"] text="Back to the top, lists and the paragraph.\n"
 bench preview block=22 lines=65-70 tags=["conflict-current", "conflict-current-label", "prose"] text="ours\nOur side\ntheirs\nTheir side\n"
 bench preview block=23 lines=71-73 tags=["fndef", "gap", "prose"] text="1. The footnote.\n"
+bench preview figure accent://file/preview-drill.png key=Some("preview-drill.png") loaded=true size=96x48 reads=2
+bench preview figure accent://file/preview-drill.drawio key=Some("preview-drill.drawio") loaded=true size=383x252 reads=2
 bench preview link "link" leave https://example.org
 bench preview link "Other note#Part" open Other note#Part
 bench preview link "#drilltag" tag drilltag
 bench preview link "[1]" scroll accent://file/#fn:one
+bench preview link "￼" open preview-drill.drawio
 bench preview link "the top" scroll accent://file/#preview-drill
 bench preview link "lists" scroll accent://file/#lists
 bench preview link "the paragraph" scroll accent://file/#^para
@@ -62,7 +65,7 @@ bench preview copy "H2O and Ctrl\u{2028}next line"
 bench preview copy "▾ More"
 bench preview copy "Inside details "
 bench preview copy ""
-bench preview copy "[picture.png]"
+bench preview copy "![[preview-drill.png]] ![[preview-drill.drawio]]"
 bench preview copy "Back to the top, lists and the paragraph."
 bench preview copy "ours"
 bench preview copy "Our side"

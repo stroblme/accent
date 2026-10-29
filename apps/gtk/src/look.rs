@@ -70,7 +70,6 @@ impl Look {
 
     /// [`Self::palette`] for a diagram a note embeds, under the diagrams' switch: the canvas's
     /// rule (`DiagramTab::restyle`).
-    #[cfg(feature = "webkit")]
     fn diagram(&self, inverted: bool) -> Option<Page> {
         recolour::onto(self.diagrams, inverted, self.theme, self.opposite)
     }
@@ -396,6 +395,27 @@ pub fn show_bytes(
     Ok((shown, recoloured.is_some()))
 }
 
+/// A diagram's page a note embeds, as its SVG `svg` (`diagram::embed`), drawn at `scale` and `zoom`
+/// as [`show`] draws an SVG file, recoloured under the diagrams' switch. On a worker.
+pub fn show_diagram(
+    svg: &str,
+    look: Look,
+    inverted: bool,
+    scale: i32,
+    zoom: f64,
+) -> Result<Shown, glib::Error> {
+    let filtered = look
+        .diagram(inverted)
+        .and_then(|page| filtered(svg, page, look.fills(page)));
+    let (texture, size) = rasterise(filtered.as_deref().unwrap_or(svg).as_bytes(), scale, zoom)?;
+    Ok(Shown {
+        original: None,
+        texture,
+        size: Some(size),
+        animated: false,
+    })
+}
+
 /// The classifier's verdict on `texture`. One too large to look at is not a document, unmeasured.
 pub(crate) fn measure(texture: &gdk::Texture) -> Verdict {
     match pixels(texture) {
@@ -493,7 +513,6 @@ pub(crate) fn animated(path: &Path) -> bool {
 pub(crate) const ANIMATED: &str = "Animated images are shown without recolouring";
 
 /// The same, after the command's name in the preview's menu.
-#[cfg(feature = "webkit")]
 pub(crate) const ANIMATED_LABEL: &str = "(animated)";
 
 fn extension(path: &Path) -> String {

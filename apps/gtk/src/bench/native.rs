@@ -66,7 +66,7 @@ Inside details
 
 <style>p { color: red }</style>
 
-![[picture.png]]
+![[preview-drill.png]] ![[preview-drill.drawio]]
 
 Back to [the top](#preview-drill), [lists](#lists) and [the paragraph](#^para).
 
@@ -96,7 +96,30 @@ pub(super) fn bench_preview(app: &Rc<App>, arg: &str) {
     let filler: String = (1..=40)
         .map(|i| format!("Filler paragraph {i}, there for the page to scroll.\n\n"))
         .collect();
-    if let Err(e) = std::fs::write(app.root().join(NOTE), format!("{FIXTURE}\n{filler}")) {
+    // The pictures the fixture embeds: a striped image and a diagram's first page.
+    let stripes: Vec<u8> = (0..96 * 48)
+        .flat_map(|i| match i % 96 / 16 % 2 {
+            0 => [53u8, 132, 228],
+            _ => [246, 211, 45],
+        })
+        .collect();
+    let png = gdk::MemoryTexture::new(
+        96,
+        48,
+        gdk::MemoryFormat::R8g8b8,
+        &glib::Bytes::from_owned(stripes),
+        96 * 3,
+    )
+    .save_to_png_bytes();
+    let pictures = std::fs::write(app.root().join("preview-drill.png"), png).and_then(|_| {
+        std::fs::write(
+            app.root().join("preview-drill.drawio"),
+            super::diagram::SAMPLE,
+        )
+    });
+    if let Err(e) =
+        pictures.and_then(|_| std::fs::write(app.root().join(NOTE), format!("{FIXTURE}\n{filler}")))
+    {
         println!("bench preview wrote=false {e}");
         return bench_quit(app);
     }
@@ -130,6 +153,16 @@ async fn render(app: &Rc<App>) {
         return println!("bench preview native=none");
     };
     glib::timeout_future(Duration::from_millis(300)).await;
+    // The pictures read: a picture's size is the file's, up to the text's width.
+    let reading = || {
+        (rendered.preview().as_ref())
+            .and_then(|p| p.native())
+            .is_some_and(|n| n.figures().0.iter().any(|f| f.pending))
+    };
+    let t = Instant::now();
+    while reading() && t.elapsed() < Duration::from_secs(5) {
+        glib::timeout_future(Duration::from_millis(20)).await;
+    }
     let short = |s: &str| s.chars().take(90).collect::<String>();
     {
         let preview = rendered.preview();
@@ -143,6 +176,13 @@ async fn render(app: &Rc<App>) {
                 lines.start,
                 lines.end,
                 short(&text)
+            );
+        }
+        let (figures, reads) = native.figures();
+        for f in figures {
+            println!(
+                "bench preview figure {} key={:?} loaded={} size={}x{} reads={reads}",
+                f.uri, f.key, f.loaded, f.size.0, f.size.1
             );
         }
         for (text, route) in native.links() {
