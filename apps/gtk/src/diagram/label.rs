@@ -125,13 +125,16 @@ impl<T: 'static> LabelEditor<T> {
         // longer than the box still scrolls to the caret; typed text grows the box instead, and
         // is never scrolled.
         let frame: gtk::Widget = match note {
-            true => gtk::ScrolledWindow::builder()
-                .child(&view)
-                .hscrollbar_policy(gtk::PolicyType::Never)
-                .vscrollbar_policy(gtk::PolicyType::External)
-                .css_classes(["accent-label-editor", "view"])
-                .build()
-                .upcast(),
+            true => {
+                let scroller = gtk::ScrolledWindow::builder()
+                    .child(&view)
+                    .hscrollbar_policy(gtk::PolicyType::Never)
+                    .vscrollbar_policy(gtk::PolicyType::External)
+                    .css_classes(["accent-label-editor", "view"])
+                    .build();
+                crate::widgets::smooth_wheel(&scroller);
+                scroller.upcast()
+            }
             false => {
                 view.add_css_class("accent-label-editor");
                 view.clone().upcast()

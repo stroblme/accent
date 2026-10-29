@@ -28,12 +28,12 @@ pub(super) fn form_dialog(
     error.add_css_class("error");
     column.append(&error);
     column.append(body);
-    toolbar.set_content(Some(
-        &gtk::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk::PolicyType::Never)
-            .child(&column)
-            .build(),
-    ));
+    let scroller = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .child(&column)
+        .build();
+    crate::widgets::smooth_wheel(&scroller);
+    toolbar.set_content(Some(&scroller));
     dialog.set_child(Some(&toolbar));
     button.connect_clicked(glib::clone!(
         #[weak]

@@ -142,11 +142,13 @@ glib::wrapper! {
 }
 
 impl Minimap {
-    /// A map of `view`, following its buffer and whichever vertical adjustment it has.
-    pub fn new(view: &sourceview5::View) -> Self {
+    /// A map of `view`, following its buffer and whichever vertical adjustment it has; a wheel
+    /// over it eases the view's scroll by `wheel`.
+    pub fn new(view: &sourceview5::View, wheel: crate::widgets::Wheel) -> Self {
         let map: Self = glib::Object::builder()
             .property("accessible-role", gtk::AccessibleRole::Presentation)
             .build();
+        let _ = map.imp().eased.set(wheel);
         map.imp().attach(view);
         map
     }
@@ -601,12 +603,15 @@ impl imp::Minimap {
         let Some(adjustment) = self.view.upgrade().and_then(|view| view.vadjustment()) else {
             return glib::Propagation::Proceed;
         };
-        // A wheel's click goes as far as GtkScrolledWindow's does; a touchpad moves by pixels.
-        let step = match wheel.unit() {
-            gdk::ScrollUnit::Wheel => adjustment.page_size().powf(2.0 / 3.0),
-            _ => 1.0,
-        };
-        adjustment.set_value(adjustment.value() + dy * step);
+        // A wheel's click is eased as the view's own; a touchpad moves by pixels.
+        match wheel.unit() {
+            gdk::ScrollUnit::Wheel => {
+                if let Some(eased) = self.eased.get() {
+                    eased.notch(dy);
+                }
+            }
+            _ => adjustment.set_value(adjustment.value() + dy),
+        }
         glib::Propagation::Stop
     }
 }
@@ -870,6 +875,8 @@ mod imp {
         pub frame: Cell<Option<Frame>>,
         pub hover: Cell<bool>,
         pub grab: Cell<Option<Grab>>,
+        /// The view's eased wheel, which a wheel over the map drives too.
+        pub eased: std::cell::OnceCell<crate::widgets::Wheel>,
         /// What drawing has cost, for the drills.
         #[cfg(feature = "bench")]
         pub spent: Cell<std::time::Duration>,

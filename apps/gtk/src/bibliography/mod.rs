@@ -157,13 +157,13 @@ impl Entries {
             }
         ));
         view.add_controller(keys);
-        root.append(
-            &gtk::ScrolledWindow::builder()
-                .vexpand(true)
-                .hscrollbar_policy(gtk::PolicyType::Never)
-                .child(&view)
-                .build(),
-        );
+        let scroller = gtk::ScrolledWindow::builder()
+            .vexpand(true)
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .child(&view)
+            .build();
+        crate::widgets::smooth_wheel(&scroller);
+        root.append(&scroller);
         let message = gtk::Label::builder()
             .wrap(true)
             .margin_start(12)

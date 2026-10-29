@@ -345,7 +345,7 @@ fn frame(view: &sourceview5::View) -> Frame {
         .vexpand(true)
         .child(&clamp)
         .build();
-    crate::widgets::smooth_wheel(&scroller);
+    let wheel = crate::widgets::smooth_wheel(&scroller);
 
     // How the column learns the editor's width. The view being the scrollable child, the
     // horizontal adjustment now reports the *column's* width rather than the scroller's, so
@@ -391,7 +391,7 @@ fn frame(view: &sourceview5::View) -> Frame {
 
     // The minimap is off unless the preference says otherwise; `set_minimap` decides that, so a
     // tab that is built before the config is read still starts in a defined state.
-    let map = crate::minimap::Minimap::new(view);
+    let map = crate::minimap::Minimap::new(view, wheel);
     map.set_vexpand(true);
     map.set_visible(false);
     // It goes with the chrome while the user types (`App::hide_chrome`).

@@ -259,6 +259,7 @@ pub fn open(
         .vexpand(true)
         .child(&thumbs)
         .build();
+    crate::widgets::smooth_wheel(&thumb_strip);
     let tab = Rc::new(PdfTab {
         key: RefCell::new(key.to_string()),
         path: RefCell::new(path.to_path_buf()),

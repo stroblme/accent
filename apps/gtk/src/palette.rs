@@ -691,6 +691,7 @@ pub fn present(
         .margin_bottom(6)
         .child(&list)
         .build();
+    crate::widgets::smooth_wheel(&scroller);
 
     // DESIGN.md: an empty result set is an AdwStatusPage, not a blank list. `.compact` keeps it
     // inside a 560x420 dialog.

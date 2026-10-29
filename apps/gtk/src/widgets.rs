@@ -38,52 +38,111 @@ pub(crate) fn scroller(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
 const WHEEL_MS: u32 = 200;
 
 /// Ease each mouse-wheel notch on `scroller` over [`WHEEL_MS`] instead of GTK's jump, notches in
-/// quick succession adding up to one target; call it once the scroller has its child.
+/// quick succession adding up to one target. The [`Wheel`] returned lets a widget beside the
+/// scroller, the minimap, ease the same scroll.
 ///
 /// GTK 4 moves a wheel notch's whole step at once. Only the wheel is eased: a touchpad's pixel
 /// deltas already scroll smoothly, Shift scrolls sideways and Control zooms, all left to GTK.
-/// On the child in bubble phase, so a scroller inside takes its own wheel first, and at an edge
-/// the wheel goes on to GTK, for its overshoot and for any scroller around this one.
-pub(crate) fn smooth_wheel(scroller: &gtk::ScrolledWindow) {
-    let Some(child) = scroller.child() else {
-        return;
-    };
+/// On the scroller in bubble phase: what is inside it hears the wheel first (a scroller of its
+/// own, a diagram's page turn), and of one widget's controllers GTK runs the last added first,
+/// so this one is ahead of the scroller's own. At an edge the wheel goes on to GTK, for its
+/// overshoot and for any scroller around this one.
+pub(crate) fn smooth_wheel(scroller: &gtk::ScrolledWindow) -> Wheel {
+    // What the easing last gave the adjustment: any other value is another scroll (a page turned,
+    // the caret followed, a heading jumped to), which takes over, as it does from GTK's easing.
+    // Given by `configure` rather than `set_value`, which would stop an easing GTK's text view
+    // begins meanwhile (to the caret, a page key) before it moved anything, and win instead.
     // The adjustment is read at each step: a comparison's columns are given a shared one later.
-    // ponytail: one animation per scroller, so a wheel crossing from one column to the other
-    // within a notch's 200 ms has both easing the shared adjustment until the first ends.
-    let weak = scroller.downgrade();
+    // ponytail: one easing per scroller, so a wheel crossing from one column to the other within
+    // a notch's 200 ms stops the first column's easing where the second's starts.
+    let set = Rc::new(Cell::new(f64::NAN));
     let target = adw::CallbackAnimationTarget::new(glib::clone!(
         #[weak]
         scroller,
-        move |value| scroller.vadjustment().set_value(value)
+        #[strong]
+        set,
+        move |value| {
+            let adj = scroller.vadjustment();
+            if adj.value() == set.get() && adj.lower() + adj.page_size() <= adj.upper() {
+                adj.configure(
+                    value,
+                    adj.lower(),
+                    adj.upper(),
+                    adj.step_increment(),
+                    adj.page_increment(),
+                    adj.page_size(),
+                );
+                set.set(adj.value());
+            }
+        }
     ));
     let animation = adw::TimedAnimation::new(scroller, 0.0, 0.0, WHEEL_MS, target);
     animation.set_easing(adw::Easing::EaseOutCubic);
-    let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
-    wheel.connect_scroll(move |wheel, _, dy| {
+    let wheel = Wheel {
+        scroller: scroller.downgrade(),
+        animation,
+        set,
+    };
+    let notches = wheel.clone();
+    let controller = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+    controller.connect_scroll(move |controller, _, dy| {
         let left = gdk::ModifierType::SHIFT_MASK
             | gdk::ModifierType::CONTROL_MASK
             | crate::platform::PRIMARY_MODIFIER;
-        let Some(adj) = weak.upgrade().map(|scroller| scroller.vadjustment()) else {
-            return glib::Propagation::Proceed;
-        };
-        if wheel.unit() != gdk::ScrollUnit::Wheel || wheel.current_event_state().intersects(left) {
-            return glib::Propagation::Proceed;
+        match controller.unit() == gdk::ScrollUnit::Wheel
+            && !controller.current_event_state().intersects(left)
+            && notches.notch(dy)
+        {
+            true => glib::Propagation::Stop,
+            false => glib::Propagation::Proceed,
         }
-        let from = match animation.state() {
-            adw::AnimationState::Playing => animation.value_to(),
-            _ => adj.value(),
+    });
+    scroller.add_controller(controller);
+    wheel
+}
+
+/// A scroller's eased wheel, from [`smooth_wheel`].
+#[derive(Clone)]
+pub struct Wheel {
+    scroller: glib::WeakRef<gtk::ScrolledWindow>,
+    animation: adw::TimedAnimation,
+    set: Rc<Cell<f64>>,
+}
+
+impl Wheel {
+    /// Ease `dy` notches on from where the last is headed; false where the scroller has no room
+    /// that way, or scrolls only sideways.
+    pub(crate) fn notch(&self, dy: f64) -> bool {
+        let Some(scroller) = self
+            .scroller
+            .upgrade()
+            .filter(|s| s.vscrollbar_policy() != gtk::PolicyType::Never)
+        else {
+            return false;
+        };
+        let adj = scroller.vadjustment();
+        let easing =
+            self.animation.state() == adw::AnimationState::Playing && adj.value() == self.set.get();
+        let from = match easing {
+            true => self.animation.value_to(),
+            false => adj.value(),
         };
         let to = wheel_target(from, dy, adj.lower(), adj.upper(), adj.page_size());
-        if to == adj.value() {
-            return glib::Propagation::Proceed;
+        // On its way to the edge already: a notch more is taken, and changes nothing.
+        if easing && to == from {
+            return true;
         }
-        animation.set_value_from(adj.value());
-        animation.set_value_to(to);
-        animation.play();
-        glib::Propagation::Stop
-    });
-    child.add_controller(wheel);
+        if to == adj.value() {
+            return false;
+        }
+        // Stops an easing of GTK's own under way, as GTK's own wheel does, and moves nothing.
+        adj.set_value(adj.value());
+        self.set.set(adj.value());
+        self.animation.set_value_from(adj.value());
+        self.animation.set_value_to(to);
+        self.animation.play();
+        true
+    }
 }
 
 /// Where `dy` notches from `from` land: GTK's step of `page^(2/3)` a notch, kept in range.

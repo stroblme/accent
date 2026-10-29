@@ -275,6 +275,7 @@ pub fn install(editor: &Rc<dyn Editor>) {
         .propagate_natural_height(true)
         .child(&label)
         .build();
+    crate::widgets::smooth_wheel(&scroller);
     // Over the line, as GtkSourceView put it, start-aligned and pulled left by its inset so the
     // text starts where the word does; never autohiding, so the view keeps the keyboard.
     // Never taking the keyboard from the view, which would take the hover down.

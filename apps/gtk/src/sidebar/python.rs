@@ -70,14 +70,14 @@ impl Picker {
             .margin_bottom(6)
             .build();
         let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        content.append(
-            &gtk::ScrolledWindow::builder()
-                .hscrollbar_policy(gtk::PolicyType::Never)
-                .propagate_natural_height(true)
-                .max_content_height(280)
-                .child(&rows)
-                .build(),
-        );
+        let scroller = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .propagate_natural_height(true)
+            .max_content_height(280)
+            .child(&rows)
+            .build();
+        crate::widgets::smooth_wheel(&scroller);
+        content.append(&scroller);
         content.append(&notes);
         let menu = gtk::Popover::builder().child(&content).build();
         // Regular weight, as the branch popover's rows (`install_chrome_css`).

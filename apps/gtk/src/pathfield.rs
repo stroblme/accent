@@ -135,6 +135,7 @@ pub(crate) fn path_field(
         .max_content_height(200)
         .child(&list)
         .build();
+    crate::widgets::smooth_wheel(&scroller);
     scroller.add_css_class("card");
     let revealer = gtk::Revealer::builder().child(&scroller).build();
     let button = gtk::ToggleButton::builder()

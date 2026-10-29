@@ -532,12 +532,20 @@ impl Shell {
 /// The page of a shell's tab: `view` in a scroller, VTE being scrollable itself and drawing no
 /// scrollbar of its own. The scroller never takes the keyboard: a tab clicked to the front asks
 /// its page for it, after the tab view has given it to the shell (DESIGN.md, Terminal).
+///
+/// The scrollback is the scroller's to scroll, in pixels, so a wheel eases there as everywhere
+/// else and a touchpad glides: VTE would step it a row at a time itself. A program reading the
+/// mouse, or the alternate screen turning the wheel into arrow keys, still has it first.
 pub(crate) fn scroller(view: &vte4::Terminal) -> gtk::ScrolledWindow {
-    gtk::ScrolledWindow::builder()
+    view.set_enable_fallback_scrolling(false);
+    view.set_scroll_unit_is_pixels(true);
+    let scroller = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
         .focusable(false)
         .child(view)
-        .build()
+        .build();
+    crate::widgets::smooth_wheel(&scroller);
+    scroller
 }
 
 /// Open a shell as a tab of `tabs`, at the end or at position `at`, and start it, running `run`

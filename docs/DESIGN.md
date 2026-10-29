@@ -2061,7 +2061,9 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
   The other timings we own are debounces, which keep the main loop free.
 - A mouse wheel's notch eases over 200 ms, ease-out cubic, as GTK eases a page key or a scrollbar press (`widgets::smooth_wheel`): GTK moves a notch's whole step at once, which reads as a stutter over text.
   Notches in quick succession add up to one target; a touchpad, Shift's sideways scroll and Control's zoom stay GTK's.
-  In the editor, a notebook, a comparison, a PDF and the sidebar's lists.
+  Every scroller that scrolls up and down eases it: documents, the minimap (the view's own easing), images, diagrams, terminals, popovers, dialogs and the sidebar's panes, the Git pane's among them.
+  Any other scroll meanwhile takes over where the easing is: the caret followed, a page key, a heading jumped to, a diagram's page turned at its edge.
+  A terminal's scrollback is its scroller's, in pixels (VTE's fallback scrolling off), so a touchpad glides there too; a program reading the mouse, and the alternate screen turning the wheel into arrow keys, keep the wheel.
 - Motion the platform owns keeps its own timing: GtkSearchBar, AdwBanner, AdwTabBar, AdwToolbarView (presentation mode's status bar coming up on a hover), AdwDialog, a popover.
 - The document follows the caret and nothing else: GTK keeps the insert mark on screen by itself (arrows, typing, find, Go to Line, a search hit, every extra caret), a wheel scroll away from the caret stays put, and a dialog opening and closing over it puts nothing back.
 

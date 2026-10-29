@@ -664,6 +664,7 @@ impl Props {
             .vexpand(true)
             .child(&page)
             .build();
+        crate::widgets::smooth_wheel(&root);
         let props = Rc::new(Props {
             root,
             filling: Rc::new(Cell::new(false)),

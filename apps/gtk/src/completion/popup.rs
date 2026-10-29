@@ -103,6 +103,7 @@ impl Popup {
             .can_focus(false)
             .child(&list)
             .build();
+        crate::widgets::smooth_wheel(&rows);
 
         let doc = gtk::Label::builder()
             .use_markup(true)
@@ -120,6 +121,7 @@ impl Popup {
             .can_focus(false)
             .child(&doc)
             .build();
+        crate::widgets::smooth_wheel(&doc_scroll);
         let pane = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         pane.append(&gtk::Separator::new(gtk::Orientation::Vertical));
         pane.append(&doc_scroll);

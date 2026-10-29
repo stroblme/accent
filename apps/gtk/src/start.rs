@@ -265,6 +265,7 @@ fn recent_section(
         .propagate_natural_height(true)
         .child(&list)
         .build();
+    crate::widgets::smooth_wheel(&scroller);
     section.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     section.append(&search);
     section.append(&scroller);
@@ -744,6 +745,7 @@ fn host_field(entry: &gtk::Entry, recent: &[PathBuf]) -> gtk::Widget {
         .max_content_height(280)
         .child(&list)
         .build();
+    crate::widgets::smooth_wheel(&scroller);
     let popover = gtk::Popover::builder().child(&scroller).build();
     for host in hosts {
         let item = gtk::Button::builder()

@@ -1063,14 +1063,14 @@ fn build_branch_row() -> BranchRow {
     let branch_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
     // A repository with fifty branches is a list that scrolls, not a popover taller than the
     // screen — the shape `start.rs::host_field` settled on for the ssh hosts.
-    branch_box.append(
-        &gtk::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk::PolicyType::Never)
-            .propagate_natural_height(true)
-            .max_content_height(280)
-            .child(&branch_list)
-            .build(),
-    );
+    let branch_scroller = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .propagate_natural_height(true)
+        .max_content_height(280)
+        .child(&branch_list)
+        .build();
+    crate::widgets::smooth_wheel(&branch_scroller);
+    branch_box.append(&branch_scroller);
     branch_box.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     branch_box.append(&create);
     branch_box.append(&merge);
@@ -1237,6 +1237,7 @@ fn build_message_box() -> MessageBox {
         .max_content_height(MESSAGE_MAX_HEIGHT)
         .child(&message)
         .build();
+    crate::widgets::smooth_wheel(&message_scroller);
     // GtkTextView has no placeholder of its own, so this is one laid over it. It cannot be
     // clicked through to, which would otherwise put the caret nowhere.
     let placeholder = gtk::Label::builder()
@@ -1296,11 +1297,13 @@ fn revealed_actions(
 }
 
 fn scroller(child: &impl IsA<gtk::Widget>) -> gtk::ScrolledWindow {
-    gtk::ScrolledWindow::builder()
+    let scroller = gtk::ScrolledWindow::builder()
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Never)
         .child(child)
-        .build()
+        .build();
+    crate::widgets::smooth_wheel(&scroller);
+    scroller
 }
 
 /// The paned's default split, set once. `map` runs before the first allocation, so the height is

@@ -127,6 +127,7 @@ pub fn open(
         .vexpand(true)
         .child(&view)
         .build();
+    crate::widgets::smooth_wheel(&scroller);
     let overlay = gtk::Overlay::builder().child(&scroller).build();
     let ring = tools::DiagramRing::new();
     // Select is in hand from the start, and its button says so.
