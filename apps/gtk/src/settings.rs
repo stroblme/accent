@@ -656,9 +656,6 @@ fn terminal_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Pre
 fn commands_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder()
         .title("Commands")
-        .description(
-            "Run from the command palette or a shortcut in a new terminal at the vault root",
-        )
         .build();
     command_rows(&group, &Rc::default(), config, save, None);
     group
