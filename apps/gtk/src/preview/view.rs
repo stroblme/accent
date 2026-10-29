@@ -3,7 +3,7 @@
 //! code block, the bar beside a quote, a callout's box and a rule. Copy writes each picture,
 //! formula and table back as the markdown it came from.
 
-use super::text::Href;
+use super::text::{Href, PAD};
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{gdk, glib, graphene, gsk};
@@ -22,6 +22,11 @@ pub struct Decor {
     pub quote: gtk::TextTag,
     pub callout: gtk::TextTag,
     pub rule: gtk::TextTag,
+    /// A block's last line, the gap below it no part of a box.
+    pub gap: gtk::TextTag,
+    /// A code block's first and last lines, whose room above and below holds its box's padding.
+    pub fence_top: gtk::TextTag,
+    pub fence_bottom: gtk::TextTag,
     /// The code wash and the callout tint, the accent bar, the rule line.
     pub surface: gdk::RGBA,
     pub accent: gdk::RGBA,
@@ -79,7 +84,8 @@ impl PreviewView {
         *self.imp().on_width.borrow_mut() = Some(Box::new(width));
     }
 
-    /// Paint the decorations of the lines on screen: a run of lines under one tag is one box.
+    /// Paint the decorations of the lines on screen: a block's run of lines under one tag is one
+    /// box.
     fn decorate(&self, snapshot: &gtk::Snapshot) {
         let decor = self.imp().decor.borrow();
         let Some(decor) = decor.as_ref() else {
@@ -98,7 +104,7 @@ impl PreviewView {
             let (top, height) = (top as f32, (bottom - top) as f32);
             match kind {
                 0 => {
-                    let rect = graphene::Rect::new(left, top - 6.0, right - left, height + 12.0);
+                    let rect = graphene::Rect::new(left, top, right - left, height);
                     rounded(snapshot, &rect, [ROUND; 4], &decor.surface);
                 }
                 1 => {
@@ -119,18 +125,35 @@ impl PreviewView {
             }
         };
         let tags = [&decor.code, &decor.quote, &decor.callout, &decor.rule];
+        // Whether the run ended with its block: two code blocks a blank line apart are two boxes.
+        let mut ended = false;
         loop {
             let (y, height) = self.line_yrange(&line);
             let kind = tags.iter().position(|tag| line.has_tag(*tag));
+            let has = |tag: &gtk::TextTag| line.has_tag(tag);
+            // A code block's box holds PAD of its first and last lines' room; other boxes end at
+            // their text, the gap below their block outside them; a rule's line is all its own.
+            let top = match has(&decor.fence_top) {
+                true => y + decor.fence_top.pixels_above_lines() - PAD,
+                false => y,
+            };
+            let bottom = if has(&decor.fence_bottom) {
+                y + height - decor.fence_bottom.pixels_below_lines() + PAD
+            } else if has(&decor.gap) && kind.is_some_and(|k| k < 3) {
+                y + height - decor.gap.pixels_below_lines()
+            } else {
+                y + height
+            };
             run = match (run, kind) {
-                (Some((k, top, _)), Some(now)) if k == now => Some((k, top, y + height)),
+                (Some((k, start, _)), Some(now)) if k == now && !ended => Some((k, start, bottom)),
                 (run, kind) => {
                     if let Some(run) = run {
                         paint(run);
                     }
-                    kind.map(|k| (k, y, y + height))
+                    kind.map(|k| (k, top, bottom))
                 }
             };
+            ended = has(&decor.gap) || has(&decor.fence_bottom);
             if y > visible.y() + visible.height() || !line.forward_line() {
                 break;
             }

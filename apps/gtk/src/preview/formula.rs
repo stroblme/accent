@@ -41,6 +41,7 @@ pub(super) fn insert(w: &mut Writer, tex: &str, mathml: &str, display: bool) {
         w.newline();
         w.push(&page.tags.display);
     }
+    let line = w.at.offset();
     let solid = page.figures.solid(page);
     w.push(&solid);
     let object = Object::new("formula".into(), source);
@@ -49,6 +50,7 @@ pub(super) fn insert(w: &mut Writer, tex: &str, mathml: &str, display: bool) {
     if display {
         w.newline();
         w.pop();
+        super::text::collapse_margin(page, &page.buffer.iter_at_offset(line));
     }
 }
 

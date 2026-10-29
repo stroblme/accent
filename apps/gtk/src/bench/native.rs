@@ -55,6 +55,10 @@ $$
 E = mc^2
 $$
 
+$$
+a^2 + b^2 = c^2
+$$
+
 <div>Unwrapped <b>bold</b> div</div>
 
 <!-- hidden comment -->
@@ -171,7 +175,7 @@ async fn render(app: &Rc<App>) {
             return;
         };
         // The fixture's blocks, not the filler under them.
-        for (i, (lines, text, tags)) in native.blocks().into_iter().take(24).enumerate() {
+        for (i, (lines, text, tags)) in native.blocks().into_iter().take(25).enumerate() {
             println!(
                 "bench preview block={i} lines={}-{} tags={tags:?} text={:?}",
                 lines.start,

@@ -360,7 +360,9 @@ impl Page {
         editor::install_font(&self.font, note, None, zoom, &name);
         editor::refont(&self.view);
         self.px.set(font_px(zoom));
-        self.tags.resize(self.px.get(), self.view.left_margin());
+        let context = self.view.pango_context();
+        self.tags
+            .resize(self.px.get(), self.view.left_margin(), &context);
         self.set_clamp();
         table::set_width(self);
         figure::resize(self);
@@ -383,6 +385,9 @@ impl Page {
             quote: self.tags.quote.clone(),
             callout: self.tags.callout.clone(),
             rule: self.tags.rule.clone(),
+            gap: self.tags.gap.clone(),
+            fence_top: self.tags.fence_top.clone(),
+            fence_bottom: self.tags.fence_bottom.clone(),
             surface: crate::theme::at(fg, 0.07),
             accent,
             line: crate::theme::at(fg, 0.15),
@@ -500,6 +505,9 @@ impl Page {
             .map(|laid| self.write(&mut start, laid, source))
             .collect();
         shown.splice(prefix..prefix, added);
+        if let Some(next) = shown.get(prefix + written) {
+            text::collapse_margin(self, &self.buffer.iter_at_mark(&next.mark));
+        }
         // The blocks below keep their text but not their place in the note.
         for (s, n) in shown[prefix + written..].iter_mut().zip(new) {
             s.laid.block.lines = n.block.lines;

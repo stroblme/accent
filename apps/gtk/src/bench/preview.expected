@@ -7,25 +7,27 @@ bench preview block=5 lines=15-18 tags=["list1", "prose"] text="1. one\n2. two\n
 bench preview block=6 lines=18-22 tags=["list1", "prose"] text="[box [ ]] open task\n[box [x]] done task\n[box [/]] doing task\n"
 bench preview block=7 lines=22-24 tags=["gap", "prose", "quote"] text="A quote over two lines\n"
 bench preview block=8 lines=25-27 tags=["callout", "callout-title", "prose"] text="Callout title\nCallout body\n"
-bench preview block=9 lines=28-31 tags=["code:python3:0", "codeblock", "gap", "prose"] text="print(\"hi\")\n"
+bench preview block=9 lines=28-31 tags=["code:python3:0", "codeblock", "fence-bottom", "fence-top", "gap", "prose"] text="print(\"hi\")\n"
 bench preview block=10 lines=32-35 tags=["caption", "prose"] text="Mermaid diagram\ngraph TD; A-->B\n"
 bench preview block=11 lines=36-40 tags=["gap", "prose"] text="[table 3x3]\n"
 bench preview block=12 lines=41-42 tags=["gap", "prose", "rule"] text="\n"
 bench preview block=13 lines=43-44 tags=["gap", "prose"] text="Inline [formula] and a broken $\\frac{$ formula.\n"
 bench preview block=14 lines=45-48 tags=["display", "gap", "prose"] text="[formula]\n"
-bench preview block=15 lines=49-50 tags=["gap", "prose"] text="Unwrapped bold div\n"
-bench preview block=16 lines=51-52 tags=["prose", "void"] text="\n"
-bench preview block=17 lines=53-54 tags=["gap", "prose"] text="H2O and Ctrl\u{2028}next line\n"
-bench preview block=18 lines=55-58 tags=["prose", "summary"] text="▾ More\nInside details \n"
-bench preview block=19 lines=59-60 tags=["prose", "void"] text="\n"
-bench preview block=20 lines=61-62 tags=["gap", "prose"] text="[image preview-drill.png] [diagram preview-drill.drawio]\n"
-bench preview block=21 lines=63-64 tags=["gap", "prose"] text="Back to the top, lists and the paragraph.\n"
-bench preview block=22 lines=65-70 tags=["conflict-current", "conflict-current-label", "prose"] text="ours\nOur side\ntheirs\nTheir side\n"
-bench preview block=23 lines=71-73 tags=["fndef", "gap", "prose"] text="1. The footnote.\n"
+bench preview block=15 lines=49-52 tags=["collapsed", "display", "gap", "prose"] text="[formula]\n"
+bench preview block=16 lines=53-54 tags=["gap", "prose"] text="Unwrapped bold div\n"
+bench preview block=17 lines=55-56 tags=["prose", "void"] text="\n"
+bench preview block=18 lines=57-58 tags=["gap", "prose"] text="H2O and Ctrl\u{2028}next line\n"
+bench preview block=19 lines=59-62 tags=["prose", "summary"] text="▾ More\nInside details \n"
+bench preview block=20 lines=63-64 tags=["prose", "void"] text="\n"
+bench preview block=21 lines=65-66 tags=["gap", "prose"] text="[image preview-drill.png] [diagram preview-drill.drawio]\n"
+bench preview block=22 lines=67-68 tags=["gap", "prose"] text="Back to the top, lists and the paragraph.\n"
+bench preview block=23 lines=69-74 tags=["conflict-current", "conflict-current-label", "prose"] text="ours\nOur side\ntheirs\nTheir side\n"
+bench preview block=24 lines=75-77 tags=["fndef", "gap", "prose"] text="1. The footnote.\n"
 bench preview figure accent://file/preview-drill.png key=Some("preview-drill.png") loaded=true size=96x48 fits=true reads=2
 bench preview figure accent://file/preview-drill.drawio key=Some("preview-drill.drawio") loaded=true size=527x347 fits=true reads=2
 bench preview formula "x^2" display=false size=1.00
 bench preview formula "\nE = mc^2\n" display=true size=1.15
+bench preview formula "\na^2 + b^2 = c^2\n" display=true size=1.15
 bench preview link "link" leave https://example.org
 bench preview link "Other note#Part" open Other note#Part
 bench preview link "#drilltag" tag drilltag
@@ -61,6 +63,9 @@ bench preview copy "Inline $x^2$ and a broken $\\frac{$ formula."
 bench preview copy "$$"
 bench preview copy "E = mc^2"
 bench preview copy "$$"
+bench preview copy "$$"
+bench preview copy "a^2 + b^2 = c^2"
+bench preview copy "$$"
 bench preview copy "Unwrapped bold div"
 bench preview copy ""
 bench preview copy "H2O and Ctrl\u{2028}next line"
@@ -87,9 +92,9 @@ bench preview scroll line=9 top="Lists"
 bench preview scroll line=12 top="• nested"
 bench preview scroll line=29 top="print(\"hi\")"
 bench preview scroll line=39 top="￼"
-bench preview scroll line=68 top="Their side"
+bench preview scroll line=72 top="Their side"
 bench preview scroll line=1 top="\nPreview drill"
-bench preview edit kept=63 written=1
+bench preview edit kept=64 written=1
 bench preview code coloured=["print", "\"hi\""]
 bench preview find ["1 of 3", "2 of 3", "1 of 3", "1 of 2"] selected="side" painted=3
 bench preview find typed "1 of 2" selected="side"

@@ -83,6 +83,13 @@ fn span(tags: &Tags, tag: &gtk::TextTag) -> Option<(&'static str, &'static str)>
         .map(|(_, start, end)| (start, end))
 }
 
+/// `markup` as a cell shows it: in `line`, the prose's line height, which a label's CSS would
+/// take as a share of the font's height, not its size; its code washed in `wash`.
+fn shown(markup: &str, wash: &str, line: f32) -> String {
+    let markup = markup.replace(WASH, wash);
+    format!("<span line_height=\"{line}\">{markup}</span>")
+}
+
 /// The wash behind code, as the `code` tag's: the text's colour at 0.07.
 fn wash(page: &Page) -> String {
     let fg = page.ink.fg.get();
@@ -109,7 +116,8 @@ pub(super) fn insert(w: &mut Writer, rows: Vec<Vec<Cell>>, align: &[Alignment]) 
     let columns = rows.iter().map(Vec::len).max().unwrap_or(0);
     let label = format!("table {}x{columns}", rows.len());
     let object = Object::new(label, w.source.trim_end().to_string());
-    let table = Table::new(rows, align, w.page.text_width(), &wash(w.page));
+    let look = (wash(w.page), w.page.tags.prose.line_height());
+    let table = Table::new(rows, align, w.page.text_width(), look);
     w.widget(&table, object);
 }
 
@@ -137,18 +145,19 @@ pub(super) fn set_width(page: &Page) {
 
 /// The code in the cells washed in the theme's text colour.
 pub(super) fn restyle(page: &Page) {
-    let wash = wash(page);
+    let (wash, line) = (wash(page), page.tags.prose.line_height());
     for table in tables(page) {
         for (label, markup) in table.imp().cells.borrow().iter() {
             if markup.contains(WASH) {
-                label.set_markup(&markup.replace(WASH, &wash));
+                label.set_markup(&shown(markup, &wash, line));
             }
         }
     }
 }
 
 impl Table {
-    fn new(rows: Vec<Vec<Cell>>, align: &[Alignment], width: i32, wash: &str) -> Table {
+    /// `look` is the wash behind code and the line height.
+    fn new(rows: Vec<Vec<Cell>>, align: &[Alignment], width: i32, look: (String, f32)) -> Table {
         install_css();
         let grid = gtk::Grid::builder().css_classes(["accent-table"]).build();
         let mut cells = Vec::new();
@@ -163,7 +172,7 @@ impl Table {
                 let markup = cell.markup.trim().to_string();
                 let label = gtk::Label::builder()
                     .use_markup(true)
-                    .label(markup.replace(WASH, wash))
+                    .label(shown(&markup, &look.0, look.1))
                     .wrap(true)
                     .wrap_mode(pango::WrapMode::Word)
                     .xalign(xalign)
@@ -211,15 +220,16 @@ impl Table {
 /// Each cell's markup, the text selected in it and whether matches are painted in it.
 #[cfg(feature = "bench")]
 pub(super) fn cells(page: &Page) -> Vec<(String, String, bool)> {
-    let labels = tables(page).flat_map(|t| t.labels());
-    labels
-        .map(|label| {
+    let wash = wash(page);
+    let cells = tables(page).flat_map(|t| t.imp().cells.borrow().clone());
+    cells
+        .map(|(label, markup)| {
             let (start, end) = label.selection_bounds().unwrap_or_default();
             let text = label.text();
             let chars = text.chars().skip(start as usize);
             let selected = chars.take((end - start) as usize).collect();
             let painted = label.attributes().is_some();
-            (label.label().to_string(), selected, painted)
+            (markup.replace(WASH, &wash), selected, painted)
         })
         .collect()
 }
@@ -252,7 +262,7 @@ fn install_css() {
     let provider = gtk::CssProvider::new();
     provider.load_from_string(&format!(
         "grid.accent-table {{ border-top: {rule}; border-left: {rule}; }} \
-         grid.accent-table > label {{ padding: 0.4em 0.8em; line-height: 1.6; \
+         grid.accent-table > label {{ padding: 0.4em 0.8em; \
            border-right: {rule}; border-bottom: {rule}; }} \
          grid.accent-table > label.th {{ font-weight: 700; }}"
     ));

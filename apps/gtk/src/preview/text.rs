@@ -32,6 +32,9 @@ pub(super) struct Tags {
     pub code: gtk::TextTag,
     pub kbd: gtk::TextTag,
     pub codeblock: gtk::TextTag,
+    /// A code block's first and last lines, which hold the room of its box's padding and margin.
+    pub fence_top: gtk::TextTag,
+    pub fence_bottom: gtk::TextTag,
     pub caption: gtk::TextTag,
     pub quote: gtk::TextTag,
     pub callout: gtk::TextTag,
@@ -42,6 +45,8 @@ pub(super) struct Tags {
     pub dd: gtk::TextTag,
     pub rule: gtk::TextTag,
     pub display: gtk::TextTag,
+    /// A display formula's line right under another's, the margin between them collapsed.
+    pub collapsed: gtk::TextTag,
     pub math: gtk::TextTag,
     pub html: gtk::TextTag,
     pub figure: gtk::TextTag,
@@ -58,6 +63,8 @@ pub(super) struct Tags {
 
 /// The share of the font size a code block's text is set at, as the stylesheet's `pre`.
 const MONO: f64 = 0.92;
+/// The room inside a code block's box around its text, in pixels, as the stylesheet's `pre`.
+pub(super) const PAD: i32 = 12;
 
 impl Tags {
     pub(super) fn new(table: &gtk::TextTagTable) -> Tags {
@@ -72,14 +79,13 @@ impl Tags {
             t
         };
         Tags {
-            prose: set("prose", &|t| t.set_line_height(1.6)),
+            prose: tag("prose"),
             gap: tag("gap"),
             void: set("void", &|t| t.set_scale(0.05)),
             headings: std::array::from_fn(|i| {
                 set(&format!("h{}", i + 1), &|t| {
                     t.set_scale(crate::highlight::HEADING_SCALES[i]);
                     t.set_weight(700);
-                    t.set_line_height(1.25);
                 })
             }),
             em: set("em", &|t| t.set_style(pango::Style::Italic)),
@@ -100,8 +106,9 @@ impl Tags {
                 t.set_family(Some("monospace"));
                 t.set_scale(MONO);
                 t.set_wrap_mode(gtk::WrapMode::Char);
-                t.set_line_height(1.25);
             }),
+            fence_top: tag("fence-top"),
+            fence_bottom: tag("fence-bottom"),
             caption: set("caption", &|t| t.set_scale(0.85)),
             quote: set("quote", &|t| t.set_style(pango::Style::Italic)),
             callout: tag("callout"),
@@ -114,6 +121,7 @@ impl Tags {
             display: set("display", &|t| {
                 t.set_justification(gtk::Justification::Center)
             }),
+            collapsed: set("collapsed", &|t| t.set_pixels_above_lines(0)),
             math: set("math", &|t| t.set_family(Some("monospace"))),
             html: set("html", &|t| t.set_family(Some("monospace"))),
             figure: tag("figure"),
@@ -134,16 +142,32 @@ impl Tags {
         }
     }
 
-    /// The sizes measured in the font's pixels, `px` at the zoom, and the page's gutter, which a
-    /// tag's margin replaces rather than adds to.
-    pub(super) fn resize(&self, px: f64, gutter: i32) {
+    /// The sizes measured in the font's pixels, `px` at the zoom, in the font of `context`, and
+    /// the page's gutter, which a tag's margin replaces rather than adds to.
+    pub(super) fn resize(&self, px: f64, gutter: i32, context: &pango::Context) {
         let em = |n: f64| (n * px).round() as i32;
+        // The stylesheet's line height is a share of the font's size, Pango's of the font's
+        // height, its ascent and descent (1.16 em in DejaVu Sans Mono): `css` em as Pango's.
+        let mut font = context.font_description().unwrap_or_default();
+        font.set_absolute_size(px * f64::from(pango::SCALE));
+        let metrics = context.metrics(Some(&font), None);
+        let height = f64::from(metrics.ascent() + metrics.descent()) / f64::from(pango::SCALE);
+        let line = |css: f64| (css * px / height) as f32;
+        self.prose.set_line_height(line(1.6));
+        self.codeblock.set_line_height(line(1.6));
+        for tag in &self.headings {
+            tag.set_line_height(line(1.25));
+        }
         self.gap.set_pixels_below_lines(em(0.8));
         for (tag, scale) in self.headings.iter().zip(crate::highlight::HEADING_SCALES) {
             tag.set_pixels_above_lines(em(1.2 * scale));
             tag.set_pixels_below_lines(em(0.4 * scale));
         }
-        let inset = gutter + 12;
+        let inset = gutter + PAD;
+        // The stylesheet's `pre`: PAD inside its box and its font's 1 em outside, which takes the
+        // place of the gap the block before leaves.
+        self.fence_top.set_pixels_above_lines(em(MONO - 0.8) + PAD);
+        self.fence_bottom.set_pixels_below_lines(em(MONO) + PAD);
         self.codeblock.set_left_margin(inset);
         self.codeblock.set_right_margin(inset);
         self.quote.set_left_margin(inset + 3);
@@ -647,6 +671,21 @@ pub(super) fn write(
     (buffer.create_mark(None, &first, false), facts)
 }
 
+/// Take the margin above the line `at` starts, a display formula's, away where the line before
+/// is one too: a browser collapses the two margins into one. Again where a patch changed the
+/// block before.
+pub(super) fn collapse_margin(page: &Page, at: &gtk::TextIter) {
+    let display = &page.tags.display;
+    let mut before = *at;
+    let under = at.has_tag(display) && before.backward_line() && before.has_tag(display);
+    let mut end = *at;
+    end.forward_line();
+    match under {
+        true => page.buffer.apply_tag(&page.tags.collapsed, at, &end),
+        false => page.buffer.remove_tag(&page.tags.collapsed, at, &end),
+    }
+}
+
 /// A block's nodes into the buffer; the hooks of figures, formulas and tables write through it.
 pub(super) struct Writer<'a> {
     pub page: &'a Page,
@@ -812,6 +851,22 @@ impl Writer<'_> {
                 *done = true;
             }
         }
+    }
+
+    /// The room of a code block's box above its first line, from `start`, and below its last.
+    fn fence(&mut self, start: i32) {
+        if self.offset() == start {
+            return;
+        }
+        let (buffer, tags) = (&self.page.buffer, &self.page.tags);
+        let first = buffer.iter_at_offset(self.start + start);
+        let mut end = first;
+        end.forward_line();
+        buffer.apply_tag(&tags.fence_top, &first, &end);
+        let mut last = *self.at;
+        last.backward_char();
+        last.set_line_offset(0);
+        buffer.apply_tag(&tags.fence_bottom, &last, self.at);
     }
 
     fn html(&mut self, html: &str) {
@@ -1028,6 +1083,7 @@ impl Writer<'_> {
                 self.newline();
                 self.pop();
                 if let Some((lang, start)) = self.code.take() {
+                    self.fence(start);
                     super::code::fence(self, &lang, start..self.offset());
                 }
             }
