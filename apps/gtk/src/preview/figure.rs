@@ -564,8 +564,9 @@ mod imp {
 }
 
 /// A picture on the page as a drill reads it: its address and vault key, whether it is being
-/// read, whether it shows the file, whether that is an animation, its size, two of its pixels as
-/// drawn (`r,g,b`), and its middle in the view's coordinates.
+/// read, whether it shows the file, whether that is an animation, its size, its own size at the
+/// zoom and whether its size is that shrunk to the text's width now, two of its pixels as drawn
+/// (`r,g,b`), and its middle in the view's coordinates.
 #[cfg(feature = "bench")]
 pub struct Probe {
     pub uri: String,
@@ -574,6 +575,8 @@ pub struct Probe {
     pub loaded: bool,
     pub animated: bool,
     pub size: (i32, i32),
+    pub natural: (i32, i32),
+    pub fits: bool,
     pub corner: String,
     pub centre: String,
     pub at: (i32, i32),
@@ -599,6 +602,11 @@ fn probed(page: &Page, figure: &Figure, at: &gtk::TextIter) -> Probe {
     let loaded = figure.imp().loaded.borrow().clone();
     let shown = loaded.as_ref().and_then(|l| l.shown.as_ref());
     let size = (figure.intrinsic_width(), figure.intrinsic_height());
+    let zoomed = |n: i32| (f64::from(n) * page.zoom.get()).round() as i32;
+    let natural = shown.map_or((0, 0), |(_, p)| {
+        (zoomed(p.intrinsic_width()), zoomed(p.intrinsic_height()))
+    });
+    let fits = size.0 == natural.0.min(page.text_width());
     let pixel = |fx: f64, fy: f64| {
         let Some((shown, _)) = shown else {
             return "-".to_string();
@@ -631,6 +639,8 @@ fn probed(page: &Page, figure: &Figure, at: &gtk::TextIter) -> Probe {
         loaded: shown.is_some(),
         animated: shown.is_some_and(|s| s.0.animated),
         size,
+        natural,
+        fits,
         corner,
         centre: pixel(0.5, 0.5),
         at: (x, y),

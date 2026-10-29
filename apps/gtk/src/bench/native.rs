@@ -180,10 +180,12 @@ async fn render(app: &Rc<App>) {
             );
         }
         let (figures, reads) = native.figures();
+        // Its own size and whether it is drawn at that shrunk to the text's width: the width
+        // itself is the pane's, which differs from run to run.
         for f in figures {
             println!(
-                "bench preview figure {} key={:?} loaded={} size={}x{} reads={reads}",
-                f.uri, f.key, f.loaded, f.size.0, f.size.1
+                "bench preview figure {} key={:?} loaded={} size={}x{} fits={} reads={reads}",
+                f.uri, f.key, f.loaded, f.natural.0, f.natural.1, f.fits
             );
         }
         for (tex, display, size) in native.formulas() {

@@ -22,8 +22,8 @@ bench preview block=20 lines=61-62 tags=["gap", "prose"] text="[image preview-dr
 bench preview block=21 lines=63-64 tags=["gap", "prose"] text="Back to the top, lists and the paragraph.\n"
 bench preview block=22 lines=65-70 tags=["conflict-current", "conflict-current-label", "prose"] text="ours\nOur side\ntheirs\nTheir side\n"
 bench preview block=23 lines=71-73 tags=["fndef", "gap", "prose"] text="1. The footnote.\n"
-bench preview figure accent://file/preview-drill.png key=Some("preview-drill.png") loaded=true size=96x48 reads=2
-bench preview figure accent://file/preview-drill.drawio key=Some("preview-drill.drawio") loaded=true size=383x252 reads=2
+bench preview figure accent://file/preview-drill.png key=Some("preview-drill.png") loaded=true size=96x48 fits=true reads=2
+bench preview figure accent://file/preview-drill.drawio key=Some("preview-drill.drawio") loaded=true size=527x347 fits=true reads=2
 bench preview formula "x^2" display=false size=1.00
 bench preview formula "\nE = mc^2\n" display=true size=1.15
 bench preview link "link" leave https://example.org
