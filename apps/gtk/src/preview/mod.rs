@@ -2,7 +2,14 @@
 //! the native one ([`native::Native`]), and WebKit's ([`crate::web::Preview`]) in a build with the
 //! `webkit` feature unless `ACCENT_PREVIEW=native` asks for the native one.
 
+mod code;
+mod figure;
+mod find;
+mod formula;
 mod native;
+mod table;
+mod text;
+mod view;
 
 use accent_core::config::Config;
 use accent_core::search::Options;
@@ -128,6 +135,16 @@ impl Preview {
 
     pub fn connect_found(&self, f: impl Fn(&str) + 'static) {
         each!(self, p => p.connect_found(f))
+    }
+
+    /// The native preview, for a drill that reads its page.
+    #[cfg(feature = "bench")]
+    pub fn native(&self) -> Option<&native::Native> {
+        match self {
+            Preview::Native(p) => Some(p),
+            #[cfg(feature = "webkit")]
+            Preview::Web(_) => None,
+        }
     }
 
     /// The WebKit preview, for a drill that reads its page.
