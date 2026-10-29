@@ -11,9 +11,7 @@ use accent_core::path::{self, FileType, basename, parent_dir, stem};
 
 use super::{COMPLETIONS, empty_item};
 use crate::Backlink;
-use crate::language::{
-    Completion, Completions, Fold, Location, PdfPages, Range, Symbol, pos_of, range_of,
-};
+use crate::language::{Completion, Fold, Location, Range, Symbol, pos_of, range_of};
 
 /// What the caret is inside of, and so what a completion offers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -245,23 +243,6 @@ pub(crate) fn page_links(
             })
         })
         .collect()
-}
-
-impl PdfPages {
-    /// Return [`page_links`] when [`pdf_outline`] can read bookmarks; otherwise
-    /// defer the question to a side with a PDF reader.
-    pub(crate) fn answer(self, outline: Option<Outline>) -> Completions {
-        match outline {
-            Some(outline) => Completions {
-                items: page_links(&outline, &self.note, self.replace),
-                ..Completions::default()
-            },
-            None => Completions {
-                pages: Some(self),
-                ..Completions::default()
-            },
-        }
-    }
 }
 
 /// Normalize a link in `rel` for the index: markdown paths are relative

@@ -7,8 +7,8 @@ license.workspace = true
 
 [features]
 default = []
-# Reading a PDF's outline, which is what `[[paper.pdf#` completes against. Off by default so a
-# build with no pdfium binding is still a build; without it that one completion offers nothing.
+# The core's pdfium half, which the Android bindings read and draw PDFs through. Off by default so
+# a build with no pdfium binding is still a build.
 pdf = ["accent-core/pdf"]
 # The uniffi bindings Android calls this crate through. Off for every desktop build, so
 # `cargo build` never compiles uniffi and the façade stays what it was.
@@ -16,6 +16,8 @@ android = ["pdf", "dep:uniffi"]
 
 [dependencies]
 accent-core.workspace = true
+# A PDF's outline, which `[[paper.pdf#` completes against, read on the host too.
+accent-pdf.workspace = true
 # A Replace All rewrites a diagram's labels through its model, never its XML.
 accent-drawio.workspace = true
 accent-lsp.workspace = true

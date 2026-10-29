@@ -13,10 +13,10 @@ use accent_core::path::{self, FileType, basename, parent_dir, stem};
 
 use super::pure::{
     Trigger, block_links, context, fragment_end, front_tag, has_headings, heading_names,
-    link_names, org_context, path_candidates, ranked_paths, tag_candidates, yaml_item,
+    link_names, org_context, page_links, path_candidates, ranked_paths, tag_candidates, yaml_item,
 };
 use super::{Corpora, Corpus, Notes, empty_item, pdf_outline};
-use crate::language::{Completion, Completions, Kind, PdfPages, Pos, Range, byte_of};
+use crate::language::{Completion, Completions, Kind, Pos, Range, byte_of};
 use crate::{Local, locked};
 
 impl Notes {
@@ -97,7 +97,6 @@ impl Notes {
                 })
                 .collect(),
             incomplete: more,
-            pages: None,
             fragment: Some(replace),
         })
     }
@@ -291,7 +290,6 @@ impl Notes {
                 Ok(Completions {
                     items,
                     incomplete: more,
-                    pages: None,
                     fragment,
                 })
             }
@@ -345,7 +343,6 @@ impl Notes {
                 Ok(Completions {
                     items,
                     incomplete: false,
-                    pages: None,
                     fragment,
                 })
             }
@@ -384,7 +381,6 @@ impl Notes {
                 Ok(Completions {
                     items,
                     incomplete: more,
-                    pages: None,
                     fragment,
                 })
             }
@@ -403,7 +399,6 @@ impl Notes {
                         })
                         .collect(),
                     incomplete: more,
-                    pages: None,
                     fragment,
                 })
             }
@@ -463,7 +458,6 @@ impl Notes {
                     })
                     .collect(),
                 incomplete: more,
-                pages: None,
                 fragment,
             });
         }
@@ -498,7 +492,6 @@ impl Notes {
         Ok(Completions {
             items,
             incomplete: more,
-            pages: None,
             fragment,
         })
     }
@@ -522,12 +515,10 @@ impl Notes {
         };
         if path::file_type(&target) == FileType::Pdf {
             let outline = pdf_outline(&Local::join(&self.root, &target)?)?;
-            let pages = PdfPages {
-                rel: target,
-                note: note.to_string(),
-                replace,
-            };
-            return Ok(pages.answer(outline));
+            return Ok(Completions {
+                items: page_links(&outline, note, replace),
+                ..Completions::default()
+            });
         }
         if !has_headings(&target) {
             return Ok(Completions::default());

@@ -165,26 +165,11 @@ pub struct Completion {
 pub struct Completions {
     pub items: Vec<Completion>,
     pub incomplete: bool,
-    /// PDF bookmarks deferred by a host without a PDF reader. The window lists
-    /// them from its local copy ([`Vault::completion`]).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pages: Option<PdfPages>,
     /// The text the rows complete, inside its delimiters (`De` of `[[De]]`, `ta` of `#ta`), past
     /// the caret too: the popup stays while the caret is in it, and matches each row by all of it
     /// from the row's start. `None` is from where the rows start to the caret.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fragment: Option<Range>,
-}
-
-/// Deferred `[[paper.pdf#` completion for the side holding a readable PDF:
-/// the resolved file and the typed target retained in each page row.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PdfPages {
-    /// The PDF the link resolved to, vault-relative.
-    pub rel: String,
-    /// The link's target as it was typed, which every row spells the same way.
-    pub note: String,
-    pub replace: Range,
 }
 
 /// The signature of the call containing the caret.
@@ -1369,15 +1354,11 @@ impl Vault {
 }
 
 /// Generate document operations for [`Languages`], [`Vault`] and host RPC.
-/// Rows map `façade => trait method`: requests await a future, with `then f`
-/// finishing host answers locally; notifications finish when the provider
-/// accepts them. Providers run on the shared runtime beside the files.
+/// Rows map `façade => trait method`: requests await a future; notifications
+/// finish when the provider accepts them. Providers run on the shared runtime beside the files.
 macro_rules! requests {
     (@remote $r:ident $name:ident $params:expr) => {
         remote_task($r.clone(), stringify!($name), $params)
-    };
-    (@remote $r:ident $name:ident $params:expr, $then:path) => {
-        remote_task_then($r.clone(), stringify!($name), $params, crate::rpc::DEADLINE, $then)
     };
     (@ret) => { () };
     (@ret $ret:ty) => { $ret };
@@ -1385,8 +1366,7 @@ macro_rules! requests {
     (@answer $call:expr; $ret:ty) => { $call.await };
     ($(
         $(#[$doc:meta])*
-        $name:ident => $inner:ident ( $($arg:ident : $ty:ty),* ) $(-> $ret:ty)?
-            $(, then $then:path)?;
+        $name:ident => $inner:ident ( $($arg:ident : $ty:ty),* ) $(-> $ret:ty)?;
     )*) => {
         impl Languages { $(
             pub(crate) fn $name(&self, rel: String, $($arg: $ty),*)
@@ -1405,7 +1385,7 @@ macro_rules! requests {
                 match &self.backend {
                     Backend::Local(v) => v.$name(rel, $($arg),*),
                     Backend::Remote(r) => {
-                        requests!(@remote r $name json!([rel, $($arg),*]) $(, $then)?)
+                        requests!(@remote r $name json!([rel, $($arg),*]))
                     }
                 }
             }
@@ -1436,8 +1416,8 @@ macro_rules! requests {
 }
 
 requests! {
-    /// On a remote vault the host answers all but a PDF's bookmarks, which are read here.
-    completion => completion(pos: Pos, trigger: Option<char>) -> Completions, then list_pages;
+    /// On a remote vault the host answers, a PDF's bookmarks included.
+    completion => completion(pos: Pos, trigger: Option<char>) -> Completions;
     /// Fill in what the popup left out until a row was looked at.
     resolve_completion => resolve(item: Completion) -> Completion;
     signature_help => signature_help(pos: Pos) -> Option<Signature>;
@@ -1500,21 +1480,6 @@ pub(crate) fn remote_task_then<T: DeserializeOwned + Send + 'static>(
         }
     })
     .cancelled_by(move || r.cancel(&asked))
-}
-
-/// Complete deferred `[[paper.pdf#` bookmarks from the locally fetched PDF;
-/// host `serve` has no PDF reader. Remote bytes travel as files, never RPC data.
-fn list_pages(r: &Remote, mut answer: Completions) -> Result<Completions> {
-    match answer.pages.take() {
-        Some(pages) => {
-            let outline = notes::pdf_outline(&r.fetch(&pages.rel)?)?;
-            Ok(Completions {
-                fragment: answer.fragment,
-                ..pages.answer(outline)
-            })
-        }
-        None => Ok(answer),
-    }
 }
 
 /// The two lifecycle calls the macros do not write, where the vault is.

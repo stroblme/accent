@@ -1,6 +1,5 @@
 use super::pure::*;
 use super::*;
-use crate::language::PdfPages;
 use accent_core::fuzzy;
 
 /// A tag is typed in the front matter's `tags:` list as one of its items, in either form; a
@@ -333,27 +332,6 @@ fn page_links_name_a_bookmarks_page_from_one() {
     assert_eq!(markdown::pdf_anchor("page=5"), Some((4, None)));
 }
 
-/// A side with no PDF reader — a host's `serve` — cannot list the bookmarks, so it answers with
-/// the PDF and the link for whoever holds a copy of the file to list them from.
-#[test]
-fn a_pdf_nobody_here_can_read_is_left_to_the_side_with_a_copy() {
-    let pages = PdfPages {
-        rel: "Papers/paper.pdf".to_string(),
-        note: "paper.pdf".to_string(),
-        replace: Range::default(),
-    };
-    let unread = pages.clone().answer(None);
-    assert!(unread.items.is_empty());
-    assert_eq!(unread.pages.as_ref(), Some(&pages));
-
-    let read = pages.answer(Some(vec![("Intro".to_string(), Some(0))]));
-    assert_eq!(
-        read.pages, None,
-        "listed, so nothing is left for anyone else"
-    );
-    assert_eq!(read.items[0].insert, "[[paper.pdf#page=1]]");
-}
-
 /// A second `[[` to a note that is only linked to so far offers it, spelled the way the first
 /// link will reach it once it is written, behind the note that is there.
 #[test]
@@ -664,15 +642,10 @@ fn a_wikilink_completes_an_alias_to_its_note() {
     );
 }
 
-/// The whole `[[paper.pdf#` path: the index resolves the name, pdfium reads the outline, and
-/// what goes in is an anchor the reader can land by. Skipped where there is no libpdfium.
-#[cfg(feature = "pdf")]
+/// The whole `[[paper.pdf#` path: the index resolves the name, `accent_pdf` reads the outline,
+/// as a host's `serve` reads it too, and what goes in is an anchor the reader can land by.
 #[test]
 fn a_wiki_anchor_into_a_pdf_offers_its_bookmarks() {
-    if !accent_core::pdf::available() {
-        eprintln!("skipping: no libpdfium");
-        return;
-    }
     let vault = tempfile::tempdir().unwrap();
     std::fs::write(vault.path().join("paper.pdf"), bookmarked_pdf()).unwrap();
     std::fs::write(vault.path().join("a.md"), "[[paper.pdf#\n").unwrap();
@@ -708,7 +681,6 @@ fn a_wiki_anchor_into_a_pdf_offers_its_bookmarks() {
 
 /// Two blank pages and one bookmark on the second, written by hand so the test needs no
 /// fixture file. `crates/core/src/pdf/tests.rs` builds a fuller document the same way.
-#[cfg(feature = "pdf")]
 fn bookmarked_pdf() -> Vec<u8> {
     let objs = [
         "<</Type/Catalog/Pages 2 0 R/Outlines 4 0 R>>",

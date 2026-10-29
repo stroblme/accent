@@ -49,6 +49,7 @@ dependencies = [
  "accent-drawio",
  "accent-jupyter",
  "accent-lsp",
+ "accent-pdf",
  "blake3",
  "chrono",
  "globset",

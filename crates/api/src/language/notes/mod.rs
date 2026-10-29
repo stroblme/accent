@@ -439,25 +439,18 @@ fn or_empty<T: Default>(what: &str, r: Result<T>) -> T {
     })
 }
 
-/// Read the PDF [`Outline`], or `None` without a PDF reader. Open once
-/// on the request thread under pdfium's global lock, only after the prefix
-/// resolves to a `.pdf`.
-#[cfg(feature = "pdf")]
-pub(crate) fn pdf_outline(path: &Path) -> Result<Option<Outline>> {
-    Ok(Some(
-        accent_core::pdf::PdfDoc::open(path)?
-            .outline()?
-            .into_iter()
-            .map(|entry| (entry.title, entry.page))
-            .collect(),
-    ))
-}
-
-/// Defer bookmarks through [`PdfPages`](super::PdfPages) when built without `pdf`, as on
-/// host `accent-cli serve`.
-#[cfg(not(feature = "pdf"))]
-pub(crate) fn pdf_outline(_path: &Path) -> Result<Option<Outline>> {
-    Ok(None)
+/// Read the PDF [`Outline`] through `accent_pdf`, which every build has, a host's `serve`
+/// included: once, on the request thread, only after the prefix resolves to a `.pdf`. A damaged
+/// file is read through an xref rebuilt from its objects, as the window's pdfium repairs it.
+pub(crate) fn pdf_outline(path: &Path) -> Result<Outline> {
+    let outline = (std::fs::File::open(path).map_err(accent_pdf::Error::from))
+        .and_then(|file| {
+            accent_pdf::read(Arc::new(file), |pdf| {
+                accent_pdf::Document::new(pdf, None, &pdf.pages()?).outline()
+            })
+        })
+        .map_err(|e| accent_core::Error::Pdf(e.to_string()))?;
+    Ok(outline.into_iter().map(|b| (b.title, b.page)).collect())
 }
 
 /// The fields a note's completion never fills, so the interesting ones stay together above.

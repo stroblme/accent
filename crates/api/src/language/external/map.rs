@@ -225,7 +225,6 @@ pub(super) fn completions_of(
         fragment: fragment_of(&items, pos),
         items,
         incomplete,
-        ..Completions::default()
     }
 }
 

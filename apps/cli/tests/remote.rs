@@ -553,33 +553,35 @@ fn a_remote_vault_connects_indexes_and_answers() {
         Some("paper.pdf"),
         "the first lookup after the write missed it: the host's watcher, not the write, told it"
     );
-    remote
-        .call::<serde_json::Value>(
-            "open_document",
-            serde_json::json!(["d.md", "markdown", "[[paper.pdf#\n"]),
-        )
-        .unwrap();
-    let at = accent_api::Pos {
-        line: 0,
-        character: 12,
-    };
-    let asked: accent_api::Completions = remote
-        .call("completion", serde_json::json!(["d.md", at, null]))
-        .unwrap();
-    assert!(asked.items.is_empty(), "{asked:?}");
-    assert_eq!(asked.pages.map(|p| p.rel).as_deref(), Some("paper.pdf"));
-    let listed = wait(vault.completion("d.md", at, None)).unwrap();
-    match listed.pages {
-        // A client built without a PDF reader leaves the question as the host did.
-        Some(_) => eprintln!("no PDF reader here either: run with --features accent-api/pdf"),
-        None => {
-            let rows: Vec<(&str, &str)> = listed
-                .items
-                .iter()
-                .map(|c| (c.label.as_str(), c.insert.as_str()))
-                .collect();
-            assert_eq!(rows, [("Second", "[[paper.pdf#page=2]]")]);
-        }
+    // The host reads the bookmarks itself, a damaged file's too, through an xref rebuilt from
+    // its objects: its `accent-cli` reads PDFs without pdfium.
+    let whole = bookmarked_pdf();
+    let xref = whole.windows(4).rposition(|w| w == b"xref").unwrap();
+    vault.write_file("cut.pdf", &whole[..xref]).unwrap();
+    for name in ["paper", "cut"] {
+        let typed = format!("[[{name}.pdf#\n");
+        remote
+            .call::<serde_json::Value>(
+                "open_document",
+                serde_json::json!(["d.md", "markdown", typed]),
+            )
+            .unwrap();
+        let at = accent_api::Pos {
+            line: 0,
+            character: typed.len() as u32 - 1,
+        };
+        let rows = |c: accent_api::Completions| -> Vec<(String, String)> {
+            c.items.into_iter().map(|c| (c.label, c.insert)).collect()
+        };
+        let asked = remote
+            .call("completion", serde_json::json!(["d.md", at, null]))
+            .unwrap();
+        let want = [("Second".to_string(), format!("[[{name}.pdf#page=2]]"))];
+        assert_eq!(rows(asked), want);
+        assert_eq!(
+            rows(wait(vault.completion("d.md", at, None)).unwrap()),
+            want
+        );
     }
 
     // A page edit's links are rewritten on the host, where the notes and the index are.
