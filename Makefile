@@ -390,6 +390,10 @@ smoke: gtk-bench vault xvfb
 # `ACCENT_BENCH_SWITCHER=goto:…` exits 1 when a note picked in Go to File, from the Files tree or
 # from a note, has not taken the keyboard; the keys are real, through XTEST.
 #
+# `ACCENT_BENCH_TABS=toggle:…` exits 1 when a real `Ctrl+M`, pressed from a note, its preview tab,
+# the Files tree, a pane beside or a tab looked at, leaves another tab in front or the keyboard
+# outside it.
+#
 # `ACCENT_BENCH_DEBUG` debugs a small Python program with debugpy, held against `debug.expected`,
 # and is skipped where `python3` has no debugpy. Its program runs in a terminal tab, so under a
 # scratch HOME.
@@ -421,6 +425,9 @@ drills: gtk-bench xvfb
 		ACCENT_BENCH_CLOSE=1 exec timeout 60 $(TARGET_DIR)/accent "$$0"' "$$xdg/vault"
 	$(HEADLESS) sh -c 'echo "# Alpha" >"$$0/alpha.md" && echo "# Beta" >"$$0/beta.md" && \
 		ACCENT_BENCH_SWITCHER=goto:alpha.md,beta.md exec timeout 60 $(TARGET_DIR)/accent "$$0"' \
+		"$$xdg/vault"
+	$(HEADLESS) sh -c 'echo "# Alpha" >"$$0/alpha.md" && echo "# Beta" >"$$0/beta.md" && \
+		ACCENT_BENCH_TABS=toggle:alpha.md,beta.md exec timeout 90 $(TARGET_DIR)/accent "$$0"' \
 		"$$xdg/vault"
 	$(HEADLESS) sh -c 'echo "# Note" >"$$0/note.md" && mkdir -p "$$XDG_CONFIG_HOME/accent" && \
 		printf "[vaults.\"%s\".lsp.servers]\nc = [\"python3\", \"%s\"]\n" "$$0" "$(CURDIR)/build-aux/fake-lsp.py" \

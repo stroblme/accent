@@ -50,6 +50,7 @@ mod symbols;
 mod synctex;
 mod tags;
 mod toasts;
+mod toggle;
 mod user_commands;
 
 pub(crate) use answer::{SLOW_RELOAD_MS, SLOW_WRITE_MS, hold};
@@ -242,7 +243,8 @@ use user_commands::bench_commands;
 ///   `cycle:[<w>x<h>:]<a>,<b>,…` (25 s held Ctrl+Tab probe after XTEST `move 700 400; focus`,
 ///   the last of three or more split off to the right),
 ///   `back:<a>,<b>` (navigation across edits/reload), `loose:<rel_pdf>`
-///   (loose-file readers/assets; creates/removes `loose-drill/`). Remote
+///   (loose-file readers/assets; creates/removes `loose-drill/`), `toggle:<a>,<b>`
+///   (XTEST `Ctrl+M` between `a` and its preview tab, `toggle::bench_toggle`). Remote
 ///   pin-window/apart modes verify tabs cannot move off the host.
 /// - `ACCENT_BENCH_SLOW_READ=<ms>`: delay text reads on workers to reproduce
 ///   double-clicks before tabs arrive in the `TABS=tree:` drill.
@@ -781,6 +783,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(pdf) = rels.strip_prefix("loose:") {
                 return loose::bench_loose(&app, pdf);
+            }
+            if let Some(rels) = rels.strip_prefix("toggle:") {
+                return toggle::bench_toggle(&app, rels);
             }
             return bench_tabs(&app, &rels);
         }
