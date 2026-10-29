@@ -62,7 +62,7 @@ fn shown(cell: &str) -> usize {
 /// Each column's alignment: the first alignment cookie's in it, `<r>`, `<c>`, `<l>` or one with
 /// a width, `<l10>`; else right where at least half of its filled cells, a header's too, are
 /// numbers (`org-table-number-fraction`), left otherwise.
-fn aligns(rows: &[(Vec<Cell>, bool)]) -> Vec<Align> {
+pub(super) fn aligns(rows: &[(Vec<Cell>, bool)]) -> Vec<Align> {
     let rows: Vec<&[Cell]> = rows
         .iter()
         .filter(|(_, hline)| !hline)
@@ -90,7 +90,7 @@ fn aligns(rows: &[(Vec<Cell>, bool)]) -> Vec<Align> {
 }
 
 /// The alignment a cookie cell fixes: `<r>`, `<c>` or `<l>`, a width after it or none.
-fn cookie(cell: &str) -> Option<Align> {
+pub(super) fn cookie(cell: &str) -> Option<Align> {
     let inner = cell.strip_prefix('<')?.strip_suffix('>')?;
     let (align, width) = inner.split_at_checked(1)?;
     if !width.bytes().all(|c| c.is_ascii_digit()) {

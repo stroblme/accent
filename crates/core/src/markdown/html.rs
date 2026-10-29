@@ -316,6 +316,16 @@ fn node_events<'a>(
         ))),
         Node::Underline => out.push(html("<u>".into())),
         Node::UnderlineEnd => out.push(html("</u>".into())),
+        // Org's own: a heading's TODO keyword, which the stylesheet dims once done, and the place
+        // of a `<<target>>`, which shows nothing.
+        Node::Keyword { text, done } => {
+            let class = if *done { "done" } else { "todo" };
+            out.push(html(format!(
+                "<span class=\"{class}\">{}</span>",
+                esc_attr(text)
+            )))
+        }
+        Node::Anchor(name) => out.push(html(format!("<span id=\"{}\"></span>", esc_attr(name)))),
         Node::Conflict => out.push(html("<div class=\"conflict\">\n".into())),
         Node::Side { side, label, at } => {
             let side = match side {

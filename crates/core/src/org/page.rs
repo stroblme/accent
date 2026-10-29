@@ -1,0 +1,1076 @@
+//! An org file as the blocks its page shows, the same [`Block`]s a markdown note's page is
+//! ([`crate::markdown::page`]), so the preview, an export and Android write it alike. Read line
+//! by line as [`super::analyze`] reads the file, the subset accent shows: headings with their
+//! TODO keyword and tags, paragraphs, lists with their boxes, description lists, tables, blocks
+//! of code, examples and quotes, footnotes, and in prose emphasis, links, pictures, formulas and
+//! `<<targets>>`.
+//!
+//! What org's own export leaves out is not shown: `#+KEY:` lines (`#+TITLE` too: a markdown
+//! note's front matter is no heading either), drawers, comments, export and comment blocks, a
+//! heading's priority and its `COMMENT`.
+
+use super::links::OrgLink;
+use super::table::{aligns, cookie};
+use super::{Search, closed, emphasis, heading, is_heading, keywords, lines, target};
+use crate::markdown::{
+    Align, Block, Cell, LinkKind, Mode, Node, Part, Style, cut, is_image, math, parts,
+    percent_encode, split, write,
+};
+use crate::path::parent_dir;
+use pulldown_cmark::{
+    Alignment, CodeBlockKind, CowStr, Event, HeadingLevel, LinkType, Tag as Cm, TagEnd,
+};
+use std::ops::Range;
+
+/// The page of an org file ([`crate::markdown::page`]'s for a note): a heading's `id` its title's
+/// slug, a link to a heading or a `<<target>>` of the file pointed at its `id`.
+pub fn page(text: &str) -> Vec<Block<'_>> {
+    let all = lines(text);
+    let mut page = Page {
+        text,
+        keywords: keywords(text, &all),
+        nodes: Vec::new(),
+        headings: Vec::new(),
+        named: Vec::new(),
+        targets: Vec::new(),
+    };
+    for part in parts(text) {
+        match part {
+            Part::Stretch(r) => {
+                let inside: Vec<_> = all
+                    .iter()
+                    .filter(|l| l.start >= r.start && l.end <= r.end)
+                    .cloned()
+                    .collect();
+                page.blocks(&inside, false);
+            }
+            Part::Node(node, bytes) => page.nodes.push((node, bytes)),
+        }
+    }
+    page.finish()
+}
+
+/// The preview's HTML of an org file ([`crate::markdown::to_html`]'s rules).
+pub fn to_html(text: &str) -> String {
+    write(&page(text), Mode::Preview)
+}
+
+/// The org file at `rel`, a vault path, as an exported file holds it
+/// ([`crate::markdown::to_html_file`]'s rules).
+pub fn to_html_file(text: &str, rel: &str) -> String {
+    write(
+        &page(text),
+        Mode::File {
+            dir: parent_dir(rel),
+        },
+    )
+}
+
+/// What [`page`] has gathered so far.
+struct Page<'a> {
+    text: &'a str,
+    keywords: Vec<Vec<(&'a str, bool)>>,
+    nodes: Vec<(Node<'a>, Range<usize>)>,
+    /// Each heading's place in `nodes` and its title, as the index reads it.
+    headings: Vec<(usize, String)>,
+    /// Each link into the file by name, its place in `nodes` and the name: a `<<target>>` of that
+    /// name first, as org searches, else a heading.
+    named: Vec<(usize, String)>,
+    targets: Vec<String>,
+}
+
+/// What a line opens.
+enum Kind {
+    Blank,
+    Heading,
+    /// A block of code, an example, an export or a comment, or a drawer, to its last line.
+    Closed(usize, Style),
+    /// A quote block, to its last line.
+    Quote(usize),
+    /// A `#+KEY:` line, the fence of any other block, or a comment.
+    Hidden,
+    Fixed,
+    Table,
+    Rule,
+    /// A footnote's definition, `[fn:label]`, and where its label ends.
+    Footnote(Range<usize>),
+    Item,
+    Text,
+}
+
+impl<'a> Page<'a> {
+    fn push(&mut self, node: Node<'a>, bytes: Range<usize>) {
+        self.nodes.push((node, bytes));
+    }
+
+    /// A start event and the line marker after it, both over `bytes`, which `cut` turns into the
+    /// block's and the marker's lines.
+    fn open(&mut self, tag: Cm<'a>, bytes: Range<usize>) {
+        self.push(Node::Event(Event::Start(tag)), bytes.clone());
+        self.line(bytes, None);
+    }
+
+    fn line(&mut self, bytes: Range<usize>, id: Option<String>) {
+        self.push(Node::Line { at: 0, id }, bytes);
+    }
+
+    fn close(&mut self, tag: TagEnd, bytes: Range<usize>) {
+        self.push(Node::Event(Event::End(tag)), bytes);
+    }
+
+    fn finish(mut self) -> Vec<Block<'a>> {
+        let mut anchors = Vec::new();
+        for (at, name) in &self.named {
+            let target = self.targets.iter().find(|t| t.eq_ignore_ascii_case(name));
+            match (target, &mut self.nodes[*at].0) {
+                (Some(t), Node::Event(Event::Start(Cm::Link { dest_url, .. }))) => {
+                    *dest_url = format!("#{}", percent_encode(t)).into()
+                }
+                _ => anchors.push(*at),
+            }
+        }
+        cut(self.text, self.nodes, &self.headings, &anchors)
+    }
+
+    fn kind(&self, lines: &[Range<usize>], i: usize) -> Kind {
+        let text = self.text;
+        let line = lines[i].clone();
+        let s = text[line.clone()].trim_start();
+        let word = |m: &str| {
+            s.strip_prefix(m)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', '\t']))
+        };
+        // The first line of a list item starts past its bullet, where nothing opens a heading.
+        let column0 = line.start == 0 || text.as_bytes()[line.start - 1] == b'\n';
+        if s.is_empty() {
+            Kind::Blank
+        } else if column0 && is_heading(&text[line.clone()]) {
+            Kind::Heading
+        } else if let Some((last, style)) = closed(text, lines, i) {
+            Kind::Closed(last, style)
+        } else if let Some(last) = quote(text, lines, i) {
+            Kind::Quote(last)
+        } else if s.starts_with("#+") || word("#") {
+            Kind::Hidden
+        } else if word(":") {
+            Kind::Fixed
+        } else if s.starts_with('|') {
+            Kind::Table
+        } else if s.trim_end().len() >= 5 && s.trim_end().bytes().all(|c| c == b'-') {
+            Kind::Rule
+        } else if let Some(label) =
+            footnote(text, line.start).filter(|_| column0 && s.len() == line.len())
+        {
+            Kind::Footnote(label)
+        } else if bullet(text, line).is_some() {
+            Kind::Item
+        } else {
+            Kind::Text
+        }
+    }
+
+    /// The elements of `lines`, each read whole. In a list item (`tight`) a first paragraph is
+    /// the item's text, as a tight markdown list's is.
+    fn blocks(&mut self, lines: &[Range<usize>], mut tight: bool) {
+        let mut i = 0;
+        while i < lines.len() {
+            let blank = matches!(self.kind(lines, i), Kind::Blank | Kind::Hidden);
+            i = self.block(lines, i, tight);
+            tight &= blank;
+        }
+    }
+
+    /// The element `lines[i]` opens, and the index of the line after it.
+    fn block(&mut self, lines: &[Range<usize>], i: usize, tight: bool) -> usize {
+        let text = self.text;
+        let span = |a: usize, b: usize| lines[a].start..lines[b].end;
+        match self.kind(lines, i) {
+            Kind::Blank | Kind::Hidden => i + 1,
+            Kind::Heading => {
+                self.heading(lines, i);
+                i + 1
+            }
+            Kind::Closed(last, Style::CodeBlock) => {
+                let words: Vec<&str> = text[lines[i].clone()].trim()[8..]
+                    .split_whitespace()
+                    .take(2)
+                    .collect();
+                let kind = match words[..] {
+                    [name, lang, ..] if name.eq_ignore_ascii_case("src") => {
+                        CodeBlockKind::Fenced(lang.into())
+                    }
+                    [name, ..]
+                        if ["src", "example"]
+                            .iter()
+                            .any(|v| name.eq_ignore_ascii_case(v)) =>
+                    {
+                        CodeBlockKind::Indented
+                    }
+                    // An export or a comment block shows nothing.
+                    _ => return last + 1,
+                };
+                self.code(kind, &lines[i + 1..last], span(i, last));
+                last + 1
+            }
+            Kind::Closed(last, _) => last + 1,
+            Kind::Quote(last) => {
+                let bytes = span(i, last);
+                self.open(Cm::BlockQuote(None), bytes.clone());
+                self.blocks(&lines[i + 1..last], false);
+                self.close(TagEnd::BlockQuote(None), bytes);
+                last + 1
+            }
+            Kind::Fixed => {
+                let end = (i..lines.len())
+                    .find(|&j| !matches!(self.kind(lines, j), Kind::Fixed))
+                    .unwrap_or(lines.len());
+                // What follows each line's `:` and the space after it.
+                let body: Vec<Range<usize>> = lines[i..end]
+                    .iter()
+                    .map(|l| {
+                        let s = &text[l.clone()];
+                        let colon = l.start + s.len() - s.trim_start().len() + 1;
+                        (colon + 1).min(l.end)..l.end
+                    })
+                    .collect();
+                self.code(CodeBlockKind::Indented, &body, span(i, end - 1));
+                end
+            }
+            Kind::Table => {
+                let end = (i..lines.len())
+                    .find(|&j| !matches!(self.kind(lines, j), Kind::Table))
+                    .unwrap_or(lines.len());
+                self.table(&lines[i..end]);
+                end
+            }
+            Kind::Rule => {
+                self.push(Node::Event(Event::Rule), lines[i].clone());
+                i + 1
+            }
+            Kind::Footnote(label) => {
+                let end = self.paragraph_end(lines, i);
+                let bytes = span(i, end - 1);
+                let name: CowStr = text[label.start + 4..label.end - 1].into();
+                self.push(
+                    Node::Event(Event::Start(Cm::FootnoteDefinition(name))),
+                    bytes.clone(),
+                );
+                let body = label.end + text[label.end..bytes.end].len()
+                    - text[label.end..bytes.end].trim_start().len();
+                self.paragraph(body..bytes.end, false);
+                self.close(TagEnd::FootnoteDefinition, bytes);
+                end
+            }
+            Kind::Item => self.list(lines, i),
+            Kind::Text => {
+                let end = self.paragraph_end(lines, i);
+                self.paragraph(span(i, end - 1), tight);
+                end
+            }
+        }
+    }
+
+    /// The line after the paragraph starting at `lines[i]`: the next that is blank or opens
+    /// something else.
+    fn paragraph_end(&self, lines: &[Range<usize>], i: usize) -> usize {
+        (i + 1..lines.len())
+            .find(|&j| !matches!(self.kind(lines, j), Kind::Text))
+            .unwrap_or(lines.len())
+    }
+
+    fn paragraph(&mut self, bytes: Range<usize>, tight: bool) {
+        if tight {
+            return self.inline(bytes);
+        }
+        self.open(Cm::Paragraph, bytes.clone());
+        self.inline(bytes.clone());
+        self.close(TagEnd::Paragraph, bytes);
+    }
+
+    /// A heading: its TODO keyword, its title and its tags, as links to the tag's notes; a
+    /// property drawer under it gives it its `CUSTOM_ID`.
+    fn heading(&mut self, lines: &[Range<usize>], i: usize) {
+        let text = self.text;
+        let line = lines[i].clone();
+        let Some(head) = heading(text, line.clone(), &self.keywords) else {
+            return;
+        };
+        let level =
+            HeadingLevel::try_from(usize::from(head.level).min(6)).unwrap_or(HeadingLevel::H6);
+        self.headings
+            .push((self.nodes.len(), text[head.title.clone()].to_string()));
+        let start = Cm::Heading {
+            level,
+            id: None,
+            classes: Vec::new(),
+            attrs: Vec::new(),
+        };
+        self.push(Node::Event(Event::Start(start)), line.clone());
+        let id = custom_id(text, lines, i + 1).map(str::to_string);
+        self.line(line.clone(), id);
+        if let Some((at, done)) = head.keyword {
+            let keyword = Node::Keyword {
+                text: text[at.clone()].into(),
+                done,
+            };
+            self.push(keyword, at);
+            if !head.title.is_empty() {
+                self.push(Node::Event(Event::Text(" ".into())), line.clone());
+            }
+        }
+        self.inline(head.title);
+        for tag in head.tags {
+            self.push(Node::Event(Event::Text(" ".into())), line.clone());
+            let shown = text[tag.range.clone()].into();
+            self.push(
+                Node::Tag {
+                    name: tag.name,
+                    text: shown,
+                },
+                tag.range,
+            );
+        }
+        self.close(TagEnd::Heading(level), line);
+    }
+
+    /// A block of code: each line of `body` less the indentation they share, and less the comma
+    /// org escapes a `*` or a `#+` at the start of a line with.
+    fn code(&mut self, kind: CodeBlockKind<'a>, body: &[Range<usize>], bytes: Range<usize>) {
+        let text = self.text;
+        let indent = body
+            .iter()
+            .map(|l| &text[l.clone()])
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| s.len() - s.trim_start().len())
+            .min()
+            .unwrap_or(0);
+        self.open(Cm::CodeBlock(kind), bytes.clone());
+        for l in body {
+            let mut at = (l.start + indent).min(l.end);
+            let s = &text[at..l.end];
+            let lead = s.len() - s.trim_start().len();
+            if s[lead..].starts_with(",*") || s[lead..].starts_with(",#+") {
+                if lead > 0 {
+                    self.push(
+                        Node::Event(Event::Text(text[at..at + lead].into())),
+                        l.clone(),
+                    );
+                }
+                at += lead + 1;
+            }
+            let shown = format!("{}\n", &text[at..l.end]);
+            self.push(Node::Event(Event::Text(shown.into())), l.clone());
+        }
+        self.close(TagEnd::CodeBlock, bytes);
+    }
+
+    /// A table: rows of cells split on `|`, its first hline closing the header where rows follow
+    /// it, as org exports one; an hline and a row of alignment cookies show nothing, the cookies
+    /// aligning their columns as a column of numbers is aligned (`super::table`).
+    fn table(&mut self, rows: &[Range<usize>]) {
+        let text = self.text;
+        let bytes = rows[0].start..rows[rows.len() - 1].end;
+        let hline = |r: &Range<usize>| text[r.clone()].trim_start().starts_with("|-");
+        let read: Vec<(Vec<Cell>, bool)> = rows
+            .iter()
+            .map(|r| (split(&text[r.clone()], false).unwrap_or_default(), hline(r)))
+            .collect();
+        let aligns: Vec<Alignment> = aligns(&read)
+            .into_iter()
+            .map(|a| match a {
+                Align::None => Alignment::None,
+                Align::Left => Alignment::Left,
+                Align::Center => Alignment::Center,
+                Align::Right => Alignment::Right,
+            })
+            .collect();
+        let shown: Vec<Option<Vec<Range<usize>>>> = rows
+            .iter()
+            .map(|r| {
+                let cells = cells(text, r.clone());
+                let special = cells
+                    .iter()
+                    .all(|c| c.is_empty() || is_cookie(&text[c.clone()]));
+                (!hline(r) && !special).then_some(cells)
+            })
+            .collect();
+        // A header is the rows above the first hline that has rows below it.
+        let rule = shown
+            .iter()
+            .position(Option::is_some)
+            .and_then(|first| (first..rows.len()).find(|&j| hline(&rows[j])))
+            .filter(|&j| shown[j..].iter().any(Option::is_some));
+        let columns = aligns.len();
+        self.open(Cm::Table(aligns), bytes.clone());
+        // A table without a header has an empty one, after which the writer opens its body.
+        self.push(Node::Event(Event::Start(Cm::TableHead)), bytes.clone());
+        let mut head = rule.is_some();
+        if !head {
+            self.close(TagEnd::TableHead, bytes.clone());
+        }
+        for (j, cells) in shown.iter().enumerate() {
+            let Some(cells) = cells else { continue };
+            if !head {
+                self.push(Node::Event(Event::Start(Cm::TableRow)), rows[j].clone());
+            }
+            for k in 0..columns {
+                self.push(Node::Event(Event::Start(Cm::TableCell)), rows[j].clone());
+                if let Some(cell) = cells.get(k) {
+                    self.inline(cell.clone());
+                }
+                self.close(TagEnd::TableCell, rows[j].clone());
+            }
+            match head {
+                true => {
+                    self.close(TagEnd::TableHead, rows[j].clone());
+                    head = false;
+                }
+                false => self.close(TagEnd::TableRow, rows[j].clone()),
+            }
+        }
+        self.close(TagEnd::Table, bytes);
+    }
+
+    /// The list whose first item is `lines[i]`, and the index of the line after it: its items are
+    /// at that item's indentation, each running on over the lines indented more, a list ending at
+    /// a line indented no more that is no item, or at two blank lines. Its first item decides
+    /// whether it is ordered, or a description list (`- term :: description`).
+    fn list(&mut self, lines: &[Range<usize>], i: usize) -> usize {
+        let text = self.text;
+        let indent = |j: usize| indentation(text, lines[j].clone());
+        let ind = indent(i);
+        let mut items = Vec::new();
+        let mut j = i;
+        let end = loop {
+            let (mut k, mut blanks) = (j + 1, 0);
+            while k < lines.len() {
+                if text[lines[k].clone()].trim().is_empty() {
+                    blanks += 1;
+                    if blanks == 2 {
+                        break;
+                    }
+                } else if indent(k) <= ind {
+                    break;
+                } else {
+                    blanks = 0;
+                }
+                k += 1;
+            }
+            let last = (j..k)
+                .rev()
+                .find(|&l| !text[lines[l].clone()].trim().is_empty())
+                .unwrap_or(j);
+            items.push(j..last + 1);
+            let sibling = k < lines.len()
+                && blanks < 2
+                && indent(k) == ind
+                && matches!(self.kind(lines, k), Kind::Item);
+            match sibling {
+                true => j = k,
+                false => break last + 1,
+            }
+        };
+        let bytes = lines[i].start..lines[end - 1].end;
+        let (ordered, body) = bullet(text, lines[i].clone()).unwrap_or_default();
+        let described = ordered.is_none() && term(text, body..lines[i].end).is_some();
+        let list = match described {
+            true => Cm::DefinitionList,
+            false => Cm::List(ordered),
+        };
+        self.push(Node::Event(Event::Start(list)), bytes.clone());
+        for item in items {
+            self.item(&lines[item], described);
+        }
+        let end_tag = match described {
+            true => TagEnd::DefinitionList,
+            false => TagEnd::List(ordered.is_some()),
+        };
+        self.close(end_tag, bytes);
+        end
+    }
+
+    /// One item of a list: its box, as a task's, or its term, then what it holds.
+    fn item(&mut self, lines: &[Range<usize>], described: bool) {
+        let text = self.text;
+        let first = lines[0].clone();
+        let bytes = first.start..lines[lines.len() - 1].end;
+        let Some((_, mut body)) = bullet(text, first.clone()) else {
+            return;
+        };
+        let rest = |body: usize| -> Vec<Range<usize>> {
+            std::iter::once(body..first.end)
+                .chain(lines[1..].iter().cloned())
+                .collect()
+        };
+        if described {
+            if let Some((term, after)) = term(text, body..first.end) {
+                self.open(Cm::DefinitionListTitle, bytes.clone());
+                self.inline(term);
+                self.close(TagEnd::DefinitionListTitle, bytes.clone());
+                body = after;
+                self.push(
+                    Node::Event(Event::Start(Cm::DefinitionListDefinition)),
+                    bytes.clone(),
+                );
+            } else {
+                self.open(Cm::DefinitionListDefinition, bytes.clone());
+            }
+            self.blocks(&rest(body), true);
+            return self.close(TagEnd::DefinitionListDefinition, bytes);
+        }
+        let tick = checkbox(text, body..first.end);
+        match tick {
+            Some(_) => self.push(Node::TaskItem, bytes.clone()),
+            None => self.push(Node::Event(Event::Start(Cm::Item)), bytes.clone()),
+        }
+        self.line(bytes.clone(), None);
+        if let Some((tick, after)) = tick {
+            let node = match tick {
+                '-' => Node::TaskDoing,
+                c => Node::Event(Event::TaskListMarker(c != ' ')),
+            };
+            self.push(node, body..after);
+            body = after;
+        }
+        self.blocks(&rest(body), true);
+        self.close(TagEnd::Item, bytes);
+    }
+
+    /// The objects of the prose at `at`, over one line or several: emphasis, code, links,
+    /// pictures, formulas, footnote references, `<<targets>>`, sub- and superscripts in braces,
+    /// and the text between them.
+    fn inline(&mut self, at: Range<usize>) {
+        let text = self.text;
+        let b = text.as_bytes();
+        let (mut run, mut i, mut eol) = (at.start, at.start, at.start);
+        while i < at.end {
+            // Where the line ends: a link is on one.
+            if i >= eol {
+                eol = b[i..at.end]
+                    .iter()
+                    .position(|&c| c == b'\n')
+                    .map_or(at.end, |n| i + n);
+            }
+            let before = run..i;
+            let found = match b[i] {
+                b'[' => super::links::bracket(text, i, eol)
+                    .map(Found::Link)
+                    .or_else(|| footnote(text, i).map(Found::Footnote)),
+                b'<' if b.get(i + 1) == Some(&b'<') => target(text, i, eol).map(Found::Target),
+                b'<' => super::links::angle(text, i, eol).map(Found::Link),
+                b'\\' => latex(text, i, at.end).map(Found::Math),
+                b'$' => dollars(text, i, at.end).map(Found::Math),
+                c @ (b'_' | b'^') if b.get(i + 1) == Some(&b'{') && i > at.start => {
+                    script(text, i, eol).map(|r| Found::Script(c == b'^', r))
+                }
+                _ => None,
+            };
+            let found = found.or_else(|| match b[i] {
+                c @ (b'=' | b'~' | b'*' | b'/' | b'_' | b'+') => {
+                    emphasis(text, at.start, i, at.end).map(|end| Found::Emphasis(c, i..end))
+                }
+                c if c.is_ascii_alphabetic()
+                    && (i == at.start || !b[i - 1].is_ascii_alphanumeric()) =>
+                {
+                    super::links::plain(text, i, eol).map(Found::Link)
+                }
+                _ => None,
+            });
+            let Some(found) = found else {
+                i += 1;
+                continue;
+            };
+            self.plain(before);
+            i = self.object(found);
+            run = i;
+        }
+        self.plain(run..at.end);
+    }
+
+    /// The nodes of an object [`Page::inline`] found, and where it ends.
+    fn object(&mut self, found: Found) -> usize {
+        let text = self.text;
+        match found {
+            Found::Link(link) => {
+                let end = link.range.end;
+                self.link(&link);
+                end
+            }
+            Found::Footnote(r) => {
+                let name: CowStr = text[r.start + 4..r.end - 1].into();
+                self.push(Node::Event(Event::FootnoteReference(name)), r.clone());
+                r.end
+            }
+            Found::Target((r, name)) => {
+                self.targets.push(name.clone());
+                self.push(Node::Anchor(name), r.clone());
+                r.end
+            }
+            Found::Math((r, tex, display)) => {
+                self.push(math(text[tex].into(), display), r.clone());
+                r.end
+            }
+            Found::Script(up, r) => {
+                let (start, end) = match up {
+                    true => (Cm::Superscript, TagEnd::Superscript),
+                    false => (Cm::Subscript, TagEnd::Subscript),
+                };
+                self.push(Node::Event(Event::Start(start)), r.clone());
+                self.inline(r.start + 2..r.end - 1);
+                self.close(end, r.clone());
+                r.end
+            }
+            Found::Emphasis(c, r) => {
+                let inner = r.start + 1..r.end - 1;
+                let (start, end) = match c {
+                    b'=' | b'~' => {
+                        self.push(Node::Event(Event::Code(text[inner].into())), r.clone());
+                        return r.end;
+                    }
+                    b'*' => (
+                        Node::Event(Event::Start(Cm::Strong)),
+                        Node::Event(Event::End(TagEnd::Strong)),
+                    ),
+                    b'/' => (
+                        Node::Event(Event::Start(Cm::Emphasis)),
+                        Node::Event(Event::End(TagEnd::Emphasis)),
+                    ),
+                    b'_' => (Node::Underline, Node::UnderlineEnd),
+                    _ => (
+                        Node::Event(Event::Start(Cm::Strikethrough)),
+                        Node::Event(Event::End(TagEnd::Strikethrough)),
+                    ),
+                };
+                self.push(start, r.clone());
+                self.inline(inner);
+                self.push(end, r.clone());
+                r.end
+            }
+        }
+    }
+
+    /// A link as org shows it: a web address and a file as links, the file by its path from the
+    /// file's folder as a markdown link's is, a picture with no description in place, a heading,
+    /// a custom ID or a `<<target>>` of the file as a link into the page; anything else (an `id:`
+    /// link, `elisp:`, an absolute path) its text alone. Without a description a link shows its
+    /// address, path or name.
+    fn link(&mut self, link: &OrgLink) {
+        let text = self.text;
+        let r = link.range.clone();
+        let Some(read) = link.to_link(text) else {
+            return match link.desc.clone() {
+                Some(desc) => self.inline(desc),
+                None => self.plain(link.link.clone()),
+            };
+        };
+        let anchor = read.anchor.as_deref();
+        let dest = match read.kind {
+            LinkKind::External => read.target.clone(),
+            LinkKind::Markdown
+                if link.desc.is_none() && anchor.is_none() && is_image(&read.target) =>
+            {
+                let image = Cm::Image {
+                    link_type: LinkType::Inline,
+                    dest_url: percent_encode(&read.target).into(),
+                    title: "".into(),
+                    id: "".into(),
+                };
+                self.push(Node::Event(Event::Start(image)), r.clone());
+                return self.close(TagEnd::Image, r);
+            }
+            LinkKind::Markdown => match anchor {
+                Some(a) => format!("{}#{}", percent_encode(&read.target), percent_encode(a)),
+                None => percent_encode(&read.target),
+            },
+            _ => match anchor.map(Search::of) {
+                Some(Search::CustomId(id)) => format!("#{}", percent_encode(id)),
+                Some(Search::Name(name)) => {
+                    self.named.push((self.nodes.len(), name.to_string()));
+                    format!("#{}", percent_encode(name))
+                }
+                _ => {
+                    return match link.desc.clone() {
+                        Some(desc) => self.inline(desc),
+                        None => self.plain(link.link.clone()),
+                    };
+                }
+            },
+        };
+        let start = Cm::Link {
+            link_type: LinkType::Inline,
+            dest_url: dest.into(),
+            title: "".into(),
+            id: "".into(),
+        };
+        self.push(Node::Event(Event::Start(start)), r.clone());
+        match link.desc.clone() {
+            Some(desc) => self.inline(desc),
+            None => {
+                let shown = match read.kind {
+                    LinkKind::Wiki => anchor.unwrap_or_default().to_string(),
+                    _ => read.target,
+                };
+                self.push(Node::Event(Event::Text(shown.into())), r.clone());
+            }
+        }
+        self.close(TagEnd::Link, r);
+    }
+
+    /// Text as written, a line break a soft one and the next line's indentation gone.
+    fn plain(&mut self, at: Range<usize>) {
+        let text = self.text;
+        let mut start = at.start;
+        for (n, piece) in text[at.clone()].split('\n').enumerate() {
+            let r = start..start + piece.len();
+            start = r.end + 1;
+            let mut shown = &text[r.clone()];
+            if n > 0 {
+                self.push(Node::Event(Event::SoftBreak), r.clone());
+                shown = shown.trim_start();
+            }
+            if r.end < at.end {
+                shown = shown.trim_end();
+            }
+            if !shown.is_empty() {
+                self.push(Node::Event(Event::Text(shown.into())), r);
+            }
+        }
+    }
+}
+
+/// An object [`Page::inline`] found.
+enum Found {
+    Link(OrgLink),
+    /// `[fn:label]`.
+    Footnote(Range<usize>),
+    Target((Range<usize>, String)),
+    /// The whole formula, its LaTeX, and whether it is shown on a line of its own.
+    Math((Range<usize>, Range<usize>, bool)),
+    /// `^{…}` or `_{…}`, and whether it is a superscript.
+    Script(bool, Range<usize>),
+    Emphasis(u8, Range<usize>),
+}
+
+/// The last line of the quote block opening on `lines[i]`, before the next heading.
+fn quote(text: &str, lines: &[Range<usize>], i: usize) -> Option<usize> {
+    let at = |j: usize| text[lines[j].clone()].trim();
+    let open = at(i).get(..13)?;
+    if !open.eq_ignore_ascii_case("#+begin_quote")
+        || at(i).len() > 13 && !at(i)[13..].starts_with(' ')
+    {
+        return None;
+    }
+    (i + 1..lines.len())
+        .take_while(|&j| !is_heading(&text[lines[j].clone()]))
+        .find(|&j| at(j).eq_ignore_ascii_case("#+end_quote"))
+}
+
+/// The value of the `CUSTOM_ID` in the property drawer opening on `lines[i]`.
+fn custom_id<'a>(text: &'a str, lines: &[Range<usize>], i: usize) -> Option<&'a str> {
+    let opens = text[lines.get(i)?.clone()]
+        .trim()
+        .eq_ignore_ascii_case(":PROPERTIES:");
+    let (last, _) = closed(text, lines, i).filter(|_| opens)?;
+    lines[i + 1..last].iter().find_map(|l| {
+        let s = text[l.clone()].trim();
+        s.get(..11)
+            .filter(|key| key.eq_ignore_ascii_case(":CUSTOM_ID:"))
+            .map(|_| s[11..].trim())
+            .filter(|id| !id.is_empty())
+    })
+}
+
+/// The number an ordered list item on `line` counts from, and where its text starts past its
+/// bullet or counter; `None` for a line that is no item. A `*` at the start of a line opens a
+/// heading, so a `*` bullet is indented, as the editor reads one.
+fn bullet(text: &str, line: Range<usize>) -> Option<(Option<u64>, usize)> {
+    let s = &text[line.clone()];
+    let lead = s.len() - s.trim_start_matches([' ', '\t']).len();
+    let rest = &s[lead..];
+    let (len, number) = match rest.bytes().next()? {
+        b'-' | b'+' => (1, None),
+        b'*' if indentation(text, line.clone()) > 0 => (1, None),
+        _ => {
+            let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+            match rest.as_bytes().get(digits) {
+                Some(b'.' | b')') if digits > 0 => (digits + 1, rest[..digits].parse().ok()),
+                _ => return None,
+            }
+        }
+    };
+    let after = &rest[len..];
+    if !(after.is_empty() || after.starts_with([' ', '\t'])) {
+        return None;
+    }
+    let at = line.start + lead + len;
+    Some((number, at + after.len() - after.trim_start().len()))
+}
+
+/// How far `line` is indented, from the start of the line it is on.
+fn indentation(text: &str, line: Range<usize>) -> usize {
+    let start = text[..line.start].rfind('\n').map_or(0, |n| n + 1);
+    let s = &text[start..line.end];
+    s.len() - s.trim_start().len()
+}
+
+/// An item's checkbox at the start of `at`, `[ ]`, `[-]` or `[X]`: its tick and where the text
+/// after it starts.
+fn checkbox(text: &str, at: Range<usize>) -> Option<(char, usize)> {
+    let s = &text[at.clone()];
+    let tick = s.strip_prefix('[')?.chars().next()?;
+    let after = s.get(3..)?;
+    (matches!(tick, ' ' | '-' | 'X' | 'x')
+        && s.get(2..3) == Some("]")
+        && after.chars().next().is_none_or(char::is_whitespace))
+    .then(|| (tick, at.start + 3 + after.len() - after.trim_start().len()))
+}
+
+/// A description item's term, `term :: description` at `at`, and where its description starts.
+fn term(text: &str, at: Range<usize>) -> Option<(Range<usize>, usize)> {
+    let s = &text[at.clone()];
+    let sep = s
+        .match_indices(" ::")
+        .map(|(i, _)| i)
+        .find(|&i| s[i + 3..].chars().next().is_none_or(char::is_whitespace))?;
+    let after = &s[sep + 3..];
+    Some((
+        at.start..at.start + s[..sep].trim_end().len(),
+        at.start + sep + 3 + after.len() - after.trim_start().len(),
+    ))
+}
+
+/// `[fn:label]` at `i`: a footnote's reference, or at the start of a line its definition.
+fn footnote(text: &str, i: usize) -> Option<Range<usize>> {
+    let rest = text[i..].strip_prefix("[fn:")?;
+    let len = rest
+        .bytes()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+        .count();
+    (len > 0 && rest[len..].starts_with(']')).then(|| i..i + 4 + len + 1)
+}
+
+/// The cells of the table row at `row`, each without the blanks around it.
+fn cells(text: &str, row: Range<usize>) -> Vec<Range<usize>> {
+    let s = &text[row.clone()];
+    let start = row.start + s.len() - s.trim_start().len() + 1;
+    let end = row.start + s.trim_end().len();
+    let end = end - usize::from(end > start && text.as_bytes()[end - 1] == b'|');
+    let mut out = Vec::new();
+    let mut from = start;
+    for piece in text[start..end.max(start)].split('|') {
+        let lead = piece.len() - piece.trim_start().len();
+        out.push(from + lead..from + piece.trim_end().len());
+        from += piece.len() + 1;
+    }
+    out
+}
+
+/// Whether a cell is an alignment or a width cookie, `<r>`, `<l10>`, `<10>`: a row of them is
+/// org's own and not shown.
+fn is_cookie(cell: &str) -> bool {
+    cookie(cell).is_some()
+        || cell
+            .strip_prefix('<')
+            .and_then(|c| c.strip_suffix('>'))
+            .is_some_and(|w| !w.is_empty() && w.bytes().all(|c| c.is_ascii_digit()))
+}
+
+/// `\(…\)` or `\[…\]` at `i`: the formula, its LaTeX, and whether it is on a line of its own.
+fn latex(text: &str, i: usize, end: usize) -> Option<(Range<usize>, Range<usize>, bool)> {
+    let rest = &text[i..end];
+    let (close, display) = match rest.get(..2)? {
+        "\\(" => ("\\)", false),
+        "\\[" => ("\\]", true),
+        _ => return None,
+    };
+    let len = rest[2..].find(close)?;
+    (len > 0).then(|| (i..i + len + 4, i + 2..i + 2 + len, display))
+}
+
+/// `$$…$$` or `$…$` at `i`, by org's rules for the single one: not after a `$`, its first
+/// character no blank, `.`, `,`, `;` or `$`, its last no blank, `.`, `,` or `$`, and a blank,
+/// punctuation or the end after it, so `$5 and $10` stays text.
+fn dollars(text: &str, i: usize, end: usize) -> Option<(Range<usize>, Range<usize>, bool)> {
+    let b = text.as_bytes();
+    if i > 0 && b[i - 1] == b'$' {
+        return None;
+    }
+    if text[i..end].starts_with("$$") {
+        let len = text[i + 2..end].find("$$")?;
+        return (len > 0).then(|| (i..i + len + 4, i + 2..i + 2 + len, true));
+    }
+    let first = *b.get(i + 1).filter(|_| i + 1 < end)?;
+    if first.is_ascii_whitespace() || b".,;$".contains(&first) {
+        return None;
+    }
+    let close = i + 1 + text[i + 1..end].find('$')?;
+    let last = b[close - 1];
+    let after = b.get(close + 1).filter(|_| close + 1 < end);
+    let ends = after.is_none_or(|c| c.is_ascii_whitespace() || c.is_ascii_punctuation());
+    (!last.is_ascii_whitespace() && !b".,$".contains(&last) && ends)
+        .then(|| (i..close + 1, i + 1..close, false))
+}
+
+/// `^{…}` or `_{…}` at `i`, after a character that is no blank, within the line ending at `eol`.
+fn script(text: &str, i: usize, eol: usize) -> Option<Range<usize>> {
+    if text.as_bytes()[i - 1].is_ascii_whitespace() {
+        return None;
+    }
+    let len = text[i + 2..eol].find('}')?;
+    (len > 0).then(|| i..i + 2 + len + 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ORG: &str = "#+TITLE: Fixture
+#+FILETAGS: :f:
+#+TODO: TODO NEXT | DONE
+* NEXT [#A] COMMENT Plan :work:urgent:
+:PROPERTIES:
+:CUSTOM_ID: plan-id
+:END:
+Some *bold*, /it/, _under_, +gone+, =verb=, ~code~, x^{2} and H_{2}O.
+See [[file:sub/a.org::*Intro][the intro]], [[https://orgmode.org][Org]], <https://x.org>,
+[[*Plan]], [[here]], [[#plan-id]] and [[id:1234][by id]].
+<<here>> \\(a+b\\) and $c$ cost $5 and $10.
+\\[
+x^2
+\\]
+[[file:fig.png]]
+# a comment
+#+begin_src python :results output
+  ,* not a heading
+  x = 1
+#+end_src
+#+begin_example
+raw *text*
+#+end_example
+#+begin_quote
+Quoted /words/.
+#+end_quote
+| <r>  |     |
+| Name | Qty |
+|------+-----|
+| tea  | 12  |
+
+- [X] done
+- [-] doing
+- [ ] open
+  + nested
+
+Then:
+1. first
+2. second
+
+Terms:
+- term :: meaning
+Note.[fn:1]
+
+[fn:1] The footnote.
+* DONE Shipped
+";
+
+    /// The page's HTML without the preview's line markers, which are tested on their own.
+    fn bare(text: &str) -> String {
+        let mut out = to_html(text);
+        while let Some(i) = out.find("<span data-line=\"") {
+            let j = out[i..].find("></span>").unwrap() + i + "></span>".len();
+            let id = out[i..j]
+                .find(" id=")
+                .map(|k| format!("<span{}", &out[i + k..j]));
+            out.replace_range(i..j, &id.unwrap_or_default());
+        }
+        out
+    }
+
+    #[test]
+    fn an_org_file_shows_as_its_page() {
+        let h = bare(ORG);
+        for want in [
+            "<h1 id=\"plan\"><span id=\"plan-id\"></span><span class=\"todo\">NEXT</span> Plan \
+             <a href=\"accent://tag/work\" class=\"tag\">work</a> \
+             <a href=\"accent://tag/urgent\" class=\"tag\">urgent</a></h1>",
+            "<p>Some <strong>bold</strong>, <em>it</em>, <u>under</u>, <del>gone</del>, \
+             <code>verb</code>, <code>code</code>, x<sup>2</sup> and H<sub>2</sub>O.\n",
+            "<a href=\"sub/a.org#Intro\">the intro</a>",
+            "<a href=\"https://orgmode.org\">Org</a>",
+            "<a href=\"https://x.org\">https://x.org</a>",
+            "<a href=\"#plan\">Plan</a>, <a href=\"#here\">here</a>, \
+             <a href=\"#plan-id\">#plan-id</a> and by id.",
+            "<span id=\"here\"></span> <math",
+            " cost $5 and $10.",
+            "<math display=\"block\">",
+            "<img src=\"fig.png\" alt=\"\" />",
+            "<pre><code class=\"language-python\">* not a heading\nx = 1\n</code></pre>",
+            "<pre><code>raw *text*\n</code></pre>",
+            "<p>Quoted <em>words</em>.</p>\n</blockquote>",
+            "<table><thead><tr><th style=\"text-align: right\">Name</th>\
+             <th style=\"text-align: right\">Qty</th></tr></thead><tbody>\n\
+             <tr><td style=\"text-align: right\">tea</td>",
+            "<li class=\"task-list-item\"><input disabled=\"\" type=\"checkbox\" checked=\"\"/>\ndone</li>",
+            "<input disabled=\"\" type=\"checkbox\" class=\"in-progress\"/>\ndoing</li>",
+            "<input disabled=\"\" type=\"checkbox\"/>\nopen\n<ul>\n<li>nested</li>",
+            "<ol>\n<li>first</li>\n<li>second</li>\n</ol>",
+            "<dl>\n<dt>term</dt>\n<dd>meaning</dd>\n</dl>",
+            "<p>Note.<sup class=\"footnote-reference\"><a href=\"#1\">1</a></sup></p>",
+            "<div class=\"footnote-definition\" id=\"1\"><sup class=\"footnote-definition-label\">1</sup>\n\
+             <p>The footnote.</p>",
+            "<h1 id=\"shipped\"><span class=\"done\">DONE</span> Shipped</h1>",
+        ] {
+            assert!(h.contains(want), "{want}\nin\n{h}");
+        }
+        for hidden in [
+            "Fixture",
+            "FILETAGS",
+            "PROPERTIES",
+            "[#A]",
+            "COMMENT",
+            "a comment",
+            "results",
+            "&lt;r&gt;",
+            "c$",
+        ] {
+            assert!(!h.contains(hidden), "{hidden} in\n{h}");
+        }
+        // A link leaves the vault behind in an exported file, its text staying.
+        let file = to_html_file(ORG, "Notes/x.org");
+        assert!(
+            file.contains("the intro") && !file.contains("sub/a.org"),
+            "{file}"
+        );
+        assert!(
+            file.contains("src=\"accent://file/Notes/fig.png\""),
+            "{file}"
+        );
+    }
+
+    /// Every block is the bytes and lines of an element, on character boundaries whatever the
+    /// text, with each line marker on its element's first line.
+    #[test]
+    fn every_block_is_on_its_lines() {
+        let blocks = page(ORG);
+        let first = |b: &Block| {
+            ORG[b.bytes.clone()]
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        };
+        let heads: Vec<String> = blocks.iter().map(first).collect();
+        assert_eq!(heads[0], "* NEXT [#A] COMMENT Plan :work:urgent:");
+        assert_eq!(blocks[0].lines, 4..5);
+        assert!(heads.contains(&"| <r>  |     |".to_string()), "{heads:?}");
+        for (s, sample) in [("é", 0), ("中", 1), ("🎉", 2)] {
+            let doc = ORG.replace(['a', 'e', 'o'], s);
+            for b in page(&doc) {
+                assert!(
+                    doc.is_char_boundary(b.bytes.start) && doc.is_char_boundary(b.bytes.end),
+                    "{sample}: {:?}",
+                    b.bytes
+                );
+            }
+        }
+    }
+}

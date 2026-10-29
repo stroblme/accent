@@ -9,11 +9,13 @@
 //! styled as a note is: the content in its style, the syntax around it dimmed as [`Style::Marker`].
 
 mod links;
+mod page;
 mod search;
 mod table;
 mod task;
 
 pub use links::{link, path_link_keys, rewrite_moved};
+pub use page::{page, to_html, to_html_file};
 pub use search::{Search, file_line};
 pub use table::table_key;
 pub use task::toggle_task;

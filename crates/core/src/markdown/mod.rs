@@ -20,6 +20,8 @@ mod uri;
 
 pub use blocks::{BlockId, block_ids};
 pub use frontmatter::is_tag_char;
+/// What an org page is built and written with (`crate::org`).
+pub(crate) use html::{Mode, write};
 pub use html::{math_errors, mathml, to_html, to_html_file};
 /// What org's file links share with a markdown link's path (`crate::org`).
 pub(crate) use links::{Moved, path_key};
@@ -29,6 +31,7 @@ pub use links::{
     rewrite_moved, section, section_end, section_in, slugs, strip_ext,
 };
 pub use page::{Block, Node, Side, page};
+pub(crate) use page::{Part, cut, math, parts};
 /// What an org table shares with a pipe table's layout (`crate::org`).
 pub(crate) use table::{Align, Cell, Rules, Table, split};
 pub use table::{TableEdit, TableKey, table_key};

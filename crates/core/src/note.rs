@@ -28,6 +28,30 @@ impl Syntax {
         }
     }
 
+    /// The blocks `text`'s page shows ([`markdown::page`]).
+    pub fn page(self, text: &str) -> Vec<markdown::Block<'_>> {
+        match self {
+            Syntax::Markdown => markdown::page(text),
+            Syntax::Org => org::page(text),
+        }
+    }
+
+    /// The preview's HTML of `text` ([`markdown::to_html`]).
+    pub fn to_html(self, text: &str) -> String {
+        match self {
+            Syntax::Markdown => markdown::to_html(text),
+            Syntax::Org => org::to_html(text),
+        }
+    }
+
+    /// `text`, the note at `rel`, as an exported file holds it ([`markdown::to_html_file`]).
+    pub fn to_html_file(self, text: &str, rel: &str) -> String {
+        match self {
+            Syntax::Markdown => markdown::to_html_file(text, rel),
+            Syntax::Org => org::to_html_file(text, rel),
+        }
+    }
+
     /// The blocks of code `text` names a language for ([`markdown::code_blocks`]).
     pub fn code_blocks(self, text: &str) -> Vec<markdown::CodeBlock> {
         match self {

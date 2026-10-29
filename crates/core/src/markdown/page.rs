@@ -5,7 +5,7 @@
 //! The page is the same for every reader: [`super::to_html`] and [`super::to_html_file`] write
 //! it out, each by its own rules, and the native preview draws it, redrawing only the blocks an
 //! edit changed. [`parts`], [`cut`], [`math`] and [`picture`] know no markdown, so another syntax
-//! (org) builds the same blocks.
+//! (org, `crate::org::page`) builds the same blocks.
 
 use super::blocks::block_ids;
 use super::frontmatter::scan_tags;
@@ -99,6 +99,13 @@ pub enum Node<'a> {
     /// Underlined text (org's `_text_`), up to a [`Node::UnderlineEnd`].
     Underline,
     UnderlineEnd,
+    /// An org heading's TODO keyword as written, and whether it is a done one.
+    Keyword {
+        text: CowStr<'a>,
+        done: bool,
+    },
+    /// Where an org `<<target>>` is, by its name as written: what a link to it lands on.
+    Anchor(String),
     /// A conflict block: its sides top to bottom, up to a [`Node::ConflictEnd`].
     Conflict,
     /// A side of a conflict block, under its marker's label on line `at` of the block; its
@@ -152,6 +159,11 @@ impl Node<'_> {
             Node::CalloutTitle(title) => Node::CalloutTitle(title),
             Node::Underline => Node::Underline,
             Node::UnderlineEnd => Node::UnderlineEnd,
+            Node::Keyword { text, done } => Node::Keyword {
+                text: text.into_static(),
+                done,
+            },
+            Node::Anchor(name) => Node::Anchor(name),
             Node::Conflict => Node::Conflict,
             Node::Side { side, label, at } => Node::Side { side, label, at },
             Node::SideEnd => Node::SideEnd,
