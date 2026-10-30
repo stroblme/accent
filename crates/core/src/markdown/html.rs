@@ -316,6 +316,8 @@ fn node_events<'a>(
         ))),
         Node::Underline => out.push(html("<u>".into())),
         Node::UnderlineEnd => out.push(html("</u>".into())),
+        Node::Center => out.push(html("<div style=\"text-align: center\">\n".into())),
+        Node::CenterEnd => out.push(html("</div>\n".into())),
         // Org's own: a heading's TODO keyword, which the stylesheet dims once done, and the place
         // of a `<<target>>`, which shows nothing.
         Node::Keyword { text, done } => {

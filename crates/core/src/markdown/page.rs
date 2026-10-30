@@ -99,6 +99,9 @@ pub enum Node<'a> {
     /// Underlined text (org's `_text_`), up to a [`Node::UnderlineEnd`].
     Underline,
     UnderlineEnd,
+    /// Blocks shown centred (org's `#+begin_center`), up to a [`Node::CenterEnd`].
+    Center,
+    CenterEnd,
     /// An org heading's TODO keyword as written, and whether it is a done one.
     Keyword {
         text: CowStr<'a>,
@@ -159,6 +162,8 @@ impl Node<'_> {
             Node::CalloutTitle(title) => Node::CalloutTitle(title),
             Node::Underline => Node::Underline,
             Node::UnderlineEnd => Node::UnderlineEnd,
+            Node::Center => Node::Center,
+            Node::CenterEnd => Node::CenterEnd,
             Node::Keyword { text, done } => Node::Keyword {
                 text: text.into_static(),
                 done,
@@ -181,11 +186,13 @@ impl Node<'_> {
             | Node::TaskItem
             | Node::Callout { .. }
             | Node::Underline
+            | Node::Center
             | Node::Conflict
             | Node::Side { .. } => 1,
             Node::Event(Event::End(_))
             | Node::LinkEnd
             | Node::UnderlineEnd
+            | Node::CenterEnd
             | Node::SideEnd
             | Node::ConflictEnd => -1,
             _ => 0,

@@ -2,11 +2,10 @@
 //! ([`crate::markdown::page`]), so the preview, an export and Android write it alike. Read line
 //! by line as [`super::analyze`] reads the file, the subset accent shows: headings with their
 //! TODO keyword and tags, paragraphs, lists with their boxes, description lists, tables, blocks
-//! of code, examples, quotes and verse (a centre block's text as its paragraphs: the page has no
-//! centring), footnotes (an inline one defined after the page, as org's export defines every
-//! one), LaTeX environments as formulas, and in prose emphasis, links, pictures, formulas,
-//! `<<targets>>`, line breaks and sub- and superscripts in braces (`H_{2}O`, as org's `^:{}` has
-//! them, so `snake_case` stays as written).
+//! of code, examples, quotes, verse and centred text, footnotes (an inline one defined after the
+//! page, as org's export defines every one), LaTeX environments as formulas, and in prose
+//! emphasis, links, pictures, formulas, `<<targets>>`, line breaks and sub- and superscripts in
+//! braces (`H_{2}O`, as org's `^:{}` has them, so `snake_case` stays as written).
 //!
 //! What org's own export leaves out by default is not shown: `#+KEY:` lines (`#+TITLE` too: a
 //! markdown note's front matter is no heading either), drawers, comments, comment blocks and
@@ -99,6 +98,8 @@ enum Kind {
     Quote(usize),
     /// A verse block, to its last line.
     Verse(usize),
+    /// A centre block, to its last line.
+    Center(usize),
     /// A LaTeX environment, `\begin{equation}` to `\end{equation}`, to its last line.
     Latex(usize),
     /// A `#+KEY:` line, the fence of any other block, or a comment.
@@ -177,11 +178,8 @@ impl<'a> Page<'a> {
             Kind::Heading
         } else if let Some((last, style)) = closed(text, lines, i) {
             Kind::Closed(last, style)
-        } else if let Some((last, verse)) = quote_or_verse(text, lines, i) {
-            match verse {
-                true => Kind::Verse(last),
-                false => Kind::Quote(last),
-            }
+        } else if let Some(kind) = prose_block(text, lines, i) {
+            kind
         } else if let Some(last) = environment(text, lines, i) {
             Kind::Latex(last)
         } else if s.starts_with("#+") || word("#") {
@@ -256,6 +254,13 @@ impl<'a> Page<'a> {
                 self.open(Cm::BlockQuote(None), bytes.clone());
                 self.blocks(&lines[i + 1..last], false);
                 self.close(TagEnd::BlockQuote(None), bytes);
+                last + 1
+            }
+            Kind::Center(last) => {
+                let bytes = span(i, last);
+                self.push(Node::Center, bytes.clone());
+                self.blocks(&lines[i + 1..last], false);
+                self.push(Node::CenterEnd, bytes);
                 last + 1
             }
             // One paragraph of the lines between the fences, each ending in a break, as org's
@@ -877,22 +882,24 @@ enum Found {
     Emphasis(u8, Range<usize>),
 }
 
-/// The last line of the quote or verse block opening on `lines[i]`, before the next heading, and
-/// whether it is a verse.
-fn quote_or_verse(text: &str, lines: &[Range<usize>], i: usize) -> Option<(usize, bool)> {
+/// The quote, verse or centre block opening on `lines[i]`, to its last line before the next
+/// heading.
+fn prose_block(text: &str, lines: &[Range<usize>], i: usize) -> Option<Kind> {
     let at = |j: usize| text[lines[j].clone()].trim();
     let name = (at(i).get(..8))
         .filter(|begin| begin.eq_ignore_ascii_case("#+begin_"))
         .and_then(|_| at(i)[8..].split_whitespace().next())?;
-    let verse = name.eq_ignore_ascii_case("verse");
-    if !verse && !name.eq_ignore_ascii_case("quote") {
-        return None;
-    }
+    let kind = match name.to_ascii_lowercase().as_str() {
+        "quote" => Kind::Quote,
+        "verse" => Kind::Verse,
+        "center" => Kind::Center,
+        _ => return None,
+    };
     let end = format!("#+end_{name}");
     (i + 1..lines.len())
         .take_while(|&j| !is_heading(&text[lines[j].clone()]))
         .find(|&j| at(j).eq_ignore_ascii_case(&end))
-        .map(|j| (j, verse))
+        .map(kind)
 }
 
 /// The last line of the LaTeX environment opening on `lines[i]`, `\begin{name}` to a line of
@@ -1287,19 +1294,28 @@ Left out.
         );
     }
 
-    /// A verse block keeps its line breaks, a blank line among them; a centre block's text is
-    /// its paragraphs, not centred.
+    /// A verse block keeps its line breaks, a blank line among them.
     #[test]
     fn a_verse_keeps_its_line_breaks() {
-        let h = bare(
-            "#+begin_verse\n  Roses are /red/,\n    violets blue.\n\nThe end.\n#+end_verse\n\
-             #+begin_center\nMiddle\nline.\n#+end_center\n",
-        );
+        let h =
+            bare("#+begin_verse\n  Roses are /red/,\n    violets blue.\n\nThe end.\n#+end_verse\n");
         assert_eq!(
             h,
-            "<p>Roses are <em>red</em>,<br />\nviolets blue.<br />\n<br />\nThe end.</p>\n\
-             <p>Middle\nline.</p>\n"
+            "<p>Roses are <em>red</em>,<br />\nviolets blue.<br />\n<br />\nThe end.</p>\n"
         );
+    }
+
+    /// A centre block's paragraphs are one block of the page, shown centred.
+    #[test]
+    fn a_centre_block_is_centred() {
+        let src = "#+begin_center\nMiddle\nline.\n\nNext *one*.\n#+end_center\nAfter.\n";
+        assert_eq!(
+            bare(src),
+            "<div style=\"text-align: center\">\n<p>Middle\nline.</p>\n\
+             <p>Next <strong>one</strong>.</p>\n</div>\n<p>After.</p>\n"
+        );
+        let blocks = page(src);
+        assert_eq!((blocks.len(), blocks[0].lines.clone()), (2, 1..7));
     }
 
     /// A LaTeX environment is a formula on its own, the environment whole; one that does not

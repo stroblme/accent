@@ -45,6 +45,8 @@ pub(super) struct Tags {
     pub dd: gtk::TextTag,
     pub rule: gtk::TextTag,
     pub display: gtk::TextTag,
+    /// Org's `#+begin_center` block.
+    pub center: gtk::TextTag,
     /// A display formula's line right under another's, the margin between them collapsed.
     pub collapsed: gtk::TextTag,
     pub math: gtk::TextTag,
@@ -119,6 +121,9 @@ impl Tags {
             dd: tag("dd"),
             rule: tag("rule"),
             display: set("display", &|t| {
+                t.set_justification(gtk::Justification::Center)
+            }),
+            center: set("center", &|t| {
                 t.set_justification(gtk::Justification::Center)
             }),
             collapsed: set("collapsed", &|t| t.set_pixels_above_lines(0)),
@@ -958,6 +963,8 @@ impl Writer<'_> {
             }
             Node::Underline => self.push(&tags.underline),
             Node::UnderlineEnd => self.pop(),
+            Node::Center => self.push(&tags.center),
+            Node::CenterEnd => self.pop(),
             Node::Keyword { text, done } => {
                 self.push(if *done { &tags.done } else { &tags.todo });
                 self.text(text);
