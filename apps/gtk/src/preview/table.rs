@@ -10,9 +10,12 @@ use super::text::{Href, Object, Tags, Writer};
 use super::view::PreviewView;
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
-use gtk::{gdk, glib, pango};
+use gtk::{gdk, glib, graphene, pango};
 use pulldown_cmark::Alignment;
 use std::cell::RefCell;
+
+/// A rule's width, the stylesheet's.
+const RULE: i32 = 1;
 
 /// Stands in a cell's markup for the wash behind its code, which is the text's colour and so
 /// changes with the theme. Escaped text never holds it: GLib writes U+0001 as `&#x1;`.
@@ -131,7 +134,8 @@ fn widths(columns: &[(i32, i32)], width: i32) -> Vec<i32> {
 }
 
 glib::wrapper! {
-    /// The cells, a row's as tall as its tallest at its columns' [`widths`].
+    /// The cells, a row's as tall as its tallest at its columns' [`widths`], and the rules
+    /// between them, drawn on the whole pixels the cells are laid out on.
     pub struct Grid(ObjectSubclass<imp::Grid>)
         @extends gtk::Widget,
         @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
@@ -286,8 +290,10 @@ fn follow(label: &gtk::Label, links: Vec<Href>) {
     });
 }
 
-/// The rules and padding of the stylesheet's `th, td`, in the text's colour and the page's
-/// font, so a theme or a zoom changes them with the text: once per display.
+/// The padding of the stylesheet's `th, td`, in the page's font, so a zoom changes it with the
+/// text: once per display. The rules are the grid's own: GTK lays a cell out with its padding
+/// floored to whole pixels but draws its border around the padding unrounded, so a border would
+/// straddle two pixel rows (ISSUES.md).
 fn install_css() {
     thread_local! {
         static DONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -298,14 +304,11 @@ fn install_css() {
     if DONE.replace(true) {
         return;
     }
-    let rule = "1px solid alpha(currentColor, 0.15)";
     let provider = gtk::CssProvider::new();
-    provider.load_from_string(&format!(
-        ".accent-table {{ border-top: {rule}; border-left: {rule}; }} \
-         .accent-table > label {{ padding: 0.4em 0.8em; \
-           border-right: {rule}; border-bottom: {rule}; }} \
-         .accent-table > label.th {{ font-weight: 700; }}"
-    ));
+    provider.load_from_string(
+        ".accent-table > label { padding: 0.4em 0.8em; } \
+         .accent-table > label.th { font-weight: 700; }",
+    );
     gtk::style_context_add_provider_for_display(
         &display,
         &provider,
@@ -366,6 +369,8 @@ mod imp {
     pub struct Grid {
         /// How many cells each row holds, the head first; a header-less org table's head none.
         pub rows: RefCell<Vec<usize>>,
+        /// The columns' widths and the rows' heights it was laid out at, each with its rule.
+        layout: RefCell<(Vec<i32>, Vec<i32>)>,
     }
 
     #[glib::object_subclass]
@@ -398,12 +403,14 @@ mod imp {
                 .collect()
         }
 
-        /// Each column's narrowest and widest: its cells' longest word and whole text.
+        /// Each column's narrowest and widest: its cells' longest word and whole text, and the
+        /// rule after them.
         fn columns(cells: &[Vec<gtk::Widget>]) -> Vec<(i32, i32)> {
             let mut columns: Vec<(i32, i32)> = Vec::new();
             for row in cells {
                 for (c, cell) in row.iter().enumerate() {
                     let (min, max, ..) = cell.measure(gtk::Orientation::Horizontal, -1);
+                    let (min, max) = (min + RULE, max + RULE);
                     match columns.get_mut(c) {
                         Some(column) => *column = (column.0.max(min), column.1.max(max)),
                         None => columns.push((min, max)),
@@ -413,18 +420,17 @@ mod imp {
             columns
         }
 
-        /// Each row's height, its cells `widths` wide.
+        /// Each row's height, its cells in columns `widths` wide, and the rule under them; an
+        /// empty row's none.
         fn heights(cells: &[Vec<gtk::Widget>], widths: &[i32]) -> Vec<i32> {
-            let height =
-                |cell: &gtk::Widget, &width| cell.measure(gtk::Orientation::Vertical, width).1;
+            let height = |cell: &gtk::Widget, &width| {
+                cell.measure(gtk::Orientation::Vertical, width - RULE).1
+            };
             cells
                 .iter()
                 .map(|row| {
-                    row.iter()
-                        .zip(widths)
-                        .map(|(c, w)| height(c, w))
-                        .max()
-                        .unwrap_or(0)
+                    let tallest = row.iter().zip(widths).map(|(c, w)| height(c, w)).max();
+                    tallest.map_or(0, |h| h + RULE)
                 })
                 .collect()
         }
@@ -440,14 +446,18 @@ mod imp {
             let columns = Self::columns(&cells);
             match orientation {
                 gtk::Orientation::Horizontal => {
-                    let min = columns.iter().map(|c| c.0).sum();
-                    let max = columns.iter().map(|c| c.1).sum();
+                    let min = RULE + columns.iter().map(|c| c.0).sum::<i32>();
+                    let max = RULE + columns.iter().map(|c| c.1).sum::<i32>();
                     (min, max, -1, -1)
                 }
                 _ => {
-                    let width = if for_size < 0 { i32::MAX } else { for_size };
+                    let width = if for_size < 0 {
+                        i32::MAX
+                    } else {
+                        for_size - RULE
+                    };
                     let widths = super::widths(&columns, width);
-                    let height = Self::heights(&cells, &widths).into_iter().sum();
+                    let height = RULE + Self::heights(&cells, &widths).iter().sum::<i32>();
                     (height, height, -1, -1)
                 }
             }
@@ -455,16 +465,44 @@ mod imp {
 
         fn size_allocate(&self, width: i32, _height: i32, _baseline: i32) {
             let cells = self.cells();
-            let widths = super::widths(&Self::columns(&cells), width);
-            let mut y = 0;
-            for (row, height) in cells.iter().zip(Self::heights(&cells, &widths)) {
-                let mut x = 0;
+            let widths = super::widths(&Self::columns(&cells), width - RULE);
+            let heights = Self::heights(&cells, &widths);
+            let mut y = RULE;
+            for (row, &height) in cells.iter().zip(&heights) {
+                let mut x = RULE;
                 for (cell, &width) in row.iter().zip(&widths) {
-                    cell.size_allocate(&gtk::Allocation::new(x, y, width, height), -1);
+                    let cell_box = gtk::Allocation::new(x, y, width - RULE, height - RULE);
+                    cell.size_allocate(&cell_box, -1);
                     x += width;
                 }
                 y += height;
             }
+            self.layout.replace((widths, heights));
+        }
+
+        /// The rules the stylesheet gives `th, td`, `1px solid alpha(currentColor, 0.15)`: the
+        /// table's top and left, and each cell's right and bottom.
+        fn snapshot(&self, snapshot: &gtk::Snapshot) {
+            let ink = self.obj().color();
+            let ink = ink.with_alpha(ink.alpha() * 0.15);
+            let rule = |x: i32, y: i32, width: i32, height: i32| {
+                let rect = graphene::Rect::new(x as f32, y as f32, width as f32, height as f32);
+                snapshot.append_color(&ink, &rect);
+            };
+            let (widths, heights) = &*self.layout.borrow();
+            rule(0, 0, RULE + widths.iter().sum::<i32>(), RULE);
+            rule(0, 0, RULE, RULE + heights.iter().sum::<i32>());
+            let mut y = RULE;
+            for (&cells, &height) in self.rows.borrow().iter().zip(heights) {
+                let mut x = RULE;
+                for &width in widths.iter().take(cells) {
+                    rule(x + width - RULE, y, RULE, height);
+                    rule(x, y + height - RULE, width, RULE);
+                    x += width;
+                }
+                y += height;
+            }
+            self.parent_snapshot(snapshot);
         }
     }
 }

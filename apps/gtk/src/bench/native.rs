@@ -314,8 +314,9 @@ async fn narrow(rendered: &crate::rendered::Rendered) {
             last = last.max(right(&c));
             cell = c.next_sibling();
         }
-        // Within a pixel: GTK puts the cells a fraction of one off the grid's whole pixels.
-        let ends = (right(&widget) - last).abs() < 1.0;
+        // Within the last column's rule, which a cell's box overhangs by its padding's fraction
+        // of a pixel (ISSUES.md).
+        let ends = (right(&widget) - last).abs() <= 1.0;
         println!("bench preview table rules end at its last column={ends}");
     }
 }
