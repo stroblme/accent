@@ -151,8 +151,10 @@ modules:
           - target
           - testvault
           - testvault-external
-          # `make pdfium`'s download; the module above brings the library. vendor/mermaid is source.
+          # `make pdfium`'s download; the module above brings the library.
           - vendor/pdfium
+          # Android's mermaid.js, which the desktop app does not read.
+          - vendor/mermaid
       # Regenerate whenever Cargo.lock changes, see the command in the repo README/report.
       - cargo-sources.json
       # The server's std, from the release the rust-stable extension is (`rustc --version` in

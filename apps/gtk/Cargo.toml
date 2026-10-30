@@ -10,13 +10,10 @@ name = "accent"
 path = "src/main.rs"
 
 [features]
-default = ["webkit", "termprops"]
+default = ["termprops"]
 # The `ACCENT_BENCH_*` drills (`src/bench/`) and what only they call. Off in a shipped build;
-# `make smoke`, `make check` and CI turn it on. Several load a page, so they need WebKit.
-bench = ["webkit"]
-# WebKitGTK 6.0, which nothing packages for macOS: WebKit's preview, which `ACCENT_PREVIEW=webkit`
-# picks in place of the native one until it goes.
-webkit = ["dep:webkit6"]
+# `make smoke`, `make check` and CI turn it on.
+bench = []
 # VTE 0.78's termprops: a program's OSC 52 copy, and the shell's commands and prompts reported to
 # the tab. Without it accent builds against VTE 0.76, MacPorts' on macOS 12.
 termprops = ["vte4-sys/v0_78"]
@@ -38,8 +35,8 @@ gtk = { package = "gtk4", version = "0.11", features = ["v4_18"] }
 cairo-rs = { version = "0.22", features = ["pdf", "svg", "png", "v1_16"] }
 adw = { package = "libadwaita", version = "0.9", features = ["v1_8"] }
 sourceview5 = { version = "0.11", features = ["v5_18"] }
-webkit6 = { version = "0.6", optional = true }
-# WebKit's own HTTP library, for the pictures a diagram links from the web (`diagram::web`).
+# GNOME's HTTP library: the pictures a diagram links from the web (`diagram::web`) and the
+# metadata and PDFs of a reference (`bibliography::web`).
 soup3 = "0.9"
 # v0_76 for the context menu model and `check_match_at`; v0_78 deprecates `current_directory_uri`
 # and would fail the clippy gate, so the one 0.78 call, `vte_install_termprop` (a shell's OSC 52

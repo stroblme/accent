@@ -104,13 +104,12 @@ all: core gtk
 core:
 	$(CARGO) build $(CARGO_PROFILE_FLAG)
 
-# macOS packages no WebKitGTK 6.0, and MacPorts on macOS 12 only VTE 0.76: there the app takes
-# the default features whose library pkg-config finds (apps/gtk/Cargo.toml).
+# MacPorts on macOS 12 has only VTE 0.76: there the app leaves out the `termprops` feature unless
+# pkg-config finds 0.78 (apps/gtk/Cargo.toml).
 GTK_FEATURES = $(if $(DARWIN),--no-default-features \
-	$(if $(shell pkg-config --exists webkitgtk-6.0 && echo y),--features webkit) \
 	$(if $(shell pkg-config --atleast-version=0.78 vte-2.91-gtk4 && echo y),--features termprops))
 
-## gtk: build the desktop app (needs gtk4, libadwaita, gtksourceview5, webkitgtk-6.0, libspelling, vte-2.91-gtk4 dev packages)
+## gtk: build the desktop app (needs gtk4, libadwaita, gtksourceview5, libsoup-3.0, libspelling, vte-2.91-gtk4 dev packages)
 gtk:
 	$(CARGO) build $(CARGO_PROFILE_FLAG) -p accent $(GTK_FEATURES)
 
@@ -128,10 +127,10 @@ gtk-bench:
 # `rust-version` in Cargo.toml.
 # An optional item only warns: the app runs without it and lacks the feature it names.
 RUST_MIN := 1.95
-# On macOS WebKitGTK and VTE 0.78 are optional, as `gtk` builds without what they are for there.
-GTK_LIBS := gtk4:4.18 libadwaita-1:1.8 gtksourceview-5:5.18 harfbuzz:8.3.1 \
-            $(if $(DARWIN),vte-2.91-gtk4:0.76,webkitgtk-6.0:2.40 vte-2.91-gtk4:0.78) libspelling-1:0.1
-OPTIONAL_LIBS := $(if $(DARWIN),webkitgtk-6.0:2.40:webkit vte-2.91-gtk4:0.78:termprops)
+# On macOS VTE 0.78 is optional, as `gtk` builds without what it is for there.
+GTK_LIBS := gtk4:4.18 libadwaita-1:1.8 gtksourceview-5:5.18 harfbuzz:8.3.1 libsoup-3.0:3.0 \
+            $(if $(DARWIN),vte-2.91-gtk4:0.76,vte-2.91-gtk4:0.78) libspelling-1:0.1
+OPTIONAL_LIBS := $(if $(DARWIN),vte-2.91-gtk4:0.78:termprops)
 requirements:
 	@missing=0; \
 	for tool in cargo cc pkg-config glib-compile-resources; do \
@@ -165,14 +164,14 @@ requirements:
 # What `requirements` checks for, as each distribution packages it, plus git, ssh and curl. The one
 # list README.md, install.sh and CI rely on. GNOME 49 or newer is what has the versions above.
 PKGS_suse   := gcc make pkgconf-pkg-config glib2-devel gtk4-devel libadwaita-devel gtksourceview5-devel \
-               webkitgtk4-devel vte-devel libspelling-devel dejavu-fonts git-core openssh-clients curl
+               libsoup-devel vte-devel libspelling-devel dejavu-fonts git-core openssh-clients curl
 PKGS_fedora := gcc make pkgconf-pkg-config glib2-devel gtk4-devel libadwaita-devel gtksourceview5-devel \
-               webkitgtk6.0-devel vte291-gtk4-devel libspelling-devel dejavu-sans-mono-fonts git \
+               libsoup3-devel vte291-gtk4-devel libspelling-devel dejavu-sans-mono-fonts git \
                openssh-clients curl
 PKGS_debian := build-essential pkgconf libgio-2.0-dev-bin libgtk-4-dev libadwaita-1-dev \
-               libgtksourceview-5-dev libwebkitgtk-6.0-dev libvte-2.91-gtk4-dev libspelling-1-dev \
+               libgtksourceview-5-dev libsoup-3.0-dev libvte-2.91-gtk4-dev libspelling-1-dev \
                fonts-dejavu-mono git openssh-client curl
-PKGS_arch   := base-devel gtk4 libadwaita gtksourceview5 webkitgtk-6.0 vte4 libspelling ttf-dejavu \
+PKGS_arch   := base-devel gtk4 libadwaita gtksourceview5 libsoup3 vte4 libspelling ttf-dejavu \
                git openssh curl
 # Root (a CI container) installs directly; anyone else through sudo.
 SUDO := $(if $(filter 0,$(shell id -u)),,sudo)
@@ -301,7 +300,7 @@ fmt-check:
 ## clippy: lint everything, warnings are errors
 #
 # The desktop app three times: without its drills, as it ships, with them, and without its
-# default features (WebKit, VTE's termprops), as it builds on macOS 12.
+# default feature (VTE's termprops), as it builds on macOS 12.
 clippy:
 	$(CARGO) clippy --workspace --all-targets --locked --features accent-core/pdf -- -D warnings
 	$(CARGO) clippy -p accent --all-targets --locked --features bench -- -D warnings

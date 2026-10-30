@@ -26,7 +26,7 @@ jobs:
       # `--all` covers apps/gtk as well: rustfmt only parses the sources, it never resolves
       # dependencies, so the missing GTK dev headers on this runner do not matter.
       - run: cargo fmt --all --check
-      # apps/gtk links gtk4, libadwaita, gtksourceview5, webkit6 and libspelling, whose -devel
+      # apps/gtk links gtk4, libadwaita, gtksourceview5, libsoup3 and libspelling, whose -devel
       # packages ubuntu-latest does not carry, and accent-math HarfBuzz 8.3.1's, which this job
       # does not install. The gtk job below lints and tests both instead.
       - run: cargo clippy --workspace --exclude accent --exclude accent-math --all-targets --locked --features accent-core/pdf -- -D warnings
@@ -92,7 +92,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
-      # WebKitGTK is unavailable on macOS; this builds the native desktop dependencies.
+      # The desktop dependencies, as Homebrew packages them.
       - run: brew install pkgconf gtk4 libadwaita gtksourceview5 vte3 libspelling libsoup
       - uses: dtolnay/rust-toolchain@stable
         with:
