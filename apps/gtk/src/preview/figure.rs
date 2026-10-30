@@ -4,12 +4,11 @@
 //! recoloured as the theme and Preferences say (`look`). A picture on the web is never fetched:
 //! its alt text stands in, dimmed. Over a picture the menu offers Invert Image Colours.
 //!
-//! What is loaded is kept by the address the page names it with, as WebKit's page asked for it,
-//! so a block written again shows its pictures at once, and a new look recolours each from the
-//! file as decoded.
+//! What is loaded is kept by the address the page names it with, so a block written again shows
+//! its pictures at once, and a new look recolours each from the file as decoded.
 
 use super::Keys;
-use super::native::Page;
+use super::Page;
 use super::text::{Href, Ink, Object, Writer};
 use crate::assets::{self, Resolve};
 use crate::look::{self, Look};
@@ -61,7 +60,7 @@ pub(super) fn html_image(w: &mut Writer, src: &str, alt: &str) {
     picture(w, &uri, name, source, "image");
 }
 
-/// `dest` against the note's folder, as WebKit resolved a page's address.
+/// `dest` against the note's folder (`markdown::base_uri`).
 fn resolved(page: &Page, dest: &str) -> String {
     let base = markdown::base_uri(&page.note.borrow().0);
     glib::Uri::resolve_relative(Some(&base), dest, glib::UriFlags::NONE)
@@ -127,8 +126,8 @@ pub(super) fn restyle(page: &Page) -> bool {
 }
 
 /// Every picture recoloured in the look now, from the file as decoded (an SVG drawn again),
-/// each shown as it was until then; then `then`.
-pub(super) fn forget_images(page: &Page, then: impl FnOnce() + 'static) {
+/// each shown as it was until then.
+pub(super) fn forget_images(page: &Page) {
     let state = &page.figures.0;
     state.prune();
     let again: Vec<(String, Option<gdk::Texture>)> = (state.loaded.borrow().iter())
@@ -143,24 +142,17 @@ pub(super) fn forget_images(page: &Page, then: impl FnOnce() + 'static) {
     for (uri, original) in again {
         state.load(uri, page, original);
     }
-    then();
 }
 
 /// The pictures of `key` (a file, or a folder under it) read again: it changed, came, went, moved
 /// or was inverted. So are those not found or still being read whose address may name it.
-/// Whether one of `key`'s is shown.
-pub(super) fn forget_image(page: &Page, key: &str) -> bool {
+pub(super) fn forget_image(page: &Page, key: &str) {
     let state = &page.figures.0;
     state.prune();
     let folder = format!("{key}/");
-    let mut shown = false;
     let again: Vec<String> = (state.loaded.borrow().iter())
         .filter(|(uri, l)| match l.key.as_deref() {
-            Some(k) => {
-                let hit = k == key || k.starts_with(&folder);
-                shown |= hit;
-                hit
-            }
+            Some(k) => k == key || k.starts_with(&folder),
             None => may_name(uri, key),
         })
         .map(|(uri, _)| uri.clone())
@@ -177,7 +169,6 @@ pub(super) fn forget_image(page: &Page, key: &str) -> bool {
         state.loaded.borrow_mut().remove(&uri);
         state.load(uri, page, None);
     }
-    shown
 }
 
 /// Every picture fitted to the zoom and the text's width; an SVG or a diagram drawn for another
@@ -621,7 +612,7 @@ fn probed(page: &Page, figure: &Figure, at: &gtk::TextIter) -> Probe {
         let i = y * stride + x * 4;
         format!("{},{},{}", bytes[i], bytes[i + 1], bytes[i + 2])
     };
-    // (2, 2) on the page, as WebKit's probe read it.
+    // The picture's pixel (2, 2) as drawn.
     let corner = pixel(
         2.0 / f64::from(size.0.max(1)),
         2.0 / f64::from(size.1.max(1)),

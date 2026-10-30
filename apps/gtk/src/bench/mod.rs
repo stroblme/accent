@@ -106,7 +106,6 @@ use pdf::{
     bench_pdf_insert, bench_pdf_pages, bench_pdf_renaming, bench_pdf_render, bench_pdf_stale,
     bench_pdf_strip, bench_sketch,
 };
-use preview::bench_preview_type;
 use replace::bench_replace;
 use scroll::bench_scroll;
 use search::bench_search;
@@ -187,14 +186,12 @@ use user_commands::bench_commands;
 ///   using one scratch home), `large:<rel>` (main-loop timing).
 /// - `ACCENT_BENCH_MEMORY=<note>,<code>,<pdf>[,<rounds>]`: object/process and
 ///   resident-memory retention across closes. Requires `/tmp` scratch vault.
-/// - `ACCENT_BENCH_WEBIDLE=<note>`: WebKit reuse and two-second idle release.
-///   Writes two diagrams; use a scratch vault.
 /// - `ACCENT_BENCH_IMAGE=<rel_png>,<rel_other_png>`: zoom and replaced-image
 ///   reload; `zoom:<rel_svg>,…`: SVG zoom sources.
 /// - `ACCENT_BENCH_IMAGE_LOOK=<rel>,<rel>,…`: image classification/recolouring
 ///   across themes and inversion.
 /// - `ACCENT_BENCH_PREVIEW_LOOK=<rel_note>`: preview image themes and requests.
-/// - `ACCENT_BENCH_PREVIEW=render`: the native preview's page of a note it writes, against `preview.expected`; `time:<rel>`: its render, patch and scroll
+/// - `ACCENT_BENCH_PREVIEW=render`: the preview's page of a note it writes, against `preview.expected`; `time:<rel>`: its render, patch and scroll
 ///   costs (`native::bench_preview`).
 /// - `ACCENT_BENCH_TERM=1`: shell titles and saved terminal sessions.
 ///   `--terminal` uses a vault-less window; a vault launch opens a shell tab.
@@ -381,7 +378,6 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let preview_look = std::env::var("ACCENT_BENCH_PREVIEW_LOOK").ok();
     let compare = std::env::var("ACCENT_BENCH_COMPARE").ok();
     let memory = std::env::var("ACCENT_BENCH_MEMORY").ok();
-    let webidle = std::env::var("ACCENT_BENCH_WEBIDLE").ok();
     let pdf = std::env::var("ACCENT_BENCH_PDF").ok();
     let drawing = std::env::var("ACCENT_BENCH_DRAWING").ok();
     let tabs = std::env::var("ACCENT_BENCH_TABS").ok();
@@ -458,7 +454,6 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && panes.is_none()
         && compare.is_none()
         && memory.is_none()
-        && webidle.is_none()
         && pdf.is_none()
         && drawing.is_none()
         && tabs.is_none()
@@ -515,9 +510,6 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(arg) = memory {
             return memory::bench_memory(&app, &arg);
-        }
-        if let Some(note) = webidle {
-            return memory::bench_webidle(&app, &note);
         }
         if let Some(rel) = compare {
             // These make a repository in the vault root, or stage and commit in the one there.

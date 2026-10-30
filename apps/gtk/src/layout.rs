@@ -340,7 +340,7 @@ impl App {
         });
     }
 
-    /// Release a hidden preview after [`preview::idle_for`], ending its private web process.
+    /// Release a hidden preview after [`preview::idle_for`], its page and pictures with it.
     /// The next visible render rebuilds and scrolls to the caret. Showing cancels pending release.
     fn drop_preview(&self) {
         if let Some(preview) = self.preview.take() {
@@ -353,33 +353,17 @@ impl App {
         if self.preview.borrow().is_some() {
             return;
         }
-        let preview = self.new_preview(
-            glib::clone!(
-                #[weak(rename_to = app)]
-                self,
-                move |label| app.pane().find.set_matches_text(label)
-            ),
-            glib::clone!(
-                #[weak(rename_to = app)]
-                self,
-                move || {
-                    if let Some(tab) = app.active().filter(|_| app.shows_preview()) {
-                        app.render(&tab);
-                    }
-                }
-            ),
-        );
+        let preview = self.new_preview(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |label| app.pane().find.set_matches_text(label)
+        ));
         *self.preview.borrow_mut() = Some(preview);
     }
 
     /// A preview wired to the window: links, tags and images, the document zoom and column, and
-    /// the wheel's zoom. `found` takes its find readout, and `lost` renders the note again after
-    /// its web process ended.
-    pub(crate) fn new_preview(
-        self: &Rc<Self>,
-        found: impl Fn(&str) + 'static,
-        lost: impl Fn() + 'static,
-    ) -> preview::Preview {
+    /// the wheel's zoom. `found` takes its find readout.
+    pub(crate) fn new_preview(self: &Rc<Self>, found: impl Fn(&str) + 'static) -> preview::Preview {
         let resolve = self.asset_resolver();
         let preview = preview::Preview::new(
             move |rel: &str| resolve(rel),
@@ -404,8 +388,8 @@ impl App {
         preview.set_zoom(self.zoom.get());
         preview.set_column(&self.config.borrow());
         // The preview follows the document zoom, so the wheel over it has to reach the same
-        // setting the wheel over the editor does. Capture phase: WebKit answers a Ctrl+scroll
-        // itself, with a zoom of its own that nothing else in the window knows about.
+        // setting the wheel over the editor does. Capture phase: this is the frame around the
+        // page's scroller, which would scroll by a Ctrl+scroll first.
         zoom_on_wheel(
             preview.widget(),
             gtk::PropagationPhase::Capture,
@@ -416,7 +400,6 @@ impl App {
             ),
         );
         preview.connect_found(found);
-        preview.connect_lost(lost);
         preview
     }
 
@@ -427,8 +410,8 @@ impl App {
         Arc::new(move |rel: &str| match &vault {
             // `fetch` refuses a `rel` that climbs out lexically, on either backend. What it
             // cannot see is a symlink *inside* the vault pointing outside it, and the answer
-            // here is handed to a WebView, so that is worth one `canonicalize`: a note
-            // linking `escape.png -> ~/.ssh/id_rsa` must not render it.
+            // here is drawn on the page or written into an export, so that is worth one
+            // `canonicalize`: a note linking `escape.png -> ~/.ssh/id_rsa` must not render it.
             // `asset` first, because `![[img.png]]` names the file the way a wikilink does
             // and the index is what knows it lives in `Attachments/`.
             Some(vault) => {
@@ -446,57 +429,15 @@ impl App {
         })
     }
 
-    /// Serve `rel` to the preview again, or every file under it, if it was served: it changed,
-    /// went, moved or was inverted, and WebKit would answer the next render with what it holds.
-    /// The render asks for it alone again (`Preview::forget_image`).
-    pub fn reshow_preview_image(self: &Rc<Self>, rel: &str) {
-        let forgot = self
-            .preview
-            .borrow()
-            .as_ref()
-            .is_some_and(|p| p.forget_image(rel));
-        if forgot && let Some(tab) = self.active().filter(|_| self.shows_preview()) {
-            self.render(&tab);
-        }
-        for rendered in self.rendereds() {
-            let forgot = rendered
-                .preview()
-                .as_ref()
-                .is_some_and(|p| p.forget_image(rel));
-            if forgot {
-                self.render_rendered(&rendered, false);
-            }
-        }
+    /// Read `rel` again in every preview that shows it, or every file under it: it changed,
+    /// came, went, moved or was inverted.
+    pub fn reshow_preview_image(&self, rel: &str) {
+        self.each_preview(|p| p.forget_image(rel));
     }
 
-    /// Serve the preview's images again, after their look changed: WebKit keeps what it was
-    /// served, so its cache goes first and the note is rendered again after it.
-    pub fn reshow_preview_images(self: &Rc<Self>) {
-        if let Some(preview) = self.preview.borrow().as_ref() {
-            preview.forget_images(glib::clone!(
-                #[weak(rename_to = app)]
-                self,
-                move || {
-                    if let Some(tab) = app.active().filter(|_| app.shows_preview()) {
-                        app.render(&tab);
-                    }
-                }
-            ));
-        }
-        for rendered in self.rendereds() {
-            if let Some(preview) = rendered.preview().as_ref() {
-                let weak = Rc::downgrade(&rendered);
-                preview.forget_images(glib::clone!(
-                    #[weak(rename_to = app)]
-                    self,
-                    move || {
-                        if let Some(rendered) = weak.upgrade() {
-                            app.render_rendered(&rendered, true);
-                        }
-                    }
-                ));
-            }
-        }
+    /// Recolour every preview's pictures, after their look changed.
+    pub fn reshow_preview_images(&self) {
+        self.each_preview(|p| p.forget_images());
     }
 
     /// Render `tab` into the presented note's preview.

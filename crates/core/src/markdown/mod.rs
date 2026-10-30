@@ -9,8 +9,6 @@
 mod blocks;
 mod frontmatter;
 mod html;
-#[cfg(test)]
-mod html_before;
 mod links;
 mod page;
 mod spans;

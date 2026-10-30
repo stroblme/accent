@@ -245,8 +245,8 @@ pub fn wheel_steps(accum: &Cell<f64>, dy: f64) -> i32 {
 /// remainders. Non-Control events pass through. Scroll lacks coordinates; anchored zoom
 /// uses [`track_pointer`] or the canvas's motion controller.
 ///
-/// Callers choose phase: Bubble precedes text scrollers; Capture overrides WebKit and VTE's
-/// private zoom handling so readouts and sessions track the result.
+/// Callers choose phase: Bubble precedes text scrollers; Capture overrides VTE's private zoom
+/// handling, and a scroller below the widget, so readouts and sessions track the result.
 pub fn zoom_on_wheel(
     widget: &impl IsA<gtk::Widget>,
     phase: gtk::PropagationPhase,

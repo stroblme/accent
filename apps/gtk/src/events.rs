@@ -534,7 +534,7 @@ impl App {
 /// sender or the next event finds the window gone.
 pub fn start_events(app: &Rc<App>, events: Receiver<Event>) {
     // Weak: `Shell.windows` holds the only strong `App`, so closing a window drops it along with
-    // its vault, its worker thread and its WebKit process.
+    // its vault and its worker thread.
     let app = Rc::downgrade(app);
     let (tx, mut rx) = futures_channel::mpsc::unbounded();
     let _ = std::thread::Builder::new()

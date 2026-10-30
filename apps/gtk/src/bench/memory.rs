@@ -1,7 +1,6 @@
 //! Measure memory retention and surviving objects across repeated tab and window lifecycles.
 
 use super::*;
-use webkit6::prelude::WebViewExt;
 
 /// `ACCENT_BENCH_MEMORY=<note>,<code>,<pdf>[,<rounds>]` measures PDF read-through
 /// ([`read_through`]; use a few hundred pages), then repeated open/close cycles for
@@ -135,7 +134,7 @@ pub(super) fn bench_memory(app: &Rc<App>, arg: &str) {
             };
             other.open_path(&app.root().join(&note).to_string_lossy());
             wait(800).await;
-            // With its own preview, which is its own WebKit process.
+            // With its own preview.
             other.toggle_preview();
             wait(1500).await;
             let watch = vec![object("window", &other.window), rc("app", &other)];
@@ -147,76 +146,6 @@ pub(super) fn bench_memory(app: &Rc<App>, arg: &str) {
         block.report();
         bench_quit(&app);
     });
-}
-
-/// `ACCENT_BENCH_WEBIDLE=<note>` checks WebKit process release after the drill's
-/// 2 s idle interval ([`crate::preview::idle_for`]). Print process PSS before/during/
-/// after the note's preview tab is in front and compare rendered length and scroll when it is
-/// in front again, then open a
-/// diagram with formulas, which starts no web process. Writes `webidle.drawio`; use a scratch
-/// vault.
-pub(super) fn bench_webidle(app: &Rc<App>, note: &str) {
-    let _ = std::fs::write(app.root().join("webidle.drawio"), super::diagram::SAMPLE);
-    let (app, note) = (app.clone(), note.to_string());
-    glib::spawn_future_local(async move {
-        let wait = |ms| glib::timeout_future(Duration::from_millis(ms));
-        // The watcher has to have seen the diagram.
-        wait(2000).await;
-        println!("bench webidle start {}", webkit());
-        let Some(Doc::Text(tab)) = open(&app, &note).await else {
-            println!("bench webidle no_note");
-            return bench_quit(&app);
-        };
-        let line = tab.buffer.line_count() * 2 / 3;
-        if let Some(at) = tab.buffer.iter_at_line(line) {
-            tab.buffer.place_cursor(&at);
-        }
-        app.toggle_preview();
-        wait(2500).await;
-        let before = rendered(&app).await;
-        println!("bench webidle split page={before} {}", webkit());
-        app.toggle_preview();
-        wait(3000).await;
-        let kept = super::preview::shown(&app).is_some_and(|r| r.preview().is_some());
-        println!("bench webidle hidden preview={kept} {}", webkit());
-        app.toggle_preview();
-        wait(2500).await;
-        let after = rendered(&app).await;
-        println!(
-            "bench webidle shown page={after} same={} {}",
-            before == after,
-            webkit()
-        );
-        app.toggle_preview();
-        wait(3000).await;
-        println!("bench webidle idle {}", webkit());
-        if !matches!(open(&app, "webidle.drawio").await, Some(Doc::Diagram(_))) {
-            println!("bench webidle no_diagram");
-            return bench_quit(&app);
-        }
-        wait(1000).await;
-        println!("bench webidle diagram {}", webkit());
-        bench_quit(&app);
-    });
-}
-
-/// The rendered note's length in characters and how far it is scrolled, as `length,scrollY`.
-async fn rendered(app: &Rc<App>) -> String {
-    let native = super::preview::shown(app).and_then(|r| {
-        let preview = r.preview();
-        let n = preview.as_ref()?.native()?;
-        Some(format!("{},{}", n.text_length(), n.scroll_y().round()))
-    });
-    if let Some(native) = native {
-        return native;
-    }
-    let Some(view) = super::preview::web_view(app) else {
-        return "none".into();
-    };
-    let script = "document.body.innerText.length + ',' + Math.round(scrollY)";
-    view.evaluate_javascript_future(script, None, None)
-        .await
-        .map_or("?".into(), |v| v.to_str().to_string())
 }
 
 /// Open `rel` and wait for its tab, and a little more for what it loads after.
@@ -325,10 +254,10 @@ fn watch(doc: &Doc) -> Watch {
         watch.push(object("buffer", &tab.buffer));
     }
     if let Doc::Rendered(rendered) = doc
-        && let Some(native) = rendered.preview().as_ref().and_then(|p| p.native())
+        && let Some(preview) = rendered.preview().as_ref()
     {
-        watch.push(object("preview view", native.focus_target()));
-        watch.push(object("preview buffer", &native.buffer()));
+        watch.push(object("preview view", preview.focus_target()));
+        watch.push(object("preview buffer", &preview.buffer()));
     }
     watch
 }
@@ -411,7 +340,7 @@ fn threads() -> String {
 }
 
 /// The processes under this one by name, with how many there are of each and their resident size
-/// together in kB: WebKit's, the shells'.
+/// together in kB, the shells' among them.
 fn children() -> String {
     let mut counts = std::collections::BTreeMap::new();
     for (pid, name) in descendants() {
@@ -426,34 +355,8 @@ fn children() -> String {
     counts.join(",")
 }
 
-/// WebKit's processes under this one, each its name, pid and proportional set size in kB.
-fn webkit() -> String {
-    let pss = |pid: u32| {
-        let rollup = std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup"));
-        let kb = |l: &str| {
-            l.strip_prefix("Pss:")?
-                .trim()
-                .trim_end_matches(" kB")
-                .parse()
-                .ok()
-        };
-        rollup
-            .unwrap_or_default()
-            .lines()
-            .find_map(kb)
-            .unwrap_or(0u64)
-    };
-    let mut found: Vec<String> = descendants()
-        .into_iter()
-        .filter(|(_, name)| name.starts_with("WebKit"))
-        .map(|(pid, name)| format!("{name}:{pid}/{}", pss(pid)))
-        .collect();
-    found.sort();
-    format!("webkit=[{}]", found.join(","))
-}
-
 /// The processes under this one, by pid and name.
-pub(super) fn descendants() -> Vec<(u32, String)> {
+fn descendants() -> Vec<(u32, String)> {
     let me = std::process::id();
     let mut parents = std::collections::HashMap::new();
     for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {

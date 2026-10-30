@@ -1,7 +1,6 @@
 //! Check presentation contents, available controls and layout restoration.
 
 use super::*;
-use webkit6::prelude::WebViewExt;
 
 /// `ACCENT_BENCH_CHROME=present:<note>,<pdf>,<image>,<side>` presents four tab kinds
 /// from the left pane. Print content bounds, hidden chrome, PDF zoom and focus;
@@ -343,24 +342,10 @@ async fn position(app: &Rc<App>) -> String {
     if let Some(pdf) = app.active_pdf() {
         return pdf.page_label().unwrap_or_default();
     }
-    if let Some(y) = (app.preview.borrow().as_ref())
-        .and_then(|p| p.native())
-        .map(|n| n.scroll_y())
-    {
-        return format!("scrollY={y}");
+    match app.preview.borrow().as_ref() {
+        Some(preview) => format!("scrollY={}", preview.scroll_y()),
+        None => "none".into(),
     }
-    let view = app
-        .preview
-        .borrow()
-        .as_ref()
-        .and_then(|p| p.web())
-        .map(|p| p.view().clone());
-    let Some(view) = view else {
-        return "none".into();
-    };
-    view.evaluate_javascript_future("scrollY", None, None)
-        .await
-        .map_or("?".into(), |y| format!("scrollY={}", y.to_double()))
 }
 
 /// The middle of the row reading `text` in the menu hung off `host`, on the window's surface,

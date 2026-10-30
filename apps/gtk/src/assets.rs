@@ -1,5 +1,5 @@
 //! The files a note's page names by `accent://file/` addresses, held to the vault: what the
-//! preview serves and an export puts in the file.
+//! preview draws and an export puts in the file.
 
 use accent_core::markdown::{accent_file, percent_decode};
 use std::path::{Component, Path, PathBuf};

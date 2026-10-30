@@ -2,7 +2,7 @@
 //! task items, the raw HTML a note holds unwrapped into text, and per block the facts the view
 //! reads back: where its lines start, its anchors, its links and the source of each object.
 
-use super::native::{Laid, Page};
+use super::{Laid, Page};
 use super::{figure, formula, table};
 use accent_core::markdown::{Node, Side};
 use gtk::prelude::*;
@@ -580,7 +580,7 @@ fn decode(text: &str) -> String {
 // ------------------------------------------------------------------------------------ writer
 
 /// Where a link in the page goes: a vault file or a wikilink target with its anchor, a tag's
-/// notes, or a markdown link's destination, which [`super::native`] resolves as WebKit did.
+/// notes, or a markdown link's destination, resolved against the note's folder (`Page::route`).
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum Href {
     Open(String),

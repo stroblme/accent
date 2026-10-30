@@ -214,15 +214,14 @@ fn rasterise(svg: &[u8], scale: i32, zoom: f64) -> Result<(gdk::Texture, (i32, i
     Ok((texture.upcast(), size.get()))
 }
 
-/// What the preview hands WebKit for an image, and an exported page holds: the file as it is, or
-/// new bytes of a type.
+/// What an exported page holds for an image: the file as it is, or new bytes of a type.
 pub enum Served {
     File,
     Bytes(glib::Bytes, &'static str),
 }
 
-/// Serve preview images unchanged unless recolouring, EXIF correction or unsupported formats require PNG.
-/// Failures fall back to the original file.
+/// Serve an exported page's images unchanged unless recolouring, EXIF correction or unsupported
+/// formats require PNG. Failures fall back to the original file.
 pub fn serve(path: &Path, look: Look, inverted: bool) -> Served {
     if svg(path) {
         return match look
@@ -233,7 +232,7 @@ pub fn serve(path: &Path, look: Look, inverted: bool) -> Served {
             None => Served::File,
         };
     }
-    // WebKit draws no TIFF, and turns a JPEG the way its EXIF says but no other image.
+    // A browser draws no TIFF, and turns a JPEG the way its EXIF says but no other image.
     let converted = || match extension(path).as_str() {
         "tif" | "tiff" => true,
         "jpg" | "jpeg" => false,
@@ -247,17 +246,6 @@ pub fn serve(path: &Path, look: Look, inverted: bool) -> Served {
         },
         None => Served::File,
     }
-}
-
-/// [`serve`] for an SVG's text rather than its file: a diagram embedded in a note, drawn for it
-/// (`diagram::embed`), goes through the filter as an SVG image does, under the diagrams' switch.
-#[cfg(feature = "webkit")]
-pub fn serve_svg(text: &str, look: Look, inverted: bool) -> Served {
-    let svg = look
-        .diagram(inverted)
-        .and_then(|page| filtered(text, page, look.fills(page)))
-        .unwrap_or_else(|| text.to_string());
-    Served::Bytes(glib::Bytes::from_owned(svg.into_bytes()), "image/svg+xml")
 }
 
 /// What the classifier said about `path`, while the file is as it was then: `None` where it has

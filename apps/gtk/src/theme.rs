@@ -18,8 +18,8 @@ const DARK_BASE: &str = "#002b36";
 const DARK_RAISED: &str = "#073642";
 const DARK_TEXT: &str = "#839496";
 
-/// libadwaita's own `--view-bg-color`, which the preview needs spelled out because WebKit cannot
-/// resolve GTK's CSS variables.
+/// libadwaita's own `--view-bg-color`, spelled out because GTK has no call that reads a CSS
+/// variable's value.
 const VIEW_LIGHT: &str = "#ffffff";
 const VIEW_DARK: &str = "#1d1d20";
 
@@ -141,8 +141,8 @@ pub fn solarized() -> bool {
     CHOICE.get() == Theme::Solarized
 }
 
-/// The colour the preview paints behind the note. WebKit cannot see GTK's CSS variables, so the
-/// pane is handed the literal the rest of the window resolves to.
+/// The colour behind a view's text, the literal the rest of the window resolves to: for what blends
+/// with it or paints it itself (a note's page, a fade, the terminal).
 pub fn view_bg(dark: bool) -> &'static str {
     match (CHOICE.get(), dark) {
         (Theme::Solarized, true) => DARK_BASE,

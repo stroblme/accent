@@ -1,7 +1,7 @@
-//! The stylesheet a note's page is drawn with: the preview's, and an exported page's on paper.
+//! The stylesheet of a note's exported page, on screen in a browser and on paper.
 //!
-//! It is generated from the editor's foreground, background, accent and font, because WebKit and a
-//! browser cannot read GTK's CSS variables; so the page and the editor agree in every theme.
+//! It is generated from the editor's foreground, background, accent and font, because a browser
+//! cannot read GTK's CSS variables; so the page and the editor agree.
 
 use crate::theme;
 use accent_core::config::Config;
@@ -26,11 +26,11 @@ pub(crate) fn column(config: &Config) -> Option<u32> {
 }
 
 /// [`theme_css`] for `fg` on `bg`, in the editor's font and the system accent.
-pub(crate) fn stylesheet(fg: gdk::RGBA, bg: &str, share: Option<f64>) -> String {
+fn stylesheet(fg: gdk::RGBA, bg: &str, share: Option<f64>) -> String {
     // The editor's own font, not the GNOME document font: DESIGN.md's Typography section gives
     // prose the monospace at the *size* of the document font, and the two panes are meant to agree
     // by construction. Asked of `editor::default_font`, which is where that decision is made, so a
-    // change there reaches the preview without a second edit.
+    // change there reaches the page without a second edit.
     let font = pango::FontDescription::from_string(&crate::editor::default_font());
     let family = font
         .family()
@@ -66,8 +66,7 @@ pub(crate) fn cap_height(family: &str) -> Option<f64> {
     (cap > 0.0).then_some(cap)
 }
 
-/// The sheet a paper preview is given, for an export that carries it in the file: WebKit applies
-/// it as a user stylesheet, which the page's own DOM does not hold.
+/// The sheet an exported page carries in its file, in paper's colours.
 pub(crate) fn paper_css(config: &Config) -> String {
     let (bg, fg) = theme::paper();
     stylesheet(fg, bg, column(config).map(f64::from))
@@ -112,7 +111,7 @@ fn dim(c: gdk::RGBA, alpha: f32) -> String {
     css_rgba(crate::theme::at(c, alpha))
 }
 
-/// Generate preview styling from foreground, background, accent and document font.
+/// Generate the page's styling from foreground, background, accent and document font.
 /// Editor alpha and conflict tint rules are shared. Composite caption tints to opaque colours
 /// so underlying side backgrounds cannot darken them. `share` is the page's cap in percent of the
 /// view, `None` for no cap.
@@ -150,8 +149,6 @@ fn theme_css(
          /* The editor's column, its gutters inside the cap as they are inside the clamp. */\n\
          body {{ box-sizing: border-box; max-width: {column}; margin: 0 auto; \
          padding: 24px 48px 96px; line-height: 1.6; }}\n\
-         /* Scroll-sync markers: the script scrolls the block around them, never the marker. */\n\
-         span[data-line] {{ display: none; }}\n\
          h1, h2, h3, h4, h5, h6 {{ font-weight: 700; line-height: 1.25; margin: 1.2em 0 0.4em; }}\n\
          h1 {{ font-size: 1.6rem; }}\n\
          h2 {{ font-size: 1.4rem; }}\n\
@@ -199,8 +196,7 @@ fn theme_css(
          .callout-title {{ color: {accent}; font-weight: 700; }}\n\
          hr {{ border: 0; border-top: 1px solid {rule}; margin: 24px 0; }}\n\
          table {{ border-collapse: collapse; }}\n\
-         /* WebKit pads every cell with the table's cellpadding, 1px unless it says otherwise, as\n\
-            a hint of the page's own: that outranks this user sheet's rule, `!important` aside. */\n\
+         /* `!important` over a table's own `style` in the note's HTML, which outranks a sheet. */\n\
          th, td {{ border: 1px solid {rule}; padding: 6px 12px !important; }}\n\
          th {{ font-weight: 700; }}\n\
          /* A table wider than the page scrolls sideways on its own, never the page: a block\n\
@@ -335,9 +331,9 @@ mod tests {
         );
     }
 
-    /// A cell's padding outranks the 1 px WebKit gives every cell from the table's cellpadding.
+    /// A cell's padding outranks a table's own in the note's HTML.
     #[test]
-    fn theme_css_pads_cells_over_webkits_cellpadding() {
+    fn theme_css_pads_cells_over_a_tables_own() {
         let css = theme_css(FG, theme::view_bg(false), ACCENT, "Cantarell", 11.0, None);
         assert!(css.contains("padding: 6px 12px !important; }"), "{css}");
     }

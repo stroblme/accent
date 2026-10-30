@@ -1,5 +1,5 @@
-//! The native preview's drills: what a note's page holds, and what
-//! rendering, patching and scrolling it cost.
+//! The preview's drills: what a note's page holds, and what rendering, patching and scrolling
+//! it cost.
 
 use super::*;
 use accent_core::search::Options;
@@ -136,12 +136,14 @@ pub(super) fn bench_preview(app: &Rc<App>, arg: &str) {
     });
 }
 
-/// The preview tab's native page, once its render is in.
+/// The preview tab's page, once its render is in.
 async fn settled(app: &Rc<App>) -> Option<Rc<crate::rendered::Rendered>> {
     let t = Instant::now();
     while t.elapsed() < Duration::from_secs(10) {
         if let Some(rendered) = super::preview::shown(app) {
-            let ready = (rendered.preview().as_ref().and_then(|p| p.native()))
+            let ready = rendered
+                .preview()
+                .as_ref()
                 .is_some_and(|n| n.settled() && n.text_length() > 0);
             if ready {
                 return Some(rendered);
@@ -155,13 +157,14 @@ async fn settled(app: &Rc<App>) -> Option<Rc<crate::rendered::Rendered>> {
 async fn render(app: &Rc<App>) {
     super::preview::beside(app).await;
     let (Some(rendered), Some(tab)) = (settled(app).await, app.active()) else {
-        return println!("bench preview native=none");
+        return println!("bench preview none");
     };
     glib::timeout_future(Duration::from_millis(300)).await;
     // The pictures read: a picture's size is the file's, up to the text's width.
     let reading = || {
-        (rendered.preview().as_ref())
-            .and_then(|p| p.native())
+        rendered
+            .preview()
+            .as_ref()
             .is_some_and(|n| n.figures().0.iter().any(|f| f.pending))
     };
     let t = Instant::now();
@@ -171,11 +174,11 @@ async fn render(app: &Rc<App>) {
     let short = |s: &str| s.chars().take(90).collect::<String>();
     {
         let preview = rendered.preview();
-        let Some(native) = preview.as_ref().and_then(|p| p.native()) else {
+        let Some(preview) = preview.as_ref() else {
             return;
         };
         // The fixture's blocks, not the filler under them.
-        for (i, (lines, text, tags)) in native.blocks().into_iter().take(25).enumerate() {
+        for (i, (lines, text, tags)) in preview.blocks().into_iter().take(25).enumerate() {
             println!(
                 "bench preview block={i} lines={}-{} tags={tags:?} text={:?}",
                 lines.start,
@@ -183,7 +186,7 @@ async fn render(app: &Rc<App>) {
                 short(&text)
             );
         }
-        let (figures, reads) = native.figures();
+        let (figures, reads) = preview.figures();
         // Its own size and whether it is drawn at that shrunk to the text's width: the width
         // itself is the pane's, which differs from run to run.
         for f in figures {
@@ -192,17 +195,17 @@ async fn render(app: &Rc<App>) {
                 f.uri, f.key, f.loaded, f.natural.0, f.natural.1, f.fits
             );
         }
-        for (tex, display, size) in native.formulas() {
+        for (tex, display, size) in preview.formulas() {
             println!("bench preview formula {tex:?} display={display} size={size:.2}");
         }
-        for (text, route) in native.links() {
+        for (text, route) in preview.links() {
             println!("bench preview link {text:?} {route}");
         }
-        let copied = native.copy_all();
+        let copied = preview.copy_all();
         for line in copied.lines().take_while(|l| !l.starts_with("Filler")) {
             println!("bench preview copy {line:?}");
         }
-        for (markup, ..) in native.cells() {
+        for (markup, ..) in preview.cells() {
             println!("bench preview cell {markup:?}");
         }
     }
@@ -230,7 +233,6 @@ async fn render(app: &Rc<App>) {
         let top = rendered
             .preview()
             .as_ref()
-            .and_then(|p| p.native())
             .map(|n| short(&n.top_line()))
             .unwrap_or_default();
         println!("bench preview scroll line={line} top={top:?}");
@@ -241,11 +243,7 @@ async fn render(app: &Rc<App>) {
         let mut iter = tab.buffer.iter_at_offset(at);
         tab.buffer.insert(&mut iter, "x");
         glib::timeout_future(Duration::from_millis(1500)).await;
-        let patched = rendered
-            .preview()
-            .as_ref()
-            .and_then(|p| p.native())
-            .map(|n| n.patched());
+        let patched = rendered.preview().as_ref().map(|n| n.patched());
         if let Some((kept, written)) = patched {
             println!("bench preview edit kept={kept} written={written}");
         }
@@ -253,8 +251,8 @@ async fn render(app: &Rc<App>) {
     }
     glib::timeout_future(Duration::from_millis(1500)).await;
     // The fences coloured as the editor colours them: the text under each code tag.
-    if let Some(native) = rendered.preview().as_ref().and_then(|p| p.native()) {
-        let coloured = tagged(&native.buffer(), |n| n.starts_with("code:"));
+    if let Some(preview) = rendered.preview().as_ref() {
+        let coloured = tagged(&preview.buffer(), |n| n.starts_with("code:"));
         println!("bench preview code coloured={coloured:?}");
     }
     find(&rendered, &tab).await;
@@ -269,7 +267,7 @@ async fn find(rendered: &crate::rendered::Rendered, tab: &Tab) {
     let said = Rc::new(RefCell::new(String::new()));
     let buffer = {
         let preview = rendered.preview();
-        let Some((preview, native)) = preview.as_ref().and_then(|p| Some((p, p.native()?))) else {
+        let Some(preview) = preview.as_ref() else {
             return;
         };
         preview.connect_found(glib::clone!(
@@ -277,7 +275,7 @@ async fn find(rendered: &crate::rendered::Rendered, tab: &Tab) {
             said,
             move |label| *said.borrow_mut() = label.to_string()
         ));
-        let buffer = native.buffer();
+        let buffer = preview.buffer();
         let mut readouts = Vec::new();
         preview.find("side", Options::default());
         readouts.push(said.borrow().clone());
@@ -311,7 +309,7 @@ async fn find(rendered: &crate::rendered::Rendered, tab: &Tab) {
     // A word in a list item and in a table's cell: the cell's match counted where the table
     // stands, selected and painted in its label.
     let preview = rendered.preview();
-    let Some((preview, native)) = preview.as_ref().and_then(|p| Some((p, p.native()?))) else {
+    let Some(preview) = preview.as_ref() else {
         return;
     };
     let mut readouts = Vec::new();
@@ -319,7 +317,7 @@ async fn find(rendered: &crate::rendered::Rendered, tab: &Tab) {
     readouts.push(said.borrow().clone());
     preview.find_next();
     readouts.push(said.borrow().clone());
-    let cells = native.cells();
+    let cells = preview.cells();
     let cell = cells.iter().find(|(_, selected, _)| !selected.is_empty());
     let painted = cells.iter().filter(|(.., painted)| *painted).count();
     preview.find_next();
@@ -431,14 +429,12 @@ async fn time(app: &Rc<App>, rel: &str) {
     app.open_path(rel);
     super::preview::beside(app).await;
     let Some(rendered) = settled(app).await else {
-        return println!("bench preview time native=none");
+        return println!("bench preview time none");
     };
-    let native = || {
-        std::cell::Ref::filter_map(rendered.preview(), |p| p.as_ref().and_then(|p| p.native())).ok()
-    };
+    let preview = || std::cell::Ref::filter_map(rendered.preview(), Option::as_ref).ok();
     let landed = || async {
         let t = Instant::now();
-        while !native().is_some_and(|n| n.settled()) && t.elapsed() < Duration::from_secs(30) {
+        while !preview().is_some_and(|n| n.settled()) && t.elapsed() < Duration::from_secs(30) {
             glib::timeout_future(Duration::from_millis(1)).await;
         }
     };
@@ -453,20 +449,20 @@ async fn time(app: &Rc<App>, rel: &str) {
     };
     // Another note first, so the note goes in whole; and time for the note's editor tab to have
     // measured and coloured its own text, which shares the main thread.
-    if let Some(n) = native() {
+    if let Some(n) = preview() {
         n.render("other.md", "");
     }
     landed().await;
     glib::timeout_future(Duration::from_secs(5)).await;
     let (beat, sched) = (Beat::start(), schedstat());
-    if let Some(n) = native() {
+    if let Some(n) = preview() {
         n.render(rel, &text);
     }
     landed().await;
     glib::timeout_future(Duration::from_millis(300)).await;
     let (stall, first) = beat.stop();
     let (first_cpu, first_wait) = (schedstat().0 - sched.0, schedstat().1 - sched.1);
-    let blocks = native().map_or(0, |n| n.blocks().len());
+    let blocks = preview().map_or(0, |n| n.blocks().len());
 
     let mut edited = text.clone();
     let (mut patches, mut patch_stall) = (Vec::new(), 0.0f64);
@@ -479,12 +475,12 @@ async fn time(app: &Rc<App>, rel: &str) {
         };
         edited.insert(at, 'x');
         let line = edited[..at].matches('\n').count() as u32 + 1;
-        if let Some(n) = native() {
+        if let Some(n) = preview() {
             n.scroll_to_line(line);
         }
         glib::timeout_future(Duration::from_millis(300)).await;
         let beat = Beat::start();
-        if let Some(n) = native() {
+        if let Some(n) = preview() {
             n.render(rel, &edited);
         }
         landed().await;

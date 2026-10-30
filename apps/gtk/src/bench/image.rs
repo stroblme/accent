@@ -3,7 +3,6 @@
 use super::*;
 use crate::look::Look;
 use accent_core::config::Theme;
-use webkit6::prelude::*;
 
 /// `ACCENT_BENCH_IMAGE=<rel_png>,<rel_other_png>` zooms off fit, replaces the file with
 /// a differently sized image and prints requested/drawn sizes and zoom readout. This
@@ -310,9 +309,7 @@ fn look_state(image: &doc::Viewer, rel: &str, theme: Theme, inverted: bool) {
 }
 
 /// `ACCENT_BENCH_PREVIEW_LOOK=<rel_note>` prints each picture's pixels as drawn and the reads
-/// the pictures took, across repeated renders, themes and inversion. Under
-/// `ACCENT_PREVIEW=webkit`, image corner/centre pixels and request counts, and conflict classes,
-/// captions, heights and tints too; `ACCENT_BENCH_SHOTS=<dir>` saves page PNGs.
+/// the pictures took, across repeated renders, themes and inversion.
 ///
 /// - `=hold:<rel_note>` reports image positions and waits 40 s for XTEST menu input,
 ///   printing inversion and requests every 2 s.
@@ -320,12 +317,7 @@ fn look_state(image: &doc::Viewer, rel: &str, theme: Theme, inverted: bool) {
 ///   through 200 ms after load, and whether the latest simultaneous render wins.
 /// - `=change:<note>,<img>,<other>` replaces an image; `=gone:<note>,<img>[,<to>]` deletes
 ///   or renames it. Remote changes run on the host to exercise its watcher.
-/// - `=type:<note>[,<word>]` types into a scratch note to measure rerender cost and
-///   retained state ([`preview::bench_preview_type`]).
 pub(super) fn bench_preview_look(app: &Rc<App>, rel: &str) {
-    if let Some(arg) = rel.strip_prefix("type:") {
-        return bench_preview_type(app, arg);
-    }
     if let Some(arg) = rel.strip_prefix("change:") {
         return change_preview(app, "cp", arg);
     }
@@ -365,20 +357,10 @@ pub(super) fn bench_preview_look(app: &Rc<App>, rel: &str) {
             app.restyle_all();
             preview_look(&app, &format!("{theme:?}")).await;
         }
-        // The image menu's own route: the page's address, resolved to the vault key it names.
-        let mut keys: Vec<String> = match figures(&app) {
-            Some((figures, _)) => figures.into_iter().filter_map(|f| f.key).collect(),
-            None => page_images(&app)
-                .await
-                .iter()
-                .filter_map(|(src, ..)| {
-                    // A diagram's address names its page after a `?`.
-                    let rel = src.strip_prefix("accent://file/")?.split('?').next()?;
-                    app.vault()?
-                        .asset(&accent_core::markdown::percent_decode(rel))
-                })
-                .collect(),
-        };
+        // The image menu's own route: the vault key each picture names.
+        let mut keys: Vec<String> = (figures(&app).into_iter())
+            .flat_map(|(figures, _)| figures.into_iter().filter_map(|f| f.key))
+            .collect();
         // Once each: a diagram embedded twice, at two pages, is one file.
         keys.sort();
         keys.dedup();
@@ -390,52 +372,41 @@ pub(super) fn bench_preview_look(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// How many requests the preview tab's page has made; the native one's reads.
+/// How many reads the preview tab's pictures took.
 fn requests(app: &App) -> u32 {
-    if let Some((_, reads)) = figures(app) {
-        return reads;
-    }
-    super::preview::shown(app).map_or(0, |r| {
-        r.preview()
-            .as_ref()
-            .and_then(|p| p.web())
-            .map_or(0, |p| p.requests())
-    })
+    figures(app).map_or(0, |(_, reads)| reads)
 }
 
-/// The native preview tab's pictures and the reads they took; `None` under WebKit.
+/// The preview tab's pictures and the reads they took.
 fn figures(app: &App) -> Option<(Vec<crate::preview::Probe>, u32)> {
     let rendered = super::preview::shown(app)?;
     let preview = rendered.preview();
-    Some(preview.as_ref()?.native()?.figures())
+    Some(preview.as_ref()?.figures())
 }
 
-/// Whether the native preview tab's render is in and none of its pictures is being read.
-fn native_settled(app: &App) -> bool {
+/// Whether the preview tab's render is in and none of its pictures is being read.
+fn settled(app: &App) -> bool {
     let rendered = super::preview::shown(app);
     let preview = rendered.as_ref().map(|r| r.preview());
-    let settled = preview
-        .as_ref()
-        .and_then(|p| p.as_ref()?.native())
-        .is_some_and(|n| n.settled());
+    let settled = preview.is_some_and(|p| p.as_ref().is_some_and(|p| p.settled()));
     settled && figures(app).is_some_and(|(f, _)| f.iter().all(|f| !f.pending))
 }
 
 /// The preview tab's pictures as its page names them, and whether each shows its file.
 pub(super) async fn preview_pictures(app: &Rc<App>) -> Vec<(String, bool)> {
-    match figures(app) {
-        Some((figures, _)) => figures.into_iter().map(|f| (f.uri, f.loaded)).collect(),
-        None => (page_images(app).await.into_iter())
-            .map(|(src, .., loaded)| (src, loaded))
-            .collect(),
-    }
+    (figures(app).into_iter())
+        .flat_map(|(figures, _)| figures.into_iter().map(|f| (f.uri, f.loaded)))
+        .collect()
 }
 
-/// [`preview_look`] for the native preview: each picture as drawn, once none is being read.
-async fn native_look(app: &Rc<App>, when: &str) {
+/// Wait until no picture is being read, then print a `bench preview_look` line per picture as
+/// drawn, with how long that took (`ms`, from 300 ms after the render was asked for).
+async fn preview_look(app: &Rc<App>, when: &str) {
+    // The render, or a recolouring, is asked for on an idle, so the old page is still up for a
+    // moment.
     glib::timeout_future(Duration::from_millis(300)).await;
     let started = Instant::now();
-    while !native_settled(app) && started.elapsed() < Duration::from_secs(20) {
+    while !settled(app) && started.elapsed() < Duration::from_secs(20) {
         glib::timeout_future(Duration::from_millis(20)).await;
     }
     let ms = ms_since(started);
@@ -455,103 +426,6 @@ async fn native_look(app: &Rc<App>, when: &str) {
             f.corner,
             f.centre,
         );
-    }
-}
-
-/// List preview image addresses, document bounds and loading status.
-pub(super) async fn page_images(app: &Rc<App>) -> Vec<(String, f64, f64, f64, f64, bool)> {
-    let Some(view) = super::preview::web_view(app) else {
-        return Vec::new();
-    };
-    let script = "JSON.stringify(Array.from(document.images).map(function (i) { \
-        var r = i.getBoundingClientRect(); \
-        return [i.src, r.left + scrollX, r.top + scrollY, r.width, r.height, \
-                i.complete && i.naturalWidth > 0]; }))";
-    let json = match view.evaluate_javascript_future(script, None, None).await {
-        Ok(value) => value.to_str().to_string(),
-        Err(e) => {
-            println!("bench preview_look js_error {e}");
-            return Vec::new();
-        }
-    };
-    serde_json::from_str(&json).unwrap_or_default()
-}
-
-/// Wait for the page to settle, then print a `bench preview_look` line per image, with how long
-/// the page and its images took to arrive (`ms`, from 300 ms after the render was asked for).
-async fn preview_look(app: &Rc<App>, when: &str) {
-    // The render is asked for on an idle or after the cache is cleared, so the old page is still
-    // up for a moment.
-    if figures(app).is_some() {
-        return native_look(app, when).await;
-    }
-    glib::timeout_future(Duration::from_millis(300)).await;
-    let Some(view) = super::preview::web_view(app) else {
-        return println!("bench preview_look {when} no_preview");
-    };
-    let started = Instant::now();
-    let settled = || super::preview::settled(app);
-    while started.elapsed() < Duration::from_secs(20)
-        && (view.is_loading() || !settled() || page_images(app).await.iter().any(|i| !i.5))
-    {
-        glib::timeout_future(Duration::from_millis(20)).await;
-    }
-    let ms = ms_since(started);
-    // A frame for what arrived to be painted.
-    glib::timeout_future(Duration::from_millis(200)).await;
-    let requests = requests(app);
-    let shot = view
-        .snapshot_future(
-            webkit6::SnapshotRegion::FullDocument,
-            webkit6::SnapshotOptions::NONE,
-        )
-        .await;
-    let Ok(shot) = shot else {
-        return println!("bench preview_look {when} no_snapshot");
-    };
-    let mut downloader = gdk::TextureDownloader::new(&shot);
-    downloader.set_format(gdk::MemoryFormat::R8g8b8a8);
-    let (bytes, stride) = downloader.download_bytes();
-    let pixel = |x: f64, y: f64| {
-        let (x, y) = (x as usize, y as usize);
-        match (x < shot.width() as usize, y < shot.height() as usize) {
-            (true, true) => {
-                let at = y * stride + x * 4;
-                format!("{},{},{}", bytes[at], bytes[at + 1], bytes[at + 2])
-            }
-            _ => "-".to_string(),
-        }
-    };
-    for (src, x, y, w, h, loaded) in page_images(app).await {
-        println!(
-            "bench preview_look {when} dark={} {src} loaded={loaded} size={w}x{h} px(2,2)={} \
-             px(centre)={} requests={requests} ms={ms:.0}",
-            adw::StyleManager::default().is_dark(),
-            pixel(x + 2.0, y + 2.0),
-            pixel(x + w / 2.0, y + h / 2.0),
-        );
-    }
-    let script = "JSON.stringify(Array.from(document.querySelectorAll('.conflict > div')) \
-        .map(function (d) { var l = d.firstElementChild, s = getComputedStyle; \
-        return [d.className, l.textContent, d.offsetHeight, s(d).backgroundColor, \
-                s(l).backgroundColor]; }))";
-    let sides: Vec<(String, String, f64, String, String)> = view
-        .evaluate_javascript_future(script, None, None)
-        .await
-        .ok()
-        .and_then(|v| serde_json::from_str(&v.to_str()).ok())
-        .unwrap_or_default();
-    for (class, label, h, body, caption) in sides {
-        println!(
-            "bench preview_look {when} dark={} {class} label={label:?} h={h} body={body} \
-             caption={caption}",
-            adw::StyleManager::default().is_dark(),
-        );
-    }
-    if let Ok(dir) = std::env::var("ACCENT_BENCH_SHOTS")
-        && let Err(e) = shot.save_to_png(Path::new(&dir).join(format!("preview-{when}.png")))
-    {
-        println!("bench preview_look {when} shot_error {e}");
     }
 }
 
@@ -606,67 +480,9 @@ fn change_files(app: &Rc<App>, op: &str, rels: &[String]) -> Result<(), String> 
     }
 }
 
-/// See `=time:` on [`bench_preview_look`].
-async fn time_preview(app: &Rc<App>) {
-    if figures(app).is_some() {
-        return time_native(app).await;
-    }
-    let (Some(view), Some(tab), Some(rendered)) = (
-        super::preview::web_view(app),
-        app.active(),
-        super::preview::shown(app),
-    ) else {
-        println!("bench preview_look time no_preview");
-        return bench_quit(app);
-    };
-    let settled = || super::preview::settled(app);
-    let bytes = tab.text().len();
-    for _ in 0..5 {
-        glib::timeout_future(Duration::from_millis(500)).await;
-        let (worst, last) = (Rc::new(Cell::new(0.0)), Rc::new(Cell::new(Instant::now())));
-        let beat = glib::timeout_add_local(Duration::from_millis(1), {
-            let (worst, last) = (worst.clone(), last.clone());
-            move || {
-                let now = Instant::now();
-                worst.set(f64::max(worst.get(), ms_since(last.replace(now))));
-                glib::ControlFlow::Continue
-            }
-        });
-        let t = Instant::now();
-        app.render_rendered(&rendered, true);
-        let render = ms_since(t);
-        while !settled() && t.elapsed() < Duration::from_secs(20) {
-            glib::timeout_future(Duration::from_millis(5)).await;
-        }
-        let shown = ms_since(t);
-        glib::timeout_future(Duration::from_millis(200)).await;
-        beat.remove();
-        println!(
-            "bench preview_look time bytes={bytes} render_ms={render:.1} shown_ms={shown:.0} \
-             stall_ms={:.1}",
-            worst.get()
-        );
-    }
-    // The note and a word asked for at once: the word, asked for last, is what stays up.
-    if let Some(preview) = rendered.preview().as_ref() {
-        preview.render(&tab.rel(), &tab.text());
-        preview.render(&tab.rel(), "latest");
-    }
-    glib::timeout_future(Duration::from_secs(2)).await;
-    let shown = view
-        .evaluate_javascript_future("document.body.textContent", None, None)
-        .await
-        .map_or_else(|e| e.to_string(), |v| v.to_str().to_string());
-    println!(
-        "bench preview_look time latest={}",
-        shown.trim() == "latest"
-    );
-    bench_quit(app);
-}
-
-/// [`time_preview`] for the native preview: each render the note's page put up whole after
+/// See `=time:` on [`bench_preview_look`]: each render the note's page put up whole after
 /// another's, until its pictures are read.
-async fn time_native(app: &Rc<App>) {
+async fn time_preview(app: &Rc<App>) {
     let (Some(tab), Some(rendered)) = (app.active(), super::preview::shown(app)) else {
         println!("bench preview_look time no_preview");
         return bench_quit(app);
@@ -692,7 +508,7 @@ async fn time_native(app: &Rc<App>) {
         let t = Instant::now();
         app.render_rendered(&rendered, true);
         let asked = ms_since(t);
-        while !native_settled(app) && t.elapsed() < Duration::from_secs(20) {
+        while !settled(app) && t.elapsed() < Duration::from_secs(20) {
             glib::timeout_future(Duration::from_millis(5)).await;
         }
         let shown = ms_since(t);
@@ -709,7 +525,6 @@ async fn time_native(app: &Rc<App>) {
     render(&tab.rel(), "latest");
     glib::timeout_future(Duration::from_secs(2)).await;
     let shown = (rendered.preview().as_ref())
-        .and_then(|p| p.native())
         .map(|n| {
             let buffer = n.buffer();
             buffer.text(&buffer.start_iter(), &buffer.end_iter(), false)
@@ -722,9 +537,9 @@ async fn time_native(app: &Rc<App>) {
     bench_quit(app);
 }
 
-/// [`hold_preview`] for the native preview: each picture's middle in the window.
-async fn hold_native(app: &Rc<App>) {
-    native_look(app, "hold").await;
+/// See `=hold:` on [`bench_preview_look`]: each picture's middle in the window.
+async fn hold_preview(app: &Rc<App>) {
+    preview_look(app, "hold").await;
     let view =
         super::preview::shown(app).and_then(|r| Some(r.preview().as_ref()?.focus_target().clone()));
     if let (Some(view), Some((figures, _))) = (view, figures(app)) {
@@ -738,41 +553,6 @@ async fn hold_native(app: &Rc<App>) {
                 at.y()
             );
         }
-    }
-    for _ in 0..20 {
-        glib::timeout_future(Duration::from_secs(2)).await;
-        let mut inverted: Vec<String> = app.inverted_images.borrow().iter().cloned().collect();
-        inverted.sort();
-        println!(
-            "bench preview_look hold inverted={inverted:?} requests={}",
-            requests(app)
-        );
-    }
-    bench_quit(app);
-}
-
-/// See `=hold:` on [`bench_preview_look`].
-async fn hold_preview(app: &Rc<App>) {
-    if figures(app).is_some() {
-        return hold_native(app).await;
-    }
-    preview_look(app, "hold").await;
-    let Some(view) = super::preview::web_view(app) else {
-        return bench_quit(app);
-    };
-    let origin = view
-        .compute_point(&app.window, &graphene::Point::new(0.0, 0.0))
-        .unwrap_or_else(|| graphene::Point::new(0.0, 0.0));
-    let scroll = view
-        .evaluate_javascript_future("scrollY", None, None)
-        .await
-        .map_or(0.0, |v| v.to_double());
-    for (src, x, y, w, h, _) in page_images(app).await {
-        println!(
-            "bench preview_look hold {src} at={:.0},{:.0}",
-            f64::from(origin.x()) + x + w / 2.0,
-            f64::from(origin.y()) + y - scroll + h / 2.0,
-        );
     }
     for _ in 0..20 {
         glib::timeout_future(Duration::from_secs(2)).await;

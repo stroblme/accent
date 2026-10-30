@@ -5,7 +5,7 @@
 //! of Pango markup: the prose's inline styles, and its links followed as the page's are. Copy
 //! over the page writes the table's markdown.
 
-use super::native::Page;
+use super::Page;
 use super::text::{Href, Object, Tags, Writer};
 use super::view::PreviewView;
 use gtk::prelude::*;

@@ -2,8 +2,8 @@
 //! a drag takes into another pane to read the two side by side.
 //!
 //! The tab holds a [`Preview`] only while it is on screen and a while after
-//! ([`crate::preview::idle_for`]), so a preview tab behind another costs no web process. It closes
-//! with its note, and a note has one at most.
+//! ([`crate::preview::idle_for`]), so a preview tab behind another holds no page. It closes with
+//! its note, and a note has one at most.
 
 use super::*;
 use crate::preview::Preview;
@@ -93,7 +93,7 @@ impl Rendered {
         }
     }
 
-    /// Out of sight: the preview and its web process go after [`crate::preview::idle_for`].
+    /// Out of sight: the preview, its page and pictures, go after [`crate::preview::idle_for`].
     fn release_soon(self: &Rc<Self>) {
         let rendered = Rc::downgrade(self);
         self.idle.call_once(move || {
@@ -276,28 +276,17 @@ impl App {
     fn show_rendered(self: &Rc<Self>, rendered: &Rc<Rendered>) {
         rendered.idle.cancel();
         if rendered.preview.borrow().is_none() {
-            let (found, lost) = (Rc::downgrade(rendered), Rc::downgrade(rendered));
-            let preview = self.new_preview(
-                glib::clone!(
-                    #[weak(rename_to = app)]
-                    self,
-                    move |label| {
-                        let pane = found.upgrade().and_then(|r| app.pane_of(&r.page));
-                        if let Some(pane) = pane {
-                            pane.find.set_matches_text(label);
-                        }
+            let found = Rc::downgrade(rendered);
+            let preview = self.new_preview(glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                move |label| {
+                    let pane = found.upgrade().and_then(|r| app.pane_of(&r.page));
+                    if let Some(pane) = pane {
+                        pane.find.set_matches_text(label);
                     }
-                ),
-                glib::clone!(
-                    #[weak(rename_to = app)]
-                    self,
-                    move || {
-                        if let Some(rendered) = lost.upgrade() {
-                            app.render_rendered(&rendered, true);
-                        }
-                    }
-                ),
-            );
+                }
+            ));
             rendered.frame.set_child(Some(preview.widget()));
             *rendered.preview.borrow_mut() = Some(preview);
         }

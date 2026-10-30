@@ -84,8 +84,6 @@ mod theme;
 mod toasts;
 mod tree;
 mod typing;
-#[cfg(feature = "webkit")]
-mod web;
 mod widgets;
 mod wire;
 mod work;
@@ -345,13 +343,13 @@ struct App {
     ops: OnceCell<Rc<fileops::Ops>>,
     /// Built on idle once the window is up, so the first open of Preferences is quick too.
     preferences: OnceCell<settings::Preferences>,
-    /// The presented note's preview, created on F5 so text-only startup avoids a WebKit
-    /// process. Release after hidden idle and recreate on demand (`preview_idle`). A note's
-    /// preview tab has its own (`rendered.rs`).
+    /// The presented note's preview, created on F5 so text-only startup builds none. Release
+    /// after hidden idle and recreate on demand (`preview_idle`). A note's preview tab has its
+    /// own (`rendered.rs`).
     preview: RefCell<Option<preview::Preview>>,
     /// The pending release of the preview, from when it went out of sight.
     preview_idle: widgets::Debounce,
-    /// Session-only inverted-image keys shared by image tabs and preview serving.
+    /// Session-only inverted-image keys shared by image tabs and previews.
     inverted_images: Rc<RefCell<HashSet<String>>>,
     /// Diagram keys with Load permission for web images; persisted in session and shared with embeds.
     web_images: Rc<RefCell<HashSet<String>>>,
@@ -1143,7 +1141,7 @@ impl App {
         for image in self.images() {
             self.show_image(&image, None);
         }
-        // The images a note shows are served in the look, so a new one is a new page.
+        // A note's pictures are drawn in the look, so a new one recolours them.
         let mut look = false;
         self.each_preview(|p| look |= p.restyle());
         if look {

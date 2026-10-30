@@ -18,8 +18,8 @@ use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{gdk, glib, graphene, gsk, pango};
 
-/// The system math fonts, in the order WebKit was given them: Latin Modern's look is closest to
-/// draw.io's MathJax.
+/// The system math fonts, in the order an exported page names them: Latin Modern's look is
+/// closest to draw.io's MathJax.
 const FAMILIES: [&str; 3] = ["Latin Modern Math", "STIX Two Math", "DejaVu Math TeX Gyre"];
 
 /// The family characters the math font lacks are set in: MathJax's `unknownFamily`, as draw.io

@@ -40,7 +40,7 @@ fn latex<'a>(src: &'a str, storage: &'a Storage) -> Result<Vec<LatexEvent<'a>>, 
 ///
 /// The renderer itself never reports a failure — it writes `<merror>` and carries on — so the
 /// parser events are collected first, and that is what decides between MathML and the caller's
-/// raw-source fallback. WebKit draws MathML natively, so no stylesheet or script goes with it.
+/// raw-source fallback. A browser draws MathML natively, so no stylesheet or script goes with it.
 /// The result is well-formed XML, which the renderer's own output is not (see [`well_formed`]).
 pub fn mathml(src: &str, display: bool) -> Option<String> {
     use pulldown_latex::RenderConfig;
@@ -563,7 +563,7 @@ mod tests {
     }
 
     /// A same-page link written with a heading's text, as the editor resolves it, points at that
-    /// heading's `id`, which is where WebKit scrolls; one naming no heading is left as written.
+    /// heading's `id`, which is where a browser scrolls; one naming no heading is left as written.
     #[test]
     fn html_points_a_text_anchor_at_its_heading() {
         let h = bare(

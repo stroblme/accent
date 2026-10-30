@@ -4,7 +4,7 @@
 //! on a line of its own and shrunk to the text's width where it is wider. A zoom lays them out
 //! again. Rules are drawn on whole pixels of the formula's own.
 
-use super::native::Page;
+use super::Page;
 use super::text::{Ink, Object, Writer};
 use accent_math::Layout;
 use gtk::prelude::*;

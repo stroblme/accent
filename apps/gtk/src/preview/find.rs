@@ -6,7 +6,7 @@
 //! own: each is matched alone, its matches counted at the table's place in the text, painted by
 //! the label's attributes and the current one selected in the label.
 
-use super::native::Page;
+use super::Page;
 use super::table::Table;
 use crate::editor;
 use accent_core::search::{self, Options, Regex};
@@ -447,7 +447,7 @@ fn painted(look: &gtk::TextTag, text: &str, ranges: &[Range<i32>]) -> pango::Att
 }
 
 /// Match `at` (1-based, 0 for none selected) of `total`: "3 of 12", "12 matches", "No results".
-pub(crate) fn matches_label(at: u32, total: u32) -> String {
+fn matches_label(at: u32, total: u32) -> String {
     match (at, total) {
         (_, 0) => "No results".to_string(),
         (0, n) => format!("{n} matches"),

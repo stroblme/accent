@@ -1,5 +1,6 @@
 //! Render note diagram embeds (`![[x.drawio]]`, `![[x.drawio#Page]]`) as SVG drawing
-//! bounds in file colours, then serve through `look::serve_svg`.
+//! bounds in file colours, which the preview recolours through `look::show_diagram` and an
+//! export writes into the page.
 //!
 //! Read on a worker and draw on the GTK main thread. Cache by file version and page
 //! so note renders, theme changes and repeated embeds avoid redundant drawing.

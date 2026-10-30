@@ -1,7 +1,6 @@
 //! Check Tags updates as note tags change and preview clicks select them.
 
 use super::*;
-use webkit6::prelude::*;
 
 /// A tag no vault would already carry, so its presence in the list is the whole answer.
 const MARKER: &str = "zzbenchtag";
@@ -51,29 +50,18 @@ pub(super) fn bench_tags(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// Show the note's preview beside it and click the marker's tag link there: the anchor's own
-/// `click()`, which WebKit hands the preview's navigation policy as a pointer's click is.
+/// Show the note's preview beside it and follow the marker's tag link there, as a click on it
+/// does.
 async fn click_marker(app: &Rc<App>) {
     super::preview::beside(app).await;
     glib::timeout_future(SETTLE).await;
-    let native = super::preview::shown(app).and_then(|r| {
+    let found = super::preview::shown(app).and_then(|r| {
         let preview = r.preview();
-        preview.as_ref()?.native().map(|n| n.follow_tag(MARKER))
+        preview.as_ref().map(|p| p.follow_tag(MARKER))
     });
-    if let Some(found) = native {
-        println!("bench tags link={found}");
-        return glib::timeout_future(Duration::from_millis(300)).await;
-    }
-    let Some(view) = super::preview::web_view(app) else {
-        return println!("bench tags step=clicked preview=none");
-    };
-    let script = format!(
-        "var a = document.querySelector('a.tag[href=\"accent://tag/{MARKER}\"]'); \
-         if (a) {{ a.click(); }} !!a"
-    );
-    match view.evaluate_javascript_future(&script, None, None).await {
-        Ok(found) => println!("bench tags link={}", found.to_boolean()),
-        Err(e) => println!("bench tags js_error {e}"),
+    match found {
+        Some(found) => println!("bench tags link={found}"),
+        None => return println!("bench tags step=clicked preview=none"),
     }
     glib::timeout_future(Duration::from_millis(300)).await;
 }

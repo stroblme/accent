@@ -3,7 +3,7 @@
 //! kept already, else once the page's text is all in, from an idle. A restyle gives the tags the
 //! theme's looks.
 
-use super::native::Page;
+use super::Page;
 use super::text::Writer;
 use crate::codeblocks;
 use gtk::glib;
