@@ -138,6 +138,19 @@ pub(crate) fn notebook_css() -> String {
 /// of its own is read as a figure, and at the prose's cap height it looked small there.
 const DISPLAY_MATH: f64 = 1.15;
 
+/// The CSS generic family of `family`'s kind, told from its name: one that calls itself mono is
+/// monospace, a serif that is not a sans is serif, any other sans-serif.
+fn generic(family: &str) -> &'static str {
+    let name = family.to_lowercase();
+    if name.contains("mono") {
+        "monospace"
+    } else if name.contains("serif") && !name.contains("sans") {
+        "serif"
+    } else {
+        "sans-serif"
+    }
+}
+
 /// The foreground at `alpha`, as CSS: the same colour the editor dims with.
 fn dim(c: gdk::RGBA, alpha: f32) -> String {
     css_rgba(crate::theme::at(c, alpha))
@@ -170,7 +183,16 @@ fn theme_css(fg: gdk::RGBA, bg: &str, accent: gdk::RGBA, font: &str, share: Opti
         |share| format!("max({}px, {share:.1}%)", crate::editor::COLUMN_FLOOR),
     );
     let gap = 1.2 / DISPLAY_MATH;
-    let font = crate::editor::font_css(font, "html", 1.0);
+    // `font_css` names the family alone; a page opened where it is missing takes the generic
+    // family of its kind after it rather than the browser's default face.
+    let family = pango::FontDescription::from_string(font)
+        .family()
+        .map_or_else(String::new, |f| f.to_string());
+    let font = crate::editor::font_css(font, "html", 1.0).replacen(
+        &format!("\"{family}\";"),
+        &format!("\"{family}\", {};", generic(&family)),
+        1,
+    );
     format!(
         "html {{ background: {bg}; color: {text}; }}\n\
          {font}\n\
@@ -274,8 +296,8 @@ mod tests {
             .collect()
     }
 
-    /// The prose is in the font it is given, its face kept as the editor's rules keep it; code
-    /// keeps the monospace.
+    /// The prose is in the font it is given, its face kept as the editor's rules keep it, then
+    /// the generic family of its kind; code keeps the monospace.
     #[test]
     fn theme_css_sets_the_prose_in_its_font_and_code_in_the_monospace() {
         let css = theme_css(
@@ -287,7 +309,7 @@ mod tests {
         );
         assert!(
             css.contains(
-                "html { font-family: \"Serif\"; font-size: 12pt; font-weight: 300; \
+                "html { font-family: \"Serif\", serif; font-size: 12pt; font-weight: 300; \
                  font-style: italic; font-stretch: normal; }"
             ),
             "{css}"
@@ -296,6 +318,17 @@ mod tests {
             css.contains("code, pre, .math { font-family: monospace;"),
             "{css}"
         );
+        for (font, generic) in [
+            ("Adwaita Sans 11", "\"Adwaita Sans\", sans-serif;"),
+            ("DejaVu Sans Mono 11", "\"DejaVu Sans Mono\", monospace;"),
+            ("Noto Serif 11", "\"Noto Serif\", serif;"),
+        ] {
+            let css = theme_css(FG, theme::view_bg(false), ACCENT, font, None);
+            assert!(
+                css.contains(&format!("html {{ font-family: {generic}")),
+                "{css}"
+            );
+        }
     }
 
     #[test]
