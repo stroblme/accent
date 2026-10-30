@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Mutex, OnceLock};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use accent_core::recolour::{self, Verdict};
 use accent_core::{animation, orientation};
@@ -95,14 +95,19 @@ pub struct Shown {
     pub texture: gdk::Texture,
     /// SVG logical size, distinct from texture pixels rendered for display scale and zoom. `None` for rasters.
     pub size: Option<(i32, i32)>,
-    /// Whether the file is an animation, which Invert Image Colours leaves alone ([`animated`]).
-    pub animated: bool,
+    /// An animation's frames, recoloured as `texture`, its first, is; none for a still.
+    pub frames: Vec<Frame>,
 }
 
+/// A frame of an animation, and how long it shows: `None` for good, the last of one that plays
+/// once.
+pub type Frame = (gdk::Texture, Option<Duration>);
+
 impl Shown {
-    /// What the picture is handed: the texture, at its logical size.
+    /// What the picture is handed: the texture at its logical size, or the animation playing.
     pub fn paintable(&self) -> gdk::Paintable {
         match self.size {
+            None if !self.frames.is_empty() => Animated::new(self.frames.clone()).upcast(),
             None => self.texture.clone().upcast(),
             Some((width, height)) => Scaled::new(&self.texture, width, height).upcast(),
         }
@@ -132,6 +137,17 @@ pub fn show(
     if svg(path) {
         return show_svg(path, look, inverted, scale, zoom);
     }
+    // An animation keeps no decoding: a restyle reads its frames again.
+    if original.is_none()
+        && let Some(frames) = frames(path, look, inverted)
+    {
+        return Ok(Shown {
+            original: None,
+            texture: frames[0].0.clone(),
+            size: None,
+            frames,
+        });
+    }
     let original = match original {
         Some(texture) => texture,
         None => decode(path)?,
@@ -142,7 +158,7 @@ pub fn show(
         original: Some(original),
         texture,
         size: None,
-        animated: animated(path),
+        frames: Vec::new(),
     })
 }
 
@@ -170,7 +186,7 @@ fn show_svg(
         original: None,
         texture,
         size: Some(size),
-        animated: false,
+        frames: Vec::new(),
     })
 }
 
@@ -200,18 +216,17 @@ fn rasterise(svg: &[u8], scale: i32, zoom: f64) -> Result<(gdk::Texture, (i32, i
     let pixbuf = loader
         .pixbuf()
         .ok_or_else(|| glib::Error::new(gdk_pixbuf::PixbufError::Failed, "no image"))?;
+    Ok((texture(&pixbuf, &pixbuf.read_pixel_bytes()), size.get()))
+}
+
+/// `pixbuf` as a texture of its pixels, `bytes`.
+fn texture(pixbuf: &gdk_pixbuf::Pixbuf, bytes: &glib::Bytes) -> gdk::Texture {
     let format = match pixbuf.has_alpha() {
         true => gdk::MemoryFormat::R8g8b8a8,
         false => gdk::MemoryFormat::R8g8b8,
     };
-    let texture = gdk::MemoryTexture::new(
-        pixbuf.width(),
-        pixbuf.height(),
-        format,
-        &pixbuf.read_pixel_bytes(),
-        pixbuf.rowstride() as usize,
-    );
-    Ok((texture.upcast(), size.get()))
+    let stride = pixbuf.rowstride() as usize;
+    gdk::MemoryTexture::new(pixbuf.width(), pixbuf.height(), format, bytes, stride).upcast()
 }
 
 /// What an exported page holds for an image: the file as it is, or new bytes of a type.
@@ -238,7 +253,11 @@ pub fn serve(path: &Path, look: Look, inverted: bool) -> Served {
         "jpg" | "jpeg" => false,
         _ => tag(path) != 1,
     };
-    match recoloured(path, look, inverted, || decode(path).ok()) {
+    // An animation as it is: recoloured, it would be a still.
+    let recoloured = (!animated(path))
+        .then(|| recoloured(path, look, inverted, || decode(path).ok()))
+        .flatten();
+    match recoloured {
         Some(texture) => Served::Bytes(texture.save_to_png_bytes(), "image/png"),
         None if converted() => match decode(path) {
             Ok(texture) => Served::Bytes(texture.save_to_png_bytes(), "image/png"),
@@ -314,7 +333,7 @@ impl Pixels {
     }
 }
 
-/// Recolour a raster for `look`, or return `None` to preserve it: an animation always.
+/// Recolour a raster for `look`, or return `None` to preserve it.
 /// Decode at most once and only when classification or recolouring needs pixels.
 fn recoloured(
     path: &Path,
@@ -322,16 +341,78 @@ fn recoloured(
     inverted: bool,
     decode: impl Fn() -> Option<gdk::Texture>,
 ) -> Option<gdk::MemoryTexture> {
-    if look.palette(true, inverted).is_none() || animated(path) {
-        return None;
-    }
     let texture = OnceCell::new();
     let decoded = || texture.get_or_init(&decode).clone();
-    let document = match look.asks(inverted) {
-        true => classified(path, || decoded().map(|t| measure(&t))).is_some_and(|v| v.document),
-        false => false,
+    let page = recolouring(path, look, inverted, decoded)?;
+    paint(&decoded()?, look, page)
+}
+
+/// The page `look` puts the raster at `path` onto, `None` to leave it as it is; its pixels,
+/// `decoded`, are asked for only where the classifier has to look at them.
+fn recolouring(
+    path: &Path,
+    look: Look,
+    inverted: bool,
+    decoded: impl Fn() -> Option<gdk::Texture>,
+) -> Option<Page> {
+    look.palette(true, inverted)?;
+    let document = look.asks(inverted)
+        && classified(path, || decoded().map(|t| measure(&t))).is_some_and(|v| v.document);
+    look.palette(document, inverted)
+}
+
+/// How many pixels an animation's frames may hold in all, 64 MB of them: one past it shows its
+/// first frame, as a still does.
+const FRAMES: i64 = 16_000_000;
+
+/// The frames of the animation at `path` as gdk-pixbuf plays it, each recoloured as a still
+/// would be, judged by the first; `None` for a still, for a file gdk-pixbuf plays no animation of
+/// (glycin's loaders read no APNG) and for one past [`FRAMES`]. Reads the file, so on a worker.
+fn frames(path: &Path, look: Look, inverted: bool) -> Option<Vec<Frame>> {
+    if !animated(path) {
+        return None;
+    }
+    let animation = gdk_pixbuf::PixbufAnimation::from_file(path).ok()?;
+    // A clock of its own, stepped a frame's delay at a time, so each frame is read once.
+    let mut clock = SystemTime::UNIX_EPOCH;
+    let iter = animation.iter(Some(clock));
+    let (mut frames, mut first, mut pixels) = (Vec::new(), None::<glib::Bytes>, 0);
+    loop {
+        let pixbuf = iter.pixbuf();
+        let bytes = pixbuf.read_pixel_bytes();
+        // glycin's loader (gdk-pixbuf 2.44) learns which frame is its last only by looking past
+        // it, and then hands back the first frame's own pixels.
+        if first.as_ref().is_some_and(|f| f.as_ptr() == bytes.as_ptr()) {
+            break;
+        }
+        pixels += i64::from(pixbuf.width()) * i64::from(pixbuf.height());
+        if pixels > FRAMES {
+            return None;
+        }
+        let delay = iter.delay_time();
+        frames.push((texture(&pixbuf, &bytes), delay));
+        first.get_or_insert(bytes);
+        // gdk-pixbuf's own loaders know their last frame from the start.
+        match delay {
+            Some(delay) if !iter.on_currently_loading_frame() => {
+                clock += delay;
+                iter.advance(clock);
+            }
+            _ => break,
+        }
+    }
+    if frames.len() < 2 {
+        return None;
+    }
+    let first = frames[0].0.clone();
+    let Some(page) = recolouring(path, look, inverted, || Some(first.clone())) else {
+        return Some(frames);
     };
-    paint(&decoded()?, look, look.palette(document, inverted)?)
+    let recoloured = |(texture, delay): Frame| match paint(&texture, look, page) {
+        Some(painted) => (painted.upcast(), delay),
+        None => (texture, delay),
+    };
+    Some(frames.into_iter().map(recoloured).collect())
 }
 
 /// `texture` recoloured onto `page`, its transparent parts filled where [`Look::fills`] says.
@@ -365,7 +446,7 @@ pub fn show_bytes(
             original: None,
             texture,
             size: Some(size),
-            animated: false,
+            frames: Vec::new(),
         };
         return Ok((shown, filtered.is_some()));
     }
@@ -378,7 +459,7 @@ pub fn show_bytes(
         original: Some(original.clone()),
         texture: recoloured.clone().map_or(original, |t| t.upcast()),
         size: None,
-        animated: false,
+        frames: Vec::new(),
     };
     Ok((shown, recoloured.is_some()))
 }
@@ -400,7 +481,7 @@ pub fn show_diagram(
         original: None,
         texture,
         size: Some(size),
-        animated: false,
+        frames: Vec::new(),
     })
 }
 
@@ -491,17 +572,18 @@ fn svg(path: &Path) -> bool {
     extension(path) == "svg"
 }
 
-/// Never recoloured, nor inverted: an animated GIF, WebP or PNG, which a recolouring would hand
-/// the preview as one still. Reads the file, so off the main thread.
-pub(crate) fn animated(path: &Path) -> bool {
+/// Whether `path` is an animated GIF, WebP or PNG, which [`frames`] plays and an export carries
+/// as it is. Reads the file, so off the main thread.
+fn animated(path: &Path) -> bool {
     std::fs::File::open(path).is_ok_and(animation::animated)
 }
 
-/// Why Invert Image Colours is greyed out over an animation, in the palette ([`animated`]).
-pub(crate) const ANIMATED: &str = "Animated images are shown without recolouring";
-
-/// The same, after the command's name in the preview's menu.
-pub(crate) const ANIMATED_LABEL: &str = "(animated)";
+/// A GIF of two 1 × 1 frames, red then blue, a tenth of a second each, looping.
+#[cfg(any(test, feature = "bench"))]
+pub(crate) const TWO_FRAMES: &[u8] = b"GIF89a\x01\0\x01\0\x80\0\0\xE6\x1E\x1E\x1E\x1E\xE6\
+    \x21\xFF\x0BNETSCAPE2.0\x03\x01\0\0\0\
+    \x21\xF9\x04\x04\x0A\0\0\0\x2C\0\0\0\0\x01\0\x01\0\0\x02\x02\x44\x01\0\
+    \x21\xF9\x04\x04\x0A\0\0\0\x2C\0\0\0\0\x01\0\x01\0\0\x02\x02\x4C\x01\0\x3B";
 
 fn extension(path: &Path) -> String {
     path.extension()
@@ -510,7 +592,7 @@ fn extension(path: &Path) -> String {
 }
 
 mod imp {
-    use std::cell::{Cell, OnceCell};
+    use std::cell::{Cell, OnceCell, RefCell};
 
     use gtk::prelude::*;
     use gtk::subclass::prelude::*;
@@ -550,6 +632,64 @@ mod imp {
             }
         }
     }
+
+    #[derive(Default)]
+    pub struct Animated {
+        pub frames: OnceCell<Vec<super::Frame>>,
+        /// The frame on show.
+        pub at: Cell<usize>,
+        /// The timer to the next frame.
+        pub next: RefCell<Option<glib::SourceId>>,
+        /// Whether it was drawn since the timer last moved it on.
+        pub drawn: Cell<bool>,
+    }
+
+    impl Animated {
+        pub fn frame(&self) -> &gdk::Texture {
+            &self.frames.get().expect("set in `new`")[self.at.get()].0
+        }
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for Animated {
+        const NAME: &'static str = "AccentAnimated";
+        type Type = super::Animated;
+        type Interfaces = (gdk::Paintable,);
+    }
+
+    impl ObjectImpl for Animated {
+        fn dispose(&self) {
+            if let Some(next) = self.next.take() {
+                next.remove();
+            }
+        }
+    }
+
+    impl PaintableImpl for Animated {
+        fn flags(&self) -> gdk::PaintableFlags {
+            gdk::PaintableFlags::STATIC_SIZE
+        }
+
+        fn intrinsic_width(&self) -> i32 {
+            self.frame().width()
+        }
+
+        fn intrinsic_height(&self) -> i32 {
+            self.frame().height()
+        }
+
+        fn current_image(&self) -> gdk::Paintable {
+            self.frame().clone().upcast()
+        }
+
+        fn snapshot(&self, snapshot: &gdk::Snapshot, width: f64, height: f64) {
+            self.frame().snapshot(snapshot, width, height);
+            self.drawn.set(true);
+            if self.next.borrow().is_none() {
+                self.obj().play();
+            }
+        }
+    }
 }
 
 glib::wrapper! {
@@ -569,6 +709,53 @@ impl Scaled {
     #[cfg(feature = "bench")]
     pub fn texture(&self) -> gdk::Texture {
         self.imp().texture.get().cloned().expect("set in `new`")
+    }
+}
+
+glib::wrapper! {
+    /// An animation's frames in turn, each for its delay, while it is drawn: one nothing draws —
+    /// scrolled away, its tab behind another or closed — stops on its frame, its timer gone, and
+    /// goes on once drawn again.
+    pub struct Animated(ObjectSubclass<imp::Animated>) @implements gdk::Paintable;
+}
+
+impl Animated {
+    fn new(frames: Vec<Frame>) -> Animated {
+        let animated: Animated = glib::Object::new();
+        let _ = animated.imp().frames.set(frames);
+        animated
+    }
+
+    /// The timer to the next frame, after this one's delay, unless this is the last of an
+    /// animation that plays once. When it fires, the next frame shows if this one was drawn
+    /// meanwhile, and the animation stops if not.
+    fn play(&self) {
+        let imp = self.imp();
+        let frames = imp.frames.get().expect("set in `new`");
+        let Some(delay) = frames[imp.at.get()].1 else {
+            return;
+        };
+        let animated = self.downgrade();
+        let next = glib::timeout_add_local_once(delay, move || {
+            let Some(animated) = animated.upgrade() else {
+                return;
+            };
+            let imp = animated.imp();
+            imp.next.take();
+            if imp.drawn.replace(false) {
+                let count = imp.frames.get().map_or(1, Vec::len);
+                imp.at.set((imp.at.get() + 1) % count);
+                animated.invalidate_contents();
+                animated.play();
+            }
+        });
+        imp.next.replace(Some(next));
+    }
+
+    /// The frame on show, and whether its timer runs, for a drill.
+    #[cfg(feature = "bench")]
+    pub fn playing(&self) -> (usize, bool) {
+        (self.imp().at.get(), self.imp().next.borrow().is_some())
     }
 }
 
@@ -671,6 +858,39 @@ pub(crate) mod tests {
         }
         file.extend(0u32.to_le_bytes());
         file
+    }
+
+    /// An animation shows each of its frames in turn, each recoloured as a still would be:
+    /// inverted under Light, onto Dark's page. A still has none.
+    #[test]
+    fn an_animation_shows_every_frame_recoloured() {
+        let light = Look {
+            theme: None,
+            opposite: Some(DARK),
+            images: true,
+            diagrams: true,
+        };
+        let dir = std::env::temp_dir();
+        let (gif, tif) = (
+            dir.join(format!("accent-{}.gif", std::process::id())),
+            dir.join(format!("accent-{}-still.tif", std::process::id())),
+        );
+        std::fs::write(&gif, TWO_FRAMES).unwrap();
+        std::fs::write(&tif, grey_tiff(1)).unwrap();
+        let plain = show(&gif, None, light, false, 1, 1.0).unwrap();
+        let inverted = show(&gif, None, light, true, 1, 1.0).unwrap();
+        let still = show(&tif, None, light, false, 1, 1.0).unwrap();
+        std::fs::remove_file(&gif).unwrap();
+        std::fs::remove_file(&tif).unwrap();
+
+        let delays: Vec<_> = plain.frames.iter().map(|f| f.1).collect();
+        assert_eq!(delays, [Some(Duration::from_millis(100)); 2]);
+        let shade = |frame: &Frame| pixels(&frame.0).unwrap().data[..3].to_vec();
+        let shades = |shown: &Shown| shown.frames.iter().map(shade).collect::<Vec<_>>();
+        assert_eq!(shades(&plain), [[230, 30, 30], [30, 30, 230]]);
+        let (plain, inverted) = (shades(&plain), shades(&inverted));
+        assert!(inverted[0] != plain[0] && inverted[1] != plain[1] && inverted[0] != inverted[1]);
+        assert!(still.frames.is_empty());
     }
 
     /// A TIFF comes out of [`decode`] upright whatever its tag, GDK having done part of the turn

@@ -93,8 +93,7 @@ fn picture(w: &mut Writer, uri: &str, name: &str, source: String, kind: &str) {
     }
 }
 
-/// The menu's own item over the picture at `offset`, if any: Invert Image Colours, greyed out
-/// over an animation, which is never recoloured.
+/// The menu's own item over the picture at `offset`, if any: Invert Image Colours.
 pub(super) fn menu_item(page: &Page, offset: i32) -> Option<gio::MenuItem> {
     let figure = page.buffer.iter_at_offset(offset).paintable()?;
     let loaded = figure
@@ -104,18 +103,10 @@ pub(super) fn menu_item(page: &Page, offset: i32) -> Option<gio::MenuItem> {
         .loaded
         .borrow()
         .clone()?;
-    let (key, (shown, _)) = (loaded.key.as_ref()?, loaded.shown.as_ref()?);
-    Some(match shown.animated {
-        true => gio::MenuItem::new(
-            Some(&format!("Invert Image Colours {}", look::ANIMATED_LABEL)),
-            Some("preview.invert-animation"),
-        ),
-        false => {
-            let item = gio::MenuItem::new(Some("Invert Image Colours"), None);
-            item.set_action_and_target_value(Some("preview.invert-image"), Some(&key.to_variant()));
-            item
-        }
-    })
+    let key = loaded.key.as_ref().filter(|_| loaded.shown.is_some())?;
+    let item = gio::MenuItem::new(Some("Invert Image Colours"), None);
+    item.set_action_and_target_value(Some("preview.invert-image"), Some(&key.to_variant()));
+    Some(item)
 }
 
 /// Whether the look the pictures are drawn in changed with the theme, which
@@ -253,11 +244,8 @@ impl Figures {
                 on_invert(key);
             }
         });
-        let animation = gio::SimpleAction::new("invert-animation", None);
-        animation.set_enabled(false);
         let actions = gio::SimpleActionGroup::new();
         actions.add_action(&invert);
-        actions.add_action(&animation);
         view.insert_action_group("preview", Some(&actions));
         Figures(Rc::new(State {
             resolve: Arc::new(resolve),
@@ -302,7 +290,7 @@ impl State {
         }
         let uri = figure.uri();
         if let Some(loaded) = self.loaded.borrow().get(uri) {
-            figure.imp().loaded.replace(Some(loaded.clone()));
+            figure.set_loaded(loaded.clone());
             return;
         }
         if !self.loading.borrow().contains_key(uri) {
@@ -360,7 +348,7 @@ impl State {
                 .borrow_mut()
                 .insert(uri.clone(), loaded.clone());
             for figure in state.live().iter().filter(|f| f.uri() == uri) {
-                figure.imp().loaded.replace(Some(loaded.clone()));
+                figure.set_loaded(loaded.clone());
                 figure.invalidate_size();
             }
         });
@@ -458,6 +446,25 @@ impl Figure {
     fn fit(&self, zoom: f64, width: i32) -> bool {
         self.imp().fit.replace((zoom, width)) != (zoom, width)
     }
+
+    /// Show `loaded`, drawn again as an animation in it moves on a frame: the text redraws the
+    /// figure, not what it holds.
+    fn set_loaded(&self, loaded: Rc<Loaded>) {
+        let imp = self.imp();
+        imp.stop_following();
+        if let Some((_, p)) = &loaded.shown
+            && p.is::<look::Animated>()
+        {
+            let figure = self.downgrade();
+            let handler = p.connect_invalidate_contents(move |_| {
+                if let Some(figure) = figure.upgrade() {
+                    figure.invalidate_contents();
+                }
+            });
+            imp.following.replace(Some((p.clone(), handler)));
+        }
+        imp.loaded.replace(Some(loaded));
+    }
 }
 
 mod imp {
@@ -471,9 +478,17 @@ mod imp {
         pub(super) loaded: RefCell<Option<Rc<Loaded>>>,
         /// The zoom and the text's width.
         pub(super) fit: Cell<(f64, i32)>,
+        /// The animation it shows, and its handler that redraws the figure.
+        pub(super) following: RefCell<Option<(gdk::Paintable, glib::SignalHandlerId)>>,
     }
 
     impl Figure {
+        pub(super) fn stop_following(&self) {
+            if let Some((paintable, handler)) = self.following.take() {
+                paintable.disconnect(handler);
+            }
+        }
+
         /// Its size on the page: the picture's times the zoom, shrunk to the text's width.
         fn size(&self) -> (i32, i32) {
             let natural = match self.loaded.borrow().as_deref() {
@@ -501,7 +516,11 @@ mod imp {
         type Interfaces = (gdk::Paintable,);
     }
 
-    impl ObjectImpl for Figure {}
+    impl ObjectImpl for Figure {
+        fn dispose(&self) {
+            self.stop_following();
+        }
+    }
 
     impl PaintableImpl for Figure {
         fn intrinsic_width(&self) -> i32 {
@@ -557,7 +576,8 @@ mod imp {
 /// A picture on the page as a drill reads it: its address and vault key, whether it is being
 /// read, whether it shows the file, whether that is an animation, its size, its own size at the
 /// zoom and whether its size is that shrunk to the text's width now, two of its pixels as drawn
-/// (`r,g,b`), and its middle in the view's coordinates.
+/// (`r,g,b`), its middle in the view's coordinates, and an animation's frame on show and whether
+/// its timer runs.
 #[cfg(feature = "bench")]
 pub struct Probe {
     pub uri: String,
@@ -571,6 +591,7 @@ pub struct Probe {
     pub corner: String,
     pub centre: String,
     pub at: (i32, i32),
+    pub playing: Option<(usize, bool)>,
 }
 
 /// Every picture on the page, in order.
@@ -628,13 +649,16 @@ fn probed(page: &Page, figure: &Figure, at: &gtk::TextIter) -> Probe {
         key: loaded.as_ref().and_then(|l| l.key.clone()),
         pending: page.figures.0.loading.borrow().contains_key(figure.uri()),
         loaded: shown.is_some(),
-        animated: shown.is_some_and(|s| s.0.animated),
+        animated: shown.is_some_and(|s| !s.0.frames.is_empty()),
         size,
         natural,
         fits,
         corner,
         centre: pixel(0.5, 0.5),
         at: (x, y),
+        playing: shown
+            .and_then(|(_, p)| p.downcast_ref::<look::Animated>())
+            .map(look::Animated::playing),
     }
 }
 

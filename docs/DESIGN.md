@@ -863,7 +863,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Command mode lists the user's own commands (Terminal) by name after the table's commands, each with its shortcut, rebound from its row as any command is (Keyboard, Rebinding).
 - **Command mode lists only what applies** to the window as it stands, read afresh as it opens: what the tab in front can take (Export as PDF… over a PDF, not over a note), the vault, its repository, a debug session and a kernel (`actions::applies`).
   Every other action is disabled, so a menu greys it and its chord goes on to the focused widget.
-  Go to Source and Show in PDF without SyncTeX data, Invert Image Colours over an animation and Initialize Git Repository in a repository stay listed, greyed and saying why.
+  Go to Source and Show in PDF without SyncTeX data and Initialize Git Repository in a repository stay listed, greyed and saying why.
 - Open Recent is the same dialog over the recent vaults, read as the start screen reads them, ending with Open Local… and Open Remote…, so one surface reaches every way of changing vault and is never empty; a query that names one of the two puts it first, so typing "remote" and Enter opens Open Remote….
   The window's own vault is left out: picking it could only raise this window.
 
@@ -1118,16 +1118,18 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A TIFF is an image on the desktop only: Android has no decoder for one.
   An SVG is drawn at the display's scale, as `GtkPicture` draws one, and again when the window moves to a display of another; zoomed past 100 %, it is drawn again at the zoom once the zoom has been left alone for 300 ms, the drawing before enlarged meanwhile, up to 16 megapixels, past which a deeper zoom enlarges that without drawing it again.
   It is drawn once, recoloured or not, and held only as it is shown.
+  An animated GIF or WebP plays, through gdk-pixbuf's animation API, its frames read and recoloured once on a worker; a file gdk-pixbuf plays no animation of, or one past 64 MB of frames, shows its first frame.
+  It plays only while drawn: scrolled away, behind another tab or closed, its timer stops.
 - A document-like image — a scan, a plot, a diagram, a screenshot of text — is recoloured onto the theme's paper and ink as a PDF page is (Architecture, Recolouring); a photo is left as it is, and Light leaves every image alone, as every theme does with Images switched off in Preferences.
-  An SVG is always recoloured, through a filter on its own vector; an animation — a GIF, a WebP or a PNG of more than one frame — never, a recoloured one being a still, so Invert Image Colours is greyed out over one, saying why in the palette and in the preview's menu.
+  An SVG is always recoloured, through a filter on its own vector, and an animation frame by frame, judged by its first; an exported page carries an animation as its file, a recoloured one there being a still.
   Transparency is judged over white, and kept on the window's own page.
   An image over 64 megapixels is left alone rather than held twice.
 - Invert Image Colours does to one file what Invert PDF Colours does to a document: whatever it shows, it goes onto the other half's page — from Light onto Dark's, from either Solarized half onto the other's — and under Dark, whose other half is Light, it shows as it is.
   With Images switched off it goes onto the theme's own page instead, whatever it shows.
   A page that is not the window's own fills the image's transparent parts with its paper, so a drawing on nothing reads as a page.
   It lasts until the app quits and is written nowhere.
-- A theme change, or the Images switch, recolours the texture already decoded, the file read again only when it changes on disk; an SVG is drawn again from its file.
-- The preview shows an image as its tab would: read through the vault on a worker, at the file's size up to the column's width, recoloured as above, and read again when the file changes on disk; an animation shows its first frame.
+- A theme change, or the Images switch, recolours the texture already decoded, the file read again only when it changes on disk; an SVG is drawn again from its file, and an animation's frames read again.
+- The preview shows an image as its tab would: read through the vault on a worker, at the file's size up to the column's width, recoloured as above, and read again when the file changes on disk; an animation plays as in its tab.
   An embedded diagram is drawn the same way, as the SVG of its page (Diagram).
   Its menu over an image ends with Invert Image Colours, the same toggle as the palette's.
 

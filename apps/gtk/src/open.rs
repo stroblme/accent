@@ -468,7 +468,6 @@ impl App {
                     zoom::set_image_zoom(&picture, image.zoom.get());
                     let own = (shown.texture.width(), shown.texture.height());
                     image.size.set(Some(shown.size.unwrap_or(own)));
-                    image.animated.set(shown.animated);
                     app.sync_details();
                     app.sync_image_invert();
                     *image.image.borrow_mut() = Some((path, shown.original));
@@ -487,19 +486,13 @@ impl App {
         });
     }
 
-    /// Offer Invert Image Colours over an image alone, greyed over an animation, which is never
-    /// recoloured, once the image in front has been read.
+    /// Offer Invert Image Colours over an image alone.
     pub(crate) fn sync_image_invert(&self) {
         let image = matches!(self.active_doc(), Some(Doc::Image(_)));
         let action = self.window.lookup_action("image-invert");
         if let Some(action) = action.and_downcast::<gio::SimpleAction>() {
-            action.set_enabled(image && !self.active_animation());
+            action.set_enabled(image);
         }
-    }
-
-    /// Whether the tab in front shows an animation.
-    pub(crate) fn active_animation(&self) -> bool {
-        matches!(self.active_doc(), Some(Doc::Image(image)) if image.animated.get())
     }
 
     /// Toggle key's image appearance in tabs and preview for this process, reversing theme recolouring.

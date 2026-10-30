@@ -37,8 +37,6 @@ pub struct Viewer {
     pub size: Cell<Option<(i32, i32)>>,
     /// The monitor on a loose image, which nothing else watches (`App::watch_loose`).
     pub monitor: RefCell<Option<gio::FileMonitor>>,
-    /// Whether the file is an animation, known once it is read (`look::Shown::animated`).
-    pub animated: Cell<bool>,
 }
 
 impl Viewer {
@@ -52,7 +50,6 @@ impl Viewer {
             shows: Cell::new(0),
             size: Cell::new(None),
             monitor: RefCell::default(),
-            animated: Cell::new(false),
         })
     }
 

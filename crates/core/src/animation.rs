@@ -1,5 +1,5 @@
-//! Detect animated images. GDK and `BitmapFactory` decode only one frame, so both apps display
-//! animations as files instead of recolouring a still frame.
+//! Detect animated images, which the desktop app plays frame by frame and Android, whose
+//! `BitmapFactory` decodes one frame, shows as their files rather than as a recoloured still.
 
 use std::io::{self, BufRead, BufReader, Read};
 
