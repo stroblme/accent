@@ -44,7 +44,10 @@ pub(super) struct Tags {
     pub callout_title: gtk::TextTag,
     /// A callout's last line: the tint's padding below its text, then the gap after the block.
     pub callout_end: gtk::TextTag,
+    /// An item's lines at each depth, at the item's text.
     pub lists: [gtk::TextTag; 6],
+    /// An item's first line at each depth, its marker hung before the item's text.
+    pub hangs: [gtk::TextTag; 6],
     pub taskdone: gtk::TextTag,
     pub dt: gtk::TextTag,
     pub dd: gtk::TextTag,
@@ -123,6 +126,7 @@ impl Tags {
             callout_title: set("callout-title", &|t| t.set_weight(700)),
             callout_end: tag("callout-end"),
             lists: std::array::from_fn(|i| tag(&format!("list{}", i + 1))),
+            hangs: std::array::from_fn(|i| tag(&format!("hang{}", i + 1))),
             taskdone: tag("taskdone"),
             dt: set("dt", &|t| t.set_weight(700)),
             dd: tag("dd"),
@@ -191,9 +195,14 @@ impl Tags {
         self.callout_title.set_pixels_above_lines(em(0.8));
         self.callout_title.set_pixels_below_lines(em(0.8));
         self.callout_end.set_pixels_below_lines(em(0.8) * 2);
-        for (i, tag) in self.lists.iter().enumerate() {
-            tag.set_left_margin(gutter + em(1.4 * (i + 1) as f64));
-            tag.set_indent(-em(1.2));
+        // An item's first line starts with its marker, 1.4 em further in each depth, and GTK
+        // sets the lines it wraps onto 1.2 em in from that, under the text; every other line of
+        // the item, a later paragraph's first too, starts there, as the stylesheet lines them up.
+        for (i, (list, hang)) in self.lists.iter().zip(&self.hangs).enumerate() {
+            let marker = gutter + em(1.4 * (i + 1) as f64);
+            hang.set_left_margin(marker);
+            hang.set_indent(-em(1.2));
+            list.set_left_margin(marker + em(1.2));
         }
         self.dd.set_left_margin(gutter + em(1.4));
         self.rule.set_pixels_above_lines(12);
@@ -759,7 +768,7 @@ pub(super) fn write(
         notes: laid.notes.iter(),
         tags: Vec::new(),
         lists: Vec::new(),
-        done: Vec::new(),
+        items: Vec::new(),
         links: Vec::new(),
         image: None,
         meta: false,
@@ -818,8 +827,9 @@ pub(super) struct Writer<'a> {
     notes: std::slice::Iter<'a, usize>,
     pub tags: Vec<gtk::TextTag>,
     lists: Vec<Option<u64>>,
-    /// Per open item, whether it is a done task, whose text is dimmed.
-    done: Vec<bool>,
+    /// Per open item, where its first line starts and whether it is a done task, whose text is
+    /// dimmed.
+    items: Vec<(i32, bool)>,
     links: Vec<(i32, Href)>,
     /// A markdown image being read: its destination and alt text.
     image: Option<(String, String)>,
@@ -943,7 +953,7 @@ impl Writer<'_> {
         let depth = self.lists.len().clamp(1, 6);
         let page = self.page;
         self.push(&page.tags.lists[depth - 1]);
-        self.done.push(false);
+        self.items.push((self.offset(), false));
         if !task {
             let bullet = match self.lists.last_mut() {
                 Some(Some(n)) => {
@@ -982,7 +992,7 @@ impl Writer<'_> {
         if task == Task::Done {
             let page = self.page;
             self.push(&page.tags.taskdone);
-            if let Some(done) = self.done.last_mut() {
+            if let Some((_, done)) = self.items.last_mut() {
                 *done = true;
             }
         }
@@ -994,6 +1004,16 @@ impl Writer<'_> {
         start.backward_char();
         start.set_line_offset(0);
         self.page.buffer.apply_tag(tag, &start, self.at);
+    }
+
+    /// An item's first line, from `start`: the one its marker hangs in.
+    fn hang(&self, start: i32) {
+        let depth = self.lists.len().clamp(1, 6);
+        let buffer = &self.page.buffer;
+        let first = buffer.iter_at_offset(self.start + start);
+        let mut end = first;
+        end.forward_line();
+        buffer.apply_tag(&self.page.tags.hangs[depth - 1], &first, &end);
     }
 
     /// The room of a code block's box above its first line, from `start`, and below its last.
@@ -1258,11 +1278,15 @@ impl Writer<'_> {
                 self.lists.pop();
             }
             Event::End(TagEnd::Item) => {
-                if self.done.pop() == Some(true) {
+                let item = self.items.pop();
+                if item.is_some_and(|(_, done)| done) {
                     self.pop();
                 }
                 self.pop();
                 self.newline();
+                if let Some((start, _)) = item {
+                    self.hang(start);
+                }
             }
             // Every row read so far is the head's, which in org may be several.
             Event::End(TagEnd::TableHead) => {
