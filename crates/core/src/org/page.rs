@@ -2,9 +2,10 @@
 //! ([`crate::markdown::page`]), so the preview, an export and Android write it alike. Read line
 //! by line as [`super::analyze`] reads the file, the subset accent shows: headings with their
 //! TODO keyword and tags, paragraphs, lists with their boxes, description lists, tables, blocks
-//! of code, examples and quotes, footnotes (an inline one defined after the page, as org's
-//! export defines every one), and in prose emphasis, links, pictures, formulas, `<<targets>>` and
-//! sub- and superscripts in braces (`H_{2}O`, as org's `^:{}` has them, so `snake_case` stays as
+//! of code, examples, quotes and verse (a centre block's text as its paragraphs: the page has no
+//! centring), footnotes (an inline one defined after the page, as org's export defines every
+//! one), and in prose emphasis, links, pictures, formulas, `<<targets>>`, line breaks and sub-
+//! and superscripts in braces (`H_{2}O`, as org's `^:{}` has them, so `snake_case` stays as
 //! written).
 //!
 //! What org's own export leaves out by default is not shown: `#+KEY:` lines (`#+TITLE` too: a
@@ -37,6 +38,7 @@ pub fn page(text: &str) -> Vec<Block<'_>> {
         named: Vec::new(),
         targets: Vec::new(),
         notes: Vec::new(),
+        verse: false,
     };
     for part in parts(text) {
         match part {
@@ -83,6 +85,8 @@ struct Page<'a> {
     targets: Vec<String>,
     /// Each inline footnote's label and its text, defined after the page.
     notes: Vec<(CowStr<'a>, Range<usize>)>,
+    /// Whether the text being read is a verse block's, every line break of it a hard one.
+    verse: bool,
 }
 
 /// What a line opens.
@@ -93,6 +97,8 @@ enum Kind {
     Closed(usize, Style),
     /// A quote block, to its last line.
     Quote(usize),
+    /// A verse block, to its last line.
+    Verse(usize),
     /// A `#+KEY:` line, the fence of any other block, or a comment.
     Hidden,
     Fixed,
@@ -169,8 +175,11 @@ impl<'a> Page<'a> {
             Kind::Heading
         } else if let Some((last, style)) = closed(text, lines, i) {
             Kind::Closed(last, style)
-        } else if let Some(last) = quote(text, lines, i) {
-            Kind::Quote(last)
+        } else if let Some((last, verse)) = quote_or_verse(text, lines, i) {
+            match verse {
+                true => Kind::Verse(last),
+                false => Kind::Quote(last),
+            }
         } else if s.starts_with("#+") || word("#") {
             Kind::Hidden
         } else if word(":") {
@@ -236,6 +245,22 @@ impl<'a> Page<'a> {
                 self.open(Cm::BlockQuote(None), bytes.clone());
                 self.blocks(&lines[i + 1..last], false);
                 self.close(TagEnd::BlockQuote(None), bytes);
+                last + 1
+            }
+            // One paragraph of the lines between the fences, each ending in a break, as org's
+            // export writes a verse.
+            Kind::Verse(last) => {
+                let bytes = span(i, last);
+                self.open(Cm::Paragraph, bytes.clone());
+                if last > i + 1 {
+                    let body = span(i + 1, last - 1);
+                    let s = &text[body.clone()];
+                    let lead = body.start + s.len() - s.trim_start().len();
+                    self.verse = true;
+                    self.inline(lead..lead + s.trim().len());
+                    self.verse = false;
+                }
+                self.close(TagEnd::Paragraph, bytes);
                 last + 1
             }
             Kind::Fixed => {
@@ -770,17 +795,30 @@ impl<'a> Page<'a> {
         self.close(TagEnd::Link, r);
     }
 
-    /// Text as written, a line break a soft one and the next line's indentation gone.
+    /// Text as written, a line break a soft one and the next line's indentation gone; a hard one
+    /// after a `\\` ending the line, and every one in a verse.
     fn plain(&mut self, at: Range<usize>) {
         let text = self.text;
         let mut start = at.start;
+        let mut hard = false;
         for (n, piece) in text[at.clone()].split('\n').enumerate() {
             let r = start..start + piece.len();
             start = r.end + 1;
             let mut shown = &text[r.clone()];
             if n > 0 {
-                self.push(Node::Event(Event::SoftBreak), r.clone());
+                let brk = match hard || self.verse {
+                    true => Event::HardBreak,
+                    false => Event::SoftBreak,
+                };
+                self.push(Node::Event(brk), r.clone());
                 shown = shown.trim_start();
+            }
+            // Org's line break, `\\` and blanks to the end of the line, after no third `\`.
+            let eol = (text.as_bytes().get(r.end)).is_none_or(|&c| c == b'\n' || c == b'\r');
+            let cut = (shown.trim_end().strip_suffix("\\\\")).filter(|s| eol && !s.ends_with('\\'));
+            hard = cut.is_some();
+            if let Some(cut) = cut {
+                shown = cut.trim_end();
             }
             if r.end < at.end {
                 shown = shown.trim_end();
@@ -807,18 +845,22 @@ enum Found {
     Emphasis(u8, Range<usize>),
 }
 
-/// The last line of the quote block opening on `lines[i]`, before the next heading.
-fn quote(text: &str, lines: &[Range<usize>], i: usize) -> Option<usize> {
+/// The last line of the quote or verse block opening on `lines[i]`, before the next heading, and
+/// whether it is a verse.
+fn quote_or_verse(text: &str, lines: &[Range<usize>], i: usize) -> Option<(usize, bool)> {
     let at = |j: usize| text[lines[j].clone()].trim();
-    let open = at(i).get(..13)?;
-    if !open.eq_ignore_ascii_case("#+begin_quote")
-        || at(i).len() > 13 && !at(i)[13..].starts_with(' ')
-    {
+    let name = (at(i).get(..8))
+        .filter(|begin| begin.eq_ignore_ascii_case("#+begin_"))
+        .and_then(|_| at(i)[8..].split_whitespace().next())?;
+    let verse = name.eq_ignore_ascii_case("verse");
+    if !verse && !name.eq_ignore_ascii_case("quote") {
         return None;
     }
+    let end = format!("#+end_{name}");
     (i + 1..lines.len())
         .take_while(|&j| !is_heading(&text[lines[j].clone()]))
-        .find(|&j| at(j).eq_ignore_ascii_case("#+end_quote"))
+        .find(|&j| at(j).eq_ignore_ascii_case(&end))
+        .map(|j| (j, verse))
 }
 
 /// Whether `line`, right under a heading, is its planning line: `SCHEDULED:`, `DEADLINE:` or
@@ -1187,6 +1229,31 @@ Left out.
         assert!(h.ends_with("2</sup>\n<p>two [x]</p>\n</div>\n"), "{h}");
         let last = page("x[fn::y]\n").pop().unwrap();
         assert_eq!(last.bytes, 9..9);
+    }
+
+    /// `\\` ending a line breaks it there, gone from the text; anywhere else it is text.
+    #[test]
+    fn a_backslash_pair_ending_a_line_breaks_it() {
+        let h = bare("One\\\\\n*two* \\\\  \nthree \\\\ four\\\\\\\nfive\\\\\n");
+        assert_eq!(
+            h,
+            "<p>One<br />\n<strong>two</strong><br />\nthree \\\\ four\\\\\\\nfive</p>\n"
+        );
+    }
+
+    /// A verse block keeps its line breaks, a blank line among them; a centre block's text is
+    /// its paragraphs, not centred.
+    #[test]
+    fn a_verse_keeps_its_line_breaks() {
+        let h = bare(
+            "#+begin_verse\n  Roses are /red/,\n    violets blue.\n\nThe end.\n#+end_verse\n\
+             #+begin_center\nMiddle\nline.\n#+end_center\n",
+        );
+        assert_eq!(
+            h,
+            "<p>Roses are <em>red</em>,<br />\nviolets blue.<br />\n<br />\nThe end.</p>\n\
+             <p>Middle\nline.</p>\n"
+        );
     }
 
     /// An anchor names the `id` its element has on the page, a target's before a heading's.
