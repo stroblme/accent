@@ -20,6 +20,9 @@ use std::rc::Rc;
 pub(super) struct Tags {
     pub prose: gtk::TextTag,
     pub gap: gtk::TextTag,
+    /// A paragraph's last line inside a quote, an item, a footnote or a callout: the
+    /// stylesheet's `p` margin below it, where a block's own last line has the gap.
+    pub para: gtk::TextTag,
     /// The line a block that shows nothing still takes, as thin as it goes.
     pub void: gtk::TextTag,
     pub headings: [gtk::TextTag; 6],
@@ -39,8 +42,6 @@ pub(super) struct Tags {
     pub quote: gtk::TextTag,
     pub callout: gtk::TextTag,
     pub callout_title: gtk::TextTag,
-    /// A paragraph's line inside a callout, spaced from the next as the stylesheet's `p` is.
-    pub callout_para: gtk::TextTag,
     /// A callout's last line: the tint's padding below its text, then the gap after the block.
     pub callout_end: gtk::TextTag,
     pub lists: [gtk::TextTag; 6],
@@ -87,6 +88,7 @@ impl Tags {
         Tags {
             prose: tag("prose"),
             gap: tag("gap"),
+            para: tag("para"),
             void: set("void", &|t| t.set_scale(0.05)),
             headings: std::array::from_fn(|i| {
                 set(&format!("h{}", i + 1), &|t| {
@@ -119,7 +121,6 @@ impl Tags {
             quote: set("quote", &|t| t.set_style(pango::Style::Italic)),
             callout: tag("callout"),
             callout_title: set("callout-title", &|t| t.set_weight(700)),
-            callout_para: tag("callout-para"),
             callout_end: tag("callout-end"),
             lists: std::array::from_fn(|i| tag(&format!("list{}", i + 1))),
             taskdone: tag("taskdone"),
@@ -170,6 +171,7 @@ impl Tags {
             tag.set_line_height(line(1.25));
         }
         self.gap.set_pixels_below_lines(em(0.8));
+        self.para.set_pixels_below_lines(em(0.8));
         for (tag, scale) in self.headings.iter().zip(crate::highlight::HEADING_SCALES) {
             tag.set_pixels_above_lines(em(1.2 * scale));
             tag.set_pixels_below_lines(em(0.4 * scale));
@@ -184,11 +186,10 @@ impl Tags {
         self.quote.set_left_margin(inset + 3);
         self.callout.set_left_margin(inset + 3);
         self.callout.set_right_margin(inset);
-        // The stylesheet's callout, a flow root: each paragraph's 0.8 em, the title's too, stays
+        // The stylesheet's callout, a flow root: a paragraph's 0.8 em, the title's too, stays
         // inside the tint, above the title and below the last line.
         self.callout_title.set_pixels_above_lines(em(0.8));
         self.callout_title.set_pixels_below_lines(em(0.8));
-        self.callout_para.set_pixels_below_lines(em(0.8));
         self.callout_end.set_pixels_below_lines(em(0.8) * 2);
         for (i, tag) in self.lists.iter().enumerate() {
             tag.set_left_margin(gutter + em(1.4 * (i + 1) as f64));
@@ -1186,10 +1187,11 @@ impl Writer<'_> {
             Event::Start(Cm::DefinitionListTitle) => self.push(&tags.dt),
             Event::Start(Cm::DefinitionListDefinition) => self.push(&tags.dd),
             Event::Start(_) => {}
+            // The tags still open are the blocks the paragraph is in.
             Event::End(TagEnd::Paragraph) => {
                 self.newline();
-                if self.tags.contains(&tags.callout) {
-                    self.tag_line(&tags.callout_para);
+                if !self.tags.is_empty() {
+                    self.tag_line(&tags.para);
                 }
             }
             Event::End(TagEnd::BlockQuote(_)) if self.tags.last() == Some(&tags.callout) => {

@@ -5,7 +5,7 @@ bench preview block=3 lines=9-10 tags=["gap", "h2", "prose"] text="Lists\n"
 bench preview block=4 lines=11-15 tags=["list1", "prose"] text="• first\n• nested\n• second\n"
 bench preview block=5 lines=15-18 tags=["list1", "prose"] text="1. one\n2. two\n"
 bench preview block=6 lines=18-22 tags=["list1", "prose"] text="[box [ ]] open task\n[box [x]] done task\n[box [/]] doing task\n"
-bench preview block=7 lines=22-24 tags=["gap", "prose", "quote"] text="A quote over two lines\n"
+bench preview block=7 lines=22-24 tags=["gap", "para", "prose", "quote"] text="A quote over two lines\n"
 bench preview block=8 lines=25-27 tags=["callout", "callout-title", "prose"] text="[icon document-edit-symbolic] Callout title\nCallout body\n"
 bench preview block=9 lines=28-31 tags=["code:python3:0", "codeblock", "fence-bottom", "fence-top", "gap", "prose"] text="print(\"hi\")\n"
 bench preview block=10 lines=32-35 tags=["caption", "prose"] text="Mermaid diagram\ngraph TD; A-->B\n"
@@ -22,7 +22,7 @@ bench preview block=20 lines=63-64 tags=["prose", "void"] text="\n"
 bench preview block=21 lines=65-66 tags=["gap", "prose"] text="[image preview-drill.png] [diagram preview-drill.drawio] [image Attachments/stripes.png]\n"
 bench preview block=22 lines=67-68 tags=["gap", "prose"] text="Back to the top, lists and the paragraph.\n"
 bench preview block=23 lines=69-74 tags=["conflict-current", "conflict-current-label", "prose"] text="ours\nOur side\ntheirs\nTheir side\n"
-bench preview block=24 lines=75-77 tags=["fndef", "gap", "prose"] text="1. The footnote.\n"
+bench preview block=24 lines=75-77 tags=["fndef", "gap", "para", "prose"] text="1. The footnote.\n"
 bench preview figure accent://file/preview-drill.png key=Some("preview-drill.png") loaded=true size=96x48 fits=true reads=3
 bench preview figure accent://file/preview-drill.drawio key=Some("preview-drill.drawio") loaded=true size=527x347 fits=true reads=3
 bench preview figure accent://file/Attachments/stripes.png key=Some("Attachments/stripes.png") loaded=true size=96x48 fits=true reads=3
