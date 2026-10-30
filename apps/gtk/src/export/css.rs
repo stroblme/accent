@@ -1,7 +1,8 @@
 //! The stylesheet of a note's exported page, on screen in a browser and on paper.
 //!
-//! It is generated from the editor's foreground, background, accent and font, because a browser
-//! cannot read GTK's CSS variables; so the page and the editor agree.
+//! It is generated from the editor's foreground, background and accent and the preview's font,
+//! because a browser cannot read GTK's CSS variables; so the page, the editor and the preview
+//! agree.
 
 use crate::theme;
 use accent_core::config::Config;
@@ -25,25 +26,15 @@ pub(crate) fn column(config: &Config) -> Option<u32> {
     (!config.full_width_preview).then_some(config.column_width)
 }
 
-/// [`theme_css`] for `fg` on `bg`, in the editor's font and the system accent.
-fn stylesheet(fg: gdk::RGBA, bg: &str, share: Option<f64>) -> String {
-    // The editor's own font, not the GNOME document font: DESIGN.md's Typography section gives
-    // prose the monospace at the *size* of the document font, and the two panes are meant to agree
-    // by construction. Asked of `editor::default_font`, which is where that decision is made, so a
-    // change there reaches the page without a second edit.
-    let font = pango::FontDescription::from_string(&crate::editor::default_font());
-    let family = font
-        .family()
-        .map(|f| f.to_string())
-        .unwrap_or_else(crate::platform::monospace_family);
-    let size = match font.size() as f64 / pango::SCALE as f64 {
-        pt if pt > 0.0 => pt,
-        _ => 11.0,
-    };
+/// [`theme_css`] for `fg` on `bg`, in `font` and the system accent.
+fn stylesheet(fg: gdk::RGBA, bg: &str, font: &str, share: Option<f64>) -> String {
     let accent = adw::StyleManager::default().accent_color_rgba();
-    let css = theme_css(fg, bg, accent, &family, size, share);
+    let css = theme_css(fg, bg, accent, font, share);
+    let family = pango::FontDescription::from_string(font)
+        .family()
+        .map_or_else(|| "Sans".to_string(), |f| f.to_string());
     // A math font has TeX's proportions: Latin Modern Math's capitals are 0.68 em against about
-    // 0.73 for the monospace prose, its `x` 0.43 against 0.52, so at one font size a formula
+    // 0.73 for the prose (Adwaita Sans), its `x` 0.43 against 0.55, so at one font size a formula
     // reads small. `font-size-adjust` scales whichever math font the page gets to the prose's cap
     // height (user decision 2026-10-27: capitals matched, not MathJax's x-heights, which made
     // them stand out); DejaVu Math TeX Gyre, the GNOME runtime's, is scaled by next to nothing.
@@ -66,10 +57,13 @@ pub(crate) fn cap_height(family: &str) -> Option<f64> {
     (cap > 0.0).then_some(cap)
 }
 
-/// The sheet an exported page carries in its file, in paper's colours.
+/// The sheet an exported page carries in its file, in paper's colours and the Preview Font, the
+/// document font until one is chosen, so a printout looks like the preview.
 pub(crate) fn paper_css(config: &Config) -> String {
     let (bg, fg) = theme::paper();
-    stylesheet(fg, bg, column(config).map(f64::from))
+    let font = config.preview_font.clone();
+    let font = font.unwrap_or_else(crate::platform::document_font);
+    stylesheet(fg, bg, &font, column(config).map(f64::from))
 }
 
 /// The icons of the callouts in `body`, each type's as the preview draws it
@@ -149,18 +143,13 @@ fn dim(c: gdk::RGBA, alpha: f32) -> String {
     css_rgba(crate::theme::at(c, alpha))
 }
 
-/// Generate the page's styling from foreground, background, accent and document font.
+/// Generate the page's styling from foreground, background, accent and `font`, a Pango
+/// description whose family, size, weight, slant and width the prose takes as the editor's rules
+/// do (`editor::font_css`).
 /// Editor alpha and conflict tint rules are shared. Composite caption tints to opaque colours
 /// so underlying side backgrounds cannot darken them. `share` is the page's cap in percent of the
 /// view, `None` for no cap.
-fn theme_css(
-    fg: gdk::RGBA,
-    bg: &str,
-    accent: gdk::RGBA,
-    family: &str,
-    pt: f64,
-    share: Option<f64>,
-) -> String {
+fn theme_css(fg: gdk::RGBA, bg: &str, accent: gdk::RGBA, font: &str, share: Option<f64>) -> String {
     let (text, accent) = (css_rgba(fg), css_rgba(accent));
     let (surface, quote, rule) = (dim(fg, 0.07), dim(fg, 0.6), dim(fg, 0.15));
     let page = gdk::RGBA::parse(bg).unwrap_or(gdk::RGBA::WHITE);
@@ -181,9 +170,10 @@ fn theme_css(
         |share| format!("max({}px, {share:.1}%)", crate::editor::COLUMN_FLOOR),
     );
     let gap = 1.2 / DISPLAY_MATH;
+    let font = crate::editor::font_css(font, "html", 1.0);
     format!(
-        "html {{ background: {bg}; color: {text}; font-family: \"{family}\", sans-serif; \
-         font-size: {pt}pt; }}\n\
+        "html {{ background: {bg}; color: {text}; }}\n\
+         {font}\n\
          /* The editor's column, its gutters inside the cap as they are inside the clamp. */\n\
          body {{ box-sizing: border-box; max-width: {column}; margin: 0 auto; \
          padding: 24px 48px 96px; line-height: 1.6; }}\n\
@@ -284,16 +274,33 @@ mod tests {
             .collect()
     }
 
+    /// The prose is in the font it is given, its face kept as the editor's rules keep it; code
+    /// keeps the monospace.
     #[test]
-    fn theme_css_paints_links_with_the_accent() {
+    fn theme_css_sets_the_prose_in_its_font_and_code_in_the_monospace() {
         let css = theme_css(
             FG,
-            theme::view_bg(true),
+            theme::view_bg(false),
             ACCENT,
-            "Cantarell",
-            11.0,
-            Some(50.0),
+            "Serif Light Italic 12",
+            None,
         );
+        assert!(
+            css.contains(
+                "html { font-family: \"Serif\"; font-size: 12pt; font-weight: 300; \
+                 font-style: italic; font-stretch: normal; }"
+            ),
+            "{css}"
+        );
+        assert!(
+            css.contains("code, pre, .math { font-family: monospace;"),
+            "{css}"
+        );
+    }
+
+    #[test]
+    fn theme_css_paints_links_with_the_accent() {
+        let css = theme_css(FG, theme::view_bg(true), ACCENT, "Cantarell 11", Some(50.0));
         assert!(
             css.contains("a { color: rgba(255, 0, 0, 1.00); text-decoration: underline; }"),
             "{css}"
@@ -314,8 +321,7 @@ mod tests {
             FG,
             theme::view_bg(false),
             ACCENT,
-            "Cantarell",
-            11.0,
+            "Cantarell 11",
             Some(50.0),
         );
         let page = gdk::RGBA::parse(theme::view_bg(false)).unwrap();
@@ -336,13 +342,13 @@ mod tests {
     #[test]
     fn theme_css_writes_no_hex_but_the_background() {
         for bg in [theme::view_bg(false), theme::view_bg(true)] {
-            let css = theme_css(FG, bg, ACCENT, "Cantarell", 11.0, Some(50.0));
+            let css = theme_css(FG, bg, ACCENT, "Cantarell 11", Some(50.0));
             assert_eq!(hex_literals(&css), vec![bg], "stray hex with {bg}");
         }
         // Paper is white whatever the theme on screen.
         let (bg, ink) = theme::paper();
         assert_eq!(bg, theme::view_bg(false));
-        let css = theme_css(ink, bg, ACCENT, "Cantarell", 11.0, Some(50.0));
+        let css = theme_css(ink, bg, ACCENT, "Cantarell 11", Some(50.0));
         assert_eq!(hex_literals(&css), vec![bg]);
     }
 
@@ -354,15 +360,14 @@ mod tests {
             FG,
             theme::view_bg(false),
             ACCENT,
-            "Cantarell",
-            11.0,
+            "Cantarell 11",
             Some(55.0),
         );
         assert!(
             css.contains("body { box-sizing: border-box; max-width: max(480px, 55.0%);"),
             "{css}"
         );
-        let css = theme_css(FG, theme::view_bg(false), ACCENT, "Cantarell", 11.0, None);
+        let css = theme_css(FG, theme::view_bg(false), ACCENT, "Cantarell 11", None);
         assert!(
             css.contains("body { box-sizing: border-box; max-width: none;"),
             "{css}"
@@ -372,14 +377,14 @@ mod tests {
     /// A cell's padding outranks a table's own in the note's HTML.
     #[test]
     fn theme_css_pads_cells_over_a_tables_own() {
-        let css = theme_css(FG, theme::view_bg(false), ACCENT, "Cantarell", 11.0, None);
+        let css = theme_css(FG, theme::view_bg(false), ACCENT, "Cantarell 11", None);
         assert!(css.contains("padding: 6px 12px !important; }"), "{css}");
     }
 
     /// A display formula is larger than an inline one, with the prose's 1.2em still around it.
     #[test]
     fn theme_css_sets_a_display_formula_larger() {
-        let css = theme_css(FG, theme::view_bg(false), ACCENT, "Cantarell", 11.0, None);
+        let css = theme_css(FG, theme::view_bg(false), ACCENT, "Cantarell 11", None);
         assert!(
             css.contains("math[display=\"block\"] { font-size: 1.15em; margin: 1.043em 0; }"),
             "{css}"
@@ -393,8 +398,7 @@ mod tests {
             FG,
             theme::view_bg(false),
             ACCENT,
-            "Cantarell",
-            11.0,
+            "Cantarell 11",
             Some(50.0),
         );
         let rule =
@@ -415,8 +419,7 @@ mod tests {
             FG,
             theme::view_bg(false),
             ACCENT,
-            "Cantarell",
-            11.0,
+            "Cantarell 11",
             Some(50.0),
         );
         let print = css.split_once("@media print").expect("a print block").1;
@@ -434,24 +437,18 @@ mod tests {
     #[test]
     fn theme_css_follows_its_inputs() {
         let (light, dark) = (theme::view_bg(false), theme::view_bg(true));
-        let base = theme_css(FG, light, ACCENT, "Cantarell", 11.0, Some(50.0));
+        let base = theme_css(FG, light, ACCENT, "Cantarell 11", Some(50.0));
         let teal = gdk::RGBA::new(0.0, 0.5, 0.5, 1.0);
         assert_ne!(
             base,
-            theme_css(FG, dark, ACCENT, "Cantarell", 11.0, Some(50.0))
+            theme_css(FG, dark, ACCENT, "Cantarell 11", Some(50.0))
         );
+        assert_ne!(base, theme_css(FG, light, teal, "Cantarell 11", Some(50.0)));
+        assert_ne!(base, theme_css(FG, light, ACCENT, "Inter 11", Some(50.0)));
         assert_ne!(
             base,
-            theme_css(FG, light, teal, "Cantarell", 11.0, Some(50.0))
+            theme_css(FG, light, ACCENT, "Cantarell 13", Some(50.0))
         );
-        assert_ne!(
-            base,
-            theme_css(FG, light, ACCENT, "Inter", 11.0, Some(50.0))
-        );
-        assert_ne!(
-            base,
-            theme_css(FG, light, ACCENT, "Cantarell", 13.0, Some(50.0))
-        );
-        assert!(theme_css(FG, light, ACCENT, "Inter", 13.0, Some(50.0)).contains("\"Inter\""));
+        assert!(theme_css(FG, light, ACCENT, "Inter 13", Some(50.0)).contains("\"Inter\""));
     }
 }
