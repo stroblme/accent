@@ -459,7 +459,7 @@ impl Compare {
         let unfold = gtk::ToggleButton::builder()
             .icon_name("view-reveal-symbolic")
             .tooltip_text("Show All Unchanged Lines")
-            .css_classes(["flat"])
+            .css_classes(["flat", "chrome-fade"])
             .focus_on_click(false)
             .build();
         let host = match editable {
@@ -581,6 +581,10 @@ impl Compare {
 
     pub fn widget(&self) -> &gtk::Widget {
         self.columns.widget()
+    }
+
+    pub fn controls(&self) -> Vec<gtk::Widget> {
+        self.columns.controls()
     }
 
     fn pane(&self, side: Side) -> &Pane {

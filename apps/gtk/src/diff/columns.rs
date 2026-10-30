@@ -434,6 +434,16 @@ impl Columns {
         self.links.overlay.upcast_ref()
     }
 
+    /// The buttons on the columns' title rows, which go with the chrome (`App::hide_chrome`): the
+    /// ones carrying its `.chrome-fade`. The titles stay.
+    pub(super) fn controls(&self) -> Vec<gtk::Widget> {
+        let row =
+            |pane: &Pane| std::iter::successors(pane.header.first_child(), |w| w.next_sibling());
+        (self.panes.iter().flat_map(row))
+            .filter(|w| w.has_css_class("chrome-fade"))
+            .collect()
+    }
+
     /// Lay the columns out from `rows`: the host's every refresh.
     pub(super) fn lay(&self, rows: Rows) {
         self.waiting.set(false);

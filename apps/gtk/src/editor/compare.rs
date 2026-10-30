@@ -23,6 +23,14 @@ impl Hosted {
         }
     }
 
+    /// The buttons on its title rows, Stop Comparing or Stop Merging among them.
+    pub fn controls(&self) -> Vec<gtk::Widget> {
+        match self {
+            Hosted::Compare(c) => c.controls(),
+            Hosted::Merge(m) => m.controls(),
+        }
+    }
+
     /// Lay the columns over the texts again: on every edit of the editor's.
     pub fn refresh(&self) {
         match self {
@@ -255,6 +263,7 @@ impl Tab {
         let shut = self.open_folds();
         let close = gtk::Button::from_icon_name("window-close-symbolic");
         close.add_css_class("flat");
+        close.add_css_class("chrome-fade");
         close.set_tooltip_text(Some(stop));
         close.connect_clicked(glib::clone!(
             #[weak(rename_to = tab)]

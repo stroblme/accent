@@ -1603,7 +1603,7 @@ The point of the app: the chrome fades while the user types and comes back the m
 How much fades is the Focus Mode preference, three levels in one combo row under Theme rather than a switch per surface, each level containing the one before.
 
 - **None**: nothing fades.
-- **Medium**, the default: the header bars, the tab bars, the status bar, the sidebar's panes and the minimap go to nothing, the tree being one pointer move away, and with the bars the undershoot line a scrolled window draws against a flat one, which would stay behind as a lone line across the column.
+- **Medium**, the default: the header bars, the tab bars, the status bar, the sidebar's panes, the minimap and the buttons on a comparison's or a merge's column titles go to nothing, the tree being one pointer move away, and with the bars the undershoot line a scrolled window draws against a flat one, which would stay behind as a lone line across the column.
   The pane switcher rides in the sidebar header and goes with the top band, so the two columns stay in step.
 - **High**: Medium, plus every pane but the one being written in recedes to 0.3 (a PDF or a shell like a note), the dividers go — every paned handle, which would frame the receding panes — and the text in the focused view fades away from the carets, as in Apostrophe's focus mode.
   A pane showing the preview of the note being written stays crisp.

@@ -94,7 +94,7 @@ impl Merge {
         let unfold = gtk::ToggleButton::builder()
             .icon_name("view-reveal-symbolic")
             .tooltip_text("Show All Unchanged Lines")
-            .css_classes(["flat"])
+            .css_classes(["flat", "chrome-fade"])
             .focus_on_click(false)
             .build();
         mid.header
@@ -102,7 +102,7 @@ impl Merge {
         let resolved = gtk::Button::builder()
             .icon_name("object-select-symbolic")
             .tooltip_text("Mark Resolved")
-            .css_classes(["flat"])
+            .css_classes(["flat", "chrome-fade"])
             .focus_on_click(false)
             .build();
         mid.header
@@ -183,6 +183,10 @@ impl Merge {
 
     pub fn widget(&self) -> &gtk::Widget {
         self.columns.widget()
+    }
+
+    pub fn controls(&self) -> Vec<gtk::Widget> {
+        self.columns.controls()
     }
 
     fn pane(&self, column: usize) -> &Pane {

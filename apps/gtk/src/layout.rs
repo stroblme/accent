@@ -666,7 +666,8 @@ impl App {
     }
 
     /// What fades at Medium: both header bars, the status bar, every pane's tab bar, the
-    /// sidebar's panes, the minimaps and the notebooks' cell buttons and add strips.
+    /// sidebar's panes, the minimaps, the comparisons' title-row buttons and the notebooks' cell
+    /// buttons and add strips.
     fn chrome(&self) -> Vec<gtk::Widget> {
         let mut chrome: Vec<gtk::Widget> = vec![
             self.sidebar_header.clone().upcast(),
@@ -676,6 +677,9 @@ impl App {
         chrome.extend(self.panes.borrow().iter().map(|p| p.bar.clone().upcast()));
         chrome.extend(self.sidebar.get().map(|s| s.widget().clone()));
         chrome.extend(self.open_tabs().iter().map(|t| t.minimap().clone()));
+        let hosted = self.open_tabs().into_iter().filter_map(|t| t.hosted());
+        chrome.extend(hosted.flat_map(|h| h.controls()));
+        chrome.extend(self.diffs().iter().flat_map(|d| d.comparison().controls()));
         chrome.extend(self.notebooks().iter().flat_map(|n| n.chrome()));
         chrome
     }
