@@ -2,13 +2,15 @@
 //! ([`crate::markdown::page`]), so the preview, an export and Android write it alike. Read line
 //! by line as [`super::analyze`] reads the file, the subset accent shows: headings with their
 //! TODO keyword and tags, paragraphs, lists with their boxes, description lists, tables, blocks
-//! of code, examples and quotes, footnotes, and in prose emphasis, links, pictures, formulas,
-//! `<<targets>>` and sub- and superscripts in braces (`H_{2}O`, as org's `^:{}` has them, so
-//! `snake_case` stays as written).
+//! of code, examples and quotes, footnotes (an inline one defined after the page, as org's
+//! export defines every one), and in prose emphasis, links, pictures, formulas, `<<targets>>` and
+//! sub- and superscripts in braces (`H_{2}O`, as org's `^:{}` has them, so `snake_case` stays as
+//! written).
 //!
 //! What org's own export leaves out by default is not shown: `#+KEY:` lines (`#+TITLE` too: a
 //! markdown note's front matter is no heading either), drawers, comments, export and comment
-//! blocks, a heading's priority, and a heading marked `COMMENT` with its section.
+//! blocks, a heading's priority and planning line, and a heading marked `COMMENT` with its
+//! section.
 
 use super::links::OrgLink;
 use super::table::{aligns, cookie};
@@ -34,6 +36,7 @@ pub fn page(text: &str) -> Vec<Block<'_>> {
         headings: Vec::new(),
         named: Vec::new(),
         targets: Vec::new(),
+        notes: Vec::new(),
     };
     for part in parts(text) {
         match part {
@@ -78,6 +81,8 @@ struct Page<'a> {
     /// name first, as org searches, else a heading.
     named: Vec<(usize, String)>,
     targets: Vec<String>,
+    /// Each inline footnote's label and its text, defined after the page.
+    notes: Vec<(CowStr<'a>, Range<usize>)>,
 }
 
 /// What a line opens.
@@ -120,6 +125,21 @@ impl<'a> Page<'a> {
     }
 
     fn finish(mut self) -> Vec<Block<'a>> {
+        // An inline footnote is defined after the page, where org's export puts every footnote;
+        // its text may hold one more. The definition is written nowhere, so stands at the end.
+        let end = self.text.len()..self.text.len();
+        let mut i = 0;
+        while let Some((label, body)) = self.notes.get(i).cloned() {
+            self.push(
+                Node::Event(Event::Start(Cm::FootnoteDefinition(label))),
+                end.clone(),
+            );
+            self.push(Node::Event(Event::Start(Cm::Paragraph)), end.clone());
+            self.inline(body);
+            self.close(TagEnd::Paragraph, end.clone());
+            self.close(TagEnd::FootnoteDefinition, end.clone());
+            i += 1;
+        }
         let mut anchors = Vec::new();
         for (at, name) in &self.named {
             let target = self.targets.iter().find(|t| t.eq_ignore_ascii_case(name));
@@ -578,7 +598,8 @@ impl<'a> Page<'a> {
             let found = match b[i] {
                 b'[' => super::links::bracket(text, i, eol)
                     .map(Found::Link)
-                    .or_else(|| footnote(text, i).map(Found::Footnote)),
+                    .or_else(|| footnote(text, i).map(Found::Footnote))
+                    .or_else(|| inline_footnote(text, i, at.end).map(Found::Note)),
                 b'<' if b.get(i + 1) == Some(&b'<') => target(text, i, eol).map(Found::Target),
                 b'<' => super::links::angle(text, i, eol).map(Found::Link),
                 b'\\' => latex(text, i, at.end).map(Found::Math),
@@ -622,6 +643,16 @@ impl<'a> Page<'a> {
             Found::Footnote(r) => {
                 let name: CowStr = text[r.start + 4..r.end - 1].into();
                 self.push(Node::Event(Event::FootnoteReference(name)), r.clone());
+                r.end
+            }
+            // One without a label is named by its place among them, after a `:` no label holds.
+            Found::Note((r, label, body)) => {
+                let label: CowStr = match label.is_empty() {
+                    true => format!(":{}", self.notes.len() + 1).into(),
+                    false => text[label].into(),
+                };
+                self.notes.push((label.clone(), body));
+                self.push(Node::Event(Event::FootnoteReference(label)), r.clone());
                 r.end
             }
             Found::Target((r, name)) => {
@@ -766,6 +797,8 @@ enum Found {
     Link(OrgLink),
     /// `[fn:label]`.
     Footnote(Range<usize>),
+    /// An inline footnote, `[fn::text]` or `[fn:label:text]`: its label and its text.
+    Note((Range<usize>, Range<usize>, Range<usize>)),
     Target((Range<usize>, String)),
     /// The whole formula, its LaTeX, and whether it is shown on a line of its own.
     Math((Range<usize>, Range<usize>, bool)),
@@ -879,6 +912,36 @@ fn footnote(text: &str, i: usize) -> Option<Range<usize>> {
         .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
         .count();
     (len > 0 && rest[len..].starts_with(']')).then(|| i..i + 4 + len + 1)
+}
+
+/// An inline footnote at `i`, `[fn::text]` or `[fn:label:text]`, its brackets balanced within
+/// `end`: the whole, its label (empty for none) and its text.
+fn inline_footnote(
+    text: &str,
+    i: usize,
+    end: usize,
+) -> Option<(Range<usize>, Range<usize>, Range<usize>)> {
+    let rest = text[i..end].strip_prefix("[fn:")?;
+    let len = rest
+        .bytes()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+        .count();
+    if !rest[len..].starts_with(':') {
+        return None;
+    }
+    let body = i + 4 + len + 1;
+    let mut depth = 0usize;
+    for (k, c) in text[body..end].bytes().enumerate() {
+        match c {
+            b'[' => depth += 1,
+            b']' if depth == 0 => {
+                return Some((i..body + k + 1, i + 4..i + 4 + len, body..body + k));
+            }
+            b']' => depth -= 1,
+            _ => {}
+        }
+    }
+    None
 }
 
 /// The cells of the table row at `row`, each without the blanks around it.
@@ -1095,6 +1158,35 @@ Left out.
         assert!(h.contains("<span id=\"call\"></span>"), "{h}");
         assert!(!h.contains("SCHEDULED") && !h.contains("2026"), "{h}");
         assert!(h.contains("<p>Body.</p>\n<p>CLOSED: as text</p>"), "{h}");
+    }
+
+    /// An inline footnote is numbered as a reference is, its text defined after the page; one
+    /// with a label is the footnote a reference by that label names.
+    #[test]
+    fn an_inline_footnote_is_defined_after_the_page() {
+        let h = bare("A[fn::one /it/] B[fn:n:two [x]] C[fn:n].\n\nLast.\n");
+        let note = |label: &str, n: u32| {
+            format!("<sup class=\"footnote-reference\"><a href=\"#{label}\">{n}</a></sup>")
+        };
+        assert!(
+            h.starts_with(&format!(
+                "<p>A{} B{} C{}.</p>\n<p>Last.</p>\n",
+                note(":1", 1),
+                note("n", 2),
+                note("n", 2)
+            )),
+            "{h}"
+        );
+        assert!(
+            h.contains(
+                "<div class=\"footnote-definition\" id=\":1\">\
+                 <sup class=\"footnote-definition-label\">1</sup>\n<p>one <em>it</em></p>\n</div>"
+            ),
+            "{h}"
+        );
+        assert!(h.ends_with("2</sup>\n<p>two [x]</p>\n</div>\n"), "{h}");
+        let last = page("x[fn::y]\n").pop().unwrap();
+        assert_eq!(last.bytes, 9..9);
     }
 
     /// An anchor names the `id` its element has on the page, a target's before a heading's.
