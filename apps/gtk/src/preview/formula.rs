@@ -2,7 +2,7 @@
 //! worker wrote (refresh N10), its baseline the line's through the writer's rise tag. An inline
 //! formula's capitals stand as tall as the prose's (N9); a display one is 1.15 times that, centred
 //! on a line of its own and shrunk to the text's width where it is wider. A zoom lays them out
-//! again. Rules are drawn on whole pixels of the formula's own.
+//! again. Rules are drawn on whole device pixels, wherever the line puts the formula.
 
 use super::Page;
 use super::text::{Ink, Object, Writer};

@@ -203,8 +203,8 @@ pub fn paint(
     draw(snapshot, formula, origin, scale, ink, colour, false);
 }
 
-/// [`paint`] with each rule on whole pixels of the snapshot, so a fraction bar is one row of
-/// pixels, not two grey ones, where `origin` is on a whole pixel too.
+/// [`paint`] with each rule on whole device pixels, so a fraction bar is one row of pixels, not
+/// two grey ones, wherever the snapshot puts `origin` ([`rule_snapped`]).
 pub fn paint_snapped(
     snapshot: &gtk::Snapshot,
     formula: &Layout,
@@ -240,11 +240,13 @@ fn draw(
                     false => (w, h.max(1.0)),
                 };
                 let (x, y) = (origin.0 + x * scale, origin.1 + y * scale);
-                let (x, y, w, h) = match snap {
-                    true => (x.round(), y.round(), w.round().max(1.0), h.round().max(1.0)),
-                    false => (x, y, w, h),
-                };
-                snapshot.append_color(&rgba(color), &graphene::Rect::new(x, y, w, h));
+                match snap {
+                    true => {
+                        let (w, h) = (w.round().max(1.0), h.round().max(1.0));
+                        rule_snapped(snapshot, &rgba(color), &graphene::Rect::new(x, y, w, h));
+                    }
+                    false => snapshot.append_color(&rgba(color), &graphene::Rect::new(x, y, w, h)),
+                }
                 1
             }
             Item::Line {
@@ -290,6 +292,22 @@ fn draw(
         };
         items = &items[n..];
     }
+}
+
+/// `rect` filled on whole device pixels. A formula in the text sits on its line's baseline, which
+/// a 1.6 line height puts on a fraction of a pixel, and a snapshot does not say where it is
+/// (GTK 4.24's `gtk_snapshot_set_snap` would snap it). A cairo fill without antialiasing does
+/// not need to know: the renderer replays it on its own device pixels, and it covers those whose
+/// centres it holds, so a rule of whole pixels is that many rows at any offset.
+fn rule_snapped(snapshot: &gtk::Snapshot, colour: &gdk::RGBA, rect: &graphene::Rect) {
+    // A pixel more all round: the renderer clips to the node's bounds, which on a fraction of a
+    // pixel would dim the rows the fill covers.
+    let cr = snapshot.append_cairo(&rect.inset_r(-1.0, -1.0));
+    cr.set_antialias(gtk::cairo::Antialias::None);
+    cr.set_source_color(colour);
+    let (x, y) = (f64::from(rect.x()), f64::from(rect.y()));
+    cr.rectangle(x, y, f64::from(rect.width()), f64::from(rect.height()));
+    let _ = cr.fill();
 }
 
 impl Fonts {
