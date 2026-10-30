@@ -17,8 +17,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 - **Stack**: GTK4 + libadwaita in Rust on Linux and Kotlin + Compose on Android share one Rust core.
   The desktop links it directly; Android uses UniFFI.
-- **Two optional parts**: the `webkit` and `termprops` cargo features, on by default, hold what WebKitGTK 6.0 and VTE 0.78 bring (WebKit's preview, kept behind `ACCENT_PREVIEW=webkit` until it goes; a program's OSC 52 copy, the shell's commands and prompts), so accent builds where neither is packaged, as on macOS 12.
-  The preview is accent's own with or without them (Preview); printing and export do not need WebKit.
+- **One optional part**: the `termprops` cargo feature, on by default, holds what VTE 0.78 brings (a program's OSC 52 copy, the shell's commands and prompts), so accent builds where only VTE 0.76 is packaged, as on macOS 12.
+  The desktop app carries no web engine: the preview is accent's own (Preview), and printing and export go through the system browser.
 - **Crates**: `crates/core` has no UI types; `crates/api` exposes `Vault` for local and remote backends, JSON-RPC for `accent-cli`, and UniFFI behind the `android` feature.
   `crates/drawio` is independent; core reads diagram labels through it for indexing.
   `crates/math` (from formulary) lays out the MathML core writes in a math font the system HarfBuzz reads; only the desktop app links it.
@@ -653,7 +653,6 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - **Accent draws it itself** (user decision 2026-10-20): one read-only text view on the editor's page — its font, gutters, zoom and column — over the blocks core cuts the note into (`note::Syntax::page`), the blocks Print… and the exports write as HTML.
   Each block is tagged text in the look the stylesheet gives a printed page, in the editor's colours (Colour): headings, emphasis, lists with their boxes, quotes and callouts, footnotes, a conflict's sides; a line is 1.6 times the font's size, as the stylesheet's, Pango's line height being a share of the font's height (1.16 em in DejaVu Sans Mono) which the tags make up for.
   A picture, a diagram, a formula and a task's box stand in the text where the note has them, a table is the one widget, and what no tag draws — a code block's padded box, a quote's bar, a callout's tint, a rule — is painted under the text.
-  WebKit's preview stays behind `ACCENT_PREVIEW=webkit` in a build with WebKit until it goes.
 - Code blocks, fences and org src blocks alike, are coloured as the editor colours them.
   A mermaid fence shows its source under a dim "Mermaid diagram" caption: drawing one is deferred (user decision 2026-10-22).
 - A note's raw HTML is unwrapped (user decision 2026-10-22): its tags are dropped and their text shown, a `<p>` or a `<div>` breaking the paragraph; `<b>`, `<i>`, `<u>`, `<sub>`, `<sup>`, `<kbd>` and `<br>` style or break the text, `<img>` is a picture, `<iframe>` and `<video>` a link to their source, and a comment, `<style>` and `<script>` show nothing.
@@ -1573,7 +1572,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Neither a text tag nor a browser sees GTK's CSS variables, so both get the background as a literal from `theme.rs`.
   One rule is not derived: a `$$` block gets 1.2 em of the prose above and below, a heading's standing room, since a `<math display="block">` box carries none of a prose line's half-leading and two formulas would otherwise sit closer than two paragraphs; two in a row share one, as a browser collapses the margins.
   A `$$` block is set 1.15 times an inline formula's size, being read as a figure on a line of its own (user decision 2026-10-28); the page an export or Print writes is the same.
-  A formula's capitals stand as tall as the prose's: `font-size-adjust: cap-height` on `math` is the prose font's cap height, measured through Pango, so whichever math font the page gets is scaled to it (user decision 2026-10-27). At one font size Latin Modern Math's capitals (0.68 em) were a little shorter than the monospace prose's (about 0.73 em) and its `x` (0.43 em) a fifth shorter; matching the `x` instead, as MathJax's `matchFontHeight` does, made the capitals stand out. Its lowercase stays a little short of the prose's. The page an export or Print writes carries the same rule, which WebKitGTK, Firefox and Chromium all read, and the preview lays its formulas out at that size itself (`crates/math`), from the MathML core writes; one that does not parse shows its source.
+  A formula's capitals stand as tall as the prose's: `font-size-adjust: cap-height` on `math` is the prose font's cap height, measured through Pango, so whichever math font the page gets is scaled to it (user decision 2026-10-27). At one font size Latin Modern Math's capitals (0.68 em) were a little shorter than the monospace prose's (about 0.73 em) and its `x` (0.43 em) a fifth shorter; matching the `x` instead, as MathJax's `matchFontHeight` does, made the capitals stand out. Its lowercase stays a little short of the prose's. The page an export or Print writes carries the same rule, which Firefox and Chromium both read, and the preview lays its formulas out at that size itself (`crates/math`), from the MathML core writes; one that does not parse shows its source.
 - A diagram is painted as a PDF page is, its colours moved onto the theme's paper and ink and left alone under Light (Diagram), the accent reaching only the selection; the file keeps the colours it was given.
   The Properties pane may put any colour into the document; none is a literal in code.
 - **`theme.rs` is the only file allowed to write a hex literal**, and one anywhere else is a bug the pre-flight grep catches.
@@ -2127,7 +2126,7 @@ MOBILE_DESIGN.md says what to build; this says what each desktop surface became.
 | `AdwHeaderBar` | the `DocumentBar` row lying over the document |
 | Sidebar panes and the palette | the Browse panel: Search, Files, Tags, Backlinks and Command chips over a `HorizontalPager` |
 | `sourceview5::View` in `AdwClampScrollable` | `BasicTextField(TextFieldState)` styled from the same core spans |
-| The native preview | `WebView` over `markdown::to_html`, the same blocks written as HTML |
+| The preview | `WebView` over `markdown::to_html`, the same blocks written as HTML |
 | `AdwTabView` + `AdwTabBar` | none: one document at a time |
 | `AdwStatusPage` | a centred `Column`: icon, `headlineSmall`, `bodyMedium`, one `FilledTonalButton` |
 | The toasts / `AdwBanner` / `AdwAlertDialog` | `Snackbar` / an inline row above the content / `AlertDialog` |
