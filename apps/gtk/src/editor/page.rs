@@ -4,6 +4,7 @@
 use super::{Flavour, Syntax, Tab, line_end};
 use crate::{highlight, lang, platform, wrap};
 use adw::prelude::*;
+use glib::translate::IntoGlib;
 use gtk::{gdk, glib, graphene, pango};
 use sourceview5::prelude::*;
 use std::cell::{Cell, RefCell};
@@ -387,10 +388,12 @@ pub(crate) fn next_view_name() -> String {
 /// Default to the platform monospace at the document-font size; Preferences' Reset restores it.
 ///
 /// Monospace keeps fences, tables and wikilinks aligned while the size follows the system;
-/// preferences can override it.
+/// preferences can override it. The face is the monospace's own, so a light document font
+/// leaves the editor's weight alone.
 pub fn default_font() -> String {
-    let mut desc = pango::FontDescription::from_string(&platform::document_font());
-    desc.set_family(&platform::monospace_family());
+    let document = pango::FontDescription::from_string(&platform::document_font());
+    let mut desc = pango::FontDescription::from_string(&platform::monospace_font());
+    desc.set_size(document.size());
     desc.to_str().to_string()
 }
 
@@ -420,10 +423,12 @@ fn sticky_opener(top: i32, heading: Option<i32>, fence: Option<i32>) -> Option<i
         .max()
 }
 
-/// Extract family and point size with shared defaults, scaled by `zoom` to two decimals.
+/// Extract family, point size, weight, style and stretch with shared defaults, the size scaled
+/// by `zoom` to two decimals.
 ///
 /// Display-wide and per-tab rules use this function so missing descriptions cannot choose
-/// different faces; rounding avoids floating-point noise in CSS.
+/// different faces; rounding avoids floating-point noise in CSS. A font's variations
+/// (`@wght=300`) are left out: its weight already names the face.
 pub(crate) fn font_css(name: &str, selector: &str, zoom: f64) -> String {
     let desc = pango::FontDescription::from_string(name);
     let family = desc
@@ -435,7 +440,27 @@ pub(crate) fn font_css(name: &str, selector: &str, zoom: f64) -> String {
         _ => 11.0,
     };
     let size = (size * zoom * 100.0).round() / 100.0;
-    format!("{selector} {{ font-family: \"{family}\"; font-size: {size}pt; }}")
+    let weight = desc.weight().into_glib();
+    let style = match desc.style() {
+        pango::Style::Italic => "italic",
+        pango::Style::Oblique => "oblique",
+        _ => "normal",
+    };
+    let stretch = match desc.stretch() {
+        pango::Stretch::UltraCondensed => "ultra-condensed",
+        pango::Stretch::ExtraCondensed => "extra-condensed",
+        pango::Stretch::Condensed => "condensed",
+        pango::Stretch::SemiCondensed => "semi-condensed",
+        pango::Stretch::SemiExpanded => "semi-expanded",
+        pango::Stretch::Expanded => "expanded",
+        pango::Stretch::ExtraExpanded => "extra-expanded",
+        pango::Stretch::UltraExpanded => "ultra-expanded",
+        _ => "normal",
+    };
+    format!(
+        "{selector} {{ font-family: \"{family}\"; font-size: {size}pt; font-weight: {weight}; \
+         font-style: {style}; font-stretch: {stretch}; }}"
+    )
 }
 
 impl Tab {
@@ -716,6 +741,28 @@ mod tests {
     #[test]
     fn font_css_fills_in_a_missing_size() {
         assert!(font_css("Cantarell", "#doc", 2.0).contains("font-size: 22pt"));
+    }
+
+    /// A chosen face is kept: its weight as a number, its slant and its width.
+    #[test]
+    fn font_css_keeps_the_weight_style_and_stretch() {
+        let light = font_css("Adwaita Sans Light 11 @wght=300", "#doc", 1.0);
+        assert!(
+            light.contains("font-weight: 300; font-style: normal;"),
+            "{light}"
+        );
+        assert!(light.contains("font-stretch: normal;"), "{light}");
+        let bold = font_css("Serif Bold Italic 12", "#doc", 1.0);
+        assert!(
+            bold.contains("font-weight: 700; font-style: italic;"),
+            "{bold}"
+        );
+        let book = font_css("DejaVu Sans Mono Book 12", "#doc", 1.0);
+        assert!(book.contains("font-family: \"DejaVu Sans Mono\""), "{book}");
+        assert!(book.contains("font-weight: 380;"), "{book}");
+        let narrow = font_css("Sans Oblique Semi-Condensed 10", "#doc", 1.0);
+        assert!(narrow.contains("font-style: oblique;"), "{narrow}");
+        assert!(narrow.contains("font-stretch: semi-condensed;"), "{narrow}");
     }
 
     /// The gutter is as wide as the longest number it will ever print, and never zero wide.
