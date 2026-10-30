@@ -286,8 +286,9 @@ impl<'a> Page<'a> {
     }
 
     /// A heading: its TODO keyword, its title and its tags, as links to the tag's notes; a
-    /// property drawer under it gives it its `CUSTOM_ID`. The index of the line after it, or
-    /// after its whole section for one marked `COMMENT`, which org's export leaves out.
+    /// property drawer under it gives it its `CUSTOM_ID`. The index of the line after it and its
+    /// planning line, which org's export leaves out (`org-export-with-planning`), or after its
+    /// whole section for one marked `COMMENT`.
     fn heading(&mut self, lines: &[Range<usize>], i: usize) -> usize {
         let text = self.text;
         let line = lines[i].clone();
@@ -316,7 +317,9 @@ impl<'a> Page<'a> {
             attrs: Vec::new(),
         };
         self.push(Node::Event(Event::Start(start)), line.clone());
-        let id = custom_id(text, lines, i + 1).map(str::to_string);
+        let next =
+            i + 1 + usize::from(lines.get(i + 1).is_some_and(|l| planning(&text[l.clone()])));
+        let id = custom_id(text, lines, next).map(str::to_string);
         self.line(line.clone(), id);
         if let Some((at, done)) = head.keyword {
             let keyword = Node::Keyword {
@@ -350,7 +353,7 @@ impl<'a> Page<'a> {
             self.push(Node::Event(Event::Text(last)), line.clone());
         }
         self.close(TagEnd::Heading(level), line);
-        i + 1
+        next
     }
 
     /// A block of code: each line of `body` less the indentation they share, and less the comma
@@ -785,6 +788,15 @@ fn quote(text: &str, lines: &[Range<usize>], i: usize) -> Option<usize> {
         .find(|&j| at(j).eq_ignore_ascii_case("#+end_quote"))
 }
 
+/// Whether `line`, right under a heading, is its planning line: `SCHEDULED:`, `DEADLINE:` or
+/// `CLOSED:` and their times.
+fn planning(line: &str) -> bool {
+    let s = line.trim_start();
+    ["SCHEDULED:", "DEADLINE:", "CLOSED:"]
+        .iter()
+        .any(|k| s.starts_with(k))
+}
+
 /// The value of the `CUSTOM_ID` in the property drawer opening on `lines[i]`.
 fn custom_id<'a>(text: &'a str, lines: &[Range<usize>], i: usize) -> Option<&'a str> {
     let opens = text[lines.get(i)?.clone()]
@@ -1070,6 +1082,19 @@ Left out.
             file.contains("src=\"accent://file/Notes/fig.png\""),
             "{file}"
         );
+    }
+
+    /// A heading's planning line is left out, as org's export leaves it, and a drawer under it
+    /// still gives the heading its custom ID; anywhere else such a line is text.
+    #[test]
+    fn a_planning_line_is_hidden() {
+        let h = bare(
+            "* TODO Call\nSCHEDULED: <2026-10-30 Fri> DEADLINE: <2026-11-02 Mon>\n\
+             :PROPERTIES:\n:CUSTOM_ID: call\n:END:\nBody.\n\nCLOSED: as text\n",
+        );
+        assert!(h.contains("<span id=\"call\"></span>"), "{h}");
+        assert!(!h.contains("SCHEDULED") && !h.contains("2026"), "{h}");
+        assert!(h.contains("<p>Body.</p>\n<p>CLOSED: as text</p>"), "{h}");
     }
 
     /// An anchor names the `id` its element has on the page, a target's before a heading's.
