@@ -4,9 +4,9 @@
 //! TODO keyword and tags, paragraphs, lists with their boxes, description lists, tables, blocks
 //! of code, examples, quotes and verse (a centre block's text as its paragraphs: the page has no
 //! centring), footnotes (an inline one defined after the page, as org's export defines every
-//! one), and in prose emphasis, links, pictures, formulas, `<<targets>>`, line breaks and sub-
-//! and superscripts in braces (`H_{2}O`, as org's `^:{}` has them, so `snake_case` stays as
-//! written).
+//! one), LaTeX environments as formulas, and in prose emphasis, links, pictures, formulas,
+//! `<<targets>>`, line breaks and sub- and superscripts in braces (`H_{2}O`, as org's `^:{}` has
+//! them, so `snake_case` stays as written).
 //!
 //! What org's own export leaves out by default is not shown: `#+KEY:` lines (`#+TITLE` too: a
 //! markdown note's front matter is no heading either), drawers, comments, export and comment
@@ -99,6 +99,8 @@ enum Kind {
     Quote(usize),
     /// A verse block, to its last line.
     Verse(usize),
+    /// A LaTeX environment, `\begin{equation}` to `\end{equation}`, to its last line.
+    Latex(usize),
     /// A `#+KEY:` line, the fence of any other block, or a comment.
     Hidden,
     Fixed,
@@ -180,6 +182,8 @@ impl<'a> Page<'a> {
                 true => Kind::Verse(last),
                 false => Kind::Quote(last),
             }
+        } else if let Some(last) = environment(text, lines, i) {
+            Kind::Latex(last)
         } else if s.starts_with("#+") || word("#") {
             Kind::Hidden
         } else if word(":") {
@@ -260,6 +264,19 @@ impl<'a> Page<'a> {
                     self.inline(lead..lead + s.trim().len());
                     self.verse = false;
                 }
+                self.close(TagEnd::Paragraph, bytes);
+                last + 1
+            }
+            // The whole environment as a formula on a line of its own, as `\[…\]` is.
+            Kind::Latex(last) => {
+                let bytes = span(i, last);
+                let s = &text[bytes.clone()];
+                let lead = bytes.start + s.len() - s.trim_start().len();
+                self.open(Cm::Paragraph, bytes.clone());
+                self.push(
+                    math(text[lead..lead + s.trim().len()].into(), true),
+                    bytes.clone(),
+                );
                 self.close(TagEnd::Paragraph, bytes);
                 last + 1
             }
@@ -863,6 +880,20 @@ fn quote_or_verse(text: &str, lines: &[Range<usize>], i: usize) -> Option<(usize
         .map(|j| (j, verse))
 }
 
+/// The last line of the LaTeX environment opening on `lines[i]`, `\begin{name}` to a line of
+/// `\end{name}` alone, before the next heading.
+fn environment(text: &str, lines: &[Range<usize>], i: usize) -> Option<usize> {
+    let at = |j: usize| text[lines[j].clone()].trim();
+    let (name, _) = at(i).strip_prefix("\\begin{")?.split_once('}')?;
+    if name.is_empty() || !name.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'*') {
+        return None;
+    }
+    let end = format!("\\end{{{name}}}");
+    (i + 1..lines.len())
+        .take_while(|&j| !is_heading(&text[lines[j].clone()]))
+        .find(|&j| at(j) == end)
+}
+
 /// Whether `line`, right under a heading, is its planning line: `SCHEDULED:`, `DEADLINE:` or
 /// `CLOSED:` and their times.
 fn planning(line: &str) -> bool {
@@ -1254,6 +1285,28 @@ Left out.
             "<p>Roses are <em>red</em>,<br />\nviolets blue.<br />\n<br />\nThe end.</p>\n\
              <p>Middle\nline.</p>\n"
         );
+    }
+
+    /// A LaTeX environment is a formula on its own, the environment whole; one that does not
+    /// close is text.
+    #[test]
+    fn a_latex_environment_is_a_formula() {
+        let src = "Before\n\\begin{align*}\na &= b \\\\\nc &= d\n\\end{align*}\n\\begin{x}\nopen\n";
+        let blocks = page(src);
+        let Some(Node::Math { tex, display, .. }) = blocks[1].nodes.get(2) else {
+            panic!("{:?}", blocks[1].nodes);
+        };
+        assert_eq!(
+            (&**tex, *display),
+            ("\\begin{align*}\na &= b \\\\\nc &= d\n\\end{align*}", true)
+        );
+        assert_eq!(blocks[1].lines, 2..6);
+        let h = bare(src);
+        assert!(
+            h.starts_with("<p>Before</p>\n<p><math display=\"block\">"),
+            "{h}"
+        );
+        assert!(h.ends_with("</math></p>\n<p>\\begin{x}\nopen</p>\n"), "{h}");
     }
 
     /// An anchor names the `id` its element has on the page, a target's before a heading's.
