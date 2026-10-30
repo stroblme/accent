@@ -1375,12 +1375,13 @@ private fun leave(context: Context, uri: String, onSay: (String) -> Unit) {
 /** The schemes a document may send the reader out to. */
 private val OUTWARD = setOf("http", "https", "mailto", "tel")
 
-private const val ERASER_RADIUS = 6f
+/** The eraser's reach in page points, the desktop's default. */
+private const val ERASER_RADIUS = 3f
 
-/** Widths in page points, the same three the desktop ring offers for each tool. */
+/** Widths in page points, the desktop's defaults for each tool (`DrawingConfig`). */
 private fun Tool.width(): Float = when (this) {
-    Tool.Highlighter -> 14f
-    else -> 2f
+    Tool.Highlighter -> 10.5f
+    else -> 1.5f
 }
 
 private fun Tool.style(accent: Color): InkStyle = InkStyle(
