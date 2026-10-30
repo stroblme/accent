@@ -39,6 +39,10 @@ pub(super) struct Tags {
     pub quote: gtk::TextTag,
     pub callout: gtk::TextTag,
     pub callout_title: gtk::TextTag,
+    /// A paragraph's line inside a callout, spaced from the next as the stylesheet's `p` is.
+    pub callout_para: gtk::TextTag,
+    /// A callout's last line: the tint's padding below its text, then the gap after the block.
+    pub callout_end: gtk::TextTag,
     pub lists: [gtk::TextTag; 6],
     pub taskdone: gtk::TextTag,
     pub dt: gtk::TextTag,
@@ -115,6 +119,8 @@ impl Tags {
             quote: set("quote", &|t| t.set_style(pango::Style::Italic)),
             callout: tag("callout"),
             callout_title: set("callout-title", &|t| t.set_weight(700)),
+            callout_para: tag("callout-para"),
+            callout_end: tag("callout-end"),
             lists: std::array::from_fn(|i| tag(&format!("list{}", i + 1))),
             taskdone: tag("taskdone"),
             dt: set("dt", &|t| t.set_weight(700)),
@@ -178,6 +184,12 @@ impl Tags {
         self.quote.set_left_margin(inset + 3);
         self.callout.set_left_margin(inset + 3);
         self.callout.set_right_margin(inset);
+        // The stylesheet's callout, a flow root: each paragraph's 0.8 em, the title's too, stays
+        // inside the tint, above the title and below the last line.
+        self.callout_title.set_pixels_above_lines(em(0.8));
+        self.callout_title.set_pixels_below_lines(em(0.8));
+        self.callout_para.set_pixels_below_lines(em(0.8));
+        self.callout_end.set_pixels_below_lines(em(0.8) * 2);
         for (i, tag) in self.lists.iter().enumerate() {
             tag.set_left_margin(gutter + em(1.4 * (i + 1) as f64));
             tag.set_indent(-em(1.2));
@@ -858,6 +870,14 @@ impl Writer<'_> {
         }
     }
 
+    /// Tag the line just ended, its newline included.
+    fn tag_line(&self, tag: &gtk::TextTag) {
+        let mut start = *self.at;
+        start.backward_char();
+        start.set_line_offset(0);
+        self.page.buffer.apply_tag(tag, &start, self.at);
+    }
+
     /// The room of a code block's box above its first line, from `start`, and below its last.
     fn fence(&mut self, start: i32) {
         if self.offset() == start {
@@ -1062,7 +1082,17 @@ impl Writer<'_> {
             Event::Start(Cm::DefinitionListTitle) => self.push(&tags.dt),
             Event::Start(Cm::DefinitionListDefinition) => self.push(&tags.dd),
             Event::Start(_) => {}
-            Event::End(TagEnd::Paragraph) => self.newline(),
+            Event::End(TagEnd::Paragraph) => {
+                self.newline();
+                if self.tags.contains(&tags.callout) {
+                    self.tag_line(&tags.callout_para);
+                }
+            }
+            Event::End(TagEnd::BlockQuote(_)) if self.tags.last() == Some(&tags.callout) => {
+                self.pop();
+                self.newline();
+                self.tag_line(&tags.callout_end);
+            }
             Event::End(
                 TagEnd::Heading(_)
                 | TagEnd::BlockQuote(_)

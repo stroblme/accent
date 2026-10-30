@@ -27,6 +27,8 @@ pub struct Decor {
     /// A code block's first and last lines, whose room above and below holds its box's padding.
     pub fence_top: gtk::TextTag,
     pub fence_bottom: gtk::TextTag,
+    /// A callout's last line, whose room below holds its box's padding and then the gap.
+    pub callout_end: gtk::TextTag,
     /// The code wash and the callout tint, the accent bar, the rule line.
     pub surface: gdk::RGBA,
     pub accent: gdk::RGBA,
@@ -112,9 +114,9 @@ impl PreviewView {
                     snapshot.append_color(&decor.accent, &rect);
                 }
                 2 => {
-                    let rect = graphene::Rect::new(left, top - 6.0, right - left, height + 12.0);
+                    let rect = graphene::Rect::new(left, top, right - left, height);
                     rounded(snapshot, &rect, [0.0, ROUND, ROUND, 0.0], &decor.surface);
-                    let bar = graphene::Rect::new(left, top - 6.0, BAR, height + 12.0);
+                    let bar = graphene::Rect::new(left, top, BAR, height);
                     snapshot.append_color(&decor.accent, &bar);
                 }
                 _ => {
@@ -131,15 +133,16 @@ impl PreviewView {
             let (y, height) = self.line_yrange(&line);
             let kind = tags.iter().position(|tag| line.has_tag(*tag));
             let has = |tag: &gtk::TextTag| line.has_tag(tag);
-            // A code block's box holds PAD of its first and last lines' room; other boxes end at
-            // their text, the gap below their block outside them; a rule's line is all its own.
+            // A code block's box holds PAD of its first and last lines' room, a callout's all of its
+            // title's room above and its last line's but the gap below; other boxes end at their
+            // text, the gap below their block outside them; a rule's line is all its own.
             let top = match has(&decor.fence_top) {
                 true => y + decor.fence_top.pixels_above_lines() - PAD,
                 false => y,
             };
             let bottom = if has(&decor.fence_bottom) {
                 y + height - decor.fence_bottom.pixels_below_lines() + PAD
-            } else if has(&decor.gap) && kind.is_some_and(|k| k < 3) {
+            } else if has(&decor.callout_end) || (has(&decor.gap) && kind.is_some_and(|k| k < 3)) {
                 y + height - decor.gap.pixels_below_lines()
             } else {
                 y + height
@@ -153,7 +156,7 @@ impl PreviewView {
                     kind.map(|k| (k, top, bottom))
                 }
             };
-            ended = has(&decor.gap) || has(&decor.fence_bottom);
+            ended = has(&decor.gap) || has(&decor.fence_bottom) || has(&decor.callout_end);
             if y > visible.y() + visible.height() || !line.forward_line() {
                 break;
             }

@@ -420,6 +420,7 @@ impl Page {
             gap: self.tags.gap.clone(),
             fence_top: self.tags.fence_top.clone(),
             fence_bottom: self.tags.fence_bottom.clone(),
+            callout_end: self.tags.callout_end.clone(),
             surface: crate::theme::at(fg, 0.07),
             accent,
             line: crate::theme::at(fg, 0.15),
