@@ -1244,6 +1244,12 @@ impl Writer<'_> {
                 self.pop();
                 self.newline();
             }
+            // Every row read so far is the head's, which in org may be several.
+            Event::End(TagEnd::TableHead) => {
+                for cell in self.rows.iter_mut().flatten().flatten() {
+                    cell.head = true;
+                }
+            }
             Event::End(TagEnd::Table) => {
                 if let Some(rows) = self.rows.take() {
                     let align = std::mem::take(&mut self.align);

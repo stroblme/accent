@@ -22,12 +22,14 @@ const RULE: i32 = 1;
 const WASH: char = '\u{1}';
 
 /// A cell as the writer reads it: its text as Pango markup, each link an `<a href="i">` that
-/// goes to `links[i]`, and how deep in links the writer is, as a link in a link is not nested.
+/// goes to `links[i]`, how deep in links the writer is, as a link in a link is not nested, and
+/// whether it is in the head, a `th`.
 #[derive(Default)]
 pub(super) struct Cell {
     markup: String,
     links: Vec<Href>,
     open: usize,
+    pub head: bool,
 }
 
 impl Cell {
@@ -204,13 +206,13 @@ impl Table {
         grid.add_css_class("accent-table");
         grid.set_halign(gtk::Align::Start);
         let mut cells = Vec::new();
-        for (r, row) in rows.into_iter().enumerate() {
+        for row in rows {
             grid.imp().rows.borrow_mut().push(row.len());
             for (c, cell) in row.into_iter().enumerate() {
                 let (xalign, justify) = match align.get(c) {
                     Some(Alignment::Center) => (0.5, gtk::Justification::Center),
                     Some(Alignment::Right) => (1.0, gtk::Justification::Right),
-                    Some(Alignment::None) | None if r == 0 => (0.5, gtk::Justification::Center),
+                    Some(Alignment::None) | None if cell.head => (0.5, gtk::Justification::Center),
                     _ => (0.0, gtk::Justification::Left),
                 };
                 let markup = cell.markup.trim().to_string();
@@ -223,7 +225,7 @@ impl Table {
                     .justify(justify)
                     .selectable(true)
                     .build();
-                if r == 0 {
+                if cell.head {
                     label.add_css_class("th");
                 }
                 if !cell.links.is_empty() {
