@@ -1,6 +1,6 @@
 bench preview block=0 lines=1-4 tags=["prose", "void"] text="\n"
 bench preview block=1 lines=5-6 tags=["gap", "h1", "prose"] text="Preview drill\n"
-bench preview block=2 lines=7-8 tags=["gap", "prose"] text="A paragraph with emphasis, strong, struck, code, a link, a Other note#Part, #drilltag and "
+bench preview block=2 lines=7-8 tags=["gap", "prose"] text="A paragraph with emphasis, strong, struck, code, a link, a Other note > Part, #drilltag an"
 bench preview block=3 lines=9-10 tags=["gap", "h2", "prose"] text="Lists\n"
 bench preview block=4 lines=11-15 tags=["list1", "prose"] text="• first\n• nested\n• second\n"
 bench preview block=5 lines=15-18 tags=["list1", "prose"] text="1. one\n2. two\n"
@@ -30,7 +30,7 @@ bench preview formula "x^2" display=false size=1.00
 bench preview formula "\nE = mc^2\n" display=true size=1.15
 bench preview formula "\na^2 + b^2 = c^2\n" display=true size=1.15
 bench preview link "link" leave https://example.org
-bench preview link "Other note#Part" open Other note#Part
+bench preview link "Other note > Part" open Other note#Part
 bench preview link "#drilltag" tag drilltag
 bench preview link "[1]" scroll accent://file/#fn:one
 bench preview link "￼" open preview-drill.drawio
@@ -39,7 +39,7 @@ bench preview link "lists" scroll accent://file/#lists
 bench preview link "the paragraph" scroll accent://file/#^para
 bench preview copy ""
 bench preview copy "Preview drill"
-bench preview copy "A paragraph with emphasis, strong, struck, code, a link, a Other note#Part, #drilltag and a note[1]."
+bench preview copy "A paragraph with emphasis, strong, struck, code, a link, a Other note > Part, #drilltag and a note[1]."
 bench preview copy "Lists"
 bench preview copy "• first"
 bench preview copy "• nested"

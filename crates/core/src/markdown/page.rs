@@ -362,6 +362,13 @@ fn is_block_start(ev: &Event) -> bool {
     )
 }
 
+/// What `[[dest]]` shows without an alias, as Obsidian's reading view shows it: the note, then
+/// each heading or block it names, joined by ` > `; a link into the note itself, its anchors.
+fn wikilink_text(dest: &str) -> String {
+    let parts: Vec<&str> = dest.split('#').filter(|p| !p.is_empty()).collect();
+    parts.join(" > ")
+}
+
 /// The callout a quote starting at `src[at..]` opens: its type lowercased, its title, and the
 /// bytes of its `[!type]` line, newline included. `None` for a plain quote. A `+` or `-` fold
 /// marker is read past: a callout always shows open.
@@ -507,6 +514,9 @@ impl<'a> Builder<'a> {
         let mut in_meta = false;
         // The `[!type]` line of the callout being read, its newline included: its events go.
         let mut header = 0..0;
+        // What the wikilink just opened shows in place of the parser's one text, its target as
+        // written: none for one with an alias, whose text is the alias.
+        let mut wiki_text: Option<String> = None;
 
         // The definitions go on after the stretch, where the parser finds them; nothing of them
         // is shown, their events all starting past its end.
@@ -581,7 +591,7 @@ impl<'a> Builder<'a> {
             };
             match ev {
                 Event::Start(Cm::Link {
-                    link_type: LinkType::WikiLink { .. },
+                    link_type: LinkType::WikiLink { has_pothole },
                     ref dest_url,
                     ..
                 }) => {
@@ -592,6 +602,11 @@ impl<'a> Builder<'a> {
                     };
                     self.push(link, bytes);
                     link_ours.push(true);
+                    wiki_text = (!has_pothole).then(|| wikilink_text(dest_url));
+                }
+                Event::Text(_) if wiki_text.is_some() => {
+                    let text = wiki_text.take().unwrap_or_default();
+                    self.push(Node::Event(Event::Text(text.into())), bytes);
                 }
                 Event::Start(Cm::Link { ref dest_url, .. }) => {
                     if dest_url.starts_with('#') {
@@ -698,6 +713,30 @@ mod tests {
             marks(&blocks[4]),
             [(0, None), (1, None), (2, None), (3, None)]
         );
+    }
+
+    /// A wikilink without an alias shows as Obsidian's reading view shows it, its anchors apart.
+    #[test]
+    fn a_wikilink_shows_its_anchors_apart() {
+        let shown = |src: &str| -> String {
+            page(src)[0]
+                .nodes
+                .iter()
+                .filter_map(|n| match n {
+                    Node::Event(Event::Text(t)) => Some(t.to_string()),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(shown("[[Other note#Part]]"), "Other note > Part");
+        assert_eq!(shown("[[#Part]]"), "Part");
+        assert_eq!(shown("[[Note#^block]]"), "Note > ^block");
+        assert_eq!(shown("[[Note#A#B]]"), "Note > A > B");
+        assert_eq!(shown("[[Note#Part|shown]]"), "shown");
+        assert_eq!(shown("[[Note]] and [[N#P]]"), "Note and N > P");
+        // The exported page reads the same page.
+        let file = crate::markdown::to_html_file("[[N#P]]", "a.md");
+        assert_eq!(file.trim(), "<p>N &gt; P</p>");
     }
 
     /// A block an edit above only moved shows the same, so the native preview keeps it.
