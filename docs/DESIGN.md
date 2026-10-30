@@ -652,6 +652,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The Files tree and the window's subtitle still say what the tab is.
 - **Accent draws it itself** (user decision 2026-10-20): one read-only text view on the editor's page — its gutters, zoom and column — in the Preview Font (Typography), over the blocks core cuts the note into (`note::Syntax::page`), the blocks Print… and the exports write as HTML.
   Each block is tagged text in the look the stylesheet gives a printed page, in the editor's colours (Colour): headings, emphasis, lists with their boxes, quotes and callouts, footnotes, a conflict's sides; a line is 1.6 times the font's size, as the stylesheet's, Pango's line height being a share of the font's height (1.16 em in DejaVu Sans Mono) which the tags make up for.
+  A list item's text stands where the page's does, 1.4 em further in each depth, every line and paragraph of the item there, its marker hung before the first (user decision 2026-10-30: the preview and a printout line up).
   A picture, a diagram, a formula and a task's box stand in the text where the note has them, a table is the one widget, and what no tag draws — a code block's padded box, a quote's bar, a callout's tint, a rule — is painted under the text.
 - Code blocks, fences and org src blocks alike, are coloured as the editor colours them.
   A mermaid fence shows its source under a dim "Mermaid diagram" caption: drawing one is deferred (user decision 2026-10-22).

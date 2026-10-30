@@ -195,14 +195,14 @@ impl Tags {
         self.callout_title.set_pixels_above_lines(em(0.8));
         self.callout_title.set_pixels_below_lines(em(0.8));
         self.callout_end.set_pixels_below_lines(em(0.8) * 2);
-        // An item's first line starts with its marker, 1.4 em further in each depth, and GTK
-        // sets the lines it wraps onto 1.2 em in from that, under the text; every other line of
-        // the item, a later paragraph's first too, starts there, as the stylesheet lines them up.
+        // The stylesheet's `ul, ol`: an item's text 1.4 em further in each depth, every line of
+        // the item there. Its first line starts 1.2 em before it with the marker, GTK setting
+        // the lines that line wraps onto in by the indent's 1.2 em, under the text.
         for (i, (list, hang)) in self.lists.iter().zip(&self.hangs).enumerate() {
-            let marker = gutter + em(1.4 * (i + 1) as f64);
-            hang.set_left_margin(marker);
+            let text = gutter + em(1.4 * (i + 1) as f64);
+            list.set_left_margin(text);
+            hang.set_left_margin(text - em(1.2));
             hang.set_indent(-em(1.2));
-            list.set_left_margin(marker + em(1.2));
         }
         self.dd.set_left_margin(gutter + em(1.4));
         self.rule.set_pixels_above_lines(12);
