@@ -47,8 +47,11 @@ pub(super) struct Tags {
     pub callout_end: gtk::TextTag,
     /// An item's lines at each depth, at the item's text.
     pub lists: [gtk::TextTag; 6],
-    /// An item's first line per depth and marker, made as one is met ([`size_hang`]).
+    /// An item's first line per depth and marker, made as one is met ([`size_hang`]), a
+    /// number's marker keyed as [`Tags::hang_key`] folds it.
     pub hangs: RefCell<HashMap<(usize, String), gtk::TextTag>>,
+    /// Each digit's stand-in in a hang's key: the first digit as wide in the prose's font.
+    digits: Cell<[u8; 10]>,
     pub taskdone: gtk::TextTag,
     pub dt: gtk::TextTag,
     pub dd: gtk::TextTag,
@@ -128,6 +131,7 @@ impl Tags {
             callout_end: tag("callout-end"),
             lists: std::array::from_fn(|i| tag(&format!("list{}", i + 1))),
             hangs: RefCell::default(),
+            digits: Cell::new(std::array::from_fn(|d| b'0' + d as u8)),
             taskdone: tag("taskdone"),
             dt: set("dt", &|t| t.set_weight(700)),
             dd: tag("dd"),
@@ -159,6 +163,16 @@ impl Tags {
         }
     }
 
+    /// The key of `marker`'s hang: a number's digits each folded to the first digit as wide, so
+    /// a long list's numbers share a few hangs (all of one length one hang where the font's
+    /// digits are tabular); a bullet and a box as they are.
+    fn hang_key(&self, marker: &str) -> String {
+        let digits = self.digits.get();
+        (marker.chars())
+            .map(|c| c.to_digit(10).map_or(c, |d| char::from(digits[d as usize])))
+            .collect()
+    }
+
     /// The sizes measured in the font's pixels, `px` at the zoom, in the font of `context`, and
     /// the page's gutter, which a tag's margin replaces rather than adds to.
     pub(super) fn resize(&self, px: f64, gutter: i32, context: &pango::Context) {
@@ -170,6 +184,17 @@ impl Tags {
         let metrics = context.metrics(Some(&font), None);
         let height = f64::from(metrics.ascent() + metrics.descent()) / f64::from(pango::SCALE);
         let line = |css: f64| (css * px / height) as f32;
+        // Measured large, where the font's design tells digits apart that one size rounds alike.
+        font.set_absolute_size(1000.0 * f64::from(pango::SCALE));
+        let layout = pango::Layout::new(context);
+        layout.set_font_description(Some(&font));
+        let widths: [i32; 10] = std::array::from_fn(|d| {
+            layout.set_text(&d.to_string());
+            layout.extents().1.width()
+        });
+        let first = |d: usize| widths.iter().position(|w| *w == widths[d]).unwrap_or(d);
+        self.digits
+            .set(std::array::from_fn(|d| b'0' + first(d) as u8));
         self.prose.set_line_height(line(1.6));
         self.codeblock.set_line_height(line(1.6));
         for tag in &self.headings {
@@ -1059,12 +1084,13 @@ impl Writer<'_> {
         let depth = self.lists.len().clamp(1, 6);
         let page = self.page;
         let buffer = &page.buffer;
+        let key = page.tags.hang_key(&item.marker);
         let hang = (page.tags.hangs.borrow_mut())
-            .entry((depth, item.marker))
-            .or_insert_with_key(|(_, marker)| {
+            .entry((depth, key))
+            .or_insert_with_key(|(_, key)| {
                 let hang = gtk::TextTag::new(None);
                 buffer.tag_table().add(&hang);
-                size_hang(page, &hang, depth, marker);
+                size_hang(page, &hang, depth, key);
                 hang
             })
             .clone();
