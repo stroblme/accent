@@ -9,9 +9,9 @@
 //! them, so `snake_case` stays as written).
 //!
 //! What org's own export leaves out by default is not shown: `#+KEY:` lines (`#+TITLE` too: a
-//! markdown note's front matter is no heading either), drawers, comments, export and comment
-//! blocks, a heading's priority and planning line, and a heading marked `COMMENT` with its
-//! section.
+//! markdown note's front matter is no heading either), drawers, comments, comment blocks and
+//! export blocks but HTML ones (HTML of the page, as a note's is), a heading's priority and
+//! planning line, and a heading marked `COMMENT` with its section.
 
 use super::links::OrgLink;
 use super::table::{aligns, cookie};
@@ -226,21 +226,28 @@ impl<'a> Page<'a> {
                     .split_whitespace()
                     .take(2)
                     .collect();
-                let kind = match words[..] {
+                let tag = match words[..] {
                     [name, lang, ..] if name.eq_ignore_ascii_case("src") => {
-                        CodeBlockKind::Fenced(lang.into())
+                        Cm::CodeBlock(CodeBlockKind::Fenced(lang.into()))
                     }
                     [name, ..]
                         if ["src", "example"]
                             .iter()
                             .any(|v| name.eq_ignore_ascii_case(v)) =>
                     {
-                        CodeBlockKind::Indented
+                        Cm::CodeBlock(CodeBlockKind::Indented)
                     }
-                    // An export or a comment block shows nothing.
+                    // An HTML export block is HTML of the page, as a note's HTML is; any other
+                    // export block or a comment block shows nothing.
+                    [name, backend, ..]
+                        if name.eq_ignore_ascii_case("export")
+                            && backend.eq_ignore_ascii_case("html") =>
+                    {
+                        Cm::HtmlBlock
+                    }
                     _ => return last + 1,
                 };
-                self.code(kind, &lines[i + 1..last], span(i, last));
+                self.verbatim(tag, &lines[i + 1..last], span(i, last));
                 last + 1
             }
             Kind::Closed(last, _) => last + 1,
@@ -293,7 +300,8 @@ impl<'a> Page<'a> {
                         (colon + 1).min(l.end)..l.end
                     })
                     .collect();
-                self.code(CodeBlockKind::Indented, &body, span(i, end - 1));
+                let tag = Cm::CodeBlock(CodeBlockKind::Indented);
+                self.verbatim(tag, &body, span(i, end - 1));
                 end
             }
             Kind::Table => {
@@ -418,10 +426,17 @@ impl<'a> Page<'a> {
         next
     }
 
-    /// A block of code: each line of `body` less the indentation they share, and less the comma
-    /// org escapes a `*` or a `#+` at the start of a line with.
-    fn code(&mut self, kind: CodeBlockKind<'a>, body: &[Range<usize>], bytes: Range<usize>) {
+    /// A block of code, or of HTML for an `HtmlBlock` `tag`: each line of `body` less the
+    /// indentation they share, and less the comma org escapes a `*` or a `#+` at the start of a
+    /// line with.
+    fn verbatim(&mut self, tag: Cm<'a>, body: &[Range<usize>], bytes: Range<usize>) {
         let text = self.text;
+        let html = matches!(tag, Cm::HtmlBlock);
+        let end = tag.to_end();
+        let shown = |s: CowStr<'a>| match html {
+            true => Node::Event(Event::Html(s)),
+            false => Node::Event(Event::Text(s)),
+        };
         let indent = body
             .iter()
             .map(|l| &text[l.clone()])
@@ -429,24 +444,20 @@ impl<'a> Page<'a> {
             .map(|s| s.len() - s.trim_start().len())
             .min()
             .unwrap_or(0);
-        self.open(Cm::CodeBlock(kind), bytes.clone());
+        self.open(tag, bytes.clone());
         for l in body {
             let mut at = (l.start + indent).min(l.end);
             let s = &text[at..l.end];
             let lead = s.len() - s.trim_start().len();
             if s[lead..].starts_with(",*") || s[lead..].starts_with(",#+") {
                 if lead > 0 {
-                    self.push(
-                        Node::Event(Event::Text(text[at..at + lead].into())),
-                        l.clone(),
-                    );
+                    self.push(shown(text[at..at + lead].into()), l.clone());
                 }
                 at += lead + 1;
             }
-            let shown = format!("{}\n", &text[at..l.end]);
-            self.push(Node::Event(Event::Text(shown.into())), l.clone());
+            self.push(shown(format!("{}\n", &text[at..l.end]).into()), l.clone());
         }
-        self.close(TagEnd::CodeBlock, bytes);
+        self.close(end, bytes);
     }
 
     /// A table: rows of cells split on `|`, its first hline closing the header, of every row above
@@ -1323,6 +1334,18 @@ Left out.
             "<table><thead><tr><th>A</th><th>B</th></tr>\n<tr><th>a</th><th>b</th></tr>\
              </thead><tbody>\n<tr><td>c</td><td>d</td></tr>\n<tr><td>e</td><td>f</td></tr>\n\
              </tbody></table>\n"
+        );
+    }
+
+    /// An HTML export block is HTML of the page, line marker first, as a note's HTML block is;
+    /// one for another backend shows nothing.
+    #[test]
+    fn an_html_export_block_is_html() {
+        let src = "#+begin_export html\n<b>bold</b> &amp;\n,#+not a keyword\n#+end_export\n\
+                   #+BEGIN_EXPORT latex\n\\newpage\n#+END_EXPORT\n";
+        assert_eq!(
+            to_html(src),
+            "<span data-line=\"1\"></span><b>bold</b> &amp;\n#+not a keyword\n"
         );
     }
 
