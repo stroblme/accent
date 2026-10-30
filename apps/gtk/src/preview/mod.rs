@@ -535,10 +535,12 @@ impl Page {
         self.patched.set((prefix + suffix, written));
     }
 
-    /// The render is in. A scroll asked meanwhile goes from an idle: GTK measures the text put
-    /// in from an idle of a higher priority, so the place is measured, not estimated.
+    /// The render is in, its code coloured from here. A scroll asked meanwhile goes from an idle:
+    /// GTK measures the text put in from an idle of a higher priority, so the place is measured,
+    /// not estimated.
     fn settle(self: &Rc<Self>) {
         self.settled.set(true);
+        code::settled();
         if self.pending.get().is_none() {
             return;
         }

@@ -1,12 +1,11 @@
 //! A code block's text, set plain by [`super::text`], coloured as the editor colours it
 //! (`codeblocks.rs`, whose runs and tags it shares): at once where its language and code have runs
-//! kept already, else once the page's text is all in, from an idle. A restyle gives the tags the
-//! theme's looks.
+//! kept already, else once the page's text is all in, a budget a turn, as the editor highlights
+//! its own. A restyle gives the tags the theme's looks.
 
 use super::Page;
 use super::text::Writer;
 use crate::codeblocks;
-use gtk::glib;
 use gtk::prelude::*;
 use std::cell::RefCell;
 use std::ops::Range;
@@ -20,7 +19,7 @@ struct Waiting {
 }
 
 thread_local! {
-    /// The code blocks the previews have written since an idle last took them.
+    /// The code blocks the previews have written since a render last settled.
     static WAITING: RefCell<Vec<Waiting>> = RefCell::default();
 }
 
@@ -36,10 +35,12 @@ pub(super) fn fence(w: &mut Writer, lang: &str, range: Range<i32>) {
     let code = buffer.slice(&start, w.at, true).to_string();
     match codeblocks::runs(&language, &code, false) {
         Some(runs) => paint(buffer, &start, &runs),
-        None => wait(Waiting {
-            mark: buffer.create_mark(None, &start, false),
-            language,
-            code,
+        None => WAITING.with_borrow_mut(|all| {
+            all.push(Waiting {
+                mark: buffer.create_mark(None, &start, false),
+                language,
+                code,
+            })
         }),
     }
 }
@@ -49,24 +50,18 @@ pub(super) fn restyle(page: &Page) {
     codeblocks::restyle(&page.buffer);
 }
 
-/// Highlight `waiting` with the blocks written before an idle below the render's batches runs,
-/// and colour each that is still on show as it was written.
-fn wait(waiting: Waiting) {
-    let first = WAITING.with_borrow_mut(|all| {
-        all.push(waiting);
-        all.len() == 1
-    });
-    if !first {
+/// A render is all in: highlight the blocks written meanwhile and colour each that is still on
+/// show as it was written. Started here rather than from an idle below the render's, which a busy
+/// window (its watchers, a terminal's output) may never let run.
+pub(super) fn settled() {
+    let waiting = WAITING.take();
+    if waiting.is_empty() {
         return;
     }
-    glib::idle_add_local_full(glib::Priority::LOW, || {
-        let waiting = WAITING.take();
-        let blocks = (waiting.iter())
-            .map(|w| (w.language.clone(), w.code.clone()))
-            .collect();
-        codeblocks::later(blocks, move || waiting.iter().for_each(Waiting::paint));
-        glib::ControlFlow::Break
-    });
+    let blocks = (waiting.iter())
+        .map(|w| (w.language.clone(), w.code.clone()))
+        .collect();
+    codeblocks::later(blocks, move || waiting.iter().for_each(Waiting::paint));
 }
 
 impl Waiting {

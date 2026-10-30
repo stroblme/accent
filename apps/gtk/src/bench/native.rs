@@ -256,6 +256,22 @@ async fn render(app: &Rc<App>) {
         println!("bench preview code coloured={coloured:?}");
     }
     find(&rendered, &tab).await;
+    busy(&rendered).await;
+}
+
+/// A fence no editor has coloured, rendered while the main loop never goes idle below
+/// `DEFAULT_IDLE`, as a busy window's watchers and terminals keep it: coloured all the same.
+async fn busy(rendered: &crate::rendered::Rendered) {
+    let spin = glib::idle_add_local(|| glib::ControlFlow::Continue);
+    if let Some(preview) = rendered.preview().as_ref() {
+        preview.render("busy.md", "```rust\nfn busy() -> u8 { 1 }\n```\n");
+    }
+    glib::timeout_future(Duration::from_millis(1000)).await;
+    spin.remove();
+    if let Some(preview) = rendered.preview().as_ref() {
+        let coloured = tagged(&preview.buffer(), |n| n.starts_with("code:"));
+        println!("bench preview code busy coloured={coloured:?}");
+    }
 }
 
 /// Find from the page's top: the readout after a search, a step each way and Match Whole Word,
