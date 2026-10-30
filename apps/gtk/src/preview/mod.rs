@@ -29,7 +29,7 @@ use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use pulldown_cmark::{Event, Tag as Cm};
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -134,6 +134,10 @@ struct Page {
     /// Whether the blocks on show are a whole page, which a render can patch.
     whole: Cell<bool>,
     pending: Cell<Option<u32>>,
+    /// Whether a table written now waits for the render's text ([`Page::attach`]).
+    defer: Cell<bool>,
+    /// The tables waiting, in the page's order.
+    waiting: RefCell<VecDeque<(gtk::TextChildAnchor, gtk::Widget)>>,
     #[cfg(feature = "bench")]
     patched: Cell<(usize, usize)>,
 }
@@ -204,6 +208,8 @@ impl Preview {
             settled: Cell::new(true),
             whole: Cell::new(false),
             pending: Cell::new(None),
+            defer: Cell::new(false),
+            waiting: RefCell::default(),
             #[cfg(feature = "bench")]
             patched: Cell::default(),
         });
@@ -226,6 +232,14 @@ impl Preview {
             page,
             move |href| page.follow(href)
         ));
+        // A reader scrolling into a render under way finds its tables in place.
+        page.scroller
+            .vadjustment()
+            .connect_value_changed(glib::clone!(
+                #[weak]
+                page,
+                move |_| page.attach_waiting()
+            ));
         page.view.on_copy(glib::clone!(
             #[weak]
             page,
@@ -473,6 +487,8 @@ impl Page {
             self.buffer.delete_mark(&shown.mark);
         }
         self.buffer.set_text("");
+        self.defer.set(false);
+        self.waiting.borrow_mut().clear();
     }
 
     /// Another note: the view cleared, then `laid` put in from the top by batches.
@@ -481,12 +497,16 @@ impl Page {
         self.whole.set(false);
         self.scroller.vadjustment().set_value(0.0);
         let mut laid = laid.into_iter().peekable();
+        let mut first = true;
         let page = Rc::downgrade(self);
         glib::idle_add_local(move || {
             let Some(page) = page.upgrade().filter(|p| p.generation.get() == generation) else {
                 return glib::ControlFlow::Break;
             };
             let started = Instant::now();
+            if !page.defer.get() && page.attach_some(started) {
+                return glib::ControlFlow::Continue;
+            }
             let mut end = page.buffer.end_iter();
             while started.elapsed() < BATCH {
                 let Some(next) = laid.next() else { break };
@@ -494,12 +514,62 @@ impl Page {
                 page.shown.borrow_mut().push(shown);
             }
             if laid.peek().is_some() {
+                if std::mem::take(&mut first) {
+                    page.defer.set(true);
+                }
+                return glib::ControlFlow::Continue;
+            }
+            page.defer.set(false);
+            if page.attach_some(started) {
                 return glib::ControlFlow::Continue;
             }
             page.whole.set(true);
             page.settle();
             glib::ControlFlow::Break
         });
+    }
+
+    /// Put `widget` in the view at `anchor`, or once the render's text is all in.
+    ///
+    /// GTK goes over every widget of a text view on each frame and on each stretch of text it
+    /// measures, so a table put in at once costs every frame of the render after it (ISSUES.md).
+    /// The first batch's, on the screen the reader sees first, go in at once; the rest by batches
+    /// after the text, the text below them, out of sight, moving down, or all at once when the
+    /// reader scrolls meanwhile.
+    fn attach(&self, widget: &gtk::Widget, anchor: &gtk::TextChildAnchor) {
+        match self.defer.get() {
+            true => (self.waiting.borrow_mut()).push_back((anchor.clone(), widget.clone())),
+            false => self.put(widget, anchor),
+        }
+    }
+
+    /// Put waiting tables in until `started` is a batch ago; whether some still wait.
+    fn attach_some(&self, started: Instant) -> bool {
+        while started.elapsed() < BATCH {
+            let Some((anchor, widget)) = self.waiting.borrow_mut().pop_front() else {
+                return false;
+            };
+            self.put(&widget, &anchor);
+        }
+        !self.waiting.borrow().is_empty()
+    }
+
+    /// Every waiting table in, and the render's next ones at once.
+    fn attach_waiting(&self) {
+        self.defer.set(false);
+        loop {
+            let next = self.waiting.borrow_mut().pop_front();
+            let Some((anchor, widget)) = next else { break };
+            self.put(&widget, &anchor);
+        }
+    }
+
+    fn put(&self, widget: &gtk::Widget, anchor: &gtk::TextChildAnchor) {
+        if !anchor.is_deleted() {
+            self.view.add_child_at_anchor(widget, anchor);
+            // Measured here, within the batch, rather than in the next frame's layout.
+            widget.preferred_size();
+        }
     }
 
     fn write(&self, at: &mut gtk::TextIter, laid: Laid, source: &str) -> Shown {

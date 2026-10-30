@@ -951,7 +951,7 @@ impl Writer<'_> {
     pub fn widget(&mut self, widget: &impl IsA<gtk::Widget>, object: Object) {
         self.newline();
         let anchor = self.page.buffer.create_child_anchor(self.at);
-        self.page.view.add_child_at_anchor(widget, &anchor);
+        self.page.attach(widget.upcast_ref(), &anchor);
         self.facts.objects.push(object);
         self.line_start = false;
         self.newline();

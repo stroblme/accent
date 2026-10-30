@@ -162,8 +162,11 @@ pub(super) fn insert(w: &mut Writer, rows: Vec<Vec<Cell>>, align: &[Alignment]) 
     w.widget(&table, object);
 }
 
-/// The page's tables.
+/// The page's tables, those waiting for a render's text to be in last.
 fn tables(page: &Page) -> impl Iterator<Item = Table> {
+    let waiting: Vec<Table> = (page.waiting.borrow().iter())
+        .filter_map(|(_, widget)| widget.clone().downcast().ok())
+        .collect();
     let mut child = page.view.first_child();
     std::iter::from_fn(move || {
         while let Some(widget) = child.take() {
@@ -174,6 +177,7 @@ fn tables(page: &Page) -> impl Iterator<Item = Table> {
         }
         None
     })
+    .chain(waiting)
 }
 
 /// Lay every table out again for the page's text width, after a resize or a zoom.

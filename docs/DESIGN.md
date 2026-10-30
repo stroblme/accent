@@ -669,6 +669,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A table wider than the page scrolls sideways on its own, once its cells have wrapped as far as they can; the page never does.
 - An edit is rendered 300 ms after the last key by replacing only the blocks it changed, so the reading position, a selection, the find's place and a picture stay wherever their block did not change (the 207 KB bench note: 8–14 ms of the main thread an edit, about 100 ms as a new page, measured 2026-10-29).
   Another note goes in from the top by batches of 8 ms, so the window keeps drawing meanwhile; a new look recolours the page in place.
+  Its tables past the first batch go in after its text, by batches too, or at once when the reader scrolls meanwhile (user decision 2026-10-30): GTK goes over every widget in a text view on each frame, so a table put in early costs every frame of the render after it.
 - A block's `^id` is not shown: its block carries it as its anchor, so `[text](#^id)` scrolls there as `[text](#slug)` does to a heading.
   A link naming the heading by its text, `[text](#My%20Section)`, is pointed at its slug and scrolls there too, as the editor resolves it — with no Back entry, like every same-page link.
   A jump — such a link, an Outline row, the note's caret beside it — lands at once, not eased.
