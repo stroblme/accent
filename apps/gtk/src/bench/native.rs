@@ -71,7 +71,7 @@ Inside details
 
 <style>p { color: red }</style>
 
-![[preview-drill.png]] ![[preview-drill.drawio]]
+![[preview-drill.png]] ![[preview-drill.drawio]] ![[Attachments/stripes.png]]
 
 Back to [the top](#preview-drill), [lists](#lists) and [the paragraph](#^para).
 
@@ -101,7 +101,8 @@ pub(super) fn bench_preview(app: &Rc<App>, arg: &str) {
     let filler: String = (1..=40)
         .map(|i| format!("Filler paragraph {i}, there for the page to scroll.\n\n"))
         .collect();
-    // The pictures the fixture embeds: a striped image and a diagram's first page.
+    // The pictures the fixture embeds: a striped image, at the root and in a folder, and a
+    // diagram's first page.
     let stripes: Vec<u8> = (0..96 * 48)
         .flat_map(|i| match i % 96 / 16 % 2 {
             0 => [53u8, 132, 228],
@@ -116,21 +117,33 @@ pub(super) fn bench_preview(app: &Rc<App>, arg: &str) {
         96 * 3,
     )
     .save_to_png_bytes();
-    let pictures = std::fs::write(app.root().join("preview-drill.png"), png).and_then(|_| {
-        std::fs::write(
-            app.root().join("preview-drill.drawio"),
-            super::diagram::SAMPLE,
-        )
-    });
+    let pictures = std::fs::write(app.root().join("preview-drill.png"), &png)
+        .and_then(|_| std::fs::create_dir_all(app.root().join("Attachments")))
+        .and_then(|_| std::fs::write(app.root().join("Attachments/stripes.png"), &png))
+        .and_then(|_| {
+            std::fs::write(
+                app.root().join("preview-drill.drawio"),
+                super::diagram::SAMPLE,
+            )
+        });
     if let Err(e) =
         pictures.and_then(|_| std::fs::write(app.root().join(NOTE), format!("{FIXTURE}\n{filler}")))
     {
         println!("bench preview wrote=false {e}");
         return bench_quit(app);
     }
-    app.open_path(NOTE);
     let app = app.clone();
     glib::spawn_future_local(async move {
+        // Once the index has the picture in a folder, whose news would otherwise read it again
+        // under the page.
+        let t = Instant::now();
+        while (app.vault()).is_none_or(|v| v.asset("stripes.png").is_none())
+            && t.elapsed() < Duration::from_secs(10)
+        {
+            glib::timeout_future(Duration::from_millis(50)).await;
+        }
+        glib::timeout_future(Duration::from_millis(300)).await;
+        app.open_path(NOTE);
         render(&app).await;
         bench_quit(&app);
     });
