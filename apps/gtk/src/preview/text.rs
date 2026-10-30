@@ -251,7 +251,7 @@ impl Default for Ink {
     }
 }
 
-// ---------------------------------------------------------------------------------- task boxes
+// -------------------------------------------------------------------------------------- glyphs
 
 /// A task item's box: open, in progress (half filled) or done (filled and ticked).
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -261,93 +261,6 @@ pub enum Task {
     Doing,
     Done,
 }
-
-glib::wrapper! {
-    /// A task's box, one paintable for all three (refresh T4), as large as the font's `x` is
-    /// tall plus a little, in the accent faded as a disabled checkbox is.
-    pub struct TaskBox(ObjectSubclass<boxes::TaskBox>) @implements gdk::Paintable;
-}
-
-impl TaskBox {
-    fn new(task: Task, side: i32, ink: Rc<Ink>) -> TaskBox {
-        let paintable: TaskBox = glib::Object::new();
-        paintable.imp().task.set(task);
-        paintable.imp().side.set(side);
-        let _ = paintable.imp().ink.set(ink);
-        paintable
-    }
-}
-
-mod boxes {
-    use super::*;
-    use std::cell::OnceCell;
-
-    #[derive(Default)]
-    pub struct TaskBox {
-        pub task: Cell<Task>,
-        pub side: Cell<i32>,
-        pub ink: OnceCell<Rc<Ink>>,
-    }
-
-    #[glib::object_subclass]
-    impl ObjectSubclass for TaskBox {
-        const NAME: &'static str = "AccentPreviewTaskBox";
-        type Type = super::TaskBox;
-        type Interfaces = (gdk::Paintable,);
-    }
-
-    impl ObjectImpl for TaskBox {}
-
-    impl PaintableImpl for TaskBox {
-        fn intrinsic_width(&self) -> i32 {
-            self.side.get()
-        }
-
-        fn intrinsic_height(&self) -> i32 {
-            self.side.get()
-        }
-
-        fn snapshot(&self, snapshot: &gdk::Snapshot, width: f64, height: f64) {
-            let (Some(snapshot), Some(ink)) =
-                (snapshot.downcast_ref::<gtk::Snapshot>(), self.ink.get())
-            else {
-                return;
-            };
-            let (w, h) = (width as f32, height as f32);
-            let accent = crate::theme::at(ink.accent.get(), 0.5);
-            let line = (w / 7.0).max(1.5);
-            let rect = graphene::Rect::new(0.0, 0.0, w, h);
-            let corner = graphene::Size::new(w / 4.0, w / 4.0);
-            let shape = gsk::RoundedRect::new(rect, corner, corner, corner, corner);
-            match self.task.get() {
-                Task::Done => {
-                    snapshot.push_rounded_clip(&shape);
-                    snapshot.append_color(&accent, &rect);
-                    snapshot.pop();
-                    let tick = gsk::PathBuilder::new();
-                    tick.move_to(w * 0.25, h * 0.52);
-                    tick.line_to(w * 0.43, h * 0.7);
-                    tick.line_to(w * 0.76, h * 0.32);
-                    snapshot.append_stroke(
-                        &tick.to_path(),
-                        &gsk::Stroke::new(line),
-                        &ink.page.get(),
-                    );
-                }
-                task => {
-                    if task == Task::Doing {
-                        snapshot.push_rounded_clip(&shape);
-                        snapshot.append_color(&accent, &graphene::Rect::new(0.0, 0.0, w / 2.0, h));
-                        snapshot.pop();
-                    }
-                    snapshot.append_border(&shape, &[line; 4], &[accent; 4]);
-                }
-            }
-        }
-    }
-}
-
-// ------------------------------------------------------------------------------- callout icons
 
 /// The icon a callout of type `kind` leads its title with: Obsidian's glyph for each type it
 /// names, as the icon theme draws it, and a note's for a type it does not. Adwaita has no flame,
@@ -371,42 +284,108 @@ pub(crate) fn callout_icon(kind: &str) -> &'static str {
     }
 }
 
-glib::wrapper! {
-    /// A callout's icon, its type's symbolic icon in the accent its title is in.
-    pub struct CalloutIcon(ObjectSubclass<icons::CalloutIcon>) @implements gdk::Paintable;
+/// What a [`Glyph`] draws.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Mark {
+    /// A task's box, one paintable for all three (refresh T4), as large as the font's `x` is
+    /// tall plus a little, in the accent faded as a disabled checkbox is.
+    Task(Task),
+    /// A callout's icon, its type's symbolic icon by its name in the theme, as tall as the
+    /// font's size, in the accent its title is in.
+    Icon(&'static str),
 }
 
-impl CalloutIcon {
-    fn new(name: &'static str, side: i32, ink: Rc<Ink>) -> CalloutIcon {
-        let paintable: CalloutIcon = glib::Object::new();
-        paintable.imp().name.set(name);
-        paintable.imp().side.set(side);
-        let _ = paintable.imp().ink.set(ink);
-        paintable
+impl Default for Mark {
+    fn default() -> Mark {
+        Mark::Task(Task::Open)
     }
 }
 
-mod icons {
+impl Mark {
+    /// Its side and how far it reaches below the baseline at the prose's size `px`: a box
+    /// centred on the `x`, an icon on the capitals.
+    fn size(self, px: f64) -> (i32, i32) {
+        let (side, descent) = match self {
+            Mark::Task(_) => (0.8, 0.1),
+            Mark::Icon(_) => (1.0, 0.15),
+        };
+        ((side * px).round() as i32, (descent * px).round() as i32)
+    }
+}
+
+glib::wrapper! {
+    /// A task's box or a callout's icon in the text, sized from the prose's size, so a zoom
+    /// resizes it in place ([`resize`]).
+    pub struct Glyph(ObjectSubclass<glyph::Glyph>) @implements gdk::Paintable;
+}
+
+impl Glyph {
+    fn new(mark: Mark, px: f64, ink: Rc<Ink>) -> Glyph {
+        let glyph: Glyph = glib::Object::new();
+        glyph.imp().mark.set(mark);
+        let _ = glyph.imp().ink.set(ink);
+        glyph.fit(px);
+        glyph
+    }
+
+    /// Size it for the prose's size `px`; how far it reached below the baseline before, and
+    /// how far now.
+    fn fit(&self, px: f64) -> (i32, i32) {
+        let imp = self.imp();
+        let (side, descent) = imp.mark.get().size(px);
+        imp.side.set(side);
+        (imp.descent.replace(descent), descent)
+    }
+}
+
+/// Every glyph sized again for the prose's size at the zoom, lowered anew where that changed.
+pub(super) fn resize(page: &Page) {
+    let (buffer, px) = (&page.buffer, page.px.get());
+    let mut from = 0;
+    while let Some((start, end)) =
+        buffer
+            .iter_at_offset(from)
+            .forward_search("\u{fffc}", gtk::TextSearchFlags::empty(), None)
+    {
+        from = end.offset();
+        let Some(glyph) = start.paintable().and_downcast::<Glyph>() else {
+            continue;
+        };
+        let (before, after) = glyph.fit(px);
+        if after != before {
+            if before != 0 {
+                buffer.remove_tag(&page.rise(before), &start, &end);
+            }
+            if after != 0 {
+                buffer.apply_tag(&page.rise(after), &start, &end);
+            }
+        }
+        glyph.invalidate_size();
+    }
+}
+
+mod glyph {
     use super::*;
     use std::cell::OnceCell;
 
     #[derive(Default)]
-    pub struct CalloutIcon {
-        pub name: Cell<&'static str>,
+    pub struct Glyph {
+        pub mark: Cell<Mark>,
         pub side: Cell<i32>,
+        pub descent: Cell<i32>,
         pub ink: OnceCell<Rc<Ink>>,
     }
 
     #[glib::object_subclass]
-    impl ObjectSubclass for CalloutIcon {
-        const NAME: &'static str = "AccentPreviewCalloutIcon";
-        type Type = super::CalloutIcon;
+    impl ObjectSubclass for Glyph {
+        const NAME: &'static str = "AccentPreviewGlyph";
+        type Type = super::Glyph;
         type Interfaces = (gdk::Paintable,);
     }
 
-    impl ObjectImpl for CalloutIcon {}
+    impl ObjectImpl for Glyph {}
 
-    impl PaintableImpl for CalloutIcon {
+    impl PaintableImpl for Glyph {
         fn intrinsic_width(&self) -> i32 {
             self.side.get()
         }
@@ -416,18 +395,57 @@ mod icons {
         }
 
         fn snapshot(&self, snapshot: &gdk::Snapshot, width: f64, height: f64) {
-            let (Some(display), Some(ink)) = (gdk::Display::default(), self.ink.get()) else {
+            let (Some(snapshot), Some(ink)) =
+                (snapshot.downcast_ref::<gtk::Snapshot>(), self.ink.get())
+            else {
                 return;
             };
-            let icon = gtk::IconTheme::for_display(&display).lookup_icon(
-                self.name.get(),
-                &[],
-                width as i32,
-                1,
-                gtk::TextDirection::None,
-                gtk::IconLookupFlags::empty(),
-            );
-            icon.snapshot_symbolic(snapshot, width, height, &[ink.accent.get()]);
+            match self.mark.get() {
+                Mark::Task(task) => task_box(snapshot, task, width, height, ink),
+                Mark::Icon(name) => {
+                    let Some(display) = gdk::Display::default() else {
+                        return;
+                    };
+                    let icon = gtk::IconTheme::for_display(&display).lookup_icon(
+                        name,
+                        &[],
+                        width as i32,
+                        1,
+                        gtk::TextDirection::None,
+                        gtk::IconLookupFlags::empty(),
+                    );
+                    icon.snapshot_symbolic(snapshot, width, height, &[ink.accent.get()]);
+                }
+            }
+        }
+    }
+
+    fn task_box(snapshot: &gtk::Snapshot, task: Task, width: f64, height: f64, ink: &Ink) {
+        let (w, h) = (width as f32, height as f32);
+        let accent = crate::theme::at(ink.accent.get(), 0.5);
+        let line = (w / 7.0).max(1.5);
+        let rect = graphene::Rect::new(0.0, 0.0, w, h);
+        let corner = graphene::Size::new(w / 4.0, w / 4.0);
+        let shape = gsk::RoundedRect::new(rect, corner, corner, corner, corner);
+        match task {
+            Task::Done => {
+                snapshot.push_rounded_clip(&shape);
+                snapshot.append_color(&accent, &rect);
+                snapshot.pop();
+                let tick = gsk::PathBuilder::new();
+                tick.move_to(w * 0.25, h * 0.52);
+                tick.line_to(w * 0.43, h * 0.7);
+                tick.line_to(w * 0.76, h * 0.32);
+                snapshot.append_stroke(&tick.to_path(), &gsk::Stroke::new(line), &ink.page.get());
+            }
+            task => {
+                if task == Task::Doing {
+                    snapshot.push_rounded_clip(&shape);
+                    snapshot.append_color(&accent, &graphene::Rect::new(0.0, 0.0, w / 2.0, h));
+                    snapshot.pop();
+                }
+                snapshot.append_border(&shape, &[line; 4], &[accent; 4]);
+            }
         }
     }
 }
@@ -938,29 +956,29 @@ impl Writer<'_> {
         }
     }
 
-    /// A callout's icon before its title, as tall as the font's size and centred on its
-    /// capitals; Copy writes the `[!type]` it stands for.
-    fn icon(&mut self, kind: &str) {
-        let px = self.page.px.get();
-        let name = callout_icon(kind);
-        let paintable = CalloutIcon::new(name, px.round() as i32, self.page.ink.clone());
-        let object = Object::new(format!("icon {name}"), format!("[!{kind}]"));
-        self.paintable(&paintable, (0.15 * px).round() as i32, object);
+    /// `mark` and a space after it.
+    fn glyph(&mut self, mark: Mark, object: Object) {
+        let glyph = Glyph::new(mark, self.page.px.get(), self.page.ink.clone());
+        let descent = glyph.imp().descent.get();
+        self.paintable(&glyph, descent, object);
         self.text(" ");
     }
 
+    /// A callout's icon before its title; Copy writes the `[!type]` it stands for.
+    fn icon(&mut self, kind: &str) {
+        let name = callout_icon(kind);
+        let object = Object::new(format!("icon {name}"), format!("[!{kind}]"));
+        self.glyph(Mark::Icon(name), object);
+    }
+
     fn task(&mut self, task: Task) {
-        let px = self.page.px.get();
-        let side = (0.8 * px).round() as i32;
         let source = match task {
             Task::Open => "[ ]",
             Task::Doing => "[/]",
             Task::Done => "[x]",
         };
-        let paintable = TaskBox::new(task, side, self.page.ink.clone());
         let object = Object::new(format!("box {source}"), source.to_string());
-        self.paintable(&paintable, (0.1 * px).round() as i32, object);
-        self.text(" ");
+        self.glyph(Mark::Task(task), object);
         if task == Task::Done {
             let page = self.page;
             self.push(&page.tags.taskdone);

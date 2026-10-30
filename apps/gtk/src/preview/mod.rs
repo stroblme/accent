@@ -397,6 +397,7 @@ impl Page {
         self.tags
             .resize(self.px.get(), self.view.left_margin(), &context);
         self.set_clamp();
+        text::resize(self);
         table::set_width(self);
         figure::resize(self);
         formula::resize(self);
