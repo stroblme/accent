@@ -9,7 +9,8 @@ use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{gdk, glib, graphene, gsk, pango};
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, Tag as Cm, TagEnd};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -46,8 +47,8 @@ pub(super) struct Tags {
     pub callout_end: gtk::TextTag,
     /// An item's lines at each depth, at the item's text.
     pub lists: [gtk::TextTag; 6],
-    /// An item's first line at each depth, its marker hung before the item's text.
-    pub hangs: [gtk::TextTag; 6],
+    /// An item's first line per depth and marker, made as one is met ([`size_hang`]).
+    pub hangs: RefCell<HashMap<(usize, String), gtk::TextTag>>,
     pub taskdone: gtk::TextTag,
     pub dt: gtk::TextTag,
     pub dd: gtk::TextTag,
@@ -126,7 +127,7 @@ impl Tags {
             callout_title: set("callout-title", &|t| t.set_weight(700)),
             callout_end: tag("callout-end"),
             lists: std::array::from_fn(|i| tag(&format!("list{}", i + 1))),
-            hangs: std::array::from_fn(|i| tag(&format!("hang{}", i + 1))),
+            hangs: RefCell::default(),
             taskdone: tag("taskdone"),
             dt: set("dt", &|t| t.set_weight(700)),
             dd: tag("dd"),
@@ -195,14 +196,8 @@ impl Tags {
         self.callout_title.set_pixels_above_lines(em(0.8));
         self.callout_title.set_pixels_below_lines(em(0.8));
         self.callout_end.set_pixels_below_lines(em(0.8) * 2);
-        // The stylesheet's `ul, ol`: an item's text 1.4 em further in each depth, every line of
-        // the item there. Its first line starts 1.2 em before it with the marker, GTK setting
-        // the lines that line wraps onto in by the indent's 1.2 em, under the text.
-        for (i, (list, hang)) in self.lists.iter().zip(&self.hangs).enumerate() {
-            let text = gutter + em(1.4 * (i + 1) as f64);
-            list.set_left_margin(text);
-            hang.set_left_margin(text - em(1.2));
-            hang.set_indent(-em(1.2));
+        for (i, list) in self.lists.iter().enumerate() {
+            list.set_left_margin(list_text(px, gutter, i + 1));
         }
         self.dd.set_left_margin(gutter + em(1.4));
         self.rule.set_pixels_above_lines(12);
@@ -240,6 +235,38 @@ impl Tags {
             label.set_paragraph_background_rgba(Some(&crate::theme::over(head, page)));
         }
     }
+}
+
+/// Where a list item's text starts at `depth` (from 1), every line of the item there: the
+/// stylesheet's `ul, ol`, 1.4 em further in each depth.
+fn list_text(px: f64, gutter: i32, depth: usize) -> i32 {
+    gutter + (1.4 * depth as f64 * px).round() as i32
+}
+
+/// What a task item's first line leads with, as the buffer holds it: its box and a space.
+const TASK_MARKER: &str = "\u{fffc} ";
+
+/// Size `hang`, the first line of an item at `depth` led by `marker`: it starts the marker's
+/// width before the item's text, GTK setting the lines it wraps onto in by the indent, under the
+/// text, so the text after the marker starts there too as a browser's does. The marker is
+/// measured in the prose's font at its size, a box as its glyph is drawn, and rounded to whole
+/// pixels, which a margin is.
+fn size_hang(page: &Page, hang: &gtk::TextTag, depth: usize, marker: &str) {
+    let px = page.px.get();
+    let context = page.view.pango_context();
+    let mut font = context.font_description().unwrap_or_default();
+    font.set_absolute_size(px * f64::from(pango::SCALE));
+    let layout = pango::Layout::new(&context);
+    layout.set_font_description(Some(&font));
+    layout.set_text(&marker.replace('\u{fffc}', ""));
+    let mut width = f64::from(layout.extents().1.width()) / f64::from(pango::SCALE);
+    if marker.contains('\u{fffc}') {
+        width += f64::from(Mark::Task(Task::Open).size(px).0);
+    }
+    let width = width.round() as i32;
+    let text = list_text(px, page.view.left_margin(), depth);
+    hang.set_left_margin((text - width).max(0));
+    hang.set_indent(-width);
 }
 
 /// The colours drawn by hand, by the view and by the boxes and formulas in the text, which a
@@ -347,8 +374,12 @@ impl Glyph {
     }
 }
 
-/// Every glyph sized again for the prose's size at the zoom, lowered anew where that changed.
+/// Every glyph sized again for the prose's size at the zoom, lowered anew where that changed, and
+/// every list marker's hang measured again.
 pub(super) fn resize(page: &Page) {
+    for ((depth, marker), hang) in page.tags.hangs.borrow().iter() {
+        size_hang(page, hang, *depth, marker);
+    }
     let (buffer, px) = (&page.buffer, page.px.get());
     let mut from = 0;
     while let Some((start, end)) =
@@ -817,6 +848,17 @@ pub(super) fn collapse_margin(page: &Page, at: &gtk::TextIter) {
     }
 }
 
+/// A list item being written.
+struct OpenItem {
+    /// Where its first line starts, from the block's start.
+    start: i32,
+    /// What leads that line, as the buffer holds it: a bullet, a number or a task's box, then a
+    /// space.
+    marker: String,
+    /// Whether it is a done task, whose text is dimmed.
+    done: bool,
+}
+
 /// A block's nodes into the buffer; the hooks of figures, formulas and tables write through it.
 pub(super) struct Writer<'a> {
     pub page: &'a Page,
@@ -827,9 +869,7 @@ pub(super) struct Writer<'a> {
     notes: std::slice::Iter<'a, usize>,
     pub tags: Vec<gtk::TextTag>,
     lists: Vec<Option<u64>>,
-    /// Per open item, where its first line starts and whether it is a done task, whose text is
-    /// dimmed.
-    items: Vec<(i32, bool)>,
+    items: Vec<OpenItem>,
     links: Vec<(i32, Href)>,
     /// A markdown image being read: its destination and alt text.
     image: Option<(String, String)>,
@@ -948,22 +988,30 @@ impl Writer<'_> {
         }
     }
 
+    /// An item's start; a task's box is written by [`Writer::task`].
     fn item(&mut self, task: bool) {
         self.newline();
         let depth = self.lists.len().clamp(1, 6);
         let page = self.page;
         self.push(&page.tags.lists[depth - 1]);
-        self.items.push((self.offset(), false));
+        let start = self.offset();
+        let marker = match (task, self.lists.last_mut()) {
+            (true, _) => TASK_MARKER.to_string(),
+            (false, Some(Some(n))) => {
+                *n += 1;
+                format!("{}. ", *n - 1)
+            }
+            _ => "• ".to_string(),
+        };
         if !task {
-            let bullet = match self.lists.last_mut() {
-                Some(Some(n)) => {
-                    *n += 1;
-                    format!("{}. ", *n - 1)
-                }
-                _ => "• ".to_string(),
-            };
-            self.text(&bullet);
+            self.text(&marker);
         }
+        let item = OpenItem {
+            start,
+            marker,
+            done: false,
+        };
+        self.items.push(item);
     }
 
     /// `mark` and a space after it.
@@ -992,8 +1040,8 @@ impl Writer<'_> {
         if task == Task::Done {
             let page = self.page;
             self.push(&page.tags.taskdone);
-            if let Some((_, done)) = self.items.last_mut() {
-                *done = true;
+            if let Some(item) = self.items.last_mut() {
+                item.done = true;
             }
         }
     }
@@ -1006,14 +1054,24 @@ impl Writer<'_> {
         self.page.buffer.apply_tag(tag, &start, self.at);
     }
 
-    /// An item's first line, from `start`: the one its marker hangs in.
-    fn hang(&self, start: i32) {
+    /// `item`'s first line, the one its marker hangs in, in the hang of its depth and marker.
+    fn hang(&self, item: OpenItem) {
         let depth = self.lists.len().clamp(1, 6);
-        let buffer = &self.page.buffer;
-        let first = buffer.iter_at_offset(self.start + start);
+        let page = self.page;
+        let buffer = &page.buffer;
+        let hang = (page.tags.hangs.borrow_mut())
+            .entry((depth, item.marker))
+            .or_insert_with_key(|(_, marker)| {
+                let hang = gtk::TextTag::new(None);
+                buffer.tag_table().add(&hang);
+                size_hang(page, &hang, depth, marker);
+                hang
+            })
+            .clone();
+        let first = buffer.iter_at_offset(self.start + item.start);
         let mut end = first;
         end.forward_line();
-        buffer.apply_tag(&self.page.tags.hangs[depth - 1], &first, &end);
+        buffer.apply_tag(&hang, &first, &end);
     }
 
     /// The room of a code block's box above its first line, from `start`, and below its last.
@@ -1279,13 +1337,13 @@ impl Writer<'_> {
             }
             Event::End(TagEnd::Item) => {
                 let item = self.items.pop();
-                if item.is_some_and(|(_, done)| done) {
+                if item.as_ref().is_some_and(|item| item.done) {
                     self.pop();
                 }
                 self.pop();
                 self.newline();
-                if let Some((start, _)) = item {
-                    self.hang(start);
+                if let Some(item) = item {
+                    self.hang(item);
                 }
             }
             // Every row read so far is the head's, which in org may be several.
