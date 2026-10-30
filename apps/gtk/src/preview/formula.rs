@@ -102,10 +102,13 @@ fn inline_px(page: &Page) -> f32 {
     page.px.get() as f32 * CAPS.get()
 }
 
+/// [`CAPS`], the prose in the page's Preview Font or else the system's document font.
 fn caps(page: &Page) -> f32 {
-    let family = pango::FontDescription::from_string(&crate::editor::default_font())
+    let font = page.prose_font.borrow().clone();
+    let font = font.unwrap_or_else(crate::platform::document_font);
+    let family = pango::FontDescription::from_string(&font)
         .family()
-        .map_or_else(crate::platform::monospace_family, |f| f.to_string());
+        .map_or_else(|| "Sans".to_string(), |f| f.to_string());
     let prose = crate::export::css::cap_height(&family).unwrap_or(0.7) as f32;
     prose / crate::math::cap_height(&page.view)
 }
