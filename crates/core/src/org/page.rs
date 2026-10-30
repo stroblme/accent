@@ -256,11 +256,24 @@ impl<'a> Page<'a> {
                 self.close(TagEnd::BlockQuote(None), bytes);
                 last + 1
             }
+            // Each element centred on its own, a block of the page, spaced from the next as any
+            // two are; one that shows nothing is left out.
             Kind::Center(last) => {
-                let bytes = span(i, last);
-                self.push(Node::Center, bytes.clone());
-                self.blocks(&lines[i + 1..last], false);
-                self.push(Node::CenterEnd, bytes);
+                let inner = &lines[i + 1..last];
+                let mut j = 0;
+                while j < inner.len() {
+                    let at = self.nodes.len();
+                    self.push(Node::Center, inner[j].clone());
+                    let next = self.block(inner, j, false);
+                    if self.nodes.len() == at + 1 {
+                        self.nodes.pop();
+                    } else {
+                        let bytes = inner[j].start..inner[next - 1].end;
+                        self.nodes[at].1 = bytes.clone();
+                        self.push(Node::CenterEnd, bytes);
+                    }
+                    j = next;
+                }
                 last + 1
             }
             // One paragraph of the lines between the fences, each ending in a break, as org's
@@ -1305,17 +1318,20 @@ Left out.
         );
     }
 
-    /// A centre block's paragraphs are one block of the page, shown centred.
+    /// Each paragraph of a centre block is a block of the page, shown centred.
     #[test]
     fn a_centre_block_is_centred() {
         let src = "#+begin_center\nMiddle\nline.\n\nNext *one*.\n#+end_center\nAfter.\n";
+        let div = "<div style=\"text-align: center\">\n";
         assert_eq!(
             bare(src),
-            "<div style=\"text-align: center\">\n<p>Middle\nline.</p>\n\
-             <p>Next <strong>one</strong>.</p>\n</div>\n<p>After.</p>\n"
+            format!(
+                "{div}<p>Middle\nline.</p>\n</div>\n\
+                 {div}<p>Next <strong>one</strong>.</p>\n</div>\n<p>After.</p>\n"
+            )
         );
-        let blocks = page(src);
-        assert_eq!((blocks.len(), blocks[0].lines.clone()), (2, 1..7));
+        let lines: Vec<_> = page(src).into_iter().map(|b| b.lines).collect();
+        assert_eq!(lines, [2..4, 5..6, 7..8]);
     }
 
     /// A LaTeX environment is a formula on its own, the environment whole; one that does not
