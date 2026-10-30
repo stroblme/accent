@@ -1505,6 +1505,37 @@ fn a_foreign_stroke_is_cut_along_its_ink_list() {
     }
 }
 
+/// Another editor's stroke turned by Adjust at an angle other than a quarter keeps its width, and
+/// so do the pieces the eraser cuts from it.
+#[test]
+fn a_foreign_stroke_turned_keeps_its_width() {
+    let Some((_dir, mut doc)) = open_pdf(&foreign_ink_pdf(false)) else {
+        return;
+    };
+    let before = doc.inks(0).unwrap().remove(0);
+    assert!(
+        (before.style.width - 2.0).abs() < 0.01,
+        "{:?}",
+        before.style
+    );
+    let b = before.bounds;
+    let m = rotation(((b.left + b.right) / 2.0, (b.top + b.bottom) / 2.0), 45.0);
+    doc.transform_ink(0, before.at, m).unwrap();
+    let turned = doc.inks(0).unwrap().remove(0);
+    assert!(
+        (turned.style.width - 2.0).abs() < 0.01,
+        "{:?}",
+        turned.style
+    );
+    // Across both lines, as `a_foreign_stroke_is_cut_along_its_ink_list` cuts them unturned.
+    let (from, to) = (apply(m, (100.0, 50.0)), apply(m, (150.0, 50.0)));
+    let cut = doc.cut_ink(0, turned.at, from, to, 2.0).unwrap();
+    assert_eq!(cut.expect("the pass crossed both lines").left.len(), 4);
+    for piece in doc.inks(0).unwrap() {
+        assert!((piece.style.width - 2.0).abs() < 0.01, "{:?}", piece.style);
+    }
+}
+
 /// Rendering must not change saved annotations: what pdfium generates as it draws — appearance
 /// streams, `PDFIUM_HasGeneratedAP`, popups — stays out of the file, which pdfium never writes.
 #[test]

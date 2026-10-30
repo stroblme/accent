@@ -518,8 +518,8 @@ impl PdfDoc {
                 && a.objects().len() == 1
                 && segs.iter().skip(1).all(|s| !matches!(s, Seg::Move(_)))
                 && points.iter().all(|&q| inside.contains(q)));
-        if !ours && !strokes.is_empty() {
-            style.width *= scale(&points, &strokes);
+        if !ours {
+            style.width *= self.cos.drawn_scale(&dict);
         }
         let cuttable = ours || (!strokes.is_empty() && one_style(a));
         Some(Read {
@@ -754,29 +754,10 @@ impl Objects {
             let Object::Stream(mut stream) = self.get(r)? else {
                 continue;
             };
-            let Some(bbox) = stream.dict.get(b"BBox").and_then(|b| self.area(b)) else {
+            let Some((bbox, fitted)) = self.fitted(&stream.dict, rect) else {
                 continue;
             };
-            let form = stream
-                .dict
-                .get(b"Matrix")
-                .and_then(|m| self.resolve(m).ok());
-            let form = form.and_then(|m| <[f32; 6]>::try_from(numbers(&m)?).ok());
-            let form = form.unwrap_or(IDENTITY);
-            // Algorithm 8.1: the form's box under its matrix, fitted into the `/Rect`.
-            let shown = bbox.under(form);
-            let scale = |extent: f32, into: f32| if extent > 0.0 { into / extent } else { 1.0 };
-            let fx = scale(shown.width(), rect.width());
-            let fy = scale(shown.height(), rect.height());
-            let fit = [
-                fx,
-                0.0,
-                0.0,
-                fy,
-                rect.left - fx * shown.left,
-                rect.top - fy * shown.top,
-            ];
-            let placed = then(then(form, fit), turn);
+            let placed = then(fitted, turn);
             stream.dict.set(b"Matrix", reals(placed));
             if key == b"N" {
                 turned = Some(bbox.under(placed));
@@ -788,6 +769,44 @@ impl Objects {
         let down =
             |b: Rect| Rect::from_corners((b.left, height - b.top), (b.right, height - b.bottom));
         Ok(turned.map(down))
+    }
+
+    /// The box of the form `stream` and the matrix that puts it on the page, in the file's space:
+    /// its `/Matrix`, then the fit of the box that makes into the annotation's `rect` (ISO 32000-1
+    /// §12.5.5, Algorithm 8.1). `None` for a form without a `/BBox`.
+    fn fitted(&self, stream: &Dict, rect: Rect) -> Option<(Rect, Matrix)> {
+        let bbox = stream.get(b"BBox").and_then(|b| self.area(b))?;
+        let form = (stream.get(b"Matrix").and_then(|m| self.resolve(m).ok()))
+            .and_then(|m| <[f32; 6]>::try_from(numbers(&m)?).ok())
+            .unwrap_or(IDENTITY);
+        let shown = bbox.under(form);
+        let scale = |extent: f32, into: f32| if extent > 0.0 { into / extent } else { 1.0 };
+        let fx = scale(shown.width(), rect.width());
+        let fy = scale(shown.height(), rect.height());
+        let fit = [
+            fx,
+            0.0,
+            0.0,
+            fy,
+            rect.left - fx * shown.left,
+            rect.top - fy * shown.top,
+        ];
+        Some((bbox, then(form, fit)))
+    }
+
+    /// How many page points a unit of the space the annotation `annot`'s appearance draws in
+    /// covers: the scale of its form fitted into its `/Rect`, which a turn leaves as it was. 1
+    /// without an appearance stream.
+    fn drawn_scale(&self, annot: &Dict) -> f32 {
+        let resolved = |o: Option<&Object>| self.resolve(o?).ok();
+        let normal = resolved(annot.get(b"AP")).and_then(|ap| resolved(ap.as_dict()?.get(b"N")));
+        let (Some(Object::Stream(form)), Some(rect)) =
+            (normal, annot.get(b"Rect").and_then(|r| self.area(r)))
+        else {
+            return 1.0;
+        };
+        self.fitted(&form.dict, rect)
+            .map_or(1.0, |(_, m)| determinant_scale(m))
     }
 
     /// A rectangle as the file writes one, `[x0 y0 x1 y1]` in its own space, normalised.
@@ -855,23 +874,10 @@ struct Read {
     popup: Option<accent_pdf::Ref>,
 }
 
-/// How many page points a unit of an appearance stream's own space covers: the extent of its
-/// `/InkList`, in page points, over the extent of what the stream draws, the same strokes. 1 for
-/// a stroke drawn in the page's own space; other once Adjust has resized it.
-fn scale(drawn: &[(f32, f32)], strokes: &[Vec<(f32, f32)>]) -> f32 {
-    let reach = |points: &mut dyn Iterator<Item = &(f32, f32)>| {
-        (points.map(|&q| Rect::from_corners(q, q)))
-            .reduce(Rect::union)
-            .map_or(0.0, |r| r.width().hypot(r.height()))
-    };
-    let (drawn, listed) = (
-        reach(&mut drawn.iter()),
-        reach(&mut strokes.iter().flatten()),
-    );
-    match drawn > 0.01 && listed > 0.01 {
-        true => listed / drawn,
-        false => 1.0,
-    }
+/// How long a unit length is under `m`: the square root of how much it scales an area, which a
+/// turn leaves as it was and a stretch one way averages.
+fn determinant_scale(m: Matrix) -> f32 {
+    (m[0] * m[3] - m[1] * m[2]).abs().sqrt()
 }
 
 /// Whether every path an annotation's appearance stream draws is drawn alike, so a piece cut from
@@ -997,8 +1003,12 @@ fn read_ink(a: &PdfPageAnnotation<'_>, height: f32) -> Option<(Vec<Seg>, InkStyl
 /// handle into a page object once an appearance stream exists (see `annotation_color`).
 fn style_of(path: &PdfPagePathObject<'_>) -> Option<InkStyle> {
     let c = path.stroke_color().ok()?;
+    // In the space of the form it is drawn in: pdfium's matrix of a path in an appearance stream
+    // is what the stream's `cm`s make, its `/Matrix` left out.
+    let m = path.matrix().ok()?;
+    let cm = [m.a(), m.b(), m.c(), m.d(), m.e(), m.f()];
     Some(InkStyle {
-        width: path.stroke_width().ok()?.value,
+        width: path.stroke_width().ok()?.value * determinant_scale(cm),
         rgba: [c.red(), c.green(), c.blue(), c.alpha()],
         // ponytail: pdfium-render has no blend-mode getter, and a translucent stroke of ours is
         // the highlighter, so alpha stands in for `/Multiply`.
