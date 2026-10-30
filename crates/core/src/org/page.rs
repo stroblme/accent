@@ -449,8 +449,9 @@ impl<'a> Page<'a> {
         self.close(TagEnd::CodeBlock, bytes);
     }
 
-    /// A table: rows of cells split on `|`, its first hline closing the header where rows follow
-    /// it, as org exports one; an hline and a row of alignment cookies show nothing, the cookies
+    /// A table: rows of cells split on `|`, its first hline closing the header, of every row above
+    /// it, where rows follow it, as org exports one; an hline and a row of alignment cookies show
+    /// nothing, the cookies
     /// aligning their columns as a column of numbers is aligned (`super::table`).
     fn table(&mut self, rows: &[Range<usize>]) {
         let text = self.text;
@@ -489,13 +490,19 @@ impl<'a> Page<'a> {
         self.open(Cm::Table(aligns), bytes.clone());
         // A table without a header has an empty one, after which the writer opens its body.
         self.push(Node::Event(Event::Start(Cm::TableHead)), bytes.clone());
-        let mut head = rule.is_some();
-        if !head {
+        if rule.is_none() {
             self.close(TagEnd::TableHead, bytes.clone());
         }
+        // The head opens its first row and closes its last. A row between closes and opens as a
+        // body row does, which pulldown-cmark's writer writes as one more row of `th`s.
+        let first = shown
+            .iter()
+            .position(Option::is_some)
+            .filter(|_| rule.is_some());
+        let last = rule.and_then(|rule| (0..rule).rev().find(|&j| shown[j].is_some()));
         for (j, cells) in shown.iter().enumerate() {
             let Some(cells) = cells else { continue };
-            if !head {
+            if Some(j) != first {
                 self.push(Node::Event(Event::Start(Cm::TableRow)), rows[j].clone());
             }
             for k in 0..columns {
@@ -505,11 +512,8 @@ impl<'a> Page<'a> {
                 }
                 self.close(TagEnd::TableCell, rows[j].clone());
             }
-            match head {
-                true => {
-                    self.close(TagEnd::TableHead, rows[j].clone());
-                    head = false;
-                }
+            match Some(j) == last {
+                true => self.close(TagEnd::TableHead, rows[j].clone()),
                 false => self.close(TagEnd::TableRow, rows[j].clone()),
             }
         }
@@ -1307,6 +1311,19 @@ Left out.
             "{h}"
         );
         assert!(h.ends_with("</math></p>\n<p>\\begin{x}\nopen</p>\n"), "{h}");
+    }
+
+    /// Every row above a table's first hline is a head row, an hline under the head the end of
+    /// the head alone.
+    #[test]
+    fn every_row_above_the_first_hline_is_a_head_row() {
+        let h = bare("| A | B |\n| a | b |\n|---+---|\n| c | d |\n|---+---|\n| e | f |\n");
+        assert_eq!(
+            h,
+            "<table><thead><tr><th>A</th><th>B</th></tr>\n<tr><th>a</th><th>b</th></tr>\
+             </thead><tbody>\n<tr><td>c</td><td>d</td></tr>\n<tr><td>e</td><td>f</td></tr>\n\
+             </tbody></table>\n"
+        );
     }
 
     /// An anchor names the `id` its element has on the page, a target's before a heading's.
