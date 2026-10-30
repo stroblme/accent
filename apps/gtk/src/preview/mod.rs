@@ -17,6 +17,7 @@ mod view;
 
 #[cfg(feature = "bench")]
 pub use figure::Probe;
+pub(crate) use text::callout_icon;
 
 use crate::editor::{self, Flavour};
 use accent_core::config::Config;

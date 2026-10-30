@@ -6,7 +6,7 @@
 use crate::theme;
 use accent_core::config::Config;
 use gtk::prelude::*;
-use gtk::{gdk, pango};
+use gtk::{gdk, gio, glib, pango};
 
 fn css_rgba(c: gdk::RGBA) -> String {
     let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
@@ -70,6 +70,44 @@ pub(crate) fn cap_height(family: &str) -> Option<f64> {
 pub(crate) fn paper_css(config: &Config) -> String {
     let (bg, fg) = theme::paper();
     stylesheet(fg, bg, column(config).map(f64::from))
+}
+
+/// The icons of the callouts in `body`, each type's as the preview draws it
+/// (`preview::callout_icon`): the theme's SVG as a mask before the title, in its colour, for
+/// only the types the page has. A browser printing no backgrounds would drop it, so it asks for
+/// its colour on paper.
+pub(crate) fn callout_icons(body: &str) -> String {
+    let Some(display) = gdk::Display::default() else {
+        return String::new();
+    };
+    let theme = gtk::IconTheme::for_display(&display);
+    let mut kinds: Vec<&str> = body
+        .split("<blockquote class=\"callout\" data-callout=\"")
+        .skip(1)
+        .filter_map(|rest| rest.split('"').next())
+        .collect();
+    kinds.sort_unstable();
+    kinds.dedup();
+    let mut css = String::new();
+    for kind in kinds {
+        let name = crate::preview::callout_icon(kind);
+        let flags = gtk::IconLookupFlags::empty();
+        let icon = theme.lookup_icon(name, &[], 16, 1, gtk::TextDirection::None, flags);
+        let Some((svg, _)) = icon
+            .file()
+            .and_then(|f| f.load_contents(gio::Cancellable::NONE).ok())
+        else {
+            continue;
+        };
+        css.push_str(&format!(
+            "blockquote.callout[data-callout=\"{kind}\"] > .callout-title::before {{ content: \"\"; \
+             display: inline-block; width: 1em; height: 1em; margin-right: 0.4em; \
+             vertical-align: -0.15em; background: currentColor; print-color-adjust: exact; \
+             mask: url(\"data:image/svg+xml;base64,{}\") center / contain no-repeat; }}\n",
+            glib::base64_encode(&svg)
+        ));
+    }
+    css
 }
 
 /// What a notebook's page adds to [`paper_css`] for the cells core's `Notebook::to_html_file`

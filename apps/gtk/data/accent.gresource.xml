@@ -2,9 +2,10 @@
 <!--
   The icons Adwaita has no glyph for: the completion kinds, the drawing tools, the file types
   every file list leads its rows with, a server rack for a remote vault (the theme's
-  `network-server` is a box on a cable, or a tower), and a breakpoint's dot and ring. They are
-  shipped with the binary rather than looked up in the theme; the prefix is what
-  `IconTheme::add_resource_path` is pointed at, so GTK finds them by name like any other icon.
+  `network-server` is a box on a cable, or a tower), a breakpoint's dot and ring, and a quote
+  callout's quotation mark. They are shipped with the binary rather than looked up in the
+  theme; the prefix is what `IconTheme::add_resource_path` is pointed at, so GTK finds them by
+  name like any other icon.
   `filetype-*` rather than `file-*`, which themes already use.
 -->
 <gresources>
@@ -55,6 +56,7 @@
     <file preprocess="xml-stripblanks">icons/scalable/actions/dap-step-out-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/dap-console-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/scm-branch-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/callout-quote-symbolic.svg</file>
     <!-- The same tabler folder and file the completion kinds draw, under the file lists' names. -->
     <file alias="icons/scalable/actions/filetype-folder-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/lsp-folder-symbolic.svg</file>
     <file alias="icons/scalable/actions/filetype-file-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/lsp-file-symbolic.svg</file>

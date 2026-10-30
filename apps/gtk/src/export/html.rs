@@ -113,6 +113,7 @@ pub(crate) async fn page(app: &Rc<App>, paper: Paper, csp: Csp) -> Result<String
     let body = crate::work::off_thread("export", move || paper.body())
         .await
         .ok_or_else(stopped)?;
+    css.push_str(&css::callout_icons(&body));
     let resolve = app.asset_resolver();
     let web = app.web_images.borrow().clone();
     let drawn = drawn_diagrams(&body, &resolve, &rel, &web).await;

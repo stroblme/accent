@@ -346,6 +346,91 @@ mod boxes {
     }
 }
 
+// ------------------------------------------------------------------------------- callout icons
+
+/// The icon a callout of type `kind` leads its title with: Obsidian's glyph for each type it
+/// names, as the icon theme draws it, and a note's for a type it does not. Adwaita has no flame,
+/// bug or quotation mark: a tip has its star, a bug the Debug Console's bug and a quote a glyph
+/// of the app's own.
+pub(crate) fn callout_icon(kind: &str) -> &'static str {
+    match kind {
+        "abstract" | "summary" | "tldr" => "edit-paste-symbolic",
+        "info" => "help-about-symbolic",
+        "todo" => "checkbox-checked-symbolic",
+        "tip" | "hint" | "important" => "starred-symbolic",
+        "success" | "check" | "done" => "object-select-symbolic",
+        "question" | "help" | "faq" => "dialog-question-symbolic",
+        "warning" | "caution" | "attention" => "dialog-warning-symbolic",
+        "failure" | "fail" | "missing" => "process-stop-symbolic",
+        "danger" | "error" => "dialog-error-symbolic",
+        "bug" => "dap-console-symbolic",
+        "example" => "view-list-bullet-symbolic",
+        "quote" | "cite" => "callout-quote-symbolic",
+        _ => "document-edit-symbolic",
+    }
+}
+
+glib::wrapper! {
+    /// A callout's icon, its type's symbolic icon in the accent its title is in.
+    pub struct CalloutIcon(ObjectSubclass<icons::CalloutIcon>) @implements gdk::Paintable;
+}
+
+impl CalloutIcon {
+    fn new(name: &'static str, side: i32, ink: Rc<Ink>) -> CalloutIcon {
+        let paintable: CalloutIcon = glib::Object::new();
+        paintable.imp().name.set(name);
+        paintable.imp().side.set(side);
+        let _ = paintable.imp().ink.set(ink);
+        paintable
+    }
+}
+
+mod icons {
+    use super::*;
+    use std::cell::OnceCell;
+
+    #[derive(Default)]
+    pub struct CalloutIcon {
+        pub name: Cell<&'static str>,
+        pub side: Cell<i32>,
+        pub ink: OnceCell<Rc<Ink>>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for CalloutIcon {
+        const NAME: &'static str = "AccentPreviewCalloutIcon";
+        type Type = super::CalloutIcon;
+        type Interfaces = (gdk::Paintable,);
+    }
+
+    impl ObjectImpl for CalloutIcon {}
+
+    impl PaintableImpl for CalloutIcon {
+        fn intrinsic_width(&self) -> i32 {
+            self.side.get()
+        }
+
+        fn intrinsic_height(&self) -> i32 {
+            self.side.get()
+        }
+
+        fn snapshot(&self, snapshot: &gdk::Snapshot, width: f64, height: f64) {
+            let (Some(display), Some(ink)) = (gdk::Display::default(), self.ink.get()) else {
+                return;
+            };
+            let icon = gtk::IconTheme::for_display(&display).lookup_icon(
+                self.name.get(),
+                &[],
+                width as i32,
+                1,
+                gtk::TextDirection::None,
+                gtk::IconLookupFlags::empty(),
+            );
+            icon.snapshot_symbolic(snapshot, width, height, &[ink.accent.get()]);
+        }
+    }
+}
+
 // --------------------------------------------------------------------------------- raw HTML
 
 /// What a run of raw HTML in a note shows (user decision 2026-10-22: unwrap). A comment, a
@@ -664,6 +749,7 @@ pub(super) fn write(
         align: Vec::new(),
         html: None,
         code: None,
+        callout: String::new(),
         line_start: true,
         facts: Facts::default(),
     };
@@ -725,6 +811,8 @@ pub(super) struct Writer<'a> {
     align: Vec<Alignment>,
     html: Option<String>,
     code: Option<(String, i32)>,
+    /// The type of the callout whose title comes next.
+    callout: String,
     line_start: bool,
     facts: Facts,
 }
@@ -847,6 +935,17 @@ impl Writer<'_> {
             };
             self.text(&bullet);
         }
+    }
+
+    /// A callout's icon before its title, as tall as the font's size and centred on its
+    /// capitals; Copy writes the `[!type]` it stands for.
+    fn icon(&mut self, kind: &str) {
+        let px = self.page.px.get();
+        let name = callout_icon(kind);
+        let paintable = CalloutIcon::new(name, px.round() as i32, self.page.ink.clone());
+        let object = Object::new(format!("icon {name}"), format!("[!{kind}]"));
+        self.paintable(&paintable, (0.15 * px).round() as i32, object);
+        self.text(" ");
     }
 
     fn task(&mut self, task: Task) {
@@ -974,9 +1073,14 @@ impl Writer<'_> {
             } => formula::insert(self, tex, mathml, *display),
             Node::TaskItem => self.item(true),
             Node::TaskDoing => self.task(Task::Doing),
-            Node::Callout { .. } => self.push(&tags.callout),
+            Node::Callout { kind } => {
+                self.push(&tags.callout);
+                self.callout = kind.clone();
+            }
             Node::CalloutTitle(title) => {
                 self.push(&tags.callout_title);
+                let kind = std::mem::take(&mut self.callout);
+                self.icon(&kind);
                 self.text(title);
                 self.pop();
                 self.newline();
