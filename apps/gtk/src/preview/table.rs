@@ -1,9 +1,9 @@
-//! Tables in the page, the one child widget: wrapping cells in a grid that scrolls sideways once
-//! its words no longer fit the column, ruled and padded as the stylesheet's `th` and `td`, each
-//! column aligned as its delimiter row says, the header bold and, unaligned, centred as a
-//! browser centres a `th`; a cell's text in the middle of its row. A cell is a selectable label
-//! of Pango markup: the prose's inline styles, and its links followed as the page's are. Copy
-//! over the page writes the table's markdown.
+//! Tables in the page, the one child widget: wrapping cells in columns as wide as a browser
+//! makes them ([`widths`]), scrolling sideways once their words no longer fit the column, ruled
+//! and padded as the stylesheet's `th` and `td`, each column aligned as its delimiter row says,
+//! the header bold and, unaligned, centred as a browser centres a `th`; a cell's text in the
+//! middle of its row. A cell is a selectable label of Pango markup: the prose's inline styles,
+//! and its links followed as the page's are. Copy over the page writes the table's markdown.
 
 use super::Page;
 use super::text::{Href, Object, Tags, Writer};
@@ -102,6 +102,41 @@ fn wash(page: &Page) -> String {
     )
 }
 
+/// Each column's width out of `width`, given its narrowest and widest, `(min, max)`: a browser's
+/// automatic table layout (CSS 2.1 §17.5.2.2). Each column is as wide as its widest cell where
+/// they all fit; otherwise it gets its narrowest, its longest word, and a share of what is left
+/// in proportion to how much more its cells would take unwrapped; with nothing left, its
+/// narrowest.
+fn widths(columns: &[(i32, i32)], width: i32) -> Vec<i32> {
+    let least: i32 = columns.iter().map(|c| c.0).sum();
+    let most: i32 = columns.iter().map(|c| c.1).sum();
+    if most <= width {
+        return columns.iter().map(|c| c.1).collect();
+    }
+    if least >= width {
+        return columns.iter().map(|c| c.0).collect();
+    }
+    let (spare, wanted) = (i64::from(width - least), i64::from(most - least));
+    // Each a share of the running total, so the rounding loses no pixel.
+    let (mut want, mut given) = (0, 0);
+    columns
+        .iter()
+        .map(|&(min, max)| {
+            want += i64::from(max - min);
+            let share = (spare * want / wanted) as i32 - given;
+            given += share;
+            min + share
+        })
+        .collect()
+}
+
+glib::wrapper! {
+    /// The cells, a row's as tall as its tallest at its columns' [`widths`].
+    pub struct Grid(ObjectSubclass<imp::Grid>)
+        @extends gtk::Widget,
+        @implements gtk::Accessible, gtk::Buildable, gtk::ConstraintTarget;
+}
+
 glib::wrapper! {
     /// GtkTextView gives an anchored child its minimum size, so the table says the text's width
     /// is its minimum, and its height is the grid's at that width (spike, gate G4).
@@ -161,12 +196,12 @@ impl Table {
         install_css();
         // As wide as its columns, as a browser's table is, not the page: the grid's own rules,
         // the top and the left, would run on past a narrow table's last column.
-        let grid = gtk::Grid::builder()
-            .css_classes(["accent-table"])
-            .halign(gtk::Align::Start)
-            .build();
+        let grid: Grid = glib::Object::new();
+        grid.add_css_class("accent-table");
+        grid.set_halign(gtk::Align::Start);
         let mut cells = Vec::new();
         for (r, row) in rows.into_iter().enumerate() {
+            grid.imp().rows.borrow_mut().push(row.len());
             for (c, cell) in row.into_iter().enumerate() {
                 let (xalign, justify) = match align.get(c) {
                     Some(Alignment::Center) => (0.5, gtk::Justification::Center),
@@ -190,7 +225,7 @@ impl Table {
                 if !cell.links.is_empty() {
                     follow(&label, cell.links);
                 }
-                grid.attach(&label, c as i32, r as i32, 1, 1);
+                label.set_parent(&grid);
                 cells.push((label, markup));
             }
         }
@@ -266,10 +301,10 @@ fn install_css() {
     let rule = "1px solid alpha(currentColor, 0.15)";
     let provider = gtk::CssProvider::new();
     provider.load_from_string(&format!(
-        "grid.accent-table {{ border-top: {rule}; border-left: {rule}; }} \
-         grid.accent-table > label {{ padding: 0.4em 0.8em; \
+        ".accent-table {{ border-top: {rule}; border-left: {rule}; }} \
+         .accent-table > label {{ padding: 0.4em 0.8em; \
            border-right: {rule}; border-bottom: {rule}; }} \
-         grid.accent-table > label.th {{ font-weight: 700; }}"
+         .accent-table > label.th {{ font-weight: 700; }}"
     ));
     gtk::style_context_add_provider_for_display(
         &display,
@@ -325,5 +360,128 @@ mod imp {
                 scroller.allocate(width, height, baseline, None);
             }
         }
+    }
+
+    #[derive(Default)]
+    pub struct Grid {
+        /// How many cells each row holds, the head first; a header-less org table's head none.
+        pub rows: RefCell<Vec<usize>>,
+    }
+
+    #[glib::object_subclass]
+    impl ObjectSubclass for Grid {
+        const NAME: &'static str = "AccentPreviewTableGrid";
+        type Type = super::Grid;
+        type ParentType = gtk::Widget;
+    }
+
+    impl ObjectImpl for Grid {
+        fn dispose(&self) {
+            while let Some(child) = self.obj().first_child() {
+                child.unparent();
+            }
+        }
+    }
+
+    impl Grid {
+        /// The cells, row by row.
+        fn cells(&self) -> Vec<Vec<gtk::Widget>> {
+            let mut child = self.obj().first_child();
+            let mut cells = std::iter::from_fn(|| {
+                let cell = child.take()?;
+                child = cell.next_sibling();
+                Some(cell)
+            });
+            let rows = self.rows.borrow();
+            rows.iter()
+                .map(|&n| cells.by_ref().take(n).collect())
+                .collect()
+        }
+
+        /// Each column's narrowest and widest: its cells' longest word and whole text.
+        fn columns(cells: &[Vec<gtk::Widget>]) -> Vec<(i32, i32)> {
+            let mut columns: Vec<(i32, i32)> = Vec::new();
+            for row in cells {
+                for (c, cell) in row.iter().enumerate() {
+                    let (min, max, ..) = cell.measure(gtk::Orientation::Horizontal, -1);
+                    match columns.get_mut(c) {
+                        Some(column) => *column = (column.0.max(min), column.1.max(max)),
+                        None => columns.push((min, max)),
+                    }
+                }
+            }
+            columns
+        }
+
+        /// Each row's height, its cells `widths` wide.
+        fn heights(cells: &[Vec<gtk::Widget>], widths: &[i32]) -> Vec<i32> {
+            let height =
+                |cell: &gtk::Widget, &width| cell.measure(gtk::Orientation::Vertical, width).1;
+            cells
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .zip(widths)
+                        .map(|(c, w)| height(c, w))
+                        .max()
+                        .unwrap_or(0)
+                })
+                .collect()
+        }
+    }
+
+    impl WidgetImpl for Grid {
+        fn request_mode(&self) -> gtk::SizeRequestMode {
+            gtk::SizeRequestMode::HeightForWidth
+        }
+
+        fn measure(&self, orientation: gtk::Orientation, for_size: i32) -> (i32, i32, i32, i32) {
+            let cells = self.cells();
+            let columns = Self::columns(&cells);
+            match orientation {
+                gtk::Orientation::Horizontal => {
+                    let min = columns.iter().map(|c| c.0).sum();
+                    let max = columns.iter().map(|c| c.1).sum();
+                    (min, max, -1, -1)
+                }
+                _ => {
+                    let width = if for_size < 0 { i32::MAX } else { for_size };
+                    let widths = super::widths(&columns, width);
+                    let height = Self::heights(&cells, &widths).into_iter().sum();
+                    (height, height, -1, -1)
+                }
+            }
+        }
+
+        fn size_allocate(&self, width: i32, _height: i32, _baseline: i32) {
+            let cells = self.cells();
+            let widths = super::widths(&Self::columns(&cells), width);
+            let mut y = 0;
+            for (row, height) in cells.iter().zip(Self::heights(&cells, &widths)) {
+                let mut x = 0;
+                for (cell, &width) in row.iter().zip(&widths) {
+                    cell.size_allocate(&gtk::Allocation::new(x, y, width, height), -1);
+                    x += width;
+                }
+                y += height;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::widths;
+
+    #[test]
+    fn columns_share_the_width_as_a_browser_does() {
+        let columns = [(10, 40), (20, 30)];
+        // Room for every cell unwrapped: each column its widest.
+        assert_eq!(widths(&columns, 100), [40, 30]);
+        // Too little for their longest words: each its narrowest, and the table scrolls.
+        assert_eq!(widths(&columns, 25), [10, 20]);
+        // Between: each its narrowest, and the 30 px left shared 3:1, as 30 and 10 more would
+        // show them unwrapped.
+        assert_eq!(widths(&columns, 60), [32, 28]);
     }
 }
