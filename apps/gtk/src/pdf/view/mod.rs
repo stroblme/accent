@@ -483,6 +483,17 @@ impl PdfView {
         *self.imp().on_erase.borrow_mut() = Some(Box::new(f));
     }
 
+    /// Called when an eraser drag that reached a page ends.
+    pub fn connect_erased(&self, f: impl Fn() + 'static) {
+        *self.imp().on_erased.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// Whether an eraser drag is under way over the pages: it goes on with the strokes the view
+    /// holds, and needs none read meanwhile.
+    pub fn erasing(&self) -> bool {
+        self.imp().erasing.get().is_some()
+    }
+
     /// Called with whether the pen's eraser end came to the page, or another hand after it.
     pub fn connect_eraser(&self, f: impl Fn(bool) + 'static) {
         *self.imp().on_eraser.borrow_mut() = Some(Box::new(f));
@@ -747,7 +758,7 @@ mod imp {
         pub texts: RefCell<HashMap<usize, Vec<NamedText>>>,
         pub adjust: RefCell<Option<super::Selected>>,
         /// Where the eraser was last reported in the drag under way, as a page and a point on
-        /// it, so the next report tests the line between the two.
+        /// it, so the next report tests the line between the two; `None` once the drag ends.
         pub erasing: Cell<Option<(usize, (f32, f32))>>,
         /// Whether the drag under way has taken a stroke yet: every later one is part of the
         /// same step for Undo.
@@ -803,6 +814,7 @@ mod imp {
         pub on_clicked: RefCell<Option<Click>>,
         pub on_ink: RefCell<Option<Stroke>>,
         pub on_erase: RefCell<Option<At>>,
+        pub on_erased: RefCell<Option<Box<dyn Fn()>>>,
         pub on_transform: RefCell<Option<Transform>>,
         pub on_type: RefCell<Option<Type>>,
         pub on_tile: RefCell<Option<Page>>,
@@ -874,6 +886,7 @@ mod imp {
                 on_clicked: RefCell::new(None),
                 on_ink: RefCell::new(None),
                 on_erase: RefCell::new(None),
+                on_erased: RefCell::new(None),
                 on_transform: RefCell::new(None),
                 on_type: RefCell::new(None),
                 on_tile: RefCell::new(None),

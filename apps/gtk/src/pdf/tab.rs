@@ -101,8 +101,9 @@ pub struct PdfTab {
     /// The zoom to restore when presentation mode ends.
     pub(super) presenting: Cell<Option<PdfZoom>>,
     pub(super) links: RefCell<std::collections::HashMap<usize, Vec<pdf::Link>>>,
-    /// The pages an erase, a move, an Undo or an export changed this turn of the main loop,
-    /// whose links, comments and strokes are asked for once it is over. See [`PdfTab::reread`].
+    /// The pages an erase, a move, an Undo or an export changed this turn of the main loop, or in
+    /// the eraser drag under way, whose links, comments and strokes are asked for once it is
+    /// over. See [`PdfTab::reread`].
     pub(super) stale: RefCell<std::collections::BTreeSet<usize>>,
     /// What other readers wrote on each page, asked for with its links.
     pub(super) comments: RefCell<HashMap<usize, Vec<pdf::Comment>>>,

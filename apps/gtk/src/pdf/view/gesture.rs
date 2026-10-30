@@ -180,6 +180,12 @@ impl PdfView {
                 let from = obj.imp().drag_from.replace(None);
                 let held = obj.imp().held.replace(false);
                 let mode = obj.imp().drag_mode.get();
+                // The pages an eraser drag changed are read again now it is over.
+                if obj.imp().erasing.take().is_some()
+                    && let Some(f) = obj.imp().on_erased.borrow().as_ref()
+                {
+                    f();
+                }
                 if mode == Some(Mode::Adjust) {
                     return obj.adjust_release();
                 }

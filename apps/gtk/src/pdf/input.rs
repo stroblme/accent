@@ -114,6 +114,15 @@ impl PdfTab {
                 partial
             })
         ));
+        view.connect_erased(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move || {
+                if !tab.stale.borrow().is_empty() {
+                    tab.reread_stale();
+                }
+            }
+        ));
         view.connect_transform(glib::clone!(
             #[weak(rename_to = tab)]
             self,
