@@ -1150,6 +1150,7 @@ pub fn wire_window(app: &Rc<App>) {
                 tab.rehang();
             }
             app.each_preview(|p| {
+                p.set_zoom(app.zoom.get());
                 p.restyle();
             });
         }

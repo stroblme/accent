@@ -47,9 +47,9 @@ type Keys = Rc<RefCell<HashSet<String>>>;
 /// How long one batch of a first render may hold the main loop.
 const BATCH: Duration = Duration::from_millis(8);
 
-/// The prose's size in pixels at `zoom`: the editor's document font, as the stylesheet's.
-fn font_px(zoom: f64) -> f64 {
-    let font = gtk::pango::FontDescription::from_string(&editor::default_font());
+/// The prose's size in pixels at `zoom`, in `font`.
+fn font_px(font: &str, zoom: f64) -> f64 {
+    let font = gtk::pango::FontDescription::from_string(font);
     let pt = match f64::from(font.size()) / f64::from(gtk::pango::SCALE) {
         pt if pt > 0.0 => pt,
         _ => 11.0,
@@ -119,6 +119,8 @@ struct Page {
     pub zoom: Cell<f64>,
     /// The share of the view in percent, `None` under Full-Width Preview.
     column: Cell<Option<u32>>,
+    /// Preferences' Preview Font, `None` the system's document font.
+    prose_font: RefCell<Option<String>>,
     font: RefCell<Option<gtk::CssProvider>>,
     rises: RefCell<HashMap<i32, gtk::TextTag>>,
     shown: RefCell<Vec<Shown>>,
@@ -184,7 +186,7 @@ impl Preview {
             view,
             buffer,
             ink: Rc::default(),
-            px: Cell::new(font_px(1.0)),
+            px: Cell::new(font_px(&crate::platform::document_font(), 1.0)),
             figures,
             on_open: Box::new(on_open),
             on_tag: Box::new(on_tag),
@@ -192,6 +194,7 @@ impl Preview {
             scroller,
             zoom: Cell::new(1.0),
             column: Cell::new(None),
+            prose_font: RefCell::default(),
             font: RefCell::default(),
             rises: RefCell::default(),
             shown: RefCell::default(),
@@ -286,6 +289,15 @@ impl Preview {
         self.page.set_zoom(zoom);
     }
 
+    /// The prose's font, Preferences' Preview Font: `None` follows the system's document font.
+    /// Code keeps the monospace its tags name.
+    pub fn set_font(&self, font: Option<&str>) {
+        if self.page.prose_font.borrow().as_deref() != font {
+            *self.page.prose_font.borrow_mut() = font.map(str::to_string);
+            self.page.set_zoom(self.page.zoom.get());
+        }
+    }
+
     /// The page's width as Preferences set it: the editor's Column Width, or the whole view.
     pub fn set_column(&self, config: &Config) {
         let column = crate::export::css::column(config);
@@ -375,9 +387,11 @@ impl Page {
         editor::set_margins(self.view.upcast_ref(), zoom);
         let name = self.view.widget_name();
         let note = Flavour::Note(Syntax::Markdown);
-        editor::install_font(&self.font, note, None, zoom, &name);
+        let font = self.prose_font.borrow().clone();
+        let font = font.unwrap_or_else(crate::platform::document_font);
+        editor::install_font(&self.font, note, Some(&font), zoom, &name);
         editor::refont(&self.view);
-        self.px.set(font_px(zoom));
+        self.px.set(font_px(&font, zoom));
         let context = self.view.pango_context();
         self.tags
             .resize(self.px.get(), self.view.left_margin(), &context);

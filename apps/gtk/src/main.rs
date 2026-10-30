@@ -1789,7 +1789,10 @@ impl App {
             tab.set_column_width(config.column_width);
             tab.set_indent_width(config.indent_width);
         }
-        self.each_preview(|p| p.set_column(config));
+        self.each_preview(|p| {
+            p.set_font(config.preview_font.as_deref());
+            p.set_column(config);
+        });
         if changed.font {
             for diff in self.diffs() {
                 diff.set_font(config.editor_font.as_deref(), self.zoom.get());

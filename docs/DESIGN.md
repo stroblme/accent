@@ -650,7 +650,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A session puts it back beside its note; another window does not take it, a drag there sending it back with the toast a shell gets.
 - **In front, it stands for its note in the sidebar** (user decision 2026-10-28): Info, Outline and References show the note's, and an Outline row scrolls the preview to its heading rather than moving the note's caret.
   The Files tree and the window's subtitle still say what the tab is.
-- **Accent draws it itself** (user decision 2026-10-20): one read-only text view on the editor's page — its font, gutters, zoom and column — over the blocks core cuts the note into (`note::Syntax::page`), the blocks Print… and the exports write as HTML.
+- **Accent draws it itself** (user decision 2026-10-20): one read-only text view on the editor's page — its gutters, zoom and column — in the Preview Font (Typography), over the blocks core cuts the note into (`note::Syntax::page`), the blocks Print… and the exports write as HTML.
   Each block is tagged text in the look the stylesheet gives a printed page, in the editor's colours (Colour): headings, emphasis, lists with their boxes, quotes and callouts, footnotes, a conflict's sides; a line is 1.6 times the font's size, as the stylesheet's, Pango's line height being a share of the font's height (1.16 em in DejaVu Sans Mono) which the tags make up for.
   A picture, a diagram, a formula and a task's box stand in the text where the note has them, a table is the one widget, and what no tag draws — a code block's padded box, a quote's bar, a callout's tint, a rule — is painted under the text.
 - Code blocks, fences and org src blocks alike, are coloured as the editor colours them.
@@ -964,14 +964,14 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Match Colours to Theme holds a switch each for Images, PDFs and Diagrams, all on (user decision 2026-10-09).
   A kind switched off shows its files as they are, and its Invert command recolours one file onto the theme's paper and ink instead (PDF, Image, Diagram).
   Images covers the images a note shows too, Diagrams the canvas and a note's embeds; a switch redoes for those files what a theme change does.
-- Editor holds Full-Width Preview under Column Width, off, since the preview's page follows that width (Preview).
+- Editor holds Preview Font under Document Font, each a font button with a Reset, and Full-Width Preview under Column Width, off, since the preview's page follows that width (Preview).
 - Files holds Show Hidden Files and Colour Changed Files, both on; the second tints the tree's changed names and leaves its dims alone (Sidebar → Files).
 - Commands holds the user's own commands (Terminal), each an `AdwExpanderRow` of its name over its command line, opening on Name, Command, its Shortcut (recorded as the palette records one, refusing a chord in use by name, a clash from a hand edit marked) and Remove Command; Add Command puts a new one at the end, opened. Restore Defaults keeps them, as it keeps the recent vaults: they are the user's, not settings with a default.
 - Each window builds its dialog once, on idle after it opens, and presents that one again: an open held the main thread about 60 ms before its animation could run, a stutter, and a dialog shown before holds it about 30 (release, Xvfb, `ACCENT_BENCH_SWITCHER=prefs`).
   A config that moved while it was closed (a hand edit, the palette) gives it a new page before it shows, and Restore Defaults gives it one in place.
 - This Vault holds three folder rows: Templates, New Files and Attachments.
   The Attachments row keeps `./` and `/` as typed, those being the note's folder and the vault root.
-- The document font's Reset is an icon button (`document-revert-symbolic`): the font button already shows the whole font name, and a text button would leave it nowhere to go.
+- A font's Reset is an icon button (`document-revert-symbolic`): the font button already shows the whole font name, and a text button would leave it nowhere to go.
 - There is one config per process, so a change made anywhere — the dialog, the palette, the drawing ring, a rebound shortcut, Leave Out of Search — takes effect in every window at once, redoing only what it moved, and is written a second later, so a run of picks is one write.
 - `config.toml` is watched: a hand edit is taken in as it lands and never written over. accent's own unsaved changes stay on top key by key; where both changed one key the file wins, and the log says so.
   accent's own write changes only the keys it changed, through `toml_edit` (user decision 2026-10-28), so the file's comments, order and formatting stay as the user wrote them; a key at its default the file leaves out stays out, and a key the config does not hold (a retired one) goes.
@@ -1512,6 +1512,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Prose is **the monospace family at the document font's size** until the document font preference overrides it: a vault is prose with code fences, tables and wikilinks in it, none of which line up in a proportional face, so the family is the monospace's and the size the document font's.
   One function (`editor::font_css`) writes the display-wide rule and each zoomed tab's, so a zoomed note cannot come out in another face. libadwaita's `--document-font-family` / `--document-font-size` are the upgrade from the hand-built provider.
 - Code uses the **monospace** font, through a class and provider of its own (`accent-code`): one display-wide selector cannot answer for both faces.
+- The rendered preview's prose is the **Preview Font** preference, the document font itself until one is chosen (user decision 2026-10-30): a page read rather than edited, where nothing has to line up; its code, a formula's source and raw HTML keep the monospace.
 - The document and monospace fonts are the platform's, named in one place (`platform.rs`): GNOME's settings through libadwaita, and on macOS, which has no such settings (libadwaita falls back to GSettings' Adwaita Sans and Mono, which macOS lacks), AppKit's default for each role — Helvetica 12 for documents, Menlo 11 for code and terminals (SF Mono is Terminal's and Xcode's own), and the system font at 13 pt for the interface, where GDK sets 12.
 - Code sits in the same clamped, centred column as prose, with the same page gutters: a file is a document whatever its language, and a column changing width from tab to tab is what the eye notices.
 - Code wraps as prose does: the far end of a long line off screen is worse than a folded line.

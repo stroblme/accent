@@ -312,81 +312,20 @@ fn focus_index(mode: FocusMode) -> u32 {
 fn editor_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder().title("Editor").build();
 
-    let chosen = config.borrow().editor_font.clone();
-    let row = adw::ActionRow::builder()
-        .title("Document Font")
-        .subtitle(font_subtitle(chosen.as_deref()))
-        // Font names and vault paths are plain text, not Pango markup.
-        .use_markup(false)
-        .build();
-
-    let button = gtk::FontDialogButton::new(Some(gtk::FontDialog::new()));
-    button.set_level(gtk::FontLevel::Font);
-    button.set_valign(gtk::Align::Center);
-    button.set_font_desc(&pango::FontDescription::from_string(
-        &chosen.clone().unwrap_or_else(system_font),
+    group.add(&font_row(
+        "Document Font",
+        config,
+        save,
+        |c| &mut c.editor_font,
+        crate::editor::default_font,
     ));
-
-    // An icon rather than the word: the row already carries a font button whose label is the
-    // whole font name, and two text buttons beside it leave the name nowhere to go on a narrow
-    // dialog. `document-revert-symbolic` is the arrow back to a saved state, which is what this
-    // does; the tooltip is what keeps it discoverable (DESIGN.md, Iconography).
-    let reset = gtk::Button::builder()
-        .icon_name("document-revert-symbolic")
-        .tooltip_text("Use System Font")
-        .valign(gtk::Align::Center)
-        .sensitive(chosen.is_some())
-        .build();
-    reset.add_css_class("flat");
-
-    // Set while Reset writes the system font back into the button, so the ::font-desc
-    // notification that follows is not stored as a deliberate choice.
-    let resetting = Rc::new(Cell::new(false));
-
-    button.connect_font_desc_notify({
-        let (config, save, row, reset, resetting) = (
-            config.clone(),
-            save.clone(),
-            row.clone(),
-            reset.clone(),
-            resetting.clone(),
-        );
-        move |b| {
-            let Some(desc) = b.font_desc().filter(|_| !resetting.get()) else {
-                return;
-            };
-            let font = desc.to_str().to_string();
-            config.borrow_mut().editor_font = Some(font.clone());
-            row.set_subtitle(&font_subtitle(Some(&font)));
-            reset.set_sensitive(true);
-            save();
-        }
-    });
-
-    reset.connect_clicked({
-        let (config, save, row, button, resetting) = (
-            config.clone(),
-            save.clone(),
-            row.clone(),
-            button.clone(),
-            resetting.clone(),
-        );
-        move |b| {
-            config.borrow_mut().editor_font = None;
-            // ponytail: GtkFontDialogButton has no "unset", so Reset shows the system document
-            // font while the config says None. Both mean the same thing to the editor.
-            resetting.set(true);
-            button.set_font_desc(&pango::FontDescription::from_string(&system_font()));
-            resetting.set(false);
-            row.set_subtitle(&font_subtitle(None));
-            b.set_sensitive(false);
-            save();
-        }
-    });
-
-    row.add_suffix(&button);
-    row.add_suffix(&reset);
-    group.add(&row);
+    group.add(&font_row(
+        "Preview Font",
+        config,
+        save,
+        |c| &mut c.preview_font,
+        crate::platform::document_font,
+    ));
 
     // A share rather than a pixel count: the same setting has to read the same on a laptop and on
     // a wide monitor, and the editor is not the window (the sidebar and the preview take theirs).
@@ -507,16 +446,98 @@ fn editor_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Prefe
     group
 }
 
-/// What the font row says under its title: the chosen font, or the default it follows.
-fn font_subtitle(font: Option<&str>) -> String {
-    match font {
-        Some(f) => f.to_string(),
-        None => format!("{} (default)", crate::editor::default_font()),
-    }
+/// A font row: `field` of the config, a font button and a Reset back to `default`, which
+/// `None` stands for.
+fn font_row(
+    title: &str,
+    config: &Rc<RefCell<Config>>,
+    save: &Rc<dyn Fn()>,
+    field: fn(&mut Config) -> &mut Option<String>,
+    default: fn() -> String,
+) -> adw::ActionRow {
+    let chosen = field(&mut config.borrow_mut()).clone();
+    let row = adw::ActionRow::builder()
+        .title(title)
+        .subtitle(font_subtitle(chosen.as_deref(), default))
+        // Font names and vault paths are plain text, not Pango markup.
+        .use_markup(false)
+        .build();
+
+    let button = gtk::FontDialogButton::new(Some(gtk::FontDialog::new()));
+    button.set_level(gtk::FontLevel::Font);
+    button.set_valign(gtk::Align::Center);
+    button.set_font_desc(&pango::FontDescription::from_string(
+        &chosen.clone().unwrap_or_else(default),
+    ));
+
+    // An icon rather than the word: the row already carries a font button whose label is the
+    // whole font name, and two text buttons beside it leave the name nowhere to go on a narrow
+    // dialog. `document-revert-symbolic` is the arrow back to a saved state, which is what this
+    // does; the tooltip is what keeps it discoverable (DESIGN.md, Iconography).
+    let reset = gtk::Button::builder()
+        .icon_name("document-revert-symbolic")
+        .tooltip_text("Use System Font")
+        .valign(gtk::Align::Center)
+        .sensitive(chosen.is_some())
+        .build();
+    reset.add_css_class("flat");
+
+    // Set while Reset writes the system font back into the button, so the ::font-desc
+    // notification that follows is not stored as a deliberate choice.
+    let resetting = Rc::new(Cell::new(false));
+
+    button.connect_font_desc_notify({
+        let (config, save, row, reset, resetting) = (
+            config.clone(),
+            save.clone(),
+            row.clone(),
+            reset.clone(),
+            resetting.clone(),
+        );
+        move |b| {
+            let Some(desc) = b.font_desc().filter(|_| !resetting.get()) else {
+                return;
+            };
+            let font = desc.to_str().to_string();
+            *field(&mut config.borrow_mut()) = Some(font.clone());
+            row.set_subtitle(&font_subtitle(Some(&font), default));
+            reset.set_sensitive(true);
+            save();
+        }
+    });
+
+    reset.connect_clicked({
+        let (config, save, row, button, resetting) = (
+            config.clone(),
+            save.clone(),
+            row.clone(),
+            button.clone(),
+            resetting.clone(),
+        );
+        move |b| {
+            *field(&mut config.borrow_mut()) = None;
+            // ponytail: GtkFontDialogButton has no "unset", so Reset shows the system font while
+            // the config says None. Both mean the same thing to the view.
+            resetting.set(true);
+            button.set_font_desc(&pango::FontDescription::from_string(&default()));
+            resetting.set(false);
+            row.set_subtitle(&font_subtitle(None, default));
+            b.set_sensitive(false);
+            save();
+        }
+    });
+
+    row.add_suffix(&button);
+    row.add_suffix(&reset);
+    row
 }
 
-fn system_font() -> String {
-    crate::editor::default_font()
+/// What the font row says under its title: the chosen font, or the default it follows.
+fn font_subtitle(font: Option<&str>, default: fn() -> String) -> String {
+    match font {
+        Some(f) => f.to_string(),
+        None => format!("{} (default)", default()),
+    }
 }
 
 // ------------------------------------------------------------------------------------ files

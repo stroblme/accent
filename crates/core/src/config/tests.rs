@@ -79,6 +79,7 @@ fn config_roundtrip_parses_the_documented_example() {
     assert_eq!(c.focus_mode, FocusMode::High);
     assert!(c.recolour.images && !c.recolour.pdfs && c.recolour.diagrams);
     assert_eq!(c.editor_font, None);
+    assert_eq!(c.preview_font.as_deref(), Some("Serif 12"));
     let v = &c.vaults["/home/me/Notes"];
     assert_eq!(v.templates_dir, "Templates");
     assert_eq!(v.new_file_dir, "Inbox");
@@ -123,6 +124,7 @@ fn config_roundtrip_parses_the_documented_example() {
     assert_eq!(again.search.exclude, c.search.exclude);
     assert_eq!(again.drawing, c.drawing);
     assert_eq!(again.diagram, c.diagram);
+    assert_eq!(again.preview_font, c.preview_font);
 }
 
 /// accent's own write changes the keys it changed and nothing else: the user's comments,

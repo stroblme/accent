@@ -11,6 +11,7 @@ use std::path::PathBuf;
 macro_rules! example {
     () => {
         r#"recent_vaults = ["/home/me/Notes"]
+preview_font = "Serif 12"
 spellcheck = true
 word_suggestions = true
 ghost_text = true
@@ -145,6 +146,10 @@ pub struct Config {
     /// `None` follows the GNOME document font.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub editor_font: Option<String>,
+    /// The rendered preview's prose; `None` follows the GNOME document font. Code keeps the
+    /// monospace.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview_font: Option<String>,
     /// Pattern used for newly generated bibliography keys; existing keys are never changed on save.
     pub bibliography_key_pattern: String,
     /// Add Reference tries to download the new reference's PDF; the dialog's switch remembers it.
@@ -347,6 +352,7 @@ impl Default for Config {
         Config {
             recent_vaults: Vec::new(),
             editor_font: None,
+            preview_font: None,
             bibliography_key_pattern: crate::bib::PATTERN.into(),
             bibliography_download_pdf: true,
             bibliography_unpaywall_email: String::new(),

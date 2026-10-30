@@ -385,6 +385,7 @@ impl App {
                 move |key: &str| app.invert_image(key)
             ),
         );
+        preview.set_font(self.config.borrow().preview_font.as_deref());
         preview.set_zoom(self.zoom.get());
         preview.set_column(&self.config.borrow());
         // The preview follows the document zoom, so the wheel over it has to reach the same
