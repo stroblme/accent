@@ -257,6 +257,7 @@ async fn render(app: &Rc<App>) {
     }
     find(&rendered, &tab).await;
     busy(&rendered).await;
+    narrow(&rendered).await;
 }
 
 /// A fence no editor has coloured, rendered while the main loop never goes idle below
@@ -271,6 +272,38 @@ async fn busy(rendered: &crate::rendered::Rendered) {
     if let Some(preview) = rendered.preview().as_ref() {
         let coloured = tagged(&preview.buffer(), |n| n.starts_with("code:"));
         println!("bench preview code busy coloured={coloured:?}");
+    }
+}
+
+/// A table narrower than the page: whether its rules end at its last column, the top one too.
+async fn narrow(rendered: &crate::rendered::Rendered) {
+    let Some(root) = rendered.preview().as_ref().map(|p| p.widget().clone()) else {
+        return;
+    };
+    if let Some(preview) = rendered.preview().as_ref() {
+        preview.render("narrow.md", "| a | b |\n|---|---|\n| 1 | 2 |\n");
+    }
+    glib::timeout_future(Duration::from_millis(500)).await;
+    let mut widgets = vec![root];
+    while let Some(widget) = widgets.pop() {
+        let mut child = widget.first_child();
+        while let Some(c) = child {
+            child = c.next_sibling();
+            widgets.push(c);
+        }
+        if !widget.has_css_class("accent-table") {
+            continue;
+        }
+        let right = |w: &gtk::Widget| w.compute_bounds(&widget).map_or(0.0, |b| b.x() + b.width());
+        let mut last = 0.0f32;
+        let mut cell = widget.first_child();
+        while let Some(c) = cell {
+            last = last.max(right(&c));
+            cell = c.next_sibling();
+        }
+        // Within a pixel: GTK puts the cells a fraction of one off the grid's whole pixels.
+        let ends = (right(&widget) - last).abs() < 1.0;
+        println!("bench preview table rules end at its last column={ends}");
     }
 }
 

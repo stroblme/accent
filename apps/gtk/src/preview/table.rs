@@ -159,7 +159,12 @@ impl Table {
     /// `look` is the wash behind code and the line height.
     fn new(rows: Vec<Vec<Cell>>, align: &[Alignment], width: i32, look: (String, f32)) -> Table {
         install_css();
-        let grid = gtk::Grid::builder().css_classes(["accent-table"]).build();
+        // As wide as its columns, as a browser's table is, not the page: the grid's own rules,
+        // the top and the left, would run on past a narrow table's last column.
+        let grid = gtk::Grid::builder()
+            .css_classes(["accent-table"])
+            .halign(gtk::Align::Start)
+            .build();
         let mut cells = Vec::new();
         for (r, row) in rows.into_iter().enumerate() {
             for (c, cell) in row.into_iter().enumerate() {
