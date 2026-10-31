@@ -47,10 +47,13 @@ pub(super) struct Tags {
     pub callout_end: gtk::TextTag,
     /// An item's lines at each depth, at the item's text.
     pub lists: [gtk::TextTag; 6],
+    /// A bullet's or a number's text: tabular figures, as a browser sets a `::marker`'s.
+    pub marker: gtk::TextTag,
     /// An item's first line per depth and marker, made as one is met ([`size_hang`]), a
     /// number's marker keyed as [`Tags::hang_key`] folds it.
     pub hangs: RefCell<HashMap<(usize, String), gtk::TextTag>>,
-    /// Each digit's stand-in in a hang's key: the first digit as wide in the prose's font.
+    /// Each digit's stand-in in a hang's key: the first digit as wide in the prose's font, set
+    /// as the `marker` tag sets it.
     digits: Cell<[u8; 10]>,
     pub taskdone: gtk::TextTag,
     pub dt: gtk::TextTag,
@@ -130,6 +133,7 @@ impl Tags {
             callout_title: set("callout-title", &|t| t.set_weight(700)),
             callout_end: tag("callout-end"),
             lists: std::array::from_fn(|i| tag(&format!("list{}", i + 1))),
+            marker: set("marker", &|t| t.set_font_features(Some(TNUM))),
             hangs: RefCell::default(),
             digits: Cell::new(std::array::from_fn(|d| b'0' + d as u8)),
             taskdone: tag("taskdone"),
@@ -164,8 +168,8 @@ impl Tags {
     }
 
     /// The key of `marker`'s hang: a number's digits each folded to the first digit as wide, so
-    /// a long list's numbers share a few hangs (all of one length one hang where the font's
-    /// digits are tabular); a bullet and a box as they are.
+    /// a long list's numbers share a few hangs (all of one length one hang where the font has
+    /// tabular figures, [`TNUM`]); a bullet and a box as they are.
     fn hang_key(&self, marker: &str) -> String {
         let digits = self.digits.get();
         (marker.chars())
@@ -186,8 +190,7 @@ impl Tags {
         let line = |css: f64| (css * px / height) as f32;
         // Measured large, where the font's design tells digits apart that one size rounds alike.
         font.set_absolute_size(1000.0 * f64::from(pango::SCALE));
-        let layout = pango::Layout::new(context);
-        layout.set_font_description(Some(&font));
+        let layout = marker_layout(context, &font);
         let widths: [i32; 10] = std::array::from_fn(|d| {
             layout.set_text(&d.to_string());
             layout.extents().1.width()
@@ -271,6 +274,20 @@ fn list_text(px: f64, gutter: i32, depth: usize) -> i32 {
 /// What a task item's first line leads with, as the buffer holds it: its box and a space.
 const TASK_MARKER: &str = "\u{fffc} ";
 
+/// The CSS Lists UA stylesheet's `::marker { font-variant-numeric: tabular-nums }`, which
+/// Chromium follows: a list's numbers alike in width, `1.` as wide as `4.`.
+const TNUM: &str = "tnum=1";
+
+/// A layout to measure a marker in, `font` with the `marker` tag's figures.
+fn marker_layout(context: &pango::Context, font: &pango::FontDescription) -> pango::Layout {
+    let layout = pango::Layout::new(context);
+    layout.set_font_description(Some(font));
+    let attrs = pango::AttrList::new();
+    attrs.insert(pango::AttrFontFeatures::new(TNUM));
+    layout.set_attributes(Some(&attrs));
+    layout
+}
+
 /// Size `hang`, the first line of an item at `depth` led by `marker`: it starts the marker's
 /// width before the item's text, GTK setting the lines it wraps onto in by the indent, under the
 /// text, so the text after the marker starts there too as a browser's does. The marker is
@@ -281,8 +298,7 @@ fn size_hang(page: &Page, hang: &gtk::TextTag, depth: usize, marker: &str) {
     let context = page.view.pango_context();
     let mut font = context.font_description().unwrap_or_default();
     font.set_absolute_size(px * f64::from(pango::SCALE));
-    let layout = pango::Layout::new(&context);
-    layout.set_font_description(Some(&font));
+    let layout = marker_layout(&context, &font);
     layout.set_text(&marker.replace('\u{fffc}', ""));
     let mut width = f64::from(layout.extents().1.width()) / f64::from(pango::SCALE);
     if marker.contains('\u{fffc}') {
@@ -1029,7 +1045,9 @@ impl Writer<'_> {
             _ => "• ".to_string(),
         };
         if !task {
+            self.push(&page.tags.marker);
             self.text(&marker);
+            self.pop();
         }
         let item = OpenItem {
             start,
