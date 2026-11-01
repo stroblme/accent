@@ -628,22 +628,26 @@ fn an_upgrade_lists_resumes_and_kills_the_previous_holders_shell() {
     holder.child.wait().unwrap();
 }
 
+/// A live holder of a wire this build does not speak keeps its shells and does not stop new ones.
 #[test]
-fn an_unknown_live_holder_prevents_a_replacement_shell() {
+fn an_unknown_live_holder_does_not_stop_a_new_shell() {
     let Some(mut holder) = Holder::start("unknown-wire") else {
         return;
     };
     let conn = holder.hello("old", "/bin/sh");
     holder.version(99);
-    let out = cli(&holder.tmp)
+    // A scratch HOME, so the login shell reads no profile of the user's.
+    let mut fresh = cli(&holder.tmp)
+        .env("HOME", &holder.tmp)
         .env("SHELL", "/bin/sh")
-        .args(["attach", "--cwd"])
-        .arg(&holder.tmp)
-        .arg("old")
-        .output()
+        .args(["attach", "--run", "exit 3", "new"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .spawn()
         .unwrap();
-    assert_eq!(out.status.code(), Some(254));
-    assert!(!holder.socket().with_file_name("hold-3.sock").exists());
+    // Held open, as a tab's pty is: the end of input is a detach.
+    let _input = fresh.stdin.take();
+    assert_eq!(fresh.wait().unwrap().code(), Some(3));
     send(&conn, INPUT, b"echo still-running; exit\n");
     assert!(until(&conn, None).0.contains("still-running"));
 }

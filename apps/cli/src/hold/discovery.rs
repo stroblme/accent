@@ -29,25 +29,17 @@ pub(super) fn open(socket: &Path) -> io::Result<Option<UnixStream>> {
     }
 }
 
-/// v2 has the same HELLO, LIST and KILL wire as v3, but none of its scoped MCP operations.
+/// v2 has the same HELLO, LIST and KILL wire as v3, but none of its scoped MCP operations. A
+/// holder of any other version is left alone: its shells are out of this build's reach, and one
+/// left running on a host must not stop every new shell there.
 pub(super) fn running() -> io::Result<Vec<Held>> {
+    let dir = super::dir()?;
     let mut holders = Vec::new();
-    for entry in std::fs::read_dir(super::dir()?)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if !name.starts_with("hold-") || !name.ends_with(".sock") {
-            continue;
-        }
-        let socket = entry.path();
+    for name in ["hold-2.sock", SOCKET] {
+        let socket = dir.join(name);
         let Some(mut conn) = open(&socket)? else {
             continue;
         };
-        if name != SOCKET && name != "hold-2.sock" {
-            return Err(io::Error::other(format!(
-                "unsupported terminal holder {name}; use its matching accent-cli to resume existing shells"
-            )));
-        }
         conn.set_read_timeout(Some(Duration::from_secs(5)))?;
         conn.set_write_timeout(Some(Duration::from_secs(5)))?;
         protocol::write_frame(&mut conn, LIST, &[])?;
@@ -71,7 +63,6 @@ pub(super) fn running() -> io::Result<Vec<Held>> {
             .collect::<io::Result<Vec<_>>>()?;
         holders.push(Held { socket, shells });
     }
-    holders.sort_by(|a, b| a.socket.cmp(&b.socket));
     Ok(holders)
 }
 
