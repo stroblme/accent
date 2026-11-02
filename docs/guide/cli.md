@@ -23,5 +23,18 @@ Read-only mode lets the agent search and inspect files without editing them.
 Omit `--read-only` if you want to allow its note-writing tools.
 For a remote vault, run the MCP server on the host beside the files.
 
+To start an agent connected to the open vault, add it under **Preferences → Commands** and run it from the vault's window.
+For Claude Code:
+
+```sh
+claude --mcp-config '{"mcpServers":{"accent":{"command":"accent-cli","args":["mcp","--vault","."]}}}'
+```
+
+For Codex:
+
+```sh
+codex -c 'mcp_servers.accent.command="accent-cli"' -c "mcp_servers.accent.args=[\"mcp\",\"--vault\",\"$PWD\"]"
+```
+
 The MCP tools include search, backlinks, tags, code exploration, and diagram rendering.
 Diagram rendering also needs the Accent app and a graphical display where the server runs.
