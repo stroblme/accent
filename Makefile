@@ -552,8 +552,10 @@ release:
 	@# ponytail: GNU sed; macOS's would need -i '' and a literal newline.
 	sed -i 's/^version = ".*"/version = "$(VER)"/' Cargo.toml
 	$(CARGO) update -w
+	@# The Flatpak builds offline from this list, so a crate added since it was last made fails it.
+	$(MAKE) cargo-sources
 	sed -i 's|^\( *\)<releases>$$|&\n\1  <release version="$(VER)" date="'$$(date +%F)'"/>|' data/$(APP_ID).metainfo.xml
-	git commit -m "release: version $(VER)" Cargo.toml Cargo.lock data/$(APP_ID).metainfo.xml
+	git commit -m "release: version $(VER)" Cargo.toml Cargo.lock build-aux/cargo-sources.json data/$(APP_ID).metainfo.xml
 	git tag -a $(TAG) -m "accent $(VER)" $(if $(NOTES),-m "$(NOTES)")
 	git push origin HEAD $(TAG)
 
