@@ -8,6 +8,7 @@ use accent_core::{markdown, org};
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use sourceview5::prelude::*;
+use std::rc::Rc;
 
 /// Return the leading spaces and tabs copied to a new line below.
 pub(super) fn leading_indent(line: &str) -> &str {
@@ -734,13 +735,26 @@ impl Tab {
     /// Place the caret at the first template `{{cursor}}` and turn later
     /// byte offsets into Tab stops. GtkSourceView requires snippet-inserted
     /// text, so reinsert unchanged bytes without undo or dirty state.
-    pub fn place_stops(&self, stops: &[usize]) {
+    ///
+    /// A tab still opening takes its stops once it has a size: GtkSourceView scrolls to a
+    /// snippet as it puts it in, GTK keeps a scroll asked of a view with no height for its first
+    /// layout, and that left the view on the last line of a note shorter than the window, its
+    /// adjustment at 0 with nothing to scroll back up.
+    pub fn place_stops(self: &Rc<Self>, stops: &[usize]) {
         let text = self.text();
         match stops {
             [] => {}
             [only] => {
                 let at = text.get(..*only).map_or(0, |s| s.chars().count());
                 self.goto_range(at..at);
+            }
+            _ if self.view.height() == 0 => {
+                let (tab, stops) = (Rc::downgrade(self), stops.to_vec());
+                self.when_measured(false, move |_| {
+                    if let Some(tab) = tab.upgrade() {
+                        tab.place_stops(&stops);
+                    }
+                });
             }
             _ => {
                 let (mut start, mut end) = self.buffer.bounds();

@@ -11,7 +11,7 @@ use accent_core::search::{self, Options, Regex};
 use gtk::prelude::*;
 use gtk::{gdk, glib};
 use sourceview5::prelude::*;
-use std::cell::Ref;
+use std::cell::{Cell, Ref};
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -533,17 +533,22 @@ impl Tab {
 
     /// Run `scroll` now, or after the wait [`Tab::scroll_to_caret`] describes: while the view has
     /// no size yet, or while it is `measuring` the lines a fold just showed.
-    fn when_measured(&self, measuring: bool, scroll: impl Fn(&sourceview5::View) + Copy + 'static) {
+    pub(super) fn when_measured(
+        &self,
+        measuring: bool,
+        scroll: impl FnOnce(&sourceview5::View) + 'static,
+    ) {
         if self.view.height() > 0 && !measuring {
             return scroll(&self.view);
         }
+        let scroll = Cell::new(Some(scroll));
         self.view.add_tick_callback(move |view, _| {
             if view.height() == 0 {
                 return glib::ControlFlow::Continue;
             }
-            let view = view.downgrade();
+            let (view, scroll) = (view.downgrade(), scroll.take());
             glib::idle_add_local_once(move || {
-                if let Some(view) = view.upgrade() {
+                if let (Some(view), Some(scroll)) = (view.upgrade(), scroll) {
                     scroll(&view);
                 }
             });

@@ -420,6 +420,10 @@ smoke: gtk-bench vault xvfb
 # XTEST, puts back after a restart only the one still running, and adds, renames and removes one
 # in Preferences, held against `commands.expected`. Its shells are real, so under a scratch HOME,
 # running `true`, `false`, `pwd` and `sleep`.
+#
+# `ACCENT_BENCH_TEMPLATE=open` makes a note from a template with two stops as a window's first tab,
+# whose caret has to be on screen: a snippet pushed into a view before its first size left it past
+# the end of a short note in about half the runs.
 drills: gtk-bench xvfb
 	$(HEADLESS) ACCENT_BENCH_BIBLIOGRAPHY=1 timeout 90 $(TARGET_DIR)/accent "$$xdg/vault"
 	$(HEADLESS) ACCENT_BENCH_KEYS=1 timeout 60 $(TARGET_DIR)/accent "$$xdg/vault" >"$$xdg/keys" && \
@@ -484,6 +488,12 @@ drills: gtk-bench xvfb
 	$(HEADLESS) sh -c 'ACCENT_BENCH_PREVIEW=render timeout 60 \
 		$(TARGET_DIR)/accent "$$0/vault" >"$$0/preview" && \
 		grep "^bench preview " "$$0/preview" | diff -u apps/gtk/src/bench/preview.expected -' "$$xdg"
+	$(HEADLESS) sh -c 'mkdir "$$0/vault/Templates" && \
+		printf "%s\n" --- "accent-target: Meta.md" "tags: {{cursor}}" "aliases: {{cursor}}" --- \
+			>"$$0/vault/Templates/Meta.md" && \
+		ACCENT_BENCH_TEMPLATE=open timeout 60 $(TARGET_DIR)/accent "$$0/vault" >"$$0/template" && \
+		grep -qx "bench template_caret Meta.md on_screen=true" "$$0/template" || \
+		{ cat "$$0/template"; exit 1; }' "$$xdg"
 
 ## screenshots: regenerate docs/screenshot-1..5.png and data/screenshots (needs magick, htop, Xvfb, debugpy)
 #
