@@ -339,7 +339,8 @@ use user_commands::bench_commands;
 ///   `more:<query>[:<n>]`: expanded per-file results; `click:`: wait for XTEST;
 ///   `label:<query>` or `label:<query>:xml`: diagram-label navigation; `pdf:<word>`: a PDF's
 ///   page row, opened on its page with the match marked (writes a PDF; a scratch vault);
-///   `seed:<rel_note>`: XTEST search/replace shortcuts and box focus.
+///   `seed:<rel_note>`: XTEST search/replace shortcuts and box focus;
+///   `filter:[<query>;…]`: qualifier queries' pages, rows and counts (writes and removes a note).
 /// - `ACCENT_BENCH_HIDDEN=1`: hidden-file visibility and git row colours.
 /// - `ACCENT_BENCH_UNFOLD=<rel>,<rel>,…`: folder expansion; `race:<dir>`,
 ///   `renew:<dir>`, `again:<dir>` and `tab:<rel>`: external unindexed changes;

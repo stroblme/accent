@@ -4,16 +4,20 @@
 //! a changed query clears old results at once. Request numbers discard superseded answers
 //! because an in-flight query cannot be cancelled.
 
+mod filter;
+mod pages;
+
 use super::{OnOpen, Target};
 use crate::dialogs::confirm;
 use crate::recall::{self, QUERIES, REPLACEMENTS};
-use crate::widgets::{Debounce, Pulse, scroller, status_page};
+use crate::widgets::{Debounce, Pulse};
 use accent_core::index::{Index, MIN_INFIX, Match, SearchHit};
-use accent_core::notebook;
 use accent_core::path::{basename, holds_diagram, is_notebook, may_be_diagram, parent_dir};
 use accent_core::search::{self, Options, Regex};
+use accent_core::{notebook, query};
 use adw::prelude::*;
 use gtk::{gio, glib, pango};
+use pages::{count_label, files_label};
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
@@ -400,21 +404,6 @@ impl Answer {
     }
 }
 
-/// What an answer holds, where the progress bar is drawn between queries: "12 results in 3
-/// files". A number the list's cap may have cut short is a floor, and says so with a `+`.
-fn count_label(found: usize, files: usize, more_found: bool, more_files: bool) -> String {
-    let counted = |n: usize, more: bool, noun: &str| match (n, more) {
-        (1, false) => format!("1 {noun}"),
-        (n, false) => format!("{n} {noun}s"),
-        (n, true) => format!("{n}+ {noun}s"),
-    };
-    format!(
-        "{} in {}",
-        counted(found, more_found, "result"),
-        counted(files, more_files, "file")
-    )
-}
-
 /// The system accent as pango markup understands it. `Widget::color()` and the style manager are
 /// the only colour sources in the app, and pango's parser takes `#rrggbb` and colour names only,
 /// so the resolved accent is spelled out here rather than handed over as a CSS function.
@@ -479,6 +468,10 @@ struct Search {
     /// drawn.
     count: gtk::Label,
     body: gtk::Stack,
+    /// The Invalid Search page, which says why the query cannot be read.
+    unread: adw::StatusPage,
+    /// The Filter menu, whose qualifiers only a ranked query reads.
+    filter: gtk::MenuButton,
     view: gtk::ListView,
     results: gio::ListStore,
     /// Atomic query generation. Drop answers superseded by newer text rather than holding later
@@ -564,6 +557,8 @@ impl Search {
     /// than waited for: its answer is dropped when it lands.
     fn start(self: &Rc<Self>) {
         let key = self.key();
+        // An exact search reads a qualifier as the text it is, so there is nothing to filter by.
+        self.filter.set_sensitive(!key.grep);
         // Taken before anything else, so the branches that paint without asking the vault also
         // put the answer of a query still in flight out of date.
         let mine = if self.opened.borrow().0.as_ref() != Some(&key) {
@@ -583,14 +578,26 @@ impl Search {
             self.count.set_text("");
             return;
         }
-        let query = match compile(&key) {
-            Ok(query) => query,
-            // Only regex mode can fail to compile, and the message is always "that is not a
-            // pattern", so the entry says it in place rather than through a toast.
+        // A ranked query is read here as well as where the index is, so one whose qualifier
+        // cannot be read says why at once, as a pattern that does not compile does; what it asks
+        // for decides the passes after it.
+        let read = match key.grep {
+            true => Ok(None),
+            false => query::parse(&key.text, &chrono::Local::now()).map(Some),
+        };
+        let (query, read) = match compile(&key).and_then(|query| Ok((query, read?))) {
+            Ok(both) => both,
+            // The entry says it in place rather than through a toast, and the page says why.
             Err(e) => {
-                tracing::debug!("invalid search pattern {:?}: {e}", key.text);
+                tracing::debug!("invalid search {:?}: {e}", key.text);
                 self.entry.add_css_class("error");
-                self.body.set_visible_child_name("invalid");
+                match key.grep {
+                    true => self.body.set_visible_child_name("invalid"),
+                    false => {
+                        pages::say_unread(&self.unread, &e.to_string());
+                        self.body.set_visible_child_name("invalid-search");
+                    }
+                }
                 self.set_busy(self.busy());
                 self.set_total(0);
                 self.count.set_text("");
@@ -598,6 +605,14 @@ impl Search {
             }
         };
         self.entry.remove_css_class("error");
+        // Mid-word rows need a word a trigram long. All's walk greps one literal, so it reaches
+        // past the index for one word or phrase and nothing else.
+        let infix = read
+            .as_ref()
+            .is_some_and(|q| (q.text.iter()).any(|t| t.text.chars().count() >= MIN_INFIX));
+        let walk = read
+            .filter(|q| q.filters.is_empty() && q.text.len() == 1)
+            .map(|q| q.text[0].text.clone());
         // A rewrite is the one thing worth waiting for: it is writing the files the query reads.
         if self.replacing.get() {
             return;
@@ -633,9 +648,7 @@ impl Search {
             };
             let skip = match &answer {
                 Answer::Fts(hits)
-                    if !hits.is_empty()
-                        && hits.len() < crate::SEARCH_LIMIT
-                        && key.text.trim().chars().count() >= MIN_INFIX =>
+                    if !hits.is_empty() && hits.len() < crate::SEARCH_LIMIT && infix =>
                 {
                     // A file's rows arrive together, so its repeats are neighbours.
                     let mut files: Vec<String> = hits.iter().map(|h| h.rel_path.clone()).collect();
@@ -649,18 +662,20 @@ impl Search {
             if search.generation.load(Ordering::Relaxed) == mine {
                 search.pages.replace(pages);
                 search.show(&key, answer, &bodies);
+                let walk = walk.filter(|_| key.all);
                 if let Some(listed) = listed
-                    && (skip.is_some() || key.all)
+                    && (skip.is_some() || walk.is_some())
                 {
-                    search.widen_soon(key, mine, t0, listed, skip);
+                    search.widen_soon(key, mine, t0, listed, skip, walk);
                 }
             }
             search.set_busy(search.busy());
         });
     }
 
-    /// After [`WIDEN_AFTER`], append mid-word results then All's unindexed results in the
-    /// remaining row budget. They lack comparable FTS statistics, so prefix results stay first.
+    /// After [`WIDEN_AFTER`], append mid-word results then All's unindexed results for `walk`,
+    /// the query's one word or phrase, in the remaining row budget. They lack comparable FTS
+    /// statistics, so prefix results stay first.
     ///
     /// A newer query cancels pending passes and stops walks through the generation check;
     /// discard replies that still arrive afterward.
@@ -671,6 +686,7 @@ impl Search {
         asked: Instant,
         mut listed: usize,
         skip: Option<Vec<String>>,
+        walk: Option<String>,
     ) {
         let search = self.clone();
         let text = key.text.trim().to_string();
@@ -697,18 +713,18 @@ impl Search {
                 }
             }
             let room = crate::SEARCH_LIMIT.saturating_sub(listed);
-            if !key.all || room == 0 || stale() {
+            let Some(walk) = walk.filter(|_| room > 0 && !stale()) else {
                 return;
-            }
+            };
             let query = Query::Walk {
-                text: text.clone(),
+                text: walk.clone(),
                 limit: room,
                 stop: Box::new(stale.clone()),
             };
-            if let Some((Answer::Walked(walked), bodies)) = search.ask("walk", &text, query).await
+            if let Some((Answer::Walked(walked), bodies)) = search.ask("walk", &walk, query).await
                 && !stale()
             {
-                search.show_walked(&text, walked, room, &bodies);
+                search.show_walked(&walk, walked, room, &bodies);
             }
         });
     }
@@ -810,10 +826,12 @@ impl Search {
                 let files = files.collect::<HashSet<_>>().len();
                 let cut = hits.len() >= crate::SEARCH_LIMIT;
                 self.counted.set((found, files, cut));
-                (
-                    fts_rows(hits, &key.text),
-                    count_label(found, files, cut, cut),
-                )
+                // A query of qualifiers alone lists files, a row each, not matches in them.
+                let count = match query::free_text(&key.text).is_empty() {
+                    true => files_label(files, cut),
+                    false => count_label(found, files, cut, cut),
+                };
+                (fts_rows(hits, &key.text), count)
             }
             Answer::Grep {
                 hits,
@@ -1322,33 +1340,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen, dragging: &Rc<dyn Fn(bool)
     // rather than leaving twenty behind.
     view.set_single_click_activate(true);
 
-    let body = gtk::Stack::builder().vexpand(true).build();
-    body.add_named(
-        &status_page(
-            "system-search-symbolic",
-            "Search Files",
-            "Search across this vault. Turn on All to include ignored files.",
-        ),
-        Some("prompt"),
-    );
-    body.add_named(
-        &status_page(
-            "system-search-symbolic",
-            "No Results",
-            "Try a different search.",
-        ),
-        Some("empty"),
-    );
-    body.add_named(
-        &status_page(
-            "dialog-warning-symbolic",
-            "Invalid Pattern",
-            "This is not a valid regular expression.",
-        ),
-        Some("invalid"),
-    );
-    body.add_named(&scroller(&view), Some("results"));
-    body.set_visible_child_name("prompt");
+    let (body, unread) = pages::body(&view);
 
     // No `search-delay`: [`DEBOUNCE`] is the pane's one wait, and the entry's 150 ms default in
     // front of it made every query start some 200 ms after the keystroke that asked for it.
@@ -1357,6 +1349,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen, dragging: &Rc<dyn Fn(bool)
         .hexpand(true)
         .search_delay(0)
         .build();
+    let filter = filter::button(&entry);
     // A bar spanning the width right above the results, not a spinner beside the entry: the wait
     // belongs to the list that is about to change, and the entry needs the whole sidebar width.
     // It is faded rather than hidden, so the results never shift when a query starts.
@@ -1462,6 +1455,8 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen, dragging: &Rc<dyn Fn(bool)
         pulse: Pulse::new(&progress),
         count,
         body: body.clone(),
+        unread,
+        filter: filter.clone(),
         view: view.clone(),
         results,
         generation: Arc::new(AtomicU64::new(0)),
@@ -1587,7 +1582,11 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen, dragging: &Rc<dyn Fn(bool)
     controls.set_margin_bottom(6);
     controls.set_margin_start(6);
     controls.set_margin_end(6);
-    controls.append(&entry);
+    // The Filter menu beside the box it writes into.
+    let entry_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    entry_row.append(&entry);
+    entry_row.append(&filter);
+    controls.append(&entry_row);
     controls.append(&toggle_row);
     controls.append(&replace_row);
 
@@ -1937,20 +1936,5 @@ mod tests {
             .map(|r| (r.rel_path.as_str(), r.name.as_str()))
             .collect();
         assert_eq!(seen, [("", INSIDE_WORDS), ("menu.md", "menu.md")]);
-    }
-
-    #[test]
-    fn the_count_says_one_in_the_singular_and_a_cut_number_as_a_floor() {
-        assert_eq!(count_label(1, 1, false, false), "1 result in 1 file");
-        assert_eq!(count_label(12, 3, false, false), "12 results in 3 files");
-        // An exact scan counts every match the index holds past the cap, but not the files.
-        assert_eq!(
-            count_label(340, 20, false, true),
-            "340 results in 20+ files"
-        );
-        assert_eq!(
-            count_label(100, 20, true, true),
-            "100+ results in 20+ files"
-        );
     }
 }

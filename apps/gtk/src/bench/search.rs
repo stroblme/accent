@@ -36,6 +36,15 @@ pub(super) fn bench_search(app: &Rc<App>, arg: &str) {
     if let Some(rel) = arg.strip_prefix("seed:") {
         return bench_seed(app, rel);
     }
+    if let Some(queries) = arg.strip_prefix("filter:") {
+        let queries: Vec<String> = match queries.is_empty() {
+            true => FILTERS.iter().map(|q| q.to_string()).collect(),
+            false => queries.split(';').map(str::to_string).collect(),
+        };
+        return bench_search_indexed(app.clone(), Instant::now(), move |app| {
+            bench_filter(app, queries)
+        });
+    }
     if let Some(word) = arg.strip_prefix("pdf:") {
         let word = word.to_string();
         return bench_search_indexed(app.clone(), Instant::now(), move |app| bench_pdf(app, word));
@@ -321,6 +330,74 @@ fn bench_seed(app: &Rc<App>, rel: &str) {
         glib::timeout_future(Duration::from_millis(1500)).await;
         println!("bench seed typed {:?}", boxes[0].text());
         tab.set_text(&own);
+        bench_quit(&app);
+    });
+}
+
+/// The queries `filter:` asks with nothing after it: the generated vault's tags (`gen-vault`'s
+/// `area/word`) and its notes' highlights of its PDFs, a kind misspelt, and the note the drill
+/// writes, found by its tag in the last hour and not before it.
+const FILTERS: [&str; 6] = [
+    "#reading kind:note",
+    "kind:pdf has:highlights",
+    "kind:pfd",
+    "#accentbenchfilter modified:>1h",
+    "#accentbenchfilter modified:<1h",
+    "zorblatfilter -#accentbenchfilter",
+];
+
+/// The note `filter:` writes and takes away again.
+const FILTER_NOTE: &str = "accent-bench-filter.md";
+
+/// `ACCENT_BENCH_SEARCH=filter:[<query>;<query>…]` writes [`FILTER_NOTE`], tagged
+/// `#accentbenchfilter` and holding `zorblatfilter`, asks each query in the Search pane and prints
+/// `bench search filter query=… state=<page> rows=<n> count=… first=…`, `state` the page the pane
+/// shows (`results`, `empty`, `invalid-search`, its reason after it), then removes the note. With
+/// no queries it asks [`FILTERS`].
+fn bench_filter(app: Rc<App>, queries: Vec<String>) {
+    let path = app.root().join(FILTER_NOTE);
+    let note = "# Filter\n#accentbenchfilter zorblatfilter\n";
+    if std::fs::write(&path, note).is_err() {
+        println!("bench search filter unwritten");
+        return bench_quit(&app);
+    }
+    glib::spawn_future_local(async move {
+        // The watcher's debounce and the index batch behind it.
+        glib::timeout_future(SETTLE).await;
+        if let Some(sidebar) = app.sidebar.get() {
+            sidebar.show_pane("search");
+        }
+        for query in queries {
+            let Some(sidebar) = app.sidebar.get() else {
+                break;
+            };
+            sidebar.set_search_text(&query);
+            glib::timeout_future(Duration::from_millis(200)).await;
+            for _ in 0..200 {
+                if sidebar.search_running() == 0 {
+                    break;
+                }
+                glib::timeout_future(Duration::from_millis(25)).await;
+            }
+            let (page, rows, count) = sidebar.search_state();
+            // The page saying why, found from the rows' list: both are on the body's stack.
+            let why = (page == "invalid-search")
+                .then(|| sidebar.search_view())
+                .flatten()
+                .and_then(|view| view.ancestor(gtk::Stack::static_type()))
+                .and_downcast::<gtk::Stack>()
+                .and_then(|body| body.child_by_name("invalid-search"))
+                .and_downcast::<adw::StatusPage>()
+                .and_then(|unread| unread.description())
+                .map_or(String::new(), |why| format!(" why={why:?}"));
+            println!(
+                "bench search filter query={query:?} state={page} rows={} count={count:?} \
+                 first={:?}{why}",
+                rows.len(),
+                rows.first().map(String::as_str).unwrap_or(""),
+            );
+        }
+        let _ = std::fs::remove_file(&path);
         bench_quit(&app);
     });
 }
