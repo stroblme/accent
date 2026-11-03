@@ -9,7 +9,7 @@ use gtk::{gdk, glib, graphene};
 use super::PdfView;
 use crate::pdf::Span;
 use crate::pdf::geometry::page_at;
-use crate::pdf::protocol::{NamedInk, Pass, fresh_id};
+use crate::pdf::protocol::{NamedInk, NamedPicture, Pass, fresh_id};
 use crate::pdf::tools::{
     HANDLE, Hand, Handle, Lasso, Mode, PICK_RADIUS, Picked, Selection, Stroke, clamp_move,
     drag_matrix, drag_of, handle_at, rotate_handle, shape_of, snap, turn_matrix, width_of,
@@ -450,21 +450,31 @@ impl PdfView {
         Some(if s.moves_only() { Handle::Move } else { handle })
     }
 
-    /// The stroke or text of ours at `at` on `page`: a stroke whose edge is within
-    /// [`PICK_RADIUS`] of it, the topmost first, then a text whose box holds it. A circle's empty
-    /// middle is no part of the circle, so a press there starts a lasso.
+    /// The stroke, text or picture of ours at `at` on `page`: a stroke whose edge is within
+    /// [`PICK_RADIUS`] of it, the topmost first, then a text whose box holds it, then a picture,
+    /// so ink over a picture stays within reach. A circle's empty middle is no part of the
+    /// circle, so a press there starts a lasso.
     fn pick_at(&self, page: usize, at: (f32, f32)) -> Option<Picked> {
         let (inks, texts) = (self.imp().inks.borrow(), self.imp().texts.borrow());
+        let pictures = self.imp().pictures.borrow();
         let inks = inks.get(&page).map(Vec::as_slice).unwrap_or_default();
         let texts = texts.get(&page).map(Vec::as_slice).unwrap_or_default();
+        let pictures = pictures.get(&page).map(Vec::as_slice).unwrap_or_default();
         let on = |(_, ink): &&NamedInk| {
             let reach = PICK_RADIUS + ink.style.width / 2.0;
             ink.bounds.grow(reach).contains(at) && accent_core::pdf::hit(&ink.points, at, reach)
         };
-        (inks.iter().rev().find(on).map(Picked::stroke)).or_else(|| {
-            let text = texts.iter().rev().find(|(_, t)| t.bounds.contains(at));
-            text.map(Picked::text)
-        })
+        // A turned picture's corners are no part of it: a dot inside its outline is.
+        let inside = |(_, p): &&NamedPicture| {
+            let outline = accent_core::pdf::picture_corners(p.place);
+            p.bounds.contains(at) && accent_core::pdf::lassoed(&[at], &outline)
+        };
+        (inks.iter().rev().find(on).map(Picked::stroke))
+            .or_else(|| {
+                let text = texts.iter().rev().find(|(_, t)| t.bounds.contains(at));
+                text.map(Picked::text)
+            })
+            .or_else(|| pictures.iter().rev().find(inside).map(Picked::picture))
     }
 
     /// The drag so far: the lasso drawn on, or what the Select tool holds moved, stretched or
@@ -487,7 +497,7 @@ impl PdfView {
             && let Some(handle) = s.handle
         {
             let (dx, dy) = (dx as f32 / scale, dy as f32 / scale);
-            let b = s.bounds();
+            let (b, keep) = (s.bounds(), s.keeps_aspect());
             s.matrix = match handle {
                 Handle::Rotate => match self.on_page(s.page, x, y) {
                     Some(p) => turn_matrix(b, p, (p.0 + dx, p.1 + dy), snap),
@@ -495,9 +505,9 @@ impl PdfView {
                 },
                 Handle::Move => {
                     let size = self.page_size(s.page).unwrap_or((f32::MAX, f32::MAX));
-                    clamp_move(b, drag_matrix(handle, b, dx, dy), size)
+                    clamp_move(b, drag_matrix(handle, b, dx, dy, keep), size)
                 }
-                _ => drag_matrix(handle, b, dx, dy),
+                _ => drag_matrix(handle, b, dx, dy, keep),
             };
         }
         self.queue_draw();
@@ -549,13 +559,17 @@ impl PdfView {
         }
     }
 
-    /// What `lasso` takes of its page: each stroke at least half inside it, and each text of ours
-    /// whose box is.
+    /// What `lasso` takes of its page: each stroke at least half inside it, and each text and
+    /// picture of ours whose outline is.
     fn lassoed(&self, lasso: &Lasso) -> Vec<Picked> {
         let (inks, texts) = (self.imp().inks.borrow(), self.imp().texts.borrow());
+        let pictures = self.imp().pictures.borrow();
         let inks = inks.get(&lasso.page).map(Vec::as_slice).unwrap_or_default();
         let texts = texts
             .get(&lasso.page)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let pictures = (pictures.get(&lasso.page))
             .map(Vec::as_slice)
             .unwrap_or_default();
         let strokes = (inks.iter())
@@ -564,7 +578,9 @@ impl PdfView {
         let texts = (texts.iter())
             .filter(|(_, text)| accent_core::pdf::lassoed(&outline(text.bounds), &lasso.points))
             .map(Picked::text);
-        strokes.chain(texts).collect()
+        let pictures = (pictures.iter().map(Picked::picture))
+            .filter(|picture| accent_core::pdf::lassoed(&picture.points, &lasso.points));
+        strokes.chain(texts).chain(pictures).collect()
     }
 
     /// Under the Select tool the pointer says what a press would do: a handle's own cursor, the

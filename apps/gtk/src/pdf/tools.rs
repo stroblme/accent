@@ -272,15 +272,17 @@ pub fn turn_matrix(
 
 /// The map a drag of `handle` by `(dx, dy)` page points applies to a stroke with this box.
 ///
-/// The middle translates. An edge stretches its axis about the opposite edge. A corner scales
-/// both axes alike, by the drag's projection onto the diagonal, about the opposite corner. A
-/// scale never drops below 0.05, and an axis with no extent — a horizontal line's height — is
+/// The middle translates. An edge stretches its axis about the opposite edge, or with `keep`
+/// scales both axes alike about that edge's middle, as a picture's proportions want. A corner
+/// scales both axes alike, by the drag's projection onto the diagonal, about the opposite corner.
+/// A scale never drops below 0.05, and an axis with no extent — a horizontal line's height — is
 /// left alone rather than divided by.
 pub fn drag_matrix(
     handle: Handle,
     b: accent_core::pdf::Rect,
     dx: f32,
     dy: f32,
+    keep: bool,
 ) -> accent_core::pdf::Matrix {
     let (w, h) = (b.width(), b.height());
     let factor = |delta: f32, extent: f32| match extent > f32::EPSILON {
@@ -294,8 +296,14 @@ pub fn drag_matrix(
     // Scaling about a fixed line: x' = s·x + (1 − s)·fixed.
     let about =
         |sx: f32, sy: f32, fx: f32, fy: f32| [sx, 0.0, 0.0, sy, (1.0 - sx) * fx, (1.0 - sy) * fy];
+    let (mx, my) = ((b.left + b.right) / 2.0, (b.top + b.bottom) / 2.0);
+    let alike = |s: f32, fx: f32, fy: f32| about(s, s, fx, fy);
     match handle {
         Handle::Move => [1.0, 0.0, 0.0, 1.0, dx, dy],
+        Handle::Right if keep => alike(factor(dx, w), b.left, my),
+        Handle::Left if keep => alike(factor(-dx, w), b.right, my),
+        Handle::Bottom if keep => alike(factor(dy, h), mx, b.top),
+        Handle::Top if keep => alike(factor(-dy, h), mx, b.bottom),
         Handle::Right => about(factor(dx, w), 1.0, b.left, 0.0),
         Handle::Left => about(factor(-dx, w), 1.0, b.right, 0.0),
         Handle::Bottom => about(1.0, factor(dy, h), 0.0, b.top),
@@ -336,17 +344,27 @@ pub fn clamp_move(
     [m[0], m[1], m[2], m[3], dx, dy]
 }
 
-/// A stroke or a text of ours the Select tool holds.
+/// What an item the Select tool holds is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Stroke,
+    /// A text of ours, which only moves, its corner going where a drag takes it: its size is the
+    /// Text tool's, and an editor typing into a turned one would set it upright again.
+    Text,
+    /// A picture of ours, which keeps its proportions under every handle.
+    Picture,
+}
+
+/// A stroke, a text or a picture of ours the Select tool holds.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Picked {
     /// The render thread's name for it, which follows it through a move.
     pub id: u32,
+    /// A stroke's path, a picture's outline, closed; nothing for a text.
     pub points: Vec<(f32, f32)>,
     pub bounds: accent_core::pdf::Rect,
     pub style: accent_core::pdf::InkStyle,
-    /// A text, which only moves, its corner going where a drag takes it: its size is the Text
-    /// tool's, and an editor typing into a turned one would set it upright again.
-    pub typed: bool,
+    pub kind: Kind,
 }
 
 impl Picked {
@@ -357,7 +375,29 @@ impl Picked {
             points: ink.points.clone(),
             bounds: ink.bounds,
             style: ink.style,
-            typed: false,
+            kind: Kind::Stroke,
+        }
+    }
+
+    /// A picture of ours as the page's list names it.
+    pub fn picture((id, picture): &accent_core::pdf::NamedPicture) -> Picked {
+        Picked::placed(*id, picture.place)
+    }
+
+    /// The picture `id` whose unit square `place` puts on the page: its outline, and the box
+    /// round it.
+    pub fn placed(id: u32, place: accent_core::pdf::Matrix) -> Picked {
+        let corners = accent_core::pdf::picture_corners(place);
+        Picked {
+            id,
+            points: [&corners[..], &corners[..1]].concat(),
+            bounds: box_of(&corners),
+            style: accent_core::pdf::InkStyle {
+                width: 0.0,
+                rgba: [0; 4],
+                multiply: false,
+            },
+            kind: Kind::Picture,
         }
     }
 
@@ -373,16 +413,19 @@ impl Picked {
                 rgba: [r, g, b, 255],
                 multiply: false,
             },
-            typed: true,
+            kind: Kind::Text,
         }
     }
 
-    /// Where `m` takes it, as the render thread will draw it: a stroke whole, a text by its
-    /// corner.
+    /// Where `m` takes it, as the render thread will draw it: a stroke and a picture whole, a
+    /// text by its corner.
     pub fn under(&self, m: accent_core::pdf::Matrix) -> Picked {
         let b = self.bounds;
-        match self.typed {
-            true => {
+        let points: Vec<(f32, f32)> = (self.points.iter())
+            .map(|&p| accent_core::pdf::apply(m, p))
+            .collect();
+        match self.kind {
+            Kind::Text => {
                 let (x, y) = accent_core::pdf::apply(m, (b.left, b.top));
                 let (dx, dy) = (x - b.left, y - b.top);
                 let bounds = accent_core::pdf::Rect {
@@ -396,15 +439,27 @@ impl Picked {
                     ..self.clone()
                 }
             }
-            false => Picked {
-                points: (self.points.iter())
-                    .map(|&p| accent_core::pdf::apply(m, p))
-                    .collect(),
+            Kind::Stroke => Picked {
+                points,
                 bounds: b.under(m),
+                ..self.clone()
+            },
+            // Round its turned outline, which a turn of its box would outgrow.
+            Kind::Picture => Picked {
+                bounds: box_of(&points),
+                points,
                 ..self.clone()
             },
         }
     }
+}
+
+/// The box round `points`.
+fn box_of(points: &[(f32, f32)]) -> accent_core::pdf::Rect {
+    let corner = |&p: &(f32, f32)| accent_core::pdf::Rect::from_corners(p, p);
+    (points.iter().map(corner))
+        .reduce(accent_core::pdf::Rect::union)
+        .unwrap_or(accent_core::pdf::Rect::ZERO)
 }
 
 /// What the Select tool holds: strokes and texts of ours of one page, and the drag being applied
@@ -438,7 +493,12 @@ impl Selection {
 
     /// Whether it is texts alone, which only move: no handles and no ring.
     pub fn moves_only(&self) -> bool {
-        self.items.iter().all(|item| item.typed)
+        self.items.iter().all(|item| item.kind == Kind::Text)
+    }
+
+    /// Whether it holds a picture, whose proportions every handle keeps.
+    pub fn keeps_aspect(&self) -> bool {
+        self.items.iter().any(|item| item.kind == Kind::Picture)
     }
 
     /// The render thread's names for its items.
@@ -568,13 +628,13 @@ mod tests {
         assert_eq!(handle_at(b, (30.0, 40.0), 3.0), Some(Handle::Move));
         assert_eq!(handle_at(b, (100.0, 100.0), 3.0), None);
 
-        let m = drag_matrix(Handle::Right, b, 40.0, 0.0);
+        let m = drag_matrix(Handle::Right, b, 40.0, 0.0, false);
         assert_eq!(apply(m, (50.0, 33.0)), (90.0, 33.0));
         assert_eq!(apply(m, (10.0, 33.0)), (10.0, 33.0));
-        let m = drag_matrix(Handle::BottomRight, b, 40.0, 40.0);
+        let m = drag_matrix(Handle::BottomRight, b, 40.0, 40.0, false);
         assert_eq!(apply(m, (50.0, 60.0)), (90.0, 100.0));
         assert_eq!(apply(m, (10.0, 20.0)), (10.0, 20.0));
-        let m = drag_matrix(Handle::Move, b, 3.0, 4.0);
+        let m = drag_matrix(Handle::Move, b, 3.0, 4.0, false);
         assert_eq!(apply(m, (10.0, 20.0)), (13.0, 24.0));
         // A horizontal line has no height to stretch, and its edge drag leaves it a line.
         let flat = Rect {
@@ -584,7 +644,7 @@ mod tests {
             bottom: 5.0,
         };
         assert_eq!(
-            drag_matrix(Handle::Bottom, flat, 0.0, 9.0),
+            drag_matrix(Handle::Bottom, flat, 0.0, 9.0, false),
             accent_core::pdf::IDENTITY
         );
     }
@@ -625,27 +685,57 @@ mod tests {
             points: vec![(10.0, 20.0), (50.0, 60.0)],
             bounds: Rect::from_corners((10.0, 20.0), (50.0, 60.0)),
             style,
-            typed: false,
+            kind: Kind::Stroke,
         };
         let text = Picked {
             id: 2,
             points: Vec::new(),
             bounds: Rect::from_corners((60.0, 40.0), (90.0, 60.0)),
             style,
-            typed: true,
+            kind: Kind::Text,
         };
         let selection = Selection::of(0, vec![stroke, text]);
         let b = selection.bounds();
         assert_eq!(b, Rect::from_corners((10.0, 20.0), (90.0, 60.0)));
         assert!(!selection.moves_only());
         // Twice the size about the top-left corner.
-        let m = drag_matrix(Handle::BottomRight, b, 80.0, 40.0);
+        let m = drag_matrix(Handle::BottomRight, b, 80.0, 40.0, false);
         let [stroke, text] = [0, 1].map(|i| selection.items[i].under(m));
         assert_eq!(stroke.points, [(10.0, 20.0), (90.0, 100.0)]);
         assert_eq!(
             text.bounds,
             Rect::from_corners((110.0, 60.0), (140.0, 80.0))
         );
+    }
+
+    /// A selection holding a picture scales it alike both ways under every handle, an edge about
+    /// the opposite edge's middle; the picture's outline goes with it.
+    #[test]
+    fn a_picture_keeps_its_proportions_under_every_handle() {
+        use accent_core::pdf::apply;
+        let picture = Picked::placed(1, [40.0, 0.0, 0.0, 20.0, 10.0, 20.0]);
+        let selection = Selection::of(0, vec![picture]);
+        assert!(selection.keeps_aspect() && !selection.moves_only());
+        let b = selection.bounds();
+        for handle in [
+            Handle::Left,
+            Handle::Right,
+            Handle::Top,
+            Handle::Bottom,
+            Handle::TopLeft,
+            Handle::TopRight,
+            Handle::BottomLeft,
+            Handle::BottomRight,
+        ] {
+            let m = drag_matrix(handle, b, 8.0, 6.0, true);
+            let moved = selection.items[0].under(m).bounds;
+            assert!(m[0] != 1.0 && m[0] == m[3], "{handle:?} scales alike");
+            assert!((moved.width() - 2.0 * moved.height()).abs() < 1e-3);
+        }
+        // The right edge out by 20 about the left edge's middle, (10, 30).
+        let m = drag_matrix(Handle::Right, b, 20.0, 0.0, true);
+        assert_eq!(apply(m, (10.0, 30.0)), (10.0, 30.0));
+        assert_eq!(apply(m, (50.0, 20.0)), (70.0, 15.0));
     }
 
     /// The ring dragged a quarter round the middle turns the stroke a quarter clockwise, about

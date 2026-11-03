@@ -9,7 +9,7 @@ use gtk::{gdk, graphene, gsk};
 use super::imp;
 use crate::pdf::cache::{TILE, TileKey, Want, reach, tiles_across, tiles_within};
 use crate::pdf::geometry::{Layout, PageRect, gap_middle, on_grid, page_at};
-use crate::pdf::tools::{HANDLE, Handle, Mode, ROTATE_GAP, Selection, Stroke};
+use crate::pdf::tools::{HANDLE, Handle, Kind, Mode, ROTATE_GAP, Selection, Stroke};
 use crate::theme;
 
 /// How thick the line a dropped PDF's pages would go in at is: the thumbnail strip's drop bar.
@@ -286,9 +286,9 @@ impl imp::PdfView {
 }
 
 /// What the Select tool holds on this page. While the hand is on it, a ghost of each stroke
-/// where the drag has taken it; a dashed box round each item when there are two or more; and
-/// round them all a box with eight handles and the ring that turns them, or for texts alone, which
-/// only move, the box by itself. While it turns, the box turns with it and shows no handles, as a
+/// where the drag has taken it, a picture's being its outline filled as a highlight is; a dashed
+/// box round each item when there are two or more; and round them all a box with eight handles
+/// and the ring that turns them, or for texts alone, which only move, the box by itself. While it turns, the box turns with it and shows no handles, as a
 /// diagram's shape does.
 fn paint_selection(
     snapshot: &gtk::Snapshot,
@@ -308,6 +308,11 @@ fn paint_selection(
             builder.move_to(first.x(), first.y());
             for &p in &item.points[1..] {
                 builder.line_to(point(p).x(), point(p).y());
+            }
+            if item.kind == Kind::Picture {
+                let fill = theme::at(*accent, theme::HIGHLIGHT_ALPHA);
+                snapshot.append_fill(&builder.to_path(), gsk::FillRule::Winding, &fill);
+                continue;
             }
             let [r, g, b, _] = item.style.rgba;
             let colour = theme::rgba([r, g, b], theme::GHOST_ALPHA);

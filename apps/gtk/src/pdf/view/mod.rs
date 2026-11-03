@@ -551,6 +551,9 @@ impl PdfView {
         if let Some(list) = self.imp().texts.borrow_mut().get_mut(&page) {
             list.retain(|(id, _)| !ids.contains(id));
         }
+        if let Some(list) = self.imp().pictures.borrow_mut().get_mut(&page) {
+            list.retain(|(id, _)| !ids.contains(id));
+        }
         self.relisted(page);
         self.picked_changed();
         Some((page, ids))
@@ -598,7 +601,14 @@ impl PdfView {
                 text.typed.at = (item.bounds.left, item.bounds.top);
             }
         }
-        drop((inks, texts));
+        let mut pictures = self.imp().pictures.borrow_mut();
+        for (id, picture) in pictures.get_mut(&page).into_iter().flatten() {
+            if let Some(item) = moved(id) {
+                picture.place = accent_core::pdf::then(picture.place, m);
+                picture.bounds = item.bounds;
+            }
+        }
+        drop((inks, texts, pictures));
         self.relisted(page);
         let ids = items.iter().map(|item| item.id).collect();
         if let Some(f) = self.imp().on_transform.borrow().as_ref() {
@@ -655,7 +665,10 @@ impl PdfView {
                         .filter_map(|item| {
                             let stroke = inks.iter().find(|(id, _)| *id == item.id);
                             let text = || texts.iter().find(|(id, _)| *id == item.id);
-                            (stroke.map(Picked::stroke)).or_else(|| text().map(Picked::text))
+                            let picture = || pictures.iter().find(|(id, _)| *id == item.id);
+                            (stroke.map(Picked::stroke))
+                                .or_else(|| text().map(Picked::text))
+                                .or_else(|| picture().map(Picked::picture))
                         })
                         .collect();
                     let lost = s.items.len() != was;

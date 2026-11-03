@@ -4,13 +4,13 @@
 
 use std::rc::Rc;
 
-use accent_core::pdf::{Clip, InkStyle, Matrix};
+use accent_core::pdf::{Clip, InkStyle, Matrix, then};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 
 use super::protocol::{Clipping, Request, fresh_id};
 use super::tab::PdfTab;
-use super::tools::{Picked, clamp_move};
+use super::tools::{Kind, Picked, clamp_move};
 
 /// What the clipboard calls strokes and texts copied off a PDF: a JSON list of [`Clip`]s.
 pub const MIME: &str = "application/x-accent-pdf-ink";
@@ -162,7 +162,11 @@ impl PdfTab {
         }
         let names: Vec<u32> = clips.iter().map(|_| fresh_id()).collect();
         let items = (clips.iter().zip(&names))
-            .map(|(clip, &id)| picked_of(&clip.under(matrix), id))
+            .map(|(clip, &id)| match clip {
+                // Moved by its place alone, its bytes not copied.
+                Clip::Image { place, .. } => Picked::placed(id, then(*place, matrix)),
+                clip => picked_of(&clip.under(matrix), id),
+            })
             .collect();
         self.view.pick(page, items);
         self.ask(Request::Paste {
@@ -215,7 +219,7 @@ fn picked_of(clip: &Clip, id: u32) -> Picked {
             points: points.clone(),
             bounds: clip.bounds(),
             style: *style,
-            typed: false,
+            kind: Kind::Stroke,
         },
         Clip::Text(typed) => {
             let [r, g, b] = typed.style.rgb;
@@ -228,20 +232,10 @@ fn picked_of(clip: &Clip, id: u32) -> Picked {
                     rgba: [r, g, b, 255],
                     multiply: false,
                 },
-                typed: true,
+                kind: Kind::Text,
             }
         }
-        Clip::Image { place, .. } => Picked {
-            id,
-            points: accent_core::pdf::picture_corners(*place).to_vec(),
-            bounds: clip.bounds(),
-            style: InkStyle {
-                width: 0.0,
-                rgba: [0, 0, 0, 0],
-                multiply: false,
-            },
-            typed: false,
-        },
+        Clip::Image { place, .. } => Picked::placed(id, *place),
     }
 }
 
