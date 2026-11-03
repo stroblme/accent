@@ -28,6 +28,7 @@ use accent_core::note::Syntax;
 use accent_core::notebook::{CellId, Edit, Kind, Notebook};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
+use sourceview5::prelude::ViewExt as _;
 
 use crate::editor::{SaveState, Saves};
 use crate::widgets::{Debounce, Fade, Hook};
@@ -87,6 +88,8 @@ pub struct NotebookTab {
     gutter: Cell<i32>,
     /// Whether the markdown cells are spell checked: the Preferences switch a note follows.
     spellcheck: Cell<bool>,
+    /// How many columns a tab takes in the cells: the Indent Width a text tab follows.
+    indent: Cell<u32>,
     /// The selection whose other occurrences are painted in every cell.
     occurrence: RefCell<Option<String>>,
     selected: Cell<Option<CellId>>,
@@ -203,6 +206,7 @@ pub fn open(
         language,
         gutter: Cell::new(0),
         spellcheck: Cell::new(false),
+        indent: Cell::new(4),
         occurrence: RefCell::default(),
         selected: Cell::new(None),
         history: RefCell::default(),
@@ -510,6 +514,7 @@ impl NotebookTab {
                 .unwrap_or_default()
         };
         let editor = view.build_editor(&source, self.language.as_ref(), self.presenting.get());
+        editor.view.set_tab_width(self.indent.get());
         crate::editor::refont(&editor.view);
         self.fade_from_selected(id, editor.view.upcast_ref());
         let weak = Rc::downgrade(self);

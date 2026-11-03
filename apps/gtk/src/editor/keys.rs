@@ -95,9 +95,26 @@ fn dispatch(editor: &Rc<dyn Editor>, key: gdk::Key, state: gdk::ModifierType) ->
     }
 }
 
+/// Give `view`, whose text has no document on the language layer, its one key controller: a
+/// notebook's markdown cell, a comparison's read-only side and a diagram's label. Its carets move
+/// on a read-only view as on any other, and only an editable one is typed into.
+pub(crate) fn attach_plain(view: &sourceview5::View, flavour: Flavour) {
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    keys.connect_key_pressed(move |keys, key, _, state| {
+        let Some(view) = keys.widget().and_downcast::<sourceview5::View>() else {
+            return glib::Propagation::Proceed;
+        };
+        match view.is_editable() {
+            true => typed(&view, flavour, key, state),
+            false => carets(&view, key, state).unwrap_or(glib::Propagation::Proceed),
+        }
+    });
+    view.add_controller(keys);
+}
+
 /// The chain's last steps, which ask nothing of a language: the secondary carets, then a note's
-/// typing helpers or code's brackets and indentation. A notebook's markdown cell, which has no
-/// document on the language layer, takes these alone.
+/// typing helpers or code's brackets and indentation.
 pub(crate) fn typed(
     view: &sourceview5::View,
     flavour: Flavour,

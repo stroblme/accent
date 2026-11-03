@@ -658,6 +658,7 @@ impl App {
             font.as_deref(),
             self.zoom.get(),
         );
+        tab.set_indent_width(self.config.borrow().indent_width);
         self.docs.borrow_mut().push(Doc::Diff(tab.clone()));
         let how = match restored {
             true => Opened::Restored,

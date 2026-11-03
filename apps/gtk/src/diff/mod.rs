@@ -1224,9 +1224,19 @@ impl Compare {
     /// Reveal both columns and retain the run for caret-free Go to Line previews;
     /// removing only editor tags would expose lines under the peer's button.
     pub fn open_hiding(&self, offset: i32) -> bool {
-        let Some(side) = self.editable else {
-            return false;
-        };
+        self.editable
+            .is_some_and(|side| self.open_hiding_on(side, offset))
+    }
+
+    /// The same for `offset` in `view`, either column: a caret added on a read-only side.
+    pub fn open_hiding_in(&self, view: &sourceview5::View, offset: i32) -> bool {
+        [Side::Old, Side::New]
+            .into_iter()
+            .find(|side| self.pane(*side).view == *view)
+            .is_some_and(|side| self.open_hiding_on(side, offset))
+    }
+
+    fn open_hiding_on(&self, side: Side, offset: i32) -> bool {
         let key = {
             let (lines, rows, starts, hidden) = (
                 self.lines.borrow(),

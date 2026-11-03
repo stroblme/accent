@@ -172,21 +172,16 @@ pub fn applies(action: &str, cx: &Context) -> bool {
         "win.goto-line" => text || notebook || pdf || diagram,
         "win.duplicate-line" => text || notebook || diagram,
         "win.newline-below" => text || notebook || diagram || pdf,
-        "win.delete-line"
-        | "win.toggle-comment"
-        | "win.scroll-up"
-        | "win.scroll-down"
-        | "win.caret-above"
-        | "win.caret-below"
-        | "win.next-occurrence"
-        | "win.all-occurrences"
-        | "win.paste-plain"
-        | "win.follow-link"
-        | "win.quick-fix" => text || notebook,
+        // A staged change's panes take carets as the editor does, and no edits.
+        "win.caret-above" | "win.caret-below" | "win.next-occurrence" | "win.all-occurrences" => {
+            text || notebook || front == Some(Diff)
+        }
+        "win.delete-line" | "win.toggle-comment" | "win.scroll-up" | "win.scroll-down"
+        | "win.paste-plain" | "win.follow-link" | "win.quick-fix" => text || notebook,
         "win.source-action" | "win.lsp-restart-file" => code || notebook,
         "win.toggle-task" => note,
-        "win.toggle-wrap" | "win.fold" | "win.unfold" | "win.fold-all" | "win.unfold-all"
-        | "win.minimap" => text,
+        "win.toggle-wrap" => text || front == Some(Diff),
+        "win.fold" | "win.unfold" | "win.fold-all" | "win.unfold-all" | "win.minimap" => text,
         "win.view-mode" => note || preview,
         "win.insert-template" => note && vault,
         "win.insert-sketch" => markdown && cx.file == Some(File::Vault),

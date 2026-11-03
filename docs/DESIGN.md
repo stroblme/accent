@@ -640,6 +640,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - It wraps as prose does: nothing in a document scrolls sideways.
   A wrapped row starts one indent level deeper than its line (VS Code's `wrappingIndent: "indent"`), so it cannot pass for the next line; a note does the same, hanging a list item's rows under its text (its marker measured in the note's font as drawn, so a proportional face's `-` is not taken for a space), except in a fenced block, whose lines wrap as code's do whatever they open with.
   `Alt+Z` unwraps one tab for as long as it is open, for a generated file whose columns are the point.
+  Over a comparison it unwraps every column together, and a staged change's two panes too (user decision 2026-11-03).
 - A CSV or a TSV is code whose columns are coloured by the hue rotation (Colour), both with RFC 4180's quotes.
   A TSV is read with tabs whatever its first line holds; a CSV with whichever of `,`, `;` and tab its first line holds most of, the comma on a tie.
   An edit reads it again from the record it is in as far as the first record past it that starts where one started before: a record never starts inside quotes, so the reading from there is the last one's (`highlight::Csv`).
@@ -1264,6 +1265,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 - A side-by-side line diff, in a tab rather than a dialog: it is something to work beside, and git produces them by the dozen.
 - One involving a file — the working tree against the index, a note changed under its buffer, a sync conflict copy — happens in the file's own tab: the editor is the editable side, a read-only companion styled the same sits beside it, and the diff is highlighting over both.
+- A read-only side is read as the editor is (user decision 2026-11-03), in a file's tab and in a staged change's alike.
+  Its caret moves, selects and copies with the editor's keys, a column of carets included, and the caret chords act in the column the keyboard is in, but nothing is typed into it.
+  Both columns number their lines whatever Line Numbers says, so their gutters are equally wide.
 - Rows are kept level by blank space, never filler text, and a line's number stays beside its text.
 - Paired lines start on the row they share.
   A changed line shorter than its partner carries the difference as blank space under it, in its own tint, so a change reads as one block of equal height on both sides.

@@ -715,14 +715,22 @@ fn chunks<'a>(text: &'a str, stops: &[usize]) -> Vec<(&'a str, i32)> {
     out
 }
 
+/// What Alt+Z turns `mode` into: no wrapping, or wrapping back on.
+pub(crate) fn toggled_wrap(mode: gtk::WrapMode) -> gtk::WrapMode {
+    match mode {
+        gtk::WrapMode::None => gtk::WrapMode::WordChar,
+        _ => gtk::WrapMode::None,
+    }
+}
+
 impl Tab {
     /// Toggle per-tab wrapping, enabled initially. Disable it for files whose
-    /// column layout must remain visible.
+    /// column layout must remain visible; a comparison's other columns follow.
     pub fn toggle_wrap(&self) {
-        self.view.set_wrap_mode(match self.view.wrap_mode() {
-            gtk::WrapMode::None => gtk::WrapMode::WordChar,
-            _ => gtk::WrapMode::None,
-        });
+        self.view.set_wrap_mode(toggled_wrap(self.view.wrap_mode()));
+        if let Some(hosted) = self.hosted() {
+            hosted.follow_editor(false);
+        }
     }
 
     // --- line operations -----------------------------------------------------------------

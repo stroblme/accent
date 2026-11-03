@@ -7,6 +7,10 @@ pub(crate) const LINE_SPACING: i32 = 2;
 
 /// Build a buffer/view over `text` for `flavour`, sharing rendering
 /// with read-only diff companions so both columns match.
+///
+/// Every view a document is edited or read in is built here, given [`interact`] and then exactly
+/// one key controller, `keys::attach` over a language's document or `keys::attach_plain` without
+/// one, so the keys, the carets and the clipboard are one experience on every surface.
 pub(crate) fn build(
     flavour: Flavour,
     language: Option<sourceview5::Language>,

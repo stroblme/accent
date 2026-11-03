@@ -548,18 +548,7 @@ impl NotebookTab {
     /// note's keys, which ask no language, and its links followed by Ctrl+click.
     pub(super) fn attach_cell(self: &Rc<Self>, view: &CellView, editor: &Editor) {
         if view.kind == Kind::Markdown {
-            let keys = gtk::EventControllerKey::new();
-            keys.set_propagation_phase(gtk::PropagationPhase::Capture);
-            keys.connect_key_pressed(|keys, key, _, state| {
-                let Some(view) = keys.widget().and_downcast::<sourceview5::View>() else {
-                    return glib::Propagation::Proceed;
-                };
-                if !view.is_editable() {
-                    return glib::Propagation::Proceed;
-                }
-                crate::editor::typed_keys(&view, Flavour::Note(Syntax::Markdown), key, state)
-            });
-            editor.view.add_controller(keys);
+            crate::editor::attach_plain(&editor.view, Flavour::Note(Syntax::Markdown));
             self.follow_clicks(&editor.view);
             return;
         }

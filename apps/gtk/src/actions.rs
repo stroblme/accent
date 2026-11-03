@@ -202,7 +202,11 @@ impl App {
             // is dispatched at the window, so the editor cannot claim the chord for itself.
             "terminal-paste" => match self.active_doc() {
                 Some(Doc::Terminal(term)) => term.paste(),
-                Some(Doc::Text(tab)) => tab.paste_verbatim(),
+                Some(Doc::Text(_)) => {
+                    if let Some(tab) = self.editing_tab() {
+                        tab.paste_verbatim();
+                    }
+                }
                 Some(Doc::Notebook(notebook)) => notebook.paste_verbatim(),
                 _ => {}
             },
@@ -236,7 +240,11 @@ impl App {
             }
             "paste-plain" => match self.active_notebook() {
                 Some(notebook) => notebook.paste_verbatim(),
-                None => self.with_active(Tab::paste_verbatim),
+                None => {
+                    if let Some(tab) = self.editing_tab() {
+                        tab.paste_verbatim();
+                    }
+                }
             },
             "close-tab" => {
                 if let Some(page) = self.tabs().selected_page() {
@@ -293,7 +301,7 @@ impl App {
             },
             // A note comments as its syntax does; a notebook's markdown cell as a note, its other
             // cells by their language.
-            "toggle-comment" => match self.active() {
+            "toggle-comment" => match self.editing_tab() {
                 Some(tab) => editor::toggle_comment(&tab.view, tab.flavour()),
                 None => {
                     let cell = self.active_notebook().and_then(|n| n.editing_flavour());
@@ -302,14 +310,18 @@ impl App {
                 }
             },
             "toggle-task" => {
-                if let Some(tab) = self.active()
+                if let Some(tab) = self.editing_tab()
                     && let Flavour::Note(syntax) = tab.flavour()
                 {
                     editor::toggle_task(&tab.view, syntax);
                 }
             }
-            // Not over a notebook, whose column never scrolls sideways.
-            "toggle-wrap" => self.with_active(Tab::toggle_wrap),
+            // Not over a notebook, whose column never scrolls sideways. Over a comparison every
+            // column, a staged change's two panes too (user decision 2026-11-03).
+            "toggle-wrap" => match self.active_doc() {
+                Some(Doc::Diff(diff)) => diff.toggle_wrap(),
+                _ => self.with_active(Tab::toggle_wrap),
+            },
             "delete-line" => self.with_view(editor::delete_line),
             "newline-below" => {
                 // A notebook in front runs the selected cell, as Jupyter's `Ctrl+Enter` does, and
@@ -319,7 +331,7 @@ impl App {
                 }
                 let committed = self.active_diagram().is_some_and(|d| d.commit_label())
                     || self.active_pdf().is_some_and(|p| p.commit_text());
-                if !committed && let Some(tab) = self.active() {
+                if !committed && let Some(tab) = self.editing_tab() {
                     tab.newline_below();
                 }
             }
@@ -332,12 +344,21 @@ impl App {
             }
             "caret-above" | "caret-below" => {
                 let below = name == "caret-below";
-                match self.active() {
+                match self.editing_tab() {
                     Some(tab) => tab.add_caret(below),
-                    // A cell's column stays in the cell.
+                    // A cell's column stays in the cell, a read-only side's in its column, which
+                    // opens a run of unchanged lines as the editor's does (`Tab::revealed_at`).
                     None => self.with_view(|view| {
-                        if let Some(column) = view.downcast_ref::<multicaret::View>() {
-                            column.add_caret(below);
+                        let column = view.downcast_ref::<multicaret::View>();
+                        if let Some(opened) = column.and_then(|c| c.add_caret(below)) {
+                            let compare = match self.active_doc() {
+                                Some(Doc::Text(tab)) => tab.comparison(),
+                                Some(Doc::Diff(diff)) => Some(diff.comparison().clone()),
+                                _ => None,
+                            };
+                            if let Some(compare) = compare {
+                                compare.open_hiding_in(view, opened);
+                            }
                         }
                     }),
                 }
@@ -648,15 +669,43 @@ impl App {
         }
     }
 
-    /// Run `f` on the view the editing chords act on: the active text tab's, or the selected
-    /// cell's of the notebook in front.
+    /// Run `f` on the view the editing chords act on: the one with the keyboard in the active
+    /// tab's page, a comparison's read-only side or a staged change's pane among them, else the
+    /// active text tab's, or the selected cell's of the notebook in front.
     fn with_view(&self, f: impl FnOnce(&sourceview5::View)) {
+        if let Some(view) = self.focused_view() {
+            return f(&view);
+        }
         if let Some(tab) = self.active() {
             return f(&tab.view);
+        }
+        if let Some(Doc::Diff(diff)) = self.active_doc() {
+            return f(diff.view());
         }
         if let Some(view) = self.active_notebook().and_then(|n| n.editing_view()) {
             f(&view);
         }
+    }
+
+    /// The text view with the keyboard, where it is in the active pane's page and that page is not
+    /// a notebook's, whose chords go to its selected cell.
+    fn focused_view(&self) -> Option<sourceview5::View> {
+        if self.active_notebook().is_some() {
+            return None;
+        }
+        let focus = gtk::prelude::GtkWindowExt::focus(&self.window);
+        let view = focus.and_downcast::<sourceview5::View>()?;
+        let page = self.pane().tabs.selected_page()?;
+        view.is_ancestor(&page.child()).then_some(view)
+    }
+
+    /// The active text tab, unless the keyboard is in another text view of its page, a
+    /// comparison's read-only side: an editing chord acts where the keyboard is, and that side
+    /// takes no edits (user decision 2026-11-03).
+    fn editing_tab(&self) -> Option<Rc<Tab>> {
+        let focused = self.focused_view();
+        self.active()
+            .filter(|tab| focused.as_ref().is_none_or(|view| *view == tab.view))
     }
 
     /// The same for the actions that only mean something over a PDF.

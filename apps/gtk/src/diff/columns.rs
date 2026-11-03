@@ -773,7 +773,7 @@ impl Columns {
         }
     }
 
-    /// Copy editor margins, spacing and tab width to companion columns for
+    /// Copy editor margins, spacing, tab width and wrapping to companion columns for
     /// aligned first rows. Remeasure heading markers after margin changes
     /// and, with `refont`, editor font changes. Bottom margin remains owned
     /// by [`Columns::relayout`].
@@ -794,6 +794,10 @@ impl Columns {
             to.set_pixels_above_lines(from.pixels_above_lines());
             to.set_pixels_below_lines(from.pixels_below_lines());
             to.set_tab_width(from.tab_width());
+            if to.wrap_mode() != from.wrap_mode() {
+                to.set_wrap_mode(from.wrap_mode());
+                self.rewrapped();
+            }
             if rehang {
                 editor::rehang_companion(companion.flavour, &companion.buffer, to);
             }

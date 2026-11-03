@@ -1783,6 +1783,10 @@ impl App {
         }
         for notebook in self.notebooks() {
             notebook.set_spellcheck(config.spellcheck);
+            notebook.set_indent_width(config.indent_width);
+        }
+        for diff in self.diffs() {
+            diff.set_indent_width(config.indent_width);
         }
         for pdf in self.pdfs() {
             pdf.set_drawing_config(config.drawing.clone());

@@ -1,6 +1,8 @@
 //! Tab-hosted comparisons and merges, with read-only companion columns.
 
-use super::{Alert, Flavour, Syntax, Tab, build, line_numbers, refont, sync_scheme};
+use super::{
+    Alert, Flavour, Syntax, Tab, build, interact, keys, line_numbers, refont, sync_scheme,
+};
 use crate::{diff, fold, highlight, wrap};
 use adw::prelude::*;
 use gtk::glib;
@@ -88,10 +90,15 @@ pub(super) struct Comparing {
     pub(super) answers: Option<Alert>,
     /// Opened fold headers as text and edit-tracking marks ([`Tab::open_folds`]).
     shut: Vec<(gtk::TextMark, String)>,
+    /// The Line Numbers preference, which the editor's numbers go back to when the comparison
+    /// does: both columns show theirs meanwhile.
+    pub(super) numbers: bool,
 }
 
 /// Build a read-only companion matching the editor's rendering. Use `name`
-/// to share its font and zoom CSS, keeping both diff columns consistent.
+/// to share its font and zoom CSS, keeping both diff columns consistent. It is read as the editor
+/// is (user decision 2026-11-03): a caret moved, selected and copied from with the editor's keys,
+/// a column of carets too, and nothing typed into it.
 pub fn companion(
     flavour: Flavour,
     text: &str,
@@ -100,7 +107,8 @@ pub fn companion(
 ) -> (sourceview5::View, sourceview5::Buffer) {
     let (view, buffer) = build(flavour, language.cloned(), text);
     view.set_editable(false);
-    view.set_cursor_visible(false);
+    interact(&view, flavour);
+    keys::attach_plain(&view, flavour);
     view.set_widget_name(name);
     refont(&view);
     // A comparison is about lines, so the numbers are always on here.
@@ -123,6 +131,8 @@ fn line_text(at: &gtk::TextIter) -> String {
 pub fn overlay_view(text: &str) -> (sourceview5::View, sourceview5::Buffer) {
     let note = Flavour::Note(Syntax::Markdown);
     let (view, buffer) = build(note, None, text);
+    interact(&view, note);
+    keys::attach_plain(&view, note);
     style_companion(note, &buffer, &view);
     (view, buffer)
 }
@@ -261,6 +271,10 @@ impl Tab {
     ) -> Hosted {
         self.leave_compare();
         let shut = self.open_folds();
+        // Both columns number their lines, as the other side always does (user decision
+        // 2026-11-03), so their gutters are as wide and the rows level.
+        let numbers = self.numbers.is_visible();
+        self.numbers.set_visible(true);
         let close = gtk::Button::from_icon_name("window-close-symbolic");
         close.add_css_class("flat");
         close.add_css_class("chrome-fade");
@@ -317,6 +331,7 @@ impl Tab {
             label: label.to_string(),
             answers: None,
             shut,
+            numbers,
         });
         self.show_chevrons();
         self.update_sticky();
@@ -352,6 +367,7 @@ impl Tab {
             return;
         };
         comparing.hosted.leave();
+        self.numbers.set_visible(comparing.numbers);
         self.shut_again(comparing.shut);
         self.show_chevrons();
         // The gap tags went with it, so the messages the collapsed lines were keeping quiet about

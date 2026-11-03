@@ -49,11 +49,13 @@ pub(crate) use follow::url_under;
 pub(crate) use indent::on_key as indent_key;
 #[cfg(feature = "bench")]
 pub(crate) use keys::press;
-pub(crate) use keys::{attach as attach_keys, typed as typed_keys};
+#[cfg(feature = "bench")]
+pub(crate) use keys::typed as typed_keys;
+pub(crate) use keys::{attach as attach_keys, attach_plain};
 use lines::primary_paste;
 pub(crate) use lines::{
     caret_to_click, delete_line, duplicate_line, line_clipboard, pressed_at, toggle_comment,
-    toggle_task,
+    toggle_task, toggled_wrap,
 };
 #[cfg(feature = "bench")]
 pub(crate) use lines::{newline_below, paste_primary};

@@ -7,6 +7,7 @@ use std::rc::Rc;
 use accent_core::markdown::{self, Link};
 use accent_core::notebook::{CellId, Kind};
 use gtk::prelude::*;
+use sourceview5::prelude::ViewExt as _;
 
 use super::NotebookTab;
 
@@ -56,6 +57,16 @@ impl NotebookTab {
         {
             if let Some(editor) = view.editor() {
                 crate::editor::set_spelling(&view.spell, &editor.buffer, &editor.view, on);
+            }
+        }
+    }
+
+    /// The Indent Width preference: how many columns a tab takes in every cell, as in a text tab.
+    pub fn set_indent_width(&self, columns: u32) {
+        self.indent.set(columns);
+        for view in self.views.borrow().iter() {
+            if let Some(editor) = view.editor() {
+                editor.view.set_tab_width(columns);
             }
         }
     }

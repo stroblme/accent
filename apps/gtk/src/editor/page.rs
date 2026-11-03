@@ -529,7 +529,11 @@ impl Tab {
 
     /// Toggle line numbers for all text tabs, outside the 48 px heading-marker gutter.
     pub fn set_line_numbers(&self, on: bool) {
-        self.numbers.set_visible(on);
+        match self.comparing.borrow_mut().as_mut() {
+            // Kept for when the comparison goes, both columns numbering their lines meanwhile.
+            Some(comparing) => comparing.numbers = on,
+            None => self.numbers.set_visible(on),
+        }
         // The pinned title starts where the text does, after the gutter the numbers widen.
         self.update_sticky();
     }

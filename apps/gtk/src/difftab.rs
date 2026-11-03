@@ -2,6 +2,8 @@
 //! `diff.rs` provides the comparison widget.
 
 use gtk::glib;
+use gtk::prelude::TextViewExt as _;
+use sourceview5::prelude::ViewExt as _;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -89,6 +91,21 @@ impl DiffTab {
         self.compare.restyle();
     }
 
+    /// The Indent Width preference: how many columns a tab takes in both panes, as in a text tab.
+    pub fn set_indent_width(&self, columns: u32) {
+        for view in &self.views {
+            view.set_tab_width(columns);
+        }
+    }
+
+    /// Alt+Z: both panes unwrapped, or wrapped again, together.
+    pub fn toggle_wrap(&self) {
+        let mode = editor::toggled_wrap(self.views[1].wrap_mode());
+        for view in &self.views {
+            view.set_wrap_mode(mode);
+        }
+    }
+
     /// Both texts again, after what they compare has moved.
     pub fn set_texts(&self, old: &str, new: &str) {
         self.compare.set_side(Side::Old, old);
@@ -102,5 +119,10 @@ impl DiffTab {
     /// What takes the keyboard when the tab's pane does: the right column, what it compares to.
     pub fn key_target(&self) -> gtk::Widget {
         gtk::prelude::Cast::upcast(self.views[1].clone())
+    }
+
+    /// The pane the editing chords act on from the palette: the right one, as [`Self::key_target`].
+    pub fn view(&self) -> &sourceview5::View {
+        &self.views[1]
     }
 }
