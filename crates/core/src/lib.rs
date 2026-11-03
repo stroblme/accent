@@ -24,6 +24,7 @@ pub mod path;
 #[cfg(feature = "pdf")]
 pub mod pdf;
 pub mod pdf_text;
+pub mod query;
 pub mod recolour;
 pub mod search;
 pub mod synctex;
