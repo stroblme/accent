@@ -42,6 +42,7 @@ mod pdf_text;
 mod present;
 mod preview;
 mod quickfix;
+mod recent;
 mod refer;
 mod replace;
 mod scroll;
@@ -136,7 +137,8 @@ use user_commands::bench_commands;
 ///   only opens it. Modes: `dismiss:<relA>,<relB>` (XTEST outside clicks),
 ///   `prefs` (Preferences timing), `ignored:<rel>` (ignored-note opening),
 ///   `early:<query>` (corpus arrival), `symbol:<query>` (Go to Symbol),
-///   `goto:<relA>,<relB>` (Go to File's keyboard, XTEST).
+///   `goto:<relA>,<relB>` (Go to File's keyboard, XTEST), `recent:<vault>,<rel>`
+///   (Open Recent's Shift+Return and Shift+click, XTEST, `recent::bench_recent`).
 /// - `ACCENT_BENCH_GIT=1`: Git pane rows, controls and refreshes. Modes:
 ///   `press:<path>` (hold for XTEST), `init` (discover a new repository),
 ///   `init:command` (Initialize Git Repository, local or remote),
@@ -961,6 +963,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         };
         if let Some(rels) = query.strip_prefix("dismiss:") {
             return dismiss::bench_dismiss(&app, rels);
+        }
+        if let Some(arg) = query.strip_prefix("recent:") {
+            return recent::bench_recent(&app, arg);
         }
         if let Some(rel) = query.strip_prefix("ignored:") {
             return ignored::bench_ignored(&app, rel);

@@ -625,11 +625,13 @@ pub(crate) fn capture_shortcut(
 ///
 /// The returned handle refreshes files while the dialog remains open, reranking the query
 /// and retaining selection when its row survives. Unchanged lists need no update.
+/// `on_pick` is told whether Shift was held: Shift+Return or a Shift+click, which on a recent
+/// vault opens it in place of the window's own.
 pub fn present(
     parent: &impl IsA<gtk::Widget>,
     mode: Mode,
     sources: Sources,
-    on_pick: impl Fn(&Item) + 'static,
+    on_pick: impl Fn(&Item, bool) + 'static,
 ) -> Refill {
     let Sources {
         recent,
@@ -1086,7 +1088,7 @@ pub fn present(
         // Weak dialog: this closure hangs off widgets inside it, and a strong capture is the cycle
         // that kept every palette ever opened alive, each with its own copy of the note list.
         let (dialog, selection, on_pick) = (dialog.downgrade(), selection.clone(), on_pick.clone());
-        move || {
+        move |shift: bool| {
             let Some(dialog) = dialog.upgrade() else {
                 return;
             };
@@ -1096,7 +1098,7 @@ pub fn present(
             {
                 let item: Rc<Item> = boxed.borrow::<Rc<Item>>().clone();
                 dialog.close();
-                on_pick(&item);
+                on_pick(&item, shift);
             }
         }
     };
@@ -1108,13 +1110,21 @@ pub fn present(
             }
         }
     });
+    // GtkText activates on a bare Return only, so Shift+Return is the key controller's below.
     entry.connect_activate({
         let pick = pick.clone();
-        move |_| pick()
+        move |_| pick(false)
     });
+    // The click is GtkListView's own, so Shift is read off the keyboard.
     list.connect_activate({
         let pick = pick.clone();
-        move |_, _| pick()
+        move |list, _| {
+            let keyboard = list.display().default_seat().and_then(|s| s.keyboard());
+            pick(
+                keyboard
+                    .is_some_and(|k| k.modifier_state().contains(gdk::ModifierType::SHIFT_MASK)),
+            )
+        }
     });
 
     // `GtkSearchEntry` eats the first Escape to clear its own text, so Escape has to be caught on
@@ -1136,13 +1146,21 @@ pub fn present(
     dialog.add_controller(escape);
 
     // The list is driven from the entry, which keeps the focus: the arrows, a page and the two
-    // ends move the highlight, and Delete forgets the recent vault under it.
+    // ends move the highlight, Delete forgets the recent vault under it and Shift+Return picks.
     let keys = gtk::EventControllerKey::new();
     keys.connect_key_pressed({
         let (entry, forget) = (entry.clone(), forget_row.clone());
-        move |_, key, _, _| {
+        move |_, key, _, state| {
             if key == gdk::Key::Delete || key == gdk::Key::KP_Delete {
                 return forget(&entry);
+            }
+            if matches!(
+                key,
+                gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::ISO_Enter
+            ) && state.contains(gdk::ModifierType::SHIFT_MASK)
+            {
+                pick(true);
+                return glib::Propagation::Stop;
             }
             let Some(to) = step(key, selection.selected(), selection.n_items()) else {
                 return glib::Propagation::Proceed;

@@ -253,7 +253,7 @@ impl App {
             glib::clone!(
                 #[weak(rename_to = app)]
                 self,
-                move |item: &palette::Item| match item {
+                move |item: &palette::Item, shift: bool| match item {
                     palette::Item::File(rel)
                     | palette::Item::Ignored(rel)
                     | palette::Item::Alias { rel, .. } => app.open_as(rel, Opened::Picked),
@@ -266,13 +266,21 @@ impl App {
                     palette::Item::Tag(tag) => app.show_tag(tag),
                     palette::Item::Symbol(symbol) => app.goto_symbol(symbol),
                     // Through the shell, which raises the window that vault already has rather
-                    // than opening a second one on the same index, session and watcher.
+                    // than opening a second one on the same index, session and watcher. With
+                    // Shift this window's vault then closes as Close Vault closes it, its unsaved
+                    // files written or asked about first, once the other has a window to go to.
                     palette::Item::Vault(key) => {
                         if let (Some(shell), Some(gtk_app)) = (
                             app.shell.upgrade(),
                             app.window.application().and_downcast::<adw::Application>(),
                         ) {
                             shell.open_vault(&gtk_app, PathBuf::from(key), None);
+                            if shift
+                                && app.vault().is_some()
+                                && shell.app_for(Path::new(key)).is_some()
+                            {
+                                app.window.close();
+                            }
                         }
                     }
                 }

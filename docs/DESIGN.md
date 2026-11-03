@@ -879,6 +879,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Go to Source and Show in PDF without SyncTeX data and Initialize Git Repository in a repository stay listed, greyed and saying why.
 - Open Recent is the same dialog over the recent vaults, read as the start screen reads them, ending with Open Local… and Open Remote…, so one surface reaches every way of changing vault and is never empty; a query that names one of the two puts it first, so typing "remote" and Enter opens Open Remote….
   The window's own vault is left out: picking it could only raise this window.
+  Shift+Return or a Shift+click opens the vault picked in place of the window's own.
+  Once that vault has its window, newly opened or raised, this one closes as Close Vault closes it and writes or asks about its unsaved files first, while a window with no vault stays open.
 
 ### Find bar
 
