@@ -27,6 +27,8 @@ pub enum PdfZoom {
 pub struct PdfPlace {
     pub page: usize,
     pub zoom: PdfZoom,
+    /// Whether its drawing tools were out, which the header's Drawing toggle says per tab.
+    pub drawing: bool,
 }
 
 /// Where a diagram was last being looked at.

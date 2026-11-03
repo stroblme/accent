@@ -335,7 +335,6 @@ pub fn build_window(
         drawing_button: drawing.clone(),
         undo_button: undo,
         redo_button: redo,
-        drawing: Cell::new(false),
         tool: Cell::new(pdfview::Mode::Pen),
         ring_at: Cell::new(None),
         menu,

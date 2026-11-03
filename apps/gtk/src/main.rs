@@ -373,8 +373,6 @@ struct App {
     /// Undo and Redo beside it, shown as a pair while either has something to walk.
     undo_button: gtk::Button,
     redo_button: gtk::Button,
-    /// Whether the ring of tools is out, which is the window's state and not the tab's.
-    drawing: Cell<bool>,
     /// The tool the ring offers when it comes back.
     tool: Cell<pdfview::Mode>,
     /// Where this window last left the ring, once the reader has moved it. `None` until then,
@@ -665,8 +663,8 @@ impl App {
         if self.presenting.get().is_some() {
             self.lay_out();
         }
-        // The tools belong to the window, so they follow the tab in front, and so do SyncTeX's
-        // two commands and Invert Image Colours.
+        // The header's Drawing toggle follows the tab in front, and so do SyncTeX's two commands
+        // and Invert Image Colours.
         self.sync_drawing();
         self.sync_synctex(self.active_doc());
         self.sync_image_invert();

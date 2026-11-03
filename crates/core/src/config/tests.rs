@@ -559,6 +559,7 @@ fn session_roundtrips_as_json() {
             PdfPlace {
                 page: 4,
                 zoom: PdfZoom::Scale(1.5),
+                drawing: true,
             },
         )]),
         diagram: BTreeMap::from([(

@@ -19,6 +19,8 @@ impl App {
             place,
         );
         pdf.set_drawing_config(self.config.borrow().drawing.clone());
+        // Out as the session left them, which a tab in another pane shows before it is in front.
+        pdf.show_ring(pdf.drawing(), self.ring_at.get());
         pdf.connect_zoom(glib::clone!(
             #[weak(rename_to = app)]
             self,
@@ -591,8 +593,8 @@ impl App {
 
     /// Show or hide the ring of drawing tools over the page.
     ///
-    /// The window's state rather than the tab's: the button is in the header, and moving between
-    /// two PDFs with the tools out should not put them away.
+    /// The tab's state rather than the window's: each PDF keeps its tools out or away, with its
+    /// page in the session, and the header's button follows the tab in front.
     pub fn set_drawing(self: &Rc<Self>, showing: bool) {
         // A diagram keeps its own: its ring is out by default, and one diagram's choice must not
         // arm a PDF's pen.
@@ -602,7 +604,6 @@ impl App {
             return self.sync_status();
         }
         let Some(pdf) = self.active_pdf() else { return };
-        self.drawing.set(showing);
         self.drawing_button.set_active(showing);
         // Putting the tools away puts the pen down with them; taking them out arms the last tool.
         let tool = match showing {
@@ -612,6 +613,7 @@ impl App {
         pdf.set_drawing(showing, self.ring_at.get());
         pdf.set_mode(tool);
         self.sync_status();
+        self.save_session_soon();
     }
 
     /// Pick up one of the tools. The same one twice goes back to reading, the tools staying out.
@@ -626,10 +628,10 @@ impl App {
             self.tool.set(wanted);
         }
         // Reaching a tool from the palette with the ring away is what takes it out.
-        if wanted != pdfview::Mode::Read && !self.drawing.get() {
-            self.drawing.set(true);
+        if wanted != pdfview::Mode::Read && !pdf.drawing() {
             self.drawing_button.set_active(true);
             pdf.set_drawing(true, self.ring_at.get());
+            self.save_session_soon();
         }
         pdf.set_mode(wanted);
         self.sync_status();
@@ -646,9 +648,9 @@ impl App {
     pub fn sync_drawing(&self) {
         if let Some(pdf) = self.active_pdf() {
             // Presenting puts the tools away and the tool in hand down, so nothing draws on what
-            // is presented; the window still knows they were out.
-            let showing = self.drawing.get() && self.presenting.get().is_none();
-            pdf.set_drawing(showing, self.ring_at.get());
+            // is presented; the tab still knows they were out.
+            let showing = pdf.drawing() && self.presenting.get().is_none();
+            pdf.show_ring(showing, self.ring_at.get());
             pdf.set_mode(match showing {
                 true => self.tool.get(),
                 false => pdfview::Mode::Read,
@@ -664,7 +666,7 @@ impl App {
             .set_visible(self.active_pdf().is_some() || diagram.is_some());
         self.drawing_button.set_active(match &diagram {
             Some(d) => d.ring_shown(),
-            None => self.drawing.get(),
+            None => self.active_pdf().is_some_and(|pdf| pdf.drawing()),
         });
         self.sync_diagram_tools();
         self.sync_history();

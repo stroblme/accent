@@ -223,7 +223,7 @@ impl App {
                 // A PDF's ring comes back as it was too, but not the tool `sync_drawing` would
                 // pick up again: that stays down until it is picked up from the ring.
                 if let Some(pdf) = self.active_pdf() {
-                    pdf.set_drawing(self.drawing.get(), self.ring_at.get());
+                    pdf.show_ring(pdf.drawing(), self.ring_at.get());
                 }
                 self.lift_toasts(None);
                 self.sidebar_column.set_visible(before.sidebar);

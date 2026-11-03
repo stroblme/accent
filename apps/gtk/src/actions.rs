@@ -392,11 +392,11 @@ impl App {
             "pdf-export-highlights" => self.export_highlights(),
             "pdf-go-to-source" => self.go_to_source(),
             "show-in-pdf" => self.show_in_pdf(),
-            // A diagram's ring is its own, not the window's drawing state.
+            // Each diagram and each PDF keeps its own ring out or away.
             "pdf-draw" => {
                 let out = match self.active_diagram() {
                     Some(d) => d.ring_shown(),
-                    None => self.drawing.get(),
+                    None => self.active_pdf().is_some_and(|pdf| pdf.drawing()),
                 };
                 self.set_drawing(!out);
             }

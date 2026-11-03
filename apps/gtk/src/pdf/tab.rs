@@ -59,8 +59,11 @@ pub struct PdfTab {
     /// Plain parent for the link preview. Popovers do not re-present from widgets with custom
     /// `size_allocate`, such as `PdfView` (DESIGN.md, States).
     pub(super) host: gtk::Box,
-    /// The drawing tools, floating over the page while the window says they are wanted.
+    /// The drawing tools, floating over the page while they are out and nothing is presented.
     pub(super) ring: Rc<ring::PdfRing>,
+    /// Whether the drawing tools are out over this tab, which the header's Drawing toggle shows
+    /// and the session keeps.
+    pub(super) drawing: Cell<bool>,
     /// What floats over the page: the ring, and the editor of a text being typed.
     pub(super) overlay: gtk::Overlay,
     pub(super) typing: RefCell<Option<Rc<TextEditor>>>,
@@ -279,6 +282,7 @@ pub fn open(
         thumbs: thumbs.clone(),
         host,
         ring: ring.clone(),
+        drawing: Cell::new(place.drawing),
         overlay: overlay.clone(),
         typing: RefCell::default(),
         settling: RefCell::default(),
@@ -505,6 +509,7 @@ impl PdfTab {
         Place {
             page,
             zoom: self.view.zoom(),
+            drawing: self.drawing.get(),
         }
     }
 
@@ -812,9 +817,21 @@ impl PdfTab {
         self.view.set_drawing_config(config);
     }
 
-    /// Show or hide the ring of tools.
+    /// Whether the drawing tools are out over this tab.
+    pub fn drawing(&self) -> bool {
+        self.drawing.get()
+    }
+
+    /// Put the drawing tools out over this tab or away, the ring at `at`.
     pub fn set_drawing(&self, showing: bool, at: Option<(f64, f64)>) {
-        self.ring.set_visible(showing, at);
+        self.drawing.set(showing);
+        self.show_ring(showing, at);
+    }
+
+    /// Show or hide the ring alone, the tools staying out or away: presentation hides it
+    /// meanwhile.
+    pub fn show_ring(&self, shown: bool, at: Option<(f64, f64)>) {
+        self.ring.set_visible(shown, at);
     }
 
     /// Call `f` with where a drag puts the ring, so the next tab to show one puts it there.

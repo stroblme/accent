@@ -1042,7 +1042,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The copy waits in `~/.cache/accent/print/` while the dialog is up.
   Export as PDF… writes it where the chooser says (`paper (exported).pdf` unless renamed there), and refuses the PDF itself.
 - The drawing tools are a **ring**: Pen, Highlighter, Eraser, Line, Rectangle, Circle, Text and Select orbiting a hub that floats over the page, opening in the top right (the page is read from the left, a hand comes in from the bottom right), dragged anywhere by the hub and kept where this window left it, inside its pane however a split or a resize shrinks that.
-  The header's Drawing toggle opens and closes it.
+  The header's Drawing toggle opens and closes it for the tab in front, and each tab keeps its own (user decision 2026-11-03): a PDF's goes into the session with its page and is closed on a PDF the session has not seen, while a diagram's opens out.
   Its buttons are opaque discs, 36 px, in libadwaita's `.opaque` button colour with the foreground's alpha dropped from the mix, so the disc stays whole on a light theme too, and a shade under them: an `.osd` disc let the text under it through, and went into a dark page.
   Presentation puts it away and the tool in hand down, so nothing draws on a presented page, and brings it back as it was afterwards, the tool still down (Views).
 - With a tool in hand the pointer is the plain arrow over the whole page, the I-beam inviting a selection that will not happen; under a stylus it is a small dot where the ink goes.
