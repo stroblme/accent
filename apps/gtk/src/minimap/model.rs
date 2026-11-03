@@ -225,25 +225,13 @@ impl Pace {
         (self.total - self.usual) / (self.height - self.usual)
     }
 
-    /// The rows above a document shorter than the map, which centre it there.
-    pub fn lead(&self) -> f64 {
-        ((self.height - self.total) / 2.0).max(0.0)
-    }
-
-    /// The document row a band drawn at map row `screen` starts on, away from the ends: what
-    /// keeps a dragged band under the pointer.
-    pub fn row(&self, screen: f64) -> f64 {
-        screen * self.ratio() - self.lead()
-    }
-
     /// Return minimap scroll in rows for a visible band at `top` with height `band`.
     ///
-    /// Scroll only when the document outgrows the map, and centre it otherwise. Use the usual
-    /// band pace rather than variable heading heights to avoid jumps, clamping the band inside
-    /// both ends.
+    /// Scroll only when the document outgrows the map. Use the usual band pace rather than
+    /// variable heading heights to avoid jumps, clamping the band inside both ends.
     pub fn offset(&self, top: f64, band: f64) -> f64 {
         if self.total <= self.height {
-            return -self.lead();
+            return 0.0;
         }
         let paced = top - top / self.ratio();
         paced
@@ -497,7 +485,7 @@ mod tests {
             };
             let at = pace.offset(top, band);
             assert!(at.is_finite(), "{top} {band} {total} {height}");
-            assert!((-pace.lead()..=total.max(0.0)).contains(&at));
+            assert!((0.0..=total.max(0.0)).contains(&at));
             assert!(pace.ratio().is_finite());
         }
         let pace = Pace {
@@ -511,11 +499,11 @@ mod tests {
             total: 300.0,
             ..pace
         };
-        assert_eq!(fits.offset(10.0, 40.0), -50.0, "fits: centred, no scroll");
+        assert_eq!(fits.offset(10.0, 40.0), 0.0, "fits: no scroll");
     }
 
-    /// Verify band position round-trips through [`Pace::row`] during drag,
-    /// independent of map scrolling or centring and away from ends, changing heading heights.
+    /// Verify band position round-trips through [`Pace::ratio`] during drag,
+    /// independent of map scrolling and away from ends, changing heading heights.
     #[test]
     fn a_drag_keeps_the_band_under_the_pointer() {
         for total in [1000.0, 300.0] {
@@ -525,11 +513,10 @@ mod tests {
                 usual: 40.0,
             };
             for screen in [0.0, 50.0, 200.0, 300.0] {
-                let top = pace.row(screen).clamp(0.0, total - 40.0);
+                let top = (screen * pace.ratio()).min(total - 40.0);
                 for band in [30.0, 40.0, 46.0] {
                     let drawn = top - pace.offset(top, band);
-                    let end = top == 0.0 || top == total - 40.0;
-                    assert!((drawn - screen).abs() < 1e-9 || end);
+                    assert!((drawn - screen).abs() < 1e-9 || top == total - 40.0);
                 }
             }
         }

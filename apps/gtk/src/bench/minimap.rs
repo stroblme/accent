@@ -204,7 +204,7 @@ async fn look(app: &Rc<App>, tab: &Rc<Tab>, map: &Minimap) {
             shoot("note-held", theme);
             map.let_go();
         }
-        tab.set_text("# Short\n\nA note shorter than its map.\n\n## Part\n\nCentred.\n");
+        tab.set_text("# Short\n\nA note shorter than its map.\n\n## Part\n\nDrawn from the top.\n");
         glib::timeout_future(FRAME).await;
         shoot("short", theme);
         if compared(app, tab).await.is_some() {

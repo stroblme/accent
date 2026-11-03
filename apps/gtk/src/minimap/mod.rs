@@ -34,9 +34,9 @@ const BAND_RADIUS: f32 = 6.0;
 const CHUNK: usize = 32;
 /// How many chunks above and below the map's window are kept for a scroll to come back to.
 const KEEP: usize = 4;
-/// Heading-label sizes (h1 first) and per-level indent, forming an outline
-/// with h1 largest and leftmost.
-const LABEL_PX: [f64; 6] = [11.0, 10.0, 9.0, 8.5, 8.0, 8.0];
+/// The label sizes of an h1 and an h2, the headings the map writes out, and how far in an h2
+/// sits, so the two read as an outline. A deeper heading is bars, as text is.
+const LABEL_PX: [f64; 2] = [11.0, 10.0];
 const LABEL_INDENT: f64 = 4.0;
 /// GtkSourceView's tag over a comment, which the language spec names; the style tags that colour
 /// code have no names.
@@ -44,7 +44,7 @@ const COMMENT: &str = "gtksourceview:context-classes:comment";
 
 /// The rows a heading label of `level` takes: its size, with a line's leading.
 fn label_rows(level: u8) -> u32 {
-    (LABEL_PX[usize::from(level.clamp(1, 6) - 1)] * 1.35 / ROW).ceil() as u32
+    (LABEL_PX[usize::from(level.clamp(1, LABEL_PX.len() as u8) - 1)] * 1.35 / ROW).ceil() as u32
 }
 
 /// Text tone: foreground, dim for markup/quotes/tasks/comments, or
@@ -85,15 +85,14 @@ impl Tone {
 
 /// What every chunk of a frame is drawn with.
 struct Paint {
-    /// The foreground itself, which a label is written in.
-    text: gdk::RGBA,
+    /// The text's tone, which a label is written in too.
     ink: gdk::RGBA,
     dim: gdk::RGBA,
     accent: gdk::RGBA,
     renderer: gsk::Renderer,
     scale: f64,
     context: pango::Context,
-    /// The labels' face, bold; each level sets its own size.
+    /// The labels' face; each level sets its own size.
     label: pango::FontDescription,
     /// The looks of a keyword ([`keyword_looks`]), found when a chunk is first drawn.
     keywords: std::cell::OnceCell<Vec<gtk::TextTag>>,
@@ -454,10 +453,8 @@ impl imp::Minimap {
             self.chunks.borrow_mut().clear();
         }
         let context = obj.pango_context();
-        let mut label = context.font_description().unwrap_or_default();
-        label.set_weight(pango::Weight::Bold);
+        let label = context.font_description().unwrap_or_default();
         let paint = Paint {
-            text: ink,
             ink: theme::at(ink, theme::MAP_INK_ALPHA),
             dim: theme::at(ink, theme::MAP_DIM_ALPHA),
             accent: theme::at(accent, theme::MAP_ACCENT_ALPHA),
@@ -590,7 +587,7 @@ impl imp::Minimap {
             return;
         };
         let last = (frame.pace.total - frame.band).max(0.0);
-        let top = frame.pace.row(grab.screen + dy / ROW).clamp(0.0, last);
+        let top = ((grab.screen + dy / ROW) * frame.pace.ratio()).clamp(0.0, last);
         let (at, frac) = self.line_at_row(top);
         scroll_line_to(&view, at, frac, 0.0);
     }
@@ -699,7 +696,8 @@ fn measure(buffer: &gtk::TextBuffer, at: usize) -> Line {
             level = at as u8 + 1;
         }
     }
-    if level > 0 && model::label(&buffer.text(&start, &end, false)).is_some() {
+    let labelled = (1..=LABEL_PX.len() as u8).contains(&level);
+    if labelled && model::label(&buffer.text(&start, &end, false)).is_some() {
         line.heading = level;
         line.min_rows = label_rows(level);
     }
@@ -826,7 +824,7 @@ fn render(k: usize, model: &Model, view: &sourceview5::View, paint: &Paint) -> g
                 indent as f32,
                 (y + room / 2.0) as f32,
             ));
-            snapshot.append_layout(&layout, &paint.text);
+            snapshot.append_layout(&layout, &paint.ink);
             snapshot.restore();
             continue;
         }
