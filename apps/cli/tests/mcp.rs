@@ -536,6 +536,18 @@ fn mcp_answers_after_initialize_and_holds_to_the_vault() {
     // The shorter symlinked note ranks first; the limit counts only what is shown.
     let (hits, _) = c.call("search_notes", json!({"query": "kumquat", "limit": 1}));
     assert!(hits[0].contains(r#""path":"a.md""#), "{hits:?}");
+    // A qualifier alone lists its files with no place in them, and one it cannot read says why.
+    let (hits, error) = c.call("search_notes", json!({"query": "#tag"}));
+    assert!(!error, "{hits:?}");
+    let hits: Value = serde_json::from_str(&hits[0]).unwrap();
+    assert_eq!(hits.as_array().unwrap().len(), 1, "{hits}");
+    assert_eq!(
+        (&hits[0]["path"], &hits[0]["line"]),
+        (&json!("b.md"), &Value::Null)
+    );
+    assert_eq!(hits[0]["snippet"], "");
+    let (said, error) = c.call("search_notes", json!({"query": "kind:pfd"}));
+    assert!(error && said[0].contains("is not a kind"), "{said:?}");
 
     let (read, error) = c.call("read_note", json!({"path": "a.md", "heading": "part"}));
     assert!(!error, "{read:?}");

@@ -80,6 +80,9 @@ enum Cmd {
     Search {
         #[command(flatten)]
         common: Common,
+        /// Words in any order, "quoted phrases" and qualifiers: #tag, tag:a,b, path:, kind:pdf,
+        /// links:, linked-from:, has:highlights, modified:>7d, and - before any to leave it out.
+        /// Quote a #tag for the shell.
         query: Vec<String>,
         #[arg(long, default_value_t = 20)]
         limit: usize,

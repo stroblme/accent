@@ -21,8 +21,14 @@ use super::{
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct SearchArgs {
-    /// Search terms in any order. The final term also matches word prefixes; if no words match,
-    /// retry as substrings.
+    /// Words to find, in any order, each where a word starts and the last also as a word's
+    /// prefix. `"Quoted words"` match as one phrase, and where no word starts so the words are
+    /// looked for inside words. Qualifiers narrow the files with `#tag` or `tag:a,b` (a tag or one
+    /// nested under it, case aside), `path:folder` (part of the path), `kind:` note, pdf,
+    /// diagram, notebook, code, text or image (a comma list for either), `links:Note`,
+    /// `linked-from:Note`, `has:highlights`, `modified:>7d`, `modified:2026-10-01` or
+    /// `modified:2026-10-01..2026-10-15`. A `-` before a word, a phrase or a qualifier leaves it
+    /// out. Qualifiers alone list files, newest first, each with no line and an empty snippet.
     query: String,
     /// Maximum rows: 20 by default, up to 100. Each row is one occurrence.
     limit: Option<usize>,
@@ -309,9 +315,11 @@ impl Server {
         .await
     }
 
-    /// Full-text search over the vault's indexed files. Each row is one occurrence: the file,
-    /// its title, the 1-based line, and a snippet with the match between « and ». A PDF's rows are
-    /// its pages instead, one a page holding the match, with the 1-based `page` and no line.
+    /// Full-text search over the vault's indexed files. Each row is one occurrence of one of the
+    /// query's words or phrases: the file, its title, the 1-based line, and a snippet with every
+    /// word marked between « and ». A PDF's rows are its pages instead, one a page holding a
+    /// match, with the 1-based `page` and no line. A qualifier that cannot be read is an error
+    /// saying what it takes.
     #[tool(annotations(read_only_hint = true))]
     async fn search_notes(
         &self,
