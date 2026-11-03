@@ -120,11 +120,11 @@ pub struct PdfTab {
     /// The selected text, for Ctrl+C.
     pub(super) selected: RefCell<String>,
     /// How many copies of what the Select tool holds are on their way to the clipboard, which a
-    /// paste waits for (`pending_paste`, where it would land) rather than paste what was there.
+    /// paste waits for (`pending_paste`, the page it would land on) rather than paste what was there.
     pub(super) copying: Cell<u32>,
-    pub(super) pending_paste: Cell<Option<Option<(usize, f32, f32)>>>,
-    /// What was last pasted in place, and how many times, each a step further off.
-    pub(super) pasted: RefCell<(Option<String>, u32)>,
+    pub(super) pending_paste: Cell<Option<Option<usize>>>,
+    /// What was last pasted, as its hash, and how many times, each a step further off.
+    pub(super) pasted: RefCell<(Option<u64>, u32)>,
     /// The handler that keeps the ring's Paste in step with the clipboard, dropped with the tab.
     pub(super) clip_watch: RefCell<Option<glib::SignalHandlerId>>,
     /// The same selection as glyph ranges, one per page it covers, which is what a link is made

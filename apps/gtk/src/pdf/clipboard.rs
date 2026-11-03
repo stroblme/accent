@@ -94,28 +94,28 @@ impl PdfTab {
                 tracing::warn!("the clipboard would not take the drawing: {e}");
             }
             // The first paste of a copy steps off it, of a cut lands where it was.
-            let copied = (how == Clipping::Copy).then_some(json);
+            let copied = (how == Clipping::Copy).then(|| hash(json.as_bytes()));
             self.pasted.replace((copied, 0));
         }
         if self.copying.get() == 0
-            && let Some(at) = self.pending_paste.take()
+            && let Some(page) = self.pending_paste.take()
         {
-            self.paste_at(at);
+            self.paste_at(page);
         }
     }
 
     /// Paste drawings from the clipboard, as strokes and texts of ours, held by the Select tool:
-    /// centred where the page's menu was opened or `Ctrl+V` pressed, else where they were copied
-    /// from, a step further each time, on the page being read. Never off the paper.
+    /// where they were copied from, a step further down and right for each paste of the same copy,
+    /// on the page the page's menu was opened on, else on the page being read. Never off the paper.
     pub fn paste(self: &Rc<Self>) {
-        let at = self.pointed.get();
+        let page = self.pointed.get().map(|(page, ..)| page);
         match self.copying.get() {
-            0 => self.paste_at(at),
-            _ => self.pending_paste.set(Some(at)),
+            0 => self.paste_at(page),
+            _ => self.pending_paste.set(Some(page)),
         }
     }
 
-    fn paste_at(self: &Rc<Self>, at: Option<(usize, f32, f32)>) {
+    fn paste_at(self: &Rc<Self>, page: Option<usize>) {
         let clipboard = self.view.clipboard();
         let tab = Rc::downgrade(self);
         glib::spawn_future_local(async move {
@@ -129,36 +129,29 @@ impl PdfTab {
             if let Some(tab) = tab.upgrade()
                 && !clips.is_empty()
             {
-                tab.land(clips, &json, at);
+                tab.land(clips, &json, page);
             }
         });
     }
 
     /// Where `clips`, `json` on the clipboard, go: see [`PdfTab::paste`].
-    fn land(&self, clips: Vec<Clip>, json: &[u8], at: Option<(usize, f32, f32)>) {
-        let bounds = bounds_of(&clips);
-        let (page, (dx, dy)) = match at {
-            Some((page, x, y)) => {
-                let middle = (
-                    (bounds.left + bounds.right) / 2.0,
-                    (bounds.top + bounds.bottom) / 2.0,
-                );
-                (page, (x - middle.0, y - middle.1))
-            }
-            None => {
-                let mut pasted = self.pasted.borrow_mut();
-                let json = String::from_utf8_lossy(json).into_owned();
-                match pasted.0.as_deref() == Some(json.as_str()) {
-                    true => pasted.1 += 1,
-                    false => *pasted = (Some(json), 0),
-                }
-                let d = pasted.1 as f32 * STEP;
-                (self.current_page(), (d, d))
-            }
-        };
+    fn land(&self, clips: Vec<Clip>, json: &[u8], page: Option<usize>) {
+        let page = page.unwrap_or_else(|| self.current_page());
+        let d = self.step(hash(json));
         let size = self.page_size(page).unwrap_or((f32::MAX, f32::MAX));
-        let m = clamp_move(bounds, [1.0, 0.0, 0.0, 1.0, dx, dy], size);
+        let m = clamp_move(bounds_of(&clips), [1.0, 0.0, 0.0, 1.0, d, d], size);
         self.paste_clips(page, clips, m);
+    }
+
+    /// How far down and right the paste of the copy `key` goes: none for its first, one step
+    /// further for each after it.
+    fn step(&self, key: u64) -> f32 {
+        let mut pasted = self.pasted.borrow_mut();
+        match pasted.0 == Some(key) {
+            true => pasted.1 += 1,
+            false => *pasted = (Some(key), 0),
+        }
+        pasted.1 as f32 * STEP
     }
 
     /// `clips` drawn onto `page` under `m`, held by the Select tool at once under the names the
@@ -197,6 +190,14 @@ impl PdfTab {
         let picked = self.view.picked().is_some();
         self.ring.set_selection(picked, self.pasteable());
     }
+}
+
+/// What tells one copy on the clipboard from another: its bytes, hashed.
+fn hash(bytes: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::hash::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// The box round every clip.

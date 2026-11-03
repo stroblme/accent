@@ -1,7 +1,7 @@
 //! The Select tool's drill, `ACCENT_BENCH_PDF=select:<rel>[,<n>]`: on the first page, two lines,
 //! a rectangle and a text of ours written into the file first, then through XTEST a lasso, a
-//! move and its Undo, a copy pasted at the pointer, a pick and a delete, Ctrl+click, a cut pasted
-//! again, a click away and Escape, a group stretched by its corner, a duplicate and the arrows,
+//! move and its Undo, a copy pasted a step off it, a pick and a delete, Ctrl+click, a cut pasted
+//! in place, a click away and Escape, a group stretched by its corner, a duplicate and the arrows,
 //! each against the file. Pictures of the lasso and the group, light and dark, go to `$TMPDIR`.
 //! With `,<n>`, `n` strokes down the page's left edge first, and how long the render thread takes
 //! to move and delete them all. Writes the file.
@@ -156,7 +156,9 @@ pub(super) fn bench_pdf_select(app: &Rc<App>, arg: &str) {
         undo(false).await;
         println!("bench select undone one_step={}", filed(&path) == drawn);
 
-        // Copied, and pasted centred on the pointer, which the copies are then held as.
+        // Copied, and pasted a step down and right of it wherever the pointer is, which the
+        // copies are then held as.
+        let copied = reader.picked_box().map(|(_, b, _)| b);
         super::git::xtest(&format!("focus; {}; key ctrl+c", to((300.0, 500.0)))).await;
         let mime = reader
             .clipboard()
@@ -169,12 +171,14 @@ pub(super) fn bench_pdf_select(app: &Rc<App>, arg: &str) {
             let (w, h) = pdf.page_size(page).unwrap_or_default();
             b.left >= 0.0 && b.top >= 0.0 && b.right <= w && b.bottom <= h
         });
-        let near = reader.picked_box().is_some_and(|(_, b, _)| {
-            ((b.left + b.right) / 2.0 - 300.0).abs() < 2.0
-                && ((b.top + b.bottom) / 2.0 - 500.0).abs() < 2.0
-        });
+        let stepped = reader
+            .picked_box()
+            .zip(copied)
+            .is_some_and(|((_, b, _), c)| {
+                (b.left - c.left - 10.0).abs() < 0.5 && (b.top - c.top - 10.0).abs() < 0.5
+            });
         println!(
-            "bench select pasted +{} picked={} on_paper={on_paper} at_pointer={near}",
+            "bench select pasted +{} picked={} on_paper={on_paper} stepped={stepped}",
             filed(&path).len() - drawn.len(),
             picked()
         );
@@ -191,7 +195,7 @@ pub(super) fn bench_pdf_select(app: &Rc<App>, arg: &str) {
         super::git::xtest(&click((400.0, 240.0))).await;
         println!("bench select middle picked={}", picked());
 
-        // A line, then the text added with Ctrl; cut, and pasted again lower down.
+        // A line, then the text added with Ctrl; cut, and pasted back in its place.
         let steps = format!(
             "{}; keydown ctrl; {}; keyup ctrl",
             click((150.0, LEFT[0])),
@@ -205,9 +209,10 @@ pub(super) fn bench_pdf_select(app: &Rc<App>, arg: &str) {
         super::git::xtest(&format!("{}; key ctrl+v", to((300.0, 600.0)))).await;
         save().await;
         println!(
-            "bench select cut_pasted {} picked={}",
+            "bench select cut_pasted {} picked={} in_place={}",
             filed(&path).len(),
-            picked()
+            picked(),
+            filed(&path) == drawn
         );
         undo(false).await;
         undo(false).await;

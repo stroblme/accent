@@ -298,8 +298,7 @@ impl PdfTab {
                     }
                 }
                 // The Select tool's: `Ctrl+X`, `Ctrl+V` and `Ctrl+D`, the last a chord of the
-                // window's (Duplicate Line) that a PDF in front leaves to the page. A paste lands
-                // centred on the pointer while it is over a page.
+                // window's (Duplicate Line) that a PDF in front leaves to the page.
                 if state.contains(crate::platform::PRIMARY_MODIFIER) {
                     let command = match key.to_lower() {
                         gtk::gdk::Key::x => Some("win.pdf-cut"),
@@ -308,9 +307,7 @@ impl PdfTab {
                         _ => None,
                     };
                     if let Some(action) = command {
-                        tab.pointed.set(tab.view.under_pointer());
                         tab.run(action);
-                        tab.pointed.set(None);
                         return glib::Propagation::Stop;
                     }
                 }

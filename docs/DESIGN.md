@@ -1095,7 +1095,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Cut, Copy, Paste, Duplicate and Delete are Select's commands, on the ring's outer orbit while it holds something, Paste while there is something to paste, in the page's menu, whose secondary click picks the stroke under it first, and in the palette.
   A copy goes onto the system clipboard as plain geometry in a format of our own (`application/x-accent-pdf-ink`, JSON), beside its texts as plain text, so any PDF tab takes it, and a paste draws it again as strokes and texts of ours, which Select then holds.
   Another editor's stroke is copied stroke by stroke along its `/InkList`, so one without an `/InkList` stays out of a copy, and a cut leaves it on the page.
-  `Ctrl+V` lands centred on the pointer while it is over a page, the menu's Paste where the menu was opened, and the palette's and the ring's where the copy came from on the page being read, a step down and right for each paste of it after the first, a cut's first landing in its place, and none off the paper.
+  A paste lands where the copy came from, a step down and right for each paste of it after the first, as draw.io's does, and a cut's first in its place, wherever the pointer is (user decision 2026-11-03): one centred on the pointer put the ring's Paste under the ring.
+  The menu's Paste lands on the page it was opened on, `Ctrl+V`, the ring's and the palette's on the page being read, and none off the paper.
   A paste with another tool in hand picks Select up.
   Duplicate pastes a copy a step down and right without touching the clipboard, and the copies are held, so another Duplicate steps on from them.
   A move, a stretch, a turn, a delete, a cut, a paste and a duplicate are each one step for Undo, however many strokes they take.

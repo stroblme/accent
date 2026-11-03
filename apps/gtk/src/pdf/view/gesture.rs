@@ -432,12 +432,6 @@ impl PdfView {
         }
     }
 
-    /// The page under the pointer and the point on it, while the pointer is over a page.
-    pub fn under_pointer(&self) -> Option<(usize, f32, f32)> {
-        let (x, y) = self.imp().over.get()?;
-        self.page_point(x, y)
-    }
-
     /// Which handle of what the Select tool holds is under this point of the view: its rotate
     /// ring first, then a corner, an edge or its middle. Texts alone have only their middle.
     fn handle_under(&self, x: f64, y: f64) -> Option<Handle> {
