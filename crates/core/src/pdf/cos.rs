@@ -1,7 +1,7 @@
 //! The objects an edit reads and writes: the file through `accent_pdf`'s reader, and the
 //! session's update after it, which is what a save appends and pdfium is opened again over.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use accent_pdf::{Dict, Object, Pdf, Ref, Update};
@@ -24,6 +24,9 @@ pub(super) struct Objects {
     pub(super) pages: Vec<Ref>,
     /// Whether the page tree is one node, as the first page edit makes it (`Objects::flatten`).
     pub(super) flat: bool,
+    /// The image each picture written or copied in this session is, by its hash
+    /// (`Picture::key`): a picture pasted again shares it.
+    pub(super) pictures: HashMap<blake3::Hash, Ref>,
 }
 
 impl Objects {
@@ -34,6 +37,7 @@ impl Objects {
             pdf: Arc::new(pdf),
             pages,
             flat: false,
+            pictures: HashMap::new(),
         }
     }
 

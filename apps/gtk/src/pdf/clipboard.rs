@@ -82,7 +82,7 @@ impl PdfTab {
             let typed: Vec<&str> = (clips.iter())
                 .filter_map(|clip| match clip {
                     Clip::Text(typed) => Some(typed.text.as_str()),
-                    Clip::Ink { .. } => None,
+                    Clip::Ink { .. } | Clip::Image { .. } => None,
                 })
                 .collect();
             if !typed.is_empty() {
@@ -231,6 +231,17 @@ fn picked_of(clip: &Clip, id: u32) -> Picked {
                 typed: true,
             }
         }
+        Clip::Image { place, .. } => Picked {
+            id,
+            points: accent_core::pdf::picture_corners(*place).to_vec(),
+            bounds: clip.bounds(),
+            style: InkStyle {
+                width: 0.0,
+                rgba: [0, 0, 0, 0],
+                multiply: false,
+            },
+            typed: false,
+        },
     }
 }
 

@@ -94,6 +94,13 @@ impl Content {
         self.op(&[], " gs")
     }
 
+    /// `Do`: the XObject the resources name `name` painted, an image into the unit square.
+    pub fn paint(&mut self, name: &[u8]) -> &mut Self {
+        self.0.push(b'/');
+        self.0.extend(name);
+        self.op(&[], " Do")
+    }
+
     /// `BT`: a text object begins, its lines set from the origin.
     pub fn begin_text(&mut self) -> &mut Self {
         self.op(&[], "BT")

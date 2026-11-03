@@ -13,6 +13,7 @@ mod doc;
 mod ink;
 pub mod ledger;
 mod pages;
+mod picture;
 #[cfg(test)]
 mod tests;
 mod text;
@@ -26,7 +27,8 @@ pub use ink::{
     Drawn, IDENTITY, Matrix, apply, catmull_rom, cut, hit, invert, lassoed, rotation, swept, then,
     thin,
 };
-pub use ledger::{Ink, NamedInk, NamedText, Walked, fresh_id};
+pub use ledger::{Ink, NamedInk, NamedPicture, NamedText, Walked, fresh_id};
+pub use picture::{MAX_SIDE, Picture, PlacedPicture, picture_corners, picture_size, upright};
 pub use text::{line_top, link_with_alias, same_quads, selection_link, selection_quads};
 pub use typed::{BASELINE, LEADING, PADDING, TextStyle, Typed, TypedText, typeable};
 

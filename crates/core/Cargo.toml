@@ -7,7 +7,7 @@ license.workspace = true
 
 [features]
 default = []
-pdf = ["dep:pdfium-render", "dep:accent-pdf"]
+pdf = ["dep:pdfium-render", "dep:accent-pdf", "dep:base64"]
 
 [dependencies]
 # A diagram's labels are what the index holds of it (`index::reconcile`), read through the model.
@@ -55,6 +55,8 @@ unicode-width = "0.2"
 pdfium-render = { version = "0.9.4", optional = true, default-features = false, features = ["pdfium_latest", "thread_safe"] }
 # accent's own reader and writer of PDF objects: it makes every PDF write, pdfium only reads.
 accent-pdf = { workspace = true, optional = true }
+# Already in the lock through accent-cli; a picture's bytes in a PDF copy's JSON (`pdf::Picture`).
+base64 = { version = "0.23", optional = true }
 
 [dev-dependencies]
 # The examples' own errors: repo tooling, which matches on none of them.

@@ -5,6 +5,7 @@ mod foreign_ink;
 mod highlights;
 mod ink;
 mod pages;
+mod pictures;
 mod reads;
 mod text;
 mod writer;

@@ -93,6 +93,7 @@ dependencies = [
  "accent-drawio",
  "accent-pdf",
  "anyhow",
+ "base64",
  "blake3",
  "chrono",
  "ignore",

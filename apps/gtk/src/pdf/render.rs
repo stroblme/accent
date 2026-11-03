@@ -365,7 +365,7 @@ fn render_loop(
                 }
                 Request::Clip { page, ids, how } => {
                     let (copied, clips): (Vec<u32>, Vec<Vec<pdf::Clip>>) =
-                        ink.clips(&doc, page, &ids).into_iter().unzip();
+                        ink.clips(&mut doc, page, &ids).into_iter().unzip();
                     let clips = clips.concat();
                     send(view, Reply::Clipped { page, clips, how });
                     // What would not copy stays: a cut never loses what the clipboard lacks.

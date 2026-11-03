@@ -16,6 +16,9 @@ pub type NamedInk = (u32, pdf::InkShape);
 /// A text of ours under its name, as [`NamedInk`] names a stroke.
 pub type NamedText = (u32, pdf::TypedText);
 
+/// A picture of ours under its name, as [`NamedInk`] names a stroke.
+pub type NamedPicture = (u32, pdf::PlacedPicture);
+
 /// Allocate a process-wide name, including for eraser fragments not yet in the document.
 pub fn fresh_id() -> u32 {
     static NEXT: AtomicU32 = AtomicU32::new(1);
@@ -207,9 +210,9 @@ impl Ink {
         self.record_each(page, ids, steps)
     }
 
-    /// The strokes and texts `ids` of `page` as plain geometry, each under its name, in the
-    /// order they are drawn in; one that will not copy ([`PdfDoc::clip`]) is left out.
-    pub fn clips(&self, doc: &PdfDoc, page: usize, ids: &[u32]) -> Vec<(u32, Vec<pdf::Clip>)> {
+    /// The strokes, texts and pictures `ids` of `page` as plain geometry, each under its name,
+    /// in the order they are drawn in; one that will not copy ([`PdfDoc::clip`]) is left out.
+    pub fn clips(&self, doc: &mut PdfDoc, page: usize, ids: &[u32]) -> Vec<(u32, Vec<pdf::Clip>)> {
         (self.ordered(doc, page, ids).into_iter())
             .filter_map(|(id, at)| Some((id, doc.clip(page, at).ok()?)))
             .filter(|(_, clips)| !clips.is_empty())
@@ -359,6 +362,13 @@ impl Ink {
     pub fn named_texts(&mut self, doc: &PdfDoc, page: usize) -> Vec<NamedText> {
         (doc.texts(page).unwrap_or_default().into_iter())
             .map(|text| (self.name(text.at), text))
+            .collect()
+    }
+
+    /// Every picture of ours on `page`, each under the name the tools will know it by.
+    pub fn named_pictures(&mut self, doc: &PdfDoc, page: usize) -> Vec<NamedPicture> {
+        (doc.pictures(page).unwrap_or_default().into_iter())
+            .map(|picture| (self.name(picture.at), picture))
             .collect()
     }
 
@@ -907,13 +917,22 @@ mod tests {
         };
         let (_, at) = doc.add_text(0, (20.0, 60.0), "Hi", red).unwrap();
         ink.drew(0, at);
-        // Where each stroke starts and each text's corner is on a page, and how each is drawn.
+        let picture = pdf::Clip::Image {
+            place: [20.0, 0.0, 0.0, 10.0, 100.0, 20.0],
+            picture: pdf::Picture::pixels(1, 1, &[0, 0, 255, 255]),
+        };
+        ink.paste(&mut doc, 0, &[picture], pdf::IDENTITY, &[fresh_id()])
+            .unwrap();
+        // Where each stroke starts, each text's corner and each picture's is on a page, and how
+        // each is drawn.
         let placed = |doc: &PdfDoc, page| {
             let inks = doc.inks(page).unwrap().into_iter();
             let inks = inks.map(|i| (i.points[0], format!("{:?}", i.style)));
             let texts = doc.texts(page).unwrap().into_iter();
             let texts = texts.map(|t| (t.typed.at, format!("{:?}", t.typed.style)));
-            let mut out: Vec<_> = (inks.chain(texts))
+            let pictures = doc.pictures(page).unwrap().into_iter();
+            let pictures = pictures.map(|p| ((p.place[4], p.place[5]), "picture".to_string()));
+            let mut out: Vec<_> = (inks.chain(texts).chain(pictures))
                 .map(|((x, y), look)| (x.round() as i32, y.round() as i32, look))
                 .collect();
             out.sort();
@@ -927,20 +946,21 @@ mod tests {
         };
         let mut ids: Vec<u32> = ink.named(&doc, 0).iter().map(|(id, _)| *id).collect();
         ids.extend(ink.named_texts(&doc, 0).iter().map(|(id, _)| *id));
+        ids.extend(ink.named_pictures(&doc, 0).iter().map(|(id, _)| *id));
         let before = placed(&doc, 0);
 
         let right = [1.0, 0.0, 0.0, 1.0, 10.0, 0.0];
         ink.transform(&mut doc, 0, &ids, right).unwrap();
-        assert_eq!(corners(&doc, 0), [(30, 20), (30, 40), (30, 60)]);
+        assert_eq!(corners(&doc, 0), [(30, 20), (30, 40), (30, 60), (110, 20)]);
         ink.walk(&mut doc, false);
-        assert_eq!(placed(&doc, 0), before, "one Undo puts all three back");
+        assert_eq!(placed(&doc, 0), before, "one Undo puts all four back");
 
         ink.delete(&mut doc, 0, &ids[1..]).unwrap();
         assert_eq!(corners(&doc, 0), [(20, 20)]);
         ink.walk(&mut doc, false);
-        assert_eq!(placed(&doc, 0), before, "one Undo puts both back");
+        assert_eq!(placed(&doc, 0), before, "one Undo puts all three back");
 
-        let clips: Vec<pdf::Clip> = (ink.clips(&doc, 0, &ids).into_iter())
+        let clips: Vec<pdf::Clip> = (ink.clips(&mut doc, 0, &ids).into_iter())
             .flat_map(|(_, clips)| clips)
             .collect();
         let json = serde_json::to_string(&clips).unwrap();
@@ -953,10 +973,11 @@ mod tests {
         assert_eq!(placed(&doc, 1), pasted);
         let mut listed: Vec<u32> = ink.named(&doc, 1).iter().map(|(id, _)| *id).collect();
         listed.extend(ink.named_texts(&doc, 1).iter().map(|(id, _)| *id));
+        listed.extend(ink.named_pictures(&doc, 1).iter().map(|(id, _)| *id));
         listed.sort();
         assert_eq!(listed, names, "under the names given");
         ink.walk(&mut doc, false);
-        assert!(corners(&doc, 1).is_empty(), "one Undo takes all three off");
+        assert!(corners(&doc, 1).is_empty(), "one Undo takes all four off");
         ink.walk(&mut doc, true);
         assert_eq!(placed(&reopen(&dir, &doc), 1), pasted);
     }

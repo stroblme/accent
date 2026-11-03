@@ -79,9 +79,10 @@ pub enum Drawn {
         at: accent_pdf::Ref,
         area: super::Rect,
     },
-    /// Another editor's: the entries that left `/Annots` with it, its own and its popup's, each
-    /// with the place it had. Only its own dictionary draws it as it was, so the same entries go
-    /// back where they were; the dictionaries were never touched. `area` is the box it covers.
+    /// Another editor's, or a picture of ours: the entries that left `/Annots` with it, its own
+    /// and its popup's, each with the place it had. Only its own dictionary draws it as it was,
+    /// so the same entries go back where they were; the dictionaries were never touched. `area`
+    /// is the box it covers.
     Foreign {
         entries: Vec<(usize, accent_pdf::Object)>,
         area: super::Rect,

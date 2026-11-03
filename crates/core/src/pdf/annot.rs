@@ -12,6 +12,7 @@ use super::ink::{
     Drawn, IDENTITY, Seg, apply, catmull_rom, cut, flatten, points_of, polyline, segments_of, then,
     thin, transformed,
 };
+use super::picture::PlacedPicture;
 use super::text::{line_top, same_quads, selection_quads};
 use super::typed::Typed;
 use super::{
@@ -426,13 +427,20 @@ impl PdfDoc {
         Ok(Some(Cut { was, left, area }))
     }
 
-    /// The stroke or text of ours `at` on `page` as plain geometry, which a paste draws again as
-    /// ours: ours along its flattened path, another editor's one clip per stroke of its
-    /// `/InkList`, as the partial eraser cuts it, and a text as typed. Nothing for another
-    /// editor's stroke without an `/InkList`, which may draw in a space of its own.
-    pub fn clip(&self, page: usize, at: Ref) -> Result<Vec<Clip>> {
+    /// The stroke, text or picture of ours `at` on `page` as plain geometry, which a paste draws
+    /// again as ours: ours along its flattened path, another editor's one clip per stroke of its
+    /// `/InkList`, as the partial eraser cuts it, a text as typed and a picture with its image's
+    /// bytes, which a paste into this document then shares. Nothing for another editor's stroke
+    /// without an `/InkList`, which may draw in a space of its own.
+    pub fn clip(&mut self, page: usize, at: Ref) -> Result<Vec<Clip>> {
         if let Ok((typed, _)) = self.typed_at(page, at) {
             return Ok(vec![Clip::Text(typed)]);
+        }
+        if let Ok((placed, image)) = self.picture_at(page, at) {
+            let picture = self.cos.picture_data(image)?;
+            self.cos.pictures.entry(picture.key()).or_insert(image);
+            let place = placed.place;
+            return Ok(vec![Clip::Image { place, picture }]);
         }
         let read = self.read_at(page, at)?;
         let strokes = match read.ours {
@@ -479,11 +487,14 @@ impl PdfDoc {
         Ok(moved)
     }
 
-    /// The stroke or text of ours `at` on `page` as a move or a take needs it, read through
+    /// The stroke, text or picture `at` on `page` as a move or a take needs it, read through
     /// pdfium, so before anything of the page is written.
     fn hold(&self, page: usize, at: Ref) -> Result<Held> {
         if let Ok((typed, was)) = self.typed_at(page, at) {
             return Ok(Held::Text(typed, was));
+        }
+        if let Ok((placed, image)) = self.picture_at(page, at) {
+            return Ok(Held::Picture(placed, image));
         }
         Ok(Held::Ink(self.read_at(page, at)?))
     }
@@ -499,6 +510,11 @@ impl PdfDoc {
                 };
                 let (now, _) = self.cos.put_text(page, height, &moved, Some(at))?;
                 return Ok(was.union(now));
+            }
+            Held::Picture(placed, image) => {
+                let place = then(placed.place, m);
+                let (now, _) = (self.cos).put_stamp(page, height, image, place, Some(at))?;
+                return Ok(placed.bounds.union(now));
             }
             Held::Ink(read) => read,
         };
@@ -546,6 +562,15 @@ impl PdfDoc {
                 entries.retain(|e| *e != Object::Ref(at));
                 self.cos.set_annots(page, entries)?;
                 return Ok((Drawn::Ours { at, area }, area));
+            }
+            // A picture goes back where it was among the page's annotations, as it moves there.
+            Held::Picture(placed, _) => {
+                let mut entries = self.cos.annots(page)?;
+                let index = self.cos.index_of(page, at)?;
+                let entry = entries.remove(index);
+                self.cos.set_annots(page, entries)?;
+                let (entries, area) = (vec![(index, entry)], placed.bounds);
+                return Ok((Drawn::Foreign { entries, area }, area));
             }
             Held::Ink(read) => read,
         };
@@ -866,7 +891,7 @@ impl Objects {
     /// The box of the form `stream` and the matrix that puts it on the page, in the file's space:
     /// its `/Matrix`, then the fit of the box that makes into the annotation's `rect` (ISO 32000-1
     /// §12.5.5, Algorithm 8.1). `None` for a form without a `/BBox`.
-    fn fitted(&self, stream: &Dict, rect: Rect) -> Option<(Rect, Matrix)> {
+    pub(super) fn fitted(&self, stream: &Dict, rect: Rect) -> Option<(Rect, Matrix)> {
         let bbox = stream.get(b"BBox").and_then(|b| self.area(b))?;
         let form = (stream.get(b"Matrix").and_then(|m| self.resolve(m).ok()))
             .and_then(|m| <[f32; 6]>::try_from(numbers(&m)?).ok())
@@ -946,10 +971,12 @@ fn numbers(o: &Object) -> Option<Vec<f32>> {
     o.as_array()?.iter().map(number).collect()
 }
 
-/// A stroke or a text of ours as a move or a take reads it.
+/// A stroke, a text or a picture of ours as a move or a take reads it.
 enum Held {
     /// A text of ours, and its `/Rect`.
     Text(Typed, Rect),
+    /// A picture of ours, and its image.
+    Picture(PlacedPicture, Ref),
     Ink(Read),
 }
 
