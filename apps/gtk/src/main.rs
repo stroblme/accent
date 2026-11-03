@@ -1873,6 +1873,8 @@ impl App {
             .website("https://github.com/stroblme/accent")
             .comments("Markdown and PDF knowledge editor.")
             .build();
+        // Below the website on the Details page.
+        about.add_link("Documentation", "https://stroblme.github.io/accent/");
         about.present(Some(&self.window));
         dialogs::close_on_outside_press(about.upcast_ref());
     }
