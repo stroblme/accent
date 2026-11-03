@@ -12,9 +12,11 @@ mod paths;
 mod transfer;
 
 pub use clipboard::Clip;
-#[cfg(feature = "bench")]
+#[cfg(any(test, feature = "bench"))]
 pub use menu::labels;
-pub use menu::{context_menu, dependency_menu, row_dir};
+pub use menu::{
+    At, Facts, GROUP, actions, context_menu, dependency_menu, file_sections, item, row_dir,
+};
 pub(crate) use paths::at_free_name;
 pub use paths::{move_dest, topmost};
 #[cfg(feature = "bench")]
@@ -110,6 +112,10 @@ pub struct Ops {
     pub relist: Box<dyn Fn(&str)>,
     /// Open in Terminal on a folder: a new shell there, on the host for a remote vault.
     pub terminal: Box<dyn Fn(&str)>,
+    /// Reveal in Sidebar on a file's menu: the Files pane, scrolled to the file's row.
+    pub reveal: Box<dyn Fn(&str)>,
+    /// Print… (`None`) or an export of a file, on its tab, which is opened for it if need be.
+    pub make: Box<dyn Fn(&str, Option<crate::export::Export>)>,
     /// Dim these tree rows and undim the rest: what a Cut is waiting to move. Cleared with an
     /// empty slice by the paste that answers it.
     pub cut: Box<dyn Fn(&[String])>,

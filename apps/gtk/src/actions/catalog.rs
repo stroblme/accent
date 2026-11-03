@@ -25,9 +25,9 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.save", "Save", &["<Primary>s"]),
     ("win.save-as", "Save As…", &["<Primary><Shift>s"]),
     ("win.open-file", "Open File…", &["<Primary>o"]),
-    ("win.new-file", "New File", &["<Primary>n"]),
-    ("win.new-folder", "New Folder", &["<Primary><Shift>n"]),
-    ("win.new-drawing", "New Drawing", &[]),
+    ("win.new-file", "New File…", &["<Primary>n"]),
+    ("win.new-folder", "New Folder…", &["<Primary><Shift>n"]),
+    ("win.new-drawing", "New Drawing…", &[]),
     ("win.upload", "Upload Files…", &[]),
     // No chords: `Ctrl+P`, the HIG's Print, is the palette (DESIGN.md, Deviations).
     ("win.print", "Print…", &[]),
@@ -391,7 +391,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ),
     ("win.debug-stop", "Stop Debugging", &["<Shift>F5"]),
     ("win.debug-console", "Debug Console", &[]),
-    ("win.rename", "Rename", &["F2"]),
+    ("win.rename", "Rename…", &["F2"]),
     // No chord: Delete over a tree row already trashes, from the tree's own key controller, and
     // a chord that reaches a focused editor is the last thing a delete should have.
     ("win.trash", "Move to Trash", &[]),
@@ -477,48 +477,138 @@ mod tests {
     /// puts on a menu is a command the window has and the palette lists.
     #[test]
     fn the_tab_menu_names_actions_that_exist() {
-        for side in [Side::Left, Side::Right, Side::Up, Side::Down] {
-            for prefix in ["win.split-", "win.move-tab-"] {
-                let action = format!("{prefix}{}", side.action());
+        let loose = TabMenu {
+            movable: true,
+            view: Some("win.diagram-grid"),
+            file: TabFile::Loose(Some(Kind::Diagram)),
+            ..TabMenu::default()
+        };
+        let pinned = TabMenu {
+            pinned: true,
+            view: Some("win.notebook-open-text"),
+            ..TabMenu::default()
+        };
+        for tab in [loose, pinned] {
+            let menu = gio::Menu::new();
+            fill_tab_menu(&menu, &tab);
+            for action in menu_actions(menu.upcast_ref()) {
                 assert!(
                     ACTIONS.iter().any(|(name, _, _)| *name == action),
                     "{action} is on the tab menu but not in ACTIONS"
                 );
             }
         }
-        for action in [
-            "win.rename",
-            "win.trash",
-            "win.move-to-new-window",
-            "win.pin-tab",
-            "win.unpin-tab",
-            "win.print",
-            "win.export-pdf",
-            "win.export-html",
-            "win.export-png",
-            "win.export-svg",
-            "win.diagram-grid",
-            "win.notebook-open-text",
-        ] {
-            assert!(
-                ACTIONS.iter().any(|(name, _, _)| *name == action),
-                "{action} is on the tab menu but not in ACTIONS"
+    }
+
+    /// Split ▸ and Move Tab ▸ lead, each side an item, then Move to New Window on a tab another
+    /// window can open (not a shell, a comparison or a remote vault's file) and the pin.
+    #[test]
+    fn the_tab_menu_leads_with_its_moves() {
+        let head = |movable, pinned| {
+            let menu = gio::Menu::new();
+            fill_tab_menu(
+                &menu,
+                &TabMenu {
+                    movable,
+                    pinned,
+                    ..TabMenu::default()
+                },
             );
+            let section = menu.item_link(0, "section").expect("the tab's section");
+            crate::fileops::labels(&section)
+        };
+        assert_eq!(
+            head(true, false),
+            ["Split", "Move Tab", "Move to New Window", "Pin Tab"]
+        );
+        assert_eq!(head(false, true), ["Split", "Move Tab", "Unpin Tab"]);
+        let menu = gio::Menu::new();
+        fill_tab_menu(&menu, &TabMenu::default());
+        let actions = menu_actions(menu.upcast_ref());
+        assert_eq!(
+            actions[..4],
+            [
+                "win.split-left",
+                "win.split-right",
+                "win.split-up",
+                "win.split-down"
+            ]
+        );
+        // A shell or a comparison has nothing more, and a pane starts with that menu.
+        assert_eq!(menu.n_items(), 1);
+        assert_eq!(tab_menu().n_items(), 1);
+    }
+
+    /// A vault file's tab has the tree's file part through the window's `fileops` actions, a loose
+    /// file only what names, shows and prints it.
+    #[test]
+    fn the_tab_menu_names_its_file_as_the_tree_does() {
+        let actions = |file| {
+            let menu = gio::Menu::new();
+            fill_tab_menu(
+                &menu,
+                &TabMenu {
+                    file,
+                    ..TabMenu::default()
+                },
+            );
+            menu_actions(menu.upcast_ref())[9..].to_vec()
+        };
+        let facts = crate::fileops::Facts {
+            at: crate::fileops::At::Tab,
+            prints: Some(Kind::Pdf),
+            ..Default::default()
+        };
+        let vault = actions(TabFile::Vault {
+            rel: "a.pdf".into(),
+            facts,
+        });
+        assert_eq!(vault.first().map(String::as_str), Some("fileops.rename"));
+        assert_eq!(vault.last().map(String::as_str), Some("fileops.trash"));
+        assert!(vault.iter().any(|a| a == "fileops.reveal"));
+        assert!(vault.iter().any(|a| a == "fileops.export-pdf"));
+        assert_eq!(
+            actions(TabFile::Loose(Some(Kind::Note))),
+            [
+                "win.copy-name",
+                "win.copy-absolute-path",
+                "win.show-in-files",
+                "win.print",
+                "win.export-html"
+            ]
+        );
+    }
+
+    /// Print… and the exports are on every file's menu, not the window's.
+    #[test]
+    fn no_primary_menu_prints() {
+        use crate::shell::{Loose, WindowKey};
+        for key in [
+            WindowKey::Vault("/home/me/Notes".into()),
+            WindowKey::Loose(Loose::Documents),
+            WindowKey::Loose(Loose::Terminal),
+            WindowKey::Terminal("terminal://dev".into()),
+        ] {
+            let actions = menu_actions(primary_menu(&key).upcast_ref());
+            assert!(!actions.iter().any(|a| PRINTS.contains(&a.as_str())));
         }
     }
 
-    /// Move to New Window ends the moves before the pin, on a tab another window can open: a
-    /// shell, a comparison and a remote vault's file cannot go.
-    #[test]
-    fn only_a_tab_that_can_move_offers_a_new_window() {
-        let moves = |movable| {
-            let menu = gio::Menu::new();
-            fill_tab_menu(&menu, false, movable, false, None);
-            let section = menu.item_link(1, "section").expect("the move section");
-            menu_actions(&section)[4..].to_vec()
-        };
-        assert_eq!(moves(true), ["win.move-to-new-window", "win.pin-tab"]);
-        assert_eq!(moves(false), ["win.pin-tab"]);
+    /// Every action a menu names, its sections' and submenus' included, in the order it shows
+    /// them.
+    fn menu_actions(menu: &gio::MenuModel) -> Vec<String> {
+        (0..menu.n_items())
+            .flat_map(
+                |i| match (menu.item_link(i, "section")).or(menu.item_link(i, "submenu")) {
+                    Some(section) => menu_actions(&section),
+                    None => menu
+                        .item_attribute_value(i, "action", None)
+                        .and_then(|action| action.get::<String>())
+                        .into_iter()
+                        .collect(),
+                },
+            )
+            .collect()
     }
 
     #[test]
@@ -611,109 +701,6 @@ mod tests {
                 .iter()
                 .any(|(name, _, _)| *name == "win.close-session")
         );
-    }
-
-    /// The two items a shell or a comparison must not be offered, and that a pane built before
-    /// any page exists does not carry either.
-    #[test]
-    fn the_tab_menu_names_a_file_only_where_there_is_one() {
-        let sections = |file| {
-            let menu = gio::Menu::new();
-            fill_tab_menu(&menu, file, false, false, None);
-            menu.n_items()
-        };
-        assert_eq!(sections(true), sections(false) + 2);
-        assert_eq!(tab_menu().n_items(), sections(false));
-    }
-
-    /// Pin Tab or Unpin Tab, whichever the page is not yet, closing the section that moves it.
-    #[test]
-    fn the_tab_menu_offers_the_pin_the_page_does_not_have() {
-        let last_move = |pinned| {
-            let menu = gio::Menu::new();
-            fill_tab_menu(&menu, false, false, pinned, None);
-            let moves = menu.item_link(1, "section").expect("the move section");
-            let last = moves.n_items() - 1;
-            moves
-                .item_attribute_value(last, "action", None)
-                .and_then(|action| action.get::<String>())
-        };
-        assert_eq!(last_move(false).as_deref(), Some("win.pin-tab"));
-        assert_eq!(last_move(true).as_deref(), Some("win.unpin-tab"));
-    }
-
-    /// Every action a menu names, its sections' and submenus' included, in the order it shows
-    /// them.
-    fn menu_actions(menu: &gio::MenuModel) -> Vec<String> {
-        (0..menu.n_items())
-            .flat_map(
-                |i| match (menu.item_link(i, "section")).or(menu.item_link(i, "submenu")) {
-                    Some(section) => menu_actions(&section),
-                    None => menu
-                        .item_attribute_value(i, "action", None)
-                        .and_then(|action| action.get::<String>())
-                        .into_iter()
-                        .collect(),
-                },
-            )
-            .collect()
-    }
-
-    /// Print… and every export follow the files wherever a document can be in front; a window of
-    /// shells has none of them.
-    #[test]
-    fn the_primary_menu_prints_where_a_document_can_be() {
-        use crate::shell::{Loose, WindowKey};
-        let actions = |key| menu_actions(primary_menu(&key).upcast_ref());
-        for key in [
-            WindowKey::Vault("/home/me/Notes".into()),
-            WindowKey::Loose(Loose::Documents),
-        ] {
-            let menu = actions(key);
-            let at = menu
-                .iter()
-                .position(|a| a == "win.open-file")
-                .expect("Open File…");
-            assert_eq!(menu[at + 1..at + 6], PRINTS);
-        }
-        for key in [
-            WindowKey::Loose(Loose::Terminal),
-            WindowKey::Terminal("terminal://dev".into()),
-        ] {
-            assert!(!actions(key).iter().any(|a| PRINTS.contains(&a.as_str())));
-        }
-    }
-
-    /// A note is printed and exported two ways, a PDF two and a diagram four, right after Reveal
-    /// in Sidebar, a diagram's Show Grid after them; a shell, a comparison or any other tab is
-    /// offered none.
-    #[test]
-    fn the_tab_menu_prints_what_can_be_printed() {
-        let after_reveal = |prints| {
-            let menu = gio::Menu::new();
-            fill_tab_menu(&menu, true, false, false, prints);
-            let actions = menu_actions(menu.upcast_ref());
-            let at = actions
-                .iter()
-                .position(|a| a == "win.reveal-in-sidebar")
-                .expect("Reveal in Sidebar");
-            actions[at + 1..].to_vec()
-        };
-        let [print, pdf, html, rename, trash] = [
-            "win.print",
-            "win.export-pdf",
-            "win.export-html",
-            "win.rename",
-            "win.trash",
-        ];
-        assert_eq!(after_reveal(Some(Kind::Note)), [print, html, rename, trash]);
-        assert_eq!(after_reveal(Some(Kind::Pdf)), [print, pdf, rename, trash]);
-        let (png, svg, grid) = ("win.export-png", "win.export-svg", "win.diagram-grid");
-        assert_eq!(
-            after_reveal(Some(Kind::Diagram)),
-            [print, pdf, png, svg, grid, rename, trash]
-        );
-        assert_eq!(after_reveal(None), [rename, trash]);
     }
 
     /// Same guard for the mouse: a side button fires an action by name, so the name has to be one

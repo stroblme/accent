@@ -64,7 +64,7 @@ The `accent-target` line is only an instruction to Accent, so it does not appear
 
 Press `Ctrl+M` to show the rendered preview beside the editor, or return to the editor.
 The preview follows your edits and lets you follow links and tags.
-Use **Print…**, **Export as PDF…** or **Export as HTML…** from the menu when you want to share a note.
+Right-click a note's tab or its row in the Files pane and choose **Print…** or **Export as HTML…** when you want to share it.
 The HTML export includes local images, so it works as one file.
 If `merl-rt` is installed, Accent can suggest the rest of a line as faint **ghost text**.
 Press `Tab` to accept it, `Ctrl+Right` to take one word, or `Esc` to dismiss it.

@@ -1679,14 +1679,6 @@ impl App {
             .map(|d| d.key())
     }
 
-    /// Return the vault file targeted by an open tab menu, for Rename and Trash.
-    ///
-    /// Without a menu, those commands use tree selection. Shells, comparisons and loose files
-    /// cannot be targeted because these operations belong to the window's vault.
-    fn menu_file(&self) -> Option<String> {
-        self.vault_file_of(&self.menu_page.borrow().clone()?)
-    }
-
     /// The selected tree row, where it is one the app may act on. A row inside a dependency tree
     /// lists and opens but is never changed, so it is no target for a rename, a new note or a
     /// trash (`tree::Row::dependency`).

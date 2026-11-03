@@ -875,7 +875,7 @@ pub(super) async fn xtest(steps: &str) {
 
 /// The changes list's row for `path`, a file or a folder. A header row keeps whatever tooltip its
 /// widget last had, so the layout it shows is asked as well.
-fn change_row(list: &gtk::Widget, path: &str) -> Option<gtk::Widget> {
+pub(super) fn change_row(list: &gtk::Widget, path: &str) -> Option<gtk::Widget> {
     find_widget(list, &|w| {
         w.downcast_ref::<gtk::Stack>().is_some_and(|s| {
             matches!(s.visible_child_name().as_deref(), Some("entry" | "folder"))

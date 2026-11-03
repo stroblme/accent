@@ -1,17 +1,170 @@
-//! File-tree context menus for rows, folders and empty space, backed by an action group.
+//! File menus: the Files tree's rows, folders and empty space, and the file part a tab's menu and
+//! a Git row's menu share with them, backed by one action group on the window.
 
 use super::clipboard::{self, can_paste};
 use super::{
     Ops, download, move_to, new_drawing, new_file, new_folder, rename, trash, trash_all, upload,
 };
 use super::{copy_absolute_path, copy_name, copy_relative_path, show_in_files};
+use crate::actions::{label_of, print_actions};
+use crate::doc::Kind;
+use crate::export::{Export, printable_name};
 use accent_core::path::parent_dir;
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
 use std::rc::Rc;
 
-/// The action group the context menu's items resolve through, inserted on the tree widget.
-const GROUP: &str = "fileops";
+/// The action group every file menu's items resolve through, inserted on the window ([`actions`]).
+pub const GROUP: &str = "fileops";
+
+/// Where a file's menu is opened, which decides what it offers beside the file itself.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum At {
+    /// A Files tree row, which is where the file already is.
+    #[default]
+    Tree,
+    /// A tab, which has the file open.
+    Tab,
+    /// A Git pane row, which is about the file's change and changes the file only through git.
+    Git,
+}
+
+/// What the part of a file's menu every location shares ([`file_sections`]) is built from.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Facts {
+    pub at: At,
+    /// A folder: Leave Out of Search and Reload, and nothing printed.
+    pub dir: bool,
+    /// On a host, where Download… stands in for Show in Files.
+    pub remote: bool,
+    /// What the file can be printed and exported as.
+    pub prints: Option<Kind>,
+    /// Gone from the working tree (a Git row's deletion): only its name and paths are left.
+    pub gone: bool,
+    /// The clipboard holds files, so a tree row offers Paste.
+    pub paste: bool,
+}
+
+/// Each verb's label, a `win.` action's where the palette has the same command so the two cannot
+/// disagree; [`label_of`] hands back any other as it is.
+const LABELS: &[(&str, &str)] = &[
+    ("open", "Open"),
+    ("open-apart", "Open in New Window"),
+    ("terminal", "Open in Terminal"),
+    ("new-file", "win.new-file"),
+    ("new-folder", "win.new-folder"),
+    ("new-drawing", "win.new-drawing"),
+    ("upload", "win.upload"),
+    ("rename", "win.rename"),
+    ("rename-folder", "win.rename"),
+    ("exclude", "Leave Out of Search"),
+    ("reload", "Reload"),
+    ("cut", "Cut"),
+    ("cut-folder", "Cut"),
+    ("copy", "Copy"),
+    ("copy-folder", "Copy"),
+    ("move-to", "Move to…"),
+    ("paste", "Paste"),
+    ("copy-name", "win.copy-name"),
+    ("copy-rel", "win.copy-relative-path"),
+    ("copy-abs", "win.copy-absolute-path"),
+    ("show", "win.show-in-files"),
+    ("download", "Download…"),
+    ("reveal", "win.reveal-in-sidebar"),
+    ("print", "win.print"),
+    ("export-pdf", "win.export-pdf"),
+    ("export-html", "win.export-html"),
+    ("export-png", "win.export-png"),
+    ("export-svg", "win.export-svg"),
+    ("trash", "win.trash"),
+];
+
+/// The label of the menu item for `verb`.
+fn label(verb: &'static str) -> &'static str {
+    let named = LABELS.iter().find(|(v, _)| *v == verb);
+    label_of(named.map_or(verb, |(_, name)| name))
+}
+
+/// The item for `verb`, aimed at `target`.
+fn verb(verb: &'static str, target: &str) -> gio::MenuItem {
+    item(GROUP, label(verb), verb, target)
+}
+
+/// The verbs of a file's menu from Rename on, a section each, in DESIGN.md's order (Context
+/// menus): its name, the clipboard, the names it can be copied as and the ways out of the app,
+/// what it is printed as, and the trash. A Git row changes a file only through git, so it has
+/// neither the first two nor the last.
+fn file_verbs(f: &Facts) -> Vec<Vec<&'static str>> {
+    let changes = f.at != At::Git;
+    let mut sections = Vec::new();
+    if changes {
+        sections.push(match f.dir {
+            true => vec!["rename-folder", "exclude", "reload"],
+            false => vec!["rename"],
+        });
+        let mut clip = match f.dir {
+            true => vec!["cut-folder", "copy-folder", "move-to"],
+            false => vec!["cut", "copy", "move-to"],
+        };
+        if f.paste {
+            clip.push("paste");
+        }
+        sections.push(clip);
+    }
+    sections.push(names(f));
+    let prints: Vec<&str> = print_actions(f.prints)
+        .iter()
+        .filter_map(|action| action.strip_prefix("win."))
+        .collect();
+    if !f.dir && !f.gone && !prints.is_empty() {
+        sections.push(prints);
+    }
+    if changes {
+        sections.push(vec!["trash"]);
+    }
+    sections
+}
+
+/// Copy Name, the two Copy Paths and the way out of the app: Show in Files, or Download… for a
+/// host's file, which no file manager here can show. Reveal in Sidebar ends it on a menu that is
+/// not the tree's own, and a file deleted from the working tree has only its name and paths left.
+/// The name first: it is the shortest answer to "what is this file called".
+fn names(f: &Facts) -> Vec<&'static str> {
+    let mut verbs = vec!["copy-name", "copy-rel", "copy-abs"];
+    if f.gone {
+        return verbs;
+    }
+    match (f.remote, f.dir) {
+        (false, _) => verbs.push("show"),
+        (true, false) => verbs.push("download"),
+        (true, true) => {}
+    }
+    if f.at != At::Tree {
+        verbs.push("reveal");
+    }
+    verbs
+}
+
+/// The part of a file's menu the tree, a tab and a Git row share, from Rename on, each item a
+/// [`GROUP`] action on `rel`.
+pub fn file_sections(rel: &str, f: &Facts) -> Vec<gio::Menu> {
+    file_verbs(f)
+        .into_iter()
+        .map(|verbs| {
+            let section = gio::Menu::new();
+            for name in verbs {
+                section.append_item(&match name {
+                    "move-to" => many(label(name), name, &[(rel.to_string(), f.dir)]),
+                    // Paste puts things in the folder the row is or is in.
+                    "paste" => verb(name, row_dir(Some((rel, f.dir)))),
+                    _ => verb(name, rel),
+                });
+            }
+            section
+        })
+        .collect()
+}
+
 /// File-tree menu anchored in `host` coordinates. `row` supplies a path and directory flag;
 /// blank space offers creation and paste only. `marked` selects the multi-file [`marked_menu`].
 ///
@@ -24,71 +177,59 @@ pub fn context_menu(
     marked: &[(String, bool)],
     anchor: gdk::Rectangle,
 ) -> gtk::PopoverMenu {
-    // On the host, not the list: an action resolves up the widget tree from the popover's parent.
-    // Re-inserted per menu: the group holds a clone of `ops` and nothing else, and replacing it
-    // costs a handful of small objects, which is less than remembering whether it is already there.
-    host.insert_action_group(GROUP, Some(&actions(ops)));
-
     if !marked.is_empty() {
         let menu = marked_menu(marked, row_dir(row), can_paste(ops));
         return crate::widgets::popup_menu(host, &menu, Some(anchor));
     }
+    let remote = ops.vault.is_remote();
     let menu = gio::Menu::new();
     if let Some((rel, false)) = row {
-        menu.append_item(&item(GROUP, "Open", "open", rel));
+        menu.append_item(&verb("open", rel));
         // A window with no vault opens a file by its path on this machine, which a remote vault's
         // file is not.
-        if !ops.vault.is_remote() {
-            menu.append_item(&item(GROUP, "Open in New Window", "open-apart", rel));
+        if !remote {
+            menu.append_item(&verb("open-apart", rel));
         }
     }
     // A folder opens as a shell there, where a file has Open.
     if let Some((rel, true)) = row {
-        menu.append_item(&item(GROUP, "Open in Terminal", "terminal", rel));
+        menu.append_item(&verb("terminal", rel));
     }
     // Everything that puts something in a folder shares one target, so a right-click anywhere in
     // the tree can create: in the folder clicked, beside the file clicked, or in the vault root.
     let dir = row_dir(row);
-    menu.append_item(&item(GROUP, "New File", "new-file", dir));
-    menu.append_item(&item(GROUP, "New Folder", "new-folder", dir));
+    menu.append_item(&verb("new-file", dir));
+    menu.append_item(&verb("new-folder", dir));
     // A blank PDF to draw on.
-    menu.append_item(&item(GROUP, "New Drawing", "new-drawing", dir));
+    menu.append_item(&verb("new-drawing", dir));
     // Putting files in is only worth offering where they are not here already; a folder of a
     // local vault is one the file manager can be dropped onto.
-    if ops.vault.is_remote() {
-        menu.append_item(&item(GROUP, "Upload Files…", "upload", dir));
+    if remote {
+        menu.append_item(&verb("upload", dir));
     }
     // Everything below names one file or folder, so none of it belongs on a menu opened over
     // blank space. Splitting is not here at all: it opens a note beside the active tab, which is
     // what the tab's own menu and `win.split-*` are for, not something done to a path.
-    let Some((rel, is_dir)) = row else {
+    let Some((rel, dir)) = row else {
         // Nothing else names a path, but Paste names the folder it puts things in, and here that
         // is the vault root — the same target New File has just been given.
-        menu.append_section(None, &clip_section(ops, None, dir));
+        if can_paste(ops) {
+            let paste = gio::Menu::new();
+            paste.append_item(&verb("paste", ""));
+            menu.append_section(None, &paste);
+        }
         return crate::widgets::popup_menu(host, &menu, Some(anchor));
     };
-    // Rename is the move as well as the name: a path typed into it carries the file. A folder's is
-    // an action of its own because the dialog selects a folder's whole name and only a file's
-    // stem.
-    let rename = if is_dir { "rename-folder" } else { "rename" };
-    menu.append_item(&item(GROUP, "Rename", rename, rel));
-    // Only a directory can be left out: `[search] exclude` is a list of folders, and the path is
-    // right here, which is why this beats a preferences row nobody can point at a folder from.
-    if is_dir {
-        menu.append_item(&item(GROUP, "Leave Out of Search", "exclude", rel));
-        // For a listing that has fallen behind the disk: what the watcher never reported.
-        menu.append_item(&item(GROUP, "Reload", "reload", rel));
+    let facts = Facts {
+        dir,
+        remote,
+        prints: printable_name(rel),
+        paste: can_paste(ops),
+        ..Facts::default()
+    };
+    for section in file_sections(rel, &facts) {
+        menu.append_section(None, &section);
     }
-    // A file manager's own three, in a section of their own between what changes the file and
-    // what reads its name out.
-    menu.append_section(None, &clip_section(ops, Some((rel, is_dir)), dir));
-    // Reading the name or the path out and leaving the app are neither edits nor deletions, so
-    // they get a section of their own between the two.
-    menu.append_section(None, &elsewhere(rel, is_dir, ops.vault.is_remote()));
-    // Its own section, so the one destructive item is never next to Rename by accident.
-    let danger = gio::Menu::new();
-    danger.append_item(&item(GROUP, "Move to Trash", "trash", rel));
-    menu.append_section(None, &danger);
     crate::widgets::popup_menu(host, &menu, Some(anchor))
 }
 
@@ -102,61 +243,56 @@ pub fn dependency_menu(
     top: bool,
     anchor: gdk::Rectangle,
 ) -> gtk::PopoverMenu {
-    host.insert_action_group(GROUP, Some(&actions(ops)));
     let menu = dependency_model(rel, is_dir, ops.vault.is_remote(), top);
     crate::widgets::popup_menu(host, &menu, Some(anchor))
 }
 
-/// [`dependency_menu`]'s items: Open, or Open in Terminal and Reload, then [`elsewhere`]; on the
+/// [`dependency_menu`]'s items: Open, or Open in Terminal and Reload, then [`names`]; on the
 /// `top` folder Rename, Move to… and Move to Trash where [`context_menu`] has them.
 fn dependency_model(rel: &str, is_dir: bool, remote: bool, top: bool) -> gio::Menu {
     let menu = gio::Menu::new();
     let open = gio::Menu::new();
     if is_dir {
-        open.append_item(&item(GROUP, "Open in Terminal", "terminal", rel));
+        open.append_item(&verb("terminal", rel));
     }
     if top {
-        open.append_item(&item(GROUP, "Rename", "rename-folder", rel));
+        open.append_item(&verb("rename-folder", rel));
     }
     match is_dir {
-        true => open.append_item(&item(GROUP, "Reload", "reload", rel)),
+        true => open.append_item(&verb("reload", rel)),
         false => {
-            open.append_item(&item(GROUP, "Open", "open", rel));
+            open.append_item(&verb("open", rel));
             if !remote {
-                open.append_item(&item(GROUP, "Open in New Window", "open-apart", rel));
+                open.append_item(&verb("open-apart", rel));
             }
         }
     }
     menu.append_section(None, &open);
     if top {
         let moves = gio::Menu::new();
-        moves.append_item(&many("Move to…", "move-to", &[(rel.to_string(), is_dir)]));
+        moves.append_item(&many(
+            label("move-to"),
+            "move-to",
+            &[(rel.to_string(), is_dir)],
+        ));
         menu.append_section(None, &moves);
     }
-    menu.append_section(None, &elsewhere(rel, is_dir, remote));
+    let reads = Facts {
+        dir: is_dir,
+        remote,
+        ..Facts::default()
+    };
+    let section = gio::Menu::new();
+    for name in names(&reads) {
+        section.append_item(&verb(name, rel));
+    }
+    menu.append_section(None, &section);
     if top {
         let danger = gio::Menu::new();
-        danger.append_item(&item(GROUP, "Move to Trash", "trash", rel));
+        danger.append_item(&verb("trash", rel));
         menu.append_section(None, &danger);
     }
     menu
-}
-
-/// Copy Name, the two Copy Paths and the way out of the app. The name first: it is the shortest
-/// of the three answers to "what is this file called", and the one a note's own prose wants.
-fn elsewhere(rel: &str, is_dir: bool, remote: bool) -> gio::Menu {
-    let section = gio::Menu::new();
-    section.append_item(&item(GROUP, "Copy Name", "copy-name", rel));
-    section.append_item(&item(GROUP, "Copy Relative Path", "copy-rel", rel));
-    section.append_item(&item(GROUP, "Copy Absolute Path", "copy-abs", rel));
-    // Download… takes Show in Files' place when the file is on a host: no file manager here can
-    // show it, and a copy here is the only way to reach it with anything but accent.
-    if !remote {
-        section.append_item(&item(GROUP, "Show in Files", "show", rel));
-    } else if !is_dir {
-        section.append_item(&item(GROUP, "Download…", "download", rel));
-    }
-    section
 }
 
 /// Multi-file menu containing only actions that apply to the whole marked set. `dir` is the
@@ -165,38 +301,18 @@ fn elsewhere(rel: &str, is_dir: bool, remote: bool) -> gio::Menu {
 fn marked_menu(marked: &[(String, bool)], dir: &str, paste: bool) -> gio::Menu {
     let menu = gio::Menu::new();
     let clip = gio::Menu::new();
-    clip.append_item(&many("Cut", "cut-many", marked));
-    clip.append_item(&many("Copy", "copy-many", marked));
-    clip.append_item(&many("Move to…", "move-to", marked));
+    clip.append_item(&many(label("cut"), "cut-many", marked));
+    clip.append_item(&many(label("copy"), "copy-many", marked));
+    clip.append_item(&many(label("move-to"), "move-to", marked));
     if paste {
-        clip.append_item(&item(GROUP, "Paste", "paste", dir));
+        clip.append_item(&verb("paste", dir));
     }
     menu.append_section(None, &clip);
     // Its own section, so the one destructive item is never next to Copy by accident.
     let danger = gio::Menu::new();
-    danger.append_item(&many("Move to Trash", "trash-many", marked));
+    danger.append_item(&many(label("trash"), "trash-many", marked));
     menu.append_section(None, &danger);
     menu
-}
-
-/// Cut, Copy and Move to… act on `row`; Paste targets `dir` from [`row_dir`]. Omit Paste without
-/// clipboard files. Pass directory identity to Cut/Copy so duplicate-name suffixes preserve file
-/// extensions but treat folder names whole.
-fn clip_section(ops: &Rc<Ops>, row: Option<(&str, bool)>, dir: &str) -> gio::Menu {
-    let section = gio::Menu::new();
-    if let Some((rel, is_dir)) = row {
-        let folder = match is_dir {
-            true => "-folder",
-            false => "",
-        };
-        section.append_item(&item(GROUP, "Cut", &format!("cut{folder}"), rel));
-        section.append_item(&item(GROUP, "Copy", &format!("copy{folder}"), rel));
-        section.append_item(&many("Move to…", "move-to", &[(rel.to_string(), is_dir)]));
-    }
-    if can_paste(ops) {
-        section.append_item(&item(GROUP, "Paste", "paste", dir));
-    }
-    section
 }
 
 /// Shared destination for creation, paste and drops: the row's directory, a file's parent, or
@@ -261,59 +377,69 @@ type Run = Box<dyn Fn(&Rc<Ops>, &str)>;
 /// What one of the marked menu's actions does with the whole set it was handed.
 type RunMany = Box<dyn Fn(&Rc<Ops>, Vec<(String, bool)>)>;
 
-/// The actions the menu items name, each taking the row's path as its parameter.
-fn actions(ops: &Rc<Ops>) -> gio::SimpleActionGroup {
+/// What the action `verb` does with the one path it is handed, `None` for a verb that is no such
+/// action: Move to…, which takes a list.
+fn run(verb: &str) -> Option<Run> {
+    let run: Run = match verb {
+        "open" => Box::new(|ops, rel| (ops.open)(rel, &[])),
+        "open-apart" => Box::new(|ops, rel| (ops.apart)(rel)),
+        "terminal" => Box::new(|ops, dir| (ops.terminal)(dir)),
+        "new-file" => Box::new(new_file),
+        "new-folder" => Box::new(new_folder),
+        "new-drawing" => Box::new(new_drawing),
+        "upload" => Box::new(upload),
+        "rename" => Box::new(|ops, rel| rename(ops, rel, false)),
+        "rename-folder" => Box::new(|ops, rel| rename(ops, rel, true)),
+        "exclude" => Box::new(|ops, rel| (ops.exclude)(rel)),
+        "reload" => Box::new(|ops, dir| (ops.relist)(dir)),
+        "cut" => Box::new(|ops, rel| clipboard::cut(ops, rel, false)),
+        "cut-folder" => Box::new(|ops, rel| clipboard::cut(ops, rel, true)),
+        "copy" => Box::new(|ops, rel| clipboard::copy(ops, rel, false)),
+        "copy-folder" => Box::new(|ops, rel| clipboard::copy(ops, rel, true)),
+        "paste" => Box::new(clipboard::paste),
+        "copy-name" => Box::new(copy_name),
+        "copy-rel" => Box::new(copy_relative_path),
+        "copy-abs" => Box::new(copy_absolute_path),
+        "show" => Box::new(show_in_files),
+        "download" => Box::new(download),
+        "reveal" => Box::new(|ops, rel| (ops.reveal)(rel)),
+        "print" => Box::new(|ops, rel| (ops.make)(rel, None)),
+        "export-pdf" => Box::new(|ops, rel| (ops.make)(rel, Some(Export::Pdf))),
+        "export-html" => Box::new(|ops, rel| (ops.make)(rel, Some(Export::Html))),
+        "export-png" => Box::new(|ops, rel| (ops.make)(rel, Some(Export::Png))),
+        "export-svg" => Box::new(|ops, rel| (ops.make)(rel, Some(Export::Svg))),
+        "trash" => Box::new(trash),
+        _ => return None,
+    };
+    Some(run)
+}
+
+/// The actions every file menu's items name, each taking the row's path as its parameter: one
+/// group for the window, put on it once (`build::adopt_vault`). Each holds `ops` weakly, since
+/// `ops` holds the window.
+pub fn actions(ops: &Rc<Ops>) -> gio::SimpleActionGroup {
     let group = gio::SimpleActionGroup::new();
-    let add = |name: &str, run: Run| {
+    for (name, _) in LABELS {
+        let Some(run) = run(name) else { continue };
         let action = gio::SimpleAction::new(name, Some(glib::VariantTy::STRING));
-        let ops = ops.clone();
+        let ops = Rc::downgrade(ops);
         action.connect_activate(move |_, target| {
-            if let Some(rel) = target.and_then(|t| t.str()) {
+            if let (Some(ops), Some(rel)) = (ops.upgrade(), target.and_then(|t| t.str())) {
                 run(&ops, rel);
             }
         });
         group.add_action(&action);
-    };
-    add("open", Box::new(|ops, rel| (ops.open)(rel, &[])));
-    add("open-apart", Box::new(|ops, rel| (ops.apart)(rel)));
-    add("reload", Box::new(|ops, dir| (ops.relist)(dir)));
-    add("terminal", Box::new(|ops, dir| (ops.terminal)(dir)));
-    add("new-file", Box::new(new_file));
-    add("new-folder", Box::new(new_folder));
-    add("new-drawing", Box::new(new_drawing));
-    add("rename", Box::new(|ops, rel| rename(ops, rel, false)));
-    add("rename-folder", Box::new(|ops, rel| rename(ops, rel, true)));
-    add("cut", Box::new(|ops, rel| clipboard::cut(ops, rel, false)));
-    add(
-        "cut-folder",
-        Box::new(|ops, rel| clipboard::cut(ops, rel, true)),
-    );
-    add(
-        "copy",
-        Box::new(|ops, rel| clipboard::copy(ops, rel, false)),
-    );
-    add(
-        "copy-folder",
-        Box::new(|ops, rel| clipboard::copy(ops, rel, true)),
-    );
-    add("paste", Box::new(clipboard::paste));
-    add("copy-name", Box::new(copy_name));
-    add("copy-rel", Box::new(copy_relative_path));
-    add("copy-abs", Box::new(copy_absolute_path));
-    add("show", Box::new(show_in_files));
-    add("download", Box::new(download));
-    add("upload", Box::new(upload));
-    add("trash", Box::new(trash));
-    add("exclude", Box::new(|ops, rel| (ops.exclude)(rel)));
+    }
 
     // The marked set's four, which take the whole list rather than one path; Move to… takes a
     // single row's as a list of one.
     let add_many = |name: &str, run: RunMany| {
         let ty = glib::VariantTy::new(PATHS).expect("a valid variant type");
         let action = gio::SimpleAction::new(name, Some(ty));
-        let ops = ops.clone();
+        let ops = Rc::downgrade(ops);
         action.connect_activate(move |_, target| {
-            if let Some(marked) = target.and_then(|t| t.get::<Vec<(String, bool)>>()) {
+            let marked = target.and_then(|t| t.get::<Vec<(String, bool)>>());
+            if let (Some(ops), Some(marked)) = (ops.upgrade(), marked) {
                 run(&ops, marked);
             }
         });
@@ -380,7 +506,7 @@ mod tests {
         assert_eq!(
             labels(dependency_model(".ruff_cache", true, false, true).upcast_ref()),
             [
-                &["Open in Terminal", "Rename", "Reload", "Move to…"][..],
+                &["Open in Terminal", "Rename…", "Reload", "Move to…"][..],
                 &paths,
                 &["Show in Files", "Move to Trash"]
             ]
@@ -399,5 +525,126 @@ mod tests {
             menu(".venv/pyvenv.cfg", false, true),
             [&["Open"][..], &paths, &["Download…"]].concat()
         );
+    }
+
+    /// The labels of a file's shared part at `rel`, every section in order.
+    fn part(rel: &str, f: Facts) -> Vec<String> {
+        file_sections(rel, &f)
+            .iter()
+            .flat_map(|section| labels(section.upcast_ref()))
+            .collect()
+    }
+
+    /// One file part for the tree, a tab and a Git row (DESIGN.md, Context menus), cut to what
+    /// each place can do: a tab adds Reveal in Sidebar, a host's file has Download…, a folder
+    /// prints nothing, and a Git row changes the file only through git.
+    #[test]
+    fn one_file_part_for_every_location() {
+        let names = ["Copy Name", "Copy Relative Path", "Copy Absolute Path"];
+        let changes = ["Rename…", "Cut", "Copy", "Move to…"];
+        let note = Facts {
+            prints: Some(Kind::Note),
+            ..Facts::default()
+        };
+        let html = ["Print…", "Export as HTML…", "Move to Trash"];
+        assert_eq!(
+            part("a.md", note),
+            [&changes[..], &names, &["Show in Files"], &html].concat()
+        );
+        let tab = Facts {
+            at: At::Tab,
+            ..note
+        };
+        let shown = ["Show in Files", "Reveal in Sidebar"];
+        assert_eq!(
+            part("a.md", tab),
+            [&changes[..], &names, &shown, &html].concat()
+        );
+        let pdf = Facts {
+            at: At::Tab,
+            remote: true,
+            prints: Some(Kind::Pdf),
+            ..Facts::default()
+        };
+        assert_eq!(
+            part("a.pdf", pdf),
+            [
+                &changes[..],
+                &names,
+                &[
+                    "Download…",
+                    "Reveal in Sidebar",
+                    "Print…",
+                    "Export as PDF…",
+                    "Move to Trash"
+                ]
+            ]
+            .concat()
+        );
+        let folder = Facts {
+            dir: true,
+            paste: true,
+            ..Facts::default()
+        };
+        assert_eq!(
+            part("Notes", folder),
+            [
+                &[
+                    "Rename…",
+                    "Leave Out of Search",
+                    "Reload",
+                    "Cut",
+                    "Copy",
+                    "Move to…",
+                    "Paste"
+                ][..],
+                &names,
+                &["Show in Files", "Move to Trash"]
+            ]
+            .concat()
+        );
+        let git = Facts {
+            at: At::Git,
+            prints: Some(Kind::Diagram),
+            ..Facts::default()
+        };
+        let diagram = [
+            "Print…",
+            "Export as PDF…",
+            "Export as PNG…",
+            "Export as SVG…",
+        ];
+        assert_eq!(
+            part("a.drawio", git),
+            [&names[..], &shown, &diagram].concat()
+        );
+        assert_eq!(part("a.drawio", Facts { gone: true, ..git }), names);
+    }
+
+    /// An item whose verb is no action is greyed for good, and one with no label shows its verb.
+    #[test]
+    fn every_verb_is_an_action_with_a_label() {
+        for (verb, _) in LABELS {
+            assert!(*verb == "move-to" || run(verb).is_some(), "{verb}");
+        }
+        for at in [At::Tree, At::Tab, At::Git] {
+            for (dir, remote, gone, paste) in
+                [(false, false, false, true), (true, true, true, false)]
+            {
+                for prints in [Some(Kind::Note), Some(Kind::Pdf), Some(Kind::Diagram)] {
+                    let f = Facts {
+                        at,
+                        dir,
+                        remote,
+                        prints,
+                        gone,
+                        paste,
+                    };
+                    for verb in file_verbs(&f).concat() {
+                        assert!(LABELS.iter().any(|(v, _)| *v == verb), "{verb}");
+                    }
+                }
+            }
+        }
     }
 }

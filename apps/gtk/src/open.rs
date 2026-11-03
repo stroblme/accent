@@ -49,6 +49,7 @@ impl App {
     pub fn open_as(self: &Rc<Self>, key: &str, how: Opened) {
         let Some((key, path)) = self.locate(key) else {
             self.awaiting.borrow_mut().remove(key);
+            self.revealing.borrow_mut().remove(key);
             // Deleted since the session named it, or never in this vault: the vault has answered
             // the same way for both, and this machine's disk cannot tell them apart for a remote.
             let shown = doc::host_file_path(key).unwrap_or(key);
@@ -102,6 +103,13 @@ impl App {
                     }
                     tab.goto_pos(at);
                 }
+                // A PDF's pages and the notes' highlights on them come after its tab, so a
+                // print or an export waits for them (`App::sync_pdf_links`).
+                (Some(Reveal::Then(run)), Doc::Pdf(pdf)) if pdf.opening() => {
+                    let then = Reveal::Then(run);
+                    self.revealing.borrow_mut().insert(doc.key(), then);
+                }
+                (Some(Reveal::Then(run)), doc) => run(self, doc),
                 _ => {}
             }
         }
@@ -258,6 +266,7 @@ impl App {
             }
             Err(e) => {
                 self.awaiting.borrow_mut().remove(key);
+                self.revealing.borrow_mut().remove(key);
                 return self.cannot_open(key, e);
             }
         };
@@ -1288,11 +1297,13 @@ impl App {
 }
 
 /// What a diagram or a notebook is to show once it is open: see [`App::reveal_in_diagram`] and
-/// [`App::open_cell`].
+/// [`App::open_cell`]; or what is to be done with any document once it is, a print or an export
+/// from a file's menu (`App::make`).
 pub enum Reveal {
     Diagram(Shows<crate::diagram::DiagramTab>),
     NotebookHit(std::ops::Range<usize>),
     NotebookFilePos(accent_api::Pos),
+    Then(OnDoc),
 }
 
 /// A notebook opened as JSON needs its indexed source offset translated to the JSON spelling.
@@ -1313,6 +1324,9 @@ fn select_text_range(tab: &Tab, bytes: std::ops::Range<usize>) {
 
 /// What a [`Reveal`] does to the tab it waited for.
 type Shows<T> = Box<dyn FnOnce(&Rc<App>, &Rc<T>)>;
+
+/// What [`Reveal::Then`] does with the document it waited for.
+type OnDoc = Box<dyn FnOnce(&Rc<App>, &Doc)>;
 
 /// Show the label of `tab` whose line in its labels' text holds byte `at`, if there still is one.
 fn reveal_label(tab: &Rc<crate::diagram::DiagramTab>, at: usize) {

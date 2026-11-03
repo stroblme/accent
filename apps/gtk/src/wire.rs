@@ -167,18 +167,21 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
             // front.
             app.sync_applicable();
             // Filled for the page that is about to show it: a `GtkPopoverMenu` follows the model
-            // it was built from, so this is what puts Rename and Move to Trash on a vault file's
-            // tab and on no other. One model per pane, which is the one asked for here.
+            // it was built from, so this is what puts a vault file's menu on its tab and on no
+            // other. One model per pane, which is the one asked for here.
             if let Some(menu) = tabs.menu_model().and_downcast::<gio::Menu>() {
-                let pinned = page.is_some_and(|page| app.is_pinned(page));
-                let prints = page
-                    .and_then(|page| app.doc_for_page(page))
-                    .as_ref()
-                    .and_then(export::printable);
-                let movable = page
-                    .and_then(|page| app.doc_for_page(page))
-                    .is_some_and(|doc| shell::movable(&app, &doc));
-                actions::fill_tab_menu(&menu, app.menu_file().is_some(), movable, pinned, prints);
+                let doc = page.and_then(|page| app.doc_for_page(page));
+                let tab = actions::TabMenu {
+                    movable: doc.as_ref().is_some_and(|doc| shell::movable(&app, doc)),
+                    pinned: page.is_some_and(|page| app.is_pinned(page)),
+                    view: match &doc {
+                        Some(Doc::Diagram(_)) => Some("win.diagram-grid"),
+                        Some(Doc::Notebook(_)) => Some("win.notebook-open-text"),
+                        _ => None,
+                    },
+                    file: tab_file(&app, doc),
+                };
+                actions::fill_tab_menu(&menu, &tab);
             }
         }
     ));
@@ -1242,6 +1245,30 @@ fn bar_menu(app: &Rc<App>, host: &impl IsA<gtk::Widget>, menu: &gio::Menu) {
         app,
         move |_| app.hover_status(app.pointer())
     ));
+}
+
+/// What a tab's menu names of `doc`'s file: a preview tab's note, and nothing for a shell or a
+/// comparison.
+fn tab_file(app: &App, doc: Option<Doc>) -> actions::TabFile {
+    let Some(doc) = doc
+        .and_then(rendered::note_for)
+        .filter(|doc| !doc.is_transient())
+    else {
+        return actions::TabFile::None;
+    };
+    let prints = export::printable(&doc);
+    match app.ops() {
+        Some(ops) if !doc.is_loose() => actions::TabFile::Vault {
+            rel: doc.key(),
+            facts: fileops::Facts {
+                at: fileops::At::Tab,
+                remote: ops.vault.is_remote(),
+                prints,
+                ..fileops::Facts::default()
+            },
+        },
+        _ => actions::TabFile::Loose(prints),
+    }
 }
 
 /// Right-click and Menu open the file-operations menu; Delete trashes. A key controller on the

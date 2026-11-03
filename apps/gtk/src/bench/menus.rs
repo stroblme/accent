@@ -8,8 +8,11 @@ use super::*;
 /// `ACCENT_BENCH_MENU=menus:<rel_note>[:<dir>]` opens the note beside a PDF, an image, a
 /// notebook, a diagram and a shell and prints each tab's icon; reveals a file two folders down
 /// that the tree never listed; double-clicks a preview's tab with the sidebar on Search, then the
-/// kept tab again; and opens a PDF through the tree menu's Open, printing the toasts. With `<dir>`
-/// it saves the screen there as PNGs (ImageMagick's `import`).
+/// kept tab again; opens a PDF through the tree menu's Open, printing the toasts; prints every
+/// file menu's labels and prints a PDF that is not open from the tree; then right-clicks a tab, a
+/// tree row and two Git rows, the note changed and `Daily/2024-01-02.md` deleted. With `<dir>` it
+/// saves the screen there as PNGs (ImageMagick's `import`). The vault has to be a repository of
+/// its own, the generated vault committed.
 pub(super) fn bench_menus(app: &Rc<App>, arg: &str) {
     let (note, shots) = match arg.split_once(':') {
         Some((note, dir)) => (note.to_string(), Some(dir.to_string())),
@@ -136,8 +139,132 @@ pub(super) fn bench_menus(app: &Rc<App>, arg: &str) {
             app.doc_for(pdf).is_some(),
             app.toasts.shown()
         );
+
+        // What each file menu holds: the tree's over a note, a folder and a PDF, then each
+        // tab's, the window's own and a changed file's in the Git pane.
+        let Some(ops) = app.ops().cloned() else {
+            return bench_quit(&app);
+        };
+        for (rel, dir) in [(note.as_str(), false), ("menus", true), (pdf, false)] {
+            let at = gdk::Rectangle::new(0, 0, 1, 1);
+            let menu = fileops::context_menu(&ops, tree.widget(), Some((rel, dir)), &[], at);
+            println!("bench menus tree {rel} {:?}", labels_of(menu.menu_model()));
+            menu.popdown();
+        }
+        app.open_terminal();
+        until(|| app.docs().iter().any(|doc| doc.terminal().is_some())).await;
+        let tabs = app.pane().tabs.clone();
+        for doc in app.docs() {
+            tabs.emit_by_name::<()>("setup-menu", &[&Some(doc.page())]);
+            println!(
+                "bench menus tab {} {:?}",
+                doc.page().title(),
+                labels_of(tabs.menu_model())
+            );
+        }
+        tabs.emit_by_name::<()>("setup-menu", &[&None::<adw::TabPage>]);
+        let prints = labels_of(app.menu.menu_model())
+            .into_iter()
+            .filter(|l| l.starts_with("Print") || l.starts_with("Export"))
+            .collect::<Vec<_>>();
+        println!("bench menus primary prints={prints:?}");
+
+        // Print… from the tree on a PDF that is not open opens it, kept, and prints it.
+        let closed = "Attachments/comments.pdf";
+        let before = gtk::Window::list_toplevels();
+        let _ = tree
+            .widget()
+            .activate_action("fileops.print", Some(&closed.to_variant()));
+        until(|| app.doc_for(closed).is_some()).await;
+        let mut dialog = None;
+        let mut busy = None;
+        for _ in 0..200 {
+            let text = app.statusbar.progress_text();
+            busy = busy.or((!text.is_empty()).then_some(text));
+            dialog = gtk::Window::list_toplevels()
+                .into_iter()
+                .find(|w| w.is_visible() && !before.contains(w))
+                .and_downcast::<gtk::Window>();
+            if dialog.is_some() {
+                break;
+            }
+            glib::timeout_future(Duration::from_millis(100)).await;
+        }
+        let kept = app
+            .doc_for(closed)
+            .is_some_and(|doc| app.pane().preview().as_ref() != Some(doc.page()));
+        println!(
+            "bench menus print opened={} kept={kept} busy={busy:?} dialog={:?} toasts={:?}",
+            app.doc_for(closed).is_some(),
+            dialog.as_ref().map(|d| d.type_().name()),
+            app.toasts.shown()
+        );
+        if let Some(dialog) = dialog {
+            dialog.close();
+        }
+
+        // Real right-clicks, as the reader makes them: a tab, a tree row and a Git row.
+        let (sx, sy) = app.window.surface_transform();
+        let screen =
+            |p: graphene::Point| format!("{} {}", f64::from(p.x()) + sx, f64::from(p.y()) + sy);
+        if let Some(at) = tab_point(&app, doc::file_name(&note)) {
+            right_click(&app, &at, &shots, "tab").await;
+        }
+        app.reveal_rel(&note, false);
+        glib::timeout_future(Duration::from_millis(600)).await;
+        if let Some(at) = super::folders::centre(&app, tree, &note) {
+            right_click(&app, &screen(at), &shots, "tree").await;
+        }
+        std::fs::write(root.join(&note), "# Changed\n").unwrap();
+        let gone = "Daily/2024-01-02.md";
+        std::fs::remove_file(root.join(gone)).unwrap();
+        if let Some(sidebar) = app.sidebar.get() {
+            sidebar.show_pane("git");
+        }
+        let list = app.git.get().and_then(|git| git.divider().start_child());
+        let row = |path: &str| {
+            let list = list.as_ref()?;
+            super::git::change_row(list, path)
+        };
+        until(|| row(&note).is_some() && row(gone).is_some()).await;
+        glib::timeout_future(Duration::from_millis(600)).await;
+        for path in [note.as_str(), gone] {
+            let at = row(path).and_then(|row| {
+                let middle =
+                    graphene::Point::new(row.width() as f32 / 3.0, row.height() as f32 / 2.0);
+                row.compute_point(&app.window, &middle)
+            });
+            if let Some(at) = at {
+                let name = if path == gone { "git-deleted" } else { "git" };
+                right_click(&app, &screen(at), &shots, name).await;
+            }
+        }
         bench_quit(&app);
     });
+}
+
+/// Every label a menu model offers, its sections walked through.
+fn labels_of(menu: Option<gio::MenuModel>) -> Vec<String> {
+    menu.map(|m| fileops::labels(&m)).unwrap_or_default()
+}
+
+/// Right-click at `at` on the screen, print the menu that comes up and save the screen as `name`,
+/// then close the menu.
+async fn right_click(app: &Rc<App>, at: &str, shots: &Option<String>, name: &str) {
+    xtest(&format!("move {at}; down 3; up 3")).await;
+    let menu = find_widget(app.window.upcast_ref(), &|w| {
+        w.is::<gtk::PopoverMenu>() && w.is_visible()
+    })
+    .and_downcast::<gtk::PopoverMenu>();
+    println!(
+        "bench menus right_click {name} {:?}",
+        labels_of(menu.as_ref().and_then(|m| m.menu_model()))
+    );
+    shot(shots, name).await;
+    if let Some(menu) = menu {
+        menu.popdown();
+    }
+    glib::timeout_future(Duration::from_millis(300)).await;
 }
 
 /// The rows the tree outlines as revealed.

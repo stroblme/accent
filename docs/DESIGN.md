@@ -553,7 +553,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A folder's Discard and Discard All pass over it, and over any folder holding one, and their question says how many they leave.
 - A row's Stage / Unstage / Discard buttons show on hover and on `:focus-within`, so the keyboard reaches what the pointer does.
   They slide in and out in a revealer, at full opacity both ways whichever of the two lets them go, and take no width while away.
-  A right-click on a file or folder row, or Menu or Shift+F10 on it, lists the same buttons' actions under Open, which a click on a file does; nothing is in the menu that the row does not already offer.
+  A right-click on a file or folder row, or Menu or Shift+F10 on it, lists the same buttons' actions under Open Changes, which a click on a file does.
+  A file of the vault adds Open File beside it and the file's own menu after them, as its tab has it less Rename…, the clipboard and Move to Trash, git being how this pane changes a file (Context menus, user decision 2026-11-03).
   A row makes them the first time it reveals them, the keyboard landing on it included, and keeps them, as a commit row does its two: they are most of a row's widgets, and a list makes rows for its first 200 items, which a pick of another repository has GTK take apart again.
   Discard asks in an `AdwAlertDialog`, the one action here that can lose work.
   A folder row acts on everything under it in its section (not in Merge Conflicts, where a conflict is resolved one file at a time), and its Discard says how many files go back to the index and how many untracked ones to the trash.
@@ -939,12 +940,11 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 ### Primary menu
 
-- Five sections, by what an item changes: the files in this vault (New File, New Folder, Open File…); what the tab in front can be put out as (Print…, Export As); which vault the window is on (Open Local…, Open Remote…, Open Recent…, Reload Window, then Close Vault); what the window shows (New Terminal, Presentation Mode); the application (Preferences, Keyboard Shortcuts, About accent, Quit).
-- It holds what the window does whichever tab is in front: a command acting on the document (Save, Save As…, Find, Toggle Preview) keeps its chord, its palette entry and its tab-menu item where it has them, and has no item here.
-- Print… and Export As are the exception (user decision 2026-10-19), the commands people look for in a main menu: the submenu lists every format (PDF…, HTML…, PNG…, SVG…), and what the tab in front cannot do is greyed, following it from tab to tab by the rule the tab menu lists them by (Context menus).
-- Labels come from the action table, so the menu and the palette cannot disagree; an Export As item drops the "Export as" its submenu already says.
+- Four sections, by what an item changes: the files in this vault (New File…, New Folder…, Open File…); which vault the window is on (Open Local…, Open Remote…, Open Recent…, Reload Window, then Close Vault); what the window shows (New Terminal, Presentation Mode); the application (Preferences, Keyboard Shortcuts, About accent, Quit).
+- It holds what the window does whichever tab is in front: a command acting on the document (Save, Save As…, Find, Toggle Preview, Print… and the exports) keeps its chord, its palette entry and its place on a file's menu where it has them, and has no item here.
+- Print… and Export As left it for the file menus, which name the file they act on (user decision 2026-11-03, reversing the one of 2026-10-19).
+- Labels come from the action table, so the menu and the palette cannot disagree.
 - The sections are cut to what the window can do: without a vault, no New File, New Folder or Close Vault, which could only toast.
-  A window of shells has no Print… or Export As: a document is the exception there, and its tab menu still has them.
   A window of shells adds Save Session after Reload Window (a focused shell keeps `Ctrl+S`) and, once named, Close Session after it.
   A remote vault's window has New Local Terminal beside New Remote Terminal….
 
@@ -1468,8 +1468,13 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 ### Context menus
 
 - `GtkPopoverMenu` from a `gio::Menu`, parented to a plain widget (States), in sections: what creates or opens; what copies a name or a path or leaves the app; Move to Trash alone.
-  Tree rows and tabs share the shape and the handlers.
-- **New File, New Folder and New Drawing are on every tree menu**, aimed at the folder clicked, the folder of the file clicked, or the vault root.
+- **A file has one menu wherever it is named** (user decision 2026-11-03): its Files tree row, its tab and its Git row each lead with what that place does, then share one file part, built in one place (`fileops::file_sections`) and in this order.
+  Rename… (a folder adding Leave Out of Search and Reload), then Cut, Copy and Move to… (the tree adding Paste), then Copy Name, the two paths and Show in Files or Download…, then Print… and the exports, and Move to Trash alone at the end.
+  Each item is a `fileops` action on the file's path, one group on the window, and takes its label from the palette's command where there is one, so the two cannot disagree.
+- **A tab's menu leads with Split ▸ and Move Tab ▸**, each side an item of its submenu, then Move to New Window and Pin Tab or Unpin Tab, then the document's own view (a diagram's Show Grid, a notebook's Open as Text), then the file part with Reveal in Sidebar after Show in Files.
+  A preview tab's file part is its note's, and a shell or a comparison has no file part at all.
+  A file from outside the vault has Copy Name, Copy Absolute Path, Show in Files and its prints, which are the window's own commands, and nothing the vault does to its files.
+- **New File…, New Folder… and New Drawing… are on every tree menu**, aimed at the folder clicked, the folder of the file clicked, or the vault root.
   The vault root's menu is on the blank area below the rows, an empty vault's page and the vault's name above them: those three, Upload Files… on a remote vault, and Paste.
 - **Cut, Copy and Paste are a section of their own**, over a **hybrid clipboard**, because a vault's files are not always on this machine.
   A local vault writes the real clipboard in GNOME Files' own formats, so a file crosses between accent and Files either way.
@@ -1483,17 +1488,18 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A Copy of several files is one toast once they have all landed ("Copied 3 files to Notes"), a copy that fails being named on its own, as Move to Trash does.
   Paste is drawn only while the clipboard holds something.
 - **Show Hidden Files is on no tree menu**: it is about the listing, not the row, so it is a preference and a palette command (Sidebar).
-- **Show in Files is a local vault's**: on a remote one Download… takes its place, and the tab menu's or palette's Show in Files says why in a toast.
+- **Show in Files is a local vault's**: on a remote one Download… takes its place on every file menu, and the palette's Show in Files says why in a toast.
 - **Splitting is the tab menu's alone**: a split opens the active tab beside itself, which is not done to a file in the tree.
-  So is pinning: Pin Tab or Unpin Tab ends the Move Tab section, as in GNOME Web.
-- **Rename and Move to Trash are on the tab menu too**, acting on the page right-clicked, and only where it holds a file of this vault; on a shell, a comparison or a loose file they are absent rather than refusing.
+  So is pinning: Pin Tab or Unpin Tab ends the tab's own section after Move Tab ▸, as in GNOME Web.
+- **Rename… and Move to Trash are on the tab menu too**, acting on the page right-clicked, and only where it holds a file of this vault; on a shell, a comparison or a loose file they are absent rather than refusing.
 - **Open in New Window follows Open** on a file row, and only a local vault's: a window with no vault opens a file by its path on this machine.
   On the tab menu it is **Move to New Window**, ending the moves before Pin Tab, since the tab leaves (Tabs).
 - **Open in Terminal begins a folder row's menu**, where a file's has Open: a shell in that folder, as `Ctrl+J` opens one at the vault root — on the host for a remote vault, the host's in the Flatpak (Terminal).
 - **Reload** ends a folder row's first section, after Leave Out of Search (Sidebar, Files).
 - **A code tab's text menu** ends with Quick Fix… and Source Action…, asked at the caret the press put there; a note's ends with its spelling suggestions instead (Language servers).
-- **Print… and the exports are a section of the tab menu's own**, after Reveal in Sidebar, as they make something of the file rather than name it: a note and a notebook have Print… and Export as HTML…, a PDF Print… and Export as PDF…, a diagram Print…, Export as PDF…, Export as PNG… and Export as SVG…, any other tab none, and a loose file as much as a vault's.
-  They are on no tree menu; the primary menu lists them all, greyed where the tab in front cannot (Primary menu).
+- **Print… and the exports are a section of every file's menu**, after the names, as they make something of the file rather than name it: a note and a notebook have Print… and Export as HTML…, a PDF Print… and Export as PDF…, a diagram Print…, Export as PDF…, Export as PNG… and Export as SVG…, anything else none, and a loose file's tab as much as a vault's.
+  A tree or Git row tells the kind by the name, so a marimo notebook and a diagram saved as `.xml`, which only their bytes tell apart, offer them on their tab alone.
+  From a row whose file is not open the file opens as a kept tab first, and the print or the export runs on it once it lands (user decision 2026-11-03).
 - **Move to…** sits with Cut and Copy, on a row's menu and a marked set's: the dialog is a folder path in the vault's path field, from the vault root, opening on the folder the first path is in.
   It is a drop onto a folder by another way, for a folder that is not on screen — one plan, a taken name refusing the whole batch — and a folder not there yet is made once any Update Links? question is answered, as Rename makes the folders a typed path names.
   A folder moved into itself is refused, and what is already there stays; Rename is still the one path's move from the keyboard.
@@ -1663,7 +1669,7 @@ The `Ctrl` chords for application and document commands use GTK's `<Primary>` mo
 - Save `Ctrl+S`, Save As… `Ctrl+Shift+S`, Print…, Open in Browser, Export as PDF…, Export as HTML…, Export as PNG… and Export as SVG… (unbound), New File `Ctrl+N`, New Folder `Ctrl+Shift+N`, Upload Files (unbound), Close Tab `Ctrl+W`, Open File `Ctrl+O`, Open Local `Ctrl+Shift+O`, Open Remote (unbound), Open Recent `Ctrl+R`, New Window (unbound), Reload Window (unbound), Close Vault (unbound), Quit `Ctrl+Q`.
 - Print… and the exports act on the tab the menu was opened on, else the tab in front (Preview, Notebook, PDF, Diagram); over any tab but a note, a notebook, a PDF or a diagram they do nothing, as Save As… does, and one a tab has no such file for (PDF, PNG and SVG for a note or a notebook, HTML for a PDF or a diagram, PNG and SVG for a PDF) does nothing over it.
   Open in Browser acts the same way on a note or a notebook alone.
-  Each is disabled where it would do nothing, so the primary menu greys it.
+  Each is disabled where it would do nothing, so the palette leaves it out.
 - Open Local…, Open Remote…, Close Vault and Quit are `app.` actions, since each outlives the window that fired it; they still enter the palette's recently-run list.
 - **Reload Window** closes the window the way closing it does — every edit written or asked about, the session saved — and opens what it showed again: the same vault (a remote one connecting afresh), the same files from outside a vault, the same terminal session, with its tabs, panes and shells, at its size and maximized or fullscreen as it was.
   The shells are detached rather than ended, an unnamed window's too, and taken up again.
@@ -1972,7 +1978,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 
 ### Tab menu
 
-- Copy Name, Copy Relative Path, Copy Absolute Path, Show in Files, Reveal in Sidebar, Move to New Window, Pin Tab and Unpin Tab, and a notebook's Open as Text, all unbound: the tab menu's items, acting on the tab it was opened on, or from the palette on the active tab.
+- Copy Name, Copy Relative Path, Copy Absolute Path, Show in Files, Reveal in Sidebar, Move to New Window, Pin Tab and Unpin Tab, and a notebook's Open as Text, all unbound: what a tab's menu offers, from the palette on the active tab.
 
 ### Tabs and panes
 

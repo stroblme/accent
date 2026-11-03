@@ -118,6 +118,9 @@ pub struct Hooks {
     pub syncing: Box<dyn Fn(bool)>,
     /// Whether the changes list starts grouped by folder — `git_tree` in the config.
     pub tree: bool,
+    /// The file's own menu under a changed file's row, by vault key and whether the file is
+    /// gone from the working tree: none outside the vault or in a window without one.
+    pub file_menu: Box<dyn Fn(&str, bool) -> Vec<gio::Menu>>,
 }
 
 /// What a close waiting for git does once the commands under way have ended, told whether they

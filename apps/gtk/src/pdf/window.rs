@@ -745,6 +745,18 @@ impl App {
                 None => {}
             }
             app.sync_export();
+            // A print or an export from a file's menu that waited for the document and its
+            // highlights (`App::make`).
+            let then = {
+                let mut revealing = app.revealing.borrow_mut();
+                match revealing.get(&key) {
+                    Some(open::Reveal::Then(_)) => revealing.remove(&key),
+                    _ => None,
+                }
+            };
+            if let Some(open::Reveal::Then(run)) = then {
+                run(&app, &Doc::Pdf(pdf));
+            }
         });
     }
 

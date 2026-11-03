@@ -36,20 +36,53 @@ pub fn printable(doc: &Doc) -> Option<Kind> {
     }
 }
 
+/// What the file at `key` can be printed and exported as by its name alone, for a file's menu
+/// away from its tab, where [`printable`] answers. A marimo `.py` and a diagram saved as `.xml`
+/// are known by their bytes, so only their tabs offer it.
+pub fn printable_name(key: &str) -> Option<Kind> {
+    match doc::kind_of(key) {
+        Kind::Text if accent_core::path::is_org(key) => Some(Kind::Note),
+        Kind::Text | Kind::Image => None,
+        kind => Some(kind),
+    }
+}
+
 impl App {
-    /// Print…: the tab right-clicked, else the one in front. A note or a notebook opens in the
-    /// system browser, which prints it, a PDF and a diagram go through their tabs' print dialogs;
-    /// any other tab does nothing, as Save As does.
+    /// Print…: the tab right-clicked, else the one in front.
     pub(crate) fn print(self: &Rc<Self>) {
-        match self.menu_doc() {
-            Some(Doc::Pdf(pdf)) => pdf::export::print(self, &pdf),
-            Some(Doc::Diagram(tab)) => diagram::export::print(self, &tab),
+        if let Some(doc) = self.menu_doc() {
+            self.print_doc(&doc);
+        }
+    }
+
+    /// Print `doc`: a note or a notebook opens in the system browser, which prints it, a PDF and
+    /// a diagram go through their tabs' print dialogs; any other tab does nothing, as Save As
+    /// does.
+    fn print_doc(self: &Rc<Self>, doc: &Doc) {
+        match doc {
+            Doc::Pdf(pdf) => pdf::export::print(self, pdf),
+            Doc::Diagram(tab) => diagram::export::print(self, tab),
             doc => {
-                if let Some(paper) = doc.as_ref().and_then(Paper::of) {
+                if let Some(paper) = Paper::of(doc) {
                     self.open_in_browser(paper, Some("Opened in your browser. Print from there"))
                 }
             }
         }
+    }
+
+    /// Print… (`None`) or an export of `key` from a file's menu in the tree or the Git pane, on
+    /// its tab: opened, kept, where it is not open yet, and run once it lands.
+    pub(crate) fn make(self: &Rc<Self>, key: &str, what: Option<Export>) {
+        let run = move |app: &Rc<App>, doc: &Doc| match what {
+            None => app.print_doc(doc),
+            Some(to) => app.export_doc(doc.clone(), to),
+        };
+        if let Some(doc) = self.doc_for(key) {
+            return run(self, &doc);
+        }
+        let then = open::Reveal::Then(Box::new(run));
+        self.revealing.borrow_mut().insert(key.to_string(), then);
+        self.open_path(key);
     }
 
     /// Open in Browser: the note or notebook the menu acts on, as Print… opens it; any other tab
@@ -60,13 +93,20 @@ impl App {
         }
     }
 
-    /// Choose a local destination and export the supported format.
+    /// Export as…: the tab right-clicked, else the one in front.
+    pub(crate) fn export(self: &Rc<Self>, to: Export) {
+        if let Some(doc) = self.menu_doc() {
+            self.export_doc(doc, to);
+        }
+    }
+
+    /// Choose a local destination and export `doc` in the supported format.
     /// Notes and notebooks support HTML, PDFs PDF, and diagrams PDF/PNG/SVG; other kinds cannot
     /// export.
-    pub(crate) fn export(self: &Rc<Self>, to: Export) {
-        let Some(doc) = self.menu_doc().filter(|doc| printable(doc).is_some()) else {
+    fn export_doc(self: &Rc<Self>, doc: Doc, to: Export) {
+        if printable(&doc).is_none() {
             return;
-        };
+        }
         let key = doc.key();
         let stem = Path::new(doc::file_name(&key))
             .file_stem()

@@ -593,9 +593,10 @@ fn offered(row: &Row) -> Option<[bool; 3]> {
     ])
 }
 
-/// A file or folder row's right-click menu: Open, which a click on a file does, then the row's
-/// buttons, through a `change` action group put on the layout the row's stack shows, which the
-/// menu hangs from.
+/// A file or folder row's right-click menu: Open Changes, which a click on a file does, and Open
+/// File, then the row's buttons, through a `change` action group put on the layout the row's
+/// stack shows, which the menu hangs from; then the file's own menu, as its tab has it less what
+/// git is the way to do here ([`Hooks::file_menu`]).
 fn change_menu(
     stack: &gtk::Widget,
     item: &gtk::ListItem,
@@ -609,11 +610,27 @@ fn change_menu(
         .visible_child()?;
     let on = offered(&row).unwrap_or_default();
     let file = matches!(row, Row::Entry { .. });
+    // The file's own part, for a file of the window's vault that is no repository of its own.
+    let (key, gone, file_part) = match (&row, panel.upgrade()) {
+        (
+            Row::Entry {
+                entry,
+                section,
+                key,
+                ..
+            },
+            Some(panel),
+        ) if !own_repository(&entry.path) => {
+            let gone = deleted(*section, entry);
+            (key.as_str(), gone, (panel.hooks.file_menu)(key, gone))
+        }
+        _ => ("", true, Vec::new()),
+    };
     let group = gio::SimpleActionGroup::new();
     let menu = gio::Menu::new();
     let mut section = gio::Menu::new();
     for (label, name, shown, act) in [
-        ("Open", "open", file, None),
+        ("Open Changes", "open", file, None),
         ("Stage", "stage", on[0], Some(Act::Stage)),
         ("Unstage", "unstage", on[1], Some(Act::Unstage)),
         ("Discard", "discard", on[2], Some(Act::Discard)),
@@ -640,15 +657,37 @@ fn change_menu(
         });
         group.add_action(&action);
         section.append(Some(label), Some(&format!("change.{name}")));
+        // The file itself beside its changes, opened as the Files tree's Open opens it.
+        if name == "open" && !file_part.is_empty() && !gone {
+            section.append_item(&crate::fileops::item(
+                crate::fileops::GROUP,
+                "Open File",
+                "open",
+                key,
+            ));
+        }
     }
     if section.n_items() > 0 {
         menu.append_section(None, &section);
+    }
+    for part in &file_part {
+        menu.append_section(None, part);
     }
     if menu.n_items() == 0 {
         return None;
     }
     host.insert_action_group("change", Some(&group));
     Some((host, menu))
+}
+
+/// Whether a row's file is gone from the working tree, deleted there or staged as deleted, so
+/// there is no file to open, show or print.
+fn deleted(section: Section, entry: &Entry) -> bool {
+    match section {
+        Section::Staged => entry.x == 'D',
+        Section::Changes => entry.y == 'D',
+        Section::Conflicts => false,
+    }
 }
 
 /// Whether Discard can restore `entry`. Untracked files outside the vault are unsupported

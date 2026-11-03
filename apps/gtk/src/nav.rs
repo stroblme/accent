@@ -386,7 +386,7 @@ impl App {
     }
 
     /// The vault file `page` shows, or `None` for a shell, a comparison, a preview or a loose
-    /// file: what Reveal in Sidebar, Rename and Move to Trash can act on.
+    /// file, which have no row to reveal.
     pub(crate) fn vault_file_of(&self, page: &adw::TabPage) -> Option<String> {
         let doc = self.doc_for_page(page)?;
         (!doc.is_transient() && !doc.is_loose()).then(|| doc.key())

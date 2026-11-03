@@ -363,7 +363,11 @@ pub fn build_window(
         captured: gtk::ShortcutController::new(),
     });
     if let Some(vault) = &vault {
-        let _ = app.ops.set(build_ops(&app, vault));
+        let ops = build_ops(&app, vault);
+        // Every file menu's items, the tree's, the tabs' and the Git pane's, resolve here.
+        app.window
+            .insert_action_group(fileops::GROUP, Some(&fileops::actions(&ops)));
+        let _ = app.ops.set(ops);
     }
     app.sync_placeholder();
 
@@ -778,7 +782,8 @@ fn ports_data(vault: &Arc<Vault>) -> sidebar::PortsData {
 
 /// Wire Git hooks with weak window captures to avoid retaining the vault after window closure.
 fn build_git(app: &Rc<App>, source: Arc<git::Source>) -> Rc<git::Panel> {
-    let (toast, open, diff, compare, merge, leave, trash, changed, syncing) = (
+    let (toast, open, diff, compare, merge, leave, trash, changed, syncing, files) = (
+        Rc::downgrade(app),
         Rc::downgrade(app),
         Rc::downgrade(app),
         Rc::downgrade(app),
@@ -790,6 +795,21 @@ fn build_git(app: &Rc<App>, source: Arc<git::Source>) -> Rc<git::Panel> {
         Rc::downgrade(app),
     );
     git::Panel::new(git::Hooks {
+        file_menu: Box::new(move |key, gone| {
+            // A file outside the vault is no path the file menu's actions take.
+            let app = files.upgrade().filter(|_| !doc::is_loose_key(key));
+            let Some(ops) = app.as_ref().and_then(|app| app.ops()) else {
+                return Vec::new();
+            };
+            let facts = fileops::Facts {
+                at: fileops::At::Git,
+                remote: ops.vault.is_remote(),
+                prints: export::printable_name(key),
+                gone,
+                ..fileops::Facts::default()
+            };
+            fileops::file_sections(key, &facts)
+        }),
         tree: app.config.borrow().git_tree,
         source,
         window: app.window.clone(),
@@ -1080,6 +1100,8 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
     let apart = Rc::downgrade(app);
     let relist = Rc::downgrade(app);
     let terminal = Rc::downgrade(app);
+    let reveal = Rc::downgrade(app);
+    let make = Rc::downgrade(app);
     Rc::new(fileops::Ops {
         vault: vault.clone(),
         window: app.window.clone(),
@@ -1100,6 +1122,11 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
         }),
         open: Box::new(move |rel, stops| {
             let Some(app) = open.upgrade() else { return };
+            // Only a template's stops need the text tab: anything else opens as what it is, a PDF
+            // in its viewer rather than refused as no text.
+            if stops.is_empty() {
+                return app.open_path(rel);
+            }
             let stops = stops.to_vec();
             app.with_tab(rel, Opened::Kept, "open", move |_, tab| {
                 tab.place_stops(&stops)
@@ -1183,6 +1210,16 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
         terminal: Box::new(move |dir| {
             if let Some(app) = terminal.upgrade() {
                 app.open_terminal_in(dir);
+            }
+        }),
+        reveal: Box::new(move |rel| {
+            if let Some(app) = reveal.upgrade() {
+                app.reveal_rel(rel, true);
+            }
+        }),
+        make: Box::new(move |rel, what| {
+            if let Some(app) = make.upgrade() {
+                app.make(rel, what);
             }
         }),
         cut: Box::new(move |rels| {

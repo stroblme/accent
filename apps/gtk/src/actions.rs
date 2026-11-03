@@ -591,24 +591,23 @@ impl App {
                 }
             }
             "python-environment" => self.choose_python_environment(),
-            // The tab menu names its own page; F2 and the palette mean the tree's selection, and
-            // the tab in front where the tree has none.
+            // F2 and the palette mean the tree's selection, and the tab in front where the tree
+            // has none; a file's menu names its own file (`fileops`).
             "rename" => {
                 let target = self
-                    .menu_file()
-                    .map(|rel| (false, rel))
-                    .or_else(|| self.selected_row().map(|row| (row.is_dir(), row.rel)))
+                    .selected_row()
+                    .map(|row| (row.is_dir(), row.rel))
                     .or_else(|| self.active().map(|tab| (false, tab.rel())));
                 if let (Some((is_dir, rel)), Some(ops)) = (target, self.need_ops("rename a file")) {
                     fileops::rename(ops, &rel, is_dir);
                 }
             }
-            // The same three targets, in the same order. A trash goes to the system's, so it is
-            // the one delete that can be taken back and needs no question of its own.
+            // The same two targets, in the same order. A trash goes to the system's, so it is the
+            // one delete that can be taken back and needs no question of its own.
             "trash" => {
                 let target = self
-                    .menu_file()
-                    .or_else(|| self.selected_row().map(|row| row.rel))
+                    .selected_row()
+                    .map(|row| row.rel)
                     .or_else(|| self.active().map(|tab| tab.rel()));
                 if let (Some(rel), Some(ops)) = (target, self.need_ops("move a file to the trash"))
                 {
@@ -1065,8 +1064,8 @@ pub fn label_of(action: &str) -> &str {
 ///
 /// Omit unavailable vault operations. Shell windows offer Save Session and named sessions
 /// Close Session; local shell creation is separate when New Terminal targets a host.
-/// Document commands stay in shortcuts and the palette rather than this window-level menu, but
-/// for Print… and Export As, which [`primary_menu`] adds after the files.
+/// Document commands, Print… and the exports among them, stay in shortcuts, the palette and a
+/// file's menu rather than this window-level menu.
 fn primary_actions(key: &crate::shell::WindowKey) -> [Vec<&'static str>; 4] {
     let vault = key.vault().is_some();
     let mut shows = vec!["win.terminal", "win.terminal-remote"];
@@ -1115,9 +1114,6 @@ pub fn menu_button(key: &crate::shell::WindowKey) -> gtk::MenuButton {
 
 /// The primary menu's model for a window opened on `key`, and again whenever the window takes
 /// another key: a window of shells saved under a name gains Close Session there and then.
-///
-/// Print… and Export As follow the files, every format listed and greyed where the tab in front
-/// cannot do it (`App::sync_applicable`); not in a window of shells, where a document is the exception.
 pub fn primary_menu(key: &crate::shell::WindowKey) -> gio::Menu {
     let menu = gio::Menu::new();
     let section = |actions: Vec<&str>| {
@@ -1127,23 +1123,7 @@ pub fn primary_menu(key: &crate::shell::WindowKey) -> gio::Menu {
         }
         section
     };
-    let [files, vaults, shows, application] = primary_actions(key);
-    menu.append_section(None, &section(files));
-    if !key.is_terminal() {
-        let exports = gio::Menu::new();
-        // The submenu says "Export as" already, so an item names only its format.
-        for action in &PRINTS[1..] {
-            let label = label_of(action);
-            exports.append(
-                Some(label.strip_prefix("Export as ").unwrap_or(label)),
-                Some(action),
-            );
-        }
-        let prints = section(vec![PRINTS[0]]);
-        prints.append_submenu(Some("Export As"), &exports);
-        menu.append_section(None, &prints);
-    }
-    for group in [vaults, shows, application] {
+    for group in primary_actions(key) {
         menu.append_section(None, &section(group));
     }
     menu
@@ -1158,8 +1138,8 @@ pub const PRINTS: [&str; 5] = [
     "win.export-svg",
 ];
 
-/// Which of [`PRINTS`] a document of `kind` can do: what the tab menu lists, and what the primary
-/// menu leaves sensitive.
+/// Which of [`PRINTS`] a document of `kind` can do: what a file's menu lists, and what the palette
+/// offers for the tab in front.
 pub fn print_actions(kind: Option<Kind>) -> &'static [&'static str] {
     match kind {
         Some(Kind::Note | Kind::Notebook) => &["win.print", "win.export-html"],
@@ -1174,95 +1154,103 @@ pub fn print_actions(kind: Option<Kind>) -> &'static [&'static str] {
     }
 }
 
-/// Initial tab menu with Pin and no page-specific file, transfer or print commands.
+/// What a tab's menu is filled for ([`fill_tab_menu`]).
+#[derive(Default)]
+pub struct TabMenu {
+    /// Another window can open it: Move to New Window.
+    pub movable: bool,
+    /// Unpin Tab rather than Pin Tab.
+    pub pinned: bool,
+    /// A view of the document's own, as a diagram's Show Grid or a notebook's Open as Text.
+    pub view: Option<&'static str>,
+    pub file: TabFile,
+}
+
+/// The file a tab's menu names, after the moves and the view.
+#[derive(Default)]
+pub enum TabFile {
+    /// A shell, a comparison, or no page at all: nothing.
+    #[default]
+    None,
+    /// A file from outside the vault, which can be printed as this: its name, its path and
+    /// Show in Files, through the window's own actions.
+    Loose(Option<Kind>),
+    /// A file of the vault at `rel`: the menu its tree row and its Git row have.
+    Vault { rel: String, facts: fileops::Facts },
+}
+
+/// The tab menu a pane starts with, before any page has asked for its own.
 pub fn tab_menu() -> gio::Menu {
     let menu = gio::Menu::new();
-    fill_tab_menu(&menu, false, false, false, None);
+    fill_tab_menu(&menu, &TabMenu::default());
     menu
 }
 
-/// Fill the shared tab context menu for the page about to show it.
-///
-/// `file` enables vault-only Rename and Trash; `movable` enables opening in another window.
-/// `pinned` selects Pin or Unpin, and `prints`, the page's kind, supplies supported
-/// print/export formats and a diagram's Show Grid.
-/// Split leads; Reveal and exports have separate sections because their effects differ.
+/// Fill the shared tab context menu for the page about to show it: Split ▸ and Move Tab ▸, Move
+/// to New Window and Pin Tab or Unpin Tab, then the document's view, then its file's part.
 ///
 /// Update the existing model because AdwTabView and its popover retain it across pages
 /// (`wire::wire_pane`, `setup-menu`).
-pub fn fill_tab_menu(
-    menu: &gio::Menu,
-    file: bool,
-    movable: bool,
-    pinned: bool,
-    prints: Option<Kind>,
-) {
+pub fn fill_tab_menu(menu: &gio::Menu, tab: &TabMenu) {
     menu.remove_all();
-    let split = gio::Menu::new();
-    for side in [Side::Left, Side::Right, Side::Up, Side::Down] {
-        let action = format!("win.split-{}", side.action());
-        split.append(Some(label_of(&action)), Some(&action));
-    }
-    menu.append_section(None, &split);
-    let move_tab = gio::Menu::new();
-    for side in [Side::Left, Side::Right, Side::Up, Side::Down] {
-        let action = format!("win.move-tab-{}", side.action());
-        move_tab.append(Some(label_of(&action)), Some(&action));
-    }
-    if movable {
+    // Each submenu says "Split" or "Move Tab" already, so an item names only its side, as the
+    // Export As submenu once did.
+    let sides = |prefix: &str, title: &str| {
+        let submenu = gio::Menu::new();
+        for side in [Side::Left, Side::Right, Side::Up, Side::Down] {
+            let action = format!("win.{prefix}-{}", side.action());
+            let label = label_of(&action);
+            let label = label.strip_prefix(title).map_or(label, str::trim_start);
+            submenu.append(Some(label), Some(&action));
+        }
+        submenu
+    };
+    let tabs = gio::Menu::new();
+    tabs.append_submenu(Some("Split"), &sides("split", "Split"));
+    tabs.append_submenu(Some("Move Tab"), &sides("move-tab", "Move Tab"));
+    if tab.movable {
         let action = "win.move-to-new-window";
-        move_tab.append(Some(label_of(action)), Some(action));
+        tabs.append(Some(label_of(action)), Some(action));
     }
     // After the moves, as GNOME Web has it: pinning is where in the bar the tab stays.
-    let pin = match pinned {
+    let pin = match tab.pinned {
         true => "win.unpin-tab",
         false => "win.pin-tab",
     };
-    move_tab.append(Some(label_of(pin)), Some(pin));
-    menu.append_section(None, &move_tab);
-    for action in [
-        "win.copy-name",
-        "win.copy-relative-path",
-        "win.copy-absolute-path",
-        "win.show-in-files",
-    ] {
-        menu.append(Some(label_of(action)), Some(action));
-    }
-    let reveal = gio::Menu::new();
-    reveal.append(
-        Some(label_of("win.reveal-in-sidebar")),
-        Some("win.reveal-in-sidebar"),
-    );
-    menu.append_section(None, &reveal);
-    let diagram = prints == Some(Kind::Diagram);
-    let notebook = prints == Some(Kind::Notebook);
-    let prints = print_actions(prints);
-    if !prints.is_empty() {
-        let section = gio::Menu::new();
-        for action in prints {
-            section.append(Some(label_of(action)), Some(action));
-        }
-        menu.append_section(None, &section);
-    }
-    if diagram {
+    tabs.append(Some(label_of(pin)), Some(pin));
+    menu.append_section(None, &tabs);
+    if let Some(action) = tab.view {
         let view = gio::Menu::new();
-        view.append(Some(label_of("win.diagram-grid")), Some("win.diagram-grid"));
-        menu.append_section(None, &view);
-    }
-    if notebook {
-        let view = gio::Menu::new();
-        let action = "win.notebook-open-text";
         view.append(Some(label_of(action)), Some(action));
         menu.append_section(None, &view);
     }
-    if file {
-        // The tree's own arrangement, which is what "tree rows and tabs share the shape" means:
-        // the name first, and the one destructive item alone at the end so it is never next to
-        // Rename by accident (DESIGN.md, Context menus).
-        for action in ["win.rename", "win.trash"] {
-            let section = gio::Menu::new();
-            section.append(Some(label_of(action)), Some(action));
-            menu.append_section(None, &section);
+    match &tab.file {
+        TabFile::None => {}
+        // The tree's own part, which is what "tree rows and tabs share the shape" means.
+        TabFile::Vault { rel, facts } => {
+            for section in fileops::file_sections(rel, facts) {
+                menu.append_section(None, &section);
+            }
+        }
+        // No Rename, clipboard or trash for a file the vault does not hold, and no relative path.
+        TabFile::Loose(kind) => {
+            let names = gio::Menu::new();
+            for action in [
+                "win.copy-name",
+                "win.copy-absolute-path",
+                "win.show-in-files",
+            ] {
+                names.append(Some(label_of(action)), Some(action));
+            }
+            menu.append_section(None, &names);
+            let prints = print_actions(*kind);
+            if !prints.is_empty() {
+                let section = gio::Menu::new();
+                for action in prints {
+                    section.append(Some(label_of(action)), Some(action));
+                }
+                menu.append_section(None, &section);
+            }
         }
     }
 }
