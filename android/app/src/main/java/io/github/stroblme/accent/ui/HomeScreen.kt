@@ -133,7 +133,6 @@ fun HomeScreen(model: VaultModel) {
                     revision = state.revision,
                     indexing = state.indexing,
                     paused = state.paused,
-                    scanned = state.scanned,
                     front = doc?.rel,
                     note = doc is Open,
                     openTag = browseTag,

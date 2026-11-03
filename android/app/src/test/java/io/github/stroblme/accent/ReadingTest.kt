@@ -10,22 +10,11 @@ import org.junit.Test
 
 /** Browse distinguishes partial search results during indexing from complete empty results. */
 class ReadingTest {
+    /** A running walk says so with its bar alone; a stopped one, with no bar, in words. */
     @Test
-    fun `the line is up exactly while a list may be missing files`() {
-        assertEquals(
-            "Indexing… 120 files. Results may be incomplete.",
-            readingLine(indexing = true, paused = false, scanned = 120),
-        )
-        // The rescan's scan, which counts nothing it could show.
-        assertEquals(
-            "Indexing… Results may be incomplete.",
-            readingLine(indexing = true, paused = false, scanned = 0),
-        )
-        assertEquals(
-            "Indexing paused. Results may be incomplete.",
-            readingLine(indexing = false, paused = true, scanned = 0),
-        )
-        assertNull(readingLine(indexing = false, paused = false, scanned = 0))
+    fun `the line is up only while a stopped walk leaves files out`() {
+        assertNull(readingLine(paused = false))
+        assertEquals("Indexing paused. Results may be incomplete.", readingLine(paused = true))
     }
 
     /** A failed or unobserved walk clears progress state while retaining indexed results. */

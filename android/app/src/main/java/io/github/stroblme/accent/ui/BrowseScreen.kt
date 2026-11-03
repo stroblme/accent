@@ -59,10 +59,9 @@ fun BrowseScreen(
     searchFailed: String?,
     /** Bumped as the index takes in more files ([VaultState.revision]). */
     revision: Int,
-    /** The walk is running, or was stopped, and how far it has read: what [readingLine] says. */
+    /** The walk is running, or was stopped, which is what [readingLine] says. */
     indexing: Boolean,
     paused: Boolean,
-    scanned: Long,
     front: String?,
     /** Whether [front] is a note, whose links go both ways: the files it links to too. */
     note: Boolean,
@@ -220,12 +219,13 @@ fun BrowseScreen(
         delay(SLOW_MS)
         slow = true
     }
-    val line = readingLine(indexing, paused, scanned)
+    val line = readingLine(paused)
 
     PullDownPanel(onClose) {
         ScreenBar("Browse")
         // Over every page, since every list here is drawn from the index: what is not read yet is
-        // in none of them. The start screen's words and its bar.
+        // in none of them. A running walk says so with the start screen's bar alone, and a
+        // stopped one, which has no bar, in words.
         line?.let { Status(it) }
         if (reading || slow) {
             LinearProgressIndicator(
@@ -532,16 +532,11 @@ private data class Ranked(val mode: Mode, val query: String, val rows: List<Int>
 /** How long a query goes unanswered before the bar says it is still being looked for. */
 private const val SLOW_MS = 200L
 
-/** Status shown while indexing is running or paused with incomplete results. */
-internal fun readingLine(indexing: Boolean, paused: Boolean, scanned: Long): String? = when {
-    indexing && scanned > 0 ->
-        "Indexing… %,d files. Results may be incomplete.".format(scanned)
-    indexing -> "Indexing… Results may be incomplete."
-    paused -> "Indexing paused. Results may be incomplete."
-    else -> null
-}
+/** Status shown while indexing is paused with incomplete results. */
+internal fun readingLine(paused: Boolean): String? =
+    if (paused) "Indexing paused. Results may be incomplete." else null
 
-/** What a query that matched nothing says: nothing yet, while [readingLine] has a line. */
+/** What a query that matched nothing says: nothing yet, while the walk is running or stopped. */
 internal fun nothingFound(indexing: Boolean, paused: Boolean): String = when {
     indexing -> "No results yet. Indexing is in progress."
     paused -> "No results in indexed files."

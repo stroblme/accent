@@ -30,7 +30,7 @@ Follow these rules where they differ from Material 3, using a flat layout and ty
   Files is the switcher — the recent files, then names ranked against the query — and Command the palette; both lay their rows out from the bottom up, so the best match is nearest the thumb, and both put the keyboard up when their page lands.
   Command lists what applies to the document in front, as the desktop's palette does (DESIGN.md, Palette): Find and Print… while a note or a PDF is, Close Note while any document is.
   Files lists the index's names at once, and the notes in the folders git ignores join when their walk lands, which over shared storage is a walk of the whole vault; the names are ranked on the core's side, so a key sends the query and not them.
-- Every list here is the index's, so while the vault is still being read a muted line under the title says what is not listed yet, over the start screen's bar; a stopped walk keeps the line and drops the bar.
+- Every list here is the index's, so while the vault is still being read the start screen's bar runs under the title, without words (user decision 2026-11-03); a stopped walk drops the bar for a muted line saying what is not listed yet.
   Search and Files ask again as the walk reads more files, so a file it reaches turns up without the query being typed again, and a query that matched nothing says "Nothing found yet" until it ends.
   A query unanswered after 200 ms puts the bar up as well.
 - A search hit opens its note marked by the page's own find; where that find cannot see what the index matched — an accent folded, markup the page does not show, a title — the note opens unmarked at its top rather than marked at the wrong words.
