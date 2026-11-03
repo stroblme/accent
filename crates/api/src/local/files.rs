@@ -60,8 +60,8 @@ impl Local {
         Ok(())
     }
 
-    /// Write `bytes` to a file nothing holds yet, an image pasted into a note, and tell the worker
-    /// as [`save`](Self::save) does: an embed of it resolves at once, not a watcher debounce later.
+    /// Write `bytes` to a file nothing holds yet, an image pasted into a note, and index it as
+    /// [`wrote`](Self::wrote) does: an embed of it resolves at once, not a watcher debounce later.
     /// A name taken meanwhile fails with `AlreadyExists(rel)` and keeps what it holds.
     pub fn write_file(&self, rel: &str, bytes: &[u8]) -> Result<()> {
         let path = self.resolve(rel)?;
@@ -71,21 +71,20 @@ impl Local {
             let _ = std::fs::remove_file(&path);
             return Err(e.into());
         }
-        self.post(Msg::Update {
-            rel: rel.to_string(),
-            own: true,
-        });
-        Ok(())
+        self.wrote(rel)
     }
 
     /// Notify the worker of an external write, including remote
-    /// [`write_file`](Self::write_file) bytes transferred separately over SSH.
+    /// [`write_file`](Self::write_file) bytes transferred separately over SSH, and return once
+    /// it is indexed, so a lookup right after finds it. Off the main loop, as
+    /// [`settle_index`](Self::settle_index) is.
     pub fn wrote(&self, rel: &str) -> Result<()> {
         self.resolve(rel)?;
         self.post(Msg::Update {
             rel: rel.to_string(),
             own: true,
         });
+        self.settle_index();
         Ok(())
     }
 

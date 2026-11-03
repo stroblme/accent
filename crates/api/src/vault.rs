@@ -414,7 +414,7 @@ methods! {
     /// fine, as `mkdir -p` has it; without, a taken `rel` fails with `AlreadyExists`, so the folder
     /// is the caller's own.
     create_dir(rel: ref str, merge: val bool) -> ();
-    /// Index an external write immediately, without watcher debounce.
+    /// Index an external write without watcher debounce, answering once it is indexed.
     /// [`write_file`](Vault::write_file) calls this after uploading bytes.
     wrote(rel: ref str) -> ();
     /// Copy a file or directory within the vault, without transferring remote bytes.

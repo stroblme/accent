@@ -1026,11 +1026,11 @@ fn a_file_said_to_be_written_is_indexed_without_a_watcher() {
 
     std::fs::write(root.path().join("pasted.png"), "png").unwrap();
     vault.wrote("pasted.png").unwrap();
-    assert!(wait_for(&events, |e| matches!(e, Event::DirsChanged(_)), BUDGET).is_some());
     assert_eq!(
         vault.resolve_link("pasted.png").unwrap().as_deref(),
         Some("pasted.png")
     );
+    assert!(wait_for(&events, |e| matches!(e, Event::DirsChanged(_)), BUDGET).is_some());
     assert!(vault.wrote("../elsewhere.png").is_err());
 }
 
