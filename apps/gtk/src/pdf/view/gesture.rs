@@ -1,5 +1,5 @@
-//! PDF pointer gestures for selection, drawing, erasing and stroke adjustment.
-//! Choose tools by input device and handle stylus dots.
+//! PDF pointer gestures for text selection, drawing, erasing and the Select tool's lasso, picks
+//! and handles. Choose tools by input device and handle stylus dots.
 
 use adw::prelude::*;
 use gtk::glib::translate::IntoGlib;
@@ -11,8 +11,8 @@ use crate::pdf::Span;
 use crate::pdf::geometry::page_at;
 use crate::pdf::protocol::{NamedInk, Pass, fresh_id};
 use crate::pdf::tools::{
-    ADJUST_RADIUS, HANDLE, Hand, Handle, Mode, Selected, Stroke, drag_matrix, drag_of, handle_at,
-    rotate_handle, shape_of, snap, turn_matrix, width_of,
+    HANDLE, Hand, Handle, Lasso, Mode, PICK_RADIUS, Picked, Selection, Stroke, clamp_move,
+    drag_matrix, drag_of, handle_at, rotate_handle, shape_of, snap, turn_matrix, width_of,
 };
 
 impl PdfView {
@@ -29,6 +29,7 @@ impl PdfView {
                 let hand = hand_of(motion);
                 obj.show_dot(hand);
                 obj.note_hand(hand);
+                obj.hover(x, y);
                 let handler = obj.imp().on_motion.borrow();
                 if let Some(f) = handler.as_ref() {
                     f(&obj, x, y);
@@ -63,7 +64,7 @@ impl PdfView {
                     return;
                 };
                 match mode {
-                    Mode::Select => {}
+                    Mode::Read => {}
                     // Typing into a box the tab opens, or into a text of ours under the press.
                     Mode::Text => {
                         let Some((page, _, _)) = obj.page_point(x, y) else {
@@ -93,10 +94,11 @@ impl PdfView {
                             done: false,
                         });
                     }
-                    Mode::Adjust => {
-                        if obj.adjust_press(x, y) {
-                            gesture.set_state(gtk::EventSequenceState::Claimed);
-                        }
+                    // Claimed at once, as a pen's stroke is: a lasso is drawn from the press.
+                    Mode::Select => {
+                        gesture.set_state(gtk::EventSequenceState::Claimed);
+                        let state = gesture.current_event_state();
+                        obj.select_press(x, y, state.contains(crate::platform::PRIMARY_MODIFIER));
                     }
                     _ => {
                         gesture.set_state(gtk::EventSequenceState::Claimed);
@@ -116,13 +118,13 @@ impl PdfView {
                 };
                 // A finger's drag is a selection once a long press has made it one, and until
                 // then the scrolled window's to pan.
-                let held = obj.imp().held.get().then_some(Mode::Select);
+                let held = obj.imp().held.get().then_some(Mode::Read);
                 let Some(mode) = obj.imp().drag_mode.get().or(held) else {
                     return;
                 };
                 match mode {
                     Mode::Text => {}
-                    Mode::Select => {
+                    Mode::Read => {
                         // A few pixels of travel is a click with a shaky hand, not a
                         // selection. And the strip selects nothing: a drag there moves the
                         // page, which is its drag source's to claim (`organize.rs`).
@@ -165,9 +167,10 @@ impl PdfView {
                         }
                         obj.queue_draw();
                     }
-                    Mode::Adjust => {
+                    Mode::Select => {
                         let state = gesture.current_event_state();
-                        obj.adjust_drag(dx, dy, state.contains(gdk::ModifierType::SHIFT_MASK))
+                        let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
+                        obj.select_drag(gesture, dx, dy, shift)
                     }
                     _ => obj.erase_at(x + dx, y + dy),
                 }
@@ -186,8 +189,8 @@ impl PdfView {
                 {
                     f();
                 }
-                if mode == Some(Mode::Adjust) {
-                    return obj.adjust_release();
+                if mode == Some(Mode::Select) {
+                    return obj.select_release();
                 }
                 if mode == Some(Mode::Text) {
                     return;
@@ -276,7 +279,7 @@ impl PdfView {
                 obj.grab_focus();
                 // While a pen is out, a press is the start of a mark, not a link to follow; a
                 // finger's may be the start of a pan, and waits to be a tap (`drag-end`).
-                if obj.effective_mode(gesture) != Some(Mode::Select) {
+                if obj.effective_mode(gesture) != Some(Mode::Read) {
                     return;
                 }
                 match gesture.current_button() {
@@ -325,7 +328,7 @@ impl PdfView {
     /// of travel is what the link hover avoids too.
     fn show_dot(&self, hand: Hand) {
         let pen = matches!(hand, Hand::Pen { .. });
-        let dot = self.imp().mode.get() != Mode::Select && pen;
+        let dot = self.imp().mode.get() != Mode::Read && pen;
         if self.imp().dot.replace(dot) == dot {
             return;
         }
@@ -356,70 +359,151 @@ impl PdfView {
         self.note_hand(Hand::Pen { eraser });
     }
 
-    /// The Adjust tool's press: a handle of the stroke already held, its rotate handle first,
-    /// else whichever stroke or text of ours is under the pointer, else nothing. A text has no
-    /// handles: anywhere on it is its middle. Whether the press took hold of anything.
-    fn adjust_press(&self, x: f64, y: f64) -> bool {
+    /// The Select tool's press. The rotate ring, a corner or an edge of what it holds takes hold
+    /// of all of it, and so does a press on one of its items or anywhere in their box; a stroke
+    /// or a text of ours not held is picked alone, held by its middle, so a drag moves it at once.
+    /// With Ctrl a stroke or a text is added or let go of, and nothing is taken hold of. Anywhere
+    /// else starts a lasso, which with Ctrl adds to what is held.
+    fn select_press(&self, x: f64, y: f64, ctrl: bool) {
         let Some((page, at)) = self.nearest_page_point(x, y) else {
-            return false;
+            return;
         };
+        let handle = self.handle_under(x, y);
+        let hit = self.pick_at(page, at);
+        let mut picked = self.imp().picked.borrow_mut();
+        let held = |id: u32| {
+            (picked.as_ref().filter(|s| s.page == page))
+                .is_some_and(|s| s.items.iter().any(|item| item.id == id))
+        };
+        let grab = match (handle, hit, ctrl) {
+            (Some(h), _, false) if h != Handle::Move => Some(h),
+            (_, Some(item), true) => {
+                match picked.as_mut().filter(|s| s.page == page) {
+                    Some(s) => match s.items.iter().position(|i| i.id == item.id) {
+                        Some(at) => drop(s.items.remove(at)),
+                        None => s.items.push(item),
+                    },
+                    None => *picked = Some(Selection::of(page, vec![item])),
+                }
+                None
+            }
+            (_, Some(item), false) if !held(item.id) => {
+                *picked = Some(Selection::of(page, vec![item]));
+                Some(Handle::Move)
+            }
+            (_, Some(_), false) | (Some(Handle::Move), None, false) => Some(Handle::Move),
+            _ => {
+                let lasso = Lasso {
+                    page,
+                    points: vec![at],
+                    add: ctrl,
+                };
+                self.imp().lasso.replace(Some(lasso));
+                None
+            }
+        };
+        if picked.as_ref().is_some_and(|s| s.items.is_empty()) {
+            *picked = None;
+        }
+        if let Some(s) = picked.as_mut() {
+            s.handle = grab;
+            s.matrix = accent_core::pdf::IDENTITY;
+        }
+        drop(picked);
+        self.picked_changed();
+    }
+
+    /// Pick the stroke or text of ours at this point of the view, unless the Select tool holds it
+    /// already: what a secondary click does before its menu offers the commands.
+    pub fn pick_under(&self, x: f64, y: f64) {
+        let Some((page, at)) = self.nearest_page_point(x, y) else {
+            return;
+        };
+        let Some(item) = self.pick_at(page, at) else {
+            return;
+        };
+        let held = (self.imp().picked.borrow().as_ref())
+            .is_some_and(|s| s.page == page && s.items.iter().any(|i| i.id == item.id));
+        if !held {
+            self.imp()
+                .picked
+                .replace(Some(Selection::of(page, vec![item])));
+            self.picked_changed();
+        }
+    }
+
+    /// The page under the pointer and the point on it, while the pointer is over a page.
+    pub fn under_pointer(&self) -> Option<(usize, f32, f32)> {
+        let (x, y) = self.imp().over.get()?;
+        self.page_point(x, y)
+    }
+
+    /// Which handle of what the Select tool holds is under this point of the view: its rotate
+    /// ring first, then a corner, an edge or its middle. Texts alone have only their middle.
+    fn handle_under(&self, x: f64, y: f64) -> Option<Handle> {
+        let picked = self.imp().picked.borrow();
+        let s = picked.as_ref()?;
         let scale = self.imp().layout.borrow().scale;
         let grip = HANDLE / scale;
-        let mut adjust = self.imp().adjust.borrow_mut();
-        if let Some(a) = adjust.as_mut() {
-            // Measured on the held stroke's page: the ring may stand off its paper.
-            let (rx, ry) = rotate_handle(a.bounds, scale);
-            let ring = !a.typed
-                && (self.on_page(a.page, x, y))
-                    .is_some_and(|(px, py)| (px - rx).hypot(py - ry) <= grip);
-            let held = match ring {
-                true => Some(Handle::Rotate),
-                false => (a.page == page)
-                    .then(|| handle_at(a.bounds, at, grip))
-                    .flatten()
-                    .map(|h| if a.typed { Handle::Move } else { h }),
-            };
-            if let Some(handle) = held {
-                a.handle = Some(handle);
-                return true;
-            }
+        // Measured on the selection's page, wherever the pointer is: the ring may stand off it.
+        let at = self.on_page(s.page, x, y)?;
+        let b = s.bounds();
+        let (rx, ry) = rotate_handle(b, scale);
+        if !s.moves_only() && (at.0 - rx).hypot(at.1 - ry) <= grip {
+            return Some(Handle::Rotate);
         }
-        // The stroke under the pointer first, then a text of ours it is on, then the first
-        // stroke whose box it is inside: a thin line wants the pointer on it, a circle's empty
-        // middle still belongs to the circle.
+        let handle = handle_at(b, at, grip)?;
+        Some(if s.moves_only() { Handle::Move } else { handle })
+    }
+
+    /// The stroke or text of ours at `at` on `page`: a stroke whose edge is within
+    /// [`PICK_RADIUS`] of it, the topmost first, then a text whose box holds it. A circle's empty
+    /// middle is no part of the circle, so a press there starts a lasso.
+    fn pick_at(&self, page: usize, at: (f32, f32)) -> Option<Picked> {
         let (inks, texts) = (self.imp().inks.borrow(), self.imp().texts.borrow());
         let inks = inks.get(&page).map(Vec::as_slice).unwrap_or_default();
         let texts = texts.get(&page).map(Vec::as_slice).unwrap_or_default();
-        let on = |i: &&NamedInk| accent_core::pdf::hit(&i.1.points, at, ADJUST_RADIUS);
-        let inside = |i: &&NamedInk| handle_at(i.1.bounds, at, grip).is_some();
-        *adjust = (inks.iter().find(on).map(|i| Selected::stroke(page, i)))
-            .or_else(|| {
-                let text = texts.iter().find(|(_, t)| t.bounds.contains(at));
-                text.map(|t| Selected::text(page, t))
-            })
-            .or_else(|| inks.iter().find(inside).map(|i| Selected::stroke(page, i)));
-        let held = adjust.is_some();
-        drop(adjust);
-        self.queue_draw();
-        held
+        let on = |(_, ink): &&NamedInk| {
+            let reach = PICK_RADIUS + ink.style.width / 2.0;
+            ink.bounds.grow(reach).contains(at) && accent_core::pdf::hit(&ink.points, at, reach)
+        };
+        (inks.iter().rev().find(on).map(Picked::stroke)).or_else(|| {
+            let text = texts.iter().rev().find(|(_, t)| t.bounds.contains(at));
+            text.map(Picked::text)
+        })
     }
 
-    /// The drag so far, `snap` (Shift) turning in steps of 15°.
-    fn adjust_drag(&self, dx: f64, dy: f64, snap: bool) {
+    /// The drag so far: the lasso drawn on, or what the Select tool holds moved, stretched or
+    /// turned, `snap` (Shift) turning in steps of 15°. A move stops at the page's edge.
+    fn select_drag(&self, gesture: &gtk::GestureDrag, dx: f64, dy: f64, snap: bool) {
+        let Some((x, y)) = self.imp().drag_from.get() else {
+            return;
+        };
+        if let Some(lasso) = self.imp().lasso.borrow_mut().as_mut() {
+            let page = lasso.page;
+            let merged = merged(gesture, self).into_iter();
+            let merged = merged.filter_map(|(x, y)| self.on_page(page, x, y));
+            lasso.points.extend(merged);
+            lasso.points.extend(self.on_page(page, x + dx, y + dy));
+            self.queue_draw();
+            return;
+        }
         let scale = self.imp().layout.borrow().scale;
-        let from = self.imp().drag_from.get();
-        if let Some(a) = self.imp().adjust.borrow_mut().as_mut()
-            && let Some(handle) = a.handle
+        if let Some(s) = self.imp().picked.borrow_mut().as_mut()
+            && let Some(handle) = s.handle
         {
             let (dx, dy) = (dx as f32 / scale, dy as f32 / scale);
-            a.matrix = match handle {
-                Handle::Rotate => {
-                    let from = from.and_then(|(x, y)| self.on_page(a.page, x, y));
-                    from.map_or(a.matrix, |p| {
-                        turn_matrix(a.bounds, p, (p.0 + dx, p.1 + dy), snap)
-                    })
+            let b = s.bounds();
+            s.matrix = match handle {
+                Handle::Rotate => match self.on_page(s.page, x, y) {
+                    Some(p) => turn_matrix(b, p, (p.0 + dx, p.1 + dy), snap),
+                    None => s.matrix,
+                },
+                Handle::Move => {
+                    let size = self.page_size(s.page).unwrap_or((f32::MAX, f32::MAX));
+                    clamp_move(b, drag_matrix(handle, b, dx, dy), size)
                 }
-                _ => drag_matrix(handle, a.bounds, dx, dy),
+                _ => drag_matrix(handle, b, dx, dy),
             };
         }
         self.queue_draw();
@@ -431,31 +515,83 @@ impl PdfView {
         self.imp().layout.borrow().to_page(page, cx, cy)
     }
 
-    /// The hand let go: what the drag amounted to goes to the tab, and the selection keeps
-    /// painting where the stroke will be until the fresh list confirms it.
-    fn adjust_release(&self) {
-        let sent = {
-            let mut adjust = self.imp().adjust.borrow_mut();
-            let Some(a) = adjust.as_mut() else {
+    /// The hand let go. A lasso holds what it took, at least half of each stroke inside it and a
+    /// text by its box, or with Ctrl adds that to what is held; a click on the paper lets go
+    /// of everything. A drag of what is held goes to the tab, and its items keep painting where
+    /// they will be until the page's fresh list confirms it.
+    fn select_release(&self) {
+        if let Some(lasso) = self.imp().lasso.take() {
+            // A click's lasso, a point or a shaky few, encloses nothing.
+            let taken = self.lassoed(&lasso);
+            let mut picked = self.imp().picked.borrow_mut();
+            match picked
+                .as_mut()
+                .filter(|s| lasso.add && s.page == lasso.page)
+            {
+                Some(s) => {
+                    for item in taken {
+                        if !s.items.iter().any(|held| held.id == item.id) {
+                            s.items.push(item);
+                        }
+                    }
+                }
+                None if lasso.add && taken.is_empty() => {}
+                None => *picked = (!taken.is_empty()).then(|| Selection::of(lasso.page, taken)),
+            }
+            drop(picked);
+            return self.picked_changed();
+        }
+        let m = {
+            let mut picked = self.imp().picked.borrow_mut();
+            let Some(s) = picked.as_mut() else {
                 return;
             };
-            a.handle = None;
-            let m = std::mem::replace(&mut a.matrix, accent_core::pdf::IDENTITY);
-            if m == accent_core::pdf::IDENTITY {
-                return;
-            }
-            a.points = a
-                .points
-                .iter()
-                .map(|&p| accent_core::pdf::apply(m, p))
-                .collect();
-            a.bounds = a.bounds.under(m);
-            (a.page, a.id, m)
+            s.handle = None;
+            std::mem::replace(&mut s.matrix, accent_core::pdf::IDENTITY)
         };
-        if let Some(f) = self.imp().on_transform.borrow().as_ref() {
-            f(sent.0, sent.1, sent.2);
+        match m == accent_core::pdf::IDENTITY {
+            true => self.queue_draw(),
+            false => self.transform_picked(m),
         }
-        self.queue_draw();
+    }
+
+    /// What `lasso` takes of its page: each stroke at least half inside it, and each text of ours
+    /// whose box is.
+    fn lassoed(&self, lasso: &Lasso) -> Vec<Picked> {
+        let (inks, texts) = (self.imp().inks.borrow(), self.imp().texts.borrow());
+        let inks = inks.get(&lasso.page).map(Vec::as_slice).unwrap_or_default();
+        let texts = texts
+            .get(&lasso.page)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let strokes = (inks.iter())
+            .filter(|(_, ink)| accent_core::pdf::lassoed(&ink.points, &lasso.points))
+            .map(Picked::stroke);
+        let texts = (texts.iter())
+            .filter(|(_, text)| accent_core::pdf::lassoed(&outline(text.bounds), &lasso.points))
+            .map(Picked::text);
+        strokes.chain(texts).collect()
+    }
+
+    /// Under the Select tool the pointer says what a press would do: a handle's own cursor, the
+    /// move cursor over a stroke or a text, the arrow elsewhere. Set only when that changes.
+    fn hover(&self, x: f64, y: f64) {
+        let imp = self.imp();
+        if imp.mode.get() != Mode::Select || imp.dot.get() || imp.drag_from.get().is_some() {
+            return;
+        }
+        let picks = || {
+            let (page, at) = self.nearest_page_point(x, y)?;
+            self.pick_at(page, at)
+        };
+        let name = match self.handle_under(x, y) {
+            Some(handle) => handle.cursor(),
+            None if picks().is_some() => "move",
+            None => "default",
+        };
+        if self.cursor().and_then(|c| c.name()).as_deref() != Some(name) {
+            self.set_cursor_from_name(Some(name));
+        }
     }
 
     /// Tell the tab which strokes the eraser passed over since it was last reported, and what a
@@ -526,11 +662,7 @@ impl PdfView {
         if let Some(list) = self.imp().texts.borrow_mut().get_mut(&page) {
             list.retain(|(id, text)| {
                 let b = text.bounds;
-                let edge = [b.left, b.right, b.right, b.left, b.left];
-                let edge: Vec<(f32, f32)> = (edge.into_iter())
-                    .zip([b.top, b.top, b.bottom, b.bottom, b.top])
-                    .collect();
-                let hit = b.contains(at) || accent_core::pdf::swept(&edge, from, at, radius);
+                let hit = b.contains(at) || accent_core::pdf::swept(&outline(b), from, at, radius);
                 if hit {
                     taken.push((*id, None));
                 }
@@ -539,9 +671,7 @@ impl PdfView {
         }
         if let Some(f) = self.imp().on_erase.borrow().as_ref() {
             for (id, pass) in taken {
-                let sent = self.imp().erases.get() + 1;
-                self.imp().erases.set(sent);
-                self.imp().last_erase.borrow_mut().insert(page, sent);
+                self.relisted(page);
                 f(page, id, pass, self.imp().erased.replace(true));
             }
         }
@@ -584,6 +714,13 @@ impl PdfView {
         let page = page_at(&layout, f64::from(cy));
         Some((page, layout.to_page(page, cx, cy)?))
     }
+}
+
+/// The edge of a box, round from its top-left corner, as a polyline: how a lasso measures a
+/// text, and the eraser too.
+fn outline(b: accent_core::pdf::Rect) -> [(f32, f32); 5] {
+    let (l, t, r, bt) = (b.left, b.top, b.right, b.bottom);
+    [(l, t), (r, t), (r, bt), (l, bt), (l, t)]
 }
 
 /// The positions GDK merged into the motion `gesture` is handling, oldest first, in `view`'s

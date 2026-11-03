@@ -110,6 +110,26 @@ impl<T: Tool> Ring<T> {
         button
     }
 
+    /// A button on the outer orbit, slot `i` of `n`, running `action` and named by its label: a
+    /// command rather than an option, so a plain button, which no checked look can leave stuck.
+    /// Hidden until shown.
+    pub fn add_button(&self, i: usize, n: usize, icon: &str, action: &str) -> gtk::Button {
+        let button = gtk::Button::builder()
+            .icon_name(icon)
+            .tooltip_text(crate::actions::label_of(action))
+            .action_name(action)
+            .visible(false)
+            .build();
+        button.add_css_class("circular");
+        button.add_css_class("opaque");
+        button.add_css_class("accent-floating");
+        button.add_css_class("accent-ring-tool");
+        let centre = f64::from(SIZE) / 2.0;
+        let (dx, dy) = orbit(i, n, OPTIONS);
+        place(&self.root, &button, centre + dx, centre + dy, OPTION);
+        button
+    }
+
     /// Dragging the hub moves the whole ring, an overlay child the overlay places where `at` says.
     fn wire_drag(self: &std::rc::Rc<Self>, hub: &gtk::Button) {
         let drag = gtk::GestureDrag::new();

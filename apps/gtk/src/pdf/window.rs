@@ -607,7 +607,7 @@ impl App {
         // Putting the tools away puts the pen down with them; taking them out arms the last tool.
         let tool = match showing {
             true => self.tool.get(),
-            false => pdfview::Mode::Select,
+            false => pdfview::Mode::Read,
         };
         pdf.set_drawing(showing, self.ring_at.get());
         pdf.set_mode(tool);
@@ -618,15 +618,15 @@ impl App {
     pub fn pdf_mode(self: &Rc<Self>, mode: pdfview::Mode) {
         let Some(pdf) = self.active_pdf() else { return };
         let wanted = match pdf.mode() == mode {
-            true => pdfview::Mode::Select,
+            true => pdfview::Mode::Read,
             false => mode,
         };
         // Remembered even when it is put down, so the ring coming back offers the same tool.
-        if wanted != pdfview::Mode::Select {
+        if wanted != pdfview::Mode::Read {
             self.tool.set(wanted);
         }
         // Reaching a tool from the palette with the ring away is what takes it out.
-        if wanted != pdfview::Mode::Select && !self.drawing.get() {
+        if wanted != pdfview::Mode::Read && !self.drawing.get() {
             self.drawing.set(true);
             self.drawing_button.set_active(true);
             pdf.set_drawing(true, self.ring_at.get());
@@ -651,7 +651,7 @@ impl App {
             pdf.set_drawing(showing, self.ring_at.get());
             pdf.set_mode(match showing {
                 true => self.tool.get(),
-                false => pdfview::Mode::Select,
+                false => pdfview::Mode::Read,
             });
         }
         let diagram = self.active_diagram();

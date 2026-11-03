@@ -65,7 +65,7 @@ impl PdfTab {
     /// The comments under a point of the reading view, and their page. None with a tool in hand,
     /// which the page belongs to, or over a link, which a click follows.
     fn comments_at(&self, x: f64, y: f64) -> Option<(usize, Vec<pdf::Comment>)> {
-        if self.view.mode() != Mode::Select || self.link_at(&self.view, x, y).is_some() {
+        if self.view.mode() != Mode::Read || self.link_at(&self.view, x, y).is_some() {
             return None;
         }
         let (page, px, py) = self.view.page_point(x, y)?;

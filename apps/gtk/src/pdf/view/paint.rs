@@ -9,7 +9,7 @@ use gtk::{gdk, graphene, gsk};
 use super::imp;
 use crate::pdf::cache::{TILE, TileKey, Want, reach, tiles_across, tiles_within};
 use crate::pdf::geometry::{Layout, PageRect, gap_middle, on_grid, page_at};
-use crate::pdf::tools::{HANDLE, Handle, Mode, ROTATE_GAP, Stroke};
+use crate::pdf::tools::{HANDLE, Handle, Mode, ROTATE_GAP, Selection, Stroke};
 use crate::theme;
 
 /// How thick the line a dropped PDF's pages would go in at is: the thumbnail strip's drop bar.
@@ -46,7 +46,8 @@ impl imp::PdfView {
         let marks = self.marks.borrow();
         let highlights = self.highlights.borrow();
         let strokes = self.strokes.borrow();
-        let adjust = self.adjust.borrow();
+        let picked = self.picked.borrow();
+        let lasso = self.lasso.borrow();
         let selection = self.selection.borrow();
         let shown = ((ox, ox + vw), (oy, oy + vh));
         let near = reach(shown, sf);
@@ -227,74 +228,11 @@ impl imp::PdfView {
                     snapshot.append_color(&colour, &layout.rect_of(rect, glyph));
                 }
             }
-            // The stroke the Adjust tool holds: its box with eight handles and the ring that
-            // turns it, and while the hand is on it, a ghost of the stroke where the drag has
-            // taken it.
-            if let Some(a) = adjust.as_ref().filter(|a| a.page == index) {
-                let point = |p: (f32, f32)| {
-                    let (x, y) = accent_core::pdf::apply(a.matrix, p);
-                    graphene::Point::new(rect.x + x * layout.scale, rect.y + y * layout.scale)
-                };
-                if a.handle.is_some()
-                    && let Some(first) = a.points.first()
-                {
-                    let builder = gsk::PathBuilder::new();
-                    builder.move_to(point(*first).x(), point(*first).y());
-                    for &p in &a.points[1..] {
-                        builder.line_to(point(p).x(), point(p).y());
-                    }
-                    let [r, g, b, _] = a.style.rgba;
-                    let colour = theme::rgba([r, g, b], theme::GHOST_ALPHA);
-                    let ghost = gsk::Stroke::new(a.style.width * layout.scale);
-                    ghost.set_line_cap(gsk::LineCap::Round);
-                    ghost.set_line_join(gsk::LineJoin::Round);
-                    snapshot.append_stroke(&builder.to_path(), &ghost, &colour);
-                }
-                // While it turns, its box turns with it and shows no handles, as a diagram's
-                // shape does.
-                if a.handle == Some(Handle::Rotate) {
-                    let [tl, tr, bl, br] = a.bounds.quad_corners().map(point);
-                    let builder = gsk::PathBuilder::new();
-                    builder.move_to(tl.x(), tl.y());
-                    for corner in [tr, br, bl] {
-                        builder.line_to(corner.x(), corner.y());
-                    }
-                    builder.close();
-                    snapshot.append_stroke(&builder.to_path(), &gsk::Stroke::new(1.0), &accent);
-                } else {
-                    let moved = a.bounds.under(a.matrix);
-                    let frame = layout.rect_of(rect, &moved);
-                    let (l, t) = (frame.x(), frame.y());
-                    let (r, b) = (l + frame.width(), t + frame.height());
-                    snapshot.append_border(
-                        &gsk::RoundedRect::from_rect(frame, 0.0),
-                        &[1.0; 4],
-                        &[accent; 4],
-                    );
-                    // A text only moves: its frame alone.
-                    if !a.typed {
-                        let (cx, cy) = ((l + r) / 2.0, (t + b) / 2.0);
-                        for (hx, hy) in [
-                            (l, t),
-                            (cx, t),
-                            (r, t),
-                            (l, cy),
-                            (r, cy),
-                            (l, b),
-                            (cx, b),
-                            (r, b),
-                        ] {
-                            let (x, y) = (hx - HANDLE / 2.0, hy - HANDLE / 2.0);
-                            let square = graphene::Rect::new(x, y, HANDLE, HANDLE);
-                            snapshot.append_color(&accent, &square);
-                        }
-                        // The rotate handle: the diagram's ring beyond the top-right corner.
-                        let ring = gsk::PathBuilder::new();
-                        let at = graphene::Point::new(r + ROTATE_GAP, t - ROTATE_GAP);
-                        ring.add_circle(&at, HANDLE / 2.0);
-                        snapshot.append_stroke(&ring.to_path(), &gsk::Stroke::new(1.5), &accent);
-                    }
-                }
+            if let Some(s) = picked.as_ref().filter(|s| s.page == index) {
+                paint_selection(snapshot, s, rect, &layout, &accent);
+            }
+            if let Some(lasso) = lasso.as_ref().filter(|l| l.page == index) {
+                paint_lasso(snapshot, &lasso.points, rect, &layout, &accent);
             }
             if let Some(page_marks) = marks.get(&index) {
                 for (n, mark) in page_marks.iter().enumerate() {
@@ -345,6 +283,129 @@ impl imp::PdfView {
             }
         }
     }
+}
+
+/// What the Select tool holds on this page. While the hand is on it, a ghost of each stroke
+/// where the drag has taken it; a dashed box round each item when there are two or more; and
+/// round them all a box with eight handles and the ring that turns them, or for texts alone, which
+/// only move, the box by itself. While it turns, the box turns with it and shows no handles, as a
+/// diagram's shape does.
+fn paint_selection(
+    snapshot: &gtk::Snapshot,
+    s: &Selection,
+    rect: &PageRect,
+    layout: &Layout,
+    accent: &gdk::RGBA,
+) {
+    let point = |p: (f32, f32)| {
+        let (x, y) = accent_core::pdf::apply(s.matrix, p);
+        graphene::Point::new(rect.x + x * layout.scale, rect.y + y * layout.scale)
+    };
+    if s.handle.is_some() {
+        for item in s.items.iter().filter(|item| !item.points.is_empty()) {
+            let builder = gsk::PathBuilder::new();
+            let first = point(item.points[0]);
+            builder.move_to(first.x(), first.y());
+            for &p in &item.points[1..] {
+                builder.line_to(point(p).x(), point(p).y());
+            }
+            let [r, g, b, _] = item.style.rgba;
+            let colour = theme::rgba([r, g, b], theme::GHOST_ALPHA);
+            let ghost = gsk::Stroke::new(item.style.width * layout.scale);
+            ghost.set_line_cap(gsk::LineCap::Round);
+            ghost.set_line_join(gsk::LineJoin::Round);
+            snapshot.append_stroke(&builder.to_path(), &ghost, &colour);
+        }
+    }
+    let turning = s.handle == Some(Handle::Rotate);
+    if s.items.len() > 1 && !turning {
+        let dashed = gsk::Stroke::new(1.0);
+        dashed.set_dash(&[3.0, 3.0]);
+        for item in &s.items {
+            let builder = gsk::PathBuilder::new();
+            builder.add_rect(&layout.rect_of(rect, &item.under(s.matrix).bounds));
+            snapshot.append_stroke(&builder.to_path(), &dashed, accent);
+        }
+    }
+    if turning {
+        let [tl, tr, bl, br] = s.bounds().quad_corners().map(point);
+        let builder = gsk::PathBuilder::new();
+        builder.move_to(tl.x(), tl.y());
+        for corner in [tr, br, bl] {
+            builder.line_to(corner.x(), corner.y());
+        }
+        builder.close();
+        snapshot.append_stroke(&builder.to_path(), &gsk::Stroke::new(1.0), accent);
+        return;
+    }
+    let moved = match s.moves_only() {
+        // A text keeps its size under any drag, so its box only moves.
+        true => (s.items.iter().map(|item| item.under(s.matrix).bounds))
+            .reduce(accent_core::pdf::Rect::union)
+            .unwrap_or(accent_core::pdf::Rect::ZERO),
+        false => s.bounds().under(s.matrix),
+    };
+    let frame = layout.rect_of(rect, &moved);
+    snapshot.append_border(
+        &gsk::RoundedRect::from_rect(frame, 0.0),
+        &[1.0; 4],
+        &[*accent; 4],
+    );
+    if s.moves_only() {
+        return;
+    }
+    let (l, t) = (frame.x(), frame.y());
+    let (r, b) = (l + frame.width(), t + frame.height());
+    let (cx, cy) = ((l + r) / 2.0, (t + b) / 2.0);
+    for (hx, hy) in [
+        (l, t),
+        (cx, t),
+        (r, t),
+        (l, cy),
+        (r, cy),
+        (l, b),
+        (cx, b),
+        (r, b),
+    ] {
+        let square = graphene::Rect::new(hx - HANDLE / 2.0, hy - HANDLE / 2.0, HANDLE, HANDLE);
+        snapshot.append_color(accent, &square);
+    }
+    // The rotate handle: the diagram's ring beyond the top-right corner.
+    let ring = gsk::PathBuilder::new();
+    ring.add_circle(
+        &graphene::Point::new(r + ROTATE_GAP, t - ROTATE_GAP),
+        HANDLE / 2.0,
+    );
+    snapshot.append_stroke(&ring.to_path(), &gsk::Stroke::new(1.5), accent);
+}
+
+/// A lasso being drawn, closed by the line back to where it began: filled as a highlight is and
+/// outlined in a dashed accent line, the diagram's rubber band drawn free-hand.
+fn paint_lasso(
+    snapshot: &gtk::Snapshot,
+    points: &[(f32, f32)],
+    rect: &PageRect,
+    layout: &Layout,
+    accent: &gdk::RGBA,
+) {
+    let Some(&(x, y)) = points.first() else {
+        return;
+    };
+    let at = |(x, y): (f32, f32)| (rect.x + x * layout.scale, rect.y + y * layout.scale);
+    let builder = gsk::PathBuilder::new();
+    let (x, y) = at((x, y));
+    builder.move_to(x, y);
+    for &p in &points[1..] {
+        let (x, y) = at(p);
+        builder.line_to(x, y);
+    }
+    builder.close();
+    let path = builder.to_path();
+    let fill = theme::at(*accent, theme::HIGHLIGHT_ALPHA);
+    snapshot.append_fill(&path, gsk::FillRule::EvenOdd, &fill);
+    let dashed = gsk::Stroke::new(1.0);
+    dashed.set_dash(&[3.0, 3.0]);
+    snapshot.append_stroke(&path, &dashed, accent);
 }
 
 /// A stroke no tile carries yet, in page-local pixels: a rectangle or a circle from its two

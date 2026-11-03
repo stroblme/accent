@@ -12,7 +12,7 @@ use accent_core::pdf::{self, Ink, PdfDoc};
 use anyhow::{Result, anyhow};
 use gtk::glib;
 
-use super::protocol::{Request, fresh_id};
+use super::protocol::{Clipping, Request, fresh_id};
 use super::{Highlights, LOWRES_W, PdfView, Reply, TILE, TileKey, Want};
 
 /// Open and own `PdfDoc` on the render thread until its sender is dropped. All pdfium calls
@@ -69,14 +69,32 @@ fn open(path: &Path) -> Result<(PdfDoc, Vec<(f32, f32)>), String> {
 /// or a copy's channel closing is what its waiter hears. An erase dropped is still counted.
 fn wait(rx: &Receiver<Request>, path: &mut PathBuf, erases: &mut u64) -> bool {
     while let Ok(request) = rx.recv() {
+        if relists(&request) {
+            *erases += 1;
+        }
         match request {
             Request::Reload => return true,
             Request::Retarget(moved) => *path = moved,
-            Request::Erase { .. } => *erases += 1,
             _ => {}
         }
     }
     false
+}
+
+/// Whether the view counts `request` as an erase ([`spawn`]): a change to a page's strokes the
+/// view makes to its own list as it sends it, so a list read before it is of the page before.
+fn relists(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::Erase { .. }
+            | Request::Transform { .. }
+            | Request::Delete { .. }
+            | Request::Paste { .. }
+            | Request::Clip {
+                how: Clipping::Cut,
+                ..
+            }
+    )
 }
 
 /// Cache extracted page glyphs until reload, sharing the costly extraction between highlights,
@@ -144,7 +162,7 @@ fn render_loop(
                 break;
             };
             // Counted however it ends, one refused below as well: the view counts what it sends.
-            if matches!(current, Request::Erase { .. }) {
+            if relists(&current) {
                 *erases += 1;
             }
             // Written into in place, as pdflatex writes its output: every page pdfium has not
@@ -337,24 +355,37 @@ fn render_loop(
                         }
                     }
                 }
-                Request::Transform { page, id, matrix } => {
-                    let moved = ink
-                        .at(id)
-                        .ok_or_else(|| anyhow!("stroke {id} is gone"))
-                        .and_then(|at| Ok((at, doc.transform_ink(page, at, matrix)?)));
-                    match moved {
-                        Ok((at, area)) => {
-                            ink.moved(page, at, matrix);
-                            ink.dirty = true;
-                            send(view, Reply::PageChanged(page, area, None));
-                        }
-                        // Gone or refused, as for an erase below: the page's list goes back.
-                        Err(e) => {
-                            tracing::debug!("moving a stroke on page {page}: {e:#}");
-                            send(view, listed(&mut ink, &doc, page, *erases));
-                        }
+                Request::Transform { page, ids, matrix } => {
+                    let moved = ink.transform(&mut doc, page, &ids, matrix);
+                    answered(&mut ink, &doc, view, page, moved, *erases);
+                }
+                Request::Delete { page, ids } => {
+                    let taken = ink.delete(&mut doc, page, &ids);
+                    answered(&mut ink, &doc, view, page, taken, *erases);
+                }
+                Request::Clip { page, ids, how } => {
+                    let (copied, clips): (Vec<u32>, Vec<Vec<pdf::Clip>>) =
+                        ink.clips(&doc, page, &ids).into_iter().unzip();
+                    let clips = clips.concat();
+                    send(view, Reply::Clipped { page, clips, how });
+                    // What would not copy stays: a cut never loses what the clipboard lacks.
+                    if how == Clipping::Cut {
+                        let taken = ink.delete(&mut doc, page, &copied);
+                        answered(&mut ink, &doc, view, page, taken, *erases);
                     }
                 }
+                Request::Paste {
+                    page,
+                    clips,
+                    matrix,
+                    names,
+                } => match ink.paste(&mut doc, page, &clips, matrix, &names) {
+                    Ok(area) => {
+                        ink.dirty = true;
+                        send(view, Reply::PageChanged(page, area, None));
+                    }
+                    Err(e) => tracing::warn!("pasting on page {page}: {e:#}"),
+                },
                 Request::Erase {
                     page,
                     id,
@@ -593,6 +624,28 @@ fn render_loop(
         }
     }
     None
+}
+
+/// A change the Select tool asked of `page` was made, or none of it could be: the page's tiles
+/// go, or its lists go back at once, so the view and the page agree again (as an erase's do).
+fn answered(
+    ink: &mut Ink,
+    doc: &PdfDoc,
+    view: &glib::SendWeakRef<PdfView>,
+    page: usize,
+    made: accent_core::Result<pdf::Rect>,
+    erases: u64,
+) {
+    match made {
+        Ok(area) => {
+            ink.dirty = true;
+            send(view, Reply::PageChanged(page, area, None));
+        }
+        Err(e) => {
+            tracing::debug!("changing strokes on page {page}: {e:#}");
+            send(view, listed(ink, doc, page, erases));
+        }
+    }
 }
 
 /// Every stroke of `page` under its name, stamped with the erases counted so far ([`spawn`]).

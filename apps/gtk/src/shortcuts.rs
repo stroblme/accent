@@ -37,12 +37,16 @@ const SECTIONS: [&str; 19] = [
 /// `DiagramTab::wire_keys`, `NotebookTab::wire_keys`) with these commands, which carry none in the
 /// table: a bare `space` or `Delete` there would be taken from every entry (DESIGN.md, PDF and
 /// Diagram). A presented diagram's paging keys are left out, being its only keys then.
-const TAB_KEYS: [(&str, &[&str]); 26] = [
+const TAB_KEYS: [(&str, &[&str]); 30] = [
     ("win.bib-undo", &["<Primary>z"]),
     ("win.bib-redo", &["<Primary><Shift>z", "<Primary>y"]),
     ("win.pdf-next-page", &["space", "n", "Right"]),
     ("win.pdf-previous-page", &["<Shift>space", "p", "Left"]),
     ("win.pdf-copy", &["<Primary>c"]),
+    ("win.pdf-cut", &["<Primary>x"]),
+    ("win.pdf-paste", &["<Primary>v"]),
+    ("win.pdf-duplicate", &["<Primary>d"]),
+    ("win.pdf-delete", &["Delete", "BackSpace"]),
     ("win.pdf-undo", &["<Primary>z"]),
     ("win.pdf-redo", &["<Primary><Shift>z", "<Primary>y"]),
     ("win.diagram-undo", &["<Primary>z"]),
@@ -191,6 +195,12 @@ mod tests {
             .map(|(_, accels)| accels.clone())
     }
 
+    /// The same under one heading, for a label two headings share.
+    fn accels_under(rows: &[Section], title: &str, label: &str) -> Option<Vec<String>> {
+        let under = rows.iter().filter(|(t, _)| *t == title);
+        accels_of(&under.cloned().collect::<Vec<_>>(), label)
+    }
+
     /// Every command has a heading, so none can be missing from the dialog once bound, and a
     /// misspelt name in the tabs' own keys would leave them out.
     #[test]
@@ -228,7 +238,7 @@ mod tests {
             Some(vec!["space".into(), "n".into(), "Right".into()])
         );
         assert_eq!(
-            accels_of(&shown, "Duplicate Selection"),
+            accels_under(&shown, "Diagram", "Duplicate Selection"),
             Some(vec!["<Primary>d".into()])
         );
         assert_eq!(
@@ -250,7 +260,7 @@ mod tests {
             .insert("win.duplicate-line".into(), Vec::new());
         let shown = rows(&config);
         assert_eq!(accels_of(&shown, "Save"), None);
-        assert_eq!(accels_of(&shown, "Duplicate Selection"), None);
+        assert_eq!(accels_under(&shown, "Diagram", "Duplicate Selection"), None);
         let (_, tab_menu) = shown
             .iter()
             .find(|(title, _)| *title == "Tab menu")

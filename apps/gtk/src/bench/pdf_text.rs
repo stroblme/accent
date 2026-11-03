@@ -1,5 +1,5 @@
 //! The Text tool's drill, `ACCENT_BENCH_PDF=text:<rel>`: through XTEST, text placed on the
-//! page being read, typed and finished each way, typed again, moved with Adjust and erased, with
+//! page being read, typed and finished each way, typed again, moved with Select and erased, with
 //! the Undo of each, as the file has it after every step.
 
 use super::pdf::{opened, written};
@@ -147,8 +147,8 @@ pub(super) fn bench_pdf_text(app: &Rc<App>, rel: &str) {
             filed(&pdf, page)
         );
 
-        // Moved by Adjust 40 px down, and back by Undo.
-        app.pdf_mode(pdfview::Mode::Adjust);
+        // Moved by Select 40 px down, and back by Undo.
+        app.pdf_mode(pdfview::Mode::Select);
         glib::timeout_future(Duration::from_secs(1)).await;
         if let Some((x, y)) = first() {
             let (x, y) = on_screen(x, y);
@@ -163,7 +163,7 @@ pub(super) fn bench_pdf_text(app: &Rc<App>, rel: &str) {
         save().await;
         println!(
             "bench text moved held={:?} {}",
-            reader.adjusted().is_some(),
+            reader.picked_box().is_some(),
             filed(&pdf, page)
         );
         undo(false).await;

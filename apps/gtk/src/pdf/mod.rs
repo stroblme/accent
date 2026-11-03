@@ -11,6 +11,7 @@
 //! Re-exports preserve the window's `pdfview::` and `pdftab::` names.
 
 pub mod cache;
+mod clipboard;
 mod comment;
 mod disk;
 mod drop;

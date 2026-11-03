@@ -22,6 +22,17 @@ const ERASERS: [(bool, &str, &str); 2] = [
     (true, "edit-cut-symbolic", "Erase Only What It Passes Over"),
 ];
 
+/// The Select tool's commands and their icons, on the slots the other tools give their widths and
+/// colours to, as the page's menu lists them too: Paste while there is something to paste, the
+/// rest while it holds something. Adwaita has no duplicate, so that one is tabler's `copy-plus`.
+pub(super) const COMMANDS: [(&str, &str); 5] = [
+    ("win.pdf-cut", "edit-cut-symbolic"),
+    ("win.pdf-copy", "edit-copy-symbolic"),
+    ("win.pdf-paste", "edit-paste-symbolic"),
+    ("win.pdf-duplicate", "tool-duplicate-symbolic"),
+    ("win.pdf-delete", "edit-delete-symbolic"),
+];
+
 /// What the three width buttons are called, and for the text, which they size.
 const WIDTHS: [&str; 3] = ["Narrow Width", "Medium Width", "Wide Width"];
 const SIZES: [&str; 3] = ["Small Text", "Medium Text", "Large Text"];
@@ -62,6 +73,11 @@ pub struct PdfRing {
     widths: Vec<gtk::ToggleButton>,
     swatches: Vec<gtk::ToggleButton>,
     erasers: Vec<gtk::ToggleButton>,
+    /// The Select tool's [`COMMANDS`], and whether it holds anything and there is anything to
+    /// paste, which say which of them show.
+    commands: Vec<gtk::Button>,
+    picked: Cell<bool>,
+    pasteable: Cell<bool>,
     config: RefCell<DrawingConfig>,
     /// The document's recolouring, which the swatches are painted through.
     theme: Rc<Cell<Theme>>,
@@ -110,15 +126,21 @@ impl PdfRing {
                 button
             })
             .collect();
+        let commands = (COMMANDS.iter().enumerate())
+            .map(|(i, (action, icon))| ring.add_button(i, slots, icon, action))
+            .collect();
 
         let ring = Rc::new(PdfRing {
             ring,
             widths,
             swatches,
             erasers,
+            commands,
+            picked: Cell::new(false),
+            pasteable: Cell::new(false),
             config: RefCell::new(DrawingConfig::default()),
             theme,
-            tool: Cell::new(Mode::Select),
+            tool: Cell::new(Mode::Read),
             eraser: Cell::new(false),
             on_choice: RefCell::new(None),
         });
@@ -218,6 +240,22 @@ impl PdfRing {
         for (button, (partial, _, _)) in self.erasers.iter().zip(ERASERS) {
             check(button, erasing, erasing && config.eraser_partial == partial);
         }
+        let selecting = self.ring.tool() == Mode::Select;
+        for (button, (action, _)) in self.commands.iter().zip(COMMANDS) {
+            let offered = match action {
+                "win.pdf-paste" => self.pasteable.get(),
+                _ => self.picked.get(),
+            };
+            button.set_visible(selecting && offered);
+        }
+    }
+
+    /// Whether the Select tool holds anything and there is anything to paste: which of its
+    /// commands the ring shows.
+    pub fn set_selection(&self, picked: bool, pasteable: bool) {
+        self.picked.set(picked);
+        self.pasteable.set(pasteable);
+        self.sync_options();
     }
 
     /// Paint the swatches as pages recoloured by `theme` show them.
@@ -286,8 +324,9 @@ impl PdfRing {
                 format!("#{r:02x}{g:02x}{b:02x}")
             })
             .collect();
+        let commands = self.commands.iter().filter(|b| b.is_visible()).count();
         format!(
-            "shown={:?} widths={} swatches={} erasers={} painted={}",
+            "shown={:?} widths={} swatches={} erasers={} commands={commands} painted={}",
             self.ring.tool(),
             shown(&self.widths),
             shown(&self.swatches),

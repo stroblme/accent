@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet};
 use super::cache::{Cache, TileKey, Want, texture};
 use super::geometry::{Layout, PT_TO_PX, PdfZoom, Span, stepped};
 use super::protocol::{Highlights, NamedInk, NamedText, Pass, Reply};
-use super::tools::{Mode, Selected, Stroke};
+use super::tools::{Lasso, Mode, Picked, Selection, Stroke};
 use crate::theme;
 
 glib::wrapper! {
@@ -344,14 +344,12 @@ impl PdfView {
         self.imp().texts.borrow().get(&page).cloned()
     }
 
-    /// The page and box of the stroke the Adjust tool holds. Only `ACCENT_BENCH_PDF=pen:` asks.
+    /// The page and box of what the Select tool holds, and how many items it is. Only drills
+    /// ask.
     #[cfg(feature = "bench")]
-    pub fn adjusted(&self) -> Option<(usize, accent_core::pdf::Rect)> {
-        self.imp()
-            .adjust
-            .borrow()
-            .as_ref()
-            .map(|a| (a.page, a.bounds))
+    pub fn picked_box(&self) -> Option<(usize, accent_core::pdf::Rect, usize)> {
+        let picked = self.imp().picked.borrow();
+        picked.as_ref().map(|s| (s.page, s.bounds(), s.items.len()))
     }
 
     /// How many lists of a page the render thread has sent the tools. Only
@@ -409,8 +407,9 @@ impl PdfView {
 
     pub fn set_mode(&self, mode: Mode) {
         self.imp().mode.set(mode);
-        if mode != Mode::Adjust {
+        if mode != Mode::Select {
             self.clear_inks();
+            self.imp().lasso.replace(None);
         }
         // The plain pointer for every tool, and never the I-beam the page otherwise shows: with a
         // tool in hand a drag draws rather than selects, and a cursor that says "text" invites
@@ -418,7 +417,7 @@ impl PdfView {
         // A stylus's next move puts its dot back.
         self.imp().dot.set(false);
         self.set_cursor_from_name(match mode {
-            Mode::Select => None,
+            Mode::Read => None,
             Mode::Text => Some("text"),
             _ => Some("default"),
         });
@@ -499,15 +498,137 @@ impl PdfView {
         *self.imp().on_eraser.borrow_mut() = Some(Box::new(f));
     }
 
-    /// Called with a page, the id of a stroke on it and the map to move it by.
-    pub fn connect_transform(&self, f: impl Fn(usize, u32, accent_core::pdf::Matrix) + 'static) {
+    /// Called with a page, the ids of strokes and texts on it and the map to move them by.
+    pub fn connect_transform(
+        &self,
+        f: impl Fn(usize, Vec<u32>, accent_core::pdf::Matrix) + 'static,
+    ) {
         *self.imp().on_transform.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// Called whenever what the Select tool holds changes.
+    pub fn connect_picked(&self, f: impl Fn() + 'static) {
+        *self.imp().on_picked.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// The page and the ids of what the Select tool holds, if anything.
+    pub fn picked(&self) -> Option<(usize, Vec<u32>)> {
+        let picked = self.imp().picked.borrow();
+        picked.as_ref().map(|s| (s.page, s.ids()))
+    }
+
+    /// The box of what the Select tool holds on its page, if anything.
+    pub fn picked_bounds(&self) -> Option<(usize, accent_core::pdf::Rect)> {
+        let picked = self.imp().picked.borrow();
+        picked.as_ref().map(|s| (s.page, s.bounds()))
+    }
+
+    /// Hold `items` of `page`, which the render thread is about to draw under their ids: what a
+    /// paste leaves picked. The page's list read before they land is of the page without them.
+    pub fn pick(&self, page: usize, items: Vec<Picked>) {
+        self.relisted(page);
+        self.imp().picked.replace(Some(Selection::of(page, items)));
+        self.picked_changed();
+    }
+
+    /// Let go of what the Select tool holds; whether it held anything.
+    pub fn clear_pick(&self) -> bool {
+        let held = self.imp().picked.take().is_some();
+        if held {
+            self.picked_changed();
+        }
+        held
+    }
+
+    /// Take what the Select tool holds off the page's list at once, as an erase does, and say
+    /// which page and ids it was: what a delete and a cut send.
+    pub fn drop_picked(&self) -> Option<(usize, Vec<u32>)> {
+        let selection = self.imp().picked.take()?;
+        let (page, ids) = (selection.page, selection.ids());
+        if let Some(list) = self.imp().inks.borrow_mut().get_mut(&page) {
+            list.retain(|(id, _)| !ids.contains(id));
+        }
+        if let Some(list) = self.imp().texts.borrow_mut().get_mut(&page) {
+            list.retain(|(id, _)| !ids.contains(id));
+        }
+        self.relisted(page);
+        self.picked_changed();
+        Some((page, ids))
+    }
+
+    /// Move what the Select tool holds by `dx`, `dy` points, as far as its page allows: the
+    /// arrow keys. Whether it held anything.
+    pub fn nudge(&self, dx: f32, dy: f32) -> bool {
+        let moved = {
+            let picked = self.imp().picked.borrow();
+            let Some(s) = picked.as_ref() else {
+                return false;
+            };
+            let size = self.page_size(s.page).unwrap_or((f32::MAX, f32::MAX));
+            super::tools::clamp_move(s.bounds(), [1.0, 0.0, 0.0, 1.0, dx, dy], size)
+        };
+        self.transform_picked(moved);
+        true
+    }
+
+    /// Move what the Select tool holds by `m` and send it to the tab. Its items, and the page's
+    /// lists, go where the render thread will put them, so an eraser pass right after the move
+    /// finds them there.
+    fn transform_picked(&self, m: accent_core::pdf::Matrix) {
+        let (page, items) = {
+            let mut picked = self.imp().picked.borrow_mut();
+            let Some(s) = picked.as_mut() else {
+                return;
+            };
+            s.items = s.items.iter().map(|item| item.under(m)).collect();
+            (s.page, s.items.clone())
+        };
+        let moved = |id: &u32| items.iter().find(|item| item.id == *id);
+        let mut inks = self.imp().inks.borrow_mut();
+        for (id, ink) in inks.get_mut(&page).into_iter().flatten() {
+            if let Some(item) = moved(id) {
+                ink.points = item.points.clone();
+                ink.bounds = item.bounds;
+            }
+        }
+        let mut texts = self.imp().texts.borrow_mut();
+        for (id, text) in texts.get_mut(&page).into_iter().flatten() {
+            if let Some(item) = moved(id) {
+                text.bounds = item.bounds;
+                text.typed.at = (item.bounds.left, item.bounds.top);
+            }
+        }
+        drop((inks, texts));
+        self.relisted(page);
+        let ids = items.iter().map(|item| item.id).collect();
+        if let Some(f) = self.imp().on_transform.borrow().as_ref() {
+            f(page, ids, m);
+        }
+        self.queue_draw();
+    }
+
+    /// Count a change this view makes to `page`'s list as it sends it, which a list of the page
+    /// has to have seen to be current ([`PdfView::set_inks`]): an erase, a move, a delete, a cut
+    /// or a paste. The render thread counts the same requests (`render::relists`).
+    fn relisted(&self, page: usize) {
+        let sent = self.imp().erases.get() + 1;
+        self.imp().erases.set(sent);
+        self.imp().last_erase.borrow_mut().insert(page, sent);
+    }
+
+    /// Repaint, and tell the tab, whose ring and menu offer what can be done with it.
+    fn picked_changed(&self) {
+        self.queue_draw();
+        if let Some(f) = self.imp().on_picked.borrow().as_ref() {
+            f();
+        }
     }
 
     /// Apply page strokes only if their `erases` count includes this view's latest erase on the
     /// page. Older replies are stale relative to locally updated strokes; the erase sends a fresh
     /// list. An erase on another page does not hold this one's back: nothing would ask again.
-    /// Follow an adjusted selection, a stroke or a text, by its ID or clear it if deleted.
+    /// What the Select tool holds follows its strokes and texts by their ids, letting go of one
+    /// no longer on the page.
     pub fn set_inks(&self, page: usize, inks: Vec<NamedInk>, texts: Vec<NamedText>, erases: u64) {
         #[cfg(feature = "bench")]
         {
@@ -518,21 +639,29 @@ impl PdfView {
         if erases < latest.unwrap_or(0) {
             return;
         }
-        {
-            let mut adjust = self.imp().adjust.borrow_mut();
-            if let Some(a) = adjust.as_ref()
-                && a.page == page
-            {
-                let stroke = inks.iter().find(|(id, _)| *id == a.id);
-                let text = || texts.iter().find(|(id, _)| *id == a.id);
-                let fresh = (stroke.map(|i| Selected::stroke(page, i)))
-                    .or_else(|| text().map(|t| Selected::text(page, t)));
-                *adjust = fresh.map(|fresh| Selected {
-                    handle: a.handle,
-                    matrix: a.matrix,
-                    ..fresh
-                });
+        let followed = {
+            let mut picked = self.imp().picked.borrow_mut();
+            match picked.as_mut().filter(|s| s.page == page) {
+                Some(s) => {
+                    let was = s.items.len();
+                    s.items = (s.items.iter())
+                        .filter_map(|item| {
+                            let stroke = inks.iter().find(|(id, _)| *id == item.id);
+                            let text = || texts.iter().find(|(id, _)| *id == item.id);
+                            (stroke.map(Picked::stroke)).or_else(|| text().map(Picked::text))
+                        })
+                        .collect();
+                    let lost = s.items.len() != was;
+                    if s.items.is_empty() {
+                        *picked = None;
+                    }
+                    lost
+                }
+                None => false,
             }
+        };
+        if followed {
+            self.picked_changed();
         }
         self.imp().inks.borrow_mut().insert(page, inks);
         self.imp().texts.borrow_mut().insert(page, texts);
@@ -553,7 +682,7 @@ impl PdfView {
     pub fn clear_inks(&self) {
         self.imp().inks.borrow_mut().clear();
         self.imp().texts.borrow_mut().clear();
-        *self.imp().adjust.borrow_mut() = None;
+        self.clear_pick();
         self.queue_draw();
     }
 
@@ -695,7 +824,7 @@ mod imp {
     /// A page and the id of a stroke on it the eraser passed over, what a partial eraser left of
     /// it, and whether the same drag took one before it.
     type At = Box<dyn Fn(usize, u32, Option<super::Pass>, bool)>;
-    type Transform = Box<dyn Fn(usize, u32, accent_core::pdf::Matrix)>;
+    type Transform = Box<dyn Fn(usize, Vec<u32>, accent_core::pdf::Matrix)>;
     /// Where the Text tool pressed, and the text of ours there.
     type Type = Box<dyn Fn(usize, (f32, f32), Option<NamedText>)>;
     /// Whether the pen's eraser end came to the page, or another hand after it.
@@ -752,11 +881,13 @@ mod imp {
         // long as the strokes drawn inside one render — one or two in practice. It cannot leak:
         // a stroke with no render to replace it is one that still has to be painted.
         pub strokes: RefCell<Vec<super::Stroke>>,
-        /// What the eraser and the Adjust tool can find, per page they have been told about, and
+        /// What the eraser and the Select tool can find, per page they have been told about, and
         /// the texts of ours, which the Text tool types again too.
         pub inks: RefCell<HashMap<usize, Vec<NamedInk>>>,
         pub texts: RefCell<HashMap<usize, Vec<NamedText>>>,
-        pub adjust: RefCell<Option<super::Selected>>,
+        /// What the Select tool holds, and the lasso it is drawing.
+        pub picked: RefCell<Option<super::Selection>>,
+        pub lasso: RefCell<Option<super::Lasso>>,
         /// Where the eraser was last reported in the drag under way, as a page and a point on
         /// it, so the next report tests the line between the two; `None` once the drag ends.
         pub erasing: Cell<Option<(usize, (f32, f32))>>,
@@ -816,6 +947,7 @@ mod imp {
         pub on_erase: RefCell<Option<At>>,
         pub on_erased: RefCell<Option<Box<dyn Fn()>>>,
         pub on_transform: RefCell<Option<Transform>>,
+        pub on_picked: RefCell<Option<Box<dyn Fn()>>>,
         pub on_type: RefCell<Option<Type>>,
         pub on_tile: RefCell<Option<Page>>,
         pub on_eraser: RefCell<Option<EraserEnd>>,
@@ -852,7 +984,8 @@ mod imp {
                 strokes: RefCell::new(Vec::new()),
                 inks: RefCell::new(HashMap::new()),
                 texts: RefCell::new(HashMap::new()),
-                adjust: RefCell::new(None),
+                picked: RefCell::new(None),
+                lasso: RefCell::new(None),
                 erasing: Cell::new(None),
                 erased: Cell::new(false),
                 erases: Cell::new(0),
@@ -888,6 +1021,7 @@ mod imp {
                 on_erase: RefCell::new(None),
                 on_erased: RefCell::new(None),
                 on_transform: RefCell::new(None),
+                on_picked: RefCell::new(None),
                 on_type: RefCell::new(None),
                 on_tile: RefCell::new(None),
                 on_eraser: RefCell::new(None),

@@ -116,6 +116,14 @@ pub struct PdfTab {
     pub(super) glyphs: RefCell<std::collections::HashMap<usize, Vec<pdf::Glyph>>>,
     /// The selected text, for Ctrl+C.
     pub(super) selected: RefCell<String>,
+    /// How many copies of what the Select tool holds are on their way to the clipboard, which a
+    /// paste waits for (`pending_paste`, where it would land) rather than paste what was there.
+    pub(super) copying: Cell<u32>,
+    pub(super) pending_paste: Cell<Option<Option<(usize, f32, f32)>>>,
+    /// What was last pasted in place, and how many times, each a step further off.
+    pub(super) pasted: RefCell<(Option<String>, u32)>,
+    /// The handler that keeps the ring's Paste in step with the clipboard, dropped with the tab.
+    pub(super) clip_watch: RefCell<Option<glib::SignalHandlerId>>,
     /// The same selection as glyph ranges, one per page it covers, which is what a link is made
     /// of. Kept beside the text because the boxes on screen cannot be turned back into indices.
     pub(super) ranges: RefCell<Vec<pdf::Selection>>,
@@ -316,6 +324,10 @@ pub fn open(
         pinned: RefCell::default(),
         glyphs: RefCell::new(std::collections::HashMap::new()),
         selected: RefCell::new(String::new()),
+        copying: Cell::new(0),
+        pending_paste: Cell::new(None),
+        pasted: RefCell::default(),
+        clip_watch: RefCell::new(None),
         ranges: RefCell::new(Vec::new()),
         notes: RefCell::new(Vec::new()),
         pending_show: Cell::new(None),
@@ -396,6 +408,7 @@ pub fn open(
         }
     ));
     tab.wire_keys();
+    tab.watch_clipboard();
     tab.wire_preview();
     tab.wire_comments();
     tab.wire_menu();
@@ -759,8 +772,9 @@ impl PdfTab {
             return;
         }
         self.view.set_mode(mode);
+        self.sync_commands();
         // Putting the pen down is a good moment to write, rather than waiting out the timer.
-        if mode == pdfview::Mode::Select {
+        if mode == pdfview::Mode::Read {
             self.flush();
         }
         if self.wants_inks() {
@@ -772,7 +786,7 @@ impl PdfTab {
     /// Whether active tools need page strokes for adjustment or erasing. A stylus eraser can
     /// erase under any drawing tool.
     pub(super) fn wants_inks(&self) -> bool {
-        self.view.mode() != pdfview::Mode::Select
+        self.view.mode() != pdfview::Mode::Read
     }
 
     /// Give those tools every page at least partly on screen.
@@ -1118,6 +1132,14 @@ impl PdfTab {
     /// the view moves, which is what makes `anchor()` still the place being left.
     pub(super) fn jumping(self: &Rc<Self>) {
         self.on_jump.emit(self);
+    }
+}
+
+impl Drop for PdfTab {
+    fn drop(&mut self) {
+        if let Some(watch) = self.clip_watch.take() {
+            self.view.clipboard().disconnect(watch);
+        }
     }
 }
 

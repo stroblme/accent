@@ -69,7 +69,7 @@ impl PdfTab {
                 // is what the editor's link hover deliberately avoids too.
                 // While a tool is out, the cursor says so and nothing here takes it back: the
                 // page is not text to be selected, and a link is not to be followed.
-                if view.mode() != pdfview::Mode::Select {
+                if view.mode() != pdfview::Mode::Read {
                     return;
                 }
                 let over = tab.link_at(view, x, y).is_some();
@@ -126,7 +126,12 @@ impl PdfTab {
         view.connect_transform(glib::clone!(
             #[weak(rename_to = tab)]
             self,
-            move |page, id, matrix| tab.ask(Request::Transform { page, id, matrix })
+            move |page, ids, matrix| tab.ask(Request::Transform { page, ids, matrix })
+        ));
+        view.connect_picked(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move || tab.sync_commands()
         ));
         view.connect_tile(glib::clone!(
             #[weak(rename_to = tab)]
@@ -171,10 +176,10 @@ impl PdfTab {
         ));
     }
 
-    /// Page context menu: Go to Source when available, selection copy actions, page edits and
-    /// highlight export. Commands target the pointer's page; palette and status-bar commands
-    /// target the reading page. Read-only and remote refusals are reported by toast. Drawing
-    /// tools use the ring.
+    /// Page context menu: Go to Source when available, selection copy actions, the Select tool's
+    /// commands, page edits and highlight export. Commands target the pointer's page; palette and
+    /// status-bar commands target the reading page. Read-only and remote refusals are reported by
+    /// toast. Drawing tools use the ring.
     ///
     /// Use `win.` actions for palette entries and rebindable accelerators; Ctrl+C stays in the
     /// tab's key controller.
@@ -203,7 +208,27 @@ impl PdfTab {
         let open = gio::Menu::new();
         open.append_item(&source);
         menu.append_section(None, &open);
-        if !self.selected.borrow().is_empty() {
+        // Under the Select tool a stroke or a text not held is picked first, as a click would.
+        if self.view.mode() == pdfview::Mode::Select {
+            self.view.pick_under(x, y);
+        }
+        let (picked, pasteable) = (self.view.picked().is_some(), self.pasteable());
+        let offered = |action: &&str| match *action {
+            "win.pdf-paste" => pasteable,
+            _ => picked,
+        };
+        let section = gio::Menu::new();
+        for action in super::ring::COMMANDS
+            .iter()
+            .map(|(a, _)| *a)
+            .filter(offered)
+        {
+            section.append(Some(crate::actions::label_of(action)), Some(action));
+        }
+        if section.n_items() > 0 {
+            menu.append_section(None, &section);
+        }
+        if !picked && !self.selected.borrow().is_empty() {
             let clipboard = gio::Menu::new();
             for action in ["win.pdf-copy", "win.pdf-copy-link"] {
                 clipboard.append(Some(crate::actions::label_of(action)), Some(action));
@@ -272,10 +297,32 @@ impl PdfTab {
                         return glib::Propagation::Stop;
                     }
                 }
-                // `Escape` puts the pen down.
-                if tab.mode() != pdfview::Mode::Select && key == gtk::gdk::Key::Escape {
-                    tab.set_mode(pdfview::Mode::Select);
-                    return glib::Propagation::Stop;
+                // The Select tool's: `Ctrl+X`, `Ctrl+V` and `Ctrl+D`, the last a chord of the
+                // window's (Duplicate Line) that a PDF in front leaves to the page. A paste lands
+                // centred on the pointer while it is over a page.
+                if state.contains(crate::platform::PRIMARY_MODIFIER) {
+                    let command = match key.to_lower() {
+                        gtk::gdk::Key::x => Some("win.pdf-cut"),
+                        gtk::gdk::Key::d => Some("win.pdf-duplicate"),
+                        gtk::gdk::Key::v => Some("win.pdf-paste"),
+                        _ => None,
+                    };
+                    if let Some(action) = command {
+                        tab.pointed.set(tab.view.under_pointer());
+                        tab.run(action);
+                        tab.pointed.set(None);
+                        return glib::Propagation::Stop;
+                    }
+                }
+                // `Escape` lets go of what the Select tool holds, then puts the pen down.
+                if key == gtk::gdk::Key::Escape {
+                    if tab.view.clear_pick() {
+                        return glib::Propagation::Stop;
+                    }
+                    if tab.mode() != pdfview::Mode::Read {
+                        tab.set_mode(pdfview::Mode::Read);
+                        return glib::Propagation::Stop;
+                    }
                 }
                 // `Space`, `n`, `p` and the arrows stay bare keys here rather than joining the
                 // table: an application accelerator is dispatched at the window ahead of whatever
@@ -291,6 +338,26 @@ impl PdfTab {
                         | gtk::gdk::ModifierType::SUPER_MASK
                         | gtk::gdk::ModifierType::META_MASK,
                 );
+                // While the Select tool holds something, `Delete` takes it off the page and the
+                // arrows move it a point, ten with Shift, each move a step for Undo.
+                if bare && tab.view.picked().is_some() {
+                    let d = if shift { 10.0 } else { 1.0 };
+                    let nudge = match key {
+                        gtk::gdk::Key::Delete | gtk::gdk::Key::BackSpace => {
+                            tab.run("win.pdf-delete");
+                            return glib::Propagation::Stop;
+                        }
+                        gtk::gdk::Key::Left => Some((-d, 0.0)),
+                        gtk::gdk::Key::Right => Some((d, 0.0)),
+                        gtk::gdk::Key::Up => Some((0.0, -d)),
+                        gtk::gdk::Key::Down => Some((0.0, d)),
+                        _ => None,
+                    };
+                    if let Some((dx, dy)) = nudge {
+                        tab.view.nudge(dx, dy);
+                        return glib::Propagation::Stop;
+                    }
+                }
                 match key {
                     gtk::gdk::Key::space if shift => tab.page(false),
                     gtk::gdk::Key::space => tab.page(true),

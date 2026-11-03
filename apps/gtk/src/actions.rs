@@ -370,7 +370,20 @@ impl App {
             "forward" => self.navigate(true),
             "pdf-invert" => self.with_pdf(|pdf| pdf.toggle_invert()),
             "image-invert" => self.with_image(|image| self.invert_image(&image.key())),
-            "pdf-copy" => self.with_pdf(|pdf| pdf.copy_selection()),
+            "pdf-copy" => self.with_pdf(|pdf| pdf.copy()),
+            "pdf-cut" => self.with_pdf(|pdf| pdf.cut()),
+            "pdf-duplicate" => self.with_pdf(|pdf| pdf.duplicate()),
+            "pdf-delete" => self.with_pdf(|pdf| pdf.delete_picked()),
+            // What a paste lands as is held by the Select tool, which it picks up.
+            "pdf-paste" => {
+                let Some(pdf) = self.active_pdf().filter(|pdf| pdf.pasteable()) else {
+                    return;
+                };
+                if pdf.mode() != pdfview::Mode::Select {
+                    self.pdf_mode(pdfview::Mode::Select);
+                }
+                pdf.paste();
+            }
             "pdf-undo" => self.with_pdf(|pdf| pdf.undo()),
             "pdf-redo" => self.with_pdf(|pdf| pdf.redo()),
             "pdf-copy-link" => self.with_pdf(|pdf| pdf.copy_link()),
@@ -394,7 +407,7 @@ impl App {
             "pdf-rect" => self.pdf_mode(pdfview::Mode::Rect),
             "pdf-circle" => self.pdf_mode(pdfview::Mode::Circle),
             "pdf-text" => self.pdf_mode(pdfview::Mode::Text),
-            "pdf-adjust" => self.pdf_mode(pdfview::Mode::Adjust),
+            "pdf-select" => self.pdf_mode(pdfview::Mode::Select),
             "insert-sketch" => self.insert_sketch(),
             "pdf-add-page-before" => self.pdf_add_page(false),
             "pdf-add-page-after" => self.pdf_add_page(true),

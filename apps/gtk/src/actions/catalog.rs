@@ -240,6 +240,12 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pdf-invert", "Invert PDF Colours", &[]),
     ("win.image-invert", "Invert Image Colours", &[]),
     ("win.pdf-copy", "Copy Selection", &[]),
+    // The Select tool's, which the PDF tab's key controller fires on `Ctrl+X`, `Ctrl+V`, `Ctrl+D`
+    // and `Delete`, carrying none here for the paging commands' reason.
+    ("win.pdf-cut", "Cut Selection", &[]),
+    ("win.pdf-paste", "Paste into PDF", &[]),
+    ("win.pdf-duplicate", "Duplicate Selection", &[]),
+    ("win.pdf-delete", "Delete Selection", &[]),
     // No accelerator here for the same reason the paging commands have none: `Ctrl+Z` over a
     // note is GtkSourceView's own undo, and an application accelerator would take it from every
     // text view in the window. The PDF tab's key controller fires these two.
@@ -259,7 +265,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pdf-rect", "Rectangle", &[]),
     ("win.pdf-circle", "Circle", &[]),
     ("win.pdf-text", "Text", &[]),
-    ("win.pdf-adjust", "Adjust", &[]),
+    ("win.pdf-select", "Select", &[]),
     ("win.insert-sketch", "Insert Sketch", &[]),
     // A page put in before or after, taken out, or moved from the one being read. The thumbnail
     // strip does the same by pointer, on any page.
@@ -869,6 +875,10 @@ mod tests {
             "win.pdf-previous-page",
             "win.pdf-undo",
             "win.pdf-redo",
+            "win.pdf-cut",
+            "win.pdf-paste",
+            "win.pdf-duplicate",
+            "win.pdf-delete",
             "win.diagram-undo",
             "win.diagram-redo",
             "win.diagram-delete",

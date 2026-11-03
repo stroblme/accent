@@ -38,6 +38,7 @@ mod notebook_lsp;
 mod outline;
 mod panes;
 mod pdf;
+mod pdf_select;
 mod pdf_text;
 mod present;
 mod preview;
@@ -241,7 +242,11 @@ use user_commands::bench_commands;
 ///   `ring:<rel_path>` (the ring under the pen's eraser end, told by hand, and its swatches
 ///   under Light, Dark and Solarized, pictured into `$TMPDIR`),
 ///   `text:<rel_path>` (the Text tool through XTEST: text typed and finished each way, typed
-///   again, moved, erased and emptied, with Undo, against the file; writes the file).
+///   again, moved, erased and emptied, with Undo, against the file; writes the file),
+///   `select:<rel_path>[,<n>]` (the Select tool through XTEST: a lasso, moves, copy, cut, paste,
+///   duplicate, delete, the arrows and a corner, with Undo, against the file, pictured light and
+///   dark into `$TMPDIR`; with `n` strokes, the render thread's time to move and delete them all;
+///   writes the file).
 /// - `ACCENT_BENCH_DRAWING=1`: New Drawing; `file`: New File named `Blank.pdf`;
 ///   `sketch:<rel_note>`: Insert Sketch.
 /// - `ACCENT_BENCH_TABS=<rel_note>,<rel_pdf>`: preview/tab close transitions.
@@ -657,6 +662,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("text:") {
                 return pdf_text::bench_pdf_text(&app, rel);
+            }
+            if let Some(arg) = rel.strip_prefix("select:") {
+                return pdf_select::bench_pdf_select(&app, arg);
             }
             if let Some(rel) = rel.strip_prefix("synctex:") {
                 return synctex::bench_synctex(&app, rel);

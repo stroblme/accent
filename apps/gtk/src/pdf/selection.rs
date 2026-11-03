@@ -157,7 +157,7 @@ impl PdfTab {
         y: f64,
         state: gtk::gdk::ModifierType,
     ) {
-        if view.mode() != super::Mode::Select || self.link_at(view, x, y).is_some() {
+        if view.mode() != super::Mode::Read || self.link_at(view, x, y).is_some() {
             return;
         }
         if state.contains(crate::platform::PRIMARY_MODIFIER) {

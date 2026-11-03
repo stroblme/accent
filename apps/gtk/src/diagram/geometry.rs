@@ -12,7 +12,7 @@ use crate::zoom::clamp_scale;
 
 /// Room left around the drawing, in pixels on screen.
 pub const GAP: f64 = 24.0;
-/// A selection handle's side, in pixels on screen — the PDF's Adjust box's.
+/// A selection handle's side, in pixels on screen — the PDF's Select box's.
 pub const HANDLE: f64 = 8.0;
 /// A press has to move this far, in pixels, before it is a drag rather than a click.
 pub const DRAG_SLOP: f64 = 3.0;

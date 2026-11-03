@@ -1,11 +1,11 @@
-//! Pure PDF drawing-tool geometry for drags and Adjust handles.
+//! Pure PDF drawing-tool geometry for drags and the Select tool's handles.
 
 /// What a drag over the page does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Mode {
-    /// Select the text under it, which is what a drag has always done.
+    /// No tool in hand: a drag selects the text under it, which is what it has always done.
     #[default]
-    Select,
+    Read,
     /// Draw on the page.
     Pen,
     /// Draw over it in a wide translucent stroke that darkens rather than covers.
@@ -20,13 +20,13 @@ pub enum Mode {
     Circle,
     /// Type onto the page: a click opens a box there, or on a text of ours types it again.
     Text,
-    /// Take hold of a stroke: drag its middle to move it, an edge to stretch it, a corner to
-    /// scale it.
-    Adjust,
+    /// Take hold of strokes and texts: drag its middle to move it, an edge to stretch it, a corner
+    /// to scale it.
+    Select,
 }
 
 impl Mode {
-    /// Whether a drag draws — everything but selecting, erasing and adjusting.
+    /// Whether a drag draws — everything but reading, erasing and selecting.
     pub fn draws(self) -> bool {
         matches!(
             self,
@@ -39,11 +39,11 @@ impl Mode {
         matches!(self, Mode::Line | Mode::Rect | Mode::Circle)
     }
 
-    /// Window action for this tool, or `None` for Select. The ring, status bar and palette share
+    /// Window action for this tool, or `None` for Read. The ring, status bar and palette share
     /// its `ACTIONS` label to keep names consistent.
     pub fn action(self) -> Option<&'static str> {
         Some(match self {
-            Mode::Select => return None,
+            Mode::Read => return None,
             Mode::Pen => "win.pdf-pen",
             Mode::Highlighter => "win.pdf-highlighter",
             Mode::Eraser => "win.pdf-eraser",
@@ -51,7 +51,7 @@ impl Mode {
             Mode::Rect => "win.pdf-rect",
             Mode::Circle => "win.pdf-circle",
             Mode::Text => "win.pdf-text",
-            Mode::Adjust => "win.pdf-adjust",
+            Mode::Select => "win.pdf-select",
         })
     }
 
@@ -76,7 +76,7 @@ impl crate::ring::Tool for Mode {
         (Mode::Rect, "tool-rect-symbolic"),
         (Mode::Circle, "tool-circle-symbolic"),
         (Mode::Text, "insert-text-symbolic"),
-        (Mode::Adjust, "tool-adjust-symbolic"),
+        (Mode::Select, "tool-select-symbolic"),
     ];
 
     fn action(self) -> Option<&'static str> {
@@ -84,7 +84,7 @@ impl crate::ring::Tool for Mode {
     }
 
     fn none() -> Mode {
-        Mode::Select
+        Mode::Read
     }
 }
 
@@ -101,17 +101,18 @@ pub enum Hand {
 
 /// What a drag begun by `hand` does with `tool` in hand. A pen's tip draws and its eraser erases
 /// under any tool; a mouse draws only while it may (`mouse_draws`: no pen on the seat, or the
-/// preference), and selects otherwise, but always places text, which is typed anyway. A finger
-/// is `None` under every tool: it never draws, and its drag is the scrolled window's to pan, a
-/// long press first making it a selection.
+/// preference), and selects text otherwise, but always places text, which is typed anyway, and
+/// always uses the Select tool, which draws nothing. A finger is `None` under every tool: it
+/// never draws, and its drag is the scrolled window's to pan, a long press first making it a
+/// selection.
 pub fn drag_of(tool: Mode, hand: Hand, mouse_draws: bool) -> Option<Mode> {
     match hand {
         Hand::Finger => None,
-        _ if tool == Mode::Select => Some(Mode::Select),
+        _ if tool == Mode::Read => Some(Mode::Read),
         Hand::Pen { eraser: true } => Some(Mode::Eraser),
         Hand::Pen { eraser: false } => Some(tool),
-        Hand::Mouse if mouse_draws || tool == Mode::Text => Some(tool),
-        Hand::Mouse => Some(Mode::Select),
+        Hand::Mouse if mouse_draws || matches!(tool, Mode::Text | Mode::Select) => Some(tool),
+        Hand::Mouse => Some(Mode::Read),
     }
 }
 
@@ -127,7 +128,7 @@ const WIDTHS: [(Mode, [f32; 3]); 4] = [
 /// The three widths `tool` offers, by whose style it draws in; none for a tool without one.
 pub fn widths(tool: Mode) -> Option<[f32; 3]> {
     match tool {
-        Mode::Select | Mode::Adjust => None,
+        Mode::Read | Mode::Select => None,
         _ => WIDTHS
             .iter()
             .find(|(m, _)| *m == tool.style_owner())
@@ -151,9 +152,10 @@ pub fn width_of(tool: Mode, stored: f32) -> f32 {
 
 /// How close to an axis, in degrees, a line has to be to snap onto it.
 const SNAP_DEG: f32 = 4.0;
-/// How near the pointer has to come to a stroke, in page points, for the Adjust tool to take it.
-pub(super) const ADJUST_RADIUS: f32 = 4.0;
-/// The side of an Adjust handle, in pixels.
+/// How near the pointer has to come to a stroke's edge, in page points, for the Select tool to
+/// pick it.
+pub(super) const PICK_RADIUS: f32 = 4.0;
+/// The side of a Select handle, in pixels.
 pub(super) const HANDLE: f32 = 8.0;
 /// How far beyond the box's top-right corner the rotate handle sits, in pixels, as the diagram's
 /// does (draw.io's `rotationHandleVSpacing`).
@@ -188,7 +190,7 @@ pub fn shape_of(mode: Mode, a: (f32, f32), b: (f32, f32)) -> Option<accent_core:
     }
 }
 
-/// Where on a selected stroke's box the Adjust tool took hold.
+/// Where on the selection's box the Select tool took hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Handle {
     Move,
@@ -202,6 +204,24 @@ pub enum Handle {
     BottomRight,
     /// The ring beyond the top-right corner, which turns the stroke about its middle.
     Rotate,
+}
+
+impl Handle {
+    /// The pointer over it, saying what a press there would do, as the diagram's handles say.
+    pub fn cursor(self) -> &'static str {
+        match self {
+            Handle::Move => "move",
+            Handle::Left => "w-resize",
+            Handle::Right => "e-resize",
+            Handle::Top => "n-resize",
+            Handle::Bottom => "s-resize",
+            Handle::TopLeft => "nw-resize",
+            Handle::TopRight => "ne-resize",
+            Handle::BottomLeft => "sw-resize",
+            Handle::BottomRight => "se-resize",
+            Handle::Rotate => "grab",
+        }
+    }
 }
 
 /// Which part of `bounds` is under `at`: a corner within `grip` of it, else an edge, else the
@@ -301,42 +321,50 @@ pub fn drag_matrix(
     }
 }
 
-/// The stroke or the text of ours the Adjust tool has hold of, and the drag being applied to it.
-pub struct Selected {
-    pub page: usize,
+/// The translation `m` makes, cut back so that it takes `bounds` no further off a page of `size`
+/// than it already is: a selection moved stops at the paper's edge.
+pub fn clamp_move(
+    bounds: accent_core::pdf::Rect,
+    m: accent_core::pdf::Matrix,
+    (width, height): (f32, f32),
+) -> accent_core::pdf::Matrix {
+    let along = |d: f32, low: f32, high: f32, extent: f32| {
+        d.max((-low).min(0.0)).min((extent - high).max(0.0))
+    };
+    let dx = along(m[4], bounds.left, bounds.right, width);
+    let dy = along(m[5], bounds.top, bounds.bottom, height);
+    [m[0], m[1], m[2], m[3], dx, dy]
+}
+
+/// A stroke or a text of ours the Select tool holds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Picked {
     /// The render thread's name for it, which follows it through a move.
     pub id: u32,
     pub points: Vec<(f32, f32)>,
     pub bounds: accent_core::pdf::Rect,
     pub style: accent_core::pdf::InkStyle,
-    /// A text, which only moves: no handles and no ring, its box all of it.
+    /// A text, which only moves, its corner going where a drag takes it: its size is the Text
+    /// tool's, and an editor typing into a turned one would set it upright again.
     pub typed: bool,
-    /// Where the hand is holding it, while it is.
-    pub handle: Option<Handle>,
-    /// What the drag so far amounts to, painted over the page until the hand lets go.
-    pub matrix: accent_core::pdf::Matrix,
 }
 
-impl Selected {
-    /// A stroke of `page` taken hold of by its middle.
-    pub fn stroke(page: usize, (id, ink): &accent_core::pdf::NamedInk) -> Selected {
-        Selected {
-            page,
+impl Picked {
+    /// A stroke as the page's list names it.
+    pub fn stroke((id, ink): &accent_core::pdf::NamedInk) -> Picked {
+        Picked {
             id: *id,
             points: ink.points.clone(),
             bounds: ink.bounds,
             style: ink.style,
             typed: false,
-            handle: Some(Handle::Move),
-            matrix: accent_core::pdf::IDENTITY,
         }
     }
 
-    /// A text of ours on `page` taken hold of: its box, and no path to draw a ghost along.
-    pub fn text(page: usize, (id, text): &accent_core::pdf::NamedText) -> Selected {
+    /// A text of ours as the page's list names it: its box, and no path to draw a ghost along.
+    pub fn text((id, text): &accent_core::pdf::NamedText) -> Picked {
         let [r, g, b] = text.typed.style.rgb;
-        Selected {
-            page,
+        Picked {
             id: *id,
             points: Vec::new(),
             bounds: text.bounds,
@@ -346,10 +374,85 @@ impl Selected {
                 multiply: false,
             },
             typed: true,
-            handle: Some(Handle::Move),
+        }
+    }
+
+    /// Where `m` takes it, as the render thread will draw it: a stroke whole, a text by its
+    /// corner.
+    pub fn under(&self, m: accent_core::pdf::Matrix) -> Picked {
+        let b = self.bounds;
+        match self.typed {
+            true => {
+                let (x, y) = accent_core::pdf::apply(m, (b.left, b.top));
+                let (dx, dy) = (x - b.left, y - b.top);
+                let bounds = accent_core::pdf::Rect {
+                    left: x,
+                    top: y,
+                    right: b.right + dx,
+                    bottom: b.bottom + dy,
+                };
+                Picked {
+                    bounds,
+                    ..self.clone()
+                }
+            }
+            false => Picked {
+                points: (self.points.iter())
+                    .map(|&p| accent_core::pdf::apply(m, p))
+                    .collect(),
+                bounds: b.under(m),
+                ..self.clone()
+            },
+        }
+    }
+}
+
+/// What the Select tool holds: strokes and texts of ours of one page, and the drag being applied
+/// to them.
+pub struct Selection {
+    pub page: usize,
+    pub items: Vec<Picked>,
+    /// Where the hand is holding it, while it is.
+    pub handle: Option<Handle>,
+    /// What the drag so far amounts to, painted over the page until the hand lets go.
+    pub matrix: accent_core::pdf::Matrix,
+}
+
+impl Selection {
+    /// `items` of `page`, held by nothing yet.
+    pub fn of(page: usize, items: Vec<Picked>) -> Selection {
+        Selection {
+            page,
+            items,
+            handle: None,
             matrix: accent_core::pdf::IDENTITY,
         }
     }
+
+    /// The box round every item.
+    pub fn bounds(&self) -> accent_core::pdf::Rect {
+        (self.items.iter().map(|item| item.bounds))
+            .reduce(accent_core::pdf::Rect::union)
+            .unwrap_or(accent_core::pdf::Rect::ZERO)
+    }
+
+    /// Whether it is texts alone, which only move: no handles and no ring.
+    pub fn moves_only(&self) -> bool {
+        self.items.iter().all(|item| item.typed)
+    }
+
+    /// The render thread's names for its items.
+    pub fn ids(&self) -> Vec<u32> {
+        self.items.iter().map(|item| item.id).collect()
+    }
+}
+
+/// A free-hand lasso being drawn on `page`, in that page's own points; `add` (Ctrl) adds what it
+/// takes to what the Select tool holds rather than holding that alone.
+pub struct Lasso {
+    pub page: usize,
+    pub points: Vec<(f32, f32)>,
+    pub add: bool,
 }
 
 /// A stroke as the widget holds it while it is being drawn.
@@ -370,11 +473,11 @@ mod tests {
     #[test]
     fn a_finger_never_draws_or_selects_and_a_pen_always_draws() {
         let tools = [
-            Mode::Select,
+            Mode::Read,
             Mode::Pen,
             Mode::Highlighter,
             Mode::Eraser,
-            Mode::Adjust,
+            Mode::Select,
         ];
         for tool in tools {
             for mouse_draws in [true, false] {
@@ -385,10 +488,14 @@ mod tests {
         }
         let eraser = Hand::Pen { eraser: true };
         assert_eq!(drag_of(Mode::Pen, eraser, false), Some(Mode::Eraser));
-        assert_eq!(drag_of(Mode::Select, eraser, false), Some(Mode::Select));
+        assert_eq!(drag_of(Mode::Read, eraser, false), Some(Mode::Read));
         assert_eq!(drag_of(Mode::Pen, Hand::Mouse, true), Some(Mode::Pen));
-        assert_eq!(drag_of(Mode::Pen, Hand::Mouse, false), Some(Mode::Select));
+        assert_eq!(drag_of(Mode::Pen, Hand::Mouse, false), Some(Mode::Read));
         assert_eq!(drag_of(Mode::Text, Hand::Mouse, false), Some(Mode::Text));
+        assert_eq!(
+            drag_of(Mode::Select, Hand::Mouse, false),
+            Some(Mode::Select)
+        );
     }
 
     #[test]
@@ -398,7 +505,7 @@ mod tests {
         assert_eq!(width_of(Mode::Line, 4.0), 3.0, "a shape draws in the pen's");
         assert_eq!(width_of(Mode::Highlighter, 14.0), 10.5);
         assert_eq!(width_of(Mode::Eraser, 4.0), 3.0);
-        assert_eq!(widths(Mode::Adjust), None);
+        assert_eq!(widths(Mode::Select), None);
         let fresh = accent_core::config::DrawingConfig::default();
         for (tool, width) in [
             (Mode::Pen, fresh.pen_width),
@@ -479,6 +586,65 @@ mod tests {
         assert_eq!(
             drag_matrix(Handle::Bottom, flat, 0.0, 9.0),
             accent_core::pdf::IDENTITY
+        );
+    }
+
+    /// A move stops at the page's edges, and a box already over one moves along it but no
+    /// further out.
+    #[test]
+    fn a_move_keeps_the_selection_on_its_page() {
+        use accent_core::pdf::Rect;
+        let b = Rect {
+            left: 10.0,
+            top: 20.0,
+            right: 50.0,
+            bottom: 60.0,
+        };
+        let page = (100.0, 100.0);
+        let by = |dx: f32, dy: f32| [1.0, 0.0, 0.0, 1.0, dx, dy];
+        assert_eq!(clamp_move(b, by(5.0, 5.0), page), by(5.0, 5.0));
+        assert_eq!(clamp_move(b, by(80.0, 80.0), page), by(50.0, 40.0));
+        assert_eq!(clamp_move(b, by(-30.0, -30.0), page), by(-10.0, -20.0));
+        let over = Rect { left: -5.0, ..b };
+        assert_eq!(clamp_move(over, by(-3.0, 0.0), page), by(0.0, 0.0));
+        assert_eq!(clamp_move(over, by(3.0, 0.0), page), by(3.0, 0.0));
+    }
+
+    /// A selection's box holds every item; scaled by its corner, a stroke grows with it and a
+    /// text only moves its corner, set as it was.
+    #[test]
+    fn a_selection_scales_its_strokes_and_moves_its_texts() {
+        use accent_core::pdf::{InkStyle, Rect};
+        let style = InkStyle {
+            width: 1.0,
+            rgba: [0, 0, 0, 255],
+            multiply: false,
+        };
+        let stroke = Picked {
+            id: 1,
+            points: vec![(10.0, 20.0), (50.0, 60.0)],
+            bounds: Rect::from_corners((10.0, 20.0), (50.0, 60.0)),
+            style,
+            typed: false,
+        };
+        let text = Picked {
+            id: 2,
+            points: Vec::new(),
+            bounds: Rect::from_corners((60.0, 40.0), (90.0, 60.0)),
+            style,
+            typed: true,
+        };
+        let selection = Selection::of(0, vec![stroke, text]);
+        let b = selection.bounds();
+        assert_eq!(b, Rect::from_corners((10.0, 20.0), (90.0, 60.0)));
+        assert!(!selection.moves_only());
+        // Twice the size about the top-left corner.
+        let m = drag_matrix(Handle::BottomRight, b, 80.0, 40.0);
+        let [stroke, text] = [0, 1].map(|i| selection.items[i].under(m));
+        assert_eq!(stroke.points, [(10.0, 20.0), (90.0, 100.0)]);
+        assert_eq!(
+            text.bounds,
+            Rect::from_corners((110.0, 60.0), (140.0, 80.0))
         );
     }
 

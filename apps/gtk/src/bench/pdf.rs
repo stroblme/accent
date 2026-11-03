@@ -448,7 +448,7 @@ pub(super) fn bench_pdf_ring(app: &Rc<App>, rel: &str) {
 /// Then what the render thread did per stroke — its CPU time, and how many strokes it listed for
 /// the tools — and whether the strokes the view holds for the first page agree with the file's,
 /// under the same names a fresh list gives them, after the strokes, an eraser drag down the
-/// middle, its Undo, an Adjust drag of the first stroke, a quarter turn of it by its ring with its
+/// middle, its Undo, a Select drag of the first stroke, a quarter turn of it by its ring with its
 /// Undo and Redo, and the file broken under the tab and mended.
 pub(super) fn bench_pdf_pen(app: &Rc<App>, arg: &str) {
     let mut parts = arg.split(',');
@@ -675,7 +675,7 @@ pub(super) fn bench_pdf_pen(app: &Rc<App>, arg: &str) {
         spent("undone").await;
         // The first stroke, taken by where it starts and moved down.
         let file = filed();
-        app.pdf_mode(pdfview::Mode::Adjust);
+        app.pdf_mode(pdfview::Mode::Select);
         glib::timeout_future(Duration::from_secs(2)).await;
         let (x, y) = on_screen(w * 0.2, h * 0.2);
         super::git::xtest(&format!(
@@ -689,7 +689,7 @@ pub(super) fn bench_pdf_pen(app: &Rc<App>, arg: &str) {
         written(&app).await;
         agree("moved");
         println!("bench pen moved changed={}", filed() != file);
-        // The stroke Adjust holds turned a quarter clockwise by its ring, Shift held, then undone
+        // The stroke Select holds turned a quarter clockwise by its ring, Shift held, then undone
         // and made again: the one stroke taller than it is wide is that one.
         let tall = || {
             let doc = accent_core::pdf::PdfDoc::open(pdf.path()).ok();
@@ -698,7 +698,7 @@ pub(super) fn bench_pdf_pen(app: &Rc<App>, arg: &str) {
                 .filter(|i| i.bounds.height() > i.bounds.width())
                 .count()
         };
-        let held = reader.adjusted();
+        let held = reader.picked_box().map(|(page, b, _)| (page, b));
         if let Some(r) = held.and_then(|(page, b)| reader.widget_rect(page, &b)) {
             let (l, t) = (f64::from(r.x()), f64::from(r.y()));
             let (w, h) = (f64::from(r.width()), f64::from(r.height()));
@@ -790,7 +790,7 @@ fn listen(on: bool) -> String {
 }
 
 /// `n` short strokes down the left edge of `path`'s first page, written into the file.
-fn fill_first_page(path: &std::path::Path, n: usize) -> anyhow::Result<()> {
+pub(super) fn fill_first_page(path: &std::path::Path, n: usize) -> anyhow::Result<()> {
     use accent_core::pdf;
     let mut doc = pdf::PdfDoc::open(path)?;
     let (_, height) = doc.page_size(0)?;
@@ -2041,7 +2041,7 @@ pub(super) fn bench_pdf_comments(app: &Rc<App>, rel: &str) {
             "bench comments eraser note_opened={}",
             app.tab_for(&note).is_some()
         );
-        pdf.set_mode(pdfview::Mode::Select);
+        pdf.set_mode(pdfview::Mode::Read);
         probe("note", ada);
         let opened = until(|| app.tab_for(&note)).await.is_some();
         println!("bench comments note_opened={opened}");
@@ -2138,7 +2138,7 @@ fn render_threads() -> usize {
 }
 
 /// How long the PDF render threads have run on a CPU, in ms: `schedstat`'s first field is ns.
-fn render_cpu_ms() -> f64 {
+pub(super) fn render_cpu_ms() -> f64 {
     let ran = |task: &std::path::PathBuf| {
         let stat = std::fs::read_to_string(task.join("schedstat")).ok()?;
         stat.split_whitespace().next()?.parse::<f64>().ok()
