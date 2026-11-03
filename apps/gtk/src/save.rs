@@ -676,10 +676,18 @@ impl App {
         match self.doc_for_page(page) {
             Some(doc) if doc.is_transient() => self.nav.borrow_mut().forget(&doc.key()),
             Some(Doc::Text(tab)) => {
-                let text = (tab.buffer.upcast_ref::<gtk::TextBuffer>(), tab.replaced());
-                self.nav.borrow_mut().release(&tab.rel(), Some(text));
+                let (buffer, replaced) =
+                    (tab.buffer.upcast_ref::<gtk::TextBuffer>(), tab.replaced());
+                self.nav.borrow_mut().release(&tab.rel(), |held| {
+                    let iter = held.iter_in(buffer, replaced)?;
+                    Some(Spot::Caret(iter.line() + 1, iter.line_offset() + 1))
+                });
             }
-            Some(doc) => self.nav.borrow_mut().release(&doc.key(), None),
+            Some(Doc::Notebook(book)) => {
+                let resolve = |held: &Held| book.spot_of(&held.iter()?);
+                self.nav.borrow_mut().release(&book.key(), resolve);
+            }
+            Some(doc) => self.nav.borrow_mut().release(&doc.key(), |_| None),
             None => {}
         }
         self.docs.borrow_mut().retain(|d| d.page() != page);

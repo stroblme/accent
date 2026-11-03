@@ -866,9 +866,14 @@ impl App {
                 return sidebar.set_outline(Some(&none));
             }
             let jump = glib::clone!(
+                #[weak(rename_to = app)]
+                self,
                 #[weak]
                 nb,
-                move |(id, at)| nb.goto(id, at)
+                move |(id, at)| {
+                    app.mark();
+                    nb.goto(id, at)
+                }
             );
             if sidebar.set_outline_rows(&doc.key(), &rows, jump, None) {
                 self.follow_outline();

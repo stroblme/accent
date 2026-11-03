@@ -258,7 +258,8 @@ use user_commands::bench_commands;
 ///   `apart:<rel>,…` (new-window actions; creates/removes `apart-drill.md`),
 ///   `cycle:[<w>x<h>:]<a>,<b>,…` (25 s held Ctrl+Tab probe after XTEST `move 700 400; focus`,
 ///   the last of three or more split off to the right),
-///   `back:<a>,<b>` (navigation across edits/reload), `loose:<rel_pdf>`
+///   `back:<a>,<b>[,<ipynb>]` (navigation across edits/reload; with a notebook, which it writes,
+///   caret moves far at once, through XTEST, in `a` and between cells), `loose:<rel_pdf>`
 ///   (loose-file readers/assets; creates/removes `loose-drill/`), `toggle:<a>,<b>`
 ///   (XTEST `Ctrl+M` between `a` and its preview tab, `toggle::bench_toggle`), `commands`
 ///   (Run Command's rows over a note and a PDF it writes, `listed::bench_listed`). Remote

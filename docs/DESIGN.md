@@ -1827,10 +1827,12 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 ### History
 
 - Back / Forward `Alt+Left` / `Alt+Right`, and the mouse's side buttons (8 and 9) through the same actions.
-- **One history per window** (user decision 2026-10-25), of places rather than tabs: a document and a position in it, a caret, a PDF's page anchor or a diagram's page.
+- **One history per window** (user decision 2026-10-25), of places rather than tabs: a document and a position in it, a caret, a caret in a notebook's cell, a PDF's page anchor or a diagram's page.
   Back goes to the tab that holds the place, in whichever pane, with the keyboard, and that pane becomes the active one.
   A PDF's page edit takes its places with the pages, and a rename or move takes them with the file.
-- What goes in is a jump — a wikilink followed, a search hit opened, Go to Definition or References landing, a page or line typed into Go to Line, a find's first step (so Back returns to where the search began), a switch to another document in the active pane, a move to another pane — and an edit, coalesced: keystrokes within ten lines and ten seconds of the last entry replace it, so a typed paragraph leaves one mark.
+- What goes in is a jump — a wikilink followed, a search hit opened, Go to Definition or References landing, a page or line typed into Go to Line, a find's first step (so Back returns to where the search began), an Outline row, the next or previous conflict, a switch to another document in the active pane, a move to another pane — and an edit, coalesced: keystrokes within ten lines and ten seconds of the last entry replace it, so a typed paragraph leaves one mark.
+- **A caret taken ten lines or more at once leaves the place it was at** (user decision 2026-11-03), as VS Code's does (`TextEditorPaneSelection`), whether a click, Page Down or Ctrl+End took it, so walking line by line adds nothing.
+  In a notebook the distance is counted in the lines of its cells joined, so arrowing into the next cell adds nothing and a click in a far one does, and typing in a cell leaves its place as typing in a note does.
   Places where the reader already is — the last edit's, say — are passed over, so Back never seems to do nothing.
 - A hundred places.
   A closed file's places stay: Back to one opens the file again in the active pane, at the place (user decision 2026-10-25, as VS Code does).

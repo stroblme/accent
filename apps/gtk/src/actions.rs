@@ -604,6 +604,7 @@ impl App {
             },
             "conflict-next" | "conflict-previous" => {
                 let forward = name == "conflict-next";
+                self.mark();
                 if !self
                     .active()
                     .is_some_and(|tab| tab.conflicts().step(forward))

@@ -216,7 +216,10 @@ impl App {
     pub(crate) fn outline_jump(&self, tab: &Rc<Tab>, at: accent_api::Pos) {
         match self.rendered_in(&self.pane()).filter(|r| r.is_of(tab)) {
             Some(rendered) => rendered.scroll_to_line(at.line + 1),
-            None => tab.goto_pos(at),
+            None => {
+                self.mark();
+                tab.goto_pos(at)
+            }
         }
     }
 

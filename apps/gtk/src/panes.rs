@@ -195,8 +195,9 @@ pub fn mark_pinned(page: &adw::TabPage, pinned: bool) {
 
 /// Maximum window navigation history, shared with the PDF reader.
 const HISTORY: usize = 100;
-/// Line distance separating navigation entries, coalescing nearby typing into one place.
-const NEARBY: i32 = 10;
+/// Line distance separating navigation entries, coalescing nearby typing into one place, and how
+/// far a caret goes at once for the place it left to be one (VS Code's `TextEditorPaneSelection`).
+pub(crate) const NEARBY: i32 = 10;
 /// Pause separating repeat visits to nearby text, while allowing mid-sentence pauses to coalesce.
 const COALESCE: Duration = Duration::from_secs(10);
 
@@ -209,6 +210,15 @@ pub enum Spot {
     Page(Anchor),
     /// A diagram's page, by its index.
     Sheet(usize),
+    /// A caret in a notebook's cell: the cell's place among the cells, the 1-based line and
+    /// column in it, and the 0-based line of the cells joined that it is on, which says how far
+    /// apart two places in the notebook are.
+    Cell {
+        cell: usize,
+        line: i32,
+        column: i32,
+        at: i32,
+    },
     Whole,
 }
 
@@ -247,6 +257,12 @@ impl Held {
         let ours = !self.mark.is_deleted() && self.mark.buffer().as_ref() == Some(buffer);
         (ours && replaced == self.replaced).then(|| buffer.iter_at_mark(&self.mark))
     }
+
+    /// Resolve the mark in whichever buffer holds it, a notebook cell's, or `None` once it is gone.
+    pub fn iter(&self) -> Option<gtk::TextIter> {
+        let buffer = self.mark.buffer().filter(|_| !self.mark.is_deleted())?;
+        Some(buffer.iter_at_mark(&self.mark))
+    }
 }
 
 impl Drop for Held {
@@ -267,7 +283,8 @@ pub fn coalesces(last: &Place, next: &Place, apart: Duration) -> bool {
         return false;
     }
     match (last.at, next.at) {
-        (Spot::Caret(a, _), Spot::Caret(b, _)) => {
+        (Spot::Caret(a, _), Spot::Caret(b, _))
+        | (Spot::Cell { at: a, .. }, Spot::Cell { at: b, .. }) => {
             (a - b).abs() <= NEARBY && (apart <= COALESCE || last.at == next.at)
         }
         // A page is as near as a PDF's places get: the fractions move with every scroll.
@@ -351,19 +368,15 @@ impl Nav {
     }
 
     /// A file's tab has closed: its places stay, for Back to open it again there, but let go of
-    /// their marks, which the buffer `text` (with its count of replacements) resolves into the
-    /// line and column each has moved to since.
-    pub fn release(&mut self, key: &str, text: Option<(&gtk::TextBuffer, u32)>) {
+    /// their marks, each of which `resolve` turns into the place it has moved to since, where it
+    /// can say.
+    pub fn release(&mut self, key: &str, resolve: impl Fn(&Held) -> Option<Spot>) {
         for place in self.back.iter_mut().chain(&mut self.forward) {
             if place.key != key {
                 continue;
             }
-            let held = place.mark.take();
-            if let Some(iter) = held
-                .zip(text)
-                .and_then(|(held, (buffer, replaced))| held.iter_in(buffer, replaced))
-            {
-                place.at = Spot::Caret(iter.line() + 1, iter.line_offset() + 1);
+            if let Some(at) = place.mark.take().and_then(|held| resolve(&held)) {
+                place.at = at;
             }
         }
     }
@@ -385,7 +398,7 @@ impl Nav {
                 _ if place.key != key => {}
                 Spot::Page(anchor) => anchor.page = map(anchor.page),
                 Spot::Sheet(page) => *page = map(*page),
-                Spot::Caret(..) | Spot::Whole => {}
+                Spot::Caret(..) | Spot::Cell { .. } | Spot::Whole => {}
             }
         }
     }
@@ -1285,7 +1298,7 @@ mod tests {
         nav.record(caret("a.md", 1), now);
         nav.record(caret("shell:1", 1), now);
         nav.record(caret("b.md", 1), now);
-        nav.release("a.md", None);
+        nav.release("a.md", |_| None);
         nav.forget("shell:1");
         assert_eq!(nav.back(caret("c.md", 1)), Some(caret("b.md", 1)));
         assert_eq!(nav.back(caret("b.md", 1)), Some(caret("a.md", 1)));
@@ -1318,6 +1331,36 @@ mod tests {
         }
         assert_eq!(nav.back.len(), HISTORY);
         assert_eq!(nav.back[0], caret("a.md", 100));
+    }
+
+    /// A notebook's places are carets in its cells, as far apart as the lines of its cells joined:
+    /// a cell thirty lines on is somewhere else, the next cell's first line is not, and Back from
+    /// one cell goes to the other (user decision 2026-11-03).
+    #[test]
+    fn a_notebook_cell_is_a_place_of_its_own() {
+        let cell = |cell, line, at| Place {
+            key: "n.ipynb".to_string(),
+            at: Spot::Cell {
+                cell,
+                line,
+                column: 1,
+                at,
+            },
+            mark: None,
+        };
+        let quick = Duration::from_millis(80);
+        assert!(!coalesces(&cell(0, 3, 2), &cell(3, 1, 32), quick));
+        assert!(coalesces(&cell(0, 5, 4), &cell(1, 1, 6), quick));
+        // Another document's caret is never near one in a cell.
+        assert!(!coalesces(&cell(0, 1, 0), &caret("n.ipynb", 1), quick));
+        let mut nav = Nav::default();
+        nav.record(cell(0, 3, 2), Instant::now());
+        assert_eq!(nav.back(cell(3, 1, 32)), Some(cell(0, 3, 2)));
+        assert_eq!(nav.forward(cell(0, 3, 2)), Some(cell(3, 1, 32)));
+        // From the next cell's first line Back has nowhere else to go.
+        let mut nav = Nav::default();
+        nav.record(cell(0, 5, 4), Instant::now());
+        assert!(nav.back(cell(1, 1, 6)).is_none());
     }
 
     /// Two tabs pinned besides the one asked about: a pinned tab goes no further right than the

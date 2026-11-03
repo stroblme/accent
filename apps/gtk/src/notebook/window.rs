@@ -115,12 +115,21 @@ impl App {
                 app.sync_status();
             }
         }));
-        // Typing in a cell fades the chrome, as typing in a note does.
+        // Typing in a cell fades the chrome, as typing in a note does, and leaves a place to come
+        // back to, coalesced as a note's edits are.
         tab.connect_typed(on(|app, tab| {
             if app.is_active_notebook(tab) {
+                app.mark_page(&tab.page);
                 app.hide_chrome();
             }
         }));
+        tab.connect_leap(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            #[weak]
+            tab,
+            move |from| app.leaped(&Doc::Notebook(tab.clone()), from)
+        ));
         tab.connect_starting(on(|app, tab| {
             if app.is_active_notebook(tab) {
                 app.sync_status();

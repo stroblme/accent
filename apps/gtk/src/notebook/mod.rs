@@ -123,6 +123,8 @@ pub struct NotebookTab {
     on_select: TabHook,
     /// Ctrl+scroll over the notebook: `true` zooms out.
     on_zoom: Hook<dyn Fn(bool)>,
+    /// The caret went far at once from the place handed over (`selection::leaped`).
+    on_leap: Hook<dyn Fn(&gtk::TextIter)>,
     /// The find bar's query over the cells and where it matches (`find`).
     find: RefCell<find::Find>,
     /// The matches or the readout changed.
@@ -228,6 +230,7 @@ pub fn open(
         on_banner: Hook::default(),
         on_select: Hook::default(),
         on_zoom: Hook::default(),
+        on_leap: Hook::default(),
         find: RefCell::default(),
         on_matches: Hook::default(),
         on_caret: Hook::default(),
@@ -516,6 +519,16 @@ impl NotebookTab {
         let editor = view.build_editor(&source, self.language.as_ref(), self.presenting.get());
         editor.view.set_tab_width(self.indent.get());
         crate::editor::refont(&editor.view);
+        // A key that takes the caret far within the cell leaves a place to come back to; a click
+        // is the notebook's to judge, which knows the cell the caret left (`press`).
+        if let Some(column) = editor.view.downcast_ref::<crate::multicaret::View>() {
+            let (weak, buffer) = (Rc::downgrade(self), editor.buffer.clone());
+            column.on_leap(move |from, click| {
+                if let Some(tab) = weak.upgrade().filter(|_| !click) {
+                    tab.leaped(&buffer.iter_at_offset(from));
+                }
+            });
+        }
         self.fade_from_selected(id, editor.view.upcast_ref());
         let weak = Rc::downgrade(self);
         let on = move |f: fn(&Rc<NotebookTab>, CellId)| {
@@ -1358,6 +1371,10 @@ impl NotebookTab {
 
     pub fn connect_zoom(&self, f: impl Fn(bool) + 'static) {
         self.on_zoom.set(Rc::new(f));
+    }
+
+    pub fn connect_leap(&self, f: impl Fn(&gtk::TextIter) + 'static) {
+        self.on_leap.set(Rc::new(f));
     }
 }
 

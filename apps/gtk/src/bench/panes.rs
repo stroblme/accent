@@ -824,10 +824,12 @@ pub(super) fn bench_tabs(app: &Rc<App>, rels: &str) {
 
 /// See `ACCENT_BENCH_TABS=back:` above.
 pub(super) fn bench_back(app: &Rc<App>, rels: &str) {
-    let Some((a, b)) = rels.split_once(',') else {
-        return bench_quit(app);
+    let rels: Vec<String> = rels.split(',').map(str::to_string).collect();
+    let (a, b, notebook) = match &rels[..] {
+        [a, b] => (a.clone(), b.clone(), None),
+        [a, b, n] => (a.clone(), b.clone(), Some(n.clone())),
+        _ => return bench_quit(app),
     };
-    let (a, b) = (a.to_string(), b.to_string());
     app.open_path(&a);
     app.open_path(&b);
     let landed = {
@@ -920,12 +922,148 @@ pub(super) fn bench_back(app: &Rc<App>, rels: &str) {
             println!("bench back reopened {}", where_(&app));
             bench_step(&app, "win.forward").await;
             println!("bench back reopened_forward {}", where_(&app));
+            if let Some(notebook) = notebook {
+                back_leaps(&app, &a, &notebook).await;
+            }
             bench_quit(&app);
         });
     });
 }
 
 /// Fire `action` on the window and give it a moment to land.
+/// A caret taken far at once is a place to come back to (user decision 2026-11-03): Ctrl+End in
+/// `a` and a click far up it, and in the notebook `rel`, which is written here, a click into a
+/// cell ten lines on, a click into the next cell that is near, which leaves nothing, and Ctrl+End
+/// in a long cell, then Back by the mouse's back button. Prints where each Back and Forward lands.
+async fn back_leaps(app: &Rc<App>, a: &str, rel: &str) {
+    let Some(tab) = app.tab_for(a) else {
+        return println!("bench back leap no_tab");
+    };
+    app.reveal_page(&tab.page);
+    tab.view.grab_focus();
+    super::git::xtest("move 400 300; focus").await;
+    let line = |tab: &Rc<Tab>| tab.buffer.iter_at_mark(&tab.buffer.get_insert()).line() + 1;
+    tab.goto_line(10, 1);
+    glib::timeout_future(Duration::from_millis(300)).await;
+    tab.view
+        .emit_move_cursor(gtk::MovementStep::BufferEnds, 1, false);
+    let end = line(&tab);
+    bench_step(app, "win.back").await;
+    let back = line(&tab);
+    bench_step(app, "win.forward").await;
+    println!(
+        "bench back leap_key end={end} back={back} forward={}",
+        line(&tab)
+    );
+
+    // A click on line 2 with the caret on line 30, both on screen.
+    tab.goto_line(30, 1);
+    tab.view
+        .scroll_to_iter(&mut tab.buffer.start_iter(), 0.0, true, 0.0, 0.0);
+    glib::timeout_future(Duration::from_millis(300)).await;
+    let point = |line: i32| {
+        let at = tab
+            .buffer
+            .iter_at_line(line - 1)
+            .unwrap_or(tab.buffer.start_iter());
+        let rect = tab.view.iter_location(&at);
+        let (x, y) = tab.view.buffer_to_window_coords(
+            gtk::TextWindowType::Widget,
+            rect.x() + 4,
+            rect.y() + rect.height() / 2,
+        );
+        let point = graphene::Point::new(x as f32, y as f32);
+        let point = tab.view.compute_point(&app.window, &point).unwrap_or(point);
+        format!("{:.0} {:.0}", point.x(), point.y())
+    };
+    super::git::xtest(&format!("move {}; sleep 0.2; down; up", point(2))).await;
+    let clicked = line(&tab);
+    bench_step(app, "win.back").await;
+    println!(
+        "bench back leap_click clicked={clicked} back={}",
+        line(&tab)
+    );
+
+    // The notebook: twelve lines in its first cell, three in the next, forty in the last.
+    let cell = |n: i32, prefix: &str| -> Vec<String> {
+        (0..n).map(|i| format!("{prefix}{i} = {i}\n")).collect()
+    };
+    let source = |lines: Vec<String>| {
+        let mut lines = lines;
+        if let Some(last) = lines.last_mut() {
+            last.pop();
+        }
+        serde_json::json!({"cell_type": "code", "execution_count": null, "metadata": {},
+            "outputs": [], "source": lines})
+    };
+    let json = serde_json::json!({
+        "cells": [source(cell(12, "a")), source(cell(3, "b")), source(cell(40, "c"))],
+        "metadata": {"language_info": {"name": "python"}},
+        "nbformat": 4,
+        "nbformat_minor": 5,
+    });
+    if std::fs::write(app.root().join(rel), json.to_string()).is_err() {
+        return println!("bench back leap no_notebook");
+    }
+    app.open_path(rel);
+    glib::timeout_future(Duration::from_millis(800)).await;
+    let Some(book) = app.active_notebook() else {
+        return println!("bench back leap no_notebook");
+    };
+    let caret = |book: &Rc<crate::notebook::NotebookTab>| book.bench_caret();
+    book.goto_place(0, 1, 1);
+    glib::timeout_future(Duration::from_millis(400)).await;
+    let first_line = |n: usize| {
+        let view = book.bench_view(n)?;
+        let rect = view.iter_location(&view.buffer().start_iter());
+        let (x, y) = view.buffer_to_window_coords(
+            gtk::TextWindowType::Widget,
+            rect.x() + 4,
+            rect.y() + rect.height() / 2,
+        );
+        let point = graphene::Point::new(x as f32, y as f32);
+        let point = view.compute_point(&app.window, &point)?;
+        Some(format!("{:.0} {:.0}", point.x(), point.y()))
+    };
+    let Some(next) = first_line(1) else {
+        return println!("bench back leap no_cell");
+    };
+
+    super::git::xtest(&format!("move {next}; sleep 0.2; down; up")).await;
+    let clicked = caret(&book);
+    bench_step(app, "win.back").await;
+    let back = caret(&book);
+    bench_step(app, "win.forward").await;
+    println!(
+        "bench back leap_cell clicked={clicked:?} back={back:?} forward={:?}",
+        caret(&book)
+    );
+    // Near: from the first cell's last line into the next cell is two lines of the cells.
+    book.goto_place(0, 12, 1);
+    glib::timeout_future(Duration::from_millis(300)).await;
+    super::git::xtest(&format!("move {next}; sleep 0.2; down; up")).await;
+    bench_step(app, "win.back").await;
+    println!("bench back leap_near back={:?}", caret(&book));
+    // Ctrl+End in the long last cell.
+    book.goto_place(2, 1, 1);
+    glib::timeout_future(Duration::from_millis(300)).await;
+    if let Some(view) = book.bench_view(2) {
+        view.emit_move_cursor(gtk::MovementStep::BufferEnds, 1, false);
+    }
+    let end = caret(&book);
+    bench_step(app, "win.back").await;
+    println!(
+        "bench back leap_cell_key end={end:?} back={:?}",
+        caret(&book)
+    );
+    // The mouse's back button, last: under Xvfb the first click after an XTEST button 8 is lost.
+    if let Some(view) = book.bench_view(2) {
+        view.emit_move_cursor(gtk::MovementStep::BufferEnds, 1, false);
+    }
+    super::git::xtest("down 8; up 8").await;
+    println!("bench back leap_button back={:?}", caret(&book));
+}
+
 async fn bench_step(app: &Rc<App>, action: &str) {
     let _ = WidgetExt::activate_action(&app.window, action, None);
     glib::timeout_future(Duration::from_millis(300)).await;

@@ -199,20 +199,18 @@ impl App {
 
     // --- back and forward ---------------------------------------------------------------------
 
-    /// Where a document is being read: the caret in a text tab, the reading anchor in a PDF, and
-    /// the document itself for anything with no position of its own.
+    /// Where a document is being read: the caret in a text tab or a notebook's cell, the reading
+    /// anchor in a PDF, and the document itself for anything with no position of its own.
     fn place_of(doc: &Doc) -> Place {
-        let mut mark = None;
+        let caret = match doc {
+            Doc::Text(tab) => Some(tab.buffer.iter_at_mark(&tab.buffer.get_insert())),
+            Doc::Notebook(book) => book.caret(),
+            _ => None,
+        };
+        if let Some(place) = caret.and_then(|iter| Self::place_at(doc, &iter)) {
+            return place;
+        }
         let at = match doc {
-            Doc::Text(tab) => {
-                let iter = tab.buffer.iter_at_mark(&tab.buffer.get_insert());
-                mark = Some(Rc::new(Held::at(
-                    tab.buffer.upcast_ref(),
-                    &iter,
-                    tab.replaced(),
-                )));
-                Spot::Caret(iter.line() + 1, iter.line_offset() + 1)
-            }
             Doc::Pdf(pdf) => Spot::Page(pdf.anchor()),
             Doc::Diagram(d) => Spot::Sheet(d.page_index()),
             _ => Spot::Whole,
@@ -220,7 +218,34 @@ impl App {
         Place {
             key: doc.key(),
             at,
-            mark,
+            mark: None,
+        }
+    }
+
+    /// The place of `iter` in `doc`'s text, a text tab's or a notebook cell's: a mark there, and
+    /// where it is for when the mark can say nothing.
+    fn place_at(doc: &Doc, iter: &gtk::TextIter) -> Option<Place> {
+        let (at, replaced) = match doc {
+            Doc::Text(tab) => (
+                Spot::Caret(iter.line() + 1, iter.line_offset() + 1),
+                tab.replaced(),
+            ),
+            Doc::Notebook(book) => (book.spot_of(iter)?, 0),
+            _ => return None,
+        };
+        let held = Held::at(&iter.buffer(), iter, replaced);
+        Some(Place {
+            key: doc.key(),
+            at,
+            mark: Some(Rc::new(held)),
+        })
+    }
+
+    /// The caret in `doc` went far at once from `from`, a key or a click away: where it was is a
+    /// place to come back to, VS Code's rule (user decision 2026-11-03).
+    pub(crate) fn leaped(&self, doc: &Doc, from: &gtk::TextIter) {
+        if let Some(place) = Self::place_at(doc, from) {
+            self.record(place);
         }
     }
 
@@ -301,6 +326,17 @@ impl App {
             }
             (Doc::Pdf(pdf), Spot::Page(anchor)) => pdf.scroll_to(anchor),
             (Doc::Diagram(d), Spot::Sheet(page)) => d.show_page(page),
+            (
+                Doc::Notebook(book),
+                Spot::Cell {
+                    cell, line, column, ..
+                },
+            ) => {
+                let marked = to.mark.as_ref().and_then(|held| held.iter());
+                if !marked.is_some_and(|iter| book.goto_iter(&iter)) {
+                    book.goto_place(cell, line, column);
+                }
+            }
             _ => {}
         }
         true
@@ -323,6 +359,13 @@ impl App {
             Spot::Sheet(page) => {
                 let show = move |_: &Rc<App>, d: &Rc<crate::diagram::DiagramTab>| d.show_page(page);
                 let reveal = open::Reveal::Diagram(Box::new(show));
+                self.revealing.borrow_mut().insert(to.key.clone(), reveal);
+                self.open_path(&to.key);
+            }
+            Spot::Cell {
+                cell, line, column, ..
+            } => {
+                let reveal = open::Reveal::NotebookCell(cell, line, column);
                 self.revealing.borrow_mut().insert(to.key.clone(), reveal);
                 self.open_path(&to.key);
             }

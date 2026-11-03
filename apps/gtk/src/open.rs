@@ -88,6 +88,9 @@ impl App {
             let reveal = self.revealing.borrow_mut().remove(&doc.key());
             match (reveal, &doc) {
                 (Some(Reveal::Diagram(reveal)), Doc::Diagram(tab)) => reveal(self, tab),
+                (Some(Reveal::NotebookCell(cell, line, column)), Doc::Notebook(tab)) => {
+                    tab.goto_place(cell, line, column);
+                }
                 (Some(Reveal::NotebookHit(bytes)), Doc::Notebook(tab)) => tab.reveal_hit(bytes),
                 (Some(Reveal::NotebookHit(bytes)), Doc::Text(tab)) => {
                     select_text_range(tab, bytes);
@@ -1101,6 +1104,17 @@ impl App {
             tab,
             move |_| app.on_edit(&tab)
         ));
+        // A key or a click that takes the caret far at once leaves a place to come back to.
+        if let Some(view) = tab.view.downcast_ref::<multicaret::View>() {
+            view.on_leap(glib::clone!(
+                #[weak(rename_to = app)]
+                self,
+                #[weak]
+                tab,
+                move |from, _| app
+                    .leaped(&Doc::Text(tab.clone()), &tab.buffer.iter_at_offset(from))
+            ));
+        }
 
         // A click in the marks column toggles a breakpoint, where the file is one a debugger runs.
         sourceview5::prelude::ViewExt::connect_line_mark_activated(
@@ -1301,6 +1315,9 @@ impl App {
 /// [`App::open_cell`]; or what is to be done with any document once it is, a print or an export
 /// from a file's menu (`App::make`).
 pub enum Reveal {
+    /// A notebook's cell, by its place, and the 1-based line and column in it, where Back opens a
+    /// closed notebook.
+    NotebookCell(usize, i32, i32),
     Diagram(Shows<crate::diagram::DiagramTab>),
     NotebookHit(std::ops::Range<usize>),
     NotebookFilePos(accent_api::Pos),

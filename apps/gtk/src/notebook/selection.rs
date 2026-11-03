@@ -9,6 +9,7 @@ use gtk::{glib, graphene};
 
 use super::NotebookTab;
 use super::cell::Editor;
+use crate::panes::{NEARBY, Spot};
 
 impl NotebookTab {
     pub(super) fn select(self: &Rc<Self>, id: CellId) {
@@ -32,14 +33,19 @@ impl NotebookTab {
     }
 
     /// A press in cell `id`, ahead of its editor's: the cell is selected, and the caret the editor
-    /// puts down is not followed, being where the pointer is.
+    /// puts down is not followed, being where the pointer is. A caret put down ten lines of the
+    /// cells or more from where it was, in this cell or another, leaves a place to come back to.
     pub(super) fn press(self: &Rc<Self>, id: CellId) {
+        let from = self.caret().map(|at| (at.buffer(), at.offset()));
         self.select(id);
         self.pressing.set(true);
         let weak = Rc::downgrade(self);
         glib::idle_add_local_once(move || {
             if let Some(tab) = weak.upgrade() {
                 tab.pressing.set(false);
+                if let Some((buffer, offset)) = from {
+                    tab.leaped(&buffer.iter_at_offset(offset));
+                }
             }
         });
         // A cell pressed before its editor was built: the editor takes the keyboard.
@@ -112,6 +118,22 @@ impl NotebookTab {
         row(&at) == row(&edge) && self.step_cell(id, down)
     }
 
+    /// The caret went to where it is from `from`, in this cell's buffer or another's: ten lines of
+    /// the cells or more away, the place it left is one to come back to.
+    pub(super) fn leaped(self: &Rc<Self>, from: &gtk::TextIter) {
+        let at = |spot: Option<Spot>| match spot {
+            Some(Spot::Cell { at, .. }) => Some(at),
+            _ => None,
+        };
+        let here = self.caret().and_then(|caret| at(self.spot_of(&caret)));
+        if let (Some(from_at), Some(here)) = (at(self.spot_of(from)), here)
+            && (from_at - here).abs() >= NEARBY
+            && let Some(told) = self.on_leap.get()
+        {
+            told(from);
+        }
+    }
+
     /// Past the end of cell `id`, into the next cell's first line, or the previous cell's last.
     pub(super) fn step_cell(self: &Rc<Self>, id: CellId, down: bool) -> bool {
         let views = self.views.borrow().clone();
@@ -135,6 +157,71 @@ impl NotebookTab {
             self.focus_cell(next.id);
         }
         true
+    }
+
+    /// Where the caret is, as the window's history keeps a place: in the selected cell, if there
+    /// is one, with its editor's buffer.
+    pub fn caret(self: &Rc<Self>) -> Option<gtk::TextIter> {
+        let (_, editor) = self.editor(self.selected.get()?)?;
+        Some(editor.buffer.iter_at_mark(&editor.buffer.get_insert()))
+    }
+
+    /// The place of `iter` in a cell's buffer: the cell's place among the cells, its 1-based line
+    /// and column in it, and the 0-based line of the cells joined that it is on.
+    pub fn spot_of(&self, iter: &gtk::TextIter) -> Option<Spot> {
+        let buffer = iter.buffer();
+        let views = self.views.borrow();
+        let cell = views.iter().position(|v| {
+            v.editor()
+                .is_some_and(|e| e.buffer.upcast_ref::<gtk::TextBuffer>() == &buffer)
+        })?;
+        let above: i32 = views[..cell].iter().map(|v| v.line_count()).sum();
+        Some(Spot::Cell {
+            cell,
+            line: iter.line() + 1,
+            column: iter.line_offset() + 1,
+            at: above + iter.line(),
+        })
+    }
+
+    /// Put the caret on `iter` in whichever cell's buffer holds it, as [`goto`](Self::goto) does;
+    /// `false` where no cell does any more.
+    pub fn goto_iter(self: &Rc<Self>, iter: &gtk::TextIter) -> bool {
+        let buffer = iter.buffer();
+        let id = self.views.borrow().iter().find_map(|v| {
+            let editor = v.editor()?;
+            (editor.buffer.upcast_ref::<gtk::TextBuffer>() == &buffer).then_some(v.id)
+        });
+        match id {
+            Some(id) => {
+                self.goto(id, iter.offset());
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Put the caret on 1-based `line` and `column` of the cell at place `cell`, or as near as the
+    /// cells now come, as [`goto`](Self::goto) does.
+    pub fn goto_place(self: &Rc<Self>, cell: usize, line: i32, column: i32) {
+        let id = {
+            let views = self.views.borrow();
+            views.get(cell).or(views.last()).map(|v| v.id)
+        };
+        let Some((_, editor)) = id.and_then(|id| self.editor(id)) else {
+            return;
+        };
+        let buffer = &editor.buffer;
+        let line = (line - 1).clamp(0, buffer.line_count() - 1);
+        let mut at = buffer.iter_at_line(line).unwrap_or(buffer.end_iter());
+        if !at.ends_line() {
+            let mut end = at;
+            end.forward_to_line_end();
+            at.set_line_offset((column - 1).clamp(0, end.line_offset()));
+        }
+        if let Some(id) = id {
+            self.goto(id, at.offset());
+        }
     }
 
     /// Keep cell `id`'s caret in sight: the cells do not scroll themselves, the notebook does.

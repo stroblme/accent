@@ -379,6 +379,7 @@ const CARETS_CLASS: &str = "accent-carets";
 mod imp {
     use super::*;
     use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
 
     /// Secondary caret marks, anchor and retained vertical goal, a buffer x the caret aims for
     /// on its way up and down. `below` records Add Caret direction (`true` below), or `None` for
@@ -455,10 +456,15 @@ mod imp {
         pub fade_follows: RefCell<Option<Follows>>,
         /// Told when a column starts ([`super::View::on_column_started`]).
         pub column_started: RefCell<Option<Box<dyn Fn()>>>,
+        /// Told when a key or a click takes the selection far at once ([`super::View::on_leap`]).
+        pub leap: RefCell<Option<Leap>>,
     }
 
     /// The lines a view's fade is measured from when not its own carets', 0-based.
     pub type Follows = Box<dyn Fn() -> Option<std::ops::RangeInclusive<i32>>>;
+
+    /// What a far move is told of: the offset the selection started at, and whether a click made it.
+    pub type Leap = Rc<dyn Fn(i32, bool)>;
 
     #[glib::object_subclass]
     impl ObjectSubclass for View {
@@ -472,6 +478,7 @@ mod imp {
             self.parent_constructed();
             let obj = self.obj().clone();
             box_drag(&obj);
+            leaps_by_click(&obj);
 
             // The buffer arrives after construction. Every `mark-set` on it that we did not
             // cause is the user moving the primary caret — a click, a selection, a find-bar
@@ -649,6 +656,7 @@ mod imp {
             self.goal.set(None);
             let obj = self.obj();
             let buffer = obj.buffer();
+            let from = obj.start();
             match step {
                 // Without a caret GTK scrolls instead, which these keys still do.
                 gtk::MovementStep::DisplayLineEnds if obj.is_cursor_visible() => {
@@ -679,6 +687,7 @@ mod imp {
                     }
                 }
             }
+            obj.leaped(&from, false);
         }
     }
 
@@ -929,6 +938,30 @@ impl View {
         self.imp().redo.take();
         if let Some(told) = self.imp().column_started.borrow().as_ref() {
             told();
+        }
+    }
+
+    /// Call `f` with the offset the selection started at when a key, or a click (`true`), takes its
+    /// start [`NEARBY`](crate::panes::NEARBY) lines or more away at once: VS Code keeps the place
+    /// it left as one to come back to (`TextEditorPaneSelection`), and so does the window.
+    pub(crate) fn on_leap(&self, f: impl Fn(i32, bool) + 'static) {
+        self.imp().leap.replace(Some(std::rc::Rc::new(f)));
+    }
+
+    /// Where the selection starts, or the caret: what a move is measured from.
+    fn start(&self) -> gtk::TextIter {
+        let buffer = self.buffer();
+        buffer
+            .selection_bounds()
+            .map_or_else(|| caret(&buffer), |(start, _)| start)
+    }
+
+    /// Tell [`on_leap`](Self::on_leap) of a move from `from`, a click's or a key's, that went far.
+    fn leaped(&self, from: &gtk::TextIter, click: bool) {
+        let far = (self.start().line() - from.line()).abs() >= crate::panes::NEARBY;
+        let told = self.imp().leap.borrow().clone();
+        if let Some(told) = told.filter(|_| far) {
+            told(from.offset(), click);
         }
     }
 
@@ -1303,6 +1336,34 @@ fn box_drag(view: &View) {
         });
     });
     view.add_controller(drag);
+}
+
+/// Measure each primary click as a move ([`View::on_leap`]), from the selection's start at the
+/// press to where it is at the release. Raw events, which no gesture of GTK's claims away from it,
+/// and never stopped.
+fn leaps_by_click(view: &View) {
+    let clicks = gtk::EventControllerLegacy::new();
+    clicks.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let pressed = std::cell::Cell::new(None);
+    clicks.connect_event(move |clicks, event| {
+        let primary = event
+            .downcast_ref::<gdk::ButtonEvent>()
+            .is_some_and(|b| b.button() == gdk::BUTTON_PRIMARY);
+        let view = clicks.widget().and_downcast::<View>();
+        if let (true, Some(view)) = (primary, view) {
+            match event.event_type() {
+                gdk::EventType::ButtonPress => pressed.set(Some(view.start().offset())),
+                gdk::EventType::ButtonRelease => {
+                    if let Some(from) = pressed.take() {
+                        view.leaped(&view.buffer().iter_at_offset(from), true);
+                    }
+                }
+                _ => {}
+            }
+        }
+        glib::Propagation::Proceed
+    });
+    view.add_controller(clicks);
 }
 
 /// How often a box drag resting past the view's edge scrolls on: GTK's own drag-select scan.
