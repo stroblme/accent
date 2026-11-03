@@ -200,6 +200,14 @@ impl Doc {
                 v.page.set_tooltip(&fileops::display_path(root, key));
             }
         }
+        // The icon is the file's type, which a new extension can change; a file that would not
+        // open keeps its warning.
+        if matches!(
+            self,
+            Doc::Text(_) | Doc::Pdf(_) | Doc::Diagram(_) | Doc::Notebook(_) | Doc::Image(_)
+        ) {
+            set_file_icon(self.page(), key);
+        }
     }
 }
 
@@ -257,8 +265,8 @@ pub fn opens_differently(from: &str, to: &str) -> bool {
 /// The icon every file list leads a directory's row with.
 pub const FOLDER_ICON: &str = "filetype-folder-symbolic";
 
-/// The icon every file list leads `key`'s row with. The `filetype-*` set is shipped in the app's
-/// GResource (`data/accent.gresource.xml`); tabs keep the icons their documents give them.
+/// The icon every file list and a file's tab lead `key` with. The `filetype-*` set is shipped in
+/// the app's GResource (`data/accent.gresource.xml`).
 pub fn icon_for(key: &str) -> &'static str {
     match file_type(key) {
         FileType::Note => "filetype-markdown-symbolic",
@@ -269,8 +277,14 @@ pub fn icon_for(key: &str) -> &'static str {
         FileType::Code => "filetype-code-symbolic",
         FileType::Config => "filetype-config-symbolic",
         FileType::Text => "filetype-text-symbolic",
+        FileType::Other if accent_core::path::is_notebook(key) => "filetype-notebook-symbolic",
         FileType::Other => "filetype-file-symbolic",
     }
+}
+
+/// Lead a file's tab with the icon its row has in the file lists, so the two look alike.
+pub fn set_file_icon(page: &adw::TabPage, key: &str) {
+    page.set_icon(Some(&gio::ThemedIcon::new(icon_for(key))));
 }
 
 #[cfg(test)]
@@ -299,12 +313,13 @@ mod tests {
         let xml = include_str!("../data/accent.gresource.xml");
         let keys = [
             "a.md", "a.pdf", "a.drawio", "a.csv", "a.png", "a.rs", "a.toml", "a.txt", "a.zip",
+            "a.ipynb",
         ];
         let mut names: Vec<&str> = keys.into_iter().map(icon_for).collect();
         names.push(FOLDER_ICON);
         names.sort_unstable();
         names.dedup();
-        assert_eq!(names.len(), 10, "one name per file type, and the folder");
+        assert_eq!(names.len(), 11, "one name per file type, and the folder");
         for name in names {
             assert!(
                 xml.contains(&format!("icons/scalable/actions/{name}.svg")),

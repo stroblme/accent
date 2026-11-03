@@ -44,6 +44,7 @@
     <file preprocess="xml-stripblanks">icons/scalable/actions/filetype-code-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/filetype-config-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/filetype-text-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/filetype-notebook-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/remote-server-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/dap-breakpoint-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/dap-breakpoint-unverified-symbolic.svg</file>

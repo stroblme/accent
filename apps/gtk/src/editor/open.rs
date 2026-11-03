@@ -150,6 +150,7 @@ pub fn open(
     column.append(&document);
     let page = tabs.append(&column);
     page.set_title(crate::doc::file_name(key));
+    crate::doc::set_file_icon(&page, key);
     // The title is only the file name, so where the note really lives is a hover away.
     let tooltip = match crate::doc::host_file_path(key) {
         Some(path) => format!("{path} (remote host)"),

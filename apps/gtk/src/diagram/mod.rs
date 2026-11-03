@@ -149,9 +149,7 @@ pub fn open(
     let page = tabs.append(&host);
     page.set_title(title);
     page.set_tooltip(tooltip);
-    page.set_icon(Some(&gio::ThemedIcon::new(
-        "applications-graphics-symbolic",
-    )));
+    crate::doc::set_file_icon(&page, key);
 
     let (strip, thumbs) = strip::PageStrip::new();
     let organize = crate::organize::Organize::new(

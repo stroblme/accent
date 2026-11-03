@@ -253,7 +253,7 @@ pub fn open(
     let page = tabs.append(&stack);
     page.set_title(title);
     page.set_tooltip(tooltip);
-    page.set_icon(Some(&gio::ThemedIcon::new("x-office-document-symbolic")));
+    crate::doc::set_file_icon(&page, key);
 
     let thumb_strip = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)

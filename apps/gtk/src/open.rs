@@ -346,7 +346,7 @@ impl App {
             .child(&picture)
             .build();
         crate::widgets::smooth_wheel(&scroller);
-        let image = self.adopt_viewer(Doc::Image, key, &scroller, "image-x-generic-symbolic", how);
+        let image = self.adopt_viewer(Doc::Image, key, &scroller, doc::icon_for(key), how);
         *image.monitor.borrow_mut() = self.watch_loose(key, path);
         // An SVG is drawn at the display's scale, so a window moved onto another display draws it
         // again (`show_image` asks for the scale with the look).

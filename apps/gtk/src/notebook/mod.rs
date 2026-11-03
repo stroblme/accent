@@ -174,7 +174,7 @@ pub fn open(
     let page = tabs.append(&host);
     page.set_title(title);
     page.set_tooltip(tooltip);
-    page.set_icon(Some(&gio::ThemedIcon::new("view-list-ordered-symbolic")));
+    crate::doc::set_file_icon(&page, key);
 
     let language = crate::editor::language_for(&format!("cell{}", notebook.extension()), "");
     let tab = Rc::new(NotebookTab {
