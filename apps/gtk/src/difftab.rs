@@ -116,6 +116,12 @@ impl DiffTab {
         &self.compare
     }
 
+    /// Both panes' views, the old one first.
+    #[cfg(feature = "bench")]
+    pub fn views(&self) -> &[sourceview5::View; 2] {
+        &self.views
+    }
+
     /// What takes the keyboard when the tab's pane does: the right column, what it compares to.
     pub fn key_target(&self) -> gtk::Widget {
         gtk::prelude::Cast::upcast(self.views[1].clone())

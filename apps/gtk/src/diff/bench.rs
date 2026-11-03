@@ -74,6 +74,11 @@ impl Compare {
             .collect()
     }
 
+    /// The text view of the column showing `side`.
+    pub fn view(&self, side: Side) -> &sourceview5::View {
+        &self.pane(side).view
+    }
+
     /// The divider between the columns.
     pub fn paned(&self) -> &gtk::Paned {
         &self.columns.paned

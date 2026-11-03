@@ -51,6 +51,7 @@ mod shots;
 mod start;
 mod style;
 mod suggest;
+mod surfaces;
 mod symbols;
 mod synctex;
 mod tags;
@@ -151,7 +152,9 @@ use user_commands::bench_commands;
 ///   handled by `start::bench_start` without an `App`.
 /// - `ACCENT_BENCH_KEYS=1`: editor key semantics and completion acceptance.
 ///   `<rel_note>` checks Return/Tab on list lines; `occur:<rel>` checks
-///   occurrence shortcuts; `box:<rel>` checks Shift+Alt pointer selections.
+///   occurrence shortcuts; `box:<rel>` checks Shift+Alt pointer selections;
+///   `surfaces:<code>,<note>,<ipynb>` asks the same keys of every editor surface
+///   (`surfaces::bench_surfaces`), in a scratch vault under `/tmp`.
 /// - `ACCENT_BENCH_SUGGEST=escape:<rel>`: Escape with popup/ghost/find/compare
 ///   layers; `ghost:<rel>`: ghost-session progress and preference lifecycle;
 ///   `words:<rel>`: word-suggestion toggles and XTEST popup activation.
@@ -907,6 +910,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = arg.strip_prefix("menu:") {
                 return bench_menu_caret(&app, rel);
+            }
+            if let Some(rels) = arg.strip_prefix("surfaces:") {
+                return surfaces::bench_surfaces(&app, rels);
             }
             return match arg.as_str() {
                 "1" => bench_keys(&app),
