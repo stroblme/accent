@@ -128,7 +128,7 @@ async fn run(app: &Rc<App>) {
     folder_terminal(app).await;
     let _ = WidgetExt::activate_action(&app.window, "win.close-tab", None);
     glib::timeout_future(Duration::from_millis(500)).await;
-    println!("bench commands held={}", super::keys::bench_held());
+    println!("bench commands held={}", super::shells::bench_held());
     // Quit as Ctrl+Q does, through the window's close, which writes the session `open` starts
     // from: `bench_quit` ends the process with the closes' debounced save still pending, and the
     // session as last written puts back a closed shell's tab with a new shell in it.
@@ -183,7 +183,7 @@ async fn open(app: &Rc<App>) {
     println!(
         "bench commands open terminals={} held={}",
         app.terminals().len(),
-        super::keys::bench_held()
+        super::shells::bench_held()
     );
     if let Some(gtk_app) = app.window.application() {
         gtk_app.activate_action("quit", None);
@@ -201,13 +201,13 @@ async fn back(app: &Rc<App>) {
         .collect();
     println!(
         "bench commands back titles={titles:?} held={}",
-        super::keys::bench_held()
+        super::shells::bench_held()
     );
     let _ = WidgetExt::activate_action(&app.window, "win.close-tab", None);
     glib::timeout_future(Duration::from_millis(1500)).await;
     println!(
         "bench commands back closed held={}",
-        super::keys::bench_held()
+        super::shells::bench_held()
     );
     bench_quit(app);
 }

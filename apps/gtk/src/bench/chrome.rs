@@ -196,7 +196,7 @@ pub(super) fn bench_chrome_keys(app: &Rc<App>, rels: &str) {
             println!("bench chrome_keys carets_after={}", column.has_carets());
             column.clear_carets();
         }
-        // The popup, as `keys::bench_popup` raises it, and Down inside it.
+        // The popup, as `keys_typing::bench_popup` raises it, and Down inside it.
         let session = crate::completion::session(&tab);
         tab.set_text("comp");
         tab.buffer.place_cursor(&tab.buffer.end_iter());

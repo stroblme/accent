@@ -26,6 +26,8 @@ mod image;
 mod info;
 mod kernel;
 mod keys;
+mod keys_typing;
+mod keys_xtest;
 mod listed;
 mod loose;
 mod memory;
@@ -48,6 +50,7 @@ mod refer;
 mod replace;
 mod scroll;
 mod search;
+mod shells;
 mod shots;
 mod start;
 mod style;
@@ -93,10 +96,9 @@ use git::{
 use goals::bench_goals;
 use image::{bench_image, bench_image_look, bench_preview_look};
 use info::bench_info;
-use keys::{
-    bench_box_drag, bench_hold, bench_keys, bench_list, bench_menu_caret, bench_occurrence_keys,
-    bench_shell_keys, bench_term,
-};
+use keys::bench_keys;
+use keys_typing::bench_list;
+use keys_xtest::{bench_box_drag, bench_menu_caret, bench_occurrence_keys};
 use minimap::bench_minimap;
 use notebook::bench_notebook;
 use outline::bench_outline;
@@ -115,6 +117,7 @@ use pdf::{
 use replace::bench_replace;
 use scroll::bench_scroll;
 use search::bench_search;
+use shells::{bench_hold, bench_shell_keys, bench_term};
 pub(crate) use start::bench_start;
 use style::{
     bench_drag_fold, bench_follow, bench_listing, bench_numbers, bench_occurrences, bench_reveal,
