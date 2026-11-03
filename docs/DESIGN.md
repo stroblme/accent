@@ -1081,19 +1081,20 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The box finished stays over the page until a tile carries what it typed, as a stroke does.
   It is a `/FreeText` (ISO 32000-1 §12.5.6.6) with an appearance stream of ours, drawn alike by every reader: Helvetica, which every reader has, so nothing is embedded, in WinAnsi encoding — Latin-1, the euro and Windows-1252's quotes and dashes, anything else refused as it is typed — its text the `/Contents` and its size and colour the `/DA`, which is what Firefox and Acrobat edit it by.
   Each text typed, typed again, moved or erased is one Undo step; it is not a comment, so neither the Outline pane nor a tooltip lists it, and another editor's typed text is theirs, which the tools leave alone.
-- **Select takes hold of strokes and texts** (user decisions 2026-11-03), any ink stroke, ours or another editor's, and our typed text, which is what the eraser takes too.
-  A drag on the paper draws a lasso, dashed in the accent over a highlight's fill and closed by the line back to where it began, and it takes every stroke at least half of whose length lies inside it and every text whose box does.
-  A press on a stroke, within 4 pt of its edge, or on a text's box picks that one alone, and a drag from it moves it at once, while a press in a circle's empty middle starts a lasso.
+- **Select takes hold of strokes, texts and pictures** (user decisions 2026-11-03), any ink stroke, ours or another editor's, which is what the eraser takes too, and our typed text and pictures.
+  A drag on the paper draws a lasso, dashed in the accent over a highlight's fill and closed by the line back to where it began, and it takes every stroke at least half of whose length lies inside it and every text and picture whose outline does.
+  A press on a stroke, within 4 pt of its edge, on a text's box or on a picture picks that one alone, the stroke first, so ink drawn over a photo stays within reach, and a drag from it moves it at once, while a press in a circle's empty middle starts a lasso.
   With Ctrl a click adds a stroke or a text or lets go of it, and a lasso adds what it takes.
   A click on the paper lets go of everything, and so does `Escape`, a second `Escape` putting the tool down.
 - What Select holds shows one box round it all with eight handles and the diagram's ring beyond the top-right corner, and a dashed box round each item when there are two or more.
   A drag inside the box moves the lot, stopping at the paper's edge, an edge stretches one axis, a corner scales both alike, and the ring turns them about their middle, freely, or in steps of 15° with Shift.
+  With a picture among them every handle keeps the proportions, an edge scaling both axes about the opposite edge's middle, and while the hand is on it the picture shows as its outline filled as a highlight is.
   A text only moves, its corner going where the others take it, since its size is the Text tool's and an editor typing into a turned one would set it upright again, so texts alone show their box without handles or ring.
   While it turns the box turns with it and shows no handles, as a diagram's shape does, and once let go the turn is in the strokes themselves, no angle kept beside them.
   Ours are drawn again along the moved path, each line keeping its width, while another editor's keeps everything it carries, only its `/Rect` and `/InkList` moving, so every reader fits its appearance stream into the new `/Rect` and it scales as a picture would.
   A turn no `/Rect` can fit turns another editor's as a picture, its appearance a copy of its stream whose `/Matrix` puts it where the turn does (ISO 32000-1 §12.5.5), the stream it had left in the file.
 - Cut, Copy, Paste, Duplicate and Delete are Select's commands, on the ring's outer orbit while it holds something, Paste while there is something to paste, in the page's menu, whose secondary click picks the stroke under it first, and in the palette.
-  A copy goes onto the system clipboard as plain geometry in a format of our own (`application/x-accent-pdf-ink`, JSON), beside its texts as plain text, so any PDF tab takes it, and a paste draws it again as strokes and texts of ours, which Select then holds.
+  A copy goes onto the system clipboard as plain geometry in a format of our own (`application/x-accent-pdf-ink`, JSON), a picture with its image's bytes in base64, beside its texts as plain text, so any PDF tab takes it, and a paste draws it again as strokes, texts and pictures of ours, which Select then holds.
   Another editor's stroke is copied stroke by stroke along its `/InkList`, so one without an `/InkList` stays out of a copy, and a cut leaves it on the page.
   A paste lands where the copy came from, a step down and right for each paste of it after the first, as draw.io's does, and a cut's first in its place, wherever the pointer is (user decision 2026-11-03): one centred on the pointer put the ring's Paste under the ring.
   The menu's Paste lands on the page it was opened on, `Ctrl+V`, the ring's and the palette's on the page being read, and none off the paper.
@@ -1102,6 +1103,16 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A move, a stretch, a turn, a delete, a cut, a paste and a duplicate are each one step for Undo, however many strokes they take.
   Each is written in one go and pdfium opened again once, its Undo and Redo too, so moving 20 strokes on a page of a 2069-page document takes 7 ms of the render thread, where opening it after each stroke took 95 ms.
   Select holds one page at a time, and a cut pasted on another page is how a drawing moves between pages.
+- **Pictures come onto the page from the clipboard and from a drop** (user decisions 2026-11-03): Paste takes another application's picture when the clipboard holds no drawing of ours, and image files or an image dropped from another application, or an image's row from the Files tree, land on the page under the pointer.
+  A pasted picture lands in the middle of what is on screen of its page, stepping on as a copy does, and a dropped one centred under the pointer, each further one a step on from it, at its natural size of 96 pixels an inch, shrunk to fit half the page each way and never enlarged, and none off the paper.
+  The clipboard is read in that order, our drawing, then a JPEG's bytes, then any image GDK decodes, and text on it is no picture.
+  A JPEG offered beside a PNG is passed over: such a source encodes both from its pixels, GTK's for every image it copies, and its JPEG would lose detail and every clear pixel.
+  It is a `/Stamp` of ours (ISO 32000-1 §12.5.6.12) whose appearance paints one image XObject into the unit square, its form's `/Matrix` putting that where the picture is, so every reader draws it, and a move, a stretch or a turn writes that small form again and never the image.
+  A JPEG goes in as it is (`/DCTDecode`), turned the way its EXIF says through that matrix, and anything else is decoded by GDK, an SVG drawn at twice its size first, scaled down past 4096 pixels on its longer side and deflated as RGB, with a soft mask only where some pixel is translucent.
+  A picture moves and turns in its place among the page's annotations, and a delete's Undo puts it back there, while a paste or a drop of several is one step.
+  A copy carries the image, so another PDF takes it, and pasted into the document it came from it shares the image already written, which nothing frees, as nothing frees a stroke.
+  The eraser leaves pictures alone, another editor's stamps are theirs, and a picture is recoloured with the page.
+  Reading, decoding and deflating run on a worker, and pdfium decodes a picture again for every tile over it, a tile clear of it costing nothing: a 12-megapixel JPEG of 4.3 MB costs the render thread about 107 ms a 512 px tile, and the screen drawn again 366 ms against 19 ms without it (AMCOMP, 2026-11-03).
 - A second orbit holds the tool's options: three widths (for the text three sizes, 10, 14 and 20 pt), and for the pen, the shapes, the highlighter and the text six swatches (the accent, four hues round the wheel by the CSV rule, and black), each painted as the document's recolouring shows that ink, black as the theme's text on a recoloured page, while the stroke is written in the swatch's own colour; for the eraser, Whole Strokes (`edit-delete-symbolic`) and Partial (`edit-cut-symbolic`); for Select, its commands.
   Each pick is kept in the config's `[drawing]`; a width there that is none of the three draws as the nearest of them.
 - With a tool in hand the other tools' icons dim to Adwaita's `--dim-opacity`, their discs staying opaque, so the options read as that tool's; a dimmed tool comes back under the pointer or the keyboard and still takes a click.
@@ -1138,6 +1149,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   One toast names what went in ("Inserted 3 pages from paper.pdf"), the tab is kept if it was a preview, as a drop's is, and the reader lands on the first of the pages, as on an added page.
   Each page comes with everything it uses — text, annotations, ink, pop-ups with the marks they belong to — and a link between two of the pages leads to the copy; the other document's bookmarks do not come, nor its structure tree, and a form widget is cut loose from its field.
   A file that will not open as a PDF is said in a toast; the document dropped onto itself is no such drop.
+  Images dropped the same ways go onto the page under the pointer instead, as pictures (above), with no line and no shade.
 - **A page edit is an Undo step**, in the one history the ink keeps, so Undo takes back strokes, adds, moves and deletes in the order they were made.
   A delete therefore asks nothing: Undo puts the page back.
   Another PDF's pages are one step, kept as a delete keeps its page, so Undo takes them all out and Redo puts them back without reading that file again.
@@ -1830,6 +1842,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 - Copy Selection, Copy Link to Selection, Export Highlights, Insert Sketch, Add Page Before, Add Page After and Delete Page are in the palette and the page's menu, Move Page Up and Move Page Down in the palette, all unbound: the thumbnail strip is where pages are organised by pointer.
 - Go to Source (the page's menu) and Show in PDF (a `.tex` tab's menu) are in the palette too, unbound: Ctrl+click is Go to Source's pointer, and no free chord says either.
 - Select's Cut Selection `Ctrl+X`, Copy Selection `Ctrl+C`, Paste into PDF `Ctrl+V`, Duplicate Selection `Ctrl+D` and Delete Selection `Delete` or `Backspace` are the tab's own keys, as Copy is, and `Ctrl+D` is Duplicate Line's chord, which a PDF in front leaves to the page.
+  Paste into PDF pastes another application's picture too.
   While Select holds something the arrows move it a point, ten with Shift, each press a step for Undo, and `Escape` lets go of it, the arrows paging again.
   With Select in hand Ctrl+click adds a stroke or lets go of it, and Go to Source is the page's menu's.
 - `Ctrl+Z` takes back the last stroke, text, erase, move or page edit of this session, tool in hand or not, and `Ctrl+Shift+Z` or `Ctrl+Y` makes it again, as in a note; `Escape` puts the pen down, once Select has let go of what it held.
