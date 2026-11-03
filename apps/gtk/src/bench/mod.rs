@@ -29,6 +29,7 @@ mod keys;
 mod listed;
 mod loose;
 mod memory;
+mod menus;
 mod minimap;
 mod motion;
 mod native;
@@ -288,6 +289,8 @@ use user_commands::bench_commands;
 ///   `build-aux/xtest.py :99 "move X Y; keydown ctrl; down; up; keyup ctrl"`;
 ///   `hover:<rel_file>`: hover, clicks, the menu, F2, a drag, Delete and Reveal through XTEST,
 ///   `rel_file` in the root of a scratch vault it adds three files to (`folders::bench_hover`).
+///   `menus:<rel_note>[:<dir>]`: tab icons, Reveal into unlisted folders, a tab double-clicked,
+///   Open on a PDF, screenshots into `<dir>` (`menus::bench_menus`).
 /// - `ACCENT_BENCH_TAGS=<rel_note>`: tag-list updates after edits.
 /// - `ACCENT_BENCH_INFO=<rel>[,<rel>…]`: per-file Info sections; `terminal`
 ///   opens a shell instead.

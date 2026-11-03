@@ -16,6 +16,7 @@ The [Notes](notes.md) page covers links, attachments and templates.
 Click a file to open a temporary preview tab.
 Click another and it replaces that tab, which keeps a quick browse from filling the tab bar.
 Edit the file, double-click its tab, or click its eye to keep it open.
+Double-click a tab that is already kept to find its file in the Files pane.
 You can also pin a tab from its menu.
 Drag a tab or a file to an edge of the document area to open a split pane.
 The active pane is the one you last worked in, and `Ctrl+Tab` walks its recently used tabs.

@@ -1,0 +1,182 @@
+//! The file menus' drill: a file's tab icon, Reveal in Sidebar into folders not listed yet, a
+//! double-click on a tab, and what Open does on a file that is no text.
+
+use super::files::until;
+use super::git::xtest;
+use super::*;
+
+/// `ACCENT_BENCH_MENU=menus:<rel_note>[:<dir>]` opens the note beside a PDF, an image, a
+/// notebook, a diagram and a shell and prints each tab's icon; reveals a file two folders down
+/// that the tree never listed; double-clicks a preview's tab with the sidebar on Search, then the
+/// kept tab again; and opens a PDF through the tree menu's Open, printing the toasts. With `<dir>`
+/// it saves the screen there as PNGs (ImageMagick's `import`).
+pub(super) fn bench_menus(app: &Rc<App>, arg: &str) {
+    let (note, shots) = match arg.split_once(':') {
+        Some((note, dir)) => (note.to_string(), Some(dir.to_string())),
+        None => (arg.to_string(), None),
+    };
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        let root = app.root();
+        let files = [
+            ("menus/inner/deep.md", "# Deep\n"),
+            ("menus/b.md", "# B\n"),
+            (
+                "menus/sheet.drawio",
+                "<mxfile><diagram name=\"Page-1\"><mxGraphModel><root><mxCell id=\"0\"/>\
+                 <mxCell id=\"1\" parent=\"0\"/></root></mxGraphModel></diagram></mxfile>",
+            ),
+        ];
+        for (rel, text) in files {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, text).unwrap();
+        }
+        let tree = app.tree.get().expect("a tree");
+        until(|| app.reconciled.get()).await;
+
+        let opened = [
+            note.as_str(),
+            "Attachments/paper-0.pdf",
+            "Attachments/img-0.png",
+            "Notebooks/analysis.ipynb",
+            "menus/sheet.drawio",
+        ];
+        for rel in opened {
+            app.open_path(rel);
+        }
+        app.open_terminal();
+        until(|| opened.iter().all(|rel| app.doc_for(rel).is_some())).await;
+        glib::timeout_future(Duration::from_millis(600)).await;
+        for doc in app.docs() {
+            let icon = doc.page().icon().and_then(|i| IconExt::to_string(&i));
+            println!(
+                "bench menus icon {} {}",
+                doc.page().title(),
+                icon.as_deref().unwrap_or("none")
+            );
+        }
+        // The note alone, the preview to come beside it.
+        for doc in app.docs().iter().filter(|doc| doc.key() != note) {
+            app.pane().tabs.close_page(doc.page());
+        }
+        glib::timeout_future(Duration::from_millis(600)).await;
+
+        // Two folders down, neither listed yet: Reveal waits for their listings.
+        let deep = "menus/inner/deep.md";
+        app.toasts.dismiss_all();
+        app.reveal_rel(deep, true);
+        let refused = || {
+            app.toasts
+                .shown()
+                .iter()
+                .any(|t| t.contains("not in the sidebar"))
+        };
+        until(|| outlined(tree) == [deep] || refused()).await;
+        println!(
+            "bench menus reveal outlined={:?} toasts={:?}",
+            outlined(tree),
+            app.toasts.shown()
+        );
+
+        // A preview's tab double-clicked keeps it, the kept tab double-clicked reveals it.
+        app.open_preview("menus/b.md");
+        until(|| app.doc_for("menus/b.md").is_some()).await;
+        glib::timeout_future(Duration::from_millis(600)).await;
+        if let Some(sidebar) = app.sidebar.get() {
+            sidebar.show_pane("search");
+        }
+        let showing = || match app.sidebar.get() {
+            Some(s) if s.is_showing("files") => "files",
+            Some(s) if s.is_showing("search") => "search",
+            _ => "other",
+        };
+        let kept = || {
+            app.doc_for("menus/b.md")
+                .is_some_and(|doc| app.pane().preview().as_ref() != Some(doc.page()))
+        };
+        let double = |rel: &str| tab_point(&app, doc::file_name(rel));
+        if let Some(at) = double("menus/b.md") {
+            xtest(&format!("move {at}; focus; down; up; down; up")).await;
+        }
+        glib::timeout_future(Duration::from_millis(400)).await;
+        println!(
+            "bench menus double preview kept={} pane={} outlined={:?}",
+            kept(),
+            showing(),
+            outlined(tree)
+        );
+        if let Some(at) = double("menus/b.md") {
+            xtest(&format!("move {at}; down; up; down; up")).await;
+        }
+        until(|| outlined(tree) == ["menus/b.md"]).await;
+        let focus = gtk::prelude::GtkWindowExt::focus(&app.window);
+        println!(
+            "bench menus double kept pane={} outlined={:?} tree_focus={} focus={:?}",
+            showing(),
+            outlined(tree),
+            focus.as_ref().is_some_and(|f| f.is_ancestor(tree.view())),
+            focus.map(|f| f.type_().name()),
+        );
+        shot(&shots, "double").await;
+        // The tree menu's Open on a PDF opens it, and says nothing about text.
+        let pdf = "Attachments/pages.pdf";
+        app.toasts.dismiss_all();
+        if let Some(ops) = app.ops() {
+            let at = gdk::Rectangle::new(0, 0, 1, 1);
+            fileops::context_menu(ops, tree.widget(), Some((pdf, false)), &[], at).popdown();
+        }
+        let _ = tree
+            .widget()
+            .activate_action("fileops.open", Some(&pdf.to_variant()));
+        until(|| app.doc_for(pdf).is_some()).await;
+        glib::timeout_future(Duration::from_millis(600)).await;
+        println!(
+            "bench menus open pdf opened={} toasts={:?}",
+            app.doc_for(pdf).is_some(),
+            app.toasts.shown()
+        );
+        bench_quit(&app);
+    });
+}
+
+/// The rows the tree outlines as revealed.
+fn outlined(tree: &tree::Tree) -> Vec<String> {
+    tree::expanders(tree.view())
+        .into_iter()
+        .filter(|e| e.has_css_class("accent-revealed"))
+        .filter_map(|e| Some(tree::decode(&e.list_row()?.item()?)?.rel))
+        .collect()
+}
+
+/// Where on the screen the active pane's tab titled `title` is, for `xtest`.
+fn tab_point(app: &App, title: &str) -> Option<String> {
+    let bar = app.pane().bar.clone();
+    let tab = find_widget(bar.upcast_ref(), &|w| {
+        w.css_name() == "tab"
+            && find_widget(w, &|l| {
+                l.downcast_ref::<gtk::Label>()
+                    .is_some_and(|l| l.label() == title)
+            })
+            .is_some()
+    })?;
+    let middle = graphene::Point::new(tab.width() as f32 / 2.0, tab.height() as f32 / 2.0);
+    let p = tab.compute_point(&app.window, &middle)?;
+    let (sx, sy) = app.window.surface_transform();
+    Some(format!(
+        "{} {}",
+        f64::from(p.x()) + sx,
+        f64::from(p.y()) + sy
+    ))
+}
+
+/// Save the screen as `<dir>/<name>.png` when the drill was given a directory.
+async fn shot(dir: &Option<String>, name: &str) {
+    let Some(dir) = dir else { return };
+    let display = std::env::var("DISPLAY").unwrap_or_default();
+    let file = format!("{dir}/{name}.png");
+    let argv = ["import", "-display", &display, "-window", "root", &file].map(std::ffi::OsStr::new);
+    if let Ok(run) = gio::Subprocess::newv(&argv, gio::SubprocessFlags::NONE) {
+        let _ = run.wait_future().await;
+    }
+}

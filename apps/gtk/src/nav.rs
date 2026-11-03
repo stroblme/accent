@@ -374,6 +374,40 @@ impl App {
         }
     }
 
+    /// A double-click on `page`'s tab: a preview is kept, a kept vault file revealed in the
+    /// sidebar with the keyboard left where it is, so one double-click never does both.
+    pub(crate) fn tab_double_clicked(self: &Rc<Self>, page: &adw::TabPage) {
+        if self.pane_of(page).and_then(|pane| pane.preview()).as_ref() == Some(page) {
+            return self.promote(page);
+        }
+        if let Some(rel) = self.vault_file_of(page) {
+            self.reveal_rel(&rel, false);
+        }
+    }
+
+    /// The vault file `page` shows, or `None` for a shell, a comparison, a preview or a loose
+    /// file: what Reveal in Sidebar, Rename and Move to Trash can act on.
+    pub(crate) fn vault_file_of(&self, page: &adw::TabPage) -> Option<String> {
+        let doc = self.doc_for_page(page)?;
+        (!doc.is_transient() && !doc.is_loose()).then(|| doc.key())
+    }
+
+    /// Show `rel` where it lives: the Files pane, un-hidden if it was, scrolled to the row once
+    /// its folders are listed and outlined for a moment so the eye finds it. `focus` gives the
+    /// row the keyboard, as Reveal in Sidebar does and a double-clicked tab does not.
+    pub(crate) fn reveal_rel(self: &Rc<Self>, rel: &str, focus: bool) {
+        self.show_pane("files");
+        let Some(tree) = self.tree.get() else { return };
+        let (app, shown) = (Rc::downgrade(self), rel.to_string());
+        tree.reveal_when_listed(rel, focus, move |found| {
+            let Some(app) = app.upgrade() else { return };
+            match (found, app.tree.get()) {
+                (true, Some(tree)) => tree.flash(&shown),
+                _ => app.toast(&format!("{shown} is not in the sidebar")),
+            }
+        });
+    }
+
     // --- pinned tabs ---------------------------------------------------------------------
 
     /// Whether the window marks `page` as pinned, surviving transfers between panes.

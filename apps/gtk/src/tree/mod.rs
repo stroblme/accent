@@ -414,27 +414,87 @@ impl Tree {
         });
     }
 
-    /// Expand ancestors, select `rel` and scroll to it. Return false for
-    /// missing paths so callers can report failure.
+    /// Expand ancestors, select `rel`, scroll to it and give it the keyboard. Return false for
+    /// paths not listed yet so callers can report failure.
+    #[cfg(feature = "bench")]
     pub fn reveal(&self, rel: &str) -> bool {
-        for dir in ancestors(rel) {
-            let Some(row) = find_row(&self.model, dir) else {
-                return false;
-            };
-            self.opened.borrow_mut().revealing = true;
-            row.set_expanded(true);
-            self.opened.borrow_mut().revealing = false;
+        show_row(&self.model, &self.view, &self.opened, rel, true)
+    }
+
+    /// [`reveal`](Self::reveal) once the folders above `rel` are listed, which happens off the
+    /// main thread as each opens: tried again as rows land, for at most [`LISTING_WAIT`], then
+    /// `done` says whether the row was reached. `focus` gives the row the keyboard.
+    pub fn reveal_when_listed(&self, rel: &str, focus: bool, done: impl FnOnce(bool) + 'static) {
+        if show_row(&self.model, &self.view, &self.opened, rel, focus) {
+            return done(true);
         }
-        let Some(row) = find_row(&self.model, rel) else {
+        let done: Waiting = Rc::new(RefCell::new(Some(Box::new(done))));
+        let (view, opened, waiting, rel) = (
+            self.view.downgrade(),
+            self.opened.clone(),
+            done.clone(),
+            rel.to_string(),
+        );
+        let landed = self.model.connect_items_changed(move |model, _, _, _| {
+            // Not from inside the signal, since expanding a folder changes the model again.
+            let (model, view, opened, waiting, rel) = (
+                model.downgrade(),
+                view.clone(),
+                opened.clone(),
+                waiting.clone(),
+                rel.clone(),
+            );
+            glib::idle_add_local_once(move || {
+                let (Some(model), Some(view)) = (model.upgrade(), view.upgrade()) else {
+                    return;
+                };
+                if waiting.borrow().is_some() && show_row(&model, &view, &opened, &rel, focus) {
+                    let done = waiting.take();
+                    done.into_iter().for_each(|done| done(true));
+                }
+            });
+        });
+        let model = self.model.clone();
+        glib::timeout_add_local_once(LISTING_WAIT, move || {
+            model.disconnect(landed);
+            let failed = done.take();
+            failed.into_iter().for_each(|done| done(false));
+        });
+    }
+}
+
+/// How long [`Tree::reveal_when_listed`] waits for the folders above a row to be listed.
+const LISTING_WAIT: Duration = Duration::from_secs(3);
+
+/// What [`Tree::reveal_when_listed`] calls once, when the row is reached or the wait is over.
+type Waiting = Rc<RefCell<Option<Box<dyn FnOnce(bool)>>>>;
+
+/// Expand the folders above `rel` as far as they are listed, then select its row and scroll to
+/// it, with `focus` giving it the keyboard. False while the row is not listed.
+fn show_row(
+    model: &gtk::TreeListModel,
+    view: &gtk::ListView,
+    opened: &Fresh,
+    rel: &str,
+    focus: bool,
+) -> bool {
+    for dir in ancestors(rel) {
+        let Some(row) = find_row(model, dir) else {
             return false;
         };
-        self.view.scroll_to(
-            row.position(),
-            gtk::ListScrollFlags::SELECT | gtk::ListScrollFlags::FOCUS,
-            None,
-        );
-        true
+        opened.borrow_mut().revealing = true;
+        row.set_expanded(true);
+        opened.borrow_mut().revealing = false;
     }
+    let Some(row) = find_row(model, rel) else {
+        return false;
+    };
+    let flags = match focus {
+        true => gtk::ListScrollFlags::SELECT | gtk::ListScrollFlags::FOCUS,
+        false => gtk::ListScrollFlags::SELECT,
+    };
+    view.scroll_to(row.position(), flags, None);
+    true
 }
 
 /// Separate ignored directories and individual files when Git status arrives.

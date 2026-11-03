@@ -784,7 +784,8 @@ impl Pane {
         });
     }
 
-    /// Call `f` with the page whose tab was double-clicked.
+    /// Call `f` with the page whose tab was double-clicked, not its close or indicator button nor
+    /// the bar's empty end.
     ///
     /// AdwTabBox claims presses, cancelling gestures but not raw controllers. A capture-phase
     /// legacy controller observes without consuming them. The first press already selected
@@ -808,7 +809,9 @@ impl Pane {
                     {
                         // A third press starts a new pair rather than promoting again.
                         *last.borrow_mut() = None;
-                        if let Some(page) = pane.tabs.selected_page() {
+                        if on_tab(&pane.bar, now)
+                            && let Some(page) = pane.tabs.selected_page()
+                        {
                             f(&page);
                         }
                     }
@@ -898,6 +901,27 @@ fn primary_press(event: &gdk::Event) -> Option<crate::paned::Click> {
         y,
         time: event.time(),
     })
+}
+
+/// Whether `press`, in the coordinates of `bar`'s surface, landed on a tab itself: not on a
+/// button in it (close, indicator) and not on the bar's empty end.
+fn on_tab(bar: &adw::TabBar, press: crate::paned::Click) -> bool {
+    let Some(native) = bar.native() else {
+        return false;
+    };
+    let (dx, dy) = native.surface_transform();
+    let mut at = native.pick(press.x - dx, press.y - dy, gtk::PickFlags::DEFAULT);
+    while let Some(widget) = at {
+        if widget.is::<gtk::Button>() {
+            return false;
+        }
+        // `AdwTab`, which is private: its CSS name is all that tells it apart.
+        if widget.css_name() == "tab" {
+            return true;
+        }
+        at = widget.parent();
+    }
+    false
 }
 
 /// Split `pane` with `new` on `side`, replacing it with a paned whose handle starts at the old midpoint.

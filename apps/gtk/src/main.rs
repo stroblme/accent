@@ -1684,21 +1684,7 @@ impl App {
     /// Without a menu, those commands use tree selection. Shells, comparisons and loose files
     /// cannot be targeted because these operations belong to the window's vault.
     fn menu_file(&self) -> Option<String> {
-        let page = self.menu_page.borrow().clone()?;
-        let doc = self.doc_for_page(&page)?;
-        (!doc.is_transient() && !doc.is_loose()).then(|| doc.key())
-    }
-
-    /// Show the open note where it lives: the Files pane, un-hidden if it was, scrolled to the row,
-    /// which is outlined for a moment so the eye finds it.
-    fn reveal_in_sidebar(&self) {
-        let Some(rel) = self.menu_rel() else { return };
-        self.show_pane("files");
-        let Some(tree) = self.tree.get() else { return };
-        match tree.reveal(&rel) {
-            true => tree.flash(&rel),
-            false => self.toast(&format!("{rel} is not in the sidebar")),
-        }
+        self.vault_file_of(&self.menu_page.borrow().clone()?)
     }
 
     /// The selected tree row, where it is one the app may act on. A row inside a dependency tree

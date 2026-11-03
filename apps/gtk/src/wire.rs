@@ -233,12 +233,13 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
         }
     ));
     // Double-clicking a tab is what makes a preview tab a real one, which is VS Code's gesture
-    // for it. A pane holding one tab hides its bar, so there is nothing to double-click there —
-    // and nothing to protect either, since a preview tab is only ever replaced by the next one.
+    // for it, and on a kept tab it reveals the file in the sidebar. A pane holding one tab hides
+    // its bar, so there is nothing to double-click there — and nothing to protect either, since a
+    // preview tab is only ever replaced by the next one.
     pane.on_tab_double_click(glib::clone!(
         #[weak]
         app,
-        move |page| app.promote(page)
+        move |page| app.tab_double_clicked(page)
     ));
     // The placeholder is a property of the window, not of one pane: it shows only when no pane
     // has anything left to show, which with panes that close themselves means the last one.

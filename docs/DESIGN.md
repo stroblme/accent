@@ -262,7 +262,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The row clicked takes the selection, a folder's too as in VS Code, until another is clicked or the tab in front changes (user decision 2026-10-29).
   The arrow keys move the selection, and Delete, F2 and Menu act on the selected row.
   Only among rows on screen: no folder opens and nothing scrolls, which is Reveal in Sidebar's job.
-- Reveal in Sidebar, from the tab menu or the palette, outlines the row it lands on in the accent for a second, which then fades over two (Motion), so the eye finds it in a long listing.
+- Reveal in Sidebar, from a file's menu or the palette, outlines the row it lands on in the accent for a second, which then fades over two (Motion), so the eye finds it in a long listing.
+  The folders above the row are listed off the main thread as it opens them, so it goes on as each listing lands and says the file is not in the sidebar only after three seconds without it.
 - A change on disk or in git refills the tree in place: the open folders stay open and the list stays where it is.
   A row that goes while it has the keyboard hands it to the row now in its place, not to the window's first widget, which would scroll the list to its top (`widgets::set_model`).
 - Ctrl+click and Shift+click mark rows, the tree's only multiple selection, tinted with the accent across the row's whole shape: the selection is already the open file.
@@ -838,6 +839,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A pane holds at most one and the next such open replaces it, so clicking down a list leaves one tab, not twenty.
   What the reader named is kept: the palette, Open File…, a drop, a rename, the command line, the session.
 - A preview is kept once edited, double-clicked (its tab, or its row in the Files tree), its eye clicked, or moved out of its pane — each the reader saying they want it.
+- **A double-click on a kept tab reveals its file in the sidebar** as Reveal in Sidebar does, the sidebar shown and switched to Files, while the keyboard stays where the click left it (user decision 2026-11-03).
+  A preview's double-click only keeps it, so one double-click never does both, and a double-click on a tab's buttons or on the bar's empty end does neither.
+  A shell, a comparison and a file from outside the vault have no row to reveal, and nothing happens.
   A restored tab is always kept.
 - **The eye is the mark**: `view-reveal-symbolic` in the indicator slot, tooltipped Preview — Click to Keep, gone once kept.
   `AdwTabPage` takes no style class and no title markup, so VS Code's italics are not available and the indicator is the one slot that can speak and be clicked.

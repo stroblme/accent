@@ -426,7 +426,11 @@ impl App {
                     fileops::reveal(&self.window, &path, move |m| toast.toast(m));
                 }
             }
-            "reveal-in-sidebar" => self.reveal_in_sidebar(),
+            "reveal-in-sidebar" => {
+                if let Some(rel) = self.menu_rel() {
+                    self.reveal_rel(&rel, true);
+                }
+            }
             "sidebar" => self
                 .sidebar_column
                 .set_visible(!self.sidebar_column.is_visible()),
