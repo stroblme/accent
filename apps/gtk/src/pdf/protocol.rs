@@ -14,7 +14,7 @@ use super::cache::{TileKey, Want};
 /// index of the link each came from.
 pub type Highlights = HashMap<usize, Vec<(Vec<accent_core::pdf::Rect>, usize)>>;
 
-pub use accent_core::pdf::{Clip, NamedInk, NamedText, fresh_id};
+pub use accent_core::pdf::{Clip, NamedInk, NamedPicture, NamedText, fresh_id};
 
 /// What a copy of the strokes and texts the Select tool holds is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,18 +81,19 @@ pub enum Reply {
     Highlights(Highlights),
     /// An export finished: how many annotations it wrote, or why it could not.
     Exported(Result<usize, String>),
-    /// Every ink stroke of one page with its box and style, and every text of ours on it, for
-    /// the eraser to find, the Select tool to take hold of and the Text tool to type again, and
-    /// how many erases the thread had answered when it read them: a list read before an erase
-    /// still on its way is of the page before it.
+    /// Every ink stroke of one page with its box and style, and every text and picture of ours
+    /// on it, for the eraser to find, the Select tool to take hold of and the Text tool to type
+    /// again, and how many erases the thread had answered when it read them: a list read before
+    /// an erase still on its way is of the page before it.
     Inks {
         page: usize,
         inks: Vec<NamedInk>,
         texts: Vec<NamedText>,
+        pictures: Vec<NamedPicture>,
         erases: u64,
     },
-    /// Strokes and texts of `page` as plain geometry, in the order they are drawn in, for what
-    /// `how` says.
+    /// Strokes, texts and pictures of `page` as plain geometry, in the order they are drawn in,
+    /// for what `how` says.
     Clipped {
         page: usize,
         clips: Vec<Clip>,
@@ -237,15 +238,15 @@ pub enum Request {
         page: usize,
         ids: Vec<u32>,
     },
-    /// Strokes and texts of a page, named by their ids, as plain geometry for what `how` says,
-    /// answered with [`Reply::Clipped`]; a cut takes off what it copied, as one step.
+    /// Strokes, texts and pictures of a page, named by their ids, as plain geometry for what `how`
+    /// says, answered with [`Reply::Clipped`]; a cut takes off what it copied, as one step.
     Clip {
         page: usize,
         ids: Vec<u32>,
         how: Clipping,
     },
-    /// Draw `clips` onto a page under `matrix` as strokes and texts of ours, each under the name
-    /// `names` gives it, as one step.
+    /// Draw `clips` onto a page under `matrix` as strokes, texts and pictures of ours, each under
+    /// the name `names` gives it, as one step.
     Paste {
         page: usize,
         clips: Vec<Clip>,

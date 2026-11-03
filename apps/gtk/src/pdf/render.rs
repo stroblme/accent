@@ -648,14 +648,17 @@ fn answered(
     }
 }
 
-/// Every stroke of `page` under its name, stamped with the erases counted so far ([`spawn`]).
+/// Every stroke, text and picture of `page` under its name, stamped with the erases counted so
+/// far ([`spawn`]).
 fn listed(ink: &mut Ink, doc: &PdfDoc, page: usize, erases: u64) -> Reply {
     let inks = ink.named(doc, page);
     let texts = ink.named_texts(doc, page);
+    let pictures = ink.named_pictures(doc, page);
     Reply::Inks {
         page,
         inks,
         texts,
+        pictures,
         erases,
     }
 }

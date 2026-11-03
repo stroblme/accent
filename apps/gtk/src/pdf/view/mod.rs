@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::cache::{Cache, TileKey, Want, texture};
 use super::geometry::{Layout, PT_TO_PX, PdfZoom, Span, stepped};
-use super::protocol::{Highlights, NamedInk, NamedText, Pass, Reply};
+use super::protocol::{Highlights, NamedInk, NamedPicture, NamedText, Pass, Reply};
 use super::tools::{Lasso, Mode, Picked, Selection, Stroke};
 use crate::theme;
 
@@ -629,7 +629,14 @@ impl PdfView {
     /// list. An erase on another page does not hold this one's back: nothing would ask again.
     /// What the Select tool holds follows its strokes and texts by their ids, letting go of one
     /// no longer on the page.
-    pub fn set_inks(&self, page: usize, inks: Vec<NamedInk>, texts: Vec<NamedText>, erases: u64) {
+    pub fn set_inks(
+        &self,
+        page: usize,
+        inks: Vec<NamedInk>,
+        texts: Vec<NamedText>,
+        pictures: Vec<NamedPicture>,
+        erases: u64,
+    ) {
         #[cfg(feature = "bench")]
         {
             self.imp().heard.set(self.imp().heard.get() + inks.len());
@@ -665,6 +672,7 @@ impl PdfView {
         }
         self.imp().inks.borrow_mut().insert(page, inks);
         self.imp().texts.borrow_mut().insert(page, texts);
+        self.imp().pictures.borrow_mut().insert(page, pictures);
         self.queue_draw();
     }
 
@@ -678,10 +686,11 @@ impl PdfView {
         }
     }
 
-    /// Forget every stroke and text the tools knew: the document changed under them.
+    /// Forget every stroke, text and picture the tools knew: the document changed under them.
     pub fn clear_inks(&self) {
         self.imp().inks.borrow_mut().clear();
         self.imp().texts.borrow_mut().clear();
+        self.imp().pictures.borrow_mut().clear();
         self.clear_pick();
         self.queue_draw();
     }
@@ -882,9 +891,11 @@ mod imp {
         // a stroke with no render to replace it is one that still has to be painted.
         pub strokes: RefCell<Vec<super::Stroke>>,
         /// What the eraser and the Select tool can find, per page they have been told about, and
-        /// the texts of ours, which the Text tool types again too.
+        /// the texts of ours, which the Text tool types again too, and the pictures of ours,
+        /// which only the Select tool takes hold of.
         pub inks: RefCell<HashMap<usize, Vec<NamedInk>>>,
         pub texts: RefCell<HashMap<usize, Vec<NamedText>>>,
+        pub pictures: RefCell<HashMap<usize, Vec<NamedPicture>>>,
         /// What the Select tool holds, and the lasso it is drawing.
         pub picked: RefCell<Option<super::Selection>>,
         pub lasso: RefCell<Option<super::Lasso>>,
@@ -984,6 +995,7 @@ mod imp {
                 strokes: RefCell::new(Vec::new()),
                 inks: RefCell::new(HashMap::new()),
                 texts: RefCell::new(HashMap::new()),
+                pictures: RefCell::new(HashMap::new()),
                 picked: RefCell::new(None),
                 lasso: RefCell::new(None),
                 erasing: Cell::new(None),
