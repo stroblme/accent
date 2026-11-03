@@ -55,6 +55,7 @@ mod tags;
 mod toasts;
 mod toggle;
 mod user_commands;
+mod wheel;
 
 pub(crate) use answer::{SLOW_RELOAD_MS, SLOW_WRITE_MS, hold};
 use answer::{bench_answer, bench_answer_doc, bench_answer_same};
@@ -327,6 +328,8 @@ use user_commands::bench_commands;
 ///   without Shift (`refer::bench_refer`). Writes its files under `refer/`.
 /// - `ACCENT_BENCH_SCROLL=<rel_dir>`: list scroll retention during vault/git
 ///   changes. Creates a repository; requires a scratch vault under `/tmp`.
+/// - `ACCENT_BENCH_WHEEL=<rel>`: XTEST wheel notches and a touchpad's scroll over the note, the
+///   Files tree, the switcher and Preferences, and how far each went (`wheel::bench_wheel`).
 /// - `ACCENT_BENCH_DIAGRAM=<rel>`: diagram edits/save, creating a sample if
 ///   absent; `shot:<rel>:<dir>`: render pages; `export:<rel>:<dir>`: dark-theme
 ///   PDF/PNG/SVG export and print output. `ACCENT_BENCH_DIAGRAM_SHOT=<png>` adds a picture
@@ -427,9 +430,11 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let moving = std::env::var("ACCENT_BENCH_MOVE").ok();
     let unfold = std::env::var("ACCENT_BENCH_UNFOLD").ok();
     let shot = std::env::var("ACCENT_BENCH_SHOT").ok();
+    let wheel = std::env::var("ACCENT_BENCH_WHEEL").ok();
     if expand.is_none()
         && unfold.is_none()
         && scroll.is_none()
+        && wheel.is_none()
         && moving.is_none()
         && attach.is_none()
         && answer.is_none()
@@ -750,6 +755,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(arg) = notebook_lsp {
             return notebook_lsp::bench_notebook_lsp(&app, &arg);
+        }
+        if let Some(rel) = wheel {
+            return wheel::bench_wheel(&app, &rel);
         }
         if let Some(dir) = scroll {
             own_repository_only(&app, "ACCENT_BENCH_SCROLL");

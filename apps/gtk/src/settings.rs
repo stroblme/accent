@@ -166,6 +166,7 @@ fn fill(
         page.add(&vault_group(config, root, &save));
     }
     page.add(&reset_group(dialog, config, root, &save, on_change));
+    crate::widgets::smooth_wheels(page.upcast_ref());
 
     // The new page opens where the old one was scrolled to: a hand edit or a reset is not the
     // reader scrolling back to the top.

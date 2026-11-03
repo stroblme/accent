@@ -2102,7 +2102,10 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 - A mouse wheel's notch eases over 200 ms, ease-out cubic, as GTK eases a page key or a scrollbar press (`widgets::smooth_wheel`): GTK moves a notch's whole step at once, which reads as a stutter over text.
   Notches in quick succession add up to one target; a touchpad, Shift's sideways scroll and Control's zoom stay GTK's.
   Every scroller that scrolls up and down eases it: documents, the minimap (the view's own easing), images, diagrams, terminals, popovers, dialogs and the sidebar's panes, the Git pane's among them.
+  The scrollers libadwaita builds into Preferences, Keyboard Shortcuts and About ease it too (`widgets::smooth_wheels`).
   Any other scroll meanwhile takes over where the easing is: the caret followed, a page key, a heading jumped to, a diagram's page turned at its edge.
+  A list (`GtkListView`) keeps its scroll in whole pixels, so the easing takes the pixel or two it rounds away as its own, which otherwise stopped each notch after its first frame, a fifth of its step at 60 Hz (`widgets::holds`).
+  For the same reason a touchpad's delta goes onto the value GTK asked for last, not the one the list rounded down, which took a fifth off a scroll of 2.5 px a frame going down, added a fifth going up and kept a slower one from going down at all.
   A terminal's scrollback is its scroller's, in pixels (VTE's fallback scrolling off), so a touchpad glides there too; a program reading the mouse, and the alternate screen turning the wheel into arrow keys, keep the wheel.
 - Motion the platform owns keeps its own timing: GtkSearchBar, AdwBanner, AdwTabBar, AdwToolbarView (presentation mode's status bar coming up on a hover), AdwDialog, a popover.
 - The document follows the caret and nothing else: GTK keeps the insert mark on screen by itself (arrows, typing, find, Go to Line, a search hit, every extra caret), a wheel scroll away from the caret stays put, and a dialog opening and closing over it puts nothing back.

@@ -47,9 +47,15 @@ const WHEEL_MS: u32 = 200;
 /// own, a diagram's page turn), and of one widget's controllers GTK runs the last added first,
 /// so this one is ahead of the scroller's own. At an edge the wheel goes on to GTK, for its
 /// overshoot and for any scroller around this one.
+///
+/// A list (`GtkListView`) keeps its scroll in whole pixels, so a touchpad's scroll also needs
+/// help there: GTK adds each delta to the value the list rounded down, which lost a slow scroll
+/// down and sped one up ([`holds`]). The value GTK asked for is put back before it adds the next
+/// ([`Wheel::touchpad`]).
 pub(crate) fn smooth_wheel(scroller: &gtk::ScrolledWindow) -> Wheel {
-    // What the easing last gave the adjustment: any other value is another scroll (a page turned,
-    // the caret followed, a heading jumped to), which takes over, as it does from GTK's easing.
+    // What the easing last gave the adjustment: any other value, a list's rounding aside, is
+    // another scroll (a page turned, the caret followed, a heading jumped to), which takes over,
+    // as it does from GTK's easing.
     // Given by `configure` rather than `set_value`, which would stop an easing GTK's text view
     // begins meanwhile (to the caret, a page key) before it moved anything, and win instead.
     // The adjustment is read at each step: a comparison's columns are given a shared one later.
@@ -63,7 +69,7 @@ pub(crate) fn smooth_wheel(scroller: &gtk::ScrolledWindow) -> Wheel {
         set,
         move |value| {
             let adj = scroller.vadjustment();
-            if adj.value() == set.get() && adj.lower() + adj.page_size() <= adj.upper() {
+            if holds(&adj, set.get()) && adj.lower() + adj.page_size() <= adj.upper() {
                 adj.configure(
                     value,
                     adj.lower(),
@@ -82,17 +88,29 @@ pub(crate) fn smooth_wheel(scroller: &gtk::ScrolledWindow) -> Wheel {
         scroller: scroller.downgrade(),
         animation,
         set,
+        asked: Rc::new(Cell::new(f64::NAN)),
+        landing: Rc::new(Cell::new(false)),
     };
+    // A list keeps its scroller's adjustment, so the one there now is the one to watch.
+    scroller.vadjustment().connect_value_changed({
+        let (asked, landing) = (wheel.asked.clone(), wheel.landing.clone());
+        move |adj| {
+            if landing.take() {
+                asked.set(adj.value());
+            }
+        }
+    });
     let notches = wheel.clone();
     let controller = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
     controller.connect_scroll(move |controller, _, dy| {
+        if controller.unit() != gdk::ScrollUnit::Wheel {
+            notches.touchpad();
+            return glib::Propagation::Proceed;
+        }
         let left = gdk::ModifierType::SHIFT_MASK
             | gdk::ModifierType::CONTROL_MASK
             | crate::platform::PRIMARY_MODIFIER;
-        match controller.unit() == gdk::ScrollUnit::Wheel
-            && !controller.current_event_state().intersects(left)
-            && notches.notch(dy)
-        {
+        match !controller.current_event_state().intersects(left) && notches.notch(dy) {
             true => glib::Propagation::Stop,
             false => glib::Propagation::Proceed,
         }
@@ -101,12 +119,28 @@ pub(crate) fn smooth_wheel(scroller: &gtk::ScrolledWindow) -> Wheel {
     wheel
 }
 
+/// [`smooth_wheel`] on every scroller under `root`, for a libadwaita dialog that builds its own:
+/// Preferences, Keyboard Shortcuts and About.
+pub(crate) fn smooth_wheels(root: &gtk::Widget) {
+    let mut child = root.first_child();
+    while let Some(widget) = child {
+        if let Some(scroller) = widget.downcast_ref::<gtk::ScrolledWindow>() {
+            smooth_wheel(scroller);
+        }
+        smooth_wheels(&widget);
+        child = widget.next_sibling();
+    }
+}
+
 /// A scroller's eased wheel, from [`smooth_wheel`].
 #[derive(Clone)]
 pub struct Wheel {
     scroller: glib::WeakRef<gtk::ScrolledWindow>,
     animation: adw::TimedAnimation,
     set: Rc<Cell<f64>>,
+    /// What GTK's touchpad scroll last asked of the adjustment, recorded as it lands.
+    asked: Rc<Cell<f64>>,
+    landing: Rc<Cell<bool>>,
 }
 
 impl Wheel {
@@ -122,7 +156,7 @@ impl Wheel {
         };
         let adj = scroller.vadjustment();
         let easing =
-            self.animation.state() == adw::AnimationState::Playing && adj.value() == self.set.get();
+            self.animation.state() == adw::AnimationState::Playing && holds(&adj, self.set.get());
         let from = match easing {
             true => self.animation.value_to(),
             false => adj.value(),
@@ -143,6 +177,28 @@ impl Wheel {
         self.animation.play();
         true
     }
+
+    /// Ahead of GTK adding a touchpad's delta, which its handler does right after this one: put
+    /// back the value it asked for last, which a list rounded down ([`holds`]), and record the
+    /// one it asks for now.
+    pub(crate) fn touchpad(&self) {
+        let asked = self.asked.replace(f64::NAN);
+        if let Some(adj) = self.scroller.upgrade().map(|s| s.vadjustment())
+            && adj.value() != asked
+            && holds(&adj, asked)
+        {
+            adj.set_value(asked);
+        }
+        self.landing.set(true);
+    }
+}
+
+/// Whether `adj` still holds `value`, which a scroll of ours gave it, or another scroll has moved
+/// it since. A list (`GtkListView`) keeps whole pixels: it rounds the value down at its next
+/// layout, and putting its anchor back can take a pixel more (`gtk_list_base_update_adjustments`),
+/// which read as another scroll and stopped a notch's easing after its first frame.
+fn holds(adj: &gtk::Adjustment, value: f64) -> bool {
+    (adj.value() - value).abs() < 2.0
 }
 
 /// Where `dy` notches from `from` land: GTK's step of `page^(2/3)` a notch, kept in range.

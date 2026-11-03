@@ -175,6 +175,7 @@ pub fn present(window: &adw::ApplicationWindow, config: &Config) {
         }
         dialog.add(section);
     }
+    crate::widgets::smooth_wheels(dialog.upcast_ref());
     dialog.present(Some(window));
     crate::dialogs::close_on_outside_press(dialog.upcast_ref());
 }

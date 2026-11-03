@@ -1875,6 +1875,7 @@ impl App {
             .build();
         // Below the website on the Details page.
         about.add_link("Documentation", "https://stroblme.github.io/accent/");
+        widgets::smooth_wheels(about.upcast_ref());
         about.present(Some(&self.window));
         dialogs::close_on_outside_press(about.upcast_ref());
     }
