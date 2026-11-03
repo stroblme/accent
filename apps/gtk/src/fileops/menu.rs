@@ -43,6 +43,9 @@ pub struct Facts {
     pub gone: bool,
     /// The clipboard holds files, so a tree row offers Paste.
     pub paste: bool,
+    /// Inside a dependency tree (`tree::Row::dependency`), which is read and never changed: only
+    /// its names and the ways out of the app, as its tree row has them.
+    pub dependency: bool,
 }
 
 /// Each verb's label, a `win.` action's where the palette has the same command so the two cannot
@@ -77,6 +80,7 @@ const LABELS: &[(&str, &str)] = &[
     ("export-png", "win.export-png"),
     ("export-svg", "win.export-svg"),
     ("trash", "win.trash"),
+    ("delete", "win.delete"),
 ];
 
 /// The label of the menu item for `verb`.
@@ -95,6 +99,9 @@ fn verb(verb: &'static str, target: &str) -> gio::MenuItem {
 /// what it is printed as, and the trash. A Git row changes a file only through git, so it has
 /// neither the first two nor the last.
 fn file_verbs(f: &Facts) -> Vec<Vec<&'static str>> {
+    if f.dependency {
+        return vec![names(f)];
+    }
     let changes = f.at != At::Git;
     let mut sections = Vec::new();
     if changes {
@@ -120,9 +127,17 @@ fn file_verbs(f: &Facts) -> Vec<Vec<&'static str>> {
         sections.push(prints);
     }
     if changes {
-        sections.push(vec!["trash"]);
+        sections.push(vec![trash_verb(f.remote)]);
     }
     sections
+}
+
+/// Move to Trash, or on a remote vault, which has no trash, Delete…, which asks first.
+fn trash_verb(remote: bool) -> &'static str {
+    match remote {
+        true => "delete",
+        false => "trash",
+    }
 }
 
 /// Copy Name, the two Copy Paths and the way out of the app: Show in Files, or Download… for a
@@ -178,7 +193,7 @@ pub fn context_menu(
     anchor: gdk::Rectangle,
 ) -> gtk::PopoverMenu {
     if !marked.is_empty() {
-        let menu = marked_menu(marked, row_dir(row), can_paste(ops));
+        let menu = marked_menu(marked, row_dir(row), can_paste(ops), ops.vault.is_remote());
         return crate::widgets::popup_menu(host, &menu, Some(anchor));
     }
     let remote = ops.vault.is_remote();
@@ -289,16 +304,17 @@ fn dependency_model(rel: &str, is_dir: bool, remote: bool, top: bool) -> gio::Me
     menu.append_section(None, &section);
     if top {
         let danger = gio::Menu::new();
-        danger.append_item(&verb("trash", rel));
+        danger.append_item(&verb(trash_verb(remote), rel));
         menu.append_section(None, &danger);
     }
     menu
 }
 
 /// Multi-file menu containing only actions that apply to the whole marked set. `dir` is the
-/// paste destination from [`row_dir`]; `paste` indicates available clipboard content. Omit
-/// single-file actions rather than silently using one selected row.
-fn marked_menu(marked: &[(String, bool)], dir: &str, paste: bool) -> gio::Menu {
+/// paste destination from [`row_dir`]; `paste` indicates available clipboard content, and
+/// `remote` a vault with no trash, where the set is deleted. Omit single-file actions rather than
+/// silently using one selected row.
+fn marked_menu(marked: &[(String, bool)], dir: &str, paste: bool, remote: bool) -> gio::Menu {
     let menu = gio::Menu::new();
     let clip = gio::Menu::new();
     clip.append_item(&many(label("cut"), "cut-many", marked));
@@ -310,7 +326,7 @@ fn marked_menu(marked: &[(String, bool)], dir: &str, paste: bool) -> gio::Menu {
     menu.append_section(None, &clip);
     // Its own section, so the one destructive item is never next to Copy by accident.
     let danger = gio::Menu::new();
-    danger.append_item(&many(label("trash"), "trash-many", marked));
+    danger.append_item(&many(label(trash_verb(remote)), "trash-many", marked));
     menu.append_section(None, &danger);
     menu
 }
@@ -408,7 +424,7 @@ fn run(verb: &str) -> Option<Run> {
         "export-html" => Box::new(|ops, rel| (ops.make)(rel, Some(Export::Html))),
         "export-png" => Box::new(|ops, rel| (ops.make)(rel, Some(Export::Png))),
         "export-svg" => Box::new(|ops, rel| (ops.make)(rel, Some(Export::Svg))),
-        "trash" => Box::new(trash),
+        "trash" | "delete" => Box::new(trash),
         _ => return None,
     };
     Some(run)
@@ -478,12 +494,12 @@ mod tests {
     fn a_marked_set_offers_only_what_can_act_on_several_paths() {
         let marked = [("a.md".to_string(), false), ("Notes".to_string(), true)];
         assert_eq!(
-            labels(marked_menu(&marked, "", true).upcast_ref()),
+            labels(marked_menu(&marked, "", true, false).upcast_ref()),
             ["Cut", "Copy", "Move to…", "Paste", "Move to Trash"]
         );
         // Paste is drawn only where the clipboard holds something, as it is on the single-row menu.
         assert_eq!(
-            labels(marked_menu(&marked, "", false).upcast_ref()),
+            labels(marked_menu(&marked, "", false, false).upcast_ref()),
             ["Cut", "Copy", "Move to…", "Move to Trash"]
         );
     }
@@ -576,7 +592,7 @@ mod tests {
                     "Reveal in Sidebar",
                     "Print…",
                     "Export as PDF…",
-                    "Move to Trash"
+                    "Delete…"
                 ]
             ]
             .concat()
@@ -621,6 +637,41 @@ mod tests {
         assert_eq!(part("a.drawio", Facts { gone: true, ..git }), names);
     }
 
+    /// A tab on a file inside a dependency tree offers what that file's row offers, which reads it
+    /// and changes nothing; on a host the names' way out is Download….
+    #[test]
+    fn a_dependency_file_is_only_read() {
+        let tab = Facts {
+            at: At::Tab,
+            dependency: true,
+            prints: Some(Kind::Note),
+            ..Facts::default()
+        };
+        let names = ["Copy Name", "Copy Relative Path", "Copy Absolute Path"];
+        assert_eq!(
+            part("node_modules/a/README.md", tab),
+            [&names[..], &["Show in Files", "Reveal in Sidebar"]].concat()
+        );
+        let remote = Facts {
+            remote: true,
+            ..tab
+        };
+        assert_eq!(
+            part("node_modules/a/README.md", remote),
+            [&names[..], &["Download…", "Reveal in Sidebar"]].concat()
+        );
+        // The tree's own top folder of one goes whole, deleted on a host.
+        assert_eq!(
+            labels(dependency_model("node_modules", true, true, true).upcast_ref()).last(),
+            Some(&"Delete…".to_string())
+        );
+        let marked = [("a.md".to_string(), false)];
+        assert_eq!(
+            labels(marked_menu(&marked, "", false, true).upcast_ref()).last(),
+            Some(&"Delete…".to_string())
+        );
+    }
+
     /// An item whose verb is no action is greyed for good, and one with no label shows its verb.
     #[test]
     fn every_verb_is_an_action_with_a_label() {
@@ -639,6 +690,7 @@ mod tests {
                         prints,
                         gone,
                         paste,
+                        dependency: false,
                     };
                     for verb in file_verbs(&f).concat() {
                         assert!(LABELS.iter().any(|(v, _)| *v == verb), "{verb}");

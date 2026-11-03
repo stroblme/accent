@@ -89,6 +89,8 @@ fn section(action: &str) -> Option<&'static str> {
         "save" | "save-as" | "open-file" | "new-file" | "new-folder" | "upload" | "print"
         | "open-in-browser" | "close-tab" | "new-window" | "open-local" | "open-remote"
         | "open-recent" | "close-vault" | "reload-window" | "quit" => "Files",
+        "open-in-new-window" | "open-in-terminal" | "cut-file" | "copy-file" | "move-file-to"
+        | "paste-files" | "download-file" | "exclude-folder" | "reload-folder" => "Files",
         _ if starts(&["export-"]) => "Files",
         "find" | "find-next" | "find-previous" | "replace" | "replace-in-files" | "search-all"
         | "goto-line" => "Palette and find",
@@ -110,7 +112,7 @@ fn section(action: &str) -> Option<&'static str> {
         _ if starts(&["pane-"]) => "Panes",
         "merge-resolved" => "Git",
         _ if starts(&["git-", "conflict-", "hunk-"]) => "Git",
-        "rename" | "trash" | "new-from-template" | "insert-template" => "Notes",
+        "rename" | "trash" | "delete" | "new-from-template" | "insert-template" => "Notes",
         "follow-link" | "quick-fix" | "source-action" | "fold" | "unfold" | "fold-all"
         | "unfold-all" | "lsp-restart-file" | "python-environment" => "Code",
         _ if starts(&["debug-"]) => "Debugging",

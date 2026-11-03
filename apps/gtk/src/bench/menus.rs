@@ -9,10 +9,12 @@ use super::*;
 /// notebook, a diagram and a shell and prints each tab's icon; reveals a file two folders down
 /// that the tree never listed; double-clicks a preview's tab with the sidebar on Search, then the
 /// kept tab again; opens a PDF through the tree menu's Open, printing the toasts; prints every
-/// file menu's labels and prints a PDF that is not open from the tree; then right-clicks a tab, a
-/// tree row and two Git rows, the note changed and `Daily/2024-01-02.md` deleted. With `<dir>` it
-/// saves the screen there as PNGs (ImageMagick's `import`). The vault has to be a repository of
-/// its own, the generated vault committed.
+/// file menu's labels, a dependency file's tab menu and which of the tree's palette commands
+/// apply, copies the note and pastes it into a folder through the palette, and prints a PDF that
+/// is not open from the tree; then right-clicks a tab, a tree row and two Git rows, the note
+/// changed and `Daily/2024-01-02.md` deleted. With `<dir>` it saves the screen there as PNGs
+/// (ImageMagick's `import`). The vault has to be a repository of its own, the generated vault
+/// committed.
 pub(super) fn bench_menus(app: &Rc<App>, arg: &str) {
     let (note, shots) = match arg.split_once(':') {
         Some((note, dir)) => (note.to_string(), Some(dir.to_string())),
@@ -202,6 +204,57 @@ pub(super) fn bench_menus(app: &Rc<App>, arg: &str) {
         if let Some(dialog) = dialog {
             dialog.close();
         }
+
+        // A file inside a dependency tree is only read, from its tab as from its row.
+        let dependency = "node_modules/pkg/index.js";
+        std::fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        std::fs::write(root.join(dependency), "module.exports = 1;\n").unwrap();
+        app.open_path(dependency);
+        until(|| app.doc_for(dependency).is_some()).await;
+        if let Some(doc) = app.doc_for(dependency) {
+            tabs.emit_by_name::<()>("setup-menu", &[&Some(doc.page())]);
+            println!(
+                "bench menus tab dependency {:?}",
+                labels_of(tabs.menu_model())
+            );
+            tabs.emit_by_name::<()>("setup-menu", &[&None::<adw::TabPage>]);
+        }
+
+        // The tree's own commands from the palette: which apply here, then Copy File on the
+        // selected note and Paste Files into a folder selected after it.
+        app.sync_applicable();
+        let commands = [
+            "open-in-new-window",
+            "open-in-terminal",
+            "cut-file",
+            "copy-file",
+            "move-file-to",
+            "paste-files",
+            "download-file",
+            "exclude-folder",
+            "reload-folder",
+            "trash",
+            "delete",
+        ];
+        let enabled: Vec<_> = commands
+            .iter()
+            .filter(|name| {
+                app.window
+                    .lookup_action(name)
+                    .is_some_and(|action| action.is_enabled())
+            })
+            .collect();
+        println!("bench menus palette enabled={enabled:?}");
+        app.reveal_rel(&note, false);
+        until(|| tree.selected().is_some_and(|row| row.rel == note)).await;
+        let _ = WidgetExt::activate_action(&app.window, "win.copy-file", None);
+        glib::timeout_future(Duration::from_millis(400)).await;
+        app.reveal_rel("menus/inner", false);
+        until(|| tree.selected().is_some_and(|row| row.rel == "menus/inner")).await;
+        let _ = WidgetExt::activate_action(&app.window, "win.paste-files", None);
+        let pasted = root.join("menus/inner").join(doc::file_name(&note));
+        until(|| pasted.exists()).await;
+        println!("bench menus palette pasted={}", pasted.exists());
 
         // Real right-clicks, as the reader makes them: a tab, a tree row and a Git row.
         let (sx, sy) = app.window.surface_transform();

@@ -135,12 +135,21 @@ pub fn applies(action: &str, cx: &Context) -> bool {
         | "win.new-drawing"
         | "win.new-from-template"
         | "win.rename"
-        | "win.trash"
+        | "win.cut-file"
+        | "win.copy-file"
+        | "win.move-file-to"
+        | "win.paste-files"
+        | "win.open-in-terminal"
+        | "win.exclude-folder"
+        | "win.reload-folder"
         | "win.git-init"
         | "win.palette-symbols"
         | "win.palette-tags"
         | "app.close-vault" => vault,
-        "win.upload" | "win.terminal-local" => remote,
+        "win.upload" | "win.terminal-local" | "win.delete" | "win.download-file" => remote,
+        // Neither is a host's: it has no trash, and a window with no vault opens a file by its
+        // path on this machine.
+        "win.trash" | "win.open-in-new-window" => vault && !remote,
         "win.save" => text || diagram || notebook || cx.shells,
         "win.save-as" => {
             cx.file == Some(File::Vault)

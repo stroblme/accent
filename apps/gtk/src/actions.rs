@@ -638,8 +638,9 @@ impl App {
                 }
             }
             // The same two targets, in the same order. A trash goes to the system's, so it is the
-            // one delete that can be taken back and needs no question of its own.
-            "trash" => {
+            // one delete that can be taken back and needs no question of its own. Delete… is the
+            // same on a remote vault, which has no trash and asks first.
+            "trash" | "delete" => {
                 let target = self
                     .selected_row()
                     .map(|row| row.rel)
@@ -649,6 +650,9 @@ impl App {
                     fileops::trash(ops, &rel);
                 }
             }
+            "open-in-new-window" | "open-in-terminal" | "cut-file" | "copy-file"
+            | "move-file-to" | "paste-files" | "download-file" | "exclude-folder"
+            | "reload-folder" => self.file_command(name),
             "new-from-template" => {
                 if let Some(ops) = self.need_ops("create a note from a template") {
                     fileops::new_from_template(ops);
@@ -662,6 +666,37 @@ impl App {
             "menu" => self.menu.popup(),
             "about" => self.about(),
             _ => tracing::warn!("no handler for action {name}"),
+        }
+    }
+
+    /// The Files tree's own commands from the palette, on the selected row, else the vault file in
+    /// front, as Rename takes them. Paste, Open in Terminal, Leave Out of Search and Reload act on
+    /// the folder that is, or that the file is in; the vault root is never left out of search.
+    fn file_command(&self, name: &str) {
+        let target = self
+            .selected_row()
+            .map(|row| (row.is_dir(), row.rel))
+            .or_else(|| {
+                let doc = self
+                    .active_doc()
+                    .filter(|d| !d.is_transient() && !d.is_loose())?;
+                Some((false, doc.key()))
+            });
+        let (Some((dir, rel)), Some(ops)) = (target, self.ops()) else {
+            return;
+        };
+        let folder = fileops::row_dir(Some((&rel, dir))).to_string();
+        match name {
+            "open-in-new-window" if !dir => (ops.apart)(&rel),
+            "open-in-terminal" => (ops.terminal)(&folder),
+            "cut-file" => fileops::clipboard::cut(ops, &rel, dir),
+            "copy-file" => fileops::clipboard::copy(ops, &rel, dir),
+            "move-file-to" => fileops::move_to(ops, vec![(rel, dir)]),
+            "paste-files" => fileops::clipboard::paste(ops, &folder),
+            "download-file" if !dir => fileops::download(ops, &rel),
+            "exclude-folder" if !folder.is_empty() => (ops.exclude)(&folder),
+            "reload-folder" => (ops.relist)(&folder),
+            _ => {}
         }
     }
 

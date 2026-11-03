@@ -1264,10 +1264,32 @@ fn tab_file(app: &App, doc: Option<Doc>) -> actions::TabFile {
                 at: fileops::At::Tab,
                 remote: ops.vault.is_remote(),
                 prints,
+                dependency: in_dependency_tree(app, &doc.key()),
                 ..fileops::Facts::default()
             },
         },
         _ => actions::TabFile::Loose(prints),
+    }
+}
+
+/// Whether `rel` lies inside a dependency tree, whose files are read and never changed: the Files
+/// tree's word where it lists the row, else the disk's on a local vault. A host's file the tree
+/// has not listed is taken as the reader's own.
+fn in_dependency_tree(app: &App, rel: &str) -> bool {
+    let listed = app
+        .tree
+        .get()
+        .and_then(|tree| tree::find_row(tree.model(), rel))
+        .and_then(|row| row.item())
+        .as_ref()
+        .and_then(tree::decode);
+    match listed {
+        Some(row) => row.dependency,
+        None => {
+            !app.on_host(rel)
+                && accent_core::walk::unindexed(&app.root(), rel)
+                    == Some(accent_core::walk::Unindexed::Dependency)
+        }
     }
 }
 

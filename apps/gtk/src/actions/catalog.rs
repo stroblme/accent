@@ -110,7 +110,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.reload-window", "Reload Window", &[]),
     // Save's session half, for the primary menu of a window of shells: a focused shell keeps
     // `Ctrl+S`, and Save over a note in front saves the note.
-    ("win.save-session", "Save Session", &[]),
+    ("win.save-session", "Save Session…", &[]),
     ("win.close-session", "Close Session", &[]),
     ("app.quit", "Quit", &["<Primary>q"]),
     ("win.palette-files", "Go to File…", &["<Primary>e"]),
@@ -401,6 +401,19 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     // No chord: Delete over a tree row already trashes, from the tree's own key controller, and
     // a chord that reaches a focused editor is the last thing a delete should have.
     ("win.trash", "Move to Trash", &[]),
+    // A remote vault has no trash, so there the same command deletes, asking first.
+    ("win.delete", "Delete…", &[]),
+    // The Files tree's own commands, for the selected row or the tab in front. Each names what it
+    // acts on, which its menu item leaves to the row it is opened on.
+    ("win.open-in-new-window", "Open in New Window", &[]),
+    ("win.open-in-terminal", "Open Folder in Terminal", &[]),
+    ("win.cut-file", "Cut File", &[]),
+    ("win.copy-file", "Copy File", &[]),
+    ("win.move-file-to", "Move File to…", &[]),
+    ("win.paste-files", "Paste Files", &[]),
+    ("win.download-file", "Download File…", &[]),
+    ("win.exclude-folder", "Leave Folder Out of Search", &[]),
+    ("win.reload-folder", "Reload Folder", &[]),
     (
         "win.new-from-template",
         "New from Template…",

@@ -238,6 +238,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Every folder is listed, the ones the index does not walk included (`node_modules`, a `.venv`, a cargo `target/`): a listing that silently leaves a folder out cannot be trusted.
   Those rows are read off the disk one level per expansion, stay out of the index and every query, and are dimmed, search not reaching them.
 - A dependency tree (`node_modules`, a `.venv`, a marked `target/`, Lean's `.lake`, gigabytes with Mathlib and no marker file) lists and opens but is never changed — its menu holds only what reads it (Open and Open in New Window, or Open in Terminal and Reload, Copy Name, the paths, Show in Files or Download…), and it takes no marking, drag or drop: it is somebody else's.
+  A tab on one of its files offers the same names and ways out, with Reveal in Sidebar, and nothing that changes the file (user decision 2026-11-03).
   Its top folder, the `node_modules` or `.ruff_cache` itself, adds Rename, Move to… and Move to Trash, and Delete trashes it: a cache or an environment is cleared or moved whole, never a file in it (user decision 2026-10-28).
   A gitignored folder is the reader's own and gets the whole menu: being out of the index stops a file being searched, not edited, and opening one puts it in (Architecture, An opened file joins the index).
 - A gitignored folder is watched while the tree holds its listing, one level deep, by the vault's own watcher — on the host for a remote vault, the one place its files can be watched from — and what happens in it re-lists it and reaches nothing else (`Event::UnindexedChanged`); a dependency tree is not — 40 000 files is the tree that must not be watched — and is as fresh as its last expansion.
@@ -947,7 +948,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Print… and Export As left it for the file menus, which name the file they act on (user decision 2026-11-03, reversing the one of 2026-10-19).
 - Labels come from the action table, so the menu and the palette cannot disagree.
 - The sections are cut to what the window can do: without a vault, no New File, New Folder or Close Vault, which could only toast.
-  A window of shells adds Save Session after Reload Window (a focused shell keeps `Ctrl+S`) and, once named, Close Session after it.
+  A window of shells adds Save Session… after Reload Window (a focused shell keeps `Ctrl+S`) and, once named, Close Session after it.
   A remote vault's window has New Local Terminal beside New Remote Terminal….
 
 ### New Window
@@ -1492,7 +1493,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - `GtkPopoverMenu` from a `gio::Menu`, parented to a plain widget (States), in sections: what creates or opens; what copies a name or a path or leaves the app; Move to Trash alone.
 - **A file has one menu wherever it is named** (user decision 2026-11-03): its Files tree row, its tab and its Git row each lead with what that place does, then share one file part, built in one place (`fileops::file_sections`) and in this order.
   Rename… (a folder adding Leave Out of Search and Reload), then Cut, Copy and Move to… (the tree adding Paste), then Copy Name, the two paths and Show in Files or Download…, then Print… and the exports, and Move to Trash alone at the end.
+  A remote vault has no trash, so there Move to Trash is Delete… on every file menu and in the palette, and asks before it deletes (user decision 2026-11-03).
   Each item is a `fileops` action on the file's path, one group on the window, and takes its label from the palette's command where there is one, so the two cannot disagree.
+  The tree's own commands are palette entries too (Principle 3), each named there by what it acts on, which a menu item leaves to its row: Cut File, Reload Folder (Keyboard, Files).
 - **A tab's menu leads with Split ▸ and Move Tab ▸**, each side an item of its submenu, then Move to New Window and Pin Tab or Unpin Tab, then the document's own view (a diagram's Show Grid, a notebook's Open as Text), then the file part with Reveal in Sidebar after Show in Files.
   A preview tab's file part is its note's, and a shell or a comparison has no file part at all.
   A file from outside the vault has Copy Name, Copy Absolute Path, Show in Files and its prints, which are the window's own commands, and nothing the vault does to its files.
@@ -1513,7 +1516,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - **Show in Files is a local vault's**: on a remote one Download… takes its place on every file menu, and the palette's Show in Files says why in a toast.
 - **Splitting is the tab menu's alone**: a split opens the active tab beside itself, which is not done to a file in the tree.
   So is pinning: Pin Tab or Unpin Tab ends the tab's own section after Move Tab ▸, as in GNOME Web.
-- **Rename… and Move to Trash are on the tab menu too**, acting on the page right-clicked, and only where it holds a file of this vault; on a shell, a comparison or a loose file they are absent rather than refusing.
+- **Rename… and Move to Trash are on the tab menu too**, acting on the page right-clicked, and only where it holds a file of this vault outside a dependency tree; on a shell, a comparison or a loose file they are absent rather than refusing.
 - **Open in New Window follows Open** on a file row, and only a local vault's: a window with no vault opens a file by its path on this machine.
   On the tab menu it is **Move to New Window**, ending the moves before Pin Tab, since the tab leaves (Tabs).
 - **Open in Terminal begins a folder row's menu**, where a file's has Open: a shell in that folder, as `Ctrl+J` opens one at the vault root — on the host for a remote vault, the host's in the Flatpak (Terminal).
@@ -1689,6 +1692,8 @@ The `Ctrl` chords for application and document commands use GTK's `<Primary>` mo
 ### Files
 
 - Save `Ctrl+S`, Save As… `Ctrl+Shift+S`, Print…, Open in Browser, Export as PDF…, Export as HTML…, Export as PNG… and Export as SVG… (unbound), New File `Ctrl+N`, New Folder `Ctrl+Shift+N`, Upload Files (unbound), Close Tab `Ctrl+W`, Open File `Ctrl+O`, Open Local `Ctrl+Shift+O`, Open Remote (unbound), Open Recent `Ctrl+R`, New Window (unbound), Reload Window (unbound), Close Vault (unbound), Quit `Ctrl+Q`.
+- Open in New Window, Open Folder in Terminal, Cut File, Copy File, Move File to…, Paste Files, Download File… (a remote vault's), Leave Folder Out of Search and Reload Folder are the Files tree's own commands, all unbound (user decision 2026-11-03).
+  Each acts on the selected row, else on the vault file in front, as Rename does, and Paste, the terminal, Leave Out of Search and Reload on the folder that is, or that the file is in.
 - Print… and the exports act on the tab the menu was opened on, else the tab in front (Preview, Notebook, PDF, Diagram); over any tab but a note, a notebook, a PDF or a diagram they do nothing, as Save As… does, and one a tab has no such file for (PDF, PNG and SVG for a note or a notebook, HTML for a PDF or a diagram, PNG and SVG for a PDF) does nothing over it.
   Open in Browser acts the same way on a note or a notebook alone.
   Each is disabled where it would do nothing, so the palette leaves it out.
@@ -1863,7 +1868,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 ### Terminal
 
 - New Terminal `Ctrl+J`; `Ctrl+W` closes the tab and ends the shell, where closing the window does not.
-  New Remote Terminal…, New Local Terminal, Save Session and Close Session are unbound.
+  New Remote Terminal…, New Local Terminal, Save Session… and Close Session are unbound.
 - In a window of shells with no note in front, `Ctrl+S` saves the session; a focused shell keeps that chord, so Save Session is in the primary menu and the palette.
 - Inside a shell, Copy in Terminal `Ctrl+Shift+C` and Paste in Terminal `Ctrl+Shift+V` are rows like any other: they rebind, list in the palette and name the shell's menu items.
   Over a text tab `Ctrl+Shift+V` is Paste as Plain Text.
@@ -1911,7 +1916,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 
 ### Notes
 
-- Rename `F2`, Move to Trash `Delete` (tree only), New from Template… `Ctrl+Shift+D`, Insert Template… (unbound).
+- Rename `F2`, Move to Trash `Delete` (tree only), Delete… (a remote vault's Move to Trash, unbound), New from Template… `Ctrl+Shift+D`, Insert Template… (unbound).
 - A name with `/` in it is a path from the file's own folder, `..` included, so Rename is the move too and the keyboard needs no second dialog.
   It opens with a file's name selected up to its last dot, so typing keeps the extension, and a folder's selected whole.
 - A template names where its notes go with an `accent-target:` front-matter line, so `accent-target: Daily/{{date:%Y-%m-%d}}.md` is the daily note, and asking twice in a day opens the one already made.
