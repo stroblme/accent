@@ -147,13 +147,13 @@ fun Modifier.onTap(
     }
 }
 
-/** Floating action styled with inverted page contrast. */
+/** Floating action in the system accent, as the app's other primary actions are (`Button`). */
 @Composable
 fun Pill(label: String, onClick: () -> Unit) {
     Surface(
         shape = MaterialTheme.shapes.extraLarge,
-        color = MaterialTheme.colorScheme.inverseSurface,
-        contentColor = MaterialTheme.colorScheme.inverseOnSurface,
+        color = MaterialTheme.colorScheme.primary,
+        contentColor = MaterialTheme.colorScheme.onPrimary,
         shadowElevation = 6.dp,
     ) {
         Text(

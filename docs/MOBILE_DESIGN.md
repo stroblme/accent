@@ -173,7 +173,7 @@ Provide a visible control for each action that otherwise depends on a gesture.
 - Match the desktop page and ink: `#333338` on `#ffffff` in light, `#ebebeb` on `#1d1d20` in dark (`apps/gtk/src/theme.rs`).
   Derive secondary text and borders from that ink; keep the page free of wallpaper tint.
 - The one departure is a conflict block git left in a note, whose sides the rendered view boxes as the desktop's preview does, in its green and blue mixed with the ink by its numbers (`conflictTints`): a conflict's two sides have to read as two, and as they do on the desktop.
-- Use `inverseSurface` for the Browse button so it stays distinct from the page without spending another accent colour.
+- Use Material You's `primary` for the Browse button, as for the app's other primary actions (user decision 2026-11-03).
 - A PDF is recoloured in a dark theme as on the desktop: the document's paper lands on the app's surface and its ink on the app's text, each pixel keeping its chroma, so a coloured figure stays coloured.
   Invert in its bar turns that round for the file, as an image's does below.
 - Recolour document-like still images and SVGs in notes and the image screen; leave photos, animations and rasters over 64 MP untouched.
