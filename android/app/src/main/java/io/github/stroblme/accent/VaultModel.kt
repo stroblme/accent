@@ -345,7 +345,8 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     /** Hoisted editor buffer shared by rendering, saving, and conflict resolution. */
     val buffer = TextFieldState()
 
-    private var vault: Vault? = null
+    /** Set and cleared on the main thread, which is where whatever was read for it is published. */
+    @Volatile private var vault: Vault? = null
 
     /** The exit [leave] is holding while the reader answers, if there is one. */
     private var held: (suspend () -> Unit)? = null
@@ -368,8 +369,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     private val _listing = MutableStateFlow(false)
     val listing: StateFlow<Boolean> = _listing.asStateFlow()
 
-    /** How far the batch being applied said the walk had got, and when the tree last caught up. */
-    private var seen: Progress? = null
+    /** When the tree last caught up with a running walk. */
     private var lastRelist = 0L
 
     init {
@@ -442,18 +442,25 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
                 // Half a second is short enough that closing the vault is not felt and long
                 // enough that a quiet app is not waking up for nothing.
                 val batch = runCatching { v.nextEvents(500u) }.getOrElse { return@launch }
-                if (batch.isNotEmpty()) apply(batch)
+                // Applied on the main thread and only while [v] is still open there: the vault
+                // may have been closed or replaced while the batch was being waited for.
+                if (batch.isNotEmpty()) withContext(Dispatchers.Main) {
+                    if (vault === v) apply(v, batch)
+                }
             }
         } finally {
             // However the loop ends, nothing will say a walk is over any more. A vault closed or
             // replaced meanwhile has a state of its own.
-            if (vault === v) _state.update { it.walkOver() }
+            withContext(NonCancellable) { publishFor(v) { it.walkOver() } }
         }
     }
 
-    private suspend fun apply(batch: List<Event>) {
+    /** Apply [batch], read for [v], on the main thread while [v] is the vault open. */
+    private suspend fun apply(v: Vault, batch: List<Event>) {
         var reindexed = false
         var stopped = false
+        // How far the batch said the walk had got.
+        var seen: Progress? = null
         val touched = mutableSetOf<String>()
         for (event in batch) when (event) {
             is Event.Reconciled -> {
@@ -495,22 +502,22 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
                     revision = it.revision + 1,
                 )
             }
-            relist(_state.value.expanded)
+            // The listing waits on the vault, which may be closed or replaced meanwhile.
+            if (!relist(v, _state.value.expanded)) return
             // Stopped while it was still finding the files, a walk writes nothing, so whether
             // there is anything to browse is whatever an earlier walk left behind.
             if (stopped) {
                 _state.update { it.copy(ready = it.ready || !it.children[""].isNullOrEmpty()) }
             }
         } else if (touched.isNotEmpty()) {
-            relist(touched.intersect(_state.value.children.keys))
+            relist(v, touched.intersect(_state.value.children.keys))
         } else {
-            seen?.let { walking(it) }
+            seen?.let { walking(v, it) }
         }
-        seen = null
     }
 
-    /** Publish walk progress and refresh the tree after each indexed batch. */
-    private suspend fun walking(p: Progress) {
+    /** Publish walk progress and refresh the tree after each indexed batch, for [v]. */
+    private suspend fun walking(v: Vault, p: Progress) {
         // Out of [Phase.SCAN] with files behind it is the moment there is something to open, and
         // it is the moment the status line says so.
         val read = p.phase != Phase.SCAN && p.done > 0uL
@@ -530,8 +537,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         val now = System.currentTimeMillis()
         if (now - lastRelist < RELIST_EVERY_MS) return
         lastRelist = now
-        relist(_state.value.expanded)
-        _state.update { it.copy(revision = it.revision + 1) }
+        if (relist(v, _state.value.expanded)) _state.update { it.copy(revision = it.revision + 1) }
     }
 
     /** Reload switcher names without cancelling an active load; optionally scan ignored folders. */
@@ -577,17 +583,34 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** List every directory the tree has open again. */
-    fun refresh() = viewModelScope.launch { relist(_state.value.expanded) }
-
-    private suspend fun relist(dirs: Set<String>) = withContext(Dispatchers.IO) {
-        val v = vault ?: return@withContext
-        val listed = dirs.mapNotNull { dir ->
-            runCatching { dir to v.listDir(dir) }
-                .onFailure { logged("Cannot list \"$dir\"", it) }
-                .getOrNull()
-        }
-        _state.update { it.copy(children = it.children + listed) }
+    fun refresh() = viewModelScope.launch {
+        vault?.let { relist(it, _state.value.expanded) }
     }
+
+    /**
+     * List [dirs] of [v] again and merge them into the tree, unless [v] was closed or replaced
+     * while they were read: whether it is still the vault open.
+     */
+    private suspend fun relist(v: Vault, dirs: Set<String>): Boolean {
+        val listed = withContext(Dispatchers.IO) {
+            dirs.mapNotNull { dir ->
+                runCatching { dir to v.listDir(dir) }
+                    .onFailure { logged("Cannot list \"$dir\"", it) }
+                    .getOrNull()
+            }
+        }
+        return publishFor(v) { it.copy(children = it.children + listed) }
+    }
+
+    /**
+     * Apply [f] to the state on the main thread, where vaults are opened and closed, if [v] is
+     * still the vault open there: what was read for a vault since closed or replaced changes
+     * nothing. Whether it was applied.
+     */
+    private suspend fun publishFor(v: Vault, f: (VaultState) -> VaultState): Boolean =
+        withContext(Dispatchers.Main.immediate) {
+            (vault === v).also { if (it) _state.update(f) }
+        }
 
     fun toggle(dir: String) {
         val open = _state.value.expanded
@@ -595,7 +618,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
             _state.update { it.copy(expanded = open - dir) }
         } else {
             _state.update { it.copy(expanded = open + dir) }
-            viewModelScope.launch { relist(setOf(dir)) }
+            viewModelScope.launch { vault?.let { relist(it, setOf(dir)) } }
         }
     }
 
@@ -611,7 +634,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         }
         // Not asked, no walk will say it is over either.
         if (!was.paused && !was.indexing) runCatching { v.rescan() }.onFailure {
-            if (vault === v) _state.update { s -> s.walkOver() }
+            publishFor(v) { s -> s.walkOver() }
             fail("Cannot refresh the vault", it)
         }
         // An open note may have been changed by Syncthing while the app was away.
@@ -636,9 +659,9 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     /** Resume a paused walk and publish its starting state immediately. */
     fun resumeIndexing() = viewModelScope.launch(Dispatchers.IO) {
         val v = vault ?: return@launch
-        _state.update { it.copy(indexing = true, paused = false) }
+        if (!publishFor(v) { it.copy(indexing = true, paused = false) }) return@launch
         runCatching { v.resumeIndexing() }.onFailure {
-            if (vault === v) _state.update { s -> s.walkOver() }
+            publishFor(v) { s -> s.walkOver() }
             fail("Cannot resume indexing", it)
         }
     }
@@ -1059,7 +1082,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         val found = runCatching { v.conflictsOf(rel) }
             .onFailure { logged("Cannot look for conflict copies", it) }
             .getOrNull() ?: return@launch
-        _state.update { s -> s.withNote(rel) { it.copy(conflicts = found) } }
+        publishFor(v) { s -> s.withNote(rel) { it.copy(conflicts = found) } }
     }
 
     // ------------------------------------------------------------------------------- search
@@ -1074,7 +1097,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
             val hits = if (query.isBlank()) Result.success(emptyList())
             else runCatching { v.search(query, 100u, false) }
                 .onFailure { logged("Cannot search", it) }
-            _state.update { if (!asked.holds(mine)) it else it.answered(query, hits) }
+            publishFor(v) { if (!asked.holds(mine)) it else it.answered(query, hits) }
         }
     }
 
