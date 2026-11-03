@@ -8,7 +8,7 @@ use lang::Editor;
 
 impl App {
     /// Ask the server for its fixes and refactorings over the selection, or at the caret, of the
-    /// text tab in front or the notebook's selected code cell, and list them in a menu there.
+    /// text tab in front or the notebook's selected cell, and list them in a menu there.
     pub fn quick_fix(self: &Rc<Self>) {
         self.ask_actions(false);
     }

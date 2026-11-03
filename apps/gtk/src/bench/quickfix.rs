@@ -282,7 +282,7 @@ async fn shown_menu(tab: &Rc<Tab>) -> Option<gtk::PopoverMenu> {
 }
 
 /// The Quick Fix menu once it is up on `view`.
-async fn menu_on(view: &sourceview5::View) -> Option<gtk::PopoverMenu> {
+pub(super) async fn menu_on(view: &sourceview5::View) -> Option<gtk::PopoverMenu> {
     for _ in 0..50 {
         let mut child = view.first_child();
         while let Some(widget) = child {

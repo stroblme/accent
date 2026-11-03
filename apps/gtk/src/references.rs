@@ -210,7 +210,10 @@ impl App {
         if let Some(link) = notebook.link_at_caret() {
             return self.follow_cell_link(notebook, &link);
         }
-        let Some(cell) = notebook.language_editor() else {
+        let Some(cell) = notebook
+            .language_editor()
+            .filter(|c| !c.flavour().is_note())
+        else {
             // A markdown cell's bare URL, which no language answers for.
             if let Some(view) = notebook.editing_view()
                 && let Some((_, url)) = editor::url_under(&editor::caret(&view.buffer()))

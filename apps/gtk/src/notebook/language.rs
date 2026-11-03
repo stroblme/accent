@@ -2,8 +2,8 @@
 //! (`Notebook::program`), opened as a code tab's file is, and its markdown cells another, one note
 //! (`Notebook::prose`), opened as a note is; each cell's editor is a [`lang::Editor`] over that
 //! cell's lines of its document, so hover, signature help, completion and the code tab's keys work
-//! in a code cell as in a code tab, and completion, ghost text and a note's keys in a markdown
-//! cell as in a note (DESIGN.md, Architecture › Notebooks).
+//! in a code cell as in a code tab, and hover, hints, completion, ghost text and a note's keys in a
+//! markdown cell as in a note (DESIGN.md, Architecture › Notebooks).
 
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::HashMap;
@@ -31,8 +31,6 @@ pub(super) struct State {
     /// The markdown cells as one note, open as a note is.
     prose: Layer,
     editors: RefCell<HashMap<CellId, Rc<CellEditor>>>,
-    /// What the server said about cells with no editor yet, in their own lines.
-    waiting: RefCell<HashMap<CellId, Vec<Diagnostic>>>,
     /// The status count's press: every cell's diagnostics kept out of its text.
     hidden: Cell<bool>,
     /// The flush an edit schedules, replaced by the next edit's.
@@ -59,6 +57,8 @@ struct Layer {
     doc: Rc<lang::Document>,
     /// The text last handed to the server, whose lines its answers are in.
     sent: RefCell<Sent>,
+    /// What the server said about cells with no editor yet, in their own lines.
+    waiting: RefCell<HashMap<CellId, Vec<Diagnostic>>>,
 }
 
 /// The program last handed to the server, and whether it is known to have got there: a flush
@@ -478,15 +478,48 @@ impl NotebookTab {
         }
     }
 
-    /// A publish for the program: each cell's share painted in its editor, or kept for when it
-    /// has one.
-    pub fn set_diagnostics(&self, items: Vec<Diagnostic>) {
-        let mut cells = cells_of(&self.lang.code.sent.borrow().program, items);
+    /// The kind of cells whose document is open under `key`, if it is one of the notebook's.
+    fn kind_of(&self, key: &str) -> Option<Kind> {
+        [Kind::Code, Kind::Markdown].into_iter().find(|&kind| {
+            let doc = &self.lang.layer(kind).doc;
+            doc.vault().is_some() && doc.key() == key
+        })
+    }
+
+    /// Whether `key` is one of the notebook's documents on the language layer: the program or
+    /// the markdown cells' note.
+    pub fn has_document(&self, key: &str) -> bool {
+        self.kind_of(key).is_some()
+    }
+
+    /// A publish for the document open under `key`: each of its cells' share painted in the
+    /// cell's editor, or kept for when it has one.
+    pub fn set_diagnostics(&self, key: &str, items: Vec<Diagnostic>) {
+        let Some(kind) = self.kind_of(key) else {
+            return;
+        };
+        let layer = self.lang.layer(kind);
+        let mut cells = cells_of(&layer.sent.borrow().program, items);
         let editors: Vec<Rc<CellEditor>> = self.lang.editors.borrow().values().cloned().collect();
-        for cell in editors {
+        for cell in editors.into_iter().filter(|c| c.kind == kind) {
             cell.painted.set(cells.remove(&cell.id).unwrap_or_default());
         }
-        *self.lang.waiting.borrow_mut() = cells;
+        *layer.waiting.borrow_mut() = cells;
+    }
+
+    /// The index found or lost files: the markdown cells' links are diagnosed again, as an open
+    /// note's are, since a link may name a note that is there now.
+    pub fn rediagnose(&self) {
+        let doc = &self.lang.prose.doc;
+        let Some(vault) = doc.vault() else {
+            return;
+        };
+        let key = doc.key();
+        glib::spawn_future_local(async move {
+            if let Err(e) = vault.rediagnose(&key).await {
+                tracing::debug!("re-diagnosing {key}: {e:#}");
+            }
+        });
     }
 
     /// Recut each built cell's full diagnostic messages after its width or font changes.
@@ -503,14 +536,10 @@ impl NotebookTab {
 
     /// The status bar's errors and warnings over every cell, as a code tab counts its own.
     pub fn diagnostics_counts(&self) -> Option<String> {
-        let mut all: Vec<Diagnostic> = self
-            .lang
-            .waiting
-            .borrow()
-            .values()
-            .flatten()
-            .cloned()
-            .collect();
+        let mut all: Vec<Diagnostic> = Vec::new();
+        for layer in [&self.lang.code, &self.lang.prose] {
+            all.extend(layer.waiting.borrow().values().flatten().cloned());
+        }
         for cell in self.lang.editors.borrow().values() {
             all.extend(cell.painted.items().iter().cloned());
         }
@@ -531,8 +560,8 @@ impl NotebookTab {
     }
 
     /// Give cell `view`'s editor, just built, its keys and the language features over its
-    /// document, and Go to Definition by Ctrl+click: a code cell a code tab's, with the
-    /// diagnostics that waited for it; a markdown cell a note's keys, completion and ghost text, its
+    /// document, with the diagnostics that waited for it, and Go to Definition by Ctrl+click: a
+    /// code cell a code tab's; a markdown cell a note's keys, hover, completion and ghost text, its
     /// Ctrl+click following a link.
     pub(super) fn attach_cell(self: &Rc<Self>, view: &CellView, editor: &Editor) {
         if !matches!(view.kind, Kind::Code | Kind::Markdown) {
@@ -540,13 +569,9 @@ impl NotebookTab {
         }
         let painted = diagnostics::Painted::new(&editor.view, &editor.buffer);
         painted.hide(self.lang.hidden.get());
-        painted.set(
-            self.lang
-                .waiting
-                .borrow_mut()
-                .remove(&view.id)
-                .unwrap_or_default(),
-        );
+        let layer = self.lang.layer(view.kind);
+        let waiting = layer.waiting.borrow_mut().remove(&view.id);
+        painted.set(waiting.unwrap_or_default());
         let cell = Rc::new(CellEditor {
             id: view.id,
             kind: view.kind,
@@ -564,11 +589,9 @@ impl NotebookTab {
         follow_edits(&cell);
         let features: Rc<dyn lang::Editor> = cell.clone();
         crate::editor::attach_keys(&features);
+        crate::hover::install(&features);
         match view.kind {
-            Kind::Code => {
-                crate::hover::install(&features);
-                crate::signature::install(&features);
-            }
+            Kind::Code => crate::signature::install(&features),
             _ => {
                 cell.ghost.on.set(self.lang.ghost.get());
                 ghost::install(&features);
@@ -658,12 +681,10 @@ impl NotebookTab {
         }
     }
 
-    /// The selected code cell's editor on the language layer, built if need be: what Go to
-    /// Definition, Quick Fix and References ask about. A markdown cell's is asked only what is
-    /// typed in it.
+    /// The selected cell's editor on the language layer, built if need be: what Quick Fix asks
+    /// about, and Go to Definition in a code cell.
     pub(crate) fn language_editor(self: &Rc<Self>) -> Option<Rc<dyn lang::Editor>> {
-        let cell = self.language_editor_of(self.selected.get()?)?;
-        (cell.kind == Kind::Code).then_some(cell as Rc<dyn lang::Editor>)
+        Some(self.language_editor_of(self.selected.get()?)?)
     }
 
     /// Cell `id`'s editor on the language layer, built if need be.
@@ -754,7 +775,7 @@ impl NotebookTab {
             .filter(|v| v.kind == Kind::Code)
             .map(|v| v.id)
             .collect();
-        let (editors, waiting) = (self.lang.editors.borrow(), self.lang.waiting.borrow());
+        let (editors, waiting) = (self.lang.editors.borrow(), self.lang.code.waiting.borrow());
         ids.into_iter()
             .map(|id| match editors.get(&id) {
                 Some(cell) => (
@@ -788,7 +809,11 @@ fn follow_edits(cell: &Rc<CellEditor>) {
             cell.painted.edited(crate::editor::caret(buffer).line());
         }
     });
-    // The underlines' colours are read off the view's, which it has once it is mapped.
+    // The underlines' colours are read off the view's, which it has once it is mapped: at once
+    // for an editor built in a cell on screen, which is mapped as it goes in.
+    if cell.view.is_mapped() {
+        diagnostics::restyle(&cell.buffer, &cell.view);
+    }
     let weak = Rc::downgrade(cell);
     cell.view.connect_map(move |view| {
         if let Some(cell) = weak.upgrade() {

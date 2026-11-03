@@ -153,12 +153,16 @@ impl App {
         }
         // A note's hints are about the index as much as about its own text: the file a
         // `[[link]]` names may have just been created, renamed or deleted, and none of that is
-        // an edit of the note holding the link. So the open notes are diagnosed again whenever
-        // the walk found or lost files, rather than at the next keystroke. Notes only: a
-        // language server publishes its own diagnostics when it has something new to say.
+        // an edit of the note holding the link. So the open notes, and the notebooks' markdown
+        // cells, are diagnosed again whenever the walk found or lost files, rather than at the
+        // next keystroke. Notes only: a language server publishes its own diagnostics when it has
+        // something new to say.
         if matches!(event, Event::Reconciled(_) | Event::DirsChanged(_)) {
             for tab in self.open_tabs().iter().filter(|t| t.flavour().is_note()) {
                 lang::rediagnose(tab);
+            }
+            for notebook in self.notebooks() {
+                notebook.rediagnose();
             }
         }
         // A code tab with no language server is outlined from the index, which has just taken
@@ -510,12 +514,10 @@ impl App {
                     if self.is_active(&tab) {
                         self.sync_status();
                     }
-                } else if let Some(notebook) = self
-                    .notebooks()
-                    .into_iter()
-                    .find(|n| n.document_key().as_deref() == Some(rel.as_str()))
+                } else if let Some(notebook) =
+                    self.notebooks().into_iter().find(|n| n.has_document(&rel))
                 {
-                    notebook.set_diagnostics(items);
+                    notebook.set_diagnostics(&rel, items);
                     if self
                         .active_notebook()
                         .is_some_and(|n| Rc::ptr_eq(&n, &notebook))

@@ -4,9 +4,10 @@
 //! the key the program opened under; the diagnostics in their cells, a cell's shown value not
 //! called unused, and a cell two screens down holding its share until its editor is built; a
 //! hover; Go to Definition into another cell; a completion whose import into another cell is
-//! left out; signature help; the hover again after a line typed in above; `[[#` in its markdown
-//! cell, answered with the headings of its markdown cells as one note; and Go to Definition in a
-//! marimo notebook.
+//! left out; signature help; the hover again after a line typed in above; its markdown cell's
+//! hints on links to notes not there, one of them gone once that note is written, the hover on
+//! that link and Quick Fix on the other, as a note has them; `[[#` in its markdown cell, answered
+//! with the headings of its markdown cells as one note; and Go to Definition in a marimo notebook.
 
 use super::*;
 use crate::notebook::NotebookTab;
@@ -16,6 +17,8 @@ use accent_core::notebook::{self, Edit, Kind};
 /// Code cells after the first three, enough that the last is far below the view.
 const FILLER: usize = 60;
 const DRIVER: &str = "lsp_driver.py";
+/// The note the markdown cell's second link names, written once its hint is in.
+const LINKED: &str = "lsp_note.md";
 
 pub(super) fn bench_notebook_lsp(app: &Rc<App>, arg: &str) {
     scratch_only(app, "ACCENT_BENCH_NOTEBOOK_LSP");
@@ -39,9 +42,9 @@ pub(super) fn bench_notebook_lsp(app: &Rc<App>, arg: &str) {
     });
 }
 
-/// The two notebooks: an `.ipynb` of a markdown cell, `import os\nx = 1`, `%matplotlib
-/// inline\ny = x + oops`, `x`, the filler and `z = oops`; and a marimo notebook of `x = 1` and
-/// `y = x + 1`.
+/// The two notebooks: an `.ipynb` of a markdown cell linking to two notes not there,
+/// `import os\nx = 1`, `%matplotlib inline\ny = x + oops`, `x`, the filler and `z = oops`; and a
+/// marimo notebook of `x = 1` and `y = x + 1`.
 fn write(app: &Rc<App>, ipynb: &str, marimo: &str) -> bool {
     let Some(vault) = app.vault().cloned() else {
         return false;
@@ -55,7 +58,7 @@ fn write(app: &Rc<App>, ipynb: &str, marimo: &str) -> bool {
         text: "import os\nx = 1".into(),
     });
     let mut cells = vec![
-        (0, Kind::Markdown, "# T"),
+        (0, Kind::Markdown, "# T\n[[Missing]] and [[lsp_note]]"),
         (2, Kind::Code, "%matplotlib inline\ny = x + oops"),
         (3, Kind::Code, "x"),
     ];
@@ -208,7 +211,68 @@ async fn ipynb_drill(app: &Rc<App>, rel: &str) {
         hover.unwrap_or_default()
     );
 
+    markdown_hints(app, &tab).await;
     complete_markdown(&tab).await;
+}
+
+/// The markdown cell's hints and their underlines, as a note's are: one on each link to a note
+/// not there; then, once [`LINKED`] is written and the walk has found it, the one left, the hover
+/// on the link that reaches it now, and the hover's fixes and Quick Fix's menu on the other.
+async fn markdown_hints(app: &Rc<App>, tab: &Rc<NotebookTab>) {
+    let (Some(cell), Some(vault)) = (tab.bench_language_editor(0), app.vault().cloned()) else {
+        return println!("bench notebook_lsp hints no_editor");
+    };
+    let hints = |cell: &Rc<dyn crate::lang::Editor>| {
+        let items: Vec<String> = cell
+            .diagnostics()
+            .iter()
+            .map(|d| {
+                let (from, to) = (d.range.start, d.range.end);
+                let at = format!(
+                    "{}:{}-{}:{}",
+                    from.line, from.character, to.line, to.character
+                );
+                format!("{:?} {at} {}", d.severity, d.message)
+            })
+            .collect();
+        let buffer = cell.view().buffer().downcast::<sourceview5::Buffer>();
+        let underlined = buffer.map_or(0, |b| crate::diagnostics::painted(&b).0);
+        format!("{items:?} underlined={underlined}")
+    };
+    println!("bench notebook_lsp hints {}", hints(&cell));
+    if let Err(e) = vault.save(LINKED, "# Target note\n\nWhat the link shows.\n", None) {
+        return println!("bench notebook_lsp write_failed {LINKED} {e:?}");
+    }
+    for _ in 0..100 {
+        if cell.diagnostics().len() == 1 {
+            break;
+        }
+        glib::timeout_future(Duration::from_millis(50)).await;
+    }
+    println!("bench notebook_lsp hints_after_walk {}", hints(&cell));
+    let at = |character| {
+        let pos = Pos { line: 1, character };
+        (pos, crate::lang::iter_at(&cell.view().buffer(), pos))
+    };
+    let hover = crate::hover::markup_at(cell.clone(), at(20).1).await;
+    let fixes = crate::hover::fixes_at(cell.clone(), at(3).0).await;
+    let fixes: Vec<String> = fixes.into_iter().map(|a| a.title).collect();
+    tab.bench_select(0);
+    cell.view().grab_focus();
+    cell.view().buffer().place_cursor(&at(3).1);
+    app.quick_fix();
+    let menu = super::quickfix::menu_on(cell.view()).await;
+    let rows = menu
+        .as_ref()
+        .and_then(|m| m.menu_model())
+        .map(|m| fileops::labels(&m));
+    if let Some(menu) = menu {
+        menu.popdown();
+    }
+    println!(
+        "bench notebook_lsp markdown_hover {:?} fixes={fixes:?} menu={rows:?}",
+        hover.unwrap_or_default()
+    );
 }
 
 /// `[[#` typed on a line of its own at the end of the markdown cell, the first row taken: the key

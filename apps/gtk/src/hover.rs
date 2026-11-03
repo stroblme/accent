@@ -257,7 +257,7 @@ struct Hover {
 }
 
 /// Give an editor's view its hover. Called by [`crate::lang::attach`] and for each notebook code
-/// cell.
+/// and markdown cell.
 pub fn install(editor: &Rc<dyn Editor>) {
     let view = editor.view();
     let label = gtk::Label::builder()
