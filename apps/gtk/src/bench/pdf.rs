@@ -250,7 +250,7 @@ pub(super) fn bench_pdf_insert(app: &Rc<App>, arg: &str) {
         }
         let view = pdf.key_target();
         let at = pdf.drop_point(0, &view).unwrap_or_default();
-        let taken = file_drop(&view, &outside, at);
+        let taken = file_drop(&view, &[&outside], at);
         written(&app).await;
         step(&format!("outside_pages taken={taken}"));
         walk("win.pdf-undo", "outside_pages_undo").await;
@@ -261,7 +261,7 @@ pub(super) fn bench_pdf_insert(app: &Rc<App>, arg: &str) {
         walk("win.pdf-undo", "tree_row_undo").await;
 
         let target = tree_row_widget(&app, &rel);
-        let taken = target.is_some_and(|row| file_drop(&row, &outside, (1.0, 1.0)));
+        let taken = target.is_some_and(|row| file_drop(&row, &[&outside], (1.0, 1.0)));
         written(&app).await;
         step(&format!("outside_row taken={taken}"));
         walk("win.pdf-undo", "outside_row_undo").await;
@@ -275,7 +275,7 @@ pub(super) fn bench_pdf_insert(app: &Rc<App>, arg: &str) {
 
 /// A press on `from`, a drag in steps to `to` and a rest there before the release, as XTEST
 /// steps: the rest is what the line is watched in.
-fn drag_steps(from: &str, to: &str) -> String {
+pub(super) fn drag_steps(from: &str, to: &str) -> String {
     let point = |at: &str| -> (f64, f64) {
         let mut xy = at.split(' ').filter_map(|v| v.parse().ok());
         (xy.next().unwrap_or(0.0), xy.next().unwrap_or(0.0))
@@ -328,30 +328,33 @@ fn tree_row_widget(app: &Rc<App>, rel: &str) -> Option<gtk::Widget> {
 }
 
 /// Where on `rel`'s row in the Files tree to press, in the window: on its name.
-fn tree_row(app: &Rc<App>, rel: &str) -> Option<(f32, f32)> {
+pub(super) fn tree_row(app: &Rc<App>, rel: &str) -> Option<(f32, f32)> {
     let row = tree_row_widget(app, rel)?;
     let at = graphene::Point::new(40.0, row.height() as f32 / 2.0);
     let at = row.compute_point(&app.window, &at)?;
     Some((at.x(), at.y()))
 }
 
-/// A drop of `file` from another application at `(x, y)` of `widget`, through its own file drop
+/// A drop of `files` from another application at `(x, y)` of `widget`, through its own file drop
 /// target: Xvfb carries a drag inside one process and not between two.
-fn file_drop(widget: &gtk::Widget, file: &std::path::Path, (x, y): (f32, f32)) -> bool {
+pub(super) fn file_drop(widget: &gtk::Widget, files: &[&std::path::Path], at: (f32, f32)) -> bool {
+    let files: Vec<gio::File> = files.iter().map(gio::File::for_path).collect();
+    value_drop(widget, gdk::FileList::from_array(&files).to_value(), at)
+}
+
+/// A drop of `value` at `(x, y)` of `widget`, through its own drop target for that type, as
+/// [`file_drop`] drops files.
+pub(super) fn value_drop(widget: &gtk::Widget, value: glib::Value, (x, y): (f32, f32)) -> bool {
     let target = widget
         .observe_controllers()
         .into_iter()
         .flatten()
         .filter_map(|c| c.downcast::<gtk::DropTarget>().ok())
-        .find(|t| {
-            t.formats()
-                .is_some_and(|f| f.contains_type(gdk::FileList::static_type()))
-        });
+        .find(|t| t.formats().is_some_and(|f| f.contains_type(value.type_())));
     let Some(target) = target else {
         return false;
     };
-    let list = gdk::FileList::from_array(&[gio::File::for_path(file)]);
-    let value = glib::BoxedValue(list.to_value());
+    let value = glib::BoxedValue(value);
     target.emit_by_name::<bool>("drop", &[&value, &f64::from(x), &f64::from(y)])
 }
 
