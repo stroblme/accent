@@ -60,10 +60,18 @@ jobs:
           path: accent-*.apk
           if-no-files-found: error
 
+  # Each arch on a runner of its own, as building aarch64 under QEMU would take hours.
   flatpak:
-    name: desktop app
+    name: desktop app (${{ matrix.arch }})
     needs: tests
-    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     container:
       image: ghcr.io/flathub-infra/flatpak-github-actions:gnome-51
       options: --privileged
@@ -72,8 +80,9 @@ jobs:
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           manifest-path: build-aux/io.github.stroblme.Accent.yml
-          bundle: accent-${{ github.ref_name }}-x86_64.flatpak
-          cache-key: flatpak-builder-${{ github.sha }}
+          arch: ${{ matrix.arch }}
+          bundle: accent-${{ github.ref_name }}-${{ matrix.arch }}.flatpak
+          cache-key: flatpak-builder-${{ matrix.arch }}-${{ github.sha }}
 
   # The static servers a remote vault uploads, for Accent.app to carry; macOS has no musl
   # toolchain of its own. Not named accent-*, so the release below leaves them out.

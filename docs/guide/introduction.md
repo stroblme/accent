@@ -14,10 +14,10 @@ The desktop app runs on Linux, with an [Android companion](android.md) for editi
 
 ## Install and open a vault
 
-Download the Flatpak bundle from the [latest release](https://github.com/stroblme/accent/releases/latest), then install it with:
+Download the Flatpak bundle for your machine (`x86_64` or `aarch64`) from the [latest release](https://github.com/stroblme/accent/releases/latest), then install it with:
 
 ```sh
-flatpak install --user accent-<version>-x86_64.flatpak
+flatpak install --user accent-<version>-<arch>.flatpak
 ```
 
 For a native install on a recent GNOME Linux system, use the [installer](https://github.com/stroblme/accent/blob/main/install.sh):

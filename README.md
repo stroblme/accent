@@ -65,10 +65,10 @@ We have very little resource requirements for the remote deamon, allowing to sup
 
 ### Desktop
 
-A Flatpak bundle is shipped with each [release](https://github.com/stroblme/accent/releases):
+A Flatpak bundle for `x86_64` and `aarch64` is shipped with each [release](https://github.com/stroblme/accent/releases):
 
 ```sh
-flatpak install --user accent-<version>-x86_64.flatpak
+flatpak install --user accent-<version>-<arch>.flatpak
 ```
 
 For a native install into `~/.local` (GNOME 49 or newer: Fedora 43+, openSUSE Tumbleweed, Debian testing, Ubuntu 26.04+, Arch), go for the following:
