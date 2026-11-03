@@ -3,16 +3,18 @@
 
 use super::*;
 use crate::open::Reveal;
+use accent_api::OutLink;
 use accent_core::markdown;
 
 /// DESIGN.md, Motion: the References section follows the caret by 300 ms.
 const REFERENCES: Duration = Duration::from_millis(300);
 
 impl App {
-    /// Fill References with note backlinks, code-symbol references or links to the active file.
+    /// Fill References with a note's links either way, code-symbol references or links to the
+    /// active file.
     ///
-    /// The title distinguishes symbol references from file backlinks. Debounce caret-driven
-    /// requests and drop superseded ones to cancel server work.
+    /// The title distinguishes symbol references from links. Debounce caret-driven requests and
+    /// drop superseded ones to cancel server work.
     pub fn refresh_references(self: &Rc<Self>) {
         if let Some(handle) = self.references.borrow_mut().take() {
             handle.abort();
@@ -23,25 +25,32 @@ impl App {
         let doc = self.side_doc();
         let empty = references_empty(doc.as_ref());
         let code = matches!(&doc, Some(Doc::Text(tab)) if !tab.flavour().is_note());
-        // Whatever code asks, the answer is backlinks; a code tab's says which once it lands.
-        let title = (!code).then_some("Backlinks");
+        // Whatever code asks, the answer is links; a code tab's says which once it lands.
+        let title = (!code).then_some("Links");
         // A diff, a shell and a file from outside the vault are nothing the index links to, and
         // only a dependency's server has references in one.
         let (Some(doc), Some(vault)) = (
             doc.filter(|doc| !doc.is_transient() && (!doc.is_loose() || is_dependency(doc))),
             self.vault().cloned(),
         ) else {
-            return sidebar.set_references(title, Some(&[]), empty);
+            sidebar.show_links_direction(false);
+            return sidebar.set_references(title, Some(&[]), &[], empty);
         };
+        let (key, tab) = (doc.key(), doc.tab().cloned());
+        let note = tab.as_ref().is_some_and(|tab| tab.flavour().is_note());
+        // Only a note's links go both ways: the index holds no other file's way out.
+        let links = note && !doc::is_loose_key(&key);
+        sidebar.show_links_direction(links);
+        if links && sidebar.links_outgoing() {
+            return self.refresh_links_out(key, vault);
+        }
         // Emptied at once, so the section never shows the last file's answer while this one's is
         // still coming.
-        sidebar.set_references(title, None, empty);
-        let (key, tab) = (doc.key(), doc.tab().cloned());
+        sidebar.set_references(title, None, &[], empty);
         let language_key = tab
             .as_ref()
             .map(|tab| tab.language_key())
             .unwrap_or_else(|| key.clone());
-        let note = tab.as_ref().is_some_and(|tab| tab.flavour().is_note());
         let pos = tab
             .as_ref()
             .map(|tab| lang::pos_of(&tab.buffer.iter_at_mark(&tab.buffer.get_insert())));
@@ -74,11 +83,38 @@ impl App {
             }
             if let Some(sidebar) = app.sidebar.get() {
                 let title = match note || backlinks {
-                    true => "Backlinks",
+                    true => "Links",
                     false => "References",
                 };
                 let rows = reference_rows(&found, note || backlinks);
-                sidebar.set_references(Some(title), Some(&rows), empty);
+                sidebar.set_references(Some(title), Some(&rows), &[], empty);
+            }
+        });
+        *self.references.borrow_mut() = Some(handle);
+    }
+
+    /// Fill References with the files the note `key` links to, as the index last read it.
+    fn refresh_links_out(self: &Rc<Self>, key: String, vault: Arc<Vault>) {
+        let Some(sidebar) = self.sidebar.get() else {
+            return;
+        };
+        const EMPTY: &str = "This note links to no file yet.";
+        sidebar.set_references(Some("Links"), None, &[], EMPTY);
+        let weak = Rc::downgrade(self);
+        let handle = glib::spawn_future_local(async move {
+            let asked = key.clone();
+            let found = crate::work::off_thread("outgoing links", move || vault.links_from(&asked))
+                .await
+                .map(|found| crate::work::or_empty("listing the outgoing links", found))
+                .unwrap_or_default();
+            let Some(app) = weak.upgrade() else { return };
+            // As for the links coming in: the reader may have moved on meanwhile.
+            if app.side_doc().map(|doc| doc.key()).as_deref() != Some(&key) {
+                return;
+            }
+            if let Some(sidebar) = app.sidebar.get() {
+                let (rows, missing) = link_rows(&found);
+                sidebar.set_references(Some("Links"), Some(&rows), &missing, EMPTY);
             }
         });
         *self.references.borrow_mut() = Some(handle);
@@ -106,7 +142,13 @@ impl App {
         }
         if let Some(sidebar) = self.sidebar.get() {
             let rows = reference_rows(found, false);
-            sidebar.set_references(Some("Definitions"), Some(&rows), references_empty(None));
+            sidebar.show_links_direction(false);
+            sidebar.set_references(
+                Some("Definitions"),
+                Some(&rows),
+                &[],
+                references_empty(None),
+            );
         }
     }
 
@@ -351,7 +393,8 @@ fn reference_rows(found: &[Location], per_path: bool) -> Vec<String> {
     rows
 }
 
-/// A References row read back: the path and the line it names.
+/// A References row read back: the path and the line it names. An outgoing link's row names no
+/// line, and is followed as the link is ([`App::open_target`]).
 pub fn reference_target(row: &str) -> Option<Location> {
     let (path, line) = row.rsplit_once(':')?;
     let line: u32 = line.parse().ok()?;
@@ -366,10 +409,41 @@ pub fn reference_target(row: &str) -> Option<Location> {
     })
 }
 
-/// The icon a References row leads with: its file's, the `:line` after the path set aside the
-/// way [`reference_target`] sets it aside.
+/// The file a References row names: the path before its `:line`, or the whole row for an
+/// outgoing link's, which names a file and no line.
+pub fn reference_path(row: &str) -> &str {
+    match row.rsplit_once(':') {
+        Some((path, line)) if line.parse::<u32>().is_ok() => path,
+        _ => row,
+    }
+}
+
+/// The icon a References row leads with: its file's.
 pub fn reference_icon(row: &str) -> &'static str {
-    crate::doc::icon_for(row.rsplit_once(':').map_or(row, |(path, _)| path))
+    crate::doc::icon_for(reference_path(row))
+}
+
+/// A note's outgoing links as rows, one per file in the order the note first names each, with
+/// those nothing in the vault answers to: such a link's row is the file New File would write
+/// for it. Web links and links to the note's own headings name no file.
+fn link_rows(found: &[OutLink]) -> (Vec<String>, Vec<String>) {
+    let (mut rows, mut missing) = (Vec::new(), Vec::new());
+    for link in found {
+        if link.kind == LinkKind::External || link.target.is_empty() {
+            continue;
+        }
+        let row = link
+            .path
+            .clone()
+            .unwrap_or_else(|| accent_core::path::linked_path(&link.target));
+        if !rows.contains(&row) {
+            if link.path.is_none() {
+                missing.push(row.clone());
+            }
+            rows.push(row);
+        }
+    }
+    (rows, missing)
 }
 
 /// Empty-state text distinguishing file backlinks from text-symbol references.
@@ -442,6 +516,35 @@ mod tests {
         assert!(reference_target("no-line-here").is_none());
         // The icon is the file's, not the line number's.
         assert_eq!(reference_icon("notes/a.md:3"), crate::doc::icon_for("a.md"));
+        // An outgoing link's row is the file alone, a colon in its name included.
+        assert_eq!(reference_path("notes/a.md:3"), "notes/a.md");
+        assert_eq!(reference_path("notes/at 10:30.md"), "notes/at 10:30.md");
+    }
+
+    /// A note's way out lists each file once, in the order the note first names it, and a link
+    /// nothing answers to as the file New File would write; web links and the note's own
+    /// headings name no file.
+    #[test]
+    fn outgoing_rows_are_one_per_file_with_the_missing_ones_named() {
+        let link = |target: &str, path: Option<&str>, kind| accent_api::OutLink {
+            target: target.to_string(),
+            path: path.map(str::to_string),
+            kind,
+            anchor: None,
+            byte_start: 0,
+        };
+        let found = [
+            link("Beta", Some("Beta.md"), LinkKind::Wiki),
+            link("https://example.org", None, LinkKind::External),
+            link("", None, LinkKind::Wiki),
+            link("Missing idea", None, LinkKind::Wiki),
+            link("Beta", Some("Beta.md"), LinkKind::Wiki),
+            link("diagram.png", Some("diagram.png"), LinkKind::Embed),
+            link("Missing idea", None, LinkKind::Wiki),
+        ];
+        let (rows, missing) = link_rows(&found);
+        assert_eq!(rows, ["Beta.md", "Missing idea.md", "diagram.png"]);
+        assert_eq!(missing, ["Missing idea.md"]);
     }
 
     #[test]

@@ -134,7 +134,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen) -> Pane {
             on_open(rel, (!tag.is_empty()).then_some(Target::Tag(tag)));
         }
     };
-    let files_list = path_list(&files, crate::doc::icon_for, open_file, None);
+    let files_list = path_list(&files, crate::doc::icon_for, open_file, None, None);
     files_box.append(&scroller(&files_list));
     files_box.set_visible(false);
 

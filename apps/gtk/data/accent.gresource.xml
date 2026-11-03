@@ -57,6 +57,8 @@
     <file preprocess="xml-stripblanks">icons/scalable/actions/dap-console-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/scm-branch-symbolic.svg</file>
     <file preprocess="xml-stripblanks">icons/scalable/actions/callout-quote-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/links-in-symbolic.svg</file>
+    <file preprocess="xml-stripblanks">icons/scalable/actions/links-out-symbolic.svg</file>
     <!-- The same tabler folder and file the completion kinds draw, under the file lists' names. -->
     <file alias="icons/scalable/actions/filetype-folder-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/lsp-folder-symbolic.svg</file>
     <file alias="icons/scalable/actions/filetype-file-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/lsp-file-symbolic.svg</file>

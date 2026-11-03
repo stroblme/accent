@@ -35,6 +35,7 @@ use accent_core::config::{CodePane, InfoPane};
 use adw::prelude::*;
 use gtk::{glib, pango};
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::ops::Range;
 use std::rc::Rc;
 use std::time::Duration;
@@ -134,6 +135,13 @@ struct VaultPanes {
     /// tab holds — a note has backlinks, a source file has references — so they are set rather
     /// than built in.
     references_empty: gtk::Label,
+    /// The rows that name a file nothing in the vault is yet: an outgoing link that dangles.
+    references_missing: Rc<RefCell<HashSet<String>>>,
+    /// The References section's direction button, shown while it lists a note's links, and
+    /// whether it lists the files the note links to rather than the notes linking to it. Per
+    /// window and never saved, so a window starts on the links coming in.
+    links_button: gtk::Button,
+    links_out: Rc<Cell<bool>>,
     tags_dirty: Rc<Cell<bool>>,
     tags_refill: Rc<dyn Fn()>,
     #[cfg(feature = "bench")]
@@ -197,12 +205,15 @@ impl Sidebar {
 
             let tags = tags::pane(&Rc::new(data.tags), &on_open);
             let references = gtk::StringList::new(&[]);
+            let missing: Rc<RefCell<HashSet<String>>> = Rc::default();
             let (references_stack, references_empty) =
-                references_body(&references, on_reference, &on_drag);
+                references_body(&references, on_reference, &on_drag, &missing);
             let info = info::Info::new(
                 Some((references_stack.upcast_ref(), &tags.widget)),
                 &details.root,
             );
+            let (links_button, links_out) = links_direction();
+            info.references.add_suffix(&links_button);
             stack.add_titled_with_icon(&info.root, Some("info"), "Info", info::ICON);
             vault_info = Some(info.clone());
 
@@ -253,7 +264,14 @@ impl Sidebar {
             (
                 search,
                 tags,
-                (references, references_stack, references_empty),
+                (
+                    references,
+                    references_stack,
+                    references_empty,
+                    missing,
+                    links_button,
+                    links_out,
+                ),
                 tags_catch_up,
                 (ports_page, ports_refill),
             )
@@ -314,7 +332,14 @@ impl Sidebar {
             git,
             panes: panes.map(
                 |(search, tags, references, tags_catch_up, (ports_page, ports_refill))| {
-                    let (references, references_stack, references_empty) = references;
+                    let (
+                        references,
+                        references_stack,
+                        references_empty,
+                        references_missing,
+                        links_button,
+                        links_out,
+                    ) = references;
                     VaultPanes {
                         search_entry: search.entry,
                         replace_toggle: search.replace_toggle,
@@ -334,6 +359,9 @@ impl Sidebar {
                         references,
                         references_stack,
                         references_empty,
+                        references_missing,
+                        links_button,
+                        links_out,
                         tags_dirty: tags.dirty,
                         tags_refill: tags.refill,
                         #[cfg(feature = "bench")]
@@ -613,10 +641,17 @@ impl Sidebar {
 
     /// Replace what the References section lists, and say what its emptiness would mean: a
     /// note's backlinks and a source file's references are the same section asking different
-    /// questions. `title` names what the rows are — the language server's References, the
-    /// Backlinks, a definition's several answers — and `None` keeps the one shown. `rows` is
-    /// `None` while the answer is still coming, which empties the list without calling it empty.
-    pub fn set_references(&self, title: Option<&str>, rows: Option<&[String]>, empty: &str) {
+    /// questions. `title` names what the rows are — the language server's References, a note's
+    /// Links, a definition's several answers — and `None` keeps the one shown. `rows` is `None`
+    /// while the answer is still coming, which empties the list without calling it empty, and
+    /// `missing` are the rows naming a file nothing in the vault is yet.
+    pub fn set_references(
+        &self,
+        title: Option<&str>,
+        rows: Option<&[String]>,
+        missing: &[String],
+        empty: &str,
+    ) {
         let Some(panes) = self.panes.as_ref() else {
             return;
         };
@@ -624,6 +659,10 @@ impl Sidebar {
         if let Some(title) = title {
             section.set_title(title);
         }
+        // Before the rows go in, which binds them.
+        panes
+            .references_missing
+            .replace(missing.iter().cloned().collect());
         section.set_count(rows.map(<[String]>::len));
         let list: Vec<&str> = rows
             .unwrap_or_default()
@@ -638,6 +677,28 @@ impl Sidebar {
             Some([]) => "empty",
             _ => "list",
         });
+    }
+
+    /// Show the References section's direction button while it lists a note's links, which go
+    /// both ways, and hide it for anything else.
+    pub fn show_links_direction(&self, shown: bool) {
+        if let Some(panes) = self.panes.as_ref() {
+            panes.links_button.set_visible(shown);
+        }
+    }
+
+    /// Whether a note's links are listed going out, the files it links to, rather than coming in.
+    pub fn links_outgoing(&self) -> bool {
+        self.panes
+            .as_ref()
+            .is_some_and(|panes| panes.links_out.get())
+    }
+
+    /// Call `f` once the reader has turned the direction of a note's links round.
+    pub fn connect_links_direction(&self, f: impl Fn() + 'static) {
+        if let Some(panes) = self.panes.as_ref() {
+            panes.links_button.connect_clicked(move |_| f());
+        }
     }
 
     /// Fit the Info pane to the tab `key` in front (empty for none): its sections for a file,
@@ -1066,6 +1127,7 @@ fn references_body(
     model: &gtk::StringList,
     on_reference: impl Fn(&str) + 'static,
     dragging: &Rc<dyn Fn(bool)>,
+    missing: &Rc<RefCell<HashSet<String>>>,
 ) -> (gtk::Stack, gtk::Label) {
     let stack = gtk::Stack::builder().vexpand(true).build();
     // The window sets the words to suit what the tab holds (`references::references_empty`).
@@ -1080,21 +1142,60 @@ fn references_body(
         .build();
     empty.add_css_class("dimmed");
     stack.add_named(&empty, Some("empty"));
-    // A row names the file a backlink or a use is in.
+    // A row names the file a link or a use is in, or the file a link leads to.
     let drag = crate::refer::RowDrag {
         of: Rc::new(|item| {
             let row = item.item().and_downcast::<gtk::StringObject>()?.string();
-            let rel = crate::references::reference_target(&row)?.path;
+            let rel = crate::references::reference_path(&row).to_string();
             Some(crate::refer::Dragged { rel, heading: None })
         }),
         dragging: dragging.clone(),
     };
+    let missing = missing.clone();
     let list = path_list(
         model,
         crate::references::reference_icon,
         on_reference,
         Some(drag),
+        Some(Rc::new(move |row: &str| missing.borrow().contains(row))),
     );
     stack.add_named(&scroller(&list), Some("list"));
     (stack, empty)
+}
+
+/// The References section's direction button for a note's links, hidden until they are listed,
+/// and whether it points out. Its arrow points the way the links listed go: in to the note, as a
+/// window starts, or out of it; a press turns it round.
+fn links_direction() -> (gtk::Button, Rc<Cell<bool>>) {
+    let button = gtk::Button::builder()
+        .visible(false)
+        .valign(gtk::Align::Center)
+        // A press leaves the keyboard where it was, as the debugger strip's buttons do.
+        .focus_on_click(false)
+        .build();
+    button.add_css_class("flat");
+    let out = Rc::new(Cell::new(false));
+    point_links(&button, false);
+    // Connected first, so whoever the window connects hears the new direction.
+    button.connect_clicked({
+        let out = out.clone();
+        move |button| {
+            out.set(!out.get());
+            point_links(button, out.get());
+        }
+    });
+    (button, out)
+}
+
+/// Point the direction button the way the links listed go, and name what a press turns to.
+fn point_links(button: &gtk::Button, out: bool) {
+    // Shipped (tabler's `arrow-down-left` and `arrow-up-right`): the theme's `go-previous` and
+    // `go-next` are chevrons, which in a header read as Back.
+    let (icon, next) = match out {
+        true => ("links-out-symbolic", "Show Incoming Links"),
+        false => ("links-in-symbolic", "Show Outgoing Links"),
+    };
+    button.set_icon_name(icon);
+    button.set_tooltip_text(Some(next));
+    button.update_property(&[gtk::accessible::Property::Label(next)]);
 }

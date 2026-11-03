@@ -10,7 +10,7 @@ For example, `- [ ] Pack a notebook` makes a task, while `$x^2$` adds inline mat
 Use `[[Trip plan]]` to link to another note, or `[[Trip plan#Packing]]` to link to its heading.
 Add a label with `[[Trip plan|our plan]]`.
 If the note does not exist yet, following the link offers to create it.
-Accent suggests notes as you type `[[`, and you can browse links back to the current note in [Info](search.md#info-and-outline).
+Accent suggests notes as you type `[[`, and you can browse the links to and from the current note in [Info](search.md#info-and-outline).
 
 Add `#travel` in the text to tag a note.
 You can also put tags and alternative names in front matter at the top:

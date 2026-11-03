@@ -22,7 +22,8 @@ The find bar belongs to its pane, so each half of a split can have a different s
 ## Info and outline
 
 The **Info** pane (`Ctrl+Shift+B`) brings related details together.
-**References** shows notes that link to the current file, and **Tags** lists tagged notes in the vault.
+**Links** shows notes that link to the current file, and its arrow button switches a note's list to the files it links to.
+**Tags** lists tagged notes in the vault.
 Open **Details** there for facts such as a note's word count or a PDF's page count.
 The **Outline** pane (`Ctrl+Shift+W`) lists headings in the open note, so a long page is easier to navigate.
 For names of files instead of their contents, use **Go to File** (`Ctrl+E`) in [the workspace](vaults.md#find-your-way).

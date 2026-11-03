@@ -3,6 +3,15 @@
 use crate::widgets::row_text;
 use gtk::pango;
 use gtk::prelude::*;
+use std::rc::Rc;
+
+/// A row naming a file nothing in the vault is yet, underlined as the editor's hint on such a
+/// link is (the app's CSS, `build.rs`): the hint's 25 % mixed into the background, since Pango
+/// draws a label's underline without the colour's alpha.
+const UNRESOLVED: &str = "accent-unresolved";
+
+/// Whether a row names a file nothing in the vault is yet.
+pub(super) type Missing = Rc<dyn Fn(&str) -> bool>;
 
 /// One section: a header that folds it, with its title and a count, over its body.
 pub(super) struct Section {
@@ -34,6 +43,16 @@ impl Section {
         self.title.set_text(title);
     }
 
+    /// Put `widget` at the header's far end, after the title and the count.
+    pub(super) fn add_suffix(&self, widget: &impl IsA<gtk::Widget>) {
+        if let Some(header) = self.title.parent().and_downcast::<gtk::Box>() {
+            header.set_hexpand(true);
+            widget.set_hexpand(true);
+            widget.set_halign(gtk::Align::End);
+            header.append(widget);
+        }
+    }
+
     /// How many rows the section holds. `None` and none at all show no number, so neither an
     /// answer still coming nor an empty one reads as "0".
     pub(super) fn set_count(&self, n: Option<usize>) {
@@ -52,12 +71,14 @@ impl Section {
 
 /// A `GtkListView` of plain strings — references and the files carrying a tag are the same row,
 /// led by the icon `icon` gives the row's text, as every file list's rows are. With `drag` its
-/// rows drag as references ([`crate::refer`]).
+/// rows drag as references ([`crate::refer`]). A row `missing` says names no file yet is drawn as
+/// the editor draws a link nothing answers to.
 pub(super) fn path_list(
     model: &gtk::StringList,
     icon: fn(&str) -> &'static str,
     on_activate: impl Fn(&str) + 'static,
     drag: Option<crate::refer::RowDrag>,
+    missing: Option<Missing>,
 ) -> gtk::ListView {
     let factory = crate::widgets::factory(
         move |item| {
@@ -83,6 +104,10 @@ pub(super) fn path_list(
             };
             image.set_icon_name(Some(icon(&text)));
             label.set_text(&text);
+            match missing.as_ref().is_some_and(|missing| missing(&text)) {
+                true => label.add_css_class(UNRESOLVED),
+                false => label.remove_css_class(UNRESOLVED),
+            }
         },
     );
 

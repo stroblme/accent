@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- tabler-icons "arrow-down-left" (v3.35.0), MIT (see LICENSE.tabler); strokes converted to fills. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24">
+    <path d="M 16.205078,6.2050781 6.2050781,16.205078 a 1.125,1.125 0 0 0 0,1.589844 1.125,1.125 0 0 0 1.5898438,0 L 17.794922,7.7949219 a 1.125,1.125 0 0 0 0,-1.5898438 1.125,1.125 0 0 0 -1.589844,0 z" fill="currentColor"/>
+    <path d="M 7,6.875 A 1.125,1.125 0 0 0 5.875,8 v 9 A 1.1251125,1.1251125 0 0 0 7,18.125 h 9 A 1.125,1.125 0 0 0 17.125,17 1.125,1.125 0 0 0 16,15.875 H 8.125 V 8 A 1.125,1.125 0 0 0 7,6.875 Z" fill="currentColor"/>
+</svg>

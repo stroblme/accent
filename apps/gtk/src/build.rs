@@ -967,10 +967,11 @@ fn adopt_sidebar(
         glib::clone!(
             #[weak]
             app,
-            move |row: &str| {
-                if let Some(loc) = reference_target(row) {
-                    app.open_at(&loc);
-                }
+            // A row with no line is a file an outgoing link leads to, followed as the link is:
+            // New File for one nothing answers to.
+            move |row: &str| match reference_target(row) {
+                Some(loc) => app.open_at(&loc),
+                None => app.open_target(row),
             }
         ),
         // As a drag out of the tree does: every window's drop sheets go up.
@@ -1025,6 +1026,11 @@ fn adopt_sidebar(
                 _ => {}
             }
         }
+    ));
+    pane.connect_links_direction(glib::clone!(
+        #[weak]
+        app,
+        move || app.refresh_references()
     ));
     let bibliography = bibliography::Panel::new(app);
     pane.add_bibliography(&bibliography.root);
@@ -1431,6 +1437,9 @@ fn install_chrome_css() {
                color-mix(in srgb, currentColor var(--border-opacity), transparent); }} }} \
              .accent-section > box > title > expander:dir(ltr) {{ margin-right: 6px; }} \
              .accent-section > box > title > expander:dir(rtl) {{ margin-left: 6px; }} \
+             .accent-unresolved {{ text-decoration-line: underline; \
+               text-decoration-color: \
+                 color-mix(in srgb, currentColor 25%, var(--view-bg-color)); }} \
              .accent-lone-header > windowhandle > box {{ padding-bottom: 0; }} \
              textview.accent-doc {{ color: var(--view-fg-color); \
                background-color: var(--view-bg-color); }} \
