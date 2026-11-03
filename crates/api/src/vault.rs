@@ -469,6 +469,9 @@ methods! {
     /// [`rescan`](Vault::rescan) scans the whole vault.
     rescan_dir(dir: ref str) -> ();
     search(query: ref str, limit: val usize, include_ignored: val bool) -> Vec<SearchHit>;
+    /// A note's saved search: [`search`](Vault::search) without what git ignores, which neither
+    /// cancels the Search pane's query nor is cancelled by it.
+    saved_search(query: ref str, limit: val usize) -> Vec<SearchHit>;
     /// The text the index holds of `rel`: for a PDF, its pages joined by form feeds, which the
     /// Search pane lists the rest of its matches from (`Index::indexed_text`).
     indexed_text(rel: ref str) -> Option<String>;

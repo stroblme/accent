@@ -47,6 +47,13 @@ impl Local {
         Ok(self.supersede(|index| index.search(query, limit, include_ignored))?)
     }
 
+    /// A saved search's rows (a `search` block in a note): [`search`](Self::search) with what git
+    /// ignores left out, on the same connection but never superseded, nor superseding the pane's
+    /// query, which it waits for instead.
+    pub fn saved_search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        Ok(self.searcher().search(query, limit, false)?)
+    }
+
     /// The mid-word matches below a ranked search: [`Index::search_mid_word`], on the same
     /// connection as [`search`](Self::search) and superseded as it is.
     pub fn search_mid_word(

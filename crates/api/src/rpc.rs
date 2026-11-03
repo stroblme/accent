@@ -966,6 +966,27 @@ mod tests {
         );
     }
 
+    /// A query's qualifiers are read on the host, where the index is, and a saved search takes the
+    /// same route as the pane's; one the host cannot read says why.
+    #[test]
+    fn a_query_is_read_where_the_index_is() {
+        let w = Wired::open();
+        assert!(w.wait(|e| matches!(e, Event::Reconciled(_))));
+
+        let hits: Vec<crate::SearchHit> =
+            w.client.call("saved_search", json!(["#tag", 10])).unwrap();
+        let files: Vec<&str> = hits.iter().map(|h| h.rel_path.as_str()).collect();
+        assert_eq!(files, ["b.md"]);
+        let refused = w
+            .client
+            .call::<Vec<crate::SearchHit>>("search", json!(["kind:pfd", 10, false]))
+            .unwrap_err();
+        assert!(
+            matches!(&refused, Error::Core(Core::Invalid(why)) if why.contains("is not a kind")),
+            "{refused}"
+        );
+    }
+
     /// A cancel is a notification: it is taken, nothing comes back for it, and the connection
     /// carries on answering. One for a request that has already finished is simply not there.
     #[test]
