@@ -214,13 +214,6 @@ fn edit_for(key: gdk::Key, state: gdk::ModifierType) -> Option<Edit> {
     }
 }
 
-/// Clamp a vertical destination to `len` while retaining `goal`, restoring
-/// the desired column after crossing short lines.
-fn vertical_step(goal: Option<i32>, column: i32, len: i32) -> (i32, i32) {
-    let goal = goal.unwrap_or(column);
-    (goal.min(len), goal)
-}
-
 /// The column `prefix` ends at, a tab counting on to the next stop rather than as one character.
 fn visual_column(prefix: &str, width: usize) -> usize {
     prefix.chars().fold(0, |column, c| match c {
@@ -387,8 +380,9 @@ mod imp {
     use super::*;
     use std::cell::{Cell, RefCell};
 
-    /// Secondary caret marks, anchor and retained vertical goal. `below`
-    /// records Add Caret direction (`true` below), or `None` for other origins.
+    /// Secondary caret marks, anchor and retained vertical goal, a buffer x the caret aims for
+    /// on its way up and down. `below` records Add Caret direction (`true` below), or `None` for
+    /// other origins.
     pub struct Caret {
         pub mark: gtk::TextMark,
         pub anchor: gtk::TextMark,
@@ -436,7 +430,7 @@ mod imp {
         /// Programmatic-edit guard so mark/change hooks do not discard carets
         /// as if external movement occurred.
         pub busy: Cell<bool>,
-        /// Primary goal column, like [`Caret::goal`], cleared by edits or
+        /// Primary goal, like [`Caret::goal`], cleared by edits or
         /// non-column movement.
         pub goal: Cell<Option<i32>>,
         /// Whole-word matching for a selected current word
@@ -447,9 +441,6 @@ mod imp {
         pub blinked_at: Cell<i64>,
         /// The tick callback that repaints the blink, while there is one to repaint.
         pub blink: RefCell<Option<gtk::TickCallbackId>>,
-        /// Document-line vertical movement for code. Wrapped prose keeps display
-        /// rows because one paragraph may span several screens.
-        pub logical_lines: Cell<bool>,
         /// Focus mode's line fade (`fade.rs`): whether it is wanted, how far in it is from 0 to
         /// 1, the frame time and strength its ramp started from, and the tick running the ramp.
         pub fade_on: Cell<bool>,
@@ -651,26 +642,33 @@ mod imp {
             );
         }
 
-        /// Use document lines for requested Up/Down/Home/End code movement.
-        /// Retain GTK display paging and other motions, correcting carets
-        /// left on hidden lines.
+        /// Up and Down by screen rows, GTK's own, in every flavour (user decision 2026-11-03);
+        /// Home and End as VS Code takes them on a wrapped line ([`super::home`],
+        /// [`super::end`]). A caret GTK leaves on hidden lines is put back where the text shows.
         fn move_cursor(&self, step: gtk::MovementStep, count: i32, extend: bool) {
+            self.goal.set(None);
+            let obj = self.obj();
+            let buffer = obj.buffer();
             match step {
-                gtk::MovementStep::DisplayLines if self.logical_lines.get() => {
-                    self.obj().move_by_lines(count, extend)
-                }
-                gtk::MovementStep::DisplayLineEnds => {
-                    self.goal.set(None);
-                    // GTK implements `ParagraphEnds` as the start and the end of the line.
-                    self.parent_move_cursor(gtk::MovementStep::ParagraphEnds, count, extend);
+                // Without a caret GTK scrolls instead, which these keys still do.
+                gtk::MovementStep::DisplayLineEnds if obj.is_cursor_visible() => {
+                    obj.reset_im_context();
+                    let insert = buffer.get_insert();
+                    let at = buffer.iter_at_mark(&insert);
+                    let to = match count > 0 {
+                        true => super::end(obj.upcast_ref(), &at),
+                        false => super::home(obj.upcast_ref(), &at),
+                    };
+                    match extend {
+                        true => buffer.move_mark(&insert, &to),
+                        false => buffer.place_cursor(&to),
+                    }
+                    obj.scroll_mark_onscreen(&insert);
                 }
                 _ => {
-                    self.goal.set(None);
                     self.parent_move_cursor(step, count, extend);
                     // GTK passes over a shut block, but where nothing is shown past it — Down at
                     // the end of the text — it lands inside, out of sight.
-                    let obj = self.obj();
-                    let buffer = obj.buffer();
                     let insert = buffer.get_insert();
                     if let Some(to) = crate::fold::shown(&buffer, &buffer.iter_at_mark(&insert)) {
                         match extend {
@@ -702,13 +700,6 @@ impl Default for View {
 impl View {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Use document-line Up/Down for code so wrapped statements remain one
-    /// vertical step. Prose retains GTK display rows to avoid skipping
-    /// whole wrapped paragraphs.
-    pub fn set_logical_lines(&self, on: bool) {
-        self.imp().logical_lines.set(on);
     }
 
     /// Paint ghost text without inserting into the buffer, preserving undo,
@@ -827,10 +818,13 @@ impl View {
             .box_columns()
             .unwrap_or((from.line_offset(), from.line_offset()));
         let len = line_length(&buffer, line);
-        let (column, goal) = vertical_step(None, caret, len);
-        target.set_line_offset(column);
+        target.set_line_offset(caret.min(len));
         let mut start = target;
         start.set_line_offset(anchor.min(len));
+        // The new caret aims where the column's caret is on screen, past a short line too.
+        let mut aim = from;
+        aim.set_line_offset(caret.min(line_length(&buffer, from.line())));
+        let goal = self.iter_location(&aim).x();
 
         // A caret already there would be a second one on the same character, which is one caret.
         if self
@@ -1329,12 +1323,105 @@ fn line_length(buffer: &gtk::TextBuffer, line: i32) -> i32 {
     line_end(buffer, line).line_offset()
 }
 
+/// Where Home takes a caret at `at`, as VS Code takes it on a wrapped line: on a row the line
+/// wraps onto, to the row's first character that is not a space, and from there, or from the
+/// line's first row, to the line's, then to the line's start and back.
+pub(crate) fn home(view: &gtk::TextView, at: &gtk::TextIter) -> gtk::TextIter {
+    let mut row = *at;
+    view.backward_display_line_start(&mut row);
+    if !row.starts_line() {
+        let mut row_end = row;
+        view.forward_display_line_end(&mut row_end);
+        let first = non_blank(&row, &row_end);
+        if first != *at {
+            return first;
+        }
+    }
+    let mut start = *at;
+    start.set_line_offset(0);
+    let first = non_blank(&start, &line_end(&at.buffer(), at.line()));
+    match first == *at {
+        true => start,
+        false => first,
+    }
+}
+
+/// Where End takes a caret at `at`, as VS Code takes it on a wrapped line: to the end of its
+/// screen row, and from there, or from the line's last row, to the end of the line.
+pub(crate) fn end(view: &gtk::TextView, at: &gtk::TextIter) -> gtk::TextIter {
+    let mut row_end = *at;
+    view.forward_display_line_end(&mut row_end);
+    match row_end == *at {
+        true => line_end(&at.buffer(), at.line()),
+        false => row_end,
+    }
+}
+
+/// The first character from `from` to `to` that is not a space or a tab, or `from` where every
+/// one of them is.
+fn non_blank(from: &gtk::TextIter, to: &gtk::TextIter) -> gtk::TextIter {
+    let mut at = *from;
+    while at < *to && matches!(at.char(), ' ' | '\t') {
+        at.forward_char();
+    }
+    match at < *to {
+        true => at,
+        false => *from,
+    }
+}
+
+/// The character `count` screen rows from `at`, up for a negative count, nearest buffer x `x`:
+/// a shut block's lines are no rows. With no row that way the caret goes to the end of the text
+/// going down or to the start of its line going up, as GTK's own Down and Up take one, and a page
+/// goes as far as there are rows.
+fn row_by(view: &gtk::TextView, at: &gtk::TextIter, x: i32, count: i32) -> gtk::TextIter {
+    let buffer = at.buffer();
+    let mut row = *at;
+    for step in 0..count.abs() {
+        let mut next = row;
+        let moved = match count > 0 {
+            true => view.forward_display_line(&mut next),
+            false => view.backward_display_line(&mut next),
+        };
+        if !moved && step == 0 {
+            // GTK has left `next` at the end of the text going down, and where it was going up.
+            if count < 0 {
+                next.set_line_offset(0);
+            }
+            return crate::fold::shown(&buffer, &next).unwrap_or(next);
+        }
+        if !moved {
+            break;
+        }
+        row = next;
+    }
+    let landed = at_x(view, &row, x);
+    crate::fold::shown(&buffer, &landed).unwrap_or(landed)
+}
+
+/// The character on the screen row of `row` nearest buffer x `x`, short of the row's last where
+/// the line wraps on past it, as GTK puts its own caret there. Walked along the row rather than
+/// asked of a point, whose height GTK may not have measured yet for a row off screen.
+fn at_x(view: &gtk::TextView, row: &gtk::TextIter, x: i32) -> gtk::TextIter {
+    let mut at = *row;
+    view.backward_display_line_start(&mut at);
+    let mut end = at;
+    view.forward_display_line_end(&mut end);
+    while at < end {
+        let rect = view.iter_location(&at);
+        if x < rect.x() + rect.width() / 2 {
+            break;
+        }
+        at.forward_char();
+    }
+    at
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         Edit, Motion, Span, blink_alpha, departure, edit_for, ends_column, merge, next_occurrence,
-        occurrences, spaces_ahead, spaces_behind, spread, tab_insert, undo_or_redo, vertical_step,
-        visual_column,
+        occurrences, spaces_ahead, spaces_behind, spread, tab_insert, undo_or_redo, visual_column,
     };
     use gtk::gdk::{Key, ModifierType as Mod};
 
@@ -1460,16 +1547,6 @@ mod tests {
         assert_eq!(spread("a\nb", 3), ["a\nb"; 3]);
         assert_eq!(spread("x", 2), ["x", "x"]);
         assert_eq!(spread("a\n", 1), ["a\n"], "one caret is a plain paste");
-    }
-
-    /// A caret moving into a shorter line stops at its end rather than off it, and keeps aiming
-    /// at the column it came from, so the line after that brings it back.
-    #[test]
-    fn a_caret_crossing_a_short_line_keeps_aiming_at_its_column() {
-        assert_eq!(vertical_step(None, 9, 3), (3, 9));
-        assert_eq!(vertical_step(Some(9), 3, 10), (9, 9));
-        assert_eq!(vertical_step(None, 2, 3), (2, 2));
-        assert_eq!(vertical_step(None, 0, 0), (0, 0));
     }
 
     /// `Ctrl+Delete` on whitespace takes the run and stops; inside a word it is not the

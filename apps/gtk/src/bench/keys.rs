@@ -6,14 +6,15 @@ use accent_api::{Completion, Kind, Pos, Range, TextEdit};
 use accent_core::note::Syntax;
 use vte4::TerminalExt as _;
 
-/// Drive word deletion, logical-line movement and multicaret semantics through binding signals
+/// Drive word deletion, screen-row movement and multicaret semantics through binding signals
 /// and [`multicaret::View::press`]. Use an isolated view/window, requiring a display but no
 /// input or vault writes. `make drills` compares every printed buffer/caret result with
 /// `keys.expected`.
 pub(super) fn bench_keys(app: &Rc<App>) {
     let view = multicaret::View::new();
-    // The drills are about the code flavours, which is where the logical-line moves are wanted.
-    view.set_logical_lines(true);
+    // Monospace, as code is: a caret going up and down aims for its place on screen, which is
+    // then its column.
+    view.set_monospace(true);
     view.set_wrap_mode(gtk::WrapMode::Word);
     // A tab's whole-line cut and copy, which the column drills go through.
     editor::line_clipboard(view.upcast_ref());
@@ -57,7 +58,7 @@ pub(super) fn bench_keys(app: &Rc<App>) {
         view.emit_delete_from_cursor(gtk::DeleteType::WordEnds, -1);
         println!("bench ctrl_backspace {:?}", text(&buffer));
 
-        // Down is one line of the document even where that line wraps over several rows.
+        // Down is one screen row, the wrapped line's next, in code as in prose.
         buffer.set_text(&format!("{}\nshort\ntail", "wide ".repeat(80)));
         buffer.place_cursor(&buffer.iter_at_offset(3));
         let mut row = buffer.start_iter();
@@ -65,13 +66,39 @@ pub(super) fn bench_keys(app: &Rc<App>) {
         println!("bench wraps {wraps}");
         view.emit_move_cursor(gtk::MovementStep::DisplayLines, 1, false);
         let at = buffer.iter_at_mark(&buffer.get_insert());
-        println!("bench down_line {} {}", at.line(), at.line_offset());
+        println!(
+            "bench down_line {} {}",
+            at.line(),
+            at.line_offset() > row.line_offset()
+        );
 
-        // End goes to the end of the line, not to the end of the screen row it is on.
+        // End goes to the end of the screen row, a second End to the end of the line, and Home
+        // back to the row's start, then to the line's: VS Code's keys on a wrapped line.
+        let shown = |step: &str| {
+            let at = buffer.iter_at_mark(&buffer.get_insert());
+            println!("bench {step} {} {}", at.line(), at.line_offset());
+        };
         buffer.place_cursor(&buffer.iter_at_offset(3));
         view.emit_move_cursor(gtk::MovementStep::DisplayLineEnds, 1, false);
-        let at = buffer.iter_at_mark(&buffer.get_insert());
-        println!("bench end_line {} {}", at.line(), at.line_offset());
+        shown("end_row");
+        view.emit_move_cursor(gtk::MovementStep::DisplayLineEnds, 1, false);
+        shown("end_line");
+        buffer.place_cursor(&buffer.iter_at_offset(row.offset() + 3));
+        view.emit_move_cursor(gtk::MovementStep::DisplayLineEnds, -1, false);
+        println!(
+            "bench home_row {}",
+            buffer.iter_at_mark(&buffer.get_insert()) == row
+        );
+        view.emit_move_cursor(gtk::MovementStep::DisplayLineEnds, -1, false);
+        shown("home_line");
+        // An indented line: Home goes to its first character that is not a space, then to its
+        // start, and back.
+        buffer.set_text("    indented");
+        buffer.place_cursor(&buffer.end_iter());
+        for _ in 0..3 {
+            view.emit_move_cursor(gtk::MovementStep::DisplayLineEnds, -1, false);
+            shown("home_indent");
+        }
 
         // Every caret answers Ctrl+Delete, not only the primary one.
         buffer.set_text("a   b\nc   d");
@@ -337,8 +364,6 @@ async fn bench_column(view: &multicaret::View) {
 async fn bench_box(view: &multicaret::View) {
     let buffer = view.buffer();
     view.clear_carets();
-    // Monospace, so a column is the same number of pixels on every line.
-    view.set_monospace(true);
     let wrapped = "wide ".repeat(80);
     buffer.set_text(&format!(
         "0123456789\n0\n0123\n\n0123456789\n{wrapped}\n0123456789"
@@ -370,7 +395,6 @@ async fn bench_box(view: &multicaret::View) {
     show("wrap_up");
     view.select_box(point(2, 1), point(2, 1));
     show("click");
-    view.set_monospace(false);
 }
 
 /// Add Caret Below and Above with a word selected grow a box from it: the same columns on each
@@ -441,25 +465,28 @@ async fn bench_folds(view: &multicaret::View) {
     view.clear_carets();
 
     // One caret steps over the block, from its header to the line after it and back.
-    for (mode, logical) in [("code", true), ("prose", false)] {
-        view.set_logical_lines(logical);
-        buffer.set_text(text);
-        shut(1, 3);
-        buffer.place_cursor(&at(&buffer, 1, 0));
-        glib::timeout_future(Duration::from_millis(100)).await;
-        view.emit_move_cursor(gtk::MovementStep::DisplayLines, 1, false);
-        show(&format!("{mode}_down"));
-        view.emit_move_cursor(gtk::MovementStep::DisplayLines, -1, false);
-        show(&format!("{mode}_up"));
-        // A block reaching the end of the text: Down from its header has nowhere to go.
-        buffer.set_text("x0\nhead\n  a");
-        shut(1, 2);
-        buffer.place_cursor(&at(&buffer, 1, 2));
-        glib::timeout_future(Duration::from_millis(100)).await;
-        view.emit_move_cursor(gtk::MovementStep::DisplayLines, 1, false);
-        show(&format!("{mode}_down_at_end"));
-    }
-    view.set_logical_lines(true);
+    buffer.set_text(text);
+    shut(1, 3);
+    buffer.place_cursor(&at(&buffer, 1, 0));
+    glib::timeout_future(Duration::from_millis(100)).await;
+    view.emit_move_cursor(gtk::MovementStep::DisplayLines, 1, false);
+    show("down");
+    view.emit_move_cursor(gtk::MovementStep::DisplayLines, -1, false);
+    show("up");
+    // A block reaching the end of the text: Down from its header has nowhere to go.
+    buffer.set_text("x0\nhead\n  a");
+    shut(1, 2);
+    buffer.place_cursor(&at(&buffer, 1, 2));
+    glib::timeout_future(Duration::from_millis(100)).await;
+    view.emit_move_cursor(gtk::MovementStep::DisplayLines, 1, false);
+    show("down_at_end");
+    // A column at the end of the text: Down from the header has nowhere to go either.
+    buffer.place_cursor(&at(&buffer, 0, 1));
+    view.add_caret(true);
+    glib::timeout_future(Duration::from_millis(100)).await;
+    view.press(gdk::Key::Down, gdk::ModifierType::empty());
+    show("column_down_at_end");
+    view.clear_carets();
 
     // A column steps over it too.
     buffer.set_text(text);

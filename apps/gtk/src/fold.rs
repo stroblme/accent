@@ -117,20 +117,6 @@ pub fn hiding(buffer: &gtk::TextBuffer, iter: &gtk::TextIter) -> Vec<gtk::TextTa
     hiders(buffer).filter(|tag| iter.has_tag(tag)).collect()
 }
 
-/// Move `count` visible lines from `at`, backwards for negative counts, skipping hidden runs.
-/// At document bounds return the last reached line and `false`.
-pub fn line_by(at: &gtk::TextIter, count: i32) -> (i32, bool) {
-    let mut line = *at;
-    for _ in 0..count.abs() {
-        let mut next = line;
-        if !visible_line(&mut next, count > 0) {
-            return (line.line(), false);
-        }
-        line = next;
-    }
-    (line.line(), true)
-}
-
 /// Move a caret out of hidden text to the preceding line end or, at document start, the following line start.
 /// Return `None` for visible lines. This corrects GTK moves into hidden text at document bounds.
 pub fn shown(buffer: &gtk::TextBuffer, at: &gtk::TextIter) -> Option<gtk::TextIter> {

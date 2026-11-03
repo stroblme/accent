@@ -1,8 +1,14 @@
 bench ctrl_delete "a b"
 bench ctrl_backspace "ab"
 bench wraps true
-bench down_line 1 3
+bench down_line 0 true
+bench end_row 0 34
 bench end_line 0 400
+bench home_row true
+bench home_line 0 0
+bench home_indent 0 4
+bench home_indent 0 0
+bench home_indent 0 4
 bench caret_delete "ab\ncd"
 bench caret_words [(0, 5), (1, 2), (2, 5)]
 bench caret_down [(1, 2), (2, 2), (3, 5)]
@@ -51,7 +57,7 @@ bench selection_cut "ad\neh\nil" [(1, 1), (4, 4), (7, 7)]
 bench selection_cut_clipboard Ok(Some("bc\nfg\njk"))
 bench selection_paste "a1d\ne2h\ni3l" [(2, 2), (6, 6), (10, 10)]
 bench selection_meet "ab\ncd\nef\ngh" [(1, 4), (4, 7), (7, 10)]
-bench selection_merge "ab\ncd\nef\ngh" [(1, 10)]
+bench selection_merge "ab\ncd\nef\ngh" [(1, 11)]
 bench selection_merge_carets false
 bench selection_duplicate "ab\nab\ncd\ncd\nef\nef\ngh" [(4, 5), (10, 11), (16, 17)]
 bench selection_duplicate_run "ab\ncd\nef\ngh\nab\ncd\nef\ngh\nij" [(13, 16), (16, 19), (19, 22)]
@@ -107,12 +113,10 @@ bench grow_take_back 1:6-10 2:2-2 3:6-8
 bench grow_original 1:6-10
 bench grow_up 0:6-10 1:6-10
 bench grow_typed "one twXree\nalpha X\nxy\ngamma de\nomega zeta"
-bench fold_code_down [(4, 0)] shut=true
-bench fold_code_up [(1, 0)] shut=true
-bench fold_code_down_at_end [(1, 4)] shut=true
-bench fold_prose_down [(4, 0)] shut=true
-bench fold_prose_up [(1, 0)] shut=true
-bench fold_prose_down_at_end [(1, 4)] shut=true
+bench fold_down [(4, 0)] shut=true
+bench fold_up [(1, 0)] shut=true
+bench fold_down_at_end [(1, 4)] shut=true
+bench fold_column_down_at_end [(1, 1), (1, 4)] shut=true
 bench fold_column_down [(1, 1), (4, 1)] shut=true
 bench fold_column_up [(0, 1), (1, 1)] shut=true
 bench fold_add_below [(1, 1), (2, 1)] shut=false

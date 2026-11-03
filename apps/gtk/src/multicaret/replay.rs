@@ -4,44 +4,6 @@
 use super::*;
 
 impl View {
-    /// Move by `count` document lines while retaining the goal column across
-    /// shorter lines, so returning restores the original column.
-    pub(super) fn move_by_lines(&self, count: i32, extend: bool) {
-        let imp = self.imp();
-        self.reset_im_context();
-        let buffer = self.buffer();
-        let insert = buffer.get_insert();
-        let from = buffer.iter_at_mark(&insert);
-        let (line, reached) = crate::fold::line_by(&from, count);
-        let (landing, goal) = vertical_step(
-            imp.goal.get(),
-            from.line_offset(),
-            line_length(&buffer, line),
-        );
-        let at = match reached {
-            true => {
-                let mut at = buffer.iter_at_line(line).unwrap_or(from);
-                at.set_line_offset(landing);
-                at
-            }
-            // Past the last line shown the caret parks at its end, or at the start of the first,
-            // which is what GTK does and what keeps Down at the bottom doing something.
-            false if count > 0 => line_end(&buffer, line),
-            false => buffer.iter_at_line(line).unwrap_or(from),
-        };
-        imp.goal.set(Some(goal));
-
-        // Ours, not the user's: the `mark-set` hook would read it as a click and drop both the
-        // goal we just set and every secondary caret.
-        imp.busy.set(true);
-        match extend {
-            true => buffer.move_mark(&insert, &at),
-            false => buffer.place_cursor(&at),
-        }
-        imp.busy.set(false);
-        self.scroll_mark_onscreen(&insert);
-    }
-
     /// Dispatch one press at every caret, shared by `editor::keys` and
     /// headless drills.
     pub(crate) fn press(&self, key: gdk::Key, state: gdk::ModifierType) -> glib::Propagation {
@@ -82,7 +44,7 @@ impl View {
         let buffer = self.buffer();
         let insert = buffer.get_insert();
         let imp = self.imp();
-        // Marks and goal column per caret, the primary appended so it is edited like any other.
+        // Marks and goal per caret, the primary appended so it is edited like any other.
         // Copied out of the cells first: the edits below move marks, and a borrow held across
         // them would meet the hooks that fire on the way.
         let mut carets: Vec<(gtk::TextMark, gtk::TextMark, Option<i32>)> = imp
@@ -95,7 +57,7 @@ impl View {
         // Measured before anything moves.
         let page =
             matches!(edit, Edit::Move(Motion::PageUp | Motion::PageDown, _)).then(|| self.page());
-        let page_lines = page.map_or(0, |(lines, _)| lines);
+        let page_rows = page.map_or(0, |(rows, _)| rows);
 
         let opened = self.begin_step();
         for (mark, anchor, goal) in &mut carets {
@@ -111,7 +73,8 @@ impl View {
                 at = buffer.iter_at_offset(span.start());
                 buffer.delete(&mut at, &mut to);
             }
-            // Only vertical movement leaves a column behind to aim at; everything else drops it.
+            // Only vertical movement leaves a place on screen behind to aim at; everything else
+            // drops it.
             let mut aim = None;
             match edit {
                 Edit::Insert(text) => buffer.insert(&mut at, text),
@@ -169,26 +132,17 @@ impl View {
                             let step = match motion {
                                 Motion::Up => -1,
                                 Motion::Down => 1,
-                                Motion::PageUp => -page_lines,
-                                _ => page_lines,
+                                Motion::PageUp => -page_rows,
+                                _ => page_rows,
                             };
-                            // A shut block is one line, as at a single caret, and a page stops at
-                            // either end of the document: a line step there lands where the
-                            // caret already is.
-                            let (line, _) = crate::fold::line_by(&at, step);
-                            if let Some(mut moved) = buffer.iter_at_line(line) {
-                                let (column, kept) = vertical_step(
-                                    *goal,
-                                    at.line_offset(),
-                                    line_length(&buffer, line),
-                                );
-                                moved.set_line_offset(column);
-                                at = moved;
-                                aim = Some(kept);
-                            }
+                            // Screen rows, as a single caret goes, each caret aiming for the place
+                            // on screen it set out from across shorter rows.
+                            let x = goal.unwrap_or_else(|| self.iter_location(&at).x());
+                            at = row_by(self.upcast_ref(), &at, x, step);
+                            aim = Some(x);
                         }
-                        Motion::Home => at.set_line_offset(0),
-                        Motion::End => at = line_end(&buffer, at.line()),
+                        Motion::Home => at = home(self.upcast_ref(), &at),
+                        Motion::End => at = end(self.upcast_ref(), &at),
                     }
                     self.put(mark, anchor, &at, *extend);
                 }
@@ -207,20 +161,27 @@ impl View {
         }
     }
 
-    /// Return visible document-line count for paging, excluding folded bodies,
-    /// and the primary's viewport fraction (0 top, 1 bottom) to retain it
-    /// after scrolling the same page.
+    /// Return the count of screen rows on screen for paging, a shut block's lines being none,
+    /// and the primary's viewport fraction (0 top, 1 bottom) to retain it after scrolling the
+    /// same page.
     fn page(&self) -> (i32, f64) {
         let rect = self.visible_rect();
+        let bottom = rect.y() + rect.height();
         let (mut row, _) = self.line_at_y(rect.y());
-        let (bottom, _) = self.line_at_y(rect.y() + rect.height());
         let y = self.iter_location(&caret(&self.buffer())).y() - rect.y();
         let align = f64::from(y) / f64::from(rect.height().max(1));
-        let mut lines = 0;
-        while crate::fold::visible_line(&mut row, true) && row.line() <= bottom.line() {
-            lines += 1;
+        let mut rows = 0;
+        loop {
+            let top = self.iter_location(&row).y();
+            if top >= bottom {
+                break;
+            }
+            rows += i32::from(top >= rect.y());
+            if !self.forward_display_line(&mut row) {
+                break;
+            }
         }
-        (lines.max(1), align.clamp(0.0, 1.0))
+        (rows.max(1), align.clamp(0.0, 1.0))
     }
 
     /// Move a caret to `at`, retaining its anchor only with `extend`. Use GTK
