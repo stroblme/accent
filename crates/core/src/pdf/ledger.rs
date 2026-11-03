@@ -453,13 +453,18 @@ impl Ink {
         let walked = |area: Result<pdf::Rect>| area.map(|area| Walked::Ink(page, area));
         match Batch::of(&run[0], forwards) {
             Some(Batch::Move(_)) => {
-                let moves: Vec<(Ref, pdf::Matrix)> = (run.iter())
+                let mut moves: Vec<(Ref, pdf::Matrix)> = (run.iter())
                     .filter_map(|step| match step {
                         Step::Moved { at, matrix, .. } => Some((*at, *matrix)),
                         _ => None,
                     })
                     .map(|(at, m)| (at, if forwards { m } else { pdf::invert(m) }))
                     .collect();
+                // Each of ours moved goes to the end of `/Annots`, so Undo moves them in the
+                // order the move did, which keeps them stacked as they were among themselves.
+                if !forwards {
+                    moves.reverse();
+                }
                 doc.transform_inks(page, &moves)?
                     .into_iter()
                     .map(walked)
@@ -467,7 +472,7 @@ impl Ink {
             }
             // Drawing forwards puts a stroke on, and so does erasing backwards.
             Some(Batch::On(_)) => {
-                let drawn: Vec<&pdf::Drawn> = (run.iter())
+                let mut drawn: Vec<&pdf::Drawn> = (run.iter())
                     .map(|step| match step {
                         Step::Drawn { at, kept, .. } | Step::Erased { at, kept, .. } => (kept
                             .as_ref())
@@ -475,6 +480,15 @@ impl Ink {
                         _ => Err(Error::Pdf("not a stroke put back".to_string())),
                     })
                     .collect::<Result<_>>()?;
+                // Another editor's stroke goes back to its place in `/Annots`, so in the reverse
+                // of the order they were taken in, and ours to its end: Undo puts theirs back
+                // first, then ours in the order they were taken, stacked as they were.
+                if !forwards {
+                    let (mut ours, theirs): (Vec<_>, Vec<_>) =
+                        (drawn.into_iter()).partition(|d| matches!(d, pdf::Drawn::Ours { .. }));
+                    ours.reverse();
+                    drawn = theirs.into_iter().chain(ours).collect();
+                }
                 doc.redraw_inks(page, &drawn)?
                     .into_iter()
                     .map(walked)
@@ -945,6 +959,40 @@ mod tests {
         assert!(corners(&doc, 1).is_empty(), "one Undo takes all three off");
         ink.walk(&mut doc, true);
         assert_eq!(placed(&reopen(&dir, &doc), 1), pasted);
+    }
+
+    /// Strokes moved or deleted together stay stacked as they were drawn through the Undo and the
+    /// Redo, each of ours going to the end of `/Annots` in the order the step made them.
+    #[test]
+    fn undo_of_a_group_move_or_delete_keeps_the_stacking() {
+        let Some((_dir, mut doc)) = open_tiny() else {
+            return;
+        };
+        let mut ink = Ink::default();
+        for y in [20.0, 40.0, 60.0] {
+            let line = pdf::Shape::Line {
+                a: (20.0, y),
+                b: (80.0, y),
+            };
+            let (_, at) = doc.add_shape(0, line, STYLE).unwrap();
+            ink.drew(0, at);
+        }
+        let stacked = |ink: &mut Ink, doc: &PdfDoc| -> Vec<u32> {
+            ink.named(doc, 0).iter().map(|(id, _)| *id).collect()
+        };
+        let drawn = stacked(&mut ink, &doc);
+
+        let right = [1.0, 0.0, 0.0, 1.0, 10.0, 0.0];
+        ink.transform(&mut doc, 0, &drawn, right).unwrap();
+        assert_eq!(stacked(&mut ink, &doc), drawn, "the move");
+        ink.walk(&mut doc, false);
+        assert_eq!(stacked(&mut ink, &doc), drawn, "its Undo");
+        ink.walk(&mut doc, true);
+        assert_eq!(stacked(&mut ink, &doc), drawn, "its Redo");
+
+        ink.delete(&mut doc, 0, &drawn).unwrap();
+        ink.walk(&mut doc, false);
+        assert_eq!(stacked(&mut ink, &doc), drawn, "a delete's Undo");
     }
 
     /// A cut is one step: Undo takes the pieces off and puts the stroke back whole, and Redo cuts
