@@ -43,6 +43,24 @@ Read the [user guide](https://stroblme.github.io/accent/) for setup and everyday
 
 ![A Python program paused at a breakpoint in the Solarized theme, beside its Debug Console and output](docs/screenshot-5.png)
 
+## Device support
+
+| Feature                        | Linux (native)   | Linux (Flatpak)        | macOS 15+ | Android 12+ |
+| ------------------------------ | ---------------- | ---------------------- | --------- | ----------- |
+| Notes, search, tags, backlinks | Yes              | Yes                    | Yes       | Yes         |
+| PDF reading & highlights       | Yes              | Yes                    | Yes       | Yes         |
+| PDF drawing & page editing     | Yes              | Yes                    | Yes       | No          |
+| draw.io diagrams               | Yes              | Yes                    | Yes       | No          |
+| Git                            | Yes              | Yes                    | Yes       | No          |
+| Persistent terminals           | Yes              | Yes, with host shells  | Yes       | No          |
+| Python debugging               | Yes              | Remote vaults only     | ?         | No          |
+| Notebooks                      | Yes              | Yes, with host kernels | ?         | No          |
+| Spell checking                 | Yes              | Yes                    | No        | No          |
+| Remote vaults                  | x86-64 & AArch64 | Same architecture      | Yes       | No          |
+| MCP server                     | Yes              | Yes                    | Yes       | No          |
+
+We have very little resource requirements for the remote deamon, allowing to support small devices like the Raspberry Pi Zero 2 W (512 MB) for remote development.
+
 ## Get started
 
 ### Desktop
