@@ -396,7 +396,9 @@ fn frames(path: &Path, look: Look, inverted: bool) -> Option<Vec<Frame>> {
         match delay {
             Some(delay) if !iter.on_currently_loading_frame() => {
                 clock += delay;
-                iter.advance(clock);
+                // Just past the frame's end, as gdk-pixbuf's glycin loader before 2.44.5
+                // (Fedora 44 ships 2.44.4) moves on only once that end has passed.
+                iter.advance(clock + Duration::from_millis(1));
             }
             _ => break,
         }
