@@ -275,13 +275,39 @@ impl PdfDoc {
         Ok(taken)
     }
 
+    /// Take each of `ats` off `page` as [`PdfDoc::take_ink`] takes one, in that order, the
+    /// document opened again once: what each left, or why it could not go. Every one is read
+    /// off the page before any is taken, while pdfium still lists the page as `/Annots` does.
+    pub fn take_inks(&mut self, page: usize, ats: &[Ref]) -> Result<Vec<Result<(Drawn, Rect)>>> {
+        let held: Vec<_> = ats.iter().map(|&at| self.hold(page, at)).collect();
+        let taken = (ats.iter().zip(held))
+            .map(|(&at, held)| held.and_then(|held| self.taken(page, at, held)))
+            .collect();
+        self.reopen()?;
+        Ok(taken)
+    }
+
     /// Put back a stroke or text [`PdfDoc::take_ink`] took, and say what box it covers: one of
     /// ours at the end of the page's `/Annots`, another editor's where it was.
     pub fn redraw_ink(&mut self, page: usize, drawn: &Drawn) -> Result<Rect> {
+        let area = self.put_back(page, drawn)?;
+        self.reopen()?;
+        Ok(area)
+    }
+
+    /// Put back each of `drawn` as [`PdfDoc::redraw_ink`] puts back one, in that order, the
+    /// document opened again once: the box each covers, or why it could not go back.
+    pub fn redraw_inks(&mut self, page: usize, drawn: &[&Drawn]) -> Result<Vec<Result<Rect>>> {
+        let put = drawn.iter().map(|d| self.put_back(page, d)).collect();
+        self.reopen()?;
+        Ok(put)
+    }
+
+    /// [`PdfDoc::redraw_ink`] without opening the document again.
+    fn put_back(&mut self, page: usize, drawn: &Drawn) -> Result<Rect> {
         match drawn {
             Drawn::Ours { at, area } => {
                 self.cos.put_last(page, *at)?;
-                self.reopen()?;
                 Ok(*area)
             }
             Drawn::Foreign { entries, area } => {
@@ -290,7 +316,6 @@ impl PdfDoc {
                     list.insert((*at).min(list.len()), entry.clone());
                 }
                 self.cos.set_annots(page, list)?;
-                self.reopen()?;
                 Ok(*area)
             }
         }
@@ -429,31 +454,70 @@ impl PdfDoc {
     /// picture (`Objects::turn`). A text of ours moves in its place, its corner where `m` takes
     /// it, set as it was.
     pub fn transform_ink(&mut self, page: usize, at: Ref, m: Matrix) -> Result<Rect> {
+        let held = self.hold(page, at)?;
+        let area = self.moved(page, at, m, held)?;
+        self.reopen()?;
+        Ok(area)
+    }
+
+    /// Transform each of `moves` on `page` as [`PdfDoc::transform_ink`] transforms one, in that
+    /// order, the document opened again once: on 2069 pages that is 4–5 ms, and a move of 20
+    /// strokes took 95 ms opening it after each, 7 ms opening it once. The box each covered and
+    /// now covers comes back, or why it could not move. Every one is read off the page before
+    /// any is written, while pdfium still lists the page as `/Annots` does, since a stroke of ours
+    /// moved goes to the end of it.
+    pub fn transform_inks(
+        &mut self,
+        page: usize,
+        moves: &[(Ref, Matrix)],
+    ) -> Result<Vec<Result<Rect>>> {
+        let held: Vec<_> = moves.iter().map(|&(at, _)| self.hold(page, at)).collect();
+        let moved = (moves.iter().zip(held))
+            .map(|(&(at, m), held)| held.and_then(|held| self.moved(page, at, m, held)))
+            .collect();
+        self.reopen()?;
+        Ok(moved)
+    }
+
+    /// The stroke or text of ours `at` on `page` as a move or a take needs it, read through
+    /// pdfium, so before anything of the page is written.
+    fn hold(&self, page: usize, at: Ref) -> Result<Held> {
         if let Ok((typed, was)) = self.typed_at(page, at) {
-            let moved = Typed {
-                at: apply(m, typed.at),
-                ..typed
-            };
-            let (now, _) = self.typed(page, &moved, Some(at))?;
-            return Ok(was.union(now));
+            return Ok(Held::Text(typed, was));
         }
-        let read = self.read_at(page, at)?;
+        Ok(Held::Ink(self.read_at(page, at)?))
+    }
+
+    /// `held`, the object `at`, moved by `m` in the update, without opening the document again.
+    fn moved(&mut self, page: usize, at: Ref, m: Matrix, held: Held) -> Result<Rect> {
+        let (_, height) = self.page_size(page)?;
+        let read = match held {
+            Held::Text(typed, was) => {
+                let moved = Typed {
+                    at: apply(m, typed.at),
+                    ..typed
+                };
+                let (now, _) = self.cos.put_text(page, height, &moved, Some(at))?;
+                return Ok(was.union(now));
+            }
+            Held::Ink(read) => read,
+        };
         if read.ours {
             let segs = transformed(&read.segs, m);
-            let (now, _) = self.drawn(page, &segs, read.style, Some(at))?;
+            let (now, _) = self
+                .cos
+                .put_ink(page, height, &segs, read.style, Some(at))?;
             return Ok(read.bounds.union(now));
         }
         let was = read.bounds;
         let strokes: Vec<Vec<(f32, f32)>> = (read.strokes.iter())
             .map(|stroke| stroke.iter().map(|&q| apply(m, q)).collect())
             .collect();
-        let (_, height) = self.page_size(page)?;
         let now = match m[1] == 0.0 && m[2] == 0.0 {
             true => was.under(m),
             false => (self.cos.turn(at, height, m)?).unwrap_or(was.under(m)),
         };
         self.cos.place(at, height, now, &strokes)?;
-        self.reopen()?;
         Ok(was.union(now))
     }
 
@@ -469,13 +533,22 @@ impl PdfDoc {
     /// Take the `/Ink` annotation or the text of ours `at` off a page, as [`PdfDoc::take_ink`]
     /// does, without opening the document again, and say what box it left.
     fn take(&mut self, page: usize, at: Ref) -> Result<(Drawn, Rect)> {
-        if let Ok((_, area)) = self.typed_at(page, at) {
-            let mut entries = self.cos.annots(page)?;
-            entries.retain(|e| *e != Object::Ref(at));
-            self.cos.set_annots(page, entries)?;
-            return Ok((Drawn::Ours { at, area }, area));
-        }
-        let read = self.read_at(page, at)?;
+        let held = self.hold(page, at)?;
+        self.taken(page, at, held)
+    }
+
+    /// `held`, the object `at`, taken off `page` in the update, without opening the document
+    /// again.
+    fn taken(&mut self, page: usize, at: Ref, held: Held) -> Result<(Drawn, Rect)> {
+        let read = match held {
+            Held::Text(_, area) => {
+                let mut entries = self.cos.annots(page)?;
+                entries.retain(|e| *e != Object::Ref(at));
+                self.cos.set_annots(page, entries)?;
+                return Ok((Drawn::Ours { at, area }, area));
+            }
+            Held::Ink(read) => read,
+        };
         let mut entries = self.cos.annots(page)?;
         let index = self.cos.index_of(page, at)?;
         let drawn = match read.ours {
@@ -871,6 +944,13 @@ pub(super) const PRINT: i64 = 4;
 /// The numbers of an array, or `None` for anything else.
 fn numbers(o: &Object) -> Option<Vec<f32>> {
     o.as_array()?.iter().map(number).collect()
+}
+
+/// A stroke or a text of ours as a move or a take reads it.
+enum Held {
+    /// A text of ours, and its `/Rect`.
+    Text(Typed, Rect),
+    Ink(Read),
 }
 
 /// One `/Ink` annotation as it was read off its page.

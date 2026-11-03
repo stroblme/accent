@@ -172,26 +172,39 @@ impl Ink {
         ids: &[u32],
         m: pdf::Matrix,
     ) -> Result<pdf::Rect> {
-        self.each(doc, page, ids, |doc, at| {
-            let area = doc.transform_ink(page, at, m)?;
-            Ok((
-                area,
-                Step::Moved {
-                    page,
-                    at,
-                    matrix: m,
-                },
-            ))
-        })
+        let ats: Vec<Ref> = self
+            .ordered(doc, page, ids)
+            .into_iter()
+            .map(|(_, at)| at)
+            .collect();
+        let moves: Vec<(Ref, pdf::Matrix)> = ats.iter().map(|&at| (at, m)).collect();
+        let moved = doc.transform_inks(page, &moves)?.into_iter().zip(&ats);
+        let steps = moved.map(|(made, &at)| {
+            let matrix = m;
+            (
+                at,
+                made.map(|area| (area, Step::Moved { page, at, matrix })),
+            )
+        });
+        self.record_each(page, ids, steps)
     }
 
     /// Take the strokes and texts `ids` off `page`, as one step: the box they covered.
     pub fn delete(&mut self, doc: &mut PdfDoc, page: usize, ids: &[u32]) -> Result<pdf::Rect> {
-        self.each(doc, page, ids, |doc, at| {
-            let (drawn, area) = doc.take_ink(page, at)?;
-            let kept = Some(drawn);
-            Ok((area, Step::Erased { page, at, kept }))
-        })
+        let ats: Vec<Ref> = self
+            .ordered(doc, page, ids)
+            .into_iter()
+            .map(|(_, at)| at)
+            .collect();
+        let taken = doc.take_inks(page, &ats)?.into_iter().zip(&ats);
+        let steps = taken.map(|(made, &at)| {
+            let made = made.map(|(drawn, area)| (area, Some(drawn)));
+            (
+                at,
+                made.map(|(area, kept)| (area, Step::Erased { page, at, kept })),
+            )
+        });
+        self.record_each(page, ids, steps)
     }
 
     /// The strokes and texts `ids` of `page` as plain geometry, each under its name, in the
@@ -231,19 +244,17 @@ impl Ink {
         Ok(area)
     }
 
-    /// `change` made to each of the objects `ids` name on `page`, in the order they are drawn
-    /// in, as one step: the box the changes covered. One no longer on the page, or that will not
-    /// change, is passed over; none changed at all is refused.
-    fn each(
+    /// The changes made to the objects `ids` named on `page`, recorded as one step: the box
+    /// they covered. One that could not be made is passed over; none made at all is refused.
+    fn record_each(
         &mut self,
-        doc: &mut PdfDoc,
         page: usize,
         ids: &[u32],
-        mut change: impl FnMut(&mut PdfDoc, Ref) -> Result<(pdf::Rect, Step)>,
+        made: impl Iterator<Item = (Ref, Result<(pdf::Rect, Step)>)>,
     ) -> Result<pdf::Rect> {
         let mut area: Option<pdf::Rect> = None;
-        for (_, at) in self.ordered(doc, page, ids) {
-            match change(doc, at) {
+        for (at, made) in made {
+            match made {
                 Ok((changed, step)) => {
                     self.record(step, area.is_some());
                     area = Some(area.map_or(changed, |a| a.union(changed)));
@@ -377,19 +388,30 @@ impl Ink {
         if !forwards {
             gesture.reverse();
         }
+        // A run of strokes moved, put on or taken off one page is made at once, the document
+        // opened again once: the steps of a group moved by the Select tool are one each.
         let mut changed = Vec::new();
-        for step in &mut gesture {
-            match self.apply(doc, step, forwards) {
-                Ok(walked) => changed.push(walked),
+        let mut rest: &mut [Step] = &mut gesture;
+        while !rest.is_empty() {
+            let run = match Batch::of(&rest[0], forwards) {
+                Some(batch) => (rest.iter())
+                    .take_while(|step| Batch::of(step, forwards) == Some(batch))
+                    .count(),
+                None => 1,
+            };
+            let (run, after) = std::mem::take(&mut rest).split_at_mut(run);
+            match self.apply(doc, run, forwards) {
+                Ok(walked) => changed.extend(walked),
                 Err(e) => {
                     tracing::warn!("walking the history: {e:#}");
-                    if matches!(step, Step::Paged { .. }) {
+                    if matches!(run[0], Step::Paged { .. }) {
                         self.done.clear();
                         self.undone.clear();
                     }
                     return changed;
                 }
             }
+            rest = after;
         }
         if !forwards {
             gesture.reverse();
@@ -401,48 +423,106 @@ impl Ink {
         changed
     }
 
-    /// Make one step (`forwards`) or take it back: a stroke goes on or comes off the page or moves
-    /// by the map or by its inverse, or the pages are edited or edited back. A delete and the
-    /// Undo of an import keep the pages they take out, which their Undo and Redo put back. The
-    /// page a blank insert put in is blank again when its Undo takes it out, every step on it
-    /// having been walked back first, so a blank one is what Redo puts in.
-    fn apply(&mut self, doc: &mut PdfDoc, step: &mut Step, forwards: bool) -> Result<Walked> {
-        match (step, forwards) {
+    /// Make a run of steps (`forwards`) or take it back, in its order: strokes go on or come
+    /// off the page or move by their maps or by their inverses, or the pages are edited or edited
+    /// back. A run is one step but for strokes moved, put on or taken off one page ([`Batch`]).
+    /// A delete and the Undo of an import keep the pages they take out, which their Undo and Redo
+    /// put back. The page a blank insert put in is blank again when its Undo takes it out, every
+    /// step on it having been walked back first, so a blank one is what Redo puts in.
+    fn apply(&mut self, doc: &mut PdfDoc, run: &mut [Step], forwards: bool) -> Result<Vec<Walked>> {
+        let page = match (&mut run[0], forwards) {
             (Step::Paged { edit, kept, id }, _) => {
                 let made = match forwards {
                     true => *edit,
                     false => edit.inverse(),
                 };
                 self.edit(doc, made, kept.as_mut())?;
-                Ok(Walked::Pages(made, *id))
+                return Ok(vec![Walked::Pages(made, *id)]);
             }
             // Either way, what it says swaps with what was kept.
             (Step::Retyped { page, at, kept }, _) => {
                 let (was, area) = doc.retype(*page, *at, &kept.text, kept.style)?;
                 *kept = was;
-                Ok(Walked::Ink(*page, area))
+                return Ok(vec![Walked::Ink(*page, area)]);
             }
-            (Step::Moved { page, at, matrix }, _) => {
-                let m = match forwards {
-                    true => *matrix,
-                    false => pdf::invert(*matrix),
-                };
-                let area = doc.transform_ink(*page, *at, m)?;
-                Ok(Walked::Ink(*page, area))
+            (
+                Step::Moved { page, .. } | Step::Drawn { page, .. } | Step::Erased { page, .. },
+                _,
+            ) => *page,
+        };
+        let walked = |area: Result<pdf::Rect>| area.map(|area| Walked::Ink(page, area));
+        match Batch::of(&run[0], forwards) {
+            Some(Batch::Move(_)) => {
+                let moves: Vec<(Ref, pdf::Matrix)> = (run.iter())
+                    .filter_map(|step| match step {
+                        Step::Moved { at, matrix, .. } => Some((*at, *matrix)),
+                        _ => None,
+                    })
+                    .map(|(at, m)| (at, if forwards { m } else { pdf::invert(m) }))
+                    .collect();
+                doc.transform_inks(page, &moves)?
+                    .into_iter()
+                    .map(walked)
+                    .collect()
             }
             // Drawing forwards puts a stroke on, and so does erasing backwards.
-            (Step::Drawn { page, at, kept }, true) | (Step::Erased { page, at, kept }, false) => {
-                let drawn = (kept.as_ref())
-                    .ok_or_else(|| Error::Pdf(format!("nothing kept of object {}", at.num)))?;
-                let area = doc.redraw_ink(*page, drawn)?;
-                Ok(Walked::Ink(*page, area))
+            Some(Batch::On(_)) => {
+                let drawn: Vec<&pdf::Drawn> = (run.iter())
+                    .map(|step| match step {
+                        Step::Drawn { at, kept, .. } | Step::Erased { at, kept, .. } => (kept
+                            .as_ref())
+                        .ok_or_else(|| Error::Pdf(format!("nothing kept of object {}", at.num))),
+                        _ => Err(Error::Pdf("not a stroke put back".to_string())),
+                    })
+                    .collect::<Result<_>>()?;
+                doc.redraw_inks(page, &drawn)?
+                    .into_iter()
+                    .map(walked)
+                    .collect()
             }
-            (Step::Drawn { page, at, kept }, false) | (Step::Erased { page, at, kept }, true) => {
-                let (drawn, area) = doc.take_ink(*page, *at)?;
-                *kept = Some(drawn);
-                Ok(Walked::Ink(*page, area))
+            _ => {
+                let ats: Vec<Ref> = (run.iter())
+                    .filter_map(|step| match step {
+                        Step::Drawn { at, .. } | Step::Erased { at, .. } => Some(*at),
+                        _ => None,
+                    })
+                    .collect();
+                let taken = doc.take_inks(page, &ats)?;
+                let mut changed = Vec::with_capacity(taken.len());
+                for (step, taken) in run.iter_mut().zip(taken) {
+                    let (drawn, area) = taken?;
+                    if let Step::Drawn { kept, .. } | Step::Erased { kept, .. } = step {
+                        *kept = Some(drawn);
+                    }
+                    changed.push(Walked::Ink(page, area));
+                }
+                Ok(changed)
             }
         }
+    }
+}
+
+/// What a run of a gesture's steps on one page does, which is made at once ([`Ink::walk`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Batch {
+    Move(usize),
+    On(usize),
+    Off(usize),
+}
+
+impl Batch {
+    /// What `step` does walked `forwards` or back, `None` for one made alone.
+    fn of(step: &Step, forwards: bool) -> Option<Batch> {
+        Some(match (step, forwards) {
+            (Step::Moved { page, .. }, _) => Batch::Move(*page),
+            (Step::Drawn { page, .. }, true) | (Step::Erased { page, .. }, false) => {
+                Batch::On(*page)
+            }
+            (Step::Drawn { page, .. }, false) | (Step::Erased { page, .. }, true) => {
+                Batch::Off(*page)
+            }
+            (Step::Paged { .. } | Step::Retyped { .. }, _) => return None,
+        })
     }
 }
 
