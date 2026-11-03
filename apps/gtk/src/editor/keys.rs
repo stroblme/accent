@@ -15,7 +15,7 @@
 
 use super::{Flavour, Tab, indent};
 use crate::lang::Editor;
-use crate::{completion, multicaret, signature, typing};
+use crate::{completion, ghost, multicaret, signature, typing};
 use gtk::prelude::*;
 use gtk::{gdk, glib};
 use std::rc::Rc;
@@ -82,7 +82,7 @@ fn dispatch(editor: &Rc<dyn Editor>, key: gdk::Key, state: gdk::ModifierType) ->
             key,
             gdk::Key::Tab | gdk::Key::KP_Tab | gdk::Key::ISO_Left_Tab
         );
-    if !stepping_a_template && let Some(answer) = editor.clone().ghost_key(key, state) {
+    if !stepping_a_template && let Some(answer) = ghost::on_key(editor.as_ref(), key, state) {
         return answer;
     }
     let view = editor.view();
@@ -96,8 +96,8 @@ fn dispatch(editor: &Rc<dyn Editor>, key: gdk::Key, state: gdk::ModifierType) ->
 }
 
 /// Give `view`, whose text has no document on the language layer, its one key controller: a
-/// notebook's markdown cell, a comparison's read-only side and a diagram's label. Its carets move
-/// on a read-only view as on any other, and only an editable one is typed into.
+/// comparison's read-only side and a diagram's label. Its carets move on a read-only view as on
+/// any other, and only an editable one is typed into.
 pub(crate) fn attach_plain(view: &sourceview5::View, flavour: Flavour) {
     let keys = gtk::EventControllerKey::new();
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);

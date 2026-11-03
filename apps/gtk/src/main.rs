@@ -1788,6 +1788,7 @@ impl App {
         }
         for notebook in self.notebooks() {
             notebook.set_spellcheck(config.spellcheck);
+            notebook.set_ghost_text(config.ghost_text);
             notebook.set_indent_width(config.indent_width);
         }
         for diff in self.diffs() {

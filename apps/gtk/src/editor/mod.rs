@@ -47,11 +47,11 @@ use follow::Follow;
 pub(crate) use follow::url_under;
 #[cfg(feature = "bench")]
 pub(crate) use indent::on_key as indent_key;
+pub(crate) use keys::attach as attach_keys;
 #[cfg(feature = "bench")]
 pub(crate) use keys::press;
 #[cfg(feature = "bench")]
 pub(crate) use keys::typed as typed_keys;
-pub(crate) use keys::{attach as attach_keys, attach_plain};
 use lines::primary_paste;
 pub(crate) use lines::{
     caret_to_click, delete_line, duplicate_line, line_clipboard, pressed_at, toggle_comment,
@@ -1053,7 +1053,7 @@ impl Tab {
             .sum()
     }
 
-    /// Whether this tab was built with ghost text wanted; read once by `ghost::install`.
+    /// Whether this tab was built with ghost text wanted; read once by `lang::attach`.
     pub fn ghost_text_wanted(&self) -> bool {
         self.ghost_text.get()
     }
@@ -1064,7 +1064,7 @@ impl Tab {
         self.ghost_text.set(on);
         self.lang.ghost.on.set(on);
         if !on {
-            crate::ghost::clear(self);
+            crate::ghost::clear(self.as_ref());
         }
     }
 

@@ -1,7 +1,9 @@
-//! A notebook's code cells on the language layer. The notebook is one document there, its code
-//! cells' program (`Notebook::program`), opened as a code tab's file is; each code cell's editor
-//! is a [`lang::Editor`] over that cell's lines of it, so hover, signature help, completion and
-//! the code tab's keys work in a cell as in a code tab (DESIGN.md, Architecture › Notebooks).
+//! A notebook's cells on the language layer. Its code cells are one document there, their program
+//! (`Notebook::program`), opened as a code tab's file is, and its markdown cells another, one note
+//! (`Notebook::prose`), opened as a note is; each cell's editor is a [`lang::Editor`] over that
+//! cell's lines of its document, so hover, signature help, completion and the code tab's keys work
+//! in a code cell as in a code tab, and completion, ghost text and a note's keys in a markdown
+//! cell as in a note (DESIGN.md, Architecture › Notebooks).
 
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::HashMap;
@@ -9,8 +11,7 @@ use std::ops::Range;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
-use accent_api::{Completion, Completions, Diagnostic, Pos, Vault};
-use accent_core::note::Syntax;
+use accent_api::{Diagnostic, Pos, Vault};
 use accent_core::notebook::{CellId, Format, Kind, Program};
 use gtk::glib;
 use gtk::prelude::*;
@@ -18,16 +19,17 @@ use sourceview5::prelude::*;
 
 use super::cell::{CellView, Editor};
 use super::{NotebookTab, TabHook};
-use crate::completion::{Reply, Session, Source};
+use crate::completion::{EditorSource, Reply, Session};
 use crate::editor::Flavour;
-use crate::{diagnostics, lang, signature};
+use crate::{diagnostics, ghost, lang, signature};
 
-/// A notebook's document on the language layer, and its cells' editors there.
+/// A notebook's documents on the language layer, and its cells' editors there.
 #[derive(Default)]
 pub(super) struct State {
-    doc: Rc<lang::Document>,
-    /// The program last handed to the server, whose lines its answers are in.
-    sent: RefCell<Sent>,
+    /// The code cells' program, open as a code tab's file is.
+    code: Layer,
+    /// The markdown cells as one note, open as a note is.
+    prose: Layer,
     editors: RefCell<HashMap<CellId, Rc<CellEditor>>>,
     /// What the server said about cells with no editor yet, in their own lines.
     waiting: RefCell<HashMap<CellId, Vec<Diagnostic>>>,
@@ -37,6 +39,26 @@ pub(super) struct State {
     refresh: RefCell<Option<glib::JoinHandle<()>>>,
     on_follow: TabHook,
     on_starting: TabHook,
+    /// The Ghost Text preference, which the markdown cells follow as a note does.
+    ghost: Cell<bool>,
+}
+
+impl State {
+    /// The document cells of `kind` are in.
+    fn layer(&self, kind: Kind) -> &Layer {
+        match kind {
+            Kind::Markdown => &self.prose,
+            _ => &self.code,
+        }
+    }
+}
+
+/// One of a notebook's documents on the language layer: its cells of one kind as one text.
+#[derive(Default)]
+struct Layer {
+    doc: Rc<lang::Document>,
+    /// The text last handed to the server, whose lines its answers are in.
+    sent: RefCell<Sent>,
 }
 
 /// The program last handed to the server, and whether it is known to have got there: a flush
@@ -77,14 +99,17 @@ impl Drop for State {
         for cell in self.editors.take().into_values() {
             cell.detach();
         }
-        self.doc.close();
+        self.code.doc.close();
+        self.prose.doc.close();
     }
 }
 
-/// A code cell's editor as the language features see it: its view, over its cell's lines of the
-/// notebook's document.
+/// A cell's editor as the language features see it: its view, over its cell's lines of the
+/// notebook's document of its kind.
 struct CellEditor {
     id: CellId,
+    /// Code or markdown, which says the document its lines are in.
+    kind: Kind,
     tab: Weak<NotebookTab>,
     doc: Rc<lang::Document>,
     view: sourceview5::View,
@@ -97,18 +122,16 @@ struct CellEditor {
     completion: RefCell<Option<Rc<Session>>>,
     /// The last snippet a completion put in: its stops are walked while it holds a buffer.
     snippet: RefCell<Option<sourceview5::Snippet>>,
+    /// A markdown cell's ghost text, as a note has it.
+    ghost: ghost::State,
 }
 
 impl CellEditor {
-    /// The lines of the program last sent that are this cell's.
+    /// The lines of the text last sent that are this cell's.
     fn lines(&self) -> Option<Range<u32>> {
-        self.tab
-            .upgrade()?
-            .lang
-            .sent
-            .borrow()
-            .program
-            .lines(self.id)
+        let tab = self.tab.upgrade()?;
+        let sent = tab.lang.layer(self.kind).sent.borrow();
+        sent.program.lines(self.id)
     }
 
     fn detach(&self) {
@@ -132,7 +155,7 @@ impl lang::Editor for CellEditor {
         let tab = self.tab.upgrade();
         Box::pin(async move {
             if let Some(tab) = tab {
-                tab.flush_language().await;
+                tab.flush_layer(self.kind).await;
             }
         })
     }
@@ -157,13 +180,17 @@ impl lang::Editor for CellEditor {
     }
 
     fn language_id(&self) -> String {
-        self.buffer
-            .language()
-            .map_or_else(|| "text".to_string(), |l| l.id().to_string())
+        match self.kind {
+            Kind::Markdown => "markdown".to_string(),
+            _ => self
+                .buffer
+                .language()
+                .map_or_else(|| "text".to_string(), |l| l.id().to_string()),
+        }
     }
 
     fn flavour(&self) -> Flavour {
-        Flavour::Code
+        super::cell::flavour(self.kind)
     }
 
     fn is_loading(&self) -> bool {
@@ -182,116 +209,15 @@ impl lang::Editor for CellEditor {
         let snippet = self.snippet.borrow();
         snippet.as_ref().is_some_and(|s| s.buffer().is_some())
     }
-}
 
-/// A cell's completions, asked of the notebook's document at the cell's lines.
-struct CellSource(Weak<CellEditor>);
-
-/// `cell` flushed, the vault it asks, and the lines it is in the program the server now holds.
-async fn flushed(cell: Weak<CellEditor>) -> Option<(Rc<CellEditor>, Arc<Vault>, Range<u32>)> {
-    let cell = cell.upgrade()?;
-    let vault = cell.doc.vault()?;
-    lang::Editor::flush(cell.clone()).await;
-    let lines = cell.lines()?;
-    Some((cell, vault, lines))
-}
-
-impl Source for CellSource {
-    fn fetch(&self, at: Pos, trigger: Option<char>) -> Reply<Completions> {
-        let cell = self.0.clone();
-        Box::pin(async move {
-            let Some((cell, vault, lines)) = flushed(cell).await else {
-                return Completions::default();
-            };
-            let at = Pos {
-                line: lines.start + at.line,
-                ..at
-            };
-            match vault.completion(&cell.doc.key(), at, trigger).await {
-                Ok(mut answer) => {
-                    answer.items = answer
-                        .items
-                        .into_iter()
-                        .filter_map(|item| into_cell(item, &lines))
-                        .collect();
-                    answer.fragment = answer.fragment.and_then(|f| in_cell(f, &lines));
-                    answer
-                }
-                Err(e) => {
-                    tracing::debug!("completion for a cell: {e:#}");
-                    Completions::default()
-                }
-            }
-        })
+    fn push_snippet(&self, snippet: &sourceview5::Snippet, at: &mut gtk::TextIter) {
+        self.view.push_snippet(snippet, Some(at));
+        self.snippet.replace(Some(snippet.clone()));
     }
 
-    fn resolve(&self, item: Completion) -> Reply<Completion> {
-        let cell = self.0.clone();
-        Box::pin(async move {
-            let Some((cell, vault, lines)) = flushed(cell).await else {
-                return item;
-            };
-            let asked = out_of_cell(item.clone(), &lines);
-            match vault.resolve_completion(&cell.doc.key(), asked).await {
-                Ok(full) => into_cell(full, &lines).unwrap_or(item),
-                Err(e) => {
-                    tracing::debug!("completionItem/resolve for a cell: {e:#}");
-                    item
-                }
-            }
-        })
+    fn ghost(&self) -> Option<&ghost::State> {
+        (self.kind == Kind::Markdown).then_some(&self.ghost)
     }
-
-    fn walking(&self) -> bool {
-        self.0
-            .upgrade()
-            .is_some_and(|cell| lang::Editor::snippet_active(&*cell))
-    }
-
-    fn push_snippet(
-        &self,
-        view: &sourceview5::View,
-        snippet: &sourceview5::Snippet,
-        at: &mut gtk::TextIter,
-    ) {
-        view.push_snippet(snippet, Some(at));
-        if let Some(cell) = self.0.upgrade() {
-            cell.snippet.replace(Some(snippet.clone()));
-        }
-    }
-}
-
-/// `item`, answered in the document's lines, in those of the cell at `lines`: `None` when what
-/// it replaces is outside the cell, and the edits it makes elsewhere, an import at the top of
-/// another cell, left out (user decision 2026-10-20).
-fn into_cell(mut item: Completion, lines: &Range<u32>) -> Option<Completion> {
-    item.replace = in_cell(item.replace, lines)?;
-    item.extra_edits
-        .retain_mut(|edit| match in_cell(edit.range, lines) {
-            Some(range) => {
-                edit.range = range;
-                true
-            }
-            None => false,
-        });
-    Some(item)
-}
-
-/// `range`, of the document's lines, in those of the cell at `lines`: `None` where it is not all
-/// in the cell.
-fn in_cell(range: accent_api::Range, lines: &Range<u32>) -> Option<accent_api::Range> {
-    (lines.contains(&range.start.line) && lines.contains(&range.end.line))
-        .then(|| moved(range, |line| line - lines.start))
-}
-
-/// `item` of the cell at `lines` in the document's lines, as the server is asked about it.
-fn out_of_cell(mut item: Completion, lines: &Range<u32>) -> Completion {
-    let down = |line| line + lines.start;
-    item.replace = moved(item.replace, down);
-    for edit in &mut item.extra_edits {
-        edit.range = moved(edit.range, down);
-    }
-    item
 }
 
 fn moved(range: accent_api::Range, line: impl Fn(u32) -> u32) -> accent_api::Range {
@@ -337,32 +263,36 @@ fn cells_of(program: &Program, items: Vec<Diagnostic>) -> HashMap<CellId, Vec<Di
 impl NotebookTab {
     /// Open the code cells' program on `vault`'s language layer, as a code tab's file is: under
     /// the notebook's own path for a marimo notebook, under `<path>.py` for an `.ipynb` (user
-    /// decision 2026-10-20). Nothing without a vault, or for cells no language colours.
+    /// decision 2026-10-20), unless no language colours the cells; and the markdown cells as a
+    /// note under `<path>.md`. Nothing without a vault.
     pub fn attach_language(self: &Rc<Self>, vault: Option<Arc<Vault>>) {
         if let Some(vault) = vault {
-            self.open_language(vault, None);
+            self.open_layer(Kind::Code, vault.clone(), None);
+            self.open_layer(Kind::Markdown, vault, None);
         }
     }
 
-    /// Restart File, and a rename: the document is closed and opened again under the key the
+    /// Restart File, and a rename: each document is closed and opened again under the key the
     /// notebook's path gives it now, as it stands.
     pub fn reopen_language(self: &Rc<Self>) {
-        if let Some(vault) = self.lang.doc.vault() {
-            let old = self.lang.doc.key();
-            self.open_language(vault, Some(old));
+        for kind in [Kind::Code, Kind::Markdown] {
+            let doc = &self.lang.layer(kind).doc;
+            if let Some(vault) = doc.vault() {
+                self.open_layer(kind, vault, Some(doc.key()));
+            }
         }
     }
 
-    /// Open the program as it stands on `vault`, once `closing` is closed there.
-    fn open_language(self: &Rc<Self>, vault: Arc<Vault>, closing: Option<String>) {
-        let (Some(language), Some(key)) = (self.language.as_ref(), self.program_key()) else {
+    /// Open the cells of `kind` as they stand on `vault`, once `closing` is closed there.
+    fn open_layer(self: &Rc<Self>, kind: Kind, vault: Arc<Vault>, closing: Option<String>) {
+        let (Some(language), Some(key)) = (self.layer_language(kind), self.layer_key(kind)) else {
             return;
         };
-        self.sync_model();
-        let program = self.model.borrow().program();
+        let program = self.text_of(kind);
         let text = program.text.clone();
         let opened = text.clone();
-        self.lang.sent.replace(Sent {
+        let layer = self.lang.layer(kind);
+        layer.sent.replace(Sent {
             program,
             arrived: false,
         });
@@ -372,10 +302,7 @@ impl NotebookTab {
                 tab.lang.on_starting.emit(&tab);
             }
         };
-        let opening = self
-            .lang
-            .doc
-            .open(vault.clone(), &key, &language.id(), text, told);
+        let opening = layer.doc.open(vault.clone(), &key, &language, text, told);
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             if let Some(old) = closing {
@@ -394,42 +321,58 @@ impl NotebookTab {
             // What was typed while it opened.
             if let Some(tab) = weak.upgrade() {
                 if let Some(opened) = opened {
-                    tab.lang.sent.borrow_mut().arrived(&opened);
+                    tab.lang.layer(kind).sent.borrow_mut().arrived(&opened);
                 }
-                tab.flush_language().await;
+                tab.flush_layer(kind).await;
             }
         });
     }
 
     /// The key the program is open under while it is open on a vault.
     pub fn document_key(&self) -> Option<String> {
-        self.lang.doc.vault().map(|_| self.lang.doc.key())
+        let doc = &self.lang.code.doc;
+        doc.vault().map(|_| doc.key())
     }
 
     /// The document the program is on the language layer.
     pub fn language_document(&self) -> Rc<lang::Document> {
-        self.lang.doc.clone()
+        self.lang.code.doc.clone()
     }
 
-    /// The key the program opens under: an `.ipynb`'s path with its code's extension after it,
-    /// a server reading a file by its name; `None` for code in no language the notebook names.
-    fn program_key(&self) -> Option<String> {
+    /// The language the cells of `kind` are opened in: the notebook's own for code, `None` for
+    /// code in no language the notebook names.
+    fn layer_language(&self, kind: Kind) -> Option<String> {
+        match kind {
+            Kind::Markdown => Some("markdown".to_string()),
+            _ => self.language.as_ref().map(|l| l.id().to_string()),
+        }
+    }
+
+    /// The key the cells of `kind` open under: for code an `.ipynb`'s path with its code's
+    /// extension after it, a server reading a file by its name; for markdown the notebook's path
+    /// and `.md`, a note in the notebook's folder, where its relative links are read from, that no
+    /// file beside it is.
+    fn layer_key(&self, kind: Kind) -> Option<String> {
         let model = self.model.borrow();
-        match model.format() {
-            Format::Marimo => Some(self.key()),
-            Format::Ipynb => (!model.extension().is_empty())
+        match (kind, model.format()) {
+            (Kind::Markdown, _) => Some(format!("{}.md", self.key())),
+            (_, Format::Marimo) => Some(self.key()),
+            (_, Format::Ipynb) => (!model.extension().is_empty())
                 .then(|| format!("{}{}", self.key(), model.extension())),
         }
     }
 
-    /// The notebook changed: the server's copy of the program may be stale, which a flush a
-    /// moment after the last change finds out. A markdown cell's edit or a run's outputs leave
-    /// the program as it was, and send nothing.
+    /// The notebook changed: the server's copy of either text may be stale, which a flush a
+    /// moment after the last change finds out; a run's outputs leave both as they were, and send
+    /// nothing. As in a note, the markdown cell typed in asks for its ghost text first.
     pub(super) fn language_changed(self: &Rc<Self>) {
-        if self.lang.doc.vault().is_none() {
+        let docs = [&self.lang.code.doc, &self.lang.prose.doc];
+        if docs.iter().all(|doc| doc.vault().is_none()) {
             return;
         }
-        self.lang.doc.edited();
+        for doc in docs {
+            doc.edited();
+        }
         // A signature that is up is about the call being typed, so it is asked again.
         let cells: Vec<Rc<CellEditor>> = self.lang.editors.borrow().values().cloned().collect();
         for cell in cells.into_iter().filter(|c| c.signature.is_shown()) {
@@ -437,7 +380,11 @@ impl NotebookTab {
         }
         let weak = Rc::downgrade(self);
         let handle = glib::spawn_future_local(async move {
-            glib::timeout_future(lang::REFRESH).await;
+            glib::timeout_future(lang::GHOST).await;
+            if let Some(tab) = weak.upgrade() {
+                tab.suggest().await;
+            }
+            glib::timeout_future(lang::REFRESH.saturating_sub(lang::GHOST)).await;
             if let Some(tab) = weak.upgrade() {
                 tab.flush_language().await;
             }
@@ -447,39 +394,65 @@ impl NotebookTab {
         }
     }
 
-    /// Send the server the program as it stands, if it is not the one it holds. Dropped part way
-    /// or refused, it leaves the program unsent, and the next flush sends it again.
+    /// The selected cell's ghost text, if it is a markdown cell.
+    async fn suggest(self: Rc<Self>) {
+        let cell = self.selected.get().and_then(|id| {
+            let editors = self.lang.editors.borrow();
+            editors
+                .get(&id)
+                .filter(|c| c.kind == Kind::Markdown)
+                .cloned()
+        });
+        if let Some(cell) = cell {
+            self.flush_layer(Kind::Markdown).await;
+            ghost::request(cell.as_ref()).await;
+        }
+    }
+
+    /// Send the server both texts as they stand.
     async fn flush_language(self: Rc<Self>) {
-        let doc = self.lang.doc.clone();
+        self.clone().flush_layer(Kind::Code).await;
+        self.flush_layer(Kind::Markdown).await;
+    }
+
+    /// Send the server the cells of `kind` as they stand, if that is not the text it holds.
+    /// Dropped part way or refused, it leaves the text unsent, and the next flush sends it again.
+    async fn flush_layer(self: Rc<Self>, kind: Kind) {
+        let doc = self.lang.layer(kind).doc.clone();
         let handed = RefCell::new(None);
         let sent = doc
             .flush(|| {
-                let text = self.program_text();
+                let program = self.text_of(kind);
+                let text = self.lang.layer(kind).sent.borrow_mut().next(program);
                 handed.replace(text.clone());
                 text
             })
             .await;
         if let (true, Some(text)) = (sent, handed.take()) {
-            self.lang.sent.borrow_mut().arrived(&text);
+            self.lang.layer(kind).sent.borrow_mut().arrived(&text);
         }
     }
 
-    /// The program as the model holds it, `None` while the server holds it already.
-    fn program_text(&self) -> Option<String> {
+    /// The cells of `kind` as the model holds them.
+    fn text_of(&self, kind: Kind) -> Program {
         self.sync_model();
-        let program = self.model.borrow().program();
-        self.lang.sent.borrow_mut().next(program)
+        let model = self.model.borrow();
+        match kind {
+            Kind::Markdown => model.prose(),
+            _ => model.program(),
+        }
     }
 
-    /// The server saved the document: what it does on a save of a code tab's file.
+    /// The server saved the document: what it does on a save of a code tab's file. The markdown
+    /// cells' note has no file to be read again.
     pub fn language_saved(self: &Rc<Self>) {
-        let Some(vault) = self.lang.doc.vault() else {
+        let Some(vault) = self.lang.code.doc.vault() else {
             return;
         };
         let tab = self.clone();
         glib::spawn_future_local(async move {
-            tab.clone().flush_language().await;
-            let key = tab.lang.doc.key();
+            tab.clone().flush_layer(Kind::Code).await;
+            let key = tab.lang.code.doc.key();
             if let Err(e) = vault.save_document(&key).await {
                 tracing::debug!("saved {key}: {e:#}");
             }
@@ -491,10 +464,24 @@ impl NotebookTab {
         glib::spawn_future_local(self.clone().flush_language());
     }
 
+    /// The Ghost Text preference, which the markdown cells follow as a note does: off takes a
+    /// suggestion away at once.
+    pub fn set_ghost_text(&self, on: bool) {
+        self.lang.ghost.set(on);
+        for cell in self.lang.editors.borrow().values() {
+            if let Some(state) = lang::Editor::ghost(cell.as_ref()) {
+                state.on.set(on);
+                if !on {
+                    ghost::clear(cell.as_ref());
+                }
+            }
+        }
+    }
+
     /// A publish for the program: each cell's share painted in its editor, or kept for when it
     /// has one.
     pub fn set_diagnostics(&self, items: Vec<Diagnostic>) {
-        let mut cells = cells_of(&self.lang.sent.borrow().program, items);
+        let mut cells = cells_of(&self.lang.code.sent.borrow().program, items);
         let editors: Vec<Rc<CellEditor>> = self.lang.editors.borrow().values().cloned().collect();
         for cell in editors {
             cell.painted.set(cells.remove(&cell.id).unwrap_or_default());
@@ -543,16 +530,12 @@ impl NotebookTab {
         self.lang.hidden.get()
     }
 
-    /// Give code cell `view`'s editor, just built, the code tab's keys and the language features
-    /// over the notebook's document, and the diagnostics that waited for it; a markdown cell's, a
-    /// note's keys, which ask no language, and its links followed by Ctrl+click.
+    /// Give cell `view`'s editor, just built, its keys and the language features over its
+    /// document, and Go to Definition by Ctrl+click: a code cell a code tab's, with the
+    /// diagnostics that waited for it; a markdown cell a note's keys, completion and ghost text, its
+    /// Ctrl+click following a link.
     pub(super) fn attach_cell(self: &Rc<Self>, view: &CellView, editor: &Editor) {
-        if view.kind == Kind::Markdown {
-            crate::editor::attach_plain(&editor.view, Flavour::Note(Syntax::Markdown));
-            self.follow_clicks(&editor.view);
-            return;
-        }
-        if view.kind != Kind::Code {
+        if !matches!(view.kind, Kind::Code | Kind::Markdown) {
             return;
         }
         let painted = diagnostics::Painted::new(&editor.view, &editor.buffer);
@@ -566,8 +549,9 @@ impl NotebookTab {
         );
         let cell = Rc::new(CellEditor {
             id: view.id,
+            kind: view.kind,
             tab: Rc::downgrade(self),
-            doc: self.lang.doc.clone(),
+            doc: self.lang.layer(view.kind).doc.clone(),
             view: editor.view.clone(),
             buffer: editor.buffer.clone(),
             painted,
@@ -575,12 +559,21 @@ impl NotebookTab {
             signature: signature::Help::default(),
             completion: RefCell::default(),
             snippet: RefCell::default(),
+            ghost: ghost::State::default(),
         });
         follow_edits(&cell);
         let features: Rc<dyn lang::Editor> = cell.clone();
         crate::editor::attach_keys(&features);
-        crate::hover::install(&features);
-        crate::signature::install(&features);
+        match view.kind {
+            Kind::Code => {
+                crate::hover::install(&features);
+                crate::signature::install(&features);
+            }
+            _ => {
+                cell.ghost.on.set(self.lang.ghost.get());
+                ghost::install(&features);
+            }
+        }
         self.follow_clicks(&editor.view);
         self.lang.editors.borrow_mut().insert(view.id, cell);
         if self.selected.get() == Some(view.id) {
@@ -634,8 +627,8 @@ impl NotebookTab {
             if cell.completion.borrow().is_some() || cell.doc.vault().is_none() {
                 return;
             }
-            let source = Box::new(CellSource(Rc::downgrade(&cell)));
             let features: Rc<dyn lang::Editor> = cell.clone();
+            let source = Box::new(EditorSource(Rc::downgrade(&features)));
             let session = crate::completion::install(&features, source);
             cell.completion.replace(Some(session));
         });
@@ -666,21 +659,22 @@ impl NotebookTab {
     }
 
     /// The selected code cell's editor on the language layer, built if need be: what Go to
-    /// Definition asks about.
+    /// Definition, Quick Fix and References ask about. A markdown cell's is asked only what is
+    /// typed in it.
     pub(crate) fn language_editor(self: &Rc<Self>) -> Option<Rc<dyn lang::Editor>> {
-        self.language_editor_of(self.selected.get()?)
+        let cell = self.language_editor_of(self.selected.get()?)?;
+        (cell.kind == Kind::Code).then_some(cell as Rc<dyn lang::Editor>)
     }
 
-    /// Code cell `id`'s editor on the language layer, built if need be.
-    fn language_editor_of(self: &Rc<Self>, id: CellId) -> Option<Rc<dyn lang::Editor>> {
+    /// Cell `id`'s editor on the language layer, built if need be.
+    fn language_editor_of(self: &Rc<Self>, id: CellId) -> Option<Rc<CellEditor>> {
         self.editor(id)?;
-        let cell = self.lang.editors.borrow().get(&id).cloned()?;
-        Some(cell)
+        self.lang.editors.borrow().get(&id).cloned()
     }
 
     /// The caret at `at` in the program, in the cell that line is in, a quarter down the view.
     pub fn go_to(self: &Rc<Self>, at: Pos) -> bool {
-        let found = self.lang.sent.borrow().program.cell_at(at.line);
+        let found = self.lang.code.sent.borrow().program.cell_at(at.line);
         let Some((id, line)) = found else {
             return false;
         };
@@ -726,15 +720,20 @@ impl NotebookTab {
 /// What `ACCENT_BENCH_NOTEBOOK_LSP` reads.
 #[cfg(feature = "bench")]
 impl NotebookTab {
-    /// Whether the program's server answered its opening.
+    /// Whether the program's server and the notes answered their openings.
     pub fn bench_supported(&self) -> bool {
-        self.lang.doc.support().is_some()
+        self.lang.code.doc.support().is_some() && self.lang.prose.doc.support().is_some()
+    }
+
+    /// The key the markdown cells are open under.
+    pub fn bench_prose_key(&self) -> String {
+        self.lang.prose.doc.key()
     }
 
     /// Cell `n`'s editor on the language layer, built if need be.
     pub fn bench_language_editor(self: &Rc<Self>, n: usize) -> Option<Rc<dyn lang::Editor>> {
         let id = self.views.borrow().get(n)?.id;
-        self.language_editor_of(id)
+        Some(self.language_editor_of(id)?)
     }
 
     /// The selected cell, by its place, and its caret's line and column.
@@ -801,7 +800,7 @@ fn follow_edits(cell: &Rc<CellEditor>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use accent_api::{Kind as CompletionKind, Severity, TextEdit};
+    use accent_api::Severity;
     use accent_core::notebook::{Edit, read};
 
     fn range(line: u32, from: u32, to_line: u32, to: u32) -> accent_api::Range {
@@ -893,45 +892,5 @@ mod tests {
         sent.arrived(&program.text);
         assert_eq!(sent.next(program.clone()), None, "the server holds it");
         assert!(sent.next(Program::default()).is_some(), "an edit is sent");
-    }
-
-    #[test]
-    fn a_completion_answer_is_the_cells_and_edits_outside_it_go() {
-        let item = |replace, extra: Vec<TextEdit>| Completion {
-            label: "alpha".to_string(),
-            kind: CompletionKind::Function,
-            detail: None,
-            doc: None,
-            filter: None,
-            insert: "alpha".to_string(),
-            is_snippet: false,
-            replace,
-            extra_edits: extra,
-            resolve: None,
-            preselect: false,
-            commit: Vec::new(),
-        };
-        let edit = |line, text: &str| TextEdit {
-            range: range(line, 0, line, 0),
-            text: text.to_string(),
-        };
-        let lines = 2..3;
-        let extra = vec![edit(0, "import alpha\n"), edit(2, "alpha.")];
-        let kept = into_cell(item(range(2, 8, 2, 12), extra), &lines).unwrap();
-        assert_eq!(kept.replace, range(0, 8, 0, 12));
-        assert_eq!(
-            kept.extra_edits,
-            [edit(0, "alpha.")],
-            "the import into another cell is gone"
-        );
-        assert!(into_cell(item(range(1, 0, 1, 1), vec![]), &lines).is_none());
-        // The fragment the answer completes goes with its rows.
-        assert_eq!(
-            in_cell(range(2, 8, 2, 12), &lines),
-            Some(range(0, 8, 0, 12))
-        );
-        assert_eq!(in_cell(range(1, 0, 2, 1), &lines), None);
-        let back = out_of_cell(kept, &lines);
-        assert_eq!(back.replace, range(2, 8, 2, 12));
     }
 }

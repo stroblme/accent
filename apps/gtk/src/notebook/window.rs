@@ -70,6 +70,7 @@ impl App {
             let config = self.config.borrow();
             tab.set_font(config.editor_font.as_deref(), self.zoom.get());
             tab.set_spellcheck(config.spellcheck);
+            tab.set_ghost_text(config.ghost_text);
             tab.set_indent_width(config.indent_width);
         }
         // Nothing else watches a loose file: the vault's worker only reports on its own tree.

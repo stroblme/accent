@@ -156,7 +156,7 @@ async fn scene_files(app: &Rc<App>, shot: &Shot) {
         set_dark(app, dark).await;
         if tab.ghost_view().and_then(|v| v.ghost()).is_none() {
             crate::lang::flush(tab.clone()).await;
-            crate::ghost::request(&tab).await;
+            crate::ghost::request(tab.as_ref()).await;
         }
         until("ghost", 10_000, || {
             tab.ghost_view().and_then(|v| v.ghost()).is_some()

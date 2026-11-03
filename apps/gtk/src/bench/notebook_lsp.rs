@@ -4,8 +4,9 @@
 //! the key the program opened under; the diagnostics in their cells, a cell's shown value not
 //! called unused, and a cell two screens down holding its share until its editor is built; a
 //! hover; Go to Definition into another cell; a completion whose import into another cell is
-//! left out; signature help; the hover again after a line typed in above; and Go to Definition
-//! in a marimo notebook.
+//! left out; signature help; the hover again after a line typed in above; `[[#` in its markdown
+//! cell, answered with the headings of its markdown cells as one note; and Go to Definition in a
+//! marimo notebook.
 
 use super::*;
 use crate::notebook::NotebookTab;
@@ -205,6 +206,39 @@ async fn ipynb_drill(app: &Rc<App>, rel: &str) {
     println!(
         "bench notebook_lsp moved hover {:?}",
         hover.unwrap_or_default()
+    );
+
+    complete_markdown(&tab).await;
+}
+
+/// `[[#` typed on a line of its own at the end of the markdown cell, the first row taken: the key
+/// the markdown cells are open under, the rows and the line written.
+async fn complete_markdown(tab: &Rc<NotebookTab>) {
+    let Some(cell) = tab.bench_language_editor(0) else {
+        return println!("bench notebook_lsp markdown no_editor");
+    };
+    tab.bench_select(0);
+    // The popup is made in an idle once the cell is selected.
+    glib::timeout_future(Duration::from_millis(50)).await;
+    let Some(session) = cell.completion() else {
+        return println!("bench notebook_lsp markdown no_popup");
+    };
+    let buffer = cell.view().buffer();
+    buffer.place_cursor(&buffer.end_iter());
+    cell.view().grab_focus();
+    typed(&buffer, "\n[[#");
+    super::complete::bench_settle(&session).await;
+    let (rows, _) = session.rows();
+    session.press(gdk::Key::Down, gdk::ModifierType::empty());
+    session.press(gdk::Key::Return, gdk::ModifierType::empty());
+    let end = buffer.end_iter();
+    let line = buffer
+        .text(&buffer.iter_at_line(end.line()).unwrap_or(end), &end, true)
+        .to_string();
+    println!(
+        "bench notebook_lsp markdown key={} rows={} text={line:?}",
+        tab.bench_prose_key(),
+        rows.join(",")
     );
 }
 

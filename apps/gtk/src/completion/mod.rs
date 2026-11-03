@@ -20,9 +20,10 @@ use std::cell::{Cell, RefCell};
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::{Rc, Weak};
+use std::sync::Arc;
 use std::time::Duration;
 
-use accent_api::{Completion, Completions, Kind, Pos, Range, TextEdit};
+use accent_api::{Completion, Completions, Kind, Pos, Range, TextEdit, Vault};
 use accent_core::fuzzy::Corpus;
 use gtk::prelude::*;
 use gtk::{gdk, glib};
@@ -859,30 +860,43 @@ fn doc_markup(item: &Completion) -> Option<String> {
     }
 }
 
-// ------------------------------------------------------------------------------------ a tab's
+// --------------------------------------------------------------------------------- an editor's
 
-/// A tab's document, asked through its vault.
+/// An editor's document, asked through its vault at the editor's place in it: a text tab's whole
+/// file, a notebook cell's lines of the notebook's ([`Editor::to_document`]).
 ///
-/// Weak: the session is the tab's, and the tab holds the view the session's handlers hang off.
-pub(crate) struct TabSource(pub(crate) Weak<Tab>);
+/// Weak: the session is the editor's, and the editor holds the view the session's handlers hang
+/// off.
+pub(crate) struct EditorSource(pub(crate) Weak<dyn Editor>);
 
-impl Source for TabSource {
+impl EditorSource {
+    /// The editor, with the vault its document is open on.
+    fn asked(&self) -> Option<(Rc<dyn Editor>, Arc<Vault>)> {
+        let editor = self.0.upgrade()?;
+        let vault = editor.document().vault()?;
+        Some((editor, vault))
+    }
+}
+
+impl Source for EditorSource {
     fn fetch(&self, at: Pos, trigger: Option<char>) -> Reply<Completions> {
-        let tab = self.0.upgrade();
-        if let Some(answer) = tab.as_deref().and_then(|tab| abbreviations(tab, at)) {
+        let editor = self.0.upgrade();
+        if let Some(answer) = editor.as_deref().and_then(|e| abbreviations(e, at)) {
             return Box::pin(async move { answer });
         }
+        let asked = self.asked();
         Box::pin(async move {
-            let Some((tab, vault)) = tab.and_then(|tab| Some((tab.clone(), tab.lang.vault()?)))
-            else {
+            let Some((editor, vault)) = asked else {
                 return Completions::default();
             };
-            lang::flush(tab.clone()).await;
-            let rel = tab.language_key();
-            match vault.completion(&rel, at, trigger).await {
+            editor.clone().flush().await;
+            let (key, Some(pos)) = (editor.document().key(), editor.to_document(at)) else {
+                return Completions::default();
+            };
+            match vault.completion(&key, pos, trigger).await {
                 Ok(answer) => {
                     tracing::debug!(
-                        "completion for {rel} at {at:?}: {} items{}",
+                        "completion for {key} at {pos:?}: {} items{}",
                         answer.items.len(),
                         if answer.incomplete {
                             ", more to ask"
@@ -890,10 +904,10 @@ impl Source for TabSource {
                             ""
                         }
                     );
-                    answer
+                    in_view(answer, |at| editor.to_view(at))
                 }
                 Err(e) => {
-                    tracing::debug!("completion for {rel}: {e:#}");
+                    tracing::debug!("completion for {key}: {e:#}");
                     Completions::default()
                 }
             }
@@ -901,18 +915,20 @@ impl Source for TabSource {
     }
 
     fn resolve(&self, item: Completion) -> Reply<Completion> {
-        let tab = self.0.upgrade();
+        let asked = self.asked();
         Box::pin(async move {
-            let Some((tab, vault)) = tab.and_then(|tab| Some((tab.clone(), tab.lang.vault()?)))
-            else {
+            let Some((editor, vault)) = asked else {
                 return item;
             };
-            lang::flush(tab.clone()).await;
+            editor.clone().flush().await;
+            let Some(out) = moved(item.clone(), |at| editor.to_document(at)) else {
+                return item;
+            };
             match vault
-                .resolve_completion(&tab.language_key(), item.clone())
+                .resolve_completion(&editor.document().key(), out)
                 .await
             {
-                Ok(full) => full,
+                Ok(full) => moved(full, |at| editor.to_view(at)).unwrap_or(item),
                 Err(e) => {
                     tracing::debug!("completionItem/resolve: {e:#}");
                     item
@@ -924,20 +940,22 @@ impl Source for TabSource {
     /// Clear ghost text while the popup is shown. Flush deferred ghost
     /// requests when it closes so unobscured suggestions are refreshed.
     fn shown(&self, up: bool) {
-        let Some(tab) = self.0.upgrade() else { return };
+        let Some(editor) = self.0.upgrade() else {
+            return;
+        };
         match up {
-            true => crate::ghost::clear(&tab),
+            true => crate::ghost::clear(editor.as_ref()),
             false => {
                 glib::spawn_future_local(async move {
-                    lang::flush(tab.clone()).await;
-                    crate::ghost::request(&tab).await;
+                    editor.clone().flush().await;
+                    crate::ghost::request(editor.as_ref()).await;
                 });
             }
         }
     }
 
     fn walking(&self) -> bool {
-        self.0.upgrade().is_some_and(|tab| tab.snippet_active())
+        self.0.upgrade().is_some_and(|e| e.snippet_active())
     }
 
     fn push_snippet(
@@ -947,25 +965,59 @@ impl Source for TabSource {
         at: &mut gtk::TextIter,
     ) {
         match self.0.upgrade() {
-            Some(tab) => tab.push_snippet(snippet, at),
+            Some(editor) => editor.push_snippet(snippet, at),
             None => view.push_snippet(snippet, Some(at)),
         }
     }
 }
 
+/// `answer`, given in the document's positions, in the view's (`to`): the rows and the fragment
+/// that are not all in the view left out.
+fn in_view(mut answer: Completions, to: impl Fn(Pos) -> Option<Pos>) -> Completions {
+    answer.items = answer
+        .items
+        .into_iter()
+        .filter_map(|item| moved(item, &to))
+        .collect();
+    answer.fragment = answer.fragment.and_then(|f| moved_range(f, &to));
+    answer
+}
+
+/// `item` with its ranges moved by `to`, between the view's positions and its document's: `None`
+/// when what it replaces does not move, and an edit it makes that does not, an import at the top
+/// of another notebook cell, left out (user decision 2026-10-20).
+fn moved(mut item: Completion, to: impl Fn(Pos) -> Option<Pos>) -> Option<Completion> {
+    item.replace = moved_range(item.replace, &to)?;
+    item.extra_edits
+        .retain_mut(|edit| match moved_range(edit.range, &to) {
+            Some(range) => {
+                edit.range = range;
+                true
+            }
+            None => false,
+        });
+    Some(item)
+}
+
+fn moved_range(range: Range, to: impl Fn(Pos) -> Option<Pos>) -> Option<Range> {
+    Some(Range {
+        start: to(range.start)?,
+        end: to(range.end)?,
+    })
+}
+
 /// Complete Lean backslash abbreviations locally ([`abbrev`]); the server
 /// has no answer for this input prefix. The name runs on past the caret to its end, all of it
 /// matched and replaced, the backslash opening it being no part of the fragment.
-fn abbreviations(tab: &Tab, at: Pos) -> Option<Completions> {
-    if lang::language_id(tab) != abbrev::LANGUAGE {
+fn abbreviations(editor: &dyn Editor, at: Pos) -> Option<Completions> {
+    if editor.language_id() != abbrev::LANGUAGE {
         return None;
     }
-    let caret = lang::iter_at(&tab.buffer, at);
-    let before = line_prefix(&tab.buffer, &caret);
+    let buffer = editor.view().buffer();
+    let caret = lang::iter_at(&buffer, at);
+    let before = line_prefix(&buffer, &caret);
     let typed = abbrev::typed(&before)?;
-    let after = tab
-        .buffer
-        .text(&caret, &line_end(&tab.buffer, caret.line()), true);
+    let after = buffer.text(&caret, &line_end(&buffer, caret.line()), true);
     let rest = abbrev::rest(&after);
     let at_char = |character| Pos {
         line: at.line,
@@ -1090,5 +1142,75 @@ impl Source for Fixed {
 
     fn resolve(&self, item: Completion) -> Reply<Completion> {
         Box::pin(async move { item })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn range(line: u32, from: u32, to_line: u32, to: u32) -> Range {
+        Range {
+            start: Pos {
+                line,
+                character: from,
+            },
+            end: Pos {
+                line: to_line,
+                character: to,
+            },
+        }
+    }
+
+    /// A notebook cell's view over line 2 of its document, as `lang::Editor::to_view` maps it.
+    fn cell_view(at: Pos) -> Option<Pos> {
+        (at.line == 2).then_some(Pos { line: 0, ..at })
+    }
+
+    #[test]
+    fn an_answer_is_the_views_and_edits_outside_it_go() {
+        let item = |replace, extra: Vec<TextEdit>| Completion {
+            label: "alpha".to_string(),
+            kind: Kind::Function,
+            detail: None,
+            doc: None,
+            filter: None,
+            insert: "alpha".to_string(),
+            is_snippet: false,
+            replace,
+            extra_edits: extra,
+            resolve: None,
+            preselect: false,
+            commit: Vec::new(),
+        };
+        let edit = |line, text: &str| TextEdit {
+            range: range(line, 0, line, 0),
+            text: text.to_string(),
+        };
+        let extra = vec![edit(0, "import alpha\n"), edit(2, "alpha.")];
+        let answer = in_view(
+            Completions {
+                items: vec![
+                    item(range(2, 8, 2, 12), extra),
+                    item(range(1, 0, 2, 1), vec![]),
+                ],
+                incomplete: true,
+                fragment: Some(range(2, 8, 2, 12)),
+            },
+            cell_view,
+        );
+        assert_eq!(answer.items.len(), 1, "a row reaching out of the view goes");
+        let kept = &answer.items[0];
+        assert_eq!(kept.replace, range(0, 8, 0, 12));
+        assert_eq!(
+            kept.extra_edits,
+            [edit(0, "alpha.")],
+            "the import into another cell is gone"
+        );
+        assert_eq!(answer.fragment, Some(range(0, 8, 0, 12)));
+        // Back into the document, as a resolve asks about it.
+        let down = |at: Pos| Some(Pos { line: 2, ..at });
+        let back = moved(kept.clone(), down).unwrap();
+        assert_eq!(back.replace, range(2, 8, 2, 12));
     }
 }

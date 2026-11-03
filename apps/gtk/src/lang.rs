@@ -12,8 +12,8 @@ use accent_api::{
 };
 use accent_core::note::Syntax;
 use futures_channel::oneshot;
+use gtk::glib;
 use gtk::prelude::*;
-use gtk::{gdk, glib};
 use sourceview5::prelude::*;
 use std::cell::{Cell, Ref, RefCell};
 use std::rc::Rc;
@@ -25,7 +25,7 @@ use std::time::Duration;
 pub(crate) const REFRESH: Duration = Duration::from_millis(300);
 
 /// Short ghost-text debounce so caret-local suggestions do not appear to disappear while typing.
-const GHOST: Duration = Duration::from_millis(100);
+pub(crate) const GHOST: Duration = Duration::from_millis(100);
 
 /// Server-start delay before showing status, suppressing brief handshakes while reporting slow cold starts.
 const SLOW_START: Duration = Duration::from_secs(1);
@@ -343,6 +343,9 @@ pub(crate) trait Editor {
     fn completion(&self) -> Option<Rc<Session>>;
     /// Whether a template's or a completion's stops are being walked.
     fn snippet_active(&self) -> bool;
+    /// Put `snippet` in at `at`, its stops to be walked with Tab: see
+    /// [`snippet_active`](Self::snippet_active).
+    fn push_snippet(&self, snippet: &sourceview5::Snippet, at: &mut gtk::TextIter);
     /// Stop all active snippets by toggling `enable-snippets`, the available GtkSourceView 5.20
     /// cancellation mechanism.
     fn end_snippet(&self) {
@@ -354,12 +357,8 @@ pub(crate) trait Editor {
     fn value(self: Rc<Self>, _start: &gtk::TextIter) -> Option<(String, Task<Evaluated>)> {
         None
     }
-    /// A key for the ghost text painted, if any: see [`crate::ghost::on_key`].
-    fn ghost_key(
-        self: Rc<Self>,
-        _key: gdk::Key,
-        _state: gdk::ModifierType,
-    ) -> Option<glib::Propagation> {
+    /// Its ghost text, where it has any: see [`crate::ghost`].
+    fn ghost(&self) -> Option<&crate::ghost::State> {
         None
     }
     /// Whether the server's quick fixes are offered here: wherever the text can be edited.
@@ -413,16 +412,16 @@ impl Editor for Tab {
         Tab::snippet_active(self)
     }
 
+    fn push_snippet(&self, snippet: &sourceview5::Snippet, at: &mut gtk::TextIter) {
+        Tab::push_snippet(self, snippet, at)
+    }
+
     fn value(self: Rc<Self>, start: &gtk::TextIter) -> Option<(String, Task<Evaluated>)> {
         crate::hover::value_of(&self, start)
     }
 
-    fn ghost_key(
-        self: Rc<Self>,
-        key: gdk::Key,
-        state: gdk::ModifierType,
-    ) -> Option<glib::Propagation> {
-        crate::ghost::on_key(&self, key, state)
+    fn ghost(&self) -> Option<&crate::ghost::State> {
+        Some(&self.lang.ghost)
     }
 }
 
@@ -468,12 +467,13 @@ pub fn attach(tab: &Rc<Tab>, vault: Option<Arc<Vault>>, hooks: Hooks) {
         return restart(tab, Duration::ZERO);
     };
     let editor: Rc<dyn Editor> = tab.clone();
-    let source = crate::completion::TabSource(Rc::downgrade(tab));
+    let source = crate::completion::EditorSource(Rc::downgrade(&editor));
     let session = crate::completion::install(&editor, Box::new(source));
     *tab.lang.completion.borrow_mut() = Some(session);
     crate::hover::install(&editor);
     crate::signature::install(&editor);
-    crate::ghost::install(tab);
+    tab.lang.ghost.on.set(tab.ghost_text_wanted());
+    crate::ghost::install(&editor);
     join(tab, vault);
 }
 
@@ -736,7 +736,7 @@ async fn refresh(tab: Rc<Tab>, rest: Duration) {
     flush(tab.clone()).await;
     // First, because it is the one answer the user is waiting to see: the symbols and folds
     // behind it feed panes that are already drawn.
-    crate::ghost::request(&tab).await;
+    crate::ghost::request(tab.as_ref()).await;
     pause(rest).await;
     let rel = tab.language_key();
     match vault.symbols(&rel).await {

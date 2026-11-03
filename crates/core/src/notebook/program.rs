@@ -1,12 +1,14 @@
-//! A notebook's code cells as one program, which a language server reads as it reads a file.
+//! A notebook's cells of one kind as one text, which the language layer reads as it reads a file:
+//! the code cells as a program, the markdown cells as a note.
 
 use std::borrow::Cow;
 use std::ops::Range;
 
 use super::{CellId, Format, Kind, Notebook};
 
-/// The code cells' sources in the notebook's order, a line break after each, so a cell is a run
-/// of whole lines and a position maps between a cell and the program by the cell's first line.
+/// The sources of a notebook's cells of one kind in the notebook's order, a line break after
+/// each, so a cell is a run of whole lines and a position maps between a cell and the text by the
+/// cell's first line.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Program {
     pub text: String,
@@ -31,12 +33,23 @@ impl Notebook {
     /// Python, line for line with ordinary Python columns unchanged ([`as_python`]).
     pub fn program(&self) -> Program {
         let ipython = self.format() == Format::Ipynb && self.language == "python";
+        self.joined(Kind::Code, |source| match ipython {
+            true => Cow::Owned(as_python(source)),
+            false => Cow::Borrowed(source),
+        })
+    }
+
+    /// The markdown cells as one note, as they are written: what a markdown cell's completion
+    /// and ghost text read.
+    pub fn prose(&self) -> Program {
+        self.joined(Kind::Markdown, Cow::Borrowed)
+    }
+
+    /// The cells of `kind` joined, each source as `read` gives it, line for line.
+    fn joined<'a>(&'a self, kind: Kind, read: impl Fn(&'a str) -> Cow<'a, str>) -> Program {
         let mut program = Program::default();
-        for cell in self.cells.iter().filter(|c| c.kind == Kind::Code) {
-            let source = match ipython {
-                true => Cow::Owned(as_python(&cell.source)),
-                false => Cow::Borrowed(cell.source.as_str()),
-            };
+        for cell in self.cells.iter().filter(|c| c.kind == kind) {
+            let source = read(&cell.source);
             let first = program.cells.last().map_or(0, |s| s.first + s.lines);
             let lines: Vec<&str> = source.split('\n').collect();
             let last = lines.iter().rposition(|l| {
@@ -57,7 +70,7 @@ impl Notebook {
 }
 
 impl Program {
-    /// The lines cell `id` is, `None` for a cell that is not code.
+    /// The lines cell `id` is, `None` for a cell of another kind.
     pub fn lines(&self, id: CellId) -> Option<Range<u32>> {
         let span = self.cells.iter().find(|s| s.id == id)?;
         Some(span.first..span.first + span.lines)
@@ -69,7 +82,7 @@ impl Program {
         Some((span.id, line - span.first))
     }
 
-    /// Whether `line` is its cell's last line of code, whose value a notebook shows.
+    /// Whether `line` is its code cell's last line of code, whose value a notebook shows.
     pub fn ends_cell(&self, line: u32) -> bool {
         self.span_at(line).is_some_and(|s| s.last == line)
     }
@@ -159,6 +172,27 @@ mod tests {
         let last = code.last().unwrap().id();
         assert_eq!(program.cell_at(lines - 1), Some((last, 0)));
         assert_eq!(program.cell_at(lines), None);
+    }
+
+    #[test]
+    fn the_markdown_cells_are_one_note_a_line_apart() {
+        let mut nb = read("a.ipynb", EMPTY_IPYNB).unwrap();
+        for (at, kind, source) in [
+            (0, Kind::Markdown, "# Title\nIntro"),
+            (2, Kind::Markdown, "%not magic\n## Part"),
+        ] {
+            let cell = nb.new_cell(kind, source).unwrap();
+            nb.apply(Edit::Insert { at, cell });
+        }
+        let prose = nb.prose();
+        assert_eq!(
+            prose.text, "# Title\nIntro\n%not magic\n## Part\n",
+            "as written"
+        );
+        let cells = nb.cells();
+        assert_eq!(prose.lines(cells[0].id()), Some(0..2));
+        assert_eq!(prose.lines(cells[1].id()), None, "a code cell");
+        assert_eq!(prose.cell_at(3), Some((cells[2].id(), 1)));
     }
 
     #[test]

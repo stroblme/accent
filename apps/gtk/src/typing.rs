@@ -272,11 +272,14 @@ pub fn on_key(
     key: gdk::Key,
     state: gdk::ModifierType,
 ) -> glib::Propagation {
-    if state.intersects(
-        gdk::ModifierType::CONTROL_MASK
-            | gdk::ModifierType::ALT_MASK
-            | gdk::ModifierType::META_MASK,
-    ) {
+    // A read-only view, a presented notebook's cell say, is not typed into.
+    if !view.is_editable()
+        || state.intersects(
+            gdk::ModifierType::CONTROL_MASK
+                | gdk::ModifierType::ALT_MASK
+                | gdk::ModifierType::META_MASK,
+        )
+    {
         return glib::Propagation::Proceed;
     }
     match key {
