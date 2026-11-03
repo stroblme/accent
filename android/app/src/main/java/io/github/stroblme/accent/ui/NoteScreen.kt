@@ -51,7 +51,13 @@ import kotlin.math.roundToInt
 
 /** Display a note as rendered HTML or editable Markdown with core styling spans. */
 @Composable
-fun NoteScreen(model: VaultModel, open: Open, chrome: Chrome, onTag: (String) -> Unit) {
+fun NoteScreen(
+    model: VaultModel,
+    open: Open,
+    chrome: Chrome,
+    onTag: (String) -> Unit,
+    onSearch: (String) -> Unit,
+) {
     var editing by remember(open.rel) { mutableStateOf(false) }
     var details by remember(open.rel) { mutableStateOf(false) }
     val context = LocalContext.current
@@ -99,7 +105,7 @@ fun NoteScreen(model: VaultModel, open: Open, chrome: Chrome, onTag: (String) ->
             if (editing) {
                 Box(Modifier.padding(top = bar)) { Editor(model, open.rel) }
             } else {
-                Rendered(model, open, chrome, onTag)
+                Rendered(model, open, chrome, onTag, onSearch)
             }
         }
     }
@@ -177,7 +183,13 @@ private fun UnsavedDialog(why: String, onAnswer: (Boolean?) -> Unit) {
  * [served], load [MERMAID] from the APK, and block other requests.
  */
 @Composable
-private fun Rendered(model: VaultModel, open: Open, chrome: Chrome, onTag: (String) -> Unit) {
+private fun Rendered(
+    model: VaultModel,
+    open: Open,
+    chrome: Chrome,
+    onTag: (String) -> Unit,
+    onSearch: (String) -> Unit,
+) {
     val colors = MaterialTheme.colorScheme
     // What the images are served under, read by the loading thread; a change in either loads the
     // page again, since an image is recoloured on its way into it.
@@ -209,6 +221,7 @@ private fun Rendered(model: VaultModel, open: Open, chrome: Chrome, onTag: (Stri
     // a parameter.
     val finding by rememberUpdatedState(open.finding)
     val tagged by rememberUpdatedState(onTag)
+    val searched by rememberUpdatedState(onSearch)
 
     // The reader's own find: every keystroke marks the page again, and an empty field — which is
     // where the bar opens, and what it leaves behind when it closes — takes the marks off. One
@@ -317,6 +330,8 @@ private fun Rendered(model: VaultModel, open: Open, chrome: Chrome, onTag: (Stri
                                 Click.Scroll -> return false
                                 is Click.Open -> model.openLink(to.v1)
                                 is Click.Tag -> tagged(to.v1)
+                                // A saved search's Show Results: its query, asked in Browse.
+                                is Click.Search -> searched(to.v1)
                                 // Only for a tap: a refresh or a redirect launches nothing.
                                 Click.Leave -> if (request.hasGesture()) {
                                     launchUri(view.context, url) { model.said(it) }
@@ -453,6 +468,8 @@ ${if (diagrams(body)) mermaid(if (bg.dark()) "dark" else "neutral") else ""}
     background: ${fg.copy(alpha = 0.07f).rgba()};
   }
   .callout-title { margin: 0.75em 0; font-weight: 700; color: ${accent.css()}; }
+  /* A saved search: its query under a dim caption, which links its results in Browse. */
+  .saved-search { margin: 1em 0 0.25em; font-size: 0.85em; opacity: 0.7; }
   table { border-collapse: collapse; display: block; overflow-x: auto; }
   th, td { padding: 4px 10px 4px 0; text-align: left; }
   math[display="block"] { margin: 1.2em 0; }

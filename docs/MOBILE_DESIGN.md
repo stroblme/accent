@@ -33,7 +33,9 @@ Follow these rules where they differ from Material 3, using a flat layout and ty
 - Every list here is the index's, so while the vault is still being read the start screen's bar runs under the title, without words (user decision 2026-11-03); a stopped walk drops the bar for a muted line saying what is not listed yet.
   Search and Files ask again as the walk reads more files, so a file it reaches turns up without the query being typed again, and a query that matched nothing says "Nothing found yet" until it ends.
   A query unanswered after 200 ms puts the bar up as well.
-- A search hit opens its note marked by the page's own find; where that find cannot see what the index matched — an accent folded, markup the page does not show, a title — the note opens unmarked at its top rather than marked at the wrong words.
+- Search reads the desktop's query language (DESIGN.md, Architecture), its words found in any order, and a query of qualifiers alone lists files with no line under them.
+- A search hit opens its note marked by the page's own find on the word its row marks, the query as typed being no text the page holds once its words are found in any order; where that find cannot see what the index matched — an accent folded, markup the page does not show, a title — the note opens unmarked at its top rather than marked at the wrong words.
+- A saved search in a note shows its query under a caption with a Show Results link, which opens Browse on Search with that query (user decision 2026-11-03).
 - New from Template… and Today's Note are the commands that ask first: the Command page lists the templates they offer under the command's name in the accent, as a tag lists its notes, and the field narrows them.
   A pick makes the note there, or opens the one it made — a dated target asked twice in a day is the day's note — and Back returns to the commands.
   New from Template… offers every template that says where its notes go (`accent-target:`, as the desktop's does); Today's Note those whose destination is dated (`{{date…}}`), and goes straight to the day's note when there is one.

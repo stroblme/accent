@@ -66,6 +66,8 @@ fun BrowseScreen(
     /** Whether [front] is a note, whose links go both ways: the files it links to too. */
     note: Boolean,
     openTag: String?,
+    /** A saved search's query the panel opens on, on the Search page. */
+    openQuery: String?,
     /** Whether a note or a PDF is in front, which is what Find and Print… act on. */
     printable: Boolean,
     onOpen: (rel: String, find: String?) -> Unit,
@@ -81,7 +83,7 @@ fun BrowseScreen(
     // Which page the pager is nearest, which is what the field means and which chip is lit: both
     // follow the surface across, rather than waiting for it to land.
     val mode = Mode.entries[pager.currentPage]
-    var query by remember { mutableStateOf("") }
+    var query by remember { mutableStateOf(openQuery.orEmpty()) }
     // The ranking and the page and query it was ranked for, as places in [palette] or in [files].
     // Two pages are composed at once while one is being dragged in, and a file row drawn from a
     // command's place is a row that says the wrong thing.
@@ -374,11 +376,12 @@ fun BrowseScreen(
                     else -> items(results, key = { "${it.relPath}:${it.at?.start}" }) { hit ->
                         ListItem(
                             headlineContent = { Text(hit.title ?: File(hit.relPath).name) },
-                            supportingContent = {
-                                Text(hit.snippet, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            // A query of qualifiers alone lists files, with no line to quote.
+                            supportingContent = hit.snippet.takeIf { it.isNotEmpty() }?.let {
+                                { Text(it, maxLines = 2, overflow = TextOverflow.Ellipsis) }
                             },
                             colors = flatRow(),
-                            modifier = Modifier.row { onOpen(hit.relPath, query) },
+                            modifier = Modifier.row { onOpen(hit.relPath, marked(hit.snippet)) },
                         )
                     }
                 }
@@ -690,3 +693,11 @@ private fun newName(): String {
         .format(java.util.Date())
     return "Untitled $stamp.md"
 }
+
+/**
+ * The words a search row marks, which the page's own find marks again on opening it: the query's
+ * words are found in any order, so the query as typed is no text the page holds. Null for a row
+ * that marks none, a title's hit or a file a qualifier listed, which opens at its top.
+ */
+private fun marked(snippet: String): String? =
+    snippet.substringAfter('«', "").substringBefore('»', "").takeIf { it.isNotEmpty() }

@@ -29,6 +29,8 @@ fun HomeScreen(model: VaultModel) {
     var screen by remember { mutableStateOf(Screen.Home) }
     // The tag a tap in a note asked Browse to open on; the button opens it on Search.
     var browseTag by remember { mutableStateOf<String?>(null) }
+    // A saved search's query, which Browse opens on its Search page with ([BrowseScreen]).
+    var browseQuery by remember { mutableStateOf<String?>(null) }
     val chrome = remember { Chrome() }
     val snackbar = remember { SnackbarHostState() }
 
@@ -74,6 +76,12 @@ fun HomeScreen(model: VaultModel) {
                     chrome = chrome,
                     onTag = {
                         browseTag = it
+                        browseQuery = null
+                        screen = Screen.Browse
+                    },
+                    onSearch = {
+                        browseQuery = it
+                        browseTag = null
                         screen = Screen.Browse
                     },
                 )
@@ -105,6 +113,7 @@ fun HomeScreen(model: VaultModel) {
                     state.ready,
                 onBrowse = {
                     browseTag = null
+                    browseQuery = null
                     screen = Screen.Browse
                 },
                 modifier = Modifier.align(Alignment.BottomCenter),
@@ -136,6 +145,7 @@ fun HomeScreen(model: VaultModel) {
                     front = doc?.rel,
                     note = doc is Open,
                     openTag = browseTag,
+                    openQuery = browseQuery,
                     printable = doc is Open || doc is OpenPdf,
                     onOpen = { rel, find ->
                         model.openFile(rel, find)
