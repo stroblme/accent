@@ -471,10 +471,17 @@ fn wire_pane_drops(app: &Rc<App>, pane: &Rc<Pane>) {
                 .flatten()
                 .map(|(_, _, gap)| gap);
             app.show_pdf_drop(&pane, gap);
+            // An image from the tree over a PDF's page lands on it as a picture, under the
+            // pointer: no shade says it would open.
+            let picture = (zone == Zone::Here && caret.is_none())
+                .then(|| app.picture_drop(&pane, target, None, (x, y)))
+                .flatten()
+                .is_some();
             // A folder or a marked set opens in no pane: only a reference takes one.
             let tab = drop.formats().contains_type(adw::TabPage::static_type());
             let opens = tab || refer::one_file(&drop).is_some();
-            pane.show_zone((opens && gap.is_none() && caret.is_none()).then_some(zone));
+            let shade = opens && gap.is_none() && !picture && caret.is_none();
+            pane.show_zone(shade.then_some(zone));
             if !opens && caret.is_none() {
                 return gdk::DragAction::empty();
             }
@@ -572,6 +579,13 @@ fn wire_pane_drops(app: &Rc<App>, pane: &Rc<Pane>) {
                 .flatten();
             if let Some((pdf, from, gap)) = into {
                 app.import_pdf(&pdf, Some(gap), &from);
+                return true;
+            }
+            let picture = (zone == Zone::Here)
+                .then(|| app.picture_drop(&pane, target, Some(value), (x, y)))
+                .flatten();
+            if let Some((pdf, from, under)) = picture {
+                app.insert_picture(&pdf, &from, under);
                 return true;
             }
             app.dropped(&pane, zone, value)

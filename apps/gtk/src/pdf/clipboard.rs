@@ -1,6 +1,7 @@
 //! The Select tool's commands: copy, cut, paste, duplicate and delete what it holds. A copy goes
 //! onto the system clipboard as JSON in a format of our own, beside the typed texts it holds as
-//! plain text, so another PDF tab, in this window or another, pastes it.
+//! plain text, so another PDF tab, in this window or another, pastes it. A picture another
+//! application copied pastes too.
 
 use std::rc::Rc;
 
@@ -8,6 +9,7 @@ use accent_core::pdf::{Clip, InkStyle, Matrix, then};
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 
+use super::pictures::Incoming;
 use super::protocol::{Clipping, Request, fresh_id};
 use super::tab::PdfTab;
 use super::tools::{Kind, Picked, clamp_move};
@@ -15,9 +17,14 @@ use super::tools::{Kind, Picked, clamp_move};
 /// What the clipboard calls strokes and texts copied off a PDF: a JSON list of [`Clip`]s.
 pub const MIME: &str = "application/x-accent-pdf-ink";
 
+/// What another application's JPEG is on the clipboard, which goes into the file as it is.
+const JPEG: &str = "image/jpeg";
+/// What a source that encodes its pixels offers beside its JPEG, which is then no file's own.
+const PNG: &str = "image/png";
+
 /// How far a paste in place, or a duplicate, lands down and right of what it copies, in page
-/// points.
-const STEP: f32 = 10.0;
+/// points: and each picture of a drop of several from the one before.
+pub(super) const STEP: f32 = 10.0;
 
 impl PdfTab {
     /// Copy what the Select tool holds, or else the selected text: `Ctrl+C` and Copy Selection.
@@ -58,9 +65,14 @@ impl PdfTab {
         self.ask(Request::Clip { page, ids, how });
     }
 
-    /// Whether there are drawings to paste: on the clipboard, or on their way to it.
+    /// Whether there is something to paste: drawings on the clipboard or on their way to it, or a
+    /// picture.
     pub fn pasteable(&self) -> bool {
-        self.copying.get() > 0 || self.view.clipboard().formats().contain_mime_type(MIME)
+        let formats = self.view.clipboard().formats();
+        self.copying.get() > 0
+            || formats.contain_mime_type(MIME)
+            || formats.contain_mime_type(JPEG)
+            || formats.contains_type(gdk::Texture::static_type())
     }
 
     /// The render thread's copy of what the Select tool held on `page` landed. A paste asked for
@@ -104,9 +116,12 @@ impl PdfTab {
         }
     }
 
-    /// Paste drawings from the clipboard, as strokes and texts of ours, held by the Select tool:
-    /// where they were copied from, a step further down and right for each paste of the same copy,
-    /// on the page the page's menu was opened on, else on the page being read. Never off the paper.
+    /// Paste drawings from the clipboard, as strokes, texts and pictures of ours, held by the
+    /// Select tool: where they were copied from, a step further down and right for each paste of
+    /// the same copy, on the page the page's menu was opened on, else on the page being read. A
+    /// picture from another application lands in the middle of what is on screen of that page,
+    /// at its natural size up to half the page, and steps on the same way. Never off the paper.
+    /// Text is no drawing, and is left alone.
     pub fn paste(self: &Rc<Self>) {
         let page = self.pointed.get().map(|(page, ..)| page);
         match self.copying.get() {
@@ -115,21 +130,40 @@ impl PdfTab {
         }
     }
 
+    /// Our drawing first, then a JPEG's bytes where they are the source's own, which go into the
+    /// file as they are, then any picture, decoded by GDK.
     fn paste_at(self: &Rc<Self>, page: Option<usize>) {
         let clipboard = self.view.clipboard();
         let tab = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let Some(json) = read(&clipboard).await else {
+            let formats = clipboard.formats();
+            if formats.contain_mime_type(MIME) {
+                let Some(json) = read(&clipboard, MIME).await else {
+                    return;
+                };
+                let clips: Vec<Clip> = match serde_json::from_slice(&json) {
+                    Ok(clips) => clips,
+                    Err(e) => return tracing::warn!("the clipboard's drawing does not read: {e}"),
+                };
+                if let Some(tab) = tab.upgrade()
+                    && !clips.is_empty()
+                {
+                    tab.land(clips, &json, page);
+                }
                 return;
+            }
+            // A source offering PNG too encodes both from its pixels, GTK's from every image
+            // it copies, and its JPEG would lose detail and every clear pixel.
+            let jpeg = match formats.contain_mime_type(JPEG) && !formats.contain_mime_type(PNG) {
+                true => read(&clipboard, JPEG).await.and_then(Incoming::jpeg),
+                false => None,
             };
-            let clips: Vec<Clip> = match serde_json::from_slice(&json) {
-                Ok(clips) => clips,
-                Err(e) => return tracing::warn!("the clipboard's drawing does not read: {e}"),
+            let incoming = match jpeg {
+                Some(jpeg) => Some(jpeg),
+                None => picture(&clipboard).await,
             };
-            if let Some(tab) = tab.upgrade()
-                && !clips.is_empty()
-            {
-                tab.land(clips, &json, page);
+            if let (Some(tab), Some(incoming)) = (tab.upgrade(), incoming) {
+                tab.land_picture(incoming, page);
             }
         });
     }
@@ -141,6 +175,28 @@ impl PdfTab {
         let size = self.page_size(page).unwrap_or((f32::MAX, f32::MAX));
         let m = clamp_move(bounds_of(&clips), [1.0, 0.0, 0.0, 1.0, d, d], size);
         self.paste_clips(page, clips, m);
+    }
+
+    /// Where a picture from another application goes: see [`PdfTab::paste`].
+    fn land_picture(&self, incoming: Incoming, page: Option<usize>) {
+        let page = page.unwrap_or_else(|| self.current_page());
+        let Some(size) = self.page_size(page) else {
+            return;
+        };
+        let shown = (self.view.visible_part(page))
+            .unwrap_or(accent_core::pdf::Rect::from_corners((0.0, 0.0), size));
+        let middle = (
+            (shown.left + shown.right) / 2.0,
+            (shown.top + shown.bottom) / 2.0,
+        );
+        let d = self.step(incoming.key);
+        let place = incoming.place(middle, size);
+        let clip = Clip::Image {
+            place,
+            picture: incoming.picture,
+        };
+        let m = clamp_move(clip.bounds(), [1.0, 0.0, 0.0, 1.0, d, d], size);
+        self.paste_clips(page, vec![clip], m);
     }
 
     /// How far down and right the paste of the copy `key` goes: none for its first, one step
@@ -156,7 +212,7 @@ impl PdfTab {
 
     /// `clips` drawn onto `page` under `m`, held by the Select tool at once under the names the
     /// render thread will list them by.
-    fn paste_clips(&self, page: usize, clips: Vec<Clip>, matrix: Matrix) {
+    pub(super) fn paste_clips(&self, page: usize, clips: Vec<Clip>, matrix: Matrix) {
         if clips.is_empty() {
             return;
         }
@@ -239,12 +295,22 @@ fn picked_of(clip: &Clip, id: u32) -> Picked {
     }
 }
 
-/// The drawing on `clipboard`, as the JSON a copy put there, or `None` when it holds none.
-async fn read(clipboard: &gdk::Clipboard) -> Option<Vec<u8>> {
+/// The picture on `clipboard`, decoded by GDK and read on a worker, or `None` when it holds none.
+async fn picture(clipboard: &gdk::Clipboard) -> Option<Incoming> {
+    let texture = (clipboard.read_texture_future().await)
+        .inspect_err(|e| tracing::debug!("no picture on the clipboard: {e}"))
+        .ok()??;
+    let read = move || Incoming::pasted(&texture);
+    crate::work::off_thread("read the pasted picture", read).await?
+}
+
+/// What `clipboard` holds as `mime`: the JSON a copy put there, or a JPEG's bytes. `None` when it
+/// holds none.
+async fn read(clipboard: &gdk::Clipboard, mime: &str) -> Option<Vec<u8>> {
     let (stream, _) = (clipboard
-        .read_future(&[MIME], glib::Priority::DEFAULT)
+        .read_future(&[mime], glib::Priority::DEFAULT)
         .await)
-        .inspect_err(|e| tracing::debug!("no drawing on the clipboard: {e}"))
+        .inspect_err(|e| tracing::debug!("no {mime} on the clipboard: {e}"))
         .ok()?;
     // Read whole, however large: a page of strokes is easily more than a buffer's guess.
     let out = gio::MemoryOutputStream::new_resizable();

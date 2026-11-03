@@ -3,6 +3,8 @@
 use crate::*;
 use accent_core::pdf::PageEdit;
 
+use super::pictures::Incoming;
+
 impl App {
     /// A PDF, in the reader.
     pub(crate) fn open_pdf(self: &Rc<Self>, key: &str, path: &Path, how: Opened) {
@@ -144,6 +146,27 @@ impl App {
                 app.toast(&what);
             }
         ));
+        // What a drop put on the page is held by the Select tool, which it picks up there.
+        pdf.connect_pictured(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |pdf, landed, unread| {
+                if landed > 0 {
+                    app.reveal_page(&pdf.page);
+                    if pdf.mode() != pdfview::Mode::Select {
+                        app.pdf_mode(pdfview::Mode::Select);
+                    }
+                }
+                match unread {
+                    0 => {}
+                    1 => app.cannot("insert the picture", "it does not read as an image"),
+                    n => app.cannot(
+                        &format!("insert {n} pictures"),
+                        "they do not read as images",
+                    ),
+                }
+            }
+        ));
         pdf.connect_choice(glib::clone!(
             #[weak(rename_to = app)]
             self,
@@ -242,19 +265,51 @@ impl App {
         (x, y): (f64, f64),
     ) -> Option<(Rc<pdftab::PdfTab>, String, usize)> {
         let pdf = self.pdf_of(pane)?;
-        let carried = match value {
-            Some(value) => value.clone(),
-            None => {
-                let content = target.current_drop()?.drag()?.content();
-                content.value(String::static_type()).ok()?
-            }
-        };
-        let from = carried.get::<String>().ok()?;
+        let from = dragged(target, value)?;
         if doc::kind_of(&from) != Kind::Pdf || from == pdf.key() {
             return None;
         }
         let gap = pdf.drop_gap(&target.widget()?, x, y)?;
         Some((pdf, from, gap))
+    }
+
+    /// A row dragged from the tree over `pane` at `(x, y)` of `target`'s sheet, as
+    /// [`App::pdf_drop`] reads one: the PDF in front there, the dragged image's path, and the page
+    /// under the pointer and the point on it, where the image lands as a picture.
+    pub(crate) fn picture_drop(
+        &self,
+        pane: &Pane,
+        target: &gtk::DropTarget,
+        value: Option<&glib::Value>,
+        (x, y): (f64, f64),
+    ) -> Option<(Rc<pdftab::PdfTab>, String, OnPage)> {
+        let pdf = self.pdf_of(pane)?;
+        let from = dragged(target, value).filter(|from| accent_core::markdown::is_image(from))?;
+        let under = pdf.page_under(&target.widget()?, x, y)?;
+        Some((pdf, from, under))
+    }
+
+    /// Put the image `from`, a vault path, on `page` of `into` centred at `at`, as a picture
+    /// dropped there from another application lands. A remote vault's file is fetched first, as
+    /// one opened is.
+    pub(crate) fn insert_picture(
+        self: &Rc<Self>,
+        into: &Rc<pdftab::PdfTab>,
+        from: &str,
+        (page, at): OnPage,
+    ) {
+        let name = doc::file_name(from).to_string();
+        let Some((key, path)) = self.locate(from) else {
+            return self.cannot(&format!("insert {name}"), "not in this vault");
+        };
+        let into = Rc::downgrade(into);
+        self.local_copy(&key, &path, move |app, copy| {
+            let Some(into) = into.upgrade() else { return };
+            match copy {
+                Ok(copy) => into.drop_pictures(page, at, move || vec![Incoming::file(&copy)]),
+                Err(e) => app.cannot(&format!("insert {name}"), e),
+            }
+        });
     }
 
     /// Show the line a dropped PDF's pages would go in at on the PDF in front of `pane`, or take
@@ -799,4 +854,20 @@ impl App {
             self.sync_pdf_links(&pdf);
         }
     }
+}
+
+/// A page, and a point on it in its own points.
+type OnPage = (usize, (f32, f32));
+
+/// The path a row dragged from the tree carries: off the drop's `value` once it has landed, off
+/// the drag until then.
+fn dragged(target: &gtk::DropTarget, value: Option<&glib::Value>) -> Option<String> {
+    let carried = match value {
+        Some(value) => value.clone(),
+        None => {
+            let content = target.current_drop()?.drag()?.content();
+            content.value(String::static_type()).ok()?
+        }
+    };
+    carried.get::<String>().ok()
 }

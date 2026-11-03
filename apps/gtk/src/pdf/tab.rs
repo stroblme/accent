@@ -46,6 +46,8 @@ type UriHook = Hook<dyn Fn(&str)>;
 type RepageHook = Hook<dyn Fn(&Rc<PdfTab>, pdf::PageEdit, u32)>;
 /// Another PDF's pages went in: its name, and how many or why they could not.
 type ImportHook = Hook<dyn Fn(&Rc<PdfTab>, &str, Result<usize, String>)>;
+/// Pictures dropped onto the pages landed: how many, and how many did not read as an image.
+type PictureHook = Hook<dyn Fn(&Rc<PdfTab>, usize, usize)>;
 
 pub struct PdfTab {
     pub(super) key: RefCell<String>,
@@ -210,6 +212,7 @@ pub struct PdfTab {
     pub(super) on_choice: ChoiceHook,
     pub(super) on_repaged: RepageHook,
     pub(super) on_imported: ImportHook,
+    pub(super) on_pictured: PictureHook,
     /// The monitor on a loose file, which nothing else watches (`App::watch_loose`).
     pub monitor: RefCell<Option<gio::FileMonitor>>,
 }
@@ -372,6 +375,7 @@ pub fn open(
         on_choice: Hook::default(),
         on_repaged: Hook::default(),
         on_imported: Hook::default(),
+        on_pictured: Hook::default(),
         monitor: RefCell::default(),
     });
 
@@ -1093,6 +1097,12 @@ impl PdfTab {
     /// Called once another PDF's pages went in, with its name and how many, or why they did not.
     pub fn connect_imported(&self, f: impl Fn(&Rc<PdfTab>, &str, Result<usize, String>) + 'static) {
         self.on_imported.set(Rc::new(f));
+    }
+
+    /// Called once pictures dropped onto the pages landed, held by the Select tool, with how many
+    /// and how many did not read as an image.
+    pub fn connect_pictured(&self, f: impl Fn(&Rc<PdfTab>, usize, usize) + 'static) {
+        self.on_pictured.set(Rc::new(f));
     }
 
     fn show_status(&self, message: &str) {

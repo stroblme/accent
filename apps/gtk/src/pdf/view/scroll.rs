@@ -144,6 +144,22 @@ impl PdfView {
         page_at(&layout, y)..=page_at(&layout, y + height)
     }
 
+    /// The part of page `page` on screen, in its own points, or `None` when none of it is: where
+    /// a picture pasted from outside lands.
+    pub fn visible_part(&self, page: usize) -> Option<accent_core::pdf::Rect> {
+        let size = |a: Option<gtk::Adjustment>| a.map_or(0.0, |a| a.page_size());
+        let (w, h) = (size(self.hadjustment()), size(self.vadjustment()));
+        let ((x0, y0), (x1, y1)) = (self.content_at(0.0, 0.0), self.content_at(w, h));
+        let (pw, ph) = self.page_size(page)?;
+        let layout = self.imp().layout.borrow();
+        let on = |x: f32, y: f32| {
+            let (x, y) = layout.to_page(page, x, y)?;
+            Some((x.clamp(0.0, pw), y.clamp(0.0, ph)))
+        };
+        let part = accent_core::pdf::Rect::from_corners(on(x0, y0)?, on(x1, y1)?);
+        (part.width() > 0.0 && part.height() > 0.0).then_some(part)
+    }
+
     /// Turn a widget coordinate into a page and a point on it.
     pub fn page_point(&self, x: f64, y: f64) -> Option<(usize, f32, f32)> {
         let (cx, cy) = self.content_at(x, y);

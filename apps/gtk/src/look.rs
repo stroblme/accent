@@ -201,7 +201,11 @@ fn capped(zoom: f64, (width, height): (i32, i32), scale: i32) -> f64 {
 }
 
 /// Rasterise an SVG through gdk-pixbuf at display `scale` and capped `zoom`, returning its intrinsic size.
-fn rasterise(svg: &[u8], scale: i32, zoom: f64) -> Result<(gdk::Texture, (i32, i32)), glib::Error> {
+pub(crate) fn rasterise(
+    svg: &[u8],
+    scale: i32,
+    zoom: f64,
+) -> Result<(gdk::Texture, (i32, i32)), glib::Error> {
     let loader = gdk_pixbuf::PixbufLoader::new();
     let size = Rc::new(Cell::new((0, 0)));
     let own = size.clone();
@@ -280,7 +284,7 @@ pub fn verdict(path: &Path) -> Option<Verdict> {
 
 /// `path` decoded by GDK and turned the way up its EXIF says, which GDK's decoders ignore. One
 /// too large to hold twice is left as it is, as the recolouring leaves it.
-fn decode(path: &Path) -> Result<gdk::Texture, glib::Error> {
+pub(crate) fn decode(path: &Path) -> Result<gdk::Texture, glib::Error> {
     let texture = gdk::Texture::from_filename(path)?;
     let tag = match extension(path).as_str() {
         "tif" | "tiff" => after_libtiff(tag(path)),
@@ -315,10 +319,10 @@ fn after_libtiff(tag: u8) -> u8 {
 }
 
 /// Straight RGBA8 pixels and their size.
-struct Pixels {
-    data: Vec<u8>,
-    width: u32,
-    height: u32,
+pub(crate) struct Pixels {
+    pub(crate) data: Vec<u8>,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
 }
 
 impl Pixels {
@@ -501,7 +505,7 @@ pub(crate) fn measure(texture: &gdk::Texture) -> Verdict {
 
 /// `texture`'s pixels, or `None` above [`recolour::MAX_PIXELS`]: such an image is left alone
 /// rather than held twice.
-fn pixels(texture: &gdk::Texture) -> Option<Pixels> {
+pub(crate) fn pixels(texture: &gdk::Texture) -> Option<Pixels> {
     let (width, height) = (texture.width() as u32, texture.height() as u32);
     if u64::from(width) * u64::from(height) > recolour::MAX_PIXELS {
         return None;
