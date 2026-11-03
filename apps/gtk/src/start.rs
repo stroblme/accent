@@ -57,8 +57,8 @@ pub fn present(
         .label("Open Local…")
         .halign(gtk::Align::Center)
         .build();
+    // At the size of the app's other buttons, not a status page's larger pill.
     open.add_css_class("suggested-action");
-    open.add_css_class("pill");
     open.connect_clicked({
         // Weak window: this button is inside it, so holding it strongly is a cycle that keeps the
         // start screen alive after it closes.
@@ -85,8 +85,8 @@ pub fn present(
         }
     });
 
-    // A pill like its neighbour but not suggested: opening a folder on this machine stays the
-    // primary action, and two suggested buttons side by side would name neither of them.
+    // Like its neighbour but not suggested: opening a folder on this machine stays the primary
+    // action, and two suggested buttons side by side would name neither of them.
     //
     // The action rather than a handler of its own: `app.open-remote` opens the same dialog from
     // the primary menu and the Open Recent picker, and this window is built with an application,
@@ -96,7 +96,6 @@ pub fn present(
         .halign(gtk::Align::Center)
         .action_name("app.open-remote")
         .build();
-    remote.add_css_class("pill");
 
     // 12 px, the spacing DESIGN.md gives two related widgets.
     let buttons = gtk::Box::builder()
