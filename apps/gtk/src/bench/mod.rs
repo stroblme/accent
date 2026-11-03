@@ -40,6 +40,9 @@ mod notebook_lsp;
 mod outline;
 mod panes;
 mod pdf;
+mod pdf_draw;
+mod pdf_outline;
+mod pdf_remote;
 mod pdf_select;
 mod pdf_text;
 mod present;
@@ -107,12 +110,16 @@ use panes::{
     bench_panes, bench_pin, bench_pin_window, bench_pins_restored, bench_reload, bench_tabs,
     bench_tree,
 };
-pub(crate) use pdf::heard;
 use pdf::{
-    bench_drawing, bench_pdf, bench_pdf_bookmarks, bench_pdf_broken, bench_pdf_closed,
-    bench_pdf_comments, bench_pdf_deep, bench_pdf_deleted, bench_pdf_dropped, bench_pdf_failed,
-    bench_pdf_insert, bench_pdf_pages, bench_pdf_renaming, bench_pdf_render, bench_pdf_stale,
-    bench_pdf_strip, bench_sketch,
+    bench_pdf, bench_pdf_broken, bench_pdf_deep, bench_pdf_insert, bench_pdf_pages,
+    bench_pdf_render, bench_pdf_strip,
+};
+pub(crate) use pdf_draw::heard;
+use pdf_draw::{bench_drawing, bench_sketch};
+use pdf_outline::{bench_pdf_bookmarks, bench_pdf_comments};
+use pdf_remote::{
+    bench_pdf_closed, bench_pdf_deleted, bench_pdf_dropped, bench_pdf_failed, bench_pdf_renaming,
+    bench_pdf_stale,
 };
 use replace::bench_replace;
 use scroll::bench_scroll;
@@ -656,13 +663,13 @@ pub fn install_bench_hooks(app: &Rc<App>) {
                 return bench_pdf_comments(&app, rel);
             }
             if let Some(rel) = rel.strip_prefix("walk:") {
-                return pdf::bench_pdf_walk(&app, rel);
+                return pdf_outline::bench_pdf_walk(&app, rel);
             }
             if let Some(arg) = rel.strip_prefix("pen:") {
-                return pdf::bench_pdf_pen(&app, arg);
+                return pdf_draw::bench_pdf_pen(&app, arg);
             }
             if let Some(rel) = rel.strip_prefix("ring:") {
-                return pdf::bench_pdf_ring(&app, rel);
+                return pdf_draw::bench_pdf_ring(&app, rel);
             }
             if let Some(rel) = rel.strip_prefix("text:") {
                 return pdf_text::bench_pdf_text(&app, rel);

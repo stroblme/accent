@@ -1116,7 +1116,7 @@ fn bench_unfold_down(app: &Rc<App>, rel: &str) {
             accent_api::ssh::quote(&remote.url().path.to_string_lossy())
         );
         for (round, then) in [("walk", "true"), ("index", index.as_str())] {
-            let ended = super::pdf::link_down(&app, &remote).await;
+            let ended = super::pdf_remote::link_down(&app, &remote).await;
             // The old server gone with its link, so nothing on the host hears the write but what
             // runs after it.
             glib::timeout_future(Duration::from_secs(1)).await;

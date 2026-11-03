@@ -323,7 +323,7 @@ async fn timed(
     n: usize,
 ) {
     pdf.flush_blocking();
-    if let Err(e) = super::pdf::fill_first_page(path, n) {
+    if let Err(e) = super::pdf_draw::fill_first_page(path, n) {
         return println!("bench select fill_failed {e:#}");
     }
     // The tab reads the file again once its change has settled.
