@@ -682,6 +682,12 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A picture, a diagram, a formula and a task's box stand in the text where the note has them, a table is the one widget, and what no tag draws — a code block's padded box, a quote's bar, a callout's tint, a rule — is painted under the text.
 - Code blocks, fences and org src blocks alike, are coloured as the editor colours them.
   A mermaid fence shows its source under a dim "Mermaid diagram" caption: drawing one is deferred (user decision 2026-10-22).
+- **A `search` fence is a saved search** (user decisions 2026-11-03), and so is org's `#+begin_src search`. Its lines are one query of the Search pane's language (Architecture, A ranked query is words and qualifiers), and `limit=N` in its info string lists at most N rows, 20 unless it says and 100 at most.
+  It shows its query under a dim "Saved search" caption and one list under that, a row a hit as the Search pane draws one, the note itself never among them. A click or Enter opens the row's file, a PDF on its page, and a last row counts what the limit left out.
+  The list says "Searching…" until the first answer and "Nothing in this vault matches this search" for none, and a query that cannot be read says why in the error colour.
+  It asks the vault again a second after the vault last changed, never superseding the Search pane's query nor superseded by it, and a preview out of sight asks once it is shown. An edit that leaves the query as it was keeps the list.
+  Copy writes its fence. Printouts and the HTML export show the query as code under the caption, and Android's rendered note adds a Show Results link that opens Browse's Search on it.
+  In the editor the fence is coloured as the query language (`accent-search.lang`).
 - A note's raw HTML is unwrapped (user decision 2026-10-22): its tags are dropped and their text shown, a `<p>` or a `<div>` breaking the paragraph; `<b>`, `<i>`, `<u>`, `<sub>`, `<sup>`, `<kbd>` and `<br>` style or break the text, `<img>` is a picture, `<iframe>` and `<video>` a link to their source, and a comment, `<style>` and `<script>` show nothing.
   A `<details>` block is always open, its summary a bold line: GtkTextView cannot hide text safely.
 - A table's cells wrap, ruled and padded as the stylesheet's, each column aligned as its delimiter row says and the header bold; a cell holds the prose's inline styles, and a link, a wikilink or a tag in one is followed as on the page.

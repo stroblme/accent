@@ -225,8 +225,12 @@ impl<'a> Page<'a> {
                     .take(2)
                     .collect();
                 let tag = match words[..] {
-                    [name, lang, ..] if name.eq_ignore_ascii_case("src") => {
-                        Cm::CodeBlock(CodeBlockKind::Fenced(lang.into()))
+                    // The words after the language as a fence's info string has them, so a
+                    // `search` block's `limit=` reaches it (`markdown::page`).
+                    [name, _, ..] if name.eq_ignore_ascii_case("src") => {
+                        let info =
+                            text[lines[i].clone()].trim()[8..].trim_start()[name.len()..].trim();
+                        Cm::CodeBlock(CodeBlockKind::Fenced(info.into()))
                     }
                     [name, ..]
                         if ["src", "example"]
@@ -1126,6 +1130,23 @@ fn script(text: &str, i: usize, eol: usize) -> Option<Range<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An org `search` src block is a saved search as a note's fence is, its header's `limit=`
+    /// read; any other src block keeps its language first.
+    #[test]
+    fn a_search_src_block_is_a_saved_search() {
+        let blocks = page("#+begin_src search limit=3\nkind:pdf\n#+end_src\n");
+        assert!(
+            blocks[0].nodes.contains(&Node::SavedSearch {
+                query: "kind:pdf".into(),
+                limit: 3
+            }),
+            "{:?}",
+            blocks[0].nodes
+        );
+        let html = to_html("#+begin_src python :results output\nx = 1\n#+end_src\n");
+        assert!(html.contains("<code class=\"language-python\">"), "{html}");
+    }
 
     const ORG: &str = "#+TITLE: Fixture
 #+FILETAGS: :f:

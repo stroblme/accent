@@ -14,6 +14,8 @@ pub enum Click {
     Open(String),
     /// A tag, whose notes are listed.
     Tag(String),
+    /// A saved search's query, whose results are listed.
+    Search(String),
     /// A place on the page in front, which the view scrolls to itself.
     Scroll,
     /// An address the system opens: the web, mail, a phone number ([`is_url`]).
@@ -27,6 +29,7 @@ pub enum Click {
 pub fn click(uri: &str, page: &str) -> Click {
     match accent_uri(uri) {
         Some(("tag", tag)) => Click::Tag(tag),
+        Some(("search", query)) => Click::Search(query),
         _ if same_page(uri, page) => Click::Scroll,
         // The anchor is kept for a PDF, which needs the page as well as the file, and for a
         // note, whose heading it names. Rejoined here rather than kept by `accent_uri`, since
@@ -134,6 +137,10 @@ mod tests {
             Click::Open("Note#C++".into())
         );
         assert_eq!(open("accent://tag/c%2B%2B"), Click::Tag("c++".into()));
+        assert_eq!(
+            open("accent://search/%23paper%20-%23read%20path%3Aa/b"),
+            Click::Search("#paper -#read path:a/b".into())
+        );
     }
 
     #[test]

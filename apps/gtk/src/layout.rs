@@ -365,6 +365,14 @@ impl App {
     /// the wheel's zoom. `found` takes its find readout.
     pub(crate) fn new_preview(self: &Rc<Self>, found: impl Fn(&str) + 'static) -> preview::Preview {
         let resolve = self.asset_resolver();
+        // A note's saved searches, never superseding the Search pane's query nor superseded.
+        let vault = self.vault().cloned();
+        let search: preview::SavedSearch = std::sync::Arc::new(move |query: &str, limit| {
+            let answer = vault.as_ref()?.saved_search(query, limit);
+            answer
+                .inspect_err(|e| tracing::warn!("saved search: {e}"))
+                .ok()
+        });
         let preview = preview::Preview::new(
             move |rel: &str| resolve(rel),
             self.inverted_images.clone(),
@@ -384,6 +392,7 @@ impl App {
                 self,
                 move |key: &str| app.invert_image(key)
             ),
+            search,
         );
         preview.set_font(self.config.borrow().preview_font.as_deref());
         preview.set_zoom(self.zoom.get());

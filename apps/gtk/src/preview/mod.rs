@@ -11,12 +11,14 @@ mod code;
 mod figure;
 mod find;
 mod formula;
+mod saved;
 mod table;
 mod text;
 mod view;
 
 #[cfg(feature = "bench")]
 pub use figure::Probe;
+pub use saved::Search as SavedSearch;
 pub(crate) use text::callout_icon;
 
 use crate::editor::{self, Flavour};
@@ -113,8 +115,14 @@ struct Page {
     /// The prose's size in pixels at the zoom.
     pub px: Cell<f64>,
     pub figures: figure::Figures,
-    on_open: Box<dyn Fn(&str)>,
+    on_open: Rc<dyn Fn(&str)>,
     on_tag: Box<dyn Fn(&str)>,
+    /// What answers the page's saved searches, and their blocks on show (`saved`).
+    search: SavedSearch,
+    saved: RefCell<Vec<Rc<saved::Block>>>,
+    /// The vault changed while the page was out of sight, so its saved searches ask once shown.
+    saved_dirty: Cell<bool>,
+    saved_soon: crate::widgets::Debounce,
     clamp: adw::ClampScrollable,
     scroller: gtk::ScrolledWindow,
     pub zoom: Cell<f64>,
@@ -152,7 +160,8 @@ pub struct Preview {
 
 impl Preview {
     /// A preview resolving assets through `resolve` and following links through `on_open`, tags
-    /// through `on_tag` and Invert Image Colours through `on_invert`.
+    /// through `on_tag` and Invert Image Colours through `on_invert`; `search` answers its saved
+    /// searches.
     pub fn new(
         resolve: impl Fn(&str) -> Option<(String, PathBuf)> + Send + Sync + 'static,
         inverted: Keys,
@@ -160,6 +169,7 @@ impl Preview {
         on_open: impl Fn(&str) + 'static,
         on_tag: impl Fn(&str) + 'static,
         on_invert: impl Fn(&str) + 'static,
+        search: SavedSearch,
     ) -> Preview {
         let view = PreviewView::new();
         view.add_css_class("accent-doc");
@@ -193,8 +203,12 @@ impl Preview {
             ink: Rc::default(),
             px: Cell::new(font_px(&crate::platform::document_font(), 1.0)),
             figures,
-            on_open: Box::new(on_open),
+            on_open: Rc::new(on_open),
             on_tag: Box::new(on_tag),
+            search,
+            saved: RefCell::default(),
+            saved_dirty: Cell::new(false),
+            saved_soon: crate::widgets::Debounce::new(saved::SETTLE),
             clamp,
             scroller,
             zoom: Cell::new(1.0),
@@ -223,8 +237,19 @@ impl Preview {
             page,
             move |_| {
                 table::set_width(&page);
+                saved::set_width(&page);
                 figure::resize(&page);
                 formula::resize(&page);
+            }
+        ));
+        // A page out of sight while the vault changed asks its saved searches again once shown.
+        page.view.connect_map(glib::clone!(
+            #[weak]
+            page,
+            move |_| {
+                if page.saved_dirty.get() {
+                    saved::requery(&page);
+                }
             }
         ));
         page.view.on_follow(glib::clone!(
@@ -270,6 +295,19 @@ impl Preview {
 
     pub fn focus_target(&self) -> &gtk::Widget {
         self.page.view.upcast_ref()
+    }
+
+    /// The vault changed: the page's saved searches ask again once it has been still a moment.
+    pub fn requery_soon(&self) {
+        if self.page.saved.borrow().is_empty() {
+            return;
+        }
+        let page = Rc::downgrade(&self.page);
+        self.page.saved_soon.call(move || {
+            if let Some(page) = page.upgrade() {
+                saved::requery(&page);
+            }
+        });
     }
 
     /// Put `text` up, `rel` being the note it is; the same again changes nothing.
@@ -489,6 +527,7 @@ impl Page {
         self.buffer.set_text("");
         self.defer.set(false);
         self.waiting.borrow_mut().clear();
+        self.saved.borrow_mut().clear();
     }
 
     /// Another note: the view cleared, then `laid` put in from the top by batches.
@@ -768,6 +807,8 @@ impl Page {
         match click {
             Click::Open(target) => (self.on_open)(&target),
             Click::Tag(name) => (self.on_tag)(&name),
+            // The desktop answers a saved search on the page itself, never through a link.
+            Click::Search(query) => tracing::debug!("preview: a link to a search: {query}"),
             Click::Scroll => {
                 if let Some((_, id)) = uri.split_once('#') {
                     self.scroll_to_id(&markdown::percent_decode(id));
@@ -995,6 +1036,7 @@ impl Preview {
                 let kind = match click {
                     Click::Open(_) => "open",
                     Click::Tag(_) => "tag",
+                    Click::Search(_) => "search",
                     Click::Scroll => "scroll",
                     Click::Leave => "leave",
                     Click::Nowhere => "nowhere",
@@ -1014,6 +1056,11 @@ impl Preview {
             self.page.follow(&href);
         }
         found
+    }
+
+    /// Each saved search on the page: its query and its rows, a row's labels joined by `|`.
+    pub fn saved(&self) -> Vec<(String, Vec<String>)> {
+        saved::probe(&self.page)
     }
 
     /// Select All and what Copy writes for it.

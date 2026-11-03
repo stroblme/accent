@@ -277,6 +277,8 @@ fn lookup(name: &str) -> Option<sourceview5::Language> {
         "tex" => "latex",
         "golang" => "go",
         "dockerfile" => "docker",
+        // A saved search's query (`data/language-specs/accent-search.lang`).
+        "search" => "accent-search",
         _ => name,
     };
     let manager = sourceview5::LanguageManager::default();

@@ -3,7 +3,7 @@
 //! reads back: where its lines start, its anchors, its links and the source of each object.
 
 use super::{Laid, Page};
-use super::{figure, formula, table};
+use super::{figure, formula, saved, table};
 use accent_core::markdown::{Node, Side};
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
@@ -1254,6 +1254,14 @@ impl Writer<'_> {
             Node::SideEnd => {
                 self.newline();
                 self.pop();
+            }
+            // Its query under a caption, as a mermaid fence's source is, and its rows under that
+            // (`saved`); the code block's end, which closes it, takes the caption off.
+            Node::SavedSearch { query, limit } => {
+                self.newline();
+                self.push(&tags.caption);
+                self.text(&format!("Saved search · {query}"));
+                saved::insert(self, query, *limit);
             }
         }
     }

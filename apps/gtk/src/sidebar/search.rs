@@ -1055,6 +1055,17 @@ fn compile_regex(key: &Key) -> accent_core::Result<Regex> {
     search::pattern(&key.text, key.options)
 }
 
+/// A ranked hit as its row shows it: the file's name, the folder and the line or page dim beside
+/// it, and the matched line as markup. What a note's saved search lists too (`preview::saved`).
+pub(crate) fn hit_text(hit: &SearchHit) -> (String, String, String) {
+    let place = match hit.page {
+        Some(page) => page_of(&hit.rel_path, page),
+        None => dir_label(&hit.rel_path, hit.line),
+    };
+    let name = basename(&hit.rel_path).to_string();
+    (name, place, snippet_markup(&hit.snippet))
+}
+
 /// One row per hit of the ranked search for `query`, which is one per occurrence: the line the
 /// match sits on with the match marked in it, the file and that line as the dim half, and the
 /// same tail row a grep row gets where the per-file cap cut a file short. A hit whose body does
@@ -1068,13 +1079,11 @@ fn fts_rows(hits: Vec<SearchHit>, query: &str) -> Vec<Row> {
             let (_, rest) = hit.snippet.split_once('«')?;
             Some(rest.split_once('»')?.0.to_string())
         };
+        let (name, dir, snippet) = hit_text(&hit);
         rows.push(Row {
-            name: basename(&hit.rel_path).to_string(),
-            dir: match hit.page {
-                Some(page) => page_of(&hit.rel_path, page),
-                None => dir_label(&hit.rel_path, hit.line),
-            },
-            snippet: snippet_markup(&hit.snippet),
+            name,
+            dir,
+            snippet,
             at: hit.at.clone(),
             page: hit
                 .page

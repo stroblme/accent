@@ -26,6 +26,7 @@ pub use details::{Fact, Group};
 pub use outline::{Line, above, outline_note};
 pub use ports::Data as PortsData;
 pub use python::{Data as PythonData, KernelChoices};
+pub(crate) use search::hit_text;
 pub use search::{Answer, Data as SearchData, Query};
 pub use tags::Data as TagsData;
 

@@ -7,22 +7,23 @@ bench preview block=5 lines=15-18 tags=["list1", "marker", "prose"] text="1. one
 bench preview block=6 lines=18-22 tags=["list1", "prose"] text="[box [ ]] open task\n[box [x]] done task\n[box [/]] doing task\n"
 bench preview block=7 lines=22-24 tags=["gap", "para", "prose", "quote"] text="A quote over two lines\n"
 bench preview block=8 lines=25-27 tags=["callout", "callout-title", "prose"] text="[icon document-edit-symbolic] Callout title\nCallout body\n"
-bench preview block=9 lines=28-31 tags=["code:python3:0", "codeblock", "fence-bottom", "fence-top", "gap", "prose"] text="print(\"hi\")\n"
+bench preview block=9 lines=28-31 tags=["code:python3:1", "codeblock", "fence-bottom", "fence-top", "gap", "prose"] text="print(\"hi\")\n"
 bench preview block=10 lines=32-35 tags=["caption", "prose"] text="Mermaid diagram\ngraph TD; A-->B\n"
-bench preview block=11 lines=36-40 tags=["gap", "prose"] text="[table 3x3]\n"
-bench preview block=12 lines=41-42 tags=["gap", "prose", "rule"] text="\n"
-bench preview block=13 lines=43-44 tags=["gap", "prose"] text="Inline [formula] and a broken $\\frac{$ formula.\n"
-bench preview block=14 lines=45-48 tags=["display", "gap", "prose"] text="[formula]\n"
-bench preview block=15 lines=49-52 tags=["collapsed", "display", "gap", "prose"] text="[formula]\n"
-bench preview block=16 lines=53-54 tags=["gap", "prose"] text="Unwrapped bold div\n"
-bench preview block=17 lines=55-56 tags=["prose", "void"] text="\n"
-bench preview block=18 lines=57-58 tags=["gap", "prose"] text="H2O and Ctrl\u{2028}next line\n"
-bench preview block=19 lines=59-62 tags=["prose", "summary"] text="▾ More\nInside details \n"
-bench preview block=20 lines=63-64 tags=["prose", "void"] text="\n"
-bench preview block=21 lines=65-66 tags=["gap", "prose"] text="[image preview-drill.png] [diagram preview-drill.drawio] [image Attachments/stripes.png]\n"
-bench preview block=22 lines=67-68 tags=["gap", "prose"] text="Back to the top, lists and the paragraph.\n"
-bench preview block=23 lines=69-74 tags=["conflict-current", "conflict-current-label", "prose"] text="ours\nOur side\ntheirs\nTheir side\n"
-bench preview block=24 lines=75-77 tags=["fndef", "gap", "para", "prose"] text="1. The footnote.\n"
+bench preview block=11 lines=36-39 tags=["caption", "prose"] text="Saved search · kind:diagram\n[search kind:diagram]\n"
+bench preview block=12 lines=40-44 tags=["gap", "prose"] text="[table 3x3]\n"
+bench preview block=13 lines=45-46 tags=["gap", "prose", "rule"] text="\n"
+bench preview block=14 lines=47-48 tags=["gap", "prose"] text="Inline [formula] and a broken $\\frac{$ formula.\n"
+bench preview block=15 lines=49-52 tags=["display", "gap", "prose"] text="[formula]\n"
+bench preview block=16 lines=53-56 tags=["collapsed", "display", "gap", "prose"] text="[formula]\n"
+bench preview block=17 lines=57-58 tags=["gap", "prose"] text="Unwrapped bold div\n"
+bench preview block=18 lines=59-60 tags=["prose", "void"] text="\n"
+bench preview block=19 lines=61-62 tags=["gap", "prose"] text="H2O and Ctrl\u{2028}next line\n"
+bench preview block=20 lines=63-66 tags=["prose", "summary"] text="▾ More\nInside details \n"
+bench preview block=21 lines=67-68 tags=["prose", "void"] text="\n"
+bench preview block=22 lines=69-70 tags=["gap", "prose"] text="[image preview-drill.png] [diagram preview-drill.drawio] [image Attachments/stripes.png]\n"
+bench preview block=23 lines=71-72 tags=["gap", "prose"] text="Back to the top, lists and the paragraph.\n"
+bench preview block=24 lines=73-78 tags=["conflict-current", "conflict-current-label", "prose"] text="ours\nOur side\ntheirs\nTheir side\n"
+bench preview block=25 lines=79-81 tags=["fndef", "gap", "para", "prose"] text="1. The footnote.\n"
 bench preview figure accent://file/preview-drill.png key=Some("preview-drill.png") loaded=true size=96x48 fits=true reads=3
 bench preview figure accent://file/preview-drill.drawio key=Some("preview-drill.drawio") loaded=true size=527x347 fits=true reads=3
 bench preview figure accent://file/Attachments/stripes.png key=Some("Attachments/stripes.png") loaded=true size=96x48 fits=true reads=3
@@ -37,6 +38,7 @@ bench preview link "￼" open preview-drill.drawio
 bench preview link "the top" scroll accent://file/#preview-drill
 bench preview link "lists" scroll accent://file/#lists
 bench preview link "the paragraph" scroll accent://file/#^para
+bench preview saved "kind:diagram" rows=["preview-drill.drawio"]
 bench preview copy ""
 bench preview copy "Preview drill"
 bench preview copy "A paragraph with emphasis, strong, struck, code, a link, a Other note > Part, #drilltag and a note[1]."
@@ -55,6 +57,10 @@ bench preview copy "Callout body"
 bench preview copy "print(\"hi\")"
 bench preview copy "Mermaid diagram"
 bench preview copy "graph TD; A-->B"
+bench preview copy "Saved search · kind:diagram"
+bench preview copy "```search limit=5"
+bench preview copy "kind:diagram"
+bench preview copy "```"
 bench preview copy "| Name | Value | Note |"
 bench preview copy "|---|---|---|"
 bench preview copy "| a | 1 | first |"
@@ -92,10 +98,10 @@ bench preview cell "<a href=\"0\">second</a>, <a href=\"1\">Other note</a> and <
 bench preview scroll line=9 top="Lists"
 bench preview scroll line=12 top="• nested"
 bench preview scroll line=29 top="print(\"hi\")"
-bench preview scroll line=39 top="￼"
-bench preview scroll line=72 top="Their side"
+bench preview scroll line=43 top="￼"
+bench preview scroll line=76 top="Their side"
 bench preview scroll line=1 top="\nPreview drill"
-bench preview edit kept=64 written=1
+bench preview edit kept=65 written=1
 bench preview code coloured=["print", "\"hi\""]
 bench preview find ["1 of 3", "2 of 3", "1 of 3", "1 of 2"] selected="side" painted=3
 bench preview find typed "1 of 2" selected="side"

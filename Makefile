@@ -421,6 +421,10 @@ smoke: gtk-bench vault xvfb
 # in Preferences, held against `commands.expected`. Its shells are real, so under a scratch HOME,
 # running `true`, `false`, `pwd` and `sleep`.
 #
+# `ACCENT_BENCH_PREVIEW=saved` writes a note holding a saved search for a tag and a second note
+# with the tag, then a third, and makes the query one that cannot be read, held against
+# `saved.expected`: the rows each time, the note itself never among them.
+#
 # `ACCENT_BENCH_TEMPLATE=open` makes a note from a template with two stops as a window's first tab,
 # whose caret has to be on screen: a snippet pushed into a view before its first size left it past
 # the end of a short note in about half the runs.
@@ -488,6 +492,9 @@ drills: gtk-bench xvfb
 	$(HEADLESS) sh -c 'ACCENT_BENCH_PREVIEW=render timeout 60 \
 		$(TARGET_DIR)/accent "$$0/vault" >"$$0/preview" && \
 		grep "^bench preview " "$$0/preview" | diff -u apps/gtk/src/bench/preview.expected -' "$$xdg"
+	$(HEADLESS) sh -c 'ACCENT_BENCH_PREVIEW=saved timeout 60 \
+		$(TARGET_DIR)/accent "$$0/vault" >"$$0/saved" && \
+		grep "^bench preview saved " "$$0/saved" | diff -u apps/gtk/src/bench/saved.expected -' "$$xdg"
 	$(HEADLESS) sh -c 'mkdir "$$0/vault/Templates" && \
 		printf "%s\n" --- "accent-target: Meta.md" "tags: {{cursor}}" "aliases: {{cursor}}" --- \
 			>"$$0/vault/Templates/Meta.md" && \

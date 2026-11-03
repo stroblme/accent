@@ -1,0 +1,3 @@
+bench preview saved step=first query="#drillsaved" rows=["first.md"]
+bench preview saved step=written query="#drillsaved" rows=["second.md", "first.md"]
+bench preview saved step=unread query="kind:pfd" rows=["kind:pfd is not a kind. Use note, pdf, diagram, notebook, code, text or image."]

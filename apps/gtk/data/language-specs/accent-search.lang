@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  accent's saved-search query, the language of a note's ```search fence (accent_core::query):
+  its qualifiers' names, a #tag, a "quoted phrase", a date or an age, and the - that leaves out
+  what follows it. Free words are left as text.
+-->
+<language id="accent-search" name="Accent Search" version="2.0" _section="Other">
+  <styles>
+    <style id="qualifier" name="Qualifier" map-to="def:keyword"/>
+    <style id="tag" name="Tag" map-to="def:type"/>
+    <style id="string" name="Phrase" map-to="def:string"/>
+    <style id="date" name="Date" map-to="def:number"/>
+    <style id="exclude" name="Exclude" map-to="def:operator"/>
+  </styles>
+
+  <definitions>
+    <context id="accent-search">
+      <include>
+        <context id="string" style-ref="string" end-at-line-end="true">
+          <start>"</start>
+          <end>"</end>
+        </context>
+        <context id="exclude" style-ref="exclude">
+          <match>(?&lt;!\S)-(?=\S)</match>
+        </context>
+        <context id="qualifier" style-ref="qualifier">
+          <match case-sensitive="false">(?&lt;![\w-])(tag|path|kind|links|linked-from|has|modified):</match>
+        </context>
+        <context id="tag" style-ref="tag">
+          <match>(?&lt;![\w#])#[\w/-]*[^\W\d][\w/-]*</match>
+        </context>
+        <context id="date" style-ref="date">
+          <match>[&lt;&gt;]?=?(\d{4}-\d{2}-\d{2}(\.\.\d{4}-\d{2}-\d{2})?|\d+[hdw])\b</match>
+        </context>
+      </include>
+    </context>
+  </definitions>
+</language>

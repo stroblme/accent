@@ -15,7 +15,7 @@ use super::options;
 use super::spans::list_marker;
 use super::task::in_progress;
 use crate::conflict;
-use pulldown_cmark::{CowStr, Event, LinkType, Options, Parser, Tag as Cm, TagEnd};
+use pulldown_cmark::{CodeBlockKind, CowStr, Event, LinkType, Options, Parser, Tag as Cm, TagEnd};
 use std::collections::HashMap;
 use std::ops::Range;
 
@@ -120,6 +120,28 @@ pub enum Node<'a> {
     },
     SideEnd,
     ConflictEnd,
+    /// A `search` code block (` ```search limit=20 `, org's `#+begin_src search`), in place of
+    /// its `Start(CodeBlock)`: its lines as one query (`crate::query`), and how many rows it
+    /// lists. Its text goes with it, and its `End(CodeBlock)` closes it.
+    SavedSearch {
+        query: String,
+        limit: usize,
+    },
+}
+
+/// The rows a saved search lists unless its block says (`limit=N`), and the most it may ask for.
+const SEARCH_LIMIT: (usize, usize) = (20, 100);
+
+/// How many rows a code block whose info string is `info` lists as a saved search, `limit=N`
+/// held to [`SEARCH_LIMIT`]; `None` for a block in any other language.
+fn saved_search(info: &str) -> Option<usize> {
+    let mut words = info.split_whitespace();
+    if !words.next()?.eq_ignore_ascii_case("search") {
+        return None;
+    }
+    let (rows, most) = SEARCH_LIMIT;
+    let asked = words.find_map(|w| w.strip_prefix("limit=")?.parse::<usize>().ok());
+    Some(asked.unwrap_or(rows).clamp(1, most))
 }
 
 impl Block<'_> {
@@ -173,6 +195,7 @@ impl Node<'_> {
             Node::Side { side, label, at } => Node::Side { side, label, at },
             Node::SideEnd => Node::SideEnd,
             Node::ConflictEnd => Node::ConflictEnd,
+            Node::SavedSearch { query, limit } => Node::SavedSearch { query, limit },
         }
     }
 
@@ -188,7 +211,8 @@ impl Node<'_> {
             | Node::Underline
             | Node::Center
             | Node::Conflict
-            | Node::Side { .. } => 1,
+            | Node::Side { .. }
+            | Node::SavedSearch { .. } => 1,
             Node::Event(Event::End(_))
             | Node::LinkEnd
             | Node::UnderlineEnd
@@ -289,6 +313,7 @@ pub(crate) fn cut<'a>(
             *id = Some(slug.into());
         }
     }
+    let nodes = saved_searches(nodes);
     let newlines: Vec<usize> = text.match_indices('\n').map(|(i, _)| i).collect();
     let line = |at: usize| newlines.partition_point(|&n| n < at) as u32 + 1;
     let mut blocks = Vec::new();
@@ -314,6 +339,41 @@ pub(crate) fn cut<'a>(
     }
     blocks.extend(open);
     blocks
+}
+
+/// Each `search` code block as the saved search it holds ([`Node::SavedSearch`]): its start
+/// replaced, its lines joined by spaces into the query, its end kept to close it.
+fn saved_searches<'a>(nodes: Vec<(Node<'a>, Range<usize>)>) -> Vec<(Node<'a>, Range<usize>)> {
+    let mut out: Vec<(Node<'a>, Range<usize>)> = Vec::with_capacity(nodes.len());
+    // The open block's node in `out`, and the text read of it so far.
+    let mut open: Option<(usize, String)> = None;
+    for (node, bytes) in nodes {
+        match (&node, &mut open) {
+            (Node::Event(Event::Start(Cm::CodeBlock(CodeBlockKind::Fenced(info)))), None) => {
+                if let Some(limit) = saved_search(info) {
+                    open = Some((out.len(), String::new()));
+                    let query = String::new();
+                    out.push((Node::SavedSearch { query, limit }, bytes));
+                    continue;
+                }
+            }
+            (Node::Event(Event::Text(text)), Some((_, read))) => {
+                read.push_str(text);
+                continue;
+            }
+            (Node::Event(Event::End(TagEnd::CodeBlock)), Some((at, read))) => {
+                let lines: Vec<&str> = read.lines().map(str::trim).collect();
+                let lines: Vec<&str> = lines.into_iter().filter(|l| !l.is_empty()).collect();
+                if let Node::SavedSearch { query, .. } = &mut out[*at].0 {
+                    *query = lines.join(" ");
+                }
+                open = None;
+            }
+            _ => {}
+        }
+        out.push((node, bytes));
+    }
+    out
 }
 
 /// The node of a formula: its MathML, or, if its LaTeX does not parse, its event, so a typo
@@ -713,6 +773,43 @@ mod tests {
             marks(&blocks[4]),
             [(0, None), (1, None), (2, None), (3, None)]
         );
+    }
+
+    /// A `search` fence is a saved search: its lines one query, its `limit=` held to 1..=100, its
+    /// end closing it; a fence in any other language stays its code.
+    #[test]
+    fn a_search_fence_is_a_saved_search() {
+        let saved = |src: &str| -> Vec<(String, usize)> {
+            page(src)
+                .iter()
+                .flat_map(|b| &b.nodes)
+                .filter_map(|n| match n {
+                    Node::SavedSearch { query, limit } => Some((query.clone(), *limit)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let text = "```search limit=5\n#paper\n  -#read\n```\n";
+        assert_eq!(saved(text), [("#paper -#read".to_string(), 5)]);
+        let nodes = &page(text)[0].nodes;
+        assert!(matches!(
+            nodes.last(),
+            Some(Node::Event(Event::End(TagEnd::CodeBlock)))
+        ));
+        assert!(
+            !nodes
+                .iter()
+                .any(|n| matches!(n, Node::Event(Event::Text(_))))
+        );
+        assert_eq!(
+            saved("```Search\nkind:pdf\n```"),
+            [("kind:pdf".to_string(), 20)]
+        );
+        assert_eq!(saved("```search limit=500\nx\n```")[0].1, 100);
+        assert_eq!(saved("```search limit=0\nx\n```")[0].1, 1);
+        assert!(saved("```searches\nx\n```\n```python\nx\n```").is_empty());
+        // Inside a list item it is the item's.
+        assert_eq!(saved("- a\n\n  ```search\n  b\n  ```\n").len(), 1);
     }
 
     /// A wikilink without an alias shows as Obsidian's reading view shows it, its anchors apart.

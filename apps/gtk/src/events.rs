@@ -150,6 +150,8 @@ impl App {
                 sidebar.mark_tags_dirty();
                 sidebar.requery_search_soon();
             }
+            // The saved searches on a preview's page answer from the same index.
+            self.each_preview(|preview| preview.requery_soon());
         }
         // A note's hints are about the index as much as about its own text: the file a
         // `[[link]]` names may have just been created, renamed or deleted, and none of that is

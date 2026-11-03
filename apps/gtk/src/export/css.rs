@@ -244,6 +244,8 @@ fn theme_css(fg: gdk::RGBA, bg: &str, accent: gdk::RGBA, font: &str, share: Opti
          blockquote.callout {{ display: flow-root; padding-right: 12px; border-radius: 0 6px 6px 0; \
          background: {surface}; color: {text}; font-style: normal; }}\n\
          .callout-title {{ color: {accent}; font-weight: 700; }}\n\
+         /* A saved search's caption over its query, dim as the preview draws it. */\n\
+         .saved-search {{ margin-bottom: 0.25em; font-size: 0.85em; color: {quote}; }}\n\
          hr {{ border: 0; border-top: 1px solid {rule}; margin: 24px 0; }}\n\
          table {{ border-collapse: collapse; }}\n\
          /* `!important` over a table's own `style` in the note's HTML, which outranks a sheet. */\n\

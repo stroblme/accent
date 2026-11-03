@@ -122,6 +122,7 @@ pub enum LinkKind {
 pub enum Click {
     Open(String),
     Tag(String),
+    Search(String),
     Scroll,
     Leave,
     Nowhere,

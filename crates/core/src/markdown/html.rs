@@ -328,6 +328,23 @@ fn node_events<'a>(
             )))
         }
         Node::Anchor(name) => out.push(html(format!("<span id=\"{}\"></span>", esc_attr(name)))),
+        // A saved search is its query as code under a caption, the results being the vault's
+        // (user decision 2026-11-03); the preview's page links them, which the app opens in its
+        // own search (`Click::Search`). The block's end closes the code.
+        Node::SavedSearch { query, .. } => {
+            let link = match preview {
+                true => format!(
+                    " · <a href=\"accent://search/{}\">Show Results</a>",
+                    percent_encode(query)
+                ),
+                false => String::new(),
+            };
+            out.push(html(format!(
+                "<p class=\"saved-search\">Saved search{link}</p>\n\
+                 <pre><code class=\"language-search\">{}",
+                esc_attr(query)
+            )));
+        }
         Node::Conflict => out.push(html("<div class=\"conflict\">\n".into())),
         Node::Side { side, label, at } => {
             let side = match side {
@@ -353,6 +370,33 @@ fn node_events<'a>(
 mod tests {
     use super::*;
     use crate::markdown::slugs;
+
+    /// A saved search is its query as code under a caption; the preview's page links its results,
+    /// an exported one cannot.
+    #[test]
+    fn a_saved_search_is_its_query_under_a_caption() {
+        let text = "```search\n#paper -#read <b>\n```\n";
+        let h = to_html(text);
+        assert!(
+            h.contains(
+                "<p class=\"saved-search\">Saved search · <a href=\"accent://search/\
+                 %23paper%20-%23read%20%3Cb%3E\">Show Results</a></p>"
+            ),
+            "{h}"
+        );
+        assert!(
+            h.contains(
+                "<code class=\"language-search\">#paper -#read &lt;b><span data-line=\"1\">"
+            ),
+            "{h}"
+        );
+        assert!(h.trim_end().ends_with("</code></pre>"), "{h}");
+        let file = to_html_file(text, "a.md");
+        assert!(
+            file.starts_with("<p class=\"saved-search\">Saved search</p>\n<pre><code class=\"language-search\">#paper -#read &lt;b></code></pre>"),
+            "{file}"
+        );
+    }
 
     #[test]
     fn html_rewrites_wikilinks() {

@@ -42,6 +42,10 @@ print("hi")
 graph TD; A-->B
 ```
 
+```search limit=5
+kind:diagram
+```
+
 | Name | Value | Note |
 |---|---|---|
 | a | 1 | first |
@@ -84,12 +88,82 @@ Their side
 [^one]: The footnote.
 "#;
 
+/// `ACCENT_BENCH_PREVIEW=saved`: a note holding a saved search for a tag, its rows printed as
+/// the vault first answers, after another note with the tag is written, and after the block's
+/// query is made one that cannot be read; the note itself is never one of its rows. Writes its
+/// notes: a scratch vault.
+async fn saved(app: &Rc<App>) {
+    const HOST: &str = "saved-drill.md";
+    let write = |rel: &str, text: &str| std::fs::write(app.root().join(rel), text);
+    let host = "# Saved\n#drillsaved\n\n```search\n#drillsaved\n```\n";
+    if let Err(e) = write("first.md", "# First\n#drillsaved one\n").and(write(HOST, host)) {
+        return println!("bench preview saved wrote=false {e}");
+    }
+    // Once the index has both.
+    glib::timeout_future(Duration::from_millis(2500)).await;
+    app.open_path(HOST);
+    super::preview::beside(app).await;
+    let Some(rendered) = settled(app).await else {
+        return println!("bench preview saved none");
+    };
+    let print = |step: &str| {
+        for (query, rows) in rendered
+            .preview()
+            .as_ref()
+            .map(|p| p.saved())
+            .unwrap_or_default()
+        {
+            println!("bench preview saved step={step} query={query:?} rows={rows:?}");
+        }
+    };
+    glib::timeout_future(Duration::from_millis(1000)).await;
+    print("first");
+    // Another note with the tag: the block asks again once the vault has been still a second.
+    if let Err(e) = write("second.md", "# Second\n#drillsaved two\n") {
+        return println!("bench preview saved wrote=false {e}");
+    }
+    glib::timeout_future(Duration::from_millis(3500)).await;
+    print("written");
+    // A kind misspelt, typed over the tag, which says why in place of the rows.
+    if let Some(tab) = app.active() {
+        let text = tab.text();
+        let fence = "```search\n";
+        if let Some(at) = text.find("```search\n#drillsaved") {
+            let start = text[..at + fence.len()].chars().count() as i32;
+            let end = start + "#drillsaved".chars().count() as i32;
+            tab.buffer.begin_user_action();
+            let (mut from, mut to) = (
+                tab.buffer.iter_at_offset(start),
+                tab.buffer.iter_at_offset(end),
+            );
+            tab.buffer.delete(&mut from, &mut to);
+            tab.buffer
+                .insert(&mut tab.buffer.iter_at_offset(start), "kind:pfd");
+            tab.buffer.end_user_action();
+        }
+    }
+    glib::timeout_future(Duration::from_millis(1500)).await;
+    print("unread");
+    if let Some(tab) = app.active() {
+        tab.buffer.undo();
+    }
+}
+
 /// `ACCENT_BENCH_PREVIEW=render`: writes [`NOTE`] and shows its
 /// preview beside it, then prints each block's lines, the tags on its first character and its
 /// text, an object as `[label]`; where `scroll_to_line` puts chosen lines; where each link goes;
 /// what Copy writes for Select All; and the blocks kept and written after a one-character edit.
 /// `apps/gtk/src/bench/preview.expected` holds the lines. `time:<rel>`: [`time`].
 pub(super) fn bench_preview(app: &Rc<App>, arg: &str) {
+    if arg == "saved" {
+        scratch_only(app, "ACCENT_BENCH_PREVIEW=saved");
+        let app = app.clone();
+        glib::spawn_future_local(async move {
+            saved(&app).await;
+            bench_quit(&app);
+        });
+        return;
+    }
     if let Some(rel) = arg.strip_prefix("time:") {
         let (app, rel) = (app.clone(), rel.to_string());
         glib::spawn_future_local(async move {
@@ -191,7 +265,7 @@ async fn render(app: &Rc<App>) {
             return;
         };
         // The fixture's blocks, not the filler under them.
-        for (i, (lines, text, tags)) in preview.blocks().into_iter().take(25).enumerate() {
+        for (i, (lines, text, tags)) in preview.blocks().into_iter().take(26).enumerate() {
             println!(
                 "bench preview block={i} lines={}-{} tags={tags:?} text={:?}",
                 lines.start,
@@ -213,6 +287,9 @@ async fn render(app: &Rc<App>) {
         }
         for (text, route) in preview.links() {
             println!("bench preview link {text:?} {route}");
+        }
+        for (query, rows) in preview.saved() {
+            println!("bench preview saved {query:?} rows={rows:?}");
         }
         let copied = preview.copy_all();
         for line in copied.lines().take_while(|l| !l.starts_with("Filler")) {
