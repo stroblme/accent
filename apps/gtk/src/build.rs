@@ -1447,13 +1447,16 @@ fn install_chrome_css() {
                opacity: var(--dim-opacity); }} \
              popover.accent-completion .detail {{ margin-left: 12px; }} \
              popover.accent-completion .doc {{ margin: 3px 8px; }} \
-             minimap {{ color: var(--view-fg-color); }} \
+             minimap {{ color: var(--view-fg-color); opacity: {map_rest}; }} \
+             minimap:hover, minimap:active {{ opacity: 1; }} \
+             minimap.chrome-hidden {{ opacity: 0; }} \
              expander {{ -gtk-icon-source: -gtk-icontheme(\"pan-down-symbolic\"); }} \
              expander, image.accent-chevron {{ -gtk-icon-transform: rotate(-90deg); }} \
              expander:dir(rtl), image.accent-chevron:dir(rtl) {{ \
                -gtk-icon-transform: rotate(90deg); }} \
              expander:checked, image.accent-chevron:checked {{ -gtk-icon-transform: none; }}",
             away = fade::FLOOR,
+            map_rest = crate::minimap::REST_OPACITY,
             added = crate::diff::css_tint(crate::diff::ADDED_HUE),
             inset = crate::completion::CONTENTS_PADDING,
             row = crate::completion::ROW_PADDING,

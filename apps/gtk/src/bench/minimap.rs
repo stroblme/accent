@@ -22,7 +22,8 @@ const XTEST: Duration = Duration::from_secs(10);
 /// - `drag`: move the band 40, 120 and -60 px, then 80% map height; require pointer
 ///   tracking within a row. `aim <x> <y> <dy>` requests an equivalent XTEST drag.
 /// - `look`: write `minimap-<theme>-<what>.png` in the working directory for light/dark
-///   headings, comparison hunks and a generated code file.
+///   headings (at rest and with the band held), a short note, comparison hunks and a
+///   generated code file.
 /// - `frames`: scroll a quarter-page per frame for [`STEPS`], map off/on, three rounds.
 ///   Report median/worst `paint_ms` (layout end to paint end), `frame_ms` (whole frame)
 ///   and `paint_cpu_ms` (main-thread painting CPU, excluding scheduling delays).
@@ -50,7 +51,7 @@ pub(super) fn bench_minimap(app: &Rc<App>, arg: &str) {
             ("band", Some(map)) => band(&app, &tab, &map).await,
             ("jump", Some(map)) => jump(&app, &tab, &map).await,
             ("drag", Some(map)) => drag(&app, &tab, &map).await,
-            ("look", Some(_)) => look(&app, &tab).await,
+            ("look", Some(map)) => look(&app, &tab, &map).await,
             (round @ ("frames" | "typing"), _) => {
                 let step = match round {
                     "frames" => Step::Scroll,
@@ -163,7 +164,7 @@ async fn compared(app: &Rc<App>, tab: &Rc<Tab>) -> Option<Rc<diff::Compare>> {
     None
 }
 
-async fn look(app: &Rc<App>, tab: &Rc<Tab>) {
+async fn look(app: &Rc<App>, tab: &Rc<Tab>, map: &Minimap) {
     let note: String = (0..40)
         .map(|i| {
             let chapter = match i % 8 {
@@ -196,6 +197,16 @@ async fn look(app: &Rc<App>, tab: &Rc<Tab>) {
         shoot("note-top", theme);
         scroll(tab, 0.25).await;
         shoot("note", theme);
+        // Held at the band's top edge, which scrolls nothing: the map at full strength.
+        if let Some((y, _)) = map.band_px() {
+            map.press_at(y + 1.0);
+            glib::timeout_future(FRAME).await;
+            shoot("note-held", theme);
+            map.let_go();
+        }
+        tab.set_text("# Short\n\nA note shorter than its map.\n\n## Part\n\nCentred.\n");
+        glib::timeout_future(FRAME).await;
+        shoot("short", theme);
         if compared(app, tab).await.is_some() {
             glib::timeout_future(FRAME).await;
             shoot("compare", theme);

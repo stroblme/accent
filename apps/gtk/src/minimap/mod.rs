@@ -23,6 +23,11 @@ use std::ops::Range;
 const WIDTH: i32 = 100;
 /// A row's height in logical pixels; a character is one pixel wide.
 const ROW: f64 = 2.0;
+/// How much of the map shows while the pointer is elsewhere (build.rs): all of it under the
+/// pointer and while the band is held.
+pub const REST_OPACITY: f32 = 0.55;
+/// The band's corner radius.
+const BAND_RADIUS: f32 = 6.0;
 /// Lines per cached drawing chunk. Use 32 to reduce typing redraw cost
 /// against 64 without losing scroll performance; 16 gave no further gain
 /// (`ACCENT_BENCH_MINIMAP=typing:`/`frames:`, `map_us`).
@@ -143,12 +148,23 @@ glib::wrapper! {
 
 impl Minimap {
     /// A map of `view`, following its buffer and whichever vertical adjustment it has; a wheel
-    /// over it eases the view's scroll by `wheel`.
-    pub fn new(view: &sourceview5::View, wheel: crate::widgets::Wheel) -> Self {
+    /// over it eases the view's scroll by `wheel`. While `cover`, a bar laid over the view's top
+    /// (the sticky title), shows, the page starts under it, and so does the map.
+    pub fn new(
+        view: &sourceview5::View,
+        cover: &impl IsA<gtk::Widget>,
+        wheel: crate::widgets::Wheel,
+    ) -> Self {
         let map: Self = glib::Object::builder()
             .property("accessible-role", gtk::AccessibleRole::Presentation)
             .build();
         let _ = map.imp().eased.set(wheel);
+        map.imp().cover.set(Some(cover.upcast_ref()));
+        cover.connect_visible_notify(glib::clone!(
+            #[weak]
+            map,
+            move |_| map.queue_draw()
+        ));
         map.imp().attach(view);
         map
     }
@@ -476,7 +492,13 @@ impl imp::Minimap {
             band,
             pace,
         }));
-        snapshot.push_clip(&rect(0.0, 0.0, width, height));
+        // Nothing above the rule under the cover, which is where the page starts while it shows.
+        let cover = self
+            .cover
+            .upgrade()
+            .filter(|cover| cover.is_visible())
+            .map_or(0.0, |cover| f64::from(cover.height()));
+        snapshot.push_clip(&rect(0.0, cover, width, (height - cover).max(0.0)));
         if total > 0.0 {
             let lines = model.line_at_row(offset).0..model.line_at_row(offset + rows).0 + 1;
             self.highlight(&view, lines.clone());
@@ -503,10 +525,12 @@ impl imp::Minimap {
             true => theme::MAP_BAND_HOVER_ALPHA,
             false => theme::MAP_BAND_ALPHA,
         };
-        snapshot.append_color(
-            &theme::at(ink, alpha),
-            &rect(0.0, (top - offset) * ROW, width, band * ROW),
-        );
+        // Rounded, as Xcode draws its visible region.
+        let shown = rect(0.0, (top - offset) * ROW, width, band * ROW);
+        let radius = BAND_RADIUS.min(shown.height() / 2.0);
+        snapshot.push_rounded_clip(&gsk::RoundedRect::from_rect(shown, radius));
+        snapshot.append_color(&theme::at(ink, alpha), &shown);
+        snapshot.pop();
         snapshot.pop();
     }
 
@@ -552,6 +576,8 @@ impl imp::Minimap {
             }
         };
         self.grab.set(Some(imp::Grab { screen }));
+        // `:active` keeps the map at full strength while the band is held (build.rs).
+        self.obj().set_state_flags(gtk::StateFlags::ACTIVE, false);
         self.obj().queue_draw();
     }
 
@@ -564,13 +590,14 @@ impl imp::Minimap {
             return;
         };
         let last = (frame.pace.total - frame.band).max(0.0);
-        let top = ((grab.screen + dy / ROW) * frame.pace.ratio()).clamp(0.0, last);
+        let top = frame.pace.row(grab.screen + dy / ROW).clamp(0.0, last);
         let (at, frac) = self.line_at_row(top);
         scroll_line_to(&view, at, frac, 0.0);
     }
 
     fn release(&self) {
         self.grab.set(None);
+        self.obj().unset_state_flags(gtk::StateFlags::ACTIVE);
         self.obj().queue_draw();
     }
 
@@ -857,6 +884,8 @@ mod imp {
     #[derive(Default)]
     pub struct Minimap {
         pub view: glib::WeakRef<sourceview5::View>,
+        /// The bar over the view's top, under which the map starts while it shows.
+        pub cover: glib::WeakRef<gtk::Widget>,
         pub model: RefCell<Model>,
         /// A texture per [`CHUNK`] lines, `None` until it is drawn again.
         pub chunks: RefCell<Vec<Option<gsk::RenderNode>>>,

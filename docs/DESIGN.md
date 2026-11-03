@@ -600,10 +600,13 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   It is ours (`minimap/`), 100 px wide: a bar per word, a pixel per character and two per row, in the foreground at 45 %; a dimmer tone where the editor dims the text (markup, quotes, done tasks, a code comment) and the accent where it writes in the accent (a note's links and tags) and, in code, on a keyword: a tag whose look is the style scheme's keyword or statement style, GtkSourceView's highlighting tags having no names.
   No other syntax colour.
   A heading stands on the map as a label in the UI font, as VS Code draws a section header, h1 largest and leftmost and each level smaller and further in; a comparison's, a merge's and a conflict block's row tints come along as the page has them.
-  A band covers the lines on screen, always, stronger under the pointer: a press puts the line pressed in the middle of the view, a press on the band takes hold of it, a drag keeps it under the pointer, the wheel scrolls the view, and the caret never moves.
+  A rounded band, as Xcode draws its visible region, covers the lines on screen, always, stronger under the pointer: a press puts the line pressed in the middle of the view, a press on the band takes hold of it, a drag keeps it under the pointer, the wheel scrolls the view, and the caret never moves.
   The rows are estimated from the characters on each line and the column's width, never asked of GTK's layout, where its hidden-text aborts are; hidden lines take none.
   Once the document is taller than the map, the map scrolls itself in step with the band, which then runs from its top to its bottom as the view goes from the first screen to the last.
   In a comparison it stays beside the editor's column.
+  It rests at 55 % and comes up to full strength under the pointer and while its band is held, on the chrome's fade, so the text stays in front until the map is reached for (user decision 2026-11-03).
+  It runs between the page's rules, from the one under a pinned sticky title, else the one above the page, down to the status bar's, and a document shorter than the map sits in its middle.
+  The sticky title's rule cuts the map without moving it, so a title coming and going as a code tab scrolls does not shake it.
   GtkSourceMap, which it replaced, painted no band on GTK 4.22, laid the whole document out a second time and followed the adjustment its view had when it was set.
 - **Git's conflict markers are decorated as VS Code decorates them**, in every text tab: a block's current side tinted green and its incoming side blue, each marker line more strongly than its side, a diff3 base grey and `=======` bare.
   Accept Current, Accept Incoming and Accept Both sit in a band the `<<<<<<<` line is given above itself, the comparison's `.osd` row of buttons, and each replaces the block with what it keeps as one undo step.

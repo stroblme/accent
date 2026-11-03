@@ -391,7 +391,7 @@ fn frame(view: &sourceview5::View) -> Frame {
 
     // The minimap is off unless the preference says otherwise; `set_minimap` decides that, so a
     // tab that is built before the config is read still starts in a defined state.
-    let map = crate::minimap::Minimap::new(view, wheel);
+    let map = crate::minimap::Minimap::new(view, &sticky_bar, wheel);
     map.set_vexpand(true);
     map.set_visible(false);
     // It goes with the chrome while the user types (`App::hide_chrome`).
