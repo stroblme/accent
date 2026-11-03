@@ -14,9 +14,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -26,6 +30,7 @@ import io.github.stroblme.accent.VaultModel
 import io.github.stroblme.accent.failure
 import io.github.stroblme.accent.ffi.FileKind
 import io.github.stroblme.accent.ffi.FileRow
+import io.github.stroblme.accent.ffi.LinkedFile
 import io.github.stroblme.accent.ffi.SearchHit
 import io.github.stroblme.accent.ffi.TagCount
 import io.github.stroblme.accent.ffi.fuzzyRank
@@ -35,11 +40,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
-/** Search, file, tag, backlink and command pages, in chip order. */
-private enum class Mode { Search, Files, Tags, Backlinks, Command }
+/** Search, file, tag, link and command pages, in chip order. */
+private enum class Mode { Search, Files, Tags, Links, Command }
 
 /**
- * Browse search results, files, tags, backlinks, and commands. The field filters each page;
+ * Browse search results, files, tags, links, and commands. The field filters each page;
  * search hits pass their query to the opened note for highlighting.
  */
 @Composable
@@ -59,6 +64,8 @@ fun BrowseScreen(
     paused: Boolean,
     scanned: Long,
     front: String?,
+    /** Whether [front] is a note, whose links go both ways: the files it links to too. */
+    note: Boolean,
     openTag: String?,
     /** Whether a note or a PDF is in front, which is what Find and Print… act on. */
     printable: Boolean,
@@ -82,13 +89,22 @@ fun BrowseScreen(
     var ranked by remember { mutableStateOf(Ranked(Mode.Search, "", emptyList())) }
     // What the Files page's places are places in.
     var files by remember { mutableStateOf(Corpus()) }
-    // What the Tags and Backlinks pages list, asked for as the panel opens and as a tag is opened:
+    // What the Tags and Links pages list, asked for as the panel opens and as a tag is opened:
     // null until it has arrived, so a page still asking does not say there is nothing, and one
     // that could not be read says why instead.
     var tags by remember { mutableStateOf<Result<List<TagCount>>?>(null) }
     var tag by remember { mutableStateOf<TagCount?>(null) }
     var tagged by remember { mutableStateOf<Result<List<String>>?>(null) }
     var linked by remember { mutableStateOf<Result<List<String>>?>(null) }
+    // A note's links going out rather than coming in, as the arrow on the Links page turns them.
+    // The panel opens on the links coming in, as the desktop's window does: nothing keeps it.
+    var outgoing by remember { mutableStateOf(false) }
+    val out = outgoing && note
+    var linkedOut by remember { mutableStateOf<Result<List<LinkedFile>>?>(null) }
+    val outFiles = remember(linkedOut) { linkedOut?.getOrNull()?.map { it.relPath } }
+    val unwritten = remember(linkedOut) {
+        linkedOut?.getOrNull().orEmpty().filter { it.missing }.map { it.relPath }.toSet()
+    }
     // The template command asking which template, and the ones it offers, listed in the
     // commands' place until one is picked.
     var picking by remember { mutableStateOf<Pair<Command, List<String>>?>(null) }
@@ -108,6 +124,10 @@ fun BrowseScreen(
         }
     }
     LaunchedEffect(front) { linked = front?.let { model.linkedFrom(it) } }
+    LaunchedEffect(front, out) {
+        linkedOut = null
+        linkedOut = front?.takeIf { out }?.let { model.linksFrom(it) }
+    }
     LaunchedEffect(tag) {
         tagged = null
         tagged = tag?.let { model.filesWithTag(it.name) }
@@ -132,12 +152,12 @@ fun BrowseScreen(
         walked = true
     }
 
-    LaunchedEffect(query, mode, tags, tag, tagged, linked, picking, corpus) {
+    LaunchedEffect(query, mode, tags, tag, tagged, linked, out, outFiles, picking, corpus) {
         if (mode == Mode.Search) return@LaunchedEffect
         val choosing = mode == Mode.Command && picking != null
-        if (mode == Mode.Tags || mode == Mode.Backlinks || choosing) {
+        if (mode == Mode.Tags || mode == Mode.Links || choosing) {
             val list = when {
-                mode == Mode.Backlinks -> linked?.getOrNull()
+                mode == Mode.Links -> if (out) outFiles else linked?.getOrNull()
                 choosing -> picking?.second
                 tag != null -> tagged?.getOrNull()
                 else -> tags?.getOrNull()
@@ -169,7 +189,7 @@ fun BrowseScreen(
     // for the page to settle — half the screen taken away mid-swipe is taken away from a gesture
     // that has not finished.
     //
-    // Only on the two pages the query is the point of: Tags and Backlinks land on a list to read,
+    // Only on the two pages the query is the point of: Tags and Links land on a list to read,
     // as Search lands on the tree, and the field is there for the reader who wants to narrow it.
     val landed = Mode.entries[pager.settledPage]
     LaunchedEffect(landed) {
@@ -231,7 +251,7 @@ fun BrowseScreen(
                         heading = tagHeading(open),
                         notes = tagged?.getOrNull(),
                         rows = placesIn(tagged?.getOrNull()),
-                        failed = tagged.failed("Cannot list the tag's notes"),
+                        instead = tagged.failed("Cannot list the tag's notes"),
                         onBack = { tag = null },
                     ) { onOpen(it, null) }
                     failed != null -> Quiet(failed)
@@ -252,18 +272,36 @@ fun BrowseScreen(
                 }
                 return@HorizontalPager
             }
-            if (tab == Mode.Backlinks) {
+            if (tab == Mode.Links) {
                 val to = front
-                val links = linked?.getOrNull()
-                val failed = linked.failed("Cannot list the links")
-                when {
-                    to == null -> Quiet("Open a vault file to see its backlinks.")
-                    failed != null -> Quiet(failed)
-                    links?.isEmpty() == true -> Quiet("No backlinks to ${title(to)}.")
-                    else -> Notes("Links to ${title(to)}", links, placesIn(links)) {
-                        model.openBacklink(it, from = to)
-                        onClose()
+                if (to == null) {
+                    Quiet("Open a vault file to see its links.")
+                    return@HorizontalPager
+                }
+                val links = if (out) outFiles else linked?.getOrNull()
+                // Under the heading rather than in its place, so the arrow turning the links
+                // round is there however few there are.
+                val instead = (if (out) linkedOut else linked).failed("Cannot list the links")
+                    ?: when {
+                        links?.isEmpty() != true -> null
+                        out -> "This note links to no file yet."
+                        else -> "No notes link to this file yet."
                     }
+                Notes(
+                    heading = if (out) "Links from ${title(to)}" else "Links to ${title(to)}",
+                    notes = links,
+                    rows = placesIn(links),
+                    instead = instead,
+                    action = if (note) ({ Turn(out) { outgoing = !out } }) else null,
+                    unwritten = if (out) unwritten else emptySet(),
+                ) {
+                    // Made as the switcher makes a note not created yet, and opened with Back
+                    // to here as every other row is.
+                    when {
+                        out && it in unwritten -> model.create(it)
+                        else -> model.openBacklink(it, from = to)
+                    }
+                    onClose()
                 }
                 return@HorizontalPager
             }
@@ -372,7 +410,7 @@ fun BrowseScreen(
                 Mode.Search -> "Search"
                 Mode.Files -> "Find a file"
                 Mode.Tags -> tag?.let { "Filter #${it.name}" } ?: "Find a tag"
-                Mode.Backlinks -> "Filter backlinks"
+                Mode.Links -> "Filter links"
                 Mode.Command -> if (picking != null) "Find a template" else "Run a command"
             },
             modifier = Modifier.focusRequester(focus),
@@ -405,16 +443,19 @@ private fun Tags(tags: List<TagCount>, rows: List<Int>, onOpen: (TagCount) -> Un
 }
 
 /**
- * Show notes under [heading], with [notes] null while loading, [failed] saying why they could
- * not be listed, and [onBack] for navigation.
+ * Show notes under [heading], with [notes] null while loading, [instead] saying why there are
+ * none to show, [onBack] for navigation, [action] at the heading's end, and the [unwritten] ones,
+ * nothing in the vault yet, marked as the desktop marks a link to nothing.
  */
 @Composable
 private fun Notes(
     heading: String,
     notes: List<String>?,
     rows: List<Int>,
-    failed: String? = null,
+    instead: String? = null,
     onBack: (() -> Unit)? = null,
+    action: (@Composable () -> Unit)? = null,
+    unwritten: Set<String> = emptySet(),
     onOpen: (String) -> Unit,
 ) {
     LazyColumn(Modifier.fillMaxSize()) {
@@ -431,17 +472,27 @@ private fun Notes(
                     )
                 },
                 leadingContent = onBack?.let { { Text("‹", color = accent) } },
+                trailingContent = action,
                 colors = flatRow(),
                 modifier = onBack?.let { Modifier.row(it) } ?: Modifier,
             )
         }
-        if (failed != null) item { Quiet(failed) }
+        if (instead != null) item { Quiet(instead) }
         if (notes != null) items(rows, key = { notes[it] }) { i ->
             val rel = notes[i]
             val folder = VaultModel.parentOf(rel)
             ListItem(
                 headlineContent = {
-                    Text(title(rel), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        title(rel),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = if (rel in unwritten) {
+                            Modifier.hinted(LocalContentColor.current)
+                        } else {
+                            Modifier
+                        },
+                    )
                 },
                 supportingContent = if (folder.isEmpty()) null else ({
                     Text(folder, maxLines = 1, overflow = TextOverflow.MiddleEllipsis)
@@ -451,6 +502,28 @@ private fun Notes(
             )
         }
     }
+}
+
+/**
+ * The arrow at the end of the Links heading: which way the links listed go, in to the note
+ * ([out] false) or out of it, the desktop's ↙ and ↗; a tap turns it round.
+ */
+@Composable
+private fun Turn(out: Boolean, onTurn: () -> Unit) {
+    val next = if (out) "Show incoming links" else "Show outgoing links"
+    TextButton(onClick = onTurn, modifier = Modifier.semantics { contentDescription = next }) {
+        Text(if (out) "↗" else "↙")
+    }
+}
+
+/**
+ * Underline text in [ink] as the desktop's editor marks a link nothing answers to: a hairline at a
+ * quarter of the text's colour, which `TextDecoration` cannot draw, its line being the text's own.
+ */
+private fun Modifier.hinted(ink: Color): Modifier = drawWithContent {
+    drawContent()
+    val y = size.height - 1.dp.toPx()
+    drawLine(ink.copy(alpha = 0.25f), Offset(0f, y), Offset(size.width, y), 1.dp.toPx())
 }
 
 /** A ranking, and the page and the query it was ranked for. */

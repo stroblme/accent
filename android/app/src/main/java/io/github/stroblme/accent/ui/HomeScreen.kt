@@ -135,6 +135,7 @@ fun HomeScreen(model: VaultModel) {
                     paused = state.paused,
                     scanned = state.scanned,
                     front = doc?.rel,
+                    note = doc is Open,
                     openTag = browseTag,
                     printable = doc is Open || doc is OpenPdf,
                     onOpen = { rel, find ->

@@ -12,6 +12,7 @@ import io.github.stroblme.accent.ffi.Backlink
 import io.github.stroblme.accent.ffi.Etag
 import io.github.stroblme.accent.ffi.Event
 import io.github.stroblme.accent.ffi.FileRow
+import io.github.stroblme.accent.ffi.LinkedFile
 import io.github.stroblme.accent.ffi.Note
 import io.github.stroblme.accent.ffi.NoteAlias
 import io.github.stroblme.accent.ffi.PdfLink
@@ -770,6 +771,10 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     /** The notes that link to the document at [rel], once each ([linkingNotes]). */
     suspend fun linkedFrom(rel: String): Result<List<String>> =
         listing("Cannot list the links") { linkingNotes(vault?.backlinks(rel).orEmpty()) }
+
+    /** The files the note at [rel] links to, once each in the order it first names them. */
+    suspend fun linksFrom(rel: String): Result<List<LinkedFile>> =
+        listing("Cannot list the links") { vault?.linksFrom(rel).orEmpty() }
 
     /** Every tag in the vault with how many notes carry it, most used first. */
     suspend fun tags(): Result<List<TagCount>> =

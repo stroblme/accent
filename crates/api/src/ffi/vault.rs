@@ -8,9 +8,10 @@ use std::time::Duration;
 
 use accent_core::config::VaultConfig;
 use accent_core::fs::Etag;
-use accent_core::index::{Backlink, FileRow};
+use accent_core::index::{Backlink, FileRow, OutLink};
+use accent_core::markdown::LinkKind;
 
-use crate::ffi::convert::{self, Note, NoteAlias, PdfLink, SearchHit, TagCount};
+use crate::ffi::convert::{self, LinkedFile, Note, NoteAlias, PdfLink, SearchHit, TagCount};
 use crate::ffi::error::Answer;
 use crate::ffi::event::{self, Event};
 
@@ -167,6 +168,11 @@ impl Vault {
         Ok(self.inner.backlinks(&rel)?)
     }
 
+    /// The files the note at `rel` links to, as the index last read it ([`linked_files`]).
+    pub fn links_from(&self, rel: String) -> Answer<Vec<LinkedFile>> {
+        Ok(linked_files(self.inner.links_from(&rel)?))
+    }
+
     /// Every note link that points into a page of this PDF: what paints as a highlight over it.
     pub fn pdf_links(&self, rel: String) -> Answer<Vec<PdfLink>> {
         Ok(convert::all(self.inner.pdf_links(&rel)?))
@@ -268,6 +274,26 @@ impl Vault {
     }
 }
 
+/// A note's links as the files they lead to, once each in the order the note first names them,
+/// as the desktop's Links section lists them going out. Web links and links to the note's own
+/// headings name no file.
+fn linked_files(links: Vec<OutLink>) -> Vec<LinkedFile> {
+    let mut files: Vec<LinkedFile> = Vec::new();
+    for link in links {
+        if link.kind == LinkKind::External || link.target.is_empty() {
+            continue;
+        }
+        let missing = link.path.is_none();
+        let rel_path = link
+            .path
+            .unwrap_or_else(|| accent_core::path::linked_path(&link.target));
+        if !files.iter().any(|f| f.rel_path == rel_path) {
+            files.push(LinkedFile { rel_path, missing });
+        }
+    }
+    files
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -342,5 +368,39 @@ mod tests {
             .template_raw_target("Templates/Log.md".to_string())
             .unwrap();
         assert_eq!(raw.as_deref(), Some("Logs/{{title}}.md"));
+    }
+
+    /// Browse's Links going out lists each file once, in the order the note first names it, a
+    /// link nothing answers to as the file New File would write; web links and the note's own
+    /// headings name no file.
+    #[test]
+    fn a_notes_way_out_is_one_row_per_file() {
+        let link = |target: &str, path: Option<&str>, kind| OutLink {
+            target: target.to_string(),
+            path: path.map(str::to_string),
+            kind,
+            anchor: None,
+            byte_start: 0,
+        };
+        let rows = linked_files(vec![
+            link("Beta", Some("Beta.md"), LinkKind::Wiki),
+            link("https://example.org", None, LinkKind::External),
+            link("", None, LinkKind::Wiki),
+            link("Missing idea", None, LinkKind::Wiki),
+            link("Beta", Some("Beta.md"), LinkKind::Wiki),
+            link("diagram.png", Some("diagram.png"), LinkKind::Embed),
+        ]);
+        let rows: Vec<(&str, bool)> = rows
+            .iter()
+            .map(|f| (f.rel_path.as_str(), f.missing))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("Beta.md", false),
+                ("Missing idea.md", true),
+                ("diagram.png", false)
+            ]
+        );
     }
 }

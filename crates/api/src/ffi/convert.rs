@@ -192,6 +192,14 @@ pub struct NoteAlias {
     pub rel_path: String,
 }
 
+/// A file a note links to. While nothing in the vault is it yet (`missing`), `rel_path` is the
+/// file New File would write for the link.
+#[derive(uniffi::Record)]
+pub struct LinkedFile {
+    pub rel_path: String,
+    pub missing: bool,
+}
+
 #[derive(uniffi::Record)]
 pub struct SearchHit {
     pub rel_path: String,

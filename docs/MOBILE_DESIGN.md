@@ -21,9 +21,9 @@ Follow these rules where they differ from Material 3, using a flat layout and ty
 
 ### Browse
 
-- A panel over what is being read, with the Search / Files / Tags / Backlinks / Command chips and the query field at the foot of the screen, nearest the thumb.
+- A panel over what is being read, with the Search / Files / Tags / Links / Command chips and the query field at the foot of the screen, nearest the thumb.
   The desktop's eight sidebar panes and its palette collapse into it.
-- The chips go from the whole vault to the one document and then to acting on it: what the notes say, what they are called, what they are about, what links to the one in front, what can be done.
+- The chips go from the whole vault to the one document and then to acting on it: what the notes say, what they are called, what they are about, what links to and from the one in front, what can be done.
   Five do not fit across a phone, so the row scrolls sideways under the thumb and keeps the lit chip on screen as the pages are swiped; the chip cut off at the edge is what says there is more.
   A scrolling row rather than shorter labels or icons, because each is the one word for its page and the platform's own chips scroll the same way.
 - Search is the default: the tree until there is a query, then what the notes say.
@@ -41,10 +41,12 @@ Follow these rules where they differ from Material 3, using a flat layout and ty
 - Tags is every tag with how many notes carry it, most used first and bottom-up as Files is, the query ranking them as it ranks names.
   A tap opens the tag on the same page: its notes by name and folder, from the top, under `#tag · N` in the accent, which a tap or Back takes back to the tags.
   A tag tapped in a note — a link in the accent, as the editor colours it — opens Browse on that page, its notes listed, as if it had been opened here.
-- Backlinks is the notes linking to the document in front — a note, a PDF or an image — once each, by name and folder under "Links to …", the desktop's References for a note.
+- Links is the notes linking to the document in front — a note, a PDF or an image — once each, by name and folder under "Links to …", the desktop's Links section.
+  On a note an arrow at the heading's end turns the list round to the files the note links to, under "Links from …", as the desktop's button does (user decision 2026-11-03): ↙ for the links coming in, where every opening of the panel starts, ↗ for those going out.
+  Going out, each file is listed once in the order the note first names it, web links and the note's own headings left out, and a link nothing answers to is listed as the note it would make, underlined in a hairline at a quarter of the ink as the desktop's hint is; a tap on it makes that note, as Files does for one not created yet.
   One opened from here is one step from where the reader was: Back from it opens that document again where they left it — a note scrolled as it was, a PDF at its page, zoom and pan, an image fitted as it always opens.
   With nothing in front, or nothing linking, the page says so in a line where the rows would be.
-- Tags and Backlinks keep the keyboard down when they land: each is a list to read, as the tree is, and the field is there to narrow it.
+- Tags and Links keep the keyboard down when they land: each is a list to read, as the tree is, and the field is there to narrow it.
 - A handle at the top, and a pull down anywhere in it closes it.
   No Close button: Back already does that, and a second way out costing a corner of the screen is a corner spent twice.
 
@@ -114,7 +116,7 @@ Provide a visible control for each action that otherwise depends on a gesture.
 | Gesture | What it does | Its visible twin |
 |---|---|---|
 | Pull the panel down | Closes Browse | The handle at its top |
-| Swipe across the panel | Steps between Search, Files, Tags, Backlinks and Command | The chips, which travel with it |
+| Swipe across the panel | Steps between Search, Files, Tags, Links and Command | The chips, which travel with it |
 | Tap the content | Puts the chrome up or takes it down | — |
 | Scroll on | Takes the chrome down; scrolling back brings it up | — |
 | Pinch on a page | Zooms a PDF, 1× to 8× (less on a viewport wider than 4095 px), around the point between the fingers | — |
