@@ -1,7 +1,7 @@
 //! The tables, and the knobs that shape how they are filled.
 
 /// Bump on any schema change: `open` then drops and recreates the cache.
-pub(super) const SCHEMA_VERSION: i64 = 17;
+pub(super) const SCHEMA_VERSION: i64 = 18;
 
 /// Maximum indexed body size for non-markdown files. Stricter than [`crate::fs::MAX_TEXT`]
 /// because indexing repeatedly consumes database space and FTS query work, whereas opening a
@@ -27,6 +27,10 @@ CREATE TABLE files(
     mtime_ns     INTEGER NOT NULL,
     size         INTEGER NOT NULL,
     kind         INTEGER NOT NULL,
+    -- What `kind:` calls it (`query::Doc`): a note, a PDF, a diagram, a notebook, code, text or an
+    -- image, 0 for none of them. Kept rather than worked out from the name at query time, because
+    -- an `.xml` diagram and a marimo notebook are known by their bytes alone.
+    doc          INTEGER NOT NULL DEFAULT 0,
     title        TEXT,
     content_hash BLOB,
     -- Written by the git refresh, not by the walk: the vault tree is walked whatever the

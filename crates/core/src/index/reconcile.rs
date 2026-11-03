@@ -4,6 +4,7 @@ use super::links::{BEST_FILE, resolve_links_of};
 use super::schema::{BATCH, MAX_INDEXED_BODY, OPENED_CAP};
 use super::{Change, Index, Phase, Progress, ReconcileStats};
 use crate::note::Syntax;
+use crate::query::Doc;
 use crate::walk::{self, FileKind, ScanOptions};
 use crate::{Error, Result};
 use crate::{markdown, path};
@@ -630,6 +631,8 @@ struct Content {
     text: Option<String>,
     analysis: Option<markdown::Analysis>,
     symbols: Vec<crate::code::Decl>,
+    /// What `kind:` calls the file, `files.doc`.
+    doc: Option<Doc>,
 }
 
 /// Read, hash and parse one scanned entry for [`upsert`]. Use the editor's text reader so indexed
@@ -639,6 +642,7 @@ struct Content {
 /// until a pass of its own reads its text ([`Index::claim_pdfs`]). Unreadable files also keep
 /// their stat rows, with the missing body logged at debug level.
 fn read_content(f: &walk::FileMeta) -> Content {
+    let mut sniffed_diagram = false;
     let body = || match crate::fs::read_text(&f.canonical) {
         Ok(read) => Some(read),
         Err(e) => {
@@ -661,6 +665,7 @@ fn read_content(f: &walk::FileMeta) -> Content {
         FileKind::Other if f.size <= MAX_INDEXED_BODY && !path::is_binary(&f.rel_path) => body()
             .and_then(|read| match read {
                 crate::fs::Read::Text(t) if crate::path::holds_diagram(&f.rel_path, &t.text) => {
+                    sniffed_diagram = true;
                     diagram_labels(crate::fs::Read::Text(t))
                 }
                 read => Some(read),
@@ -686,11 +691,25 @@ fn read_content(f: &walk::FileMeta) -> Content {
             .unwrap_or_default(),
         _ => Vec::new(),
     };
+    // A `.py` is a notebook where its text makes marimo's app, an `.xml` a diagram where its
+    // first element is draw.io's; anything else is what its name says.
+    let doc = match f.kind {
+        FileKind::Dir | FileKind::Conflict => None,
+        _ if sniffed_diagram => Some(Doc::Diagram),
+        _ if text
+            .as_deref()
+            .is_some_and(|t| path::holds_notebook(&f.rel_path, t)) =>
+        {
+            Some(Doc::Notebook)
+        }
+        _ => Doc::named(&f.rel_path),
+    };
     Content {
         hash: text.as_deref().map(|t| blake3::hash(t.as_bytes())),
         text,
         analysis,
         symbols,
+        doc,
     }
 }
 
@@ -710,6 +729,7 @@ fn upsert(
         text,
         analysis,
         symbols,
+        doc,
     } = content;
     // The row it replaces, as this transaction sees it rather than as the caller's diff did:
     // another process sharing the index (`accent-cli mcp` beside the app) may have written it
@@ -765,14 +785,15 @@ fn upsert(
     // its files shallowest first, so a directory is always upserted before its children.
     let id: i64 = tx
         .prepare_cached(
-            "INSERT INTO files(rel_path, parent_dir, canonical, dev, ino, mtime_ns, size, kind, title, content_hash, git_ignored)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,
+            "INSERT INTO files(rel_path, parent_dir, canonical, dev, ino, mtime_ns, size, kind, title, content_hash, doc, git_ignored)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,
                     COALESCE((SELECT git_ignored FROM files WHERE rel_path = ?2), 0))
              ON CONFLICT(rel_path) DO UPDATE SET
                 parent_dir=excluded.parent_dir,
                 canonical=excluded.canonical, dev=excluded.dev, ino=excluded.ino,
                 mtime_ns=excluded.mtime_ns, size=excluded.size, kind=excluded.kind,
-                title=excluded.title, content_hash=excluded.content_hash, text_pages=NULL
+                title=excluded.title, content_hash=excluded.content_hash, doc=excluded.doc,
+                text_pages=NULL
              RETURNING id",
         )?
         .query_row(
@@ -787,6 +808,7 @@ fn upsert(
                 f.kind.as_i64(),
                 title,
                 hash.as_ref().map(|h| h.as_bytes().to_vec()),
+                doc.map_or(0, Doc::as_i64),
             ],
             |r| r.get(0),
         )?;

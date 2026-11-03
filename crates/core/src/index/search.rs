@@ -1,12 +1,15 @@
 //! Full-text and regex search over the indexed bodies, and the pure text functions that cut
 //! and mark a snippet the way the FTS tokenizer folds it.
 
-use super::{Index, Match, SearchHit};
+use super::{Index, Match, SearchHit, filter};
 use crate::Result;
 use crate::path::{FileType, file_type};
+use crate::query::{self, Query, Term};
 use crate::search::Regex;
 use crate::walk::FileKind;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::types::Value;
+use rusqlite::{OptionalExtension, params, params_from_iter};
+use std::cmp::Reverse;
 use std::ops::Range;
 
 /// Bytes of a matched line [`Index::grep`] keeps before and after the match. A note can hold a
@@ -23,9 +26,12 @@ pub const MIN_INFIX: usize = 3;
 pub(super) const PER_FILE: usize = 5;
 
 impl Index {
-    /// Search indexed titles and bodies as an ordered phrase ([`fts_query`]), returning byte
-    /// ranges. Directories, conflict copies, binaries and a PDF whose text is not read yet have no
-    /// searchable body; a PDF's rows are one a page ([`SearchHit::page`]).
+    /// Search indexed titles and bodies for a query ([`crate::query`]): its words and phrases in
+    /// any order, the last one matched as the start of a word ([`fts_query`]), in the files its
+    /// qualifiers leave, returning byte ranges. Directories, conflict copies, binaries and a PDF
+    /// whose text is not read yet have no searchable body; a PDF's rows are one a page
+    /// ([`SearchHit::page`]). A query of qualifiers alone lists their files, newest first
+    /// ([`listed`](Self::listed)). A qualifier that cannot be read is [`crate::Error::Invalid`].
     ///
     /// Exclude ignored non-note files unless `include_ignored`; filter before applying `limit`.
     ///
@@ -42,13 +48,20 @@ impl Index {
         limit: usize,
         include_ignored: bool,
     ) -> Result<Vec<SearchHit>> {
-        let phrase = fold(&terms(query).join(" "));
-        let hits = self.ranked(query, &phrase, limit, include_ignored)?;
+        let q = query::parse(query, &chrono::Local::now())?;
+        if q.text.is_empty() {
+            return match q.filters.is_empty() {
+                true => Ok(Vec::new()),
+                false => self.listed(&q, limit, include_ignored),
+            };
+        }
+        let needles = needles(&q.text);
+        let hits = self.ranked(&q, &needles, limit, include_ignored)?;
         let hits = match hits.is_empty() {
-            true => self.infix(query, limit, include_ignored)?,
+            true => self.infix(&q, &needles, limit, include_ignored)?,
             false => hits,
         };
-        self.per_match(hits, &phrase, limit)
+        self.per_match(hits, &needles, limit)
     }
 
     /// The files holding any of `words`, each matched as the start of a word, best first by
@@ -63,7 +76,7 @@ impl Index {
         let q: Vec<String> = words
             .iter()
             .filter(|w| !w.trim().is_empty())
-            .map(|w| format!("\"{}\"*", w.replace('"', "\"\"")))
+            .map(|w| fts_term(w, true))
             .collect();
         if q.is_empty() {
             return Ok(Vec::new());
@@ -81,8 +94,8 @@ impl Index {
     }
 
     /// What the trigram index adds below a [`search`](Self::search) that found something: the
-    /// files holding the query mid-word, in [`infix`](Self::infix)'s order, leaving out the
-    /// `skip` files already listed, at most `limit` rows. `toggle` finds `retoggle.md` here.
+    /// files holding the query's words mid-word, in [`infix`](Self::infix)'s order, leaving out
+    /// the `skip` files already listed, at most `limit` rows. `toggle` finds `retoggle.md` here.
     ///
     /// Nothing where the prefix index found nothing, because `search` has already answered that
     /// query from the trigram index and this would list the same files again.
@@ -93,53 +106,88 @@ impl Index {
         include_ignored: bool,
         skip: &[String],
     ) -> Result<Vec<SearchHit>> {
-        let phrase = fold(&terms(query).join(" "));
-        if self.ranked(query, &phrase, 1, include_ignored)?.is_empty() {
+        let q = query::parse(query, &chrono::Local::now())?;
+        let needles = needles(&q.text);
+        if q.text.is_empty() || self.ranked(&q, &needles, 1, include_ignored)?.is_empty() {
             return Ok(Vec::new());
         }
-        let hits = self.infix(query, limit + skip.len(), include_ignored)?;
+        let hits = self.infix(&q, &needles, limit + skip.len(), include_ignored)?;
         let hits = hits.into_iter().filter(|h| !skip.contains(&h.rel_path));
-        self.per_match(hits.take(limit).collect(), &phrase, limit)
+        self.per_match(hits.take(limit).collect(), &needles, limit)
     }
 
-    /// The files the prefix index ranks for `query`, best first, at most `limit` of them: one hit
+    /// The files the prefix index ranks for `q`, best first, at most `limit` of them: one hit
     /// each, before [`per_match`](Self::per_match) makes rows of them.
     fn ranked(
         &self,
-        query: &str,
-        phrase: &str,
+        q: &Query,
+        needles: &str,
         limit: usize,
         include_ignored: bool,
     ) -> Result<Vec<SearchHit>> {
-        let q = fts_query(query);
-        if q.is_empty() {
+        let fts = fts_query(&q.text);
+        if fts.is_empty() {
             return Ok(Vec::new());
         }
-        let mut st = self.conn.prepare_cached(
+        // The qualifiers narrow the files that are ranked, so `LIMIT` counts the ones they leave.
+        let (filter, values) = filter::sql(&q.filters, "g", 7);
+        let mut st = self.conn.prepare_cached(&format!(
             "SELECT f.rel_path, f.title, snippet_window(notes_fts.body, ?4),
                     phrase_start(notes_fts.body, ?4)
              FROM notes_fts JOIN files f ON f.id = notes_fts.rowid
              WHERE notes_fts MATCH ?1 AND notes_fts.rowid IN (
                  SELECT notes_fts.rowid FROM notes_fts JOIN files g ON g.id = notes_fts.rowid
-                  WHERE notes_fts MATCH ?1 AND (?5 OR g.git_ignored = 0 OR g.kind = ?6)
+                  WHERE notes_fts MATCH ?1 AND (?5 OR g.git_ignored = 0 OR g.kind = ?6){filter}
                   ORDER BY lower(ifnull(g.title, '')) = lower(?2) DESC, bm25(notes_fts, 1.0, 10.0)
                   LIMIT ?3)
-             ORDER BY lower(ifnull(f.title, '')) = lower(?2) DESC, bm25(notes_fts, 1.0, 10.0)",
-        )?;
-        // What the query matched is one phrase, so that is what the window is cut around and what
-        // the snippet marks. It goes in folded, and with its whitespace squeezed, because that is
-        // how `snippet_window` reads the body it looks through.
-        let rows = st.query_map(
-            params![
-                q,
-                query.trim(),
-                limit as i64,
-                phrase,
-                include_ignored,
-                FileKind::Markdown.as_i64(),
-            ],
-            |r| hit(r, phrase),
-        )?;
+             ORDER BY lower(ifnull(f.title, '')) = lower(?2) DESC, bm25(notes_fts, 1.0, 10.0)"
+        ))?;
+        // The window is cut around the first of the words in the note, and the snippet marks every
+        // one in it. They go in folded, and with their whitespace squeezed, because that is how
+        // `snippet_window` reads the body it looks through.
+        let title: Vec<&str> = q.text.iter().map(|t| t.text.as_str()).collect();
+        let mut args = vec![
+            Value::Text(fts),
+            Value::Text(title.join(" ")),
+            Value::Integer(limit as i64),
+            Value::Text(needles.to_string()),
+            Value::Integer(include_ignored.into()),
+            Value::Integer(FileKind::Markdown.as_i64()),
+        ];
+        args.extend(values);
+        let rows = st.query_map(params_from_iter(args), |r| hit(r, needles))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// A query of qualifiers alone: the files they leave, newest first, at most `limit`, one
+    /// row each with no snippet and no place in the file. Every kind of file but a folder and a
+    /// conflict copy, and what git ignores only as [`search`](Self::search) takes it.
+    fn listed(&self, q: &Query, limit: usize, include_ignored: bool) -> Result<Vec<SearchHit>> {
+        let (filter, values) = filter::sql(&q.filters, "f", 4);
+        let kinds = [FileKind::Markdown, FileKind::Pdf, FileKind::Other].map(|k| k.as_i64());
+        let mut st = self.conn.prepare_cached(&format!(
+            "SELECT f.rel_path, f.title FROM files f
+             WHERE f.kind IN ({}, {}, {}) AND (?1 OR f.git_ignored = 0 OR f.kind = ?2){filter}
+             ORDER BY f.mtime_ns DESC LIMIT ?3",
+            kinds[0], kinds[1], kinds[2]
+        ))?;
+        let mut args = vec![
+            Value::Integer(include_ignored.into()),
+            Value::Integer(FileKind::Markdown.as_i64()),
+            Value::Integer(limit as i64),
+        ];
+        args.extend(values);
+        let rows = st.query_map(params_from_iter(args), |r| {
+            Ok(SearchHit {
+                rel_path: r.get(0)?,
+                title: r.get(1)?,
+                snippet: String::new(),
+                at: None,
+                line: None,
+                page: None,
+                more: 0,
+            })
+        })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -152,7 +200,7 @@ impl Index {
     fn per_match(
         &self,
         hits: Vec<SearchHit>,
-        phrase: &str,
+        needles: &str,
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
         let mut st = self.conn.prepare_cached(
@@ -167,7 +215,7 @@ impl Index {
             let body: Option<String> = st.query_row([&hit.rel_path], |r| r.get(0)).optional()?;
             let rows = body.map_or_else(Vec::new, |body| {
                 let cap = room.min(PER_FILE);
-                phrase_hits(&hit.rel_path, hit.title.as_deref(), &body, phrase, 0, cap)
+                phrase_hits(&hit.rel_path, hit.title.as_deref(), &body, needles, 0, cap)
             });
             match rows.is_empty() {
                 true => out.push(hit),
@@ -181,46 +229,59 @@ impl Index {
     /// [`search`](Self::search) uses this when prefix search is empty;
     /// [`search_mid_word`](Self::search_mid_word) adds results after typing stops.
     ///
+    /// Every word of the query has to be in the body or the title, mid-word or not; the ones of
+    /// [`MIN_INFIX`] characters or more are what the trigram index is asked for, so a query of
+    /// shorter words only has no answer here.
+    ///
     /// Matches fold case and Latin diacritics, treating `%` and `_` literally. Trigram
-    /// candidates are verified with [`folded_find`] through `phrase_start` rather than an
+    /// candidates are verified with [`folded_find`] through `holds_all` rather than an
     /// unfolded wildcard `LIKE`.
     ///
     /// Without term statistics (`detail=none`), title matches lead, then shorter files.
-    fn infix(&self, query: &str, limit: usize, include_ignored: bool) -> Result<Vec<SearchHit>> {
-        let needle = terms(query).join(" ");
-        let chars: Vec<char> = needle.chars().collect();
-        if chars.len() < MIN_INFIX {
+    fn infix(
+        &self,
+        q: &Query,
+        needles: &str,
+        limit: usize,
+        include_ignored: bool,
+    ) -> Result<Vec<SearchHit>> {
+        // One quoted term per window: `detail='none'` answers no phrase of several.
+        let windows: Vec<String> = q
+            .text
+            .iter()
+            .flat_map(|t| {
+                let chars: Vec<char> = t.text.chars().collect();
+                let windows: Vec<String> = chars
+                    .windows(MIN_INFIX)
+                    .map(|w| format!("\"{}\"", String::from_iter(w).replace('"', "\"\"")))
+                    .collect();
+                windows
+            })
+            .collect();
+        if windows.is_empty() {
             return Ok(Vec::new());
         }
-        // One quoted term per window: `detail='none'` answers no phrase of several.
-        let windows: Vec<String> = chars
-            .windows(MIN_INFIX)
-            .map(|w| format!("\"{}\"", String::from_iter(w).replace('"', "\"\"")))
-            .collect();
-        let mut st = self.conn.prepare_cached(
+        let (filter, values) = filter::sql(&q.filters, "g", 6);
+        let mut st = self.conn.prepare_cached(&format!(
             "SELECT f.rel_path, f.title, snippet_window(n.body, ?2), phrase_start(n.body, ?2)
              FROM notes n JOIN files f ON f.id = n.file_id
              WHERE n.file_id IN (
                  SELECT t.rowid FROM notes_tri t JOIN files g ON g.id = t.rowid
-                  WHERE notes_tri MATCH ?1
-                    AND (phrase_start(t.body, ?2) IS NOT NULL
-                         OR phrase_start(t.title, ?2) IS NOT NULL)
-                    AND (?4 OR g.git_ignored = 0 OR g.kind = ?5)
-                  ORDER BY phrase_start(ifnull(g.title, ''), ?2) IS NOT NULL DESC, g.size
+                  WHERE notes_tri MATCH ?1 AND holds_all(t.body, t.title, ?2)
+                    AND (?4 OR g.git_ignored = 0 OR g.kind = ?5){filter}
+                  ORDER BY holds_all(ifnull(g.title, ''), '', ?2) DESC, g.size
                   LIMIT ?3)
-             ORDER BY phrase_start(ifnull(f.title, ''), ?2) IS NOT NULL DESC, f.size",
-        )?;
-        let phrase = fold(&needle);
-        let rows = st.query_map(
-            params![
-                windows.join(" AND "),
-                &phrase,
-                limit as i64,
-                include_ignored,
-                FileKind::Markdown.as_i64(),
-            ],
-            |r| hit(r, &phrase),
-        )?;
+             ORDER BY holds_all(ifnull(f.title, ''), '', ?2) DESC, f.size"
+        ))?;
+        let mut args = vec![
+            Value::Text(windows.join(" AND ")),
+            Value::Text(needles.to_string()),
+            Value::Integer(limit as i64),
+            Value::Integer(include_ignored.into()),
+            Value::Integer(FileKind::Markdown.as_i64()),
+        ];
+        args.extend(values);
+        let rows = st.query_map(params_from_iter(args), |r| hit(r, needles))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -344,8 +405,8 @@ impl Index {
 
     /// [`matches_from`](Self::matches_from) for the rows [`search`](Self::search) lists: the
     /// ranked query's occurrences in one body from byte `from` on, one row each, at most `cap`
-    /// and the rest counted onto the last. The phrase is folded as `search` folds it, so the rows
-    /// go on where that file's listed ones stopped.
+    /// and the rest counted onto the last. Its words are folded as `search` folds them, so the
+    /// rows go on where that file's listed ones stopped.
     pub fn phrase_hits_from(
         rel: &str,
         body: &str,
@@ -353,8 +414,8 @@ impl Index {
         from: usize,
         cap: usize,
     ) -> Vec<SearchHit> {
-        let phrase = fold(&terms(query).join(" "));
-        phrase_hits(rel, None, body, &phrase, from, cap)
+        let words: Vec<String> = query::free_text(query).iter().map(|t| fold(t)).collect();
+        phrase_hits(rel, None, body, &words.join("\n"), from, cap)
     }
 
     /// The files whose indexed body matches at all, in `rel_path` order: the bodies
@@ -453,12 +514,14 @@ impl<'a> Lines<'a> {
     }
 }
 
-/// Every occurrence of the folded `phrase` in `body` from byte `from` on as a hit of its own: the
-/// line it sits on, clipped the way an exact search clips one, with that occurrence alone marked
-/// in it. At most `cap` rows, the occurrences past that counted onto the last row.
+/// Every occurrence of any of the folded `needles` (a line each) in `body` from byte `from` on as a
+/// hit of its own: the line it sits on, clipped the way an exact search clips one, with that
+/// occurrence alone marked in it. At most `cap` rows, the occurrences past that counted onto the
+/// last row. Where two start together the longer is the occurrence, and one inside another's is
+/// none.
 ///
-/// Empty where the body does not hold the phrase — a hit on the title, or one folded across a
-/// stretch [`folded_find`] cannot put back together — and the caller keeps its file row then.
+/// Empty where the body holds none of them — a hit on the title, or one folded across a stretch
+/// [`folded_find`] cannot put back together — and the caller keeps its file row then.
 ///
 /// A PDF's rows are its pages: the first occurrence on a page is its row, the next row is on a
 /// later page, and a `from` inside a page goes on from the next.
@@ -466,7 +529,7 @@ fn phrase_hits(
     rel: &str,
     title: Option<&str>,
     body: &str,
-    phrase: &str,
+    needles: &str,
     from: usize,
     cap: usize,
 ) -> Vec<SearchHit> {
@@ -481,13 +544,30 @@ fn phrase_hits(
     if pdf && from > 0 {
         from = next_page(body, from);
     }
+    // Each needle's next occurrence, looked for again only once the walk has passed it, so every
+    // needle reads the body once however many rows the others make.
+    let needles: Vec<&str> = needles.split('\n').filter(|n| !n.is_empty()).collect();
+    let find = |from: usize, needle: &str| {
+        folded_find(&body[from..], needle).map(|(at, len)| (from + at, len))
+    };
+    let mut next: Vec<Option<(usize, usize)>> = needles.iter().map(|n| find(from, n)).collect();
     // A zero-length match would never advance, so an empty query lists nothing rather than looping.
-    while let Some((at, len)) = folded_find(&body[from..], phrase).filter(|&(_, len)| len > 0) {
-        let start = from + at;
+    while let Some((start, len)) = next
+        .iter()
+        .flatten()
+        .min_by_key(|&&(start, len)| (start, Reverse(len)))
+        .copied()
+        .filter(|&(_, len)| len > 0)
+    {
         from = match pdf {
             true => next_page(body, start),
             false => start + len,
         };
+        for (at, needle) in next.iter_mut().zip(&needles) {
+            if at.is_some_and(|(start, _)| start < from) {
+                *at = find(from, needle);
+            }
+        }
         if out.len() >= cap {
             if let Some(last) = out.last_mut() {
                 last.more += 1;
@@ -545,25 +625,25 @@ fn clip(line: &str, range: Range<usize>) -> (String, Range<usize>) {
     (text, at(range.start)..at(range.end))
 }
 
-/// One row of either search: `rel_path, title, snippet_window(body, phrase), phrase_start(body,
-/// phrase)`, turned into the hit the sidebar paints. `phrase` arrives folded, the way both SQL
-/// functions read it.
-fn hit(r: &rusqlite::Row<'_>, phrase: &str) -> rusqlite::Result<SearchHit> {
+/// One row of either search: `rel_path, title, snippet_window(body, needles),
+/// phrase_start(body, needles)`, turned into the hit the sidebar paints. `needles` arrive folded,
+/// a line each, the way both SQL functions read them.
+fn hit(r: &rusqlite::Row<'_>, needles: &str) -> rusqlite::Result<SearchHit> {
     let window: String = r.get(2)?;
     let start: Option<i64> = r.get(3)?;
     Ok(SearchHit {
         rel_path: r.get(0)?,
         title: r.get(1)?,
         // The window holds the same first occurrence `phrase_start` found — it starts
-        // [`SNIPPET_LEAD`] characters ahead of it — so the phrase's length is measured over those
-        // few hundred characters rather than over the note a second time. Folding can make it
-        // differ from the needle's, which is why it is measured.
+        // [`SNIPPET_LEAD`] characters ahead of it — so its length is measured over those few
+        // hundred characters rather than over the note a second time. Folding can make it differ
+        // from the needle's, which is why it is measured.
         at: start.map(|s| {
             let s = s as usize;
-            let len = folded_find(&window, phrase).map_or(phrase.len(), |(_, n)| n);
+            let len = first_of(&window, needles).map_or(0, |(_, n)| n);
             s..s + len
         }),
-        snippet: mark_phrase(&window, phrase),
+        snippet: mark_terms(&window, needles),
         // A file row until [`Index::per_match`] has read the body and found where in it the
         // phrase occurs; what is left of one is the hit whose body does not hold it at all.
         line: None,
@@ -572,10 +652,11 @@ fn hit(r: &rusqlite::Row<'_>, phrase: &str) -> rusqlite::Result<SearchHit> {
     })
 }
 
-/// The query's words: the tokens [`fts_query`] runs into one phrase, and — joined by a single
-/// space — the needle the snippet is cut and marked around.
-fn terms(query: &str) -> Vec<&str> {
-    query.split_whitespace().collect()
+/// What the text of a query is found by in a body: its words and phrases folded, a line each,
+/// which is how the SQL functions take them.
+fn needles(text: &[Term]) -> String {
+    let folded: Vec<String> = text.iter().map(|t| fold(&t.text)).collect();
+    folded.join("\n")
 }
 
 /// How much of a note a snippet quotes, and how much of that comes before the term it found.
@@ -604,7 +685,7 @@ fn fold_char(c: char) -> char {
     }
 }
 
-pub(super) fn fold(s: &str) -> String {
+pub(crate) fn fold(s: &str) -> String {
     s.chars().map(fold_char).collect()
 }
 
@@ -648,12 +729,31 @@ pub(super) fn folded_find(hay: &str, needle: &str) -> Option<(usize, usize)> {
         .find_map(|(i, _)| folded_prefix(&hay[i..], needle).map(|n| (i, n)))
 }
 
-/// Snippet around the first folded match: [`SNIPPET_LEAD`] preceding characters and
-/// [`SNIPPET_CHARS`] total, with `…` at clipped ends. `needle` is already folded; local matching
-/// handles diacritics that SQLite's ASCII-only `lower()` cannot.
-pub(super) fn snippet_window(body: &str, needle: &str) -> String {
+/// The first folded match of any of `needles` (a line each) in `hay`, the longer where two start
+/// together: [`folded_find`] for a query of several words.
+pub(super) fn first_of(hay: &str, needles: &str) -> Option<(usize, usize)> {
+    needles
+        .split('\n')
+        .filter(|n| !n.is_empty())
+        .filter_map(|needle| folded_find(hay, needle))
+        .min_by_key(|&(at, len)| (at, Reverse(len)))
+}
+
+/// Whether every one of `needles` (a line each) is in `body` or in `title`: what makes a trigram
+/// candidate an answer to a query of several words.
+pub(super) fn holds_all(body: &str, title: &str, needles: &str) -> bool {
+    needles
+        .split('\n')
+        .filter(|n| !n.is_empty())
+        .all(|n| folded_find(body, n).is_some() || folded_find(title, n).is_some())
+}
+
+/// Snippet around the first folded match of any of `needles`: [`SNIPPET_LEAD`] preceding
+/// characters and [`SNIPPET_CHARS`] total, with `…` at clipped ends. `needles` are already folded;
+/// local matching handles diacritics that SQLite's ASCII-only `lower()` cannot.
+pub(super) fn snippet_window(body: &str, needles: &str) -> String {
     // Characters, not bytes: the window is cut by character position on both ends.
-    let hit = match folded_find(body, needle) {
+    let hit = match first_of(body, needles) {
         Some((at, _)) => body[..at].chars().count(),
         None => 0,
     };
@@ -670,18 +770,21 @@ pub(super) fn snippet_window(body: &str, needle: &str) -> String {
     out
 }
 
-/// Wrap every occurrence of the query phrase in the guillemets the UI turns into bold, the way
-/// FTS5's own `snippet()` did. The input is the window [`snippet_window`] already cut, so this is
-/// a pass over a row of text rather than over a note, and it folds the same way that cut did.
+/// Wrap every occurrence of the query's words and phrases in the guillemets the UI turns into
+/// bold, the way FTS5's own `snippet()` did. The input is the window [`snippet_window`] already
+/// cut, so this is a pass over a row of text rather than over a note, and it folds the same way
+/// that cut did.
 ///
-/// The phrase is marked as one run: the query matched those words in that order, and marking them
+/// A phrase is marked as one run: the query matched those words in that order, and marking them
 /// separately would highlight text the query did not find.
-fn mark_phrase(window: &str, phrase: &str) -> String {
+fn mark_terms(window: &str, needles: &str) -> String {
+    let needles: Vec<&str> = needles.split('\n').collect();
     let mut out = String::with_capacity(window.len() + 8);
     let mut rest = window;
     while !rest.is_empty() {
         // A zero-length match — an empty query — would mark nothing and never advance.
-        match folded_prefix(rest, phrase).filter(|n| *n > 0) {
+        let longest = needles.iter().filter_map(|n| folded_prefix(rest, n)).max();
+        match longest.filter(|n| *n > 0) {
             Some(n) => {
                 out.push('«');
                 out.push_str(&rest[..n]);
@@ -698,16 +801,22 @@ fn mark_phrase(window: &str, phrase: &str) -> String {
     out
 }
 
-/// Quote a query as one safe FTS5 phrase with its last token matched as a prefix, e.g. `toggle
-/// split vie` becomes `"toggle split vie"*`. Ordered words preserve sentence matching; the
-/// prefix supports queries during typing. Operators are treated literally, preventing syntax
-/// errors from user punctuation.
-fn fts_query(q: &str) -> String {
-    let toks = terms(q);
-    if toks.is_empty() {
-        return String::new();
-    }
-    format!("\"{}\"*", toks.join(" ").replace('"', "\"\""))
+/// A query's words and phrases as FTS5 terms that must all match, each quoted so its operators
+/// and punctuation are text, never syntax: `toggle "split view" vie` becomes `"toggle" AND
+/// "split view" AND "vie"*`, the last matched as a prefix while it is being typed.
+fn fts_query(text: &[Term]) -> String {
+    let terms: Vec<String> = text
+        .iter()
+        .filter(|t| t.text.chars().any(char::is_alphanumeric))
+        .map(|t| fts_term(&t.text, t.prefix))
+        .collect();
+    terms.join(" AND ")
+}
+
+/// `text` as one FTS5 phrase, `*` after it for a prefix.
+pub(super) fn fts_term(text: &str, prefix: bool) -> String {
+    let star = if prefix { "*" } else { "" };
+    format!("\"{}\"{star}", text.replace('"', "\"\""))
 }
 
 #[cfg(test)]
@@ -764,32 +873,38 @@ mod tests {
     fn a_snippet_marks_the_phrase_and_not_its_words_apart() {
         let phrase = fold("Ferris the crab");
         assert_eq!(
-            mark_phrase("a FERRIS THE CRAB here", &phrase),
+            mark_terms("a FERRIS THE CRAB here", &phrase),
             "a «FERRIS THE CRAB» here"
         );
         // The words on their own are not what the query matched, so they are not marked.
         assert_eq!(
-            mark_phrase("a crab, and Ferris too", &phrase),
+            mark_terms("a crab, and Ferris too", &phrase),
             "a crab, and Ferris too"
         );
         // A phrase the note wrapped across two lines is one match, the way FTS5 read it.
         assert_eq!(
-            mark_phrase("a ferris\nthe  crab here", &phrase),
+            mark_terms("a ferris\nthe  crab here", &phrase),
             "a «ferris\nthe  crab» here"
         );
-        assert_eq!(mark_phrase("as is", &fold("")), "as is");
+        assert_eq!(mark_terms("as is", &fold("")), "as is");
         // The index folds diacritics to find the note, so the marking folds them to show why.
         assert_eq!(
-            mark_phrase("un café au coin", &fold("cafe au")),
+            mark_terms("un café au coin", &fold("cafe au")),
             "un «café au» coin"
         );
-        assert_eq!(mark_phrase("ÄHNLICH", &fold("ahnlich")), "«ÄHNLICH»");
+        assert_eq!(mark_terms("ÄHNLICH", &fold("ahnlich")), "«ÄHNLICH»");
+        // Several words are marked each where it stands, the longer where two start together.
+        assert_eq!(
+            mark_terms("a crab, and Ferris too", "crab\nferris"),
+            "a «crab», and «Ferris» too"
+        );
+        assert_eq!(mark_terms("the crabs", "crab\ncrabs"), "the «crabs»");
     }
 
-    /// Phrase search must match adjacent ordered words rather than independent terms anywhere in
-    /// a note.
+    /// Words are found in any order (user decision 2026-11-03), and a quoted phrase only as one:
+    /// adjacent, in its order.
     #[test]
-    fn a_ranked_query_matches_the_whole_phrase() {
+    fn a_ranked_query_finds_its_words_anywhere_and_a_phrase_whole() {
         let vault = tempfile::tempdir().unwrap();
         fs::write(
             vault.path().join("shortcuts.md"),
@@ -805,7 +920,8 @@ mod tests {
         let mut ix = open(&db);
         ix.reconcile(vault.path(), |_| {}).unwrap();
 
-        let hits = ix.search("Toggle Split Vie", 10, false).unwrap();
+        // Still being typed, so the quote is open and its last word a prefix.
+        let hits = ix.search("\"Toggle Split Vie", 10, false).unwrap();
         assert_eq!(
             hits.iter().map(|h| h.rel_path.as_str()).collect::<Vec<_>>(),
             ["shortcuts.md"],
@@ -817,6 +933,26 @@ mod tests {
         let body = fs::read_to_string(vault.path().join("shortcuts.md")).unwrap();
         let at = hits[0].at.clone().expect("the body holds the phrase");
         assert_eq!(&body[at], "Toggle Split Vie");
+
+        // Unquoted, both notes hold the three words, each a row of its own where it stands.
+        let hits = ix.search("vie split Toggle", 10, false).unwrap();
+        let mut found = files(&hits);
+        found.sort();
+        assert_eq!(found, ["scattered.md", "shortcuts.md"], "{hits:?}");
+        let rows: Vec<&str> = hits
+            .iter()
+            .filter(|h| h.rel_path == "scattered.md")
+            .map(|h| h.snippet.as_str())
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "«Toggle» the sidebar. Split the day in two. A view of the lake.",
+                "Toggle the sidebar. «Split» the day in two. A view of the lake.",
+                // Clipped as an exact search's row is, the word that far into its line.
+                "…le the sidebar. Split the day in two. A «vie»w of the lake.",
+            ]
+        );
 
         // A one-word query is what it always was.
         assert_eq!(ix.search("split", 10, false).unwrap().len(), 2);
@@ -1143,18 +1279,20 @@ mod tests {
         ix.reconcile(vault.path(), |_| {}).unwrap();
 
         let word = ix.search("toggle split", 10, false).unwrap();
-        assert_eq!(word.len(), 1, "{word:?}");
+        assert_eq!(files(&word), ["target.md"], "{word:?}");
         let mid = ix.search("oggle split", 10, false).unwrap();
-        assert_eq!(mid.len(), 1, "{mid:?}");
-        assert_eq!(mid[0].rel_path, word[0].rel_path);
+        assert_eq!(files(&mid), ["target.md"], "{mid:?}");
         // Trigrams reach inside a word from either end, which a reversed-token column would not.
-        assert_eq!(ix.search("ggle spl", 10, false).unwrap().len(), 1);
+        assert_eq!(
+            files(&ix.search("ggle spl", 10, false).unwrap()),
+            ["target.md"]
+        );
 
         // The hit is still a hit: the snippet marks what was found and the row opens on it.
         assert!(mid[0].snippet.contains('\u{ab}'), "{:?}", mid[0].snippet);
         let body = fs::read_to_string(vault.path().join("target.md")).unwrap();
         let at = mid[0].at.clone().expect("the body holds it");
-        assert_eq!(&body[at], "oggle split");
+        assert_eq!(&body[at], "oggle");
 
         // A vault that does not hold the words is still no result, and nothing shorter than a
         // trigram is asked of the index at all.
@@ -1184,8 +1322,13 @@ mod tests {
         let hits = ix.search("CAFE", 10, false).unwrap();
         assert_eq!(files(&hits), ["mini.md", "u.md"], "shortest first");
         assert!(hits[1].snippet.contains("Uni«café»"), "{:?}", hits[1]);
-        let hits = ix.infix("50%", 10, false).unwrap();
+        let q = query::parse("50%", &chrono::Local::now()).unwrap();
+        let hits = ix.infix(&q, &needles(&q.text), 10, false).unwrap();
         assert_eq!(files(&hits), ["share.md"]);
+        // Each word mid-word or not, in any order; one shorter than a trigram is checked too.
+        let hits = ix.search("afe un", 10, false).unwrap();
+        assert_eq!(files(&hits), ["u.md"], "{hits:?}");
+        assert!(ix.search("afe zz", 10, false).unwrap().is_empty());
     }
 
     #[test]
@@ -1293,5 +1436,134 @@ mod tests {
         let hits = ix.search("ryptonite Ledg", 10, false).unwrap();
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].rel_path, "Kryptonite Ledger.md");
+    }
+
+    /// A small vault for the qualifiers: tags, links, a highlight, kinds and a folder.
+    fn qualified_vault() -> (tempfile::TempDir, tempfile::TempDir) {
+        let vault = tempfile::tempdir().unwrap();
+        let at = |rel: &str| vault.path().join(rel);
+        fs::create_dir_all(at("Reading/Old")).unwrap();
+        fs::write(
+            at("Reading/paper notes.md"),
+            "# Paper notes\nAbout ferris, #Reading/papers too.\n\
+             See [[paper.pdf#page=1&selection=0,1,0,5|quoted]] and [[Missing]].\n",
+        )
+        .unwrap();
+        fs::write(
+            at("Reading/Old/draft.md"),
+            "# Draft\nferris draft #reading\n",
+        )
+        .unwrap();
+        fs::write(at("plain.md"), "# Plain\nferris and [[paper notes]]\n").unwrap();
+        fs::write(at("paper.pdf"), b"%PDF-1.4 not really").unwrap();
+        fs::write(
+            at("flow.xml"),
+            r#"<mxfile><diagram name="P"><mxGraphModel><root><mxCell id="0"/></root></mxGraphModel></diagram></mxfile>"#,
+        )
+        .unwrap();
+        fs::write(at("data.xml"), "<data/>\n").unwrap();
+        fs::write(
+            at("nb.py"),
+            "import marimo\napp = marimo.App()\n\n\n@app.cell\ndef _():\n    x = 1\n    return\n",
+        )
+        .unwrap();
+        fs::write(at("tool.py"), "print('ferris')\n").unwrap();
+        fs::write(at("table.csv"), "a,b\n").unwrap();
+        (vault, tempfile::tempdir().unwrap())
+    }
+
+    /// The files a query lists, sorted, whatever their order.
+    fn listed(ix: &Index, query: &str) -> Vec<String> {
+        let mut out: Vec<String> = ix
+            .search(query, 100, false)
+            .unwrap()
+            .into_iter()
+            .map(|h| h.rel_path)
+            .collect();
+        out.dedup();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn qualifiers_narrow_the_files_the_words_are_found_in() {
+        let (vault, db) = qualified_vault();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        // A tag takes the tags nested under it, in any case; a word beside it is looked for in
+        // what it leaves.
+        let reading = ["Reading/Old/draft.md", "Reading/paper notes.md"];
+        assert_eq!(listed(&ix, "#reading"), reading);
+        assert_eq!(
+            listed(&ix, "tag:READING/Papers"),
+            ["Reading/paper notes.md"]
+        );
+        assert_eq!(listed(&ix, "ferris tag:reading"), reading);
+        assert_eq!(listed(&ix, "ferris -#reading"), ["plain.md", "tool.py"]);
+        assert_eq!(
+            listed(&ix, "ferris -draft"),
+            ["Reading/paper notes.md", "plain.md", "tool.py"]
+        );
+        assert_eq!(listed(&ix, "path:old"), ["Reading/Old/draft.md"]);
+        assert_eq!(
+            listed(&ix, "path:\"paper notes\""),
+            ["Reading/paper notes.md"]
+        );
+
+        assert_eq!(listed(&ix, "kind:diagram"), ["flow.xml"]);
+        assert_eq!(listed(&ix, "kind:notebook"), ["nb.py"]);
+        assert_eq!(listed(&ix, "kind:code"), ["tool.py"]);
+        assert_eq!(listed(&ix, "kind:text"), ["data.xml", "table.csv"]);
+        assert_eq!(listed(&ix, "kind:pdf"), ["paper.pdf"]);
+        assert_eq!(
+            listed(&ix, "ferris kind:note"),
+            [reading[0], reading[1], "plain.md"]
+        );
+
+        assert_eq!(
+            listed(&ix, "has:highlights"),
+            ["Reading/paper notes.md", "paper.pdf"]
+        );
+        assert_eq!(listed(&ix, "links:paper.pdf"), ["Reading/paper notes.md"]);
+        assert_eq!(listed(&ix, "links:[[paper notes]]"), ["plain.md"]);
+        // Nothing answers to it, so the note waiting for it is what links to it.
+        assert_eq!(listed(&ix, "links:missing"), ["Reading/paper notes.md"]);
+        assert_eq!(listed(&ix, "linked-from:plain"), ["Reading/paper notes.md"]);
+        assert_eq!(
+            listed(&ix, "-has:highlights kind:note"),
+            ["Reading/Old/draft.md", "plain.md"]
+        );
+
+        assert_eq!(listed(&ix, "ferris modified:>1d").len(), 4);
+        assert!(listed(&ix, "ferris modified:<1d").is_empty());
+        assert!(matches!(
+            ix.search("kind:pfd", 10, false),
+            Err(crate::Error::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn qualifiers_alone_list_their_files_newest_first_without_a_place() {
+        let (vault, db) = qualified_vault();
+        let older = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        let file = fs::File::options()
+            .write(true)
+            .open(vault.path().join("plain.md"))
+            .unwrap();
+        file.set_modified(older).unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let hits = ix.search("kind:note", 10, false).unwrap();
+        assert_eq!(hits.last().map(|h| h.rel_path.as_str()), Some("plain.md"));
+        assert!(
+            hits.iter()
+                .all(|h| h.snippet.is_empty() && h.at.is_none() && h.line.is_none()),
+            "{hits:?}"
+        );
+        assert_eq!(ix.search("kind:note", 1, false).unwrap().len(), 1);
+        // Neither a query of nothing nor one of punctuation lists the vault.
+        assert!(ix.search("# -", 10, false).unwrap().is_empty());
     }
 }

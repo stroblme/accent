@@ -6,6 +6,7 @@
 //! `Index` methods are grouped by reconciliation, links, file listing, and search.
 
 mod files;
+mod filter;
 mod links;
 mod pdf_text;
 mod reconcile;
@@ -23,7 +24,7 @@ use rusqlite::{Connection, OptionalExtension};
 pub(crate) use schema::MAX_INDEXED_BODY;
 use schema::{BODIES, DROP_ALL, SCHEMA, SCHEMA_VERSION};
 pub use search::MIN_INFIX;
-use search::{folded_find, snippet_window};
+use search::{first_of, fold, holds_all, snippet_window};
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -316,10 +317,10 @@ impl Index {
                 ))
             },
         )?;
-        // Where that window's phrase sits in the note, so a hit opens on the match rather than at
-        // the top; `NULL` when the body does not hold it. A second pass over the body, deliberate:
-        // it is the same linear fold-compare the window costs, and the alternative is handing
-        // whole note bodies back to Rust to search them there.
+        // Where that window's first match sits in the note, so a hit opens on the match rather
+        // than at the top; `NULL` when the body holds none. A second pass over the body,
+        // deliberate: it is the same linear fold-compare the window costs, and the alternative is
+        // handing whole note bodies back to Rust to search them there.
         conn.create_scalar_function(
             "phrase_start",
             2,
@@ -327,9 +328,32 @@ impl Index {
                 | FunctionFlags::SQLITE_DETERMINISTIC
                 | FunctionFlags::SQLITE_INNOCUOUS,
             |ctx| {
-                let (body, needle) = (ctx.get_raw(0).as_str()?, ctx.get_raw(1).as_str()?);
-                Ok(folded_find(body, needle).map(|(at, _)| at as i64))
+                let (body, needles) = (ctx.get_raw(0).as_str()?, ctx.get_raw(1).as_str()?);
+                Ok(first_of(body, needles).map(|(at, _)| at as i64))
             },
+        )?;
+        // Whether a body or its title holds every word of a query, which the trigram index's
+        // candidates are checked by (`Index::infix`).
+        conn.create_scalar_function(
+            "holds_all",
+            3,
+            FunctionFlags::SQLITE_UTF8
+                | FunctionFlags::SQLITE_DETERMINISTIC
+                | FunctionFlags::SQLITE_INNOCUOUS,
+            |ctx| {
+                let body = ctx.get_raw(0).as_str()?;
+                let (title, needles) = (ctx.get_raw(1).as_str()?, ctx.get_raw(2).as_str()?);
+                Ok(holds_all(body, title, needles))
+            },
+        )?;
+        // A tag folded as search folds a word, so `tag:Paper` finds `#paper` (`index::filter`).
+        conn.create_scalar_function(
+            "fold",
+            1,
+            FunctionFlags::SQLITE_UTF8
+                | FunctionFlags::SQLITE_DETERMINISTIC
+                | FunctionFlags::SQLITE_INNOCUOUS,
+            |ctx| Ok(fold(ctx.get_raw(0).as_str()?)),
         )?;
 
         // It's a cache: rebuilding is cheaper than writing migrations. Asked once outside a
