@@ -948,7 +948,7 @@ fn unnamed_ink_pdf() -> Vec<u8> {
 
 /// Our strokes are ours by their `/NM`, `accent-` and their object number, though they carry an
 /// `/InkList` as another editor's do; one from before they were named is ours by its shape. Ours
-/// is drawn again where Adjust moves it, into its own object, under our name.
+/// is drawn again where Select moves it, into its own object, under our name.
 #[test]
 fn our_stroke_is_ours_by_its_name() {
     let Some((_dir, mut doc)) = open_tiny() else {
@@ -1317,7 +1317,7 @@ fn a_foreign_stroke_erased_and_undone_is_the_same_stroke() {
     assert!(doc.inks(0).unwrap().is_empty());
 }
 
-/// Another editor's stroke moved with Adjust keeps its place, its appearance stream and every key
+/// Another editor's stroke moved with Select keeps its place, its appearance stream and every key
 /// but its `/Rect` and `/InkList`, which the map moves; the viewer fits the stream into the moved
 /// `/Rect`, so its red and blue lines show where the map put them, still turned as they were.
 /// Undo moves it back to the very bytes it had.
@@ -1423,7 +1423,7 @@ fn a_turned_stroke_is_drawn_along_the_turned_path() {
     );
 }
 
-/// Another editor's stroke turned with Adjust turns as a picture: its `/InkList` turned, its
+/// Another editor's stroke turned with Select turns as a picture: its `/InkList` turned, its
 /// appearance a copy of its stream whose `/Matrix` puts the form where the turn does, its other
 /// keys and its old stream untouched. Its red and blue lines show turned, and Undo draws them
 /// where they were.
@@ -1505,7 +1505,7 @@ fn a_foreign_stroke_is_cut_along_its_ink_list() {
     }
 }
 
-/// Another editor's stroke turned by Adjust at an angle other than a quarter keeps its width, and
+/// Another editor's stroke turned by Select at an angle other than a quarter keeps its width, and
 /// so do the pieces the eraser cuts from it.
 #[test]
 fn a_foreign_stroke_turned_keeps_its_width() {

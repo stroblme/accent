@@ -3,6 +3,7 @@
 //! draws it as accent does, and its `/Contents` and `/DA` are what Firefox and Acrobat edit it by.
 
 use accent_pdf::{Content, Object, Ref, form, helvetica_width, winansi};
+use serde::{Deserialize, Serialize};
 
 use super::annot::{OURS, PRINT};
 use super::cos::{Objects, decoded, dict, name, reals, text};
@@ -10,7 +11,7 @@ use super::{PdfDoc, Rect};
 use crate::{Error, Result};
 
 /// How typed text is set: its size in points, and its colour.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct TextStyle {
     pub size: f32,
     pub rgb: [u8; 3],
@@ -18,7 +19,7 @@ pub struct TextStyle {
 
 /// Text typed onto a page: the top-left corner of its box in top-left page points, what it says,
 /// a line to each `\n`, and how it is set.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Typed {
     pub at: (f32, f32),
     pub text: String,

@@ -15,7 +15,7 @@ use super::ink::{
 use super::text::{line_top, same_quads, selection_quads};
 use super::typed::Typed;
 use super::{
-    Comment, Cut, Glyph, Highlight, InkShape, InkStyle, Matrix, PdfDoc, Rect, Shape, lock,
+    Clip, Comment, Cut, Glyph, Highlight, InkShape, InkStyle, Matrix, PdfDoc, Rect, Shape, lock,
 };
 use crate::index::PdfLink;
 
@@ -236,7 +236,7 @@ impl PdfDoc {
 
     /// Draw a line, a rectangle or a circle as an `/Ink` annotation, exactly as the pen draws.
     ///
-    // ponytail: an `/Ink` rather than a `/Line`, `/Square` or `/Circle`: the eraser, Adjust and
+    // ponytail: an `/Ink` rather than a `/Line`, `/Square` or `/Circle`: the eraser, Select and
     // every read here know ink alone. Every viewer renders the appearance stream; what it costs is
     // another editor's shape palette seeing a stroke.
     pub fn add_shape(&mut self, page: usize, shape: Shape, style: InkStyle) -> Result<(Rect, Ref)> {
@@ -296,7 +296,7 @@ impl PdfDoc {
         }
     }
 
-    /// Return visible `/Ink` annotations with flattened strokes, bounds and style for the Adjust
+    /// Return visible `/Ink` annotations with flattened strokes, bounds and style for the Select
     /// tool. Sampling curves makes hit testing follow the painted edge.
     ///
     /// Read external strokes from `/InkList` in page coordinates. Their appearance streams may
@@ -399,6 +399,25 @@ impl PdfDoc {
         }
         self.reopen()?;
         Ok(Some(Cut { was, left, area }))
+    }
+
+    /// The stroke or text of ours `at` on `page` as plain geometry, which a paste draws again as
+    /// ours: ours along its flattened path, another editor's one clip per stroke of its
+    /// `/InkList`, as the partial eraser cuts it, and a text as typed. Nothing for another
+    /// editor's stroke without an `/InkList`, which may draw in a space of its own.
+    pub fn clip(&self, page: usize, at: Ref) -> Result<Vec<Clip>> {
+        if let Ok((typed, _)) = self.typed_at(page, at) {
+            return Ok(vec![Clip::Text(typed)]);
+        }
+        let read = self.read_at(page, at)?;
+        let strokes = match read.ours {
+            true => vec![flatten(&read.segs)],
+            false => read.strokes,
+        };
+        let style = read.style;
+        Ok((strokes.into_iter())
+            .map(|points| Clip::Ink { points, style })
+            .collect())
     }
 
     /// Transform one `/Ink` annotation, returning the union of old and new bounds. Each keeps

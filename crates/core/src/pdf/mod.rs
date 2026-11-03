@@ -7,6 +7,7 @@
 //! write.
 
 mod annot;
+mod clip;
 mod cos;
 mod doc;
 mod ink;
@@ -19,9 +20,11 @@ mod typed;
 
 pub use crate::page_edit::PageEdit;
 pub use annot::{LinkHighlights, highlight_quads, link_annotations};
+pub use clip::Clip;
 pub use doc::{A4, PdfDoc, blank_pdf};
 pub use ink::{
-    Drawn, IDENTITY, Matrix, apply, catmull_rom, cut, hit, invert, rotation, swept, then, thin,
+    Drawn, IDENTITY, Matrix, apply, catmull_rom, cut, hit, invert, lassoed, rotation, swept, then,
+    thin,
 };
 pub use ledger::{Ink, NamedInk, NamedText, Walked, fresh_id};
 pub use text::{line_top, link_with_alias, same_quads, selection_link, selection_quads};
@@ -215,7 +218,7 @@ impl Rect {
 ///
 /// `multiply` is what makes a highlighter one: the stroke darkens what is under it instead of
 /// covering it, so the text stays readable through the colour.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct InkStyle {
     /// Stroke width in page points.
     pub width: f32,
@@ -231,7 +234,7 @@ pub enum Shape {
     Circle { centre: (f32, f32), radius: f32 },
 }
 
-/// One `/Ink` annotation as the Adjust tool sees it: its object, its path flattened to a
+/// One `/Ink` annotation as the Select tool sees it: its object, its path flattened to a
 /// polyline, its `/Rect`, and how it is drawn.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InkShape {

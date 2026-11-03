@@ -276,7 +276,7 @@ fn cubic(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32), p3: (f32, f32), t: f32)
     )
 }
 
-/// Whether `at` lies within `radius` of the polyline through `points` — the Adjust tool's hit
+/// Whether `at` lies within `radius` of the polyline through `points` — the Select tool's hit
 /// test.
 pub fn hit(points: &[(f32, f32)], at: (f32, f32), radius: f32) -> bool {
     swept(points, at, at, radius)
@@ -437,4 +437,99 @@ fn length(points: &[(f32, f32)]) -> f32 {
         .windows(2)
         .map(|w| (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1))
         .sum()
+}
+
+/// Whether the free-hand `lasso`, closed by the line back to its start, takes the polyline
+/// through `points`: when at least half its length lies inside, measured a point at a time, a
+/// dot by itself. A lasso of fewer than three points encloses nothing.
+pub fn lassoed(points: &[(f32, f32)], lasso: &[(f32, f32)]) -> bool {
+    let (Some(&first), true) = (points.first(), lasso.len() >= 3) else {
+        return false;
+    };
+    let span = |ps: &[(f32, f32)]| {
+        let corner = |p: &(f32, f32)| super::Rect::from_corners(*p, *p);
+        ps.iter().map(corner).reduce(super::Rect::union)
+    };
+    // Nothing of a stroke whose box misses the lasso's can be inside it.
+    if let (Some(a), Some(b)) = (span(points), span(lasso))
+        && (a.right < b.left || a.left > b.right || a.bottom < b.top || a.top > b.bottom)
+    {
+        return false;
+    }
+    let total = length(points);
+    if total <= f32::EPSILON {
+        return enclosed(first, lasso);
+    }
+    // The middle of each step of at most a point, weighed by its length.
+    let inside: f32 = (points.windows(2))
+        .map(|w| {
+            let step = (w[1].0 - w[0].0).hypot(w[1].1 - w[0].1);
+            let n = step.ceil().max(1.0) as usize;
+            let middles = (0..n).map(|i| lerp(w[0], w[1], (i as f32 + 0.5) / n as f32));
+            middles.filter(|&p| enclosed(p, lasso)).count() as f32 * step / n as f32
+        })
+        .sum();
+    2.0 * inside >= total
+}
+
+/// Whether `p` is inside the polygon `lasso`, by the even-odd rule: a ray to the right of it
+/// crosses its edges, the closing one included, an odd number of times.
+fn enclosed(p: (f32, f32), lasso: &[(f32, f32)]) -> bool {
+    let n = lasso.len();
+    let crossed = (0..n)
+        .map(|i| (lasso[i], lasso[(i + 1) % n]))
+        .filter(|&(a, b)| {
+            (a.1 > p.1) != (b.1 > p.1) && p.0 < a.0 + (p.1 - a.1) / (b.1 - a.1) * (b.0 - a.0)
+        })
+        .count();
+    crossed % 2 == 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A square lasso from (0, 0) to (100, 100), left open: the closing edge is implied.
+    const SQUARE: [(f32, f32); 4] = [(0.0, 0.0), (100.0, 0.0), (100.0, 100.0), (0.0, 100.0)];
+
+    #[test]
+    fn a_stroke_is_lassoed_by_at_least_half_its_length() {
+        assert!(
+            lassoed(&[(10.0, 50.0), (90.0, 50.0)], &SQUARE),
+            "wholly inside"
+        );
+        assert!(
+            !lassoed(&[(110.0, 50.0), (190.0, 50.0)], &SQUARE),
+            "wholly outside"
+        );
+        // 70 of 100 pt inside, then 30 of 100.
+        assert!(lassoed(&[(30.0, 50.0), (130.0, 50.0)], &SQUARE));
+        assert!(!lassoed(&[(70.0, 50.0), (170.0, 50.0)], &SQUARE));
+        // A dot is in or out.
+        assert!(lassoed(&[(50.0, 50.0)], &SQUARE));
+        assert!(!lassoed(&[(150.0, 50.0)], &SQUARE));
+        // Too few points to enclose anything.
+        assert!(!lassoed(&[(50.0, 50.0)], &SQUARE[..2]));
+    }
+
+    /// A U-shaped lasso round a notch: a stroke inside the notch is outside the lasso, though it
+    /// lies within the lasso's box.
+    #[test]
+    fn a_stroke_in_the_notch_of_a_concave_lasso_is_not_lassoed() {
+        let u = [
+            (0.0, 0.0),
+            (30.0, 0.0),
+            (30.0, 70.0),
+            (70.0, 70.0),
+            (70.0, 0.0),
+            (100.0, 0.0),
+            (100.0, 100.0),
+            (0.0, 100.0),
+        ];
+        assert!(!lassoed(&[(40.0, 10.0), (60.0, 60.0)], &u), "in the notch");
+        assert!(
+            lassoed(&[(10.0, 80.0), (90.0, 90.0)], &u),
+            "across the base"
+        );
+    }
 }

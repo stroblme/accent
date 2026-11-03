@@ -163,6 +163,110 @@ impl Ink {
         self.record(Step::Moved { page, at, matrix }, false);
     }
 
+    /// Move, stretch or turn the strokes and texts `ids` of `page` by `m`, as one step: the box
+    /// they covered and now cover.
+    pub fn transform(
+        &mut self,
+        doc: &mut PdfDoc,
+        page: usize,
+        ids: &[u32],
+        m: pdf::Matrix,
+    ) -> Result<pdf::Rect> {
+        self.each(doc, page, ids, |doc, at| {
+            let area = doc.transform_ink(page, at, m)?;
+            Ok((
+                area,
+                Step::Moved {
+                    page,
+                    at,
+                    matrix: m,
+                },
+            ))
+        })
+    }
+
+    /// Take the strokes and texts `ids` off `page`, as one step: the box they covered.
+    pub fn delete(&mut self, doc: &mut PdfDoc, page: usize, ids: &[u32]) -> Result<pdf::Rect> {
+        self.each(doc, page, ids, |doc, at| {
+            let (drawn, area) = doc.take_ink(page, at)?;
+            let kept = Some(drawn);
+            Ok((area, Step::Erased { page, at, kept }))
+        })
+    }
+
+    /// The strokes and texts `ids` of `page` as plain geometry, each under its name, in the
+    /// order they are drawn in; one that will not copy ([`PdfDoc::clip`]) is left out.
+    pub fn clips(&self, doc: &PdfDoc, page: usize, ids: &[u32]) -> Vec<(u32, Vec<pdf::Clip>)> {
+        (self.ordered(doc, page, ids).into_iter())
+            .filter_map(|(id, at)| Some((id, doc.clip(page, at).ok()?)))
+            .filter(|(_, clips)| !clips.is_empty())
+            .collect()
+    }
+
+    /// `clips` drawn onto `page` under `m` as strokes and texts of ours, each under the name
+    /// `names` gives it, as one step: the box they cover.
+    pub fn paste(
+        &mut self,
+        doc: &mut PdfDoc,
+        page: usize,
+        clips: &[pdf::Clip],
+        m: pdf::Matrix,
+        names: &[u32],
+    ) -> Result<pdf::Rect> {
+        let (area, objects) = doc.paste(page, clips, m)?;
+        for (n, at) in objects.into_iter().enumerate() {
+            match names.get(n) {
+                Some(&id) => self.bind(id, at),
+                None => drop(self.name(at)),
+            }
+            self.record(
+                Step::Drawn {
+                    page,
+                    at,
+                    kept: None,
+                },
+                n > 0,
+            );
+        }
+        Ok(area)
+    }
+
+    /// `change` made to each of the objects `ids` name on `page`, in the order they are drawn
+    /// in, as one step: the box the changes covered. One no longer on the page, or that will not
+    /// change, is passed over; none changed at all is refused.
+    fn each(
+        &mut self,
+        doc: &mut PdfDoc,
+        page: usize,
+        ids: &[u32],
+        mut change: impl FnMut(&mut PdfDoc, Ref) -> Result<(pdf::Rect, Step)>,
+    ) -> Result<pdf::Rect> {
+        let mut area: Option<pdf::Rect> = None;
+        for (_, at) in self.ordered(doc, page, ids) {
+            match change(doc, at) {
+                Ok((changed, step)) => {
+                    self.record(step, area.is_some());
+                    area = Some(area.map_or(changed, |a| a.union(changed)));
+                }
+                Err(e) => tracing::debug!("object {} of page {page}: {e:#}", at.num),
+            }
+        }
+        area.ok_or_else(|| Error::Pdf(format!("none of {ids:?} changed on page {page}")))
+    }
+
+    /// The objects `ids` name on `page`, in its `/Annots` order, which is the order they are
+    /// drawn in; a name no longer on the page is left out.
+    fn ordered(&self, doc: &PdfDoc, page: usize, ids: &[u32]) -> Vec<(u32, Ref)> {
+        let mut found: Vec<(usize, u32, Ref)> = (ids.iter())
+            .filter_map(|&id| {
+                let at = self.at(id)?;
+                Some((doc.cos.index_of(page, at).ok()?, id, at))
+            })
+            .collect();
+        found.sort_unstable_by_key(|(index, ..)| *index);
+        found.into_iter().map(|(_, id, at)| (id, at)).collect()
+    }
+
     /// The text `at` was typed again; `was` is what it said before.
     pub fn retyped(&mut self, page: usize, at: Ref, was: pdf::Typed) {
         self.record(
@@ -684,6 +788,84 @@ mod tests {
         rgba: [0, 0, 0, 255],
         multiply: false,
     };
+
+    /// A selection is one step for a move, a delete and a paste each: two lines and a text of
+    /// ours move together and come back together, one taken off comes back, and their copies,
+    /// through JSON, go onto the second page as they were drawn, under the names given them, and
+    /// into the file saved.
+    #[test]
+    fn a_selection_moves_deletes_and_pastes_as_one_step_each() {
+        let Some((dir, mut doc)) = open_tiny() else {
+            return;
+        };
+        let mut ink = Ink::default();
+        for y in [20.0, 40.0] {
+            let line = pdf::Shape::Line {
+                a: (20.0, y),
+                b: (80.0, y),
+            };
+            let (_, at) = doc.add_shape(0, line, STYLE).unwrap();
+            ink.drew(0, at);
+        }
+        let red = pdf::TextStyle {
+            size: 10.0,
+            rgb: [200, 0, 0],
+        };
+        let (_, at) = doc.add_text(0, (20.0, 60.0), "Hi", red).unwrap();
+        ink.drew(0, at);
+        // Where each stroke starts and each text's corner is on a page, and how each is drawn.
+        let placed = |doc: &PdfDoc, page| {
+            let inks = doc.inks(page).unwrap().into_iter();
+            let inks = inks.map(|i| (i.points[0], format!("{:?}", i.style)));
+            let texts = doc.texts(page).unwrap().into_iter();
+            let texts = texts.map(|t| (t.typed.at, format!("{:?}", t.typed.style)));
+            let mut out: Vec<_> = (inks.chain(texts))
+                .map(|((x, y), look)| (x.round() as i32, y.round() as i32, look))
+                .collect();
+            out.sort();
+            out
+        };
+        let corners = |doc: &PdfDoc, page| -> Vec<(i32, i32)> {
+            placed(doc, page)
+                .into_iter()
+                .map(|(x, y, _)| (x, y))
+                .collect()
+        };
+        let mut ids: Vec<u32> = ink.named(&doc, 0).iter().map(|(id, _)| *id).collect();
+        ids.extend(ink.named_texts(&doc, 0).iter().map(|(id, _)| *id));
+        let before = placed(&doc, 0);
+
+        let right = [1.0, 0.0, 0.0, 1.0, 10.0, 0.0];
+        ink.transform(&mut doc, 0, &ids, right).unwrap();
+        assert_eq!(corners(&doc, 0), [(30, 20), (30, 40), (30, 60)]);
+        ink.walk(&mut doc, false);
+        assert_eq!(placed(&doc, 0), before, "one Undo puts all three back");
+
+        ink.delete(&mut doc, 0, &ids[1..]).unwrap();
+        assert_eq!(corners(&doc, 0), [(20, 20)]);
+        ink.walk(&mut doc, false);
+        assert_eq!(placed(&doc, 0), before, "one Undo puts both back");
+
+        let clips: Vec<pdf::Clip> = (ink.clips(&doc, 0, &ids).into_iter())
+            .flat_map(|(_, clips)| clips)
+            .collect();
+        let json = serde_json::to_string(&clips).unwrap();
+        let clips: Vec<pdf::Clip> = serde_json::from_str(&json).unwrap();
+        let names: Vec<u32> = clips.iter().map(|_| fresh_id()).collect();
+        let down = [1.0, 0.0, 0.0, 1.0, 0.0, 100.0];
+        ink.paste(&mut doc, 1, &clips, down, &names).unwrap();
+        let moved = |(x, y, look): (i32, i32, String)| (x, y + 100, look);
+        let pasted: Vec<_> = before.iter().cloned().map(moved).collect();
+        assert_eq!(placed(&doc, 1), pasted);
+        let mut listed: Vec<u32> = ink.named(&doc, 1).iter().map(|(id, _)| *id).collect();
+        listed.extend(ink.named_texts(&doc, 1).iter().map(|(id, _)| *id));
+        listed.sort();
+        assert_eq!(listed, names, "under the names given");
+        ink.walk(&mut doc, false);
+        assert!(corners(&doc, 1).is_empty(), "one Undo takes all three off");
+        ink.walk(&mut doc, true);
+        assert_eq!(placed(&reopen(&dir, &doc), 1), pasted);
+    }
 
     /// A cut is one step: Undo takes the pieces off and puts the stroke back whole, and Redo cuts
     /// it again, the pieces under the names the widget gave them.
