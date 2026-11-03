@@ -4,7 +4,8 @@
 //! on `App`.
 
 use accent_core::config::{
-    Config, CustomCommand, DebugTerminal, FocusMode, RecolourConfig, Theme, VaultConfig,
+    Config, CustomCommand, DebugTerminal, DiagramConfig, DrawingConfig, FocusMode, RecolourConfig,
+    Theme, VaultConfig,
 };
 use adw::prelude::*;
 use gtk::{gio, glib, pango};
@@ -54,8 +55,8 @@ const DEBUG_TERMINALS: [(DebugTerminal, &str); 5] = [
 pub struct Preferences {
     dialog: adw::PreferencesDialog,
     config: Rc<RefCell<Config>>,
-    /// Config snapshot while closed, `None` while shown. Rebuild rows if config changed
-    /// between openings because each row reads its initial value only once.
+    /// What the rows showed of the config ([`on_page`]) while closed, `None` while shown. Rebuild
+    /// rows if it changed between openings because each row reads its initial value only once.
     shown: Rc<RefCell<Option<Config>>>,
 }
 
@@ -89,11 +90,11 @@ impl Preferences {
         actions.add_action(&action);
         dialog.insert_action_group("preferences", Some(&actions));
 
-        let shown = Rc::new(RefCell::new(Some(config.borrow().clone())));
+        let shown = Rc::new(RefCell::new(Some(on_page(&config.borrow()))));
         dialog.connect_closed({
             let (config, shown) = (config.clone(), shown.clone());
             move |_| {
-                shown.replace(Some(config.borrow().clone()));
+                shown.replace(Some(on_page(&config.borrow())));
             }
         });
         crate::dialogs::close_on_outside_press(dialog.upcast_ref());
@@ -106,10 +107,26 @@ impl Preferences {
 
     pub fn present(&self, parent: &impl IsA<gtk::Widget>) {
         let shown = self.shown.take();
-        if shown.is_some_and(|shown| shown != *self.config.borrow()) {
+        if shown.is_some_and(|shown| shown != on_page(&self.config.borrow())) {
             reload(self.dialog.upcast_ref());
         }
         self.dialog.present(Some(parent));
+    }
+}
+
+/// `config` less what no row shows and using accent moves: the recent vaults (a vault opened),
+/// the drawing ring's pens and a diagram's tools. A new page costs the opening its build and first
+/// layout, as the first opening did, where a page shown before takes about 5 ms
+/// (`ACCENT_BENCH_SWITCHER=prefs`).
+fn on_page(config: &Config) -> Config {
+    Config {
+        recent_vaults: Vec::new(),
+        drawing: DrawingConfig {
+            mouse: config.drawing.mouse,
+            ..DrawingConfig::default()
+        },
+        diagram: DiagramConfig::default(),
+        ..config.clone()
     }
 }
 
@@ -1006,5 +1023,23 @@ mod tests {
         assert_eq!(folder("/ Templates/Daily "), "Templates/Daily");
         assert_eq!(folder(""), "");
         assert_eq!(folder("   "), "");
+    }
+
+    #[test]
+    fn only_what_a_row_shows_needs_a_new_page() {
+        let before = Config::default();
+        let mut used = before.clone();
+        used.recent_vaults.push("/elsewhere".into());
+        used.drawing.pen_width += 1.0;
+        used.diagram.grid = !used.diagram.grid;
+        assert_eq!(on_page(&used), on_page(&before));
+        for shown in [
+            |c: &mut Config| c.minimap = !c.minimap,
+            |c: &mut Config| c.drawing.mouse = !c.drawing.mouse,
+        ] {
+            let mut moved = before.clone();
+            shown(&mut moved);
+            assert_ne!(on_page(&moved), on_page(&before));
+        }
     }
 }

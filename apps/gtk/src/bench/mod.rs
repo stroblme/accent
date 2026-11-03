@@ -1003,7 +1003,8 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     });
 }
 
-/// Time three Preferences presentations: `open_ms`, `first_frame_ms`, frame count,
+/// Time four Preferences presentations, the last after another vault was opened, which needs no
+/// new page: `open_ms`, `first_frame_ms`, frame count,
 /// `worst_frame_ms`, total `layout_ms` and median `paint_ms`. Cairo paints the
 /// whole window in software under Xvfb. Verify external config changes update
 /// the retained dialog while closed or open, and Restore Defaults reuses it.
@@ -1016,7 +1017,13 @@ fn bench_prefs(app: &Rc<App>) {
         let Some(clock) = app.window.frame_clock() else {
             return bench_quit(&app);
         };
-        for round in 0..3 {
+        for round in 0..4 {
+            // The last opening follows a change the dialog does not show: another vault opened.
+            if round == 3 {
+                app.config
+                    .borrow_mut()
+                    .touch_recent(Path::new("/tmp/accent-bench-other"));
+            }
             // Each phase's end, by its first letter: connected after GTK's own handlers, so an
             // update's mark is where the frame's styling and layout start, a layout's where they
             // end and its painting starts, and a paint's where that ends.

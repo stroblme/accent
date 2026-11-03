@@ -977,6 +977,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Commands holds the user's own commands (Terminal), each an `AdwExpanderRow` of its name over its command line, opening on Name, Command, its Shortcut (recorded as the palette records one, refusing a chord in use by name, a clash from a hand edit marked) and Remove Command; Add Command puts a new one at the end, opened. Restore Defaults keeps them, as it keeps the recent vaults: they are the user's, not settings with a default.
 - Each window builds its dialog once, on idle after it opens, and presents that one again: an open held the main thread about 60 ms before its animation could run, a stutter, and a dialog shown before holds it about 30 (release, Xvfb, `ACCENT_BENCH_SWITCHER=prefs`).
   A config that moved while it was closed (a hand edit, the palette) gives it a new page before it shows, and Restore Defaults gives it one in place.
+  What using accent moves and no row shows, the recent vaults, the drawing ring's pens and a diagram's tools, gives it none (`settings::on_page`), since a new page costs the opening as much as the first one did.
 - This Vault holds three folder rows: Templates, New Files and Attachments.
   The Attachments row keeps `./` and `/` as typed, those being the note's folder and the vault root.
 - A font's Reset is an icon button (`document-revert-symbolic`): the font button already shows the whole font name, and a text button would leave it nowhere to go.
