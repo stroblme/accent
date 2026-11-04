@@ -249,8 +249,8 @@ pub const HIGHLIGHTER_ALPHA: f32 = 0.4;
 pub const MAP_INK_ALPHA: f32 = 0.45;
 pub const MAP_DIM_ALPHA: f32 = 0.2;
 pub const MAP_ACCENT_ALPHA: f32 = 0.8;
-pub const MAP_BAND_ALPHA: f32 = 0.08;
-pub const MAP_BAND_HOVER_ALPHA: f32 = 0.12;
+pub const MAP_BAND_ALPHA: f32 = 0.12;
+pub const MAP_BAND_HOVER_ALPHA: f32 = 0.16;
 
 /// Override incoming-conflict tints for Solarized Light, or use derived foreground tints.
 ///
