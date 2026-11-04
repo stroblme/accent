@@ -211,6 +211,13 @@ async fn bench_tab_focus() {
     tabs.set_selected_page(&shell_page);
     shell_page.child().grab_focus();
     print("shell");
+    // A terminal editor's, told from a shell by its widget's name.
+    let editor = vte4::Terminal::new();
+    editor.set_widget_name(crate::terminal::EDITOR);
+    let editor_page = tabs.append(&crate::terminal::scroller(&editor));
+    tabs.set_selected_page(&editor_page);
+    editor.grab_focus();
+    print("editor");
     window.close();
 }
 

@@ -785,6 +785,58 @@ mod tests {
         }
     }
 
+    /// A terminal editor has Vim's and Helix's `Ctrl+W`, `Ctrl+E` and `Ctrl+J` to itself, and
+    /// leaves the window the rest of what a shell leaves it.
+    #[test]
+    fn an_editor_keeps_only_window_chords() {
+        for (action, accel) in [
+            ("win.close-tab", "<Primary>w"),
+            ("win.palette-files", "<Primary>e"),
+            ("win.terminal", "<Primary>j"),
+        ] {
+            assert!(installed(action, accel, Keys::Shell, false, &[]));
+            assert!(
+                !installed(action, accel, Keys::Editor, false, &[]),
+                "{action}"
+            );
+        }
+        for (action, accel) in [
+            ("win.next-tab", "<Primary>Tab"),
+            ("win.palette-commands", "<Primary><Shift>p"),
+            ("win.zoom-in", "<Primary>plus"),
+            ("win.fullscreen", "F11"),
+            ("win.move-tab-left", "<Shift><Alt>Left"),
+            ("win.close-tab", "<Primary><Shift>w"),
+        ] {
+            assert!(
+                installed(action, accel, Keys::Editor, false, &[]),
+                "{action}"
+            );
+        }
+        assert!(!installed(
+            "win.save",
+            "<Primary>s",
+            Keys::Editor,
+            false,
+            &[]
+        ));
+        // Forward All Keys hands it all but Copy and Paste in Terminal, as it does a shell.
+        assert!(!installed(
+            "win.next-tab",
+            "<Primary>Tab",
+            Keys::Editor,
+            true,
+            &[]
+        ));
+        assert!(installed(
+            "win.terminal-copy",
+            "<Control><Shift>c",
+            Keys::Editor,
+            true,
+            &[]
+        ));
+    }
+
     /// Forwarding every key leaves the window Copy and Paste in Terminal alone: the reserved set
     /// goes to the shell with the rest of the table.
     #[test]
@@ -943,7 +995,7 @@ mod tests {
         let f5 = ["F5".to_string()];
         assert!(!installed("win.present", "F5", Keys::Tab, false, &f5));
         assert!(installed("win.present", "F5", Keys::Tab, false, &[]));
-        for keys in [Keys::Tab, Keys::Shell, Keys::Elsewhere] {
+        for keys in [Keys::Tab, Keys::Shell, Keys::Editor, Keys::Elsewhere] {
             for shadowed in [&f5[..], &[]] {
                 let continues = installed("win.debug-continue", "F5", keys, false, shadowed);
                 assert!(!continues, "{keys:?}");

@@ -1213,8 +1213,10 @@ fn ends_presenting(app: &App, event: &gdk::Event) -> bool {
 fn session_chord(app: &App, event: &gdk::Event) -> Option<&'static str> {
     let config = app.config.borrow();
     let forwarded = config.forward_keys_to_terminal
-        && actions::Keys::at(gtk::prelude::GtkWindowExt::focus(&app.window))
-            == actions::Keys::Shell;
+        && matches!(
+            actions::Keys::at(gtk::prelude::GtkWindowExt::focus(&app.window)),
+            actions::Keys::Shell | actions::Keys::Editor
+        );
     (app.debugger.running() && app.window.visible_dialog().is_none() && !forwarded)
         .then(|| actions::session_chord(&config, event))
         .flatten()

@@ -1950,6 +1950,10 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 - `Ctrl+W` is the budgeted cost — readline loses delete-word, which `Alt+Backspace` still does; `Ctrl+E` is the same trade, end-of-line being `End` too; the zoom chords are the same trade, a terminal having its own zoom; `F11` means nothing to readline or curses and is what GNOME Terminal keeps.
 - A rebound chord follows the rule of the default it replaced.
 - A user's command (Terminal) follows the general rule (user decision 2026-10-28): its chord stays the window's in a focused shell only when it is spelled with both `Control` and `Shift`, any other being the shell's there.
+- **A terminal editor keeps `Ctrl+W`, `Ctrl+E` and `Ctrl+J`** (user decision 2026-11-04), which Vim, Helix and the rest bind, and leaves the window the rest of a shell's reserved set, so `Ctrl+Tab`, the Move Tab chords, zoom, `F11`, every chord spelled with both `Control` and `Shift`, `Ctrl+PageUp` / `Ctrl+PageDown` and `Alt+1` to `Alt+9` still leave it.
+  Its tab closes by its ×, the tab menu or the palette.
+  Forward All Keys and a debug session's chords treat it as they treat a shell.
+  Its view is told from a shell's by its widget's name (`terminal::EDITOR`).
 - The table is the application's, one for every window, so the shell that narrows it is the one in the active window: moving to another window gives that window its chords back.
 
 ### Dismiss

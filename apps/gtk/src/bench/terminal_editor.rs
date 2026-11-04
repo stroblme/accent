@@ -11,6 +11,9 @@ use vte4::TerminalExt as _;
 /// picking it is the config's editor. `=open`: notes open in it as tabs that look like their
 /// files', once each; a diagram, a notebook and an image stay accent's; exit 0 closes the tab,
 /// exit 1 keeps it, a missing editor hands the file to accent's own; a preview is replaced.
+/// `=keys`, through XTEST with `ACCENT_FAKE_EDITOR=keys`, which logs three keys raw: `Ctrl+W`,
+/// `Ctrl+E` and `Ctrl+J` reach the editor; `Ctrl+PageUp` and `Ctrl+Tab` leave it; `Ctrl+Shift+P`
+/// opens the palette over it; a key keeps a preview.
 pub(super) fn bench_editor(app: &Rc<App>, step: &str) {
     let (app, step) = (app.clone(), step.to_string());
     glib::spawn_future_local(async move {
@@ -18,6 +21,7 @@ pub(super) fn bench_editor(app: &Rc<App>, step: &str) {
         match step.as_str() {
             "prefs" => prefs(&app).await,
             "open" => open(&app).await,
+            "keys" => keys(&app).await,
             _ => println!("bench editor unknown step {step}"),
         }
         bench_quit(&app);
@@ -170,6 +174,76 @@ async fn open(app: &Rc<App>) {
     // Every editor still running ends, so nothing is left held behind the drill.
     for term in app.terminals() {
         term.view.feed_child(b"0\n");
+    }
+    until(|| app.terminals().iter().all(|t| t.ended()), 10_000).await;
+}
+
+async fn keys(app: &Rc<App>) {
+    let root = app.root();
+    for rel in ["note.md", "other.md", "third.md", "fourth.md"] {
+        std::fs::write(root.join(rel), "# Keys\n").unwrap();
+    }
+    until(|| app.reconciled.get(), 30_000).await;
+    pick(app, Editor::Nano);
+    // A tab of accent's own to leave the editor's for.
+    app.in_accent.borrow_mut().insert("other.md".into());
+    app.open_path("other.md");
+    until(|| kind_of(app, "other.md") == "text", 10_000).await;
+    app.open_path("note.md");
+    let Some(term) = started(app, "note.md").await else {
+        return println!("bench editor keys started=false");
+    };
+    super::git::xtest("move 700 450; focus").await;
+    term.view.grab_focus();
+    glib::timeout_future(Duration::from_millis(300)).await;
+    let at = crate::actions::Keys::at(gtk::prelude::GtkWindowExt::focus(&app.window));
+    super::git::xtest("key ctrl+w; key ctrl+e; key ctrl+j").await;
+    let log = glib::home_dir().join("editor-keys");
+    let read = || std::fs::read_to_string(&log).unwrap_or_default();
+    until(|| !read().trim().is_empty(), 5000).await;
+    println!("bench editor keys at={at:?} bytes={}", read().trim());
+
+    let front = || {
+        let page = app.tabs().selected_page();
+        page.map(|page| page.title().to_string())
+            .unwrap_or_default()
+    };
+    let mut lines = Vec::new();
+    for chord in ["ctrl+Page_Up", "ctrl+Tab"] {
+        app.open_path("third.md");
+        let Some(term) = started(app, "third.md").await else {
+            return println!("bench editor keys third=false");
+        };
+        term.view.grab_focus();
+        glib::timeout_future(Duration::from_millis(200)).await;
+        super::git::xtest(&format!("key {chord}")).await;
+        lines.push(format!("{chord}={}", front()));
+    }
+    app.open_path("third.md");
+    if let Some(term) = started(app, "third.md").await {
+        term.view.grab_focus();
+    }
+    glib::timeout_future(Duration::from_millis(200)).await;
+    super::git::xtest("key ctrl+shift+p").await;
+    let palette = app.window.visible_dialog();
+    lines.push(format!("palette={}", palette.is_some()));
+    if let Some(dialog) = palette {
+        dialog.close();
+    }
+    glib::timeout_future(Duration::from_millis(300)).await;
+
+    app.open_preview("fourth.md");
+    if let Some(term) = started(app, "fourth.md").await {
+        term.view.grab_focus();
+        glib::timeout_future(Duration::from_millis(200)).await;
+        super::git::xtest("key a").await;
+        let preview = app.pane().preview();
+        lines.push(format!("kept={}", preview.as_ref() != Some(&term.page)));
+    }
+    println!("bench editor keys {}", lines.join(" "));
+    // Three keys end each fake still waiting.
+    for term in app.terminals() {
+        term.view.feed_child(b"xyz");
     }
     until(|| app.terminals().iter().all(|t| t.ended()), 10_000).await;
 }

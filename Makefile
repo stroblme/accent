@@ -499,6 +499,7 @@ drills: gtk-bench xvfb
 		echo "PATH=\"\$$HOME/bin:\$$PATH\"" >"$$HOME/.profile" && \
 		ACCENT_BENCH_EDITOR=prefs timeout 60 $(TARGET_DIR)/accent "$$0/vault" >"$$0/editor" && \
 		ACCENT_BENCH_EDITOR=open timeout 90 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/editor" && \
+		ACCENT_BENCH_EDITOR=keys ACCENT_FAKE_EDITOR=keys timeout 90 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/editor" && \
 		grep "^bench editor " "$$0/editor" | diff -u apps/gtk/src/bench/editor.expected -' "$$xdg"
 	$(HEADLESS) sh -c 'ACCENT_BENCH_PREVIEW=render timeout 60 \
 		$(TARGET_DIR)/accent "$$0/vault" >"$$0/preview" && \

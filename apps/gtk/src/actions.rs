@@ -959,6 +959,8 @@ const EDITING: &[&str] = &[
 pub enum Keys {
     /// In a shell, which keeps every chord but [`kept`] ones.
     Shell,
+    /// In a terminal editor, which keeps a shell's but [`EDITOR_OWNS`].
+    Editor,
     /// In a tab, or on a pane's tab bar: the whole table.
     Tab,
     /// Anywhere else, which leaves the [`EDITING`] chords to the focused widget.
@@ -984,6 +986,9 @@ impl Keys {
                 .any(|tabs| w.ancestor(tabs).is_some())
         };
         match focus {
+            Some(w) if w.is::<vte4::Terminal>() && w.widget_name() == crate::terminal::EDITOR => {
+                Keys::Editor
+            }
             Some(w) if w.is::<vte4::Terminal>() => Keys::Shell,
             Some(w) if in_tab(&w) => Keys::Tab,
             _ => Keys::Elsewhere,
@@ -1022,8 +1027,18 @@ fn reserved(action: &str, accel: &str) -> bool {
             | "win.palette-files"
             | "win.fold"
             | "win.unfold"
-    ) || ((accel.contains("<Primary>") || accel.contains("<Control>")) && accel.contains("<Shift>"))
+    ) || control_shift(accel)
 }
+
+/// Whether `accel` is spelled with both Control and Shift, which a focused shell leaves the window.
+fn control_shift(accel: &str) -> bool {
+    (accel.contains("<Primary>") || accel.contains("<Control>")) && accel.contains("<Shift>")
+}
+
+/// The reserved chords a terminal editor takes from the window (user decision 2026-11-04): Vim's
+/// and Helix's `Ctrl+W`, `Ctrl+E` and `Ctrl+J`, unless a rebind spells them with Control and
+/// Shift.
+const EDITOR_OWNS: [&str; 3] = ["win.close-tab", "win.palette-files", "win.terminal"];
 
 /// Keep [`reserved`] shortcuts, or only terminal Copy and Paste when forwarding all keys.
 ///
@@ -1046,6 +1061,9 @@ fn installed(action: &str, accel: &str, keys: Keys, forward: bool, shadowed: &[S
     }
     match keys {
         Keys::Shell => kept(action, accel, forward),
+        Keys::Editor => {
+            kept(action, accel, forward) && (!EDITOR_OWNS.contains(&action) || control_shift(accel))
+        }
         Keys::Tab => true,
         Keys::Elsewhere => !EDITING.contains(&action),
     }

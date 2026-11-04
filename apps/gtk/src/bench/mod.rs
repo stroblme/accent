@@ -229,7 +229,8 @@ use user_commands::bench_commands;
 ///   XTEST; `open` then `back`: on one scratch state, only a command still running comes back;
 ///   `prefs`: Preferences → Commands. Its shells are real: a scratch `HOME`, as for `HOLD`.
 /// - `ACCENT_BENCH_EDITOR=prefs`: Preferences → Text Editor lists the editors the login shell
-///   finds; `open`: files opened, ended and replaced in a terminal editor's tabs. Its editors are
+///   finds; `open`: files opened, ended and replaced in a terminal editor's tabs; `keys`: the
+///   chords a terminal editor keeps, through XTEST. Its editors are
 ///   `build-aux/fake-editor.sh` alone, in a scratch `HOME` (`terminal_editor::bench_editor`).
 /// - `ACCENT_BENCH_PDF=<rel_path>`: fit, save, rename and external reload.
 ///   Writes and moves the file; use a scratch multipage PDF. Modes:

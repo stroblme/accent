@@ -5,3 +5,5 @@ bench editor exit0 closed=true edited=true
 bench editor exit1 kept=true said=true line=Some("[Exited with code 1]")
 bench editor missing kind=text toasted=1
 bench editor preview first=none second=editor
+bench editor keys at=Editor bytes=17 05 0a
+bench editor keys ctrl+Page_Up=other.md ctrl+Tab=other.md palette=true kept=true

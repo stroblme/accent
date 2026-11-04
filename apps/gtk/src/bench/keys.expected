@@ -167,3 +167,4 @@ bench popup_column Some(Proceed) shown=true carets=true
 bench tab_focus document Some("GtkTextView") Tab
 bench tab_focus label Some("AdwTab") Tab
 bench tab_focus shell Some("VteTerminal") Shell
+bench tab_focus editor Some("VteTerminal") Editor
