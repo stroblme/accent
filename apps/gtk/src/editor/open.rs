@@ -388,8 +388,14 @@ fn frame(view: &sourceview5::View) -> Frame {
     sticky_bar.add_css_class("view");
     sticky_bar.append(&sticky);
     // A rule under it, or the pinned line reads as a line of the note that the one below it has
-    // been scrolled halfway behind.
-    sticky_bar.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    // been scrolled halfway behind. Held 6 px off the column's sides, as the Git pane's divider is
+    // off the sidebar's, so it does not run into the line beside the column.
+    let rule = gtk::Separator::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .margin_start(6)
+        .margin_end(6)
+        .build();
+    sticky_bar.append(&rule);
     overlay.add_overlay(&sticky_bar);
 
     // The minimap is off unless the preference says otherwise; `set_minimap` decides that, so a

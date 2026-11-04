@@ -617,6 +617,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A note's blocks are its headings and fenced blocks, both already tagged by the styling pass.
   A code tab's are the language layer's symbols, a source file's functions and types, each pinned at the line of its name rather than where the server's range starts, which may be a doc comment (`lang::innermost`); a CSV tab has none.
   A plain label in the document font, aligned with the text, a fence's opening line on the wash the code under it has, on a `.view` box with a rule under it.
+  The rule stops 6 px short of the column's sides, as the Git pane's divider does in the sidebar, so it never runs into the sidebar's line.
 - **The minimap** (off by default: Minimap in Preferences, or Toggle Minimap) stands in for the vertical scrollbar, as VS Code's does, so the column loses width once.
   It is ours (`minimap/`), 100 px wide: a bar per word, a pixel per character and two per row, in the foreground at 45 %; a dimmer tone where the editor dims the text (markup, quotes, done tasks, a code comment) and the accent where it writes in the accent (a note's links and tags) and, in code, on a keyword: a tag whose look is the style scheme's keyword or statement style, GtkSourceView's highlighting tags having no names.
   No other syntax colour.
