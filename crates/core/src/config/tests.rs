@@ -75,6 +75,7 @@ fn config_roundtrip_parses_the_documented_example() {
     assert_eq!(c.indent_width, 4);
     assert!(!c.forward_keys_to_terminal);
     assert_eq!(c.debug_terminal, DebugTerminal::Down);
+    assert_eq!(c.editor, Editor::Helix);
     assert_eq!(c.theme, Theme::Solarized);
     assert_eq!(c.focus_mode, FocusMode::High);
     assert!(c.recolour.images && !c.recolour.pdfs && c.recolour.diagrams);
@@ -118,6 +119,7 @@ fn config_roundtrip_parses_the_documented_example() {
     assert_eq!(again.theme, Theme::Solarized);
     assert_eq!(again.focus_mode, FocusMode::High);
     assert_eq!(again.debug_terminal, DebugTerminal::Down);
+    assert_eq!(again.editor, Editor::Helix);
     assert_eq!(again.vaults["/home/me/Notes"].new_file_dir, "Inbox");
     assert_eq!(again.shortcuts, c.shortcuts);
     assert_eq!(again.commands, c.commands);
@@ -191,6 +193,8 @@ fn a_default_config_writes_no_empty_table() {
     assert!(!text.contains("[shortcuts]"), "{text}");
     assert!(!text.contains("[[commands]]"), "{text}");
     assert!(!text.contains("[vaults"), "{text}");
+    // Accent's own editor is the default, so the file names none.
+    assert!(!text.contains("editor ="), "{text}");
     assert_eq!(Config::read(&p).unwrap(), Config::default());
     assert!(unknown_keys(&text.parse().unwrap()).is_empty());
 

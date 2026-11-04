@@ -27,6 +27,7 @@ mod diff;
 mod difftab;
 mod doc;
 mod editor;
+mod editors;
 mod events;
 mod export;
 mod fade;

@@ -421,6 +421,10 @@ smoke: gtk-bench vault xvfb
 # in Preferences, held against `commands.expected`. Its shells are real, so under a scratch HOME,
 # running `true`, `false`, `pwd` and `sleep`.
 #
+# `ACCENT_BENCH_EDITOR` opens files in a terminal editor, held against `editor.expected`. Its
+# shells are real, so under a scratch HOME, and its editor is `build-aux/fake-editor.sh` alone,
+# linked in as `nano` and `kak` ahead of the system's on the login shell's PATH.
+#
 # `ACCENT_BENCH_PREVIEW=saved` writes a note holding a saved search for a tag and a second note
 # with the tag, then a third, and makes the query one that cannot be read, held against
 # `saved.expected`: the rows each time, the note itself never among them.
@@ -489,6 +493,12 @@ drills: gtk-bench xvfb
 		sleep 3 && ACCENT_BENCH_COMMANDS=back timeout 60 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/commands" && \
 		ACCENT_BENCH_COMMANDS=prefs timeout 60 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/commands" && \
 		grep "^bench commands " "$$0/commands" | diff -u apps/gtk/src/bench/commands.expected -' "$$xdg"
+	$(HEADLESS) sh -c 'export HOME="$$0/home" SHELL=/bin/sh && mkdir -p "$$HOME/bin" && \
+		ln -s "$(CURDIR)/build-aux/fake-editor.sh" "$$HOME/bin/nano" && \
+		ln -s "$(CURDIR)/build-aux/fake-editor.sh" "$$HOME/bin/kak" && \
+		echo "PATH=\"\$$HOME/bin:\$$PATH\"" >"$$HOME/.profile" && \
+		ACCENT_BENCH_EDITOR=prefs timeout 60 $(TARGET_DIR)/accent "$$0/vault" >"$$0/editor" && \
+		grep "^bench editor " "$$0/editor" | diff -u apps/gtk/src/bench/editor.expected -' "$$xdg"
 	$(HEADLESS) sh -c 'ACCENT_BENCH_PREVIEW=render timeout 60 \
 		$(TARGET_DIR)/accent "$$0/vault" >"$$0/preview" && \
 		grep "^bench preview " "$$0/preview" | diff -u apps/gtk/src/bench/preview.expected -' "$$xdg"

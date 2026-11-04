@@ -65,6 +65,7 @@ mod surfaces;
 mod symbols;
 mod synctex;
 mod tags;
+mod terminal_editor;
 mod toasts;
 mod toggle;
 mod user_commands;
@@ -227,6 +228,9 @@ use user_commands::bench_commands;
 /// - `ACCENT_BENCH_COMMANDS=run`: the user's commands from Run Command and their shortcuts, through
 ///   XTEST; `open` then `back`: on one scratch state, only a command still running comes back;
 ///   `prefs`: Preferences → Commands. Its shells are real: a scratch `HOME`, as for `HOLD`.
+/// - `ACCENT_BENCH_EDITOR=prefs`: Preferences → Text Editor lists the editors the login shell
+///   finds. Its editors are `build-aux/fake-editor.sh` alone, in a scratch `HOME`
+///   (`terminal_editor::bench_editor`).
 /// - `ACCENT_BENCH_PDF=<rel_path>`: fit, save, rename and external reload.
 ///   Writes and moves the file; use a scratch multipage PDF. Modes:
 ///   `stale:<rel_path>` (remote conflicts), `failed:<rel_path>` (read-only
@@ -404,6 +408,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     }
     if std::env::var_os("ACCENT_BENCH_ANIMATION").is_some() {
         return animation::bench_animation(app);
+    }
+    if let Ok(step) = std::env::var("ACCENT_BENCH_EDITOR") {
+        return terminal_editor::bench_editor(app, &step);
     }
     let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
     let minimap = std::env::var("ACCENT_BENCH_MINIMAP").ok();

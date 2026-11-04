@@ -1431,8 +1431,22 @@ pub fn cli() -> Option<Vec<String>> {
 
 /// Launch the Flatpak's static `accent-cli` on the host so shells use the user's tools. The
 /// `app-path` in `/.flatpak-info` locates it. If Flatpak bus access is unavailable, the caller
-/// falls back to an unheld sandbox shell. Pass VTE's environment values to the host holder.
+/// falls back to an unheld sandbox shell.
 fn host_cli(info: &str) -> Option<Vec<String>> {
+    let file = glib::KeyFile::new();
+    file.load_from_data(info, glib::KeyFileFlags::NONE).ok()?;
+    let app = file.string("Instance", "app-path").ok()?;
+    let mut argv = host_prefix(info)?;
+    argv.push(format!(
+        "{app}/lib/accent/accent-cli-{}",
+        std::env::consts::ARCH
+    ));
+    Some(argv)
+}
+
+/// What runs a command on the host from the Flatpak, where its shells are, with VTE's
+/// environment values; `None` once host access is revoked.
+pub fn host_prefix(info: &str) -> Option<Vec<String>> {
     let file = glib::KeyFile::new();
     file.load_from_data(info, glib::KeyFileFlags::NONE).ok()?;
     let policy = file
@@ -1441,7 +1455,6 @@ fn host_cli(info: &str) -> Option<Vec<String>> {
     if !matches!(policy.as_str(), "talk" | "own") {
         return None;
     }
-    let app = file.string("Instance", "app-path").ok()?;
     // SAFETY: plain getters of constants compiled into libvte.
     let vte = unsafe {
         vte_sys::vte_get_major_version() * 10000
@@ -1454,7 +1467,6 @@ fn host_cli(info: &str) -> Option<Vec<String>> {
         "--env=TERM=xterm-256color".to_string(),
         "--env=COLORTERM=truecolor".to_string(),
         format!("--env=VTE_VERSION={vte}"),
-        format!("{app}/lib/accent/accent-cli-{}", std::env::consts::ARCH),
     ])
 }
 

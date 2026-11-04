@@ -25,6 +25,7 @@ full_width_preview = true
 indent_width = 4
 forward_keys_to_terminal = false
 debug_terminal = "down"
+editor = "helix"
 theme = "solarized"
 focus_mode = "high"
 
@@ -135,6 +136,29 @@ pub enum DebugTerminal {
     Down,
 }
 
+/// What opens a text file: accent's own editor, or a terminal editor in a terminal tab
+/// (DESIGN.md, Terminal).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Editor {
+    #[default]
+    Accent,
+    Helix,
+    Neovim,
+    Vim,
+    Kakoune,
+    Emacs,
+    Nano,
+    Micro,
+}
+
+impl Editor {
+    /// Accent's own, which the file leaves out.
+    pub fn is_accent(&self) -> bool {
+        *self == Editor::Accent
+    }
+}
+
 /// The global config file.
 #[doc = concat!("\n```toml\n", example!(), "```")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -192,6 +216,9 @@ pub struct Config {
     /// window keeps (DESIGN.md, Keyboard → Terminal).
     pub forward_keys_to_terminal: bool,
     pub debug_terminal: DebugTerminal,
+    /// The editor a text file opens in.
+    #[serde(skip_serializing_if = "Editor::is_accent")]
+    pub editor: Editor,
     pub theme: Theme,
     pub focus_mode: FocusMode,
     pub recolour: RecolourConfig,
@@ -369,6 +396,7 @@ impl Default for Config {
             indent_width: 4,
             forward_keys_to_terminal: false,
             debug_terminal: DebugTerminal::Same,
+            editor: Editor::Accent,
             theme: Theme::System,
             focus_mode: FocusMode::default(),
             recolour: RecolourConfig::default(),

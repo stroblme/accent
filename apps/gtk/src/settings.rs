@@ -3,9 +3,10 @@
 //! Shared config, vault and `on_change` are supplied by the caller, avoiding a dependency
 //! on `App`.
 
+use crate::editors;
 use accent_core::config::{
-    Config, CustomCommand, DebugTerminal, DiagramConfig, DrawingConfig, FocusMode, RecolourConfig,
-    Theme, VaultConfig,
+    Config, CustomCommand, DebugTerminal, DiagramConfig, DrawingConfig, Editor, FocusMode,
+    RecolourConfig, Theme, VaultConfig,
 };
 use adw::prelude::*;
 use gtk::{gio, glib, pango};
@@ -327,9 +328,81 @@ fn focus_index(mode: FocusMode) -> u32 {
 
 // ----------------------------------------------------------------------------------- editor
 
+/// Text Editor: accent's own, the terminal editors the shell finds, and the one picked marked
+/// where the shell finds no such program. The shell is asked once the row is first shown
+/// ([`editors::installed`]), so a window that never opens Preferences never asks it.
+fn text_editor_row(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::ComboRow {
+    let row = adw::ComboRow::builder()
+        .title("Text Editor")
+        .subtitle("A terminal editor opens files in a terminal tab")
+        .build();
+    // What each line of the model picks, and whether the model is being replaced, whose
+    // selection changes say nothing about the reader's pick.
+    let listed: Rc<RefCell<Vec<Editor>>> = Rc::default();
+    let filling = Rc::new(Cell::new(false));
+    let fill = Rc::new({
+        let (config, listed, filling) = (config.clone(), listed.clone(), filling.clone());
+        move |row: &adw::ComboRow, found: Option<&[editors::Found]>| {
+            let chosen = config.borrow().editor;
+            let mut items = vec![(Editor::Accent, editors::name(Editor::Accent).to_string())];
+            let found = found.map(|found| found.iter().map(|(editor, _)| *editor));
+            let answered = found.is_some();
+            items.extend(
+                found
+                    .into_iter()
+                    .flatten()
+                    .map(|e| (e, editors::name(e).into())),
+            );
+            if items.iter().all(|(editor, _)| *editor != chosen) {
+                let name = editors::name(chosen);
+                items.push((
+                    chosen,
+                    match answered {
+                        true => format!("{name} (not found)"),
+                        false => name.to_string(),
+                    },
+                ));
+            }
+            let names: Vec<&str> = items.iter().map(|(_, name)| name.as_str()).collect();
+            filling.set(true);
+            row.set_model(Some(&gtk::StringList::new(&names)));
+            let at = items.iter().position(|(editor, _)| *editor == chosen);
+            row.set_selected(at.unwrap_or(0) as u32);
+            filling.set(false);
+            *listed.borrow_mut() = items.into_iter().map(|(editor, _)| editor).collect();
+        }
+    });
+    fill(&row, None);
+    row.connect_selected_notify({
+        let (config, save) = (config.clone(), save.clone());
+        move |r| {
+            let picked = listed.borrow().get(r.selected() as usize).copied();
+            if filling.get() || picked.is_none_or(|e| e == config.borrow().editor) {
+                return;
+            }
+            config.borrow_mut().editor = picked.unwrap_or_default();
+            save();
+        }
+    });
+    let asked = Cell::new(false);
+    row.connect_map(move |row| {
+        if asked.replace(true) {
+            return;
+        }
+        let (row, fill) = (row.downgrade(), fill.clone());
+        editors::installed(move |found| {
+            if let Some(row) = row.upgrade() {
+                fill(&row, Some(found));
+            }
+        });
+    });
+    row
+}
+
 fn editor_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder().title("Editor").build();
 
+    group.add(&text_editor_row(config, save));
     group.add(&font_row(
         "Document Font",
         config,

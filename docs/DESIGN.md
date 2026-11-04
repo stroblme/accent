@@ -1000,12 +1000,14 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 ### Preferences
 
-- `AdwPreferencesDialog` of `AdwPreferencesGroup` / `AdwSwitchRow`, an `AdwComboRow` each for the theme, the focus mode (its subtitle saying what the level fades) and the Debug Terminal (Terminal), and a destructive `AdwButtonRow` for Restore Defaults.
+- `AdwPreferencesDialog` of `AdwPreferencesGroup` / `AdwSwitchRow`, an `AdwComboRow` each for the theme, the focus mode (its subtitle saying what the level fades), the Text Editor and the Debug Terminal (Terminal), and a destructive `AdwButtonRow` for Restore Defaults.
 - A click outside it closes it, as one outside the palette does (Palette).
 - Match Colours to Theme holds a switch each for Images, PDFs and Diagrams, all on (user decision 2026-10-09).
   A kind switched off shows its files as they are, and its Invert command recolours one file onto the theme's paper and ink instead (PDF, Image, Diagram).
   Images covers the images a note shows too, Diagrams the canvas and a note's embeds; a switch redoes for those files what a theme change does.
 - Editor holds Preview Font under Document Font, each a font button with a Reset, and Full-Width Preview under Column Width, off, since the preview's page follows that width (Preview).
+- Editor leads with Text Editor, which lists Accent and the terminal editors the login shell finds, and marks a picked one it no longer finds as not found (Terminal).
+  The shell is asked once a process, when the row is first shown, so a window that never opens Preferences never asks it.
 - Files holds Show Hidden Files and Colour Changed Files, both on; the second tints the tree's changed names and leaves its dims alone (Sidebar → Files).
 - Commands holds the user's own commands (Terminal), each an `AdwExpanderRow` of its name over its command line, opening on Name, Command, its Shortcut (recorded as the palette records one, refusing a chord in use by name, a clash from a hand edit marked) and Remove Command; Add Command puts a new one at the end, opened. Restore Defaults keeps them, as it keeps the recent vaults: they are the user's, not settings with a default.
 - Each window builds its dialog once, on idle after it opens, and presents that one again: an open held the main thread about 60 ms before its animation could run, a stutter, and a dialog shown before holds it about 30 (release, Xvfb, `ACCENT_BENCH_SWITCHER=prefs`).
