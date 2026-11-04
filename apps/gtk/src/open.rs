@@ -143,9 +143,12 @@ impl App {
         let Some(pane) = self.pane_of(page) else {
             return;
         };
-        if let Some(old) = pane.set_preview(page) {
+        // The preview it replaces goes while it is still one, which a terminal editor's question
+        // is not asked of.
+        if let Some(old) = pane.preview().filter(|old| old != page) {
             pane.tabs.close_page(&old);
         }
+        pane.set_preview(page);
         if keep {
             pane.keep(page);
         }

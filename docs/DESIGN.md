@@ -753,6 +753,10 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Opening the file again brings that tab to the front, and browsing opens it as a preview, kept once a key reaches the editor (a click is the editor's mouse, which keeps nothing).
   The program run is the first of the editor's names the login shell finds on this machine (Helix is `hx`, else `helix`), asked once a process, and the first name on a host.
   Exit 0 closes the tab and any other end keeps it as a command's does, but exit 127, the shell finding no such program, closes it and opens the file in accent's editor with a toast.
+  The session puts its tab back with its editor (`ShellPlace::edits`), taken up while it runs and started on the file again otherwise, every attach being find-or-start (`attach --run`), and closing the window only lets go of it.
+  Closing a kept tab whose editor runs asks first, saying that the editor's unsaved changes are lost, as does closing a window that keeps no session while one runs, its shells ending with it.
+  A preview's editor has taken no key and ends unasked.
+  Open in Accent's Editor, on the tab's menu, in the palette and on a text file's row in the Files tree, ends the editor after that question and opens the file in accent's own editor once, as a notebook's Open as Text does.
   Colours are the editor's own over the terminal's sixteen, which a theme of sixteen colours follows, such as Helix's `base16_terminal`, Vim's default and Neovim's with `notermguicolors`.
 - **The debugger's two terminals, the program's and the Debug Console, are the shells not held** (user decisions 2026-10-17). The program's: the adapter's `runInTerminal` is answered with a tab running its command line in its folder with its environment, under VTE directly, on a host over the vault's master with `ssh -t`, so the program reads its input there; the program is its session's and must not outlive it, where a held shell would.
   Its key is `program:<16 hex>`, which no holder and no session restore takes for a shell's.
@@ -1559,8 +1563,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A remote vault has no trash, so there Move to Trash is Delete… on every file menu and in the palette, and asks before it deletes (user decision 2026-11-03).
   Each item is a `fileops` action on the file's path, one group on the window, and takes its label from the palette's command where there is one, so the two cannot disagree.
   The tree's own commands are palette entries too (Principle 3), each named there by what it acts on, which a menu item leaves to its row: Cut File, Reload Folder (Keyboard, Files).
-- **A tab's menu leads with Split ▸ and Move Tab ▸**, each side an item of its submenu, then Move to New Window and Pin Tab or Unpin Tab, then the document's own view (a diagram's Show Grid, a notebook's Open as Text), then the file part with Reveal in Sidebar after Show in Files.
-  A preview tab's file part is its note's, and a shell or a comparison has no file part at all.
+- **A tab's menu leads with Split ▸ and Move Tab ▸**, each side an item of its submenu, then Move to New Window and Pin Tab or Unpin Tab, then the document's own view (a diagram's Show Grid, a notebook's Open as Text, a terminal editor's Open in Accent's Editor), then the file part with Reveal in Sidebar after Show in Files.
+  A preview tab's file part is its note's, a terminal editor's is its file's, and a shell or a comparison has no file part at all.
+- A file's row in the Files tree offers Open in Accent's Editor under Open while a terminal editor is picked (Terminal).
   A file from outside the vault has Copy Name, Copy Absolute Path, Show in Files and its prints, which are the window's own commands, and nothing the vault does to its files.
 - **New File…, New Folder… and New Drawing… are on every tree menu**, aimed at the folder clicked, the folder of the file clicked, or the vault root.
   The vault root's menu is on the blank area below the rows, an empty vault's page and the vault's name above them: those three, Upload Files… on a remote vault, and Paste.
@@ -2083,7 +2088,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 
 ### Tab menu
 
-- Copy Name, Copy Relative Path, Copy Absolute Path, Show in Files, Reveal in Sidebar, Move to New Window, Pin Tab and Unpin Tab, and a notebook's Open as Text, all unbound: what a tab's menu offers, from the palette on the active tab.
+- Copy Name, Copy Relative Path, Copy Absolute Path, Show in Files, Reveal in Sidebar, Move to New Window, Pin Tab and Unpin Tab, a notebook's Open as Text and a terminal editor's Open in Accent's Editor, all unbound: what a tab's menu offers, from the palette on the active tab.
 
 ### Tabs and panes
 

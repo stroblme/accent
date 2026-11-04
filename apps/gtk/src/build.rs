@@ -1104,6 +1104,8 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
     let moved = Rc::downgrade(app);
     let unmark = Rc::downgrade(app);
     let apart = Rc::downgrade(app);
+    let terminal_editor = Rc::downgrade(app);
+    let in_accent = Rc::downgrade(app);
     let relist = Rc::downgrade(app);
     let terminal = Rc::downgrade(app);
     let reveal = Rc::downgrade(app);
@@ -1187,6 +1189,14 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
             let gtk_app = app.window.application().and_downcast::<adw::Application>();
             if let (Some(shell), Some(gtk_app)) = (app.shell.upgrade(), gtk_app) {
                 shell.open_apart(&gtk_app, &app.root().join(rel), Opened::Kept);
+            }
+        }),
+        terminal_editor: Box::new(move || {
+            (terminal_editor.upgrade()).is_some_and(|app| !app.config.borrow().editor.is_accent())
+        }),
+        in_accent: Box::new(move |rel| {
+            if let Some(app) = in_accent.upgrade() {
+                app.open_in_accent(rel, None);
             }
         }),
         relist: Box::new(move |dir| {

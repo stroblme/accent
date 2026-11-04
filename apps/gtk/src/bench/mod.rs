@@ -230,7 +230,8 @@ use user_commands::bench_commands;
 ///   `prefs`: Preferences → Commands. Its shells are real: a scratch `HOME`, as for `HOLD`.
 /// - `ACCENT_BENCH_EDITOR=prefs`: Preferences → Text Editor lists the editors the login shell
 ///   finds; `open`: files opened, ended and replaced in a terminal editor's tabs; `keys`: the
-///   chords a terminal editor keeps, through XTEST. Its editors are
+///   chords a terminal editor keeps, through XTEST; `accent`: Open in Accent's Editor and when
+///   closing asks; `hold` then `back`: its tab put back with its editor. Its editors are
 ///   `build-aux/fake-editor.sh` alone, in a scratch `HOME` (`terminal_editor::bench_editor`).
 /// - `ACCENT_BENCH_PDF=<rel_path>`: fit, save, rename and external reload.
 ///   Writes and moves the file; use a scratch multipage PDF. Modes:

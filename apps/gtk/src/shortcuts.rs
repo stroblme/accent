@@ -119,7 +119,8 @@ fn section(action: &str) -> Option<&'static str> {
         "view-mode" | "minimap" | "present" => "Views",
         "fullscreen" | "preferences" | "shortcuts" | "menu" | "about" => "Window",
         "copy-name" | "copy-relative-path" | "copy-absolute-path" | "show-in-files"
-        | "reveal-in-sidebar" | "move-to-new-window" | "pin-tab" | "unpin-tab" => "Tab menu",
+        | "reveal-in-sidebar" | "move-to-new-window" | "pin-tab" | "unpin-tab"
+        | "open-in-accent" => "Tab menu",
         "next-tab" | "previous-tab" | "close-pane-tabs" => "Tabs and panes",
         _ if starts(&["split-", "move-tab-", "divider-"]) => "Tabs and panes",
         _ => return None,

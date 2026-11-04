@@ -13,7 +13,10 @@ use vte4::TerminalExt as _;
 /// exit 1 keeps it, a missing editor hands the file to accent's own; a preview is replaced.
 /// `=keys`, through XTEST with `ACCENT_FAKE_EDITOR=keys`, which logs three keys raw: `Ctrl+W`,
 /// `Ctrl+E` and `Ctrl+J` reach the editor; `Ctrl+PageUp` and `Ctrl+Tab` leave it; `Ctrl+Shift+P`
-/// opens the palette over it; a key keeps a preview.
+/// opens the palette over it; a key keeps a preview. `=accent`: Open in Accent's Editor on a
+/// preview ends its editor unasked, a kept tab's would ask (an `AdwAlertDialog` takes no answer
+/// under Xvfb). `=hold`, then `=back` twice on one scratch state, the holder ended between: the
+/// editor's tab comes back attached to the editor, then with the editor started again.
 pub(super) fn bench_editor(app: &Rc<App>, step: &str) {
     let (app, step) = (app.clone(), step.to_string());
     glib::spawn_future_local(async move {
@@ -22,9 +25,12 @@ pub(super) fn bench_editor(app: &Rc<App>, step: &str) {
             "prefs" => prefs(&app).await,
             "open" => open(&app).await,
             "keys" => keys(&app).await,
+            "accent" => accent(&app).await,
+            "hold" => return hold(&app).await,
+            "back" => return back(&app).await,
             _ => println!("bench editor unknown step {step}"),
         }
-        bench_quit(&app);
+        finish(&app);
     });
 }
 
@@ -246,6 +252,75 @@ async fn keys(app: &Rc<App>) {
         term.view.feed_child(b"xyz");
     }
     until(|| app.terminals().iter().all(|t| t.ended()), 10_000).await;
+}
+
+async fn accent(app: &Rc<App>) {
+    let root = app.root();
+    std::fs::write(root.join("look.md"), "# Look\n").unwrap();
+    until(|| app.reconciled.get(), 30_000).await;
+    pick(app, Editor::Nano);
+    app.open_preview("look.md");
+    let Some(term) = started(app, "look.md").await else {
+        return println!("bench editor accent started=false");
+    };
+    let preview_asks = app.editor_asks(&term.page).is_some();
+    app.promote(&term.page);
+    let kept_asks = app.editor_asks(&term.page).is_some();
+    // Back to a preview, whose editor Open in Accent's Editor ends without a question.
+    if let Some(pane) = app.pane_of(&term.page) {
+        pane.set_preview(&term.page);
+    }
+    let _ = WidgetExt::activate_action(&app.window, "win.open-in-accent", None);
+    until(|| kind_of(app, "look.md") == "text", 10_000).await;
+    println!(
+        "bench editor accent preview_asks={preview_asks} kept_asks={kept_asks} kind={} editors={}",
+        kind_of(app, "look.md"),
+        app.terminals().len()
+    );
+}
+
+/// How many times a fake editor has started under this `HOME`.
+fn starts() -> usize {
+    let starts = std::fs::read_to_string(glib::home_dir().join("editor-starts"));
+    starts.unwrap_or_default().lines().count()
+}
+
+/// End every terminal tab unasked and write the session before quitting, so the next step puts
+/// back no editor of this one's.
+fn finish(app: &Rc<App>) {
+    for term in app.terminals() {
+        app.forget_page(&term.page);
+        app.close_page(&term.page);
+    }
+    app.save_session();
+    bench_quit(app);
+}
+
+/// Quit as Ctrl+Q does, through the window's close, which writes the session and lets the editor
+/// go on running.
+fn quit(app: &Rc<App>) {
+    if let Some(gtk_app) = app.window.application() {
+        gtk_app.activate_action("quit", None);
+    }
+}
+
+async fn hold(app: &Rc<App>) {
+    // Counted from here: the steps before started editors of their own.
+    let _ = std::fs::remove_file(glib::home_dir().join("editor-starts"));
+    std::fs::write(app.root().join("held.md"), "# Held\n").unwrap();
+    until(|| app.reconciled.get(), 30_000).await;
+    pick(app, Editor::Nano);
+    app.open_path("held.md");
+    let started = started(app, "held.md").await.is_some();
+    println!("bench editor hold started={started} starts={}", starts());
+    quit(app);
+}
+
+async fn back(app: &Rc<App>) {
+    let term = started(app, "held.md").await;
+    let title = term.as_ref().map(|term| term.page.title().to_string());
+    println!("bench editor back title={title:?} starts={}", starts());
+    quit(app);
 }
 
 /// Wait up to `ms` for `done`.

@@ -97,6 +97,7 @@ impl App {
                 .as_ref()
                 .and_then(Doc::terminal)
                 .and_then(|t| t.share_state()),
+            editor: (doc.as_ref().and_then(Doc::terminal)).is_some_and(|t| t.edits().is_some()),
         }
     }
 
@@ -246,6 +247,7 @@ impl App {
                     }
                 }
             },
+            "open-in-accent" => self.editor_tab_in_accent(),
             "close-tab" => {
                 if let Some(page) = self.tabs().selected_page() {
                     self.tabs().close_page(&page);

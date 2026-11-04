@@ -146,6 +146,19 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
                 });
                 return glib::Propagation::Stop;
             }
+            // A terminal editor still running in a kept tab is asked about: its unsaved changes
+            // are beyond accent's reach.
+            if let Some(term) = app.editor_asks(page) {
+                let (tabs, page) = (tabs.clone(), page.clone());
+                app.ask_close_editor(&term, move |app, close| {
+                    if close {
+                        app.select_survivor(&page);
+                        app.forget_page(&page);
+                    }
+                    tabs.close_page_finish(&page, close);
+                });
+                return glib::Propagation::Stop;
+            }
             app.select_survivor(page);
             app.forget_page(page);
             // The pane goes with its last tab.
@@ -177,6 +190,7 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
                     view: match &doc {
                         Some(Doc::Diagram(_)) => Some("win.diagram-grid"),
                         Some(Doc::Notebook(_)) => Some("win.notebook-open-text"),
+                        Some(Doc::Terminal(t)) if t.edits().is_some() => Some("win.open-in-accent"),
                         _ => None,
                     },
                     file: tab_file(&app, doc),
@@ -963,6 +977,9 @@ pub fn wire_window(app: &Rc<App>) {
             // render thread, so it is waited for rather than left to be killed.
             for pdf in app.pdfs() {
                 pdf.flush_blocking();
+            }
+            if !app.editors_closed() {
+                return glib::Propagation::Stop;
             }
             // The close is certain now: a fetch or a push still running is stopped, not waited for.
             if let Some(git) = app.git.get() {

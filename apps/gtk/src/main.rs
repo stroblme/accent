@@ -1262,7 +1262,8 @@ impl App {
 
     /// Put back a shell the session remembers, in its own pane, where it last was: its directory,
     /// or home when that has gone since, and on a host the path it was opened at. One that ran a
-    /// command of the user's is taken up only if the command still runs.
+    /// command of the user's is taken up only if the command still runs, and a terminal editor
+    /// comes back with its editor.
     fn restore_shell(self: &Rc<Self>, key: &str, place: Option<&ShellPlace>) {
         let at = place.map_or("", |p| p.at.as_str());
         let shell = match ssh::is_remote(at) {
@@ -1279,6 +1280,9 @@ impl App {
                     .unwrap_or_else(glib::home_dir),
             ),
         };
+        if let Some(edits) = place.and_then(|p| p.edits.clone()) {
+            return self.restore_editor(key, shell, edits);
+        }
         let run = place
             .and_then(|p| p.command.clone())
             .map(terminal::Run::resume);

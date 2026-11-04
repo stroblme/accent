@@ -7,3 +7,7 @@ bench editor missing kind=text toasted=1
 bench editor preview first=none second=editor
 bench editor keys at=Editor bytes=17 05 0a
 bench editor keys ctrl+Page_Up=other.md ctrl+Tab=other.md palette=true kept=true
+bench editor accent preview_asks=false kept_asks=true kind=text editors=0
+bench editor hold started=true starts=1
+bench editor back title=Some("held.md") starts=1
+bench editor back title=Some("held.md") starts=2

@@ -500,6 +500,12 @@ drills: gtk-bench xvfb
 		ACCENT_BENCH_EDITOR=prefs timeout 60 $(TARGET_DIR)/accent "$$0/vault" >"$$0/editor" && \
 		ACCENT_BENCH_EDITOR=open timeout 90 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/editor" && \
 		ACCENT_BENCH_EDITOR=keys ACCENT_FAKE_EDITOR=keys timeout 90 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/editor" && \
+		ACCENT_BENCH_EDITOR=accent timeout 60 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/editor" && \
+		ACCENT_BENCH_EDITOR=hold timeout 60 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/editor" && \
+		ACCENT_BENCH_EDITOR=back timeout 60 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/editor" && \
+		{ fuser -k "$$TMPDIR/accent-$$(id -u)/hold-3.lock" >/dev/null 2>&1; sleep 1; } && \
+		ACCENT_BENCH_EDITOR=back timeout 60 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/editor" && \
+		{ fuser -k "$$TMPDIR/accent-$$(id -u)/hold-3.lock" >/dev/null 2>&1; true; } && \
 		grep "^bench editor " "$$0/editor" | diff -u apps/gtk/src/bench/editor.expected -' "$$xdg"
 	$(HEADLESS) sh -c 'ACCENT_BENCH_PREVIEW=render timeout 60 \
 		$(TARGET_DIR)/accent "$$0/vault" >"$$0/preview" && \

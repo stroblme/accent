@@ -53,6 +53,7 @@ pub struct Facts {
 const LABELS: &[(&str, &str)] = &[
     ("open", "Open"),
     ("open-apart", "Open in New Window"),
+    ("open-accent", "win.open-in-accent"),
     ("terminal", "Open in Terminal"),
     ("new-file", "win.new-file"),
     ("new-folder", "win.new-folder"),
@@ -200,6 +201,10 @@ pub fn context_menu(
     let menu = gio::Menu::new();
     if let Some((rel, false)) = row {
         menu.append_item(&verb("open", rel));
+        // Where a terminal editor is picked, and this file would open in it.
+        if (ops.terminal_editor)() && matches!(crate::doc::kind_of(rel), Kind::Note | Kind::Text) {
+            menu.append_item(&verb("open-accent", rel));
+        }
         // A window with no vault opens a file by its path on this machine, which a remote vault's
         // file is not.
         if !remote {
@@ -399,6 +404,7 @@ fn run(verb: &str) -> Option<Run> {
     let run: Run = match verb {
         "open" => Box::new(|ops, rel| (ops.open)(rel, &[])),
         "open-apart" => Box::new(|ops, rel| (ops.apart)(rel)),
+        "open-accent" => Box::new(|ops, rel| (ops.in_accent)(rel)),
         "terminal" => Box::new(|ops, dir| (ops.terminal)(dir)),
         "new-file" => Box::new(new_file),
         "new-folder" => Box::new(new_folder),

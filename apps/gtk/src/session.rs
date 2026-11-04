@@ -404,8 +404,8 @@ impl App {
                 .terminals()
                 .iter()
                 .filter_map(|t| {
-                    let (at, command) = (t.at()?, t.command_name());
-                    Some((t.key(), ShellPlace { at, command }))
+                    let (at, command, edits) = (t.at()?, t.command_name(), t.edits().cloned());
+                    Some((t.key(), ShellPlace { at, command, edits }))
                 })
                 .collect(),
             pinned: self
@@ -1330,6 +1330,7 @@ mod tests {
         ShellPlace {
             at: at.into(),
             command: None,
+            edits: None,
         }
     }
 }

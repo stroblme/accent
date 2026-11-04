@@ -71,6 +71,8 @@ pub struct Context {
     pub python: bool,
     /// The shell in front can be shared with MCP: `Some(shared)`.
     pub shared: Option<bool>,
+    /// The tab is a terminal editor's.
+    pub editor: bool,
 }
 
 /// Actions another sync enables, on state of its own that changes with no tab change: SyncTeX's
@@ -203,6 +205,7 @@ pub fn applies(action: &str, cx: &Context) -> bool {
         "win.terminal-paste" => front == Some(Terminal) || text || notebook,
         "win.terminal-share" => front == Some(Terminal) && cx.shared == Some(false),
         "win.terminal-revoke" => front == Some(Terminal) && cx.shared == Some(true),
+        "win.open-in-accent" => cx.editor,
         "win.pdf-draw" => pdf || diagram,
         a if a.starts_with("win.pdf-") => pdf,
         a if a.starts_with("win.diagram-") => diagram,

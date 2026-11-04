@@ -575,13 +575,27 @@ fn session_roundtrips_as_json() {
                 y: 20.0,
             },
         )]),
-        terminals: BTreeMap::from([(
-            "terminal:0123456789abcdef".to_string(),
-            ShellPlace {
-                at: "/home/me/src".to_string(),
-                command: Some("Claude".to_string()),
-            },
-        )]),
+        terminals: BTreeMap::from([
+            (
+                "terminal:0123456789abcdef".to_string(),
+                ShellPlace {
+                    at: "/home/me/src".to_string(),
+                    command: Some("Claude".to_string()),
+                    edits: None,
+                },
+            ),
+            (
+                "terminal:fedcba9876543210".to_string(),
+                ShellPlace {
+                    at: "/home/me/Notes".to_string(),
+                    command: None,
+                    edits: Some(Edits {
+                        editor: Editor::Helix,
+                        file: "Inbox/a b.md".to_string(),
+                    }),
+                },
+            ),
+        ]),
         pinned: vec!["b.md".to_string()],
         web_images: vec!["Figures/flow.drawio".to_string()],
         compared: BTreeMap::from([(

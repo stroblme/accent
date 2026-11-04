@@ -4,7 +4,7 @@
 
 use crate::open::Opened;
 use crate::terminal::{self, Term};
-use crate::{App, doc, fileops};
+use crate::{App, dialogs, doc, fileops};
 use accent_api::ssh;
 use accent_core::config::{Editor, Edits};
 use gtk::prelude::*;
@@ -239,16 +239,35 @@ impl App {
             editor,
             file: key.to_string(),
         };
-        let run = self.editor_run(edits);
-        let term = self.wire_term(terminal::new_key(), shell, how, None, Some(run));
-        term.page
-            .set_tooltip(&fileops::display_path(&self.root(), key));
-        self.mark_loose(&term.page, key);
-        keep_on_key(self, &term);
-        self.watch_folder_of(key);
-        self.select_new_page(&term.page, how);
+        let term = self.editor_tab(terminal::new_key(), shell, edits, how);
         self.mark_opened(&term.page, how);
         true
+    }
+
+    /// Put back the terminal editor tab `key` a session names, attached to its editor, or with
+    /// the editor started on the file again where nothing runs it any more.
+    pub(crate) fn restore_editor(self: &Rc<Self>, key: &str, shell: terminal::Shell, edits: Edits) {
+        self.editor_tab(key.to_string(), shell, edits, Opened::Restored);
+    }
+
+    /// A terminal editor's tab on `edits`' file, opened as `key` and wired as the file's.
+    fn editor_tab(
+        self: &Rc<Self>,
+        key: String,
+        shell: terminal::Shell,
+        edits: Edits,
+        how: Opened,
+    ) -> Rc<Term> {
+        let file = edits.file.clone();
+        let run = self.editor_run(edits);
+        let term = self.wire_term(key, shell, how, None, Some(run));
+        term.page
+            .set_tooltip(&fileops::display_path(&self.root(), &file));
+        self.mark_loose(&term.page, &file);
+        keep_on_key(self, &term);
+        self.watch_folder_of(&file);
+        self.select_new_page(&term.page, how);
+        term
     }
 
     /// Where a terminal editor on `key` runs: at the vault root, on the host for a remote vault's
@@ -297,6 +316,137 @@ impl App {
             return None;
         }
         self.editor_of(key).map(|term| term.page.clone())
+    }
+
+    /// The terminal editor whose tab `page` is, where closing it asks first: one still running in
+    /// a kept tab. A preview's has taken no key.
+    pub(crate) fn editor_asks(&self, page: &adw::TabPage) -> Option<Rc<Term>> {
+        let term = self.doc_for_page(page)?.terminal()?.clone();
+        let preview = self.pane_of(page).and_then(|pane| pane.preview());
+        let running = term.edits().is_some() && !term.ended();
+        (running && preview.as_ref() != Some(page)).then_some(term)
+    }
+
+    /// Ask before `term`'s tab ends its editor, unsaved changes and all, and tell `then` the
+    /// answer: `true` to close.
+    pub(crate) fn ask_close_editor(
+        self: &Rc<Self>,
+        term: &Term,
+        then: impl FnOnce(&Rc<App>, bool) + 'static,
+    ) {
+        let Some(edits) = term.edits() else {
+            return then(self, true);
+        };
+        let heading = format!("Close {}?", doc::file_name(&edits.file));
+        let body = format!(
+            "{} is still running; unsaved changes in it are lost.",
+            name(edits.editor)
+        );
+        self.ask_close(&heading, &body, then);
+    }
+
+    /// Ask before an unnamed window's close ends the terminal editors running in it, which a
+    /// window keeping no session cannot hand back. `true` once there are none left to ask about.
+    pub(crate) fn editors_closed(self: &Rc<Self>) -> bool {
+        let running: Vec<Rc<Term>> = (self.terminals().into_iter())
+            .filter(|term| self.editor_asks(&term.page).is_some())
+            .collect();
+        let (Some(first), false) = (running.first(), self.keeps_session() || self.reloading())
+        else {
+            return true;
+        };
+        let body = match (running.len(), first.edits()) {
+            (1, Some(edits)) => format!(
+                "{} is still running in {}; unsaved changes in it are lost.",
+                name(edits.editor),
+                doc::file_name(&edits.file)
+            ),
+            (n, _) => {
+                format!(
+                    "Terminal editors are still running in {n} tabs; unsaved changes in them are lost."
+                )
+            }
+        };
+        self.ask_close("Close Window?", &body, move |app, close| {
+            if !close {
+                return app.keep_open();
+            }
+            // Gone from the window's documents, so the close that follows asks nothing.
+            for term in &running {
+                app.forget_page(&term.page);
+            }
+            app.window.close();
+        });
+        false
+    }
+
+    /// Cancel or Close, the second destructive.
+    fn ask_close(
+        self: &Rc<Self>,
+        heading: &str,
+        body: &str,
+        then: impl FnOnce(&Rc<App>, bool) + 'static,
+    ) {
+        let dialog = dialogs::alert(
+            heading,
+            body,
+            &[
+                ("cancel", "Cancel", adw::ResponseAppearance::Default),
+                (
+                    dialogs::CONFIRM,
+                    "Close",
+                    adw::ResponseAppearance::Destructive,
+                ),
+            ],
+            "cancel",
+        );
+        let app = self.clone();
+        dialogs::choose(&dialog, Some(&self.window), move |response| {
+            then(&app, response == dialogs::CONFIRM)
+        });
+    }
+
+    /// Open in Accent's Editor, on the terminal editor's tab the menu was opened on, else the one
+    /// in front.
+    pub(crate) fn editor_tab_in_accent(self: &Rc<Self>) {
+        let page = (self.menu_page.borrow().clone()).or_else(|| self.tabs().selected_page());
+        let term = page
+            .and_then(|page| self.doc_for_page(&page))
+            .and_then(|doc| doc.terminal().cloned());
+        if let Some(file) = term.as_ref().and_then(|term| term.file()) {
+            self.open_in_accent(&file, term);
+        }
+    }
+
+    /// Open `key` in accent's own editor, once, as a notebook's Open as Text does: the terminal
+    /// editor `term` running on it, else the one [`editor_of`](Self::editor_of) finds, ends with
+    /// its tab first, asked about as its × asks.
+    pub(crate) fn open_in_accent(self: &Rc<Self>, key: &str, term: Option<Rc<Term>>) {
+        let Some(page) = term.or_else(|| self.editor_of(key)).map(|t| t.page.clone()) else {
+            return self.once_in_accent(key);
+        };
+        let asks = self.editor_asks(&page);
+        let key = key.to_string();
+        let close = move |app: &Rc<App>| {
+            app.select_survivor(&page);
+            app.forget_page(&page);
+            app.close_page(&page);
+            app.once_in_accent(&key);
+        };
+        match asks {
+            Some(term) => self.ask_close_editor(&term, move |app, yes| {
+                if yes {
+                    close(app);
+                }
+            }),
+            None => close(self),
+        }
+    }
+
+    /// Open `key` in accent's own editor this once.
+    fn once_in_accent(self: &Rc<Self>, key: &str) {
+        self.in_accent.borrow_mut().insert(key.to_string());
+        self.open_path(key);
     }
 
     /// A terminal editor the shell did not find: its tab goes, saying so, and its file opens in

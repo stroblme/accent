@@ -53,6 +53,10 @@ pub struct ShellPlace {
     /// the command still runs: never started again.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// The file a terminal editor in it edits, whose tab comes back with its editor: taken up
+    /// while it runs, started on the file again otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edits: Option<Edits>,
 }
 
 /// A file a terminal editor has open in a terminal tab (DESIGN.md, Terminal).

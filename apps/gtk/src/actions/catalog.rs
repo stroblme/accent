@@ -340,6 +340,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.notebook-clear-outputs", "Clear Outputs", &[]),
     ("win.notebook-clear-all-outputs", "Clear All Outputs", &[]),
     ("win.notebook-open-text", "Open as Text", &[]),
+    ("win.open-in-accent", "Open in Accent's Editor", &[]),
     ("win.python-environment", "Select Python Environment", &[]),
     ("win.view-mode", "Toggle Preview", &["<Primary>m"]),
     ("win.minimap", "Toggle Minimap", &[]),

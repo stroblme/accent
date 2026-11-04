@@ -107,6 +107,12 @@ pub struct Ops {
     pub exclude: Box<dyn Fn(&str)>,
     /// Open in New Window: the file in a window of its own with no vault.
     pub apart: Box<dyn Fn(&str)>,
+    /// Whether a terminal editor is picked, which a file's row offers Open in Accent's Editor
+    /// beside.
+    pub terminal_editor: Box<dyn Fn() -> bool>,
+    /// Open in Accent's Editor: the file in accent's own editor once, a terminal editor running
+    /// on it ending first.
+    pub in_accent: Box<dyn Fn(&str)>,
     /// Reload on a folder: list it and every folder open under it again, and bring the index up
     /// to date where it holds the folder.
     pub relist: Box<dyn Fn(&str)>,
