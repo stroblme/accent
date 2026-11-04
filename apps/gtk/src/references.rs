@@ -349,6 +349,11 @@ impl App {
             self.open_as(&key, how);
             return self.show_pdf_anchor(&key, page);
         }
+        // In the terminal editor picked, at the place, where the file opens in one.
+        let place = (at.line + 1, Some(at.character + 1));
+        if loc.anchor.is_none() && self.edit_at(&key, place, how) {
+            return;
+        }
         // Any other anchor is a heading the note does not have.
         let missed = loc.anchor.clone();
         if missed.is_none()

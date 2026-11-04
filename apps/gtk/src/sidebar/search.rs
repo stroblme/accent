@@ -260,6 +260,7 @@ fn more_row(rel_path: &str, count: usize, more: More) -> Row {
     Row {
         rel_path: rel_path.to_string(),
         at: None,
+        line: None,
         page: None,
         name: String::new(),
         dir: format!("+{count} more in this file"),
@@ -426,6 +427,8 @@ struct Row {
     /// The match's byte range in the note; `None` opens the note at the top, which is all a hit
     /// on a note's title alone can name.
     at: Option<Range<usize>>,
+    /// The 1-based line the match is on, which a terminal editor opens the file at.
+    line: Option<u32>,
     /// On a PDF's row, which is one of its pages: that page, 0-based, and the text matched there.
     page: Option<(usize, String)>,
     /// The file's name, and beside it in dim the folder it sits in — plus, on a grep row, the
@@ -1085,6 +1088,7 @@ fn fts_rows(hits: Vec<SearchHit>, query: &str) -> Vec<Row> {
             dir,
             snippet,
             at: hit.at.clone(),
+            line: hit.line,
             page: hit
                 .page
                 .zip(marked())
@@ -1134,6 +1138,7 @@ fn grep_rows(
             },
             snippet: match_markup(&m.line_text, m.range, replaced.as_deref(), accent),
             at: Some(at),
+            line: Some(m.line),
             page,
             rel_path: m.rel_path.clone(),
             more: None,
@@ -1182,6 +1187,7 @@ fn heading(name: &str) -> Row {
     Row {
         rel_path: String::new(),
         at: None,
+        line: None,
         page: None,
         name: name.to_string(),
         dir: String::new(),
@@ -1513,7 +1519,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen, dragging: &Rc<dyn Fn(bool)
                         page: *page,
                         text: text.clone(),
                     }),
-                    None => row.at.clone().map(Target::Range),
+                    None => row.at.clone().map(|at| Target::Range(at, row.line)),
                 };
                 on_open(&row.rel_path, target);
             }

@@ -2,7 +2,8 @@
 //! (DESIGN.md, Terminal): the ones accent knows, which of them the user's shell finds, and the
 //! tab one runs in, which stands for its file as a text tab does.
 
-use crate::open::Opened;
+use crate::doc::Kind;
+use crate::open::{Opened, Reveal};
 use crate::terminal::{self, Term};
 use crate::{App, dialogs, doc, fileops};
 use accent_api::ssh;
@@ -97,11 +98,34 @@ fn binary(editor: Editor) -> &'static str {
     found.unwrap_or_else(|| first(editor))
 }
 
-/// The command line that opens `file` in `editor`, run as `bin`.
-fn line(editor: Editor, bin: &str, file: &str) -> String {
+/// A 1-based line, and column where known, a terminal editor opens a file at.
+pub type Place = (u32, Option<u32>);
+
+/// The command line that opens `file` in `editor`, run as `bin`, at `at` where given, written as
+/// each editor reads a place.
+fn line(editor: Editor, bin: &str, file: &str, at: Option<Place>) -> String {
     let args = known(editor).map_or(&[][..], |known| known.args);
     let mut words: Vec<String> = [bin].iter().chain(args).map(|w| w.to_string()).collect();
-    words.push(ssh::quote(file));
+    let file = ssh::quote(file);
+    let column = |sep: &str, column: Option<u32>| column.map(|c| format!("{sep}{c}"));
+    match at {
+        None => words.push(file),
+        Some((line, c)) => match editor {
+            Editor::Helix => words.push(format!(
+                "{file}:{line}{}",
+                column(":", c).unwrap_or_default()
+            )),
+            Editor::Neovim | Editor::Vim => words.extend([format!("+{line}"), file]),
+            Editor::Nano => words.extend([
+                format!("+{line}{}", column(",", c).unwrap_or_default()),
+                file,
+            ]),
+            _ => words.extend([
+                format!("+{line}{}", column(":", c).unwrap_or_default()),
+                file,
+            ]),
+        },
+    }
     words.join(" ")
 }
 
@@ -218,15 +242,20 @@ impl App {
     /// dependency or a package manager's file, which are read-only.
     pub(crate) fn open_in_editor(self: &Rc<Self>, key: &str, how: Opened) -> bool {
         let editor = self.config.borrow().editor;
+        // A place a search hit, a symbol or a definition asked for ([`App::edit_at`]); anything
+        // else waiting is for accent's own tab.
+        let at = match self.revealing.borrow().get(key) {
+            Some(Reveal::Line(line, column)) => Some((*line, *column)),
+            Some(_) => return false,
+            None => None,
+        };
         if self.in_accent.borrow_mut().remove(key)
-            || editor.is_accent()
+            || self.stays_accents(key)
             || self.awaiting.borrow().contains_key(key)
-            || self.revealing.borrow().contains_key(key)
-            || doc::host_file_path(key).is_some()
-            || (doc::is_loose_key(key) && accent_core::path::managed(Path::new(key)))
         {
             return false;
         }
+        self.revealing.borrow_mut().remove(key);
         let shell = match self.editor_shell(key) {
             Ok(shell) => shell,
             Err(why) => {
@@ -239,15 +268,47 @@ impl App {
             editor,
             file: key.to_string(),
         };
-        let term = self.editor_tab(terminal::new_key(), shell, edits, how);
+        let term = self.editor_tab(terminal::new_key(), shell, edits, at, how);
         self.mark_opened(&term.page, how);
+        true
+    }
+
+    /// Whether `key` opens in accent's own editor whatever the reader asks: Accent picked, a
+    /// host's dependency, or a package manager's file, the last two being read-only.
+    fn stays_accents(&self, key: &str) -> bool {
+        self.config.borrow().editor.is_accent()
+            || doc::host_file_path(key).is_some()
+            || (doc::is_loose_key(key) && accent_core::path::managed(Path::new(key)))
+    }
+
+    /// Open `rel` at `at`, as a search hit, a symbol or a definition lands, in the terminal
+    /// editor picked, and say whether it did. A tab of the editor's already on the file comes to
+    /// the front with its cursor left where it is. It stays the caller's to land where `rel` is
+    /// accent's, a tab of accent's own having it among them.
+    pub(crate) fn edit_at(self: &Rc<Self>, rel: &str, at: Place, how: Opened) -> bool {
+        if self.stays_accents(rel)
+            || self.doc_for(rel).is_some()
+            || !matches!(doc::kind_of(rel), Kind::Note | Kind::Text)
+        {
+            return false;
+        }
+        if let Some(page) = self.editing(rel) {
+            self.reveal_page(&page);
+            self.focus_picked(&page, how);
+            return true;
+        }
+        // Through the read, whose bytes say whether a `.py` or an `.xml` is a notebook or a
+        // diagram after all; one that lands in accent's own editor lands at the place.
+        let line = Reveal::Line(at.0, at.1);
+        self.revealing.borrow_mut().insert(rel.to_string(), line);
+        self.open_as(rel, how);
         true
     }
 
     /// Put back the terminal editor tab `key` a session names, attached to its editor, or with
     /// the editor started on the file again where nothing runs it any more.
     pub(crate) fn restore_editor(self: &Rc<Self>, key: &str, shell: terminal::Shell, edits: Edits) {
-        self.editor_tab(key.to_string(), shell, edits, Opened::Restored);
+        self.editor_tab(key.to_string(), shell, edits, None, Opened::Restored);
     }
 
     /// A terminal editor's tab on `edits`' file, opened as `key` and wired as the file's.
@@ -256,10 +317,11 @@ impl App {
         key: String,
         shell: terminal::Shell,
         edits: Edits,
+        at: Option<Place>,
         how: Opened,
     ) -> Rc<Term> {
         let file = edits.file.clone();
-        let run = self.editor_run(edits);
+        let run = self.editor_run(edits, at);
         let term = self.wire_term(key, shell, how, None, Some(run));
         term.page
             .set_tooltip(&fileops::display_path(&self.root(), &file));
@@ -290,7 +352,7 @@ impl App {
 
     /// What runs `edits`' editor on its file: the program the shell found here, or on a host,
     /// which was not asked, the editor's first name.
-    pub(crate) fn editor_run(&self, edits: Edits) -> terminal::Run {
+    fn editor_run(&self, edits: Edits, at: Option<Place>) -> terminal::Run {
         let file = match doc::is_loose_key(&edits.file) {
             true => PathBuf::from(&edits.file),
             false => self.root().join(&edits.file),
@@ -299,7 +361,7 @@ impl App {
             true => first(edits.editor),
             false => binary(edits.editor),
         };
-        let line = line(edits.editor, bin, &file.to_string_lossy());
+        let line = line(edits.editor, bin, &file.to_string_lossy(), at);
         terminal::Run::editor(edits, line)
     }
 
@@ -514,9 +576,28 @@ mod tests {
     #[test]
     fn a_line_quotes_its_file() {
         assert_eq!(
-            line(Editor::Emacs, "emacs", "/v/a b's.md"),
+            line(Editor::Emacs, "emacs", "/v/a b's.md", None),
             r"emacs -nw '/v/a b'\''s.md'"
         );
-        assert_eq!(line(Editor::Helix, "helix", "/v/n.md"), "helix '/v/n.md'");
+        assert_eq!(
+            line(Editor::Helix, "helix", "/v/n.md", None),
+            "helix '/v/n.md'"
+        );
+    }
+
+    /// Each editor reads a place its own way, and one with no column is a line alone.
+    #[test]
+    fn a_line_puts_the_place_where_each_editor_reads_it() {
+        let at = |editor, bin| line(editor, bin, "/v/n.md", Some((12, Some(5))));
+        assert_eq!(at(Editor::Helix, "hx"), "hx '/v/n.md':12:5");
+        assert_eq!(at(Editor::Neovim, "nvim"), "nvim +12 '/v/n.md'");
+        assert_eq!(at(Editor::Vim, "vim"), "vim +12 '/v/n.md'");
+        assert_eq!(at(Editor::Kakoune, "kak"), "kak +12:5 '/v/n.md'");
+        assert_eq!(at(Editor::Emacs, "emacs"), "emacs -nw +12:5 '/v/n.md'");
+        assert_eq!(at(Editor::Nano, "nano"), "nano +12,5 '/v/n.md'");
+        assert_eq!(at(Editor::Micro, "micro"), "micro +12:5 '/v/n.md'");
+        let line_only = |editor, bin| line(editor, bin, "/v/n.md", Some((12, None)));
+        assert_eq!(line_only(Editor::Helix, "hx"), "hx '/v/n.md':12");
+        assert_eq!(line_only(Editor::Nano, "nano"), "nano +12 '/v/n.md'");
     }
 }

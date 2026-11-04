@@ -110,7 +110,7 @@ impl App {
                             app,
                             move |_| app.open_note_at(
                                 &path,
-                                Some(crate::sidebar::Target::Range(range.clone()))
+                                Some(crate::sidebar::Target::Range(range.clone(), Some(line)))
                             )
                         ));
                     }

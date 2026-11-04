@@ -55,8 +55,9 @@ const GIT_ICON: &str = "scm-branch-symbolic";
 /// Where in the file an activated row points, when it points at more than the file itself.
 #[derive(Clone)]
 pub enum Target {
-    /// The byte range a search hit matched.
-    Range(Range<usize>),
+    /// The byte range a search hit matched, and the 1-based line it is on where known, which a
+    /// terminal editor opens the file at.
+    Range(Range<usize>, Option<u32>),
     /// The tag a row under the Tags section was listed under. The section knows the name and not
     /// where in the note it is written, so the note itself is asked once it is open.
     Tag(String),

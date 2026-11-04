@@ -1376,7 +1376,7 @@ pub(super) fn bench_reveal(app: &Rc<App>, rel: &str) {
                     .split_whitespace()
                     .find(|w| w.len() >= 6 && w.chars().all(|c| c.is_ascii_alphabetic()))
                     .and_then(|w| on_disk.find(w).map(|at| at..at + w.len()))
-                    .map(crate::sidebar::Target::Range),
+                    .map(|at| crate::sidebar::Target::Range(at, None)),
             ),
         ] {
             let Some(target) = target else {

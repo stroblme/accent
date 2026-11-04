@@ -340,7 +340,7 @@ async fn hit_drill(app: &Rc<App>, ipynb: &str, marimo: &str) {
                 }
             }
         } else if let Some(at) = at {
-            app.open_note_at(rel, Some(sidebar::Target::Range(at)));
+            app.open_note_at(rel, Some(sidebar::Target::Range(at, None)));
         }
         let mut tab = None;
         for _ in 0..100 {
@@ -758,7 +758,7 @@ async fn text_drill(app: &Rc<App>, ipynb: &str) {
             .at
     });
     if let Some(at) = at {
-        app.open_note_at(ipynb, Some(sidebar::Target::Range(at)));
+        app.open_note_at(ipynb, Some(sidebar::Target::Range(at, None)));
     }
     let selected = app
         .doc_for(ipynb)

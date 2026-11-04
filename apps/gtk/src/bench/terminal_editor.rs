@@ -16,7 +16,9 @@ use vte4::TerminalExt as _;
 /// opens the palette over it; a key keeps a preview. `=accent`: Open in Accent's Editor on a
 /// preview ends its editor unasked, a kept tab's would ask (an `AdwAlertDialog` takes no answer
 /// under Xvfb). `=hold`, then `=back` twice on one scratch state, the holder ended between: the
-/// editor's tab comes back attached to the editor, then with the editor started again.
+/// editor's tab comes back attached to the editor, then with the editor started again. `=line`: a
+/// search hit and Go to Symbol open the editor at their line, and a hit in a file it has open
+/// brings its tab to the front without starting it again.
 pub(super) fn bench_editor(app: &Rc<App>, step: &str) {
     let (app, step) = (app.clone(), step.to_string());
     glib::spawn_future_local(async move {
@@ -26,6 +28,7 @@ pub(super) fn bench_editor(app: &Rc<App>, step: &str) {
             "open" => open(&app).await,
             "keys" => keys(&app).await,
             "accent" => accent(&app).await,
+            "line" => line(&app).await,
             "hold" => return hold(&app).await,
             "back" => return back(&app).await,
             _ => println!("bench editor unknown step {step}"),
@@ -277,6 +280,51 @@ async fn accent(app: &Rc<App>) {
         kind_of(app, "look.md"),
         app.terminals().len()
     );
+}
+
+/// The arguments the fake editor in `term` was started with, the vault's root written `<vault>`.
+fn args(app: &Rc<App>, term: &Term) -> Option<String> {
+    let root = app.root().display().to_string();
+    let line = text(term)
+        .lines()
+        .find(|l| l.starts_with("fake-editor"))?
+        .to_string();
+    Some(line.replace(&root, "<vault>"))
+}
+
+async fn line(app: &Rc<App>) {
+    let root = app.root();
+    std::fs::write(root.join("deep.md"), "# Deep\n\nthe zebrafish swims\n").unwrap();
+    std::fs::write(root.join("code.rs"), "\nfn alpha() {}\n").unwrap();
+    until(|| app.reconciled.get(), 30_000).await;
+    pick(app, Editor::Nano);
+    let hit = sidebar::Target::Range(12..21, Some(3));
+    app.open_note_at("deep.md", Some(hit));
+    let deep = started(app, "deep.md").await;
+    let hit = deep.as_ref().and_then(|term| args(app, term));
+    let symbol = accent_api::SymbolName {
+        name: "alpha".to_string(),
+        kind: accent_api::SymbolKind::Function,
+        container: None,
+        rel_path: "code.rs".to_string(),
+        line: 2,
+        end_line: 2,
+    };
+    app.goto_symbol(&symbol);
+    let code = started(app, "code.rs").await;
+    let symbol = code.as_ref().and_then(|term| args(app, term));
+    let before = starts();
+    app.open_note_at("deep.md", Some(sidebar::Target::Range(0..1, Some(1))));
+    glib::timeout_future(Duration::from_millis(500)).await;
+    let front = app.tabs().selected_page().map(|p| p.title().to_string());
+    println!(
+        "bench editor line hit={hit:?} symbol={symbol:?} again_front={front:?} again_starts={}",
+        starts() - before
+    );
+    for term in app.terminals() {
+        term.view.feed_child(b"0\n");
+    }
+    until(|| app.terminals().iter().all(|t| t.ended()), 10_000).await;
 }
 
 /// How many times a fake editor has started under this `HOME`.

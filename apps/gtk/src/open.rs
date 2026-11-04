@@ -118,6 +118,14 @@ impl App {
                     self.revealing.borrow_mut().insert(doc.key(), then);
                 }
                 (Some(Reveal::Then(run)), doc) => run(self, doc),
+                // Meant for a terminal editor and landed in accent's own: at the same place.
+                (Some(Reveal::Line(line, column)), Doc::Text(tab)) => {
+                    let column = column.unwrap_or(1);
+                    tab.goto_pos(accent_api::Pos {
+                        line: line.saturating_sub(1),
+                        character: column.saturating_sub(1),
+                    });
+                }
                 _ => {}
             }
         }
@@ -723,26 +731,29 @@ impl App {
     pub fn open_note_at(self: &Rc<Self>, rel: &str, at: Option<sidebar::Target>) {
         self.mark();
         match at {
-            Some(sidebar::Target::Range(bytes)) if doc::kind_of(rel) == Kind::Diagram => {
+            // In the terminal editor picked, at the hit's line, where the file opens in one.
+            Some(sidebar::Target::Range(_, Some(line)))
+                if self.edit_at(rel, (line, None), Opened::Preview) => {}
+            Some(sidebar::Target::Range(bytes, _)) if doc::kind_of(rel) == Kind::Diagram => {
                 self.open_label(rel, bytes.start)
             }
             // Only its bytes say whether an `.xml` is a diagram: the hit lands on the label if it
             // is one and on the text if it is not, whichever tab it opens as.
-            Some(sidebar::Target::Range(bytes)) if accent_core::path::may_be_diagram(rel) => {
+            Some(sidebar::Target::Range(bytes, _)) if accent_core::path::may_be_diagram(rel) => {
                 match self.doc_for(rel) {
                     Some(Doc::Diagram(_)) => self.open_label(rel, bytes.start),
-                    Some(_) => self.select_when_open(rel, sidebar::Target::Range(bytes)),
+                    Some(_) => self.select_when_open(rel, sidebar::Target::Range(bytes, None)),
                     None => {
                         let at = bytes.start;
                         self.revealing.borrow_mut().insert(
                             rel.to_string(),
                             Reveal::Diagram(Box::new(move |_, tab| reveal_label(tab, at))),
                         );
-                        self.select_when_open(rel, sidebar::Target::Range(bytes));
+                        self.select_when_open(rel, sidebar::Target::Range(bytes, None));
                     }
                 }
             }
-            Some(sidebar::Target::Range(bytes)) if accent_core::path::may_be_notebook(rel) => {
+            Some(sidebar::Target::Range(bytes, _)) if accent_core::path::may_be_notebook(rel) => {
                 self.open_cell(rel, bytes)
             }
             Some(sidebar::Target::Page { page, text }) => {
@@ -770,7 +781,7 @@ impl App {
                 self.reveal_page(&tab.page);
                 tab.reveal_hit(bytes);
             }
-            Some(_) => self.select_when_open(rel, sidebar::Target::Range(bytes)),
+            Some(_) => self.select_when_open(rel, sidebar::Target::Range(bytes, None)),
             None => {
                 self.revealing
                     .borrow_mut()
@@ -778,7 +789,7 @@ impl App {
                 // Only text has a tab to wait on, and only its bytes say what a `.py` is.
                 match accent_core::path::is_notebook(rel) {
                     true => self.open_preview(rel),
-                    false => self.select_when_open(rel, sidebar::Target::Range(bytes)),
+                    false => self.select_when_open(rel, sidebar::Target::Range(bytes, None)),
                 }
             }
         }
@@ -818,7 +829,7 @@ impl App {
     /// it writes it.
     fn select_when_open(self: &Rc<Self>, rel: &str, at: sidebar::Target) {
         self.with_tab(rel, Opened::Preview, "open", move |_, tab| match &at {
-            sidebar::Target::Range(bytes) => select_text_range(tab, bytes.clone()),
+            sidebar::Target::Range(bytes, _) => select_text_range(tab, bytes.clone()),
             sidebar::Target::Tag(name) => tab.goto_tag(name),
             // A PDF's, which has no text tab: `open_note_at` takes it.
             sidebar::Target::Page { .. } => {}
@@ -1288,7 +1299,7 @@ impl App {
     }
 
     /// Give a tab picked in the palette the keyboard, wherever the palette gave it back to.
-    fn focus_picked(&self, page: &adw::TabPage, how: Opened) {
+    pub(crate) fn focus_picked(&self, page: &adw::TabPage, how: Opened) {
         if how == Opened::Picked
             && let Some(pane) = self.pane_of(page)
         {
@@ -1340,6 +1351,8 @@ pub enum Reveal {
     NotebookHit(std::ops::Range<usize>),
     NotebookFilePos(accent_api::Pos),
     Then(OnDoc),
+    /// The 1-based line and column a terminal editor opens the file at ([`App::edit_at`]).
+    Line(u32, Option<u32>),
 }
 
 /// A notebook opened as JSON needs its indexed source offset translated to the JSON spelling.

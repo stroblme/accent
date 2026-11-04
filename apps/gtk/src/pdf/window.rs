@@ -99,7 +99,7 @@ impl App {
             #[weak(rename_to = app)]
             self,
             // A zero-length range: the caret goes to the `[[`, nothing is selected.
-            move |rel, at| app.open_note_at(rel, Some(sidebar::Target::Range(at..at)))
+            move |rel, at| app.open_note_at(rel, Some(sidebar::Target::Range(at..at, None)))
         ));
         pdf.connect_save_failed(glib::clone!(
             #[weak(rename_to = app)]

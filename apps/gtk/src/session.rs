@@ -299,8 +299,11 @@ impl App {
     }
 
     /// Open the file a declaration is in, as Go to File does, with the caret on its name.
-    fn goto_symbol(self: &Rc<Self>, symbol: &SymbolName) {
+    pub(crate) fn goto_symbol(self: &Rc<Self>, symbol: &SymbolName) {
         self.mark();
+        if self.edit_at(&symbol.rel_path, (symbol.line, None), Opened::Picked) {
+            return;
+        }
         let name = symbol.name.clone();
         let (first, last) = (
             symbol.line.saturating_sub(1),
