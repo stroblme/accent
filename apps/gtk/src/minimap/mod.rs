@@ -1,7 +1,7 @@
 //! A document map replacing the vertical scrollbar (`Tab::set_minimap`).
 //!
 //! Clicks centre a line; dragging the visible band or scrolling moves the view without
-//! moving the caret. Colours match editor emphasis and preserve comparison tints.
+//! moving the caret. Colours match editor emphasis and preserve conflict tints.
 //!
 //! GtkSourceMap duplicates layout and has band, adjustment and hidden-text issues (ISSUES.md).
 //! [`model`] estimates rows from line text and places the band using visible lines.
@@ -705,7 +705,7 @@ fn measure(buffer: &gtk::TextBuffer, at: usize) -> Line {
 }
 
 /// The row tint of the line starting at `start`: the paragraph background of its highest-priority
-/// tag that sets one, which is a comparison's, a merge's or a conflict block's.
+/// tag that sets one, which is a conflict block's: a comparison or a merge hides the map.
 fn tint(start: &gtk::TextIter) -> Option<gdk::RGBA> {
     start
         .tags()

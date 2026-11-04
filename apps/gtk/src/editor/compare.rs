@@ -93,6 +93,9 @@ pub(super) struct Comparing {
     /// The Line Numbers preference, which the editor's numbers go back to when the comparison
     /// does: both columns show theirs meanwhile.
     pub(super) numbers: bool,
+    /// The Minimap preference, which comes back with the editor alone: the columns have no
+    /// room for it, so the scrollbar stands in meanwhile.
+    pub(super) minimap: bool,
 }
 
 /// Build a read-only companion matching the editor's rendering. Use `name`
@@ -275,6 +278,8 @@ impl Tab {
         // 2026-11-03), so their gutters are as wide and the rows level.
         let numbers = self.numbers.is_visible();
         self.numbers.set_visible(true);
+        let minimap = self.map.is_visible();
+        self.show_minimap(false);
         let close = gtk::Button::from_icon_name("window-close-symbolic");
         close.add_css_class("flat");
         close.add_css_class("chrome-fade");
@@ -332,6 +337,7 @@ impl Tab {
             answers: None,
             shut,
             numbers,
+            minimap,
         });
         self.show_chevrons();
         self.update_sticky();
@@ -368,6 +374,7 @@ impl Tab {
         };
         comparing.hosted.leave();
         self.numbers.set_visible(comparing.numbers);
+        self.show_minimap(comparing.minimap);
         self.shut_again(comparing.shut);
         self.show_chevrons();
         // The gap tags went with it, so the messages the collapsed lines were keeping quiet about

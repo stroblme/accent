@@ -1183,8 +1183,8 @@ pub(in crate::bench) fn bench_compare_press(app: &Rc<App>, rel: &str) {
 /// <y>` for XTEST.
 ///
 /// Input steps: wheel `"move <x> <y>; focus; scroll -3"`; page `"move <x> <y>; focus; down; up;
-/// key Page_Down"`; bar/map `"move <x> <y>; sleep 0.1; down; move <x> <y+100>; up"`;
-/// end/end_animated `"move <x> <y>; focus; key ctrl+End"`. The map case enables the minimap.
+/// key Page_Down"`; bar `"move <x> <y>; sleep 0.1; down; move <x> <y+100>; up"`;
+/// end/end_animated `"move <x> <y>; focus; key ctrl+End"`.
 ///
 /// Expected `kept=true` at input, `back=false`, and settled `got` matching `asked`; end cases
 /// retain the caret with `caret_shown=true`. Only end_animated enables animations. Allow 10 s
@@ -1214,22 +1214,13 @@ pub(in crate::bench) fn bench_compare_reader(app: &Rc<App>, rel: &str) {
         tab.set_text(&text(true));
         // Where the comparison ends up when only its own scrolls move it: the drill's round.
         let mut opens = None;
-        for what in [
-            "drill",
-            "wheel",
-            "page",
-            "bar",
-            "map",
-            "end",
-            "end_animated",
-        ] {
+        for what in ["drill", "wheel", "page", "bar", "end", "end_animated"] {
             // A key's scroll made at once rather than over the frames after it, but in the round
             // that has GTK animate it.
             if let Some(settings) = gtk::Settings::default() {
                 settings.set_gtk_enable_animations(what == "end_animated");
             }
             tab.leave_compare();
-            tab.set_minimap(what == "map");
             if let Some(adj) = tab.view.vadjustment() {
                 adj.set_value(0.0);
             }
@@ -1287,17 +1278,12 @@ async fn reader(
         adj.set_value(adj.value() + adj.page_size() / 2.0);
         asked.replace(Some((adj.value(), text_top(&view))));
     } else {
-        // Over the editor's column, at the right edge of the other column, where its scrollbar
-        // is, or over the minimap.
-        let map = || find_widget(compare.widget(), &|w| w.is::<crate::minimap::Minimap>());
-        let (target, x, y) = match (what, theirs.parent(), map()) {
-            ("bar", Some(scroller), _) => {
+        // Over the editor's column, or at the right edge of the other column, where its
+        // scrollbar is.
+        let (target, x, y) = match (what, theirs.parent()) {
+            ("bar", Some(scroller)) => {
                 let (w, h) = (scroller.width(), scroller.height());
                 (scroller, w - 4, h * 3 / 10)
-            }
-            ("map", _, Some(map)) => {
-                let (w, h) = (map.width(), map.height());
-                (map, w / 2, h * 3 / 10)
             }
             _ => (view.clone().upcast(), view.width() / 2, view.height() / 2),
         };

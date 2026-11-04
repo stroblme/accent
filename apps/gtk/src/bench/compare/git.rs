@@ -129,8 +129,8 @@ pub(in crate::bench) fn bench_compare_row(app: &Rc<App>, rel: &str) {
                     bench_compare_line(&compare)
                 );
                 println!("bench compare_row tops {}", bench_tops(&compare));
-                // The minimap, switched on over the comparison, follows the scroll both columns
-                // share, and the editor's own once the comparison is left.
+                // The minimap, switched on over the comparison, stays hidden while it is up
+                // (`map=None`), and follows the editor's own scroll once it is left.
                 tab.set_minimap(true);
                 wait(300).await;
                 let map = bench_map(tab);

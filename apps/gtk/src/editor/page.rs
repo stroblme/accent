@@ -559,9 +559,18 @@ impl Tab {
         painted_cursor(&self.numbers)
     }
 
+    /// Turn the Minimap preference on or off for this tab.
+    pub fn set_minimap(&self, on: bool) {
+        match self.comparing.borrow_mut().as_mut() {
+            // Kept for when the comparison goes, whose columns have no room for it meanwhile.
+            Some(comparing) => comparing.minimap = on,
+            None => self.show_minimap(on),
+        }
+    }
+
     /// Replace the scrollbar with the minimap so the document does not lose
     /// width to both.
-    pub fn set_minimap(&self, on: bool) {
+    pub(super) fn show_minimap(&self, on: bool) {
         self.map.set_visible(on);
         let vertical = match on {
             true => gtk::PolicyType::External,

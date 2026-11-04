@@ -13,7 +13,7 @@ pub struct Line {
     pub chars: u32,
     /// A heading's text scale, which wraps it sooner; 1.0 for everything else.
     pub scale: f32,
-    /// Hidden by a fold or a comparison's collapsed run: no rows at all.
+    /// Hidden by a fold: no rows at all.
     pub hidden: bool,
     /// The fewest rows the line takes: a heading's label needs more than one.
     pub min_rows: u32,

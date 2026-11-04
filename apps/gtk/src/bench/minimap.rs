@@ -15,15 +15,15 @@ const XTEST: Duration = Duration::from_secs(10);
 /// and enables the minimap. Available rounds:
 ///
 /// - `band`: compare view and band line ranges at four scroll positions, folded,
-///   unwrapped, at 150% zoom and in collapsed/expanded comparisons. `ok` requires
-///   equal ranges and a band inside the map.
+///   unwrapped, at 150% zoom and after a comparison, which hides the map while it is up.
+///   `ok` requires equal ranges and a band inside the map.
 /// - `jump`: press at 70% map height, then request XTEST input at `aim <x> <y>` (30%).
 ///   The target line must settle in the middle third, or remain visible at the end.
 /// - `drag`: move the band 40, 120 and -60 px, then 80% map height; require pointer
 ///   tracking within a row. `aim <x> <y> <dy>` requests an equivalent XTEST drag.
 /// - `look`: write `minimap-<theme>-<what>.png` in the working directory for light/dark
-///   headings (at rest and with the band held), a short note, comparison hunks and a
-///   generated code file.
+///   headings (at rest and with the band held), a short note, a comparison (which hides the
+///   map) and a generated code file.
 /// - `frames`: scroll a quarter-page per frame for [`STEPS`], map off/on, three rounds.
 ///   Report median/worst `paint_ms` (layout end to paint end), `frame_ms` (whole frame)
 ///   and `paint_cpu_ms` (main-thread painting CPU, excluding scheduling delays).
@@ -116,28 +116,13 @@ async fn band(app: &Rc<App>, tab: &Rc<Tab>, map: &Minimap) {
     say_band(tab, map, "zoomed");
     tab.set_font(None, 1.0);
 
-    let Some(compare) = compared(app, tab).await else {
-        println!("bench minimap band compare=none");
-        return;
-    };
-    for (at, frac) in [("compare_top", 0.0), ("compare_half", 0.5)] {
-        scroll(tab, frac).await;
-        say_band(tab, map, at);
-    }
-    let all = find_widget(compare.widget(), &|w| {
-        w.is::<gtk::ToggleButton>()
-            && w.tooltip_text().as_deref() == Some("Show All Unchanged Lines")
-    });
-    match all.and_downcast::<gtk::ToggleButton>() {
-        Some(all) => {
-            all.set_active(true);
-            glib::timeout_future(Duration::from_secs(1)).await;
-            scroll(tab, 0.5).await;
-            say_band(tab, map, "compare_all");
-        }
-        None => println!("bench minimap band show_all=none"),
-    }
+    // A comparison hides the map, and leaving it brings the map back.
+    let hidden = compared(app, tab).await.map(|_| !map.is_visible());
     tab.leave_compare();
+    glib::timeout_future(FRAME).await;
+    scroll(tab, 0.5).await;
+    println!("bench minimap band compare_hidden={hidden:?}");
+    say_band(tab, map, "compare_left");
 }
 
 /// The note compared with its disk copy, every fortieth of its 1200 lines changed, once the

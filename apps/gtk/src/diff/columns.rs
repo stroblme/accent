@@ -199,7 +199,7 @@ pub(super) fn reaching<T>(
 
 /// Release [`Columns::keep`] on reader scroll input and hold the resulting top line instead.
 ///
-/// Capture wheel, paging, Home/End and scrollbar/minimap presses before movement. Hold after
+/// Capture wheel, paging, Home/End and scrollbar presses before movement. Hold after
 /// the wheel, validated key scroll or press release; Home/End use the caret. Programmatic
 /// adjustment changes emit none of these inputs, so they cannot cancel their own hold.
 fn let_go_on_input(root: &gtk::Widget, columns: &Weak<Columns>) {
@@ -231,18 +231,14 @@ fn let_go_on_input(root: &gtk::Widget, columns: &Weak<Columns>) {
         glib::Propagation::Proceed
     });
     root.add_controller(keys);
-    // A drag on the scrollbar or the minimap claims the press, so its release is heard as an
-    // event rather than by a gesture.
+    // A drag on the scrollbar claims the press, so its release is heard as an event rather than
+    // by a gesture.
     let dragged = Rc::new(Cell::new(false));
     let press = gtk::GestureClick::new();
     press.set_propagation_phase(gtk::PropagationPhase::Capture);
     let (w, drag) = (columns.clone(), dragged.clone());
     press.connect_pressed(move |press, _, x, y| {
-        let bar = |w: gtk::Widget| {
-            w.ancestor(gtk::Scrollbar::static_type())
-                .or_else(|| w.ancestor(crate::minimap::Minimap::static_type()))
-                .is_some()
-        };
+        let bar = |w: gtk::Widget| w.ancestor(gtk::Scrollbar::static_type()).is_some();
         let picked = press
             .widget()
             .and_then(|w| w.pick(x, y, gtk::PickFlags::DEFAULT));
