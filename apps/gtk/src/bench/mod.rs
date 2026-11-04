@@ -46,6 +46,7 @@ mod pdf_picture;
 mod pdf_remote;
 mod pdf_select;
 mod pdf_text;
+mod pdf_zoom;
 mod present;
 mod preview;
 mod quickfix;
@@ -239,6 +240,7 @@ use user_commands::bench_commands;
 ///   `strip:<rel_path>` (40 s XTEST hover/drag),
 ///   `bookmarks:<rel_path>[,<rel_diagram>]` (outline following),
 ///   `render:<rel_path>` (tiles/thumbnail bursts; hundreds of heavy pages),
+///   `zoom:<rel_path>[,<shot_directory>]` (immediate zoom quality and time to sharp tiles),
 ///   `broken:<rel_path or absolute path>` (truncation/recovery; scratch file),
 ///   `deep:<rel_path>[,<percent>]` (800% default; a few text pages),
 ///   `synctex:<rel_path>` (source/PDF round trip; scratch LaTeX `-synctex=1`
@@ -644,6 +646,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("render:") {
                 return bench_pdf_render(&app, rel);
+            }
+            if let Some(arg) = rel.strip_prefix("zoom:") {
+                return pdf_zoom::run(&app, arg);
             }
             if let Some(arg) = rel.strip_prefix("broken:") {
                 return bench_pdf_broken(&app, arg);

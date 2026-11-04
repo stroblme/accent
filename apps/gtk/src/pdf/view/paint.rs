@@ -42,6 +42,8 @@ impl imp::PdfView {
         let (mut wanted, mut ahead): (Vec<Want>, Vec<Want>) = (Vec::new(), Vec::new());
         #[cfg(feature = "bench")]
         let mut unsharp = 0;
+        #[cfg(feature = "bench")]
+        let mut reused = 0;
         let cache = obj.cache();
         let marks = self.marks.borrow();
         let highlights = self.highlights.borrow();
@@ -83,6 +85,7 @@ impl imp::PdfView {
             // screen has not, which paints it.
             let (mut missing, mut blank) = (false, false);
             let mut tiles = Vec::new();
+            let mut holes = Vec::new();
             let refreshing = self.stale_pages.borrow_mut().remove(&page);
             if !thumbnails {
                 let device_w = (rect.w * sf as f32).round() as i32;
@@ -137,6 +140,9 @@ impl imp::PdfView {
                             None => {
                                 missing = true;
                                 blank |= on;
+                                if on {
+                                    holes.push(key);
+                                }
                                 #[cfg(feature = "bench")]
                                 {
                                     unsharp += usize::from(on);
@@ -170,11 +176,41 @@ impl imp::PdfView {
                 }
                 _ => {}
             }
+            // Keep the previous zoom's detail until each replacement arrives. Clip each hole
+            // so a scaled fallback never softens a tile already rendered at this zoom.
+            let sf = sf as f32;
+            let stale = self.stale_tiles.borrow();
+            base.push_clip(&bounds);
+            for key in holes {
+                let area = graphene::Rect::new(
+                    f32::from(key.tx) * TILE as f32,
+                    f32::from(key.ty) * TILE as f32,
+                    TILE as f32,
+                    TILE as f32,
+                );
+                let logical = |r: graphene::Rect| {
+                    graphene::Rect::new(r.x() / sf, r.y() / sf, r.width() / sf, r.height() / sf)
+                };
+                base.push_clip(&logical(area));
+                for (old, texture) in cache.borrow_mut().fallbacks(key, &area) {
+                    if !stale.contains(&old) {
+                        #[cfg(feature = "bench")]
+                        {
+                            reused += 1;
+                        }
+                        let rect = logical(old.bounds_at(&texture, scale_milli));
+                        base.append_scaled_texture(&texture, gsk::ScalingFilter::Linear, &rect);
+                    }
+                }
+                base.pop();
+            }
+            base.pop();
+            drop(stale);
             for (tx, ty, texture) in tiles {
-                let x = rect.x + (tx * TILE) as f32 / sf as f32;
-                let y = rect.y + (ty * TILE) as f32 / sf as f32;
-                let w = texture.width() as f32 / sf as f32;
-                let h = texture.height() as f32 / sf as f32;
+                let x = rect.x + (tx * TILE) as f32 / sf;
+                let y = rect.y + (ty * TILE) as f32 / sf;
+                let w = texture.width() as f32 / sf;
+                let h = texture.height() as f32 / sf;
                 base.append_texture(&texture, &graphene::Rect::new(x, y, w, h));
             }
             // Under the highlights and the selection, as in the tile that will carry them.
@@ -274,6 +310,8 @@ impl imp::PdfView {
         self.unrendered.replace(wanted.clone());
         #[cfg(feature = "bench")]
         self.unsharp.set(unsharp);
+        #[cfg(feature = "bench")]
+        self.reused.set(reused);
         if !wanted.is_empty() && (self.asked_for.get() != stamp || *self.asked.borrow() != wanted) {
             self.asked_for.set(stamp);
             *self.asked.borrow_mut() = wanted.clone();

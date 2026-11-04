@@ -2,7 +2,7 @@
 
 use accent_core::pdf::Theme;
 use adw::prelude::*;
-use gtk::{gdk, glib};
+use gtk::{gdk, glib, graphene};
 use std::collections::HashMap;
 use std::ops::Range;
 
@@ -30,6 +30,23 @@ pub struct TileKey {
     pub tx: u16,
     pub ty: u16,
     pub theme: Theme,
+}
+
+impl TileKey {
+    /// This tile's bounds at another render scale, on the device pixel grid.
+    pub fn bounds_at(&self, texture: &gdk::MemoryTexture, scale_milli: u32) -> graphene::Rect {
+        let ratio = scale_milli as f32 / self.scale_milli as f32;
+        let x = f32::from(self.tx) * TILE as f32;
+        let y = f32::from(self.ty) * TILE as f32;
+        let left = (x * ratio).round();
+        let top = (y * ratio).round();
+        graphene::Rect::new(
+            left,
+            top,
+            ((x + texture.width() as f32) * ratio).round() - left,
+            ((y + texture.height() as f32) * ratio).round() - top,
+        )
+    }
 }
 
 /// LRU texture cache with separate budgets for zoom-specific tiles and fixed-size stand-ins that
@@ -64,6 +81,44 @@ impl Cache {
         let (texture, used) = self.tiles.get_mut(key)?;
         *used = tick;
         Some(texture.clone())
+    }
+
+    /// Existing detail under a missing tile, worst scale first so the closest paints last.
+    /// A tie favours downsampling. Only intersecting tiles count as used.
+    pub fn fallbacks(
+        &mut self,
+        wanted: TileKey,
+        bounds: &graphene::Rect,
+    ) -> Vec<(TileKey, gdk::MemoryTexture)> {
+        self.tick += 1;
+        let mut found: Vec<_> = self
+            .tiles
+            .iter_mut()
+            .filter_map(|(key, (texture, used))| {
+                if key.page != wanted.page
+                    || key.theme != wanted.theme
+                    || key.scale_milli == wanted.scale_milli
+                    || key
+                        .bounds_at(texture, wanted.scale_milli)
+                        .intersection(bounds)
+                        .is_none()
+                {
+                    return None;
+                }
+                *used = self.tick;
+                Some((*key, texture.clone()))
+            })
+            .collect();
+        let quality = |key: TileKey| {
+            let (a, b) = (key.scale_milli, wanted.scale_milli);
+            a.min(b) as f64 / a.max(b) as f64
+        };
+        found.sort_unstable_by(|(a, _), (b, _)| {
+            quality(*a)
+                .total_cmp(&quality(*b))
+                .then(a.scale_milli.cmp(&b.scale_milli))
+        });
+        found
     }
 
     pub fn insert(&mut self, key: TileKey, texture: gdk::MemoryTexture, bytes: usize) {
@@ -171,6 +226,9 @@ fn drop_oldest<K: Copy + Eq + std::hash::Hash>(
     bytes: usize,
     budget: usize,
 ) -> usize {
+    if bytes <= budget {
+        return 0;
+    }
     let used = map
         .iter()
         .map(|(key, (texture, tick))| (*tick, bytes_of(texture), *key))
@@ -269,6 +327,66 @@ pub(super) fn tiles_within(origin: f32, span: (f64, f64), sf: i32, count: i32) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zoom_fallbacks_keep_detail_and_respect_page_and_theme() {
+        let mut cache = Cache::default();
+        let key = TileKey {
+            page: 0,
+            scale_milli: 2000,
+            tx: 0,
+            ty: 0,
+            theme: Theme::Plain,
+        };
+        let image = || {
+            texture(accent_core::pdf::RgbaImage {
+                width: 512,
+                height: 512,
+                data: vec![255; 512 * 512 * 4],
+            })
+        };
+        for scale_milli in [1000, 2000, 4000] {
+            cache.insert(TileKey { scale_milli, ..key }, image(), 512 * 512 * 4);
+        }
+        let bounds = graphene::Rect::new(0.0, 0.0, 256.0, 256.0);
+        let tile = image();
+        for scale in [900, 1250, 2667, 8000] {
+            let left = key.bounds_at(&tile, scale);
+            let right = TileKey { tx: 1, ..key }.bounds_at(&tile, scale);
+            assert_eq!(left.x() + left.width(), right.x(), "no seam at {scale}");
+        }
+        let fallbacks = cache.fallbacks(key, &bounds);
+        assert_eq!(
+            fallbacks
+                .iter()
+                .map(|(k, _)| k.scale_milli)
+                .collect::<Vec<_>>(),
+            vec![1000, 4000]
+        );
+        assert!(
+            cache
+                .fallbacks(TileKey { page: 1, ..key }, &bounds)
+                .is_empty()
+        );
+        assert!(
+            cache
+                .fallbacks(
+                    TileKey {
+                        theme: Theme::Recolour {
+                            paper: [0; 3],
+                            ink: [255; 3]
+                        },
+                        ..key
+                    },
+                    &bounds
+                )
+                .is_empty()
+        );
+        let elsewhere = graphene::Rect::new(1024.0, 1024.0, 512.0, 512.0);
+        assert!(cache.fallbacks(key, &elsewhere).is_empty());
+        cache.forget_page_except(0, 2000, Theme::Plain);
+        assert!(cache.fallbacks(key, &bounds).is_empty());
+    }
 
     #[test]
     fn tiles_cover_the_page_including_a_partial_last_one() {

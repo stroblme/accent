@@ -162,7 +162,7 @@ impl PdfView {
         self.imp().theme.get()
     }
 
-    /// Take a rendered tile. Ignored if the document has moved on from the scale it was for.
+    /// Take a rendered tile, keeping earlier zoom levels available as fallbacks.
     pub fn insert_tile(&self, key: TileKey, texture: gdk::MemoryTexture, bytes: usize) {
         self.imp().stale_tiles.borrow_mut().remove(&key);
         // A hidden view has let its tiles go, and these were asked for before it was hidden.
@@ -821,6 +821,18 @@ impl PdfView {
     pub fn unsharp(&self) -> usize {
         self.imp().unsharp.get()
     }
+
+    /// Capture a zoom before the main loop can deliver replacement tiles.
+    #[cfg(feature = "bench")]
+    pub fn zoom_frame(&self) -> (Option<gtk::gsk::RenderNode>, usize, usize) {
+        let snapshot = gtk::Snapshot::new();
+        self.imp().paint(&snapshot);
+        (
+            snapshot.to_node(),
+            self.imp().unsharp.get(),
+            self.imp().reused.get(),
+        )
+    }
 }
 
 mod imp {
@@ -947,6 +959,8 @@ mod imp {
         /// How many tiles on screen the last frame showed other than sharp.
         #[cfg(feature = "bench")]
         pub unsharp: Cell<usize>,
+        #[cfg(feature = "bench")]
+        pub reused: Cell<usize>,
         /// The points of every stroke the pen has finished, as the gesture took them.
         #[cfg(feature = "bench")]
         pub drawn: Cell<usize>,
@@ -1027,6 +1041,8 @@ mod imp {
                 unrendered: RefCell::new(Vec::new()),
                 #[cfg(feature = "bench")]
                 unsharp: Cell::new(0),
+                #[cfg(feature = "bench")]
+                reused: Cell::new(0),
                 #[cfg(feature = "bench")]
                 drawn: Cell::new(0),
                 #[cfg(feature = "bench")]

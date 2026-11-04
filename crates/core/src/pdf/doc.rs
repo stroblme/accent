@@ -8,7 +8,7 @@
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use super::cos::Objects;
 use super::refused;
@@ -27,6 +27,9 @@ pub struct PdfDoc {
     // `Option` only so that `Drop` can close the document while still holding `CALLS`; it is
     // `Some` for the whole life of the value.
     doc: Option<PdfDocument<'static>>,
+    /// The last page rendered, retaining its parsed paths and decoded images across tiles.
+    /// Closed under CALLS before the document is replaced or dropped.
+    rendered: Mutex<Option<(usize, PdfPage<'static>)>>,
     /// The file the document was read from, and what it looked like when it was opened; `None`
     /// for a document read from bytes. See [`PdfDoc::intact`].
     file: Option<(Arc<File>, Etag)>,
@@ -43,6 +46,10 @@ pub struct PdfDoc {
 impl Drop for PdfDoc {
     fn drop(&mut self) {
         let _guard = lock();
+        self.rendered
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
         drop(self.doc.take());
     }
 }
@@ -171,6 +178,7 @@ impl PdfDoc {
         };
         let mut made = PdfDoc {
             doc: Some(doc),
+            rendered: Mutex::new(None),
             file,
             base_len: base.size(),
             base,
@@ -203,6 +211,10 @@ impl PdfDoc {
             .load_pdf_from_reader(tail, None)
             .map_err(refused("read the edited pdf"))?;
         // The document it replaces is closed here, under the lock.
+        self.rendered
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
         self.doc = Some(doc);
         self.section = section;
         Ok(())
@@ -222,6 +234,24 @@ impl PdfDoc {
             .pages()
             .get(page as PdfPageIndex)
             .map_err(|e| Error::Pdf(format!("page {page}: {e:?}")))
+    }
+
+    /// Keep one parsed page across renders, under the same lock as every pdfium operation.
+    /// Other readers load their own pages without evicting the one being drawn.
+    fn rendering<T>(&self, page: usize, draw: impl FnOnce(&PdfPage<'_>) -> Result<T>) -> Result<T> {
+        let _guard = lock();
+        let mut rendered = self.rendered.lock().unwrap_or_else(|e| e.into_inner());
+        if rendered.as_ref().is_none_or(|(at, _)| *at != page) {
+            // Release a large page before loading another one.
+            rendered.take();
+            let loaded = self
+                .doc()
+                .pages()
+                .get(page as PdfPageIndex)
+                .map_err(|e| Error::Pdf(format!("page {page}: {e:?}")))?;
+            *rendered = Some((page, loaded));
+        }
+        draw(&rendered.as_ref().expect("page loaded above").1)
     }
 
     /// Page width and height in points without loading its content. `FPDF_GetPageSizeByIndexF`
@@ -252,21 +282,20 @@ impl PdfDoc {
 
     /// Render one page at `scale` pixels per point.
     pub fn render_page(&self, page: usize, scale: f32, theme: Theme) -> Result<RgbaImage> {
-        let (width, height, mut data) = {
-            let _guard = lock();
-            let p = self.page(page)?;
+        let (width, height, mut data) = self.rendering(page, |p| {
             let config = PdfRenderConfig::new()
                 .scale_page_by_factor(scale)
+                .limit_render_image_cache_size(true)
                 .render_annotations(true);
             let bitmap = p
                 .render_with_config(&config)
                 .map_err(|e| Error::Pdf(format!("render page {page}: {e:?}")))?;
-            (
+            Ok((
                 bitmap.width() as u32,
                 bitmap.height() as u32,
                 bitmap.as_rgba_bytes(),
-            )
-        };
+            ))
+        })?;
         // Outside the lock on purpose: the theme pass costs about as much as the render itself
         // and touches nothing but our own buffer, so it must not block other pdfium callers.
         if let Theme::Recolour { paper, ink } = theme {
@@ -298,9 +327,7 @@ impl PdfDoc {
         h: i32,
         theme: Theme,
     ) -> Result<RgbaImage> {
-        let (width, height, mut data) = {
-            let _guard = lock();
-            let p = self.page(page)?;
+        let (width, height, mut data) = self.rendering(page, |p| {
             let page_w = (p.width().value * scale).round() as i32;
             let page_h = (p.height().value * scale).round() as i32;
             let (w, h) = (w.min(page_w - x), h.min(page_h - y));
@@ -313,13 +340,14 @@ impl PdfDoc {
             let config = PdfRenderConfig::new()
                 .scale_page_by_factor(scale)
                 .set_origin(-x, -y)
+                .limit_render_image_cache_size(true)
                 .render_annotations(true);
             let mut bitmap = PdfBitmap::empty(w, h, PdfBitmapFormat::BGRA)
                 .map_err(|e| Error::Pdf(format!("tile bitmap {w}x{h}: {e:?}")))?;
             p.render_into_bitmap_with_config(&mut bitmap, &config)
                 .map_err(|e| Error::Pdf(format!("render tile of page {page}: {e:?}")))?;
-            (w as u32, h as u32, bitmap.as_rgba_bytes())
-        };
+            Ok((w as u32, h as u32, bitmap.as_rgba_bytes()))
+        })?;
         if let Theme::Recolour { paper, ink } = theme {
             recolour(&mut data, paper, ink);
         }

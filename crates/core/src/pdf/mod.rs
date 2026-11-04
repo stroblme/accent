@@ -101,8 +101,8 @@ pub fn available() -> bool {
 // Pdfium is not thread-safe; its authors recommend parallel *processes*, not threads. pdfium-render
 // 0.9.4's `thread_safe` puts each call behind a process-wide mutex of its own (0.9.0 to 0.9.3 only
 // added `Send`/`Sync`, and two threads touching pdfium aborted with `free(): invalid size`). One
-// call at a time is not one operation at a time, though: a tile is a page loaded, drawn and
-// closed, and pdfium's last error and pdfium-render's page cache are shared by every document. So
+// call at a time is not one operation at a time, though: a tile loads or reuses a page, draws it
+// and copies its bitmap, and pdfium's last error and pdfium-render's page cache are shared. So
 // every entry point below still holds this lock for the whole operation, closing a document
 // included; the reader pdfium calls back into (`doc::Tail`) takes neither lock.
 //

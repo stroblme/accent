@@ -139,6 +139,37 @@ fn render_tile_matches_the_full_render() {
     );
 }
 
+/// A retained render page must follow edits, and switching pages must not reuse another page's
+/// content. Compare with a fresh reader of the saved bytes after each change.
+#[test]
+fn rendered_pages_follow_edits_and_page_switches() {
+    let Some((_dir, mut doc)) = open_tiny() else {
+        return;
+    };
+    let render = |doc: &PdfDoc, page| {
+        doc.render_tile(page, 2.0, 0, 0, 400, 200, Theme::Plain)
+            .unwrap()
+            .data
+    };
+    let before = render(&doc, 0);
+    let style = InkStyle {
+        width: 5.0,
+        rgba: [255, 0, 0, 255],
+        multiply: false,
+    };
+    let (_, at) = doc
+        .add_ink(0, &[(20.0, 20.0), (80.0, 20.0)], style, 1.0)
+        .unwrap();
+    let after = render(&doc, 0);
+    assert_ne!(before, after);
+    let fresh = PdfDoc::from_bytes(doc.save().unwrap()).unwrap();
+    assert_eq!(after, render(&fresh, 0));
+    assert_eq!(render(&doc, 1), render(&fresh, 1));
+    assert_eq!(after, render(&doc, 0));
+    doc.take_ink(0, at).unwrap();
+    assert_eq!(before, render(&doc, 0));
+}
+
 #[test]
 fn links_read_dest_and_uri() {
     let Some((_d, doc)) = open_tiny_with(true) else {
