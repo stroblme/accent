@@ -365,6 +365,10 @@ pub struct Picked {
     pub bounds: accent_core::pdf::Rect,
     pub style: accent_core::pdf::InkStyle,
     pub kind: Kind,
+    /// Whether a recolour reaches it: a text, a stroke of ours, and another editor's stroke the
+    /// partial eraser would cut, which a recolour draws again as ours. A picture keeps its
+    /// colours, and so does a stroke the eraser takes whole.
+    pub recolourable: bool,
 }
 
 impl Picked {
@@ -376,6 +380,7 @@ impl Picked {
             bounds: ink.bounds,
             style: ink.style,
             kind: Kind::Stroke,
+            recolourable: ink.cuttable,
         }
     }
 
@@ -398,6 +403,7 @@ impl Picked {
                 multiply: false,
             },
             kind: Kind::Picture,
+            recolourable: false,
         }
     }
 
@@ -414,7 +420,14 @@ impl Picked {
                 multiply: false,
             },
             kind: Kind::Text,
+            recolourable: true,
         }
+    }
+
+    /// The colour a recolour changes, for one it reaches.
+    pub fn colour(&self) -> Option<[u8; 3]> {
+        let [r, g, b, _] = self.style.rgba;
+        self.recolourable.then_some([r, g, b])
     }
 
     /// Where `m` takes it, as the render thread will draw it: a stroke and a picture whole, a
@@ -686,6 +699,7 @@ mod tests {
             bounds: Rect::from_corners((10.0, 20.0), (50.0, 60.0)),
             style,
             kind: Kind::Stroke,
+            recolourable: true,
         };
         let text = Picked {
             id: 2,
@@ -693,6 +707,7 @@ mod tests {
             bounds: Rect::from_corners((60.0, 40.0), (90.0, 60.0)),
             style,
             kind: Kind::Text,
+            recolourable: true,
         };
         let selection = Selection::of(0, vec![stroke, text]);
         let b = selection.bounds();

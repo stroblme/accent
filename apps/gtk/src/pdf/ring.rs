@@ -1,4 +1,5 @@
-//! PDF drawing-ring options for width, colour and eraser mode, stored in config.
+//! PDF drawing-ring options for width, colour and eraser mode, stored in config, and the Select
+//! tool's commands, whose Colour recolours what it holds.
 
 use adw::prelude::*;
 use gtk::glib;
@@ -14,6 +15,9 @@ use crate::ring::{Ring, dot};
 
 /// Told which tool was in hand and what was picked for it.
 type OnChoice = Box<dyn Fn(Mode, Choice)>;
+
+/// Told which swatch was picked for what the Select tool holds, `None` being the accent.
+type OnRecolour = Box<dyn Fn(Option<[u8; 3]>)>;
 
 /// The eraser's two ways, on the first two of the slots the other tools give their colours to:
 /// whole strokes, or only what it passes over.
@@ -78,6 +82,15 @@ pub struct PdfRing {
     commands: Vec<gtk::Button>,
     picked: Cell<bool>,
     pasteable: Cell<bool>,
+    /// Select's Colour command, on the slot before its first, and the six swatches it puts on the
+    /// commands' slots in their place, for what Select holds.
+    colour: gtk::ToggleButton,
+    recolours: Vec<gtk::ToggleButton>,
+    /// The colours of what Select holds that a recolour reaches, one each: whether Colour shows,
+    /// and which swatch is checked.
+    colours: RefCell<Vec<[u8; 3]>>,
+    /// Whether the swatches are out in place of the commands.
+    choosing: Cell<bool>,
     config: RefCell<DrawingConfig>,
     /// The document's recolouring, which the swatches are painted through.
     theme: Rc<Cell<Theme>>,
@@ -86,6 +99,7 @@ pub struct PdfRing {
     /// Whether the pen's eraser end is at the page, which the ring shows in place of the tool.
     eraser: Cell<bool>,
     on_choice: RefCell<Option<OnChoice>>,
+    on_recolour: RefCell<Option<OnRecolour>>,
 }
 
 impl PdfRing {
@@ -93,7 +107,9 @@ impl PdfRing {
     pub fn new() -> Rc<PdfRing> {
         let ring = Ring::<Mode>::new();
         let theme = Rc::new(Cell::new(Theme::Plain));
-        // Nine slots outside the tools: the widths at the top, the colours after them.
+        // Nine slots outside the tools: the widths at the top, the colours after them. Select's
+        // commands start at the top too, its Colour on the last slot, beside the first, so the
+        // swatches it puts out take the commands' slots, clockwise from it.
         let swatch_count = crate::theme::swatches().len();
         let slots = 3 + swatch_count;
         let option = |i: usize, child: &gtk::Widget| ring.add_option(i, slots, child);
@@ -102,21 +118,21 @@ impl PdfRing {
             .enumerate()
             .map(|(i, diameter)| option(i, dot(diameter, |area| area.color()).upcast_ref()))
             .collect();
-        let swatches: Vec<_> = (0..swatch_count)
-            .map(|i| {
-                let theme = theme.clone();
-                let colour =
-                    move |_: &gtk::DrawingArea| crate::theme::rgba(painted(i, theme.get()), 1.0);
-                let button = option(3 + i, dot(14.0, colour).upcast_ref());
-                let label = match i {
-                    0 => "Accent Colour".to_string(),
-                    i if i + 1 == swatch_count => "Black".to_string(),
-                    _ => format!("Colour {}", i + 1),
-                };
-                button.set_tooltip_text(Some(&label));
-                button
-            })
-            .collect();
+        // Swatch `i` on the slot `at`, painted as pages recoloured by the theme show it.
+        let swatch = |at: usize, i: usize| {
+            let theme = theme.clone();
+            let colour =
+                move |_: &gtk::DrawingArea| crate::theme::rgba(painted(i, theme.get()), 1.0);
+            let button = option(at, dot(14.0, colour).upcast_ref());
+            let label = match i {
+                0 => "Accent Colour".to_string(),
+                i if i + 1 == swatch_count => "Black".to_string(),
+                _ => format!("Colour {}", i + 1),
+            };
+            button.set_tooltip_text(Some(&label));
+            button
+        };
+        let swatches: Vec<_> = (0..swatch_count).map(|i| swatch(3 + i, i)).collect();
         let erasers: Vec<_> = ERASERS
             .iter()
             .enumerate()
@@ -129,6 +145,10 @@ impl PdfRing {
         let commands = (COMMANDS.iter().enumerate())
             .map(|(i, (action, icon))| ring.add_button(i, slots, icon, action))
             .collect();
+        let palette = gtk::Image::from_icon_name("preferences-color-symbolic");
+        let colour = option(slots - 1, palette.upcast_ref());
+        colour.set_tooltip_text(Some("Colour"));
+        let recolours = (0..swatch_count).map(|i| swatch(i, i)).collect();
 
         let ring = Rc::new(PdfRing {
             ring,
@@ -138,11 +158,16 @@ impl PdfRing {
             commands,
             picked: Cell::new(false),
             pasteable: Cell::new(false),
+            colour,
+            recolours,
+            colours: RefCell::default(),
+            choosing: Cell::new(false),
             config: RefCell::new(DrawingConfig::default()),
             theme,
             tool: Cell::new(Mode::Read),
             eraser: Cell::new(false),
             on_choice: RefCell::new(None),
+            on_recolour: RefCell::new(None),
         });
         ring.wire_options();
         ring
@@ -181,6 +206,29 @@ impl PdfRing {
                 move |_| ring.choose(ring.ring.tool(), Choice::Partial(partial))
             ));
         }
+        // Colour puts the swatches out in place of the commands, or away again. A swatch picked
+        // recolours what Select holds, never through a `Choice`: the pen's colour stays its own.
+        self.colour.connect_clicked(glib::clone!(
+            #[weak(rename_to = ring)]
+            self,
+            move |_| {
+                ring.choosing.set(!ring.choosing.get());
+                ring.sync_options();
+            }
+        ));
+        for (i, button) in self.recolours.iter().enumerate() {
+            button.connect_clicked(glib::clone!(
+                #[weak(rename_to = ring)]
+                self,
+                move |_| {
+                    ring.choosing.set(false);
+                    if let Some(f) = ring.on_recolour.borrow().as_ref() {
+                        f(crate::theme::swatches()[i]);
+                    }
+                    ring.sync_options();
+                }
+            ));
+        }
     }
 
     fn choose(&self, tool: Mode, choice: Choice) {
@@ -195,6 +243,21 @@ impl PdfRing {
     /// Called with the tool in hand and what was picked for it.
     pub fn connect_choice(&self, f: impl Fn(Mode, Choice) + 'static) {
         *self.on_choice.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// Called with the swatch picked for what the Select tool holds, `None` being the accent.
+    pub fn connect_recolour(&self, f: impl Fn(Option<[u8; 3]>) + 'static) {
+        *self.on_recolour.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// Put the Colour swatches away and the commands back, changing nothing: `Escape`. Whether
+    /// they were out.
+    pub fn close_colours(&self) -> bool {
+        let open = self.choosing.replace(false);
+        if open {
+            self.sync_options();
+        }
+        open
     }
 
     /// What the preferences say about the tools, which is what the options show as checked.
@@ -241,19 +304,29 @@ impl PdfRing {
             check(button, erasing, erasing && config.eraser_partial == partial);
         }
         let selecting = self.ring.tool() == Mode::Select;
+        let colours = self.colours.borrow();
+        let recolourable = selecting && self.picked.get() && !colours.is_empty();
+        let choosing = recolourable && self.choosing.get();
+        self.choosing.set(choosing);
         for (button, (action, _)) in self.commands.iter().zip(COMMANDS) {
             let offered = match action {
                 "win.pdf-paste" => self.pasteable.get(),
                 _ => self.picked.get(),
             };
-            button.set_visible(selecting && offered);
+            button.set_visible(selecting && offered && !choosing);
+        }
+        check(&self.colour, recolourable, choosing);
+        let checked = swatch_of(&colours, &swatches.map(resolved));
+        for (i, button) in self.recolours.iter().enumerate() {
+            check(button, choosing, checked == Some(i));
         }
     }
 
-    /// Whether the Select tool holds anything and there is anything to paste: which of its
-    /// commands the ring shows.
-    pub fn set_selection(&self, picked: bool, pasteable: bool) {
+    /// Whether the Select tool holds anything, the colours of what it holds that a recolour
+    /// reaches, and whether there is anything to paste: which of its commands the ring shows.
+    pub fn set_selection(&self, picked: bool, colours: Vec<[u8; 3]>, pasteable: bool) {
         self.picked.set(picked);
+        self.colours.replace(colours);
         self.pasteable.set(pasteable);
         self.sync_options();
     }
@@ -261,7 +334,7 @@ impl PdfRing {
     /// Paint the swatches as pages recoloured by `theme` show them.
     pub fn set_theme(&self, theme: Theme) {
         self.theme.set(theme);
-        for swatch in &self.swatches {
+        for swatch in self.swatches.iter().chain(&self.recolours) {
             if let Some(dot) = swatch.child() {
                 dot.queue_draw();
             }
@@ -325,12 +398,17 @@ impl PdfRing {
             })
             .collect();
         let commands = self.commands.iter().filter(|b| b.is_visible()).count();
+        let swatches = crate::theme::swatches().map(resolved);
+        let checked = swatch_of(&self.colours.borrow(), &swatches);
         format!(
-            "shown={:?} widths={} swatches={} erasers={} commands={commands} painted={}",
+            "shown={:?} widths={} swatches={} erasers={} commands={commands} colour={} \
+             recolours={} checked={checked:?} painted={}",
             self.ring.tool(),
             shown(&self.widths),
             shown(&self.swatches),
             shown(&self.erasers),
+            self.colour.is_visible(),
+            shown(&self.recolours),
             painted.join(",")
         )
     }
@@ -339,13 +417,38 @@ impl PdfRing {
 /// Swatch `i` as a page recoloured by `theme` shows its ink, which on a recoloured page is not the
 /// colour the file is given: Solarized shows black as its blue-grey text.
 fn painted(i: usize, theme: Theme) -> [u8; 3] {
-    let rgb = crate::theme::swatches()[i].unwrap_or_else(crate::theme::accent_rgb);
-    super::view::shown(rgb, theme)
+    super::view::shown(resolved(crate::theme::swatches()[i]), theme)
+}
+
+/// A swatch's colour as the file is given it: the accent as it is now for `None`.
+fn resolved(swatch: Option<[u8; 3]>) -> [u8; 3] {
+    swatch.unwrap_or_else(crate::theme::accent_rgb)
+}
+
+/// Which of `swatches` every one of `colours` is: the swatch shown checked for what the Select
+/// tool holds, none for nothing held or colours that differ.
+fn swatch_of(colours: &[[u8; 3]], swatches: &[[u8; 3]]) -> Option<usize> {
+    let (first, rest) = colours.split_first()?;
+    match rest.iter().all(|c| c == first) {
+        true => swatches.iter().position(|s| s == first),
+        false => None,
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Choice, Mode};
+    use super::{Choice, Mode, swatch_of};
+
+    /// The swatch checked for what Select holds is the one all of it shares, and none when its
+    /// colours differ, when it is no swatch's or when nothing is held.
+    #[test]
+    fn the_checked_swatch_is_the_one_every_colour_shares() {
+        let swatches = [[0, 0, 200], [200, 0, 0], [0, 0, 0]];
+        assert_eq!(swatch_of(&[[0, 0, 0], [0, 0, 0]], &swatches), Some(2));
+        assert_eq!(swatch_of(&[[0, 0, 0], [200, 0, 0]], &swatches), None);
+        assert_eq!(swatch_of(&[[1, 2, 3]], &swatches), None);
+        assert_eq!(swatch_of(&[], &swatches), None);
+    }
 
     #[test]
     fn a_choice_lands_in_the_right_tool() {

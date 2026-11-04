@@ -89,6 +89,7 @@ fn relists(request: &Request) -> bool {
         Request::Erase { .. }
             | Request::Transform { .. }
             | Request::Delete { .. }
+            | Request::Recolour { .. }
             | Request::Paste { .. }
             | Request::Clip {
                 how: Clipping::Cut,
@@ -362,6 +363,16 @@ fn render_loop(
                 Request::Delete { page, ids } => {
                     let taken = ink.delete(&mut doc, page, &ids);
                     answered(&mut ink, &doc, view, page, taken, *erases);
+                }
+                Request::Recolour { page, ids, rgb } => {
+                    let made = ink.recolour(&mut doc, page, &ids, rgb);
+                    let made = made.map(|(area, pieces)| {
+                        if !pieces.is_empty() {
+                            send(view, Reply::Redrawn { page, pieces });
+                        }
+                        area
+                    });
+                    answered(&mut ink, &doc, view, page, made, *erases);
                 }
                 Request::Clip { page, ids, how } => {
                     let (copied, clips): (Vec<u32>, Vec<Vec<pdf::Clip>>) =

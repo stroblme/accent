@@ -415,6 +415,11 @@ pub fn open(
             }
         }
     ));
+    tab.ring.connect_recolour(glib::clone!(
+        #[weak]
+        tab,
+        move |colour| tab.recolour_picked(colour)
+    ));
     tab.wire_keys();
     tab.watch_clipboard();
     tab.wire_preview();

@@ -1112,6 +1112,13 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A move, a stretch, a turn, a delete, a cut, a paste and a duplicate are each one step for Undo, however many strokes they take.
   Each is written in one go and pdfium opened again once, its Undo and Redo too, so moving 20 strokes on a page of a 2069-page document takes 7 ms of the render thread, where opening it after each stroke took 95 ms.
   Select holds one page at a time, and a cut pasted on another page is how a drawing moves between pages.
+- **Colour recolours what Select holds** (user decisions 2026-11-04), a command on the ring's orbit beside Cut while Select holds a stroke or a text a recolour reaches.
+  Clicking it puts the pen's six swatches on the commands' slots with the one everything held shares checked, and a swatch recolours what is held and brings the commands back, while Colour again or `Escape` brings them back without a change.
+  The file is given the swatch's own colour, the accent as it is at the click, so the page's recolouring shows it as it shows the pen's ink, and the pen keeps its own colour.
+  A stroke or a text of ours takes the colour in its place among the page's annotations, and a highlighter keeps its opacity and `Multiply`.
+  Another editor's stroke is drawn again as ours along its `/InkList`, a stroke for each of its lines as the partial eraser draws its pieces, and Select holds those in its place.
+  One the eraser takes whole keeps its colour, as a picture does, and both stay held.
+  A recolour is one step for Undo, which puts another editor's stroke back as it was.
 - **Pictures come onto the page from the clipboard and from a drop** (user decisions 2026-11-03): Paste takes another application's picture when the clipboard holds no drawing of ours, and image files or an image dropped from another application, or an image's row from the Files tree, land on the page under the pointer.
   A pasted picture lands in the middle of what is on screen of its page, stepping on as a copy does, and a dropped one centred under the pointer, each further one a step on from it, at its natural size of 96 pixels an inch, shrunk to fit half the page each way and never enlarged, and none off the paper.
   The clipboard is read in that order, our drawing, then a JPEG's bytes, then any image GDK decodes, and text on it is no picture.
@@ -1122,7 +1129,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A copy carries the image, so another PDF takes it, and pasted into the document it came from it shares the image already written, which nothing frees, as nothing frees a stroke.
   The eraser leaves pictures alone, another editor's stamps are theirs, and a picture is recoloured with the page.
   Reading, decoding and deflating run on a worker, and pdfium decodes a picture again for every tile over it, a tile clear of it costing nothing: a 12-megapixel JPEG of 4.3 MB costs the render thread about 107 ms a 512 px tile, and the screen drawn again 366 ms against 19 ms without it (AMCOMP, 2026-11-03).
-- A second orbit holds the tool's options: three widths (for the text three sizes, 10, 14 and 20 pt), and for the pen, the shapes, the highlighter and the text six swatches (the accent, four hues round the wheel by the CSV rule, and black), each painted as the document's recolouring shows that ink, black as the theme's text on a recoloured page, while the stroke is written in the swatch's own colour; for the eraser, Whole Strokes (`edit-delete-symbolic`) and Partial (`edit-cut-symbolic`); for Select, its commands.
+- A second orbit holds the tool's options: three widths (for the text three sizes, 10, 14 and 20 pt), and for the pen, the shapes, the highlighter and the text six swatches (the accent, four hues round the wheel by the CSV rule, and black), each painted as the document's recolouring shows that ink, black as the theme's text on a recoloured page, while the stroke is written in the swatch's own colour; for the eraser, Whole Strokes (`edit-delete-symbolic`) and Partial (`edit-cut-symbolic`); for Select, its commands and Colour (`preferences-color-symbolic`).
   Each pick is kept in the config's `[drawing]`; a width there that is none of the three draws as the nearest of them.
 - With a tool in hand the other tools' icons dim to Adwaita's `--dim-opacity`, their discs staying opaque, so the options read as that tool's; a dimmed tool comes back under the pointer or the keyboard and still takes a click.
   A press between the ring's buttons reaches the page.
@@ -1852,7 +1859,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 - Go to Source (the page's menu) and Show in PDF (a `.tex` tab's menu) are in the palette too, unbound: Ctrl+click is Go to Source's pointer, and no free chord says either.
 - Select's Cut Selection `Ctrl+X`, Copy Selection `Ctrl+C`, Paste into PDF `Ctrl+V`, Duplicate Selection `Ctrl+D` and Delete Selection `Delete` or `Backspace` are the tab's own keys, as Copy is, and `Ctrl+D` is Duplicate Line's chord, which a PDF in front leaves to the page.
   Paste into PDF pastes another application's picture too.
-  While Select holds something the arrows move it a point, ten with Shift, each press a step for Undo, and `Escape` lets go of it, the arrows paging again.
+  While Select holds something the arrows move it a point, ten with Shift, each press a step for Undo, and `Escape` lets go of it, the arrows paging again, once it has put away the ring's Colour swatches if they were out.
   With Select in hand Ctrl+click adds a stroke or lets go of it, and Go to Source is the page's menu's.
 - `Ctrl+Z` takes back the last stroke, text, erase, move or page edit of this session, tool in hand or not, and `Ctrl+Shift+Z` or `Ctrl+Y` makes it again, as in a note; `Escape` puts the pen down, once Select has let go of what it held.
   They are the tab's own keys, like Copy, so an entry with the keyboard, the find bar's included, keeps its own undo.

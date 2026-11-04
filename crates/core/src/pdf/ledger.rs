@@ -19,6 +19,10 @@ pub type NamedText = (u32, pdf::TypedText);
 /// A picture of ours under its name, as [`NamedInk`] names a stroke.
 pub type NamedPicture = (u32, pdf::PlacedPicture);
 
+/// Another editor's stroke a recolour drew again as ours: its name, and the names of the strokes
+/// of ours in its place.
+pub type Renamed = (u32, Vec<u32>);
+
 /// Allocate a process-wide name, including for eraser fragments not yet in the document.
 pub fn fresh_id() -> u32 {
     static NEXT: AtomicU32 = AtomicU32::new(1);
@@ -50,6 +54,9 @@ pub enum Step {
         at: Ref,
         matrix: pdf::Matrix,
     },
+    /// A stroke or text of ours was given a colour, in its place: `kept` is the colour it had,
+    /// and once Undo has put that back, the one Redo gives it again.
+    Recoloured { page: usize, at: Ref, kept: [u8; 3] },
     /// A text of ours was typed again, in its place: `kept` is what it said before, and once
     /// Undo has put that back, what Redo makes it say again.
     Retyped {
@@ -208,6 +215,68 @@ impl Ink {
             )
         });
         self.record_each(page, ids, steps)
+    }
+
+    /// Give the strokes and texts `ids` of `page` the colour `rgb`, as one step
+    /// ([`PdfDoc::recolour_inks`]): the box they covered, and for each of another editor's strokes
+    /// drawn again as ours, its name and its pieces' names. One that keeps its colour, a picture
+    /// or a stroke the eraser takes whole, is passed over; none changed at all is refused.
+    pub fn recolour(
+        &mut self,
+        doc: &mut PdfDoc,
+        page: usize,
+        ids: &[u32],
+        rgb: [u8; 3],
+    ) -> Result<(pdf::Rect, Vec<Renamed>)> {
+        let found = self.ordered(doc, page, ids);
+        let colours: Vec<(Ref, [u8; 3])> = found.iter().map(|&(_, at)| (at, rgb)).collect();
+        let made = doc.recolour_inks(page, &colours)?;
+        // Ours first, then theirs taken off, then their pieces drawn: three runs for Undo and
+        // Redo to make at once, whatever the order on the page.
+        let (mut ours, mut theirs, mut pieces, mut redrawn) = (vec![], vec![], vec![], vec![]);
+        let mut area: Option<pdf::Rect> = None;
+        for ((id, at), made) in found.into_iter().zip(made) {
+            let changed = match made {
+                Ok(pdf::Recoloured::InPlace { was, area }) => {
+                    ours.push(Step::Recoloured {
+                        page,
+                        at,
+                        kept: was,
+                    });
+                    area
+                }
+                Ok(pdf::Recoloured::Redrawn {
+                    was,
+                    pieces: drawn,
+                    area,
+                }) => {
+                    theirs.push(Step::Erased {
+                        page,
+                        at,
+                        kept: Some(was),
+                    });
+                    redrawn.push((id, drawn.iter().map(|&at| self.name(at)).collect()));
+                    let drawn = drawn.into_iter().map(|at| Step::Drawn {
+                        page,
+                        at,
+                        kept: None,
+                    });
+                    pieces.extend(drawn);
+                    area
+                }
+                Err(e) => {
+                    tracing::debug!("object {} of page {page}: {e:#}", at.num);
+                    continue;
+                }
+            };
+            area = Some(area.map_or(changed, |a| a.union(changed)));
+        }
+        let area =
+            area.ok_or_else(|| Error::Pdf(format!("none of {ids:?} changed on page {page}")))?;
+        for (n, step) in ours.into_iter().chain(theirs).chain(pieces).enumerate() {
+            self.record(step, n > 0);
+        }
+        Ok((area, redrawn))
     }
 
     /// The strokes, texts and pictures `ids` of `page` as plain geometry, each under its name,
@@ -456,12 +525,36 @@ impl Ink {
                 return Ok(vec![Walked::Ink(*page, area)]);
             }
             (
-                Step::Moved { page, .. } | Step::Drawn { page, .. } | Step::Erased { page, .. },
+                Step::Moved { page, .. }
+                | Step::Drawn { page, .. }
+                | Step::Erased { page, .. }
+                | Step::Recoloured { page, .. },
                 _,
             ) => *page,
         };
         let walked = |area: Result<pdf::Rect>| area.map(|area| Walked::Ink(page, area));
         match Batch::of(&run[0], forwards) {
+            // Either way, each colour swaps with the one kept.
+            Some(Batch::Recolour(_)) => {
+                let colours: Vec<(Ref, [u8; 3])> = (run.iter())
+                    .filter_map(|step| match step {
+                        Step::Recoloured { at, kept, .. } => Some((*at, *kept)),
+                        _ => None,
+                    })
+                    .collect();
+                let made = doc.recolour_inks(page, &colours)?;
+                let mut changed = Vec::with_capacity(made.len());
+                for (step, made) in run.iter_mut().zip(made) {
+                    let (Step::Recoloured { kept, .. }, pdf::Recoloured::InPlace { was, area }) =
+                        (step, made?)
+                    else {
+                        return Err(Error::Pdf("not a colour of ours to swap".to_string()));
+                    };
+                    *kept = was;
+                    changed.push(Walked::Ink(page, area));
+                }
+                Ok(changed)
+            }
             Some(Batch::Move(_)) => {
                 let mut moves: Vec<(Ref, pdf::Matrix)> = (run.iter())
                     .filter_map(|step| match step {
@@ -532,6 +625,7 @@ enum Batch {
     Move(usize),
     On(usize),
     Off(usize),
+    Recolour(usize),
 }
 
 impl Batch {
@@ -539,6 +633,7 @@ impl Batch {
     fn of(step: &Step, forwards: bool) -> Option<Batch> {
         Some(match (step, forwards) {
             (Step::Moved { page, .. }, _) => Batch::Move(*page),
+            (Step::Recoloured { page, .. }, _) => Batch::Recolour(*page),
             (Step::Drawn { page, .. }, true) | (Step::Erased { page, .. }, false) => {
                 Batch::On(*page)
             }
@@ -980,6 +1075,79 @@ mod tests {
         assert!(corners(&doc, 1).is_empty(), "one Undo takes all four off");
         ink.walk(&mut doc, true);
         assert_eq!(placed(&reopen(&dir, &doc), 1), pasted);
+    }
+
+    /// A recolour is one step: a line, a highlighter and a red text of ours take the colour, each
+    /// in its place on the page and the highlighter keeping its opacity, while the picture held
+    /// with them keeps its own. One Undo gives every colour back, Redo the new one again, and the
+    /// file saved holds it. A picture alone changes nothing.
+    #[test]
+    fn a_selection_recolours_as_one_step() {
+        let Some((dir, mut doc)) = open_tiny() else {
+            return;
+        };
+        let mut ink = Ink::default();
+        let marker = pdf::InkStyle {
+            width: 10.0,
+            rgba: [255, 200, 0, 128],
+            multiply: true,
+        };
+        for (y, style) in [(20.0, STYLE), (40.0, marker)] {
+            let line = pdf::Shape::Line {
+                a: (20.0, y),
+                b: (80.0, y),
+            };
+            let (_, at) = doc.add_shape(0, line, style).unwrap();
+            ink.drew(0, at);
+        }
+        let red = pdf::TextStyle {
+            size: 10.0,
+            rgb: [200, 0, 0],
+        };
+        let (_, at) = doc.add_text(0, (20.0, 60.0), "Hi", red).unwrap();
+        ink.drew(0, at);
+        let picture = pdf::Clip::Image {
+            place: [20.0, 0.0, 0.0, 10.0, 100.0, 20.0],
+            picture: pdf::Picture::pixels(1, 1, &[0, 0, 255, 255]),
+        };
+        ink.paste(&mut doc, 0, &[picture], pdf::IDENTITY, &[fresh_id()])
+            .unwrap();
+        // How each stroke and text of the page is drawn: its colour, opacity and blend.
+        let looks = |ink: &mut Ink, doc: &PdfDoc| -> Vec<([u8; 4], bool)> {
+            let inks = ink.named(doc, 0).into_iter();
+            let inks = inks.map(|(_, i)| (i.style.rgba, i.style.multiply));
+            let texts = ink.named_texts(doc, 0).into_iter();
+            let texts = texts.map(|(_, t)| {
+                let [r, g, b] = t.typed.style.rgb;
+                ([r, g, b, 255], false)
+            });
+            inks.chain(texts).collect()
+        };
+        let mut ids: Vec<u32> = ink.named(&doc, 0).iter().map(|(id, _)| *id).collect();
+        ids.extend(ink.named_texts(&doc, 0).iter().map(|(id, _)| *id));
+        ids.extend(ink.named_pictures(&doc, 0).iter().map(|(id, _)| *id));
+        let order = ink.ordered(&doc, 0, &ids);
+        let before = looks(&mut ink, &doc);
+        assert_eq!(before[1], ([255, 200, 0, 128], true), "{before:?}");
+
+        let (_, redrawn) = ink.recolour(&mut doc, 0, &ids, [0, 0, 200]).unwrap();
+        assert!(redrawn.is_empty(), "all of them ours");
+        let blue = |&([.., a], multiply): &([u8; 4], bool)| ([0, 0, 200, a], multiply);
+        let recoloured: Vec<_> = before.iter().map(blue).collect();
+        assert_eq!(looks(&mut ink, &doc), recoloured);
+        assert_eq!(ink.ordered(&doc, 0, &ids), order, "each in its place");
+        ink.walk(&mut doc, false);
+        assert_eq!(
+            looks(&mut ink, &doc),
+            before,
+            "one Undo gives every colour back"
+        );
+        assert_eq!(ink.ordered(&doc, 0, &ids), order);
+        ink.walk(&mut doc, true);
+        assert_eq!(looks(&mut ink, &reopen(&dir, &doc)), recoloured);
+
+        let picture = &ids[3..];
+        assert!(ink.recolour(&mut doc, 0, picture, [0, 0, 0]).is_err());
     }
 
     /// Strokes moved or deleted together stay stacked as they were drawn through the Undo and the

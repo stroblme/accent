@@ -311,9 +311,10 @@ impl PdfTab {
                         return glib::Propagation::Stop;
                     }
                 }
-                // `Escape` lets go of what the Select tool holds, then puts the pen down.
+                // `Escape` puts the ring's Colour dots away, lets go of what the Select tool
+                // holds, then puts the pen down.
                 if key == gtk::gdk::Key::Escape {
-                    if tab.view.clear_pick() {
+                    if tab.ring.close_colours() || tab.view.clear_pick() {
                         return glib::Propagation::Stop;
                     }
                     if tab.mode() != pdfview::Mode::Read {

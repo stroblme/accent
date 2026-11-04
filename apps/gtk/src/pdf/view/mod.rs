@@ -559,6 +559,55 @@ impl PdfView {
         Some((page, ids))
     }
 
+    /// The colours of what the Select tool holds that a recolour reaches, one each.
+    pub fn picked_colours(&self) -> Vec<[u8; 3]> {
+        let picked = self.imp().picked.borrow();
+        let items = picked.iter().flat_map(|s| &s.items);
+        items.filter_map(Picked::colour).collect()
+    }
+
+    /// Give what the Select tool holds that a recolour reaches `rgb`, each keeping its opacity,
+    /// and say which page and ids changed: nothing when every one has it already.
+    pub fn recolour_picked(&self, rgb: [u8; 3]) -> Option<(usize, Vec<u32>)> {
+        let (page, ids) = {
+            let mut picked = self.imp().picked.borrow_mut();
+            let s = picked.as_mut()?;
+            let mut ids = Vec::new();
+            for item in s.items.iter_mut() {
+                if item.colour().is_some_and(|c| c != rgb) {
+                    let [.., alpha] = item.style.rgba;
+                    item.style.rgba = [rgb[0], rgb[1], rgb[2], alpha];
+                    ids.push(item.id);
+                }
+            }
+            (s.page, ids)
+        };
+        if ids.is_empty() {
+            return None;
+        }
+        self.relisted(page);
+        self.picked_changed();
+        Some((page, ids))
+    }
+
+    /// Another editor's strokes of `page` a recolour drew again as ours, each named with its
+    /// pieces' names: the Select tool holds the pieces in its place, as it held the stroke, until
+    /// the page's list says where each is.
+    pub fn redrawn(&self, page: usize, pieces: &[accent_core::pdf::Renamed]) {
+        let mut picked = self.imp().picked.borrow_mut();
+        let Some(s) = picked.as_mut().filter(|s| s.page == page) else {
+            return;
+        };
+        s.items = (s.items.iter())
+            .flat_map(|item| match pieces.iter().find(|(id, _)| *id == item.id) {
+                Some((_, names)) => (names.iter())
+                    .map(|&id| Picked { id, ..item.clone() })
+                    .collect(),
+                None => vec![item.clone()],
+            })
+            .collect();
+    }
+
     /// Move what the Select tool holds by `dx`, `dy` points, as far as its page allows: the
     /// arrow keys. Whether it held anything.
     pub fn nudge(&self, dx: f32, dy: f32) -> bool {

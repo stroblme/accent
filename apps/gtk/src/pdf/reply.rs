@@ -77,6 +77,7 @@ impl PdfTab {
                 erases,
             } => self.view.set_inks(page, inks, texts, pictures, erases),
             Reply::Clipped { page, clips, how } => self.clipped(page, clips, how),
+            Reply::Redrawn { page, pieces } => self.view.redrawn(page, &pieces),
             Reply::History { undo, redo } => {
                 self.history.set((undo, redo));
                 self.on_history.emit(self);

@@ -233,6 +233,45 @@ fn a_foreign_stroke_is_cut_along_its_ink_list() {
     }
 }
 
+/// Another editor's stroke of one colour given another is drawn again as ours along its
+/// `/InkList`, a stroke of ours for each of its lines, in the new colour and its width, the
+/// original leaving with its popup; one Undo puts both back as they were. One whose paths differ
+/// in colour keeps its colours.
+#[test]
+fn a_foreign_stroke_recoloured_is_drawn_again_as_ours() {
+    let Some((_dir, mut doc)) = open_pdf(&foreign_ink_pdf(false)) else {
+        return;
+    };
+    let saved = doc.save().unwrap();
+    let mut ink = Ink::default();
+    let (id, _) = ink.named(&doc, 0).remove(0);
+    let (_, redrawn) = ink.recolour(&mut doc, 0, &[id], [0, 0, 255]).unwrap();
+    let pieces: Vec<u32> = ink.named(&doc, 0).iter().map(|(id, _)| *id).collect();
+    assert_eq!(redrawn, [(id, pieces.clone())]);
+    assert_eq!(pieces.len(), 2);
+    for (_, piece) in ink.named(&doc, 0) {
+        assert_eq!(piece.style.rgba, [0, 0, 255, 255]);
+        assert!((piece.style.width - 2.0).abs() < 0.01, "{:?}", piece.style);
+    }
+    assert_eq!(doc.annotation_count(0).unwrap(), 2, "the popup went too");
+    let blue = doc.render_page(0, 4.0, Theme::Plain).unwrap();
+    assert!(MARKS.iter().all(|&(at, _)| hue_at(&blue, at) == Some(2)));
+
+    ink.walk(&mut doc, false);
+    let again = doc.save().unwrap();
+    for num in [4, 5, 6] {
+        assert_eq!(object(&again, num), object(&saved, num), "object {num}");
+    }
+    assert_eq!(ink.named(&doc, 0).remove(0).0, id, "under its name");
+
+    let Some((_dir, mut doc)) = open_pdf(&foreign_ink_pdf(true)) else {
+        return;
+    };
+    let mut ink = Ink::default();
+    let (id, _) = ink.named(&doc, 0).remove(0);
+    assert!(ink.recolour(&mut doc, 0, &[id], [0, 0, 255]).is_err());
+}
+
 /// Another editor's stroke turned by Select at an angle other than a quarter keeps its width, and
 /// so do the pieces the eraser cuts from it.
 #[test]

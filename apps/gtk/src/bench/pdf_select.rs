@@ -2,9 +2,11 @@
 //! a rectangle and a text of ours written into the file first, then through XTEST a lasso, a
 //! move and its Undo, a copy pasted a step off it, a pick and a delete, Ctrl+click, a cut pasted
 //! in place, a click away and Escape, a group stretched by its corner, a duplicate and the arrows,
-//! each against the file. Pictures of the lasso and the group, light and dark, go to `$TMPDIR`.
-//! With `,<n>`, `n` strokes down the page's left edge first, and how long the render thread takes
-//! to move and delete them all. Writes the file.
+//! the lines and the text recoloured through the ring's Colour, each against the file. Pictures of
+//! the lasso, the group and the Colour swatches, light and dark, go to `$TMPDIR`. Last another
+//! editor's stroke, in a file of its own beside it, is recoloured and drawn again as ours. With
+//! `,<n>`, `n` strokes down the page's left edge first, and how long the render thread takes to
+//! move and delete them all. Writes the files.
 
 use super::pdf::{opened, written};
 use super::*;
@@ -35,6 +37,25 @@ fn filed(path: &std::path::Path) -> Vec<(i32, i32)> {
         .collect();
     out.sort();
     out
+}
+
+/// Where each stroke and text of `path`'s first page begins and its colour, strokes first, each in
+/// its `/Annots` order.
+fn coloured(path: &std::path::Path) -> Vec<((i32, i32), [u8; 3])> {
+    let Ok(doc) = pdf::PdfDoc::open(path) else {
+        return Vec::new();
+    };
+    let corner = |b: Rect| (b.left.round() as i32, b.top.round() as i32);
+    let inks = doc.inks(0).unwrap_or_default().into_iter();
+    let inks = inks.map(|i| {
+        (
+            corner(i.bounds),
+            [i.style.rgba[0], i.style.rgba[1], i.style.rgba[2]],
+        )
+    });
+    let texts = doc.texts(0).unwrap_or_default().into_iter();
+    let texts = texts.map(|t| (corner(t.bounds), t.typed.style.rgb));
+    inks.chain(texts).collect()
 }
 
 /// The two lines, the rectangle and the text, written into `path`'s first page.
@@ -289,9 +310,64 @@ pub(super) fn bench_pdf_select(app: &Rc<App>, arg: &str) {
             filed(&path) == drawn
         );
 
+        // The lines and the text held, and recoloured black through the ring's Colour, which
+        // Escape puts away first; the pen keeps its colour, and one Undo gives every one back.
+        let before = coloured(&path);
+        super::git::xtest(&lasso(round_left, true)).await;
+        let text = click((TEXT.0 + 10.0, TEXT.1 + 8.0));
+        super::git::xtest(&format!("keydown ctrl; {text}; keyup ctrl")).await;
+        let state = || pdf.ring().state();
+        println!("bench select recolour picked={} {}", picked(), state());
+        let ring = pdf.ring().widget().clone();
+        let press = |tip: &str| {
+            let shown =
+                |w: &gtk::Widget| w.is_visible() && w.tooltip_text().as_deref() == Some(tip);
+            let button = find_widget(&ring, &shown).and_downcast::<gtk::Button>();
+            button.map(|b| b.emit_clicked()).is_some()
+        };
+        let out = press("Colour");
+        println!("bench select colours_out={out} {}", state());
+        super::git::xtest("key Escape").await;
+        println!(
+            "bench select colours_escaped picked={} {}",
+            picked(),
+            state()
+        );
+        press("Colour");
+        let black = press("Black");
+        save().await;
+        let after = coloured(&path);
+        let kept = before
+            .iter()
+            .map(|(at, _)| at)
+            .eq(after.iter().map(|(at, _)| at));
+        let colours: Vec<[u8; 3]> = after.iter().map(|(_, rgb)| *rgb).collect();
+        let pen = app.config.borrow().drawing.pen_color;
+        println!(
+            "bench select recoloured black={black} order_kept={kept} colours={colours:?} \
+             pen_colour={pen:?} picked={} {}",
+            picked(),
+            state()
+        );
+        // The swatches out over what they recoloured, light and dark.
+        press("Colour");
+        use accent_core::config::Theme;
+        for (name, theme) in [("light", Theme::Light), ("dark", Theme::Dark)] {
+            crate::theme::apply(theme);
+            glib::timeout_future(Duration::from_millis(300)).await;
+            pdf.restyle();
+            style::bench_painted(&app.window, String::new).await;
+            glib::timeout_future(Duration::from_secs(1)).await;
+            picture(&view, &format!("select-colour-{name}.png"));
+        }
+        crate::theme::apply(Theme::Light);
+        pdf.restyle();
+        super::git::xtest("key Escape; sleep 0.2; key Escape").await;
+        undo(false).await;
+        println!("bench select recolour_undone {}", coloured(&path) == before);
+
         // The group with its handles, and a lasso being drawn, light and dark.
         super::git::xtest(&lasso(round_left, true)).await;
-        use accent_core::config::Theme;
         for (name, theme) in [("light", Theme::Light), ("dark", Theme::Dark)] {
             crate::theme::apply(theme);
             glib::timeout_future(Duration::from_millis(300)).await;
@@ -314,6 +390,7 @@ pub(super) fn bench_pdf_select(app: &Rc<App>, arg: &str) {
         if fill > 0 {
             timed(&app, &pdf, &reader, &path, fill).await;
         }
+        foreign(&app, &rel).await;
         bench_quit(&app);
     });
 }
@@ -373,6 +450,97 @@ async fn timed(
     })
     .await;
     spent("delete", &|| pdf.delete_picked()).await;
+}
+
+/// A page with another editor's `/Ink`: two red lines in an X from (100, 200) to (200, 300),
+/// top-left page points, by Ada, drawn by its own appearance stream and named by its `/InkList`.
+fn foreign_pdf() -> Vec<u8> {
+    let stream = "1 0 0 RG 2 w 100 642 m 200 542 l S 100 542 m 200 642 l S";
+    let objects = [
+        "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 595 842]/Annots[4 0 R]>>".to_string(),
+        "<</Type/Annot/Subtype/Ink/Rect[90 532 210 652]/C[1 0 0]/T(Ada)\
+         /InkList[[100 642 200 542][100 542 200 642]]/AP<</N 5 0 R>>/F 4>>"
+            .to_string(),
+        format!(
+            "<</Type/XObject/Subtype/Form/BBox[90 532 210 652]/Length {}>>stream\n{stream}\nendstream",
+            stream.len()
+        ),
+    ];
+    let mut out = String::from("%PDF-1.4\n");
+    let mut offsets = Vec::new();
+    for (i, o) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.push_str(&format!("{} 0 obj\n{o}\nendobj\n", i + 1));
+    }
+    let xref = out.len();
+    let size = objects.len() + 1;
+    out.push_str(&format!("xref\n0 {size}\n0000000000 65535 f \n"));
+    for at in offsets {
+        out.push_str(&format!("{at:010} 00000 n \n"));
+    }
+    out.push_str(&format!(
+        "trailer\n<</Size {size}/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n"
+    ));
+    out.into_bytes()
+}
+
+/// Another editor's stroke beside `rel`, picked where its lines cross and recoloured black: it is
+/// drawn again as two strokes of ours, which Select holds in its place, and one Undo puts it back.
+async fn foreign(app: &Rc<App>, rel: &str) {
+    let rel = std::path::Path::new(rel).with_file_name("select-foreign.pdf");
+    let path = app.root().join(&rel);
+    if let Err(e) = std::fs::write(&path, foreign_pdf()) {
+        return println!("bench select foreign_failed {e}");
+    }
+    let Some(pdf) = opened(app, &rel.to_string_lossy()).await else {
+        return println!("bench select foreign no_tab");
+    };
+    let view = pdf.views()[0].clone();
+    let Some(reader) = view.downcast_ref::<pdfview::PdfView>().cloned() else {
+        return;
+    };
+    app.pdf_mode(pdfview::Mode::Select);
+    glib::timeout_future(Duration::from_secs(2)).await;
+    let (sx, sy) = app.window.surface_transform();
+    let Some(r) = reader.widget_rect(0, &Rect::from_corners((150.0, 250.0), (150.0, 250.0))) else {
+        return;
+    };
+    let p = graphene::Point::new(r.x() as f32, r.y() as f32);
+    let p = view.compute_point(&app.window, &p).unwrap_or(p);
+    let (x, y) = (f64::from(p.x()) + sx, f64::from(p.y()) + sy);
+    super::git::xtest(&format!("move {x:.0} {y:.0}; down; up; sleep 0.2")).await;
+    let picked = || reader.picked_box().map_or(0, |(_, _, n)| n);
+    println!(
+        "bench select foreign picked={} {}",
+        picked(),
+        pdf.ring().state()
+    );
+    let ring = pdf.ring().widget().clone();
+    for tip in ["Colour", "Black"] {
+        let shown = |w: &gtk::Widget| w.is_visible() && w.tooltip_text().as_deref() == Some(tip);
+        if let Some(button) = find_widget(&ring, &shown).and_downcast::<gtk::Button>() {
+            button.emit_clicked();
+        }
+    }
+    pdf.flush();
+    written(app).await;
+    let strokes = |path: &std::path::Path| -> Vec<[u8; 4]> {
+        let doc = pdf::PdfDoc::open(path).ok();
+        let inks = doc.and_then(|d| d.inks(0).ok()).unwrap_or_default();
+        inks.iter().map(|i| i.style.rgba).collect()
+    };
+    println!(
+        "bench select foreign_recoloured strokes={:?} picked={} {}",
+        strokes(&path),
+        picked(),
+        pdf.ring().state()
+    );
+    let _ = WidgetExt::activate_action(&app.window, "win.pdf-undo", None);
+    pdf.flush();
+    written(app).await;
+    println!("bench select foreign_undone strokes={:?}", strokes(&path));
 }
 
 /// What the page `view` is in shows, pictured into `$TMPDIR`.

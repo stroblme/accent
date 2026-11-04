@@ -27,7 +27,7 @@ pub use ink::{
     Drawn, IDENTITY, Matrix, apply, catmull_rom, cut, hit, invert, lassoed, rotation, swept, then,
     thin,
 };
-pub use ledger::{Ink, NamedInk, NamedPicture, NamedText, Walked, fresh_id};
+pub use ledger::{Ink, NamedInk, NamedPicture, NamedText, Renamed, Walked, fresh_id};
 pub use picture::{MAX_SIDE, Picture, PlacedPicture, picture_corners, picture_size, upright};
 pub use text::{line_top, link_with_alias, same_quads, selection_link, selection_quads};
 pub use typed::{BASELINE, LEADING, PADDING, TextStyle, Typed, TypedText, typeable};
@@ -258,6 +258,20 @@ pub struct Cut {
     pub was: Drawn,
     pub left: Vec<accent_pdf::Ref>,
     pub area: Rect,
+}
+
+/// What a recolour did to one stroke or text, and the box it covered and now covers.
+#[derive(Debug, Clone)]
+pub enum Recoloured {
+    /// One of ours, given the colour in its place: the colour it had.
+    InPlace { was: [u8; 3], area: Rect },
+    /// Another editor's stroke, taken off as an erase takes it and drawn again as strokes of
+    /// ours, one for each stroke of its `/InkList`.
+    Redrawn {
+        was: Drawn,
+        pieces: Vec<accent_pdf::Ref>,
+        area: Rect,
+    },
 }
 
 /// A rendered page. `data` is tightly packed RGBA8, `width * height * 4` bytes.

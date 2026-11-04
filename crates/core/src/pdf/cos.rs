@@ -134,6 +134,15 @@ impl Objects {
         self.set_annots(page, entries)
     }
 
+    /// The annotation `at` put back at `index` of page `page`'s `/Annots`, where it was before
+    /// a write moved it to the end.
+    pub(super) fn put_at(&mut self, page: usize, at: Ref, index: usize) -> Result<()> {
+        let mut entries = self.annots(page)?;
+        entries.retain(|e| *e != Object::Ref(at));
+        entries.insert(index.min(entries.len()), Object::Ref(at));
+        self.set_annots(page, entries)
+    }
+
     /// Where the annotation `at` sits in page `page`'s `/Annots`, which is pdfium's index for it.
     pub(super) fn index_of(&self, page: usize, at: Ref) -> Result<usize> {
         let entries = self.annots(page)?;

@@ -99,6 +99,12 @@ pub enum Reply {
         clips: Vec<Clip>,
         how: Clipping,
     },
+    /// Another editor's strokes of `page` a recolour drew again as ours: each one's name, and
+    /// the names of the strokes of ours in its place.
+    Redrawn {
+        page: usize,
+        pieces: Vec<pdf::Renamed>,
+    },
     /// Whether there is anything for Undo to take back and for Redo to put back.
     History {
         undo: bool,
@@ -237,6 +243,13 @@ pub enum Request {
     Delete {
         page: usize,
         ids: Vec<u32>,
+    },
+    /// Give strokes and texts of a page, named by their ids, the colour `rgb`, as one step.
+    /// Another editor's stroke is drawn again as ours, answered with [`Reply::Redrawn`].
+    Recolour {
+        page: usize,
+        ids: Vec<u32>,
+        rgb: [u8; 3],
     },
     /// Strokes, texts and pictures of a page, named by their ids, as plain geometry for what `how`
     /// says, answered with [`Reply::Clipped`]; a cut takes off what it copied, as one step.

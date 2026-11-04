@@ -1,7 +1,7 @@
-//! The Select tool's commands: copy, cut, paste, duplicate and delete what it holds. A copy goes
-//! onto the system clipboard as JSON in a format of our own, beside the typed texts it holds as
-//! plain text, so another PDF tab, in this window or another, pastes it. A picture another
-//! application copied pastes too.
+//! The Select tool's commands: copy, cut, paste, duplicate, delete and recolour what it holds. A
+//! copy goes onto the system clipboard as JSON in a format of our own, beside the typed texts it
+//! holds as plain text, so another PDF tab, in this window or another, pastes it. A picture
+//! another application copied pastes too.
 
 use std::rc::Rc;
 
@@ -54,6 +54,16 @@ impl PdfTab {
     pub fn delete_picked(&self) {
         if let Some((page, ids)) = self.view.drop_picked() {
             self.ask(Request::Delete { page, ids });
+        }
+    }
+
+    /// Give what the Select tool holds a swatch's colour, `None` being the accent, as one step:
+    /// what the ring's Colour dots do. The file keeps the swatch's own colour, the accent as it is
+    /// now, which the page's recolouring then shows as it shows the pen's ink.
+    pub fn recolour_picked(&self, colour: Option<[u8; 3]>) {
+        let rgb = colour.unwrap_or_else(crate::theme::accent_rgb);
+        if let Some((page, ids)) = self.view.recolour_picked(rgb) {
+            self.ask(Request::Recolour { page, ids, rgb });
         }
     }
 
@@ -244,11 +254,12 @@ impl PdfTab {
         self.clip_watch.replace(Some(watch));
     }
 
-    /// Show on the ring what can be done with what the Select tool holds, and Paste while there
-    /// is something to paste.
+    /// Show on the ring what can be done with what the Select tool holds, its colours among it,
+    /// and Paste while there is something to paste.
     pub(super) fn sync_commands(&self) {
         let picked = self.view.picked().is_some();
-        self.ring.set_selection(picked, self.pasteable());
+        let colours = self.view.picked_colours();
+        self.ring.set_selection(picked, colours, self.pasteable());
     }
 }
 
@@ -276,6 +287,7 @@ fn picked_of(clip: &Clip, id: u32) -> Picked {
             bounds: clip.bounds(),
             style: *style,
             kind: Kind::Stroke,
+            recolourable: true,
         },
         Clip::Text(typed) => {
             let [r, g, b] = typed.style.rgb;
@@ -289,6 +301,7 @@ fn picked_of(clip: &Clip, id: u32) -> Picked {
                     multiply: false,
                 },
                 kind: Kind::Text,
+                recolourable: true,
             }
         }
         Clip::Image { place, .. } => Picked::placed(id, *place),

@@ -14,9 +14,10 @@ use super::ink::{
 };
 use super::picture::PlacedPicture;
 use super::text::{line_top, same_quads, selection_quads};
-use super::typed::Typed;
+use super::typed::{TextStyle, Typed};
 use super::{
-    Clip, Comment, Cut, Glyph, Highlight, InkShape, InkStyle, Matrix, PdfDoc, Rect, Shape, lock,
+    Clip, Comment, Cut, Glyph, Highlight, InkShape, InkStyle, Matrix, PdfDoc, Recoloured, Rect,
+    Shape, lock,
 };
 use crate::index::PdfLink;
 
@@ -485,6 +486,77 @@ impl PdfDoc {
             .collect();
         self.reopen()?;
         Ok(moved)
+    }
+
+    /// Give each stroke and text of `colours` on `page` its colour, in that order, the document
+    /// opened again once, every one read off the page before any is written: what each had, or
+    /// why it could not take one.
+    ///
+    /// Ours keep their place in `/Annots`, and a stroke its opacity and blend, so a highlighter
+    /// stays one. Another editor's stroke is drawn again as ours along its `/InkList`, as the
+    /// partial eraser draws its pieces, at the end of `/Annots`; one the eraser takes whole keeps
+    /// its colour, and so does a picture.
+    pub fn recolour_inks(
+        &mut self,
+        page: usize,
+        colours: &[(Ref, [u8; 3])],
+    ) -> Result<Vec<Result<Recoloured>>> {
+        let held: Vec<_> = colours.iter().map(|&(at, _)| self.hold(page, at)).collect();
+        let made = (colours.iter().zip(held))
+            .map(|(&(at, rgb), held)| held.and_then(|held| self.recoloured(page, at, rgb, held)))
+            .collect();
+        self.reopen()?;
+        Ok(made)
+    }
+
+    /// `held`, the object `at`, given `rgb` in the update, without opening the document again.
+    fn recoloured(&mut self, page: usize, at: Ref, rgb: [u8; 3], held: Held) -> Result<Recoloured> {
+        let (_, height) = self.page_size(page)?;
+        let read = match held {
+            Held::Text(typed, bounds) => {
+                let was = typed.style.rgb;
+                let style = TextStyle { rgb, ..typed.style };
+                let typed = Typed { style, ..typed };
+                let (now, _) = self.cos.put_text(page, height, &typed, Some(at))?;
+                let area = bounds.union(now);
+                return Ok(Recoloured::InPlace { was, area });
+            }
+            Held::Picture(..) => return Err(Error::Invalid("a picture keeps its colours".into())),
+            Held::Ink(read) => read,
+        };
+        let [r, g, b, alpha] = read.style.rgba;
+        let style = InkStyle {
+            rgba: [rgb[0], rgb[1], rgb[2], alpha],
+            ..read.style
+        };
+        if read.ours {
+            let index = self.cos.index_of(page, at)?;
+            let (now, _) = self
+                .cos
+                .put_ink(page, height, &read.segs, style, Some(at))?;
+            self.cos.put_at(page, at, index)?;
+            let area = read.bounds.union(now);
+            return Ok(Recoloured::InPlace {
+                was: [r, g, b],
+                area,
+            });
+        }
+        if !read.cuttable {
+            return Err(Error::Invalid(
+                "its paths are drawn in more than one way".into(),
+            ));
+        }
+        let strokes = read.strokes.clone();
+        let (was, mut area) = self.taken(page, at, Held::Ink(read))?;
+        let mut pieces = Vec::with_capacity(strokes.len());
+        for stroke in strokes {
+            let (piece, at) = self
+                .cos
+                .put_ink(page, height, &polyline(&stroke), style, None)?;
+            area = area.union(piece);
+            pieces.push(at);
+        }
+        Ok(Recoloured::Redrawn { was, pieces, area })
     }
 
     /// The stroke, text or picture `at` on `page` as a move or a take needs it, read through
