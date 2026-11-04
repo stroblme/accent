@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "accent"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "accent-api",
  "accent-core",
@@ -33,7 +33,7 @@ dependencies = [
 
 [[package]]
 name = "accent-android"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "accent-api",
  "uniffi",
@@ -41,7 +41,7 @@ dependencies = [
 
 [[package]]
 name = "accent-api"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "accent-core",
  "accent-dap",
@@ -66,7 +66,7 @@ dependencies = [
 
 [[package]]
 name = "accent-cli"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "accent-api",
  "accent-core",
@@ -88,7 +88,7 @@ dependencies = [
 
 [[package]]
 name = "accent-core"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "accent-drawio",
  "accent-pdf",
@@ -121,7 +121,7 @@ dependencies = [
 
 [[package]]
 name = "accent-dap"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "accent-lsp",
  "serde",
@@ -133,7 +133,7 @@ dependencies = [
 
 [[package]]
 name = "accent-drawio"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "miniz_oxide",
  "quick-xml",
@@ -142,7 +142,7 @@ dependencies = [
 
 [[package]]
 name = "accent-jupyter"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "accent-lsp",
  "chrono",
@@ -159,7 +159,7 @@ dependencies = [
 
 [[package]]
 name = "accent-lsp"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "accent-math"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "accent-core",
  "pkg-config",
@@ -180,7 +180,7 @@ dependencies = [
 
 [[package]]
 name = "accent-pdf"
-version = "3.0.0"
+version = "3.0.1"
 dependencies = [
  "aes",
  "cbc",

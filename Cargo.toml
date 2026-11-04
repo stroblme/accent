@@ -7,7 +7,7 @@ members = ["crates/core", "crates/lsp", "crates/dap", "crates/jupyter", "crates/
 default-members = ["crates/core", "crates/lsp", "crates/dap", "crates/jupyter", "crates/api", "crates/drawio", "crates/pdf", "apps/cli"]
 
 [workspace.package]
-version = "3.0.0"
+version = "3.0.1"
 edition = "2024"
 # 1.95 for `use super::{self as …}` (apps/gtk/src/pdf); the dependencies alone ask 1.92.
 rust-version = "1.95"
