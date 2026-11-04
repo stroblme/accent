@@ -7,7 +7,7 @@ bench preview block=5 lines=15-18 tags=["list1", "marker", "prose"] text="1. one
 bench preview block=6 lines=18-22 tags=["list1", "prose"] text="[box [ ]] open task\n[box [x]] done task\n[box [/]] doing task\n"
 bench preview block=7 lines=22-24 tags=["gap", "para", "prose", "quote"] text="A quote over two lines\n"
 bench preview block=8 lines=25-27 tags=["callout", "callout-title", "prose"] text="[icon document-edit-symbolic] Callout title\nCallout body\n"
-bench preview block=9 lines=28-31 tags=["code:python3:1", "codeblock", "fence-bottom", "fence-top", "gap", "prose"] text="print(\"hi\")\n"
+bench preview block=9 lines=28-31 tags=["code:python3", "codeblock", "fence-bottom", "fence-top", "gap", "prose"] text="print(\"hi\")\n"
 bench preview block=10 lines=32-35 tags=["caption", "prose"] text="Mermaid diagram\ngraph TD; A-->B\n"
 bench preview block=11 lines=36-39 tags=["caption", "prose"] text="Saved search · kind:diagram\n[search kind:diagram]\n"
 bench preview block=12 lines=40-44 tags=["gap", "prose"] text="[table 3x3]\n"
@@ -25,7 +25,7 @@ bench preview block=23 lines=71-72 tags=["gap", "prose"] text="Back to the top, 
 bench preview block=24 lines=73-78 tags=["conflict-current", "conflict-current-label", "prose"] text="ours\nOur side\ntheirs\nTheir side\n"
 bench preview block=25 lines=79-81 tags=["fndef", "gap", "para", "prose"] text="1. The footnote.\n"
 bench preview figure accent://file/preview-drill.png key=Some("preview-drill.png") loaded=true size=96x48 fits=true reads=3
-bench preview figure accent://file/preview-drill.drawio key=Some("preview-drill.drawio") loaded=true size=527x347 fits=true reads=3
+bench preview figure accent://file/preview-drill.drawio key=Some("preview-drill.drawio") loaded=true size=fonts fits=true reads=3
 bench preview figure accent://file/Attachments/stripes.png key=Some("Attachments/stripes.png") loaded=true size=96x48 fits=true reads=3
 bench preview formula "x^2" display=false size=1.00
 bench preview formula "\nE = mc^2\n" display=true size=1.15

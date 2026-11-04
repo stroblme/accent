@@ -264,8 +264,15 @@ async fn render(app: &Rc<App>) {
         let Some(preview) = preview.as_ref() else {
             return;
         };
-        // The fixture's blocks, not the filler under them.
+        // The fixture's blocks, not the filler under them. A code look's number counts the looks
+        // met before it, in whichever order the editor and the preview highlighted their blocks.
         for (i, (lines, text, tags)) in preview.blocks().into_iter().take(26).enumerate() {
+            let tags: Vec<&str> = (tags.iter())
+                .map(|t| match t.rsplit_once(':') {
+                    Some((look, _)) if t.starts_with("code:") => look,
+                    _ => t,
+                })
+                .collect();
             println!(
                 "bench preview block={i} lines={}-{} tags={tags:?} text={:?}",
                 lines.start,
@@ -275,11 +282,17 @@ async fn render(app: &Rc<App>) {
         }
         let (figures, reads) = preview.figures();
         // Its own size and whether it is drawn at that shrunk to the text's width: the width
-        // itself is the pane's, which differs from run to run.
+        // itself is the pane's, which differs from run to run, and a diagram's takes in its
+        // labels as the fonts at hand lay them out.
         for f in figures {
+            let size = if f.uri.contains(".drawio") {
+                "fonts".to_string()
+            } else {
+                format!("{}x{}", f.natural.0, f.natural.1)
+            };
             println!(
-                "bench preview figure {} key={:?} loaded={} size={}x{} fits={} reads={reads}",
-                f.uri, f.key, f.loaded, f.natural.0, f.natural.1, f.fits
+                "bench preview figure {} key={:?} loaded={} size={size} fits={} reads={reads}",
+                f.uri, f.key, f.loaded, f.fits
             );
         }
         for (tex, display, size) in preview.formulas() {
