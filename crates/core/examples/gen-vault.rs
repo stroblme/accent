@@ -722,6 +722,111 @@ The Outline, folds and links of an org file: [[file:Real.md][the real note]], \
 <https://orgmode.org>.\n- [X] a done box\n- [-] one under way\n- [ ] an open one\n\
   + nested, and 1) counted\n# a comment\n: fixed width\n| a | b |\n|---+---|\n| 1 | 2 |\n";
 
+/// A second org fixture for what an org file's page shows, which `OUTLINE_ORG` leaves to its
+/// note look: inline markup and formulas, footnotes, every kind of block, a table out of line for
+/// Tab to line up, the file links' search options, a planning line and property drawer, a
+/// `COMMENT` heading and a saved search, with the `#+KEY:` lines, drawers and comments the page
+/// leaves out.
+const PREVIEW_ORG: &str = r##"#+TITLE: Org preview
+#+FILETAGS: :org:sample:
+#+TODO: TODO NEXT | DONE
+
+What an Org file shows on its page, beside [[file:Outline.org][the outline file]].
+
+* Text :text:
+Prose with *bold*, /italic/, _underline_, +struck+, =verbatim=, ~code~, H_{2}O and x^{2}, while snake_case stays.
+A line ending in two backslashes breaks\\
+here. Inline maths \(e^{i\pi} + 1 = 0\) and $a^2 + b^2 = c^2$, though $5 and $10 are prices.
+
+\[
+\int_0^1 x^2 \, dx = \frac{1}{3}
+\]
+
+\begin{align*}
+a &= b + c \\
+d &= e
+\end{align*}
+
+Footnotes are numbered and defined after the page,[fn::an inline one with /emphasis/] one by label[fn:note] too.
+
+[fn:note] Defined where it is named.
+
+* Lists
+- [X] a done box
+- [-] one under way
+  + nested
+- [ ] an open one
+
+Counted:
+1. first
+2. second
+
+Described:
+- term :: its description
+
+* Blocks
+#+begin_quote
+A quoted /line/.
+#+end_quote
+
+#+begin_verse
+Roses are red,
+  violets are blue.
+#+end_verse
+
+#+begin_center
+A centred *paragraph*.
+#+end_center
+
+: a fixed-width line
+
+#+begin_example
+raw *text*, left as written
+#+end_example
+
+#+begin_src python
+def f():
+    return [[1]]
+#+end_src
+
+#+begin_src search limit=3
+kind:pdf
+#+end_src
+
+#+begin_export html
+<p><b>HTML</b> of the page</p>
+#+end_export
+
+#+begin_comment
+Not on the page.
+#+end_comment
+
+* Tables
+| <l>    | <r> |
+| Name   | Qty |
+|--------+-----|
+| tea | 12 |
+| coffee | 7 |
+
+* Links
+A heading, [[*Text]], a target, [[here]] (<<here>>), a custom ID, [[#plan]], a line, [[file:Outline.org::5]], a heading of another file, [[file:Outline.org::*Look][its look]], a match, [[file:Outline.org::/bold/][the first bold]], this file's custom ID, [[file:Preview.org::#plan]], a note, [[file:Real.md][Real]], one that is missing, [[file:Missing.md][a missing note]], and the web, [[https://orgmode.org][Org]] or <https://orgmode.org>.
+
+[[file:../Attachments/figure.png]]
+
+* TODO [#A] Plan the trip :travel:
+SCHEDULED: <2026-11-10 Tue> DEADLINE: <2026-11-20 Fri>
+:PROPERTIES:
+:CUSTOM_ID: plan
+:END:
+Its priority, planning line and drawer are not on the page.
+** NEXT Book the flight
+** DONE Pick a date
+
+* COMMENT Draft
+Left out with its section.
+** Notes to self
+"##;
+
 /// Print/export fixture covering headings, inline and display math, diagrams, long code lines,
 /// tables, local and web images, and local, external and heading links. Its script must neither
 /// execute nor appear in the export.
@@ -1228,10 +1333,10 @@ fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Result
     let venv_in = (files / 40).clamp(2, 1000);
     let venv_ext = (files / 20).clamp(4, 2000);
 
-    // 36: the files written at fixed paths below (ignore files, .obsidian, templates, Code/,
+    // 37: the files written at fixed paths below (ignore files, .obsidian, templates, Code/,
     // Syncthing artefacts, pyvenv.cfg, the five-page and the commented PDF, the image-theming
-    // figures and their note, the org file), which the bulk fill has to leave room for.
-    let floor = notes + 36 + venv_in + flat_imgs + flat_pdfs + excal;
+    // figures and their note, the org files), which the bulk fill has to leave room for.
+    let floor = notes + 37 + venv_in + flat_imgs + flat_pdfs + excal;
     if files < floor {
         bail!("--files {files} is too small for --notes {notes}: need at least {floor}");
     }
@@ -1547,6 +1652,7 @@ fn run(out: &Path, notes: usize, files: usize, seed: u64, force: bool) -> Result
     // Print and export's drill input: one of everything a page has to carry off the screen.
     g.write("Notes-QC/Export.md", EXPORT_NOTE.as_bytes())?;
     g.write("Notes-QC/Outline.org", OUTLINE_ORG.as_bytes())?;
+    g.write("Notes-QC/Preview.org", PREVIEW_ORG.as_bytes())?;
     // The notebook drill's inputs.
     g.mkdir("Notebooks")?;
     g.write("Notebooks/analysis.ipynb", ANALYSIS_IPYNB.as_bytes())?;
@@ -1838,6 +1944,13 @@ mod tests {
         let org = fs::read_to_string(vault.join("Notes-QC/Outline.org")).unwrap();
         let a = accent_core::org::analyze(&org);
         assert_eq!((a.headings.len(), a.links.len()), (6, 5));
+        // The page fixture: all its headings, its links and the footnote and block its page keeps.
+        let org = fs::read_to_string(vault.join("Notes-QC/Preview.org")).unwrap();
+        let a = accent_core::org::analyze(&org);
+        assert_eq!((a.headings.len(), a.links.len()), (10, 13));
+        let page = accent_core::org::to_html(&org);
+        assert!(page.contains("footnote-definition"), "{page}");
+        assert!(!page.contains("Not on the page"), "{page}");
 
         // The notebook drill's inputs read as notebooks and are written back as they were.
         for (rel, cells) in [
