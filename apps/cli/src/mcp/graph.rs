@@ -1,11 +1,13 @@
 //! Call relationships for explore, using indexed declarations and names or language-server call
 //! hierarchy (`precise.rs`). Name matches do not resolve individual declarations; ambiguous
-//! names are reported.
+//! names are reported. By name, a callable is used where its name is called in its own language,
+//! and a type wherever its name is written there; a bare call in a file that declares a function
+//! of that name is that one's.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use accent_api::{CodeSymbol, Mention, Read};
-use accent_core::code;
+use accent_core::code::{self, Lang};
 
 use super::explore::count;
 use super::precise::Precise;
@@ -16,6 +18,11 @@ const DEFS: usize = 3;
 const SEEDS: usize = 6;
 /// Maximum references to one name.
 const MENTIONS: usize = 200;
+/// Call sites quoted for a seed, and the characters of each line quoted.
+const SITES: usize = 3;
+const SITE_TEXT: usize = 120;
+/// Subtypes listed for a seed.
+const SUBTYPES: usize = 6;
 /// Caller depth and fan-out when searching for tests.
 const HOPS: usize = 3;
 const PER_HOP: usize = 8;
@@ -30,9 +37,11 @@ pub(super) struct Seed {
     pub defs: usize,
 }
 
-/// Resolve `names` to declarations, matching bare or qualified names in the given case.
-pub(super) fn seeds(s: &Shared, names: &[String]) -> Result<Vec<Seed>, String> {
+/// Resolve `names` to declarations, matching bare or qualified names in the given case; the names
+/// nothing is declared by as well.
+pub(super) fn seeds(s: &Shared, names: &[String]) -> Result<(Vec<Seed>, Vec<String>), String> {
     let mut out: Vec<Seed> = Vec::new();
+    let mut missing = Vec::new();
     for name in names {
         let bare = name.rsplit([':', '.']).next().unwrap_or(name);
         let found = s.vault.find_symbols(name, 50).map_err(fail)?;
@@ -45,20 +54,24 @@ pub(super) fn seeds(s: &Shared, names: &[String]) -> Result<Vec<Seed>, String> {
             .into_iter()
             .filter(|c| !cased || c.name == bare)
             .collect();
-        // Every declaration of the name counts, whatever its container: a call reaches any.
-        let defs = s
+        if exact.is_empty() {
+            missing.push(name.clone());
+        }
+        // Every declaration of the name in its language counts, whatever its container: a call
+        // reaches any.
+        let all = s
             .vault
             .symbols_named(&[bare.to_string()], "", 50)
-            .map_err(fail)?
-            .len();
+            .map_err(fail)?;
         for sym in exact.into_iter().take(DEFS) {
             if !out.iter().any(|o| same(&o.sym, &sym)) {
+                let defs = all.iter().filter(|d| same_lang(d, &sym)).count();
                 out.push(Seed { sym, defs });
             }
         }
     }
     out.truncate(SEEDS);
-    Ok(out)
+    Ok((out, missing))
 }
 
 /// What explore says about the seeds above its cards, and the declarations it shows beside them.
@@ -91,19 +104,22 @@ pub(super) fn graph(
     let mut lines = vec![
         match precise {
             true => "**Blast radius** (precise: by the language servers' call hierarchy)",
-            false => "**Blast radius** (by name: a call counts for every declaration of its name)",
+            false => {
+                "**Blast radius** (by name: a call counts for every declaration of its name in its \
+                 language)"
+            }
         }
         .to_string(),
     ];
     for seed in seeds {
         let sym = &seed.sym;
         let (callers, by_name) = edges.callers(sym)?;
-        let mut by_file: BTreeMap<&str, usize> = BTreeMap::new();
-        for m in &callers {
-            *by_file.entry(m.rel_path.as_str()).or_default() += 1;
-        }
-        let files: Vec<String> = by_file.keys().take(6).map(|f| format!("`{f}`")).collect();
-        let more = by_file.len().saturating_sub(files.len());
+        // A type, a const or a trait is named rather than called.
+        let word = match sym.kind.callable() {
+            true => "call",
+            false => "reference",
+        };
+        let files: HashSet<&str> = callers.iter().map(|m| m.rel_path.as_str()).collect();
         let mut line = format!(
             "- `{}` {} ({}:{}) — ",
             label(sym),
@@ -111,17 +127,10 @@ pub(super) fn graph(
             sym.rel_path,
             sym.line
         );
-        line.push_str(&match callers.len() {
-            0 => "no callers found".to_string(),
-            n => format!(
-                "{} in {}{}",
-                count(n, "call"),
-                files.join(", "),
-                match more {
-                    0 => String::new(),
-                    more => format!(" +{}", count(more, "file")),
-                }
-            ),
+        line.push_str(&match (callers.len(), files.len()) {
+            (0, _) => format!("no {word}s found"),
+            (n, 1) => count(n, word),
+            (n, f) => format!("{} in {}", count(n, word), count(f, "file")),
         });
         line.push_str(&format!("; {}", tested(&mut edges, sym, &callers)?));
         if by_name && precise {
@@ -131,6 +140,10 @@ pub(super) fn graph(
             line.push_str(&format!("; {} declarations share this name", seed.defs));
         }
         lines.push(line);
+        lines.extend(sites(&callers));
+        if !sym.kind.callable() {
+            lines.extend(subtypes(s, sym)?);
+        }
         let callees = edges.callees(sym)?;
         let mut called: Vec<String> = Vec::new();
         for c in &callees {
@@ -178,9 +191,12 @@ pub(super) fn graph(
 struct Edges<'a> {
     s: &'a Shared,
     code: Reader<'a>,
-    mentioned: HashMap<String, Vec<Mention>>,
+    mentioned: Mentioned,
     precise: Option<Precise<'a>>,
 }
+
+/// The uses of a name found once per exploration, by name, language and whether as calls.
+type Mentioned = HashMap<(String, Lang, bool), Vec<Mention>>;
 
 impl Edges<'_> {
     /// Return callers of `sym`, their containing declarations, and whether matching used names.
@@ -188,10 +204,7 @@ impl Edges<'_> {
         if let Some(found) = self.precise.as_mut().and_then(|p| p.callers(sym)) {
             return Ok((found, false));
         }
-        Ok((
-            callers(self.s, &mut self.mentioned, &sym.name)?.clone(),
-            true,
-        ))
+        Ok((callers(self.s, &mut self.mentioned, sym)?, true))
     }
 
     fn callees(&mut self, sym: &CodeSymbol) -> Result<Vec<CodeSymbol>, String> {
@@ -223,21 +236,141 @@ fn same(a: &CodeSymbol, b: &CodeSymbol) -> bool {
     a.rel_path == b.rel_path && a.byte_start == b.byte_start
 }
 
-/// Find references to `name` within other declarations, reading each file once.
-fn callers<'a>(
+/// Whether two declarations are written in the same language.
+fn same_lang(a: &CodeSymbol, b: &CodeSymbol) -> bool {
+    code::lang_of(&a.rel_path) == code::lang_of(&b.rel_path)
+}
+
+/// Find where `sym` is used within other declarations of its language, called where it is a
+/// callable, reading each file once. A bare call in a file that declares a free function of the
+/// name is that function's, and a call of a parameter of the name is the parameter's.
+fn callers(
     s: &Shared,
-    mentioned: &'a mut HashMap<String, Vec<Mention>>,
-    name: &str,
-) -> Result<&'a Vec<Mention>, String> {
-    if !mentioned.contains_key(name) {
-        let found = s.vault.mentions(name, MENTIONS).map_err(fail)?;
+    mentioned: &mut Mentioned,
+    sym: &CodeSymbol,
+) -> Result<Vec<Mention>, String> {
+    let Some(lang) = code::lang_of(&sym.rel_path) else {
+        return Ok(Vec::new());
+    };
+    let key = (sym.name.clone(), lang, sym.kind.callable());
+    if !mentioned.contains_key(&key) {
+        let found = s.vault.mentions(&sym.name, lang, key.2, MENTIONS);
         let found = found
+            .map_err(fail)?
             .into_iter()
             .filter(|m| m.symbol.is_some() && s.shown(&m.rel_path))
             .collect();
-        mentioned.insert(name.to_string(), found);
+        mentioned.insert(key.clone(), found);
     }
-    Ok(&mentioned[name])
+    let namesakes: HashSet<String> = s
+        .vault
+        .symbols_named(std::slice::from_ref(&sym.name), "", 50)
+        .map_err(fail)?
+        .into_iter()
+        .filter(|d| d.container.is_none() && d.kind.callable() && d.rel_path != sym.rel_path)
+        .map(|d| d.rel_path)
+        .collect();
+    let theirs = |m: &Mention| {
+        let param = m
+            .symbol
+            .as_ref()
+            .is_some_and(|c| binds(&c.signature, &sym.name));
+        param || namesakes.contains(&m.rel_path) && calls_bare(&m.text, &sym.name)
+    };
+    Ok(mentioned[&key]
+        .iter()
+        .filter(|m| !theirs(m))
+        .cloned()
+        .collect())
+}
+
+/// Whether a declaration's `signature` takes a parameter called `name`: `(name: T`, `mut name`,
+/// Python's `name=None`.
+fn binds(signature: &str, name: &str) -> bool {
+    let params = signature.split_once('(').map_or("", |(_, p)| p);
+    params.split(',').any(|p| {
+        let p = p.trim_start();
+        let p = ["mut ", "val ", "var "]
+            .iter()
+            .fold(p, |p, m| p.trim_start_matches(m));
+        p.strip_prefix(name)
+            .is_some_and(|rest| rest.trim_start().starts_with([':', '=', ')']))
+    })
+}
+
+/// Whether `line` calls `name` bare, `name(`, rather than as a method or by a path.
+fn calls_bare(line: &str, name: &str) -> bool {
+    line.match_indices(name).any(|(i, _)| {
+        let before = line[..i].trim_end();
+        line[i + name.len()..].trim_start().starts_with('(')
+            && !before.ends_with(|c: char| c.is_alphanumeric() || "_.:".contains(c))
+    })
+}
+
+/// The first [`SITES`] of `callers` as `path:line (caller) line`, one a file before a second in
+/// any, and the files the rest are in.
+fn sites(callers: &[Mention]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let (firsts, others): (Vec<&Mention>, Vec<&Mention>) = callers
+        .iter()
+        .partition(|m| seen.insert(m.rel_path.as_str()));
+    let ordered: Vec<&Mention> = firsts.into_iter().chain(others).collect();
+    let (shown, rest) = ordered.split_at(SITES.min(ordered.len()));
+    let mut out: Vec<String> = shown
+        .iter()
+        .map(|m| {
+            let caller = m.symbol.as_ref().map(label).unwrap_or_default();
+            let mut text: String = m.text.chars().take(SITE_TEXT).collect();
+            if text.len() < m.text.len() {
+                text.push('…');
+            }
+            format!("  {}:{} ({caller}) {text}", m.rel_path, m.line)
+        })
+        .collect();
+    if !rest.is_empty() {
+        let mut files: Vec<&str> = Vec::new();
+        for m in rest {
+            if !files.contains(&m.rel_path.as_str()) {
+                files.push(&m.rel_path);
+            }
+        }
+        let named: Vec<String> = files.iter().take(5).map(|f| format!("`{f}`")).collect();
+        let more = match files.len() - named.len() {
+            0 => String::new(),
+            n => format!(" +{}", count(n, "file")),
+        };
+        out.push(format!(
+            "  +{} more in {}{more}",
+            rest.len(),
+            named.join(", ")
+        ));
+    }
+    out
+}
+
+/// What implements or extends the type `sym` in its language: each type and where it says so.
+fn subtypes(s: &Shared, sym: &CodeSymbol) -> Result<Option<String>, String> {
+    let found = s.vault.subtypes(&sym.name, 50).map_err(fail)?;
+    let found: Vec<CodeSymbol> = found
+        .into_iter()
+        .filter(|c| same_lang(c, sym) && s.shown(&c.rel_path))
+        .collect();
+    if found.is_empty() {
+        return Ok(None);
+    }
+    let named: Vec<String> = found
+        .iter()
+        .take(SUBTYPES)
+        .map(|c| {
+            let ty = c.container.as_deref().unwrap_or_default();
+            format!("`{ty}` ({}:{})", c.rel_path, c.line)
+        })
+        .collect();
+    let more = match found.len() - named.len() {
+        0 => String::new(),
+        n => format!(" +{n}"),
+    };
+    Ok(Some(format!("  subtypes {}{more}", named.join(", "))))
 }
 
 /// Whether a test reaches `sym` within [`HOPS`] caller hops.
@@ -287,10 +420,10 @@ fn call_paths(edges: &mut Edges, seeds: &[Seed]) -> Result<Vec<String>, String> 
                 }
                 parent.insert(key(&next), Some(at.clone()));
                 if let Some(to) = seeds.iter().find(|s| same(&s.sym, &next)) {
-                    let mut path = vec![to.sym.name.clone()];
+                    let mut path = vec![label(&to.sym)];
                     let mut step = Some(at.clone());
                     while let Some(c) = step {
-                        path.push(c.name.clone());
+                        path.push(label(&c));
                         step = parent.get(&key(&c)).cloned().flatten();
                     }
                     path.reverse();
@@ -338,13 +471,46 @@ impl<'a> Reader<'a> {
             .filter(|n| *n != sym.name)
             .map(str::to_string)
             .collect();
+        // More than are kept of a name, as some may be another language's.
         let found = s
             .vault
-            .symbols_named(&names, &sym.rel_path, DEFS)
+            .symbols_named(&names, &sym.rel_path, 4 * DEFS)
             .map_err(fail)?;
+        let mut kept: HashMap<String, usize> = HashMap::new();
         Ok(found
             .into_iter()
-            .filter(|c| c.kind.callable() && s.shown(&c.rel_path))
+            .filter(|c| c.kind.callable() && same_lang(c, sym) && s.shown(&c.rel_path))
+            .filter(|c| {
+                let n = kept.entry(c.name.clone()).or_default();
+                *n += 1;
+                *n <= DEFS
+            })
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// A bare call is `name(`; a method's, a path's and a longer name's are not.
+    #[test]
+    fn a_bare_call_is_neither_a_method_nor_a_path() {
+        assert!(super::calls_bare("let n = rank (a) + 1;", "rank"));
+        for line in ["x.rank(a)", "Self::rank(a)", "let rank = 1;", "prerank(a)"] {
+            assert!(!super::calls_bare(line, "rank"), "{line}");
+        }
+    }
+
+    /// A parameter is bound in its declaration's signature, in any of the languages read.
+    #[test]
+    fn a_parameter_of_the_name_is_bound() {
+        for signature in [
+            "fn eventually(probe: impl Fn() -> bool) -> bool",
+            "fn f(a: u8, mut probe: P)",
+            "def f(self, probe=None)",
+            "fun f(probe: () -> Boolean)",
+        ] {
+            assert!(super::binds(signature, "probe"), "{signature}");
+        }
+        assert!(!super::binds("fn f(probes: u8) -> Probe", "probe"));
     }
 }

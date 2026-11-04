@@ -8,6 +8,7 @@ use std::sync::mpsc::{Receiver, channel};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use accent_core::code::Lang;
 use accent_core::path::linked_path;
 
 use crate::link::Stop;
@@ -508,8 +509,11 @@ methods! {
     symbol_names() -> Vec<SymbolName>;
     /// The declarations of each of `names`, those in `near` first.
     symbols_named(names: ref [String], near: ref str, per: val usize) -> Vec<CodeSymbol>;
-    /// Where a name is written in code, with the declaration around it.
-    mentions(name: ref str, limit: val usize) -> Vec<Mention>;
+    /// Where a name is written in code of `lang`, called when `calls`, with the declaration
+    /// around it.
+    mentions(name: ref str, lang: val Lang, calls: val bool, limit: val usize) -> Vec<Mention>;
+    /// What implements or extends the type `name`, each with the implementing type.
+    subtypes(name: ref str, limit: val usize) -> Vec<CodeSymbol>;
     /// The declarations named by a question's words, with how many of their parts it holds.
     symbols_by_words(words: ref [String], limit: val usize) -> Vec<(CodeSymbol, usize)>;
     /// The note links that highlight a page of this PDF. Asked of the host on a remote vault,

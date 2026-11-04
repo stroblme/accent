@@ -8,6 +8,7 @@ use std::sync::mpsc::channel;
 
 use crate::Result;
 
+use accent_core::code::Lang;
 use accent_core::index::Index;
 use accent_core::walk::{self, FileKind};
 use accent_core::{git, notebook, search};
@@ -247,8 +248,18 @@ impl Local {
     }
 
     /// Read on the search connection, as a search is: every code body holding the name's words.
-    pub fn mentions(&self, name: &str, limit: usize) -> Result<Vec<Mention>> {
-        Ok(self.supersede(|index| index.mentions(name, limit))?)
+    pub fn mentions(
+        &self,
+        name: &str,
+        lang: Lang,
+        calls: bool,
+        limit: usize,
+    ) -> Result<Vec<Mention>> {
+        Ok(self.supersede(|index| index.mentions(name, lang, calls, limit))?)
+    }
+
+    pub fn subtypes(&self, name: &str, limit: usize) -> Result<Vec<CodeSymbol>> {
+        Ok(self.index().subtypes(name, limit)?)
     }
 
     pub(crate) fn pdf_links(&self, rel: &str) -> Result<Vec<PdfLink>> {

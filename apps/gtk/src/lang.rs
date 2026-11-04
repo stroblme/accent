@@ -991,7 +991,8 @@ pub fn declaration_icon(kind: SymbolKind) -> &'static str {
         SymbolKind::Method => Kind::Method,
         SymbolKind::Struct => Kind::Struct,
         SymbolKind::Enum => Kind::Enum,
-        SymbolKind::Trait => Kind::Interface,
+        // No outline lists an `Impl` row; were one shown, it is what a type implements.
+        SymbolKind::Trait | SymbolKind::Impl => Kind::Interface,
         SymbolKind::Class => Kind::Class,
         SymbolKind::TypeAlias => Kind::TypeParameter,
         SymbolKind::Module => Kind::Module,

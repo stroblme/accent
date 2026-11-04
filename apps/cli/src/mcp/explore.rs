@@ -47,6 +47,8 @@ const DOC: usize = 12;
 /// Initial limits for outline lines, links, backlinks, and tags on each card.
 const LIST: usize = 8;
 const LIST_WHOLE: usize = 40;
+/// Declarations and headings pointed at in each file of the closing list.
+const POINTERS: usize = 4;
 /// Line length limits, including longer limits for matches that may contain data URIs.
 const LINE: usize = 300;
 const FOUND_LINE: usize = 2_000;
@@ -108,6 +110,8 @@ struct Found {
     headings: Vec<usize>,
     /// Number of top files linked to or from this file, when at least two.
     near: usize,
+    /// Whether a tag the question names is on it.
+    tagged: bool,
     title: Option<String>,
     /// The declarations in it to show: named in the question, or calling or called by one.
     symbols: Vec<CodeSymbol>,
@@ -137,7 +141,19 @@ pub(super) fn explore(s: &Shared, a: &ExploreArgs) -> Result<String, String> {
         return Ok(out);
     }
 
-    let (mut found, seeds) = rank(s, &q)?;
+    let (mut found, seeds, missing) = rank(s, &q)?;
+    // A name written as code is one the question expects to be declared.
+    let missing: Vec<String> = missing
+        .iter()
+        .filter(|n| codey(n, true))
+        .map(|n| format!("`{n}`"))
+        .collect();
+    if !missing.is_empty() {
+        out.push_str(&format!(
+            "Nothing is declared as {}.\n\n",
+            missing.join(", ")
+        ));
+    }
     // The callers and callees of what the question names, shown in the files likeliest to get
     // a card.
     let carded: Vec<String> = found.iter().take(CARDED).map(|(r, _)| r.clone()).collect();
@@ -172,17 +188,27 @@ pub(super) fn explore(s: &Shared, a: &ExploreArgs) -> Result<String, String> {
         rest.push((rel, f));
     }
     if !rest.is_empty() {
-        out.push_str("**Also relevant** (explore a path for its card)\n\n");
+        out.push_str("**Also relevant** (explore a path or a name for more)\n\n");
+        // A file the question's words found in no declaration or heading is left out, unless it
+        // is a note or a PDF, whose words are what it holds.
+        let mut words_only = 0;
         for (rel, f) in rest {
+            let at = pointers(s, rel, f)?;
+            let read = outlined(rel) || path::file_type(rel) == FileType::Pdf;
+            if at.is_empty() && f.near == 0 && !f.tagged && !q.pins.contains(rel) && !read {
+                words_only += 1;
+                continue;
+            }
             // Any other file's title is its name.
             let title = match &f.title {
                 Some(t) if outlined(rel) => format!(" — {t}"),
                 _ => String::new(),
             };
-            let why = match (f.hits, f.near) {
-                (0, 0) => String::new(),
-                (0, near) => format!(" (linked with {near} of these)"),
-                (hits, _) => format!(" ({})", count(hits, "hit")),
+            let why = match (at.is_empty(), f.hits, f.near) {
+                (false, _, _) => format!(": {}", at.join(", ")),
+                (true, 0, 0) => String::new(),
+                (true, 0, near) => format!(" (linked with {near} of these)"),
+                (true, hits, _) => format!(" ({})", count(hits, "hit")),
             };
             let line = format!("- `{rel}`{title}{why}\n");
             if out.len() + line.len() > budget {
@@ -190,7 +216,48 @@ pub(super) fn explore(s: &Shared, a: &ExploreArgs) -> Result<String, String> {
             }
             out.push_str(&line);
         }
+        if words_only > 0 {
+            let line = format!(
+                "+{} holding the words alone: search_notes finds the lines\n",
+                count(words_only, "file")
+            );
+            if out.len() + line.len() <= budget {
+                out.push_str(&line);
+            }
+        }
     }
+    Ok(out)
+}
+
+/// Where to look next in a file no card shows, each with its line: the declarations the question
+/// reaches or its words are found in, then the headings holding its words.
+fn pointers(s: &Shared, rel: &str, f: &Found) -> Result<Vec<String>, String> {
+    let declared = match code::lang_of(rel) {
+        Some(_) => s.vault.file_symbols(rel).map_err(fail)?,
+        None => Vec::new(),
+    };
+    let holding = f.lines.iter().filter_map(|&n| {
+        let n = n as u32;
+        let inner = declared.iter().filter(|c| c.line <= n && n <= c.end_line);
+        inner.min_by_key(|c| c.end_line - c.line)
+    });
+    let mut out: Vec<String> = Vec::new();
+    for c in f.symbols.iter().chain(holding) {
+        let at = format!("`{}`:{}", graph::label(c), c.line);
+        if !out.contains(&at) {
+            out.push(at);
+        }
+    }
+    let heads = s.lines(f.headings.iter().map(|&b| (rel.to_string(), b)));
+    for (_, line, text) in heads {
+        out.push(format!(
+            "{}:{line}",
+            text.trim_start_matches(['#', '*']).trim()
+        ));
+    }
+    let more = out.len().saturating_sub(POINTERS);
+    out.truncate(POINTERS);
+    out.extend((more > 0).then(|| format!("+{more}")));
     Ok(out)
 }
 
@@ -289,8 +356,8 @@ fn is_file(s: &Shared, rel: &str) -> bool {
     s.inside(rel).is_ok() && s.vault.resolve(rel).is_ok_and(|p| p.is_file())
 }
 
-/// Return up to [`SHOWN`] ranked files and named declarations.
-fn rank(s: &Shared, q: &Query) -> Result<(Ranked, Vec<Seed>), String> {
+/// Return up to [`SHOWN`] ranked files, the declarations named, and the names nothing declares.
+fn rank(s: &Shared, q: &Query) -> Result<(Ranked, Vec<Seed>, Vec<String>), String> {
     let mut found: HashMap<String, Found> = HashMap::new();
     let mut cache: HashMap<String, bool> = HashMap::new();
     let mut shown = |rel: &str| *cache.entry(rel.to_string()).or_insert_with(|| s.shown(rel));
@@ -299,7 +366,7 @@ fn rank(s: &Shared, q: &Query) -> Result<(Ranked, Vec<Seed>), String> {
         found.entry(rel.clone()).or_default().score += 100.0 - i as f64;
     }
     // A declaration named comes right after a file named.
-    let mut seeds = graph::seeds(s, &q.names)?;
+    let (mut seeds, missing) = graph::seeds(s, &q.names)?;
     for (i, seed) in seeds.iter().enumerate() {
         let e = found.entry(seed.sym.rel_path.clone()).or_default();
         e.score += 50.0 - i as f64;
@@ -326,6 +393,7 @@ fn rank(s: &Shared, q: &Query) -> Result<(Ranked, Vec<Seed>), String> {
             if shown(&f.rel_path) {
                 let e = found.entry(f.rel_path).or_default();
                 e.score += 1.0;
+                e.tagged = true;
                 e.title = f.title;
             }
         }
@@ -392,7 +460,7 @@ fn rank(s: &Shared, q: &Query) -> Result<(Ranked, Vec<Seed>), String> {
             .then_with(|| a.0.cmp(&b.0))
     });
     found.truncate(SHOWN);
-    Ok((found, seeds))
+    Ok((found, seeds, missing))
 }
 
 /// Score candidates by their best [`PASSAGE`]-line span, giving rarer words more weight, and
@@ -593,14 +661,18 @@ fn card(s: &Shared, rel: &str, f: &Found, cap: usize, whole: bool) -> Result<Str
     let mut lines = f.lines.clone();
     lines.extend(f.headings.iter().map(|&b| line_of(b)));
     let all: Vec<&str> = text.lines().collect();
+    let fence = "`".repeat(longest_tick_run(&text).max(2) + 1);
+    let cut = format!("... (cut: read_note `{rel}` for the rest)\n");
     // The whole file is one run of lines, and the list of runs below holds just it.
     #[allow(clippy::single_range_in_vec_init)]
     let ranges = match (whole, symbols.is_empty()) {
         (true, _) => vec![1..=all.len().max(1)],
         (false, true) => shown_lines(all.len(), &heads, &lines),
-        (false, false) => code_lines(&all, &symbols, &f.symbols, &lines),
+        (false, false) => {
+            let room = cap.saturating_sub(out.len() + 2 * fence.len() + cut.len() + 20);
+            fitting(code_lines(&all, &symbols, &f.symbols, &lines), &all, room)
+        }
     };
-    let fence = "`".repeat(longest_tick_run(&text).max(2) + 1);
     let lang = match (note, source_view) {
         (true, _) => "markdown",
         (_, true) => "text",
@@ -612,7 +684,6 @@ fn card(s: &Shared, rel: &str, f: &Found, cap: usize, whole: bool) -> Result<Str
     out.push_str(&format!("{fence}{lang}\n"));
     // Line by line while the line, the word on where the rest is, and the fence fit the cap.
     let end = format!("{fence}\n\n");
-    let cut = format!("... (cut: read_note `{rel}` for the rest)\n");
     let mut last = 0;
     'ranges: for range in ranges {
         for n in range {
@@ -705,7 +776,9 @@ fn shown_lines(len: usize, heads: &[usize], found: &BTreeSet<usize>) -> Vec<Rang
 }
 
 /// Choose 1-based ranges for named declarations and matches, including preceding docs and
-/// attributes. Abbreviate long declarations and show context for unmatched lines.
+/// attributes, in the order they matter: the declarations `show` names first, in its order, then
+/// those the matches are in, then the matches outside any. Abbreviate long declarations and
+/// show context for unmatched lines.
 fn code_lines(
     all: &[&str],
     symbols: &[CodeSymbol],
@@ -714,6 +787,7 @@ fn code_lines(
 ) -> Vec<RangeInclusive<usize>> {
     let len = all.len();
     let mut ranges: Vec<RangeInclusive<usize>> = Vec::new();
+    let mut loose: Vec<RangeInclusive<usize>> = Vec::new();
     let mut whole: Vec<&CodeSymbol> = show.iter().collect();
     for &n in found.iter().filter(|&&n| n >= 1 && n <= len) {
         let inner = symbols
@@ -721,8 +795,9 @@ fn code_lines(
             .filter(|c| (c.line as usize) <= n && n <= c.end_line as usize)
             .min_by_key(|c| c.end_line - c.line);
         match inner {
+            Some(c) if whole.iter().any(|w| w.byte_start == c.byte_start) => {}
             Some(c) => whole.push(c),
-            None => ranges.push(n.saturating_sub(AROUND).max(1)..=(n + AROUND).min(len)),
+            None => loose.push(n.saturating_sub(AROUND).max(1)..=(n + AROUND).min(len)),
         }
     }
     for c in whole {
@@ -742,10 +817,35 @@ fn code_lines(
         }
         ranges.push(end..=end);
     }
+    ranges.extend(loose);
     if ranges.is_empty() {
         ranges.push(1..=len.min(HEAD));
     }
-    merge(ranges)
+    ranges
+}
+
+/// `ranges` in their order while their lines fit `room` characters together, the first whatever
+/// its length, merged into line order.
+fn fitting(
+    ranges: Vec<RangeInclusive<usize>>,
+    all: &[&str],
+    room: usize,
+) -> Vec<RangeInclusive<usize>> {
+    // A line costs its number, a tab and a newline beside its text; a run, its gap line.
+    let cost = |r: &RangeInclusive<usize>| -> usize {
+        let lines = r.clone().filter_map(|n| all.get(n - 1));
+        lines.map(|l| l.len().min(LINE) + 8).sum::<usize>() + 14
+    };
+    let mut used = 0;
+    let mut kept = Vec::new();
+    for r in ranges {
+        let c = cost(&r);
+        if kept.is_empty() || used + c <= room {
+            used += c;
+            kept.push(r);
+        }
+    }
+    merge(kept)
 }
 
 /// Whether a preceding comment, attribute, or annotation belongs to a declaration.
@@ -796,5 +896,15 @@ mod tests {
         let found: BTreeSet<usize> = [60].into();
         assert_eq!(shown_lines(100, &[1, 2], &found), [2..=2, 58..=62]);
         assert_eq!(shown_lines(30, &[], &BTreeSet::new()), [1..=HEAD]);
+    }
+
+    /// A small card keeps the ranges that matter most, the first whatever the lines above it.
+    #[test]
+    fn a_small_card_keeps_the_first_range() {
+        let all = vec!["x"; 20];
+        assert_eq!(
+            fitting(vec![10..=12, 1..=3, 5..=5], &all, 70),
+            [5..=5, 10..=12]
+        );
     }
 }

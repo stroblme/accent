@@ -1,7 +1,7 @@
 //! The tables, and the knobs that shape how they are filled.
 
 /// Bump on any schema change: `open` then drops and recreates the cache.
-pub(super) const SCHEMA_VERSION: i64 = 18;
+pub(super) const SCHEMA_VERSION: i64 = 19;
 
 /// Maximum indexed body size for non-markdown files. Stricter than [`crate::fs::MAX_TEXT`]
 /// because indexing repeatedly consumes database space and FTS query work, whereas opening a
@@ -72,7 +72,8 @@ CREATE TABLE note_aliases(file_id INTEGER NOT NULL, name TEXT NOT NULL);
 CREATE TABLE notes(file_id INTEGER PRIMARY KEY, body TEXT NOT NULL, title TEXT NOT NULL);
 -- A code file's declarations as `code::symbols` finds them: what an outline, a caller and a
 -- callee are answered from without a language server. Only a file `code::lang_of` reads has any.
--- Lines are kept beside the bytes so an outline needs no file read.
+-- Lines are kept beside the bytes so an outline needs no file read. What a type implements or
+-- extends is a row too (`SymbolKind::Impl`), named by the supertype, which only `subtypes` reads.
 CREATE TABLE symbols(
     file_id    INTEGER NOT NULL,
     kind       INTEGER NOT NULL,

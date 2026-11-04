@@ -774,6 +774,8 @@ fn org_headings_are_outlined_read_and_resolved() {
 }
 
 /// Explore shows named declarations, callers, callees, test reachability, paths, and file outlines.
+/// By name a call is one in the declaration's language, a variable of its name none, and a type
+/// is referenced and implemented.
 #[test]
 fn explore_follows_code_by_name() {
     let scratch = Scratch::new("code");
@@ -788,23 +790,38 @@ fn explore_follows_code_by_name() {
     .unwrap();
     write(
         "use.rs",
-        "fn caller(ix: &Index) -> usize {\n    ix.backlinks()\n}\n",
+        "fn caller(ix: &Index) -> usize {\n    ix.backlinks()\n}\n\nfn other() -> usize {\n    \
+         let helper = 2;\n    helper\n}\n\npub trait Counts {}\nimpl Counts for Index {}\n",
     )
     .unwrap();
+    write("Use.kt", "fun use(): Int = helper()\n").unwrap();
     let mut c = Client::start(&scratch, &[]);
     c.initialize();
 
     let (said, error) = c.call("explore", json!({"query": "Index::backlinks helper"}));
     assert!(!error, "{said:?}");
     for row in [
-        "- `Index::backlinks` method (lib.rs:5) — 2 calls in `lib.rs`, `use.rs`; tested by \
-         `counts` (lib.rs)",
-        "  calls `helper`",
-        "**Call paths**\n- `backlinks` → `helper`",
+        "- `Index::backlinks` method (lib.rs:5) — 2 calls in 2 files; tested by `counts` \
+         (lib.rs)\n  lib.rs:18 (counts) assert_eq!(super::Index.backlinks(), 1);\n  use.rs:2 \
+         (caller) ix.backlinks()\n  calls `helper`\n",
+        "- `helper` fn (lib.rs:10) — 1 call; tested via `backlinks` (lib.rs)\n  lib.rs:6 \
+         (Index::backlinks) helper()\n",
+        "**Call paths**\n- `Index::backlinks` → `helper`",
         "4\t    /// Finds the links.\n5\t    pub fn backlinks(&self) -> usize {",
     ] {
         assert!(said[0].contains(row), "{row:?} not in {}", said[0]);
     }
+
+    let (said, _) = c.call("explore", json!({"query": "Counts"}));
+    let row = "- `Counts` trait (use.rs:10) — no references found; no tests found within 3 caller \
+               hops\n  subtypes `Index` (use.rs:11)\n";
+    assert!(said[0].contains(row), "{}", said[0]);
+    let (said, _) = c.call("explore", json!({"query": "Index::nothing"}));
+    assert!(
+        said[0].contains("Nothing is declared as `Index::nothing`."),
+        "{}",
+        said[0]
+    );
 
     let (said, _) = c.call("explore", json!({"query": "lib.rs"}));
     assert!(
@@ -866,18 +883,19 @@ fn explore_asks_the_language_server_when_precise() {
 
     let query = "Index::backlinks helper";
     let (said, _) = c.call("explore", json!({"query": query}));
-    let by_name = "- `Index::backlinks` method (lib.rs:4) — 2 calls in `lib.rs`, `other.rs`; \
-                   tested by `counts` (lib.rs); 2 declarations share this name";
+    let by_name = "- `Index::backlinks` method (lib.rs:4) — 2 calls in 2 files; tested by \
+                   `counts` (lib.rs); 2 declarations share this name";
     assert!(said[0].contains(by_name), "{}", said[0]);
 
     let (said, error) = c.call("explore", json!({"query": query, "precise": true}));
     assert!(!error, "{said:?}");
     for row in [
         "**Blast radius** (precise: by the language servers' call hierarchy)\n",
-        "- `Index::backlinks` method (lib.rs:4) — 1 call in `lib.rs`; tested by `counts` \
-         (lib.rs)\n  calls `helper`\n",
-        "- `helper` fn (lib.rs:9) — 1 call in `lib.rs`; tested via `backlinks` (lib.rs)\n",
-        "**Call paths**\n- `backlinks` → `helper`",
+        "- `Index::backlinks` method (lib.rs:4) — 1 call; tested by `counts` (lib.rs)\n  \
+         lib.rs:17 (counts) assert_eq!(super::Index.backlinks(), 1);\n  calls `helper`\n",
+        "- `helper` fn (lib.rs:9) — 1 call; tested via `backlinks` (lib.rs)\n  lib.rs:5 \
+         (Index::backlinks) helper()\n",
+        "**Call paths**\n- `Index::backlinks` → `helper`",
     ] {
         assert!(said[0].contains(row), "{row:?} not in {}", said[0]);
     }
@@ -885,8 +903,7 @@ fn explore_asks_the_language_server_when_precise() {
     let (said, _) = c.call("explore", json!({"query": "tally", "precise": true}));
     for row in [
         "precise: accent-no-such-server is not installed, name-based callers shown\n",
-        "- `tally` fn (tool.py:1) — 1 call in `tool.py`; no tests found within 3 caller hops; \
-         by name",
+        "- `tally` fn (tool.py:1) — 1 call; no tests found within 3 caller hops; by name",
     ] {
         assert!(said[0].contains(row), "{row:?} not in {}", said[0]);
     }

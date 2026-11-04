@@ -39,17 +39,20 @@ pub enum SymbolKind {
     Module,
     Const,
     Macro,
+    /// What a type implements or extends, a row of its own: `impl Trait for Type`, the `B` of
+    /// `class A : B`; named by the supertype, its container the type. No outline lists it.
+    Impl,
 }
 
 impl SymbolKind {
-    pub fn as_i64(self) -> i64 {
+    pub const fn as_i64(self) -> i64 {
         self as i64
     }
 
     pub fn from_i64(v: i64) -> Self {
         use SymbolKind::*;
         [
-            Function, Method, Struct, Enum, Trait, Class, TypeAlias, Module, Const, Macro,
+            Function, Method, Struct, Enum, Trait, Class, TypeAlias, Module, Const, Macro, Impl,
         ]
         .get(v as usize)
         .copied()
@@ -69,6 +72,7 @@ impl SymbolKind {
             SymbolKind::Module => "mod",
             SymbolKind::Const => "const",
             SymbolKind::Macro => "macro",
+            SymbolKind::Impl => "impl",
         }
     }
 
@@ -172,6 +176,15 @@ pub fn calls(masked: &str) -> Vec<&str> {
         }
     }
     out
+}
+
+/// Whether the name at `at` in `masked` is called there or named by its path — `name(`,
+/// `name::<T>(`, `name!(`, `name![`, `::name` — rather than bound or read as a variable is.
+pub fn is_called(masked: &str, at: Range<usize>) -> bool {
+    static CALL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^\s*(?:::\s*<[^<>()]*>\s*)?(?:\(|!\s*[(\[{])").expect("a valid regex")
+    });
+    masked[..at.start].trim_end().ends_with("::") || CALL.is_match(&masked[at.end..])
 }
 
 /// Where `name` is first written as a whole word in `text[decl]`, a declaration's span: the byte
@@ -615,16 +628,20 @@ fn braced(lang: Lang, masked: &str, text: &str) -> Vec<Decl> {
                     open.scope = f.scope;
                     open.kind = Some(f.kind);
                     open.test |= f.kind == SymbolKind::Module && f.name == "tests";
+                    let mut impls = Vec::new();
                     if f.scope == Scope::Type {
-                        open.name = Some(match f.name.is_empty() {
+                        let ty = match f.name.is_empty() {
                             false => f.name.clone(),
                             true => scope_type(lang, &masked[f.at..i], &stack),
-                        });
+                        };
+                        impls = supertypes(lang, &f, &ty, masked, text, i, open.test);
+                        open.name = Some(ty);
                     }
                     if !f.name.is_empty() {
                         open.decl = Some(out.len());
                         out.push(decl(&stack, f, i + 1, text, i, open.test));
                     }
+                    out.extend(impls);
                 }
                 stack.push(open);
                 chunk = i + 1;
@@ -674,7 +691,12 @@ fn braced(lang: Lang, masked: &str, text: &str) -> Vec<Decl> {
                 match found {
                     Some(f) => {
                         let test = top.test || test_attr(lang, &masked[chunk..i]);
+                        let impls = match f.scope {
+                            Scope::Type => supertypes(lang, &f, &f.name, masked, text, i, test),
+                            _ => Vec::new(),
+                        };
                         out.push(decl(&stack, f, i, text, i, test));
+                        out.extend(impls);
                     }
                     None if line.starts_with('@') => continue,
                     None => {}
@@ -722,12 +744,6 @@ fn decl(stack: &[Open], f: Found, end: usize, text: &str, header_end: usize, tes
         (kind, Scope::Type, None) => (kind, top.name.clone()),
         (kind, _, None) => (kind, None),
     };
-    let line = &text[f.line..header_end.max(f.line)];
-    let mut signature = line.split_whitespace().collect::<Vec<_>>().join(" ");
-    if let Some((cut, _)) = signature.char_indices().nth(200) {
-        signature.truncate(cut);
-        signature.push('…');
-    }
     Decl {
         kind,
         name: f.name,
@@ -735,9 +751,19 @@ fn decl(stack: &[Open], f: Found, end: usize, text: &str, header_end: usize, tes
         range: f.line..end,
         line: 0,
         end_line: 0,
-        signature,
+        signature: one_line(&text[f.line..header_end.max(f.line)]),
         test,
     }
+}
+
+/// A header on one line, at most 200 characters of it.
+fn one_line(header: &str) -> String {
+    let mut line = header.split_whitespace().collect::<Vec<_>>().join(" ");
+    if let Some((cut, _)) = line.char_indices().nth(200) {
+        line.truncate(cut);
+        line.push('…');
+    }
+    line
 }
 
 /// Whether the attributes or annotations before a declaration mark it a test.
@@ -1159,6 +1185,99 @@ fn strip_generics(text: &str) -> String {
     out
 }
 
+/// An [`Impl`] row for each type `ty` implements or extends, read from the header
+/// `masked[f.at..end]` that declares it or implements for it: the trait of `impl Trait for Type`,
+/// a trait's supertraits, what follows a Kotlin or C++ class's `:`, a Java or TypeScript type's
+/// `extends` and `implements`.
+fn supertypes(
+    lang: Lang,
+    f: &Found,
+    ty: &str,
+    masked: &str,
+    text: &str,
+    end: usize,
+    test: bool,
+) -> Vec<Decl> {
+    // A nameless block other than Rust's `impl`, a Kotlin companion object, is its class's; a C
+    // enum's `:` gives the type it is stored as.
+    if f.name.is_empty() && lang != Lang::Rust || ty.is_empty() || lang == Lang::C && f.kind == Enum
+    {
+        return Vec::new();
+    }
+    let head = one_line(&without(&strip_generics(&masked[f.at..end]), '(', ')'));
+    let list = match lang {
+        // An inherent `impl Type` implements nothing.
+        Lang::Rust if f.name.is_empty() => head
+            .split_once(" for ")
+            .map(|(t, _)| t[t.find("impl").map_or(0, |i| i + 4)..].to_string()),
+        Lang::Rust | Lang::Kotlin | Lang::C => {
+            // What follows the first `:` that is not half of a `::`, its `where` clause aside.
+            let head = head.split(" where ").next().unwrap_or_default();
+            let b = head.as_bytes();
+            (1..b.len())
+                .find(|&i| b[i] == b':' && b[i - 1] != b':' && b.get(i + 1) != Some(&b':'))
+                .map(|i| head[i + 1..].to_string())
+        }
+        Lang::Java | Lang::Script => {
+            // `extends A implements B, C`, which an interface's `extends B, C` is too.
+            let list = |kw: &str| {
+                let rest = head.split_once(kw).map_or("", |(_, rest)| rest);
+                rest.split(" implements ").next().unwrap_or_default()
+            };
+            Some(format!("{},{}", list(" extends "), list(" implements ")))
+        }
+        _ => None,
+    };
+    let signature = one_line(&text[f.line..end]);
+    type_names(&list.unwrap_or_default())
+        .into_iter()
+        .map(|name| Decl {
+            kind: Impl,
+            name,
+            container: Some(ty.to_string()),
+            range: f.line..end,
+            line: 0,
+            end_line: 0,
+            signature: signature.clone(),
+            test,
+        })
+        .collect()
+}
+
+/// The type names a list of supertypes holds — `public Base`, `a::C`, `D by d`, `Send + 'a` —
+/// each by its last path segment; lifetimes, `?Sized` and negative bounds are none.
+fn type_names(list: &str) -> Vec<String> {
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
+    list.split([',', '+'])
+        .filter_map(|item| {
+            let word = item
+                .split_whitespace()
+                .find(|w| !matches!(*w, "public" | "private" | "protected" | "virtual" | "dyn"))?;
+            let name = word
+                .trim_end_matches(|c| !ident(c))
+                .rsplit([':', '.'])
+                .next()?;
+            (name.starts_with(|c: char| c.is_alphabetic() || c == '_') && name.chars().all(ident))
+                .then(|| name.to_string())
+        })
+        .collect()
+}
+
+/// `text` without what stands between `open` and `close`, nested or not.
+fn without(text: &str, open: char, close: char) -> String {
+    let mut depth = 0usize;
+    text.chars()
+        .filter(|&c| {
+            match c {
+                _ if c == open => depth += 1,
+                _ if c == close => depth = depth.saturating_sub(1),
+                _ => return depth == 0,
+            }
+            false
+        })
+        .collect()
+}
+
 /// C's `#define`s, which a statement-at-a-time reading never sees.
 fn defines(masked: &str, text: &str) -> Vec<Decl> {
     static DEFINE: LazyLock<Regex> = LazyLock::new(|| {
@@ -1243,6 +1362,30 @@ fn indented(masked: &str, text: &str) -> Vec<Decl> {
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
+        let signature: String = signature.chars().take(200).collect();
+        // A class's bases, its keyword arguments, `metaclass=` among them, aside.
+        let bases = match is_class {
+            true => masked[whole.end()..colon.min(masked.len())].trim(),
+            false => "",
+        };
+        let bases = bases.strip_prefix('(').and_then(|b| b.strip_suffix(')'));
+        let bases = without(&without(bases.unwrap_or_default(), '[', ']'), '(', ')');
+        let bases = bases
+            .split(',')
+            .filter(|b| !b.contains('=') && b.trim() != "object");
+        let impls: Vec<Decl> = type_names(&bases.collect::<Vec<_>>().join(","))
+            .into_iter()
+            .map(|base| Decl {
+                kind: Impl,
+                name: base,
+                container: Some(name.clone()),
+                range: whole.start()..colon.min(text.len()),
+                line: 0,
+                end_line: 0,
+                signature: signature.clone(),
+                test,
+            })
+            .collect();
         out.push(Decl {
             kind,
             name,
@@ -1250,9 +1393,10 @@ fn indented(masked: &str, text: &str) -> Vec<Decl> {
             range: whole.start()..end,
             line: 0,
             end_line: 0,
-            signature: signature.chars().take(200).collect(),
+            signature,
             test,
         });
+        out.extend(impls);
     }
     out
 }
@@ -1363,6 +1507,7 @@ mod tests {
                 row(Trait, "Area", None, (15, 20)),
                 row(Method, "area", Some("Area"), (16, 16)),
                 row(Method, "twice", Some("Area"), (17, 19)),
+                row(Impl, "Area", Some("Wrapper"), (22, 22)),
                 row(TypeAlias, "Output", Some("Wrapper"), (23, 23)),
                 row(Const, "SIDES", Some("Wrapper"), (24, 24)),
                 row(Method, "area", Some("Wrapper"), (25, 31)),
@@ -1379,10 +1524,63 @@ mod tests {
                 test(Function, "it_waits", None, (55, 55)),
             ]
         );
-        let new = &symbols(Lang::Rust, text)[10];
+        let new = &symbols(Lang::Rust, text)[11];
         assert_eq!(new.signature, "pub const fn new(x: i32) -> Self");
         assert!(text[new.range.clone()].starts_with("    pub const fn new"));
         assert!(text[new.range.clone()].ends_with("Point { x }\n    }"));
+    }
+
+    /// What a type implements or extends is a row each: a trait's supertraits, `impl Trait for`, a
+    /// class's `:`, `extends` and `implements`, a Python class's bases. A lifetime, a negative or
+    /// inherent `impl`, a `where` clause, a constructor's parameters and a C enum's stored type
+    /// are none.
+    #[test]
+    fn supertypes_are_rows_of_their_own() {
+        let impls = |lang, text: &str| -> Vec<(String, String)> {
+            symbols(lang, text)
+                .into_iter()
+                .filter(|d| d.kind == Impl)
+                .map(|d| (d.container.unwrap_or_default(), d.name))
+                .collect()
+        };
+        let pairs = |list: &[(&str, &str)]| -> Vec<(String, String)> {
+            list.iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect()
+        };
+        let rust = "trait Probe: Saves + Sized + 'static {}\nunsafe impl<T> Send for a::Tab<T> {}\n\
+                    impl !Sync for Tab {}\nimpl Tab {}\nimpl<'a> fmt::Display\n    for Tab {}\n\
+                    struct S<T> where T: Clone {}\n";
+        assert_eq!(
+            impls(Lang::Rust, rust),
+            pairs(&[
+                ("Probe", "Saves"),
+                ("Probe", "Sized"),
+                ("Tab", "Send"),
+                ("Tab", "Display")
+            ])
+        );
+        let kotlin =
+            "data class A(val x: Int) : B(x), C by c\nclass D<T : Any> : E<T> where T : F {\n}\n";
+        assert_eq!(
+            impls(Lang::Kotlin, kotlin),
+            pairs(&[("A", "B"), ("A", "C"), ("D", "E")])
+        );
+        let java =
+            "public class A<T> extends B<T> implements C, D {\n}\ninterface E extends F, G {}\n";
+        assert_eq!(
+            impls(Lang::Java, java),
+            pairs(&[("A", "B"), ("A", "C"), ("A", "D"), ("E", "F"), ("E", "G")])
+        );
+        let cpp =
+            "class B final : public C, private virtual D {\n};\nenum class E : unsigned char {};\n";
+        assert_eq!(impls(Lang::C, cpp), pairs(&[("B", "C"), ("B", "D")]));
+        let python =
+            "class A(b.B, Generic[T], metaclass=M):\n    pass\nclass C(object):\n    pass\n";
+        assert_eq!(
+            impls(Lang::Python, python),
+            pairs(&[("A", "B"), ("A", "Generic")])
+        );
     }
 
     /// Repository fixtures ensure every `fn` declaration is found despite strings, lifetimes and
@@ -1462,6 +1660,7 @@ class TestGroup:
             [
                 row(Function, "top", None, (6, 9)),
                 row(Class, "Thing", None, (11, 23)),
+                row(Impl, "Base", Some("Thing"), (11, 11)),
                 row(Method, "method", Some("Thing"), (14, 17)),
                 row(Function, "inner", None, (15, 16)),
                 row(Method, "other", Some("Thing"), (19, 19)),
@@ -1540,6 +1739,7 @@ class CircleTest {
                 row(Method, "area", Some("Shape"), (9, 9)),
                 row(Method, "name", Some("Shape"), (10, 10)),
                 row(Class, "Circle", None, (13, 22)),
+                row(Impl, "Shape", Some("Circle"), (13, 13)),
                 row(Method, "area", Some("Circle"), (14, 17)),
                 row(Method, "unit", Some("Circle"), (20, 20)),
                 row(Enum, "Color", None, (24, 24)),
@@ -1659,6 +1859,7 @@ describe("Box", () => {
                 row(Function, "gen", None, (8, 8)),
                 row(Function, "mul", None, (13, 15)),
                 row(Class, "Box", None, (17, 30)),
+                row(Impl, "Base", Some("Box"), (17, 17)),
                 row(Method, "constructor", Some("Box"), (19, 21)),
                 row(Method, "value", Some("Box"), (22, 24)),
                 row(Method, "of", Some("Box"), (25, 29)),
@@ -1774,6 +1975,7 @@ double geo::Shape::half() const {
                 row(Function, "add", None, (16, 24)),
                 row(Function, "main", None, (26, 31)),
                 row(Class, "Shape", None, (34, 38)),
+                row(Impl, "Base", Some("Shape"), (34, 34)),
                 row(Method, "twice", Some("Shape"), (37, 37)),
                 row(Method, "half", Some("Shape"), (41, 43)),
             ]

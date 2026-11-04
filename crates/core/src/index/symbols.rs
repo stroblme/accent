@@ -3,7 +3,7 @@
 
 use super::Index;
 use crate::Result;
-use crate::code::{self, SymbolKind};
+use crate::code::{self, Lang, SymbolKind};
 use regex::Regex;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
@@ -54,6 +54,10 @@ pub struct Mention {
 const COLUMNS: &str = "f.rel_path, s.kind, s.name, s.container, s.byte_start, s.byte_end, \
                        s.line, s.end_line, s.signature, s.test";
 
+/// The rows that are declarations: every one but what a type implements ([`SymbolKind::Impl`]).
+const DECLARED: &str = "s.kind <> 10";
+const _: () = assert!(SymbolKind::Impl.as_i64() == 10);
+
 fn symbol(r: &rusqlite::Row<'_>) -> rusqlite::Result<CodeSymbol> {
     Ok(CodeSymbol {
         rel_path: r.get(0)?,
@@ -101,7 +105,7 @@ impl Index {
     pub fn file_symbols(&self, rel: &str) -> Result<Vec<CodeSymbol>> {
         let mut st = self.conn.prepare_cached(&format!(
             "SELECT {COLUMNS} FROM symbols s JOIN files f ON f.id = s.file_id
-             WHERE f.rel_path = ?1 ORDER BY s.byte_start"
+             WHERE f.rel_path = ?1 AND {DECLARED} ORDER BY s.byte_start"
         ))?;
         let rows = st.query_map([rel], symbol)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -110,12 +114,12 @@ impl Index {
     /// Every declaration the index holds, a test's after the rest, then the shorter name and the
     /// shorter path first: the order a fuzzy ranking of the names keeps where they score alike.
     pub fn symbol_names(&self) -> Result<Vec<SymbolName>> {
-        let mut st = self.conn.prepare_cached(
+        let mut st = self.conn.prepare_cached(&format!(
             "SELECT s.name, s.kind, s.container, f.rel_path, s.line, s.end_line
-             FROM symbols s JOIN files f ON f.id = s.file_id
+             FROM symbols s JOIN files f ON f.id = s.file_id WHERE {DECLARED}
              ORDER BY s.test, length(s.name), s.name, length(f.rel_path), f.rel_path,
-                      s.byte_start",
-        )?;
+                      s.byte_start"
+        ))?;
         let rows = st.query_map([], |r| {
             Ok(SymbolName {
                 name: r.get(0)?,
@@ -146,7 +150,7 @@ impl Index {
         let like = like_literal(name);
         let mut st = self.conn.prepare_cached(&format!(
             "SELECT {COLUMNS} FROM symbols s JOIN files f ON f.id = s.file_id
-             WHERE (?2 IS NULL OR s.container = ?2 COLLATE NOCASE)
+             WHERE {DECLARED} AND (?2 IS NULL OR s.container = ?2 COLLATE NOCASE)
                AND CASE ?4
                    WHEN 0 THEN s.name = ?1 COLLATE NOCASE
                    WHEN 1 THEN s.name LIKE ?3 || '%' ESCAPE '\\' AND s.name <> ?1 COLLATE NOCASE
@@ -179,7 +183,7 @@ impl Index {
     ) -> Result<Vec<CodeSymbol>> {
         let mut st = self.conn.prepare_cached(&format!(
             "SELECT {COLUMNS} FROM symbols s JOIN files f ON f.id = s.file_id
-             WHERE s.name = ?1 COLLATE NOCASE AND s.name = ?1
+             WHERE s.name = ?1 COLLATE NOCASE AND s.name = ?1 AND {DECLARED}
              ORDER BY f.rel_path <> ?2, s.test, length(f.rel_path), f.rel_path, s.byte_start
              LIMIT ?3"
         ))?;
@@ -209,7 +213,7 @@ impl Index {
             })
         };
         let mut st = self.conn.prepare_cached(&format!(
-            "SELECT {COLUMNS} FROM symbols s JOIN files f ON f.id = s.file_id"
+            "SELECT {COLUMNS} FROM symbols s JOIN files f ON f.id = s.file_id WHERE {DECLARED}"
         ))?;
         let mut out = Vec::new();
         let mut rows = st.query([])?;
@@ -236,14 +240,33 @@ impl Index {
         Ok(out.into_iter().map(|(s, held, _)| (s, held)).collect())
     }
 
-    /// Where `name` is written in the code the index holds, as a whole word outside comments and
-    /// strings, each with the innermost declaration around it, by file; the declarations of
-    /// `name` themselves left out. At most `limit`.
+    /// What implements or extends the type `name`: the [`SymbolKind::Impl`] rows naming it, each
+    /// with the implementing type as its container; at most `limit`.
+    pub fn subtypes(&self, name: &str, limit: usize) -> Result<Vec<CodeSymbol>> {
+        let mut st = self.conn.prepare_cached(&format!(
+            "SELECT {COLUMNS} FROM symbols s JOIN files f ON f.id = s.file_id
+             WHERE s.name = ?1 COLLATE NOCASE AND s.name = ?1 AND NOT {DECLARED}
+             ORDER BY s.test, f.rel_path, s.byte_start LIMIT ?2"
+        ))?;
+        let rows = st.query_map(params![name, limit as i64], symbol)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Where `name` is written in the code of `lang` the index holds, as a whole word outside
+    /// comments and strings — where it is called or named by its path alone when `calls`
+    /// ([`code::is_called`]) — each with the innermost declaration around it, by file; the
+    /// declarations of `name` themselves left out. At most `limit`.
     ///
     /// The full-text index narrows the files to those holding the name's words, and those are
     /// read for it: a name is known by its spelling, not by what it resolves to, so a `new` finds
-    /// every `new`.
-    pub fn mentions(&self, name: &str, limit: usize) -> Result<Vec<Mention>> {
+    /// every `new` of its language.
+    pub fn mentions(
+        &self,
+        name: &str,
+        lang: Lang,
+        calls: bool,
+        limit: usize,
+    ) -> Result<Vec<Mention>> {
         let words: Vec<&str> = name
             .split(|c: char| !c.is_alphanumeric())
             .filter(|w| !w.is_empty())
@@ -267,11 +290,15 @@ impl Index {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut out = Vec::new();
         for (rel, body) in files {
-            let Some(lang) = code::lang_of(&rel) else {
+            if code::lang_of(&rel) != Some(lang) {
                 continue;
-            };
+            }
             let masked = code::mask(lang, &body);
-            let at: Vec<usize> = re.find_iter(&masked).map(|m| m.start()).collect();
+            let at: Vec<usize> = re
+                .find_iter(&masked)
+                .filter(|m| !calls || code::is_called(&masked, m.range()))
+                .map(|m| m.start())
+                .collect();
             if at.is_empty() {
                 continue;
             }
@@ -307,7 +334,7 @@ impl Index {
 
 #[cfg(test)]
 mod tests {
-    use crate::code::SymbolKind;
+    use crate::code::{Lang, SymbolKind};
     use crate::index::testing::{fixture, open};
     use std::fs;
 
@@ -486,35 +513,77 @@ mod tests {
         assert_eq!(super::name_parts("SettleAll_x2"), ["settle", "all", "x2"]);
     }
 
-    /// Where a name is written, in code and outside comments, with the declaration around it;
-    /// its own declaration is not one of them.
+    /// Where a name is written, in code of its language and outside comments, with the
+    /// declaration around it; its own declaration is not one of them, nor, for a call, a
+    /// variable of its name.
     #[test]
     fn mentions_name_the_declaration_they_are_in() {
         let (vault, db) = fixture();
         fs::write(vault.path().join("lib.rs"), LIB).unwrap();
-        fs::write(vault.path().join("use.rs"), USE).unwrap();
+        fs::write(
+            vault.path().join("use.rs"),
+            format!("{USE}fn other(backlinks: u8) -> fn(&Index) {{\n    Index::backlinks\n}}\n"),
+        )
+        .unwrap();
+        fs::write(vault.path().join("Use.kt"), "fun use() = backlinks()\n").unwrap();
         let mut ix = open(&db);
         ix.reconcile(vault.path(), |_| {}).unwrap();
 
-        let found: Vec<(String, u32, Option<String>)> = ix
-            .mentions("backlinks", 10)
-            .unwrap()
-            .into_iter()
-            .map(|m| (m.rel_path, m.line, m.symbol.map(|s| s.name)))
-            .collect();
+        let found = |calls: bool| -> Vec<(String, u32, Option<String>)> {
+            ix.mentions("backlinks", Lang::Rust, calls, 10)
+                .unwrap()
+                .into_iter()
+                .map(|m| (m.rel_path, m.line, m.symbol.map(|s| s.name)))
+                .collect()
+        };
+        let row = |rel: &str, line, symbol: &str| (rel.into(), line, Some(symbol.into()));
         assert_eq!(
-            found,
+            found(true),
             [
-                ("lib.rs".into(), 6, Some("links_from".into())),
-                ("use.rs".into(), 3, Some("caller".into())),
+                row("lib.rs", 6, "links_from"),
+                row("use.rs", 3, "caller"),
+                row("use.rs", 6, "other"),
             ]
         );
-        assert_eq!(ix.mentions("backlinks", 1).unwrap().len(), 1);
+        assert_eq!(found(false).len(), 4, "the parameter is a mention");
+        assert_eq!(
+            ix.mentions("backlinks", Lang::Rust, true, 1).unwrap().len(),
+            1
+        );
 
         let named = ix
             .symbols_named(&["backlinks".into(), "caller".into()], "use.rs", 5)
             .unwrap();
         let named: Vec<&str> = named.iter().map(|s| s.rel_path.as_str()).collect();
         assert_eq!(named, ["lib.rs", "use.rs"]);
+    }
+
+    /// What implements a trait is a row of its own, which no outline or name search lists.
+    #[test]
+    fn subtypes_are_rows_apart_from_declarations() {
+        let (vault, db) = fixture();
+        fs::write(
+            vault.path().join("lib.rs"),
+            "pub trait Saves {}\nstruct Tab;\nimpl Saves for Tab {}\n",
+        )
+        .unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        let subtypes = ix.subtypes("Saves", 10).unwrap();
+        let subtypes: Vec<(Option<&str>, u32)> = subtypes
+            .iter()
+            .map(|s| (s.container.as_deref(), s.line))
+            .collect();
+        assert_eq!(subtypes, [(Some("Tab"), 3)]);
+        let kinds: Vec<SymbolKind> = ix
+            .file_symbols("lib.rs")
+            .unwrap()
+            .into_iter()
+            .map(|s| s.kind)
+            .collect();
+        assert_eq!(kinds, [SymbolKind::Trait, SymbolKind::Struct]);
+        assert_eq!(ix.find_symbols("Saves", 10).unwrap().len(), 1);
+        assert_eq!(ix.symbol_names().unwrap().len(), 2);
     }
 }
