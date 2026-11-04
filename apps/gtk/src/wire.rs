@@ -1261,24 +1261,24 @@ fn bar_menu(app: &Rc<App>, host: &impl IsA<gtk::Widget>, menu: &gio::Menu) {
     ));
 }
 
-/// What a tab's menu names of `doc`'s file: a preview tab's note, and nothing for a shell or a
-/// comparison.
+/// What a tab's menu names of `doc`'s file: a preview tab's note, a terminal editor's file, and
+/// nothing for a shell or a comparison.
 fn tab_file(app: &App, doc: Option<Doc>) -> actions::TabFile {
-    let Some(doc) = doc
-        .and_then(rendered::note_for)
-        .filter(|doc| !doc.is_transient())
-    else {
+    let Some(doc) = doc.and_then(rendered::note_for) else {
+        return actions::TabFile::None;
+    };
+    let Some(key) = doc.file() else {
         return actions::TabFile::None;
     };
     let prints = export::printable(&doc);
     match app.ops() {
-        Some(ops) if !doc.is_loose() => actions::TabFile::Vault {
-            rel: doc.key(),
+        Some(ops) if !doc::is_loose_key(&key) => actions::TabFile::Vault {
+            rel: key.clone(),
             facts: fileops::Facts {
                 at: fileops::At::Tab,
                 remote: ops.vault.is_remote(),
                 prints,
-                dependency: in_dependency_tree(app, &doc.key()),
+                dependency: in_dependency_tree(app, &key),
                 ..fileops::Facts::default()
             },
         },

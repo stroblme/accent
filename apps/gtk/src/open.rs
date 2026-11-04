@@ -62,6 +62,11 @@ impl App {
             self.reveal_page(doc.page());
             return self.focus_picked(doc.page(), how);
         }
+        // So does a file a terminal editor has open, unless what asked needs accent's own buffer.
+        if let Some(page) = self.editing(&key) {
+            self.reveal_page(&page);
+            return self.focus_picked(&page, how);
+        }
         let kind = doc::kind_of(&key);
         // Only text becomes a `Tab`, so anything else has nothing for a waiting closure to run on.
         if !matches!(kind, Kind::Note | Kind::Text) {
@@ -220,10 +225,11 @@ impl App {
             // A second open while the first read was in flight — two clicks on the same row, or
             // the command line naming a note the session restores: the tab exists now, and comes
             // to the front as an open file does.
-            if let Some(doc) = app.doc_for(&key) {
+            let open = app.doc_for(&key).map(|doc| doc.page().clone());
+            if let Some(page) = open.or_else(|| app.editing(&key)) {
                 if how != Opened::Restored {
-                    app.reveal_page(doc.page());
-                    app.focus_picked(doc.page(), how);
+                    app.reveal_page(&page);
+                    app.focus_picked(&page, how);
                 }
                 return;
             }
@@ -253,6 +259,12 @@ impl App {
                 );
             }
             Ok(accent_core::fs::Read::TooLarge { size }) => {
+                // Too large for accent's editor, not for a terminal editor.
+                if matches!(doc::kind_of(key), Kind::Note | Kind::Text)
+                    && self.open_in_editor(key, how)
+                {
+                    return;
+                }
                 return self.open_status(
                     key,
                     "File Too Large",
@@ -294,6 +306,9 @@ impl App {
                 false => self.drop_awaiting(key, "a notebook, not a text file"),
             }
             return self.open_notebook_text(key, text, flavour, how);
+        }
+        if !as_text && self.open_in_editor(key, how) {
+            return;
         }
         self.adopt_text_tab(key, text, flavour, how);
     }

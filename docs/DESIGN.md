@@ -746,6 +746,14 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Its shell is held like any other but runs the line as a login shell, interactive still (`$SHELL -l -i -c`, so the profile's `PATH` and the rc file's aliases apply), in place of its prompt, and ends with it (`accent-cli attach --run`): closing the window, Reload Window and a dropped link leave the command running, and its tab takes it up again.
   The tab closes when the command exits 0; any other end keeps it, its output and a last line saying how (`[Exited with code 1]`, a signal being 128 and its number, as a shell reports one), until its ×.
   Only the first attach starts the command: a reconnect or a restored session takes it up only while it runs (`attach --existing`), so one that ended while no window held it is dropped, never started again, its tab closing at once, behind another too. The session marks its shell with the command's name (`ShellPlace::command`).
+- **A terminal editor** (Preferences → Text Editor, one of Helix, Neovim, Vim, Kakoune, Emacs, Nano and Micro; user decisions 2026-11-04) opens every file accent would open as text, and one too large for accent's editor, in a terminal tab of its own, as a user's command runs.
+  It runs at the vault root, on the host for a remote vault's file, and in its folder for a file outside the vault.
+  A diagram, a notebook, a picture, a PDF, a binary file, a host's dependency and a package manager's file stay accent's, and so does whatever needs accent's own buffer, such as a session's accent tabs, Back, a comparison, a template's stops and a jump to a heading.
+  Its tab stands for the file as a text tab does, titled with the file's name, led by its file-type icon, tooltipped with its path, its row lit in the Files tree and its menu holding the file's names.
+  Opening the file again brings that tab to the front, and browsing opens it as a preview, kept once a key reaches the editor (a click is the editor's mouse, which keeps nothing).
+  The program run is the first of the editor's names the login shell finds on this machine (Helix is `hx`, else `helix`), asked once a process, and the first name on a host.
+  Exit 0 closes the tab and any other end keeps it as a command's does, but exit 127, the shell finding no such program, closes it and opens the file in accent's editor with a toast.
+  Colours are the editor's own over the terminal's sixteen, which a theme of sixteen colours follows, such as Helix's `base16_terminal`, Vim's default and Neovim's with `notermguicolors`.
 - **The debugger's two terminals, the program's and the Debug Console, are the shells not held** (user decisions 2026-10-17). The program's: the adapter's `runInTerminal` is answered with a tab running its command line in its folder with its environment, under VTE directly, on a host over the vault's master with `ssh -t`, so the program reads its input there; the program is its session's and must not outlive it, where a held shell would.
   Its key is `program:<16 hex>`, which no holder and no session restore takes for a shell's.
   It opens where Preferences → Terminal → Debug Terminal says (`debug_terminal`): behind the tab in front of the active pane (Same Pane, the default), or in front in a pane split off it on a side (Split Right, Left, Up, Down); either way the keyboard and the active pane stay where they were, so the file stays in front with its Code pane (user decision 2026-10-25). New Terminal is not this setting's.
@@ -831,7 +839,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Close Tab, the splits, the title, the find bar and focus mode all go by it; `Ctrl+Tab` and Back and Forward reach every pane (below, and History).
 - A tab is titled with the file's whole name, `.md` included: a vault holds more than notes, and `todo` beside `todo.txt` should not be told apart by an icon.
 - **A file's tab carries the file-type icon its row has in the file lists** (user decision 2026-11-03), so a tab and its row look alike, and a rename to another extension changes it (Iconography).
-  A shell, a comparison, a note's preview and a file that would not open keep an icon of their own.
+  A shell, a comparison, a note's preview and a file that would not open keep an icon of their own, and a terminal editor's tab is its file's (Terminal).
 - A pane is split from the tab or tree menu, `win.split-*`, or by dropping a tab or a tree row on one of its four edges.
   A tab dropped on the middle of another pane moves to the end of its bar, taking the keyboard.
   A pane whose last tab closes or leaves closes with it; the window always keeps one.
@@ -1009,7 +1017,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Images covers the images a note shows too, Diagrams the canvas and a note's embeds; a switch redoes for those files what a theme change does.
 - Editor holds Preview Font under Document Font, each a font button with a Reset, and Full-Width Preview under Column Width, off, since the preview's page follows that width (Preview).
 - Editor leads with Text Editor, which lists Accent and the terminal editors the login shell finds, and marks a picked one it no longer finds as not found (Terminal).
-  The shell is asked once a process, when the row is first shown, so a window that never opens Preferences never asks it.
+  The shell is asked once a process, when the row is first shown or a window opens with a terminal editor picked, and never while Accent is picked and Preferences stays shut.
 - Files holds Show Hidden Files and Colour Changed Files, both on; the second tints the tree's changed names and leaves its dims alone (Sidebar → Files).
 - Commands holds the user's own commands (Terminal), each an `AdwExpanderRow` of its name over its command line, opening on Name, Command, its Shortcut (recorded as the palette records one, refusing a chord in use by name, a clash from a hand edit marked) and Remove Command; Add Command puts a new one at the end, opened. Restore Defaults keeps them, as it keeps the recent vaults: they are the user's, not settings with a default.
 - Each window builds its dialog once, on idle after it opens, and presents that one again: an open held the main thread about 60 ms before its animation could run, a stutter, and a dialog shown before holds it about 30 (release, Xvfb, `ACCENT_BENCH_SWITCHER=prefs`).

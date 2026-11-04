@@ -99,6 +99,16 @@ impl Doc {
         matches!(self, Doc::Diff(_) | Doc::Terminal(_) | Doc::Rendered(_))
     }
 
+    /// The file the tab stands for: its own, or the one a terminal editor in it edits; none for
+    /// a shell, a comparison or a preview.
+    pub fn file(&self) -> Option<String> {
+        match self {
+            Doc::Terminal(term) => term.file(),
+            doc if doc.is_transient() => None,
+            doc => Some(doc.key()),
+        }
+    }
+
     /// Whether the session keeps it: a debugged program's terminal and the Debug Console are a
     /// debug session's alone, and are not put back.
     pub fn is_kept(&self) -> bool {

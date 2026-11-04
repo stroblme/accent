@@ -3,19 +3,175 @@
 //! missing program does), which that `HOME`'s `.profile` puts first on the login shell's `PATH`.
 
 use super::*;
+use crate::terminal::Term;
 use accent_core::config::Editor;
+use vte4::TerminalExt as _;
 
 /// `=prefs`: Preferences → Text Editor lists the fake `nano` once the shell has been asked, and
-/// picking it is the config's editor.
+/// picking it is the config's editor. `=open`: notes open in it as tabs that look like their
+/// files', once each; a diagram, a notebook and an image stay accent's; exit 0 closes the tab,
+/// exit 1 keeps it, a missing editor hands the file to accent's own; a preview is replaced.
 pub(super) fn bench_editor(app: &Rc<App>, step: &str) {
     let (app, step) = (app.clone(), step.to_string());
     glib::spawn_future_local(async move {
         glib::timeout_future(Duration::from_millis(400)).await;
-        if step.as_str() == "prefs" {
-            prefs(&app).await;
+        match step.as_str() {
+            "prefs" => prefs(&app).await,
+            "open" => open(&app).await,
+            _ => println!("bench editor unknown step {step}"),
         }
         bench_quit(&app);
     });
+}
+
+/// Pick `editor`, as Preferences does.
+fn pick(app: &Rc<App>, editor: Editor) {
+    app.config.borrow_mut().editor = editor;
+    app.config_changed();
+}
+
+/// The live terminal editor on `rel`, once it has started.
+async fn started(app: &Rc<App>, rel: &str) -> Option<Rc<Term>> {
+    let fake = || {
+        app.editor_of(rel)
+            .filter(|term| text(term).contains("fake-editor"))
+    };
+    until(|| fake().is_some(), 10_000).await;
+    fake()
+}
+
+fn text(term: &Term) -> String {
+    term.view
+        .text_format(vte4::Format::Text)
+        .map(|t| t.to_string())
+        .unwrap_or_default()
+}
+
+/// What kind of tab has `rel` open.
+fn kind_of(app: &Rc<App>, rel: &str) -> &'static str {
+    if app.editor_of(rel).is_some() {
+        return "editor";
+    }
+    match app.doc_for(rel) {
+        Some(Doc::Text(_)) => "text",
+        Some(Doc::Diagram(_)) => "diagram",
+        Some(Doc::Notebook(_)) => "notebook",
+        Some(Doc::Image(_)) => "image",
+        Some(_) => "other",
+        None => "none",
+    }
+}
+
+async fn open(app: &Rc<App>) {
+    let root = app.root();
+    for (rel, text) in [
+        ("note.md", "# Note\n"),
+        ("kept.md", "# Kept\n"),
+        ("gone.md", "# Gone\n"),
+        ("first.md", "# First\n"),
+        ("second.md", "# Second\n"),
+        ("flow.drawio", super::diagram::SAMPLE),
+        (
+            "book.ipynb",
+            r#"{"cells":[],"metadata":{},"nbformat":4,"nbformat_minor":5}"#,
+        ),
+    ] {
+        std::fs::write(root.join(rel), text).unwrap();
+    }
+    std::fs::write(root.join("anim.gif"), crate::look::TWO_FRAMES).unwrap();
+    until(|| app.reconciled.get(), 30_000).await;
+    // Listed, so the tree has a row to light for the tab.
+    let listed = || {
+        let tree = app.tree.get();
+        tree.is_some_and(|tree| crate::tree::find_row(tree.model(), "note.md").is_some())
+    };
+    until(listed, 10_000).await;
+    pick(app, Editor::Nano);
+
+    app.open_path("note.md");
+    let Some(term) = started(app, "note.md").await else {
+        return println!("bench editor open started=false");
+    };
+    let row = app
+        .tree
+        .get()
+        .and_then(|tree| tree.selected())
+        .map(|row| row.rel);
+    let args = text(&term)
+        .lines()
+        .find(|line| line.starts_with("fake-editor"))
+        .map(|line| line.replace(&root.display().to_string(), "<vault>"));
+    println!(
+        "bench editor open title={} icon={} subtitle={} row={row:?} args={args:?}",
+        term.page.title(),
+        term.page
+            .icon()
+            .and_then(|icon| IconExt::to_string(&icon))
+            .unwrap_or_default(),
+        app.title.subtitle(),
+    );
+    app.open_path("note.md");
+    glib::timeout_future(Duration::from_millis(500)).await;
+    for rel in ["flow.drawio", "book.ipynb", "anim.gif"] {
+        app.open_path(rel);
+    }
+    let kinds = || ["note.md", "flow.drawio", "book.ipynb", "anim.gif"].map(|r| kind_of(app, r));
+    until(|| !kinds().contains(&"none"), 10_000).await;
+    println!(
+        "bench editor open again terminals={} kinds={:?}",
+        app.terminals().len(),
+        kinds()
+    );
+
+    term.view.feed_child(b"0\n");
+    let closed = until(|| app.terminals().is_empty(), 10_000).await;
+    let edited = std::fs::read_to_string(root.join("note.md")).unwrap_or_default();
+    println!(
+        "bench editor exit0 closed={closed} edited={}",
+        edited.ends_with("edited\n")
+    );
+
+    app.open_path("kept.md");
+    if let Some(term) = started(app, "kept.md").await {
+        term.view.feed_child(b"1\n");
+        let said = until(|| text(&term).contains("[Exited"), 10_000).await;
+        let line = text(&term)
+            .lines()
+            .rfind(|l| l.starts_with('['))
+            .map(str::to_string);
+        println!(
+            "bench editor exit1 kept={} said={said} line={line:?}",
+            app.terminals().len() == 1
+        );
+    }
+
+    // `kak` is the fake that ends as a program the shell cannot find does.
+    pick(app, Editor::Kakoune);
+    let toasts = app.toasted.get();
+    app.open_path("gone.md");
+    until(|| kind_of(app, "gone.md") == "text", 10_000).await;
+    println!(
+        "bench editor missing kind={} toasted={}",
+        kind_of(app, "gone.md"),
+        app.toasted.get() - toasts
+    );
+
+    pick(app, Editor::Nano);
+    app.open_preview("first.md");
+    started(app, "first.md").await;
+    app.open_preview("second.md");
+    started(app, "second.md").await;
+    glib::timeout_future(Duration::from_millis(300)).await;
+    println!(
+        "bench editor preview first={} second={}",
+        kind_of(app, "first.md"),
+        kind_of(app, "second.md")
+    );
+    // Every editor still running ends, so nothing is left held behind the drill.
+    for term in app.terminals() {
+        term.view.feed_child(b"0\n");
+    }
+    until(|| app.terminals().iter().all(|t| t.ended()), 10_000).await;
 }
 
 /// Wait up to `ms` for `done`.

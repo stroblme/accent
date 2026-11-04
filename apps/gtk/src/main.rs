@@ -316,6 +316,9 @@ struct App {
     keep_on_landing: RefCell<HashSet<String>>,
     /// Notebooks the reader asked to open as text (Open as Text), until their text tab lands.
     as_text: RefCell<HashSet<String>>,
+    /// Files to open in accent's own editor once rather than the terminal editor picked (Open in
+    /// Accent's Editor, or an editor the shell did not find), until their text tab lands.
+    in_accent: RefCell<HashSet<String>>,
     /// The pane a restored tab goes into, by key, until it has one: see [`App::tabs_for`].
     placing: RefCell<HashMap<String, std::rc::Weak<Pane>>>,
     /// The tabs the files of the last launch naming several have landed in so far, each with its
@@ -673,11 +676,8 @@ impl App {
         // rather than which row the pointer last crossed. A diff, a terminal and a file from
         // outside the vault have no row to point at, and clear it.
         if let Some(tree) = self.tree.get() {
-            let open = self
-                .active_doc()
-                .filter(|doc| !doc.is_transient() && !doc.is_loose())
-                .map(|doc| doc.key());
-            tree.set_active(open.as_deref());
+            let open = self.active_doc().and_then(|doc| doc.file());
+            tree.set_active(open.filter(|key| !doc::is_loose_key(key)).as_deref());
         }
         self.sync_info();
         self.sync_code_pane();
@@ -702,21 +702,21 @@ impl App {
             return;
         };
         self.stat_details();
-        let key = doc.key();
         // A diff is not a file: it is no note anyone opened, and its key names a comparison
         // rather than a path, so the subtitle says what the tab is called instead. A shell says
-        // where it is running, which is VTE's own answer rather than the tab's label.
-        match doc.is_transient() {
-            true => self.title.set_subtitle(&match doc.terminal() {
+        // where it is running, which is VTE's own answer rather than the tab's label; a terminal
+        // editor names its file, as a text tab does.
+        match doc.file() {
+            None => self.title.set_subtitle(&match doc.terminal() {
                 Some(term) => term.subtitle(),
                 None => doc.page().title().to_string(),
             }),
-            false => {
+            Some(key) => {
                 if doc::host_file_path(&key).is_none() {
                     self.file_used(&key);
                 }
                 // The title above names the host on a remote vault, so the path needs no more.
-                self.title.set_subtitle(&match doc.is_loose() {
+                self.title.set_subtitle(&match doc::is_loose_key(&key) {
                     true => doc::host_file_path(&key)
                         .map(str::to_string)
                         .unwrap_or_else(|| fileops::display_path(&self.root(), &key)),
@@ -1312,6 +1312,31 @@ impl App {
         at: Option<(Rc<Pane>, i32)>,
         run: Option<terminal::Run>,
     ) {
+        let term = self.wire_term(key, shell, how, at, run);
+        let view = term.view.clone();
+        self.select_new_page(&term.page, how);
+        if how == Opened::Restored {
+            return;
+        }
+        // The terminal itself, not the scroller around it: focus on the wrapper leaves the shell
+        // unable to hear a keystroke, which is a terminal you have to click before you can type
+        // in. From an idle, because the page has only just been selected and the widget it holds
+        // is not on screen to take focus until the frame it was added in is done.
+        glib::idle_add_local_once(move || {
+            view.grab_focus();
+        });
+    }
+
+    /// A shell's tab, opened and wired into the window, not yet selected: what a shell and a
+    /// terminal editor (`editors.rs`) share.
+    fn wire_term(
+        self: &Rc<Self>,
+        key: String,
+        shell: terminal::Shell,
+        how: Opened,
+        at: Option<(Rc<Pane>, i32)>,
+        run: Option<terminal::Run>,
+    ) -> Rc<terminal::Term> {
         use vte4::TerminalExt as _;
         // Said once per window, the first time a shell here could have been held and was not.
         // The Flatpak ships accent-cli, so there it means host commands were revoked.
@@ -1364,7 +1389,9 @@ impl App {
                 self,
                 move |term: &Rc<terminal::Term>| {
                     if app.active_doc().is_some_and(|doc| doc.page() == &term.page) {
-                        app.title.set_subtitle(&term.subtitle());
+                        if term.file().is_none() {
+                            app.title.set_subtitle(&term.subtitle());
+                        }
                         app.stat_details();
                         app.sync_terminal_git();
                     }
@@ -1376,7 +1403,10 @@ impl App {
             glib::clone!(
                 #[weak(rename_to = app)]
                 self,
-                move |term| app.close_page(&term.page)
+                move |term, ended| match ended {
+                    terminal::Ended::Missing => app.editor_missing(term),
+                    _ => app.close_page(&term.page),
+                }
             ),
             glib::clone!(
                 #[weak(rename_to = app)]
@@ -1410,20 +1440,8 @@ impl App {
                 self,
                 move |_| app.save_session_soon()
             ));
-        let page = term.page.clone();
-        let view = term.view.clone();
-        self.docs.borrow_mut().push(Doc::Terminal(term));
-        self.select_new_page(&page, how);
-        if how == Opened::Restored {
-            return;
-        }
-        // The terminal itself, not the scroller around it: focus on the wrapper leaves the shell
-        // unable to hear a keystroke, which is a terminal you have to click before you can type
-        // in. From an idle, because the page has only just been selected and the widget it holds
-        // is not on screen to take focus until the frame it was added in is done.
-        glib::idle_add_local_once(move || {
-            view.grab_focus();
-        });
+        self.docs.borrow_mut().push(Doc::Terminal(term.clone()));
+        term
     }
 
     /// Show the active file's repository branch, including nested repositories; comparisons retain the prior readout.
@@ -1431,10 +1449,7 @@ impl App {
         let Some(git) = self.git.get() else {
             return;
         };
-        let key = self
-            .active_doc()
-            .filter(|d| !d.is_transient())
-            .map(|d| d.key());
+        let key = self.active_doc().and_then(|d| d.file());
         self.statusbar
             .set_branch(git.branch_label(key.as_deref()).as_deref());
     }
@@ -1673,14 +1688,9 @@ impl App {
     /// active tab when the same action is fired from the palette.
     fn menu_rel(&self) -> Option<String> {
         let Some(page) = self.menu_page.borrow().clone() else {
-            return self
-                .active_doc()
-                .filter(|d| !d.is_transient())
-                .map(|d| d.key());
+            return self.active_doc().and_then(|d| d.file());
         };
-        self.doc_for_page(&page)
-            .filter(|d| !d.is_transient())
-            .map(|d| d.key())
+        self.doc_for_page(&page).and_then(|d| d.file())
     }
 
     /// The selected tree row, where it is one the app may act on. A row inside a dependency tree

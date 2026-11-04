@@ -55,6 +55,14 @@ pub struct ShellPlace {
     pub command: Option<String>,
 }
 
+/// A file a terminal editor has open in a terminal tab (DESIGN.md, Terminal).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Edits {
+    pub editor: super::Editor,
+    /// The file's key: vault-relative, or absolute for a file outside the vault.
+    pub file: String,
+}
+
 /// The Info pane's sections as the reader left them: which are open, and where each divider
 /// between them sits, as the share of its split above it (`None` for an even split).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

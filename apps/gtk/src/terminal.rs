@@ -9,7 +9,8 @@
 //!
 //! `accent-cli` holds the shell; the tab runs `accent-cli attach`. Hangup detaches, Close Tab
 //! ends it explicitly ([`Term::kill`]), and [`sweep`] ends shells no saved session names. A
-//! user's command ([`Run`]) is such a shell running its command line in place of a prompt.
+//! user's command ([`Run`]) is such a shell running its command line in place of a prompt, and so
+//! is a terminal editor on a file ([`Run::editor`]).
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -19,6 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use accent_api::ssh;
+use accent_core::config::Edits;
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib, pango};
 use vte4::TerminalExt;
@@ -73,6 +75,8 @@ pub struct Run {
     line: RefCell<Option<String>>,
     /// Whether the last attach was such a take-up, so that one finding nothing closes the tab.
     resumed: Cell<bool>,
+    /// The file a terminal editor's tab edits, which it is titled, iconed and put back as.
+    edits: Option<Edits>,
 }
 
 impl Run {
@@ -82,6 +86,18 @@ impl Run {
             name,
             line: RefCell::new(Some(line)),
             resumed: Cell::new(false),
+            edits: None,
+        }
+    }
+
+    /// A terminal editor's `line` on `edits`' file. Its line stays: every attach, a restored
+    /// tab's and a reconnect's, finds the editor still running or starts it on the file again.
+    pub fn editor(edits: Edits, line: String) -> Run {
+        Run {
+            name: crate::doc::file_name(&edits.file).to_string(),
+            line: RefCell::new(Some(line)),
+            resumed: Cell::new(false),
+            edits: Some(edits),
         }
     }
 
@@ -91,12 +107,17 @@ impl Run {
             name,
             line: RefCell::new(None),
             resumed: Cell::new(true),
+            edits: None,
         }
     }
 
-    /// What `attach` is given for it: `--run <line>` the first time, `--existing` after.
+    /// What `attach` is given for it: `--run <line>` the first time, `--existing` after, and an
+    /// editor's line every time.
     fn flags(&self) -> Vec<String> {
-        let line = self.line.take();
+        let line = match self.edits {
+            Some(_) => self.line.borrow().clone(),
+            None => self.line.take(),
+        };
         self.resumed.set(line.is_none());
         match line {
             Some(line) => vec!["--run".to_string(), line],
@@ -167,7 +188,23 @@ impl Term {
 
     /// The name of the user's command it runs, if it runs one.
     pub fn command_name(&self) -> Option<String> {
-        self.run.as_ref().map(|run| run.name.clone())
+        let run = self.run.as_ref().filter(|run| run.edits.is_none());
+        run.map(|run| run.name.clone())
+    }
+
+    /// What a terminal editor's tab edits.
+    pub fn edits(&self) -> Option<&Edits> {
+        self.run.as_ref()?.edits.as_ref()
+    }
+
+    /// The file a terminal editor's tab edits, which the tab stands for as a text tab would.
+    pub fn file(&self) -> Option<String> {
+        self.edits().map(|edits| edits.file.clone())
+    }
+
+    /// Whether what it ran has ended, its tab kept saying how.
+    pub fn ended(&self) -> bool {
+        self.ended.get()
     }
 
     /// Header subtitle from VTE's `user@host:dir`, falling back to the launch directory until first reported.
@@ -591,10 +628,16 @@ pub fn open(
         }
         .as_str(),
     );
-    page.set_icon(Some(&gio::ThemedIcon::new(match shell {
-        Shell::Console => "dap-console-symbolic",
+    let edits = run.as_ref().and_then(|run| run.edits.as_ref());
+    page.set_icon(Some(&gio::ThemedIcon::new(match (shell, edits) {
+        (_, Some(edits)) => crate::doc::icon_for(&edits.file),
+        (Shell::Console, None) => "dap-console-symbolic",
         _ => "utilities-terminal-symbolic",
     })));
+    // What tells the window's keys a terminal editor from a shell (`actions::Keys::at`).
+    if edits.is_some() {
+        view.set_widget_name(EDITOR);
+    }
     // A tab appended to a visible pane is mapped already, so the signal above has been and gone.
     if view.is_mapped() {
         paint(&view);
@@ -1063,11 +1106,11 @@ pub fn on_report(term: &Rc<Term>, changed: impl Fn(&Rc<Term>) + 'static) {
 ///
 /// Remote disconnects retain the tab for [`Term::reopen`]; local exit 255 is ordinary exit.
 /// Failed `accent-cli attach` tabs also remain so their error can be read. Ctrl+W closes either.
-/// A command's tab closes when it exits 0, or when taking it up again found it ended; any other
-/// end keeps it, saying how, as a debugged program's does.
+/// A command's or an editor's tab goes as [`ended`] says, kept saying how it ended otherwise, as
+/// a debugged program's is.
 pub fn on_exit(
     term: &Rc<Term>,
-    done: impl Fn(&Rc<Term>) + 'static,
+    done: impl Fn(&Rc<Term>, Ended) + 'static,
     lost: impl Fn(&Rc<Term>) + 'static,
 ) {
     let weak = Rc::downgrade(term);
@@ -1092,21 +1135,47 @@ pub fn on_exit(
             }
             _ if let Some(run) = &term.run => {
                 term.ended.set(true);
-                let gone = run.resumed.get() && exited_with(status, ATTACH_FAILED);
-                match exited_with(status, 0) || gone {
-                    true => done(&term),
-                    false => say_exit(view, &exit_line(status, false)),
+                match ended(status, run.resumed.get(), run.edits.is_some()) {
+                    Ended::Keep => say_exit(view, &exit_line(status, false)),
+                    how => done(&term, how),
                 }
             }
             _ => {
                 term.ended.set(true);
                 if !exited_with(status, ATTACH_FAILED) {
-                    done(&term);
+                    done(&term, Ended::Close);
                 }
             }
         }
     });
 }
+
+/// What the end of a command, or of a terminal editor, does to its tab (DESIGN.md, Terminal).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ended {
+    /// It closes.
+    Close,
+    /// It stays, its output and a line saying how it ended kept until its ×.
+    Keep,
+    /// It closes, and the file opens in accent's own editor: the shell found no such editor.
+    Missing,
+}
+
+/// How a command's or an editor's end, from the wait status, leaves its tab: exit 0 closes it,
+/// as does a command taken up again that had ended meanwhile, an editor's 127 is a program the
+/// shell did not find, and anything else keeps it.
+fn ended(status: i32, resumed: bool, editing: bool) -> Ended {
+    if exited_with(status, 0) || (resumed && exited_with(status, ATTACH_FAILED)) {
+        return Ended::Close;
+    }
+    match editing && exited_with(status, NOT_FOUND) {
+        true => Ended::Missing,
+        false => Ended::Keep,
+    }
+}
+
+/// What a shell exits with when it finds no program of the name it was given.
+const NOT_FOUND: i32 = 127;
 
 /// Feed how a program ended on a line of its own, after a blank one: a program that ended mid-line
 /// gets both.
@@ -1364,6 +1433,9 @@ fn monospace() -> pango::FontDescription {
 fn user_shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string())
 }
+
+/// The widget name of a terminal editor's view.
+pub const EDITOR: &str = "accent-editor";
 
 /// What a terminal's key starts with. Not a path, so nothing that walks the open documents by path
 /// can collide with one.
@@ -1838,6 +1910,19 @@ mod tests {
         assert!(!link_lost(1 << 8));
         // Killed by a signal, whatever the byte above says.
         assert!(!link_lost((255 << 8) | 9));
+    }
+
+    /// An editor's tab goes with exit 0, stays on any other end and hands its file to accent's
+    /// own editor when the shell found no such program; a command's 127 is its own to say.
+    #[test]
+    fn an_editor_closes_on_0_stays_on_1_and_falls_back_on_127() {
+        assert_eq!(ended(0, false, true), Ended::Close);
+        assert_eq!(ended(1 << 8, false, true), Ended::Keep);
+        assert_eq!(ended(15, false, true), Ended::Keep);
+        assert_eq!(ended(127 << 8, false, true), Ended::Missing);
+        assert_eq!(ended(127 << 8, false, false), Ended::Keep);
+        assert_eq!(ended(ATTACH_FAILED << 8, true, false), Ended::Close);
+        assert_eq!(ended(ATTACH_FAILED << 8, false, false), Ended::Keep);
     }
 
     /// A debugged program's tab says how it ended, from the wait status VTE hands over.

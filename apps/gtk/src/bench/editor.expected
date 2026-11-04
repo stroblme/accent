@@ -1,1 +1,7 @@
 bench editor prefs nano=1 chosen=nano
+bench editor open title=note.md icon=filetype-markdown-symbolic subtitle=note.md row=Some("note.md") args=Some("fake-editor <vault>/note.md")
+bench editor open again terminals=1 kinds=["editor", "diagram", "notebook", "image"]
+bench editor exit0 closed=true edited=true
+bench editor exit1 kept=true said=true line=Some("[Exited with code 1]")
+bench editor missing kind=text toasted=1
+bench editor preview first=none second=editor

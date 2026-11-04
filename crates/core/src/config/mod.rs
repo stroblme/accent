@@ -93,8 +93,8 @@ mod tests;
 
 pub use file::{Reread, config_path, daily_keys, daily_target, state_path, vault_hash, xdg};
 pub use session::{
-    Breakpoint, CodePane, DiagramPlace, ExceptionFilter, InfoPane, Layout, PdfPlace, PdfZoom,
-    Session, ShellPlace, rename_in, rename_keys, touch,
+    Breakpoint, CodePane, DiagramPlace, Edits, ExceptionFilter, InfoPane, Layout, PdfPlace,
+    PdfZoom, Session, ShellPlace, rename_in, rename_keys, touch,
 };
 
 /// Which colours the window paints itself in. System, light and dark are libadwaita's own;

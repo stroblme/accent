@@ -138,16 +138,13 @@ impl App {
     /// comparison by its tab's own icon and title.
     fn switcher_entry(&self, page: &adw::TabPage) -> switcher::Entry {
         let name = page.title().to_string();
-        match self.doc_for_page(page).filter(|doc| !doc.is_transient()) {
-            Some(doc) => {
-                let key = doc.key();
-                switcher::Entry {
-                    icon: Some(gio::ThemedIcon::new(doc::icon_for(&key)).upcast()),
-                    name,
-                    folder: accent_core::path::parent_dir(&key).to_string(),
-                    pane: None,
-                }
-            }
+        match self.doc_for_page(page).and_then(|doc| doc.file()) {
+            Some(key) => switcher::Entry {
+                icon: Some(gio::ThemedIcon::new(doc::icon_for(&key)).upcast()),
+                name,
+                folder: accent_core::path::parent_dir(&key).to_string(),
+                pane: None,
+            },
             None => switcher::Entry {
                 icon: page.icon(),
                 name,
@@ -428,11 +425,11 @@ impl App {
         }
     }
 
-    /// The vault file `page` shows, or `None` for a shell, a comparison, a preview or a loose
-    /// file, which have no row to reveal.
+    /// The vault file `page` shows, a terminal editor's included, or `None` for a shell, a
+    /// comparison, a preview or a loose file, which have no row to reveal.
     pub(crate) fn vault_file_of(&self, page: &adw::TabPage) -> Option<String> {
-        let doc = self.doc_for_page(page)?;
-        (!doc.is_transient() && !doc.is_loose()).then(|| doc.key())
+        let key = self.doc_for_page(page)?.file()?;
+        (!doc::is_loose_key(&key)).then_some(key)
     }
 
     /// Show `rel` where it lives: the Files pane, un-hidden if it was, scrolled to the row once

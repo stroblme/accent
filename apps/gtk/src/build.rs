@@ -308,6 +308,7 @@ pub fn build_window(
         revealing: RefCell::new(HashMap::new()),
         keep_on_landing: RefCell::new(HashSet::new()),
         as_text: RefCell::new(HashSet::new()),
+        in_accent: RefCell::new(HashSet::new()),
         placing: RefCell::new(HashMap::new()),
         launched: RefCell::new(Vec::new()),
         restore: RefCell::new(std::rc::Weak::new()),
@@ -428,6 +429,11 @@ pub fn build_window(
     glib::idle_add_local_full(glib::Priority::LOW, move || {
         if let Some(app) = weak.upgrade() {
             app.prepared_preferences();
+            // The program a terminal editor goes by on this machine, asked before a file opens in
+            // it ([`editors::binary`]).
+            if !app.config.borrow().editor.is_accent() {
+                editors::installed(|_| {});
+            }
         }
         glib::ControlFlow::Break
     });
@@ -483,6 +489,7 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
             app,
             move |_kind, rel: &str, double| match (double, app.doc_for(rel)) {
                 (true, Some(doc)) => app.promote(doc.page()),
+                (true, None) if let Some(page) = app.editing(rel) => app.promote(&page),
                 (true, None) => {
                     app.keep_on_landing.borrow_mut().insert(rel.to_string());
                 }

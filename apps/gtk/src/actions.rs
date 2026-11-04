@@ -58,8 +58,8 @@ impl App {
             front: doc.as_ref().map(front_of),
             file: doc
                 .as_ref()
-                .filter(|doc| !doc.is_transient())
-                .map(|doc| match doc.is_loose() {
+                .and_then(Doc::file)
+                .map(|key| match doc::is_loose_key(&key) {
                     true => applies::File::Loose,
                     false => applies::File::Vault,
                 }),
