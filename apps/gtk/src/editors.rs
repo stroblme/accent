@@ -102,10 +102,13 @@ fn binary(editor: Editor) -> &'static str {
 pub type Place = (u32, Option<u32>);
 
 /// The command line that opens `file` in `editor`, run as `bin`, at `at` where given, written as
-/// each editor reads a place.
+/// each editor reads a place. Helix runs without `COLORTERM`, since only then is its default theme
+/// the sixteen-colour one drawn in the terminal's colours.
 fn line(editor: Editor, bin: &str, file: &str, at: Option<Place>) -> String {
     let args = known(editor).map_or(&[][..], |known| known.args);
-    let mut words: Vec<String> = [bin].iter().chain(args).map(|w| w.to_string()).collect();
+    let env = (editor == Editor::Helix).then_some("COLORTERM=");
+    let words = env.iter().chain([&bin]).chain(args);
+    let mut words: Vec<String> = words.map(|w| w.to_string()).collect();
     let file = ssh::quote(file);
     let column = |sep: &str, column: Option<u32>| column.map(|c| format!("{sep}{c}"));
     match at {
@@ -581,7 +584,7 @@ mod tests {
         );
         assert_eq!(
             line(Editor::Helix, "helix", "/v/n.md", None),
-            "helix '/v/n.md'"
+            "COLORTERM= helix '/v/n.md'"
         );
     }
 
@@ -589,7 +592,7 @@ mod tests {
     #[test]
     fn a_line_puts_the_place_where_each_editor_reads_it() {
         let at = |editor, bin| line(editor, bin, "/v/n.md", Some((12, Some(5))));
-        assert_eq!(at(Editor::Helix, "hx"), "hx '/v/n.md':12:5");
+        assert_eq!(at(Editor::Helix, "hx"), "COLORTERM= hx '/v/n.md':12:5");
         assert_eq!(at(Editor::Neovim, "nvim"), "nvim +12 '/v/n.md'");
         assert_eq!(at(Editor::Vim, "vim"), "vim +12 '/v/n.md'");
         assert_eq!(at(Editor::Kakoune, "kak"), "kak +12:5 '/v/n.md'");
@@ -597,7 +600,7 @@ mod tests {
         assert_eq!(at(Editor::Nano, "nano"), "nano +12,5 '/v/n.md'");
         assert_eq!(at(Editor::Micro, "micro"), "micro +12:5 '/v/n.md'");
         let line_only = |editor, bin| line(editor, bin, "/v/n.md", Some((12, None)));
-        assert_eq!(line_only(Editor::Helix, "hx"), "hx '/v/n.md':12");
+        assert_eq!(line_only(Editor::Helix, "hx"), "COLORTERM= hx '/v/n.md':12");
         assert_eq!(line_only(Editor::Nano, "nano"), "nano +12 '/v/n.md'");
     }
 }
