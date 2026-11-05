@@ -9,6 +9,7 @@ bench editor keys at=Editor bytes=17 05 0a
 bench editor keys ctrl+Page_Up=other.md ctrl+Tab=other.md palette=true kept=true
 bench editor accent preview_asks=false kept_asks=true kind=text editors=0
 bench editor line hit=Some("fake-editor +3 <vault>/deep.md") symbol=Some("fake-editor +2 <vault>/code.rs") again_front=Some("deep.md") again_starts=0
+bench editor custom args=Some("fake-editor --at 2 <vault>/custom.md")
 bench editor hold started=true starts=1
 bench editor back title=Some("held.md") starts=1
 bench editor back title=Some("held.md") starts=2

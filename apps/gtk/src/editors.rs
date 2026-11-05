@@ -77,7 +77,15 @@ fn known(editor: Editor) -> Option<&'static Known> {
 
 /// What Preferences calls `editor`.
 pub fn name(editor: Editor) -> &'static str {
-    known(editor).map_or("Accent", |known| known.name)
+    match editor {
+        Editor::Custom => "Custom Command",
+        editor => known(editor).map_or("Accent", |known| known.name),
+    }
+}
+
+/// The program a command line runs: its first word that sets no variable.
+fn program(command: &str) -> Option<&str> {
+    command.split_whitespace().find(|word| !word.contains('='))
 }
 
 /// The first of the programs `editor` goes by.
@@ -130,6 +138,19 @@ fn line(editor: Editor, bin: &str, file: &str, at: Option<Place>) -> String {
         },
     }
     words.join(" ")
+}
+
+/// The user's own `command` on `file`: `{line}` is the line asked for, else 1, and `{file}` the
+/// file quoted for the shell, written after the command where it names none.
+fn custom_line(command: &str, file: &str, at: Option<Place>) -> String {
+    let line = at.map_or(1, |(line, _)| line).to_string();
+    // The line first, so a file whose name holds `{line}` keeps it.
+    let command = command.trim().replace("{line}", &line);
+    let file = ssh::quote(file);
+    match command.contains("{file}") {
+        true => command.replace("{file}", &file),
+        false => format!("{command} {file}"),
+    }
 }
 
 /// What the probe prints before each program it finds, so the lines a chatty rc file prints are
@@ -262,7 +283,7 @@ impl App {
         let shell = match self.editor_shell(key) {
             Ok(shell) => shell,
             Err(why) => {
-                let what = format!("open {} in {}", doc::file_name(key), name(editor));
+                let what = format!("open {} in {}", doc::file_name(key), self.called(editor));
                 self.cannot(&what, why);
                 return false;
             }
@@ -276,11 +297,17 @@ impl App {
         true
     }
 
-    /// Whether `key` opens in accent's own editor whatever the reader asks: Accent picked, a
-    /// host's dependency, or a package manager's file, the last two being read-only.
+    /// Whether `key` opens in accent's own editor whatever the reader asks: Accent picked, or a
+    /// custom command with no command line, a host's dependency, or a package manager's file, the
+    /// last two being read-only.
     fn stays_accents(&self, key: &str) -> bool {
-        self.config.borrow().editor.is_accent()
-            || doc::host_file_path(key).is_some()
+        let config = self.config.borrow();
+        let none = match config.editor {
+            Editor::Accent => true,
+            Editor::Custom => config.editor_command.trim().is_empty(),
+            _ => false,
+        };
+        none || doc::host_file_path(key).is_some()
             || (doc::is_loose_key(key) && accent_core::path::managed(Path::new(key)))
     }
 
@@ -353,19 +380,30 @@ impl App {
         }
     }
 
-    /// What runs `edits`' editor on its file: the program the shell found here, or on a host,
-    /// which was not asked, the editor's first name.
+    /// What runs `edits`' editor on its file: the user's command line, or the program the shell
+    /// found here, or on a host, which was not asked, the editor's first name.
     fn editor_run(&self, edits: Edits, at: Option<Place>) -> terminal::Run {
         let file = match doc::is_loose_key(&edits.file) {
             true => PathBuf::from(&edits.file),
             false => self.root().join(&edits.file),
         };
-        let bin = match self.on_host(&edits.file) {
-            true => first(edits.editor),
-            false => binary(edits.editor),
+        let file = file.to_string_lossy();
+        let line = match (edits.editor, self.on_host(&edits.file)) {
+            (Editor::Custom, _) => custom_line(&self.config.borrow().editor_command, &file, at),
+            (editor, true) => line(editor, first(editor), &file, at),
+            (editor, false) => line(editor, binary(editor), &file, at),
         };
-        let line = line(edits.editor, bin, &file.to_string_lossy(), at);
         terminal::Run::editor(edits, line)
+    }
+
+    /// What the window's messages call `editor`: its name, or the program a custom command runs.
+    fn called(&self, editor: Editor) -> String {
+        match editor {
+            Editor::Custom => program(&self.config.borrow().editor_command)
+                .unwrap_or("The editor")
+                .to_string(),
+            editor => name(editor).to_string(),
+        }
     }
 
     /// The terminal editor still running on `key`.
@@ -405,7 +443,7 @@ impl App {
         let heading = format!("Close {}?", doc::file_name(&edits.file));
         let body = format!(
             "{} is still running; unsaved changes in it are lost.",
-            name(edits.editor)
+            self.called(edits.editor)
         );
         self.ask_close(&heading, &body, then);
     }
@@ -423,7 +461,7 @@ impl App {
         let body = match (running.len(), first.edits()) {
             (1, Some(edits)) => format!(
                 "{} is still running in {}; unsaved changes in it are lost.",
-                name(edits.editor),
+                self.called(edits.editor),
                 doc::file_name(&edits.file)
             ),
             (n, _) => {
@@ -529,7 +567,7 @@ impl App {
         let file = doc::file_name(&edits.file);
         self.toast(&format!(
             "No {} found, so {file} opened in Accent's editor",
-            name(edits.editor)
+            self.called(edits.editor)
         ));
         self.in_accent.borrow_mut().insert(edits.file.clone());
         self.open_as(&edits.file, how);
@@ -586,6 +624,27 @@ mod tests {
             line(Editor::Helix, "helix", "/v/n.md", None),
             "COLORTERM= helix '/v/n.md'"
         );
+    }
+
+    /// A custom command has its placeholders filled in, the file quoted, and is given the file
+    /// last where it names none; an open that asks no line is at the first.
+    #[test]
+    fn a_custom_command_fills_in_its_file_and_line() {
+        let file = "/v/a b's.md";
+        assert_eq!(
+            custom_line("kak +{line} {file}", file, Some((12, Some(5)))),
+            r"kak +12 '/v/a b'\''s.md'"
+        );
+        assert_eq!(
+            custom_line(" COLORTERM= hx {file}:{line} ", "/v/n.md", None),
+            "COLORTERM= hx '/v/n.md':1"
+        );
+        assert_eq!(custom_line("micro", "/v/n.md", None), "micro '/v/n.md'");
+        assert_eq!(
+            custom_line("vim {file}", "/v/{line}.md", Some((3, None))),
+            "vim '/v/{line}.md'"
+        );
+        assert_eq!(program("COLORTERM= hx {file}"), Some("hx"));
     }
 
     /// Each editor reads a place its own way, and one with no column is a line alone.

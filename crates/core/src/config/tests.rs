@@ -182,6 +182,16 @@ pen_width = 2.0
     );
 }
 
+/// A custom editor is the user's command line, read and written as the user wrote it.
+#[test]
+fn a_custom_editor_keeps_its_command() {
+    let c: Config =
+        toml::from_str("editor = \"custom\"\neditor_command = \"kak +{line} {file}\"\n").unwrap();
+    assert_eq!(c.editor, Editor::Custom);
+    let again: Config = toml::from_str(&toml::to_string(&c).unwrap()).unwrap();
+    assert_eq!(again.editor_command, "kak +{line} {file}");
+}
+
 /// An empty map is left out rather than written as a bare `[shortcuts]` header, and reads
 /// back as the empty map it was.
 #[test]

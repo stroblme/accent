@@ -18,7 +18,7 @@ use vte4::TerminalExt as _;
 /// under Xvfb). `=hold`, then `=back` twice on one scratch state, the holder ended between: the
 /// editor's tab comes back attached to the editor, then with the editor started again. `=line`: a
 /// search hit and Go to Symbol open the editor at their line, and a hit in a file it has open
-/// brings its tab to the front without starting it again.
+/// brings its tab to the front without starting it again; a custom command gets its file and line.
 pub(super) fn bench_editor(app: &Rc<App>, step: &str) {
     let (app, step) = (app.clone(), step.to_string());
     glib::spawn_future_local(async move {
@@ -296,6 +296,7 @@ async fn line(app: &Rc<App>) {
     let root = app.root();
     std::fs::write(root.join("deep.md"), "# Deep\n\nthe zebrafish swims\n").unwrap();
     std::fs::write(root.join("code.rs"), "\nfn alpha() {}\n").unwrap();
+    std::fs::write(root.join("custom.md"), "# Custom\n\nline two\n").unwrap();
     until(|| app.reconciled.get(), 30_000).await;
     pick(app, Editor::Nano);
     let hit = sidebar::Target::Range(12..21, Some(3));
@@ -320,6 +321,19 @@ async fn line(app: &Rc<App>) {
     println!(
         "bench editor line hit={hit:?} symbol={symbol:?} again_front={front:?} again_starts={}",
         starts() - before
+    );
+    // The user's own command line, the fake being its program.
+    {
+        let mut config = app.config.borrow_mut();
+        config.editor = Editor::Custom;
+        config.editor_command = "COLORTERM= nano --at {line} {file}".to_string();
+    }
+    app.config_changed();
+    app.open_note_at("custom.md", Some(sidebar::Target::Range(0..1, Some(2))));
+    let custom = started(app, "custom.md").await;
+    println!(
+        "bench editor custom args={:?}",
+        custom.as_ref().and_then(|term| args(app, term))
     );
     for term in app.terminals() {
         term.view.feed_child(b"0\n");

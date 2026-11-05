@@ -329,7 +329,8 @@ fn focus_index(mode: FocusMode) -> u32 {
 // ----------------------------------------------------------------------------------- editor
 
 /// Text Editor: accent's own, the terminal editors the shell finds, and the one picked marked
-/// where the shell finds no such program. The shell is asked once the row is first shown
+/// where the shell finds no such program; a custom command, which only `config.toml` sets, is
+/// listed while it is picked. The shell is asked once the row is first shown
 /// ([`editors::installed`]), so a window that never opens Preferences never asks it.
 fn text_editor_row(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::ComboRow {
     let row = adw::ComboRow::builder()
@@ -357,7 +358,7 @@ fn text_editor_row(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Co
                 let name = editors::name(chosen);
                 items.push((
                     chosen,
-                    match answered {
+                    match answered && chosen != Editor::Custom {
                         true => format!("{name} (not found)"),
                         false => name.to_string(),
                     },

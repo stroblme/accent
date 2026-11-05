@@ -150,6 +150,8 @@ pub enum Editor {
     Emacs,
     Nano,
     Micro,
+    /// The user's own command line, [`Config::editor_command`].
+    Custom,
 }
 
 impl Editor {
@@ -219,6 +221,9 @@ pub struct Config {
     /// The editor a text file opens in.
     #[serde(skip_serializing_if = "Editor::is_accent")]
     pub editor: Editor,
+    /// The command line `editor = "custom"` runs, `{file}` and `{line}` filled in.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub editor_command: String,
     pub theme: Theme,
     pub focus_mode: FocusMode,
     pub recolour: RecolourConfig,
@@ -397,6 +402,7 @@ impl Default for Config {
             forward_keys_to_terminal: false,
             debug_terminal: DebugTerminal::Same,
             editor: Editor::Accent,
+            editor_command: String::new(),
             theme: Theme::System,
             focus_mode: FocusMode::default(),
             recolour: RecolourConfig::default(),

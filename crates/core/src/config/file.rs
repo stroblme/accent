@@ -163,8 +163,8 @@ impl Config {
 /// fields before Serde discards extras. Leave `daily_*` keys to [`daily_keys`] for migration advice.
 pub(super) fn unknown_keys(table: &toml::Table) -> Vec<String> {
     // The struct's own field names, read off a serialised value rather than kept as a second
-    // list. The fonts are skipped when `None`, the editor when accent's own and the maps when
-    // empty, so each is filled in to be seen.
+    // list. The fonts are skipped when `None`, the editor when accent's own, its command and the
+    // maps when empty, so each is filled in to be seen.
     fn names<T: Serialize>(v: T) -> Vec<String> {
         toml::Value::try_from(v)
             .ok()
@@ -185,6 +185,7 @@ pub(super) fn unknown_keys(table: &toml::Table) -> Vec<String> {
         editor_font: Some(String::new()),
         preview_font: Some(String::new()),
         editor: Editor::Helix,
+        editor_command: "x".into(),
         shortcuts: one(),
         commands: vec![CustomCommand::default()],
         lsp: LspConfig { servers: one() },

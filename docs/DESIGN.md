@@ -762,6 +762,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Opening the file again brings that tab to the front, and browsing opens it as a preview, kept once a key reaches the editor (a click is the editor's mouse, which keeps nothing).
   A search hit, Go to Symbol, Go to Definition and a reference open the file in it at their line, and at their column where they know it, as each editor reads a place (Helix `file:12:5`, Neovim and Vim `+12`, Nano `+12,5`, Kakoune, Emacs and Micro `+12:5`), and one already open there comes to the front with its cursor where it was.
   The program run is the first of the editor's names the login shell finds on this machine (Helix is `hx`, else `helix`), asked once a process, and the first name on a host.
+  With `editor = "custom"` in `config.toml`, `editor_command` runs instead, a command line for the login shell in which `{file}` stands for the file's quoted path and `{line}` for the line an open lands on, or 1 (user decision 2026-11-05).
+  A command naming no `{file}` gets the file at its end, the shell is not asked about its program, and the messages call it by that program.
   Exit 0 closes the tab and any other end keeps it as a command's does, but exit 127, the shell finding no such program, closes it and opens the file in accent's editor with a toast.
   The session puts its tab back with its editor (`ShellPlace::edits`), taken up while it runs and started on the file again otherwise, every attach being find-or-start (`attach --run`), and closing the window only lets go of it.
   Closing a kept tab whose editor runs asks first, saying that the editor's unsaved changes are lost, as does closing a window that keeps no session while one runs, its shells ending with it.
@@ -1031,7 +1033,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A kind switched off shows its files as they are, and its Invert command recolours one file onto the theme's paper and ink instead (PDF, Image, Diagram).
   Images covers the images a note shows too, Diagrams the canvas and a note's embeds; a switch redoes for those files what a theme change does.
 - Editor holds Preview Font under Document Font, each a font button with a Reset, and Full-Width Preview under Column Width, off, since the preview's page follows that width (Preview).
-- Editor leads with Text Editor, which lists Accent and the terminal editors the login shell finds, and marks a picked one it no longer finds as not found (Terminal).
+- Editor leads with Text Editor, which lists Accent and the terminal editors the login shell finds, marks a picked one it no longer finds as not found, and lists Custom Command while `config.toml` picks one, which only the file sets (Terminal).
   The shell is asked once a process, when the row is first shown or a window opens with a terminal editor picked, and never while Accent is picked and Preferences stays shut.
 - Files holds Show Hidden Files and Colour Changed Files, both on; the second tints the tree's changed names and leaves its dims alone (Sidebar → Files).
 - Commands holds the user's own commands (Terminal), each an `AdwExpanderRow` of its name over its command line, opening on Name, Command, its Shortcut (recorded as the palette records one, refusing a chord in use by name, a clash from a hand edit marked) and Remove Command; Add Command puts a new one at the end, opened. Restore Defaults keeps them, as it keeps the recent vaults: they are the user's, not settings with a default.

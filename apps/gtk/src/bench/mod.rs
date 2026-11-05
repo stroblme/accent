@@ -232,7 +232,7 @@ use user_commands::bench_commands;
 ///   finds; `open`: files opened, ended and replaced in a terminal editor's tabs; `keys`: the
 ///   chords a terminal editor keeps, through XTEST; `accent`: Open in Accent's Editor and when
 ///   closing asks; `hold` then `back`: its tab put back with its editor; `line`: search hits and
-///   Go to Symbol at their line. Its editors are
+///   Go to Symbol at their line, and a custom command's. Its editors are
 ///   `build-aux/fake-editor.sh` alone, in a scratch `HOME` (`terminal_editor::bench_editor`).
 /// - `ACCENT_BENCH_PDF=<rel_path>`: fit, save, rename and external reload.
 ///   Writes and moves the file; use a scratch multipage PDF. Modes:
