@@ -19,11 +19,13 @@ Edit the file, double-click its tab, or click its eye to keep it open.
 Double-click a tab that is already kept to find its file in the Files pane.
 You can also pin a tab from its menu, which offers the same file commands as the file's row in the Files and Git panes.
 Drag a tab or a file to an edge of the document area to open a split pane.
-The active pane is the one you last worked in, and `Ctrl+Tab` walks its recently used tabs.
+The active pane is the one you last worked in, and `Ctrl+Tab` walks recently used tabs across every pane in the window.
 
 Hidden files appear dimmed by default, and you can hide them under **Preferences → Files**.
-Ignored folders still appear in the tree, but [search](search.md) skips most of their files by default.
-Markdown notes remain searchable even there.
+Ignored folders still appear in the tree, but [search](search.md) skips their files until you open them.
+Markdown files ignored by name remain searchable when their folder is indexed.
+Opening an ignored text file adds that file to search.
+Files in dependency trees such as `node_modules` open read-only, while their top folder can still be moved, renamed or trashed as a whole.
 You can open a file from outside the vault with **Open File…** (`Ctrl+O`), though it will not have vault backlinks.
 
 ## Find your way
@@ -34,6 +36,7 @@ Press `F9` to show or hide the sidebar.
 Press `Ctrl+E` to find a file by name, or `Ctrl+P` to run a command by name.
 In the same palette, start with `#` for tags or `@` for symbols.
 The [Keyboard shortcuts](keyboard.md) page has a small cheat sheet.
+Use `Alt+Left` and `Alt+Right` to go back and forward through places visited across the window, including files whose tabs you closed.
 
 Images open fitted to the window, and you can zoom with `Ctrl++` or `Ctrl+-`.
 For scans and screenshots, Accent can recolour the image to match the theme.

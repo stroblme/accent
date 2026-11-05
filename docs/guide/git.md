@@ -3,6 +3,7 @@
 When a [vault](vaults.md) contains a Git repository, the **Git** pane appears in the sidebar.
 If it contains more than one, choose the repository at the top of the pane.
 Accent uses Git on the computer holding the vault, including a [remote host](remote.md).
+For a folder without a repository, run **Initialize Git Repository** from the command palette.
 
 ## Review and commit changes
 

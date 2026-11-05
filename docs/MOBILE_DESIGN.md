@@ -22,7 +22,7 @@ Follow these rules where they differ from Material 3, using a flat layout and ty
 ### Browse
 
 - A panel over what is being read, with the Search / Files / Tags / Links / Command chips and the query field at the foot of the screen, nearest the thumb.
-  The desktop's eight sidebar panes and its palette collapse into it.
+  The desktop's nine sidebar panes and its palette collapse into it.
 - The chips go from the whole vault to the one document and then to acting on it: what the notes say, what they are called, what they are about, what links to and from the one in front, what can be done.
   Five do not fit across a phone, so the row scrolls sideways under the thumb and keeps the lit chip on screen as the pages are swiped; the chip cut off at the edge is what says there is more.
   A scrolling row rather than shorter labels or icons, because each is the one word for its page and the platform's own chips scroll the same way.
@@ -219,4 +219,4 @@ The shared architecture is in [DESIGN.md](DESIGN.md).
 
 - Git, language servers, ghost text, word suggestions, remote vaults, the terminal, the draw.io editor, splits, comparison, Replace All, the minimap, focus levels and presentation mode remain desktop features.
   Add a phone feature only when it helps read the vault, make a small edit or work with a PDF.
-- Deferred rather than refused: a native Compose renderer in place of the WebView, exporting highlights, and the PDF shapes and Adjust tool.
+- Deferred features include a native Compose renderer in place of the WebView, a separate Export Highlights command, and the desktop PDF drawing tools, including Text, Select and pictures.

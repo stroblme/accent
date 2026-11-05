@@ -14,13 +14,26 @@ You can also change how images, PDFs and diagrams are recoloured to match the th
 
 ## Editor and files
 
-**Document Font** changes the reading and writing font.
+**Text Editor** chooses Accent or a [terminal editor](terminals.md#terminal-editors) found by your login shell.
+**Document Font** changes the editor's font, while **Preview Font** changes the rendered page and its printouts and HTML exports.
+Until you choose one, the editor uses the system monospace font and the preview uses the system document font.
 **Column Width** sets how wide the text can grow, and **Full-Width Preview** gives wide tables more room.
 The editor also offers **Spell Checking**, **Word Suggestions**, **Ghost Text**, **Line Numbers** and a **Minimap**.
 See [Notes](notes.md) for ghost text and preview use.
 
 Under **Files**, **Show Hidden Files** controls names beginning with a dot.
 **Colour Changed Files** tints files changed in Git and their folders in the [Files pane](vaults.md#files-and-tabs).
+
+## Commands and terminals
+
+Under **Commands**, choose **Add Command** to save a name, command line and optional shortcut.
+Run it by name from the command palette or with its shortcut.
+It opens in a terminal at the vault root, on the host for a remote vault, and closes after a successful exit.
+An unsuccessful exit keeps the tab and its output visible.
+Closing the window leaves a running command available when the vault reopens.
+
+Under **Terminal**, **Debug Terminal** places a debugged program's terminal in the same pane or a split on the chosen side.
+It leaves the keyboard in the source editor.
 
 ## This Vault
 

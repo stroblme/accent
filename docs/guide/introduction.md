@@ -3,18 +3,20 @@
 ![Accent logo](social-preview.png)
 
 Accent allows you to work with code, PDFs and drawings in a single workspace, which we call a **vault**.
-This vault may either be an ordinary folder or a set of files and terminals.
+Its files remain ordinary files, alongside any terminal sessions you open in Accent.
 
 In such a vault, you can use Accent to
+
 - **Connect notes and sources.** Follow [wikilinks, tags and backlinks](notes.md), embed drawings, and [link a selected PDF passage to a note](pdf.md#link-a-passage-to-a-note). The link takes you back to the passage.
 - **Work directly on documents.** [Annotate and rearrange PDF pages](pdf.md), edit [draw.io diagrams](diagrams.md) on a native canvas, and move between LaTeX source and its PDF with [SyncTeX](code.md#latex-and-synctex).
 - **Keep development in the same window.** Edit [code](code.md), run [Jupyter cells](notebooks.md), review and resolve [Git changes](git.md), and return to [terminal sessions](terminals.md) after closing the window.
+- **Manage references.** Edit [BibTeX bibliographies](bibliography.md), import references by DOI and attach their PDFs.
 - **Work where the files live.** Open a vault over [SSH](remote.md) with search, Git and tools running on its host, or let an agent use the vault through the [command line and MCP server](cli.md).
 
 
 ## Install and open a vault
 
-At the moment, we support Linux (native + Flatpak), MacOS and Android (companion only). 
+Accent supports Linux through native and Flatpak installations, macOS, and an Android companion app.
 
 Download the Flatpak bundle for your machine (`x86_64` or `aarch64`) from the [latest release](https://github.com/stroblme/accent/releases/latest), then install it with:
 
@@ -27,6 +29,10 @@ For a native install on a recent GNOME Linux system, use the [installer](https:/
 ```sh
 curl -fsSL https://raw.githubusercontent.com/stroblme/accent/main/install.sh | bash
 ```
+
+For macOS 15 or later, download the disk image for Apple Silicon or Intel from the same release and copy Accent.app into Applications.
+The app is signed ad hoc, so macOS may require you to allow its first launch in Privacy & Security.
+For Android installation and its available features, see [Android app](android.md).
 
 Open Accent and choose **Open Local…** to use a folder you already have, or make a new one in the folder chooser.
 Accent will show its files in the sidebar and start indexing them for [search](search.md) and links.

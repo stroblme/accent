@@ -12,6 +12,7 @@
 
 - [PDFs](pdf.md)
 - [Diagrams](diagrams.md)
+- [Bibliographies](bibliography.md)
 
 # Code
 

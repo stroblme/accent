@@ -1151,7 +1151,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A picture moves and turns in its place among the page's annotations, and a delete's Undo puts it back there, while a paste or a drop of several is one step.
   A copy carries the image, so another PDF takes it, and pasted into the document it came from it shares the image already written, which nothing frees, as nothing frees a stroke.
   The eraser leaves pictures alone, another editor's stamps are theirs, and a picture is recoloured with the page.
-  Reading, decoding and deflating run on a worker, and pdfium decodes a picture again for every tile over it, a tile clear of it costing nothing: a 12-megapixel JPEG of 4.3 MB costs the render thread about 107 ms a 512 px tile, and the screen drawn again 366 ms against 19 ms without it (AMCOMP, 2026-11-03).
+  Reading, decoding and deflating run on a worker.
+  The retained PDFium page shares a picture's decoded image across its tiles and zoom levels, as it does an image already in the page (PDF).
 - A second orbit holds the tool's options: three widths (for the text three sizes, 10, 14 and 20 pt), and for the pen, the shapes, the highlighter and the text six swatches (the accent, four hues round the wheel by the CSV rule, and black), each painted as the document's recolouring shows that ink, black as the theme's text on a recoloured page, while the stroke is written in the swatch's own colour; for the eraser, Whole Strokes (`edit-delete-symbolic`) and Partial (`edit-cut-symbolic`); for Select, its commands and Colour (`preferences-color-symbolic`).
   Each pick is kept in the config's `[drawing]`; a width there that is none of the three draws as the nearest of them.
 - With a tool in hand the other tools' icons dim to Adwaita's `--dim-opacity`, their discs staying opaque, so the options read as that tool's; a dimmed tool comes back under the pointer or the keyboard and still takes a click.

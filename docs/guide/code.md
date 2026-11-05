@@ -25,6 +25,11 @@ Completion appears as you type, or you can request it with `Ctrl+Space`.
 Choose a suggestion with the arrow keys, then press `Tab` or `Return`.
 Hover over a name for details, or use `F12`, `Ctrl+Shift+Return`, or `Ctrl`+click to go to its definition.
 The Info pane shows references, while the status bar's diagnostic count toggles inline messages.
+Use **Quick Fix…** (`Alt+Return`) for a diagnostic's fixes or **Source Action…** for actions on the file.
+
+For Python, choose **Python Environment** in the Code pane to use the vault's interpreter for analysis, [debugging](debugging.md) and [notebooks](notebooks.md).
+A running program or kernel keeps its interpreter until restarted.
+Project settings for Pyright's virtual environment take precedence for language analysis.
 
 To choose a different server, set its command in `~/.config/accent/config.toml`:
 
@@ -53,3 +58,5 @@ The Code pane shows goals and the expected type at the caret, while a bar in the
 Type an abbreviation such as `\to`, then press `Tab` to insert `→`.
 These abbreviations also work while the server is still starting.
 After rebuilding imports, run **Restart File in Language Server** from the [command palette](keyboard.md).
+
+To use Helix, Vim or another terminal editor for text files, choose it in [Preferences](terminals.md#terminal-editors).

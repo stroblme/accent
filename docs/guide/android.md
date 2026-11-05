@@ -7,17 +7,22 @@ If you keep a vault on several devices, sync its folder with a separate app such
 
 ## Find your way around
 
-Tap **Browse** to open Search, Files, Tags, Backlinks and Command.
+Tap **Browse** to open Search, Files, Tags, Links and Command.
 Swipe between them or tap their chips.
 Search finds text in the vault, while Files finds names and folders.
+Search accepts the same [words and qualifiers](search.md#narrow-a-search) as the desktop.
 Tap a tag in a note to see its notes in Browse.
-Backlinks shows which notes link to the document you are reading.
+Links shows which notes link to the document you are reading.
+On a note, its arrow button switches to the files that note links to.
 Command includes **New Note**, **Find** and **Print…** when they apply.
+**New from Template…** and **Today's Note** use the vault's [templates](notes.md#templates).
 
 ## Read and write
 
 A [note](notes.md) opens as a rendered page.
 Tap **Edit** to work on its Markdown, then **Done** to read it again.
+Org notes also open rendered and can be edited in their own syntax.
+For a [saved search](search.md#saved-searches), tap **Show Results** to open its query in Browse.
 Tap a link to follow it, or tap an image to open it on its own screen.
 You can pinch to zoom an image and use **Invert** if its colours are hard to read.
 

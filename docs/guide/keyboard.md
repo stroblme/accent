@@ -17,12 +17,15 @@ For the full list, choose **Keyboard Shortcuts** from the main menu or press `Ct
 | Toggle Preview | `Ctrl+M` |
 | Split Right | `Ctrl+\` |
 | Next recently used tab | `Ctrl+Tab` |
+| Go Back / Go Forward | `Alt+Left` / `Alt+Right` |
+| Toggle Task | `Alt+X` |
 | Close Tab | `Ctrl+W` |
 | Toggle Sidebar | `F9` |
 | Presentation Mode | `F5` |
 
 Shortcuts for a [PDF](pdf.md), [diagram](diagrams.md), [notebook](notebooks.md), [terminal](terminals.md) or [debug session](debugging.md) depend on what is in front.
 The in-app shortcut list shows those keys too.
+In a [terminal editor](terminals.md#terminal-editors), `Ctrl+W`, `Ctrl+E` and `Ctrl+J` go to the editor.
 
 ## Change a shortcut
 

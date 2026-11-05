@@ -2,6 +2,8 @@
 
 Install Python and `debugpy` on the computer holding your [vault](vaults.md).
 Accent uses the nearest `.venv` or `venv` for your program, or `python3` if neither exists.
+Use **Python Environment** in the Code pane to choose another detected interpreter for the vault.
+The choice is shared with notebooks and Python language analysis, and a running debug session changes interpreter only when restarted.
 If your interpreter lives elsewhere, set it in `~/.config/accent/config.toml`:
 
 ```toml
@@ -15,6 +17,7 @@ The path in this example is relative to the vault root.
 
 Open a Python file and press `Ctrl+F5` to start debugging it.
 Accent saves your open changes first, then opens the program in a terminal tab.
+**Preferences → Terminal → Debug Terminal** chooses whether it opens behind the source or in a split pane.
 Click the editor gutter to add or remove a breakpoint, or press `Ctrl+F9` on its line.
 Breakpoints return when you reopen the vault.
 
