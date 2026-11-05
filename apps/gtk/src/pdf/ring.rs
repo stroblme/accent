@@ -26,15 +26,16 @@ const ERASERS: [(bool, &str, &str); 2] = [
     (true, "edit-cut-symbolic", "Erase Only What It Passes Over"),
 ];
 
-/// The Select tool's commands and their icons, on the slots the other tools give their widths and
-/// colours to, as the page's menu lists them too: Paste while there is something to paste, the
-/// rest while it holds something. Adwaita has no duplicate, so that one is tabler's `copy-plus`.
+/// The Select tool's commands and their icons, on the slots the other tools give their colours
+/// to, as the page's menu lists them too: Paste while there is something to paste, the rest while
+/// it holds something. Adwaita has no duplicate, so that one is tabler's `copy-plus`, and Delete
+/// is the trash can every other delete in the app shows.
 pub(super) const COMMANDS: [(&str, &str); 5] = [
     ("win.pdf-cut", "edit-cut-symbolic"),
     ("win.pdf-copy", "edit-copy-symbolic"),
     ("win.pdf-paste", "edit-paste-symbolic"),
     ("win.pdf-duplicate", "tool-duplicate-symbolic"),
-    ("win.pdf-delete", "edit-delete-symbolic"),
+    ("win.pdf-delete", "user-trash-symbolic"),
 ];
 
 /// What the three width buttons are called, and for the text, which they size.
@@ -82,8 +83,8 @@ pub struct PdfRing {
     commands: Vec<gtk::Button>,
     picked: Cell<bool>,
     pasteable: Cell<bool>,
-    /// Select's Colour command, on the slot before its first, and the six swatches it puts on the
-    /// commands' slots in their place, for what Select holds.
+    /// Select's Colour command, on the slot before its first, and the six swatches it puts out in
+    /// the commands' place for what Select holds, where the other tools have their colours.
     colour: gtk::ToggleButton,
     recolours: Vec<gtk::ToggleButton>,
     /// The colours of what Select holds that a recolour reaches, one each: whether Colour shows,
@@ -108,12 +109,12 @@ impl PdfRing {
         let ring = Ring::<Mode>::new();
         let theme = Rc::new(Cell::new(Theme::Plain));
         // Nine slots outside the tools: the widths at the top, the colours after them. Select's
-        // commands start at the top too, its Colour on the last slot, beside the first, so the
-        // swatches it puts out take the commands' slots, clockwise from it.
+        // commands take the colours' slots and its Colour the last width's, beside them, so the
+        // swatches it puts out land where every other tool has them, clockwise from it.
         let swatch_count = crate::theme::swatches().len();
         let slots = 3 + swatch_count;
         let option = |i: usize, child: &gtk::Widget| ring.add_option(i, slots, child);
-        let widths: Vec<_> = [5.0, 8.0, 12.0]
+        let widths: Vec<_> = [6.0, 10.0, 15.0]
             .into_iter()
             .enumerate()
             .map(|(i, diameter)| option(i, dot(diameter, |area| area.color()).upcast_ref()))
@@ -123,7 +124,7 @@ impl PdfRing {
             let theme = theme.clone();
             let colour =
                 move |_: &gtk::DrawingArea| crate::theme::rgba(painted(i, theme.get()), 1.0);
-            let button = option(at, dot(14.0, colour).upcast_ref());
+            let button = option(at, dot(18.0, colour).upcast_ref());
             button.set_tooltip_text(Some(&swatch_name(i, swatch_count)));
             button
         };
@@ -132,18 +133,18 @@ impl PdfRing {
             .iter()
             .enumerate()
             .map(|(i, (_, icon, label))| {
-                let button = option(3 + i, gtk::Image::from_icon_name(icon).upcast_ref());
+                let button = option(3 + i, crate::ring::glyph(icon).upcast_ref());
                 button.set_tooltip_text(Some(label));
                 button
             })
             .collect();
         let commands = (COMMANDS.iter().enumerate())
-            .map(|(i, (action, icon))| ring.add_button(i, slots, icon, action))
+            .map(|(i, (action, icon))| ring.add_button(3 + i, slots, icon, action))
             .collect();
-        let palette = gtk::Image::from_icon_name("preferences-color-symbolic");
-        let colour = option(slots - 1, palette.upcast_ref());
+        let palette = crate::ring::glyph("preferences-color-symbolic");
+        let colour = option(2, palette.upcast_ref());
         colour.set_tooltip_text(Some("Colour"));
-        let recolours = (0..swatch_count).map(|i| swatch(i, i)).collect();
+        let recolours = (0..swatch_count).map(|i| swatch(3 + i, i)).collect();
 
         let ring = Rc::new(PdfRing {
             ring,

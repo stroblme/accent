@@ -1135,7 +1135,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Each is written in one go and pdfium opened again once, its Undo and Redo too, so moving 20 strokes on a page of a 2069-page document takes 7 ms of the render thread, where opening it after each stroke took 95 ms.
   Select holds one page at a time, and a cut pasted on another page is how a drawing moves between pages.
 - **Colour recolours what Select holds** (user decisions 2026-11-04), a command on the ring's orbit beside Cut while Select holds a stroke or a text a recolour reaches.
-  Clicking it puts the pen's six swatches on the commands' slots with the one everything held shares checked, and a swatch recolours what is held and brings the commands back, while Colour again or `Escape` brings them back without a change.
+  Clicking it puts the pen's six swatches in the commands' place with the one everything held shares checked, each where the other tools have it, as Colour sits on the last width's slot and the commands on the colours' (user decision 2026-11-05).
+  A swatch recolours what is held and brings the commands back, while Colour again or `Escape` brings them back without a change.
   The palette has the same six as Recolour Selection commands named as the ring's tooltips name them, from `Recolour Selection: Accent Colour` to `Recolour Selection: Black` (user decision 2026-11-05), offered only while Select holds something a recolour reaches, so the keyboard reaches them too.
   Each does what its swatch does.
   The file is given the swatch's own colour, the accent as it is at the click, so the page's recolouring shows it as it shows the pen's ink, and the pen keeps its own colour.
@@ -1154,7 +1155,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The eraser leaves pictures alone, another editor's stamps are theirs, and a picture is recoloured with the page.
   Reading, decoding and deflating run on a worker.
   The retained PDFium page shares a picture's decoded image across its tiles and zoom levels, as it does an image already in the page (PDF).
-- A second orbit holds the tool's options: three widths (for the text three sizes, 10, 14 and 20 pt), and for the pen, the shapes, the highlighter and the text six swatches (the accent, four hues round the wheel by the CSV rule, and black), each painted as the document's recolouring shows that ink, black as the theme's text on a recoloured page, while the stroke is written in the swatch's own colour; for the eraser, Whole Strokes (`edit-delete-symbolic`) and Partial (`edit-cut-symbolic`); for Select, its commands and Colour (`preferences-color-symbolic`).
+- A second orbit holds the tool's options: three widths (for the text three sizes, 10, 14 and 20 pt), and for the pen, the shapes, the highlighter and the text six swatches (the accent, four hues round the wheel by the CSV rule, and black), each painted as the document's recolouring shows that ink, black as the theme's text on a recoloured page, while the stroke is written in the swatch's own colour; for the eraser, Whole Strokes (`edit-delete-symbolic`) and Partial (`edit-cut-symbolic`); for Select, its commands, Delete being the `user-trash-symbolic` every other delete shows, and Colour (`preferences-color-symbolic`).
+  Its discs are 30 px and their glyphs 20 px, a quarter above the tools' 16 px, so the smaller discs still read at a glance (user decision 2026-11-05).
   Each pick is kept in the config's `[drawing]`; a width there that is none of the three draws as the nearest of them.
 - With a tool in hand the other tools' icons dim to Adwaita's `--dim-opacity`, their discs staying opaque, so the options read as that tool's; a dimmed tool comes back under the pointer or the keyboard and still takes a click.
   A press between the ring's buttons reaches the page.

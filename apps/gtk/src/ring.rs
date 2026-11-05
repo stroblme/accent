@@ -10,9 +10,9 @@ use std::cell::{Cell, RefCell};
 /// The distance from the hub to a tool button, in pixels.
 const ORBIT: f64 = 54.0;
 /// The distance from the hub to an option button: just clear of the tools.
-const OPTIONS: f64 = 88.0;
+const OPTIONS: f64 = 91.0;
 /// The whole ring's box, wide enough for the outer orbit plus a button either side of it.
-const SIZE: i32 = 204;
+const SIZE: i32 = 216;
 /// How far the ring sits from the corner it starts in.
 const INSET: f64 = 24.0;
 
@@ -115,7 +115,7 @@ impl<T: Tool> Ring<T> {
     /// Hidden until shown.
     pub fn add_button(&self, i: usize, n: usize, icon: &str, action: &str) -> gtk::Button {
         let button = gtk::Button::builder()
-            .icon_name(icon)
+            .child(&glyph(icon))
             .tooltip_text(crate::actions::label_of(action))
             .action_name(action)
             .visible(false)
@@ -242,6 +242,13 @@ impl<T: Tool> Ring<T> {
     }
 }
 
+/// An option's icon, at the outer orbit's [`GLYPH`] size.
+pub(crate) fn glyph(icon: &str) -> gtk::Image {
+    let image = gtk::Image::from_icon_name(icon);
+    image.set_pixel_size(GLYPH);
+    image
+}
+
 /// A filled circle of `diameter` pixels in whatever colour `colour` says when it is drawn.
 pub(crate) fn dot(
     diameter: f64,
@@ -323,12 +330,15 @@ fn place(root: &RingBox, button: &impl IsA<gtk::Widget>, cx: f64, cy: f64, size:
 /// A tool button's diameter. Big enough to hit while drawing, and above libadwaita's 34 px
 /// minimum, small enough to leave the page visible around the ring.
 const BUTTON: i32 = 36;
-/// An option button's: a dot, not a glyph, so it can be smaller.
-const OPTION: i32 = 24;
+/// An option button's, smaller than a tool's so the two orbits are told apart.
+const OPTION: i32 = 30;
+/// The size of an option's icon, a quarter above the tools' 16 px so the smaller discs still read
+/// at a glance.
+const GLYPH: i32 = 20;
 
 #[cfg(test)]
 mod tests {
-    use super::{BUTTON, OPTION, OPTIONS, ORBIT, orbit};
+    use super::{BUTTON, OPTION, OPTIONS, ORBIT, SIZE, orbit};
 
     /// The most tools the inner orbit holds a button apart; the PDF has eight.
     const TOOLS: usize = 9;
@@ -355,5 +365,17 @@ mod tests {
                 "options {i} and next are {gap} px apart"
             );
         }
+    }
+
+    /// The options sit clear of the tools, a few pixels out, and inside the ring's box.
+    #[test]
+    fn the_options_clear_the_tools_inside_the_box() {
+        let gap = OPTIONS - f64::from(OPTION) / 2.0 - (ORBIT + f64::from(BUTTON) / 2.0);
+        assert!(gap >= 4.0, "the options are {gap} px off the tools");
+        let reach = OPTIONS + f64::from(OPTION) / 2.0;
+        assert!(
+            reach <= f64::from(SIZE) / 2.0,
+            "the options reach {reach} px out"
+        );
     }
 }
