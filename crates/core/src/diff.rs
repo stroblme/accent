@@ -31,8 +31,9 @@ pub struct DiffLine {
     pub new_line: Option<usize>,
     /// The line without its trailing newline.
     pub text: String,
-    /// Byte ranges into `text` that differ from the line this one is paired with. Empty for an
-    /// unchanged line, and for a change the word diff judged too dissimilar to refine.
+    /// Byte ranges into `text` that differ from the line [`matches`] pairs this one with. Empty for
+    /// an unchanged line, a change paired with none, and a change the word diff judged too
+    /// dissimilar to refine.
     pub emphasis: Vec<Range<usize>>,
 }
 
@@ -42,8 +43,9 @@ pub const REFINE: Duration = Duration::from_millis(100);
 
 /// Line diff in source order for side-by-side views.
 ///
-/// Changed pairs from [`align`] receive word-level emphasis; unpaired lines and pairs below
-/// `similar`'s 0.5 similarity floor stay unrefined.
+/// The changed lines [`align`] lays beside each other for their words ([`matches`]) receive
+/// word-level emphasis; the rest, and pairs below `similar`'s 0.5 similarity floor, stay
+/// unrefined.
 pub fn lines(old: &str, new: &str) -> Vec<DiffLine> {
     lines_within(old, new, REFINE).0
 }
@@ -65,16 +67,23 @@ pub fn lines_within(old: &str, new: &str, refine: Duration) -> (Vec<DiffLine>, b
                 emphasis: Vec::new(),
             }
         }));
-        // A replacement's deletions come first, then its insertions, paired in order as `align`
-        // pairs them.
+        // A replacement's deletions come first, then its insertions, matched as `align` matches
+        // them.
         let (old_len, new_len) = (op.old_range().len(), op.new_range().len());
         if let DiffTag::Replace = op.tag() {
-            for i in 0..old_len.min(new_len) {
+            let text = |i: usize| lines[i].text.as_str();
+            let pairs = matches(
+                &(at..at + old_len).map(text).collect::<Vec<_>>(),
+                &(at + old_len..at + old_len + new_len)
+                    .map(text)
+                    .collect::<Vec<_>>(),
+            );
+            for (o, n) in pairs {
                 if Instant::now() > deadline {
                     whole = false;
                     break;
                 }
-                let (o, n) = (at + i, at + old_len + i);
+                let (o, n) = (at + o, at + old_len + n);
                 [lines[o].emphasis, lines[n].emphasis] =
                     emphasis(&lines[o].text, &lines[n].text, deadline);
             }
@@ -195,16 +204,17 @@ impl Side {
     }
 }
 
-/// Align equal lines on both sides and pair adjacent delete/insert runs row by row, padding the
-/// shorter run with `None`. Kept independent of the toolkit so side-by-side alignment can be
-/// tested directly.
+/// Align equal lines on both sides, and in each block of deleted and inserted lines put the
+/// lines [`matches`] finds alike on rows of their own, the lines between two of them side by side
+/// in order and the longer side's rest beside `None`. Kept independent of the toolkit so
+/// side-by-side alignment can be tested directly.
 pub fn align(lines: &[DiffLine]) -> Vec<Row> {
     let mut rows = Vec::new();
     let (mut dels, mut ins) = (Vec::new(), Vec::new());
     for (i, line) in lines.iter().enumerate() {
         match line.op {
             Op::Equal => {
-                flush(&mut dels, &mut ins, &mut rows);
+                flush(lines, &mut dels, &mut ins, &mut rows);
                 rows.push(Row {
                     old: Some(i),
                     new: Some(i),
@@ -214,26 +224,142 @@ pub fn align(lines: &[DiffLine]) -> Vec<Row> {
             // inserts within a hunk, so this only guards against input that does not.
             Op::Delete => {
                 if !ins.is_empty() {
-                    flush(&mut dels, &mut ins, &mut rows);
+                    flush(lines, &mut dels, &mut ins, &mut rows);
                 }
                 dels.push(i);
             }
             Op::Insert => ins.push(i),
         }
     }
-    flush(&mut dels, &mut ins, &mut rows);
+    flush(lines, &mut dels, &mut ins, &mut rows);
     rows
 }
 
-fn flush(dels: &mut Vec<usize>, ins: &mut Vec<usize>, rows: &mut Vec<Row>) {
-    for i in 0..dels.len().max(ins.len()) {
-        rows.push(Row {
-            old: dels.get(i).copied(),
-            new: ins.get(i).copied(),
-        });
+/// Lay one block of deleted and inserted lines (indices into `lines`) out as [`align`] says.
+fn flush(lines: &[DiffLine], dels: &mut Vec<usize>, ins: &mut Vec<usize>, rows: &mut Vec<Row>) {
+    let text = |i: &usize| lines[*i].text.as_str();
+    let matched = matches(
+        &dels.iter().map(text).collect::<Vec<_>>(),
+        &ins.iter().map(text).collect::<Vec<_>>(),
+    );
+    let (mut a, mut b) = (0, 0);
+    let end = (dels.len(), ins.len());
+    for &(to_a, to_b) in matched.iter().chain(std::iter::once(&end)) {
+        let (old, new) = (&dels[a..to_a], &ins[b..to_b]);
+        for i in 0..old.len().max(new.len()) {
+            rows.push(Row {
+                old: old.get(i).copied(),
+                new: new.get(i).copied(),
+            });
+        }
+        if (to_a, to_b) != end {
+            rows.push(Row {
+                old: Some(dels[to_a]),
+                new: Some(ins[to_b]),
+            });
+        }
+        (a, b) = (to_a + 1, to_b + 1);
     }
     dels.clear();
     ins.clear();
+}
+
+/// The least [`likeness`] two changed lines need to be laid beside each other and refined word by
+/// word.
+const ALIKE: f32 = 0.5;
+
+/// The most line pairs [`matches`] weighs in one block of deletions and insertions: 50 lines each
+/// way, which it matches in about 1 ms (AMCOMP's P-cores, 2026-11-05). The work grows with the
+/// pairs, and a diff laid where the reader waits pays it twice, in [`lines_within`] and in
+/// [`align`]; a bigger block is a rewrite more than an edit, and matching it by position costs
+/// nothing.
+const MATCHED_PAIRS: usize = 2_500;
+
+/// The lines of a block of deletions `old` and insertions `new` to lay beside each other, as index
+/// pairs in order on both sides: pairs at least [`ALIKE`], together as alike as such pairs can be.
+///
+/// Matched by position, a line put in above edited ones stood beside the first of them, and every
+/// edited line beside the one before its own, each refined against a line it had nothing to do
+/// with: `similar` counts the spaces between words as shared, and a list's `-` and a `the` were
+/// enough to lift two unrelated sentences over its floor. A block of more than [`MATCHED_PAIRS`]
+/// is still matched by position.
+fn matches(old: &[&str], new: &[&str]) -> Vec<(usize, usize)> {
+    if old.len() * new.len() > MATCHED_PAIRS {
+        return (0..old.len().min(new.len())).map(|i| (i, i)).collect();
+    }
+    let old_words: Vec<Vec<&str>> = old.iter().map(|line| words(line)).collect();
+    let new_words: Vec<Vec<&str>> = new.iter().map(|line| words(line)).collect();
+    // At `a * width + b`: the most likeness the pairs among `old[..a]` and `new[..b]` add up to,
+    // and the step that got there, which the walk back from the end below retraces.
+    let width = new.len() + 1;
+    let mut best = vec![0.0f32; (old.len() + 1) * width];
+    let mut took = vec![Step::Old; (old.len() + 1) * width];
+    for a in 1..=old.len() {
+        for b in 1..=new.len() {
+            let at = a * width + b;
+            (best[at], took[at]) = (best[at - width], Step::Old);
+            if best[at - 1] > best[at] {
+                (best[at], took[at]) = (best[at - 1], Step::New);
+            }
+            let texts = (old[a - 1], new[b - 1]);
+            let alike = likeness(&old_words[a - 1], &new_words[b - 1], texts);
+            if alike >= ALIKE && best[at - width - 1] + alike > best[at] {
+                (best[at], took[at]) = (best[at - width - 1] + alike, Step::Both);
+            }
+        }
+    }
+    let (mut a, mut b, mut pairs) = (old.len(), new.len(), Vec::new());
+    while a > 0 && b > 0 {
+        match took[a * width + b] {
+            Step::Old => a -= 1,
+            Step::New => b -= 1,
+            Step::Both => {
+                (a, b) = (a - 1, b - 1);
+                pairs.push((a, b));
+            }
+        }
+    }
+    pairs.reverse();
+    pairs
+}
+
+/// How [`matches`] reached a pair of prefixes: leaving the last old line out, the last new one, or
+/// matching the two.
+#[derive(Clone, Copy)]
+enum Step {
+    Old,
+    New,
+    Both,
+}
+
+/// A line's words, the runs of letters, digits and `_`, sorted for [`likeness`]. The spaces and
+/// the punctuation between them are left out, since unrelated lines share plenty of both.
+fn words(line: &str) -> Vec<&str> {
+    let mut words: Vec<&str> = (line.split(|c: char| !(c.is_alphanumeric() || c == '_')))
+        .filter(|word| !word.is_empty())
+        .collect();
+    words.sort_unstable();
+    words
+}
+
+/// How alike two lines are: twice the words they share over all their words, a word counting as
+/// often as both have it. Two lines without a word are alike only when they read the same.
+fn likeness(old: &[&str], new: &[&str], texts: (&str, &str)) -> f32 {
+    if old.is_empty() && new.is_empty() {
+        return match texts.0.trim() == texts.1.trim() {
+            true => 1.0,
+            false => 0.0,
+        };
+    }
+    let (mut i, mut j, mut shared) = (0, 0, 0);
+    while let (Some(x), Some(y)) = (old.get(i), new.get(j)) {
+        match x.cmp(y) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => (i, j, shared) = (i + 1, j + 1, shared + 1),
+        }
+    }
+    2.0 * shared as f32 / (old.len() + new.len()) as f32
 }
 
 /// Whether a row shows the same unchanged line on both sides.
@@ -566,6 +692,92 @@ mod tests {
                 ("c three", vec![]),
             ],
             "each line against the one beside it; the line with no partner is left whole"
+        );
+    }
+
+    /// Each row of `old` against `new` as [`align`] lays it, a side's line with its emphasis in
+    /// brackets, and `None` where the side has blank space.
+    fn laid(old: &str, new: &str) -> Vec<(Option<String>, Option<String>)> {
+        let d = lines(old, new);
+        let shown = |i: Option<usize>| {
+            i.map(|i| {
+                let (line, mut at, mut out) = (&d[i], 0, String::new());
+                for r in &line.emphasis {
+                    out += &format!("{}[{}]", &line.text[at..r.start], &line.text[r.clone()]);
+                    at = r.end;
+                }
+                out + &line.text[at..]
+            })
+        };
+        (align(&d).iter())
+            .map(|r| (shown(r.old), shown(r.new)))
+            .collect()
+    }
+
+    fn row(old: Option<&str>, new: Option<&str>) -> (Option<String>, Option<String>) {
+        (old.map(str::to_string), new.map(str::to_string))
+    }
+
+    #[test]
+    fn a_line_put_in_above_edited_ones_stands_alone_and_each_edit_faces_its_original() {
+        let old = "- The quick brown fox jumps over the lazy dog.\n\
+                   - A second item that stays nearly the same.\n";
+        let new = "- An entirely new first item about last week.\n\
+                   - The quick brown fox leaps over the lazy dog.\n\
+                   - A second item that stays almost the same.\n";
+        assert_eq!(
+            laid(old, new),
+            [
+                row(None, Some("- An entirely new first item about last week.")),
+                row(
+                    Some("- The quick brown fox [jumps] over the lazy dog."),
+                    Some("- The quick brown fox [leaps] over the lazy dog.")
+                ),
+                row(
+                    Some("- A second item that stays [nearly] the same."),
+                    Some("- A second item that stays [almost] the same.")
+                ),
+            ],
+            "the new line has blank space beside it and no emphasis"
+        );
+        assert_eq!(
+            apply_lines(old, new, Side::New, 2..=2),
+            "- The quick brown fox leaps over the lazy dog.\n\
+             - A second item that stays nearly the same.\n",
+            "staging a line takes the one it is laid beside"
+        );
+    }
+
+    #[test]
+    fn of_two_lines_swapped_and_edited_the_closer_pair_faces_and_the_other_two_stand_alone() {
+        let old = "Each run writes a file per sensor.\nThe readings are checked every day.\n";
+        let new = "The readings are checked every week, then filed.\n\
+                   Each run writes a file per channel.\n";
+        assert_eq!(
+            laid(old, new),
+            [
+                row(
+                    None,
+                    Some("The readings are checked every week, then filed.")
+                ),
+                row(
+                    Some("Each run writes a file per [sensor.]"),
+                    Some("Each run writes a file per [channel.]")
+                ),
+                row(Some("The readings are checked every day."), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn unlike_lines_between_two_alike_ones_stay_side_by_side_unrefined() {
+        assert_eq!(
+            laid("one two three\nfour\nfive\n", "one two six\nseven\n"),
+            [
+                row(Some("one two [three]"), Some("one two [six]")),
+                row(Some("four"), Some("seven")),
+                row(Some("five"), None),
+            ]
         );
     }
 
