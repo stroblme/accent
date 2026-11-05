@@ -92,7 +92,7 @@ impl Merge {
             picker
         });
         let unfold = gtk::ToggleButton::builder()
-            .icon_name("view-reveal-symbolic")
+            .icon_name("diff-unfold-symbolic")
             .tooltip_text("Show All Unchanged Lines")
             .css_classes(["flat", "chrome-fade"])
             .focus_on_click(false)

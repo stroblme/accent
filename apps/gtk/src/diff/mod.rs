@@ -457,7 +457,7 @@ impl Compare {
         // Beside Stop Comparing on the editor's title row, or at the end of the right one's. A
         // click leaves the keyboard in the text.
         let unfold = gtk::ToggleButton::builder()
-            .icon_name("view-reveal-symbolic")
+            .icon_name("diff-unfold-symbolic")
             .tooltip_text("Show All Unchanged Lines")
             .css_classes(["flat", "chrome-fade"])
             .focus_on_click(false)
