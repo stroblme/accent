@@ -30,6 +30,7 @@
             src = lib.fileset.toSource {
               root = ./.;
               fileset = lib.fileset.unions [
+                ./.cargo
                 ./Cargo.toml
                 ./Cargo.lock
                 ./crates

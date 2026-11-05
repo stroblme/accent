@@ -3,9 +3,16 @@
 # has, does not, so the flag says it. Harmless on a 4 KB device: the pages are just further apart
 # in the file.
 #
-# Desktop targets are untouched — this file only names the two Android ones.
+# Desktop targets keep their rustflags — only the two Android ones are named.
 [target.aarch64-linux-android]
 rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
 
 [target.x86_64-linux-android]
 rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]
+
+# Bundled SQLite without what the index never asks of it: FTS3/4, R-tree and the JSON functions.
+# FTS5, which the index is, stays, as do threading and WAL. Every cargo build in the tree reads
+# this, so the Flatpak, Nix, Android and `make server` builds get it too. libsqlite3-sys passes
+# these after its own flags, so a `-U` takes back one of its `-D`s.
+[env]
+LIBSQLITE3_FLAGS = "-USQLITE_ENABLE_FTS3 -USQLITE_ENABLE_FTS3_PARENTHESIS -USQLITE_ENABLE_RTREE -DSQLITE_OMIT_JSON"
