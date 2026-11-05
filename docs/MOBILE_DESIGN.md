@@ -200,6 +200,8 @@ The shared architecture is in [DESIGN.md](DESIGN.md).
 - **Foreground indexing**: hold an `IndexingService` of type `dataSync` while walking, with a quiet, ongoing progress notification that returns to the app when tapped.
   Stop the service when the walk ends or pauses; no notification permission is required for the service to run.
 - **PDF rules**: use the shared core for highlights, links and annotation data; Compose handles gestures and drawing.
+- **A PDF from another app is read from a copy** in `cacheDir/pdf`, deleted as soon as the core has it open, so the document never sits in memory whole and the session reads its own file until it closes.
+  The provider's descriptor is not read directly, because a pipe has no offsets to read at and the write-back truncates the file pdfium would be reading.
 - **Recents are Android-local** (`Recents.kt`, `SharedPreferences`); vault, note and command history is kept separately from desktop window sessions.
 - **The rendered view is a `WebView`** over the core's `to_html` for the note's syntax (`note::Syntax`, an `.org` file's org, its styling spans too), with the desktop's `accent://` scheme and generated CSS — it is the only thing on the platform that draws MathML.
 - **Mermaid**: serve the shared bootstrap (`vendor/mermaid/bootstrap.js`) and library at `accent://app/`, enabling JavaScript only for notes with Mermaid fences.

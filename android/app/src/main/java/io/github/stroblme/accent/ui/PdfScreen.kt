@@ -148,13 +148,12 @@ fun LoosePdfScreen(uri: Uri) {
     var doc by remember(uri) { mutableStateOf<PdfModel?>(null) }
     var failed by remember(uri) { mutableStateOf<String?>(null) }
     LaunchedEffect(uri) {
+        // Copied off the main thread: the whole file is read, and it is somebody else's document,
+        // which may be on a network provider.
         runCatching {
-            // Off the main thread: the whole file is read, and it is somebody else's document,
-            // which may be on a network provider.
-            val bytes = withContext(Dispatchers.IO) {
-                context.contentResolver.openInputStream(uri)!!.use { it.readBytes() }
+            PdfModel.copied(File(context.cacheDir, "pdf")) {
+                context.contentResolver.openInputStream(uri)!!
             }
-            PdfModel.of(bytes)
         }.onSuccess { doc = it }
             .onFailure { failed = it.message ?: "Cannot open this PDF" }
     }

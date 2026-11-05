@@ -24,9 +24,9 @@ pub fn link_with_alias(link: String, text: String) -> String {
 
 struct State {
     doc: PdfDoc,
-    /// Source path and last read/write etag. Both are `None` for byte-backed
-    /// documents, which cannot save to a file.
-    path: Option<PathBuf>,
+    /// The file the document was opened from, and its etag as last read or written (`None` if
+    /// the file could not be stat'ed).
+    path: PathBuf,
     etag: Option<Etag>,
     ink: Ink,
     /// Per page, so a selection drag does not re-read the text on every move.
@@ -43,13 +43,13 @@ impl PdfSession {
         f(&mut self.0.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
-    fn of(doc: PdfDoc, path: Option<PathBuf>) -> Answer<Self> {
+    fn of(doc: PdfDoc, path: PathBuf) -> Answer<Self> {
         if doc.page_count() == 0 {
             return Err(AccentError::Failed {
                 reason: "this file has no pages".to_string(),
             });
         }
-        let etag = path.as_deref().and_then(|p| Etag::of(p).ok());
+        let etag = Etag::of(&path).ok();
         Ok(PdfSession(Mutex::new(State {
             doc,
             path,
@@ -63,7 +63,8 @@ impl PdfSession {
 
 #[uniffi::export]
 impl PdfSession {
-    /// Open a document from a file, which is what a vault holds.
+    /// Open a document from a file: what a vault holds, and the copy Android makes of a
+    /// document another app hands over, which it deletes once this returns.
     #[uniffi::constructor]
     pub fn open(path: String) -> Answer<Self> {
         if !pdf::available() {
@@ -72,20 +73,7 @@ impl PdfSession {
             });
         }
         let path = PathBuf::from(path);
-        PdfSession::of(PdfDoc::open(&path)?, Some(path))
-    }
-
-    /// Open bytes, such as from a `content://` URI without a file path.
-    /// [`save`](Self::save) is unavailable; write [`save_bytes`](Self::save_bytes)
-    /// through the source that supplied the bytes.
-    #[uniffi::constructor]
-    pub fn open_bytes(bytes: Vec<u8>) -> Answer<Self> {
-        if !pdf::available() {
-            return Err(AccentError::Failed {
-                reason: "libpdfium was not found".to_string(),
-            });
-        }
-        PdfSession::of(PdfDoc::from_bytes(bytes)?, None)
+        PdfSession::of(PdfDoc::open(&path)?, path)
     }
 
     pub fn page_count(&self) -> u32 {
@@ -359,19 +347,13 @@ impl PdfSession {
     // ---------------------------------------------------------------------------------- saving
 
     /// Save to the source path, rejecting external changes. `None` means
-    /// nothing changed. Byte-backed documents must use [`save_bytes`](Self::save_bytes).
+    /// nothing changed.
     pub fn save(&self) -> Answer<Option<Etag>> {
         self.with(|s| {
             if !s.ink.dirty {
                 return Ok(None);
             }
-            let Some(path) = s.path.clone() else {
-                return Err(AccentError::Failed {
-                    reason: "this document was opened from bytes and has no file to save into"
-                        .to_string(),
-                });
-            };
-            let etag = s.doc.save_to(&path, s.etag)?;
+            let etag = s.doc.save_to(&s.path, s.etag)?;
             s.etag = Some(etag);
             s.ink.dirty = false;
             Ok(Some(etag))
@@ -435,6 +417,16 @@ mod tests {
 
     fn scratch(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("accent-ffi-{name}-{}.pdf", std::process::id()))
+    }
+
+    /// `bytes` opened as Android opens a document from another app: from a copy that is deleted
+    /// as soon as the session has it, which goes on reading it.
+    fn opened(name: &str, bytes: Vec<u8>) -> PdfSession {
+        let path = scratch(name);
+        std::fs::write(&path, bytes).unwrap();
+        let s = PdfSession::open(path.to_string_lossy().into_owned()).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        s
     }
 
     fn pen() -> InkStyle {
@@ -548,7 +540,7 @@ mod tests {
             eprintln!("skipping: no libpdfium");
             return;
         }
-        let s = PdfSession::open_bytes(text_pdf()).unwrap();
+        let s = opened("link", text_pdf());
         let link = |selection: Vec<u32>| PdfLink {
             src_rel_path: "Note.md".to_string(),
             byte_start: 0,
@@ -585,7 +577,7 @@ mod tests {
             eprintln!("skipping: no libpdfium");
             return;
         }
-        let s = PdfSession::open_bytes(text_pdf()).unwrap();
+        let s = opened("print", text_pdf());
         s.add_stroke(0, line(), pen(), 1.0).unwrap();
         let link = |selection: Vec<u32>| PdfLink {
             src_rel_path: "Note.md".to_string(),
@@ -597,7 +589,7 @@ mod tests {
         let bytes = s
             .copy_with_highlights(vec![link(vec![0, 0, 0, 5]), link(vec![1, 2])], 0x3584_e4ff)
             .unwrap();
-        let copy = PdfSession::open_bytes(bytes).unwrap();
+        let copy = opened("printed", bytes);
         let marks = copy.highlights(0).unwrap();
         assert_eq!(marks.len(), 1);
         assert_eq!(marks[0].contents.as_deref(), Some("Hello"));
@@ -606,21 +598,21 @@ mod tests {
         assert!(s.dirty(), "the copy is not a save");
     }
 
-    /// A document with no file behind it draws and hands its bytes back, and never writes.
+    /// A document from another app, whose copy is already gone, hands its ink back as bytes for
+    /// that app to write.
     #[test]
-    fn a_document_opened_from_bytes_saves_only_as_bytes() {
+    fn a_document_whose_copy_is_gone_hands_its_ink_back_as_bytes() {
         if !pdf::available() {
             eprintln!("skipping: no libpdfium");
             return;
         }
-        let s = PdfSession::open_bytes(pdf::blank_pdf(pdf::A4).unwrap()).unwrap();
+        let s = opened("loose", pdf::blank_pdf(pdf::A4).unwrap());
         s.add_stroke(0, line(), pen(), 1.0).unwrap();
-        assert!(matches!(s.save(), Err(AccentError::Failed { .. })));
         let bytes = s.save_bytes().unwrap();
         assert!(bytes.starts_with(b"%PDF"), "not a pdf");
         assert!(!s.dirty());
         // And the bytes it gave back really carry the stroke.
-        let again = PdfSession::open_bytes(bytes).unwrap();
+        let again = opened("loose-again", bytes);
         assert_eq!(again.0.lock().unwrap().doc.inks(0).unwrap().len(), 1);
     }
 }

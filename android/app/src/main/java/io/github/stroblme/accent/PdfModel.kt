@@ -28,8 +28,14 @@ import io.github.stroblme.accent.ui.union
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.io.InputStream
+import java.io.OutputStream
 import java.nio.ByteBuffer
+import java.util.UUID
 import java.util.concurrent.Executors
 
 /**
@@ -196,14 +202,20 @@ class PdfModel(private val session: PdfSession) : AutoCloseable {
     companion object {
         suspend fun open(path: String): PdfModel = acquire { PdfSession.open(path) }
 
-        suspend fun of(bytes: ByteArray): PdfModel = acquire { PdfSession.openBytes(bytes) }
+        /**
+         * A document another app hands over as a [stream], read from a copy in [dir] ([throughCopy]).
+         * The core reads that copy a page at a time, where reading the stream whole held the
+         * document in memory several times over.
+         */
+        suspend fun copied(dir: File, stream: () -> InputStream): PdfModel =
+            acquire { throughCopy(dir, stream) { PdfSession.open(it) } }
 
         /**
          * Open a session and read its page sizes off the main thread. Until the caller holds the
          * model, a failure or a cancellation closes it, including one `withContext` raises as it
          * hands the model back.
          */
-        internal suspend fun acquire(session: () -> PdfSession): PdfModel {
+        internal suspend fun acquire(session: suspend () -> PdfSession): PdfModel {
             var made: PdfModel? = null
             try {
                 return withContext(Dispatchers.IO) {
@@ -217,6 +229,36 @@ class PdfModel(private val session: PdfSession) : AutoCloseable {
                 throw e
             }
         }
+    }
+}
+
+/**
+ * Copy [stream] into a new file in [dir] and [open] it from there, deleting the file once [open]
+ * returns, fails or is cancelled: an open session keeps reading the file it opened, and its space
+ * comes back when the session closes. One document from outside is open at a time (`singleTask`),
+ * so whatever [dir] already holds is a copy a killed process left behind, or one let go, and goes
+ * first.
+ */
+internal suspend fun <T> throughCopy(dir: File, stream: () -> InputStream, open: (String) -> T): T {
+    dir.mkdirs()
+    dir.listFiles()?.forEach { it.delete() }
+    val copy = File(dir, "${UUID.randomUUID()}.pdf")
+    try {
+        stream().use { input -> copy.outputStream().use { input.copyCancellably(it) } }
+        return open(copy.path)
+    } finally {
+        copy.delete()
+    }
+}
+
+/** [InputStream.copyTo] that stops between blocks once its coroutine is cancelled. */
+private suspend fun InputStream.copyCancellably(out: OutputStream) {
+    val block = ByteArray(DEFAULT_BUFFER_SIZE)
+    while (true) {
+        currentCoroutineContext().ensureActive()
+        val n = read(block)
+        if (n < 0) return
+        out.write(block, 0, n)
     }
 }
 
