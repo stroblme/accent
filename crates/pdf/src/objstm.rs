@@ -59,7 +59,7 @@ impl Cache {
 /// A decoded object stream.
 pub(crate) struct ObjStm {
     /// Each object's number and where it starts in `data`.
-    index: Vec<(u32, usize)>,
+    index: Vec<(u32, u32)>,
     data: Vec<u8>,
 }
 
@@ -75,14 +75,17 @@ impl ObjStm {
             return Err(Error::Broken("object stream without /N or /First".into()));
         };
         let mut lex = Lexer::new(&data, 0, true);
-        let mut index = Vec::new();
-        // Each pair takes four bytes at least, which caps a lying `/N`.
-        for _ in 0..n.min(data.len() / 4) {
+        // Each pair takes four bytes at least and eight in the index, which caps a lying `/N` at
+        // an index twice the data.
+        let count = n.min(data.len() / 4);
+        let mut index = Vec::with_capacity(count);
+        for _ in 0..count {
             let pair = lex.unsigned().and_then(|num| Ok((num, lex.unsigned()?)));
             let Ok((num, off)) = pair else {
                 return Err(Error::Broken("object stream index".into()));
             };
-            let (Ok(num), Some(at)) = (u32::try_from(num), first.checked_add(off as usize)) else {
+            let at = first.checked_add(off as usize).map(u32::try_from);
+            let (Ok(num), Some(Ok(at))) = (u32::try_from(num), at) else {
                 return Err(Error::Broken("object stream index".into()));
             };
             index.push((num, at));
@@ -94,7 +97,7 @@ impl ObjStm {
 
     /// The bytes it holds: its data and its index.
     pub fn size(&self) -> usize {
-        self.data.capacity() + self.index.capacity() * size_of::<(u32, usize)>()
+        self.data.capacity() + self.index.capacity() * size_of::<(u32, u32)>()
     }
 
     /// The numbers of the objects it holds, in order.
@@ -105,12 +108,34 @@ impl ObjStm {
     /// Object `num`, the `i`th of the stream.
     pub fn get(&self, i: usize, num: u32) -> Result<Object> {
         match self.index.get(i) {
-            Some(&(n, at)) if n == num && at <= self.data.len() => Lexer::new(&self.data, at, true)
-                .object()
-                .map_err(|_| Error::Broken(format!("object {num} in its object stream"))),
+            Some(&(n, at)) if n == num && at as usize <= self.data.len() => {
+                Lexer::new(&self.data, at as usize, true)
+                    .object()
+                    .map_err(|_| Error::Broken(format!("object {num} in its object stream")))
+            }
             _ => Err(Error::Broken(format!(
                 "object {num} is not where the xref puts it"
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Dict;
+
+    #[test]
+    fn a_lying_count_indexes_at_most_twice_the_data() {
+        let data = b"0 0 ".repeat(1 << 18);
+        let len = data.len();
+        let dict = Dict(vec![
+            (b"N".to_vec(), Object::Int(1 << 40)),
+            (b"First".to_vec(), Object::Int(len as i64)),
+        ]);
+        let stm = ObjStm::new(&dict, data).unwrap();
+        assert_eq!(stm.numbers().count(), len / 4);
+        // The data, and an index of at most twice its size.
+        assert!(stm.size() <= 3 * len);
     }
 }
