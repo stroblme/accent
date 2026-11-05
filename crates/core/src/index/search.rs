@@ -252,17 +252,7 @@ impl Index {
             return Ok(Vec::new());
         }
         let (filter, values) = filter::sql(&q.filters, "g", 6);
-        let mut st = self.conn.prepare_cached(&format!(
-            "SELECT f.rel_path, f.title, snippet_window(n.body, ?2), phrase_start(n.body, ?2)
-             FROM notes n JOIN files f ON f.id = n.file_id
-             WHERE n.file_id IN (
-                 SELECT t.rowid FROM notes_tri t JOIN files g ON g.id = t.rowid
-                  WHERE notes_tri MATCH ?1 AND holds_all(t.body, t.title, ?2)
-                    AND (?4 OR g.git_ignored = 0 OR g.kind = ?5){filter}
-                  ORDER BY holds_all(ifnull(g.title, ''), '', ?2) DESC, g.size
-                  LIMIT ?3)
-             ORDER BY holds_all(ifnull(f.title, ''), '', ?2) DESC, f.size"
-        ))?;
+        let mut st = self.conn.prepare_cached(&infix_sql(&filter))?;
         let mut args = vec![
             Value::Text(windows.join(" AND ")),
             Value::Text(needles.to_string()),
@@ -446,6 +436,26 @@ fn ranked_sql(filter: &str) -> String {
          SELECT f.rel_path, f.title, snippet_window(n.body, ?4), phrase_start(n.body, ?4)
          FROM r JOIN files f ON f.id = r.id JOIN notes n ON n.file_id = r.id
          ORDER BY r.exact DESC, r.score"
+    )
+}
+
+/// [`Index::infix`]'s statement, the qualifiers' conditions `filter` on `g` from `?6` on.
+///
+/// A candidate's body is read only once its `files` row has passed the qualifiers: the check
+/// takes the title from that row (the one `notes` holds), and SQLite tests a condition in the
+/// innermost loop it names, in the order written. Taken from `notes_tri`, it was tested before
+/// the join, so `quantum kind:notebook` read 14k bodies for 3 notebooks (generated vault).
+fn infix_sql(filter: &str) -> String {
+    format!(
+        "SELECT f.rel_path, f.title, snippet_window(n.body, ?2), phrase_start(n.body, ?2)
+         FROM notes n JOIN files f ON f.id = n.file_id
+         WHERE n.file_id IN (
+             SELECT t.rowid FROM notes_tri t JOIN files g ON g.id = t.rowid
+              WHERE notes_tri MATCH ?1 AND (?4 OR g.git_ignored = 0 OR g.kind = ?5){filter}
+                AND holds_all(t.body, ifnull(g.title, ''), ?2)
+              ORDER BY holds_all(ifnull(g.title, ''), '', ?2) DESC, g.size
+              LIMIT ?3)
+         ORDER BY holds_all(ifnull(f.title, ''), '', ?2) DESC, f.size"
     )
 }
 
@@ -1596,5 +1606,44 @@ mod tests {
         assert_eq!(ix.search("kind:note", 1, false).unwrap().len(), 1);
         // Neither a query of nothing nor one of punctuation lists the vault.
         assert!(ix.search("# -", 10, false).unwrap().is_empty());
+    }
+
+    /// The trigram path's qualifiers narrow as the ranked path's do, and they are tested before a
+    /// candidate's body is read: the files row is looked up first, its body read after.
+    #[test]
+    fn a_mid_word_query_reads_only_the_bodies_its_qualifiers_leave() {
+        let (vault, db) = qualified_vault();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+
+        // `erris` starts no word, so the trigram index answers it, where `ferris` is ranked.
+        assert_eq!(listed(&ix, "erris").len(), 4);
+        for qualifier in [
+            "kind:note",
+            "-kind:note",
+            "-#reading",
+            "tag:reading",
+            "path:old",
+        ] {
+            assert_eq!(
+                listed(&ix, &format!("erris {qualifier}")),
+                listed(&ix, &format!("ferris {qualifier}")),
+                "{qualifier}"
+            );
+        }
+
+        let q = query::parse("kind:notebook", &chrono::Local::now()).unwrap();
+        let (filter, _) = filter::sql(&q.filters, "g", 6);
+        let mut st = ix
+            .conn
+            .prepare(&format!("EXPLAIN {}", infix_sql(&filter)))
+            .unwrap();
+        let ops: Vec<String> = st
+            .query_map(params_from_iter(vec![Value::Null; 5]), |r| r.get(1))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let first = |op: &str| ops.iter().position(|o| o == op).expect(op);
+        assert!(first("SeekRowid") < first("VColumn"), "{ops:?}");
     }
 }
