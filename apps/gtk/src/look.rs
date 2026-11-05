@@ -92,12 +92,39 @@ impl Look {
 pub struct Shown {
     /// A raster's decoding, kept so a restyle need not read it again; `None` for an SVG, which a
     /// restyle draws again from its text, so it is held only as shown.
-    pub original: Option<gdk::Texture>,
+    pub original: Option<Decoded>,
     pub texture: gdk::Texture,
-    /// SVG logical size, distinct from texture pixels rendered for display scale and zoom. `None` for rasters.
+    /// The logical size where the texture's pixels differ from it: an SVG's, drawn for the
+    /// display's scale and the zoom, or a raster's reduced to a preview's column ([`Decoded`]).
+    /// `None` for a raster held whole and for an animation.
     pub size: Option<(i32, i32)>,
     /// An animation's frames, recoloured as `texture`, its first, is; none for a still.
     pub frames: Vec<Frame>,
+}
+
+/// A raster as decoded and turned upright, which a restyle recolours without reading the file.
+#[derive(Clone)]
+pub struct Decoded {
+    pub texture: gdk::Texture,
+    /// The file's own size, upright, where `texture` holds fewer pixels: reduced for a preview.
+    pub size: Option<(i32, i32)>,
+}
+
+impl Decoded {
+    /// The file decoded whole.
+    fn whole(texture: gdk::Texture) -> Decoded {
+        Decoded {
+            texture,
+            size: None,
+        }
+    }
+
+    /// Whether it holds what a column `need` device pixels wide draws: every pixel of the file,
+    /// or at least `need` across.
+    pub fn serves(&self, need: i32) -> bool {
+        self.size
+            .is_none_or(|(width, _)| self.texture.width() >= need.min(width))
+    }
 }
 
 /// A frame of an animation, and how long it shows: `None` for good, the last of one that plays
@@ -125,15 +152,17 @@ pub fn drawn_zoom(path: &Path, zoom: Option<f64>, size: Option<(i32, i32)>, scal
 }
 
 /// Decode `path`, unless `original` already holds it, and recolour it as `look` asks, an SVG drawn
-/// at `scale` (the display's) and `zoom` ([`drawn_zoom`]). On a worker: a large scan takes a
-/// while to decode, and longer to recolour.
+/// at `scale` (the display's) and `zoom` ([`drawn_zoom`]). A raster is held whole, or for a
+/// preview whose column is `fit` device pixels wide, reduced to that ([`reduced`]). On a worker:
+/// a large scan takes a while to decode, and longer to recolour.
 pub fn show(
     path: &Path,
-    original: Option<gdk::Texture>,
+    original: Option<Decoded>,
     look: Look,
     inverted: bool,
     scale: i32,
     zoom: f64,
+    fit: Option<i32>,
 ) -> Result<Shown, glib::Error> {
     if svg(path) {
         return show_svg(path, look, inverted, scale, zoom);
@@ -149,18 +178,58 @@ pub fn show(
             frames,
         });
     }
-    let original = match original {
-        Some(texture) => texture,
-        None => decode(path)?,
+    // A reduced decoding a wider column has outgrown is read again.
+    let original = match original.filter(|d| fit.is_none_or(|need| d.serves(need))) {
+        Some(decoded) => decoded,
+        None => reduced(path, decode(path)?, fit),
     };
-    let texture = recoloured(path, look, inverted, || Some(original.clone()))
-        .map_or_else(|| original.clone(), |t| t.upcast());
+    let texture = recoloured(path, look, inverted, || Some(original.texture.clone()))
+        .map_or_else(|| original.texture.clone(), |t| t.upcast());
     Ok(Shown {
+        size: original.size,
         original: Some(original),
         texture,
-        size: None,
         frames: Vec::new(),
     })
+}
+
+/// `texture`, the file at `path` decoded whole, reduced for a column `fit` device pixels wide
+/// where it is wider than that and a quarter, the quarter sparing a column that grows a little a
+/// read. Its verdict is taken on every pixel first, so the preview recolours it as the tab
+/// does; one past [`recolour::MAX_PIXELS`] is held whole, as recolouring leaves it.
+fn reduced(path: &Path, texture: gdk::Texture, fit: Option<i32>) -> Decoded {
+    let (width, height) = (texture.width(), texture.height());
+    let Some(wide) = fit
+        .map(|need| need.max(1) + need / 4)
+        .filter(|&w| width > w)
+    else {
+        return Decoded::whole(texture);
+    };
+    let Some(p) = pixels(&texture) else {
+        return Decoded::whole(texture);
+    };
+    drop(texture);
+    classified(path, || {
+        Some(recolour::classify(&p.data, p.width, p.height))
+    });
+    let high = (f64::from(height) * f64::from(wide) / f64::from(width)).round() as i32;
+    let whole = gdk_pixbuf::Pixbuf::from_bytes(
+        &glib::Bytes::from_owned(p.data),
+        gdk_pixbuf::Colorspace::Rgb,
+        true,
+        8,
+        width,
+        height,
+        width * 4,
+    );
+    // Bilinear reduces by averaging every pixel each one covers, as a box filter does.
+    match whole.scale_simple(wide, high.max(1), gdk_pixbuf::InterpType::Bilinear) {
+        Some(small) => Decoded {
+            texture: self::texture(&small, &small.read_pixel_bytes()),
+            size: Some((width, height)),
+        },
+        None => Decoded::whole(self::texture(&whole, &whole.read_pixel_bytes())),
+    }
 }
 
 /// Render SVG text through a vector recolouring filter at display scale.
@@ -488,7 +557,7 @@ pub fn show_bytes(
         .palette(document, false)
         .and_then(|page| paint(&original, look, page));
     let shown = Shown {
-        original: Some(original.clone()),
+        original: Some(Decoded::whole(original.clone())),
         texture: recoloured.clone().map_or(original, |t| t.upcast()),
         size: None,
         frames: Vec::new(),
@@ -737,8 +806,7 @@ impl Scaled {
         scaled
     }
 
-    /// The texture as drawn, for a drill.
-    #[cfg(feature = "bench")]
+    /// The texture it draws.
     pub fn texture(&self) -> gdk::Texture {
         self.imp().texture.get().cloned().expect("set in `new`")
     }
@@ -909,9 +977,9 @@ pub(crate) mod tests {
         );
         std::fs::write(&gif, TWO_FRAMES).unwrap();
         std::fs::write(&tif, grey_tiff(1)).unwrap();
-        let plain = show(&gif, None, light, false, 1, 1.0).unwrap();
-        let inverted = show(&gif, None, light, true, 1, 1.0).unwrap();
-        let still = show(&tif, None, light, false, 1, 1.0).unwrap();
+        let plain = show(&gif, None, light, false, 1, 1.0, None).unwrap();
+        let inverted = show(&gif, None, light, true, 1, 1.0, None).unwrap();
+        let still = show(&tif, None, light, false, 1, 1.0, None).unwrap();
         std::fs::remove_file(&gif).unwrap();
         std::fs::remove_file(&tif).unwrap();
 
@@ -944,7 +1012,7 @@ pub(crate) mod tests {
         .concat();
         let path = std::env::temp_dir().join(format!("accent-{}-huge.png", std::process::id()));
         std::fs::write(&path, &png).unwrap();
-        let shown = show(&path, None, Look::paper(), false, 1, 1.0).err();
+        let shown = show(&path, None, Look::paper(), false, 1, 1.0, None).err();
         let decoded = decode(&path).err();
         std::fs::remove_file(&path).unwrap();
 
@@ -954,6 +1022,96 @@ pub(crate) mod tests {
             assert!(e.matches(gdk::TextureError::TooLarge), "{e}");
             assert_eq!(e.message(), "60000 × 60000 pixels is too large to show");
         }
+    }
+
+    /// A preview's column gets a raster reduced to it and a quarter, upright, its size the file's
+    /// and its verdict taken on the whole; a restyle recolours that without reading the file, a
+    /// column twice as wide reads it again, and the tab gets every pixel.
+    #[test]
+    fn a_preview_holds_a_raster_reduced_to_its_column() {
+        // 400 × 200: a black quarter on the left, white paper for the rest.
+        let data: Vec<u8> = (0..200 * 400)
+            .flat_map(|i| match i % 400 < 100 {
+                true => [0, 0, 0, 255],
+                false => [255, 255, 255, 255],
+            })
+            .collect();
+        let png = Pixels {
+            data,
+            width: 400,
+            height: 200,
+        }
+        .texture()
+        .save_to_png_bytes();
+        let dark = Look {
+            theme: Some(DARK),
+            opposite: None,
+            images: true,
+            diagrams: true,
+        };
+        let path = std::env::temp_dir().join(format!("accent-{}-wide.png", std::process::id()));
+        std::fs::write(&path, &png).unwrap();
+        let tab = show(&path, None, Look::paper(), false, 1, 1.0, None).unwrap();
+        assert!(verdict(&path).is_none(), "Light has nothing to judge");
+        let preview = show(&path, None, Look::paper(), false, 1, 1.0, Some(100)).unwrap();
+        let wider = show(
+            &path,
+            preview.original.clone(),
+            dark,
+            false,
+            1,
+            1.0,
+            Some(200),
+        );
+        let judged = verdict(&path);
+        std::fs::remove_file(&path).unwrap();
+        let restyled = show(
+            &path,
+            preview.original.clone(),
+            dark,
+            false,
+            1,
+            1.0,
+            Some(100),
+        );
+
+        let pixels_of = |s: &Shown| (s.texture.width(), s.texture.height());
+        assert_eq!((pixels_of(&tab), tab.size), ((400, 200), None));
+        assert_eq!(
+            (pixels_of(&preview), preview.size),
+            ((125, 63), Some((400, 200)))
+        );
+        let paintable = preview.paintable();
+        assert_eq!(
+            (paintable.intrinsic_width(), paintable.intrinsic_height()),
+            (400, 200)
+        );
+        let p = pixels(&preview.texture).unwrap();
+        let at = |x: usize| p.data[(30 * 125 + x) * 4];
+        assert_eq!((at(10), at(115)), (0, 255), "black left, white right");
+        assert!(judged.is_some_and(|v| v.document), "judged on the whole");
+        let restyled = restyled.expect("recoloured as held, the file gone");
+        assert_eq!(
+            (pixels_of(&restyled), restyled.size),
+            ((125, 63), Some((400, 200)))
+        );
+        assert_ne!(
+            pixels(&restyled.texture).unwrap().data,
+            p.data,
+            "onto Dark's page"
+        );
+        assert_eq!(pixels_of(&wider.unwrap()), (250, 125), "read again");
+    }
+
+    /// A raster is turned upright before it is reduced, so its size is the upright file's.
+    #[test]
+    fn a_reduced_raster_is_upright() {
+        let path = std::env::temp_dir().join(format!("accent-{}-turned.tif", std::process::id()));
+        std::fs::write(&path, grey_tiff(6)).unwrap();
+        let shown = show(&path, None, Look::paper(), false, 1, 1.0, Some(1)).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(shown.size, Some((2, 3)));
+        assert_eq!((shown.texture.width(), shown.texture.height()), (1, 2));
     }
 
     /// A TIFF comes out of [`decode`] upright whatever its tag, GDK having done part of the turn

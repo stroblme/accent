@@ -288,13 +288,13 @@ fn look_state(image: &doc::Viewer, rel: &str, theme: Theme, inverted: bool) {
         .unwrap_or_else(|| "-".to_string());
     // An SVG keeps no plain drawing to compare with: recoloured where the look asks for it.
     let recoloured = match &original {
-        Some(original) => texture.as_ref() != Some(original),
+        Some(original) => texture.as_ref() != Some(&original.texture),
         None => Look::now().palette(true, inverted).is_some(),
     };
     let pixels = texture.map_or((0, 0), |t| (t.width(), t.height()));
     let t = Instant::now();
     let zoom = crate::look::drawn_zoom(&path, image.zoom.get(), image.size.get(), scale);
-    let _ = crate::look::show(&path, original, Look::now(), inverted, scale, zoom);
+    let _ = crate::look::show(&path, original, Look::now(), inverted, scale, zoom, None);
     println!(
         "bench image_look {rel} theme={theme:?} dark={} inverted={inverted} {verdict} \
          recoloured={recoloured} size={}x{} pixels={}x{} px(2,2)={px} type={} ms={:.1}",
@@ -313,6 +313,8 @@ fn look_state(image: &doc::Viewer, rel: &str, theme: Theme, inverted: bool) {
 ///
 /// - `=hold:<rel_note>` reports image positions and waits 40 s for XTEST menu input,
 ///   printing inversion and requests every 2 s.
+/// - `=zoom:<rel_note>` shows the preview alone in its pane at zoom 1, then 2, each held 10 s
+///   once its pictures are read, printing the pixels each holds.
 /// - `=time:<rel_note>` renders five times, reporting `render_ms`, `shown_ms`, `stall_ms`
 ///   through 200 ms after load, and whether the latest simultaneous render wins.
 /// - `=change:<note>,<img>,<other>` replaces an image; `=gone:<note>,<img>[,<to>]` deletes
@@ -327,6 +329,9 @@ pub(super) fn bench_preview_look(app: &Rc<App>, rel: &str) {
             _ => "mv",
         };
         return change_preview(app, op, arg);
+    }
+    if let Some(rel) = rel.strip_prefix("zoom:") {
+        return zoom_preview(app, rel);
     }
     let (hold, rel) = match rel.strip_prefix("hold:") {
         Some(rel) => (true, rel),
@@ -368,6 +373,32 @@ pub(super) fn bench_preview_look(app: &Rc<App>, rel: &str) {
             app.invert_image(key);
         }
         preview_look(&app, "inverted").await;
+        bench_quit(&app);
+    });
+}
+
+/// See `=zoom:` on [`bench_preview_look`].
+fn zoom_preview(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        let t = Instant::now();
+        while app.active().is_none() && t.elapsed() < Duration::from_secs(10) {
+            glib::timeout_future(Duration::from_millis(50)).await;
+        }
+        let Some(tab) = app.active() else {
+            println!("bench preview_look zoom no_tab");
+            return bench_quit(&app);
+        };
+        let rendered =
+            (app.rendered_of(&tab)).unwrap_or_else(|| app.open_rendered(&tab, Opened::Kept));
+        app.reveal_page(&rendered.page);
+        for zoom in [1.0, 2.0] {
+            app.set_zoom(zoom);
+            preview_look(&app, &format!("zoom={zoom}")).await;
+            println!("bench preview_look zoom={zoom} held");
+            glib::timeout_future(Duration::from_secs(10)).await;
+        }
         bench_quit(&app);
     });
 }
@@ -416,13 +447,15 @@ async fn preview_look(app: &Rc<App>, when: &str) {
     for f in figures {
         println!(
             "bench preview_look {when} dark={} {} loaded={} animated={} size={}x{} \
-             px(2,2)={} px(centre)={} reads={reads} ms={ms:.0}",
+             pixels={}x{} px(2,2)={} px(centre)={} reads={reads} ms={ms:.0}",
             adw::StyleManager::default().is_dark(),
             f.uri,
             f.loaded,
             f.animated,
             f.size.0,
             f.size.1,
+            f.pixels.0,
+            f.pixels.1,
             f.corner,
             f.centre,
         );

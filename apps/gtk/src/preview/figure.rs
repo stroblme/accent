@@ -17,7 +17,7 @@ use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{gdk, gio, glib, graphene, gsk};
 use std::cell::{Cell, OnceCell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -121,7 +121,7 @@ pub(super) fn restyle(page: &Page) -> bool {
 pub(super) fn forget_images(page: &Page) {
     let state = &page.figures.0;
     state.prune();
-    let again: Vec<(String, Option<gdk::Texture>)> = (state.loaded.borrow().iter())
+    let again: Vec<(String, Option<look::Decoded>)> = (state.loaded.borrow().iter())
         .map(|(uri, l)| {
             (
                 uri.clone(),
@@ -163,10 +163,12 @@ pub(super) fn forget_image(page: &Page, key: &str) {
 }
 
 /// Every picture fitted to the zoom and the text's width; an SVG or a diagram drawn for another
-/// zoom drawn again for this one, as an image tab draws one.
+/// zoom drawn again for this one, as an image tab draws one, and a raster reduced for a narrower
+/// column read again for this one.
 pub(super) fn resize(page: &Page) {
     let (zoom, width) = (page.zoom.get(), page.text_width());
     let state = &page.figures.0;
+    state.need.set(need(page));
     for figure in state.live() {
         if figure.fit(zoom, width) {
             figure.invalidate_size();
@@ -174,15 +176,17 @@ pub(super) fn resize(page: &Page) {
     }
     let loading = state.loading.borrow().clone();
     let again: Vec<String> = (state.loaded.borrow().iter())
-        .filter(|(uri, l)| {
-            let svg = l.shown.as_ref().is_some_and(|s| s.0.size.is_some());
-            svg && l.zoom != zoom.max(1.0) && !loading.contains_key(*uri)
-        })
+        .filter(|(uri, l)| l.outgrown(zoom, state.need.get()) && !loading.contains_key(*uri))
         .map(|(uri, _)| uri.clone())
         .collect();
     for uri in again {
         state.load(uri, page, None);
     }
+}
+
+/// The device pixels across the text's column, which a raster wider than that is reduced to.
+fn need(page: &Page) -> i32 {
+    page.text_width() * page.view.scale_factor()
 }
 
 /// Whether the picture at `uri` may be the vault file `key` (or under the folder `key`) before
@@ -207,6 +211,28 @@ struct Loaded {
     zoom: f64,
 }
 
+impl Loaded {
+    /// A raster reduced for a narrower column than `need` device pixels.
+    fn short_of(&self, need: i32) -> bool {
+        let original = self.shown.as_ref().and_then(|(s, _)| s.original.as_ref());
+        original.is_some_and(|d| !d.serves(need))
+    }
+
+    /// Whether it is read again for the page at `zoom` and `need`: drawn for another zoom (an
+    /// SVG, a diagram) or reduced for a narrower column (a raster).
+    fn outgrown(&self, zoom: f64, need: i32) -> bool {
+        let drawn = self
+            .shown
+            .as_ref()
+            .is_some_and(|(s, _)| s.original.is_none() && s.size.is_some());
+        (drawn && self.zoom != zoom.max(1.0)) || self.short_of(need)
+    }
+}
+
+/// How many pictures a page reads at once, the rest waiting their turn: each read holds its file
+/// decoded whole until it is reduced, and GLib's pool would run about ten.
+const READING: usize = 2;
+
 /// A page's pictures: how they are found and drawn, and each one loaded, by its address.
 pub(super) struct Figures(Rc<State>);
 
@@ -221,6 +247,11 @@ struct State {
     /// nowhere.
     loading: RefCell<HashMap<String, u64>>,
     tickets: Cell<u64>,
+    /// The reads waiting for a turn, oldest first, with their tickets, and how many run.
+    queued: RefCell<VecDeque<(u64, Read, Option<look::Decoded>)>>,
+    reading: Cell<usize>,
+    /// The device pixels across the column now ([`need`]).
+    need: Cell<i32>,
     figures: RefCell<Vec<glib::WeakRef<Figure>>>,
     /// Line height 1 for a picture or a formula: the prose's 1.6 would lead its whole height.
     solid: OnceCell<gtk::TextTag>,
@@ -255,6 +286,9 @@ impl Figures {
             loaded: RefCell::default(),
             loading: RefCell::default(),
             tickets: Cell::new(0),
+            queued: RefCell::default(),
+            reading: Cell::new(0),
+            need: Cell::new(0),
             figures: RefCell::default(),
             solid: OnceCell::new(),
             #[cfg(feature = "bench")]
@@ -316,14 +350,10 @@ impl State {
 
     /// Read `uri` for `page`'s note in the look now, from `original` where the file is decoded
     /// already, and show it in every picture of it once read.
-    fn load(self: &Rc<Self>, uri: String, page: &Page, original: Option<gdk::Texture>) {
-        let ticket = self.tickets.get() + 1;
-        self.tickets.set(ticket);
-        self.loading.borrow_mut().insert(uri.clone(), ticket);
-        #[cfg(feature = "bench")]
-        self.reads.set(self.reads.get() + 1);
+    fn load(self: &Rc<Self>, uri: String, page: &Page, original: Option<look::Decoded>) {
+        self.need.set(need(page));
         let read = Read {
-            uri: uri.clone(),
+            uri,
             note: page.note.borrow().0.clone(),
             resolve: self.resolve.clone(),
             look: self.look.get(),
@@ -331,31 +361,69 @@ impl State {
             web: self.web.borrow().clone(),
             scale: page.view.scale_factor(),
             zoom: page.zoom.get().max(1.0),
+            fit: self.need.get(),
         };
-        let state = Rc::downgrade(self);
-        glib::spawn_future_local(async move {
-            let loaded = read.read(original).await;
-            let Some(state) = state.upgrade() else {
+        self.queue(read, original);
+    }
+
+    /// Give `read` a ticket and its turn.
+    fn queue(self: &Rc<Self>, read: Read, original: Option<look::Decoded>) {
+        let ticket = self.tickets.get() + 1;
+        self.tickets.set(ticket);
+        self.loading.borrow_mut().insert(read.uri.clone(), ticket);
+        #[cfg(feature = "bench")]
+        self.reads.set(self.reads.get() + 1);
+        self.queued.borrow_mut().push_back((ticket, read, original));
+        self.next();
+    }
+
+    /// Start the reads waiting, while fewer than [`READING`] run, each for the column as it is
+    /// now, passing over those a later read of the same address replaced meanwhile.
+    fn next(self: &Rc<Self>) {
+        while self.reading.get() < READING {
+            let Some((ticket, mut read, original)) = self.queued.borrow_mut().pop_front() else {
                 return;
             };
-            if state.loading.borrow().get(&uri) != Some(&ticket) {
-                return;
+            if self.loading.borrow().get(&read.uri) != Some(&ticket) {
+                continue;
             }
-            state.loading.borrow_mut().remove(&uri);
-            let loaded = Rc::new(loaded);
-            state
-                .loaded
-                .borrow_mut()
-                .insert(uri.clone(), loaded.clone());
-            for figure in state.live().iter().filter(|f| f.uri() == uri) {
-                figure.set_loaded(loaded.clone());
-                figure.invalidate_size();
-            }
-        });
+            read.fit = self.need.get();
+            self.reading.set(self.reading.get() + 1);
+            let state = Rc::downgrade(self);
+            glib::spawn_future_local(async move {
+                let (uri, again) = (read.uri.clone(), read.clone());
+                let loaded = read.read(original).await;
+                let Some(state) = state.upgrade() else {
+                    return;
+                };
+                state.reading.set(state.reading.get() - 1);
+                state.next();
+                state.land(ticket, uri, loaded, again);
+            });
+        }
+    }
+
+    /// Show what the read of `ticket` found in every picture of `uri`, unless a later read
+    /// replaced it, and read again (`again`) a raster reduced for a column that grew meanwhile.
+    fn land(self: &Rc<Self>, ticket: u64, uri: String, loaded: Loaded, again: Read) {
+        if self.loading.borrow().get(&uri) != Some(&ticket) {
+            return;
+        }
+        self.loading.borrow_mut().remove(&uri);
+        let loaded = Rc::new(loaded);
+        self.loaded.borrow_mut().insert(uri.clone(), loaded.clone());
+        for figure in self.live().iter().filter(|f| f.uri() == uri) {
+            figure.set_loaded(loaded.clone());
+            figure.invalidate_size();
+        }
+        if loaded.short_of(self.need.get()) {
+            self.queue(again, None);
+        }
     }
 }
 
 /// What reading a picture takes off the main thread.
+#[derive(Clone)]
 struct Read {
     uri: String,
     note: String,
@@ -365,12 +433,14 @@ struct Read {
     web: HashSet<String>,
     scale: i32,
     zoom: f64,
+    /// The device pixels across the column, which a raster is reduced to ([`look::show`]).
+    fit: i32,
 }
 
 impl Read {
     /// The picture: a file's on a worker, a diagram's page drawn on the main thread as the
     /// diagram's tab draws it, then recoloured on a worker.
-    async fn read(self, original: Option<gdk::Texture>) -> Loaded {
+    async fn read(self, original: Option<look::Decoded>) -> Loaded {
         let Read {
             uri,
             note,
@@ -380,13 +450,14 @@ impl Read {
             web,
             scale,
             zoom,
+            fit,
         } = self;
         let page = assets::diagram_page(&uri);
         let file = crate::work::off_thread("picture", move || {
             let (key, path) = assets::asset_of(&*resolve, &note, &uri)?;
             let inverted = inverted.contains(&key);
             let shown = (!accent_core::path::is_diagram(&key))
-                .then(|| look::show(&path, original, look, inverted, scale, zoom).ok());
+                .then(|| look::show(&path, original, look, inverted, scale, zoom, Some(fit)).ok());
             Some((key, path, inverted, shown))
         });
         let Some(Some((key, path, inverted, shown))) = file.await else {
@@ -537,12 +608,17 @@ mod imp {
             };
             let loaded = self.loaded.borrow();
             match loaded.as_deref().and_then(|l| l.shown.as_ref()) {
-                // Mipmapped, so a photo shrunk to the column is not grainy.
-                Some((_, p)) => match p.downcast_ref::<gdk::Texture>() {
+                // Mipmapped, so a photo shrunk to the column is not grainy, nor a reduced one
+                // or an SVG drawn for the display's scale inside `Scaled`.
+                Some((_, p)) => match p
+                    .downcast_ref::<gdk::Texture>()
+                    .cloned()
+                    .or_else(|| p.downcast_ref::<look::Scaled>().map(look::Scaled::texture))
+                {
                     Some(texture) => {
                         let rect = graphene::Rect::new(0.0, 0.0, width as f32, height as f32);
                         snapshot.append_scaled_texture(
-                            texture,
+                            &texture,
                             gsk::ScalingFilter::Trilinear,
                             &rect,
                         );
@@ -575,9 +651,9 @@ mod imp {
 
 /// A picture on the page as a drill reads it: its address and vault key, whether it is being
 /// read, whether it shows the file, whether that is an animation, its size, its own size at the
-/// zoom and whether its size is that shrunk to the text's width now, two of its pixels as drawn
-/// (`r,g,b`), its middle in the view's coordinates, and an animation's frame on show and whether
-/// its timer runs.
+/// zoom and whether its size is that shrunk to the text's width now, the pixels its texture
+/// holds, two of its pixels as drawn (`r,g,b`), its middle in the view's coordinates, and an
+/// animation's frame on show and whether its timer runs.
 #[cfg(feature = "bench")]
 pub struct Probe {
     pub uri: String,
@@ -588,6 +664,7 @@ pub struct Probe {
     pub size: (i32, i32),
     pub natural: (i32, i32),
     pub fits: bool,
+    pub pixels: (i32, i32),
     pub corner: String,
     pub centre: String,
     pub at: (i32, i32),
@@ -653,6 +730,7 @@ fn probed(page: &Page, figure: &Figure, at: &gtk::TextIter) -> Probe {
         size,
         natural,
         fits,
+        pixels: shown.map_or((0, 0), |(s, _)| (s.texture.width(), s.texture.height())),
         corner,
         centre: pixel(0.5, 0.5),
         at: (x, y),

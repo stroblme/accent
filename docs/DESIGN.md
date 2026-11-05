@@ -1249,6 +1249,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   It lasts until the app quits and is written nowhere.
 - A theme change, or the Images switch, recolours the texture already decoded, the file read again only when it changes on disk; an SVG is drawn again from its file, and an animation's frames read again.
 - The preview shows an image as its tab would: read through the vault on a worker, at the file's size up to the column's width, recoloured as above, and read again when the file changes on disk; an animation plays as in its tab.
+  A raster wider than the column at the display's scale is held reduced to that width and a quarter more, judged for recolouring on every pixel of the file first, and read again once a wider column or a zoom outgrows it, the reduced copy enlarged until then (user decision 2026-11-05).
+  The tab holds every pixel of its file, and so does the preview for an image over 64 megapixels, which reducing would hold twice.
+  A page reads two pictures at a time, since each holds its file decoded whole until it is reduced and GLib's pool would run about ten.
   An embedded diagram is drawn the same way, as the SVG of its page (Diagram).
   Its menu over an image ends with Invert Image Colours, the same toggle as the palette's.
 

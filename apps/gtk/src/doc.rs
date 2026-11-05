@@ -8,12 +8,12 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use accent_core::path::{FileType, file_type};
-use gtk::{gdk, gio};
+use gtk::gio;
 
 use crate::difftab::DiffTab;
 use crate::editor::Tab;
 use crate::fileops;
-use crate::look::Look;
+use crate::look::{Decoded, Look};
 use crate::pdftab::PdfTab;
 use crate::terminal::Term;
 
@@ -25,9 +25,9 @@ pub struct Viewer {
     /// How far the document is zoomed, `None` while it is fitted to the window. Only an image
     /// has one: a status page draws at a size nobody chose.
     pub zoom: Cell<Option<f64>>,
-    /// Cached raster file and texture for restyling without rereading. SVGs use `look::Shown`.
-    /// `None` while loading or for a status page.
-    pub image: RefCell<Option<(PathBuf, Option<gdk::Texture>)>>,
+    /// Cached raster file and its decoding, whole, for restyling without rereading. SVGs use
+    /// `look::Shown`. `None` while loading or for a status page.
+    pub image: RefCell<Option<(PathBuf, Option<Decoded>)>>,
     /// The look, inversion, display scale and drawn zoom (`look::drawn_zoom`) the image was last
     /// asked to be shown under, so a restyle that changes none of them does nothing.
     pub look: Cell<Option<(Look, bool, i32, f64)>>,

@@ -486,7 +486,7 @@ impl App {
         glib::spawn_future_local(async move {
             let ((look, inverted, scale, zoom), from) = (wanted, path.clone());
             let shown = work::off_thread("image", move || {
-                look::show(&from, original, look, inverted, scale, zoom)
+                look::show(&from, original, look, inverted, scale, zoom, None)
             })
             .await;
             let (Some(app), Some(image)) = (app.upgrade(), image.upgrade()) else {
