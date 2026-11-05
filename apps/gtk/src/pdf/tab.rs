@@ -203,6 +203,8 @@ pub struct PdfTab {
     pub(super) on_uri: UriHook,
     pub(super) on_mode: TabHook,
     pub(super) on_history: TabHook,
+    /// Fired when what the Select tool holds changes.
+    pub(super) on_picked: TabHook,
     pub(super) on_note: NoteHook,
     pub(super) on_export: ExportHook,
     pub(super) on_save_failed: FailHook,
@@ -368,6 +370,7 @@ pub fn open(
         on_uri: Hook::default(),
         on_mode: Hook::default(),
         on_history: Hook::default(),
+        on_picked: Hook::default(),
         on_note: Hook::default(),
         on_export: Hook::default(),
         on_save_failed: Hook::default(),
@@ -890,6 +893,11 @@ impl PdfTab {
     /// Called when the pen is picked up or put down.
     pub fn connect_mode(&self, f: impl Fn(&Rc<PdfTab>) + 'static) {
         self.on_mode.set(Rc::new(f));
+    }
+
+    /// Called when what the Select tool holds changes.
+    pub fn connect_picked(&self, f: impl Fn(&Rc<PdfTab>) + 'static) {
+        self.on_picked.set(Rc::new(f));
     }
 
     /// A blank page before or `after` the [`PdfTab::command_page`], the size of the page before

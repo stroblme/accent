@@ -83,6 +83,11 @@ impl App {
                 app.sync_history();
             }
         ));
+        pdf.connect_picked(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |_| app.sync_recolour()
+        ));
         // A stroke, an erase or a page edit keeps a preview, as typing keeps a note's: the next
         // click in the sidebar would otherwise take the tab, and its Undo with it.
         pdf.connect_history(glib::clone!(
@@ -716,6 +721,7 @@ impl App {
             d.show_ring(d.ring_shown(), self.ring_at.get());
         }
         self.sync_export();
+        self.sync_recolour();
         // Only a PDF or a diagram can be drawn on, so the button goes with the tab.
         self.drawing_button
             .set_visible(self.active_pdf().is_some() || diagram.is_some());
@@ -828,6 +834,20 @@ impl App {
             .and_downcast::<gio::SimpleAction>()
         {
             action.set_enabled(offered);
+        }
+    }
+
+    /// Recolour Selection is offered only while the PDF in front's Select tool holds something a
+    /// recolour reaches, greyed in the palette otherwise as Export Highlights is.
+    pub fn sync_recolour(&self) {
+        let offered = self.active_pdf().is_some_and(|pdf| pdf.recolourable());
+        let names =
+            (crate::actions::ACTIONS.iter()).filter_map(|(name, ..)| name.strip_prefix("win."));
+        for name in names.filter(|name| name.starts_with("pdf-recolour-")) {
+            let action = self.window.lookup_action(name);
+            if let Some(action) = action.and_downcast::<gio::SimpleAction>() {
+                action.set_enabled(offered);
+            }
         }
     }
 

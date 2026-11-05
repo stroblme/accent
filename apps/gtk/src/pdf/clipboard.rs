@@ -67,6 +67,18 @@ impl PdfTab {
         }
     }
 
+    /// Recolour what the Select tool holds with the ring's swatch `i`, as clicking it does:
+    /// Recolour Selection.
+    pub fn recolour_swatch(&self, i: usize) {
+        self.ring.recolour(i);
+    }
+
+    /// Whether the Select tool holds something a recolour reaches, which is what offers Recolour
+    /// Selection.
+    pub fn recolourable(&self) -> bool {
+        !self.view.picked_colours().is_empty()
+    }
+
     /// Ask the render thread for the strokes and texts `ids` of `page`, for `how`.
     fn clip(&self, page: usize, ids: Vec<u32>, how: Clipping) {
         if how != Clipping::Duplicate {

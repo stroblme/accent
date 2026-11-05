@@ -2,8 +2,9 @@
 //! a rectangle and a text of ours written into the file first, then through XTEST a lasso, a
 //! move and its Undo, a copy pasted a step off it, a pick and a delete, Ctrl+click, a cut pasted
 //! in place, a click away and Escape, a group stretched by its corner, a duplicate and the arrows,
-//! the lines and the text recoloured through the ring's Colour, each against the file. Pictures of
-//! the lasso, the group and the Colour swatches, light and dark, go to `$TMPDIR`. Last another
+//! the lines and the text recoloured through the ring's Colour and through the palette's Recolour
+//! Selection, each against the file. Pictures of the lasso, the group and the Colour swatches,
+//! light and dark, go to `$TMPDIR`. Last another
 //! editor's stroke, in a file of its own beside it, is recoloured and drawn again as ours. With
 //! `,<n>`, `n` strokes down the page's left edge first, and how long the render thread takes to
 //! move and delete them all. Writes the files.
@@ -365,6 +366,26 @@ pub(super) fn bench_pdf_select(app: &Rc<App>, arg: &str) {
         super::git::xtest("key Escape; sleep 0.2; key Escape").await;
         undo(false).await;
         println!("bench select recolour_undone {}", coloured(&path) == before);
+
+        // The same through the palette's Recolour Selection, offered only while something is
+        // held, and one Undo again.
+        let offered = || (app.listed())("win.pdf-recolour-6");
+        let idle = offered();
+        super::git::xtest(&lasso(round_left, true)).await;
+        super::git::xtest(&format!("keydown ctrl; {text}; keyup ctrl")).await;
+        let held = offered();
+        let _ = WidgetExt::activate_action(&app.window, "win.pdf-recolour-6", None);
+        save().await;
+        let colours: Vec<[u8; 3]> = coloured(&path).iter().map(|(_, rgb)| *rgb).collect();
+        let pen = app.config.borrow().drawing.pen_color;
+        println!(
+            "bench select palette_recoloured offered={idle}/{held} colours={colours:?} \
+             pen_colour={pen:?} {}",
+            state()
+        );
+        super::git::xtest("key Escape").await;
+        undo(false).await;
+        println!("bench select palette_undone {}", coloured(&path) == before);
 
         // The group with its handles, and a lasso being drawn, light and dark.
         super::git::xtest(&lasso(round_left, true)).await;

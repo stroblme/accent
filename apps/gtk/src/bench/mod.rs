@@ -266,10 +266,10 @@ use user_commands::bench_commands;
 ///   `text:<rel_path>` (the Text tool through XTEST: text typed and finished each way, typed
 ///   again, moved, erased and emptied, with Undo, against the file; writes the file),
 ///   `select:<rel_path>[,<n>]` (the Select tool through XTEST: a lasso, moves, copy, cut, paste,
-///   duplicate, delete, the arrows, a corner and a recolour through the ring's Colour, with Undo,
-///   against the file, pictured light and dark into `$TMPDIR`; with `n` strokes, the render
-///   thread's time to move and delete them all; then another editor's stroke recoloured, in
-///   `select-foreign.pdf` beside it; writes both files),
+///   duplicate, delete, the arrows, a corner and a recolour through the ring's Colour and through
+///   the palette's Recolour Selection, with Undo, against the file, pictured light and dark into
+///   `$TMPDIR`; with `n` strokes, the render thread's time to move and delete them all; then
+///   another editor's stroke recoloured, in `select-foreign.pdf` beside it; writes both files),
 ///   `picture:<rel_path>` (pictures pasted from the clipboard through XTEST, again and undone,
 ///   stretched, turned, copied and cut; image files and an image dropped as another application
 ///   drops them, an image row dragged from the Files tree, an eraser pass; each against the file,

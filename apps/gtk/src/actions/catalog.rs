@@ -246,6 +246,18 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pdf-paste", "Paste into PDF", &[]),
     ("win.pdf-duplicate", "Duplicate Selection", &[]),
     ("win.pdf-delete", "Delete Selection", &[]),
+    // The ring's Colour swatches by the names their tooltips give them, offered while Select holds
+    // something a recolour reaches (`App::sync_recolour`).
+    (
+        "win.pdf-recolour-1",
+        "Recolour Selection: Accent Colour",
+        &[],
+    ),
+    ("win.pdf-recolour-2", "Recolour Selection: Colour 2", &[]),
+    ("win.pdf-recolour-3", "Recolour Selection: Colour 3", &[]),
+    ("win.pdf-recolour-4", "Recolour Selection: Colour 4", &[]),
+    ("win.pdf-recolour-5", "Recolour Selection: Colour 5", &[]),
+    ("win.pdf-recolour-6", "Recolour Selection: Black", &[]),
     // No accelerator here for the same reason the paging commands have none: `Ctrl+Z` over a
     // note is GtkSourceView's own undo, and an application accelerator would take it from every
     // text view in the window. The PDF tab's key controller fires these two.

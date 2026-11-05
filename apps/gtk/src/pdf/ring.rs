@@ -124,12 +124,7 @@ impl PdfRing {
             let colour =
                 move |_: &gtk::DrawingArea| crate::theme::rgba(painted(i, theme.get()), 1.0);
             let button = option(at, dot(14.0, colour).upcast_ref());
-            let label = match i {
-                0 => "Accent Colour".to_string(),
-                i if i + 1 == swatch_count => "Black".to_string(),
-                _ => format!("Colour {}", i + 1),
-            };
-            button.set_tooltip_text(Some(&label));
+            button.set_tooltip_text(Some(&swatch_name(i, swatch_count)));
             button
         };
         let swatches: Vec<_> = (0..swatch_count).map(|i| swatch(3 + i, i)).collect();
@@ -220,15 +215,22 @@ impl PdfRing {
             button.connect_clicked(glib::clone!(
                 #[weak(rename_to = ring)]
                 self,
-                move |_| {
-                    ring.choosing.set(false);
-                    if let Some(f) = ring.on_recolour.borrow().as_ref() {
-                        f(crate::theme::swatches()[i]);
-                    }
-                    ring.sync_options();
-                }
+                move |_| ring.recolour(i)
             ));
         }
+    }
+
+    /// Recolour what Select holds with swatch `i` and put the swatches away: a swatch's click,
+    /// and Recolour Selection's in the palette.
+    pub fn recolour(&self, i: usize) {
+        let Some(&colour) = crate::theme::swatches().get(i) else {
+            return;
+        };
+        self.choosing.set(false);
+        if let Some(f) = self.on_recolour.borrow().as_ref() {
+            f(colour);
+        }
+        self.sync_options();
     }
 
     fn choose(&self, tool: Mode, choice: Choice) {
@@ -420,6 +422,15 @@ fn painted(i: usize, theme: Theme) -> [u8; 3] {
     super::view::shown(resolved(crate::theme::swatches()[i]), theme)
 }
 
+/// What swatch `i` of `count` is called, on the ring and in Recolour Selection's palette rows.
+fn swatch_name(i: usize, count: usize) -> String {
+    match i {
+        0 => "Accent Colour".to_string(),
+        i if i + 1 == count => "Black".to_string(),
+        _ => format!("Colour {}", i + 1),
+    }
+}
+
 /// A swatch's colour as the file is given it: the accent as it is now for `None`.
 fn resolved(swatch: Option<[u8; 3]>) -> [u8; 3] {
     swatch.unwrap_or_else(crate::theme::accent_rgb)
@@ -437,7 +448,17 @@ fn swatch_of(colours: &[[u8; 3]], swatches: &[[u8; 3]]) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Choice, Mode, swatch_of};
+    use super::{Choice, Mode, swatch_name, swatch_of};
+
+    /// Recolour Selection names each swatch in the palette as the ring's tooltip does.
+    #[test]
+    fn the_palette_names_the_swatches_as_the_ring_does() {
+        for i in 0..6 {
+            let action = format!("win.pdf-recolour-{}", i + 1);
+            let label = format!("Recolour Selection: {}", swatch_name(i, 6));
+            assert_eq!(crate::actions::label_of(&action), label);
+        }
+    }
 
     /// The swatch checked for what Select holds is the one all of it shares, and none when its
     /// colours differ, when it is no swatch's or when nothing is held.

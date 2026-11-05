@@ -79,12 +79,19 @@ pub struct Context {
 /// pair as a build is found (`App::sync_synctex`), Export Highlights as the index answers
 /// (`App::sync_export`), Invert Image Colours once the image is read (`App::sync_image_invert`),
 /// a diagram's insert tools as its layers lock (`App::sync_diagram_tools`), the debug session's
-/// controls (`App::sync_debug`) and the kernel's (`App::sync_kernel`). [`applies`] leaves them
-/// to those, which follow the tab in front themselves.
-pub const OWN_SYNC: [&str; 19] = [
+/// controls (`App::sync_debug`), the kernel's (`App::sync_kernel`) and Recolour Selection as
+/// Select's hold changes (`App::sync_recolour`). [`applies`] leaves them to those, which follow
+/// the tab in front themselves.
+pub const OWN_SYNC: [&str; 25] = [
     "win.pdf-go-to-source",
     "win.show-in-pdf",
     "win.pdf-export-highlights",
+    "win.pdf-recolour-1",
+    "win.pdf-recolour-2",
+    "win.pdf-recolour-3",
+    "win.pdf-recolour-4",
+    "win.pdf-recolour-5",
+    "win.pdf-recolour-6",
     "win.image-invert",
     "win.diagram-rect",
     "win.diagram-ellipse",

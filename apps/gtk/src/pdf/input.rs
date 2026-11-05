@@ -131,7 +131,10 @@ impl PdfTab {
         view.connect_picked(glib::clone!(
             #[weak(rename_to = tab)]
             self,
-            move || tab.sync_commands()
+            move || {
+                tab.sync_commands();
+                tab.on_picked.emit(&tab);
+            }
         ));
         view.connect_tile(glib::clone!(
             #[weak(rename_to = tab)]

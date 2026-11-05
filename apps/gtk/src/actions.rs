@@ -376,6 +376,13 @@ impl App {
             "pdf-cut" => self.with_pdf(|pdf| pdf.cut()),
             "pdf-duplicate" => self.with_pdf(|pdf| pdf.duplicate()),
             "pdf-delete" => self.with_pdf(|pdf| pdf.delete_picked()),
+            // Recolour Selection: the ring's swatch of that number, as its click recolours.
+            a if a.starts_with("pdf-recolour-") => {
+                let n = a["pdf-recolour-".len()..].parse::<usize>().ok();
+                if let Some(swatch) = n.and_then(|n| n.checked_sub(1)) {
+                    self.with_pdf(|pdf| pdf.recolour_swatch(swatch));
+                }
+            }
             // What a paste lands as is held by the Select tool, which it picks up.
             "pdf-paste" => {
                 let Some(pdf) = self.active_pdf().filter(|pdf| pdf.pasteable()) else {

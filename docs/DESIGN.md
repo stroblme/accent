@@ -1134,6 +1134,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Select holds one page at a time, and a cut pasted on another page is how a drawing moves between pages.
 - **Colour recolours what Select holds** (user decisions 2026-11-04), a command on the ring's orbit beside Cut while Select holds a stroke or a text a recolour reaches.
   Clicking it puts the pen's six swatches on the commands' slots with the one everything held shares checked, and a swatch recolours what is held and brings the commands back, while Colour again or `Escape` brings them back without a change.
+  The palette has the same six as Recolour Selection commands named as the ring's tooltips name them, from `Recolour Selection: Accent Colour` to `Recolour Selection: Black` (user decision 2026-11-05), offered only while Select holds something a recolour reaches, so the keyboard reaches them too.
+  Each does what its swatch does.
   The file is given the swatch's own colour, the accent as it is at the click, so the page's recolouring shows it as it shows the pen's ink, and the pen keeps its own colour.
   A stroke or a text of ours takes the colour in its place among the page's annotations, and a highlighter keeps its opacity and `Multiply`.
   Another editor's stroke is drawn again as ours along its `/InkList`, a stroke for each of its lines as the partial eraser draws its pieces, and Select holds those in its place.
@@ -1882,6 +1884,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
   Paste into PDF pastes another application's picture too.
   While Select holds something the arrows move it a point, ten with Shift, each press a step for Undo, and `Escape` lets go of it, the arrows paging again, once it has put away the ring's Colour swatches if they were out.
   With Select in hand Ctrl+click adds a stroke or lets go of it, and Go to Source is the page's menu's.
+  The six Recolour Selection commands are in the palette, unbound.
 - `Ctrl+Z` takes back the last stroke, text, erase, move or page edit of this session, tool in hand or not, and `Ctrl+Shift+Z` or `Ctrl+Y` makes it again, as in a note; `Escape` puts the pen down, once Select has let go of what it held.
   They are the tab's own keys, like Copy, so an entry with the keyboard, the find bar's included, keeps its own undo.
   Undo PDF Edit and Redo PDF Edit are also the header's two buttons and palette commands.
