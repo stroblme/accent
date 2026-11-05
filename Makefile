@@ -585,6 +585,15 @@ release:
 	git tag -a $(TAG) -m "accent $(VER)" $(if $(NOTES),-m "$(NOTES)")
 	git push origin HEAD $(TAG)
 
+# An installed binary's symbols, in a file named by its build id under $(LIBDIR)/debug: where gdb
+# and coredumpctl look for them under /usr, and what a dbgsym or debuginfo package ships.
+DEBUG_FILE = $(DESTDIR)$(LIBDIR)/debug/.build-id/$$(readelf -n $(1) | sed -n 's|.*Build ID: \(..\)|\1/|p').debug
+# Installs the build $(1) as $(2) stripped, its symbols kept in its DEBUG_FILE, while target/ keeps
+# the build whole. The copy it replaces takes its symbols along, so a reinstall leaves none behind.
+INSTALL_STRIPPED = { test ! -f $(2) || rm -f $(call DEBUG_FILE,$(2)); } && install -m755 $(1) $(2) && \
+	debug=$(call DEBUG_FILE,$(2)) && mkdir -p $$(dirname $$debug) && \
+	objcopy --only-keep-debug $(2) $$debug && chmod 644 $$debug && strip --strip-unneeded $(2)
+
 ## install: install into ~/.local (no sudo), on macOS Accent.app into ~/Applications; override PREFIX for a system-wide install
 install: $(if $(DARWIN),app,all)
 ifdef DARWIN
@@ -601,8 +610,8 @@ ifdef DARWIN
 else
 	mkdir -p $(DESTDIR)$(BINDIR) $(DESTDIR)$(DATADIR)/icons/hicolor/scalable/apps \
 		$(DESTDIR)$(DATADIR)/icons/hicolor/symbolic/apps
-	install -m755 $(TARGET_DIR)/accent      $(DESTDIR)$(BINDIR)/accent
-	install -m755 $(TARGET_DIR)/accent-cli  $(DESTDIR)$(BINDIR)/accent-cli
+	$(call INSTALL_STRIPPED,$(TARGET_DIR)/accent,$(DESTDIR)$(BINDIR)/accent)
+	$(call INSTALL_STRIPPED,$(TARGET_DIR)/accent-cli,$(DESTDIR)$(BINDIR)/accent-cli)
 	mkdir -p $(DESTDIR)$(DATADIR)/applications $(DESTDIR)$(DATADIR)/metainfo
 	install -m644 data/$(APP_ID).desktop \
 		$(DESTDIR)$(DATADIR)/applications/$(APP_ID).desktop
@@ -616,7 +625,7 @@ else
 	@# without the library. $(LIBDIR)/accent is `../lib/accent` seen from the binary in $(BINDIR),
 	@# which is the second place crates/core/src/pdf.rs looks.
 	-@test -f $(PDFIUM_LIB) && mkdir -p $(DESTDIR)$(LIBDIR)/accent && \
-		install -m755 $(PDFIUM_LIB) $(DESTDIR)$(LIBDIR)/accent/$(notdir $(PDFIUM_LIB))
+		$(call INSTALL_STRIPPED,$(PDFIUM_LIB),$(DESTDIR)$(LIBDIR)/accent/$(notdir $(PDFIUM_LIB)))
 	@# Also best effort: `make server` needs a musl toolchain, and everything but opening a vault
 	@# on another machine works without it. Same `../lib/accent` the app looks in for libpdfium.
 	-@for arch in $(SERVER_ARCHES); do \
@@ -641,6 +650,14 @@ endif
 
 ## uninstall: remove what install put in place
 uninstall:
+ifndef DARWIN
+	@# The symbols first, found by the build ids of the binaries still in place.
+	-@for f in $(DESTDIR)$(BINDIR)/accent $(DESTDIR)$(BINDIR)/accent-cli \
+		$(DESTDIR)$(LIBDIR)/accent/$(notdir $(PDFIUM_LIB)); do \
+		test ! -f $$f || rm -f $(call DEBUG_FILE,$$f); \
+	done; rmdir $(DESTDIR)$(LIBDIR)/debug/.build-id/* $(DESTDIR)$(LIBDIR)/debug/.build-id \
+		$(DESTDIR)$(LIBDIR)/debug 2>/dev/null; true
+endif
 	rm -f $(DESTDIR)$(BINDIR)/accent $(DESTDIR)$(BINDIR)/accent-cli
 	rm -f $(DESTDIR)$(DATADIR)/applications/$(APP_ID).desktop
 	rm -f $(DESTDIR)$(DATADIR)/metainfo/$(APP_ID).metainfo.xml
@@ -663,8 +680,10 @@ PKGROOT = $(abspath $(TARGET_DIR))/pkgroot
 pkgroot: all pdfium
 	@for arch in $(SERVER_ARCHES); do test -f $(call SERVER_BIN,$$arch).xz || \
 		{ echo "missing $(call SERVER_BIN,$$arch).xz: run make server first"; exit 1; }; done
-	rm -rf $(PKGROOT)
+	rm -rf $(PKGROOT) $(PKGROOT)-debug
 	$(MAKE) --no-print-directory install DESTDIR=$(PKGROOT) PREFIX=/usr
+	@# The symbols `install` split off stay out of the package, kept beside it for a debug one.
+	mkdir -p $(PKGROOT)-debug/usr/lib && mv $(PKGROOT)/usr/lib/debug $(PKGROOT)-debug/usr/lib/
 
 ## deb: package the app as a .deb in the target folder, for the Debian or Ubuntu it is built on
 #

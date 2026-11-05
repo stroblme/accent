@@ -11,8 +11,10 @@ Requires:       glib-networking
 Recommends:     git
 Recommends:     openssh-clients
 
-# No stripping and no debuginfo split: each server's archive is bound to the server's exact bytes
-# (build-aux/compress-server.py). libpdfium is the app's own, not one for other packages to link.
+# No stripping and no debuginfo split: `make install` has stripped the app's binaries, their
+# symbols kept out of the tree (`make pkgroot`), and each server's archive is bound to the server's
+# exact bytes (build-aux/compress-server.py). libpdfium is the app's own, not one for other
+# packages to link.
 %global debug_package %{nil}
 %global __os_install_post %{nil}
 %global __provides_exclude_from ^/usr/lib/accent/
