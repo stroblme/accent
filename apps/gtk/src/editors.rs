@@ -11,6 +11,7 @@ use accent_core::config::{Editor, Edits};
 use gtk::prelude::*;
 use gtk::{gdk, glib};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -93,17 +94,27 @@ fn first(editor: Editor) -> &'static str {
     known(editor).map_or("", |known| known.binaries[0])
 }
 
-/// The program `editor` is run as on this machine: the one the shell found, else its first name,
-/// the shell being asked for the next file where it has not been yet.
-fn binary(editor: Editor) -> &'static str {
-    let found = PROBE.with_borrow(|probe| match probe {
-        Probe::Done(found) => found.iter().find(|(e, _)| *e == editor).map(|(_, b)| *b),
-        _ => None,
-    });
+/// Whether the shell is asked for `editor`: one of the table's, not accent's or a custom command.
+pub fn probed(editor: Editor) -> bool {
+    known(editor).is_some()
+}
+
+/// The program `editor` is run as on this machine or on `host`: the one the shell found, else its
+/// first name, the shell being asked for the next file where it has not been yet.
+fn binary(editor: Editor, host: Option<&Host>) -> &'static str {
+    let found = answer(host)
+        .flatten()
+        .and_then(|found| found.iter().find(|(e, _)| *e == editor).map(|(_, b)| *b));
     if found.is_none() {
-        installed(|_| {});
+        installed(host, |_| {});
     }
     found.unwrap_or_else(|| first(editor))
+}
+
+/// Whether the shell on this machine or on `host` has answered, and without `editor`.
+fn lacks(editor: Editor, host: Option<&Host>) -> bool {
+    let found = answer(host).flatten();
+    probed(editor) && found.is_some_and(|found| found.iter().all(|(e, _)| *e != editor))
 }
 
 /// A 1-based line, and column where known, a terminal editor opens a file at.
@@ -154,31 +165,53 @@ fn custom_line(command: &str, file: &str, at: Option<Place>) -> String {
 }
 
 /// What the probe prints before each program it finds, so the lines a chatty rc file prints are
-/// not taken for an answer.
+/// not taken for an answer, and once it has asked for every one.
 const MARK: &str = "accent-editor";
+const END: &str = "accent-editor-end";
 
-/// Ask the login shell a terminal tab runs (`$SHELL -l -i -c`, on the host from the Flatpak) for
-/// every program [`KNOWN`] names, so its `PATH` and aliases are the ones a tab will have. Blocks.
-fn probe() -> Vec<Found> {
-    let script: Vec<String> = KNOWN
+/// A remote vault's host, asked over the vault's master.
+#[derive(Clone)]
+pub struct Host {
+    pub url: ssh::Url,
+    pub ctl: PathBuf,
+}
+
+/// The login shell a terminal tab runs (`$SHELL -l -i -c`), told to run `script`.
+fn login(script: &str) -> Vec<String> {
+    let sh = r#"exec "${SHELL:-/bin/sh}" -l -i -c "$1""#;
+    ["sh", "-c", sh, "sh", script].map(str::to_string).to_vec()
+}
+
+/// `argv` as one command line, for the shell ssh hands a command to.
+fn command_line(argv: &[String]) -> String {
+    let words: Vec<String> = argv.iter().map(|word| ssh::quote(word)).collect();
+    words.join(" ")
+}
+
+/// Ask the login shell a terminal tab runs, on this machine (on the host from the Flatpak) or on
+/// `host`, for every program [`KNOWN`] names, so its `PATH` and aliases are the ones a tab will
+/// have. Blocks.
+fn probe(host: Option<Host>) -> Option<Vec<Found>> {
+    let mut script: Vec<String> = KNOWN
         .iter()
         .flat_map(|known| known.binaries)
         .map(|bin| format!("command -v {bin} >/dev/null 2>&1 && echo {MARK} {bin}"))
         .collect();
-    let host = std::fs::read_to_string("/.flatpak-info")
-        .ok()
-        .and_then(|info| crate::terminal::host_prefix(&info));
-    let mut argv = host.unwrap_or_default();
-    argv.extend(
-        [
-            "sh",
-            "-c",
-            r#"exec "${SHELL:-/bin/sh}" -l -i -c "$1""#,
-            "sh",
-            &script.join("; "),
-        ]
-        .map(str::to_string),
-    );
+    script.push(format!("echo {END}"));
+    let login = login(&script.join("; "));
+    let argv = match &host {
+        Some(host) => ssh::run(&host.url, &host.ctl, &command_line(&login)),
+        None => {
+            let flatpak = std::fs::read_to_string("/.flatpak-info")
+                .ok()
+                .and_then(|info| crate::terminal::host_prefix(&info));
+            flatpak
+                .unwrap_or_default()
+                .into_iter()
+                .chain(login)
+                .collect()
+        }
+    };
     let out = std::process::Command::new(&argv[0])
         .args(&argv[1..])
         .stdin(std::process::Stdio::null())
@@ -188,72 +221,88 @@ fn probe() -> Vec<Found> {
         Ok(out) => parse(&String::from_utf8_lossy(&out.stdout)),
         Err(e) => {
             tracing::warn!("cannot ask the shell for terminal editors: {e}");
-            Vec::new()
+            None
         }
     }
 }
 
-/// The editors the probe's output names, each by the first of its programs found.
-fn parse(out: &str) -> Vec<Found> {
-    let found: Vec<&str> = out
-        .lines()
-        .filter_map(|line| line.trim().strip_prefix(MARK)?.strip_prefix(' '))
-        .collect();
-    KNOWN
+/// The editors the probe's output names, each by the first of its programs found; `None` where
+/// the shell never got to the end, as one without `command -v` does not.
+fn parse(out: &str) -> Option<Vec<Found>> {
+    let lines: Vec<&str> = out.lines().map(str::trim).collect();
+    if !lines.contains(&END) {
+        return None;
+    }
+    let found: Vec<&str> = lines
         .iter()
-        .filter_map(|known| {
-            let bin = known.binaries.iter().find(|bin| found.contains(bin))?;
-            Some((known.editor, *bin))
-        })
-        .collect()
+        .filter_map(|line| line.strip_prefix(MARK)?.strip_prefix(' '))
+        .collect();
+    let found = KNOWN.iter().filter_map(|known| {
+        let bin = known.binaries.iter().find(|bin| found.contains(bin))?;
+        Some((known.editor, *bin))
+    });
+    Some(found.collect())
 }
+
+/// What a shell answered: the editors it finds, or `None` where it gave no answer.
+type Answer = Option<Rc<[Found]>>;
 
 /// What waits for the probe's answer.
 type Waiting = Box<dyn FnOnce(&[Found])>;
 
-/// The probe, asked once a process.
+/// A probe asked, once a process.
 enum Probe {
-    Idle,
     Running(Vec<Waiting>),
-    Done(Rc<[Found]>),
+    Done(Answer),
 }
 
 thread_local! {
-    static PROBE: RefCell<Probe> = const { RefCell::new(Probe::Idle) };
+    /// The probes of this machine, under `None`, and of each host, under its address.
+    static PROBES: RefCell<HashMap<Option<String>, Probe>> = RefCell::default();
 }
 
-/// Call `then` with the editors the shell finds: at once once the probe has answered, else when
-/// it does, the probe starting off the main thread the first time.
-pub fn installed(then: impl FnOnce(&[Found]) + 'static) {
+/// What the shell on this machine or on `host` answered, once it has.
+fn answer(host: Option<&Host>) -> Option<Answer> {
+    let key = host.map(|host| host.url.authority());
+    PROBES.with_borrow(|probes| match probes.get(&key) {
+        Some(Probe::Done(answer)) => Some(answer.clone()),
+        _ => None,
+    })
+}
+
+/// Call `then` with the editors the shell on this machine or on `host` finds: at once once the
+/// probe has answered, else when it does, the probe starting off the main thread the first time.
+pub fn installed(host: Option<&Host>, then: impl FnOnce(&[Found]) + 'static) {
+    let key = host.map(|host| host.url.authority());
     let mut then: Option<Waiting> = Some(Box::new(then));
-    let (done, start) = PROBE.with_borrow_mut(|probe| match probe {
-        Probe::Done(found) => (Some(found.clone()), false),
-        Probe::Running(waiting) => {
+    let (done, start) = PROBES.with_borrow_mut(|probes| match probes.get_mut(&key) {
+        Some(Probe::Done(answer)) => (Some(answer.clone()), false),
+        Some(Probe::Running(waiting)) => {
             waiting.extend(then.take());
             (None, false)
         }
-        Probe::Idle => {
-            *probe = Probe::Running(then.take().into_iter().collect());
+        None => {
+            let waiting = then.take().into_iter().collect();
+            probes.insert(key.clone(), Probe::Running(waiting));
             (None, true)
         }
     });
-    if let (Some(found), Some(then)) = (done, then) {
-        then(&found);
+    if let (Some(answer), Some(then)) = (done, then) {
+        then(answer.as_deref().unwrap_or_default());
     }
     if start {
-        glib::spawn_future_local(async {
-            let found: Rc<[Found]> = crate::work::off_thread("editor probe", probe)
-                .await
-                .unwrap_or_default()
-                .into();
-            let waiting = PROBE.with_borrow_mut(|probe| {
-                match std::mem::replace(probe, Probe::Done(found.clone())) {
-                    Probe::Running(waiting) => waiting,
+        let host = host.cloned();
+        glib::spawn_future_local(async move {
+            let found = crate::work::off_thread("editor probe", move || probe(host)).await;
+            let answer: Answer = found.flatten().map(Into::into);
+            let waiting = PROBES.with_borrow_mut(|probes| {
+                match probes.insert(key, Probe::Done(answer.clone())) {
+                    Some(Probe::Running(waiting)) => waiting,
                     _ => Vec::new(),
                 }
             });
             for then in waiting {
-                then(&found);
+                then(answer.as_deref().unwrap_or_default());
             }
         });
     }
@@ -277,6 +326,11 @@ impl App {
             || self.stays_accents(key)
             || self.awaiting.borrow().contains_key(key)
         {
+            return false;
+        }
+        // A shell that has answered without it runs no tab only to find it missing.
+        if lacks(editor, self.host_of(key).as_ref()) {
+            self.say_missing(editor, key);
             return false;
         }
         self.revealing.borrow_mut().remove(key);
@@ -388,12 +442,36 @@ impl App {
             false => self.root().join(&edits.file),
         };
         let file = file.to_string_lossy();
-        let line = match (edits.editor, self.on_host(&edits.file)) {
-            (Editor::Custom, _) => custom_line(&self.config.borrow().editor_command, &file, at),
-            (editor, true) => line(editor, first(editor), &file, at),
-            (editor, false) => line(editor, binary(editor), &file, at),
+        let line = match edits.editor {
+            Editor::Custom => custom_line(&self.config.borrow().editor_command, &file, at),
+            editor => {
+                let bin = binary(editor, self.host_of(&edits.file).as_ref());
+                line(editor, bin, &file, at)
+            }
         };
         terminal::Run::editor(edits, line)
+    }
+
+    /// The remote vault's host, whose shell runs a terminal editor on its files.
+    fn vault_host(&self) -> Option<Host> {
+        let remote = self.vault()?.remote()?;
+        Some(Host {
+            url: remote.url().clone(),
+            ctl: remote.control_path().to_path_buf(),
+        })
+    }
+
+    /// The host a terminal editor on `key` runs on: the remote vault's for a file of its own.
+    fn host_of(&self, key: &str) -> Option<Host> {
+        self.vault_host().filter(|_| !doc::is_loose_key(key))
+    }
+
+    /// Ask the remote vault's host which terminal editors its shell finds, once a process, while
+    /// one of the table's is picked: the first file opened there then runs the program it has.
+    pub(crate) fn probe_host(&self) {
+        if let (true, Some(host)) = (probed(self.config.borrow().editor), self.vault_host()) {
+            installed(Some(&host), |_| {});
+        }
     }
 
     /// What the window's messages call `editor`: its name, or the program a custom command runs.
@@ -564,13 +642,18 @@ impl App {
         let Some(edits) = term.edits() else {
             return;
         };
-        let file = doc::file_name(&edits.file);
-        self.toast(&format!(
-            "No {} found, so {file} opened in Accent's editor",
-            self.called(edits.editor)
-        ));
+        self.say_missing(edits.editor, &edits.file);
         self.in_accent.borrow_mut().insert(edits.file.clone());
         self.open_as(&edits.file, how);
+    }
+
+    /// Say that no `editor` was found, so `key` opened in accent's own editor.
+    fn say_missing(&self, editor: Editor, key: &str) {
+        self.toast(&format!(
+            "No {} found, so {} opened in Accent's editor",
+            self.called(editor),
+            doc::file_name(key)
+        ));
     }
 }
 
@@ -603,14 +686,35 @@ mod tests {
     #[test]
     fn the_probe_reads_its_own_lines_and_the_first_name_wins() {
         let out = "Welcome back!\naccent-editor helix\naccent-editor hx\n\
-                   accent-editor vim\nhx is an alias\naccent-editor nanos\n";
+                   accent-editor vim\nhx is an alias\naccent-editor nanos\naccent-editor-end\n";
         assert_eq!(
-            parse(out),
+            parse(out).unwrap(),
             [(Editor::Helix, "hx"), (Editor::Vim, "vim")],
             "nanos is no nano"
         );
-        assert_eq!(parse("accent-editor helix\n"), [(Editor::Helix, "helix")]);
-        assert!(parse("").is_empty());
+        let helix = "accent-editor helix\naccent-editor-end\n";
+        assert_eq!(parse(helix).unwrap(), [(Editor::Helix, "helix")]);
+        assert_eq!(parse("accent-editor-end\n").unwrap(), []);
+        // A shell that stopped short, or never ran the script, has not answered.
+        assert_eq!(parse("accent-editor vim\n"), None);
+        assert_eq!(parse(""), None);
+    }
+
+    /// The probe a host is sent reaches its login shell word for word, quotes and all.
+    #[test]
+    fn a_host_runs_the_probe_in_its_login_shell() {
+        let line = command_line(&login("echo \"$0\" it\\'s"));
+        let out = std::process::Command::new("sh")
+            .args(["-c", &line])
+            .env("SHELL", "/bin/sh")
+            .env("HOME", "/nonexistent")
+            .env("ENV", "/dev/null")
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(said.lines().last(), Some("/bin/sh it's"));
     }
 
     /// The file is one word to the shell, whatever its name holds.

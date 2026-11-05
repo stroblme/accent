@@ -431,8 +431,8 @@ pub fn build_window(
             app.prepared_preferences();
             // The program a terminal editor goes by on this machine, asked before a file opens in
             // it ([`editors::binary`]).
-            if !app.config.borrow().editor.is_accent() {
-                editors::installed(|_| {});
+            if editors::probed(app.config.borrow().editor) {
+                editors::installed(None, |_| {});
             }
         }
         glib::ControlFlow::Break

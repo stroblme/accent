@@ -391,7 +391,7 @@ fn text_editor_row(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Co
             return;
         }
         let (row, fill) = (row.downgrade(), fill.clone());
-        editors::installed(move |found| {
+        editors::installed(None, move |found| {
             if let Some(row) = row.upgrade() {
                 fill(&row, Some(found));
             }

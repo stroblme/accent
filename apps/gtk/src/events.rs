@@ -415,6 +415,8 @@ impl App {
                 self.statusbar.set_progress(None);
                 self.connect.hide();
                 self.connection_up();
+                // Before a file opens in a terminal editor there, which runs the program it has.
+                self.probe_host();
                 // A new server is a new worker on the host.
                 self.unwatched.set_revealed(false);
                 // A new server has each document as the tab last tried to send it, and an edit
