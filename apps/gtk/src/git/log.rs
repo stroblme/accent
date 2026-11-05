@@ -29,6 +29,8 @@ enum LogItem {
         path: String,
         /// Where a rename or copy came from, which is where the parent's side is read.
         orig: Option<String>,
+        /// The graph's columns running on past the commit ([`passing`]), dashed beside the file.
+        lanes: Vec<usize>,
     },
     /// The last row while git has history the store does not: activating it pages the next
     /// [`PAGE`] in. A row rather than a button under the list, so it is reached by scrolling to
@@ -202,6 +204,10 @@ impl Panel {
             let Some(at) = panel.row_of_commit(&oid) else {
                 return;
             };
+            let lanes = match boxed(panel.log.item(at)) {
+                Some(LogItem::Commit(row)) => passing(&row),
+                _ => Vec::new(),
+            };
             let rows: Vec<glib::BoxedAnyObject> = files
                 .into_iter()
                 .map(|file| {
@@ -211,6 +217,7 @@ impl Panel {
                         letter: file.letter,
                         path: file.path,
                         orig: file.orig,
+                        lanes: lanes.clone(),
                     })
                 })
                 .collect();
@@ -415,13 +422,27 @@ fn forked_layout() -> gtk::Label {
     forked
 }
 
-/// A file of the expanded commit, indented past the graph so it reads as belonging above it.
-fn file_layout() -> gtk::Box {
+/// A file of the expanded commit, after the lanes running on past it, drawn dashed so the graph
+/// stays whole and the file still reads as belonging to the commit above it.
+fn file_layout(item: &gtk::ListItem) -> gtk::Box {
+    let area = gtk::DrawingArea::new();
+    area.set_draw_func(glib::clone!(
+        #[weak]
+        item,
+        move |_, cr, _, height| {
+            if let Some(LogItem::File { lanes, .. }) = boxed(item.item()) {
+                draw_passing(cr, &lanes, height as f64);
+            }
+        }
+    ));
+    // On the line rather than the row, for the reason `commit_layout` gives.
     let file = file_line();
-    file.set_margin_start(LANE * 2);
     file.set_margin_top(2);
     file.set_margin_bottom(2);
-    file
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    row.append(&area);
+    row.append(&file);
+    row
 }
 
 /// Load More: centred and quiet, it continues the history above it rather than competing with it.
@@ -495,8 +516,21 @@ fn bind_log(item: &gtk::ListItem, panel: &Weak<Panel>) {
 
     let row = match item_row {
         LogItem::Commit(row) => row,
-        LogItem::File { letter, path, .. } => {
-            let file = layout(&stack, "file", file_layout);
+        LogItem::File {
+            letter,
+            path,
+            lanes,
+            ..
+        } => {
+            let row = layout(&stack, "file", || file_layout(item));
+            let (Some(area), Some(file)) = (
+                row.first_child().and_downcast::<gtk::DrawingArea>(),
+                row.last_child().and_downcast::<gtk::Box>(),
+            ) else {
+                return;
+            };
+            area.set_content_width(width_for(&lanes));
+            area.queue_draw();
             let icon = crate::doc::icon_for(&path);
             bind_file_line(&file, icon, letter, &path, split_name(&path).0);
             stack.set_tooltip_text(Some(&path));
@@ -618,30 +652,59 @@ fn bind_refs(labels: &gtk::Box, refs: &[git::Ref]) {
 /// `above` and `below` are lane indices and `below[0]` is the commit's own column, so an edge is
 /// always drawn between a lane's x and the node's, meeting at the row's middle.
 fn draw_lanes(cr: &gtk::cairo::Context, row: &LogRow, height: f64) {
-    let x = |lane: usize| (LANE / 2 + lane as i32 * LANE) as f64;
-    let (middle, node) = (height / 2.0, x(row.column));
+    let (middle, node) = (height / 2.0, lane_x(row.column));
     cr.set_line_width(1.5);
     for &lane in &row.through {
         lane_source(cr, lane);
-        cr.move_to(x(lane), 0.0);
-        cr.line_to(x(lane), height);
+        cr.move_to(lane_x(lane), 0.0);
+        cr.line_to(lane_x(lane), height);
         let _ = cr.stroke();
     }
     for &lane in &row.above {
         lane_source(cr, lane);
-        cr.move_to(x(lane), 0.0);
+        cr.move_to(lane_x(lane), 0.0);
         cr.line_to(node, middle);
         let _ = cr.stroke();
     }
     for &lane in &row.below {
         lane_source(cr, lane);
         cr.move_to(node, middle);
-        cr.line_to(x(lane), height);
+        cr.line_to(lane_x(lane), height);
         let _ = cr.stroke();
     }
     lane_source(cr, row.column);
     cr.arc(node, middle, 3.5, 0.0, std::f64::consts::TAU);
     let _ = cr.fill();
+}
+
+/// The columns whose lines run on below `row`: the lanes passing it and its parents' edges.
+fn passing(row: &LogRow) -> Vec<usize> {
+    let mut lanes: Vec<usize> = row.through.iter().chain(&row.below).copied().collect();
+    lanes.sort_unstable();
+    lanes.dedup();
+    lanes
+}
+
+/// The length of a dash, and of the gap after it, in px, which [`draw_passing`] rounds to fit.
+const DASH: f64 = 3.0;
+
+/// The lanes running past a file of the expanded commit, dashed. Each row holds whole dashes and
+/// starts and ends half way through a gap, so the rows of one commit's files join into one line.
+fn draw_passing(cr: &gtk::cairo::Context, lanes: &[usize], height: f64) {
+    let dash = height / (height / (2.0 * DASH)).round().max(1.0) / 2.0;
+    cr.set_line_width(1.5);
+    cr.set_dash(&[dash, dash], 1.5 * dash);
+    for &lane in lanes {
+        lane_source(cr, lane);
+        cr.move_to(lane_x(lane), 0.0);
+        cr.line_to(lane_x(lane), height);
+        let _ = cr.stroke();
+    }
+}
+
+/// The middle of a lane's column, in px from the graph's left edge.
+fn lane_x(lane: usize) -> f64 {
+    (LANE / 2 + lane as i32 * LANE) as f64
 }
 
 fn lane_source(cr: &gtk::cairo::Context, lane: usize) {
@@ -656,15 +719,18 @@ fn lane_source(cr: &gtk::cairo::Context, lane: usize) {
 
 /// Room for every lane this row touches, plus one lane of air before the text.
 fn lane_width(row: &LogRow) -> i32 {
-    let widest = row
-        .above
-        .iter()
-        .chain(&row.below)
-        .chain(&row.through)
-        .chain(std::iter::once(&row.column))
-        .copied()
-        .max()
-        .unwrap_or(0);
+    width_for(
+        row.above
+            .iter()
+            .chain(&row.below)
+            .chain(&row.through)
+            .chain(std::iter::once(&row.column)),
+    )
+}
+
+/// Room for `lanes` up to the widest of them, the first lane at least, plus one lane of air.
+fn width_for<'a>(lanes: impl IntoIterator<Item = &'a usize>) -> i32 {
+    let widest = lanes.into_iter().copied().max().unwrap_or(0);
     (widest as i32 + 1) * LANE + LANE
 }
 
@@ -805,6 +871,17 @@ mod tests {
             commit_tooltip(&placed(&c, Some("main"))),
             "HEAD -> main, origin/main, tag: v1\nabcdef1\nOn main\nA U Thor <author@example.com>\n\nsubject\n\nwhy it happened\nand a second line"
         );
+    }
+
+    #[test]
+    fn the_lanes_past_a_commit_are_those_passing_it_and_its_parents() {
+        let mut merge = placed(&commit_at("m"), None);
+        merge.above = vec![0, 2];
+        (merge.through, merge.below) = (vec![1, 3], vec![0, 1]);
+        assert_eq!(passing(&merge), [0, 1, 3], "what ends here is not drawn on");
+        let root = placed(&commit_at("r"), None);
+        assert!(passing(&root).is_empty());
+        assert_eq!(width_for(&passing(&root)), 2 * LANE, "one lane's room");
     }
 
     fn ref_to(name: &str, kind: git::RefKind, head: bool) -> git::Ref {

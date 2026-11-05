@@ -592,6 +592,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - `Ctrl+Shift+G` shows the pane with the keyboard in the commit box.
 - The lower half, across a vertical `GtkPaned`, is the history: 200 commits at a time behind Load More, each in its lane's colour (the hue rotation, Colour).
   A commit expands on a single click into the files it changed, each opening the commit against its first parent as a diff tab.
+  The lanes running on past the commit are drawn dashed beside its files, so the graph stays whole while they are shown.
 - A commit's age (`just now`, `5 min`, `3 h`) is told again twice a minute while the history is on screen and as soon as it is shown again, so it never trails by more than half a minute: a list binds a row only when its item changes or it scrolls into view.
 - A commit leads its summary with a label per decoration — HEAD's branch in the accent, a remote branch dimmer, a tag outlined, and the stash `stash` in a local branch's label, its commits being in the history with nothing else saying what they are — three at most and `+N` for the rest; a branch and a tag of one name stay apart, and `origin/HEAD` and notes are not shown.
 - Each lane is named after its first decorated commit and handed down first parents (the stash names none), and a commit where other named lanes end says "side branched here".
