@@ -15,6 +15,7 @@ pub mod fs;
 pub mod fuzzy;
 pub mod git;
 pub mod index;
+pub mod malloc;
 pub mod markdown;
 pub mod note;
 pub mod notebook;
