@@ -28,6 +28,15 @@ build-options:
     # follows the module name below.
     CARGO_HOME: /run/build/accent/cargo
 
+# What only building against the modules below reads: the app loads libspelling and VTE as shared
+# libraries, and VTE has simdutf and fast_float compiled in. Their licences stay.
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /lib/cmake
+  - /share/cmake
+  - '*.a'
+
 modules:
   # The GNOME 51 runtime ships enchant and hunspell but not libspelling, so the app has to build it.
   - name: libspelling
@@ -70,6 +79,8 @@ modules:
       - -Dglade=false
       - -Dgir=false
       - -Dvapi=false
+      # Its demo terminal, which nothing here runs.
+      - -Dapp=false
     sources:
       - type: archive
         url: https://download.gnome.org/sources/vte/0.84/vte-0.84.0.tar.xz
