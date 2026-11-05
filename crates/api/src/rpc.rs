@@ -3,10 +3,10 @@
 //! deadlines, and clients ping every [`PING`]; after the first ping, a server exits on [`SILENCE`]
 //! without input.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, SyncSender, channel, sync_channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -29,6 +29,23 @@ pub const PING: Duration = Duration::from_secs(10);
 /// Silence timeout after the first ping: nine missed pings, allowing transient
 /// VPN outages and exceeding SSH's 15 s ServerAlive timeout.
 pub const SILENCE: Duration = Duration::from_secs(90);
+
+/// The longest line a host reads, its newline included: four times the longest note a tab opens,
+/// which leaves room for JSON's escapes in a save's text (two bytes for a newline or a quote). A
+/// client refuses a longer request before sending it, since a host skips such a line without
+/// learning which request it was.
+const MAX_LINE: usize = 4 * accent_core::fs::MAX_TEXT as usize;
+
+/// The requests a host runs at once, each on a thread that takes the next waiting one when done.
+const WORKERS: usize = 64;
+
+/// The requests that wait for a worker, at most, and the bytes their lines may hold together.
+/// One past either is answered at once that the host is busy.
+const QUEUED: usize = 1024;
+const QUEUED_BYTES: usize = MAX_LINE;
+
+/// Answers and events waiting for the writer, beyond which their threads wait.
+const UNWRITTEN: usize = 64;
 
 /// Wait for in-flight work after losing the client. Covers the longest git
 /// sync (pull and push under `TRANSFER_TIMEOUT`) plus process-group shutdown.
@@ -147,7 +164,7 @@ impl Client {
             .spawn({
                 let out = out.clone();
                 move || {
-                    let ping = json!({"jsonrpc": "2.0", "method": "ping"});
+                    let ping = encode(&json!({"jsonrpc": "2.0", "method": "ping"}));
                     while emit(&out, &ping).is_ok() {
                         if !matches!(stopped.recv_timeout(PING), Err(RecvTimeoutError::Timeout)) {
                             break;
@@ -200,7 +217,7 @@ impl Client {
         }
         let _ = emit(
             &self.out,
-            &json!({"jsonrpc": "2.0", "method": "cancel", "params": [id]}),
+            &encode(&json!({"jsonrpc": "2.0", "method": "cancel", "params": [id]})),
         );
     }
 
@@ -215,12 +232,19 @@ impl Client {
             return Err(Error::Offline("not connected".to_string()));
         }
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let line = encode(&json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}));
+        if line.len() > MAX_LINE {
+            return Err(Error::Protocol(format!(
+                "{method} is {} MiB, more than the {} MiB a host reads in one request",
+                line.len() >> 20,
+                MAX_LINE >> 20
+            )));
+        }
         let (tx, rx) = channel();
         locked(&self.pending).insert(id, tx);
         // Only once there is a waiter to let go: a cancel in between would find none.
         *locked(asked) = Some(id);
 
-        let line = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
         if let Err(e) = emit(&self.out, &line) {
             locked(&self.pending).remove(&id);
             return Err(Error::Offline(format!("cannot reach the server: {e}")));
@@ -339,12 +363,9 @@ pub fn serve(
 /// Reply to the opening `hello` with the vault failure. Exiting alone would
 /// report only a closed link and lose the actionable reason.
 fn refuse(e: &crate::Error, input: impl Read, mut output: impl Write) {
-    for line in BufReader::new(input)
-        .lines()
-        .map_while(std::result::Result::ok)
-    {
+    for line in capped_lines(input) {
         // The client's pings come without an id, and one may arrive before the `hello`.
-        let id = serde_json::from_str::<Value>(&line)
+        let id = serde_json::from_slice::<Value>(&line)
             .ok()
             .and_then(|msg| msg.get("id").cloned());
         if let Some(id) = id {
@@ -357,19 +378,34 @@ fn refuse(e: &crate::Error, input: impl Read, mut output: impl Write) {
 }
 
 /// Serve requests until EOF and forward `events` as notifications.
-/// Each request has a thread and separate search reader so a vault-wide grep
-/// does not block tree reads. Lock whole output lines to prevent interleaving.
-/// After the first ping, exit on `silence` without input; unpinged manual
-/// sessions wait for EOF.
+/// Each request runs on one of [`WORKERS`] threads with its own search reader, so a vault-wide
+/// grep does not block tree reads, and the rest wait for one in the order they came. One writer
+/// takes every line out, and the reading never waits for it or for a worker, so pings and
+/// cancels are read however busy the host or slow the link. After the first ping, exit on
+/// `silence` without input; unpinged manual sessions wait for EOF.
 pub(crate) fn serve_local(
     vault: Local,
     events: Receiver<Event>,
     input: impl Read + Send + 'static,
-    output: impl Write + Send + 'static,
+    mut output: impl Write + Send + 'static,
     silence: Duration,
 ) {
     let vault = Arc::new(vault);
-    let out: Arc<Mutex<Box<dyn Write + Send>>> = Arc::new(Mutex::new(Box::new(output)));
+    let (out, unwritten) = sync_channel::<Vec<u8>>(UNWRITTEN);
+    let writer = std::thread::Builder::new()
+        .name("accent-out".to_string())
+        .spawn(move || {
+            for line in unwritten {
+                if output
+                    .write_all(&line)
+                    .and_then(|()| output.flush())
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .ok();
 
     let forwarder = std::thread::Builder::new()
         .name("accent-events".to_string())
@@ -378,7 +414,7 @@ pub(crate) fn serve_local(
             move || {
                 for event in events {
                     let line = json!({"jsonrpc": "2.0", "method": "event", "params": event});
-                    if emit(&out, &line).is_err() {
+                    if out.send(encode(&line)).is_err() {
                         break;
                     }
                 }
@@ -387,14 +423,11 @@ pub(crate) fn serve_local(
         .ok();
 
     // stdin on a thread of its own, so the loop below can notice it has gone quiet.
-    let (tx, lines) = channel();
+    let (tx, lines) = sync_channel(1);
     let _ = std::thread::Builder::new()
         .name("accent-stdin".to_string())
         .spawn(move || {
-            for line in BufReader::new(input)
-                .lines()
-                .map_while(std::result::Result::ok)
-            {
+            for line in capped_lines(input) {
                 if tx.send(line).is_err() {
                     break;
                 }
@@ -402,6 +435,7 @@ pub(crate) fn serve_local(
         });
 
     let live: InFlight = Arc::new(Mutex::new(HashMap::new()));
+    let backlog: Arc<Mutex<Backlog>> = Arc::default();
     let mut workers: Vec<std::thread::JoinHandle<()>> = Vec::new();
     let mut pinged = false;
     loop {
@@ -430,10 +464,10 @@ pub(crate) fn serve_local(
                 return;
             }
         };
-        if line.trim().is_empty() {
+        if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        let Ok(msg) = serde_json::from_str::<Value>(&line) else {
+        let Ok(msg) = serde_json::from_slice::<Value>(&line) else {
             tracing::warn!("unreadable request");
             continue;
         };
@@ -446,12 +480,18 @@ pub(crate) fn serve_local(
         let params = msg.get("params").cloned().unwrap_or(json!([]));
 
         // The one method with nothing to answer: whoever asked has stopped waiting, so the work
-        // is dropped rather than finished.
+        // is dropped rather than finished, and one still waiting never starts.
         if method == "cancel" {
-            if let Some(target) = params.get(0).and_then(Value::as_u64)
-                && let Some(handle) = locked(&live).remove(&target)
-            {
-                handle.abort();
+            if let Some(target) = params.get(0).and_then(Value::as_u64) {
+                if let Some(handle) = locked(&live).remove(&target) {
+                    handle.abort();
+                }
+                let mut backlog = locked(&backlog);
+                if let Some(at) = backlog.waiting.iter().position(|r| r.id == Some(target))
+                    && let Some(gone) = backlog.waiting.remove(at)
+                {
+                    backlog.bytes -= gone.bytes;
+                }
             }
             continue;
         }
@@ -461,29 +501,43 @@ pub(crate) fn serve_local(
             continue;
         }
 
-        let (vault, out, live) = (vault.clone(), out.clone(), live.clone());
-        let worker = std::thread::spawn(move || {
-            if let Some(id) = id {
-                SERVING.with_borrow_mut(|serving| *serving = Some((id, live)));
-            }
-            let answer = dispatch(&vault, &method, &params);
-            let Some(id) = id else { return };
-            let line = match answer {
-                Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
-                Err(e) => json!({"jsonrpc": "2.0", "id": id, "error": to_wire(&e)}),
-            };
-            let _ = emit(&out, &line);
-        });
-        workers.push(worker);
-        // Threads that have finished are reaped as we go, so a long session does not keep every
-        // handle it ever made.
-        workers.retain(|w| !w.is_finished());
+        let request = Request {
+            id,
+            method,
+            params,
+            bytes: line.len(),
+        };
+        let mut held = locked(&backlog);
+        if held.running < WORKERS {
+            held.running += 1;
+            drop(held);
+            let (vault, out, live, backlog) =
+                (vault.clone(), out.clone(), live.clone(), backlog.clone());
+            workers.push(std::thread::spawn(move || {
+                work(&vault, request, &out, &live, &backlog);
+            }));
+            // Threads that have finished are reaped as we go, so a long session does not keep
+            // every handle it ever made.
+            workers.retain(|w| !w.is_finished());
+        } else if held.waiting.len() < QUEUED && held.bytes + request.bytes <= QUEUED_BYTES {
+            held.bytes += request.bytes;
+            held.waiting.push_back(request);
+        } else if let Some(id) = request.id {
+            drop(held);
+            let busy = Error::Remote(format!(
+                "the host is busy: {WORKERS} requests are running and more are waiting"
+            ));
+            // Never waited for: a link too slow to take it leaves its caller to time out.
+            let _ = out.try_send(encode(
+                &json!({"jsonrpc": "2.0", "id": id, "error": to_wire(&busy)}),
+            ));
+        }
     }
 
     // stdin closed: the window went away. Its debug sessions and kernels end first: a console's
     // evaluation runs the reader's code, which may never return, and the thread waiting on it
     // holds the vault. Then drop the vault, which stops its worker, and let the event forwarder
-    // end with the channel.
+    // end with the channel, and the writer once it has written what they all said.
     vault.debug.shutdown();
     vault.kernels.shutdown();
     drop(vault);
@@ -493,12 +547,98 @@ pub(crate) fn serve_local(
     if let Some(forwarder) = forwarder {
         let _ = forwarder.join();
     }
+    drop(out);
+    if let Some(writer) = writer {
+        let _ = writer.join();
+    }
 }
 
-fn emit(out: &Mutex<Box<dyn Write + Send>>, line: &Value) -> std::io::Result<()> {
+/// A request read off the wire, waiting for a worker or running on one.
+struct Request {
+    id: Option<u64>,
+    method: String,
+    params: Value,
+    /// Its line's length, which it holds of [`QUEUED_BYTES`] while it waits.
+    bytes: usize,
+}
+
+/// The requests waiting for one of the [`WORKERS`], in the order they came, and how many run.
+#[derive(Default)]
+struct Backlog {
+    waiting: VecDeque<Request>,
+    bytes: usize,
+    running: usize,
+}
+
+/// Answer `request` on this thread, then each request waiting in `backlog`, until none is.
+fn work(
+    vault: &Local,
+    mut request: Request,
+    out: &SyncSender<Vec<u8>>,
+    live: &InFlight,
+    backlog: &Mutex<Backlog>,
+) {
+    loop {
+        SERVING.with_borrow_mut(|serving| *serving = request.id.map(|id| (id, live.clone())));
+        let answer = dispatch(vault, &request.method, &request.params);
+        if let Some(id) = request.id {
+            let line = match answer {
+                Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
+                Err(e) => json!({"jsonrpc": "2.0", "id": id, "error": to_wire(&e)}),
+            };
+            let _ = out.send(encode(&line));
+        }
+        let mut held = locked(backlog);
+        match held.waiting.pop_front() {
+            Some(next) => {
+                held.bytes -= next.bytes;
+                request = next;
+            }
+            None => {
+                held.running -= 1;
+                return;
+            }
+        }
+    }
+}
+
+/// The lines of `input`, each without its newline, until it ends or a read fails. A line longer
+/// than [`MAX_LINE`] is read past rather than held, and the line after it reads as usual.
+fn capped_lines(input: impl Read) -> impl Iterator<Item = Vec<u8>> {
+    let mut input = BufReader::new(input);
+    std::iter::from_fn(move || {
+        loop {
+            let mut line = Vec::new();
+            match (&mut input)
+                .take(MAX_LINE as u64)
+                .read_until(b'\n', &mut line)
+            {
+                Ok(0) | Err(_) => return None,
+                Ok(read) if read == MAX_LINE && line.last() != Some(&b'\n') => {
+                    tracing::warn!("skipped a line longer than {} MiB", MAX_LINE >> 20);
+                    input.skip_until(b'\n').ok()?;
+                }
+                Ok(_) => {
+                    if line.last() == Some(&b'\n') {
+                        line.pop();
+                    }
+                    return Some(line);
+                }
+            }
+        }
+    })
+}
+
+/// `msg` as the line it is sent as.
+fn encode(msg: &Value) -> Vec<u8> {
+    let mut line = serde_json::to_vec(msg).expect("a JSON value always serialises");
+    line.push(b'\n');
+    line
+}
+
+fn emit(out: &Mutex<Box<dyn Write + Send>>, line: &[u8]) -> std::io::Result<()> {
     let mut out = locked(out);
-    serde_json::to_writer(&mut *out, line)?;
-    out.write_all(b"\n")?;
+    out.write_all(line)?;
     out.flush()
 }
 
@@ -599,6 +739,15 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value> {
             ok(())
         }
         "repos" => ok(vault.repos()),
+        // What a test holds a worker with: answered once the file at its path exists.
+        #[cfg(test)]
+        "test_wait" => {
+            let release: std::path::PathBuf = arg(p, 0)?;
+            while !release.exists() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            ok(())
+        }
 
         // The document's lifecycle. Opening one is the only call that reads the vault's config,
         // and closing one forgets it rather than telling a provider, so neither fits the table
@@ -997,6 +1146,173 @@ mod tests {
         w.client.cancel(9999);
         let tags: Vec<(String, i64)> = w.client.call("tags", json!([])).unwrap();
         assert!(tags.iter().any(|(tag, _)| tag == "tag"), "{tags:?}");
+    }
+
+    /// A server over raw pipes, for a test that writes its own lines: its thread, what it reads,
+    /// its answers by id (the events left out), and the folder its vault is in.
+    fn raw(
+        silence: Duration,
+    ) -> (
+        std::thread::JoinHandle<()>,
+        std::io::PipeWriter,
+        impl Iterator<Item = Value>,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("vault");
+        std::fs::create_dir(&root).unwrap();
+        let db = dir.path().join("index.db");
+        let (vault, events) = Local::open_at(&root, &db, VaultConfig::default()).unwrap();
+        let (server_in, input) = std::io::pipe().unwrap();
+        let (output, server_out) = std::io::pipe().unwrap();
+        let server = std::thread::spawn(move || {
+            serve_local(vault, events, server_in, server_out, silence);
+        });
+        let answers = BufReader::new(output)
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(&line.unwrap()).unwrap())
+            .filter(|msg| msg.get("id").is_some());
+        (server, input, answers, dir)
+    }
+
+    /// This process's threads, where `/proc` counts them.
+    fn threads() -> Option<usize> {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        let count = status.lines().find_map(|l| l.strip_prefix("Threads:"))?;
+        count.trim().parse().ok()
+    }
+
+    const PING_LINE: &str = r#"{"jsonrpc":"2.0","method":"ping"}"#;
+
+    /// A burst past the workers waits for them without a thread of its own, and past the queue it
+    /// is told at once that the host is busy. Pings and cancels are read all the while: the
+    /// server outlives its silence, and a cancelled request that was waiting never runs.
+    #[test]
+    fn a_burst_waits_for_the_workers_and_past_the_queue_hears_the_host_is_busy() {
+        let silence = Duration::from_secs(1);
+        let (server, mut input, mut answers, dir) = raw(silence);
+        let release = dir.path().join("release");
+        let before = threads();
+        writeln!(input, "{PING_LINE}").unwrap();
+        let busy = WORKERS + QUEUED + 1;
+        for id in 1..=busy {
+            let held =
+                json!({"jsonrpc": "2.0", "id": id, "method": "test_wait", "params": [release]});
+            writeln!(input, "{held}").unwrap();
+        }
+        let first = answers.next().unwrap();
+        assert_eq!(first["id"], busy, "{first}");
+        let said = first["error"]["message"].as_str().unwrap();
+        assert!(said.contains("busy"), "{said}");
+        if let (Some(before), Some(now)) = (before, threads()) {
+            assert!(
+                now < before + QUEUED / 2,
+                "{} threads for {busy} requests",
+                now - before
+            );
+        }
+
+        let cancelled = WORKERS + 1;
+        writeln!(
+            input,
+            r#"{{"jsonrpc":"2.0","method":"cancel","params":[{cancelled}]}}"#
+        )
+        .unwrap();
+        for _ in 0..15 {
+            writeln!(input, "{PING_LINE}").unwrap();
+            std::thread::sleep(silence / 10);
+        }
+        assert!(!server.is_finished(), "the pings went unread");
+
+        std::fs::write(&release, "").unwrap();
+        let mut answered: Vec<u64> = (&mut answers)
+            .take(busy - 2)
+            .map(|answer| {
+                assert_eq!(answer["result"], Value::Null, "{answer}");
+                answer["id"].as_u64().unwrap()
+            })
+            .collect();
+        answered.sort_unstable();
+        let expected: Vec<u64> = (1..busy as u64)
+            .filter(|&id| id != cancelled as u64)
+            .collect();
+        assert_eq!(answered, expected);
+        drop(input);
+        server.join().unwrap();
+        assert!(answers.next().is_none(), "the cancelled request ran");
+    }
+
+    /// A client that stops reading holds up the writer and then the workers, never the reading:
+    /// pings keep the server alive, its threads stay bounded, and what was answered comes out
+    /// once the client reads again.
+    #[test]
+    fn a_client_that_stops_reading_holds_back_the_workers_and_not_the_pings() {
+        let silence = Duration::from_secs(1);
+        let (server, mut input, answers, _dir) = raw(silence);
+        let before = threads();
+        writeln!(input, "{PING_LINE}").unwrap();
+        // Each answered at once, together more than the pipe and the writer's queue hold.
+        for id in 1..=3 * QUEUED {
+            writeln!(
+                input,
+                r#"{{"jsonrpc":"2.0","id":{id},"method":"nonesuch"}}"#
+            )
+            .unwrap();
+        }
+        for _ in 0..15 {
+            writeln!(input, "{PING_LINE}").unwrap();
+            std::thread::sleep(silence / 10);
+        }
+        assert!(!server.is_finished(), "the pings went unread");
+        if let (Some(before), Some(now)) = (before, threads()) {
+            assert!(now < before + QUEUED / 2, "{} threads", now - before);
+        }
+        drop(input);
+        let mut ids: Vec<u64> = answers.map(|a| a["id"].as_u64().unwrap()).collect();
+        let answered = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), answered, "an answer came twice");
+        assert!(answered > WORKERS + QUEUED, "{answered} answers");
+        server.join().unwrap();
+    }
+
+    /// A line longer than a host reads is read past, and the request after it is answered.
+    #[test]
+    fn a_line_too_long_is_skipped_and_the_next_request_answered() {
+        let (server, mut input, mut answers, _dir) = raw(SILENCE);
+        let writer = std::thread::spawn(move || {
+            let mut long = br#"{"jsonrpc":"2.0","id":1,"method":"nonesuch","params":[""#.to_vec();
+            long.resize(MAX_LINE + 1, b'x');
+            long.extend_from_slice(b"\"]}\n");
+            input.write_all(&long).unwrap();
+            writeln!(input, r#"{{"jsonrpc":"2.0","id":2,"method":"nonesuch"}}"#).unwrap();
+            input
+        });
+        let answer = answers.next().unwrap();
+        assert_eq!(answer["id"], 2, "{answer}");
+        drop(writer.join().unwrap());
+        server.join().unwrap();
+    }
+
+    /// A request longer than a host reads fails at once with an error of its own, and the
+    /// connection carries on answering.
+    #[test]
+    fn a_request_too_long_for_the_host_is_refused_before_it_is_sent() {
+        let w = Wired::open();
+        let text = "x".repeat(MAX_LINE);
+        let e = w
+            .client
+            .call::<Etag>("save", json!(["big.md", text, null]))
+            .unwrap_err();
+        // A request sent and never answered would be the deadline's `Remote` instead.
+        assert!(
+            matches!(&e, Error::Protocol(said) if said.contains("MiB")),
+            "{e:?}"
+        );
+        w.client
+            .call::<Vec<(String, i64)>>("tags", json!([]))
+            .unwrap();
     }
 
     /// A method the host does not have is JSON-RPC's own -32601, never read as an empty answer:

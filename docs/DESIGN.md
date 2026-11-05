@@ -113,6 +113,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - **Remote lifetime**: one `serve` per window, ending on stdin EOF or after 90 s without a ping once it has been pinged; closing stops it and cancels the forwards but leaves the master its 60 s ControlPersist — no zombies after a link that dies without closing, and a reopen within the minute skips the handshake and the passphrase.
   Its kernels end with it, as its debug sessions do.
   The close runs on a thread of its own, which the app waits for on its way out: it is a second's wait for a wedged server and an ssh run per forward, which a window closing would otherwise hold the main loop for.
+- **Remote requests are bounded on the host**: a request line holds 64 MiB at most, four times the longest note a tab opens, and the window measures each request before sending it, so one that is too long fails alone with its own error while the host reads past any such line.
+  At most 64 requests run at once and 1024 more wait in the order they came, and one beyond that is answered at once that the host is busy.
+  One writer thread takes every answer and event, so a link that stops taking bytes holds up the workers but never the reading, and pings and cancels still get through, a cancel dropping a request that has not started.
 - **Remote session**: stays on this machine, keyed by the `ssh://` address — where the windows and tabs were is a fact about the desk, not about the files.
 - **Git**: shell out to the `git` binary (Zed's choice) — least code, and hooks and credential helpers work.
   The repositories are the vault root's plus every indexed directory holding a `.git` entry — a stat per directory the index already lists, not a second walk.
