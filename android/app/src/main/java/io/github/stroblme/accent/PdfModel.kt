@@ -28,8 +28,6 @@ import io.github.stroblme.accent.ui.union
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.asCoroutineDispatcher
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 import java.util.concurrent.Executors
@@ -196,18 +194,28 @@ class PdfModel(private val session: PdfSession) : AutoCloseable {
     }
 
     companion object {
-        suspend fun open(path: String): PdfModel = withContext(Dispatchers.IO) {
-            PdfModel(PdfSession.open(path)).also { it.orClose() }
-        }
+        suspend fun open(path: String): PdfModel = acquire { PdfSession.open(path) }
 
-        suspend fun of(bytes: ByteArray): PdfModel = withContext(Dispatchers.IO) {
-            PdfModel(PdfSession.openBytes(bytes)).also { it.orClose() }
-        }
+        suspend fun of(bytes: ByteArray): PdfModel = acquire { PdfSession.openBytes(bytes) }
 
-        /** Close a loaded PDF if its waiting coroutine was cancelled before receiving it. */
-        private suspend fun PdfModel.orClose() {
-            load()
-            if (!currentCoroutineContext().isActive) close()
+        /**
+         * Open a session and read its page sizes off the main thread. Until the caller holds the
+         * model, a failure or a cancellation closes it, including one `withContext` raises as it
+         * hands the model back.
+         */
+        internal suspend fun acquire(session: () -> PdfSession): PdfModel {
+            var made: PdfModel? = null
+            try {
+                return withContext(Dispatchers.IO) {
+                    PdfModel(session()).also {
+                        made = it
+                        it.load()
+                    }
+                }
+            } catch (e: Throwable) {
+                made?.close()
+                throw e
+            }
         }
     }
 }
