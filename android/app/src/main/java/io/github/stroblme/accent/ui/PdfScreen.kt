@@ -184,11 +184,8 @@ fun LoosePdfScreen(uri: Uri) {
             fileFacts = { uriDetails(context, uri) },
         ) { model ->
             // No path on this side: the bytes go back through whatever handed them over.
-            val bytes = model.bytes() ?: return@Reader Result.failure(Exception("Nothing to write"))
-            runCatching {
-                withContext(Dispatchers.IO) {
-                    context.contentResolver.openOutputStream(uri, "wt")!!.use { it.write(bytes) }
-                }
+            model.saveThrough { bytes ->
+                context.contentResolver.openOutputStream(uri, "wt")!!.use { it.write(bytes) }
             }
         }
     }

@@ -171,7 +171,16 @@ class PdfModel(private val session: PdfSession) : AutoCloseable {
         runCatching { session.save() }.map { readHistory() }
     }
 
-    suspend fun bytes(): ByteArray? = on { runCatching { session.saveBytes() }.getOrNull() }
+    /**
+     * Write the strokes back through [write], for a document with no file here, and call them
+     * saved only once [write] has returned. On the worker, so no stroke lands between the two.
+     */
+    suspend fun saveThrough(write: (ByteArray) -> Unit): Result<Unit> = on {
+        runCatching {
+            write(session.saveBytes())
+            session.markSaved()
+        }.map { readHistory() }
+    }
 
     /**
      * Return a print copy with note [links] embedded as [rgba] highlights; leave the source unchanged.

@@ -360,13 +360,15 @@ impl PdfSession {
         })
     }
 
-    /// The whole document as bytes, for a caller that has to write it somewhere itself.
+    /// The whole document as bytes, for a caller that has to write it somewhere itself. It stays
+    /// dirty until the caller has written them and says so ([`mark_saved`](Self::mark_saved)).
     pub fn save_bytes(&self) -> Answer<Vec<u8>> {
-        self.with(|s| {
-            let bytes = s.doc.save()?;
-            s.ink.dirty = false;
-            Ok(bytes)
-        })
+        self.with(|s| Ok(s.doc.save()?))
+    }
+
+    /// The bytes [`save_bytes`](Self::save_bytes) gave are written, so nothing is left to save.
+    pub fn mark_saved(&self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).ink.dirty = false;
     }
 }
 
@@ -599,7 +601,7 @@ mod tests {
     }
 
     /// A document from another app, whose copy is already gone, hands its ink back as bytes for
-    /// that app to write.
+    /// that app to write, and is saved only once that app says it has them.
     #[test]
     fn a_document_whose_copy_is_gone_hands_its_ink_back_as_bytes() {
         if !pdf::available() {
@@ -610,6 +612,8 @@ mod tests {
         s.add_stroke(0, line(), pen(), 1.0).unwrap();
         let bytes = s.save_bytes().unwrap();
         assert!(bytes.starts_with(b"%PDF"), "not a pdf");
+        assert!(s.dirty(), "the bytes are not written yet");
+        s.mark_saved();
         assert!(!s.dirty());
         // And the bytes it gave back really carry the stroke.
         let again = opened("loose-again", bytes);
