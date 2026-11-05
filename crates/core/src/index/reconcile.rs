@@ -11,14 +11,20 @@ use crate::{markdown, path};
 use rusqlite::{OptionalExtension, params};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 /// Scan-progress interval, frequent enough to show a long walk advancing while avoiding extra
 /// reports for quick scans.
 const SCAN_TICK: Duration = Duration::from_millis(250);
+
+/// The file text a walk holds at once in each of its two stages: the files its threads read and
+/// parse or that wait to be written, and the bodies of the batch being written. That is four
+/// notes at [`MAX_TEXT`](crate::fs::MAX_TEXT), while files of a megabyte still keep every thread
+/// busy.
+const ALLOWANCE: u64 = 4 * crate::fs::MAX_TEXT;
 
 impl Index {
     /// Walk `root` and bring the index in line with it. Returns what changed.
@@ -222,14 +228,19 @@ impl Index {
         }
         let written = in_order(
             &jobs,
+            |&job| read_size(&scan.files[job]),
             |&job| read_content(&scan.files[job]),
             |contents| -> Result<()> {
-                for chunk in jobs.chunks(BATCH) {
+                let mut jobs = jobs.iter().peekable();
+                while jobs.peek().is_some() {
                     let tx = self.write_tx()?;
                     // The files whose content really changed: a touched one kept its links and
                     // its keys.
                     let mut changed = Vec::new();
-                    for (&job, content) in chunk.iter().zip(&mut *contents) {
+                    // A batch's bodies wait in memory for `write_bodies`, so a batch also ends
+                    // once they reach the allowance.
+                    let mut bodies = 0;
+                    for (&job, content) in jobs.by_ref().take(BATCH).zip(&mut *contents) {
                         // Per file rather than per batch: a batch is 500 files, and one of 500
                         // large ones measured 2.5 s on the bench vault — a Stop that waits that
                         // long is not a Stop. The transaction still commits: every file in it is
@@ -240,6 +251,7 @@ impl Index {
                         }
                         let touched = stats.touched;
                         let f = &scan.files[job];
+                        bodies += content.text.as_ref().map_or(0, String::len) as u64;
                         upsert(&tx, f, content, &mut stats)?;
                         if stats.touched == touched {
                             changed.push(&f.rel_path);
@@ -248,6 +260,9 @@ impl Index {
                             stats.changed.push(f.rel_path.clone());
                         }
                         done += 1;
+                        if bodies >= ALLOWANCE {
+                            break;
+                        }
                     }
                     write_bodies(&tx)?;
                     // What these files can have changed is resolved in the transaction that
@@ -574,52 +589,102 @@ impl Index {
 }
 
 /// Run `work` over `items` on a pool of threads, one per core, and hand `consume` the results in
-/// the order of `items` as they come in. At most two a thread wait to be consumed, so a slow
-/// consumer holds the pool back rather than piling its results up in memory; once `consume`
+/// the order of `items` as they come in. At most two a thread wait to be consumed, and together
+/// with the items being worked on they hold no more than [`ALLOWANCE`] of `size`, so a slow
+/// consumer holds the pool back rather than piling its results up in memory. Once `consume`
 /// returns, the pool stops after the items it is working on.
 fn in_order<T: Sync, R: Send, O>(
     items: &[T],
+    size: impl Fn(&T) -> u64 + Sync,
     work: impl Fn(&T) -> R + Sync,
     consume: impl FnOnce(&mut dyn Iterator<Item = R>) -> O,
 ) -> O {
     let threads = std::thread::available_parallelism()
         .map_or(1, |n| n.get())
         .min(items.len());
+    let allowance = Allowance {
+        left: Mutex::new(ALLOWANCE),
+        freed: Condvar::new(),
+    };
     // A receiver per item, queued in the order of `items` as each is taken, which its result is
     // sent to once it is worked out: the queue is the order, and its bound is the memory bound.
-    let (order, results) = mpsc::sync_channel::<mpsc::Receiver<R>>(2 * threads);
+    let (order, results) = mpsc::sync_channel::<mpsc::Receiver<(R, Held<'_>)>>(2 * threads);
     let next = Mutex::new((items.iter(), order));
     std::thread::scope(|s| {
         for _ in 0..threads {
             s.spawn(|| {
                 loop {
-                    let (item, result) = {
+                    let (item, held, result) = {
                         let mut next = next.lock().unwrap();
                         let (items, order) = &mut *next;
                         let Some(item) = items.next() else { break };
+                        // Taken in the order `consume` gives the bytes back in, so whatever this
+                        // waits for is ahead of it and is consumed without it.
+                        let held = allowance.take(size(item));
                         let (result, receiver) = mpsc::sync_channel(1);
                         // Hung up: `consume` is done.
                         if order.send(receiver).is_err() {
                             break;
                         }
-                        (item, result)
+                        (item, held, result)
                     };
-                    let _ = result.send(work(item));
+                    let _ = result.send((work(item), held));
                 }
             });
         }
         // Moved in, so that it hangs up on the pool as `consume` returns, before the scope waits
-        // for the threads. Its sender lives in `next`, so the queue never ends of itself: `take`
-        // ends it. A result that never comes is a thread's panic, raised here rather than waited
-        // for.
+        // for the threads, and gives back the bytes of what was never consumed. Its sender lives
+        // in `next`, so the queue never ends of itself: `take` ends it. A result that never comes
+        // is a thread's panic, raised here rather than waited for.
         let results = results;
-        consume(
-            &mut results
-                .iter()
-                .take(items.len())
-                .map(|r| r.recv().expect("a thread of the pool panicked")),
-        )
+        let mut receivers = results.iter().take(items.len());
+        // An item holds its bytes until the next is asked for, by when `consume` is done with
+        // it, and gives them back before that wait, which may be for them.
+        let mut last = None;
+        consume(&mut std::iter::from_fn(|| {
+            drop(last.take());
+            let (result, held) = receivers
+                .next()?
+                .recv()
+                .expect("a thread of the pool panicked");
+            last = Some(held);
+            Some(result)
+        }))
     })
+}
+
+/// What is left of [`ALLOWANCE`] for the items of one [`in_order`].
+struct Allowance {
+    left: Mutex<u64>,
+    freed: Condvar,
+}
+
+impl Allowance {
+    /// Wait for `bytes`, at most the whole allowance, and hold them until the answer is dropped.
+    fn take(&self, bytes: u64) -> Held<'_> {
+        let bytes = bytes.min(ALLOWANCE);
+        let left = self.left.lock().unwrap();
+        let mut left = self.freed.wait_while(left, |left| *left < bytes).unwrap();
+        *left -= bytes;
+        Held {
+            allowance: self,
+            bytes,
+        }
+    }
+}
+
+/// The bytes of the [`Allowance`] one item holds, given back when it is dropped.
+struct Held<'a> {
+    allowance: &'a Allowance,
+    bytes: u64,
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        *self.allowance.left.lock().unwrap() += self.bytes;
+        // One thread at most waits: the one holding the queue of items.
+        self.allowance.freed.notify_one();
+    }
 }
 
 /// What a file's content gives its rows, worked out before the transaction that writes them: the
@@ -633,6 +698,24 @@ struct Content {
     symbols: Vec<crate::code::Decl>,
     /// What `kind:` calls the file, `files.doc`.
     doc: Option<Doc>,
+}
+
+/// The bytes [`read_content`] reads of `f`, by the same rules: what it holds of a walk's
+/// [`ALLOWANCE`]. A file it leaves unread holds none, however large.
+fn read_size(f: &walk::FileMeta) -> u64 {
+    let read = match f.kind {
+        FileKind::Markdown => true,
+        FileKind::Other => {
+            path::is_diagram(&f.rel_path)
+                || path::is_notebook(&f.rel_path)
+                || (f.size <= MAX_INDEXED_BODY && !path::is_binary(&f.rel_path))
+        }
+        _ => false,
+    };
+    match read {
+        true => f.size.min(crate::fs::MAX_TEXT),
+        false => 0,
+    }
 }
 
 /// Read, hash and parse one scanned entry for [`upsert`]. Use the editor's text reader so indexed
@@ -1164,6 +1247,64 @@ mod tests {
             assert_eq!(title.as_deref(), Some(format!("Note {i}").as_str()));
             assert!(body.as_ref().unwrap().starts_with(&format!("# Note {i}\n")));
         }
+    }
+
+    /// Near-limit files share one allowance from their read until they are consumed, however
+    /// many threads run, while small files between them still run side by side. The results
+    /// still come in the order of the items, and a consumer that stops early is not kept waiting.
+    #[test]
+    fn files_being_read_or_waiting_stay_within_the_allowance() {
+        use std::sync::atomic::AtomicU64;
+        let sizes: Vec<u64> = (0..300)
+            .map(|i| match i % 3 {
+                0 => crate::fs::MAX_TEXT,
+                _ => 1024,
+            })
+            .collect();
+        let (held, peak) = (AtomicU64::new(0), AtomicU64::new(0));
+        let (working, side_by_side) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        let work = |&size: &u64| {
+            peak.fetch_max(
+                held.fetch_add(size, Ordering::SeqCst) + size,
+                Ordering::SeqCst,
+            );
+            side_by_side.fetch_max(working.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(1));
+            working.fetch_sub(1, Ordering::SeqCst);
+            size
+        };
+        // A consumer slower than the pool, which a queue bounded by count alone would fill with
+        // near-limit files.
+        let got: Vec<u64> = in_order(
+            &sizes,
+            |&size| size,
+            work,
+            |results| {
+                results
+                    .inspect(|&size| {
+                        std::thread::sleep(Duration::from_millis(1));
+                        held.fetch_sub(size, Ordering::SeqCst);
+                    })
+                    .collect()
+            },
+        );
+        assert_eq!(got, sizes, "in the order of the items");
+        let peak = peak.load(Ordering::SeqCst);
+        assert!(peak <= ALLOWANCE, "{} MiB held", peak >> 20);
+        if std::thread::available_parallelism().map_or(1, |n| n.get()) > 1 {
+            assert!(
+                side_by_side.load(Ordering::SeqCst) > 1,
+                "small files ran alone"
+            );
+        }
+
+        let first: Vec<u64> = in_order(
+            &sizes,
+            |&size| size,
+            |&size| size,
+            |results| results.take(5).collect(),
+        );
+        assert_eq!(first, sizes[..5]);
     }
 
     /// Two processes share one index (the app and `accent-cli mcp`), so a row this walk found
