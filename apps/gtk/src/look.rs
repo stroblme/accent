@@ -9,13 +9,14 @@
 
 use std::cell::{Cell, OnceCell};
 use std::collections::HashMap;
+use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use accent_core::recolour::{self, Verdict};
-use accent_core::{animation, orientation};
+use accent_core::{animation, dimensions, orientation};
 use gtk::prelude::*;
 use gtk::subclass::prelude::ObjectSubclassIsExt;
 use gtk::{gdk, gdk_pixbuf, gio, glib};
@@ -282,9 +283,32 @@ pub fn verdict(path: &Path) -> Option<Verdict> {
         .map(|(_, v)| *v)
 }
 
+/// How many bytes a raster may decode to, at four a pixel as recolouring holds one: 1 GB, so a
+/// 200-megapixel phone camera's photo still fits under it.
+const MAX_DECODED: u64 = 1_000_000_000;
+
+/// Refuse the raster in `file` whose header declares more pixels than [`MAX_DECODED`] holds,
+/// before a decoder allocates them, as a file that does not read is refused. One whose header
+/// `dimensions` does not read is left to the decoder.
+fn allowed(mut file: impl Read + Seek) -> Result<(), glib::Error> {
+    match dimensions::read(&mut file) {
+        Some((w, h)) if u64::from(w) * u64::from(h) * 4 > MAX_DECODED => Err(glib::Error::new(
+            gdk::TextureError::TooLarge,
+            &format!("{w} × {h} pixels is too large to show"),
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// [`allowed`] for the file at `path`, leaving one that does not open to the decoder to report.
+fn allowed_file(path: &Path) -> Result<(), glib::Error> {
+    std::fs::File::open(path).map_or(Ok(()), allowed)
+}
+
 /// `path` decoded by GDK and turned the way up its EXIF says, which GDK's decoders ignore. One
 /// too large to hold twice is left as it is, as the recolouring leaves it.
 pub(crate) fn decode(path: &Path) -> Result<gdk::Texture, glib::Error> {
+    allowed_file(path)?;
     let texture = gdk::Texture::from_filename(path)?;
     let tag = match extension(path).as_str() {
         "tif" | "tiff" => after_libtiff(tag(path)),
@@ -371,9 +395,10 @@ const FRAMES: i64 = 16_000_000;
 
 /// The frames of the animation at `path` as gdk-pixbuf plays it, each recoloured as a still
 /// would be, judged by the first; `None` for a still, for a file gdk-pixbuf plays no animation of
-/// (glycin's loaders read no APNG) and for one past [`FRAMES`]. Reads the file, so on a worker.
+/// (glycin's loaders read no APNG) and for one past [`FRAMES`] or [`MAX_DECODED`], which
+/// [`decode`] then refuses. Reads the file, so on a worker.
 fn frames(path: &Path, look: Look, inverted: bool) -> Option<Vec<Frame>> {
-    if !animated(path) {
+    if !animated(path) || allowed_file(path).is_err() {
         return None;
     }
     let animation = gdk_pixbuf::PixbufAnimation::from_file(path).ok()?;
@@ -456,6 +481,7 @@ pub fn show_bytes(
         };
         return Ok((shown, filtered.is_some()));
     }
+    allowed(std::io::Cursor::new(bytes))?;
     let original = gdk::Texture::from_bytes(&glib::Bytes::from(bytes))?;
     let document = look.asks(false) && measure(&original).document;
     let recoloured = look
@@ -897,6 +923,37 @@ pub(crate) mod tests {
         let (plain, inverted) = (shades(&plain), shades(&inverted));
         assert!(inverted[0] != plain[0] && inverted[1] != plain[1] && inverted[0] != inverted[1]);
         assert!(still.frames.is_empty());
+    }
+
+    /// A raster whose header claims more than [`MAX_DECODED`] is refused before GDK is handed
+    /// it, file or bytes, and the error is the one a file that does not read gets: the tab says
+    /// why it cannot open it, the preview shows the missing-image sign. GDK would map 14.4 GB
+    /// for this file before finding it holds no pixels, and says so in words of its own, so the
+    /// message tells which of the two refused it.
+    #[test]
+    fn a_raster_past_the_allowance_is_refused_before_it_is_decoded() {
+        // A PNG of 60000 × 60000 RGBA whose image data is an empty zlib stream.
+        let png = [
+            &b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR"[..],
+            &60000u32.to_be_bytes(),
+            &60000u32.to_be_bytes(),
+            b"\x08\x06\0\0\0\x80\xd2\x75\x42",
+            b"\0\0\0\x08IDAT\x78\x9c\x03\0\0\0\0\x01\x48\x06\x89\xd2",
+            b"\0\0\0\0IEND\xae\x42\x60\x82",
+        ]
+        .concat();
+        let path = std::env::temp_dir().join(format!("accent-{}-huge.png", std::process::id()));
+        std::fs::write(&path, &png).unwrap();
+        let shown = show(&path, None, Look::paper(), false, 1, 1.0).err();
+        let decoded = decode(&path).err();
+        std::fs::remove_file(&path).unwrap();
+
+        let bytes = show_bytes(&png, false, Look::paper(), 1, 1.0).err();
+        for e in [shown, decoded, bytes] {
+            let e = e.expect("refused");
+            assert!(e.matches(gdk::TextureError::TooLarge), "{e}");
+            assert_eq!(e.message(), "60000 × 60000 pixels is too large to show");
+        }
     }
 
     /// A TIFF comes out of [`decode`] upright whatever its tag, GDK having done part of the turn

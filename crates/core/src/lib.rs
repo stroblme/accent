@@ -9,6 +9,7 @@ pub mod config;
 pub mod conflict;
 pub mod csv;
 pub mod diff;
+pub mod dimensions;
 mod error;
 pub mod fs;
 pub mod fuzzy;
