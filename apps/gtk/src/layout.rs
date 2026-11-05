@@ -550,7 +550,7 @@ impl App {
     /// Keep the previews showing `tab` at its caret: its preview tab, while that is on screen, and
     /// the presented one.
     pub fn sync_scroll(&self, tab: &Rc<Tab>) {
-        if let Some(rendered) = self.rendered_of(tab) {
+        if let Some(rendered) = self.rendered_of(&tab.page) {
             rendered.scroll_to_line(tab.cursor_line());
         }
         if !self.shows_preview() {
@@ -642,7 +642,7 @@ impl App {
         let beside = |pane: &Pane| {
             self.rendered_in(pane)
                 .zip(self.active())
-                .is_some_and(|(rendered, tab)| rendered.is_of(&tab))
+                .is_some_and(|(rendered, tab)| rendered.is_of(&tab.page))
         };
         for pane in self.panes.borrow().iter() {
             if !Rc::ptr_eq(pane, &active) && !beside(pane) {

@@ -71,8 +71,9 @@ pub struct Context {
     pub python: bool,
     /// The shell in front can be shared with MCP: `Some(shared)`.
     pub shared: Option<bool>,
-    /// The tab is a terminal editor's.
+    /// The tab is a terminal editor's, and on a note, which Toggle Preview renders.
     pub editor: bool,
+    pub editor_note: bool,
 }
 
 /// Actions another sync enables, on state of its own that changes with no tab change: SyncTeX's
@@ -200,7 +201,7 @@ pub fn applies(action: &str, cx: &Context) -> bool {
         "win.toggle-task" => note,
         "win.toggle-wrap" => text || front == Some(Diff),
         "win.fold" | "win.unfold" | "win.fold-all" | "win.unfold-all" | "win.minimap" => text,
-        "win.view-mode" => note || preview,
+        "win.view-mode" => note || preview || cx.editor_note,
         "win.insert-template" => note && vault,
         "win.insert-sketch" => markdown && cx.file == Some(File::Vault),
         "win.zoom-in" | "win.zoom-out" | "win.zoom-reset" => {

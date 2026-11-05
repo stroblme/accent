@@ -73,6 +73,8 @@ pub struct Term {
     sharing: Cell<bool>,
     /// The user's command the shell runs, if it runs one rather than a prompt.
     run: Option<Run>,
+    /// A terminal editor's file as last saved, which its preview tab and the side panes read.
+    pub saved: crate::editors::Saved,
 }
 
 /// A focused shell's live working directory and machine for Git discovery.
@@ -459,6 +461,7 @@ pub fn open(
         share_vault,
         sharing: Cell::new(false),
         run,
+        saved: Default::default(),
     });
     install_links(&term);
     take_copies(&term);

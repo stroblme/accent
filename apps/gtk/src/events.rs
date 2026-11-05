@@ -61,6 +61,8 @@ impl App {
     pub(crate) fn changed_on_disk(self: &Rc<Self>, rel: &str) {
         self.reshow_preview_image(rel);
         self.details_stale(rel);
+        // A terminal editor's tab is keyed as a shell, not by the file it edits.
+        self.saved_changed(rel);
         let Some(doc) = self.doc_for(rel) else {
             return;
         };
@@ -447,8 +449,8 @@ impl App {
                 // no stat is answered. So every document open across the drop looks at its file
                 // again, as a watcher's news makes it (a text reads only a file that moved), and a
                 // PDF drawn on meanwhile sends what it holds instead. The session's are read fresh.
-                for doc in self.docs() {
-                    self.changed_on_disk(&doc.key());
+                for file in self.docs().iter().filter_map(Doc::file) {
+                    self.changed_on_disk(&file);
                 }
                 self.restore_session();
                 self.sync_active();

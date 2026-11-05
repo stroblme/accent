@@ -503,6 +503,7 @@ drills: gtk-bench xvfb
 		ACCENT_BENCH_EDITOR=keys ACCENT_FAKE_EDITOR=keys timeout 90 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/editor" && \
 		ACCENT_BENCH_EDITOR=accent timeout 60 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/editor" && \
 		ACCENT_BENCH_EDITOR=line timeout 60 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/editor" && \
+		ACCENT_BENCH_EDITOR=panes timeout 60 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/editor" && \
 		ACCENT_BENCH_EDITOR=hold timeout 60 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/editor" && \
 		ACCENT_BENCH_EDITOR=back timeout 60 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/editor" && \
 		{ fuser -k "$$TMPDIR/accent-$$(id -u)/hold-3.lock" >/dev/null 2>&1; sleep 1; } && \

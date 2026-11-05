@@ -665,12 +665,12 @@ impl App {
         if let Some(Doc::Terminal(term)) = self.doc_for_page(page) {
             term.kill();
         }
-        // A file's breakpoints outlive its tab, for when it is opened again; its preview tab goes
-        // with it.
+        // A file's breakpoints outlive its tab, for when it is opened again; a note's preview tab
+        // goes with it, a terminal editor's note's too.
         if let Some(Doc::Text(tab)) = self.doc_for_page(page) {
             self.debugger.closing(&tab);
-            self.close_rendered(&tab);
         }
+        self.close_rendered(page);
         // A file's places stay for Back to open it again, letting go of the marks in its
         // buffer; a shell's and a comparison's go, there being nothing to open again.
         match self.doc_for_page(page) {

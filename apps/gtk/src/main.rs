@@ -769,12 +769,10 @@ impl App {
         };
         let doc = self.side_doc();
         let key = doc.as_ref().map(Doc::key).unwrap_or_default();
-        let file = doc.as_ref().is_some_and(|doc| !doc.is_transient());
-        let shell = matches!(doc, Some(Doc::Terminal(_)));
-        let note = doc
-            .as_ref()
-            .and_then(Doc::tab)
-            .is_some_and(|tab| tab.flavour().is_note());
+        // A terminal editor's tab stands for its file, whose links it shows as a text tab does.
+        let file = doc.as_ref().is_some_and(|doc| doc.file().is_some());
+        let shell = !file && matches!(doc, Some(Doc::Terminal(_)));
+        let note = doc.as_ref().and_then(rendered::Note::of).is_some();
         sidebar.sync_info(&key, file, shell, note);
     }
 
@@ -879,6 +877,10 @@ impl App {
             }
             return;
         }
+        // A terminal editor's is its file's, as last saved.
+        if let Some(term) = doc.terminal().filter(|term| term.file().is_some()) {
+            return self.outline_saved(sidebar, term);
+        }
         let Some(tab) = doc.tab() else {
             // A shell and a comparison are no file, and take the pane's own "Open a file…".
             let none = match doc {
@@ -919,7 +921,7 @@ impl App {
                 self,
                 #[weak]
                 tab,
-                move |at| app.outline_jump(&tab, at)
+                move |at| app.outline_jump(&rendered::Note::Tab(tab), at)
             ),
             None,
         );

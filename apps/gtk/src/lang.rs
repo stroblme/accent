@@ -576,6 +576,23 @@ pub fn index_outline(tab: &Rc<Tab>) {
     });
 }
 
+/// The Outline rows of `text`, `rel` as it is saved, which no tab holds: a note's headings, or a
+/// code file's declarations as the index has them, as [`index_outline`] gives a code tab without a
+/// language server. Blocks.
+pub(crate) fn outline_of(vault: Option<&Vault>, rel: &str, text: &str) -> Vec<(u8, String, Pos)> {
+    let symbols = match (crate::doc::kind_of(rel), vault) {
+        (crate::doc::Kind::Note, _) => accent_api::language::note_outline(rel, text).0,
+        (_, Some(vault)) if !crate::doc::is_loose_key(rel) => {
+            vault.settle_index();
+            let found = vault.file_symbols(rel);
+            found.map_or_else(|_| Vec::new(), |decls| declarations(rel, &decls, text))
+        }
+        _ => Vec::new(),
+    };
+    let rows = flatten(&symbols).into_iter();
+    rows.map(|row| (row.depth, row.name, row.at)).collect()
+}
+
 /// Notify the provider on leaving the document for expensive save-related work.
 /// Vault-wide ghost-index refresh belongs here rather than every autosave.
 pub fn settle(tab: &Rc<Tab>) {

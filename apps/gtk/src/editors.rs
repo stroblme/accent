@@ -4,13 +4,14 @@
 
 use crate::doc::Kind;
 use crate::open::{Opened, Reveal};
+use crate::rendered::Note;
 use crate::terminal::{self, Term};
-use crate::{App, dialogs, doc, fileops};
-use accent_api::ssh;
+use crate::{App, dialogs, doc, fileops, sidebar};
+use accent_api::{Pos, ssh};
 use accent_core::config::{Editor, Edits};
 use gtk::prelude::*;
-use gtk::{gdk, glib};
-use std::cell::RefCell;
+use gtk::{gdk, gio, glib};
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -308,6 +309,26 @@ pub fn installed(host: Option<&Host>, then: impl FnOnce(&[Found]) + 'static) {
     }
 }
 
+/// A terminal editor's file as it was last saved: what its preview tab and the Outline pane read
+/// in place of accent's buffer, read again whenever the watcher says the file changed.
+#[derive(Default)]
+pub struct Saved {
+    text: RefCell<String>,
+    rows: RefCell<Vec<(u8, String, Pos)>>,
+    /// Whether a read has landed, which an empty outline needs to say what it is.
+    read: Cell<bool>,
+    /// The reads asked, so only the last one's answer lands.
+    asked: Cell<u32>,
+    /// The monitor on a file outside the vault, which nothing else watches.
+    monitor: RefCell<Option<gio::FileMonitor>>,
+}
+
+impl Saved {
+    pub fn text(&self) -> String {
+        self.text.borrow().clone()
+    }
+}
+
 impl App {
     /// Open `key` in the terminal editor picked, in a terminal tab of its own, and say whether
     /// it did. It stays accent's where Accent is picked, where Open in Accent's Editor named it
@@ -412,8 +433,98 @@ impl App {
         self.mark_loose(&term.page, &file);
         keep_on_key(self, &term);
         self.watch_folder_of(&file);
+        *term.saved.monitor.borrow_mut() = self.watch_loose(&file, Path::new(&file));
+        self.read_saved(&term);
         self.select_new_page(&term.page, how);
         term
+    }
+
+    /// Read `term`'s file as it is saved, and outline it, off the main thread, then show both
+    /// where they are shown: in its preview tab, and in the side panes while they speak for it.
+    fn read_saved(self: &Rc<Self>, term: &Rc<Term>) {
+        let Some(key) = term.file() else {
+            return;
+        };
+        let asked = term.saved.asked.get().wrapping_add(1);
+        term.saved.asked.set(asked);
+        let vault = self.vault().cloned();
+        let path = match doc::is_loose_key(&key) {
+            true => PathBuf::from(&key),
+            false => self.root().join(&key),
+        };
+        let (app, term) = (Rc::downgrade(self), Rc::downgrade(term));
+        glib::spawn_future_local(async move {
+            let read = crate::work::off_thread("reading a terminal editor's file", move || {
+                let read = match &vault {
+                    Some(vault) if !doc::is_loose_key(&key) => vault.read_text(&key),
+                    _ => accent_core::fs::read_text(&path).map_err(Into::into),
+                };
+                // One too large or gone is outlined as empty.
+                let text = match read {
+                    Ok(accent_core::fs::Read::Text(read)) => read.text,
+                    _ => String::new(),
+                };
+                let rows = crate::lang::outline_of(vault.as_deref(), &key, &text);
+                (text, rows)
+            });
+            let (Some((text, rows)), Some(app), Some(term)) =
+                (read.await, app.upgrade(), term.upgrade())
+            else {
+                return;
+            };
+            if term.saved.asked.get() != asked {
+                return;
+            }
+            *term.saved.text.borrow_mut() = text;
+            *term.saved.rows.borrow_mut() = rows;
+            term.saved.read.set(true);
+            if let Some(rendered) = app.rendered_of(&term.page) {
+                app.render_rendered(&rendered, false);
+            }
+            let side = app.side_doc().and_then(|doc| doc.terminal().cloned());
+            if side.is_some_and(|side| Rc::ptr_eq(&side, &term)) {
+                app.sync_outline();
+                app.refresh_references();
+            }
+        });
+    }
+
+    /// `rel` changed on disk: the terminal editors' tabs on it read it again.
+    pub(crate) fn saved_changed(self: &Rc<Self>, rel: &str) {
+        let terms = self.terminals().into_iter();
+        for term in terms.filter(|term| term.file().as_deref() == Some(rel)) {
+            self.read_saved(&term);
+        }
+    }
+
+    /// Fill the Outline pane with `term`'s file as last saved: a note's headings, or a code file's
+    /// declarations. A row shows its place in the note's preview tab while that is in front, and
+    /// leaves the editor's cursor where the editor has it.
+    pub(crate) fn outline_saved(self: &Rc<Self>, sidebar: &sidebar::Sidebar, term: &Rc<Term>) {
+        let rows = term.saved.rows.borrow().clone();
+        if rows.is_empty() {
+            let note = term
+                .file()
+                .is_some_and(|file| doc::kind_of(&file) == Kind::Note);
+            let (title, body) = match (term.saved.read.get(), note) {
+                (false, _) => ("Opening…", "Reading the file."),
+                (true, true) => ("No Headings", "Add headings to build an outline."),
+                (true, false) => ("No Symbols", "No symbols found in this file."),
+            };
+            return sidebar.set_outline(Some(&sidebar::outline_note(title, body)));
+        }
+        let rows: Vec<_> = rows
+            .into_iter()
+            .map(|(level, text, at)| (sidebar::Line::new(level, text), at))
+            .collect();
+        let jump = glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            #[weak]
+            term,
+            move |at| app.outline_jump(&Note::Editor(term), at)
+        );
+        sidebar.set_outline_rows(&term.key(), &rows, jump, None);
     }
 
     /// Where a terminal editor on `key` runs: at the vault root, on the host for a remote vault's

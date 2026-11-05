@@ -390,8 +390,9 @@ fn zoom_preview(app: &Rc<App>, rel: &str) {
             println!("bench preview_look zoom no_tab");
             return bench_quit(&app);
         };
-        let rendered =
-            (app.rendered_of(&tab)).unwrap_or_else(|| app.open_rendered(&tab, Opened::Kept));
+        let rendered = (app.rendered_of(&tab.page)).unwrap_or_else(|| {
+            app.open_rendered(&crate::rendered::Note::Tab(tab.clone()), Opened::Kept)
+        });
         app.reveal_page(&rendered.page);
         for zoom in [1.0, 2.0] {
             app.set_zoom(zoom);

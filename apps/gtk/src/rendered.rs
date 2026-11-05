@@ -1,5 +1,6 @@
 //! A note's rendered preview in a tab of its own, right of the note in its pane (`Ctrl+M`), which
-//! a drag takes into another pane to read the two side by side.
+//! a drag takes into another pane to read the two side by side. The note is a text tab's, or a
+//! terminal editor's, read as it was last saved.
 //!
 //! The tab holds a [`Preview`] only while it is on screen and a while after
 //! ([`crate::preview::idle_for`]), so a preview tab behind another holds no page. It closes with
@@ -7,6 +8,7 @@
 
 use super::*;
 use crate::preview::Preview;
+use crate::terminal::Term;
 use std::cell::Ref;
 use std::rc::Weak;
 
@@ -31,8 +33,93 @@ pub fn note_of(key: &str) -> Option<&str> {
 /// asked for.
 pub fn note_for(doc: Doc) -> Option<Doc> {
     match doc {
-        Doc::Rendered(rendered) => rendered.note().map(Doc::Text),
+        Doc::Rendered(rendered) => rendered.note().map(|note| note.doc()),
         doc => Some(doc),
+    }
+}
+
+/// What a preview tab renders: a note in accent's own tab, or one a terminal editor has open, as
+/// last saved ([`crate::editors::Saved`]).
+#[derive(Clone)]
+pub enum Note {
+    Tab(Rc<Tab>),
+    Editor(Rc<Term>),
+}
+
+impl Note {
+    /// The note `doc` holds, which Toggle Preview renders.
+    pub fn of(doc: &Doc) -> Option<Note> {
+        match doc {
+            Doc::Text(tab) if tab.flavour().is_note() => Some(Note::Tab(tab.clone())),
+            Doc::Terminal(term)
+                if term
+                    .file()
+                    .is_some_and(|f| doc::kind_of(&f) == doc::Kind::Note) =>
+            {
+                Some(Note::Editor(term.clone()))
+            }
+            _ => None,
+        }
+    }
+
+    /// The note's own tab.
+    pub fn page(&self) -> &adw::TabPage {
+        match self {
+            Note::Tab(tab) => &tab.page,
+            Note::Editor(term) => &term.page,
+        }
+    }
+
+    pub fn rel(&self) -> String {
+        match self {
+            Note::Tab(tab) => tab.rel(),
+            Note::Editor(term) => term.file().unwrap_or_default(),
+        }
+    }
+
+    fn text(&self) -> String {
+        match self {
+            Note::Tab(tab) => tab.text(),
+            Note::Editor(term) => term.saved.text(),
+        }
+    }
+
+    /// The line accent's caret is on; a terminal editor keeps its own to itself.
+    fn caret(&self) -> Option<u32> {
+        match self {
+            Note::Tab(tab) => Some(tab.cursor_line()),
+            Note::Editor(_) => None,
+        }
+    }
+
+    pub fn doc(&self) -> Doc {
+        match self {
+            Note::Tab(tab) => Doc::Text(tab.clone()),
+            Note::Editor(term) => Doc::Terminal(term.clone()),
+        }
+    }
+
+    fn downgrade(&self) -> Held {
+        match self {
+            Note::Tab(tab) => Held::Tab(Rc::downgrade(tab)),
+            Note::Editor(term) => Held::Editor(Rc::downgrade(term)),
+        }
+    }
+}
+
+/// A [`Note`], held as long as its own tab is open.
+#[derive(Clone)]
+enum Held {
+    Tab(Weak<Tab>),
+    Editor(Weak<Term>),
+}
+
+impl Held {
+    fn upgrade(&self) -> Option<Note> {
+        match self {
+            Held::Tab(tab) => tab.upgrade().map(Note::Tab),
+            Held::Editor(term) => term.upgrade().map(Note::Editor),
+        }
     }
 }
 
@@ -44,7 +131,7 @@ pub fn beside(note: usize, pinned: usize) -> usize {
 
 pub struct Rendered {
     pub page: adw::TabPage,
-    note: Weak<Tab>,
+    note: Held,
     /// The handler on the note's tab that names this one after it.
     named: Option<glib::SignalHandlerId>,
     /// The page's child, which holds the preview while there is one.
@@ -62,12 +149,13 @@ impl Rendered {
     }
 
     /// The note it renders, open as long as this tab is.
-    pub fn note(&self) -> Option<Rc<Tab>> {
+    pub fn note(&self) -> Option<Note> {
         self.note.upgrade()
     }
 
-    pub fn is_of(&self, note: &Rc<Tab>) -> bool {
-        std::ptr::eq(self.note.as_ptr(), Rc::as_ptr(note))
+    /// Whether it renders the note whose own tab is `page`.
+    pub fn is_of(&self, page: &adw::TabPage) -> bool {
+        self.note().is_some_and(|note| note.page() == page)
     }
 
     pub fn preview(&self) -> Ref<'_, Option<Preview>> {
@@ -108,7 +196,7 @@ impl Rendered {
 impl Drop for Rendered {
     fn drop(&mut self) {
         if let (Some(note), Some(named)) = (self.note.upgrade(), self.named.take()) {
-            note.page.disconnect(named);
+            note.page().disconnect(named);
         }
     }
 }
@@ -118,15 +206,17 @@ impl App {
     /// and from a preview tab back to its note, the keyboard going along either way.
     pub(crate) fn toggle_preview(self: &Rc<Self>) {
         let page = match self.active_doc() {
-            Some(Doc::Text(tab)) if tab.flavour().is_note() => match self.rendered_of(&tab) {
-                Some(rendered) => rendered.page.clone(),
-                None => self.open_rendered(&tab, Opened::Kept).page.clone(),
-            },
             Some(Doc::Rendered(rendered)) => match rendered.note() {
-                Some(note) => note.page.clone(),
+                Some(note) => note.page().clone(),
                 None => return,
             },
-            _ => return,
+            doc => match doc.as_ref().and_then(Note::of) {
+                Some(note) => match self.rendered_of(note.page()) {
+                    Some(rendered) => rendered.page.clone(),
+                    None => self.open_rendered(&note, Opened::Kept).page.clone(),
+                },
+                None => return,
+            },
         };
         self.reveal_page(&page);
         if let Some(pane) = self.pane_of(&page) {
@@ -137,12 +227,15 @@ impl App {
     /// Open `note`'s preview tab right of the note, keeping the note, which a click down the
     /// Files tree would otherwise replace and take its preview with it. A restored one goes where
     /// the session put it ([`App::tabs_for`]).
-    pub(crate) fn open_rendered(self: &Rc<Self>, note: &Rc<Tab>, how: Opened) -> Rc<Rendered> {
+    pub(crate) fn open_rendered(self: &Rc<Self>, note: &Note, how: Opened) -> Rc<Rendered> {
         let frame = adw::Bin::new();
-        let page = match self.pane_of(&note.page).filter(|_| how != Opened::Restored) {
+        let page = match self
+            .pane_of(note.page())
+            .filter(|_| how != Opened::Restored)
+        {
             Some(pane) => {
                 let pages = pane.pages();
-                let at = pages.iter().position(|p| p == &note.page).unwrap_or(0);
+                let at = pages.iter().position(|p| p == note.page()).unwrap_or(0);
                 let pinned = pages.iter().filter(|p| self.is_pinned(p)).count();
                 pane.tabs.insert(&frame, beside(at, pinned) as i32)
             }
@@ -151,22 +244,26 @@ impl App {
         page.set_icon(Some(&gio::ThemedIcon::new(ICON)));
         // The note's file name, which its own title adds an unsaved dot and a comparison to;
         // asked again whenever that changes, a rename included.
-        let title = |note: &Tab, page: &adw::TabPage| page.set_title(doc::file_name(&note.rel()));
-        title(note, &page);
-        let named = note.page.connect_title_notify(glib::clone!(
+        page.set_title(doc::file_name(&note.rel()));
+        let held = note.downgrade();
+        let named = note.page().connect_title_notify(glib::clone!(
             #[weak]
             page,
-            #[weak]
-            note,
-            move |_| title(&note, &page)
+            #[strong]
+            held,
+            move |_| {
+                if let Some(note) = held.upgrade() {
+                    page.set_title(doc::file_name(&note.rel()));
+                }
+            }
         ));
-        note.page
+        note.page()
             .bind_property("tooltip", &page, "tooltip")
             .sync_create()
             .build();
         let rendered = Rc::new(Rendered {
             page,
-            note: Rc::downgrade(note),
+            note: note.downgrade(),
             named: Some(named),
             frame,
             preview: RefCell::new(None),
@@ -192,7 +289,7 @@ impl App {
         self.docs.borrow_mut().push(Doc::Rendered(rendered.clone()));
         self.select_new_page(&rendered.page, how);
         self.mark_opened(&rendered.page, how);
-        self.promote(&note.page);
+        self.promote(note.page());
         self.save_session_soon();
         rendered
     }
@@ -211,15 +308,19 @@ impl App {
             .is_some_and(|side| Rc::ptr_eq(&side, tab))
     }
 
-    /// Show `tab`'s Outline row at `at`: scrolled to in its preview while that is in front, else
-    /// at the caret in the note.
-    pub(crate) fn outline_jump(&self, tab: &Rc<Tab>, at: accent_api::Pos) {
-        match self.rendered_in(&self.pane()).filter(|r| r.is_of(tab)) {
-            Some(rendered) => rendered.scroll_to_line(at.line + 1),
-            None => {
+    /// Show `note`'s Outline row at `at`: scrolled to in its preview while that is in front, else
+    /// at the caret in a text tab. A terminal editor's cursor is the editor's.
+    pub(crate) fn outline_jump(&self, note: &Note, at: accent_api::Pos) {
+        let preview = self
+            .rendered_in(&self.pane())
+            .filter(|r| r.is_of(note.page()));
+        match (preview, note) {
+            (Some(rendered), _) => rendered.scroll_to_line(at.line + 1),
+            (None, Note::Tab(tab)) => {
                 self.mark();
                 tab.goto_pos(at)
             }
+            (None, Note::Editor(_)) => {}
         }
     }
 
@@ -232,8 +333,8 @@ impl App {
             .collect()
     }
 
-    /// `note`'s preview tab, if it has one open.
-    pub(crate) fn rendered_of(&self, note: &Rc<Tab>) -> Option<Rc<Rendered>> {
+    /// The preview tab of the note whose own tab is `note`, if it has one open.
+    pub(crate) fn rendered_of(&self, note: &adw::TabPage) -> Option<Rc<Rendered>> {
         self.rendereds().into_iter().find(|r| r.is_of(note))
     }
 
@@ -254,9 +355,9 @@ impl App {
         }
     }
 
-    /// Close `note`'s preview tab with the note. Picked to show in the note's place as that
-    /// closes, it hands its place on to the tab used before either.
-    pub(crate) fn close_rendered(&self, note: &Rc<Tab>) {
+    /// Close the preview tab of the note whose own tab `note` is closing. Picked to show in the
+    /// note's place as that closes, it hands its place on to the tab used before either.
+    pub(crate) fn close_rendered(&self, note: &adw::TabPage) {
         let Some(rendered) = self.rendered_of(note) else {
             return;
         };
@@ -267,7 +368,7 @@ impl App {
             && let Some(next) = pane
                 .recent()
                 .into_iter()
-                .find(|p| p != &rendered.page && p != &note.page)
+                .find(|p| p != &rendered.page && p != note)
         {
             pane.tabs.set_selected_page(&next);
         }
@@ -307,8 +408,8 @@ impl App {
             return;
         }
         preview.render(&note.rel(), &note.text());
-        if follow {
-            preview.scroll_to_line(note.cursor_line());
+        if let (true, Some(line)) = (follow, note.caret()) {
+            preview.scroll_to_line(line);
         }
     }
 
@@ -316,7 +417,7 @@ impl App {
     /// note is on screen too; one changed behind it, as a sync does, leaves the page where it is
     /// being read.
     pub(crate) fn queue_rendered(self: &Rc<Self>, note: &Rc<Tab>) {
-        let Some(rendered) = self.rendered_of(note) else {
+        let Some(rendered) = self.rendered_of(&note.page) else {
             return;
         };
         let weak = Rc::downgrade(&rendered);
@@ -325,7 +426,8 @@ impl App {
             self,
             move || {
                 if let Some(rendered) = weak.upgrade() {
-                    let follow = rendered.note().is_some_and(|n| n.view.is_mapped());
+                    let follow =
+                        matches!(rendered.note(), Some(Note::Tab(note)) if note.view.is_mapped());
                     app.render_rendered(&rendered, follow);
                 }
             }

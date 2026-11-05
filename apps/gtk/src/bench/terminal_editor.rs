@@ -16,9 +16,12 @@ use vte4::TerminalExt as _;
 /// opens the palette over it; a key keeps a preview. `=accent`: Open in Accent's Editor on a
 /// preview ends its editor unasked, a kept tab's would ask (an `AdwAlertDialog` takes no answer
 /// under Xvfb). `=hold`, then `=back` twice on one scratch state, the holder ended between: the
-/// editor's tab comes back attached to the editor, then with the editor started again. `=line`: a
+/// editor's tab comes back attached to the editor, then with the editor started again, and its
+/// preview tab with it. `=line`: a
 /// search hit and Go to Symbol open the editor at their line, and a hit in a file it has open
 /// brings its tab to the front without starting it again; a custom command gets its file and line.
+/// `=panes`: a note in the editor has a preview tab, an Outline and References of its own, which
+/// follow a save made while the editor runs, pictured into `$TMPDIR`.
 pub(super) fn bench_editor(app: &Rc<App>, step: &str) {
     let (app, step) = (app.clone(), step.to_string());
     glib::spawn_future_local(async move {
@@ -29,6 +32,7 @@ pub(super) fn bench_editor(app: &Rc<App>, step: &str) {
             "keys" => keys(&app).await,
             "accent" => accent(&app).await,
             "line" => line(&app).await,
+            "panes" => panes(&app).await,
             "hold" => return hold(&app).await,
             "back" => return back(&app).await,
             _ => println!("bench editor unknown step {step}"),
@@ -341,6 +345,83 @@ async fn line(app: &Rc<App>) {
     until(|| app.terminals().iter().all(|t| t.ended()), 10_000).await;
 }
 
+async fn panes(app: &Rc<App>) {
+    let root = app.root();
+    let before = "# Panes\n\n## First\n\nBefore the save.\n";
+    std::fs::write(root.join("panes.md"), before).unwrap();
+    std::fs::write(root.join("linker.md"), "# Linker\n\nSee [[panes]].\n").unwrap();
+    until(|| app.reconciled.get(), 30_000).await;
+    pick(app, Editor::Nano);
+    app.show_pane("outline");
+    app.open_path("panes.md");
+    let (Some(term), Some(sidebar)) = (started(app, "panes.md").await, app.sidebar.get()) else {
+        return println!("bench editor panes started=false");
+    };
+    let view_mode = app
+        .window
+        .lookup_action("view-mode")
+        .is_some_and(|action| action.is_enabled());
+    app.toggle_preview();
+    let shown = || {
+        let rendered = app.rendered_of(&term.page)?;
+        let preview = rendered.preview();
+        let buffer = preview.as_ref()?.buffer();
+        Some(
+            buffer
+                .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                .to_string(),
+        )
+    };
+    let says = |text: &str| shown().is_some_and(|shown| shown.contains(text));
+    let outline = || sidebar.outline_lines(None);
+    until(|| says("Before") && outline().len() == 2, 10_000).await;
+    let front = app.active_doc().is_some_and(|doc| doc.rendered().is_some());
+    println!(
+        "bench editor panes view_mode={view_mode} preview_front={front} before={} outline={:?}",
+        says("Before"),
+        outline()
+    );
+    // A save, as the editor makes it, while the preview tab is in front.
+    let after = format!(
+        "{}\n## Saved\n\nAfter the save.\n",
+        before.replace("Before", "Still")
+    );
+    std::fs::write(root.join("panes.md"), after).unwrap();
+    let saved = until(|| says("After") && outline().len() == 3, 10_000).await;
+    println!(
+        "bench editor panes saved={saved} before={} outline={:?}",
+        says("Before"),
+        outline()
+    );
+    shoot(app, "editor-panes-saved.png");
+    app.reveal_page(&term.page);
+    sidebar.show_section("references");
+    let links = || sidebar.info_state().0;
+    until(|| links().contains("Links:open(1)"), 10_000).await;
+    let section = links()
+        .split(' ')
+        .find(|s| s.starts_with("Links"))
+        .map(str::to_string);
+    println!("bench editor panes references={section:?}");
+    shoot(app, "editor-panes-links.png");
+    term.view.feed_child(b"0\n");
+    let closed = until(|| app.terminals().is_empty(), 10_000).await;
+    println!(
+        "bench editor panes closed={closed} previews={}",
+        app.rendereds().len()
+    );
+}
+
+/// The window as it is, pictured into `$TMPDIR` as `name`.
+fn shoot(app: &App, name: &str) {
+    let dir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
+    bench_pump();
+    super::diagram::shoot(
+        app.window.upcast_ref(),
+        &std::path::Path::new(&dir).join(name),
+    );
+}
+
 /// How many times a fake editor has started under this `HOME`.
 fn starts() -> usize {
     let starts = std::fs::read_to_string(glib::home_dir().join("editor-starts"));
@@ -373,15 +454,32 @@ async fn hold(app: &Rc<App>) {
     until(|| app.reconciled.get(), 30_000).await;
     pick(app, Editor::Nano);
     app.open_path("held.md");
-    let started = started(app, "held.md").await.is_some();
-    println!("bench editor hold started={started} starts={}", starts());
+    let started = started(app, "held.md").await;
+    // Its preview tab, which the session puts back beside it. The editor's own stays in front: a
+    // shell put back behind another tab attaches only once it is shown.
+    if let Some(term) = &started {
+        app.toggle_preview();
+        until(|| app.rendered_of(&term.page).is_some(), 5_000).await;
+        app.reveal_page(&term.page);
+    }
+    println!(
+        "bench editor hold started={} starts={}",
+        started.is_some(),
+        starts()
+    );
     quit(app);
 }
 
 async fn back(app: &Rc<App>) {
     let term = started(app, "held.md").await;
     let title = term.as_ref().map(|term| term.page.title().to_string());
-    println!("bench editor back title={title:?} starts={}", starts());
+    let preview = term
+        .as_ref()
+        .is_some_and(|t| app.rendered_of(&t.page).is_some());
+    println!(
+        "bench editor back title={title:?} starts={} preview={preview}",
+        starts()
+    );
     quit(app);
 }
 

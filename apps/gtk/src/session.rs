@@ -866,6 +866,7 @@ impl App {
             // A shell is no read: it is back in its pane at once.
             if terminal::is_key(key) {
                 self.restore_shell(key, session.terminals.get(key));
+                self.restore_editor_preview(&restore, key);
                 continue;
             }
             // A note's preview tab opens once its note has, below.
@@ -909,7 +910,7 @@ impl App {
             // as a merge while git still lists it unmerged.
             self.with_tab(key, Opened::Restored, "restore", move |app, tab| {
                 if previewed {
-                    app.open_rendered(tab, Opened::Restored);
+                    app.open_rendered(&rendered::Note::Tab(tab.clone()), Opened::Restored);
                 }
                 asked.landed.set(true);
                 app.put_back(&asked.restore);
@@ -1033,6 +1034,20 @@ impl App {
             }
         }
         restore.selecting.set(false);
+    }
+
+    /// Put back the preview tab of the note the terminal editor `key` was put back on, where the
+    /// session had one: a text tab's opens once its note has, a terminal editor's at once.
+    fn restore_editor_preview(self: &Rc<Self>, restore: &Restore, key: &str) {
+        let Some(term) = self.doc_for(key).and_then(|doc| doc.terminal().cloned()) else {
+            return;
+        };
+        let Some(preview) = term.file().map(|file| rendered::key_of(&file)) else {
+            return;
+        };
+        if restore.placed.iter().any(|p| p.tabs.contains(&preview)) {
+            self.open_rendered(&rendered::Note::Editor(term), Opened::Restored);
+        }
     }
 
     /// Whether the tab `key` is still on its way: its read, or its note's for a preview tab.

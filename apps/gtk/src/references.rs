@@ -28,16 +28,21 @@ impl App {
         // Whatever code asks, the answer is links; a code tab's says which once it lands.
         let title = (!code).then_some("Links");
         // A diff, a shell and a file from outside the vault are nothing the index links to, and
-        // only a dependency's server has references in one.
+        // only a dependency's server has references in one. A terminal editor's tab speaks for
+        // its file.
+        let in_vault = |doc: &Doc| doc.file().is_some_and(|file| !doc::is_loose_key(&file));
         let (Some(doc), Some(vault)) = (
-            doc.filter(|doc| !doc.is_transient() && (!doc.is_loose() || is_dependency(doc))),
+            doc.filter(|doc| in_vault(doc) || is_dependency(doc)),
             self.vault().cloned(),
         ) else {
             sidebar.show_links_direction(false);
             return sidebar.set_references(title, Some(&[]), &[], empty);
         };
-        let (key, tab) = (doc.key(), doc.tab().cloned());
-        let note = tab.as_ref().is_some_and(|tab| tab.flavour().is_note());
+        let (key, tab) = (doc.file().unwrap_or_default(), doc.tab().cloned());
+        let note = match &tab {
+            Some(tab) => tab.flavour().is_note(),
+            None => doc::kind_of(&key) == Kind::Note,
+        };
         // Only a note's links go both ways: the index holds no other file's way out.
         let links = note && !doc::is_loose_key(&key);
         sidebar.show_links_direction(links);
@@ -58,6 +63,7 @@ impl App {
         let handle = glib::spawn_future_local(async move {
             glib::timeout_future(REFERENCES).await;
             let mut found = Vec::new();
+            let asked = tab.is_some();
             if let (Some(tab), Some(pos)) = (tab, pos) {
                 lang::flush(tab.clone()).await;
                 found = crate::work::or_empty(
@@ -65,8 +71,9 @@ impl App {
                     vault.references(&language_key, pos).await,
                 );
             }
-            // A note's answer is its backlinks already, and nothing links to a dependency.
-            let backlinks = found.is_empty() && !note && !doc::is_loose_key(&key);
+            // A note's answer is its backlinks already, but for one no tab of accent's holds, and
+            // nothing links to a dependency.
+            let backlinks = found.is_empty() && !(note && asked) && !doc::is_loose_key(&key);
             if backlinks {
                 let asked = key.clone();
                 found =
@@ -78,7 +85,7 @@ impl App {
             let Some(app) = weak.upgrade() else { return };
             // The user may have moved on while we were asking; a stale answer must not replace
             // the rows the current tab put there.
-            if app.side_doc().map(|doc| doc.key()).as_deref() != Some(&key) {
+            if app.side_doc().and_then(|doc| doc.file()).as_deref() != Some(&key) {
                 return;
             }
             if let Some(sidebar) = app.sidebar.get() {
@@ -109,7 +116,7 @@ impl App {
                 .unwrap_or_default();
             let Some(app) = weak.upgrade() else { return };
             // As for the links coming in: the reader may have moved on meanwhile.
-            if app.side_doc().map(|doc| doc.key()).as_deref() != Some(&key) {
+            if app.side_doc().and_then(|doc| doc.file()).as_deref() != Some(&key) {
                 return;
             }
             if let Some(sidebar) = app.sidebar.get() {
@@ -458,7 +465,7 @@ fn link_rows(found: &[OutLink]) -> (Vec<String>, Vec<String>) {
 fn references_empty(doc: Option<&Doc>) -> &'static str {
     match doc {
         Some(doc) if is_dependency(doc) => "No references to this symbol.",
-        Some(doc) if doc.is_transient() || doc.is_loose() => {
+        Some(doc) if doc.file().is_none_or(|file| doc::is_loose_key(&file)) => {
             "Open a file from this vault to see what links to it."
         }
         Some(Doc::Text(tab)) if !tab.flavour().is_note() => {

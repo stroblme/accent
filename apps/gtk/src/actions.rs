@@ -98,6 +98,10 @@ impl App {
                 .and_then(Doc::terminal)
                 .and_then(|t| t.share_state()),
             editor: (doc.as_ref().and_then(Doc::terminal)).is_some_and(|t| t.edits().is_some()),
+            editor_note: matches!(
+                doc.as_ref().and_then(rendered::Note::of),
+                Some(rendered::Note::Editor(_))
+            ),
         }
     }
 

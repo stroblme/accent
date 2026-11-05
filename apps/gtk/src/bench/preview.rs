@@ -17,9 +17,9 @@ pub(super) async fn beside(app: &Rc<App>) {
     let Some(tab) = app.active() else {
         return;
     };
-    let rendered = app
-        .rendered_of(&tab)
-        .unwrap_or_else(|| app.open_rendered(&tab, Opened::Kept));
+    let rendered = app.rendered_of(&tab.page).unwrap_or_else(|| {
+        app.open_rendered(&crate::rendered::Note::Tab(tab.clone()), Opened::Kept)
+    });
     if let Some(pane) = app.pane_of(&tab.page)
         && pane.has(&rendered.page)
     {

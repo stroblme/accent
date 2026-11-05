@@ -29,7 +29,7 @@ pub(super) fn bench_toggle(app: &Rc<App>, rels: &str) {
                 .map_or(String::new(), |s| s.to_string_lossy().to_string());
             format!("key ctrl+e; sleep 0.5; type {stem}; sleep 0.8; key Return; sleep 0.8")
         };
-        let rendered = || app.tab_for(&a).and_then(|tab| app.rendered_of(&tab));
+        let rendered = || app.tab_for(&a).and_then(|tab| app.rendered_of(&tab.page));
         let (note, preview) = (a.as_str(), crate::rendered::key_of(&a));
         let mut right = true;
         let mut press = async |case: &str, keys: &str, want: &str| {
