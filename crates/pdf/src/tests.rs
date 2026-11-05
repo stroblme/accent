@@ -204,6 +204,46 @@ fn an_xref_stream_finds_objects_in_object_streams() {
     assert_eq!(note(&pdf, 3), b"first");
 }
 
+/// Object streams of twice the cache's budget, a few kilobytes each on disk and a mebibyte
+/// decoded: every page reads, in order and back again, while the cache stays within its budget
+/// and close to full, and one stream past the budget on its own still reads.
+#[test]
+fn the_object_stream_cache_keeps_to_its_budget() {
+    let budget = crate::objstm::BUDGET;
+    let pad = " ".repeat(1 << 20);
+    let n = (budget >> 20) as u32 * 2;
+    let pages: Vec<u32> = (3..3 + n).collect();
+    let mut b = Build::new();
+    b.obj(1, CATALOG);
+    let kids: String = pages.iter().map(|num| format!("{num} 0 R ")).collect();
+    b.obj(2, &format!("<</Type/Pages/Kids[{kids}]/Count {n}>>"));
+    let mut rows = Vec::new();
+    for &num in &pages {
+        let padded = format!("{}{pad}", page(&num.to_string()));
+        rows.extend(b.objstm(num + n, &[(num, &padded)]));
+    }
+    let big = 3 + 2 * n;
+    let past = format!("<</Note(big)>>{}", " ".repeat(budget));
+    rows.extend(b.objstm(big + 1, &[(big, &past)]));
+    let at = b.xref_stream(big + 2, &rows, "/Root 1 0 R");
+    assert!(b.out.len() < 256 << 10);
+    let pdf = open(b.end(at)).unwrap();
+    let cached = || pdf.objstms.lock().unwrap().bytes;
+
+    assert_eq!(
+        pdf.pages().unwrap(),
+        pages.iter().map(|&num| r(num)).collect::<Vec<_>>()
+    );
+    for &num in pages.iter().rev().chain(&pages) {
+        assert_eq!(note(&pdf, num), num.to_string().as_bytes());
+        assert!(cached() <= budget);
+    }
+    assert!(cached() > budget / 2);
+    assert_eq!(note(&pdf, big), b"big");
+    assert_eq!(note(&pdf, 3), b"3");
+    assert!(cached() <= budget);
+}
+
 #[test]
 fn a_hybrid_file_reads_its_hidden_xref_stream() {
     let mut b = Build::new();

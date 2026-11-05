@@ -1,15 +1,12 @@
 //! A PDF read lazily: the xref at open, each object when it is asked for.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use crate::crypt::Crypt;
-use crate::objstm::ObjStm;
+use crate::objstm::{Cache, ObjStm};
 use crate::xref::{self, Entry, Xref};
 use crate::{Dict, Error, Object, Ref, Result, Source, Stream};
-
-/// Object streams kept decoded, of the most recently read.
-const OBJSTMS: usize = 64;
 
 /// How deep one lookup may lead into others: a `/Length` held in an object stream, whose own
 /// `/Length` is another object. Past it a file is taken to loop.
@@ -18,7 +15,7 @@ const DEPTH: usize = 16;
 pub struct Pdf {
     pub(crate) src: Arc<dyn Source>,
     pub(crate) xref: Xref,
-    objstms: Mutex<HashMap<u32, Arc<ObjStm>>>,
+    pub(crate) objstms: Mutex<Cache>,
     /// The security handler of an encrypted file, and the `/Encrypt` dictionary's own number,
     /// which it leaves alone.
     pub(crate) crypt: Option<Crypt>,
@@ -307,19 +304,15 @@ impl Pdf {
     /// Object stream `num`, decoded once and kept while it is among the last read.
     fn objstm(&self, num: u32, depth: usize) -> Result<Arc<ObjStm>> {
         let cache = || self.objstms.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(stm) = cache().get(&num) {
-            return Ok(stm.clone());
+        if let Some(stm) = cache().get(num) {
+            return Ok(stm);
         }
         let Object::Stream(stream) = self.get_in(Ref { num, generation: 0 }, depth + 1)? else {
             return Err(Error::Broken(format!("object stream {num} is no stream")));
         };
         let data = self.decode_in(&stream, depth + 1)?;
         let stm = Arc::new(ObjStm::new(&stream.dict, data)?);
-        let mut cache = cache();
-        if cache.len() >= OBJSTMS {
-            cache.clear();
-        }
-        cache.insert(num, stm.clone());
+        cache().insert(num, stm.clone());
         Ok(stm)
     }
 }
