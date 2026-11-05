@@ -390,6 +390,11 @@ impl App {
             glib::clone!(
                 #[weak(rename_to = app)]
                 self,
+                move |query: &str| app.show_search(query)
+            ),
+            glib::clone!(
+                #[weak(rename_to = app)]
+                self,
                 move |key: &str| app.invert_image(key)
             ),
             search,

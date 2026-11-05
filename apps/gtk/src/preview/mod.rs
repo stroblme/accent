@@ -117,6 +117,7 @@ struct Page {
     pub figures: figure::Figures,
     on_open: Rc<dyn Fn(&str)>,
     on_tag: Box<dyn Fn(&str)>,
+    on_search: Box<dyn Fn(&str)>,
     /// What answers the page's saved searches, and their blocks on show (`saved`).
     search: SavedSearch,
     saved: RefCell<Vec<Rc<saved::Block>>>,
@@ -160,14 +161,16 @@ pub struct Preview {
 
 impl Preview {
     /// A preview resolving assets through `resolve` and following links through `on_open`, tags
-    /// through `on_tag` and Invert Image Colours through `on_invert`; `search` answers its saved
-    /// searches.
+    /// through `on_tag`, a link to a search's results through `on_search` and Invert Image
+    /// Colours through `on_invert`; `search` answers its saved searches.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         resolve: impl Fn(&str) -> Option<(String, PathBuf)> + Send + Sync + 'static,
         inverted: Keys,
         web: Keys,
         on_open: impl Fn(&str) + 'static,
         on_tag: impl Fn(&str) + 'static,
+        on_search: impl Fn(&str) + 'static,
         on_invert: impl Fn(&str) + 'static,
         search: SavedSearch,
     ) -> Preview {
@@ -205,6 +208,7 @@ impl Preview {
             figures,
             on_open: Rc::new(on_open),
             on_tag: Box::new(on_tag),
+            on_search: Box::new(on_search),
             search,
             saved: RefCell::default(),
             saved_dirty: Cell::new(false),
@@ -787,7 +791,8 @@ impl Page {
     }
 
     /// Where `href` goes, by `markdown::click` as on Android: a vault file or wikilink to
-    /// `on_open`, a tag to `on_tag`, a place on the page scrolled to, the web to the system.
+    /// `on_open`, a tag to `on_tag`, a search to `on_search`, a place on the page scrolled to,
+    /// the web to the system.
     fn route(&self, href: &Href) -> (Click, String) {
         match href {
             Href::Open(target) => (Click::Open(target.clone()), target.clone()),
@@ -807,8 +812,7 @@ impl Page {
         match click {
             Click::Open(target) => (self.on_open)(&target),
             Click::Tag(name) => (self.on_tag)(&name),
-            // The desktop answers a saved search on the page itself, never through a link.
-            Click::Search(query) => tracing::debug!("preview: a link to a search: {query}"),
+            Click::Search(query) => (self.on_search)(&query),
             Click::Scroll => {
                 if let Some((_, id)) = uri.split_once('#') {
                     self.scroll_to_id(&markdown::percent_decode(id));
@@ -1021,8 +1025,8 @@ impl Preview {
         self.page.buffer.slice(&start, &end, true).to_string()
     }
 
-    /// Every link's text and where a click on it goes: `open`, `tag`, `scroll`, `leave` or
-    /// `nowhere`, and the address.
+    /// Every link's text and where a click on it goes: `open`, `tag`, `search`, `scroll`, `leave`
+    /// or `nowhere`, and the address.
     pub fn links(&self) -> Vec<(String, String)> {
         let page = &self.page;
         let shown = page.shown.borrow();
@@ -1049,7 +1053,15 @@ impl Preview {
 
     /// Follow the first link to `tag`'s notes, as a click on it would; whether there was one.
     pub fn follow_tag(&self, tag: &str) -> bool {
-        let href = Href::Tag(tag.to_string());
+        self.follow_first(Href::Tag(tag.to_string()))
+    }
+
+    /// Follow the first link to the address `dest`, as a click on it would; whether there was one.
+    pub fn follow_url(&self, dest: &str) -> bool {
+        self.follow_first(Href::Url(dest.to_string()))
+    }
+
+    fn follow_first(&self, href: Href) -> bool {
         let found = (self.page.shown.borrow().iter())
             .any(|s| s.facts.links.iter().any(|(_, h)| *h == href));
         if found {

@@ -216,7 +216,7 @@ use user_commands::bench_commands;
 /// - `ACCENT_BENCH_PREVIEW_LOOK=<rel_note>`: preview image themes and requests.
 /// - `ACCENT_BENCH_ANIMATION=1`: an animated GIF playing in the preview and its tab, and its
 ///   timer stopped where hidden (`animation::bench_animation`).
-/// - `ACCENT_BENCH_PREVIEW=render`: the preview's page of a note it writes, against `preview.expected`; `saved`: a saved search's rows as the vault changes (a scratch vault); `time:<rel>`: its render, patch and scroll
+/// - `ACCENT_BENCH_PREVIEW=render`: the preview's page of a note it writes, against `preview.expected`; `saved`: a saved search's rows as the vault changes and a link to a search's results followed into the Search pane (a scratch vault); `time:<rel>`: its render, patch and scroll
 ///   costs (`native::bench_preview`).
 /// - `ACCENT_BENCH_TERM=1`: shell titles and saved terminal sessions.
 ///   `--terminal` uses a vault-less window; a vault launch opens a shell tab.

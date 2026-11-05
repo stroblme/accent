@@ -90,13 +90,16 @@ Their side
 
 /// `ACCENT_BENCH_PREVIEW=saved`: a note holding a saved search for a tag, its rows printed as
 /// the vault first answers, after another note with the tag is written, and after the block's
-/// query is made one that cannot be read; the note itself is never one of its rows. Writes its
-/// notes: a scratch vault.
+/// query is made one that cannot be read; the note itself is never one of its rows. Between the
+/// last two, its link to a search's results, as Android writes Show Results, is followed: the
+/// Search pane's query and rows. Writes its notes: a scratch vault.
 async fn saved(app: &Rc<App>) {
     const HOST: &str = "saved-drill.md";
+    const LINK: &str = "accent://search/%23drillsaved%20-path%3Afirst";
     let write = |rel: &str, text: &str| std::fs::write(app.root().join(rel), text);
-    let host = "# Saved\n#drillsaved\n\n```search\n#drillsaved\n```\n";
-    if let Err(e) = write("first.md", "# First\n#drillsaved one\n").and(write(HOST, host)) {
+    let host =
+        format!("# Saved\n#drillsaved\n\n```search\n#drillsaved\n```\n\n[Results]({LINK})\n");
+    if let Err(e) = write("first.md", "# First\n#drillsaved one\n").and(write(HOST, &host)) {
         return println!("bench preview saved wrote=false {e}");
     }
     // Once the index has both.
@@ -124,6 +127,17 @@ async fn saved(app: &Rc<App>) {
     }
     glib::timeout_future(Duration::from_millis(3500)).await;
     print("written");
+    let followed = (rendered.preview().as_ref()).is_some_and(|p| p.follow_url(LINK));
+    glib::timeout_future(Duration::from_millis(1500)).await;
+    if let Some(sidebar) = app.sidebar.get() {
+        let query = (sidebar.search_boxes()).map_or(String::new(), |[q, _]| q.text().into());
+        let (_, rows, _) = sidebar.search_state();
+        println!(
+            "bench preview saved step=link followed={followed} showing={} query={query:?} \
+             rows={rows:?}",
+            sidebar.is_showing("search")
+        );
+    }
     // A kind misspelt, typed over the tag, which says why in place of the rows.
     if let Some(tab) = app.active() {
         let text = tab.text();

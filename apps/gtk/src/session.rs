@@ -298,6 +298,15 @@ impl App {
         }
     }
 
+    /// The Search pane with `query` in its box, which runs it: a link to a search's results
+    /// followed in the preview, as Android writes one for a saved search's Show Results.
+    pub(crate) fn show_search(&self, query: &str) {
+        if let Some(sidebar) = self.sidebar.get() {
+            sidebar.set_search_text(query);
+        }
+        self.show_pane("search");
+    }
+
     /// Open the file a declaration is in, as Go to File does, with the caret on its name.
     pub(crate) fn goto_symbol(self: &Rc<Self>, symbol: &SymbolName) {
         self.mark();

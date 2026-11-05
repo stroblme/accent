@@ -426,8 +426,9 @@ smoke: gtk-bench vault xvfb
 # linked in as `nano` and `kak` ahead of the system's on the login shell's PATH.
 #
 # `ACCENT_BENCH_PREVIEW=saved` writes a note holding a saved search for a tag and a second note
-# with the tag, then a third, and makes the query one that cannot be read, held against
-# `saved.expected`: the rows each time, the note itself never among them.
+# with the tag, then a third, follows the note's link to a search's results into the Search pane
+# and makes the query one that cannot be read, held against `saved.expected`: the rows each time,
+# the note itself never among them, and the Search pane's query and rows.
 #
 # `ACCENT_BENCH_TEMPLATE=open` makes a note from a template with two stops as a window's first tab,
 # whose caret has to be on screen: a snippet pushed into a view before its first size left it past
