@@ -149,11 +149,13 @@ impl Index {
     }
 
     /// `(source rel_path, target as written, byte offset in the source)` for every link that
-    /// resolves to nothing.
+    /// resolves to nothing, but those of a file the index holds only because it was opened
+    /// ([`keep_opened`](Self::keep_opened)).
     pub fn unresolved_links(&self) -> Result<Vec<(String, String, i64)>> {
         let mut st = self.conn.prepare_cached(
             "SELECT s.rel_path, l.target, l.byte_start FROM links l JOIN files s ON s.id = l.src_file
              WHERE l.resolved_file IS NULL AND l.kind <> 3
+               AND s.rel_path NOT IN (SELECT rel_path FROM opened)
              ORDER BY s.rel_path, l.byte_start",
         )?;
         let rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
@@ -186,11 +188,14 @@ impl Index {
     /// without regard to case. Targets are already vault-relative, so equivalent wiki and
     /// markdown links yield one path.
     ///
-    /// Exclude folder targets (including local anchors) and non-note files.
+    /// Exclude folder targets (including local anchors) and non-note files, and the links of a
+    /// file the index holds only because it was opened: the vault's notes miss them, not the
+    /// opened file in a folder the walk leaves out.
     pub fn missing_notes(&self) -> Result<Vec<String>> {
         let mut st = self.conn.prepare_cached(
-            "SELECT DISTINCT l.target FROM links l
+            "SELECT DISTINCT l.target FROM links l JOIN files s ON s.id = l.src_file
              WHERE l.resolved_file IS NULL AND l.kind <> 3 AND l.target <> ''
+               AND s.rel_path NOT IN (SELECT rel_path FROM opened)
                AND NOT EXISTS (SELECT 1 FROM files f WHERE f.rel_path = l.target)
              ORDER BY l.target",
         )?;
@@ -411,6 +416,21 @@ mod tests {
             ]
         );
         assert_eq!(out[1].kind, crate::markdown::LinkKind::Markdown);
+    }
+
+    /// An opened note the walk leaves out misses no note for the vault, and no link of it dangles.
+    #[test]
+    fn an_opened_file_the_walk_leaves_out_misses_no_note() {
+        let (vault, db) = fixture();
+        fs::write(vault.path().join(".gitignore"), "build/\n").unwrap();
+        fs::create_dir(vault.path().join("build")).unwrap();
+        fs::write(vault.path().join("build/out.md"), "[[Gone]]\n").unwrap();
+        let mut ix = open(&db);
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+        ix.keep_opened(vault.path(), "build/out.md").unwrap();
+        assert!(ix.is_opened("build/out.md").unwrap());
+        assert!(ix.missing_notes().unwrap().is_empty());
+        assert!(ix.unresolved_links().unwrap().is_empty());
     }
 
     /// A note linked to before it is written is offered once, by the path New File would make,
