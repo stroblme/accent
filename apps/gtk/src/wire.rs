@@ -1483,8 +1483,8 @@ fn marks_under(tree: &tree::Tree, row: Option<&tree::Row>) -> Vec<(String, bool)
 }
 
 /// The menu for `row`: a dependency tree's row gets only what reads it, and its top folder what
-/// moves the tree whole; a marked row the marked set's, any other row and the vault root (`None`)
-/// the whole menu.
+/// moves the tree whole; a marked row the marked set's, only Move to… and Move to Trash where the
+/// set holds such a tree; any other row and the vault root (`None`) the whole menu.
 fn row_menu(
     ops: &Rc<fileops::Ops>,
     tree: &tree::Tree,
@@ -1495,10 +1495,11 @@ fn row_menu(
     // pointing at a single file, and forgets the marks the way a plain click does.
     let marked = marks_under(tree, row.as_ref());
     match row {
-        Some(row) if row.dependency => {
+        Some(row) if row.dependency && marked.is_empty() => {
             let top = tree.dependency_top(row);
             fileops::dependency_menu(ops, tree.widget(), (&row.rel, row.is_dir()), top, anchor)
         }
+        _ if tree.marks_a_dependency() => fileops::whole_menu(ops, tree.widget(), &marked, anchor),
         _ => fileops::context_menu(ops, tree.widget(), clicked(row), &marked, anchor),
     }
 }

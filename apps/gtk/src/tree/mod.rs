@@ -163,6 +163,23 @@ impl Tree {
             .collect()
     }
 
+    /// Whether the marked set holds a dependency tree, marked whole through its top folder: read
+    /// off the folder's listing, which stays cached while the folder above it is shut.
+    pub fn marks_a_dependency(&self) -> bool {
+        let cache = self.cache.borrow();
+        let dependency = |rel: &str| {
+            let store = cache.get(accent_core::path::parent_dir(rel))?;
+            (0..store.n_items())
+                .filter_map(|i| store.item(i).as_ref().and_then(decode))
+                .find(|row| row.rel == rel)
+                .map(|row| row.dependency)
+        };
+        self.marked
+            .borrow()
+            .iter()
+            .any(|(rel, is_dir)| *is_dir && dependency(rel) == Some(true))
+    }
+
     /// Whether `rel` is left out of search, git's ignores and `[search] exclude` together: what
     /// the index marks ignored and the corpus leaves out.
     pub fn is_ignored(&self, rel: &str) -> bool {
@@ -177,8 +194,7 @@ impl Tree {
     /// What a Ctrl+click on the row `rel` does: mark it, or take the mark off it again.
     #[cfg(feature = "bench")]
     pub fn toggle_mark(&self, rel: &str) {
-        let row = find_row(&self.model, rel).and_then(|row| row.item());
-        let Some(row) = row.as_ref().and_then(decode) else {
+        let Some(row) = find_row(&self.model, rel).and_then(|row| markable(&row)) else {
             return;
         };
         let mut marked = self.marked.borrow_mut();
@@ -583,6 +599,11 @@ fn ancestors(rel: &str) -> impl Iterator<Item = &str> {
 
 /// The row at a position in the list, or `None` over the blank area below the last one.
 fn row_at(view: &gtk::ListView, x: f64, y: f64) -> Option<Row> {
+    list_row_at(view, x, y)?.item().as_ref().and_then(decode)
+}
+
+/// The list's row at a position, which knows the rows above it.
+fn list_row_at(view: &gtk::ListView, x: f64, y: f64) -> Option<gtk::TreeListRow> {
     let mut widget = view.pick(x, y, gtk::PickFlags::DEFAULT)?;
     // `pick` lands on the label or the icon; the row identity hangs off the expander above it.
     let expander = loop {
@@ -591,23 +612,38 @@ fn row_at(view: &gtk::ListView, x: f64, y: f64) -> Option<Row> {
             Err(w) => widget = w.parent()?,
         }
     };
-    expander.list_row()?.item().as_ref().and_then(decode)
+    expander.list_row()
+}
+
+/// What `row` stands for in marking: a dependency tree is marked only whole, through its top
+/// folder, so a row inside one stands for that folder, and any other row for itself.
+fn markable(row: &gtk::TreeListRow) -> Option<Row> {
+    let mut row = row.clone();
+    let mut found = decode(&row.item()?)?;
+    while found.dependency {
+        let Some(parent) = row.parent() else { break };
+        match parent.item().as_ref().and_then(decode) {
+            Some(above) if above.dependency => (row, found) = (parent, above),
+            _ => break,
+        }
+    }
+    Some(found)
 }
 
 /// See [`Tree::start`].
 type Start = Rc<RefCell<Option<String>>>;
 
 /// Shift anchor: last non-Shift clicked row still listed, otherwise the
-/// open-file row. Dependency rows cannot be marked.
+/// open-file row, either standing for its dependency tree's top folder ([`markable`]).
 fn start_of(
     model: &gtk::TreeListModel,
     anchor: Option<String>,
     open: Option<String>,
 ) -> Option<Row> {
-    [anchor, open].into_iter().flatten().find_map(|rel| {
-        let row = find_row(model, &rel)?.item().as_ref().and_then(decode)?;
-        (!row.dependency).then_some(row)
-    })
+    [anchor, open]
+        .into_iter()
+        .flatten()
+        .find_map(|rel| markable(&find_row(model, &rel)?))
 }
 
 /// Whether `rel` is marked itself or inside a marked folder.
@@ -655,29 +691,28 @@ fn toggle(marks: &mut Marks, row: &Row, cache: &RefCell<HashMap<String, gio::Lis
     }
 }
 
-/// Current listed children of `dir`, excluding unmarkable dependency trees.
+/// Current listed children of `dir`. [`toggle`] never lists inside a dependency tree, so a
+/// dependency row here is a tree's top folder, which marks whole.
 fn listed(cache: &RefCell<HashMap<String, gio::ListStore>>, dir: &str) -> Vec<(String, bool)> {
     let Some(store) = cache.borrow().get(dir).cloned() else {
         return Vec::new();
     };
     (0..store.n_items())
         .filter_map(|i| store.item(i).as_ref().and_then(decode))
-        .filter(|row| !row.dependency)
         .map(|row| (row.rel.clone(), row.is_dir()))
         .collect()
 }
 
 /// Mark inclusive tree-order range `from..to`, replacing or adding.
-/// Collapsed folders in the range represent their whole contents.
+/// Collapsed folders in the range represent their whole contents, and a dependency tree it
+/// reaches into is marked whole ([`markable`]).
 fn mark_range(marks: &mut Marks, model: &gtk::TreeListModel, from: &str, to: &str, add: bool) {
     let at = |rel| find_row(model, rel).map(|row| row.position());
     let (Some(a), Some(b)) = (at(from), at(to)) else {
         return;
     };
     let rows: Vec<(String, bool)> = (a.min(b)..=a.max(b))
-        .filter_map(|i| model.item(i).and_downcast::<gtk::TreeListRow>()?.item())
-        .filter_map(|item| decode(&item))
-        .filter(|row| !row.dependency)
+        .filter_map(|i| markable(&model.item(i).and_downcast::<gtk::TreeListRow>()?))
         .map(|row| (row.rel.clone(), row.is_dir()))
         .collect();
     if !add {
@@ -1203,13 +1238,13 @@ fn drag_source(
     source.connect_prepare(move |source, _, _| {
         let expander = source.widget()?.downcast::<gtk::TreeExpander>().ok()?;
         let row = expander.list_row()?.item().as_ref().and_then(decode)?;
-        // Nothing is dragged out of somebody else's dependency tree: it is opened to look
-        // at, never edited from here.
-        if row.dependency {
+        // Nothing is dragged out of somebody else's dependency tree, which is opened to look
+        // at, never edited from here, but the tree whole, marked through its top folder.
+        let marks = marked.borrow();
+        if row.dependency && !is_marked(&marks, &row.rel) {
             return None;
         }
         // A marked row carries the whole set, unless the set is that row alone.
-        let marks = marked.borrow();
         if is_marked(&marks, &row.rel) && !(marks.len() == 1 && marks.contains_key(&row.rel)) {
             let set: Vec<&str> = marks.keys().map(String::as_str).collect();
             let set = gtk::StringList::new(&set);
@@ -1316,8 +1351,8 @@ fn bind_row(
 /// the row; the list's own click is claimed from it, the tree doing all a click does. Ctrl
 /// toggles marks; Shift replaces with the anchor range, or adds with Ctrl. Context
 /// menus, Delete and drags act on the set. Capture claiming prevents opening or toggling
-/// rows; plain clicks and blank-area clicks clear marks. Dependency rows cannot be marked
-/// because batch operations must not edit them.
+/// rows; plain clicks and blank-area clicks clear marks. A row inside a dependency tree marks
+/// the tree's top folder ([`markable`]), as batch operations must not edit inside it.
 fn marking(
     model: &gtk::TreeListModel,
     cache: &Rc<RefCell<HashMap<String, gio::ListStore>>>,
@@ -1367,7 +1402,7 @@ fn marking(
                 }
                 return;
             }
-            let row = row_at(&view, x, y).filter(|row| !row.dependency);
+            let row = list_row_at(&view, x, y).and_then(|row| markable(&row));
             let mut marks = marked.borrow_mut();
             match row {
                 Some(row) if shift => {

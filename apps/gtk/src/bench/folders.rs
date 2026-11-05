@@ -100,8 +100,62 @@ pub(super) fn bench_menu(app: &Rc<App>, rel: &str) {
         glib::timeout_future(Duration::from_millis(200)).await;
         println!("bench menu_marked_cleared {:?}", marked_rows(tree.view()));
         bench_range(tree, &rel).await;
+        bench_dependency_range(tree).await;
         bench_quit(&app);
     });
+}
+
+/// A Shift+click's range from the first dependency tree's top folder on screen to the row after
+/// the tree, then, with the folder open, one from that row up to the first row inside it, and a
+/// Ctrl+click on that row: each marks the tree whole through its top folder, never a row inside.
+async fn bench_dependency_range(tree: &tree::Tree) {
+    let model = tree.model();
+    let listed = || -> Vec<String> {
+        (0..model.n_items())
+            .filter_map(|i| model.item(i).and_downcast::<gtk::TreeListRow>())
+            .filter_map(|row| tree::decode(&row.item()?))
+            .map(|row| row.rel)
+            .collect()
+    };
+    let top = (0..model.n_items())
+        .filter_map(|i| model.item(i).and_downcast::<gtk::TreeListRow>())
+        .filter_map(|row| tree::decode(&row.item()?))
+        .find(|row| tree.dependency_top(row));
+    let Some(top) = top.map(|row| row.rel) else {
+        return println!("bench menu_dependency_range none");
+    };
+    let inside = format!("{top}/");
+    let after = |rows: Vec<String>| {
+        rows.into_iter()
+            .skip_while(|rel| *rel != top)
+            .find(|rel| *rel != top && !rel.starts_with(&inside))
+    };
+    let Some(below) = after(listed()) else {
+        return println!("bench menu_dependency_range last");
+    };
+    let say = |what: &str| {
+        println!(
+            "bench menu_dependency_range {what} {:?} whole={}",
+            tree.marked(),
+            tree.marks_a_dependency()
+        )
+    };
+    tree.mark_range(&top, &below, false);
+    say("across");
+    if let Some(row) = tree::find_row(model, &top) {
+        row.set_expanded(true);
+    }
+    // The folder's listing lands from a worker thread.
+    glib::timeout_future(Duration::from_millis(800)).await;
+    let Some(first) = listed().into_iter().find(|rel| rel.starts_with(&inside)) else {
+        return println!("bench menu_dependency_range empty");
+    };
+    tree.mark_range(&below, &first, false);
+    say("into");
+    tree.clear_marks();
+    tree.toggle_mark(&first);
+    say("ctrl");
+    tree.clear_marks();
 }
 
 /// A Shift+click's range, from `rel` down to the first shut folder below it, which is marked

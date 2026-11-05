@@ -194,7 +194,13 @@ pub fn context_menu(
     anchor: gdk::Rectangle,
 ) -> gtk::PopoverMenu {
     if !marked.is_empty() {
-        let menu = marked_menu(marked, row_dir(row), can_paste(ops), ops.vault.is_remote());
+        let menu = marked_menu(
+            marked,
+            row_dir(row),
+            can_paste(ops),
+            ops.vault.is_remote(),
+            false,
+        );
         return crate::widgets::popup_menu(host, &menu, Some(anchor));
     }
     let remote = ops.vault.is_remote();
@@ -315,17 +321,38 @@ fn dependency_model(rel: &str, is_dir: bool, remote: bool, top: bool) -> gio::Me
     menu
 }
 
+/// The menu of a marked set holding a dependency tree, marked whole through its top folder:
+/// [`marked_menu`]'s `whole`.
+pub fn whole_menu(
+    ops: &Rc<Ops>,
+    host: &gtk::Widget,
+    marked: &[(String, bool)],
+    anchor: gdk::Rectangle,
+) -> gtk::PopoverMenu {
+    let menu = marked_menu(marked, "", false, ops.vault.is_remote(), true);
+    crate::widgets::popup_menu(host, &menu, Some(anchor))
+}
+
 /// Multi-file menu containing only actions that apply to the whole marked set. `dir` is the
 /// paste destination from [`row_dir`]; `paste` indicates available clipboard content, and
-/// `remote` a vault with no trash, where the set is deleted. Omit single-file actions rather than
-/// silently using one selected row.
-fn marked_menu(marked: &[(String, bool)], dir: &str, paste: bool, remote: bool) -> gio::Menu {
+/// `remote` a vault with no trash, where the set is deleted. A set holding a dependency tree
+/// (`whole`) offers only what the tree's top folder's own menu does, Move to… and Move to Trash
+/// ([`dependency_model`]). Omit single-file actions rather than silently using one selected row.
+fn marked_menu(
+    marked: &[(String, bool)],
+    dir: &str,
+    paste: bool,
+    remote: bool,
+    whole: bool,
+) -> gio::Menu {
     let menu = gio::Menu::new();
     let clip = gio::Menu::new();
-    clip.append_item(&many(label("cut"), "cut-many", marked));
-    clip.append_item(&many(label("copy"), "copy-many", marked));
+    if !whole {
+        clip.append_item(&many(label("cut"), "cut-many", marked));
+        clip.append_item(&many(label("copy"), "copy-many", marked));
+    }
     clip.append_item(&many(label("move-to"), "move-to", marked));
-    if paste {
+    if paste && !whole {
         clip.append_item(&verb("paste", dir));
     }
     menu.append_section(None, &clip);
@@ -500,13 +527,18 @@ mod tests {
     fn a_marked_set_offers_only_what_can_act_on_several_paths() {
         let marked = [("a.md".to_string(), false), ("Notes".to_string(), true)];
         assert_eq!(
-            labels(marked_menu(&marked, "", true, false).upcast_ref()),
+            labels(marked_menu(&marked, "", true, false, false).upcast_ref()),
             ["Cut", "Copy", "Move to…", "Paste", "Move to Trash"]
         );
         // Paste is drawn only where the clipboard holds something, as it is on the single-row menu.
         assert_eq!(
-            labels(marked_menu(&marked, "", false, false).upcast_ref()),
+            labels(marked_menu(&marked, "", false, false, false).upcast_ref()),
             ["Cut", "Copy", "Move to…", "Move to Trash"]
+        );
+        // A set holding a dependency tree does only what the tree's top folder's menu does.
+        assert_eq!(
+            labels(marked_menu(&marked, "", true, false, true).upcast_ref()),
+            ["Move to…", "Move to Trash"]
         );
     }
 
@@ -673,7 +705,7 @@ mod tests {
         );
         let marked = [("a.md".to_string(), false)];
         assert_eq!(
-            labels(marked_menu(&marked, "", false, true).upcast_ref()).last(),
+            labels(marked_menu(&marked, "", false, true, false).upcast_ref()).last(),
             Some(&"Delete…".to_string())
         );
     }

@@ -250,9 +250,11 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - A folder's expander arrow is drawn at Adwaita's `dimmed` opacity (`--dim-opacity`), whatever the row's own dim (user decision 2026-10-19): the folder's icon and name say what the row is, the arrow only that it opens.
 - Every folder is listed, the ones the index does not walk included (`node_modules`, a `.venv`, a cargo `target/`): a listing that silently leaves a folder out cannot be trusted.
   Those rows are read off the disk one level per expansion, stay out of the index and every query, and are dimmed, search not reaching them.
-- A dependency tree (`node_modules`, a `.venv`, a marked `target/`, Lean's `.lake`, gigabytes with Mathlib and no marker file) lists and opens but is never changed — its menu holds only what reads it (Open and Open in New Window, or Open in Terminal and Reload, Copy Name, the paths, Show in Files or Download…), and it takes no marking, drag or drop: it is somebody else's.
+- A dependency tree (`node_modules`, a `.venv`, a marked `target/`, Lean's `.lake`, gigabytes with Mathlib and no marker file) lists and opens but is never changed — its menu holds only what reads it (Open and Open in New Window, or Open in Terminal and Reload, Copy Name, the paths, Show in Files or Download…), and it takes no drop and is marked and dragged only whole: it is somebody else's.
   A tab on one of its files offers the same names and ways out, with Reveal in Sidebar, and nothing that changes the file (user decision 2026-11-03).
   Its top folder, the `node_modules` or `.ruff_cache` itself, adds Rename, Move to… and Move to Trash, and Delete trashes it: a cache or an environment is cleared or moved whole, never a file in it (user decision 2026-10-28).
+  A row inside the tree stands for that top folder when rows are marked, so a Shift+click range reaching into the tree, or a Ctrl+click in it, marks the tree whole (user decision 2026-11-05).
+  A marked set holding the tree offers only Move to… and Move to Trash, as the folder's own menu does, and drags as any marked set does, a move taking the tree whole.
   A gitignored folder is the reader's own and gets the whole menu: being out of the index stops a file being searched, not edited, and opening one puts it in (Architecture, An opened file joins the index).
 - A gitignored folder is watched while the tree holds its listing, one level deep, by the vault's own watcher — on the host for a remote vault, the one place its files can be watched from — and what happens in it re-lists it and reaches nothing else (`Event::UnindexedChanged`); a dependency tree is not — 40 000 files is the tree that must not be watched — and is as fresh as its last expansion.
   Every opening of a folder lists it again, whatever watches it: news missed before a watch was in place is caught up by opening the folder, never lost for the window's life.
@@ -286,9 +288,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   While Shift is held over the list with nothing marked, the row a range would start from is drawn marked as the pointer moves, since it need not be the selected row; a capital typed with the pointer resting on the list lights nothing (user decision 2026-09-29: the Shift anchor only, Ctrl adding nothing).
   A shut folder in a range is marked whole, and a Ctrl+click on a row inside it takes that row alone out.
   Neither click opens or toggles anything; a plain click (once it is not a drag) and Escape let the set go.
-  A row the index does not hold is never marked.
+  A gitignored row marks as any other, and a dependency tree marks only whole, through its top folder (above).
   There is no keyboard multi-select.
-- A right-click on a marked row is about the whole set and offers only Cut, Copy, Move to…, Paste and Move to Trash (Principle 1); a right-click elsewhere forgets the marks.
+- A right-click on a marked row is about the whole set and offers only Cut, Copy, Move to…, Paste and Move to Trash (Principle 1), or Move to… and Move to Trash alone where the set holds a dependency tree; a right-click elsewhere forgets the marks.
   Delete trashes the set, a marked row dragged carries it, and a set acts on its top-most paths.
   A move or a trash lets the marks go, since it may have taken what they named.
 - Files is a drag surface both ways: a row dropped into a pane opens there, on a pane's edge splits it; dropped in the tree it moves — onto a folder into it, onto a file beside it, onto the vault label or the blank area below the rows into the root.

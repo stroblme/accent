@@ -16,6 +16,7 @@ pub use clipboard::Clip;
 pub use menu::labels;
 pub use menu::{
     At, Facts, GROUP, actions, context_menu, dependency_menu, file_sections, item, row_dir,
+    whole_menu,
 };
 pub(crate) use paths::at_free_name;
 pub use paths::{move_dest, topmost};
