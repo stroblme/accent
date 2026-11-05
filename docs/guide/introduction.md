@@ -24,7 +24,10 @@ Download the Flatpak bundle for your machine (`x86_64` or `aarch64`) from the [l
 flatpak install --user accent-<version>-<arch>.flatpak
 ```
 
-For a native install on a recent GNOME Linux system, use the [installer](https://github.com/stroblme/accent/blob/main/install.sh):
+The same release carries native packages for Ubuntu 26.04 or newer, Debian testing, Fedora 44 or newer and openSUSE Tumbleweed, which install with `sudo apt install ./<file>.deb`, `sudo dnf install ./<file>.rpm` or `sudo zypper install --allow-unsigned-rpm ./<file>.rpm`.
+On NixOS, `nix run github:stroblme/accent` builds and starts it.
+
+For a native install on any other recent GNOME Linux system, use the [installer](https://github.com/stroblme/accent/blob/main/install.sh):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/stroblme/accent/main/install.sh | bash

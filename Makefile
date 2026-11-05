@@ -95,7 +95,7 @@ XVFB_ENV := DISPLAY=:$(DISPLAY_NUM) GDK_BACKEND=x11 GSK_RENDERER=cairo GTK_A11Y=
 .PHONY: all core gtk gtk-bench clean distclean install uninstall test test-pdf check fmt fmt-check \
         clippy doc run smoke drills xvfb vault validate icons flatpak cargo-sources pdfium server \
         help requirements install-requirements android android-check android-test android-tools apk apk-release \
-        pdfium-android bindings screenshots docs app dmg release
+        pdfium-android bindings screenshots docs app dmg release pkgroot deb rpm
 
 ## all: build everything, core plus the desktop app
 all: core gtk
@@ -628,9 +628,12 @@ else
 				install -m644 $(call SERVER_BIN,$$arch)$$suffix $(DESTDIR)$(LIBDIR)/accent/accent-cli-$$arch$$suffix; \
 		done; \
 	done; true
-	@# Best effort: without these the launcher and icon can take a re-login to appear.
-	-@update-desktop-database $(DESTDIR)$(DATADIR)/applications 2>/dev/null
-	-@gtk-update-icon-cache -qtf $(DESTDIR)$(DATADIR)/icons/hicolor 2>/dev/null
+	@# Best effort: without these the launcher and icon can take a re-login to appear. Never into
+	@# a DESTDIR, whose caches would end up in a package and clash with the system's own.
+ifndef DESTDIR
+	-@update-desktop-database $(DATADIR)/applications 2>/dev/null
+	-@gtk-update-icon-cache -qtf $(DATADIR)/icons/hicolor 2>/dev/null
+endif
 endif
 	@echo "Installed to $(DESTDIR)$(if $(DARWIN),$(APPSDIR)/Accent.app,$(PREFIX))"
 	@case ":$$PATH:" in *":$(BINDIR):"*) ;; \
@@ -652,6 +655,40 @@ ifdef DARWIN
 endif
 	-@update-desktop-database $(DESTDIR)$(DATADIR)/applications 2>/dev/null
 	@echo "Uninstalled from $(DESTDIR)$(PREFIX)"
+
+# What a .deb or .rpm packs: the files `install` puts under /usr, with libpdfium and both servers
+# required rather than best effort. `build-aux/native-package.sh` builds either one in a container
+# of the distribution it is for.
+PKGROOT = $(abspath $(TARGET_DIR))/pkgroot
+pkgroot: all pdfium
+	@for arch in $(SERVER_ARCHES); do test -f $(call SERVER_BIN,$$arch).xz || \
+		{ echo "missing $(call SERVER_BIN,$$arch).xz: run make server first"; exit 1; }; done
+	rm -rf $(PKGROOT)
+	$(MAKE) --no-print-directory install DESTDIR=$(PKGROOT) PREFIX=/usr
+
+## deb: package the app as a .deb in the target folder, for the Debian or Ubuntu it is built on
+#
+# dpkg-shlibdeps names the package behind each library the binaries link, reading the version
+# floors from this system's symbol files. It wants a source tree's debian/control, so it gets an
+# empty one of its own. The servers are static and need nothing.
+deb: pkgroot
+	install -Dm644 LICENSE $(PKGROOT)/usr/share/doc/accent/copyright
+	rm -rf $(TARGET_DIR)/deb && mkdir -p $(TARGET_DIR)/deb/debian $(PKGROOT)/DEBIAN
+	touch $(TARGET_DIR)/deb/debian/control
+	cd $(TARGET_DIR)/deb && dpkg-shlibdeps -O $(PKGROOT)/usr/bin/accent $(PKGROOT)/usr/bin/accent-cli \
+		$(PKGROOT)/usr/lib/accent/libpdfium.so | sed 's/^shlibs:Depends=//' > depends
+	@# glib-networking is what gives libsoup HTTPS, which no linked library names.
+	printf '%s\n' "Package: accent" "Version: $(VERSION)" "Architecture: $$(dpkg --print-architecture)" \
+		"Maintainer: Melvin Strobl <stroblme@posteo.de>" "Depends: $$(cat $(TARGET_DIR)/deb/depends), glib-networking" \
+		"Recommends: git, openssh-client" "Section: editors" "Priority: optional" \
+		"Homepage: https://github.com/stroblme/accent" "Description: Markdown and PDF knowledge editor" \
+		> $(PKGROOT)/DEBIAN/control
+	dpkg-deb --root-owner-group --build $(PKGROOT) $(TARGET_DIR)/accent_$(VERSION)_$$(dpkg --print-architecture).deb
+
+## rpm: package the app as an .rpm in the target folder, for the Fedora or openSUSE it is built on
+rpm: pkgroot
+	rpmbuild -bb --build-in-place --define "_topdir $(abspath $(TARGET_DIR))/rpm" \
+		--define "ver $(VERSION)" --define "pkgroot $(PKGROOT)" build-aux/accent.spec
 
 ## validate: check the desktop file and the AppStream metainfo
 validate:

@@ -84,8 +84,8 @@ jobs:
           bundle: accent-${{ github.ref_name }}-${{ matrix.arch }}.flatpak
           cache-key: flatpak-builder-${{ matrix.arch }}-${{ github.sha }}
 
-  # The static servers a remote vault uploads, for Accent.app to carry; macOS has no musl
-  # toolchain of its own. Not named accent-*, so the release below leaves them out.
+  # The static servers a remote vault uploads, for Accent.app and the native packages to carry;
+  # macOS has no musl toolchain of its own. Not named accent-*, so the release below leaves them out.
   server:
     name: remote servers
     needs: tests
@@ -105,6 +105,57 @@ jobs:
           name: servers
           path: target/*-unknown-linux-musl/release/accent-cli*
           if-no-files-found: error
+
+  # A .deb or .rpm per distribution, each built and install-tested in containers of that
+  # distribution (build-aux/native-package.sh). Its newer releases take the same package.
+  native:
+    name: ${{ matrix.distro }} package (${{ matrix.arch }})
+    needs: [tests, server]
+    strategy:
+      matrix:
+        distro: [ubuntu-26.04, debian-testing, fedora-44, opensuse-tumbleweed]
+        arch: [x86_64, aarch64]
+        include:
+          - { distro: ubuntu-26.04, image: 'ubuntu:26.04', format: deb }
+          - { distro: debian-testing, image: 'debian:testing', format: deb }
+          - { distro: fedora-44, image: 'fedora:44', format: rpm }
+          - { distro: opensuse-tumbleweed, image: 'opensuse/tumbleweed', format: rpm }
+          - { arch: x86_64, runner: ubuntu-latest }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: servers
+          path: target
+      - run: build-aux/native-package.sh ${{ matrix.image }} "accent-$GITHUB_REF_NAME-${{ matrix.distro }}-${{ matrix.arch }}.${{ matrix.format }}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: accent-${{ matrix.distro }}-${{ matrix.arch }}
+          path: accent-*.${{ matrix.format }}
+          if-no-files-found: error
+
+  # NixOS installs from the flake in the repository rather than from the release, so this only
+  # checks that it still builds, and the release does not wait for it.
+  nix:
+    name: nix flake (${{ matrix.arch }})
+    needs: tests
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+      - run: nix build -L
+      - run: result/bin/accent --help && result/bin/accent-cli --help && test -e result/lib/accent/libpdfium.so
 
   # Homebrew's bottles are built for the runner's macOS, so that is the app's minimum
   # (LSMinimumSystemVersion). macos-15-intel is the last Intel image GitHub offers.
@@ -139,7 +190,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [apk, flatpak, dmg]
+    needs: [apk, flatpak, native, dmg]
     runs-on: ubuntu-latest
     permissions:
       contents: write
