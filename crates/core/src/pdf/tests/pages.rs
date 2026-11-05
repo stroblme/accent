@@ -94,7 +94,7 @@ fn a_deleted_page_comes_back_with_its_links_and_bookmark() {
 
     ink.walk(&mut doc, false);
     let saved = doc.save().unwrap();
-    for doc in [&doc, &PdfDoc::from_bytes(saved.clone()).unwrap()] {
+    for doc in [&doc, &doc_of(saved.clone()).unwrap()] {
         assert_eq!(page_texts(doc), ["Hello accent", "Second page"]);
         assert_eq!(targets(doc), (Some(1), vec![Some(1), Some(1)]));
     }

@@ -69,14 +69,14 @@ fn a_copy_carries_the_highlights_and_leaves_the_document_alone() {
         contents: None,
     };
 
-    let copy = PdfDoc::from_bytes(doc.copy_with_highlights(&[hl]).unwrap()).unwrap();
+    let copy = doc_of(doc.copy_with_highlights(&[hl]).unwrap()).unwrap();
     assert_eq!(copy.page_count(), doc.page_count());
     assert_eq!(copy.highlights().unwrap().len(), 2);
     assert_eq!(copy.inks(0).unwrap().len(), 1);
     assert_eq!(doc.highlights().unwrap().len(), 1);
     // Nothing to add is the document as it stands.
     assert_eq!(doc.copy_with_highlights(&[]).unwrap(), doc.save().unwrap());
-    let plain = PdfDoc::from_bytes(doc.copy_with_highlights(&[]).unwrap()).unwrap();
+    let plain = doc_of(doc.copy_with_highlights(&[]).unwrap()).unwrap();
     assert_eq!(plain.highlights().unwrap().len(), 1);
     assert_eq!(plain.inks(0).unwrap().len(), 1);
 }

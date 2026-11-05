@@ -71,7 +71,7 @@ fn a_documents_info_is_its_dictionary() {
     ];
     let bytes = String::from_utf8(pdf_of(&objs)).unwrap();
     let bytes = bytes.replace("/Root 1 0 R>>", "/Root 1 0 R/Info 4 0 R>>");
-    let doc = PdfDoc::from_bytes(bytes.into_bytes()).unwrap();
+    let doc = doc_of(bytes.into_bytes()).unwrap();
     let info = doc.info();
     assert_eq!(info.title.as_deref(), Some("Field Notes"));
     assert_eq!(info.author, None);
@@ -162,7 +162,7 @@ fn rendered_pages_follow_edits_and_page_switches() {
         .unwrap();
     let after = render(&doc, 0);
     assert_ne!(before, after);
-    let fresh = PdfDoc::from_bytes(doc.save().unwrap()).unwrap();
+    let fresh = doc_of(doc.save().unwrap()).unwrap();
     assert_eq!(after, render(&fresh, 0));
     assert_eq!(render(&doc, 1), render(&fresh, 1));
     assert_eq!(after, render(&doc, 0));

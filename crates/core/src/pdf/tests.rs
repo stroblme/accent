@@ -113,6 +113,14 @@ fn open_tiny_with(highlight: bool) -> Option<(tempfile::TempDir, PdfDoc)> {
     open_pdf(&tiny_pdf(highlight))
 }
 
+/// A document over `bytes`, read as every document is, from a file: here one with no name, which
+/// goes when the document does.
+fn doc_of(bytes: Vec<u8>) -> Result<PdfDoc> {
+    let mut file = tempfile::tempfile().unwrap();
+    std::io::Write::write_all(&mut file, &bytes).unwrap();
+    PdfDoc::from_file(file)
+}
+
 /// Write these bytes into a tempdir and open them, or `None` if pdfium is missing.
 fn open_pdf(bytes: &[u8]) -> Option<(tempfile::TempDir, PdfDoc)> {
     if !available() {

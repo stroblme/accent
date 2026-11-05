@@ -30,11 +30,11 @@ pub struct PdfDoc {
     /// The last page rendered, retaining its parsed paths and decoded images across tiles.
     /// Closed under CALLS before the document is replaced or dropped.
     rendered: Mutex<Option<(usize, PdfPage<'static>)>>,
-    /// The file the document was read from, and what it looked like when it was opened; `None`
-    /// for a document read from bytes. See [`PdfDoc::intact`].
-    file: Option<(Arc<File>, Etag)>,
-    /// What the session's update follows: that file, or bytes — Android's, or a damaged file as
-    /// pdfium repaired it, which is then `repaired` and saved whole.
+    /// The file the document was read from, and what it looked like when it was opened. See
+    /// [`PdfDoc::intact`].
+    file: (Arc<File>, Etag),
+    /// What the session's update follows: that file, or the bytes pdfium repaired a damaged one
+    /// into, which are then `repaired` and saved whole.
     base: Arc<dyn Source>,
     base_len: u64,
     repaired: bool,
@@ -120,8 +120,7 @@ impl PdfDoc {
     /// the document lives.
     pub(super) fn from_file(file: File) -> Result<PdfDoc> {
         let read = Etag::from_meta(&file.metadata().map_err(|e| Error::io("the pdf", e))?);
-        let file = Arc::new(file);
-        PdfDoc::over(file.clone(), Some((file, read)))
+        PdfDoc::over(Arc::new(file), read)
     }
 
     /// Whether the file this document is read from is still the one it was opened on.
@@ -131,27 +130,21 @@ impl PdfDoc {
     /// and every search on it finding nothing. A file replaced by a rename, as every save here,
     /// Syncthing and a remote fetch replace one, leaves the document reading the file it opened.
     pub fn intact(&self) -> bool {
-        self.file.as_ref().is_none_or(|(file, read)| {
-            file.metadata()
-                .is_ok_and(|meta| Etag::from_meta(&meta) == *read)
-        })
+        let (file, read) = &self.file;
+        file.metadata()
+            .is_ok_and(|meta| Etag::from_meta(&meta) == *read)
     }
 
-    /// A document read from bytes rather than a path: what Android gets from a `content://`
-    /// URI, where there is no file to open.
-    pub fn from_bytes(bytes: Vec<u8>) -> Result<PdfDoc> {
-        PdfDoc::over(Arc::new(bytes), None)
-    }
-
-    /// The document `base` holds, read by pdfium and by `accent_pdf`.
+    /// The document `file` holds, read by pdfium and by `accent_pdf`.
     ///
     /// A file `accent_pdf` cannot read as pdfium does — an xref that does not parse, an object
     /// that is not where the xref says, a page tree that loops or counts other pages — is nothing
     /// to append to. pdfium, which repairs what it reads, writes it out once, before it
     /// has rendered anything into it, and those bytes are the base: the first save writes them
     /// whole, and the file saved is sound for the next session to append to.
-    fn over(base: Arc<dyn Source>, file: Option<(Arc<File>, Etag)>) -> Result<PdfDoc> {
+    fn over(file: Arc<File>, etag: Etag) -> Result<PdfDoc> {
         let pdfium = pdfium()?;
+        let base: Arc<dyn Source> = file.clone();
         let read = objects_of(&base);
         let (doc, base, (pdf, pages), repaired) = {
             let _guard = lock();
@@ -179,7 +172,7 @@ impl PdfDoc {
         let mut made = PdfDoc {
             doc: Some(doc),
             rendered: Mutex::new(None),
-            file,
+            file: (file, etag),
             base_len: base.size(),
             base,
             repaired,
@@ -427,13 +420,12 @@ impl PdfDoc {
     /// Write the document to `path` as [`crate::fs::write_bytes`] writes a file, gated on
     /// `expected`: the file it was read from is copied as it is (a reflink where the file system
     /// has them) and the section written after it, so every save of a session leaves one update
-    /// after the original bytes. A repaired file, or one read from bytes, is written whole.
+    /// after the original bytes. A repaired file is written whole.
     pub fn save_to(&self, path: &Path, expected: Option<Etag>) -> Result<Etag> {
-        match (&self.file, self.repaired) {
-            (Some((file, _)), false) => {
-                crate::fs::write_appended(path, file, self.base_len, &self.section, expected)
-            }
-            _ => crate::fs::write_bytes(path, &self.save()?, expected),
+        let (file, _) = &self.file;
+        match self.repaired {
+            false => crate::fs::write_appended(path, file, self.base_len, &self.section, expected),
+            true => crate::fs::write_bytes(path, &self.save()?, expected),
         }
     }
 

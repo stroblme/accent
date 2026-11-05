@@ -1,5 +1,5 @@
 //! What a PDF is read from: a file, read where it is asked for (`pread`), or bytes in memory —
-//! Android's `content://` documents and a base normalised in memory.
+//! a base normalised in memory, such as a damaged file as pdfium repaired it.
 
 use std::fs::File;
 use std::io;

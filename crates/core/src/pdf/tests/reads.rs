@@ -283,7 +283,7 @@ fn a_damaged_file_reads_as_pdfium_repairs_it() {
     ] {
         let pdfium = pdfium_reads(&bytes).expect("pdfium repairs it");
         assert_eq!(pdfium.outline, reference.outline, "{what}: pdfium's repair");
-        let doc = PdfDoc::from_bytes(bytes.clone()).unwrap();
+        let doc = super::doc_of(bytes.clone()).unwrap();
         assert_eq!(
             differences(&doc, &pdfium),
             (Vec::new(), 0),

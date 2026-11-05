@@ -107,7 +107,7 @@ fn with_appended_ink(base: &[u8]) -> accent_pdf::Result<Vec<u8>> {
 
 /// The red pixels of the first page as pdfium draws it.
 fn red_pixels(bytes: Vec<u8>) -> Result<usize> {
-    let img = PdfDoc::from_bytes(bytes)?.render_page(0, 1.0, Theme::Plain)?;
+    let img = doc_of(bytes)?.render_page(0, 1.0, Theme::Plain)?;
     let pixels = img.data.as_chunks::<4>().0;
     Ok(pixels
         .iter()
@@ -167,7 +167,7 @@ fn accent_pdf_reads_what_pdfium_saves_encrypted() {
         multiply: false,
     };
     for (i, base) in encrypted().into_iter().enumerate() {
-        let mut doc = PdfDoc::from_bytes(base).unwrap();
+        let mut doc = doc_of(base).unwrap();
         doc.add_ink(0, &[(20.0, 20.0), (60.0, 40.0)], red, 1.0)
             .unwrap();
         let saved = doc.save().unwrap();
@@ -342,7 +342,7 @@ fn the_corpus_reads_in_accent_pdf_as_pdfium_reads_it() {
             let mut doc = PdfDoc::open(path)?;
             let (had, (w, h)) = (doc.inks(0)?.len(), doc.page_size(0)?);
             doc.add_ink(0, &[(w * 0.1, h * 0.2), (w * 0.9, h * 0.8)], red, 1.0)?;
-            let saved = PdfDoc::from_bytes(doc.save()?)?;
+            let saved = doc_of(doc.save()?)?;
             Ok(saved.page_count() == pdfium && saved.inks(0)?.len() == had + 1)
         })();
         if !matches!(session, Ok(true)) {
