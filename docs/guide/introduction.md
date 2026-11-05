@@ -1,18 +1,20 @@
 # Welcome to Accent
 
-![Accent logo and the words “An editor for code, markdown notes and PDFs”](social-preview.png)
+![Accent logo](social-preview.png)
 
-Accent brings notes, code, PDFs and drawings into one workspace. A **vault** is an ordinary folder of files: your files stay yours, and other apps can edit them too.
-The desktop app runs on Linux, with an [Android companion](android.md) for editing notes and reading PDFs.
+Accent allows you to work with code, PDFs and drawings in a single workspace, which we call a **vault**.
+This vault may either be an ordinary folder or a set of files and terminals.
 
-## What you can do
-
+In such a vault, you can use Accent to
 - **Connect notes and sources.** Follow [wikilinks, tags and backlinks](notes.md), embed drawings, and [link a selected PDF passage to a note](pdf.md#link-a-passage-to-a-note). The link takes you back to the passage.
 - **Work directly on documents.** [Annotate and rearrange PDF pages](pdf.md), edit [draw.io diagrams](diagrams.md) on a native canvas, and move between LaTeX source and its PDF with [SyncTeX](code.md#latex-and-synctex).
 - **Keep development in the same window.** Edit [code](code.md), run [Jupyter cells](notebooks.md), review and resolve [Git changes](git.md), and return to [terminal sessions](terminals.md) after closing the window.
 - **Work where the files live.** Open a vault over [SSH](remote.md) with search, Git and tools running on its host, or let an agent use the vault through the [command line and MCP server](cli.md).
 
+
 ## Install and open a vault
+
+At the moment, we support Linux (native + Flatpak), MacOS and Android (companion only). 
 
 Download the Flatpak bundle for your machine (`x86_64` or `aarch64`) from the [latest release](https://github.com/stroblme/accent/releases/latest), then install it with:
 
