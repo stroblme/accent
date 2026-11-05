@@ -131,17 +131,7 @@ impl Index {
         }
         // The qualifiers narrow the files that are ranked, so `LIMIT` counts the ones they leave.
         let (filter, values) = filter::sql(&q.filters, "g", 7);
-        let mut st = self.conn.prepare_cached(&format!(
-            "SELECT f.rel_path, f.title, snippet_window(notes_fts.body, ?4),
-                    phrase_start(notes_fts.body, ?4)
-             FROM notes_fts JOIN files f ON f.id = notes_fts.rowid
-             WHERE notes_fts MATCH ?1 AND notes_fts.rowid IN (
-                 SELECT notes_fts.rowid FROM notes_fts JOIN files g ON g.id = notes_fts.rowid
-                  WHERE notes_fts MATCH ?1 AND (?5 OR g.git_ignored = 0 OR g.kind = ?6){filter}
-                  ORDER BY lower(ifnull(g.title, '')) = lower(?2) DESC, bm25(notes_fts, 1.0, 10.0)
-                  LIMIT ?3)
-             ORDER BY lower(ifnull(f.title, '')) = lower(?2) DESC, bm25(notes_fts, 1.0, 10.0)"
-        ))?;
+        let mut st = self.conn.prepare_cached(&ranked_sql(&filter))?;
         // The window is cut around the first of the words in the note, and the snippet marks every
         // one in it. They go in folded, and with their whitespace squeezed, because that is how
         // `snippet_window` reads the body it looks through.
@@ -437,6 +427,26 @@ impl Index {
         }
         Ok(out)
     }
+}
+
+/// [`Index::ranked`]'s query, `filter` narrowing the files it ranks (`filter::sql` on `g`, its
+/// values from `?7`).
+///
+/// The files are ranked once and their bodies then read by key. A second `MATCH` beside
+/// `rowid IN (…)` ran the full-text query again for each ranked file, and `quantum circuit noise`
+/// took 396 ms that way against 29 ms now (generated vault, 2026-11-05).
+fn ranked_sql(filter: &str) -> String {
+    format!(
+        "WITH r AS (
+             SELECT notes_fts.rowid AS id, lower(ifnull(g.title, '')) = lower(?2) AS exact,
+                    bm25(notes_fts, 1.0, 10.0) AS score
+             FROM notes_fts JOIN files g ON g.id = notes_fts.rowid
+             WHERE notes_fts MATCH ?1 AND (?5 OR g.git_ignored = 0 OR g.kind = ?6){filter}
+             ORDER BY exact DESC, score LIMIT ?3)
+         SELECT f.rel_path, f.title, snippet_window(n.body, ?4), phrase_start(n.body, ?4)
+         FROM r JOIN files f ON f.id = r.id JOIN notes n ON n.file_id = r.id
+         ORDER BY r.exact DESC, r.score"
+    )
 }
 
 /// Every indexed path, title and text, for the sidebar's regex scan. Ordered so a capped list
@@ -1256,6 +1266,27 @@ mod tests {
         // Not the whole title, so only the bm25 title weight can decide this one.
         let hits = ix.search("coherence ledger", 10, false).unwrap();
         assert_eq!(files(&hits), ["target.md", "spam.md"], "{hits:?}");
+    }
+
+    /// The ranked query asks the full-text index once, not again for each file it ranked.
+    #[test]
+    fn a_ranked_query_asks_the_full_text_index_once() {
+        let (_vault, db) = ranking_vault();
+        let ix = open(&db);
+        let mut st = ix
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {}", ranked_sql("")))
+            .unwrap();
+        let plan: Vec<String> = st
+            .query_map(params_from_iter(vec![Value::Null; 6]), |r| r.get(3))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        let asked = plan
+            .iter()
+            .filter(|step| step.contains("notes_fts"))
+            .count();
+        assert_eq!(asked, 1, "{plan:?}");
     }
 
     /// The files a search answered with, in the order it ranked them and without the repeats the
