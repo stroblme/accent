@@ -304,10 +304,13 @@ impl DiagramRing {
     }
 }
 
-/// A small drawing of what an option does, in the foreground colour.
+/// A small drawing of what an option does, in the foreground colour, centred in its disc at the
+/// size of the PDF ring's icons: filling the disc, a square's outline would lie on its edge.
 fn glyph_area(glyph: Glyph) -> gtk::DrawingArea {
     let area = gtk::DrawingArea::new();
-    area.set_size_request(16, 16);
+    area.set_size_request(crate::ring::GLYPH, crate::ring::GLYPH);
+    area.set_halign(gtk::Align::Center);
+    area.set_valign(gtk::Align::Center);
     area.set_draw_func(move |area, cr, w, h| {
         let c = area.color();
         cr.set_source_rgba(

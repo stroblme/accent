@@ -332,9 +332,9 @@ fn place(root: &RingBox, button: &impl IsA<gtk::Widget>, cx: f64, cy: f64, size:
 const BUTTON: i32 = 36;
 /// An option button's, smaller than a tool's so the two orbits are told apart.
 const OPTION: i32 = 30;
-/// The size of an option's icon, a quarter above the tools' 16 px so the smaller discs still read
-/// at a glance.
-const GLYPH: i32 = 20;
+/// The size of an option's icon or drawn glyph, a quarter above the tools' 16 px so the smaller
+/// discs still read at a glance.
+pub(crate) const GLYPH: i32 = 20;
 
 #[cfg(test)]
 mod tests {
