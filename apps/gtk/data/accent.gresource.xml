@@ -8,76 +8,78 @@
   theme; the prefix is what `IconTheme::add_resource_path` is pointed at, so GTK finds them by
   name like any other icon.
   `filetype-*` rather than `file-*`, which themes already use.
+  Every entry is compressed, which GIO undoes on each lookup: their 128 KB take 48 KB in the
+  binary (2026-11-05).
 -->
 <gresources>
   <gresource prefix="/io/github/stroblme/Accent">
-    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-class-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-constant-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-enum-member-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-enum-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-field-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-file-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-folder-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-function-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-interface-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-keyword-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-method-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-module-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-snippet-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-struct-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-tag-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-text-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-type-parameter-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/lsp-variable-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/tool-pen-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/tool-highlighter-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/tool-eraser-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/tool-line-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/tool-rect-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/tool-circle-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/tool-select-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/tool-duplicate-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/filetype-markdown-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/filetype-pdf-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/filetype-diagram-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/filetype-table-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/filetype-image-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/filetype-code-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/filetype-config-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/filetype-text-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/filetype-notebook-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/remote-server-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/dap-breakpoint-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/dap-breakpoint-unverified-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/dap-breakpoint-conditional-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/dap-breakpoint-conditional-unverified-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/dap-logpoint-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/dap-logpoint-unverified-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/dap-step-over-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/dap-step-into-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/dap-step-out-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/dap-console-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/scm-branch-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/callout-quote-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/links-in-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/links-out-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/search-filter-symbolic.svg</file>
-    <file preprocess="xml-stripblanks">icons/scalable/actions/diff-unfold-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/lsp-class-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/lsp-constant-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/lsp-enum-member-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/lsp-enum-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/lsp-field-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/lsp-file-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/lsp-folder-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/lsp-function-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/lsp-interface-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/lsp-keyword-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/lsp-method-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/lsp-module-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/lsp-snippet-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/lsp-struct-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/lsp-tag-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/lsp-text-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/lsp-type-parameter-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/lsp-variable-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/tool-pen-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/tool-highlighter-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/tool-eraser-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/tool-line-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/tool-rect-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/tool-circle-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/tool-select-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/tool-duplicate-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/filetype-markdown-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/filetype-pdf-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/filetype-diagram-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/filetype-table-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/filetype-image-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/filetype-code-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/filetype-config-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/filetype-text-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/filetype-notebook-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/remote-server-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/dap-breakpoint-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/dap-breakpoint-unverified-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/dap-breakpoint-conditional-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/dap-breakpoint-conditional-unverified-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/dap-logpoint-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/dap-logpoint-unverified-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/dap-step-over-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/dap-step-into-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/dap-step-out-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/dap-console-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/scm-branch-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/callout-quote-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/links-in-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/links-out-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/search-filter-symbolic.svg</file>
+    <file compressed="true" preprocess="xml-stripblanks">icons/scalable/actions/diff-unfold-symbolic.svg</file>
     <!-- The same tabler folder and file the completion kinds draw, under the file lists' names. -->
-    <file alias="icons/scalable/actions/filetype-folder-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/lsp-folder-symbolic.svg</file>
-    <file alias="icons/scalable/actions/filetype-file-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/lsp-file-symbolic.svg</file>
+    <file compressed="true" alias="icons/scalable/actions/filetype-folder-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/lsp-folder-symbolic.svg</file>
+    <file compressed="true" alias="icons/scalable/actions/filetype-file-symbolic.svg" preprocess="xml-stripblanks">icons/scalable/actions/lsp-file-symbolic.svg</file>
     <!-- GtkSourceView's LaTeX with its listings in the language they name, its Lean with Lean
          4's keywords, and its TypeScript JSX with a wrapped type parameter list read as one, each
          read ahead of the one GtkSourceView ships: `install_icons` puts this folder first on its
          search path. -->
-    <file>language-specs/latex.lang</file>
-    <file>language-specs/lean.lang</file>
-    <file>language-specs/typescript-jsx.lang</file>
-    <file>language-specs/accent-search.lang</file>
+    <file compressed="true">language-specs/latex.lang</file>
+    <file compressed="true">language-specs/lean.lang</file>
+    <file compressed="true">language-specs/typescript-jsx.lang</file>
+    <file compressed="true">language-specs/accent-search.lang</file>
     <!-- GtkSourceView's four style schemes with no draw-spaces colour (`theme::scheme_id`). -->
-    <file>styles/accent-Adwaita.xml</file>
-    <file>styles/accent-Adwaita-dark.xml</file>
-    <file>styles/accent-solarized-light.xml</file>
-    <file>styles/accent-solarized-dark.xml</file>
+    <file compressed="true">styles/accent-Adwaita.xml</file>
+    <file compressed="true">styles/accent-Adwaita-dark.xml</file>
+    <file compressed="true">styles/accent-solarized-light.xml</file>
+    <file compressed="true">styles/accent-solarized-dark.xml</file>
   </gresource>
 </gresources>
