@@ -59,7 +59,7 @@ Read the [user guide](https://stroblme.github.io/accent/) for setup and everyday
 | Remote vaults                  | x86-64 & AArch64 | Same architecture      | Yes       | No          |
 | MCP server                     | Yes              | Yes                    | Yes       | No          |
 
-We have very little resource requirements for the remote deamon, allowing to support small devices like the Raspberry Pi Zero 2 W (512 MB) for remote development.
+Accent has very few resource requirements for the remote deamon, allowing you to remote develop on small devices like the Raspberry Pi Zero 2 W (512 MB).
 
 ## Get started
 
@@ -71,7 +71,18 @@ A Flatpak bundle for `x86_64` and `aarch64` is shipped with each [release](https
 flatpak install --user accent-<version>-<arch>.flatpak
 ```
 
-For a native install into `~/.local` (GNOME 49 or newer: Fedora 43+, openSUSE Tumbleweed, Debian testing, Ubuntu 26.04+, Arch), go for the following:
+Additionally, each release also carries native packages for Ubuntu 26.04 or newer, Debian testing, Fedora 44 or newer and openSUSE Tumbleweed.
+Older releases of these distributions lack the GNOME 49 libraries accent links against, so the Flatpak is the way to go there.
+
+```sh
+sudo apt install ./accent-<version>-<distro>-<arch>.deb	# Ubuntu, Debian
+sudo dnf install ./accent-<version>-fedora-44-<arch>.rpm	# Fedora
+sudo zypper install --allow-unsigned-rpm ./accent-<version>-opensuse-tumbleweed-<arch>.rpm
+```
+
+On NixOS, `nix run github:stroblme/accent` builds and starts it from the flake in this repository.
+
+If you rather like to build Accent yourself, go for the following one-liner:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/stroblme/accent/main/install.sh | bash
@@ -89,12 +100,12 @@ make all        	    # build the GTK app and accent-cli
 make install			# install the app user-wide
 ```
 
-For macOS 15 or newer, each release carries `Accent.app` as a disk image (`arm64` for Apple silicon, `x86_64` for Intel).
 Note that support for macOS is in a very early stage.
 
-If you run `accent` from a terminal, you can also provide a path to a file or folder to open it directly.
-
-`accent-cli mcp` serves a vault to an AI agent over the Model Context Protocol. It shares the app's index, works with the window closed, and offers search, code exploration, backlinks, tags, links and PDF highlights. Writing tools check the version the agent read; `--read-only` leaves them out. For Claude Code:
+`accent-cli mcp` serves a vault to an AI agent over the Model Context Protocol.
+It shares the app's index, works with the window closed, and offers search, code exploration, backlinks, tags, links and PDF highlights. 
+Writing tools ensure version-match to what the agent reads.
+E.g. for Claude Code:
 
 ```sh
 claude mcp add accent -- /path/to/accent-cli mcp --vault /path/to/notes
