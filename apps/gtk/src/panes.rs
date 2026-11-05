@@ -639,6 +639,8 @@ impl Pane {
         column.append(&overlay);
         // A pane that is not being written in recedes at High (`App::hide_chrome`).
         column.add_css_class("chrome-fade");
+        // Holds the lines across its tabs off its sides (`install_chrome_css`).
+        column.add_css_class("accent-pane");
 
         let pane = Rc::new(Pane {
             column,

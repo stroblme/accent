@@ -20,7 +20,7 @@ use sourceview5::prelude::{BufferExt as _, ViewExt as _};
 use std::ops::Range;
 
 /// The map's width, in logical pixels.
-const WIDTH: i32 = 100;
+pub(crate) const WIDTH: i32 = 100;
 /// A row's height in logical pixels; a character is one pixel wide.
 const ROW: f64 = 2.0;
 /// How much of the map shows while the pointer is elsewhere (build.rs): all of it under the
@@ -489,13 +489,20 @@ impl imp::Minimap {
             band,
             pace,
         }));
-        // Nothing above the rule under the cover, which is where the page starts while it shows.
+        // Nothing above the rule under the cover, which is where the page starts while it shows,
+        // nor on the line the scroller draws across the map at an edge with more of the page
+        // beyond it, which GTK draws while the value falls short of that end.
         let cover = self
             .cover
             .upgrade()
             .filter(|cover| cover.is_visible())
             .map_or(0.0, |cover| f64::from(cover.height()));
-        snapshot.push_clip(&rect(0.0, cover, width, (height - cover).max(0.0)));
+        let (above, below) = view.vadjustment().map_or((false, false), |a| {
+            (a.value() > a.lower(), a.value() < a.upper() - a.page_size())
+        });
+        let line = |drawn: bool| if drawn { 1.0 } else { 0.0 };
+        let (start, end) = (cover.max(line(above)), height - line(below));
+        snapshot.push_clip(&rect(0.0, start, width, (end - start).max(0.0)));
         if total > 0.0 {
             let lines = model.line_at_row(offset).0..model.line_at_row(offset + rows).0 + 1;
             self.highlight(&view, lines.clone());

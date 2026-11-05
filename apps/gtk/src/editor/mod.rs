@@ -285,7 +285,7 @@ pub struct Tab {
     /// Page content and document, retained so comparisons can insert and
     /// remove a paned around the editor ([`Tab::compare`]).
     content: gtk::Box,
-    document: gtk::Box,
+    document: gtk::Overlay,
     comparing: RefCell<Option<Comparing>>,
     /// The buttons a comparison lays over the editor, kept across comparisons: see `diff::Pool`.
     overlays: Rc<diff::Pool>,
@@ -296,6 +296,9 @@ pub struct Tab {
     /// Scrollable document-width cap ([`Tab::set_clamp`]), keeping the view
     /// as the scroller's child rather than a viewport child.
     clamp: adw::ClampScrollable,
+    /// Laid over the scroller less the minimap's width, reporting the width the text can take
+    /// (`open::follow_layout`).
+    width: gtk::DrawingArea,
     /// Zoom and width percentage needed to recompute the column cap on
     /// external editor resizes.
     zoom: Cell<f64>,

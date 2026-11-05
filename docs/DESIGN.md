@@ -623,7 +623,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A note's blocks are its headings and fenced blocks, both already tagged by the styling pass.
   A code tab's are the language layer's symbols, a source file's functions and types, each pinned at the line of its name rather than where the server's range starts, which may be a doc comment (`lang::innermost`); a CSV tab has none.
   A plain label in the document font, aligned with the text, a fence's opening line on the wash the code under it has, on a `.view` box with a rule under it.
-  The rule stops 6 px short of the column's sides, as the Git pane's divider does in the sidebar, so it never runs into the sidebar's line.
+  Its rule keeps 6 px off the pane's sides, as every line across a tab does (Colour).
 - **The minimap** (off by default: Minimap in Preferences, or Toggle Minimap) stands in for the vertical scrollbar, as VS Code's does, so the column loses width once.
   It is ours (`minimap/`), 100 px wide: a bar per word, a pixel per character and two per row, in the foreground at 45 %; a dimmer tone where the editor dims the text (markup, quotes, done tasks, a code comment) and the accent where it writes in the accent (a note's links and tags) and, in code, on a keyword: a tag whose look is the style scheme's keyword or statement style, GtkSourceView's highlighting tags having no names.
   No other syntax colour.
@@ -635,6 +635,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A comparison or a merge hides it, since their columns have no room to spare, and the scrollbar stands in until the editor is alone again.
   It rests at 55 % and comes up to full strength under the pointer and while its band is held, on the chrome's fade, so the text stays in front until the map is reached for (user decision 2026-11-03).
   It runs between the page's rules, from the one under a pinned sticky title, else the one above the page, down to the status bar's, and a document shorter than the map is drawn from its top.
+  It lies over the end of the page, so those rules run across the map as they run across the text, which keeps clear of it.
   The sticky title's rule cuts the map without moving it, so a title coming and going as a code tab scrolls does not shake it.
   GtkSourceMap, which it replaced, painted no band on GTK 4.22, laid the whole document out a second time and followed the adjustment its view had when it was set.
 - **Git's conflict markers are decorated as VS Code decorates them**, in every text tab: a block's current side tinted green and its incoming side blue, each marker line more strongly than its side, a diff3 base grey and `=======` bare.
@@ -1715,6 +1716,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - The find bar paints the note's own background (`--view-bg-color`) in every theme through `accent-flat`, which has to reach `searchbar > revealer > box`: Adwaita paints that box in the header-bar colour, a band that shows once the chrome around it fades, and draws a shade line under it, black in dark, which goes too: the bar sits on the note, divided from it by nothing.
 - The 1 px paned separator is the only division.
   Under the pointer it takes the accent at the same width, dragged it thickens to 3 px, and a double-click puts it back at its default position.
+- A line across a tab stops 6 px short of the pane's sides, as the Git pane's divider does in the sidebar, so it never runs into the sidebar's line or a split's divider (`.accent-pane`).
+  That holds for a rule, such as a sticky title's or a comparison's under its column titles, and for the line a scrolled view draws against the tab bar or the status bar while there is more of it that way.
 - Four themes, chosen in Preferences: System, Light and Dark are `AdwStyleManager` colour schemes and paint nothing of ours; Solarized redeclares libadwaita's `--*-bg-color` / `--*-fg-color` on `:root`, so every widget follows untouched and it still follows the system between its halves.
   It leaves the accent, shade and border variables alone, so the one-accent rule holds in all four.
 - Light and dark are the same design by construction: outside `theme.rs` no colour is picked per theme (Solarized's lower dim floor is a number), so there is no second palette to keep in step, and the same holds for the accent, which the user can change at any moment.

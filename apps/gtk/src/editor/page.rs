@@ -490,9 +490,10 @@ impl Tab {
     /// Recompute the percentage column cap after allocation, resize, zoom or
     /// preference changes, once the editor width is known.
     pub(super) fn set_clamp(&self) {
-        // The scroller's own width, not the horizontal adjustment's page size: with the view as
-        // the scrollable child that page size *is* the clamped column, so it would feed back.
-        let available = self.scroller.width();
+        // The scroller's width less the minimap's, not the horizontal adjustment's page size: with
+        // the view as the scrollable child that page size *is* the clamped column, so it would
+        // feed back.
+        let available = self.width.width();
         let max = match self.comparing.borrow().is_some() {
             // Beside another pane the column has no width to spare, so the cap comes off.
             true => i32::MAX / 4,
@@ -578,6 +579,14 @@ impl Tab {
         };
         self.scroller
             .set_policy(gtk::PolicyType::Automatic, vertical);
+        // The map lies over the scroller's end, which the text, its title and an unwrapped line's
+        // scrollbar keep clear of; the width hook sees the column narrow and caps it again
+        // (`open::follow_layout`).
+        let map = if on { crate::minimap::WIDTH } else { 0 };
+        self.clamp.set_margin_end(map);
+        self.width.set_margin_end(map);
+        self.sticky.set_margin_end(GUTTER + map);
+        self.scroller.hscrollbar().set_margin_end(map);
     }
 
     /// Scroll by `n` visible-line heights without moving the caret.

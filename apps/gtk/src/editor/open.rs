@@ -172,6 +172,7 @@ pub fn open(
         conflicts: crate::conflict::Conflicts::new(&view, &buffer, &scroller),
         scroller,
         clamp,
+        width: width.clone(),
         zoom: Cell::new(zoom),
         column: Cell::new(column_width),
         ghost_text: Cell::new(ghost_text),
@@ -313,17 +314,17 @@ fn gutters(
 struct Frame {
     clamp: adw::ClampScrollable,
     scroller: gtk::ScrolledWindow,
-    /// Reports the editor's width, which nothing else does; see [`frame`].
+    /// Reports the width the text can take, which nothing else does; see [`frame`].
     width: gtk::DrawingArea,
     sticky: gtk::Label,
     sticky_bar: gtk::Box,
     map: crate::minimap::Minimap,
-    /// What holds the rest: the scrolled view under the sticky title, and the minimap beside it.
-    document: gtk::Box,
+    /// What holds the rest: the scrolled view, with the sticky title and the minimap over it.
+    document: gtk::Overlay,
 }
 
 /// The page around `view`: the clamp that caps its column, the scroller, the sticky block title
-/// over the top of it and the minimap beside it.
+/// over the top of it and the minimap over its end.
 fn frame(view: &sourceview5::View) -> Frame {
     // The clamp caps the line, the view's own margins keep it off the edge, and on a narrow
     // window the clamp simply stops applying. Its maximum is a share of the editor's own width
@@ -388,26 +389,20 @@ fn frame(view: &sourceview5::View) -> Frame {
     sticky_bar.add_css_class("view");
     sticky_bar.append(&sticky);
     // A rule under it, or the pinned line reads as a line of the note that the one below it has
-    // been scrolled halfway behind. Held 6 px off the column's sides, as the Git pane's divider is
-    // off the sidebar's, so it does not run into the line beside the column.
-    let rule = gtk::Separator::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .margin_start(6)
-        .margin_end(6)
-        .build();
-    sticky_bar.append(&rule);
+    // been scrolled halfway behind. The pane holds it off its sides, as every line across a tab.
+    sticky_bar.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     overlay.add_overlay(&sticky_bar);
 
     // The minimap is off unless the preference says otherwise; `set_minimap` decides that, so a
     // tab that is built before the config is read still starts in a defined state.
     let map = crate::minimap::Minimap::new(view, &sticky_bar, wheel);
-    map.set_vexpand(true);
     map.set_visible(false);
     // It goes with the chrome while the user types (`App::hide_chrome`).
     map.add_css_class("chrome-fade");
-    let document = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    document.append(&overlay);
-    document.append(&map);
+    // Over the scroller's end rather than beside it, so the lines the scroller draws at its top
+    // and bottom run across the map as well; `Tab::show_minimap` keeps the text from under it.
+    map.set_halign(gtk::Align::End);
+    overlay.add_overlay(&map);
     Frame {
         clamp,
         scroller,
@@ -415,7 +410,7 @@ fn frame(view: &sourceview5::View) -> Frame {
         sticky,
         sticky_bar,
         map,
-        document,
+        document: overlay,
     }
 }
 
@@ -485,7 +480,7 @@ fn mark_tooltips(tab: &Rc<Tab>) {
 fn follow_layout(tab: &Rc<Tab>, width: &gtk::DrawingArea) {
     // The column is a share of the editor's width, so the cap has to be recomputed whenever that
     // width changes: a window resize, a paned drag, the sidebar, a split, the minimap. One hook
-    // covers all of them, because the overlaid area is allocated the scroller's own width.
+    // covers all of them, because the overlaid area is allocated the width the text can take.
     width.connect_resize(glib::clone!(
         #[weak(rename_to = tab)]
         tab,

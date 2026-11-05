@@ -1407,11 +1407,23 @@ fn install_chrome_css() {
         // The `tabbar.inline tabbox` pair: a tab bar under the header bar carries its tabs 6 px
         // higher, level with the sidebar's first row (the Git pane's Commit), its height kept so
         // nothing under it moves; one under a split's divider keeps Adwaita's even padding.
+        // The `.accent-pane` trio: a line across a tab, a rule or the one a scrolled window draws
+        // at an edge with more beyond it, stops 6 px short of the pane's sides, so it never runs
+        // into the sidebar's line or a split's divider. A scroller's line is an inset shadow,
+        // which a transparent border moves in; a popover's lines are the popover's own.
         provider.load_from_string(&format!(
             "{fade}.chrome-hidden {{ opacity: 0; }} \
              .chrome-away {{ opacity: {away}; }} \
              .bars-hidden scrolledwindow > undershoot {{ box-shadow: none; \
                background-image: none; }} \
+             .accent-pane scrolledwindow > undershoot.top, \
+               .accent-pane scrolledwindow > undershoot.bottom {{ \
+               border-left: 6px solid transparent; border-right: 6px solid transparent; \
+               background-clip: padding-box; }} \
+             .accent-pane box.vertical > separator.horizontal {{ \
+               margin-left: 6px; margin-right: 6px; }} \
+             .accent-pane popover box.vertical > separator.horizontal {{ \
+               margin-left: 0; margin-right: 0; }} \
              .dividers-hidden paned > separator {{ opacity: 0; }} \
              .accent-drop-zone {{ background-color: var(--accent-bg-color); opacity: 0.3; }} \
              .accent-drop-bar {{ background-color: var(--accent-bg-color); border-radius: 2px; }} \
