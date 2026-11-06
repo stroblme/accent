@@ -156,6 +156,7 @@ impl Notes {
                         message: format!("No note named {}", l.target),
                         source: Some("accent".to_string()),
                         code: None,
+                        published: None,
                     }),
             );
         }
@@ -170,6 +171,7 @@ impl Notes {
             message: format!("Cannot render this formula: {why}"),
             source: Some("accent".to_string()),
             code: None,
+            published: None,
         }));
         Ok(items)
     }
@@ -418,7 +420,13 @@ impl Language for Notes {
     }
 
     /// No source actions: a note has nothing to organize.
-    fn code_actions(&self, rel: &str, range: Range, source: bool) -> Fut<'_, Vec<CodeAction>> {
+    fn code_actions(
+        &self,
+        rel: &str,
+        range: Range,
+        _diagnostics: Vec<Diagnostic>,
+        source: bool,
+    ) -> Fut<'_, Vec<CodeAction>> {
         let rel = rel.to_string();
         Box::pin(async move {
             if source {

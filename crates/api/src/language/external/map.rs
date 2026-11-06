@@ -395,22 +395,24 @@ fn severity_of(n: Option<u32>) -> Severity {
     }
 }
 
-pub(super) fn diagnostics_of(
-    items: Vec<types::Diagnostic>,
-    text: &str,
-    enc: Encoding,
-) -> Vec<Diagnostic> {
+/// A publish's diagnostics in `text`'s characters, each keeping what the server sent for the code
+/// action requests about it.
+pub(super) fn diagnostics_of(items: Vec<Value>, text: &str, enc: Encoding) -> Vec<Diagnostic> {
     items
         .into_iter()
-        .map(|d| Diagnostic {
-            range: enc.char_range(text, d.range),
-            severity: severity_of(d.severity),
-            message: d.message,
-            source: d.source,
-            code: d.code.map(|code| match code {
-                Value::String(code) => code,
-                code => code.to_string(),
-            }),
+        .filter_map(|published| {
+            let d: types::Diagnostic = serde_json::from_value(published.clone()).ok()?;
+            Some(Diagnostic {
+                range: enc.char_range(text, d.range),
+                severity: severity_of(d.severity),
+                message: d.message,
+                source: d.source,
+                code: d.code.map(|code| match code {
+                    Value::String(code) => code,
+                    code => code.to_string(),
+                }),
+                published: Some(published),
+            })
         })
         .collect()
 }

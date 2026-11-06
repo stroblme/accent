@@ -1,3 +1,4 @@
+bench quickfix moved ["Declare oops in other.c", "Declare oops in oops.h", "Replace oops with 0", "Upper-case the line", "Swap the operands"]
 bench quickfix menu Some(["Replace oops with 0", "Declare oops in other.c", "Declare oops in oops.h", "Upper-case the line", "Swap the operands"])
 bench quickfix applied=0 text="int a = 0;\nint b = 1 + 2;\n" other="int other;\n" made=""
 bench quickfix undone=0 text="int a = oops;\nint b = 1 + 2;\n"

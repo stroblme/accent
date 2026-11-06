@@ -1513,7 +1513,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Quick Fix on such a link, and the hover's Quick Fix… over its hint, offer Create note, which opens New File with the link's path typed in, as following the link does: one place that creates a note, with its templates and its folder.
 - **Quick Fix** lists what the server offers over the selection or at the caret, in a menu at the caret: its quick fixes first, the one it prefers on top, then its refactorings.
   Source actions (Organize Imports, Fix All) are **Source Action…**'s, which asks the server for them alone (`context.only`), as VS Code does, and lists them in the same menu.
-  The diagnostics there go to the server as it published them, which is how clangd finds its fixes.
+  The diagnostics there go to the server as it published them but at the place the editor shows them, moved with the edits since, as VS Code sends them, which is how clangd finds its fixes (user decision 2026-11-06).
 - Picking one applies its edit, resolved first where the server sent it without one, or runs its command (clangd's tweaks): each open document's part as one undo step, and files no tab holds written as a move's import updates are, gated on their etags, and named in a toast.
   An action with both has its edit made first and its command run after, as LSP orders them, the command's edits a second undo step.
   A fix may create a file, as rust-analyzer's Extract module to file does: it is written new with the fix's text in it, on a local or a remote vault alike, and where a file is there already the whole fix is refused before anything is written, unless the server said to write over it or to leave it.

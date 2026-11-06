@@ -84,9 +84,11 @@ EOF
 	expect complete
 }
 
+# The C server publishes 50 ms late, so the fixes the hover asks for right after a line typed in
+# above the error come before the server has said where the error went.
 drill_quickfix() {
 	servers <<EOF
-c = ["python3", "$fake_lsp", "--actions"]
+c = ["python3", "$fake_lsp", "--actions", "--publish-delay", "0.05"]
 python3 = ["python3", "$fake_lsp", "--notebook", "--actions"]
 EOF
 	launch 60 ACCENT_BENCH_QUICKFIX=fix.c,fix.ipynb >"$dir/quickfix"

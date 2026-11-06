@@ -849,6 +849,7 @@ mod tests {
             message: "here".to_string(),
             source: None,
             code: code.map(str::to_string),
+            published: None,
         }
     }
 

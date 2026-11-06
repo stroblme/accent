@@ -18,7 +18,9 @@ rust-analyzer's and Lean's are; "Declare oops in other.c", an edit to a file no 
 "Upper-case the line", resolved for its edit (rust-analyzer's assists); and "Swap the operands", a
 command whose edit comes as its own `workspace/applyEdit` request, the command answered once that
 is (clangd's tweaks). Asked for `source` actions alone, it offers "Add a header, then swap", an
-edit and a command in one action, the command run once the edit is made.
+edit and a command in one action, the command run once the edit is made. With `--publish-delay
+SECONDS` it says what is wrong with a text that much later, holding up what was sent after it as
+a slow server does, so a request made right after an edit is asked before the publish about it.
 
 `.` triggers it, `;` commits a row (its `allCommitCharacters`), and it can resolve: `alpha` is a
 snippet with a stop (`${1:x}`, as rust-analyzer fills arguments), `beta` one with a plain stop
@@ -57,6 +59,8 @@ ROOT = [""]
 INLINE = sys.argv[sys.argv.index("--inline") + 1] if "--inline" in sys.argv else None
 NOTEBOOK = "--notebook" in sys.argv
 ACTIONS = "--actions" in sys.argv
+PUBLISH_DELAY = float(sys.argv[sys.argv.index("--publish-delay") + 1]) \
+    if "--publish-delay" in sys.argv else 0.0
 VERSIONS = {}
 COMMAND = [None]
 ANSWERS = {"hoverProvider": True, "definitionProvider": True,
@@ -78,6 +82,7 @@ def publish(uri):
         if name:
             items.append({"range": span(n, name.end(1), name.end(2)), "severity": 2,
                           "code": "reportUnusedExpression", "message": "Expression value is unused"})
+    time.sleep(PUBLISH_DELAY)
     send({"method": "textDocument/publishDiagnostics",
           "params": {"uri": uri, "version": VERSIONS[uri], "diagnostics": items}})
 

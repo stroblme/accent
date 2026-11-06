@@ -571,6 +571,22 @@ pub fn at(items: &[Diagnostic], pos: Pos) -> Vec<&Diagnostic> {
         .collect()
 }
 
+/// `editor`'s diagnostics touching `from..to`, where the edits since the last publish moved them,
+/// in its document's positions: what a code action request hands the server.
+pub fn touching(editor: &dyn lang::Editor, from: Pos, to: Pos) -> Vec<Diagnostic> {
+    let items = editor.diagnostics();
+    items
+        .iter()
+        .filter(|d| key(d.range.start) <= key(to) && key(from) <= key(d.range.end))
+        .filter_map(|d| {
+            let start = editor.to_document(d.range.start)?;
+            let end = editor.to_document(d.range.end)?;
+            let range = accent_api::Range { start, end };
+            Some(Diagnostic { range, ..d.clone() })
+        })
+        .collect()
+}
+
 /// Format nonzero error/warning counts for the status bar, or `None` to hide an empty slot.
 pub fn counts(items: &[Diagnostic]) -> Option<String> {
     let count = |want: Severity| items.iter().filter(|d| d.severity == want).count();
@@ -620,6 +636,7 @@ mod tests {
             message: format!("{severity:?} at {line}:{from}"),
             source: None,
             code: None,
+            published: None,
         }
     }
 

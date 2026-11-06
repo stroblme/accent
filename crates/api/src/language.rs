@@ -228,6 +228,10 @@ pub struct Diagnostic {
     /// `reportUnusedExpression`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
+    /// What the server published, handed back to it with a code action request at the place the
+    /// edits since moved it to ([`Vault::code_actions`]); `None` for accent's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published: Option<Value>,
 }
 
 /// A change a language server offers at a place: a quick fix, a refactoring, a source action.
@@ -415,9 +419,15 @@ pub(crate) trait Language: Send + Sync {
     fn goals(&self, _rel: &str, _pos: Pos) -> Fut<'_, Option<Goals>> {
         Box::pin(async { Ok(None) })
     }
-    /// What the server offers over `range`, the diagnostics there going along as it published
-    /// them: its source actions alone (Organize Imports) where `source` says so.
-    fn code_actions(&self, _rel: &str, _range: Range, _source: bool) -> Fut<'_, Vec<CodeAction>> {
+    /// What the server offers over `range`, `diagnostics` (the editor's over it) going along: its
+    /// source actions alone (Organize Imports) where `source` says so.
+    fn code_actions(
+        &self,
+        _rel: &str,
+        _range: Range,
+        _diagnostics: Vec<Diagnostic>,
+        _source: bool,
+    ) -> Fut<'_, Vec<CodeAction>> {
         Box::pin(async { Ok(Vec::new()) })
     }
     /// Resolve or run `action` and say what it changes.
@@ -1429,8 +1439,10 @@ requests! {
     /// The proof goals at a position, from a proof assistant's server ([`Support::goals`]).
     goals => goals(pos: Pos) -> Option<Goals>;
     /// Quick fixes and refactorings over `range`, the selection's or the caret's, or with `source`
-    /// the source actions there.
-    code_actions => code_actions(range: Range, source: bool) -> Vec<CodeAction>;
+    /// the source actions there. `diagnostics` are the ones the editor shows over it, where the
+    /// edits since the last publish have moved them.
+    code_actions => code_actions(range: Range, diagnostics: Vec<Diagnostic>, source: bool)
+        -> Vec<CodeAction>;
     /// What applying `action` changes, resolved or run at the server first where it must be.
     code_action_edits => action_edits(action: CodeAction) -> ActionEdits;
     /// Inline ghost text, or none. Queried on typing pauses, so dropping stale

@@ -161,5 +161,6 @@ pub(super) fn diagnostic(severity: Severity, line: u32, from: u32, to: u32) -> D
         message: format!("{severity:?} on line {}", line + 1),
         source: None,
         code: None,
+        published: None,
     }
 }

@@ -71,8 +71,9 @@ impl App {
             else {
                 return;
             };
+            let handed = crate::diagnostics::touching(editor.as_ref(), from, to);
             let found = vault
-                .code_actions(&doc.key(), Range { start, end }, source)
+                .code_actions(&doc.key(), Range { start, end }, handed, source)
                 .await;
             let Some(app) = weak.upgrade() else {
                 return;

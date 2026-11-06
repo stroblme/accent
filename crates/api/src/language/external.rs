@@ -48,9 +48,6 @@ const INVALID_PARAMS: i64 = -32602;
 struct Doc {
     version: i32,
     text: String,
-    /// The diagnostics the server last published for it, as it sent them: a code action request
-    /// hands them back (clangd finds its fixes by them).
-    diagnostics: Vec<Value>,
 }
 
 type Docs = Arc<Mutex<HashMap<String, Doc>>>;
@@ -215,15 +212,14 @@ async fn forward_notifications(
                 let Some(rel) = rel_of(&params.uri, &vault_root) else {
                     continue;
                 };
-                let Some((text, stale)) = locked(&docs).get_mut(&rel).map(|d| {
-                    d.diagnostics =
-                        serde_json::from_value(raw.unwrap_or_default()).unwrap_or_default();
+                let Some((text, stale)) = locked(&docs).get(&rel).map(|d| {
                     let stale = params.version.is_some_and(|v| v < d.version);
                     (d.text.clone(), stale)
                 }) else {
                     continue;
                 };
-                let items = diagnostics_of(params.diagnostics, &text, encoding);
+                let raw = serde_json::from_value(raw.unwrap_or_default()).unwrap_or_default();
+                let items = diagnostics_of(raw, &text, encoding);
                 match items.is_empty() {
                     true => painted.remove(&rel),
                     false => painted.insert(rel.clone()),
@@ -608,11 +604,7 @@ impl Language for External {
                 "uri": uri, "languageId": language_id, "version": 1, "text": text,
             }}),
         )?;
-        let doc = Doc {
-            version: 1,
-            text,
-            ..Doc::default()
-        };
+        let doc = Doc { version: 1, text };
         locked(&self.docs).insert(rel.to_string(), doc);
         Ok(self.support())
     }
@@ -774,12 +766,14 @@ impl Language for External {
         })
     }
 
-    /// The context carries the diagnostics touching `range` as the server published them, and
-    /// for `source` the one kind asked for, which the server may leave the others out for.
+    /// The context carries `diagnostics` each as the server published it, but where the editor
+    /// shows it now, moved with the edits since (as VS Code sends them), and for `source` the one
+    /// kind asked for, which the server may leave the others out for.
     fn code_actions(
         &self,
         rel: &str,
         range: super::Range,
+        diagnostics: Vec<super::Diagnostic>,
         source: bool,
     ) -> Fut<'_, Vec<CodeAction>> {
         let rel = rel.to_string();
@@ -792,21 +786,15 @@ impl Language for External {
                 let doc = docs
                     .get(&rel)
                     .ok_or_else(|| Error::Language(format!("{rel} is not open")))?;
-                let (from, to) = (
-                    self.encoding.lsp_pos(&doc.text, range.start),
-                    self.encoding.lsp_pos(&doc.text, range.end),
-                );
-                let touches = |d: &&Value| {
-                    let at = |end: &str| {
-                        serde_json::from_value::<types::Position>(d["range"][end].clone()).ok()
-                    };
-                    let key = |p: types::Position| (p.line, p.character);
-                    at("start")
-                        .zip(at("end"))
-                        .is_some_and(|(start, end)| key(start) <= key(to) && key(from) <= key(end))
+                let lsp = |at| self.encoding.lsp_pos(&doc.text, at);
+                let moved = |d: super::Diagnostic| {
+                    let mut published = d.published?;
+                    let (start, end) = (lsp(d.range.start), lsp(d.range.end));
+                    published["range"] = json!({"start": start, "end": end});
+                    Some(published)
                 };
-                let here: Vec<Value> = doc.diagnostics.iter().filter(touches).cloned().collect();
-                (from, to, here)
+                let here: Vec<Value> = diagnostics.into_iter().filter_map(moved).collect();
+                (lsp(range.start), lsp(range.end), here)
             };
             let mut context = json!({"diagnostics": diagnostics, "triggerKind": 1});
             if source {
@@ -1213,7 +1201,6 @@ mod tests {
             Doc {
                 version: 1,
                 text: text.to_string(),
-                ..Doc::default()
             },
         )])));
         server
@@ -1450,7 +1437,7 @@ mod tests {
         }
         let error = error.expect("clangd has to miss the ';'");
         let fixes = rt
-            .block_on(vault.code_actions("fix.c", error.range, false))
+            .block_on(vault.code_actions("fix.c", error.range, vec![error.clone()], false))
             .unwrap();
         let fix = fixes
             .into_iter()
@@ -1479,7 +1466,7 @@ mod tests {
             end: star,
         };
         let swap = rt
-            .block_on(vault.code_actions("tweak.c", range, false))
+            .block_on(vault.code_actions("tweak.c", range, Vec::new(), false))
             .unwrap()
             .into_iter()
             .find(|a| a.raw["command"]["command"] == "clangd.applyTweak")
@@ -1718,7 +1705,7 @@ mod tests {
             end: tactic,
         };
         let actions = rt
-            .block_on(vault.code_actions("T.lean", range, false))
+            .block_on(vault.code_actions("T.lean", range, Vec::new(), false))
             .unwrap();
         let try_this = actions
             .into_iter()

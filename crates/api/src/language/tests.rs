@@ -502,12 +502,51 @@ fn a_diagnostics_event_survives_the_wire() {
             message: "No note named b".into(),
             source: Some("accent".into()),
             code: None,
+            published: None,
         }],
         stale: true,
     };
     let json = serde_json::to_string(&event).unwrap();
     let back: Event = serde_json::from_str(&json).unwrap();
     assert!(matches!(back, Event::Diagnostics { items, stale: true, .. } if items.len() == 1));
+}
+
+/// A line typed in above an error, and Quick Fix asked before the server, half a second late,
+/// publishes again: the error goes back where the editor moved it, its code as published.
+/// `fake-lsp.py --actions` fixes only an error of its own code, over the range it is handed.
+#[test]
+fn a_code_action_after_an_edit_above_sends_the_moved_diagnostic() {
+    let fake = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build-aux/fake-lsp.py");
+    let argv = ["python3", fake, "--actions", "--publish-delay", "0.5"];
+    let f = crate::tests::Fixture::open(crate::VaultConfig {
+        lsp: configured("c", &argv),
+        ..Default::default()
+    });
+    let rt = accent_lsp::runtime();
+    let text = "int a = oops;\n".to_string();
+    rt.block_on(f.vault.open_document("fix.c", "c", text))
+        .unwrap();
+    let published = |e: &Event| matches!(e, Event::Diagnostics { items, .. } if !items.is_empty());
+    let Some(Event::Diagnostics { mut items, .. }) = f.wait(published) else {
+        panic!("the server has to say `oops` is wrong");
+    };
+    let text = "// above\nint a = oops;\n".to_string();
+    rt.block_on(f.vault.change_document("fix.c", text)).unwrap();
+    // As the editor moves it, a line down with the line typed in.
+    let mut error = items.remove(0);
+    error.range.start.line += 1;
+    error.range.end.line += 1;
+    let asked = f
+        .vault
+        .code_actions("fix.c", error.range, vec![error], false);
+    let actions = rt.block_on(asked).unwrap();
+    let replace = actions
+        .iter()
+        .find(|a| a.title == "Replace oops with 0")
+        .expect("the fix for the error handed back");
+    let edit = &replace.raw["edit"]["documentChanges"][0]["edits"][0];
+    let moved = json!({"start": {"line": 1, "character": 8}, "end": {"line": 1, "character": 12}});
+    assert_eq!(edit["range"], moved);
 }
 
 /// Ghost Text off ends `merl-rt` under an open note, and on starts it again, re-indexed,

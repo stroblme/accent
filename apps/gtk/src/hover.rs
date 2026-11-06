@@ -220,12 +220,13 @@ pub(crate) async fn fixes_at(editor: Rc<dyn Editor>, pos: Pos) -> Vec<CodeAction
     ) else {
         return Vec::new();
     };
+    let handed = crate::diagnostics::touching(editor.as_ref(), range.start, range.end);
     let range = accent_api::Range {
         start: from,
         end: to,
     };
     vault
-        .code_actions(&doc.key(), range, false)
+        .code_actions(&doc.key(), range, handed, false)
         .await
         .unwrap_or_default()
 }

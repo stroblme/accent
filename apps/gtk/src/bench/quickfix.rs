@@ -9,9 +9,10 @@ const FIX: &str = "int a = oops;\nint b = 1 + 2;\n";
 const OTHER: &str = "int other;\n";
 
 /// `ACCENT_BENCH_QUICKFIX=<rel>,<ipynb>` writes `<rel>` and `other.c` in a scratch vault under
-/// `/tmp`, opens `<rel>` with the caret on `oops` once its error is in, and prints the Quick Fix
-/// menu's rows. Then, a fresh menu each time, it picks each row: the preferred fix and the
-/// resolved refactoring and the command each change the text and are undone in one step, the
+/// `/tmp`, opens `<rel>` once its error is in, and prints the hover's fixes over it after a line
+/// typed in above, before the server publishes again. With the caret on `oops`, it prints the
+/// Quick Fix menu's rows. Then, a fresh menu each time, it picks each row: the preferred fix and
+/// the resolved refactoring and the command each change the text and are undone in one step, the
 /// fix reaching into `other.c` writes that file on disk, and the one creating `oops.h` makes it,
 /// and is refused when picked again. Source Action… lists its one action, whose edit is made and
 /// then its command run, and the right-click menu holds both commands. The hover's fixes over
@@ -59,6 +60,23 @@ async fn bench_fixes(app: &Rc<App>, rel: &str) {
         return println!("bench quickfix no_diagnostics {rel}");
     };
     tab.view.grab_focus();
+    // A line typed in above the error, and the hover's fixes asked before the server has said
+    // where the error went: the error the editor moved down goes back to it there.
+    let buffer = &tab.buffer;
+    buffer.begin_user_action();
+    buffer.insert(&mut buffer.start_iter(), "// above\n");
+    buffer.end_user_action();
+    crate::lang::flush(tab.clone()).await;
+    let on = accent_api::Pos {
+        line: 1,
+        character: 9,
+    };
+    let moved = crate::hover::fixes_at(tab.clone(), on).await;
+    let titles: Vec<String> = moved.into_iter().map(|a| a.title).collect();
+    println!("bench quickfix moved {titles:?}");
+    tab.buffer.undo();
+    crate::lang::flush(tab.clone()).await;
+    diagnosed("quickfix", &tab.lang.doc).await;
     // The file-creating fix last a second time, with the file there.
     for (n, pick) in [0u32, 1, 2, 3, 4, 2].into_iter().enumerate() {
         if n == 5 {
