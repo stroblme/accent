@@ -11,5 +11,8 @@ bench notebook_lsp hints ["Hint 1:0-1:11 No note named Missing", "Hint 1:16-1:28
 bench notebook_lsp hints_after_walk ["Hint 1:0-1:11 No note named Missing"] underlined=1
 bench notebook_lsp markdown_hover "<b>Target note</b>\n\nWhat the link shows." fixes=["Create note Missing"] menu=Some(["Create note Missing"])
 bench notebook_lsp markdown key=lsp.ipynb.md rows=T text="[[#T]]"
+bench notebook_lsp saved autosave didsave=1 modified=false
+bench notebook_lsp saved behind didsave=2 modified=false
+bench notebook_lsp saved overwrite didsave=1 modified=false
 bench notebook_lsp marimo key=lsp_marimo.py definition cell=0 at=0:0
 bench notebook_lsp marimo closed=Some((1, 0, 0))

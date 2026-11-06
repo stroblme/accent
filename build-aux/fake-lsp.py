@@ -8,7 +8,8 @@ in `make screenshots`. With `--notebook` it keeps what it is sent and answers ab
 `ACCENT_BENCH_NOTEBOOK_LSP`: an error over each `oops` and pyright's unused-expression warning on
 each line that is a name alone, after every change and naming the version they are for; `NAME at
 LINE:COLUMN` as the hover; the first `NAME =` or `def NAME` as the definition; and `f(a, b)` as the
-signature, on `(`.
+signature, on `(`. With `--saves FILE` it appends the path of each document it is told was saved
+to FILE, a line each, which that drill counts.
 
 With `--actions` it keeps what it is sent too, an error over each `oops`, and offers the code
 actions `ACCENT_BENCH_QUICKFIX` applies, one of each shape a real server sends: "Replace oops with
@@ -58,6 +59,7 @@ LOADING = [int(sys.argv[sys.argv.index("--loading") + 1]) if "--loading" in sys.
 ROOT = [""]
 INLINE = sys.argv[sys.argv.index("--inline") + 1] if "--inline" in sys.argv else None
 NOTEBOOK = "--notebook" in sys.argv
+SAVES = sys.argv[sys.argv.index("--saves") + 1] if "--saves" in sys.argv else None
 ACTIONS = "--actions" in sys.argv
 PUBLISH_DELAY = float(sys.argv[sys.argv.index("--publish-delay") + 1]) \
     if "--publish-delay" in sys.argv else 0.0
@@ -245,6 +247,9 @@ def answer(message):
             pending[:] = [p for p in pending if p[1] != cancelled]
             print(f"fake-lsp cancelled {cancelled}", file=sys.stderr, flush=True)
             send({"id": cancelled, "error": {"code": -32800, "message": "cancelled"}})
+    elif SAVES and method == "textDocument/didSave":
+        with open(SAVES, "a") as saves:
+            saves.write(unquote(message["params"]["textDocument"]["uri"][len("file://"):]) + "\n")
     elif method == "exit":
         sys.exit(0)
     elif id is not None:

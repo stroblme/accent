@@ -1094,6 +1094,7 @@ impl App {
                     true => notebook.mark_clean(etag),
                     false => notebook.save.etag.set(Some(etag)),
                 }
+                notebook.saved();
             }
             // A refused upload of the old file left its copy's name for the next one to reuse.
             (Doc::Pdf(pdf), _) => pdf.clear_conflict(),

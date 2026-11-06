@@ -8,6 +8,9 @@
 //! hints on links to notes not there, one of them gone once that note is written, the hover on
 //! that link and Quick Fix on the other, as a note has them; `[[#` in its markdown cell, answered
 //! with the headings of its markdown cells as one note; and Go to Definition in a marimo notebook.
+//! With a third argument, the file `fake-lsp.py --saves` writes, it also counts the saves the
+//! server is told of: an autosave's, a Ctrl+S landing under an edit made while it was written,
+//! and Unsaved Changes' Overwrite, which writes as a closing tab does.
 
 use super::*;
 use crate::notebook::NotebookTab;
@@ -22,11 +25,12 @@ const LINKED: &str = "lsp_note.md";
 
 pub(super) fn bench_notebook_lsp(app: &Rc<App>, arg: &str) {
     scratch_only(app, "ACCENT_BENCH_NOTEBOOK_LSP");
-    let Some((ipynb, marimo)) = arg.split_once(',') else {
-        eprintln!("ACCENT_BENCH_NOTEBOOK_LSP=<ipynb>,<marimo .py>");
+    let mut args = arg.splitn(3, ',').map(str::to_string);
+    let (Some(ipynb), Some(marimo), saves) = (args.next(), args.next(), args.next()) else {
+        eprintln!("ACCENT_BENCH_NOTEBOOK_LSP=<ipynb>,<marimo .py>[,<saves file>]");
         return bench_quit(app);
     };
-    let (app, ipynb, marimo) = (app.clone(), ipynb.to_string(), marimo.to_string());
+    let app = app.clone();
     glib::spawn_future_local(async move {
         for _ in 0..300 {
             if app.reconciled.get() {
@@ -35,7 +39,7 @@ pub(super) fn bench_notebook_lsp(app: &Rc<App>, arg: &str) {
             glib::timeout_future(Duration::from_millis(100)).await;
         }
         if write(&app, &ipynb, &marimo) {
-            ipynb_drill(&app, &ipynb).await;
+            ipynb_drill(&app, &ipynb, saves.as_deref()).await;
             marimo_drill(&app, &marimo).await;
         }
         bench_quit(&app);
@@ -101,7 +105,7 @@ async fn opened(app: &Rc<App>, rel: &str) -> Option<Rc<NotebookTab>> {
     None
 }
 
-async fn ipynb_drill(app: &Rc<App>, rel: &str) {
+async fn ipynb_drill(app: &Rc<App>, rel: &str, saves: Option<&str>) {
     let Some(tab) = opened(app, rel).await else {
         return;
     };
@@ -213,6 +217,79 @@ async fn ipynb_drill(app: &Rc<App>, rel: &str) {
 
     markdown_hints(app, &tab).await;
     complete_markdown(&tab).await;
+    if let Some(saves) = saves {
+        saved(app, &tab, Path::new(saves)).await;
+    }
+}
+
+/// How many saves of `tab`'s code cells' document the server has been told of, in the file
+/// `fake-lsp.py --saves` writes.
+fn told(tab: &NotebookTab, saves: &Path) -> usize {
+    let key = format!("/{}", tab.document_key().unwrap_or_default());
+    let told = std::fs::read_to_string(saves).unwrap_or_default();
+    told.lines().filter(|path| path.ends_with(&key)).count()
+}
+
+/// Wait up to `secs` for `tab` to have no write out and no edit left unwritten, then a second
+/// for what it tells the server to arrive.
+async fn settled(tab: &NotebookTab, secs: u64) {
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_secs(secs)
+        && (tab.save.flight.borrow().is_some() || tab.save.modified.get())
+    {
+        glib::timeout_future(Duration::from_millis(50)).await;
+    }
+    glib::timeout_future(Duration::from_millis(1000)).await;
+}
+
+/// The saves the server is told of. `autosave`: one, a second after an edit. `behind`: a Ctrl+S
+/// written slowly, an edit made meanwhile, and the save after it, two writes. `overwrite`: an edit
+/// under a change on disk, which no autosave may write, written by Unsaved Changes' Overwrite.
+async fn saved(app: &Rc<App>, tab: &Rc<NotebookTab>, saves: &Path) {
+    settled(tab, 5).await;
+    for case in ["autosave", "behind", "overwrite"] {
+        let before = told(tab, saves);
+        tab.bench_type(1, " ");
+        match case {
+            "autosave" => settled(tab, 5).await,
+            "behind" => {
+                super::SLOW_WRITE_MS.store(1500, std::sync::atomic::Ordering::Relaxed);
+                app.save_model(tab, true);
+                tab.bench_type(1, " ");
+                settled(tab, 8).await;
+                super::SLOW_WRITE_MS.store(0, std::sync::atomic::Ordering::Relaxed);
+            }
+            _ => {
+                let path = app.root().join(tab.key());
+                let disk = std::fs::read_to_string(&path).unwrap_or_default();
+                let _ = std::fs::write(&path, disk + "\n");
+                for _ in 0..100 {
+                    if tab.save.disk_changed.get() {
+                        break;
+                    }
+                    glib::timeout_future(Duration::from_millis(50)).await;
+                }
+                // Past the autosave the edit asked for, which the change on disk refuses.
+                glib::timeout_future(Duration::from_millis(1500)).await;
+                let refused: accent_api::Error = accent_core::Error::Io("refused".into()).into();
+                app.ask_unsaved_model(tab, &refused, |_, _| {});
+                let dialog = app
+                    .window
+                    .visible_dialog()
+                    .and_downcast::<adw::AlertDialog>();
+                if let Some(dialog) = dialog {
+                    dialog.emit_by_name::<()>("response", &[&"overwrite"]);
+                    dialog.close();
+                }
+                settled(tab, 5).await;
+            }
+        }
+        println!(
+            "bench notebook_lsp saved {case} didsave={} modified={}",
+            told(tab, saves) - before,
+            tab.save.modified.get()
+        );
+    }
 }
 
 /// The markdown cell's hints and their underlines, as a note's are: one on each link to a note

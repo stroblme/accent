@@ -35,7 +35,7 @@ pub(crate) trait SavesModel: Saves {
     /// The edits are given up on (a tab closing without saving them).
     fn discard(&self);
 
-    /// A save landed with nothing typed since: what else hears of it.
+    /// A write landed, whatever was typed since: what else hears of it, as a note's server does.
     fn saved(self: &Rc<Self>) {}
 }
 
@@ -88,6 +88,7 @@ impl App {
                 editor::Landing::Behind(etag) => {
                     tab.save_state().etag.set(Some(etag));
                     tab.clear_changed();
+                    tab.saved();
                     if report && explicit {
                         app.toast(said);
                     }
@@ -122,6 +123,7 @@ impl App {
         tab.mark_clean(etag);
         tab.save_state().digest.set(Some(digest));
         tab.clear_changed();
+        tab.saved();
         self.sync_status();
         Ok(())
     }

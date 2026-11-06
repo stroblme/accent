@@ -131,9 +131,9 @@ drill_kernelspec() {
 
 drill_notebook_lsp() {
 	servers <<EOF
-python3 = ["python3", "$fake_lsp", "--notebook"]
+python3 = ["python3", "$fake_lsp", "--notebook", "--saves", "$dir/saves"]
 EOF
-	launch 60 ACCENT_BENCH_NOTEBOOK_LSP=lsp.ipynb,lsp_marimo.py >"$dir/notebook-lsp"
+	launch 90 ACCENT_BENCH_NOTEBOOK_LSP=lsp.ipynb,lsp_marimo.py,"$dir/saves" >"$dir/notebook-lsp"
 	expect notebook-lsp
 }
 
