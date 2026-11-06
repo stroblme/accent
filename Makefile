@@ -83,7 +83,7 @@ VAULT     ?= testvault
 VAULT_NOTES ?= 3600
 VAULT_FILES ?= 40000
 # Repo tooling rather than a CLI subcommand, so the fixtures are not a public feature of the app.
-GEN_VAULT := crates/core/examples/gen-vault.rs
+GEN_VAULT := $(wildcard crates/core/examples/gen-vault/*.rs)
 
 # Headless runs need an X server; :99 is what CI uses. build-aux/headless.sh launches on it.
 export DISPLAY_NUM ?= 99
