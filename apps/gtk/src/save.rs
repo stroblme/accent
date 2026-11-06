@@ -231,6 +231,10 @@ impl App {
         move |text, expected| {
             #[cfg(feature = "bench")]
             crate::bench::hold(&crate::bench::SLOW_WRITE_MS);
+            #[cfg(feature = "bench")]
+            if crate::bench::OFFLINE_WRITE.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(Error::Offline("not connected".to_string()));
+            }
             let write = |expected| match &vault {
                 Some(vault) => vault.save(&rel, text, expected),
                 None => accent_core::fs::write_note(&path, text, expected).map_err(Into::into),

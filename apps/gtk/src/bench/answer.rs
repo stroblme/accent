@@ -1,18 +1,21 @@
 //! Probe save-conflict choices after external changes under unsaved note edits, and a
-//! notebook's and a diagram's reloads on a slow host.
+//! notebook's and a diagram's saves and reloads on a slow host.
 
 use super::*;
 use crate::diagram::DiagramTab;
 use crate::editor::Saves;
 use crate::notebook::NotebookTab;
 use pdf::online;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// How long a diagram's or a notebook's reload holds what it read before answering, and a save
 /// its write before writing, as a slow host's round trips would: set by `ACCENT_BENCH_ANSWER=doc:`
 /// for the case it probes.
 pub(crate) static SLOW_RELOAD_MS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static SLOW_WRITE_MS: AtomicU64 = AtomicU64::new(0);
+/// Whether a save's write fails as one over a dropped link does, before it reaches the disk: set
+/// by `ACCENT_BENCH_ANSWER=doc:` for its `offline` case, there being no host to disconnect.
+pub(crate) static OFFLINE_WRITE: AtomicBool = AtomicBool::new(false);
 
 /// Wait as long as `slow` says, on the worker it is called from.
 pub(crate) fn hold(slow: &AtomicU64) {
@@ -264,13 +267,18 @@ pub(super) fn bench_answer_same(app: &Rc<App>, rel: &str) {
 }
 
 /// `ACCENT_BENCH_ANSWER=doc:<rel_ipynb>,<rel_drawio>` writes a notebook and a diagram at those
-/// paths and reloads and overwrites each on a slow host (`SLOW_RELOAD_MS`, `SLOW_WRITE_MS`), a
-/// fresh tab a case. `racing`: an edit made while the read is out stays, and the banner asks.
-/// `overlap`: of two reloads out at once, the newer one's read is what the tab holds, though the
-/// older is answered last. `overwrite`: the conflict dialog's Overwrite holds the main loop for
-/// no write (`held_ms`), and an edit made during it is written after it. `failed`: a write the
-/// folder refuses says so, the edits and the banner kept. Writes files, and makes the folder
-/// read only for a moment; use a scratch vault.
+/// paths and saves, reloads and overwrites each on a slow host (`SLOW_RELOAD_MS`,
+/// `SLOW_WRITE_MS`), a fresh tab a case. `racing`: an edit made while the read is out stays, and
+/// the banner asks. `overlap`: of two reloads out at once, the newer one's read is what the tab
+/// holds, though the older is answered last. `overwrite`: the conflict dialog's Overwrite holds
+/// the main loop for no write (`held_ms`), and an edit made during it is written after it.
+/// `failed`: a write the folder refuses says so, the edits and the banner kept. `during`: an edit
+/// made while a Ctrl+S is written is saved after it. `flush`: a flush, as a close does, waits for
+/// that write and then writes the edit. `conflict`: a Ctrl+S over a change on disk the watcher
+/// has not reported yet is refused by the etag gate and asks, and Reload takes the disk's version.
+/// `offline`: a write over a dropped link (`OFFLINE_WRITE`) says so and raises the window's
+/// banner, the edits kept. Writes files, and makes the folder read only for a moment; use a
+/// scratch vault.
 pub(super) fn bench_answer_doc(app: &Rc<App>, arg: &str) {
     let Some((notebook, diagram)) = arg.split_once(',') else {
         eprintln!("ACCENT_BENCH_ANSWER=doc:<rel_ipynb>,<rel_drawio>");
@@ -302,6 +310,10 @@ trait Probe: Saves + Sized {
     fn holds(&self) -> String;
     fn reload(app: &Rc<App>, tab: &Rc<Self>);
     fn resolve(app: &Rc<App>, tab: &Rc<Self>);
+    /// A Ctrl+S.
+    fn save(app: &Rc<App>, tab: &Rc<Self>);
+    /// The write a closing tab makes.
+    fn flush(app: &Rc<App>, tab: &Rc<Self>) -> bool;
 }
 
 impl Probe for NotebookTab {
@@ -326,6 +338,12 @@ impl Probe for NotebookTab {
     fn resolve(app: &Rc<App>, tab: &Rc<Self>) {
         app.resolve_notebook(tab);
     }
+    fn save(app: &Rc<App>, tab: &Rc<Self>) {
+        app.save_notebook(tab, true);
+    }
+    fn flush(app: &Rc<App>, tab: &Rc<Self>) -> bool {
+        app.flush_notebook(tab).is_ok()
+    }
 }
 
 impl Probe for DiagramTab {
@@ -349,13 +367,29 @@ impl Probe for DiagramTab {
     fn resolve(app: &Rc<App>, tab: &Rc<Self>) {
         app.resolve_diagram(tab);
     }
+    fn save(app: &Rc<App>, tab: &Rc<Self>) {
+        app.save_diagram(tab, true);
+    }
+    fn flush(app: &Rc<App>, tab: &Rc<Self>) -> bool {
+        app.flush_diagram(tab).is_ok()
+    }
 }
 
 async fn doc_drill<T: Probe>(app: &Rc<App>, rel: &str) {
     let kind = T::KIND;
     let path = app.root().join(rel);
     let write = |version: &str| std::fs::write(&path, T::file(version)).is_ok();
-    for case in ["racing", "overlap", "overwrite", "failed"] {
+    let cases = [
+        "racing",
+        "overlap",
+        "overwrite",
+        "failed",
+        "during",
+        "flush",
+        "conflict",
+        "offline",
+    ];
+    for case in cases {
         SLOW_RELOAD_MS.store(0, Ordering::Relaxed);
         SLOW_WRITE_MS.store(0, Ordering::Relaxed);
         app.toasts.dismiss_all();
@@ -391,6 +425,60 @@ async fn doc_drill<T: Probe>(app: &Rc<App>, rel: &str) {
                 SLOW_RELOAD_MS.store(200, Ordering::Relaxed);
                 write("theirs B");
                 T::reload(app, &tab);
+            }
+            "during" | "flush" => {
+                tab.edit("mine");
+                SLOW_WRITE_MS.store(1500, Ordering::Relaxed);
+                T::save(app, &tab);
+                tab.edit("during");
+                if case == "flush" {
+                    said = format!(" flushed={}", T::flush(app, &tab));
+                }
+                let toast = landed(app, &tab, true).await;
+                let file = std::fs::read_to_string(&path).unwrap_or_default();
+                said += &format!(
+                    " file_mine={} file_during={} toast={toast:?}",
+                    file.contains("mine"),
+                    file.contains("during"),
+                );
+            }
+            "conflict" => {
+                tab.edit("mine");
+                // Before the watcher can say so: the write meets the change at the etag gate.
+                write("theirs");
+                T::save(app, &tab);
+                let mut dialog = None;
+                for _ in 0..100 {
+                    dialog = app
+                        .window
+                        .visible_dialog()
+                        .and_downcast::<adw::AlertDialog>();
+                    if dialog.is_some() {
+                        break;
+                    }
+                    glib::timeout_future(Duration::from_millis(50)).await;
+                }
+                said = format!(
+                    " dialog={:?}",
+                    dialog
+                        .as_ref()
+                        .and_then(|d| d.heading())
+                        .unwrap_or_default()
+                );
+                if let Some(dialog) = dialog {
+                    dialog.emit_by_name::<()>("response", &[&"reload"]);
+                    dialog.close();
+                }
+            }
+            "offline" => {
+                tab.edit("mine");
+                OFFLINE_WRITE.store(true, Ordering::Relaxed);
+                T::save(app, &tab);
+                let toast = landed(app, &tab, false).await;
+                said = format!(
+                    " connection={} toast={toast:?}",
+                    app.connection.is_revealed()
+                );
             }
             _ => {
                 tab.edit("mine");
@@ -467,9 +555,29 @@ async fn doc_drill<T: Probe>(app: &Rc<App>, rel: &str) {
         save.modified.set(false);
         app.close_page(&doc_page(app, rel));
         glib::timeout_future(Duration::from_millis(300)).await;
+        OFFLINE_WRITE.store(false, Ordering::Relaxed);
+        app.hide_connection_banner();
     }
     SLOW_RELOAD_MS.store(0, Ordering::Relaxed);
     SLOW_WRITE_MS.store(0, Ordering::Relaxed);
+}
+
+/// Wait up to 6 s for `tab` to have no write out and, with `clean`, no edit left unwritten, and
+/// return the first toast that stood meanwhile.
+async fn landed<T: Probe>(app: &App, tab: &Rc<T>, clean: bool) -> String {
+    let t = Instant::now();
+    let mut toast = String::new();
+    while t.elapsed() < Duration::from_secs(6) {
+        glib::timeout_future(Duration::from_millis(50)).await;
+        if toast.is_empty() {
+            toast = app.toasts.shown().into_iter().next().unwrap_or_default();
+        }
+        let save = tab.save_state();
+        if save.flight.borrow().is_none() && !(clean && save.modified.get()) {
+            break;
+        }
+    }
+    toast
 }
 
 /// The page of the tab showing `rel`.

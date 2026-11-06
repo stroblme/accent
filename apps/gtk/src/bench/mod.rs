@@ -72,7 +72,7 @@ mod toggle;
 mod user_commands;
 mod wheel;
 
-pub(crate) use answer::{SLOW_RELOAD_MS, SLOW_WRITE_MS, hold};
+pub(crate) use answer::{OFFLINE_WRITE, SLOW_RELOAD_MS, SLOW_WRITE_MS, hold};
 use answer::{bench_answer, bench_answer_doc, bench_answer_same};
 use attach::bench_attach;
 use chrome::{bench_chrome, bench_chrome_find, bench_chrome_keys};
@@ -322,7 +322,7 @@ use user_commands::bench_commands;
 /// - `ACCENT_BENCH_ATTACH=<rel_note>,<rel_vault_png>,<rel_code>`: image paste/drop.
 /// - `ACCENT_BENCH_ANSWER=<rel_note>`: conflict responses and main-loop timing;
 ///   `same:<rel_note>`: etag-only change during typing; `doc:<rel_ipynb>,<rel_drawio>`: a
-///   notebook's and a diagram's reloads on a slow host (`answer::bench_answer_doc`).
+///   notebook's and a diagram's saves and reloads on a slow host (`answer::bench_answer_doc`).
 /// - `ACCENT_BENCH_EXPORT=pdf:<rel_pdf>`: annotated export and print copy;
 ///   `note:<rel_note>`, `notebook:<rel_notebook>`: HTML export. Outputs use `$TMPDIR`.
 /// - `ACCENT_BENCH_SAVE_AS=<rel_file>`: note/diagram/PDF/image Save As and errors.

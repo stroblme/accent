@@ -203,6 +203,17 @@ drill_saved() {
 	expect saved "preview saved"
 }
 
+# A notebook's and a diagram's saves and reloads, a fresh tab a case. An answer to the conflict
+# dialog holds the main loop for no write, so its `held_ms` stays under a second and is left out
+# of what is compared.
+drill_answer_doc() {
+	launch 180 ACCENT_BENCH_ANSWER=doc:answer.ipynb,answer.drawio >"$dir/answer-doc.out"
+	sed -n 's/.* held_ms=\([0-9]*\).*/\1/p' "$dir/answer-doc.out" | awk '$1 >= 1000 { bad = 1 } END { exit bad }' ||
+		{ cat "$dir/answer-doc.out"; return 1; }
+	sed 's/ held_ms=[0-9]*//' "$dir/answer-doc.out" >"$dir/answer-doc"
+	expect answer-doc "answer doc"
+}
+
 # A note from a template with two stops, as a window's first tab, whose caret has to be on screen:
 # a snippet pushed into a view before its first size left it past the end of a short note in about
 # half the runs.
