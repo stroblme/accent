@@ -1736,8 +1736,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - The find bar paints the note's own background (`--view-bg-color`) in every theme through `accent-flat`, which has to reach `searchbar > revealer > box`: Adwaita paints that box in the header-bar colour, a band that shows once the chrome around it fades, and draws a shade line under it, black in dark, which goes too: the bar sits on the note, divided from it by nothing.
 - The 1 px paned separator is the only division.
   Under the pointer it takes the accent at the same width, dragged it thickens to 3 px, and a double-click puts it back at its default position.
-- A line across a tab stops 6 px short of the pane's sides, as the Git pane's divider does in the sidebar, so it never runs into the sidebar's line or a split's divider (`.accent-pane`).
-  That holds for a rule, such as a sticky title's or a comparison's under its column titles, and for the line a scrolled view draws against the tab bar or the status bar while there is more of it that way.
+- A line across a tab or a sidebar pane stops 6 px short of the pane's sides, as the Git pane's divider does, so it never runs into the sidebar's line or a split's divider (`.accent-pane`).
+  That holds for a rule, such as a sticky title's or a comparison's under its column titles, for the divider between two sidebar sections, and for the line a scrolled view draws against the tab bar or the status bar while there is more of it that way.
 - Four themes, chosen in Preferences: System, Light and Dark are `AdwStyleManager` colour schemes and paint nothing of ours; Solarized redeclares libadwaita's `--*-bg-color` / `--*-fg-color` on `:root`, so every widget follows untouched and it still follows the system between its halves.
   It leaves the accent, shade and border variables alone, so the one-accent rule holds in all four.
 - Light and dark are the same design by construction: outside `theme.rs` no colour is picked per theme (Solarized's lower dim floor is a number), so there is no second palette to keep in step, and the same holds for the accent, which the user can change at any moment.

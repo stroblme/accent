@@ -312,6 +312,14 @@ impl Sidebar {
         // Hidden until a diagram is in front: nothing else has properties to show.
         properties_page.set_visible(false);
 
+        // A line across a pane stops 6 px short of the sidebar's sides, as one across a tab does
+        // (`.accent-pane`). The Git pane's column margin already holds its lines there.
+        for page in stack.pages().iter::<adw::ViewStackPage>().flatten() {
+            if page.name().as_deref() != Some("git") {
+                page.child().add_css_class("accent-pane");
+            }
+        }
+
         // Icons, because four labels do not fit a 200 px sidebar without truncating. The switcher
         // gives every toggle the page title as its tooltip, so icon-only stays discoverable. No
         // vertical alignment of its own: as a header title widget it takes the header's full
@@ -394,6 +402,7 @@ impl Sidebar {
     }
 
     pub fn add_bibliography(&self, widget: &impl IsA<gtk::Widget>) {
+        widget.add_css_class("accent-pane");
         self.stack
             .add_titled_with_icon(
                 widget,
