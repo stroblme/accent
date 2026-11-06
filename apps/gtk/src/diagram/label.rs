@@ -9,7 +9,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use accent_core::note::Syntax;
-use accent_drawio::{CellId, Rect, VAlign};
+use accent_drawio::{Align, CellId, Rect, VAlign};
 use adw::prelude::*;
 use gtk::{gdk, glib, graphene, pango};
 
@@ -31,10 +31,13 @@ const FACE: &str = "Helvetica";
 /// What the editor shows its text as.
 pub enum Look {
     /// A diagram's label: Markdown styled as a note in the note font (`None` for the default),
-    /// zoomed to the label's size, spellchecked if asked, at least a word wide and a line tall.
+    /// zoomed to the label's size, spellchecked if asked, at least a word wide and a line tall,
+    /// its lines aligned in the box as the label's are on the canvas.
     Note {
         font: Option<String>,
         spellcheck: bool,
+        align: Align,
+        valign: VAlign,
     },
     /// Text typed onto a PDF page: plain, refusing what Helvetica cannot set, in a face like it
     /// at the text's size on screen, `ink` on `paper`, its lines and the room round them as the
@@ -140,9 +143,11 @@ impl<T: 'static> LabelEditor<T> {
                 view.clone().upcast()
             }
         };
+        // Not clipped to the box, which would cut the outline off its right and bottom.
         let layer = gtk::Fixed::builder()
             .halign(gtk::Align::Start)
             .valign(gtk::Align::Start)
+            .overflow(gtk::Overflow::Visible)
             .build();
         layer.put(&frame, 0.0, 0.0);
         overlay.add_overlay(&layer);
@@ -178,10 +183,16 @@ impl<T: 'static> LabelEditor<T> {
             return editor;
         }
         if let Look::Note {
-            spellcheck: true, ..
+            spellcheck,
+            align,
+            valign,
+            ..
         } = editor.look
         {
-            editor::spell_adapter(&editor.buffer, &editor.view).set_enabled(true);
+            if spellcheck {
+                editor::spell_adapter(&editor.buffer, &editor.view).set_enabled(true);
+            }
+            align_lines(&editor.view, align, valign);
         }
         // Styled as the note editor's companions are, on each change and in the theme's colours.
         // Weak: the view holds the buffer, which holds this closure.
@@ -374,6 +385,38 @@ impl<T: 'static> LabelEditor<T> {
     }
 }
 
+/// Set `view`'s lines in its box as `align` and `valign` set a label's: across by justification,
+/// and down by a top margin of the room its lines leave, kept as they grow. Measured an idle after
+/// the view's lines change height, which is during its allocation.
+fn align_lines(view: &sourceview5::View, align: Align, valign: VAlign) {
+    view.set_justification(match align {
+        Align::Left => gtk::Justification::Left,
+        Align::Center => gtk::Justification::Center,
+        Align::Right => gtk::Justification::Right,
+    });
+    let share = match valign {
+        VAlign::Top => return,
+        VAlign::Middle => 0.5,
+        VAlign::Bottom => 1.0,
+    };
+    let Some(adjustment) = view.vadjustment() else {
+        return;
+    };
+    let view = view.downgrade();
+    adjustment.connect_changed(move |adjustment| {
+        let (view, room) = (view.clone(), adjustment.page_size());
+        glib::idle_add_local_once(move || {
+            let Some(view) = view.upgrade() else { return };
+            // The foot of the last line, in the buffer's coordinates, which the margin is outside.
+            let (y, h) = view.line_yrange(&view.buffer().end_iter());
+            let top = ((room - f64::from(y + h)) * share).max(0.0).round() as i32;
+            if view.top_margin() != top {
+                view.set_top_margin(top);
+            }
+        });
+    });
+}
+
 /// A plain view of `text` that takes only what Helvetica can set: a paste of anything else keeps
 /// the rest of it.
 fn plain_view(text: &str) -> (sourceview5::View, sourceview5::Buffer) {
@@ -481,7 +524,7 @@ impl DiagramTab {
         let Some(sheet) = self.view.sheet() else {
             return;
         };
-        let (markdown, inside) = {
+        let (markdown, inside, align) = {
             let editor = self.editor.borrow();
             let Ok(page) = editor.page(self.page_index.get()) else {
                 return;
@@ -490,16 +533,22 @@ impl DiagramTab {
             // A label inside its shape, rather than beside it or on an edge.
             let style = cell.style.resolve(cell.edge);
             let at = |key, middle| style.get(key).is_none_or(|v| v == middle);
+            let align = match style.get("align") {
+                Some("left") => Align::Left,
+                Some("right") => Align::Right,
+                _ => Align::Center,
+            };
             (
                 accent_drawio::label::to_markdown(cell.label(), cell.is_html()),
                 cell.vertex
                     && at("labelPosition", "center")
                     && at("verticalLabelPosition", "middle"),
+                align,
             )
         };
         // Where the label is drawn, or where it will be for a cell that has none yet: halfway
         // along an edge, over the whole of a shape.
-        let (mut place, size) = sheet
+        let (mut place, size, valign) = sheet
             .scene
             .prims
             .iter()
@@ -510,14 +559,17 @@ impl DiagramTab {
                     font,
                     valign,
                     ..
-                } if *cell == id => Some((label_box(*rect, *valign, inside), font.size)),
+                } if *cell == id => Some((label_box(*rect, *valign, inside), font.size, *valign)),
                 _ => None,
             })
             .or_else(|| {
                 let m = sheet.edge_middle(&id)?;
-                Some((accent_drawio::Rect::new(m.x, m.y, 0.0, 0.0), 11.0))
+                Some((Rect::new(m.x, m.y, 0.0, 0.0), 11.0, VAlign::Middle))
             })
-            .unwrap_or_else(|| (sheet.frame_of(&id).unwrap_or_default(), 12.0));
+            .unwrap_or_else(|| {
+                let frame = sheet.frame_of(&id).unwrap_or_default();
+                (frame, 12.0, VAlign::Middle)
+            });
         if let Some(r) = sheet.rect(&id).filter(|_| place.w < 1.0 || place.h < 1.0) {
             place = r;
         }
@@ -525,6 +577,8 @@ impl DiagramTab {
         let look = Look::Note {
             font: self.font.borrow().clone(),
             spellcheck: self.spellcheck.get(),
+            align,
+            valign,
         };
         let editor = LabelEditor::open(&self.overlay, id, &markdown, place, size, look);
         *self.label.borrow_mut() = Some(editor.clone());
