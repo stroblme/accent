@@ -21,6 +21,7 @@ pub mod link;
 mod local;
 mod paths;
 pub mod python;
+mod registry;
 pub mod remote;
 pub mod rpc;
 pub mod ssh;

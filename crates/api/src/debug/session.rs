@@ -90,7 +90,7 @@ pub(super) async fn start(
     });
     // Before `launch`: the adapter asks for the program to be run while it is out. A vault shut
     // down meanwhile stopped only the sessions it held, so this one stops its own adapter.
-    if !debugs.register(id, &session) {
+    if !debugs.sessions.register(id, &session) {
         session.client.shutdown().await;
         return Err(accent_core::Error::Cancelled.into());
     }
@@ -117,7 +117,7 @@ pub(super) async fn start(
         .request_unbounded::<Value>("launch", arguments);
     if let Err(e) = launched.await {
         // Nothing runs, so nothing is kept.
-        debugs.remove(id);
+        debugs.sessions.remove(id);
         session.stop().await;
         return Err(failed(&argv[0], &session.client, e));
     }
@@ -228,7 +228,7 @@ async fn forward(
         }
     }
     // Still registered, it was neither stopped nor did it end: the adapter died.
-    let gone = debugs.upgrade().and_then(|d| d.remove(id));
+    let gone = debugs.upgrade().and_then(|d| d.sessions.remove(id));
     let error = match (&gone, terminated) {
         (Some(session), false) => Some(match session.client.last_words() {
             Some(words) => format!("the debug adapter exited: {words}"),

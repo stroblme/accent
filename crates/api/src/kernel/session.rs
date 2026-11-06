@@ -76,7 +76,7 @@ pub(super) async fn start(
         message_interrupt: launch.message_interrupt,
     });
     // A vault shut down meanwhile stopped only the kernels it held, so this one stops its own.
-    if !kernels.register(id, &session) {
+    if !kernels.sessions.register(id, &session) {
         session.kernel.shutdown().await;
         return Err(accent_core::Error::Cancelled.into());
     }
@@ -180,7 +180,7 @@ async fn forward(
         waiting.into_iter().for_each(emit);
     }
     // Still registered and not being stopped, it ended on its own.
-    let ended = kernels.upgrade().and_then(|k| k.remove(id));
+    let ended = kernels.upgrade().and_then(|k| k.sessions.remove(id));
     let error = ended
         .filter(|s| !s.stopping.load(Ordering::SeqCst))
         .map(|session| match (session.kernel.last_words(), code) {

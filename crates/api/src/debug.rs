@@ -8,11 +8,9 @@
 
 mod session;
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub use accent_core::config::{Breakpoint, ExceptionFilter};
@@ -22,8 +20,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::language::{Pos, Task, in_path, remote_task_then};
+use crate::registry::Registry;
 use crate::vault::Backend;
-use crate::{Error, Event, Local, Result, Vault, locked};
+use crate::{Error, Event, Local, Result, Vault};
 use session::Session;
 
 // ---------------------------------------------------------------- the façade's types
@@ -238,10 +237,7 @@ pub(crate) fn interpreter(root: &Path, program: &Path, configured: &[String]) ->
 pub(crate) struct Debugs {
     root: PathBuf,
     events: Sender<Event>,
-    sessions: Mutex<HashMap<u64, Arc<Session>>>,
-    /// Raised by [`Debugs::shutdown`] before it takes the sessions: a start still under way holds
-    /// `Debugs` itself, so it outlives the vault's end and must not register after it.
-    closed: AtomicBool,
+    sessions: Registry<Session>,
 }
 
 impl Debugs {
@@ -249,8 +245,7 @@ impl Debugs {
         Debugs {
             root,
             events,
-            sessions: Mutex::default(),
-            closed: AtomicBool::new(false),
+            sessions: Registry::new("debug session"),
         }
     }
 
@@ -262,7 +257,7 @@ impl Debugs {
 
     /// End the program and its adapter; a session already over is no error.
     pub(crate) fn stop(&self, id: u64) -> Task<()> {
-        let session = self.remove(id);
+        let session = self.sessions.remove(id);
         Task::spawn(async move {
             if let Some(session) = session {
                 session.stop().await;
@@ -276,41 +271,7 @@ impl Debugs {
     /// gone.
     /// Blocks on the runtime, as `Languages::shutdown` does, and starts none when nothing runs.
     pub(crate) fn shutdown(&self) {
-        self.closed.store(true, Ordering::SeqCst);
-        let sessions: Vec<Arc<Session>> = locked(&self.sessions).drain().map(|(_, s)| s).collect();
-        if sessions.is_empty() {
-            return;
-        }
-        accent_lsp::runtime().block_on(async {
-            let all = async {
-                for session in &sessions {
-                    session.stop().await;
-                }
-            };
-            let _ = tokio::time::timeout(Duration::from_secs(2), all).await;
-        });
-    }
-
-    /// Keep `session` as `id`; false once the vault has shut down, the caller then stopping it.
-    fn register(&self, id: u64, session: &Arc<Session>) -> bool {
-        let mut sessions = locked(&self.sessions);
-        // Read under the lock `shutdown` drains through, so a session is either drained or refused.
-        if self.closed.load(Ordering::SeqCst) {
-            return false;
-        }
-        sessions.insert(id, session.clone());
-        true
-    }
-
-    fn session(&self, id: u64) -> Result<Arc<Session>> {
-        locked(&self.sessions)
-            .get(&id)
-            .cloned()
-            .ok_or_else(|| Error::Language(format!("no debug session {id}")))
-    }
-
-    fn remove(&self, id: u64) -> Option<Arc<Session>> {
-        locked(&self.sessions).remove(&id)
+        self.sessions.shutdown(Session::stop);
     }
 }
 
@@ -327,7 +288,7 @@ macro_rules! sessions {
     )*) => {
         impl Debugs { $(
             pub(crate) fn $inner(&self, session: u64, $($arg: $ty),*) -> Task<$ret> {
-                let session = self.session(session);
+                let session = self.sessions.get(session);
                 Task::spawn(async move { session?.$inner($($arg),*).await })
             }
         )* }
@@ -497,7 +458,7 @@ mod tests {
         let started = accent_lsp::runtime()
             .block_on(async { tokio::time::timeout(Duration::from_secs(10), started).await });
         assert!(matches!(started, Ok(Err(_))), "{started:?}");
-        assert!(locked(&debugs.sessions).is_empty());
+        assert!(debugs.sessions.get(1).is_err());
         assert!(appears("ended"), "the adapter outlived its vault");
     }
 
