@@ -524,17 +524,37 @@ fn follow_layout(tab: &Rc<Tab>, width: &gtk::DrawingArea) {
             move |_| tab.update_sticky()
         ));
     // The find bar paints the matches around what is on screen, so a scroll or a resize that
-    // shows other lines has them painted too (`Tab::paint_matches`).
-    let adjustment = tab.scroller.vadjustment();
-    adjustment.connect_value_changed(glib::clone!(
+    // shows other lines has them painted too (`Tab::paint_matches`). Heard on whichever adjustment
+    // the view scrolls by: a comparison puts an editor that is not its first column on the one the
+    // columns share, and gives its own back when it goes.
+    let heard = RefCell::new(None::<(gtk::Adjustment, [glib::SignalHandlerId; 2])>);
+    let hear = move |tab: &Rc<Tab>| {
+        if let Some((adjustment, ids)) = heard.take() {
+            ids.into_iter().for_each(|id| adjustment.disconnect(id));
+        }
+        tab.queue_paint();
+        let Some(adjustment) = tab.view.vadjustment() else {
+            return;
+        };
+        let ids = [
+            adjustment.connect_value_changed(glib::clone!(
+                #[weak]
+                tab,
+                move |_| tab.queue_paint()
+            )),
+            adjustment.connect_changed(glib::clone!(
+                #[weak]
+                tab,
+                move |_| tab.queue_paint()
+            )),
+        ];
+        heard.replace(Some((adjustment, ids)));
+    };
+    hear(tab);
+    tab.view.connect_vadjustment_notify(glib::clone!(
         #[weak(rename_to = tab)]
         tab,
-        move |_| tab.queue_paint()
-    ));
-    adjustment.connect_changed(glib::clone!(
-        #[weak(rename_to = tab)]
-        tab,
-        move |_| tab.queue_paint()
+        move |_| hear(&tab)
     ));
 }
 

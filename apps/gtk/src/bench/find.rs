@@ -16,10 +16,14 @@ type Step = Box<dyn Fn(&Rc<App>, &Rc<Bar>)>;
 ///
 /// All three cases must report `sel=Some((0, n))` both times.
 ///
-/// `ACCENT_BENCH_FIND=options[:<rel_pdf>]` is [`bench_find_options`] instead.
+/// `ACCENT_BENCH_FIND=options[:<rel_pdf>]` is [`bench_find_options`] instead, and
+/// `ACCENT_BENCH_FIND=compare` [`bench_find_compare`].
 pub(super) fn bench_find(app: &Rc<App>, rel: &str) {
     if let Some(pdf) = rel.strip_prefix("options") {
         return bench_find_options(app, pdf.strip_prefix(':'));
+    }
+    if rel == "compare" {
+        return bench_find_compare(app);
     }
     app.open_path(rel);
     let (app, rel) = (app.clone(), rel.to_string());
@@ -177,6 +181,106 @@ fn bench_find_options(app: &Rc<App>, pdf: Option<&str>) {
         }
         run(app, bar, steps);
     });
+}
+
+/// The 600 lines [`bench_find_compare`] compares, `foo` on each: every fourth one says `word`
+/// there too, `foo` on the working tree's side and `bar` on the index's, so it is a changed line
+/// whose `foo` is emphasised.
+fn compared(word: &str) -> String {
+    (0..600)
+        .map(|i| match i % 4 {
+            1 => format!("row {i} foo {word} changed\n"),
+            _ => format!("row {i} foo stays\n"),
+        })
+        .collect()
+}
+
+/// `ACCENT_BENCH_FIND=compare` writes a 600-line note and searches it for `foo` with the bar up,
+/// then compares it with the editor on the left (a changed-on-disk comparison) and on the right
+/// (a Changes row's working-tree one), each as it opens and scrolled to its end, and scrolls it
+/// to its end alone. Every case prints
+/// `bench find compare case=<case> shown=<n> painted=<n> on_top=<n>`: the matches on screen,
+/// those carrying the find tag, and those it paints over every other tag, the comparison's word
+/// emphasis included. All three agree. The drill closes and removes its note.
+fn bench_find_compare(app: &Rc<App>) {
+    if let Err(e) = std::fs::write(app.root().join(NOTE), compared("foo")) {
+        println!("bench find compare wrote=false {e}");
+        return bench_quit(app);
+    }
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        let wait = |ms| glib::timeout_future(Duration::from_millis(ms));
+        app.open_path(NOTE);
+        wait(600).await;
+        let Some(tab) = app.active().filter(|tab| tab.rel() == NOTE) else {
+            println!("bench find compare no_tab");
+            return bench_quit(&app);
+        };
+        let bar = app.pane().find.clone();
+        bar.open(Mode::Find);
+        typed(&bar, "foo");
+        wait(SETTLED.as_millis() as u64).await;
+        let index = compared("bar");
+        for (side, case) in [(diff::Side::Old, "old"), (diff::Side::New, "new")] {
+            let compare = tab.compare("Mine", ("Index", &index), side, false, None, case);
+            for _ in 0..250 {
+                if compare.settled() {
+                    break;
+                }
+                wait(20).await;
+            }
+            wait(300).await;
+            painted(&format!("{case}_opened"), &tab);
+            to_end(&tab).await;
+            painted(&format!("{case}_end"), &tab);
+            tab.leave_compare();
+        }
+        to_end(&tab).await;
+        painted("alone_end", &tab);
+        app.close_page(&tab.page);
+        let _ = std::fs::remove_file(app.root().join(NOTE));
+        bench_quit(&app);
+    });
+}
+
+/// The view at the top, then at the end, each given time to lay its lines and paint.
+async fn to_end(tab: &Tab) {
+    let Some(adjustment) = tab.view.vadjustment() else {
+        return;
+    };
+    for end in [false, true] {
+        adjustment.set_value(match end {
+            true => adjustment.upper() - adjustment.page_size(),
+            false => 0.0,
+        });
+        glib::timeout_future(Duration::from_millis(400)).await;
+    }
+}
+
+/// What [`bench_find_compare`] prints for `case`.
+fn painted(case: &str, tab: &Tab) {
+    let (buffer, view) = (&tab.buffer, &tab.view);
+    let (Some(tag), Ok(re)) = (
+        buffer.tag_table().lookup("find"),
+        accent_core::search::pattern("foo", Default::default()),
+    ) else {
+        return println!("bench find compare case={case} no_tag");
+    };
+    let shown = view.visible_rect();
+    let (mut on_screen, mut painted, mut on_top) = (0, 0, 0);
+    for m in accent_core::search::char_ranges(&re, &tab.text()) {
+        let at = buffer.iter_at_offset(m.start as i32);
+        let (y, height) = view.line_yrange(&at);
+        if height == 0 || y + height <= shown.y() || y >= shown.y() + shown.height() {
+            continue;
+        }
+        on_screen += 1;
+        // In ascending priority, so the last that sets a background is the one painting it.
+        let tags = at.tags();
+        painted += usize::from(tags.contains(&tag));
+        on_top += usize::from(tags.iter().rev().find(|t| t.is_background_set()) == Some(&tag));
+    }
+    println!("bench find compare case={case} shown={on_screen} painted={painted} on_top={on_top}");
 }
 
 /// The PDF's steps from the page being read: typed on the third page, the query shows its hit,

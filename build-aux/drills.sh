@@ -177,6 +177,14 @@ drill_editor() {
 	expect editor editor
 }
 
+# Every match on screen painted, and over the word emphasis, wherever a comparison is scrolled to.
+drill_find_compare() {
+	launch 60 ACCENT_BENCH_FIND=compare >"$dir/find-compare"
+	awk '/^bench find compare case=/ { n++; split($5, s, "="); split($6, p, "="); split($7, t, "=")
+		if (s[2] == 0 || p[2] != s[2] || t[2] != s[2]) bad = 1 }
+		END { exit !(n == 5 && !bad) }' "$dir/find-compare" || { cat "$dir/find-compare"; return 1; }
+}
+
 drill_preview() {
 	launch 60 ACCENT_BENCH_PREVIEW=render >"$dir/preview"
 	expect preview preview
