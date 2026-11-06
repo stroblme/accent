@@ -1152,7 +1152,7 @@ fn layers(app: &Rc<App>, rel: &str) {
         press(&added, "Move Layer Down");
         if let Some(row) = tab.layer_row("2") {
             row.set_text("Slide");
-            row.emit_by_name::<()>("apply", &[]);
+            row.emit_by_name::<()>("entry-activated", &[]);
         }
         println!("bench diagram layers moved_renamed rows={:?}", rows());
         press("1", "Delete Layer");

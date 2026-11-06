@@ -133,6 +133,13 @@ impl Layers {
     /// always there.
     fn row(&self, id: &CellId) -> Row {
         let row = super::props::entry_row("");
+        // No apply button, nor the indicator it shares a place with: an entry row keeps their room
+        // at the name's end even while neither shows, which the hover buttons would leave the name
+        // none of.
+        row.set_show_apply_button(false);
+        for part in ["apply-button", "indicator"] {
+            super::props::hide_part(&row, part);
+        }
         let send = |change: fn(CellId) -> LayerChange| {
             let (send, id) = (self.send.clone(), id.clone());
             move |_: &gtk::Button| send(change(id.clone()))
@@ -166,9 +173,8 @@ impl Layers {
             row.add_suffix(button);
         }
         reveal_on_hover(&row);
-        // Enter, the apply button or the keyboard leaving the name renames the layer, and Escape
-        // puts the name back; each ends the edit. Enter on a name left as it was is
-        // `entry-activated` rather than `apply`.
+        // Enter or the keyboard leaving the name renames the layer, and Escape puts the name back;
+        // each ends the edit.
         let name = Rc::new(RefCell::new(String::new()));
         let rename = {
             let (send, layer, name) = (self.send.clone(), id.clone(), name.clone());
@@ -181,10 +187,6 @@ impl Layers {
             }
         };
         let renamed = rename.clone();
-        row.connect_apply(move |row| {
-            renamed(row);
-            end_edit(row);
-        });
         let focus = gtk::EventControllerFocus::new();
         focus.connect_leave(move |focus| {
             if let Some(row) = focus.widget().and_downcast::<adw::EntryRow>() {
@@ -235,6 +237,7 @@ impl Layers {
         row.add_controller(press);
         let (send, layer) = (self.send.clone(), id.clone());
         row.connect_entry_activated(move |row| {
+            renamed(row);
             send(LayerChange::Pick(layer.clone()));
             end_edit(row);
         });

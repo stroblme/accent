@@ -405,16 +405,16 @@ pub(super) fn entry_row(title: &str) -> adw::EntryRow {
         .title(title)
         .show_apply_button(true)
         .build();
-    hide_edit_icon(&row);
+    hide_part(&row, "edit-icon");
     row
 }
 
-/// Hide the pencil with `visible`; libadwaita toggles child visibility, so this
-/// remains hidden through editing-state changes.
-fn hide_edit_icon(row: &adw::EntryRow) {
+/// Hide the part of `row` with CSS class `class` (the pencil, `edit-icon`) with `visible`;
+/// libadwaita toggles child visibility, so this remains hidden through editing-state changes.
+pub(super) fn hide_part(row: &adw::EntryRow, class: &str) {
     let mut todo = vec![row.clone().upcast::<gtk::Widget>()];
     while let Some(widget) = todo.pop() {
-        if widget.has_css_class("edit-icon") {
+        if widget.has_css_class(class) {
             widget.set_visible(false);
             return;
         }
