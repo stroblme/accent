@@ -965,6 +965,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - The matches are painted in the lines on screen and a hundred either side, a notebook's in the cells on screen and a screen either side, again as the view scrolls; the count and the steps cover the whole note.
   A tag on each of a hundred thousand matches is seconds of work on every keystroke.
 - In a buffer the bar searches folded text too, as VS Code does: the count includes it, a step into a shut block or a collapsed comparison run opens it, and a replacement there leaves it shut.
+- In a comparison, a merge and a staged change's or a commit's tab the bar searches the column the keyboard is in, a read-only one included, as VS Code's diff editor and Meld do (user decision 2026-11-06).
+  Moving the keyboard to another column takes the readout, the painted matches and the steps with it, and Replace is offered over the editor's column alone.
 - Previous and next are `go-up-symbolic` and `go-down-symbolic`: the matches are places in a vertical document, and back and forward arrows read as history.
 - **Escape closes the bar wherever it is pressed**, from the bar ahead of `GtkSearchEntry`'s own Escape (which only clears the query), and from the document once nothing nearer the focus has answered it.
 

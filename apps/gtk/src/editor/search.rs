@@ -1,8 +1,10 @@
 //! Buffer-local find, replace, occurrence highlighting and match navigation.
 //!
-//! Widgets live in `find.rs`, one bar per pane; tabs keep their own query and matches.
+//! Widgets live in `find.rs`, one bar per pane; each searched view keeps its own query and
+//! matches in a [`Finder`].
 
 use super::{Tab, caret, line_end};
+use crate::widgets::Hook;
 use crate::{fold, lang, multicaret};
 use accent_api::Pos;
 use accent_api::language::pos_of;
@@ -11,7 +13,7 @@ use accent_core::search::{self, Options, Regex};
 use gtk::prelude::*;
 use gtk::{gdk, glib};
 use sourceview5::prelude::*;
-use std::cell::{Cell, Ref};
+use std::cell::{Cell, OnceCell, Ref, RefCell};
 use std::ops::Range;
 use std::rc::Rc;
 
@@ -133,12 +135,12 @@ fn tag_range(text: &str, name: &str, syntax: Syntax) -> Option<Range<usize>> {
 /// How many lines above and below the ones on screen the find bar's matches are painted in.
 const PAINT_MARGIN: i32 = 100;
 
-/// Tab-owned query, matches and highlight state, independent of the current find bar target.
-///
-/// Use `accent_core::search` over all text, including folds, so toggles agree with vault search.
-/// Search-result queries remain on tabs after the bar retargets.
+/// The tag a [`Finder`] paints its buffer's matches with.
+pub(crate) const FIND_TAG: &str = "find";
+
+/// A finder's query and matches, and whether they are painted.
 #[derive(Default)]
-pub(super) struct Find {
+struct Find {
     query: String,
     options: Options,
     /// The query compiled, or `None` while it is empty or does not compile.
@@ -151,6 +153,17 @@ pub(super) struct Find {
     highlight: bool,
     /// A repaint is waiting for the main loop, so a run of edits is matched once.
     queued: bool,
+}
+
+/// What a [`Finder`] tells the bar searching it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Found {
+    /// The text was matched again, after an edit or a scroll.
+    Again,
+    /// A new query, which the bar's box follows.
+    Query,
+    /// The column went with the comparison that showed it.
+    Gone,
 }
 
 /// Choose the next match from selection `at`, wrapping at both ends.
@@ -176,24 +189,104 @@ pub(crate) fn next_match<T: PartialOrd + Clone>(
     found.or(wrapped).cloned()
 }
 
-impl Tab {
-    // The widgets live in `find.rs`, one bar per window. What stays here is what belongs to one
-    // buffer: its query and matches, and the caret and scroll moves that follow a match.
+/// The find bar's query over one text view, where it matches and the paint over the matches near
+/// what is on screen. A tab's editor has one, and so has every read-only column of a comparison,
+/// a merge and a staged change's tab, so the bar searches the column the keyboard is in (user
+/// decision 2026-11-06).
+///
+/// Use `accent_core::search` over all text, including folds, so toggles agree with vault search.
+/// The query stays when the bar searches elsewhere, for F3.
+pub struct Finder {
+    view: sourceview5::View,
+    buffer: sourceview5::Buffer,
+    /// What the matches are painted with, raised to the top of the table as it paints.
+    tag: gtk::TextTag,
+    find: RefCell<Find>,
+    /// The bar last pointed at this view, told when the query has been matched again.
+    on_found: Hook<dyn Fn(Found)>,
+    /// Selects a match and opens what hides it, saying whether that showed lines: see
+    /// [`Finder::set_select`].
+    select: OnceCell<Box<dyn Fn(Range<i32>) -> bool>>,
+}
+
+impl Finder {
+    /// A finder over `view`, its tag added to the table after every tag made before it.
+    pub(crate) fn new(view: &sourceview5::View, buffer: &sourceview5::Buffer) -> Rc<Finder> {
+        let tag = gtk::TextTag::new(Some(FIND_TAG));
+        buffer.tag_table().add(&tag);
+        match_style(buffer, &tag);
+        // Focus mode's fade leaves a line holding a match whole.
+        if let Some(column) = view.downcast_ref::<multicaret::View>() {
+            column.set_find_tag(&tag);
+        }
+        let finder = Rc::new(Finder {
+            view: view.clone(),
+            buffer: buffer.clone(),
+            tag,
+            find: RefCell::default(),
+            on_found: Hook::default(),
+            select: OnceCell::new(),
+        });
+        // An edit changes what the query matches: a painted query is matched again from an idle,
+        // an unpainted one once a step needs it.
+        buffer.connect_changed(glib::clone!(
+            #[weak]
+            finder,
+            move |_| {
+                finder.find.borrow_mut().stale = true;
+                finder.queue_paint();
+            }
+        ));
+        // The matches are painted around what is on screen, so a scroll or a resize that shows
+        // other lines has them painted too, on whichever adjustment the view scrolls by.
+        let weak = Rc::downgrade(&finder);
+        crate::widgets::follow_adjustment(view, true, move |adjustment| {
+            let Some(finder) = weak.upgrade() else {
+                return Vec::new();
+            };
+            finder.queue_paint();
+            let paint = || {
+                let finder = Rc::downgrade(&finder);
+                move |_: &gtk::Adjustment| {
+                    if let Some(finder) = finder.upgrade() {
+                        finder.queue_paint();
+                    }
+                }
+            };
+            vec![
+                adjustment.connect_value_changed(paint()),
+                adjustment.connect_changed(paint()),
+            ]
+        });
+        finder
+    }
+
+    /// The view this searches.
+    pub fn view(&self) -> &sourceview5::View {
+        &self.view
+    }
+
+    /// How a step selects its match: `select` opens what hides it, the editor's folds and its
+    /// comparison's runs or a read-only column's runs, and says whether that showed lines. Without
+    /// one, a step opens what hides the match in this buffer alone.
+    pub(crate) fn set_select(&self, select: impl Fn(Range<i32>) -> bool + 'static) {
+        let _ = self.select.set(Box::new(select));
+    }
 
     /// Search for `text`, under the options last set.
     pub fn set_query(&self, text: &str) {
         let options = self.find.borrow().options;
-        self.set_find(text, options);
+        self.set(text, options);
     }
 
     /// Search for the same text under `options`, the find bar's three toggles.
-    pub fn set_find_options(&self, options: Options) {
+    pub fn set_options(&self, options: Options) {
         let query = self.find.borrow().query.clone();
-        self.set_find(&query, options);
+        self.set(&query, options);
     }
 
     /// Rematch under `options`, repaint if enabled and notify the targeted bar.
-    fn set_find(&self, text: &str, options: Options) {
+    fn set(&self, text: &str, options: Options) {
         {
             let mut find = self.find.borrow_mut();
             if find.query == text && find.options == options {
@@ -206,23 +299,23 @@ impl Tab {
             find.options = options;
             find.stale = true;
         }
-        self.paint_matches();
-        self.emit_found(true);
+        self.paint();
+        self.emit(Found::Query);
     }
 
     pub fn set_highlight(&self, on: bool) {
         if std::mem::replace(&mut self.find.borrow_mut().highlight, on) != on {
-            self.paint_matches();
+            self.paint();
         }
     }
 
-    /// What the find bar's query is for this tab, which the bar's box follows.
-    pub fn find_query(&self) -> String {
+    /// What the find bar's query is here, which the bar's box follows.
+    pub fn query(&self) -> String {
         self.find.borrow().query.clone()
     }
 
     /// Whether the query does not compile, which the bar marks as the Search pane does.
-    pub fn find_invalid(&self) -> bool {
+    pub fn invalid(&self) -> bool {
         self.find.borrow().invalid
     }
 
@@ -232,23 +325,30 @@ impl Tab {
         self.find.borrow().highlight
     }
 
-    /// Notify the last bar targeting this tab after rematching. The flag
-    /// means query changes, not buffer edits or viewport changes.
-    pub fn connect_found(&self, f: impl Fn(bool) + 'static) {
+    /// Notify the last bar targeting this view of what [`Found`] says.
+    pub fn connect_found(&self, f: impl Fn(Found) + 'static) {
         self.on_found.set(Rc::new(f));
     }
 
-    /// Taken out of its cell before it runs, so the bar may reach the tab again.
-    fn emit_found(&self, query: bool) {
+    /// Taken out of its cell before it runs, so the bar may reach the finder again.
+    fn emit(&self, found: Found) {
         if let Some(f) = self.on_found.get() {
-            f(query);
+            f(found);
         }
+    }
+
+    /// The column went with the comparison that showed it, which the bar searching it hears.
+    pub(crate) fn release(&self) {
+        self.emit(Found::Gone);
     }
 
     /// Where the query matches now, matched again first if the text changed since.
     fn matches(&self) -> Ref<'_, Vec<Range<i32>>> {
         if self.find.borrow().stale {
-            let text = self.find.borrow().re.is_some().then(|| self.text());
+            let text = self.find.borrow().re.is_some().then(|| {
+                let (start, end) = self.buffer.bounds();
+                self.buffer.text(&start, &end, true)
+            });
             let find = &mut *self.find.borrow_mut();
             find.matches = match (&find.re, text) {
                 (Some(re), Some(text)) => search::char_ranges(re, &text)
@@ -266,16 +366,15 @@ impl Tab {
     ///
     /// Refresh on scroll. Restricting tags avoids seconds of tag churn for hundreds of thousands
     /// of matches in long files.
-    fn paint_matches(&self) {
+    fn paint(&self) {
         let (start, end) = self.buffer.bounds();
-        self.buffer.remove_tag(&self.find_tag, &start, &end);
+        self.buffer.remove_tag(&self.tag, &start, &end);
         if !self.find.borrow().highlight {
             return;
         }
         // To the top of the table, as GtkSourceView raised its own search tag: a match has to
         // read as one over whatever a tag made since paints under it.
-        self.find_tag
-            .set_priority(self.buffer.tag_table().size() - 1);
+        self.tag.set_priority(self.buffer.tag_table().size() - 1);
         let shown = self.view.visible_rect();
         let line = |y: i32, margin: i32| {
             let (at, _) = self.view.line_at_y(y);
@@ -296,19 +395,12 @@ impl Tab {
                 self.buffer.iter_at_offset(m.start),
                 self.buffer.iter_at_offset(m.end),
             );
-            self.buffer.apply_tag(&self.find_tag, &from, &to);
+            self.buffer.apply_tag(&self.tag, &from, &to);
         }
     }
 
-    /// Invalidate matches after edits. Rematch painted queries from an idle
-    /// ([`Tab::queue_paint`]); defer unpainted queries until navigation needs them.
-    pub(super) fn find_edited(self: &Rc<Self>) {
-        self.find.borrow_mut().stale = true;
-        self.queue_paint();
-    }
-
     /// Coalesce edits and scrolls into one idle repaint before the next frame.
-    pub(super) fn queue_paint(self: &Rc<Self>) {
+    fn queue_paint(self: &Rc<Self>) {
         let mut find = self.find.borrow_mut();
         if !find.highlight || std::mem::replace(&mut find.queued, true) {
             return;
@@ -316,25 +408,171 @@ impl Tab {
         glib::idle_add_local_full(
             glib::Priority::HIGH_IDLE,
             glib::clone!(
-                #[weak(rename_to = tab)]
+                #[weak(rename_to = finder)]
                 self,
                 #[upgrade_or]
                 glib::ControlFlow::Break,
                 move || {
-                    tab.find.borrow_mut().queued = false;
-                    tab.paint_matches();
-                    tab.emit_found(false);
+                    finder.find.borrow_mut().queued = false;
+                    finder.paint();
+                    finder.emit(Found::Again);
                     glib::ControlFlow::Break
                 }
             ),
         );
     }
 
-    /// Current selection, or none; callers add their own eligibility rules.
-    fn selection_text(&self) -> Option<String> {
+    /// The theme's match look again, after the style scheme changed.
+    pub(crate) fn restyle(&self) {
+        match_style(&self.buffer, &self.tag);
+    }
+
+    /// Return a one-line selection for the find bar's initial query.
+    pub fn selected_query(&self) -> Option<String> {
         let (start, end) = self.buffer.selection_bounds()?;
         Some(self.buffer.text(&start, &end, false).to_string())
+            .filter(|s| !s.is_empty() && !s.contains('\n'))
     }
+
+    /// Step between matches. `from_current` starts at the selection start
+    /// so refining the query keeps the current match visible.
+    pub fn step(&self, forward: bool, from_current: bool) {
+        let insert = caret(&self.buffer);
+        let (start, end) = self.buffer.selection_bounds().unwrap_or((insert, insert));
+        let found = next_match(
+            &self.matches(),
+            start.offset()..end.offset(),
+            forward,
+            from_current,
+        );
+        let Some(m) = found else { return };
+        // A match inside a folded block or a collapsed run opens it, or the selection is
+        // invisible.
+        let opened = match self.select.get() {
+            Some(select) => select(m),
+            None => {
+                let (s, e) = (
+                    self.buffer.iter_at_offset(m.start),
+                    self.buffer.iter_at_offset(m.end),
+                );
+                let opened = fold::reveal(self.buffer.upcast_ref(), &s);
+                self.buffer.select_range(&s, &e);
+                opened
+            }
+        };
+        when_measured(&self.view, opened, |view| {
+            view.scroll_to_mark(&view.buffer().get_insert(), 0.1, false, 0.0, 0.5)
+        });
+    }
+
+    /// Replace a selected match and advance; do nothing for other selections.
+    pub fn replace_current(&self, with: &str) {
+        if let Some((mut s, mut e)) = self.buffer.selection_bounds() {
+            let at = s.offset() as usize..e.offset() as usize;
+            let found = self.replacements(with).into_iter().find(|(m, _)| *m == at);
+            if let Some((_, text)) = found {
+                self.replace_range(&mut s, &mut e, &text);
+            }
+        }
+        self.step(true, false);
+    }
+
+    /// Replace all matches in one undo step, back to front to preserve offsets.
+    pub fn replace_all(&self, with: &str) {
+        let all = self.replacements(with);
+        self.buffer.begin_user_action();
+        for (at, text) in all.into_iter().rev() {
+            let mut s = self.buffer.iter_at_offset(at.start as i32);
+            let mut e = self.buffer.iter_at_offset(at.end as i32);
+            self.replace_range(&mut s, &mut e, &text);
+        }
+        self.buffer.end_user_action();
+    }
+
+    /// Build replacements, expanding `$1` only in regex mode, as vault Replace All does.
+    fn replacements(&self, with: &str) -> Vec<(Range<usize>, String)> {
+        let find = self.find.borrow();
+        let (start, end) = self.buffer.bounds();
+        match &find.re {
+            Some(re) => {
+                let text = self.buffer.text(&start, &end, true);
+                search::replacements(re, &text, with, find.options)
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// Replace `s..e` in one undo step and leave both iters around the result.
+    /// Preserve hidden-fold tags where GTK would otherwise expose inserted
+    /// text at a hidden run's start.
+    fn replace_range(&self, s: &mut gtk::TextIter, e: &mut gtk::TextIter, with: &str) {
+        let hidden = fold::hiding(self.buffer.upcast_ref(), s);
+        let from = s.offset();
+        self.buffer.begin_user_action();
+        self.buffer.delete(s, e);
+        self.buffer.insert(s, with);
+        self.buffer.end_user_action();
+        *e = *s;
+        *s = self.buffer.iter_at_offset(from);
+        for tag in hidden {
+            self.buffer.apply_tag(&tag, s, e);
+        }
+    }
+
+    /// Return the match count as "n of m", or an invalid-query message.
+    pub fn label(&self) -> String {
+        let (blank, invalid) = {
+            let find = self.find.borrow();
+            (find.query.is_empty(), find.invalid)
+        };
+        if blank {
+            return String::new();
+        }
+        if invalid {
+            return "Invalid pattern".to_string();
+        }
+        let matches = self.matches();
+        let at = self
+            .buffer
+            .selection_bounds()
+            .map(|(s, e)| s.offset()..e.offset());
+        let position = at.and_then(|at| matches.iter().position(|m| *m == at));
+        match (matches.len(), position) {
+            (0, _) => "No results".to_string(),
+            (count, Some(i)) => format!("{} of {count}", i + 1),
+            (count, None) => format!("{count} matches"),
+        }
+    }
+}
+
+/// Run `scroll` now, or after the wait [`Tab::scroll_to_caret`] describes: while `view` has no
+/// size yet, or while it is `measuring` the lines a fold just showed.
+pub(super) fn when_measured(
+    view: &sourceview5::View,
+    measuring: bool,
+    scroll: impl FnOnce(&sourceview5::View) + 'static,
+) {
+    if view.height() > 0 && !measuring {
+        return scroll(view);
+    }
+    let scroll = Cell::new(Some(scroll));
+    view.add_tick_callback(move |view, _| {
+        if view.height() == 0 {
+            return glib::ControlFlow::Continue;
+        }
+        let (view, scroll) = (view.downgrade(), scroll.take());
+        glib::idle_add_local_once(move || {
+            if let (Some(view), Some(scroll)) = (view.upgrade(), scroll) {
+                scroll(&view);
+            }
+        });
+        glib::ControlFlow::Break
+    });
+}
+
+impl Tab {
+    // The widgets live in `find.rs`, one bar per pane, and the query and matches in the tab's
+    // [`Finder`]. What stays here is the caret and scroll moves that follow a jump.
 
     /// Highlight other case-insensitive occurrences of the selection ([`paint_occurrences`]),
     /// re-tagging nothing for a caret move that leaves the query as it was.
@@ -373,111 +611,6 @@ impl Tab {
         )
     }
 
-    /// Return a one-line selection for the find bar's initial query.
-    pub fn selected_query(&self) -> Option<String> {
-        self.selection_text()
-            .filter(|s| !s.is_empty() && !s.contains('\n'))
-    }
-
-    /// Step between matches. `from_current` starts at the selection start
-    /// so refining the query keeps the current match visible.
-    pub fn step(&self, forward: bool, from_current: bool) {
-        let insert = caret(&self.buffer);
-        let (start, end) = self.buffer.selection_bounds().unwrap_or((insert, insert));
-        let found = next_match(
-            &self.matches(),
-            start.offset()..end.offset(),
-            forward,
-            from_current,
-        );
-        if let Some(m) = found {
-            let (s, e) = (
-                self.buffer.iter_at_offset(m.start),
-                self.buffer.iter_at_offset(m.end),
-            );
-            // A match inside a folded block opens it, or the selection is invisible.
-            let opened = self.reveal_select(&s, &e);
-            self.when_measured(opened, |view| {
-                view.scroll_to_mark(&view.buffer().get_insert(), 0.1, false, 0.0, 0.5)
-            });
-        }
-    }
-
-    /// Replace a selected match and advance; do nothing for other selections.
-    pub fn replace_current(&self, with: &str) {
-        if let Some((mut s, mut e)) = self.buffer.selection_bounds() {
-            let at = s.offset() as usize..e.offset() as usize;
-            let found = self.replacements(with).into_iter().find(|(m, _)| *m == at);
-            if let Some((_, text)) = found {
-                self.replace_range(&mut s, &mut e, &text);
-            }
-        }
-        self.step(true, false);
-    }
-
-    /// Replace all matches in one undo step, back to front to preserve offsets.
-    pub fn replace_all(&self, with: &str) {
-        let all = self.replacements(with);
-        self.buffer.begin_user_action();
-        for (at, text) in all.into_iter().rev() {
-            let mut s = self.buffer.iter_at_offset(at.start as i32);
-            let mut e = self.buffer.iter_at_offset(at.end as i32);
-            self.replace_range(&mut s, &mut e, &text);
-        }
-        self.buffer.end_user_action();
-    }
-
-    /// Build replacements, expanding `$1` only in regex mode, as vault Replace All does.
-    fn replacements(&self, with: &str) -> Vec<(Range<usize>, String)> {
-        let find = self.find.borrow();
-        match &find.re {
-            Some(re) => search::replacements(re, &self.text(), with, find.options),
-            None => Vec::new(),
-        }
-    }
-
-    /// Replace `s..e` in one undo step and leave both iters around the result.
-    /// Preserve hidden-fold tags where GTK would otherwise expose inserted
-    /// text at a hidden run's start.
-    fn replace_range(&self, s: &mut gtk::TextIter, e: &mut gtk::TextIter, with: &str) {
-        let hidden = fold::hiding(self.text_buffer(), s);
-        let from = s.offset();
-        self.buffer.begin_user_action();
-        self.buffer.delete(s, e);
-        self.buffer.insert(s, with);
-        self.buffer.end_user_action();
-        *e = *s;
-        *s = self.buffer.iter_at_offset(from);
-        for tag in hidden {
-            self.buffer.apply_tag(&tag, s, e);
-        }
-    }
-
-    /// Return the match count as "n of m", or an invalid-query message.
-    pub fn matches_label(&self) -> String {
-        let (blank, invalid) = {
-            let find = self.find.borrow();
-            (find.query.is_empty(), find.invalid)
-        };
-        if blank {
-            return String::new();
-        }
-        if invalid {
-            return "Invalid pattern".to_string();
-        }
-        let matches = self.matches();
-        let at = self
-            .buffer
-            .selection_bounds()
-            .map(|(s, e)| s.offset()..e.offset());
-        let position = at.and_then(|at| matches.iter().position(|m| *m == at));
-        match (matches.len(), position) {
-            (0, _) => "No results".to_string(),
-            (count, Some(i)) => format!("{} of {count}", i + 1),
-            (count, None) => format!("{count} matches"),
-        }
-    }
-
     pub fn line_count(&self) -> i32 {
         self.buffer.line_count()
     }
@@ -495,6 +628,17 @@ impl Tab {
     pub fn show_at(&self, iter: &gtk::TextIter, align: f64) {
         let opened = self.reveal_select(iter, iter);
         self.scroll_to_caret(align, opened);
+    }
+
+    /// Have the find bar's steps select as every jump does ([`Tab::reveal_select`]).
+    pub(super) fn find_into_folds(self: &Rc<Self>) {
+        let tab = Rc::downgrade(self);
+        self.find.set_select(move |at| {
+            tab.upgrade().is_some_and(|tab| {
+                let start = tab.buffer.iter_at_offset(at.start);
+                tab.reveal_select(&start, &tab.buffer.iter_at_offset(at.end))
+            })
+        });
     }
 
     /// Select `start..end` and report whether hidden lines opened. In a
@@ -531,29 +675,13 @@ impl Tab {
         });
     }
 
-    /// Run `scroll` now, or after the wait [`Tab::scroll_to_caret`] describes: while the view has
-    /// no size yet, or while it is `measuring` the lines a fold just showed.
+    /// [`when_measured`] on the tab's view.
     pub(super) fn when_measured(
         &self,
         measuring: bool,
         scroll: impl FnOnce(&sourceview5::View) + 'static,
     ) {
-        if self.view.height() > 0 && !measuring {
-            return scroll(&self.view);
-        }
-        let scroll = Cell::new(Some(scroll));
-        self.view.add_tick_callback(move |view, _| {
-            if view.height() == 0 {
-                return glib::ControlFlow::Continue;
-            }
-            let (view, scroll) = (view.downgrade(), scroll.take());
-            glib::idle_add_local_once(move || {
-                if let (Some(view), Some(scroll)) = (view.upgrade(), scroll) {
-                    scroll(&view);
-                }
-            });
-            glib::ControlFlow::Break
-        });
+        when_measured(&self.view, measuring, scroll)
     }
 
     /// Put the caret on a 1-based line and column, both clamped to what the note has.
@@ -600,8 +728,8 @@ impl Tab {
         // was up would light up every match. The bar turns it back on the moment it is opened or
         // typed in (`find.rs::search`), which is when a reader has asked to see every match
         // rather than the one they were sent to.
-        self.set_query(&self.buffer.text(&start, &end, false));
-        self.set_highlight(false);
+        self.find.set_query(&self.buffer.text(&start, &end, false));
+        self.find.set_highlight(false);
         // After the caret and the selection have moved: both are mark moves, and a mark move is
         // one of the interactions that takes the reveal back down again. The query's own rescan
         // moves no mark and changes no text, so it cannot take the reveal down with it.

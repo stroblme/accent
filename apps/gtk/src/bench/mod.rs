@@ -348,7 +348,8 @@ use user_commands::bench_commands;
 /// - `ACCENT_BENCH_REPLACE=1`: Search-pane Replace All updates.
 /// - `ACCENT_BENCH_FIND=<rel_note>`: query selection/history; `options`:
 ///   search toggles, invalid patterns and replacement captures in a temporary note; `compare`:
-///   the matches painted on screen in a comparison scrolled to its end, either side the editor.
+///   the matches painted on screen in the column the keyboard is in, of a comparison either side
+///   the editor and of a staged change.
 /// - `ACCENT_BENCH_DIAG=<rel_code_file>`: diagnostic expansion and line-end
 ///   truncation. Writes the file; use a scratch vault.
 /// - `ACCENT_BENCH_QUICKFIX=<rel_c_file>,<ipynb>`: Quick Fix's menu and each kind of code

@@ -11,7 +11,7 @@ use accent_core::path::{FileType, file_type};
 use gtk::gio;
 
 use crate::difftab::DiffTab;
-use crate::editor::Tab;
+use crate::editor::{Finder, Tab};
 use crate::fileops;
 use crate::look::{Decoded, Look};
 use crate::pdftab::PdfTab;
@@ -133,6 +133,16 @@ impl Doc {
     pub fn tab(&self) -> Option<&Rc<Tab>> {
         match self {
             Doc::Text(tab) => Some(tab),
+            _ => None,
+        }
+    }
+
+    /// What the find bar searches here: the column of a comparison `focused` is, or the
+    /// document's own text. None for what answers find itself or has no text of ours.
+    pub fn finder(&self, focused: Option<&sourceview5::View>) -> Option<Rc<Finder>> {
+        match self {
+            Doc::Text(tab) => Some(tab.finder(focused)),
+            Doc::Diff(diff) => Some(diff.finder(focused)),
             _ => None,
         }
     }

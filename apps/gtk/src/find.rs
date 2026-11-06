@@ -3,11 +3,12 @@
 //! Pane ownership lets split documents keep separate queries, modes and visibility. The
 //! revealed row pushes the document down instead of covering it.
 //!
-//! Tabs own query state, matches and caret moves; the bar owns widgets and retargets on tab
-//! switches without clearing old matches. Presentation mode searches the rendered preview
-//! through [`PreviewOp`], keeping the bar independent of `App`.
+//! A [`Finder`] owns the query state, matches and caret moves of one text view; the bar owns
+//! widgets and retargets on tab switches and as the keyboard moves between a comparison's
+//! columns, keeping the old query. Presentation mode searches the rendered preview through
+//! [`PreviewOp`], keeping the bar independent of `App`.
 
-use crate::editor::Tab;
+use crate::editor::{Finder, Found, Tab};
 use crate::recall::{self, QUERIES, REPLACEMENTS};
 use accent_core::search::Options;
 use adw::prelude::*;
@@ -89,7 +90,8 @@ pub enum Mode {
     Goto,
 }
 
-/// Searched tab and its line-count handler, disconnected on retargeting to avoid accumulating handlers.
+/// The pane's text tab, for Go to Line, and its line-count handler, disconnected on retargeting
+/// to avoid accumulating handlers.
 type Watch = (Rc<Tab>, glib::SignalHandlerId);
 
 pub struct Bar {
@@ -104,8 +106,13 @@ pub struct Bar {
     matches: gtk::Label,
     line: gtk::Entry,
     lines: gtk::Label,
-    /// The tab being searched, and what is watching it.
+    /// The tab whose lines Go to Line counts, and what is watching it.
     target: RefCell<Option<Watch>>,
+    /// The text being searched: the tab's editor, a comparison's column the keyboard is in or a
+    /// staged change's pane.
+    searched: RefCell<Option<Rc<Finder>>>,
+    /// Whether the replace row was asked for, which it is shown for over what can be rewritten.
+    replacing: Cell<bool>,
     /// Programmatically set query awaiting its delayed search-changed signal.
     /// Distinguish sidebar jumps from user searches so query sync cannot repaint all matches or move the caret.
     synced: RefCell<Option<String>>,
@@ -238,6 +245,8 @@ impl Bar {
             line: line.clone(),
             lines,
             target: RefCell::new(None),
+            searched: RefCell::new(None),
+            replacing: Cell::new(false),
             synced: RefCell::new(None),
             busy: Cell::new(false),
             marked: Cell::new(false),
@@ -390,53 +399,74 @@ impl Bar {
         let _ = self.wiring.set(wiring);
     }
 
-    /// Retarget the bar to the pane's selected tab without clearing the old query or highlights.
+    /// Point the bar at the pane's tab, whose lines Go to Line counts, and at `finder`, the text
+    /// it searches. The old query stays for F3 and the old matches go: the keyboard has left them,
+    /// for another tab or another column of a comparison.
     /// Disconnect only the old length handler so handlers cannot accumulate.
-    pub fn retarget(self: &Rc<Self>, tab: Option<Rc<Tab>>) {
+    pub fn retarget(self: &Rc<Self>, tab: Option<Rc<Tab>>, finder: Option<Rc<Finder>>) {
         if let Some((old, lines)) = self.target.borrow_mut().take() {
             old.buffer.disconnect(lines);
         }
+        let old = self.searched.replace(finder.clone());
+        if let Some(old) = old.filter(|old| finder.as_ref().is_none_or(|new| !Rc::ptr_eq(old, new)))
+        {
+            old.set_highlight(false);
+        }
         self.sync_toggles();
-        let Some(tab) = tab else {
+        self.show_replace();
+        if let Some(tab) = tab {
+            let lines = tab.buffer.connect_changed(glib::clone!(
+                #[weak(rename_to = bar)]
+                self,
+                move |_| bar.refresh_count()
+            ));
+            *self.target.borrow_mut() = Some((tab, lines));
+        }
+        let Some(finder) = finder else {
             return self.refresh_count();
         };
-        let lines = tab.buffer.connect_changed(glib::clone!(
-            #[weak(rename_to = bar)]
-            self,
-            move |_| bar.refresh_count()
-        ));
         // Set anew on every retarget rather than taken back on the way out: a tab dragged into
         // another pane is that pane's bar's from then on, whichever bar lets go of it last.
-        tab.connect_found(glib::clone!(
+        finder.connect_found(glib::clone!(
             #[weak(rename_to = bar)]
             self,
             #[weak]
-            tab,
-            move |query| bar.found(&tab, query)
+            finder,
+            move |found| bar.found(&finder, found)
         ));
         if self.showing("find") {
-            tab.set_find_options(self.options());
-            tab.set_query(&self.query.text());
-            tab.set_highlight(true);
+            finder.set_options(self.options());
+            finder.set_query(&self.query.text());
+            finder.set_highlight(true);
         }
-        *self.target.borrow_mut() = Some((tab, lines));
         self.refresh_matches();
         self.refresh_count();
     }
 
-    /// Update the readout when the current tab rematches; update the entry only if `query` changed.
+    /// Update the readout when the searched text rematches; update the entry only for a new
+    /// query; search the tab's editor once the column searched has gone with its comparison.
     ///
     /// External query changes must reach the field so F3 agrees with it. Routine rematches must
     /// not overwrite text waiting for the entry's debounce. Skip equal text to avoid feedback,
-    /// and ignore tabs the bar no longer targets.
-    fn found(&self, tab: &Rc<Tab>, query: bool) {
-        if !self.tab().is_some_and(|mine| Rc::ptr_eq(&mine, tab)) {
+    /// and ignore finders the bar no longer targets.
+    fn found(self: &Rc<Self>, finder: &Rc<Finder>, found: Found) {
+        if !self.finder().is_some_and(|mine| Rc::ptr_eq(&mine, finder)) {
             return;
         }
-        let text = tab.find_query();
-        if query && self.query.text() != text {
-            *self.synced.borrow_mut() = Some(text.clone());
-            self.query.set_text(&text);
+        match found {
+            Found::Gone => {
+                let tab = self.tab();
+                let editor = tab.as_ref().map(|tab| tab.find.clone());
+                return self.retarget(tab, editor);
+            }
+            Found::Query => {
+                let text = finder.query();
+                if self.query.text() != text {
+                    *self.synced.borrow_mut() = Some(text.clone());
+                    self.query.set_text(&text);
+                }
+            }
+            Found::Again => {}
         }
         self.refresh_matches();
     }
@@ -471,17 +501,15 @@ impl Bar {
                 self.line.select_region(0, -1);
             }
             _ => {
-                let selected = match self.tab() {
-                    Some(tab) => tab.selected_query(),
+                let selected = match self.finder() {
+                    Some(finder) => finder.selected_query(),
                     None => self.wiring.get().and_then(|w| (w.selected)()),
                 };
                 if let Some(selected) = &selected {
                     self.query.set_text(selected);
                 }
-                // Nothing behind a presented preview or PDF can be rewritten, so the row is
-                // not offered there: it used to appear and quietly do nothing.
-                let replacing = mode == Mode::Replace && self.rewritable();
-                self.replace_row.set_visible(replacing);
+                self.replacing.set(mode == Mode::Replace);
+                let replacing = self.show_replace();
                 self.sync_toggles();
                 self.rows.set_visible_child_name("find");
                 self.reveal();
@@ -517,11 +545,11 @@ impl Bar {
                 false => PreviewOp::Previous,
             });
         }
-        let Some(tab) = self.tab() else { return };
+        let Some(finder) = self.finder() else { return };
         self.busy.set(true);
-        tab.step(forward, false);
+        finder.step(forward, false);
         self.busy.set(false);
-        self.show_matches(&tab);
+        self.show_matches(&finder);
     }
 
     /// The readout, said in the caller's own words: the PDF reader and the preview both count
@@ -564,8 +592,8 @@ impl Bar {
         self.bar.set_search_mode(false);
         // The editor is behind the preview while one is presented, and focusing a hidden view is
         // giving the keyboard to nothing the reader can see.
-        if let (false, Some(tab)) = (self.presenting(), self.tab()) {
-            tab.view.grab_focus();
+        if let (false, Some(finder)) = (self.presenting(), self.finder()) {
+            finder.view().grab_focus();
         }
     }
 
@@ -573,6 +601,11 @@ impl Bar {
 
     fn tab(&self) -> Option<Rc<Tab>> {
         self.target.borrow().as_ref().map(|(tab, ..)| tab.clone())
+    }
+
+    /// The text the bar searches, if it searches a buffer.
+    pub(crate) fn finder(&self) -> Option<Rc<Finder>> {
+        self.searched.borrow().clone()
     }
 
     fn presenting(&self) -> bool {
@@ -584,9 +617,23 @@ impl Bar {
         self.wiring.get().and_then(|w| (w.notebook)())
     }
 
-    /// Whether what the bar searches can be replaced in: a buffer, or a notebook not presented.
+    /// Whether what the bar searches can be replaced in: an editable buffer, not a comparison's
+    /// read-only column, or a notebook not presented.
     fn rewritable(&self) -> bool {
-        !self.presenting() || self.notebook() == Some(true)
+        match self.presenting() {
+            true => self.notebook() == Some(true),
+            false => self
+                .finder()
+                .is_some_and(|finder| finder.view().is_editable()),
+        }
+    }
+
+    /// Show the replace row if it was asked for and what the bar searches can be rewritten, and
+    /// say whether it is shown. It is not offered over the rest, where it would quietly do nothing.
+    fn show_replace(&self) -> bool {
+        let shown = self.replacing.get() && self.rewritable();
+        self.replace_row.set_visible(shown);
+        shown
     }
 
     /// Whether the bar is up on the `"find"` or the `"goto"` row.
@@ -606,7 +653,7 @@ impl Bar {
         if self.presenting() {
             return self.to_preview(PreviewOp::Find(text.to_string(), self.options()));
         }
-        let Some(tab) = self.tab() else { return };
+        let Some(finder) = self.finder() else { return };
         // What the two boxes have selected, to put back below. The query box says `search-changed`
         // after a delay, so this runs a moment *after* Ctrl+F or Ctrl+H over an open bar has
         // selected the whole of one of them — and the step below moves the document's caret, which
@@ -615,18 +662,18 @@ impl Bar {
         let boxes: [&gtk::Editable; 2] = [self.query.upcast_ref(), self.replace.upcast_ref()];
         let selected = boxes.map(|entry| entry.selection_bounds());
         self.busy.set(true);
-        tab.set_find_options(self.options());
-        tab.set_query(text);
-        tab.set_highlight(true);
+        finder.set_options(self.options());
+        finder.set_query(text);
+        finder.set_highlight(true);
         // From the current match, not past it: typing must not walk through the document.
-        tab.step(true, true);
+        finder.step(true, true);
         self.busy.set(false);
         for (entry, bounds) in boxes.into_iter().zip(selected) {
             if let Some((start, end)) = bounds {
                 entry.select_region(start, end);
             }
         }
-        self.show_matches(&tab);
+        self.show_matches(&finder);
     }
 
     fn replace(self: &Rc<Self>, all: bool) {
@@ -638,34 +685,34 @@ impl Bar {
         let with = self.replace.text();
         recall::remember(&QUERIES, &self.query.text());
         recall::remember(&REPLACEMENTS, &with);
-        let Some(tab) = self.tab() else {
+        let Some(finder) = self.finder() else {
             let with = with.to_string();
             return self.to_preview(PreviewOp::Replace { with, all });
         };
         self.busy.set(true);
         match all {
-            true => tab.replace_all(&with),
-            false => tab.replace_current(&with),
+            true => finder.replace_all(&with),
+            false => finder.replace_current(&with),
         }
         self.busy.set(false);
-        self.show_matches(&tab);
+        self.show_matches(&finder);
     }
 
     fn refresh_matches(&self) {
         if self.busy.get() {
             return;
         }
-        match self.tab() {
-            Some(tab) => self.show_matches(&tab),
+        match self.finder() {
+            Some(finder) => self.show_matches(&finder),
             None => self.matches.set_text(""),
         }
     }
 
-    /// The readout for `tab`, and the query box marked as the Search pane marks its own when the
-    /// query does not compile. Not while presenting, where what is searched says so itself.
-    fn show_matches(&self, tab: &Tab) {
-        self.matches.set_text(&tab.matches_label());
-        match tab.find_invalid() && !self.presenting() {
+    /// The readout for `finder`, and the query box marked as the Search pane marks its own when
+    /// the query does not compile. Not while presenting, where what is searched says so itself.
+    fn show_matches(&self, finder: &Finder) {
+        self.matches.set_text(&finder.label());
+        match finder.invalid() && !self.presenting() {
             true => self.query.add_css_class("error"),
             false => self.query.remove_css_class("error"),
         }
@@ -788,8 +835,8 @@ impl Bar {
 
     /// The bar went away: drop the match highlight on both possible targets.
     fn clear(&self) {
-        if let Some(tab) = self.tab() {
-            tab.set_highlight(false);
+        if let Some(finder) = self.finder() {
+            finder.set_highlight(false);
         }
         self.to_preview(PreviewOp::Clear);
         self.matches.set_text("");

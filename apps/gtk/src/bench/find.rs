@@ -197,11 +197,15 @@ fn compared(word: &str) -> String {
 
 /// `ACCENT_BENCH_FIND=compare` writes a 600-line note and searches it for `foo` with the bar up,
 /// then compares it with the editor on the left (a changed-on-disk comparison) and on the right
-/// (a Changes row's working-tree one), each as it opens and scrolled to its end, and scrolls it
-/// to its end alone. Every case prints
-/// `bench find compare case=<case> shown=<n> painted=<n> on_top=<n>`: the matches on screen,
-/// those carrying the find tag, and those it paints over every other tag, the comparison's word
-/// emphasis included. All three agree. The drill closes and removes its note.
+/// (a Changes row's working-tree one), each as it opens and scrolled to its end. With the editor
+/// on the right the keyboard then goes to the read-only Index column, and the comparison goes with
+/// it there; the note is scrolled to its end alone and shown as a staged change, the keyboard in
+/// either of its panes. Every case prints `bench find compare case=<case> shown=<n> painted=<n>
+/// on_top=<n> elsewhere=<n> readout=<bool>`: in the column searched, the matches on screen, those
+/// carrying the find tag and those it paints over every other tag, the comparison's word emphasis
+/// included; the matches painted on screen in the other column; and whether the bar's readout
+/// counts the column searched. The first three agree, `elsewhere` is 0 and `readout` true. The
+/// drill closes and removes its note.
 fn bench_find_compare(app: &Rc<App>) {
     if let Err(e) = std::fs::write(app.root().join(NOTE), compared("foo")) {
         println!("bench find compare wrote=false {e}");
@@ -230,22 +234,46 @@ fn bench_find_compare(app: &Rc<App>) {
                 wait(20).await;
             }
             wait(300).await;
-            painted(&format!("{case}_opened"), &tab);
-            to_end(&tab).await;
-            painted(&format!("{case}_end"), &tab);
+            let index = compare.view(side.other()).clone();
+            painted(&format!("{case}_opened"), &bar, &tab.view, &index);
+            to_end(&tab.view).await;
+            painted(&format!("{case}_end"), &bar, &tab.view, &index);
+            if side == diff::Side::New {
+                index.grab_focus();
+                bar.step(true);
+                wait(300).await;
+                painted("index_stepped", &bar, &index, &tab.view);
+                to_end(&index).await;
+                painted("index_end", &bar, &index, &tab.view);
+            }
             tab.leave_compare();
         }
-        to_end(&tab).await;
-        painted("alone_end", &tab);
+        to_end(&tab.view).await;
+        painted("alone_end", &bar, &tab.view, &tab.view);
         app.close_page(&tab.page);
+        let staged = app.open_diff(
+            &format!("staged:{NOTE}"),
+            NOTE,
+            "Staged",
+            ("Index", &index),
+            ("Working Tree", &compared("foo")),
+            false,
+        );
+        wait(800).await;
+        let [old, new] = staged.views().clone();
+        painted("staged_new", &bar, &new, &old);
+        old.grab_focus();
+        wait(SETTLED.as_millis() as u64).await;
+        painted("staged_old", &bar, &old, &new);
+        app.close_page(&staged.page);
         let _ = std::fs::remove_file(app.root().join(NOTE));
         bench_quit(&app);
     });
 }
 
-/// The view at the top, then at the end, each given time to lay its lines and paint.
-async fn to_end(tab: &Tab) {
-    let Some(adjustment) = tab.view.vadjustment() else {
+/// `view` at the top, then at the end, each given time to lay its lines and paint.
+async fn to_end(view: &sourceview5::View) {
+    let Some(adjustment) = view.vadjustment() else {
         return;
     };
     for end in [false, true] {
@@ -257,30 +285,53 @@ async fn to_end(tab: &Tab) {
     }
 }
 
-/// What [`bench_find_compare`] prints for `case`.
-fn painted(case: &str, tab: &Tab) {
-    let (buffer, view) = (&tab.buffer, &tab.view);
-    let (Some(tag), Ok(re)) = (
-        buffer.tag_table().lookup("find"),
-        accent_core::search::pattern("foo", Default::default()),
-    ) else {
-        return println!("bench find compare case={case} no_tag");
+/// The matches of `foo` on screen in `view`, those carrying the find tag and those it paints over
+/// every other tag.
+fn on_screen(view: &sourceview5::View) -> [usize; 3] {
+    let buffer = view.buffer();
+    let tag = buffer.tag_table().lookup(crate::editor::FIND_TAG);
+    let (start, end) = buffer.bounds();
+    let text = buffer.text(&start, &end, true);
+    let Ok(re) = accent_core::search::pattern("foo", Default::default()) else {
+        return [0; 3];
     };
     let shown = view.visible_rect();
-    let (mut on_screen, mut painted, mut on_top) = (0, 0, 0);
-    for m in accent_core::search::char_ranges(&re, &tab.text()) {
+    let mut counts = [0; 3];
+    for m in accent_core::search::char_ranges(&re, &text) {
         let at = buffer.iter_at_offset(m.start as i32);
         let (y, height) = view.line_yrange(&at);
         if height == 0 || y + height <= shown.y() || y >= shown.y() + shown.height() {
             continue;
         }
-        on_screen += 1;
         // In ascending priority, so the last that sets a background is the one painting it.
         let tags = at.tags();
-        painted += usize::from(tags.contains(&tag));
-        on_top += usize::from(tags.iter().rev().find(|t| t.is_background_set()) == Some(&tag));
+        let top = tags.iter().rev().find(|t| t.is_background_set());
+        counts[0] += 1;
+        counts[1] += usize::from(tag.as_ref().is_some_and(|tag| tags.contains(tag)));
+        counts[2] += usize::from(tag.is_some() && top == tag.as_ref());
     }
-    println!("bench find compare case={case} shown={on_screen} painted={painted} on_top={on_top}");
+    counts
+}
+
+/// What [`bench_find_compare`] prints for `case`, `searched` being the column the bar should
+/// search and `other` the one beside it, or `searched` again when there is none.
+fn painted(case: &str, bar: &Bar, searched: &sourceview5::View, other: &sourceview5::View) {
+    let [shown, painted, on_top] = on_screen(searched);
+    let elsewhere = match other == searched {
+        true => 0,
+        false => on_screen(other)[1],
+    };
+    let buffer = searched.buffer();
+    let (start, end) = buffer.bounds();
+    let text = buffer.text(&start, &end, true);
+    let total = text.matches("foo").count();
+    let readout = bar.readout().0;
+    let counted =
+        readout.ends_with(&format!("of {total}")) || readout == format!("{total} matches");
+    println!(
+        "bench find compare case={case} shown={shown} painted={painted} on_top={on_top} \
+         elsewhere={elsewhere} readout={counted}"
+    );
 }
 
 /// The PDF's steps from the page being read: typed on the third page, the query shows its hit,

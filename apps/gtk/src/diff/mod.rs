@@ -90,6 +90,8 @@ pub struct Pane {
     /// Reusable overlay buttons supplied externally because their view
     /// can outlive a comparison ([`Pool`]).
     pub pool: Rc<Pool>,
+    /// What the find bar searches in this column: the tab's own for the editor's.
+    pub finder: Rc<editor::Finder>,
 }
 
 /// A pane's title bar, with room for one control beside it. The comparison puts its Show All
@@ -139,6 +141,7 @@ pub fn pane(
     root.append(&header);
     root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     root.append(&scroller);
+    let finder = editor::Finder::new(&view, &buffer);
     Pane {
         root: root.upcast(),
         header,
@@ -147,7 +150,23 @@ pub fn pane(
         scroller,
         flavour,
         pool: Rc::default(),
+        finder,
     }
+}
+
+/// Have find in `pane`, a read-only column, step into a run hidden there: `open` opens the run
+/// hiding an offset of the column on every column and says whether one did.
+fn find_opens(pane: &Pane, open: impl Fn(i32) -> bool + 'static) {
+    let buffer = pane.buffer.clone();
+    pane.finder.set_select(move |at| {
+        let opened = open(at.start);
+        let at = (
+            buffer.iter_at_offset(at.start),
+            buffer.iter_at_offset(at.end),
+        );
+        buffer.select_range(&at.0, &at.1);
+        opened
+    });
 }
 
 /// Normalize companion line endings to LF, matching editor buffers
@@ -492,6 +511,16 @@ impl Compare {
         // Weak throughout: every handler below is connected to something the comparison owns or
         // to the process-wide style manager, and a strong capture is a cycle either way.
         let weak = this.weak.clone();
+        // A find step into a run hidden in a read-only column opens it as a caret moved there
+        // does; the editor's go through its tab (`Tab::find_into_folds`).
+        for side in [Side::Old, Side::New] {
+            if editable != Some(side) {
+                let w = weak.clone();
+                find_opens(this.pane(side), move |offset| {
+                    w.upgrade().is_some_and(|c| c.open_hiding_on(side, offset))
+                });
+            }
+        }
         let connect = |object: glib::Object, id: glib::SignalHandlerId| {
             this.handlers.borrow_mut().push((object, id));
         };
@@ -1226,6 +1255,11 @@ impl Compare {
     pub fn open_hiding(&self, offset: i32) -> bool {
         self.editable
             .is_some_and(|side| self.open_hiding_on(side, offset))
+    }
+
+    /// The finder of this comparison's column `view` is, if it is one.
+    pub fn finder(&self, view: Option<&sourceview5::View>) -> Option<Rc<editor::Finder>> {
+        self.columns.finder(view)
     }
 
     /// The same for `offset` in `view`, either column: a caret added on a read-only side.

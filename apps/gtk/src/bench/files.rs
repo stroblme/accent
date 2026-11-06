@@ -138,22 +138,22 @@ fn bench_template_insert(app: &Rc<App>, rel: &str) {
         let (query, want) = (text_of(&at), at.line() + 1);
         let (was_hidden, run_start) = (at.has_tag(&hides), at.starts_tag(Some(&hides)));
         tab.buffer.place_cursor(&tab.buffer.start_iter());
-        tab.set_query(&query);
-        tab.step(true, false);
+        tab.find.set_query(&query);
+        tab.find.step(true, false);
         measured().await;
         glib::timeout_future(Duration::from_millis(600)).await;
         say("find", &format!("line_{want}"), "folded");
         println!(
             "bench template_insert find folded was_hidden={was_hidden} run_start={run_start} hidden={} label={:?}",
             editor::caret(&tab.buffer).has_tag(&hides),
-            tab.matches_label()
+            tab.find.label()
         );
         tab.set_text(&original);
         glib::timeout_future(Duration::from_millis(1500)).await;
         tab.fold_all();
         let (shut, with) = (runs(), format!("{query} (replaced)"));
-        tab.set_query(&query);
-        tab.replace_all(&with);
+        tab.find.set_query(&query);
+        tab.find.replace_all(&with);
         let text = tab.text();
         let hidden = tab
             .buffer

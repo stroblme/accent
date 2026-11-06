@@ -273,27 +273,16 @@ impl Session {
         }
         // The text scrolled under the popup: it follows what it completes, and goes once that
         // is out of sight. Whatever adjustments the view has now, and any a comparison gives it.
-        self.follow_scrolling(view.vadjustment());
-        self.follow_scrolling(view.hadjustment());
-        view.connect_vadjustment_notify(glib::clone!(
-            #[weak(rename_to = me)]
-            self,
-            move |view| me.follow_scrolling(view.vadjustment())
-        ));
-        view.connect_hadjustment_notify(glib::clone!(
-            #[weak(rename_to = me)]
-            self,
-            move |view| me.follow_scrolling(view.hadjustment())
-        ));
-    }
-
-    fn follow_scrolling(self: &Rc<Self>, adjustment: Option<gtk::Adjustment>) {
-        if let Some(adjustment) = adjustment {
-            adjustment.connect_value_changed(glib::clone!(
-                #[weak(rename_to = me)]
-                self,
-                move |_| me.follow()
-            ));
+        for vertical in [true, false] {
+            let me = Rc::downgrade(self);
+            crate::widgets::follow_adjustment(view, vertical, move |adjustment| {
+                let me = me.clone();
+                vec![adjustment.connect_value_changed(move |_| {
+                    if let Some(me) = me.upgrade() {
+                        me.follow();
+                    }
+                })]
+            });
         }
     }
 

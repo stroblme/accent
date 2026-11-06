@@ -1,7 +1,8 @@
 //! Tab-hosted comparisons and merges, with read-only companion columns.
 
 use super::{
-    Alert, Flavour, Syntax, Tab, build, interact, keys, line_numbers, refont, sync_scheme,
+    Alert, FIND_TAG, Finder, Flavour, Syntax, Tab, build, interact, keys, line_numbers,
+    match_style, refont, sync_scheme,
 };
 use crate::{diff, fold, highlight, wrap};
 use adw::prelude::*;
@@ -60,6 +61,14 @@ impl Hosted {
         match self {
             Hosted::Compare(c) => c.open_hiding(offset),
             Hosted::Merge(m) => m.open_hiding(offset),
+        }
+    }
+
+    /// The finder of the column `view` is, if it is one of the hosted columns.
+    pub fn finder(&self, view: Option<&sourceview5::View>) -> Option<Rc<Finder>> {
+        match self {
+            Hosted::Compare(c) => c.finder(view),
+            Hosted::Merge(m) => m.finder(view),
         }
     }
 
@@ -155,6 +164,9 @@ pub fn style_companion(flavour: Flavour, buffer: &sourceview5::Buffer, view: &so
 /// ([`Tab::restyle`]).
 pub fn restyle_companion(flavour: Flavour, buffer: &sourceview5::Buffer, view: &sourceview5::View) {
     sync_scheme(buffer);
+    if let Some(tag) = buffer.tag_table().lookup(FIND_TAG) {
+        match_style(buffer, &tag);
+    }
     match flavour {
         Flavour::Note(_) => highlight::restyle(buffer, view),
         Flavour::Csv(_) => highlight::restyle_csv(buffer),
@@ -310,6 +322,7 @@ impl Tab {
             scroller: self.scroller.clone(),
             flavour: self.flavour,
             pool: self.overlays.clone(),
+            finder: self.find.clone(),
         };
         let hosted = make(self, editor);
         self.scroller.set_overlay_scrolling(overlay);
@@ -344,6 +357,13 @@ impl Tab {
         self.set_clamp();
         self.page.set_title(&self.tab_title());
         hosted
+    }
+
+    /// What the find bar searches in this tab: the comparison's or the merge's column `focused`
+    /// is, if it is one, or the editor.
+    pub fn finder(&self, focused: Option<&sourceview5::View>) -> Rc<Finder> {
+        let column = self.hosted().and_then(|hosted| hosted.finder(focused));
+        column.unwrap_or_else(|| self.find.clone())
     }
 
     /// The comparison the tab hosts, if it hosts one.

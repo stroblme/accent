@@ -127,6 +127,14 @@ impl Merge {
         });
 
         let weak = this.weak.clone();
+        // A find step into a run hidden in a side column opens it as one in the file does.
+        for column in [0, 2] {
+            let w = weak.clone();
+            super::find_opens(&this.columns.panes[column], move |offset| {
+                w.upgrade()
+                    .is_some_and(|m| m.open_hiding_at(column, offset))
+            });
+        }
         let connect = |object: glib::Object, id: glib::SignalHandlerId| {
             this.handlers.borrow_mut().push((object, id));
         };
@@ -273,14 +281,19 @@ impl Merge {
     /// Reveal the run hiding middle-column `offset` and report whether one
     /// opened ([`super::Compare::open_hiding`]).
     pub fn open_hiding(&self, offset: i32) -> bool {
+        self.open_hiding_at(MID, offset)
+    }
+
+    /// The same for `offset` in column `column`.
+    fn open_hiding_at(&self, column: usize, offset: i32) -> bool {
         let key = {
             let (lines, starts, hidden) = (
                 self.lines.borrow(),
                 self.starts.borrow(),
                 self.hidden.borrow(),
             );
-            let number = |r: usize| lines[r][MID].unwrap_or(1);
-            let st = &starts[MID];
+            let number = |r: usize| lines[r][column].unwrap_or(1);
+            let st = &starts[column];
             hidden
                 .iter()
                 .find(|(gap, _)| {
@@ -524,6 +537,11 @@ impl Merge {
     /// Put the editor's page on the side columns: see `Columns::follow_editor`.
     pub fn follow_editor(&self, refont: bool) {
         self.columns.follow_editor(refont);
+    }
+
+    /// The finder of this merge's column `view` is, if it is one.
+    pub fn finder(&self, view: Option<&sourceview5::View>) -> Option<Rc<editor::Finder>> {
+        self.columns.finder(view)
     }
 
     /// Everything off the columns: what leaving the merge view does before they part.

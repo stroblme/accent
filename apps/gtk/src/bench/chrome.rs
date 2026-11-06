@@ -84,8 +84,8 @@ async fn bench_chrome_veil(app: &Rc<App>) {
     if let Some(iter) = tab.buffer.iter_at_line(8) {
         tab.buffer.place_cursor(&iter);
     }
-    tab.set_query("the");
-    tab.set_highlight(true);
+    tab.find.set_query("the");
+    tab.find.set_highlight(true);
     app.hide_chrome();
     println!(
         "bench chrome_veil {} caret_line=8 find_open={} {}",
@@ -108,7 +108,7 @@ async fn bench_chrome_veil(app: &Rc<App>) {
         const PAINTS: u32 = 200;
         let mut us = [0.0; 2];
         for (query, us) in ["the", "filler"].into_iter().zip(&mut us) {
-            tab.set_query(query);
+            tab.find.set_query(query);
             // Time for the context to scan the note, as it has by the time anyone is typing.
             glib::timeout_future(Duration::from_millis(300)).await;
             let snapshot = gtk::Snapshot::new();
@@ -124,7 +124,7 @@ async fn bench_chrome_veil(app: &Rc<App>) {
             us[0], us[1]
         );
     }
-    tab.set_highlight(false);
+    tab.find.set_highlight(false);
     tab.set_text(&own);
     app.show_chrome();
     app.config.borrow_mut().focus_mode = was;

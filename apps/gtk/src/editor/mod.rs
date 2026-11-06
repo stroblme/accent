@@ -71,9 +71,10 @@ pub(crate) use page::{
 pub(crate) use paste::paste_verbatim;
 use search::matched;
 pub(crate) use search::{
-    match_style, mute, next_match, occurrence_tag, paint_occurrences, selected_occurrence,
-    selected_ranges,
+    FIND_TAG, match_style, mute, next_match, occurrence_tag, paint_occurrences,
+    selected_occurrence, selected_ranges,
 };
+pub use search::{Finder, Found};
 pub(crate) use spelling::set_spelling;
 pub use spelling::spell_adapter;
 pub(crate) use text::{caret, line_end, line_prefix};
@@ -91,8 +92,6 @@ pub(crate) const AUTOSAVE: Duration = Duration::from_secs(1);
 /// The cursor callback drives the preview's scroll sync; 100 ms is below what the eye follows.
 const CURSOR: Duration = Duration::from_millis(100);
 type TabHook = crate::widgets::Hook<dyn Fn(&Rc<Tab>)>;
-/// The find bar's hook, told whether the query itself changed ([`Tab::connect_found`]).
-type FoundHook = crate::widgets::Hook<dyn Fn(bool)>;
 
 /// Whether a tab may attempt saving its current file.
 ///
@@ -328,12 +327,8 @@ pub struct Tab {
     alerts: RefCell<Vec<Alert>>,
     /// Why the notebook this tab holds did not read as one ([`Alert::Unread`]).
     unread: RefCell<Option<String>>,
-    /// The find bar's query over this tab, and where it matches ([`search::Find`]).
-    find: RefCell<search::Find>,
-    /// What the find bar's matches are painted with, raised to the top of the table as it paints.
-    find_tag: gtk::TextTag,
-    /// The bar last pointed at this tab, told when the query has been matched again.
-    on_found: FoundHook,
+    /// The find bar's query over the editor, and where it matches.
+    pub find: Rc<Finder>,
     /// A muted tag for other occurrences of the selection, below find highlighting.
     ///
     /// Two SearchContexts repeatedly raise their tags and race for overlap priority. A normal
@@ -711,7 +706,7 @@ impl Tab {
         // Derived from the scheme that just changed, so both have to be derived again.
         mute(&self.buffer, &self.occurrence_tag);
         matched(&self.buffer, &self.reveal_tag);
-        match_style(&self.buffer, &self.find_tag);
+        self.find.restyle();
         match self.flavour {
             Flavour::Note(syntax) => restyle_note(&self.view, &self.buffer, syntax),
             // The column hues are rotated from the accent, which the theme can change under us.
@@ -1123,9 +1118,7 @@ impl Tab {
 
     fn on_changed(self: &Rc<Self>) {
         self.note_turn(true, false);
-        // Ahead of the early return: a reload changes what the query matches too, and the
-        // words it has.
-        self.find_edited();
+        // Ahead of the early return: a reload changes the words it has too.
         self.words.set(None);
         if self.loading.get() {
             return;

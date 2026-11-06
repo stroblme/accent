@@ -822,6 +822,38 @@ impl Debounce {
     }
 }
 
+/// Hear `view`'s vertical adjustment, or its horizontal one, through `connect`, which connects
+/// to the adjustment it is given and returns the handlers: again for each adjustment the view is
+/// given, the last one let go of. A comparison puts a column on the adjustment the columns share
+/// and gives it its own back when it goes, so a handler connected once goes deaf meanwhile.
+pub(crate) fn follow_adjustment(
+    view: &impl IsA<gtk::Scrollable>,
+    vertical: bool,
+    connect: impl Fn(&gtk::Adjustment) -> Vec<glib::SignalHandlerId> + 'static,
+) {
+    let heard = RefCell::new(None::<(gtk::Adjustment, Vec<glib::SignalHandlerId>)>);
+    let hear = move |view: &gtk::Scrollable| {
+        if let Some((adjustment, ids)) = heard.take() {
+            ids.into_iter().for_each(|id| adjustment.disconnect(id));
+        }
+        let adjustment = match vertical {
+            true => view.vadjustment(),
+            false => view.hadjustment(),
+        };
+        if let Some(adjustment) = adjustment {
+            let ids = connect(&adjustment);
+            heard.replace(Some((adjustment, ids)));
+        }
+    };
+    let view = view.upcast_ref::<gtk::Scrollable>();
+    hear(view);
+    let property = match vertical {
+        true => "vadjustment",
+        false => "hadjustment",
+    };
+    view.connect_notify_local(Some(property), move |view, _| hear(view));
+}
+
 /// A tab callback slot with signature `F`, usually `dyn Fn(&Rc<Tab>)`.
 ///
 /// Clone the handler before invoking it ([`Hook::get`]) so callbacks can re-enter and update

@@ -92,12 +92,12 @@ pub(in crate::bench) fn bench_compare(app: &Rc<App>, rel: &str) {
             );
             // Find Next into the same run, which by now is open: the caret's own way in.
             tab.buffer.place_cursor(&tab.buffer.start_iter());
-            tab.set_query("line 25");
-            tab.step(true, false);
+            tab.find.set_query("line 25");
+            tab.find.step(true, false);
             println!(
                 "bench compare_find caret_line={} label={:?} {}",
                 tab.cursor_line(),
-                tab.matches_label(),
+                tab.find.label(),
                 bench_compare_line(&compare)
             );
             compare.take_hunk(0, false);

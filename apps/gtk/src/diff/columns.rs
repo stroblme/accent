@@ -734,6 +734,13 @@ impl Columns {
         adj.set_value(adj.value() + f64::from(top - seen.y()) - at);
     }
 
+    /// The finder of the column whose view is `view`.
+    pub(super) fn finder(&self, view: Option<&sourceview5::View>) -> Option<Rc<editor::Finder>> {
+        let view = view?;
+        let pane = self.panes.iter().find(|pane| pane.view == *view)?;
+        Some(pane.finder.clone())
+    }
+
     /// Remove shared layout before panes separate, after host tags are cleared.
     pub(super) fn leave(&self) {
         for pane in &self.panes {
@@ -766,6 +773,12 @@ impl Columns {
         // And the editor its page's bottom margin, should it have been the column with no line.
         if let Some(mine) = self.editable {
             self.set_bottom(mine, self.page_bottom(mine), 0);
+        }
+        // A find bar searching a read-only column searches the editor again.
+        for (i, pane) in self.panes.iter().enumerate() {
+            if self.editable != Some(i) {
+                pane.finder.release();
+            }
         }
     }
 

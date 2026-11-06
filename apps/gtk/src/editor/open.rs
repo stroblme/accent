@@ -144,7 +144,7 @@ pub fn open(
         occurrence_tag,
         reveal_tag,
         follow_tag,
-        find_tag,
+        find,
     } = tags(&view, &buffer);
 
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -190,9 +190,7 @@ pub fn open(
         save: SaveState::at(text.etag, text.digest()),
         alerts: RefCell::new(Vec::new()),
         unread: RefCell::default(),
-        find: RefCell::default(),
-        find_tag,
-        on_found: Default::default(),
+        find,
         occurrence_tag,
         occurrence_query: RefCell::new(None),
         reveal_tag,
@@ -230,6 +228,7 @@ pub fn open(
     // One controller for the keys the popup, the signature, the ghost text, the extra carets and
     // the markdown helpers all want; `keys` is where their order is written down.
     keys::install(&tab);
+    tab.find_into_folds();
     tab.set_font(prefs.font.as_deref(), zoom);
     tab.set_spellcheck(prefs.spellcheck);
     tab.set_minimap(prefs.minimap);
@@ -419,7 +418,7 @@ struct Tags {
     occurrence_tag: gtk::TextTag,
     reveal_tag: gtk::TextTag,
     follow_tag: gtk::TextTag,
-    find_tag: gtk::TextTag,
+    find: Rc<Finder>,
 }
 
 /// Add the highlight tags to `buffer`'s table, lowest first.
@@ -436,18 +435,13 @@ fn tags(view: &sourceview5::View, buffer: &sourceview5::Buffer) -> Tags {
     follow_tag.set_underline(pango::Underline::Single);
     buffer.tag_table().add(&follow_tag);
     // Last of the three. The query matches folded text too, as VS Code finds into folds, and
-    // stepping to a match in a shut block opens it (`Tab::step`).
-    let find_tag = gtk::TextTag::new(Some("find"));
-    buffer.tag_table().add(&find_tag);
-    match_style(buffer, &find_tag);
-    if let Some(column) = view.downcast_ref::<multicaret::View>() {
-        column.set_find_tag(&find_tag);
-    }
+    // stepping to a match in a shut block opens it (`Tab::find_into_folds`).
+    let find = Finder::new(view, buffer);
     Tags {
         occurrence_tag,
         reveal_tag,
         follow_tag,
-        find_tag,
+        find,
     }
 }
 
@@ -475,8 +469,8 @@ fn mark_tooltips(tab: &Rc<Tab>) {
     }
 }
 
-/// Refresh column cap, sticky title, line messages and find highlights
-/// after width or scroll changes. `width` is [`Frame::width`].
+/// Refresh column cap, sticky title and line messages after width or scroll changes. `width` is
+/// [`Frame::width`].
 fn follow_layout(tab: &Rc<Tab>, width: &gtk::DrawingArea) {
     // The column is a share of the editor's width, so the cap has to be recomputed whenever that
     // width changes: a window resize, a paned drag, the sidebar, a split, the minimap. One hook
@@ -523,39 +517,6 @@ fn follow_layout(tab: &Rc<Tab>, width: &gtk::DrawingArea) {
             tab,
             move |_| tab.update_sticky()
         ));
-    // The find bar paints the matches around what is on screen, so a scroll or a resize that
-    // shows other lines has them painted too (`Tab::paint_matches`). Heard on whichever adjustment
-    // the view scrolls by: a comparison puts an editor that is not its first column on the one the
-    // columns share, and gives its own back when it goes.
-    let heard = RefCell::new(None::<(gtk::Adjustment, [glib::SignalHandlerId; 2])>);
-    let hear = move |tab: &Rc<Tab>| {
-        if let Some((adjustment, ids)) = heard.take() {
-            ids.into_iter().for_each(|id| adjustment.disconnect(id));
-        }
-        tab.queue_paint();
-        let Some(adjustment) = tab.view.vadjustment() else {
-            return;
-        };
-        let ids = [
-            adjustment.connect_value_changed(glib::clone!(
-                #[weak]
-                tab,
-                move |_| tab.queue_paint()
-            )),
-            adjustment.connect_changed(glib::clone!(
-                #[weak]
-                tab,
-                move |_| tab.queue_paint()
-            )),
-        ];
-        heard.replace(Some((adjustment, ids)));
-    };
-    hear(tab);
-    tab.view.connect_vadjustment_notify(glib::clone!(
-        #[weak(rename_to = tab)]
-        tab,
-        move |_| hear(&tab)
-    ));
 }
 
 /// What an edit and a caret move drive in the tab.

@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::diff::{Compare, Side, pane};
-use crate::editor::{self, Flavour};
+use crate::editor::{self, Finder, Flavour};
 
 /// Tab for a comparison of non-file texts. It carries the font provider that an editor
 /// would otherwise supply to both panes.
@@ -19,6 +19,8 @@ pub struct DiffTab {
     /// Both panes' views. They take the page's margins from the zoom here, having no editor
     /// beside them for the comparison to copy them from.
     views: [sourceview5::View; 2],
+    /// What the find bar searches in each pane, the old one first.
+    finders: [Rc<Finder>; 2],
     flavour: Flavour,
     name: String,
     font: RefCell<Option<gtk::CssProvider>>,
@@ -47,6 +49,7 @@ impl DiffTab {
         let old = pane(old.0, flavour, old.1, &name, language.as_ref());
         let new = pane(new.0, flavour, new.1, &name, language.as_ref());
         let views = [old.view.clone(), new.view.clone()];
+        let finders = [old.finder.clone(), new.finder.clone()];
         let compare = Compare::new(old, new, None, false);
         let page = tabs.append(compare.widget());
         page.set_title(title);
@@ -56,6 +59,7 @@ impl DiffTab {
             key: key.to_string(),
             compare,
             views,
+            finders,
             flavour,
             name,
             font: RefCell::new(None),
@@ -125,6 +129,13 @@ impl DiffTab {
     /// What takes the keyboard when the tab's pane does: the right column, what it compares to.
     pub fn key_target(&self) -> gtk::Widget {
         gtk::prelude::Cast::upcast(self.views[1].clone())
+    }
+
+    /// What the find bar searches: the pane `focused` is, or the right one, as
+    /// [`Self::key_target`].
+    pub fn finder(&self, focused: Option<&sourceview5::View>) -> Rc<Finder> {
+        let at = self.views.iter().position(|view| Some(view) == focused);
+        self.finders[at.unwrap_or(1)].clone()
     }
 
     /// The pane the editing chords act on from the palette: the right one, as [`Self::key_target`].

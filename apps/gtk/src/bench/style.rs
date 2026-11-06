@@ -1280,8 +1280,8 @@ pub(super) fn bench_occurrences(app: &Rc<App>, rel: &str) {
         // the two, or the muted hint would paint over the match the user is stepping through —
         // and it has to stay that way across an edit, which is when gtksourceview re-raises its
         // own tag.
-        tab.set_query("al");
-        tab.set_highlight(true);
+        tab.find.set_query("al");
+        tab.find.set_highlight(true);
         bench_pump();
         let at = text.find("al").expect("bench needle") as i32;
         tab.buffer.select_range(
@@ -1408,7 +1408,7 @@ pub(super) fn bench_reveal(app: &Rc<App>, rel: &str) {
             println!(
                 "bench reveal {label} query={:?} painting={} on={} at={:?}",
                 bar.query_text(),
-                tab.is_highlighting(),
+                tab.find.is_highlighting(),
                 tab.reveal_highlight().0,
                 tab.buffer
                     .selection_bounds()
@@ -1464,8 +1464,8 @@ fn bench_reveal_marks(app: &Rc<App>, tab: &Rc<Tab>) {
             println!(
                 "bench reveal case={label} on={on} at={:?} query={:?} painting={}",
                 bench_tag_ranges(&tab, &tag),
-                Some(tab.find_query()).filter(|query| !query.is_empty()),
-                tab.is_highlighting()
+                Some(tab.find.query()).filter(|query| !query.is_empty()),
+                tab.find.is_highlighting()
             );
         };
 
@@ -1485,7 +1485,7 @@ fn bench_reveal_marks(app: &Rc<App>, tab: &Rc<Tab>) {
         // match the row pointed at to the next one, wrapping, without the bar ever being opened.
         let second = at("alpha") as usize;
         tab.goto_range(second..second + 5);
-        tab.step(true, false);
+        tab.find.step(true, false);
         let stepped = tab
             .buffer
             .selection_bounds()
@@ -1525,8 +1525,8 @@ fn bench_reveal_marks(app: &Rc<App>, tab: &Rc<Tab>) {
         // taken out of the search before the one left is called the bar's.
         tab.set_text(text);
         tab.goto_range(hit..hit + 4);
-        tab.set_query("beta");
-        tab.set_highlight(true);
+        tab.find.set_query("beta");
+        tab.find.set_highlight(true);
         bench_pump();
         let (_, reveal_tag) = tab.reveal_highlight();
         let (_, muted) = tab.occurrence_highlight();

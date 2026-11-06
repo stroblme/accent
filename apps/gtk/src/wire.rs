@@ -657,6 +657,30 @@ pub fn wire_window(app: &Rc<App>) {
     app.statusbar.widget().add_controller(quiet);
     wire_empty_drop(app);
 
+    // Find searches the column the keyboard is in (user decision 2026-11-06): the keyboard moved
+    // into another column of a comparison, a merge or a staged change points its pane's bar there.
+    app.window.connect_focus_widget_notify(glib::clone!(
+        #[weak]
+        app,
+        move |_| {
+            let Some(pane) = app.keyboard_pane() else {
+                return;
+            };
+            let moved = app
+                .focused()
+                .is_some_and(|focus| focus.is::<sourceview5::View>())
+                && app.finder_of(&pane).is_some_and(|finder| {
+                    !pane
+                        .find
+                        .finder()
+                        .is_some_and(|mine| Rc::ptr_eq(&mine, &finder))
+                });
+            if moved {
+                app.retarget_find(&pane);
+            }
+        }
+    ));
+
     // The `Ctrl+Tab` card: a row clicked ends the chord there, a click beside it where it began.
     let weak = Rc::downgrade(app);
     app.switcher.connect_pick(move |at| {

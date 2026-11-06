@@ -551,13 +551,20 @@ impl App {
 
     /// Retarget Find to the pane's document; hide it over shells because VTE owns their scrollback.
     fn retarget_find(&self, pane: &Pane) {
-        pane.find.retarget(self.tab_of(pane));
+        pane.find.retarget(self.tab_of(pane), self.finder_of(pane));
         if self.notebook_of(pane).is_some() || self.rendered_in(pane).is_some() {
             pane.find.research();
         }
         if self.shows_shell(pane) {
             pane.find.close();
         }
+    }
+
+    /// The text `pane`'s find bar searches: the column of its document the keyboard is in, a
+    /// comparison's read-only one included (user decision 2026-11-06), or the document's own.
+    fn finder_of(&self, pane: &Pane) -> Option<Rc<editor::Finder>> {
+        let focused = self.focused().and_downcast::<sourceview5::View>();
+        self.doc_of(pane)?.finder(focused.as_ref())
     }
 
     /// Whether what `pane` is showing is a shell, which is the one document neither find nor go
