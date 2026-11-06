@@ -832,7 +832,7 @@ impl App {
         page.set_description(Some(&body));
     }
 
-    /// Restore splits before opening tabs, recording destinations in `placing`.
+    /// Restore splits before opening tabs, recording destinations in [`App::pending`].
     /// Worker reads finish later, so [`App::tabs_for`] chooses the pane when each tab arrives.
     fn restore_panes(self: &Rc<Self>, layout: Layout, session: &Session) {
         let active = session.active.clone();
@@ -840,9 +840,7 @@ impl App {
         self.arrange(&self.pane(), layout, &mut placed, &mut splits);
         // Each split made the pane it added the active one. Until the active tab lands, a note
         // opened meanwhile — the one on the command line — goes to the pane the reader was in.
-        let reader = active
-            .as_deref()
-            .and_then(|key| self.placing.borrow().get(key)?.upgrade());
+        let reader = active.as_deref().and_then(|key| self.pending.pane_for(key));
         if let Some(pane) = reader {
             self.set_active_pane(&pane);
         }
@@ -891,15 +889,15 @@ impl App {
                 .filter(|what| !matches!(what.sides, Sides::Worktree | Sides::Merge))
             {
                 if let Some(git) = self.git.get() {
-                    let waiting = Waiting {
+                    let waiting = pending::Waiting {
                         what: None,
                         run: Box::new(|_, _| {}),
                     };
-                    self.awaiting.borrow_mut().insert(key.clone(), waiting);
+                    self.pending.wait(key, waiting);
                     let key = key.clone();
                     git.restore(what, move || {
                         if let Some(app) = asked.app.upgrade() {
-                            app.awaiting.borrow_mut().remove(&key);
+                            app.pending.take_work(&key);
                         }
                     });
                 }
@@ -920,7 +918,7 @@ impl App {
             });
         }
         // What is still on its way keeps its place; the rest has landed, or failed to open.
-        self.placing.borrow_mut().retain(|key, _| self.awaited(key));
+        self.pending.settle();
         self.put_back(&restore);
         // A shell is back at once, where a note lands later: the one in front of the pane the
         // reader was in takes the keyboard, as a new one does.
@@ -944,9 +942,7 @@ impl App {
         match layout {
             Layout::Pane { tabs, selected } => {
                 for key in &tabs {
-                    self.placing
-                        .borrow_mut()
-                        .insert(key.clone(), Rc::downgrade(pane));
+                    self.pending.place(key, pane);
                 }
                 placed.push(Placed {
                     pane: Rc::downgrade(pane),
@@ -1010,7 +1006,7 @@ impl App {
             {
                 pane.tabs.set_selected_page(doc.page());
             }
-            let waiting = leaf.tabs.iter().any(|key| self.awaited(key));
+            let waiting = leaf.tabs.iter().any(|key| self.pending.awaited(key));
             if pane.tabs.n_pages() == 0 && !waiting {
                 self.close_pane(&pane);
             }
@@ -1048,13 +1044,6 @@ impl App {
         if restore.placed.iter().any(|p| p.tabs.contains(&preview)) {
             self.open_rendered(&rendered::Note::Editor(term), Opened::Restored);
         }
-    }
-
-    /// Whether the tab `key` is still on its way: its read, or its note's for a preview tab.
-    fn awaited(&self, key: &str) -> bool {
-        let awaiting = self.awaiting.borrow();
-        awaiting.contains_key(key)
-            || rendered::note_of(key).is_some_and(|n| awaiting.contains_key(n))
     }
 
     /// Whether current selections come from restoration rather than user navigation.

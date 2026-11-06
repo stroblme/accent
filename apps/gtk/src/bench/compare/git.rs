@@ -1279,7 +1279,7 @@ pub(in crate::bench) fn bench_compare_session(app: &Rc<App>, arg: &str) {
         if !save {
             for _ in 0..100 {
                 wait(100).await;
-                if app.restored.get() && app.awaiting.borrow().is_empty() {
+                if app.restored.get() && app.pending.waiting().is_empty() {
                     break;
                 }
             }

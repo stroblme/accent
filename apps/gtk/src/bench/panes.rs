@@ -1,6 +1,7 @@
 //! Drills over panes and tabs: moving a tab, the session's layout, and what a tab switch leaves.
 
 use super::*;
+use crate::pending::{Waiting, Work};
 
 /// Split the second of two notes right, move it back, then try moving without a neighbour.
 /// Report pane geometry rather than creation-order indices to prove the tab changed position.
@@ -473,7 +474,7 @@ pub(super) fn bench_layout(app: &Rc<App>, arg: &str) {
     }
     if arg == "1" {
         let (app, landing) = (app.clone(), app.clone());
-        let landed = move || landing.awaiting.borrow().is_empty();
+        let landed = move || landing.pending.waiting().is_empty();
         bench_layout_when(landed, move || {
             glib::timeout_add_local_once(Duration::from_millis(1000), move || {
                 bench_layout_print(&app);
@@ -655,23 +656,22 @@ pub(super) fn bench_layout_pick(app: &Rc<App>, arg: &str) {
             hooked = true;
             // Before any tab has landed, so the pane the restore made active is still empty: the
             // note a reader opens while the window is coming back.
-            let landing = app.awaiting.borrow().len();
+            let landing = app.pending.waiting().len();
             app.open_path(&rel);
             done.set(true);
             println!("bench layout_open {rel} with {landing} still landing");
         }
         if !hooked && app.restored.get() {
             hooked = true;
-            let keys: Vec<String> = app.awaiting.borrow().keys().cloned().collect();
-            for key in keys {
-                let Some(restore) = app.awaiting.borrow_mut().remove(&key) else {
+            for key in app.pending.waiting() {
+                let Some(restore) = app.pending.take_work(&key) else {
                     continue;
                 };
                 let (how, rel, done) = (how.clone(), rel.clone(), done.clone());
                 let Waiting { what, run } = restore;
                 let pick: Work = Box::new(move |app, tab| {
                     run(app, tab);
-                    let landing = app.awaiting.borrow().len();
+                    let landing = app.pending.waiting().len();
                     let Some(tab) = app.tab_for(&rel).filter(|_| !done.get() && landing > 0) else {
                         return;
                     };
@@ -689,12 +689,10 @@ pub(super) fn bench_layout_pick(app: &Rc<App>, arg: &str) {
                     done.set(true);
                     println!("bench layout_{how} {rel} with {landing} still landing");
                 });
-                app.awaiting
-                    .borrow_mut()
-                    .insert(key, Waiting { what, run: pick });
+                app.pending.wait(&key, Waiting { what, run: pick });
             }
         }
-        if !app.restored.get() || !app.awaiting.borrow().is_empty() {
+        if !app.restored.get() || !app.pending.waiting().is_empty() {
             return glib::ControlFlow::Continue;
         }
         if !done.get() {
@@ -1308,7 +1306,7 @@ pub(super) fn bench_reload(app: &Rc<App>, keys: &str) {
     if RELOADED.replace(true) {
         let landed = app.clone();
         return bench_layout_when(
-            move || landed.restored.get() && landed.awaiting.borrow().is_empty(),
+            move || landed.restored.get() && landed.pending.waiting().is_empty(),
             move || {
                 glib::timeout_add_local_once(Duration::from_millis(1000), move || {
                     let term = app.terminals().first().cloned();
@@ -1361,7 +1359,7 @@ fn bench_reload_line(app: &Rc<App>) -> String {
 /// See `ACCENT_BENCH_TABS=pins` above: the panes once every restored tab has landed.
 pub(super) fn bench_pins_restored(app: &Rc<App>) {
     let (app, landing) = (app.clone(), app.clone());
-    let landed = move || landing.restored.get() && landing.awaiting.borrow().is_empty();
+    let landed = move || landing.restored.get() && landing.pending.waiting().is_empty();
     bench_layout_when(landed, move || {
         glib::timeout_add_local_once(Duration::from_millis(500), move || {
             println!("bench pins restored {}", bench_pins_line(&app));

@@ -218,7 +218,7 @@ impl App {
         self.select_survivor(&page);
         self.forget_page(&page);
         self.close_page(&page);
-        self.as_text.borrow_mut().insert(key.clone());
+        self.pending.as_text(&key);
         self.open_path(&key);
     }
 

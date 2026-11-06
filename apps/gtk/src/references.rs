@@ -367,9 +367,7 @@ impl App {
             && accent_core::path::may_be_notebook(&key)
             && self.doc_for(&key).is_none()
         {
-            self.revealing
-                .borrow_mut()
-                .insert(key.clone(), Reveal::NotebookFilePos(at));
+            self.pending.reveal(&key, Reveal::NotebookFilePos(at));
             self.open_as(&key, how);
             return;
         }

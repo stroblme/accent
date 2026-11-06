@@ -355,15 +355,15 @@ impl App {
             }
             Spot::Sheet(page) => {
                 let show = move |_: &Rc<App>, d: &Rc<crate::diagram::DiagramTab>| d.show_page(page);
-                let reveal = open::Reveal::Diagram(Box::new(show));
-                self.revealing.borrow_mut().insert(to.key.clone(), reveal);
+                self.pending
+                    .reveal(&to.key, open::Reveal::Diagram(Box::new(show)));
                 self.open_path(&to.key);
             }
             Spot::Cell {
                 cell, line, column, ..
             } => {
                 let reveal = open::Reveal::NotebookCell(cell, line, column);
-                self.revealing.borrow_mut().insert(to.key.clone(), reveal);
+                self.pending.reveal(&to.key, reveal);
                 self.open_path(&to.key);
             }
             Spot::Page(anchor) => {

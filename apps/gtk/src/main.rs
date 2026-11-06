@@ -57,6 +57,7 @@ mod paned;
 mod panes;
 mod pathfield;
 mod pdf;
+mod pending;
 mod platform;
 mod preview;
 mod python;
@@ -250,17 +251,6 @@ fn main() -> glib::ExitCode {
 
 // ----------------------------------------------------------------------------------- app state
 
-/// The work itself, once there is a tab to run it on.
-type Work = Box<dyn FnOnce(&Rc<App>, &Rc<Tab>)>;
-
-/// Something to do with a tab once it is open: see [`App::with_tab`].
-struct Waiting {
-    /// Failure context for pending tab work ([`App::cannot`]); session restores use
-    /// `None` because `session::Asked` tracks failed opens itself.
-    what: Option<String>,
-    run: Work,
-}
-
 struct App {
     /// Window identity in a cell so saving a named session can replace it.
     key: RefCell<shell::WindowKey>,
@@ -308,19 +298,8 @@ struct App {
     statusbar: statusbar::Bar,
     /// Open tabs in a vector because renames can change their keys.
     docs: RefCell<Vec<Doc>>,
-    /// Work waiting for a tab that is still being opened, by key: see [`App::with_tab`].
-    awaiting: RefCell<HashMap<String, Waiting>>,
-    /// Pending diagram search-hit cell or linked page, by opening tab key ([`App::open_label`]).
-    revealing: RefCell<HashMap<String, open::Reveal>>,
-    /// Double-click pin requests held until a slow open lands ([`App::mark_opened`]); discard on failure.
-    keep_on_landing: RefCell<HashSet<String>>,
-    /// Notebooks the reader asked to open as text (Open as Text), until their text tab lands.
-    as_text: RefCell<HashSet<String>>,
-    /// Files to open in accent's own editor once rather than the terminal editor picked (Open in
-    /// Accent's Editor, or an editor the shell did not find), until their text tab lands.
-    in_accent: RefCell<HashSet<String>>,
-    /// The pane a restored tab goes into, by key, until it has one: see [`App::tabs_for`].
-    placing: RefCell<HashMap<String, std::rc::Weak<Pane>>>,
+    /// What waits on documents still being opened, by key: see [`pending::Pending`].
+    pending: pending::Pending,
     /// The tabs the files of the last launch naming several have landed in so far, each with its
     /// place among them: see [`App::land_in_order`].
     launched: RefCell<Vec<(usize, glib::WeakRef<adw::TabPage>)>>,

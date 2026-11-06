@@ -48,8 +48,7 @@ impl App {
 
     pub fn open_as(self: &Rc<Self>, key: &str, how: Opened) {
         let Some((key, path)) = self.locate(key) else {
-            self.awaiting.borrow_mut().remove(key);
-            self.revealing.borrow_mut().remove(key);
+            self.pending.fail(key);
             // Deleted since the session named it, or never in this vault: the vault has answered
             // the same way for both, and this machine's disk cannot tell them apart for a remote.
             let shown = doc::host_file_path(key).unwrap_or(key);
@@ -90,7 +89,7 @@ impl App {
         // A label or a page a diagram waits to show, or a notebook's search hit, which a file
         // that turned out to be text drops.
         if let Some(doc) = self.doc_for_page(page) {
-            let reveal = self.revealing.borrow_mut().remove(&doc.key());
+            let reveal = self.pending.take_reveal(&doc.key());
             match (reveal, &doc) {
                 (Some(Reveal::Diagram(reveal)), Doc::Diagram(tab)) => reveal(self, tab),
                 (Some(Reveal::NotebookCell(cell, line, column)), Doc::Notebook(tab)) => {
@@ -114,8 +113,7 @@ impl App {
                 // A PDF's pages and the notes' highlights on them come after its tab, so a
                 // print or an export waits for them (`App::sync_pdf_links`).
                 (Some(Reveal::Then(run)), Doc::Pdf(pdf)) if pdf.opening() => {
-                    let then = Reveal::Then(run);
-                    self.revealing.borrow_mut().insert(doc.key(), then);
+                    self.pending.reveal(&doc.key(), Reveal::Then(run));
                 }
                 (Some(Reveal::Then(run)), doc) => run(self, doc),
                 // Meant for a terminal editor and landed in accent's own: at the same place.
@@ -132,7 +130,7 @@ impl App {
         // A double click in the Files tree whose second press came before the tab did.
         let keep = self
             .doc_for_page(page)
-            .is_some_and(|doc| self.keep_on_landing.borrow_mut().remove(&doc.key()));
+            .is_some_and(|doc| self.pending.take_keep(&doc.key()));
         if how == Opened::Pinned {
             return self.set_pinned(page, true);
         }
@@ -290,31 +288,25 @@ impl App {
                     how,
                 );
             }
-            Err(e) => {
-                self.awaiting.borrow_mut().remove(key);
-                self.revealing.borrow_mut().remove(key);
-                return self.cannot_open(key, e);
-            }
+            Err(e) => return self.cannot_open(key, e),
         };
         // An `.xml` that draw.io wrote is a diagram, whatever its name says: known by its bytes.
         // A search hit in it waits for the diagram instead of the text tab it asked for.
         if doc::host_file_path(key).is_none() && accent_core::path::holds_diagram(key, &text.text) {
-            match self.revealing.borrow().contains_key(key) {
-                true => drop(self.awaiting.borrow_mut().remove(key)),
-                false => self.drop_awaiting(key, "a diagram, not a text file"),
+            if let Some(what) = self.pending.retarget(key) {
+                self.cannot(&what, "a diagram, not a text file");
             }
             return self.open_diagram_text(key, text, how);
         }
         // So is an `.ipynb`, and a `.py` marimo wrote, unless the reader asked for its text; a
         // search hit in it waits for the notebook as one in a diagram does.
-        let as_text = self.as_text.borrow_mut().remove(key);
+        let as_text = self.pending.take_as_text(key);
         if doc::host_file_path(key).is_none()
             && !as_text
             && accent_core::path::holds_notebook(key, &text.text)
         {
-            match self.revealing.borrow().contains_key(key) {
-                true => drop(self.awaiting.borrow_mut().remove(key)),
-                false => self.drop_awaiting(key, "a notebook, not a text file"),
+            if let Some(what) = self.pending.retarget(key) {
+                self.cannot(&what, "a notebook, not a text file");
             }
             return self.open_notebook_text(key, text, flavour, how);
         }
@@ -745,10 +737,8 @@ impl App {
                     Some(_) => self.select_when_open(rel, sidebar::Target::Range(bytes, None)),
                     None => {
                         let at = bytes.start;
-                        self.revealing.borrow_mut().insert(
-                            rel.to_string(),
-                            Reveal::Diagram(Box::new(move |_, tab| reveal_label(tab, at))),
-                        );
+                        let reveal = Reveal::Diagram(Box::new(move |_, tab| reveal_label(tab, at)));
+                        self.pending.reveal(rel, reveal);
                         self.select_when_open(rel, sidebar::Target::Range(bytes, None));
                     }
                 }
@@ -783,9 +773,7 @@ impl App {
             }
             Some(_) => self.select_when_open(rel, sidebar::Target::Range(bytes, None)),
             None => {
-                self.revealing
-                    .borrow_mut()
-                    .insert(rel.to_string(), Reveal::NotebookHit(bytes.clone()));
+                self.pending.reveal(rel, Reveal::NotebookHit(bytes.clone()));
                 // Only text has a tab to wait on, and only its bytes say what a `.py` is.
                 match accent_core::path::is_notebook(rel) {
                     true => self.open_preview(rel),
@@ -819,8 +807,7 @@ impl App {
             self.reveal_page(&tab.page);
             return reveal(self, &tab);
         }
-        let reveal = Reveal::Diagram(Box::new(reveal));
-        self.revealing.borrow_mut().insert(rel.to_string(), reveal);
+        self.pending.reveal(rel, Reveal::Diagram(Box::new(reveal)));
         self.open_preview(rel);
     }
 
@@ -955,7 +942,7 @@ impl App {
     /// A file that would not open. One that is not there reads the same whoever found out: the
     /// session naming a note deleted since, or a link to one never written.
     pub(crate) fn cannot_open(&self, key: &str, e: Error) {
-        self.keep_on_landing.borrow_mut().remove(key);
+        self.pending.fail(key);
         let shown = doc::host_file_path(key).unwrap_or(key);
         match e {
             Error::Core(Core::NotFound(_)) => {
@@ -1256,7 +1243,7 @@ impl App {
         self.save_session_soon();
         // Taken out first: the borrow of an `if let`'s scrutinee lasts through its body, and the
         // restore's `put_back` asks what else is still waiting.
-        let waiting = self.awaiting.borrow_mut().remove(&tab.rel());
+        let waiting = self.pending.take_work(&tab.rel());
         if let Some(waiting) = waiting {
             (waiting.run)(self, &tab);
         }
@@ -1265,11 +1252,8 @@ impl App {
     /// Choose restored pane placement for `key` while available, otherwise the active pane.
     /// Worker-read text tabs need this lookup on arrival instead of moving after construction.
     pub(crate) fn tabs_for(&self, key: &str) -> adw::TabView {
-        let placed = self.placing.borrow_mut().remove(key);
-        match placed
-            .and_then(|pane| pane.upgrade())
-            .filter(|pane| self.panes.borrow().iter().any(|p| Rc::ptr_eq(p, pane)))
-        {
+        let placed = self.pending.take_pane(key);
+        match placed.filter(|pane| self.panes.borrow().iter().any(|p| Rc::ptr_eq(p, pane))) {
             Some(pane) => pane.tabs.clone(),
             None => self.tabs(),
         }
@@ -1322,18 +1306,18 @@ impl App {
             self.focus_picked(&tab.page, how);
             return f(self, &tab);
         }
-        let waiting = Waiting {
+        let waiting = pending::Waiting {
             what: (how != Opened::Restored)
                 .then(|| format!("{what} {}", doc::host_file_path(key).unwrap_or(key))),
             run: Box::new(f),
         };
-        self.awaiting.borrow_mut().insert(key.to_string(), waiting);
+        self.pending.wait(key, waiting);
         self.open_as(key, how);
     }
 
     /// Discard pending text-tab work for `key` with its request reason when the file opens as another kind.
     fn drop_awaiting(&self, key: &str, why: &str) {
-        let waiting = self.awaiting.borrow_mut().remove(key);
+        let waiting = self.pending.take_work(key);
         if let Some(what) = waiting.and_then(|waiting| waiting.what) {
             self.cannot(&what, why);
         }
@@ -1375,7 +1359,7 @@ fn select_text_range(tab: &Tab, bytes: std::ops::Range<usize>) {
 type Shows<T> = Box<dyn FnOnce(&Rc<App>, &Rc<T>)>;
 
 /// What [`Reveal::Then`] does with the document it waited for.
-type OnDoc = Box<dyn FnOnce(&Rc<App>, &Doc)>;
+pub(crate) type OnDoc = Box<dyn FnOnce(&Rc<App>, &Doc)>;
 
 /// Show the label of `tab` whose line in its labels' text holds byte `at`, if there still is one.
 fn reveal_label(tab: &Rc<crate::diagram::DiagramTab>, at: usize) {

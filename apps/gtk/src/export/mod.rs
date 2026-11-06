@@ -80,8 +80,7 @@ impl App {
         if let Some(doc) = self.doc_for(key) {
             return run(self, &doc);
         }
-        let then = open::Reveal::Then(Box::new(run));
-        self.revealing.borrow_mut().insert(key.to_string(), then);
+        self.pending.reveal(key, open::Reveal::Then(Box::new(run)));
         self.open_path(key);
     }
 

@@ -34,7 +34,7 @@ pub(super) fn bench_opens(app: &Rc<App>) {
         ] {
             app.toasts.dismiss_all();
             if case == "unreadable" {
-                app.keep_on_landing.borrow_mut().insert(rel.to_string());
+                app.pending.keep(rel);
             }
             let ran = Rc::new(Cell::new(false));
             let runs = ran.clone();
@@ -45,7 +45,7 @@ pub(super) fn bench_opens(app: &Rc<App>) {
                 "bench opens {case} said={:?} ran={} waiting={} tab={}",
                 said(&app),
                 ran.get(),
-                app.awaiting.borrow().len(),
+                app.pending.waiting().len(),
                 super::terminal_editor::kind_of(&app, rel)
             );
         }
@@ -56,7 +56,7 @@ pub(super) fn bench_opens(app: &Rc<App>) {
         app.open_preview(note);
         app.with_tab(note, Opened::Kept, "go to", move |_, _| runs.set(true));
         app.open_path(note);
-        app.keep_on_landing.borrow_mut().insert(note.to_string());
+        app.pending.keep(note);
         until(|| ran.get()).await;
         // The reads asked for after the first, which find its tab when they land.
         glib::timeout_future(Duration::from_millis(1000)).await;
@@ -64,7 +64,7 @@ pub(super) fn bench_opens(app: &Rc<App>) {
             "bench opens during said={:?} ran={} waiting={} {}",
             said(&app),
             ran.get(),
-            app.awaiting.borrow().len(),
+            app.pending.waiting().len(),
             landed(&app, note)
         );
         let unread = root.join("opens-unread.md");

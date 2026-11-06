@@ -304,12 +304,7 @@ pub fn build_window(
         corpus: RefCell::new(Corpus::default()),
         statusbar,
         docs: RefCell::new(Vec::new()),
-        awaiting: RefCell::new(HashMap::new()),
-        revealing: RefCell::new(HashMap::new()),
-        keep_on_landing: RefCell::new(HashSet::new()),
-        as_text: RefCell::new(HashSet::new()),
-        in_accent: RefCell::new(HashSet::new()),
-        placing: RefCell::new(HashMap::new()),
+        pending: pending::Pending::default(),
         launched: RefCell::new(Vec::new()),
         restore: RefCell::new(std::rc::Weak::new()),
         tree: OnceCell::new(),
@@ -490,9 +485,7 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
             move |_kind, rel: &str, double| match (double, app.doc_for(rel)) {
                 (true, Some(doc)) => app.promote(doc.page()),
                 (true, None) if let Some(page) = app.editing(rel) => app.promote(&page),
-                (true, None) => {
-                    app.keep_on_landing.borrow_mut().insert(rel.to_string());
-                }
+                (true, None) => app.pending.keep(rel),
                 (false, _) => app.open_preview(rel),
             }
         ),

@@ -199,7 +199,7 @@ async fn keys(app: &Rc<App>) {
     until(|| app.reconciled.get(), 30_000).await;
     pick(app, Editor::Nano);
     // A tab of accent's own to leave the editor's for.
-    app.in_accent.borrow_mut().insert("other.md".into());
+    app.pending.in_accent("other.md");
     app.open_path("other.md");
     until(|| kind_of(app, "other.md") == "text", 10_000).await;
     app.open_path("note.md");

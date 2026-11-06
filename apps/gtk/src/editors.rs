@@ -338,15 +338,12 @@ impl App {
         let editor = self.config.borrow().editor;
         // A place a search hit, a symbol or a definition asked for ([`App::edit_at`]); anything
         // else waiting is for accent's own tab.
-        let at = match self.revealing.borrow().get(key) {
+        let at = match self.pending.reveal_of(key).as_deref() {
             Some(Reveal::Line(line, column)) => Some((*line, *column)),
             Some(_) => return false,
             None => None,
         };
-        if self.in_accent.borrow_mut().remove(key)
-            || self.stays_accents(key)
-            || self.awaiting.borrow().contains_key(key)
-        {
+        if self.pending.take_in_accent(key) || self.stays_accents(key) || self.pending.waits(key) {
             return false;
         }
         // A shell that has answered without it runs no tab only to find it missing.
@@ -354,7 +351,7 @@ impl App {
             self.say_missing(editor, key);
             return false;
         }
-        self.revealing.borrow_mut().remove(key);
+        self.pending.take_reveal(key);
         let shell = match self.editor_shell(key) {
             Ok(shell) => shell,
             Err(why) => {
@@ -404,8 +401,7 @@ impl App {
         }
         // Through the read, whose bytes say whether a `.py` or an `.xml` is a notebook or a
         // diagram after all; one that lands in accent's own editor lands at the place.
-        let line = Reveal::Line(at.0, at.1);
-        self.revealing.borrow_mut().insert(rel.to_string(), line);
+        self.pending.reveal(rel, Reveal::Line(at.0, at.1));
         self.open_as(rel, how);
         true
     }
@@ -604,7 +600,7 @@ impl App {
     /// The tab of the terminal editor that has `key` open, which an open of `key` comes to the
     /// front in, unless what asked waits for accent's own buffer of it.
     pub(crate) fn editing(&self, key: &str) -> Option<adw::TabPage> {
-        if self.awaiting.borrow().contains_key(key) {
+        if self.pending.waits(key) {
             return None;
         }
         self.editor_of(key).map(|term| term.page.clone())
@@ -737,7 +733,7 @@ impl App {
 
     /// Open `key` in accent's own editor this once.
     fn once_in_accent(self: &Rc<Self>, key: &str) {
-        self.in_accent.borrow_mut().insert(key.to_string());
+        self.pending.in_accent(key);
         self.open_path(key);
     }
 
@@ -754,7 +750,7 @@ impl App {
             return;
         };
         self.say_missing(edits.editor, &edits.file);
-        self.in_accent.borrow_mut().insert(edits.file.clone());
+        self.pending.in_accent(&edits.file);
         self.open_as(&edits.file, how);
     }
 
