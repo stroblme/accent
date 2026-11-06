@@ -167,6 +167,7 @@ pub fn open(
             move |page| strip.picture(page)
         ),
         crate::doc::Kind::Diagram,
+        &view,
     );
     let pages = file.pages.len();
     let tab = Rc::new(DiagramTab {

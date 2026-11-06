@@ -311,6 +311,7 @@ pub fn open(
                 }
             ),
             crate::doc::Kind::Pdf,
+            &view,
         ),
         tx: RefCell::new(None),
         waiting: RefCell::default(),

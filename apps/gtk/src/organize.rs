@@ -80,6 +80,9 @@ pub struct Organize {
     icon: Box<dyn Fn(usize) -> Option<gdk::Texture>>,
     /// The pages a paste here takes.
     kind: Kind,
+    /// What the document's keys reach, which a button or a drop hands the keyboard to, so
+    /// `Ctrl+Z` takes back what the strip just did.
+    keys: gtk::Widget,
     on_edit: Hook<dyn Fn(PageEdit)>,
     on_copy: Hook<dyn Fn(usize)>,
     on_paste: PasteHook,
@@ -130,14 +133,16 @@ fn edge_speed(y: f64, height: f64) -> f64 {
 }
 
 impl Organize {
-    /// The organizer of `canvas`, the pages of `kind` that `layout` places, in `strip`. Every
-    /// handler holds it weakly: the widgets they are on outlive nothing it does not.
+    /// The organizer of `canvas`, the pages of `kind` that `layout` places, in `strip`, for the
+    /// document whose keys `keys` takes. Every handler holds it weakly: the widgets they are on
+    /// outlive nothing it does not.
     pub fn new(
         strip: &gtk::ScrolledWindow,
         canvas: &impl IsA<gtk::Widget>,
         layout: impl Fn() -> Layout + 'static,
         icon: impl Fn(usize) -> Option<gdk::Texture> + 'static,
         kind: Kind,
+        keys: &impl IsA<gtk::Widget>,
     ) -> Rc<Organize> {
         // Clipped, so a button over a thumbnail scrolled half out of the strip stays inside it.
         let pane = gtk::Overlay::builder()
@@ -158,6 +163,7 @@ impl Organize {
                         && let Some(page) = o.hovered.get()
                     {
                         act(&o, page);
+                        o.keys.grab_focus();
                     }
                 });
                 button
@@ -189,6 +195,7 @@ impl Organize {
                 layout: Box::new(layout),
                 icon: Box::new(icon),
                 kind,
+                keys: keys.clone().upcast(),
                 on_edit: Hook::default(),
                 on_copy: Hook::default(),
                 on_paste: Hook::default(),
@@ -373,6 +380,7 @@ impl Organize {
             };
             o.aim(None);
             o.edit(PageEdit::Move { from, to });
+            o.keys.grab_focus();
             true
         });
         self.canvas.add_controller(target);
