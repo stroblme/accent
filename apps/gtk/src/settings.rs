@@ -565,12 +565,13 @@ fn font_row(
     // An icon rather than the word: the row already carries a font button whose label is the
     // whole font name, and two text buttons beside it leave the name nowhere to go on a narrow
     // dialog. `document-revert-symbolic` is the arrow back to a saved state, which is what this
-    // does; the tooltip is what keeps it discoverable (DESIGN.md, Iconography).
+    // does; the tooltip is what keeps it discoverable (DESIGN.md, Iconography). Hidden rather than
+    // greyed while the system font is in use, as there is nothing to go back to.
     let reset = gtk::Button::builder()
         .icon_name("document-revert-symbolic")
         .tooltip_text("Use System Font")
         .valign(gtk::Align::Center)
-        .sensitive(chosen.is_some())
+        .visible(chosen.is_some())
         .build();
     reset.add_css_class("flat");
 
@@ -593,7 +594,7 @@ fn font_row(
             let font = desc.to_str().to_string();
             *field(&mut config.borrow_mut()) = Some(font.clone());
             row.set_subtitle(&font_subtitle(Some(&font), default));
-            reset.set_sensitive(true);
+            reset.set_visible(true);
             save();
         }
     });
@@ -614,13 +615,16 @@ fn font_row(
             button.set_font_desc(&pango::FontDescription::from_string(&default()));
             resetting.set(false);
             row.set_subtitle(&font_subtitle(None, default));
-            b.set_sensitive(false);
+            // The keyboard stays in the row rather than leaving with the hidden button.
+            button.grab_focus();
+            b.set_visible(false);
             save();
         }
     });
 
-    row.add_suffix(&button);
+    // Left of the font button, so the button keeps its place as Reset comes and goes.
     row.add_suffix(&reset);
+    row.add_suffix(&button);
     row
 }
 

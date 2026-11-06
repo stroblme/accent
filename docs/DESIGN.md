@@ -1045,7 +1045,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   What using accent moves and no row shows, the recent vaults, the drawing ring's pens and a diagram's tools, gives it none (`settings::on_page`), since a new page costs the opening as much as the first one did.
 - This Vault holds three folder rows: Templates, New Files and Attachments.
   The Attachments row keeps `./` and `/` as typed, those being the note's folder and the vault root.
-- A font's Reset is an icon button (`document-revert-symbolic`): the font button already shows the whole font name, and a text button would leave it nowhere to go.
+- A font's Reset is an icon button (`document-revert-symbolic`) left of its font button: the font button already shows the whole font name, and a text button would leave it nowhere to go.
+  It is there only while a font of the reader's own is chosen, hidden rather than greyed while the system font is in use, as there is nothing to go back to (user decision 2026-11-06).
 - There is one config per process, so a change made anywhere — the dialog, the palette, the drawing ring, a rebound shortcut, Leave Out of Search — takes effect in every window at once, redoing only what it moved, and is written a second later, so a run of picks is one write.
 - `config.toml` is watched: a hand edit is taken in as it lands and never written over. accent's own unsaved changes stay on top key by key; where both changed one key the file wins, and the log says so.
   accent's own write changes only the keys it changed, through `toml_edit` (user decision 2026-10-28), so the file's comments, order and formatting stay as the user wrote them; a key at its default the file leaves out stays out, and a key the config does not hold (a retired one) goes.
