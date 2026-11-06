@@ -549,7 +549,7 @@ fn wire_pane_drops(app: &Rc<App>, pane: &Rc<Pane>) {
         pane,
         #[upgrade_or]
         false,
-        move |_, _, value| {
+        move |_, hovered, value| {
             let rel = value.get::<String>().ok();
             let Some(rel) = rel.and_then(|rel| app.row_key(rel)) else {
                 return false;
@@ -559,6 +559,7 @@ fn wire_pane_drops(app: &Rc<App>, pane: &Rc<Pane>) {
                 app.sync_active();
             }
             app.open_path(&rel);
+            keep_in_front(&app, &pane, hovered, rel);
             true
         }
     ));
@@ -609,6 +610,47 @@ fn wire_pane_drops(app: &Rc<App>, pane: &Rc<Pane>) {
             app.dropped(&pane, zone, value)
         }
     ));
+}
+
+/// How long a drag rests on a tab before libadwaita selects it (`DROP_SWITCH_TIMEOUT` in
+/// `adw-tab-box.c`).
+const DROP_SWITCH: Duration = Duration::from_millis(500);
+
+/// Keep the tab `key` opens in front of `hovered`, the tab of `pane`'s bar its row was let go on.
+/// libadwaita selects the tab a drag rests on after [`DROP_SWITCH`], and a drop does not cancel
+/// that wait, so a row let go sooner would land behind it (ISSUES.md, libadwaita). For that long
+/// such a switch is undone.
+fn keep_in_front(app: &Rc<App>, pane: &Rc<Pane>, hovered: &adw::TabPage, key: String) {
+    let handler = pane.tabs.connect_selected_page_notify(glib::clone!(
+        #[weak]
+        app,
+        #[weak]
+        pane,
+        #[strong]
+        hovered,
+        move |tabs| {
+            if tabs.selected_page().as_ref() != Some(&hovered) {
+                return;
+            }
+            let Some(page) = app.doc_for(&key).map(|doc| doc.page().clone()) else {
+                return;
+            };
+            // Selected once this notify is over: one made inside it sends its own notify only
+            // afterwards, past the flag that keeps it out of Back. Still ahead of the frame, so
+            // the switch is never on screen.
+            let (app, pane) = (app.clone(), pane.clone());
+            glib::idle_add_local_full(glib::Priority::HIGH_IDLE, move || {
+                if pane.has(&page) {
+                    app.navigating.set(true);
+                    pane.tabs.set_selected_page(&page);
+                    app.navigating.set(false);
+                }
+                glib::ControlFlow::Break
+            });
+        }
+    ));
+    let tabs = pane.tabs.clone();
+    glib::timeout_add_local_once(DROP_SWITCH, move || tabs.disconnect(handler));
 }
 
 /// A window showing No File Open has no pane on screen to take a dragged tab or a file's row: its
