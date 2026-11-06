@@ -134,6 +134,7 @@ mod tests {
             align: Align::Center,
             valign: VAlign::Middle,
             wrap: true,
+            html: true,
             rotation,
             font: Font {
                 size: 12.0,

@@ -9,9 +9,9 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use accent_core::recolour;
+use accent_drawio::scene::{line_height, wrap_width};
 use accent_drawio::{
-    Align, Cap, Color, Font, ImageSource, Join, Marks, Paint, PathCmd, Point, Prim, Rect, Run,
-    Stroke, VAlign,
+    Align, Cap, Color, ImageSource, Join, Marks, Paint, PathCmd, Point, Prim, Rect, Run, Stroke,
 };
 use gtk::prelude::*;
 use gtk::{gdk, glib, graphene, gsk, pango};
@@ -313,26 +313,15 @@ pub fn prim(
             tint,
         ),
         Prim::Text {
-            rect,
             anchor,
-            align,
-            valign,
             wrap,
             rotation,
             font,
-            runs,
             background,
             border,
             opacity,
             ..
         } => {
-            let placed = Placed {
-                rect: frame.rect(rect),
-                anchor: frame.to_content(*anchor),
-                align: *align,
-                valign: *valign,
-                wrap: *wrap,
-            };
             let look = Look {
                 background: *background,
                 border: *border,
@@ -343,12 +332,28 @@ pub fn prim(
                 match layouts.get(&index) {
                     Some(laid) if laid.scale == frame.scale => laid.clone(),
                     _ => {
-                        let width = wrap.then_some(rect.w);
-                        let laid = lay_out(widget, runs, font, width, *align, frame.scale, tint);
+                        let Some(laid) = lay_out(widget, prim, frame.scale, tint) else {
+                            return;
+                        };
                         layouts.insert(index, laid.clone());
                         laid
                     }
                 }
+            };
+            // Where draw.io sets the text, from the block Pango laid out, in page units.
+            let layout = &laid.layout;
+            let (_, logical) = layout.extents();
+            let unit = |v: i32| f64::from(v) / f64::from(pango::SCALE) / frame.scale;
+            let block = (unit(logical.width()), unit(logical.height()));
+            let lines = layout.line_count() as usize;
+            let origin = prim.text_origin(block, unit(layout.baseline()), lines);
+            let origin = origin.unwrap_or_default();
+            // A wrapped label's lines are aligned across its layout, an unwrapped one's block
+            // starts at its widest line.
+            let left = if *wrap { 0.0 } else { unit(logical.x()) };
+            let placed = Placed {
+                origin: frame.to_content(Point::new(origin.x - left, origin.y)),
+                anchor: frame.to_content(*anchor),
             };
             let block = label(snapshot, &laid, &placed, *rotation, font.color, look, tint);
             cache.painted(index, frame, block, *anchor, *rotation);
@@ -675,13 +680,11 @@ impl Look {
     }
 }
 
-/// Where a label goes, in content coordinates.
+/// Where a label goes, in content coordinates: its layout's top-left, and the point it is turned
+/// about.
 struct Placed {
-    rect: Rect,
+    origin: Point,
     anchor: Point,
-    align: Align,
-    valign: VAlign,
-    wrap: bool,
 }
 
 /// A label laid out at a scale, with its formulas where Pango set their placeholders.
@@ -710,10 +713,15 @@ fn label(
     tint: Tint,
 ) -> Rect {
     let layout = &laid.layout;
-    let (_, logical) = layout.pixel_extents();
-    let (tw, th) = (f64::from(logical.width()), f64::from(logical.height()));
-    let (x, y) = text_origin(at, (tw, th), f64::from(logical.x()));
-    let block = Rect::new(x + f64::from(logical.x()), y, tw, th);
+    let (_, logical) = layout.extents();
+    let px = |v: i32| f64::from(v) / f64::from(pango::SCALE);
+    let (x, y) = (at.origin.x, at.origin.y);
+    let block = Rect::new(
+        x + px(logical.x()),
+        y + px(logical.y()),
+        px(logical.width()),
+        px(logical.height()),
+    );
     rotated(snapshot, at.anchor, rotation, || {
         with_opacity(snapshot, look.opacity, || {
             look.frame(snapshot, &block, tint);
@@ -743,27 +751,6 @@ fn label(
         })
     });
     block
-}
-
-/// The top-left a laid-out block of `size` is drawn from. Wrapped, it sits in the rectangle by
-/// its vertical alignment (Pango aligns the lines across the width); unwrapped, its alignment
-/// point sits on the anchor.
-fn text_origin(at: &Placed, size: (f64, f64), logical_x: f64) -> (f64, f64) {
-    let (tw, th) = size;
-    let my = match at.valign {
-        VAlign::Top => 0.0,
-        VAlign::Middle => 0.5,
-        VAlign::Bottom => 1.0,
-    };
-    if at.wrap {
-        return (at.rect.x, at.rect.y + (at.rect.h - th) * my);
-    }
-    let mx = match at.align {
-        Align::Left => 0.0,
-        Align::Center => 0.5,
-        Align::Right => 1.0,
-    };
-    (at.anchor.x - tw * mx - logical_x, at.anchor.y - th * my)
 }
 
 /// What a byte range of a label's text is.
@@ -827,18 +814,23 @@ fn text_of(
     (text, spans)
 }
 
-/// A Pango layout of `runs` in `font`, at `scale`, wrapped to `width` page units when given, its
-/// runs' own colours through `tint`, and where its formulas are set. A formula is laid out at the
-/// label's font size, in page units, so a zoom lays out only the Pango layout again.
-fn lay_out(
-    widget: &gtk::Widget,
-    runs: &[Run],
-    font: &Font,
-    width: Option<f64>,
-    align: Align,
-    scale: f64,
-    tint: Tint,
-) -> Laid {
+/// A Pango layout of label `prim` at `scale`, wrapped where it wraps and its lines as far apart
+/// as draw.io sets them, its runs' own colours through `tint`, and where its formulas are set;
+/// `None` for anything but a label. A formula is laid out at the label's font size, in page
+/// units, so a zoom lays out only the Pango layout again.
+fn lay_out(widget: &gtk::Widget, prim: &Prim, scale: f64, tint: Tint) -> Option<Laid> {
+    let Prim::Text {
+        rect,
+        align,
+        wrap,
+        html,
+        font,
+        runs,
+        ..
+    } = prim
+    else {
+        return None;
+    };
     let size = font.size as f32;
     let (text, spans) = text_of(runs, |tex, display| {
         math::formula(widget, tex, display, size)
@@ -867,6 +859,10 @@ fn lay_out(
             &(0..text.len()),
         );
     }
+    // Each run's lines as far apart as its size sets them; a formula keeps the room it is given,
+    // as the inline block MathJax sets one in does.
+    let line = |size: f64| pango::AttrInt::new_line_height_absolute(px(line_height(size, *html)));
+    put(line(font.size).into(), &(0..text.len()));
     for (range, span) in &spans {
         let marks = match span {
             Span::Text(marks) => marks,
@@ -891,6 +887,7 @@ fn lay_out(
                 let em = if *display { px(font.size) } else { 0 };
                 let room = pango::Rectangle::new(0, -ascent - em, ink.width(), height + 2 * em);
                 put(pango::AttrShape::new(&ink, &room).into(), range);
+                put(pango::AttrFloat::new_line_height(1.0).into(), range);
                 continue;
             }
         };
@@ -921,11 +918,12 @@ fn lay_out(
         }
         if let Some(size) = marks.size {
             put(pango::AttrSize::new_size_absolute(px(size)).into(), range);
+            put(line(size).into(), range);
         }
     }
     layout.set_attributes(Some(&attrs));
-    if let Some(w) = width {
-        layout.set_width(px(w).max(1));
+    if *wrap {
+        layout.set_width(px(wrap_width(rect.w)).max(1));
         // Words only: draw.io's labels let a word too long for its box run over rather than
         // break it (CSS `word-wrap: normal`).
         layout.set_wrap(pango::WrapMode::Word);
@@ -936,11 +934,11 @@ fn lay_out(
         Align::Right => pango::Alignment::Right,
     });
     let formulas = set(&layout, &spans);
-    Laid {
+    Some(Laid {
         scale,
         layout,
         formulas,
-    }
+    })
 }
 
 /// Where Pango set each formula of `spans` in `layout`: its placeholder's left end and line's
@@ -1019,20 +1017,6 @@ mod tests {
             (&text[spans[3].0.clone()], &spans[3].1),
             ("\\(bad\\)", &Span::Source)
         );
-    }
-
-    #[test]
-    fn an_unwrapped_label_sits_on_its_anchor_by_its_alignment() {
-        let at = Placed {
-            rect: Rect::new(0.0, 0.0, 100.0, 40.0),
-            anchor: Point::new(50.0, 20.0),
-            align: Align::Center,
-            valign: VAlign::Middle,
-            wrap: false,
-        };
-        assert_eq!(text_origin(&at, (30.0, 10.0), 0.0), (35.0, 15.0));
-        let wrapped = Placed { wrap: true, ..at };
-        assert_eq!(text_origin(&wrapped, (30.0, 10.0), 0.0), (0.0, 15.0));
     }
 
     #[test]

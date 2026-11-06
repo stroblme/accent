@@ -1,7 +1,7 @@
 // The label placement and `point_along` are derived from draw.io mxgraph/src/view/mxCellRenderer.js,
-// mxgraph/src/view/mxGraphView.js and mxgraph/src/shape/mxText.js (Apache-2.0, Copyright (c)
-// 2006-2026 JGraph Holdings Ltd / draw.io AG), ported to Rust and modified for accent; see
-// crates/drawio/NOTICE.
+// mxgraph/src/view/mxGraphView.js, mxgraph/src/shape/mxText.js and the text setting from
+// mxgraph/src/util/mxSvgCanvas2D.js (Apache-2.0, Copyright (c) 2006-2026 JGraph Holdings Ltd /
+// draw.io AG), ported to Rust and modified for accent; see crates/drawio/NOTICE.
 //! Toolkit-independent display lists in paint order and page coordinates.
 //! The toolkit paints each [`Prim`] and measures text.
 
@@ -154,10 +154,9 @@ pub enum Prim {
         /// Paint [`SHADOW_COLOR`] under it at [`SHADOW_OFFSET`] first.
         shadow: bool,
     },
-    /// A label. With `wrap` the runs are wrapped to `rect.w` and the block is aligned inside
-    /// `rect` by `align`/`valign`; without it the text is laid out unbounded and placed so that
-    /// its (`align`, `valign`) point sits on `anchor`. Either way it is turned `rotation`
-    /// degrees about `anchor`.
+    /// A label. With `wrap` the runs are wrapped to [`wrap_width`] of `rect.w`, else laid out
+    /// unbounded; [`Prim::text_origin`] places the text by `align`/`valign` on `anchor`, and it is
+    /// turned `rotation` degrees about `anchor`.
     Text {
         cell: CellId,
         locked: bool,
@@ -166,6 +165,9 @@ pub enum Prim {
         align: Align,
         valign: VAlign,
         wrap: bool,
+        /// Set as draw.io sets an HTML label, as CSS (`html=1`, or `whiteSpace=wrap`, which
+        /// draw.io's `Graph.isHtmlLabel` counts as one), rather than as SVG text.
+        html: bool,
         rotation: f64,
         font: Font,
         runs: Vec<Run>,
@@ -220,6 +222,90 @@ impl Prim {
             Prim::Image { rect, rotation, .. } => geom::bounding_box(rect, *rotation),
         }
     }
+
+    /// Where a label's laid-out text goes, as draw.io's canvas sets it (`mxSvgCanvas2D`), in page
+    /// units: the top of its block, and the left of the box a wrapped label's lines are aligned
+    /// across ([`wrap_width`]) or else of its widest line. `block` is the text's widest line
+    /// across and its lines down, `baseline` its first baseline below its top. `None` for anything
+    /// but a label.
+    ///
+    /// An HTML label is a block aligned, overflowing as it must, in a flex box a unit square at
+    /// the anchor rounded to whole units, or as wide as it wraps (`updateTextNodes`, `createCss`).
+    /// SVG text has its first baseline a font size less one below the anchor, less half the
+    /// text's height middle-aligned and all of it and one more bottom-aligned, the text a font
+    /// size tall and a line more for every line after the first (`plainText`). Either goes
+    /// [`OUTLINE_OFFSET`] up and left of that.
+    pub fn text_origin(&self, block: (f64, f64), baseline: f64, lines: usize) -> Option<Point> {
+        let Prim::Text {
+            rect,
+            anchor,
+            align,
+            valign,
+            wrap,
+            html,
+            font,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let mx = match align {
+            Align::Left => 0.0,
+            Align::Center => 0.5,
+            Align::Right => 1.0,
+        };
+        let my = match valign {
+            VAlign::Top => 0.0,
+            VAlign::Middle => 0.5,
+            VAlign::Bottom => 1.0,
+        };
+        let (w, h) = block;
+        let at = |x: f64, y: f64| Some(Point::new(x - OUTLINE_OFFSET, y - OUTLINE_OFFSET));
+        if !html {
+            let text = font.size + lines.saturating_sub(1) as f64 * line_height(font.size, false);
+            let above = match valign {
+                VAlign::Top => 0.0,
+                VAlign::Middle => text / 2.0,
+                VAlign::Bottom => text + 1.0,
+            };
+            let first = anchor.y + font.size - 1.0 - above;
+            return at(anchor.x - mx * w, first - baseline);
+        }
+        // JavaScript's `Math.round`, halves up.
+        let round = |v: f64| (v + 0.5).floor();
+        let left = match wrap {
+            true => round(anchor.x - mx * (rect.w + FOREIGN_OBJECT_PADDING)),
+            false => round(anchor.x) + mx * (1.0 - w),
+        };
+        at(left, round(anchor.y) + my * (1.0 - h))
+    }
+}
+
+/// How far down and right of its geometry draw.io draws a one-pixel outline at 100 %, which
+/// keeps it on whole pixels, while its text stays where it is set (`mxShape.getSvgScreenOffset`,
+/// `mxText.getSvgScreenOffset`). The canvas here draws outlines on their geometry, so a label
+/// goes as far up and left, to sit on its shape as it does in draw.io.
+const OUTLINE_OFFSET: f64 = 0.5;
+
+/// draw.io sets a label's lines 1.2 font sizes apart (`mxConstants.LINE_HEIGHT`).
+pub const LINE_HEIGHT: f64 = 1.2;
+
+/// How much wider than its room draw.io lays an HTML label out (`foreignObjectPadding`).
+const FOREIGN_OBJECT_PADDING: f64 = 2.0;
+
+/// How far apart a label's lines at font `size` are set: an HTML label's 1.2 sizes, SVG text's
+/// rounded to whole units (`mxSvgCanvas2D.plainText`).
+pub fn line_height(size: f64, html: bool) -> f64 {
+    match html {
+        true => LINE_HEIGHT * size,
+        false => (LINE_HEIGHT * size).round(),
+    }
+}
+
+/// The width a wrapped label with room `w` across breaks its lines at: its room and draw.io's
+/// padding, in whole units as its CSS box is (`mxSvgCanvas2D.createCss`).
+pub fn wrap_width(w: f64) -> f64 {
+    (w + FOREIGN_OBJECT_PADDING).round()
 }
 
 /// Build a display list in paint order: layers bottom first, then each cell's shape,
@@ -731,6 +817,7 @@ impl<'a> Builder<'a> {
             align,
             valign,
             wrap: style.get("whiteSpace") == Some("wrap") && size.0 > 0.0,
+            html: cell.is_html() || style.get("whiteSpace") == Some("wrap"),
             rotation,
             font: Font {
                 size: style.num("fontSize", DEFAULT_FONTSIZE),
@@ -1009,6 +1096,34 @@ mod tests {
         // A picture's label hangs under it.
         let (_, anchor, _) = text(&s, "img");
         assert_eq!(anchor, Point::new(20.0, 240.0 + 2.0 + 5.0));
+    }
+
+    #[test]
+    fn label_text_is_set_where_draw_ios_canvas_sets_it() {
+        let cell = |id: &str, y, style: &str, label: &str| {
+            Cell::new_vertex(id, "1", Rect::new(0.0, y, 120.0, 60.0), style, label)
+        };
+        let p = page(vec![
+            cell("html", 0.0, "html=1;", "A"),
+            cell("wrap", 100.0, "whiteSpace=wrap;", "B"),
+            cell("svg", 200.0, "", "C\nD"),
+        ]);
+        let s = scene(&p);
+        let origin = |id: &str, block, lines| {
+            let mut label = s.prims.iter().filter(|p| p.cell() == id);
+            label.find_map(|p| p.text_origin(block, 11.0, lines))
+        };
+        // An HTML label's block is centred on a box a unit square at its anchor, (60, 30), and
+        // the whole half a unit up and left.
+        let at = origin("html", (30.0, 15.0), 1);
+        assert_eq!(at, Some(Point::new(60.0 - 15.0, 30.0 - 7.5)));
+        // Wrapped, its lines are aligned across its room and 2 more, from that box's left.
+        let at = origin("wrap", (30.0, 15.0), 1);
+        assert_eq!(at, Some(Point::new(60.0 - 118.0 / 2.0 - 0.5, 130.0 - 7.5)));
+        // SVG text's 12 px lines are 14 apart, the first baseline 11 below the anchor less half
+        // of 12 + 14.
+        let (x, y) = (60.0 - 15.0 - 0.5, 230.0 + 11.0 - 13.0 - 11.0 - 0.5);
+        assert_eq!(origin("svg", (30.0, 28.0), 2), Some(Point::new(x, y)));
     }
 
     #[test]
