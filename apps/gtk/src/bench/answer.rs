@@ -277,8 +277,9 @@ pub(super) fn bench_answer_same(app: &Rc<App>, rel: &str) {
 /// that write and then writes the edit. `conflict`: a Ctrl+S over a change on disk the watcher
 /// has not reported yet is refused by the etag gate and asks, and Reload takes the disk's version.
 /// `offline`: a write over a dropped link (`OFFLINE_WRITE`) says so and raises the window's
-/// banner, the edits kept. Writes files, and makes the folder read only for a moment; use a
-/// scratch vault.
+/// banner, the edits kept. `close` and `quit`: a tab's close and the window's, the write refused,
+/// ask Unsaved Changes, Cancel keeping the tab and the window. Writes files, and makes the folder
+/// read only for a moment; use a scratch vault.
 pub(super) fn bench_answer_doc(app: &Rc<App>, arg: &str) {
     let Some((notebook, diagram)) = arg.split_once(',') else {
         eprintln!("ACCENT_BENCH_ANSWER=doc:<rel_ipynb>,<rel_drawio>");
@@ -346,6 +347,11 @@ async fn doc_drill<T: Probe>(app: &Rc<App>, rel: &str) {
     let kind = T::KIND.to_lowercase();
     let path = app.root().join(rel);
     let write = |version: &str| std::fs::write(&path, T::file(version)).is_ok();
+    let folder = path.parent().unwrap_or(&path).to_path_buf();
+    let mode = |mode| {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(mode));
+    };
     let cases = [
         "racing",
         "overlap",
@@ -355,6 +361,8 @@ async fn doc_drill<T: Probe>(app: &Rc<App>, rel: &str) {
         "flush",
         "conflict",
         "offline",
+        "close",
+        "quit",
     ];
     for case in cases {
         SLOW_RELOAD_MS.store(0, Ordering::Relaxed);
@@ -447,6 +455,35 @@ async fn doc_drill<T: Probe>(app: &Rc<App>, rel: &str) {
                     app.connection.is_revealed()
                 );
             }
+            // A close the folder refuses to write for asks, and Cancel keeps the tab; once the
+            // folder takes the write, the close goes through.
+            "close" => {
+                tab.edit("mine");
+                mode(0o555);
+                app.close_page(&doc_page(app, rel));
+                let asked = cancelled(app);
+                let kept = app.doc_for(rel).is_some();
+                mode(0o755);
+                if let Some(doc) = app.doc_for(rel) {
+                    app.close_page(doc.page());
+                }
+                glib::timeout_future(Duration::from_millis(300)).await;
+                let file = std::fs::read_to_string(&path).unwrap_or_default();
+                said = format!(
+                    " asked={asked:?} kept={kept} closed={} file_mine={}",
+                    app.doc_for(rel).is_none(),
+                    file.contains("mine")
+                );
+            }
+            // The window closing asks the same, and Cancel keeps it open.
+            "quit" => {
+                tab.edit("mine");
+                mode(0o555);
+                app.window.close();
+                let asked = cancelled(app);
+                mode(0o755);
+                said = format!(" asked={asked:?} open={}", app.window.is_visible());
+            }
             _ => {
                 tab.edit("mine");
                 write("theirs");
@@ -456,12 +493,6 @@ async fn doc_drill<T: Probe>(app: &Rc<App>, rel: &str) {
                     }
                     glib::timeout_future(Duration::from_millis(50)).await;
                 }
-                let folder = path.parent().unwrap_or(&path).to_path_buf();
-                let mode = |mode| {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ =
-                        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(mode));
-                };
                 match case {
                     "overwrite" => SLOW_WRITE_MS.store(1500, Ordering::Relaxed),
                     _ => mode(0o555),
@@ -520,13 +551,30 @@ async fn doc_drill<T: Probe>(app: &Rc<App>, rel: &str) {
                 .unwrap_or("none"),
         );
         save.modified.set(false);
-        app.close_page(&doc_page(app, rel));
+        if let Some(doc) = app.doc_for(rel) {
+            app.close_page(doc.page());
+        }
         glib::timeout_future(Duration::from_millis(300)).await;
         OFFLINE_WRITE.store(false, Ordering::Relaxed);
         app.hide_connection_banner();
     }
     SLOW_RELOAD_MS.store(0, Ordering::Relaxed);
     SLOW_WRITE_MS.store(0, Ordering::Relaxed);
+}
+
+/// The heading of the dialog standing, answered Cancel.
+fn cancelled(app: &App) -> String {
+    let Some(dialog) = app
+        .window
+        .visible_dialog()
+        .and_downcast::<adw::AlertDialog>()
+    else {
+        return String::new();
+    };
+    let heading = dialog.heading().unwrap_or_default().to_string();
+    dialog.emit_by_name::<()>("response", &[&"cancel"]);
+    dialog.close();
+    heading
 }
 
 /// Wait up to 6 s for `tab` to have no write out and, with `clean`, no edit left unwritten, and

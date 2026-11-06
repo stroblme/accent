@@ -6,6 +6,8 @@ bench answer doc notebook during modified=false banner=false mine=true theirs=no
 bench answer doc notebook flush modified=false banner=false mine=true theirs=none flushed=true file_mine=true file_during=true toast=""
 bench answer doc notebook conflict modified=false banner=false mine=false theirs=theirs dialog="Notebook Changed on Disk"
 bench answer doc notebook offline modified=true banner=false mine=true theirs=none connection=true toast="Disconnected. Changes have not been saved"
+bench answer doc notebook close modified=false banner=false mine=true theirs=none asked="Unsaved Changes" kept=true closed=true file_mine=true
+bench answer doc notebook quit modified=false banner=false mine=true theirs=none asked="Unsaved Changes" open=true
 bench answer doc diagram racing modified=true banner=true mine=true theirs=none
 bench answer doc diagram overlap modified=false banner=false mine=false theirs=theirs B
 bench answer doc diagram overwrite modified=false banner=false mine=true theirs=none file_mine=true file_during=true toast="Overwritten"
@@ -14,3 +16,5 @@ bench answer doc diagram during modified=false banner=false mine=true theirs=non
 bench answer doc diagram flush modified=false banner=false mine=true theirs=none flushed=true file_mine=true file_during=true toast=""
 bench answer doc diagram conflict modified=false banner=false mine=false theirs=theirs dialog="Diagram Changed on Disk"
 bench answer doc diagram offline modified=true banner=false mine=true theirs=none connection=true toast="Disconnected. Changes have not been saved"
+bench answer doc diagram close modified=false banner=false mine=true theirs=none asked="Unsaved Changes" kept=true closed=true file_mine=true
+bench answer doc diagram quit modified=false banner=false mine=true theirs=none asked="Unsaved Changes" open=true

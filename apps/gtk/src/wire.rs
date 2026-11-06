@@ -2,6 +2,7 @@
 //! file tree.
 
 use super::*;
+use crate::save::SavesModel;
 
 /// Everything one pane's tab view has to answer for. Called for the pane the window is built with
 /// and for every pane a split adds, so a new pane behaves exactly like the first one.
@@ -108,42 +109,13 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
                 });
                 return glib::Propagation::Stop;
             }
-            // A diagram is the same, through its own save; a label still being typed is part of
-            // what it holds, so it goes into the cell first.
-            let closing = app.diagrams().into_iter().find(|d| &d.page == page);
-            if let Some(diagram) = &closing {
-                diagram.finish_label();
-            }
-            let dirty = closing.filter(|d| d.save.modified.get());
-            if let Some(diagram) = dirty
-                && let Err(e) = app.flush_model(&diagram)
-            {
-                let (tabs, page) = (tabs.clone(), page.clone());
-                app.ask_unsaved_model(&diagram, &e, move |app, close| {
-                    if close {
-                        app.select_survivor(&page);
-                        app.forget_page(&page);
-                    }
-                    tabs.close_page_finish(&page, close);
-                });
-                return glib::Propagation::Stop;
-            }
-            // A notebook too, through its own save.
-            let dirty = app
-                .notebooks()
-                .into_iter()
-                .find(|n| &n.page == page && n.save.modified.get());
-            if let Some(notebook) = dirty
-                && let Err(e) = app.flush_model(&notebook)
-            {
-                let (tabs, page) = (tabs.clone(), page.clone());
-                app.ask_unsaved_model(&notebook, &e, move |app, close| {
-                    if close {
-                        app.select_survivor(&page);
-                        app.forget_page(&page);
-                    }
-                    tabs.close_page_finish(&page, close);
-                });
+            // A diagram and a notebook are the same, through their own save.
+            let asks = match app.doc_for_page(page) {
+                Some(Doc::Diagram(diagram)) => closing_asks(&app, tabs, page, &diagram),
+                Some(Doc::Notebook(notebook)) => closing_asks(&app, tabs, page, &notebook),
+                _ => false,
+            };
+            if asks {
                 return glib::Propagation::Stop;
             }
             // A terminal editor still running in a kept tab is asked about: its unsaved changes
@@ -1024,28 +996,7 @@ pub fn wire_window(app: &Rc<App>) {
                 });
                 return glib::Propagation::Stop;
             }
-            let diagrams = app.diagrams();
-            for diagram in &diagrams {
-                diagram.finish_label();
-            }
-            for diagram in diagrams.iter().filter(|d| d.save.modified.get()) {
-                let Err(e) = app.flush_model(diagram) else {
-                    continue;
-                };
-                app.ask_unsaved_model(diagram, &e, |app, close| match close {
-                    true => app.window.close(),
-                    false => app.keep_open(),
-                });
-                return glib::Propagation::Stop;
-            }
-            for notebook in app.notebooks().iter().filter(|n| n.save.modified.get()) {
-                let Err(e) = app.flush_model(notebook) else {
-                    continue;
-                };
-                app.ask_unsaved_model(notebook, &e, |app, close| match close {
-                    true => app.window.close(),
-                    false => app.keep_open(),
-                });
+            if quitting_asks(&app, &app.diagrams()) || quitting_asks(&app, &app.notebooks()) {
                 return glib::Propagation::Stop;
             }
             // The process ends when this returns, and a drawn-on PDF's write lives on the
@@ -1577,6 +1528,51 @@ fn row_menu(
         _ if tree.marks_a_dependency() => fileops::whole_menu(ops, tree.widget(), &marked, anchor),
         _ => fileops::context_menu(ops, tree.widget(), clicked(row), &marked, anchor),
     }
+}
+
+/// Whether closing `page`, which holds `tab`, waits on the Unsaved Changes question: what is still
+/// being typed goes in, and the edits are written first, asked about only when the write fails.
+fn closing_asks<T: SavesModel>(
+    app: &Rc<App>,
+    tabs: &adw::TabView,
+    page: &adw::TabPage,
+    tab: &Rc<T>,
+) -> bool {
+    tab.finish_editing();
+    if !tab.save_state().modified.get() {
+        return false;
+    }
+    let Err(e) = app.flush_model(tab) else {
+        return false;
+    };
+    let (tabs, page) = (tabs.clone(), page.clone());
+    app.ask_unsaved_model(tab, &e, move |app, close| {
+        if close {
+            app.select_survivor(&page);
+            app.forget_page(&page);
+        }
+        tabs.close_page_finish(&page, close);
+    });
+    true
+}
+
+/// [`closing_asks`] for the window's `tabs` of one kind, the window closing: the first whose
+/// write fails asks, and the window closes again once that is answered.
+fn quitting_asks<T: SavesModel>(app: &Rc<App>, tabs: &[Rc<T>]) -> bool {
+    for tab in tabs {
+        tab.finish_editing();
+    }
+    for tab in tabs.iter().filter(|t| t.save_state().modified.get()) {
+        let Err(e) = app.flush_model(tab) else {
+            continue;
+        };
+        app.ask_unsaved_model(tab, &e, |app, close| match close {
+            true => app.window.close(),
+            false => app.keep_open(),
+        });
+        return true;
+    }
+    false
 }
 
 /// A tree row as the context menu wants it: its path, and whether it is a directory. `None` stays

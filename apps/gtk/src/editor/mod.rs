@@ -149,7 +149,7 @@ pub fn landing(
     }
 }
 
-/// Shared file/save state for note and diagram tabs using `save.rs`.
+/// Shared file/save state for note, diagram and notebook tabs using `save.rs`.
 #[derive(Default)]
 pub struct SaveState {
     pub etag: Cell<Option<Etag>>,

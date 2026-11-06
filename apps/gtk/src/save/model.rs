@@ -35,6 +35,9 @@ pub(crate) trait SavesModel: Saves {
     /// The edits are given up on (a tab closing without saving them).
     fn discard(&self);
 
+    /// What is still being typed goes into the model, before it is written as it is.
+    fn finish_editing(self: &Rc<Self>) {}
+
     /// A write landed, whatever was typed since: what else hears of it, as a note's server does.
     fn saved(self: &Rc<Self>) {}
 }

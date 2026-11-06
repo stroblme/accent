@@ -48,7 +48,7 @@ impl App {
         self.start_save(tab, explicit, Self::save_tab, Self::land_save, move || text);
     }
 
-    /// Share asynchronous saving between notes and diagrams.
+    /// Share asynchronous saving between notes, diagrams and notebooks.
     ///
     /// `contents` prepares disk text on the worker; `land` applies results, and `again` repeats
     /// a save requested in flight. One write per tab avoids crossing remote round trips; queued
@@ -983,21 +983,8 @@ impl App {
                 let note = tab.flavour().is_note();
                 (Contents::Text(tab.for_disk(), note), tab.save.edits.get())
             }
-            Doc::Diagram(diagram) => {
-                self.land_model(diagram, false);
-                diagram.finish_label();
-                (
-                    Contents::Text(diagram.for_disk(), false),
-                    diagram.save.edits.get(),
-                )
-            }
-            Doc::Notebook(notebook) => {
-                self.land_model(notebook, false);
-                (
-                    Contents::Text(notebook.for_disk(), false),
-                    notebook.save.edits.get(),
-                )
-            }
+            Doc::Diagram(diagram) => self.model_as(diagram),
+            Doc::Notebook(notebook) => self.model_as(notebook),
             // No edit count: the strokes are all in the file once it is flushed.
             Doc::Pdf(pdf) => {
                 pdf.flush_blocking();
@@ -1080,21 +1067,10 @@ impl App {
                 }
             }
             (Doc::Diagram(diagram), Some((etag, digest, _))) => {
-                diagram.clear_changed();
-                diagram.save.digest.set(Some(digest));
-                match diagram.save.edits.get() == edits {
-                    true => diagram.mark_clean(etag),
-                    false => diagram.save.etag.set(Some(etag)),
-                }
+                wrote_model_as(diagram, etag, digest, edits)
             }
             (Doc::Notebook(notebook), Some((etag, digest, _))) => {
-                notebook.clear_changed();
-                notebook.save.digest.set(Some(digest));
-                match notebook.save.edits.get() == edits {
-                    true => notebook.mark_clean(etag),
-                    false => notebook.save.etag.set(Some(etag)),
-                }
-                notebook.saved();
+                wrote_model_as(notebook, etag, digest, edits)
             }
             // A refused upload of the old file left its copy's name for the next one to reuse.
             (Doc::Pdf(pdf), _) => pdf.clear_conflict(),
@@ -1102,6 +1078,17 @@ impl App {
         }
         self.sync_active();
         self.save_session_soon();
+    }
+
+    /// What Save As writes of a diagram or a notebook, once a save still out has landed and what
+    /// is being typed has gone in, and the edits it holds then.
+    fn model_as<T: SavesModel>(self: &Rc<Self>, tab: &Rc<T>) -> (Contents, u64) {
+        self.land_model(tab, false);
+        tab.finish_editing();
+        (
+            Contents::Text(tab.for_disk(), false),
+            tab.save_state().edits.get(),
+        )
     }
 
     /// Close `doc` without writing what it has not saved: its file is being written over, or
@@ -1115,6 +1102,18 @@ impl App {
         }
         self.close_page(doc.page());
     }
+}
+
+/// A diagram's or a notebook's Save As landed at `etag`: clean when nothing was typed since its
+/// text was taken at `edits`, and told to its server as any write is.
+fn wrote_model_as<T: SavesModel>(tab: &Rc<T>, etag: Etag, digest: Digest, edits: u64) {
+    tab.clear_changed();
+    tab.save_state().digest.set(Some(digest));
+    match tab.save_state().edits.get() == edits {
+        true => tab.mark_clean(etag),
+        false => tab.save_state().etag.set(Some(etag)),
+    }
+    tab.saved();
 }
 
 /// Save As content: prepared text, local PDF cache bytes or vault-owned image bytes.

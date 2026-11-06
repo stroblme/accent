@@ -498,4 +498,9 @@ impl SavesModel for DiagramTab {
     fn discard(&self) {
         DiagramTab::discard(self);
     }
+
+    /// A label still being typed, which is an edit like any other.
+    fn finish_editing(self: &Rc<Self>) {
+        self.finish_label();
+    }
 }
