@@ -39,6 +39,9 @@ pub struct Frame {
     pub scale: f64,
     pub x: f64,
     pub y: f64,
+    /// The pixels a page unit takes where the content goes out, which a one-pixel line is kept
+    /// whole on: the scale on screen, an export's own where it paints its content in more detail.
+    pub pixels: f64,
 }
 
 impl Default for Frame {
@@ -47,6 +50,7 @@ impl Default for Frame {
             scale: 1.0,
             x: 0.0,
             y: 0.0,
+            pixels: 1.0,
         }
     }
 }
@@ -75,10 +79,12 @@ pub fn frame(extent: Rect, scale: f64, viewport: (f64, f64)) -> (Frame, (f64, f6
         (dw + 2.0 * GAP).max(viewport.0),
         (dh + 2.0 * GAP).max(viewport.1),
     );
+    // On whole pixels, which keep a one-pixel line on them as draw.io's do.
     let frame = Frame {
         scale,
-        x: (size.0 - dw) / 2.0 - extent.x * scale,
-        y: (size.1 - dh) / 2.0 - extent.y * scale,
+        x: ((size.0 - dw) / 2.0 - extent.x * scale).round(),
+        y: ((size.1 - dh) / 2.0 - extent.y * scale).round(),
+        pixels: scale,
     };
     (frame, size)
 }

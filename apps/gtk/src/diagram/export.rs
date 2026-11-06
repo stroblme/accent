@@ -127,7 +127,7 @@ pub fn print(app: &Rc<App>, tab: &Rc<DiagramTab>) {
 pub fn operation(file: &File, web: bool, name: &str) -> gtk::PrintOperation {
     let mut pages: Vec<Drawn> = Vec::new();
     for i in 0..file.pages.len() {
-        pages.extend(render::draw(file, i, Area::Sheet, web));
+        pages.extend(render::draw(file, i, Area::Sheet, web, 1.0));
     }
     let pages = Rc::new(pages);
     let op = gtk::PrintOperation::new();

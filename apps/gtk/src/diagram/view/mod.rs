@@ -235,8 +235,10 @@ impl DiagramView {
         }
     }
 
+    /// How far the content is scrolled, in whole pixels, which keep a one-pixel line on them.
     pub fn scroll(&self) -> (f64, f64) {
-        self.imp().scroll.scroll()
+        let (x, y) = self.imp().scroll.scroll();
+        (x.round(), y.round())
     }
 
     pub fn set_scroll(&self, at: (f64, f64)) {

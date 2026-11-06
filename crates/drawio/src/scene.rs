@@ -1,7 +1,8 @@
 // The label placement and `point_along` are derived from draw.io mxgraph/src/view/mxCellRenderer.js,
-// mxgraph/src/view/mxGraphView.js, mxgraph/src/shape/mxText.js and the text setting from
-// mxgraph/src/util/mxSvgCanvas2D.js (Apache-2.0, Copyright (c) 2006-2026 JGraph Holdings Ltd /
-// draw.io AG), ported to Rust and modified for accent; see crates/drawio/NOTICE.
+// mxgraph/src/view/mxGraphView.js, mxgraph/src/shape/mxText.js, the text setting from
+// mxgraph/src/util/mxSvgCanvas2D.js and `screen_offset` from mxgraph/src/shape/mxShape.js
+// (Apache-2.0, Copyright (c) 2006-2026 JGraph Holdings Ltd / draw.io AG), ported to Rust and
+// modified for accent; see crates/drawio/NOTICE.
 //! Toolkit-independent display lists in paint order and page coordinates.
 //! The toolkit paints each [`Prim`] and measures text.
 
@@ -233,8 +234,7 @@ impl Prim {
     /// the anchor rounded to whole units, or as wide as it wraps (`updateTextNodes`, `createCss`).
     /// SVG text has its first baseline a font size less one below the anchor, less half the
     /// text's height middle-aligned and all of it and one more bottom-aligned, the text a font
-    /// size tall and a line more for every line after the first (`plainText`). Either goes
-    /// [`OUTLINE_OFFSET`] up and left of that.
+    /// size tall and a line more for every line after the first (`plainText`).
     pub fn text_origin(&self, block: (f64, f64), baseline: f64, lines: usize) -> Option<Point> {
         let Prim::Text {
             rect,
@@ -260,7 +260,6 @@ impl Prim {
             VAlign::Bottom => 1.0,
         };
         let (w, h) = block;
-        let at = |x: f64, y: f64| Some(Point::new(x - OUTLINE_OFFSET, y - OUTLINE_OFFSET));
         if !html {
             let text = font.size + lines.saturating_sub(1) as f64 * line_height(font.size, false);
             let above = match valign {
@@ -269,7 +268,7 @@ impl Prim {
                 VAlign::Bottom => text + 1.0,
             };
             let first = anchor.y + font.size - 1.0 - above;
-            return at(anchor.x - mx * w, first - baseline);
+            return Some(Point::new(anchor.x - mx * w, first - baseline));
         }
         // JavaScript's `Math.round`, halves up.
         let round = |v: f64| (v + 0.5).floor();
@@ -277,15 +276,20 @@ impl Prim {
             true => round(anchor.x - mx * (rect.w + FOREIGN_OBJECT_PADDING)),
             false => round(anchor.x) + mx * (1.0 - w),
         };
-        at(left, round(anchor.y) + my * (1.0 - h))
+        Some(Point::new(left, round(anchor.y) + my * (1.0 - h)))
     }
 }
 
-/// How far down and right of its geometry draw.io draws a one-pixel outline at 100 %, which
-/// keeps it on whole pixels, while its text stays where it is set (`mxShape.getSvgScreenOffset`,
-/// `mxText.getSvgScreenOffset`). The canvas here draws outlines on their geometry, so a label
-/// goes as far up and left, to sit on its shape as it does in draw.io.
-const OUTLINE_OFFSET: f64 = 0.5;
+/// How far right and down draw.io draws a shape `pixels` output pixels a unit whose line is
+/// `width` units wide, in output pixels: half a pixel when the line is an odd number of whole
+/// pixels wide (one at the least), which puts it on whole pixels, else none
+/// (`mxShape.getSvgScreenOffset`). Labels and pictures stay where they are set.
+pub fn screen_offset(width: f64, pixels: f64) -> f64 {
+    match (width * pixels).round().max(1.0) % 2.0 == 1.0 {
+        true => 0.5,
+        false => 0.0,
+    }
+}
 
 /// draw.io sets a label's lines 1.2 font sizes apart (`mxConstants.LINE_HEIGHT`).
 pub const LINE_HEIGHT: f64 = 1.2;
@@ -1113,17 +1117,28 @@ mod tests {
             let mut label = s.prims.iter().filter(|p| p.cell() == id);
             label.find_map(|p| p.text_origin(block, 11.0, lines))
         };
-        // An HTML label's block is centred on a box a unit square at its anchor, (60, 30), and
-        // the whole half a unit up and left.
+        // An HTML label's block is centred on a box a unit square at its anchor, (60, 30).
         let at = origin("html", (30.0, 15.0), 1);
-        assert_eq!(at, Some(Point::new(60.0 - 15.0, 30.0 - 7.5)));
+        assert_eq!(at, Some(Point::new(60.0 + 0.5 - 15.0, 30.0 + 0.5 - 7.5)));
         // Wrapped, its lines are aligned across its room and 2 more, from that box's left.
         let at = origin("wrap", (30.0, 15.0), 1);
-        assert_eq!(at, Some(Point::new(60.0 - 118.0 / 2.0 - 0.5, 130.0 - 7.5)));
+        assert_eq!(at, Some(Point::new(60.0 - 118.0 / 2.0, 130.0 + 0.5 - 7.5)));
         // SVG text's 12 px lines are 14 apart, the first baseline 11 below the anchor less half
         // of 12 + 14.
-        let (x, y) = (60.0 - 15.0 - 0.5, 230.0 + 11.0 - 13.0 - 11.0 - 0.5);
+        let (x, y) = (60.0 - 15.0, 230.0 + 11.0 - 13.0 - 11.0);
         assert_eq!(origin("svg", (30.0, 28.0), 2), Some(Point::new(x, y)));
+    }
+
+    #[test]
+    fn an_odd_pixel_wide_line_is_drawn_half_a_pixel_over() {
+        use super::screen_offset;
+        // A 1 unit line at 100 % and at 300 %, at 200 %, and a 2 unit one at 50 %.
+        assert_eq!(screen_offset(1.0, 1.0), 0.5);
+        assert_eq!(screen_offset(1.0, 3.0), 0.5);
+        assert_eq!(screen_offset(1.0, 2.0), 0.0);
+        assert_eq!(screen_offset(2.0, 0.5), 0.5);
+        // A hairline is a pixel wide at the least.
+        assert_eq!(screen_offset(0.2, 1.0), 0.5);
     }
 
     #[test]

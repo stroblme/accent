@@ -60,8 +60,9 @@ impl Drawn {
 }
 
 /// Page `i` of `file`, its pictures on the web drawn as downloaded where `web` (the reader said
-/// Load for it). `None` for no such page.
-pub fn draw(file: &File, i: usize, area: Area, web: bool) -> Option<Drawn> {
+/// Load for it), for an output of `pixels` a page unit (`Frame::pixels`). `None` for no such
+/// page.
+pub fn draw(file: &File, i: usize, area: Area, web: bool, pixels: f64) -> Option<Drawn> {
     let page = file.pages.get(i)?;
     let scene = accent_drawio::scene_with(page, &super::shown(i, file.pages.len()));
     // Pango lays labels out through a widget; their sizes are absolute, so any one does.
@@ -70,6 +71,7 @@ pub fn draw(file: &File, i: usize, area: Area, web: bool) -> Option<Drawn> {
     cache.set_web(web);
     let frame = Frame {
         scale: DETAIL,
+        pixels,
         ..Frame::default()
     };
     let snapshot = gtk::Snapshot::new();
@@ -124,7 +126,7 @@ fn painted(prims: &[Prim], cache: &Cache) -> Option<Rect> {
 pub fn pdf(file: &File, web: bool) -> Result<Vec<u8>, String> {
     let surface = cairo::PdfSurface::for_stream(1.0, 1.0, Vec::<u8>::new()).map_err(say)?;
     for i in 0..file.pages.len() {
-        let Some(drawn) = draw(file, i, Area::Sheet, web) else {
+        let Some(drawn) = draw(file, i, Area::Sheet, web, 1.0) else {
             continue;
         };
         let (w, h) = (drawn.area.w * PDF_POINT, drawn.area.h * PDF_POINT);
@@ -138,7 +140,7 @@ pub fn pdf(file: &File, web: bool) -> Result<Vec<u8>, String> {
 
 /// Page `i` of `file` as an SVG of `area`, a page unit to a pixel.
 pub fn svg(file: &File, i: usize, area: Area, web: bool) -> Result<Vec<u8>, String> {
-    let drawn = draw(file, i, area, web).ok_or("there is no such page")?;
+    let drawn = draw(file, i, area, web, 1.0).ok_or("there is no such page")?;
     let mut surface =
         cairo::SvgSurface::for_stream(drawn.area.w, drawn.area.h, Vec::<u8>::new()).map_err(say)?;
     surface.set_document_unit(cairo::SvgUnit::Px);
@@ -151,7 +153,7 @@ pub fn svg(file: &File, i: usize, area: Area, web: bool) -> Result<Vec<u8>, Stri
 /// Page `i` of `file`, its drawing, as a PNG at [`PNG_SCALE`] pixels per page unit, or fewer
 /// where its longer side would be more than `longest` pixels.
 pub fn png(file: &File, i: usize, web: bool, longest: Option<f64>) -> Result<Vec<u8>, String> {
-    let drawn = draw(file, i, Area::Drawing, web).ok_or("there is no such page")?;
+    let drawn = draw(file, i, Area::Drawing, web, PNG_SCALE).ok_or("there is no such page")?;
     let scale = png_scale((drawn.area.w, drawn.area.h), longest);
     let (w, h) = (drawn.area.w * scale, drawn.area.h * scale);
     let surface =

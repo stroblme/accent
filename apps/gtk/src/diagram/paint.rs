@@ -9,7 +9,7 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use accent_core::recolour;
-use accent_drawio::scene::{line_height, wrap_width};
+use accent_drawio::scene::{line_height, screen_offset, wrap_width};
 use accent_drawio::{
     Align, Cap, Color, ImageSource, Join, Marks, Paint, PathCmd, Point, Prim, Rect, Run, Stroke,
 };
@@ -302,16 +302,25 @@ pub fn prim(
             opacity,
             shadow,
             ..
-        } => outline(
-            snapshot,
-            &to_gsk(path, frame),
-            fill.as_ref(),
-            stroke.as_ref(),
-            *opacity,
-            *shadow,
-            frame,
-            tint,
-        ),
+        } => {
+            // As far over as draw.io draws the shape, which keeps a one-pixel line on whole
+            // pixels (`screen_offset`), in content units.
+            let width = stroke.as_ref().map_or(1.0, |s| s.width);
+            let over = screen_offset(width, frame.pixels) * frame.scale / frame.pixels;
+            snapshot.save();
+            snapshot.translate(&graphene::Point::new(over as f32, over as f32));
+            outline(
+                snapshot,
+                &to_gsk(path, frame),
+                fill.as_ref(),
+                stroke.as_ref(),
+                *opacity,
+                *shadow,
+                frame,
+                tint,
+            );
+            snapshot.restore();
+        }
         Prim::Text {
             anchor,
             wrap,
