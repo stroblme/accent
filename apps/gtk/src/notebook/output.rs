@@ -9,10 +9,12 @@
 //! A run's new output fades in ([`Outputs::show`]); a right-click on an output offers Copy Output
 //! for it alone ([`copied`]).
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use accent_core::note::Syntax;
+use accent_core::notebook::bound;
 use accent_core::notebook::output::{self as core, Form, Item, Output, Table};
 use accent_core::notebook::{Cell as NotebookCell, Kind};
 use adw::prelude::*;
@@ -211,7 +213,8 @@ impl Outputs {
 
     /// Show `tail` in place of the outputs from the `from`th on; while they are held, the
     /// placeholder takes its shape. An output new to the box fades in; one drawn again in the
-    /// place of the one it grew from, a stream with more text or a display updated, does not.
+    /// place of the one it grew from, a stream with more text or a display updated, does not, and
+    /// a plain stream changes only past the text it keeps.
     pub fn show(&self, from: usize, tail: &[Output]) {
         let cleared = self.cleared.take();
         if let Some(held) = self.held.borrow().as_ref() {
@@ -227,13 +230,18 @@ impl Outputs {
                     view,
                 }) = slot.stream.as_mut()
                 && previous == stderr
-                && let Some(more) = plain_append(raw, text)
+                && let Some((old, changes)) = plain_edit(raw, text)
             {
-                let mut end = view.buffer().end_iter();
-                view.buffer().insert(&mut end, more);
-                raw.push_str(&text[raw.len()..]);
+                let buffer = view.buffer();
+                let at = |byte: usize| buffer.iter_at_offset(old[..byte].chars().count() as i32);
+                for (range, piece) in changes {
+                    let (mut start, mut end) = (at(range.start), at(range.end));
+                    buffer.delete(&mut start, &mut end);
+                    buffer.insert(&mut start, piece);
+                }
+                raw.clone_from(text);
                 if let Some(Copied::Text(copy)) = &mut slot.copy {
-                    copy.push_str(more);
+                    *copy = plain(&core::carriage(text));
                 }
                 return;
             }
@@ -322,7 +330,7 @@ impl Outputs {
         match output {
             Output::Stream { stderr, text } => {
                 let view = self.text(&core::carriage(text), *stderr);
-                if !text.contains(['\r', '\u{1b}']) {
+                if as_is(text) && matches!(bound::cut_lines(text), Cow::Borrowed(_)) {
                     self.slots.borrow_mut().last_mut().unwrap().stream = Some(Stream {
                         raw: text.clone(),
                         stderr: *stderr,
@@ -368,7 +376,8 @@ impl Outputs {
     /// Monospace text, its escape sequences turned into the terminal's colours; tinted as the
     /// terminal tints nothing, for stderr and a traceback.
     fn text(&self, text: &str, stderr: bool) -> gtk::TextView {
-        let (plain, spans) = core::ansi(text);
+        let text = bound::cut_lines(text);
+        let (plain, spans) = core::ansi(&text);
         let view = output_view(plain.trim_end_matches('\n'));
         if stderr {
             view.add_css_class("notebook-stderr");
@@ -939,14 +948,33 @@ mod imp {
     }
 }
 
-/// The visible suffix of an append-only stream without terminal controls.
-fn plain_append<'a>(old: &str, new: &'a str) -> Option<&'a str> {
-    let added = new.strip_prefix(old)?;
-    if old.contains(['\r', '\u{1b}']) || added.contains(['\r', '\u{1b}']) {
+/// What the text view of a plain stream shows of its old text, and the changes to it, the later
+/// first.
+type Changes<'a, 'b> = (&'a str, Vec<(std::ops::Range<usize>, &'b str)>);
+
+/// How the text view of a plain stream goes from `old` to `new` ([`bound::diff`]).
+fn plain_edit<'a, 'b>(old: &'a str, new: &'b str) -> Option<Changes<'a, 'b>> {
+    if !as_is(old) || !as_is(new) {
         return None;
     }
-    new.trim_end_matches('\n')
-        .strip_prefix(old.trim_end_matches('\n'))
+    let (old, new) = (shown(old), shown(new));
+    Some((old, bound::diff(old, new)))
+}
+
+/// Whether a stream's text view shows its text as it is: no colours, and no carriage return
+/// but one at its end, which says only that its last line is written over next.
+fn as_is(text: &str) -> bool {
+    !text
+        .strip_suffix('\r')
+        .unwrap_or(text)
+        .contains(['\r', '\u{1b}'])
+}
+
+/// What the text view of a plain stream shows of its text.
+fn shown(text: &str) -> &str {
+    text.strip_suffix('\r')
+        .unwrap_or(text)
+        .trim_end_matches('\n')
 }
 
 /// A read-only monospace view of `text`, selectable.
@@ -1130,12 +1158,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plain_stream_append_keeps_the_visible_suffix() {
-        assert_eq!(plain_append("first\n", "first\nsecond\n"), Some("\nsecond"));
-        assert_eq!(plain_append("first\n", "first\n\n"), Some(""));
-        assert_eq!(plain_append("first", "other"), None);
-        assert_eq!(plain_append("first", "first\rnext"), None);
-        assert_eq!(plain_append("first", "first\u{1b}[31mnext"), None);
+    fn a_plain_stream_changes_where_its_shown_text_does() {
+        let edit = |old, new| plain_edit(old, new).map(|(_, changes)| changes);
+        assert_eq!(
+            edit("first\n", "first\nsecond\n"),
+            Some(vec![(5..5, "\nsecond")])
+        );
+        assert_eq!(edit("first\n", "first\n\n"), Some(vec![(5..5, "")]));
+        assert_eq!(edit("é 1%\r", "é 2%\r"), Some(vec![(3..5, "2%")]));
+        assert_eq!(edit("first", "first\rnext"), None);
+        assert_eq!(edit("first", "first\u{1b}[31mnext"), None);
     }
 
     #[test]

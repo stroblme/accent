@@ -15,6 +15,7 @@ use std::time::Duration;
 
 pub use kernel::{Channel, Incoming, Incomings, Kernel};
 pub use wire::{Header, Message};
+pub use zmtp::MAX_MESSAGE;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

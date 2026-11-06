@@ -7,6 +7,7 @@
 //! format's own style. Every change goes through [`Notebook::apply`], which answers the edit that
 //! undoes it, so one history can hold the cell operations and the typing in the cells alike.
 
+pub mod bound;
 mod html;
 mod ipynb;
 mod marimo;
@@ -14,6 +15,7 @@ pub mod output;
 mod program;
 
 use std::borrow::Cow;
+use std::cmp::Reverse;
 
 use serde_json::Value;
 
@@ -77,29 +79,39 @@ impl Run {
         }
     }
 
-    /// Add `output`, a stream running on into the last output when that is a stream of the same
-    /// name, as Jupyter's output area joins them: `true` when the last output grew.
-    fn push(&mut self, output: Value, display_id: Option<String>) -> bool {
-        let stream = |o: &Value| match o["output_type"] == "stream" {
-            true => o["name"].as_str().map(String::from),
-            false => None,
-        };
-        if let (Some(last), Some(more)) = (self.outputs.last_mut(), output["text"].as_str())
-            && stream(last).is_some()
-            && stream(last) == stream(&output)
-            && let Some(Value::String(text)) = last.get_mut("text")
-        {
-            text.push_str(more);
-            // A stream with text reads, so the last output shown is this one.
-            if let Some(Output::Stream { text, .. }) = self.shown.last_mut() {
-                text.push_str(more);
-            }
-            return true;
-        }
+    fn push(&mut self, output: Value, display_id: Option<String>) {
         self.shown.extend(output::read(&output));
         self.outputs.push(output);
         self.display_ids.push(display_id);
-        false
+    }
+
+    /// In the last output, a stream of `name`, put `text` in place of the `replaced` bytes from
+    /// byte `at`; with no `at`, or when the last output is no such stream, add one holding
+    /// `text`.
+    fn stream(&mut self, name: &str, at: Option<usize>, replaced: usize, text: &str) {
+        let last = self
+            .outputs
+            .last_mut()
+            .filter(|o| o["output_type"] == "stream" && o["name"] == name && o["text"].is_string());
+        if let (Some(at), Some(last)) = (at, last)
+            && let Some(Value::String(stored)) = last.get_mut("text")
+            && let Some(end) = at.checked_add(replaced)
+            && end <= stored.len()
+            && stored.is_char_boundary(at)
+            && stored.is_char_boundary(end)
+        {
+            stored.replace_range(at..end, text);
+            // A stream with text reads, so the last output shown is this one.
+            match self.shown.last_mut() {
+                Some(Output::Stream { text: shown, .. }) if !stored.is_empty() => {
+                    shown.clone_from(stored);
+                }
+                _ => self.shown = self.outputs.iter().filter_map(output::read).collect(),
+            }
+            return;
+        }
+        let output = serde_json::json!({"output_type": "stream", "name": name, "text": text});
+        self.push(output, None);
     }
 
     /// Replace every output the kernel named `display_id`; return the first slot changed.
@@ -365,18 +377,102 @@ impl Notebook {
         self.format() == Format::Ipynb && self.cells[at].kind == Kind::Code
     }
 
-    /// Add `output`, nbformat 4 JSON, to cell `id`'s run, a stream running on into the stream
-    /// before it of the same name: `Some(true)` when the last output grew, `Some(false)` when
-    /// one was added, `None` for a cell without a run. Outside the history: a run is the
-    /// kernel's, not an edit; only [`Edit::Outputs`] answers its undo.
+    /// Add `output`, nbformat 4 JSON, to cell `id`'s run; `None` for a cell without a run.
+    /// Outside the history: a run is the kernel's, not an edit; only [`Edit::Outputs`] answers
+    /// its undo.
     pub fn push_output(
         &mut self,
         id: CellId,
         output: Value,
         display_id: Option<String>,
-    ) -> Option<bool> {
+    ) -> Option<()> {
         let at = self.position(id)?;
-        Some(self.cells[at].run.as_mut()?.push(output, display_id))
+        self.cells[at].run.as_mut()?.push(output, display_id);
+        Some(())
+    }
+
+    /// In cell `id`'s last output, a stream of `name`, put `text` in place of the `replaced`
+    /// bytes from byte `at`, as a kernel's stream grows or is cut ([`bound::Stream`]); with no
+    /// `at`, add a stream holding `text`. `None` for a cell without a run; outside the history as
+    /// [`push_output`](Self::push_output) is.
+    pub fn stream(
+        &mut self,
+        id: CellId,
+        name: &str,
+        at: Option<usize>,
+        replaced: usize,
+        text: &str,
+    ) -> Option<()> {
+        let cell = self.position(id)?;
+        self.cells[cell]
+            .run
+            .as_mut()?
+            .stream(name, at, replaced, text);
+        Some(())
+    }
+
+    /// The file's text as [`to_text`](Self::to_text) writes it, at most `limit` bytes long, the
+    /// most the reader takes: past it the largest outputs a kernel left go first, then the
+    /// largest the file stored, each for a line saying so, and the cells changed are answered.
+    /// Outside the history, as a run is; marimo stores no outputs.
+    pub fn to_text_within(&mut self, limit: u64) -> (String, Vec<CellId>) {
+        let mut changed = Vec::new();
+        loop {
+            let text = self.to_text();
+            let over = (text.len() as u64).saturating_sub(limit) as usize;
+            if over == 0 || self.format() != Format::Ipynb {
+                return (text, changed);
+            }
+            let size = |o: &Value| serde_json::to_string(o).map_or(0, |json| json.len());
+            let mut outputs = Vec::new();
+            for (at, cell) in self.cells.iter().enumerate() {
+                let stored = match &cell.run {
+                    Some(run) => run.outputs.iter().map(size).collect(),
+                    None if cell.kind == Kind::Code => {
+                        ipynb::stored_outputs(cell).iter().map(size).collect()
+                    }
+                    None => Vec::new(),
+                };
+                let from_file = cell.run.is_none();
+                outputs.extend(
+                    stored
+                        .into_iter()
+                        .enumerate()
+                        .map(|(n, b)| (from_file, b, at, n)),
+                );
+            }
+            outputs.sort_by_key(|&(from_file, bytes, ..)| (from_file, Reverse(bytes)));
+            let note = |bytes| bound::note(&bound::too_large_to_save(bytes, limit));
+            let mut gone = 0;
+            let picked: Vec<_> = outputs
+                .into_iter()
+                .filter(|&(_, bytes, ..)| bytes > size(&note(bytes)))
+                .take_while(|&(_, bytes, ..)| {
+                    let more = gone < over;
+                    gone += bytes;
+                    more
+                })
+                .collect();
+            if picked.is_empty() {
+                return (text, changed);
+            }
+            for (_, bytes, at, n) in picked {
+                let cell = &mut self.cells[at];
+                if cell.run.is_none() {
+                    let outputs = ipynb::stored_outputs(cell);
+                    cell.run = Some(Box::new(Run::new(cell.count, outputs)));
+                }
+                let Some(run) = cell.run.as_mut() else {
+                    continue;
+                };
+                run.outputs[n] = note(bytes);
+                run.display_ids[n] = None;
+                run.shown = run.outputs.iter().filter_map(output::read).collect();
+                if !changed.contains(&cell.id) {
+                    changed.push(cell.id);
+                }
+            }
+        }
     }
 
     /// Replace every live display with this ID, returning each cell's first changed slot.
@@ -637,31 +733,66 @@ mod tests {
     }
 
     #[test]
-    fn streams_run_on_as_jupyter_joins_them() {
+    fn a_stream_grows_or_is_cut_in_its_last_output() {
         let mut nb = read("analysis.ipynb", ANALYSIS).unwrap();
         let id = nb.cells()[2].id();
         let run = Some(Run::new(None, Vec::new()));
         nb.apply(Edit::Outputs { id, run });
-        let stream =
-            |name, text| serde_json::json!({"output_type": "stream", "name": name, "text": text});
-        let pushed: Vec<Option<bool>> = [
-            ("stdout", "a"),
-            ("stdout", "b\n"),
-            ("stderr", "x"),
-            ("stdout", "c"),
-        ]
-        .into_iter()
-        .map(|(name, text)| nb.push_output(id, stream(name, text), None))
-        .collect();
-        assert_eq!(pushed, [Some(false), Some(true), Some(false), Some(false)]);
+        nb.stream(id, "stdout", None, 0, "a");
+        nb.stream(id, "stdout", Some(1), 0, "b\nc");
+        // Cut, or written again past a carriage return: its first bytes stay.
+        nb.stream(id, "stdout", Some(2), 2, "… 1 line left out …\nd");
+        nb.stream(id, "stderr", Some(0), 0, "x");
+        nb.stream(id, "stderr", None, 0, "y");
         let out = |stderr, text: &str| Output::Stream {
             stderr,
             text: text.into(),
         };
-        let outputs = [out(false, "ab\n"), out(true, "x"), out(false, "c")];
+        let outputs = [
+            out(false, "ab… 1 line left out …\nd"),
+            out(true, "x"),
+            out(true, "y"),
+        ];
         assert_eq!(nb.cells()[2].outputs(), outputs);
         nb.set_count(id, Some(4));
         assert_eq!(nb.cells()[2].count(), Some(4));
+    }
+
+    #[test]
+    fn a_notebook_too_large_to_open_again_saves_its_largest_outputs_as_notes() {
+        let mut nb = read("empty.ipynb", EMPTY_IPYNB).unwrap();
+        let ids: Vec<CellId> = [3usize, 1, 2]
+            .into_iter()
+            .enumerate()
+            .map(|(at, mib)| {
+                let cell = nb.new_cell(Kind::Code, "print(x)").unwrap();
+                let id = cell.id();
+                nb.apply(Edit::Insert { at, cell });
+                let text = "x".repeat(mib << 20);
+                let output =
+                    serde_json::json!({"output_type": "stream", "name": "stdout", "text": text});
+                let run = Some(Run::new(Some(1), vec![output]));
+                nb.apply(Edit::Outputs { id, run });
+                id
+            })
+            .collect();
+        let (whole, changed) = nb.to_text_within(8 << 20);
+        assert!(changed.is_empty(), "a notebook within it is left alone");
+        assert_eq!(whole, nb.to_text());
+        let (text, changed) = nb.to_text_within(4 << 20);
+        assert_eq!(changed, [ids[0]], "the largest goes first, and is enough");
+        assert!(text.len() <= 4 << 20);
+        assert_eq!(text, nb.to_text());
+        let read = read("empty.ipynb", &text).unwrap();
+        let Output::Stream { text, stderr } = &read.cells()[0].outputs()[0] else {
+            panic!("{:?}", read.cells()[0].outputs());
+        };
+        assert!(*stderr);
+        assert_eq!(
+            text,
+            "… an output of 3.0 MiB left out, past the 4.0 MiB a notebook keeps …\n"
+        );
+        assert_eq!(nb.cells()[0].outputs(), read.cells()[0].outputs());
     }
 
     #[test]

@@ -1250,10 +1250,18 @@ impl NotebookTab {
         (code, markdown, outputs, sum)
     }
 
-    /// What the file should hold now, the cells' editors read into the model first.
+    /// What the file should hold now, the cells' editors read into the model first: within what
+    /// the reader takes, the largest outputs giving way, so that the notebook opens again.
     pub fn text(&self) -> String {
         self.sync_model();
-        self.model.borrow().to_text()
+        let (text, changed) = self
+            .model
+            .borrow_mut()
+            .to_text_within(accent_core::fs::MAX_TEXT);
+        for id in changed {
+            self.redraw_cell(id);
+        }
+        text
     }
 
     /// The notebook as the tab holds it now, what was typed included: what Print… and Export as

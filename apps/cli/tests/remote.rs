@@ -704,18 +704,18 @@ fn a_remote_vault_connects_indexes_and_answers() {
                 e,
                 Event::Kernel {
                     session: 1,
-                    news: kernel::News::Output { run: 1, .. }
+                    news: kernel::News::Stream { run: 1, .. }
                 }
             )
         };
         let Event::Kernel {
-            news: kernel::News::Output { output, .. },
+            news: kernel::News::Stream { text, at, .. },
             ..
         } = wait_for(&events, ran)
         else {
             unreachable!()
         };
-        assert_eq!(output["text"], "1\n", "{output}");
+        assert_eq!((text.as_str(), at), ("1\n", None));
         let done = |e: &Event| {
             matches!(
                 e,

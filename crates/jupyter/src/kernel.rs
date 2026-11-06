@@ -18,12 +18,15 @@ use tokio::sync::{mpsc, watch};
 
 use crate::Error;
 use crate::wire::{self, Header, Message, Signer};
-use crate::zmtp::{self, Kind, Reader, Writer};
+use crate::zmtp::{self, Kind, Reader, Received, Writer};
 
 /// How long a kernel may take to answer: nbclient's `startup_timeout`.
 const START: Duration = Duration::from_secs(60);
 /// How long a kernel asked to shut down may take before it is killed.
 const STOP: Duration = Duration::from_secs(2);
+/// The messages read and not yet taken, past which the readers wait: a kernel's IOPub then drops
+/// what its queue cannot hold, as ZeroMQ does for any slow subscriber.
+const INCOMING: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Channel {
@@ -45,17 +48,27 @@ const CHANNELS: [(Channel, u16); 4] = [
 #[derive(Debug, Clone, PartialEq)]
 pub enum Incoming {
     Message(Channel, Box<Message>),
+    /// A message past [`MAX_MESSAGE`](crate::MAX_MESSAGE), read past and left out: its type and
+    /// the `msg_id` of the message it answers, as far as it said them before it went past, and
+    /// its size. Unsigned, as its signature covers what was left out.
+    Dropped {
+        channel: Channel,
+        msg_type: Option<String>,
+        parent: Option<String>,
+        bytes: u64,
+    },
     /// The kernel's process ended, with its exit code when it had one.
     Exited(Option<i32>),
 }
 
-pub type Incomings = mpsc::UnboundedReceiver<Incoming>;
+pub type Incomings = mpsc::Receiver<Incoming>;
 
 pub struct Kernel {
     session: String,
     signer: Arc<Signer>,
     next: AtomicU64,
-    /// Each writable channel's frames to send, in [`CHANNELS`]' order.
+    /// Each writable channel's frames to send, in [`CHANNELS`]' order: unbounded, as they are
+    /// the window's own requests, a Run All a notebook's worth, and [`Kernel::send`] never waits.
     out: [mpsc::UnboundedSender<Vec<Vec<u8>>>; 3],
     /// The kernel's process group, which is its process id.
     group: i32,
@@ -95,7 +108,7 @@ impl Kernel {
             .id()
             .and_then(|id| i32::try_from(id).ok())
             .unwrap_or(0);
-        let (incoming, mut incomings) = mpsc::unbounded_channel();
+        let (incoming, mut incomings) = mpsc::channel(INCOMING);
         let (end, ended) = watch::channel(None);
         tokio::spawn(watch(child, end, incoming.clone()));
         let (out, outboxes): (Vec<_>, Vec<_>) = (0..3).map(|_| mpsc::unbounded_channel()).unzip();
@@ -164,7 +177,7 @@ impl Kernel {
                         info = Some(msg.content)
                     }
                     Some(Incoming::Message(Channel::Iopub, _)) => heard = true,
-                    Some(Incoming::Message(..)) => {}
+                    Some(Incoming::Message(..) | Incoming::Dropped { .. }) => {}
                     Some(Incoming::Exited(_)) | None => return Err(Error::Exited(kernel.why())),
                 }
             }
@@ -404,11 +417,11 @@ async fn drain(stderr: ChildStderr, last_words: Arc<Mutex<Option<String>>>) {
 async fn watch(
     mut child: Child,
     end: watch::Sender<Option<Option<i32>>>,
-    incoming: mpsc::UnboundedSender<Incoming>,
+    incoming: mpsc::Sender<Incoming>,
 ) {
     let code = child.wait().await.ok().and_then(|status| status.code());
     let _ = end.send(Some(code));
-    let _ = incoming.send(Incoming::Exited(code));
+    let _ = incoming.send(Incoming::Exited(code)).await;
 }
 
 /// Read `channel`'s messages until it closes, holding `_held` as long.
@@ -416,20 +429,31 @@ async fn read<R: AsyncRead + Unpin>(
     channel: Channel,
     mut reader: Reader<R>,
     signer: Arc<Signer>,
-    incoming: mpsc::UnboundedSender<Incoming>,
+    incoming: mpsc::Sender<Incoming>,
     _held: impl Send,
 ) {
-    while let Ok(frames) = reader.recv().await {
-        match wire::decode(&signer, frames) {
-            Ok(msg) => {
-                if incoming
-                    .send(Incoming::Message(channel, Box::new(msg)))
-                    .is_err()
-                {
-                    return;
+    while let Ok(received) = reader.recv().await {
+        let read = match received {
+            Received::Frames(frames) => match wire::decode(&signer, frames) {
+                Ok(msg) => Incoming::Message(channel, Box::new(msg)),
+                Err(e) => {
+                    tracing::debug!("dropped a message on {channel:?}: {e}");
+                    continue;
+                }
+            },
+            Received::TooLarge { frames, bytes } => {
+                let (msg_type, parent) = wire::head(&frames);
+                tracing::debug!("left out a message of {bytes} bytes on {channel:?}");
+                Incoming::Dropped {
+                    channel,
+                    msg_type,
+                    parent,
+                    bytes,
                 }
             }
-            Err(e) => tracing::debug!("dropped a message on {channel:?}: {e}"),
+        };
+        if incoming.send(read).await.is_err() {
+            return;
         }
     }
 }
@@ -525,7 +549,7 @@ mod tests {
     fn content(incoming: Incoming) -> (Header, Value) {
         match incoming {
             Incoming::Message(_, msg) => (msg.header, msg.content),
-            Incoming::Exited(code) => panic!("the kernel exited: {code:?}"),
+            other => panic!("not a message: {other:?}"),
         }
     }
 

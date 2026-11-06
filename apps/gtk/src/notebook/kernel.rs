@@ -27,6 +27,18 @@ struct RunJob {
     source: String,
 }
 
+/// One output of a run's news: a display, a result or an error, with its display ID, or a
+/// change to a stream's text (`News::Stream`).
+enum Arrived {
+    Data(Value, Option<String>),
+    Stream {
+        name: String,
+        at: Option<usize>,
+        replaced: usize,
+        text: String,
+    },
+}
+
 fn after_run(last: Execution, status: Status, still_queued: bool) -> (Execution, Execution) {
     let last = match status {
         Status::Ok => Execution::Succeeded,
@@ -392,7 +404,7 @@ impl NotebookTab {
     }
 
     /// Cell `id`'s outputs and count drawn afresh, after an edit that changed them.
-    fn redraw_cell(&self, id: CellId) {
+    pub(super) fn redraw_cell(&self, id: CellId) {
         let outputs = {
             let model = self.model.borrow();
             model
@@ -478,11 +490,20 @@ impl NotebookTab {
         model.position(id).and_then(|at| model.cells()[at].count())
     }
 
-    /// One more output of cell `id`'s run, or more of its last stream.
-    fn add_output(self: &Rc<Self>, id: CellId, output: Value, display_id: Option<String>) {
+    /// One more output of cell `id`'s run, or its last stream as the kernel's news has it now.
+    fn add_output(self: &Rc<Self>, id: CellId, output: Arrived) {
         let shown = {
             let mut model = self.model.borrow_mut();
-            model.push_output(id, output, display_id).and_then(|_| {
+            let added = match output {
+                Arrived::Data(output, display_id) => model.push_output(id, output, display_id),
+                Arrived::Stream {
+                    name,
+                    at,
+                    replaced,
+                    text,
+                } => model.stream(id, &name, at, replaced, &text),
+            };
+            added.and_then(|_| {
                 let at = model.position(id)?;
                 Some(model.cells()[at].outputs().len())
             })
@@ -512,15 +533,18 @@ impl NotebookTab {
         self.changed_soon();
     }
 
-    /// Draw what runs changed and mark the notebook changed, once per turn of the event pump:
-    /// a stream flushes every 0.2 s, and a turn may carry many outputs.
+    /// Draw what runs changed and mark the notebook changed, once per turn of the event pump, as
+    /// a turn may carry many outputs. At the default priority, not an idle's: a text view lays
+    /// out its lines above that, and while a stream's grew no cell was drawn (2026-11-06).
     fn changed_soon(self: &Rc<Self>) {
         if self.kernel.due.replace(true) {
             return;
         }
         let weak = Rc::downgrade(self);
-        glib::idle_add_local_once(move || {
-            let Some(tab) = weak.upgrade() else { return };
+        glib::idle_add_local_full(glib::Priority::DEFAULT, move || {
+            let Some(tab) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
             tab.kernel.due.set(false);
             for (id, from) in tab.kernel.dirty.take() {
                 if let Some(view) = tab.view_of(Some(id)) {
@@ -538,6 +562,7 @@ impl NotebookTab {
             if output_save_due(tab.kernel().as_deref()) {
                 tab.save_soon();
             }
+            glib::ControlFlow::Break
         });
     }
 
@@ -906,6 +931,19 @@ impl App {
             return;
         };
         let cell = |run: u64| kernel.runs.borrow().get(&run).map(|job| job.cell);
+        // The run's first output takes the place of the last run's, or of what it cleared.
+        let first_output = |run: u64, output: Arrived| {
+            if let Some(id) = cell(run) {
+                let stale = kernel.stale.borrow_mut().remove(&run);
+                let wait = kernel.clear_next.borrow_mut().remove(&run);
+                match (stale, wait) {
+                    (Some(count), _) => tab.empty_run(id, count),
+                    (None, true) => tab.empty_run(id, tab.count_of(id)),
+                    (None, false) => {}
+                }
+                tab.add_output(id, output);
+            }
+        };
         match news {
             // The last run's outputs stay, dimmed, for the new ones to be held against.
             News::Started { run, count } => {
@@ -920,18 +958,22 @@ impl App {
                 run,
                 output,
                 display_id,
-            } => {
-                if let Some(id) = cell(run) {
-                    let stale = kernel.stale.borrow_mut().remove(&run);
-                    let wait = kernel.clear_next.borrow_mut().remove(&run);
-                    match (stale, wait) {
-                        (Some(count), _) => tab.empty_run(id, count),
-                        (None, true) => tab.empty_run(id, tab.count_of(id)),
-                        (None, false) => {}
-                    }
-                    tab.add_output(id, output, display_id);
-                }
-            }
+            } => first_output(run, Arrived::Data(output, display_id)),
+            News::Stream {
+                run,
+                name,
+                at,
+                replaced,
+                text,
+            } => first_output(
+                run,
+                Arrived::Stream {
+                    name,
+                    at,
+                    replaced,
+                    text,
+                },
+            ),
             News::Update { display_id, output } => {
                 let changed = tab.model.borrow_mut().update_display(&display_id, output);
                 for (id, from) in changed {

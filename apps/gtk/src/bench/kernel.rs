@@ -9,8 +9,8 @@ const WAIT: Duration = Duration::from_secs(90);
 
 /// The notebook the drill writes and runs: a print, a result, `input()`, a sleep to interrupt,
 /// a cell an interrupt leaves unrun, one of a stream that grows across two flushes, an 80 × 40
-/// PNG, a table with a plain text of its own and a traceback, and a markdown cell with the PNG
-/// attached, for Copy Output.
+/// PNG, a table with a plain text of its own and a traceback, a markdown cell with the PNG
+/// attached, for Copy Output, and a flood: a line past what a line holds, then a print loop.
 const NOTEBOOK: &str = r#"{
  "cells": [
   {"cell_type": "code", "execution_count": null, "id": "a1", "metadata": {}, "outputs": [],
@@ -30,7 +30,9 @@ const NOTEBOOK: &str = r#"{
     "display({\"text/html\": \"<table><thead><tr><th></th><th>a</th></tr></thead><tbody><tr><th>0</th><td>1</td></tr></tbody></table>\", \"text/plain\": \"   a\\n0  1\"}, raw=True)\n",
     "1/0"]},
   {"cell_type": "markdown", "id": "a7", "metadata": {}, "source": ["![dot](attachment:dot.png)"],
-   "attachments": {"dot.png": {"image/png": "iVBORw0KGgoAAAANSUhEUgAAAFAAAAAoCAIAAADmAupWAAAARElEQVR42u3PQQ0AAAgEoItiVKMaxRZ+ZKMAqZ5XIiwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsfGsBdbbBD06BAAwAAAAASUVORK5CYII="}}}
+   "attachments": {"dot.png": {"image/png": "iVBORw0KGgoAAAANSUhEUgAAAFAAAAAoCAIAAADmAupWAAAARElEQVR42u3PQQ0AAAgEoItiVKMaxRZ+ZKMAqZ5XIiwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsfGsBdbbBD06BAAwAAAAASUVORK5CYII="}}},
+  {"cell_type": "code", "execution_count": null, "id": "a8", "metadata": {}, "outputs": [],
+   "source": ["print('x' * 100_000)\n", "while True: print('x' * 1000)"]}
  ],
  "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
   "language_info": {"name": "python"}},
@@ -43,10 +45,10 @@ const NOTEBOOK: &str = r#"{
 /// Insert Line Below's chord, Run Cell and Advance, `input()` answered, an interrupt, Run All
 /// stopped by one, the last run's outputs dimmed until the new ones replace them, Restart, a run
 /// with no output clearing its cell, new outputs fading in, Copy Output on a right-click on each
-/// kind of output, Clear Outputs and its undo, the save, and the tab closed with its kernel. It
-/// prints `bench kernel …` lines as the window shows each cell, timings on `bench kernel_ms …`
-/// and opacities on `bench kernel_fade …`; a step that never comes prints `bench kernel timeout
-/// <what>` and quits.
+/// kind of output, a flood stopped, Clear Outputs and its undo, the save, and the tab closed
+/// with its kernel. It prints `bench kernel …` lines as the window shows each cell, timings on
+/// `bench kernel_ms …` and opacities on `bench kernel_fade …`; a step that never comes prints
+/// `bench kernel timeout <what>` and quits.
 pub(super) fn bench_kernel(app: &Rc<App>, rel: &str) {
     scratch_only(app, "ACCENT_BENCH_KERNEL");
     if let Some(rel) = rel.strip_prefix("spec:") {
@@ -224,6 +226,9 @@ pub(super) fn bench_kernel(app: &Rc<App>, rel: &str) {
             copy_output(&app, &tab, 5, n, what).await;
         }
         copy_output(&app, &tab, 6, 0, "attachment").await;
+        if !flood(&app, &tab, 7).await {
+            return;
+        }
         tab.bench_select(0);
 
         act("win.notebook-clear-outputs");
@@ -453,6 +458,41 @@ fn kernel_of(tab: &NotebookTab) -> String {
     let what = tab.bench_kernel_what();
     what.split_once(" in ")
         .map_or(what.clone(), |(_, on)| on.to_string())
+}
+
+/// Run cell `n`, a flood, and stop it after two seconds of output: Stop is answered at once, and
+/// the cell keeps what a notebook keeps of a stream, saying what it left out.
+async fn flood(app: &Rc<App>, tab: &Rc<NotebookTab>, n: usize) -> bool {
+    use accent_core::notebook::bound::{HEAD, LINE, TAIL};
+    tab.bench_select(n);
+    let _ = WidgetExt::activate_action(&app.window, "win.notebook-run-cell", None);
+    let text = || match tab.bench_cell(n)?.1.first() {
+        Some(Output::Stream { text, .. }) => Some(text.clone()),
+        _ => None,
+    };
+    if until(app, "flood", text).await.is_none() {
+        return false;
+    }
+    glib::timeout_future(Duration::from_secs(2)).await;
+    let t = Instant::now();
+    let _ = WidgetExt::activate_action(&app.window, "win.notebook-interrupt", None);
+    if !done(app, tab, "flood interrupt").await {
+        return false;
+    }
+    let ms = ms_since(t);
+    println!("bench kernel_ms flood_interrupt {ms:.0}");
+    let text = text().unwrap_or_default();
+    let first = text.lines().next().unwrap_or_default();
+    let cut = first.ends_with(" characters left out …") && first.chars().count() <= LINE;
+    let bounded = text.len() <= HEAD + TAIL + 1024 && text.contains(" left out …\n");
+    println!(
+        "bench kernel flood interrupted={} bounded={} cut={} responsive={}",
+        u8::from(tab.bench_execution(n).as_deref() == Some("Failed")),
+        u8::from(bounded),
+        u8::from(cut),
+        u8::from(ms < 10_000.0)
+    );
+    true
 }
 
 /// Wait until no run waits or runs, saying `what` timed out otherwise.

@@ -60,11 +60,21 @@ pub enum Status {
 pub enum News {
     /// The run began, its cell's earlier outputs going.
     Started { run: u64, count: Option<u32> },
-    /// One output as nbformat 4 stores it, with its kernel-only display ID.
+    /// One output as nbformat 4 stores it, with its kernel-only display ID; never a stream.
     Output {
         run: u64,
         output: Value,
         display_id: Option<String>,
+    },
+    /// The run's stream of `name` as a notebook keeps it ([`accent_core::notebook::bound`]),
+    /// sent at most every 100 ms: in the last output, a stream of `name`, the `replaced` bytes
+    /// from byte `at` on give way to `text`; with no `at`, a new output holding `text`.
+    Stream {
+        run: u64,
+        name: String,
+        at: Option<usize>,
+        replaced: usize,
+        text: String,
     },
     /// Replace every output this kernel gave the ID, in any cell.
     Update { display_id: String, output: Value },

@@ -124,6 +124,18 @@ pub(crate) fn decode(signer: &Signer, frames: Vec<Vec<u8>>) -> Result<Message, E
     })
 }
 
+/// The type of the message `frames` begin and the `msg_id` of its parent, as far as they hold
+/// them; nothing is verified.
+pub(crate) fn head(frames: &[Vec<u8>]) -> (Option<String>, Option<String>) {
+    let at = frames.iter().position(|f| f == DELIMITER);
+    let dict = |n: usize| {
+        let frame = at.and_then(|at| frames.get(at + n))?;
+        serde_json::from_slice::<Header>(frame).ok()
+    };
+    let parent = dict(3).map(|p| p.msg_id).filter(|id| !id.is_empty());
+    (dict(2).map(|h| h.msg_type), parent)
+}
+
 pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

@@ -217,6 +217,15 @@ fn cell(raw: &str, n: u64, file_start: Option<usize>) -> Result<Cell, String> {
     })
 }
 
+/// The outputs the file stored in `cell`, an `.ipynb`'s, as nbformat 4 JSON.
+pub(super) fn stored_outputs(cell: &Cell) -> Vec<Value> {
+    let raw: Map<String, Value> = serde_json::from_str(&kept(cell).raw).unwrap_or_default();
+    match raw.get("outputs") {
+        Some(Value::Array(outputs)) => outputs.clone(),
+        _ => Vec::new(),
+    }
+}
+
 fn kept(cell: &Cell) -> &Kept {
     match cell.kept.as_ref() {
         super::Kept::Ipynb(kept) => kept,

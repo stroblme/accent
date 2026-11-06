@@ -12,6 +12,14 @@ const MORE: u8 = 1;
 const LONG: u8 = 2;
 const COMMAND: u8 = 4;
 
+/// The most a message's frames hold together that is read: ipykernel sends all a cell printed in
+/// 0.2 s as one message, tens of megabytes in a print loop, and a remote vault's link carries no
+/// line longer (`rpc::MAX_LINE`).
+pub const MAX_MESSAGE: usize = 64 << 20;
+/// The most frames a message has that is read: routing, the delimiter, the signature, the four
+/// dicts and a few buffers.
+const MAX_FRAMES: usize = 64;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Kind {
     Dealer,
@@ -82,7 +90,8 @@ pub(crate) async fn connect(
     let mut stream = UnixStream::connect(path).await?;
     handshake(&mut stream, kind, identity).await?;
     let (read, write) = stream.into_split();
-    Ok((Reader(BufReader::new(read)), Writer(BufWriter::new(write))))
+    let reader = Reader::new(BufReader::new(read), MAX_MESSAGE);
+    Ok((reader, Writer(BufWriter::new(write))))
 }
 
 async fn write_frame<W: AsyncWrite + Unpin>(w: &mut W, flags: u8, body: &[u8]) -> io::Result<()> {
@@ -96,32 +105,84 @@ async fn write_frame<W: AsyncWrite + Unpin>(w: &mut W, flags: u8, body: &[u8]) -
     w.write_all(body).await
 }
 
-async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> io::Result<(u8, Vec<u8>)> {
+/// A frame's flags and the size its peer gives it.
+async fn read_head<R: AsyncRead + Unpin>(r: &mut R) -> io::Result<(u8, u64)> {
     let flags = r.read_u8().await?;
     let size = match flags & LONG {
         0 => u64::from(r.read_u8().await?),
         _ => r.read_u64().await?,
     };
-    let size = usize::try_from(size).map_err(|_| refused("a frame is too long"))?;
-    let mut body = vec![0; size];
+    Ok((flags, size))
+}
+
+/// A frame of the handshake, which is never long.
+async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> io::Result<(u8, Vec<u8>)> {
+    let (flags, size) = read_head(r).await?;
+    if size > MAX_MESSAGE as u64 {
+        return Err(refused("a frame is too long"));
+    }
+    let mut body = vec![0; size as usize];
     r.read_exact(&mut body).await?;
     Ok((flags, body))
 }
 
-pub(crate) struct Reader<R>(R);
+/// Read past `size` bytes without holding them.
+async fn skip<R: AsyncRead + Unpin>(r: &mut R, size: u64) -> io::Result<()> {
+    let read = tokio::io::copy(&mut r.take(size), &mut tokio::io::sink()).await?;
+    match read == size {
+        true => Ok(()),
+        false => Err(io::ErrorKind::UnexpectedEof.into()),
+    }
+}
+
+/// A message as it was read.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Received {
+    Frames(Vec<Vec<u8>>),
+    /// One past [`MAX_MESSAGE`] or [`MAX_FRAMES`], read past: the frames that came before it went
+    /// past, and its size.
+    TooLarge {
+        frames: Vec<Vec<u8>>,
+        bytes: u64,
+    },
+}
+
+pub(crate) struct Reader<R> {
+    inner: R,
+    /// The most a message holds that is read: [`MAX_MESSAGE`].
+    limit: usize,
+}
 
 impl<R: AsyncRead + Unpin> Reader<R> {
-    /// The next message's frames; a command between messages is skipped.
-    pub(crate) async fn recv(&mut self) -> io::Result<Vec<Vec<u8>>> {
-        let mut frames = Vec::new();
+    pub(crate) fn new(inner: R, limit: usize) -> Reader<R> {
+        Reader { inner, limit }
+    }
+
+    /// The next message; a command between messages is skipped, and the frames of a message past
+    /// the limits are read past rather than held, whatever size its peer gives them.
+    pub(crate) async fn recv(&mut self) -> io::Result<Received> {
+        let (mut frames, mut bytes, mut over) = (Vec::new(), 0u64, false);
         loop {
-            let (flags, body) = read_frame(&mut self.0).await?;
+            let (flags, size) = read_head(&mut self.inner).await?;
             if flags & COMMAND != 0 {
+                skip(&mut self.inner, size).await?;
                 continue;
             }
-            frames.push(body);
+            bytes = bytes.saturating_add(size);
+            over |= bytes > self.limit as u64 || frames.len() == MAX_FRAMES;
+            match over {
+                true => skip(&mut self.inner, size).await?,
+                false => {
+                    let mut body = vec![0; size as usize];
+                    self.inner.read_exact(&mut body).await?;
+                    frames.push(body);
+                }
+            }
             if flags & MORE == 0 {
-                return Ok(frames);
+                return Ok(match over {
+                    true => Received::TooLarge { frames, bytes },
+                    false => Received::Frames(frames),
+                });
             }
         }
     }
@@ -191,12 +252,14 @@ mod tests {
             let message = vec![b"a".to_vec(), vec![7; 300], Vec::new()];
             let (our_read, our_write) = ours.into_split();
             let (their_read, their_write) = theirs.into_split();
-            let (mut our_read, mut our_write) = (Reader(our_read), Writer(our_write));
-            let (mut their_read, mut their_write) = (Reader(their_read), Writer(their_write));
+            let reader = |r| Reader::new(r, MAX_MESSAGE);
+            let (mut our_read, mut our_write) = (reader(our_read), Writer(our_write));
+            let (mut their_read, mut their_write) = (reader(their_read), Writer(their_write));
             our_write.send(&message).await.unwrap();
-            assert_eq!(their_read.recv().await.unwrap(), message);
+            let received = Received::Frames(message.clone());
+            assert_eq!(their_read.recv().await.unwrap(), received);
             their_write.send(&message).await.unwrap();
-            assert_eq!(our_read.recv().await.unwrap(), message);
+            assert_eq!(our_read.recv().await.unwrap(), received);
 
             // A SUB subscribes to everything once it is READY.
             let (mut ours, theirs) = UnixStream::pair().unwrap();
@@ -205,6 +268,47 @@ mod tests {
             let (mut theirs, said) = answered.await.unwrap();
             assert_eq!(said, [("Socket-Type".to_string(), b"SUB".to_vec())]);
             assert_eq!(read_frame(&mut theirs).await.unwrap(), (0, vec![1]));
+        });
+    }
+
+    #[test]
+    fn a_message_past_the_limits_is_read_past_and_the_next_one_read() {
+        accent_lsp::runtime().block_on(async {
+            let (ours, theirs) = UnixStream::pair().unwrap();
+            let (mut reader, mut writer) = (Reader::new(ours, 1000), Writer(theirs));
+            let small = vec![b"a".to_vec(), b"b".to_vec()];
+            let long = vec![
+                b"head".to_vec(),
+                vec![7; 600],
+                vec![7; 600],
+                b"end".to_vec(),
+            ];
+            let many = vec![Vec::new(); MAX_FRAMES + 1];
+            for message in [&long, &many, &small] {
+                writer.send(message).await.unwrap();
+            }
+            let frames = vec![b"head".to_vec(), vec![7; 600]];
+            let bytes = 1207;
+            assert_eq!(
+                reader.recv().await.unwrap(),
+                Received::TooLarge { frames, bytes }
+            );
+            let frames = vec![Vec::new(); MAX_FRAMES];
+            let bytes = 0;
+            assert_eq!(
+                reader.recv().await.unwrap(),
+                Received::TooLarge { frames, bytes }
+            );
+            assert_eq!(reader.recv().await.unwrap(), Received::Frames(small));
+
+            // A peer giving a frame a terabyte is never taken at its word: it ends at its end.
+            let mut said = vec![LONG];
+            said.extend((1u64 << 40).to_be_bytes());
+            said.extend([0; 10]);
+            writer.0.write_all(&said).await.unwrap();
+            drop(writer);
+            let ended = reader.recv().await.unwrap_err();
+            assert_eq!(ended.kind(), io::ErrorKind::UnexpectedEof);
         });
     }
 }
