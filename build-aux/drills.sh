@@ -64,6 +64,11 @@ drill_toggle() {
 	launch 90 ACCENT_BENCH_TABS=toggle:alpha.md,beta.md
 }
 
+drill_opens() {
+	launch 60 ACCENT_BENCH_TABS=opens >"$dir/opens"
+	expect opens opens
+}
+
 drill_run_command() {
 	test -e "$pdfium" || { echo "SKIPPED the Run Command drill: no libpdfium"; return 0; }
 	launch 60 ACCENT_BENCH_TABS=commands

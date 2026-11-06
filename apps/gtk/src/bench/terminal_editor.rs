@@ -65,7 +65,7 @@ fn text(term: &Term) -> String {
 }
 
 /// What kind of tab has `rel` open.
-fn kind_of(app: &Rc<App>, rel: &str) -> &'static str {
+pub(super) fn kind_of(app: &Rc<App>, rel: &str) -> &'static str {
     if app.editor_of(rel).is_some() {
         return "editor";
     }

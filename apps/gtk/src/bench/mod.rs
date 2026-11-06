@@ -37,6 +37,7 @@ mod motion;
 mod native;
 mod notebook;
 mod notebook_lsp;
+mod opens;
 mod outline;
 mod panes;
 mod pdf;
@@ -291,7 +292,8 @@ use user_commands::bench_commands;
 ///   caret moves far at once, through XTEST, in `a` and between cells), `loose:<rel_pdf>`
 ///   (loose-file readers/assets; creates/removes `loose-drill/`), `toggle:<a>,<b>`
 ///   (XTEST `Ctrl+M` between `a` and its preview tab, `toggle::bench_toggle`), `commands`
-///   (Run Command's rows over a note and a PDF it writes, `listed::bench_listed`). Remote
+///   (Run Command's rows over a note and a PDF it writes, `listed::bench_listed`), `opens`
+///   (failed opens, other kinds and requests during an open, `opens::bench_opens`). Remote
 ///   pin-window/apart modes verify tabs cannot move off the host.
 /// - `ACCENT_BENCH_SLOW_READ=<ms>`: delay text reads on workers to reproduce
 ///   double-clicks before tabs arrive in the `TABS=tree:` drill.
@@ -840,6 +842,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if rels == "commands" {
                 return listed::bench_listed(&app);
+            }
+            if rels == "opens" {
+                return opens::bench_opens(&app);
             }
             if let Some(rels) = rels.strip_prefix("pinwin:") {
                 return bench_pin_window(&app, rels);

@@ -1,0 +1,6 @@
+bench opens gone said=["Cannot open opens-gone.md: not in this vault"] ran=false waiting=0 tab=none
+bench opens unreadable said=["Cannot open opens-unread.md: <vault>/opens-unread.md: not a regular file"] ran=false waiting=0 tab=none
+bench opens binary said=["Cannot go to opens-blob.txt: binary file"] ran=false waiting=0 tab=other
+bench opens diagram said=["Cannot go to opens-diagram.xml: a diagram, not a text file"] ran=false waiting=0 tab=diagram
+bench opens during said=[] ran=true waiting=0 tabs=1 preview=Some(false)
+bench opens readable tabs=1 preview=Some(true)
