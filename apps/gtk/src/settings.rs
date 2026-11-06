@@ -564,11 +564,12 @@ fn font_row(
 
     // An icon rather than the word: the row already carries a font button whose label is the
     // whole font name, and two text buttons beside it leave the name nowhere to go on a narrow
-    // dialog. `document-revert-symbolic` is the arrow back to a saved state, which is what this
-    // does; the tooltip is what keeps it discoverable (DESIGN.md, Iconography). Hidden rather than
-    // greyed while the system font is in use, as there is nothing to go back to.
+    // dialog. `edit-clear-symbolic` is GNOME Settings' Reset Shortcut, a setting cleared back to
+    // its default, which is what this does; the tooltip is what keeps it discoverable (DESIGN.md,
+    // Iconography). Hidden rather than greyed while the system font is in use, as there is
+    // nothing to go back to.
     let reset = gtk::Button::builder()
-        .icon_name("document-revert-symbolic")
+        .icon_name("edit-clear-symbolic")
         .tooltip_text("Use System Font")
         .valign(gtk::Align::Center)
         .visible(chosen.is_some())
