@@ -332,9 +332,9 @@ impl Saved {
 impl App {
     /// Open `key` in the terminal editor picked, in a terminal tab of its own, and say whether
     /// it did. It stays accent's where Accent is picked, where Open in Accent's Editor named it
-    /// once, where what asked waits for accent's own buffer (`App::with_tab`), and for a host's
-    /// dependency or a package manager's file, which are read-only.
-    pub(crate) fn open_in_editor(self: &Rc<Self>, key: &str, how: Opened) -> bool {
+    /// once (`in_accent`), where what asked waits for accent's own buffer (`App::with_tab`), and
+    /// for a host's dependency or a package manager's file, which are read-only.
+    pub(crate) fn open_in_editor(self: &Rc<Self>, key: &str, how: Opened, in_accent: bool) -> bool {
         let editor = self.config.borrow().editor;
         // A place a search hit, a symbol or a definition asked for ([`App::edit_at`]); anything
         // else waiting is for accent's own tab.
@@ -343,7 +343,7 @@ impl App {
             Some(_) => return false,
             None => None,
         };
-        if self.pending.take_in_accent(key) || self.stays_accents(key) || self.pending.waits(key) {
+        if in_accent || self.stays_accents(key) || self.pending.waits(key) {
             return false;
         }
         // A shell that has answered without it runs no tab only to find it missing.

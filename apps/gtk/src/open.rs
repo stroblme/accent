@@ -58,6 +58,9 @@ impl App {
         // demote it, and looking at the preview again does not promote it.
         if let Some(doc) = self.doc_for(&key) {
             self.drop_awaiting(&key, "not a text file");
+            // Open as Text and Open in Accent's Editor asked of it end on that tab too.
+            self.pending.take_as_text(&key);
+            self.pending.take_in_accent(&key);
             self.reveal_page(doc.page());
             return self.focus_picked(doc.page(), how);
         }
@@ -257,6 +260,9 @@ impl App {
         flavour: Flavour,
         how: Opened,
     ) {
+        // Asked of this open, so its read takes them whatever the file turns out to be.
+        let as_text = self.pending.take_as_text(key);
+        let in_accent = self.pending.take_in_accent(key);
         let text = match read {
             Ok(accent_core::fs::Read::Text(text)) => text,
             Ok(accent_core::fs::Read::Binary { size }) => {
@@ -270,7 +276,7 @@ impl App {
             Ok(accent_core::fs::Read::TooLarge { size }) => {
                 // Too large for accent's editor, not for a terminal editor.
                 if matches!(doc::kind_of(key), Kind::Note | Kind::Text)
-                    && self.open_in_editor(key, how)
+                    && self.open_in_editor(key, how, in_accent)
                 {
                     return;
                 }
@@ -300,7 +306,6 @@ impl App {
         }
         // So is an `.ipynb`, and a `.py` marimo wrote, unless the reader asked for its text; a
         // search hit in it waits for the notebook as one in a diagram does.
-        let as_text = self.pending.take_as_text(key);
         if doc::host_file_path(key).is_none()
             && !as_text
             && accent_core::path::holds_notebook(key, &text.text)
@@ -310,7 +315,7 @@ impl App {
             }
             return self.open_notebook_text(key, text, flavour, how);
         }
-        if !as_text && self.open_in_editor(key, how) {
+        if !as_text && self.open_in_editor(key, how, in_accent) {
             return;
         }
         self.adopt_text_tab(key, text, flavour, how);

@@ -8,8 +8,9 @@
 //!   file, and goes when the open fails; a PDF's print or export waits on for its pages
 //!   (`App::sync_pdf_links`);
 //! - a double click's keep is taken by the landing tab, and goes when the open fails;
-//! - Open as Text and Open in Accent's Editor are taken where the text read decides what the
-//!   file opens as, so a failed open leaves them standing;
+//! - Open as Text and Open in Accent's Editor are taken by the read that decides what the file
+//!   opens as, whatever it opens as, or by the tab the open finds there already, and go when the
+//!   open fails;
 //! - a restored tab's pane is taken when its tab is made, and dropped for every tab no longer on
 //!   its way once the restore has asked for them all ([`Pending::settle`]).
 
@@ -114,11 +115,13 @@ impl Pending {
     }
 
     /// The open of `key` failed: its work goes unsaid (the open says why it failed), and so do
-    /// its reveal and a double click's keep.
+    /// its reveal, a double click's keep, and Open as Text and Open in Accent's Editor.
     pub fn fail(&self, key: &str) {
         self.work.borrow_mut().remove(key);
         self.reveals.borrow_mut().remove(key);
         self.keeps.borrow_mut().remove(key);
+        self.as_text.borrow_mut().remove(key);
+        self.in_accent.borrow_mut().remove(key);
     }
 
     /// `key` turned out to be a diagram or a notebook, which its text-tab work cannot run on: the
@@ -152,6 +155,13 @@ impl Pending {
     /// The pane restored tab `key` is to go into, left for the tab to take.
     pub fn pane_for(&self, key: &str) -> Option<Rc<Pane>> {
         self.panes.borrow().get(key)?.upgrade()
+    }
+
+    /// Whether Open as Text and Open in Accent's Editor still stand for `key`.
+    #[cfg(feature = "bench")]
+    pub fn once(&self, key: &str) -> (bool, bool) {
+        let as_text = self.as_text.borrow().contains(key);
+        (as_text, self.in_accent.borrow().contains(key))
     }
 
     /// The keys whose text-tab work is waiting.

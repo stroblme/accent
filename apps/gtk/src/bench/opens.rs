@@ -9,7 +9,11 @@ use super::*;
 /// prints what was said, whether the work ran, how much still waits and what tab the file has.
 /// Then a note looked at, asked for work, opened again and double-clicked, all before its read
 /// lands, and the unreadable one once it is a note: each lands once, kept only where the double
-/// click still stood. Writes its files into the vault root.
+/// click still stood. Open as Text and Open in Accent's Editor are asked along with each open,
+/// again of the note once it is open, and of a plain `.py` a search hit opens, and `once` says
+/// whether they still stand after it: they go with the open they were asked of, so a notebook
+/// that could not be read when Open as Text asked opens as a notebook next time. Writes its files
+/// into the vault root.
 pub(super) fn bench_opens(app: &Rc<App>) {
     let app = app.clone();
     glib::spawn_future_local(async move {
@@ -20,7 +24,9 @@ pub(super) fn bench_opens(app: &Rc<App>) {
         let wrote = std::fs::create_dir(root.join("opens-unread.md")).is_ok()
             && write("opens-blob.txt", b"blob\0\x01\x02")
             && write("opens-diagram.xml", diagram)
-            && write("opens-note.md", b"# Note\n");
+            && write("opens-note.md", b"# Note\n")
+            && write("opens-plain.py", b"x = 1\n")
+            && std::fs::create_dir(root.join("opens-unread.ipynb")).is_ok();
         if !wrote {
             println!("bench opens wrote=false");
             return bench_quit(&app);
@@ -36,23 +42,28 @@ pub(super) fn bench_opens(app: &Rc<App>) {
             if case == "unreadable" {
                 app.pending.keep(rel);
             }
+            app.pending.as_text(rel);
+            app.pending.in_accent(rel);
             let ran = Rc::new(Cell::new(false));
             let runs = ran.clone();
             app.with_tab(rel, Opened::Kept, "go to", move |_, _| runs.set(true));
             until(|| !app.toasts.shown().is_empty()).await;
             glib::timeout_future(Duration::from_millis(300)).await;
             println!(
-                "bench opens {case} said={:?} ran={} waiting={} tab={}",
+                "bench opens {case} said={:?} ran={} waiting={} tab={} once={:?}",
                 said(&app),
                 ran.get(),
                 app.pending.waiting().len(),
-                super::terminal_editor::kind_of(&app, rel)
+                super::terminal_editor::kind_of(&app, rel),
+                app.pending.once(rel)
             );
         }
         app.toasts.dismiss_all();
         let note = "opens-note.md";
         let ran = Rc::new(Cell::new(false));
         let runs = ran.clone();
+        app.pending.as_text(note);
+        app.pending.in_accent(note);
         app.open_preview(note);
         app.with_tab(note, Opened::Kept, "go to", move |_, _| runs.set(true));
         app.open_path(note);
@@ -61,12 +72,43 @@ pub(super) fn bench_opens(app: &Rc<App>) {
         // The reads asked for after the first, which find its tab when they land.
         glib::timeout_future(Duration::from_millis(1000)).await;
         println!(
-            "bench opens during said={:?} ran={} waiting={} {}",
+            "bench opens during said={:?} ran={} waiting={} {} once={:?}",
             said(&app),
             ran.get(),
             app.pending.waiting().len(),
-            landed(&app, note)
+            landed(&app, note),
+            app.pending.once(note)
         );
+        // Asked of the note open already, whose tab comes to the front.
+        app.pending.as_text(note);
+        app.pending.in_accent(note);
+        app.open_path(note);
+        println!("bench opens again once={:?}", app.pending.once(note));
+        // A search hit in a `.py`, which waits for the file to say whether it is a notebook.
+        let py = "opens-plain.py";
+        app.pending.as_text(py);
+        app.pending.in_accent(py);
+        app.open_note_at(py, Some(sidebar::Target::Range(0..1, None)));
+        until(|| app.doc_for(py).is_some()).await;
+        let tab = super::terminal_editor::kind_of(&app, py);
+        println!("bench opens hit tab={tab} once={:?}", app.pending.once(py));
+        app.toasts.dismiss_all();
+        let notebook = "opens-unread.ipynb";
+        app.pending.as_text(notebook);
+        app.open_path(notebook);
+        until(|| !app.toasts.shown().is_empty()).await;
+        let once = app.pending.once(notebook);
+        println!("bench opens as_text said={:?} once={once:?}", said(&app));
+        let cells = concat!(
+            r#"{"cells": [{"cell_type": "markdown", "id": "a", "metadata": {}, "source": ["A"]}], "#,
+            r#""metadata": {}, "nbformat": 4, "nbformat_minor": 5}"#
+        );
+        let path = root.join(notebook);
+        let _ = std::fs::remove_dir(&path).and_then(|()| std::fs::write(&path, cells));
+        app.open_preview(notebook);
+        until(|| app.doc_for(notebook).is_some()).await;
+        let tab = super::terminal_editor::kind_of(&app, notebook);
+        println!("bench opens as_text_next tab={tab}");
         let unread = root.join("opens-unread.md");
         let _ = std::fs::remove_dir(&unread).and_then(|()| std::fs::write(&unread, "# Read\n"));
         app.open_preview("opens-unread.md");
