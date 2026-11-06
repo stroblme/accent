@@ -395,3 +395,55 @@ pub(crate) fn dispatch(vault: &Local, method: &str, p: &Value) -> Option<Result<
         _ => return None,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tests::poll_until;
+
+    /// A vault closed while a kernel is still starting: the start holds `Kernels` itself, so it
+    /// must find it shut down rather than register past the vault's end.
+    #[test]
+    fn a_start_the_vault_closed_under_leaves_no_kernel() {
+        if !crate::tests::has_ipykernel() {
+            eprintln!("ipykernel is not installed: skipping the end-to-end test");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        let (events, _news) = std::sync::mpsc::channel();
+        let kernels = Arc::new(Kernels::new(dir.to_path_buf(), events));
+        std::fs::write(dir.join("hold"), "").unwrap();
+        // The kernel's Python says its process id and waits while `hold` is there, its IPython
+        // folder the test's rather than the user's.
+        let held = r#"echo $$ > pid.tmp && mv pid.tmp pid
+while [ -e hold ]; do sleep 0.01; done
+IPYTHONDIR="$PWD/ipython" exec python3 "$@""#;
+        let cfg = DebugConfig {
+            python: ["sh", "-c", held, "sh"].map(String::from).to_vec(),
+            ..Default::default()
+        };
+        let start = Start {
+            notebook: "run.ipynb".to_string(),
+            kernel: None,
+        };
+        let started = kernels.start(1, &start, &cfg);
+        let pid = dir.join("pid");
+        let spawned = poll_until(|| pid.exists(), Duration::from_secs(10));
+        assert!(spawned, "the kernel never started");
+
+        kernels.shutdown();
+        std::fs::remove_file(dir.join("hold")).unwrap();
+        let started = accent_lsp::runtime()
+            .block_on(async { tokio::time::timeout(Duration::from_secs(60), started).await });
+        let cancelled = matches!(started, Ok(Err(Error::Core(accent_core::Error::Cancelled))));
+        assert!(cancelled, "{started:?}");
+        assert!(kernels.session(1).is_err());
+        let pid = std::fs::read_to_string(pid).unwrap();
+        let pid: i32 = pid.trim().parse().unwrap();
+        // SAFETY: signal 0 only asks whether the process is there.
+        let gone = || unsafe { libc::kill(pid, 0) } != 0;
+        let gone = poll_until(gone, Duration::from_secs(5));
+        assert!(gone, "the kernel outlived its vault");
+    }
+}

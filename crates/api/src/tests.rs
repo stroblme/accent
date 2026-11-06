@@ -97,6 +97,15 @@ pub(crate) fn has_debugpy() -> bool {
         .is_ok_and(|s| s.success())
 }
 
+/// Whether this machine's `python3` has ipykernel, which the kernels' end-to-end tests need.
+pub(crate) fn has_ipykernel() -> bool {
+    std::process::Command::new("python3")
+        .args(["-c", "import ipykernel"])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 /// A debug adapter that needs no debugpy, for what happens around the protocol: `python3`
 /// answering every request with an empty success but `evaluate`, which it never answers, like a
 /// console running `while True: pass`. In its folder it leaves a file named for each request it
