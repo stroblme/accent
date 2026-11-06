@@ -135,9 +135,10 @@ impl Layers {
         let row = super::props::entry_row("");
         // No apply button, nor the indicator it shares a place with: an entry row keeps their room
         // at the name's end even while neither shows, which the hover buttons would leave the name
-        // none of.
+        // none of. Nor the title over a name, which with none ("") still holds the name below the
+        // row's middle; an unnamed layer's "Background" is the row's empty title, which stays.
         row.set_show_apply_button(false);
-        for part in ["apply-button", "indicator"] {
+        for part in ["apply-button", "indicator", "subtitle"] {
             super::props::hide_part(&row, part);
         }
         let send = |change: fn(CellId) -> LayerChange| {
