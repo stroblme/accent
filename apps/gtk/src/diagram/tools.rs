@@ -154,6 +154,105 @@ fn edge_kind(route: Route) -> EdgeKind {
     }
 }
 
+/// The keys a connector's route is written in: what [`presets::edge`] writes for one, and the
+/// `noEdgeStyle` draw.io's Waypoints menu clears.
+const ROUTE_KEYS: [&str; 5] = [
+    "edgeStyle",
+    "curved",
+    "noEdgeStyle",
+    "orthogonalLoop",
+    "jettySize",
+];
+
+/// A click on the ring's outer orbit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pick {
+    Rounded(bool),
+    Route(Route),
+    Arrow(bool),
+}
+
+impl Pick {
+    /// The tool whose new cells it is for.
+    pub fn tool(self) -> Tool {
+        match self {
+            Pick::Rounded(_) => Tool::Rect,
+            Pick::Route(_) | Pick::Arrow(_) => Tool::Connector,
+        }
+    }
+
+    /// `options` with it picked.
+    pub fn apply(self, options: DiagramConfig) -> DiagramConfig {
+        match self {
+            Pick::Rounded(rounded) => DiagramConfig { rounded, ..options },
+            Pick::Route(route) => DiagramConfig { route, ..options },
+            Pick::Arrow(arrow) => DiagramConfig { arrow, ..options },
+        }
+    }
+
+    /// A Default Style with it picked: only the keys it is about rewritten, as the ring's own
+    /// preset writes them.
+    pub fn restyle(self, style: &str) -> String {
+        let mut style = Style::parse(style);
+        match self {
+            Pick::Rounded(on) => style.set("rounded", Some(if on { "1" } else { "0" })),
+            Pick::Arrow(on) => style.set("endArrow", (!on).then_some("none")),
+            Pick::Route(route) => {
+                let preset = Style::parse(&presets::edge(edge_kind(route), true));
+                for key in ROUTE_KEYS {
+                    style.set(key, preset.get(key));
+                }
+            }
+        }
+        style.to_string()
+    }
+}
+
+/// What the ring's outer orbit shows picked: the config's picks, or where the diagram has a
+/// Default Style for the tool, what that style draws. A route the ring does not offer, an elbow
+/// above all, shows none of its three.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Picks {
+    pub rounded: bool,
+    pub route: Option<Route>,
+    pub arrow: bool,
+}
+
+impl Picks {
+    pub fn of(file: &accent_drawio::File, options: &DiagramConfig) -> Picks {
+        let default = |tool: Tool| {
+            let key = tool.default_attr()?;
+            accent_drawio::model::attr(&file.attrs, key).map(Style::parse)
+        };
+        let mut picks = Picks::from(*options);
+        if let Some(style) = default(Tool::Rect) {
+            picks.rounded = style.resolve(false).flag("rounded", false);
+        }
+        if let Some(style) = default(Tool::Connector) {
+            let style = style.resolve(true);
+            picks.route = match style.get("edgeStyle") {
+                _ if style.flag("noEdgeStyle", false) => Some(Route::Straight),
+                None => Some(Route::Straight),
+                Some("orthogonalEdgeStyle") if style.flag("curved", false) => Some(Route::Curved),
+                Some("orthogonalEdgeStyle") => Some(Route::Orthogonal),
+                Some(_) => None,
+            };
+            picks.arrow = style.get("endArrow").is_some();
+        }
+        picks
+    }
+}
+
+impl From<DiagramConfig> for Picks {
+    fn from(options: DiagramConfig) -> Picks {
+        Picks {
+            rounded: options.rounded,
+            route: Some(options.route),
+            arrow: options.arrow,
+        }
+    }
+}
+
 /// The glyphs on the outer orbit: what a rectangle's corners and a connector's line will be.
 #[derive(Debug, Clone, Copy)]
 enum Glyph {
@@ -163,7 +262,7 @@ enum Glyph {
     Arrow,
 }
 
-type OnOptions = RefCell<Option<Box<dyn Fn(DiagramConfig)>>>;
+type OnPick = RefCell<Option<Box<dyn Fn(Pick)>>>;
 
 /// The generic ring with a diagram's options on its outer orbit: plain or rounded corners while
 /// the rectangle is in hand, and the line's route and its arrow while the connector is.
@@ -172,8 +271,8 @@ pub struct DiagramRing {
     corners: Vec<(bool, gtk::ToggleButton)>,
     lines: Vec<(Route, gtk::ToggleButton)>,
     arrow: gtk::ToggleButton,
-    options: Cell<DiagramConfig>,
-    on_options: OnOptions,
+    picks: Cell<Picks>,
+    on_pick: OnPick,
 }
 
 impl DiagramRing {
@@ -209,17 +308,14 @@ impl DiagramRing {
             corners,
             lines,
             arrow,
-            options: Cell::new(DiagramConfig::default()),
-            on_options: RefCell::new(None),
+            picks: Cell::new(DiagramConfig::default().into()),
+            on_pick: RefCell::new(None),
         });
         for (rounded, button) in &diagram.corners {
             let (rounded, weak) = (*rounded, Rc::downgrade(&diagram));
             button.connect_clicked(move |_| {
                 if let Some(d) = weak.upgrade() {
-                    d.choose(DiagramConfig {
-                        rounded,
-                        ..d.options.get()
-                    });
+                    d.choose(Pick::Rounded(rounded));
                 }
             });
         }
@@ -227,21 +323,14 @@ impl DiagramRing {
             let (route, weak) = (*route, Rc::downgrade(&diagram));
             button.connect_clicked(move |_| {
                 if let Some(d) = weak.upgrade() {
-                    d.choose(DiagramConfig {
-                        route,
-                        ..d.options.get()
-                    });
+                    d.choose(Pick::Route(route));
                 }
             });
         }
         let weak = Rc::downgrade(&diagram);
         diagram.arrow.connect_clicked(move |_| {
             if let Some(d) = weak.upgrade() {
-                let options = d.options.get();
-                d.choose(DiagramConfig {
-                    arrow: !options.arrow,
-                    ..options
-                });
+                d.choose(Pick::Arrow(!d.picks.get().arrow));
             }
         });
         diagram
@@ -269,25 +358,27 @@ impl DiagramRing {
         self.sync();
     }
 
-    pub fn set_options(&self, options: DiagramConfig) {
-        self.options.set(options);
+    pub fn set_picks(&self, picks: Picks) {
+        self.picks.set(picks);
         self.sync();
     }
 
-    pub fn connect_options(&self, f: impl Fn(DiagramConfig) + 'static) {
-        *self.on_options.borrow_mut() = Some(Box::new(f));
+    /// Call `f` with each click on the outer orbit; it answers with [`DiagramRing::set_picks`].
+    pub fn connect_pick(&self, f: impl Fn(Pick) + 'static) {
+        *self.on_pick.borrow_mut() = Some(Box::new(f));
     }
 
-    fn choose(&self, options: DiagramConfig) {
-        self.set_options(options);
-        if let Some(f) = self.on_options.borrow().as_ref() {
-            f(options);
+    fn choose(&self, pick: Pick) {
+        if let Some(f) = self.on_pick.borrow().as_ref() {
+            f(pick);
         }
+        // A click that changed nothing leaves its button as it was.
+        self.sync();
     }
 
-    /// Show active-tool options, deriving checked state from settings rather than clicks.
+    /// Show active-tool options, deriving checked state from the picks rather than clicks.
     fn sync(&self) {
-        let (tool, options) = (self.ring.tool(), self.options.get());
+        let (tool, picks) = (self.ring.tool(), self.picks.get());
         let check = |button: &gtk::ToggleButton, shown: bool, wanted: bool| {
             button.set_visible(shown);
             if button.is_active() != wanted {
@@ -295,12 +386,12 @@ impl DiagramRing {
             }
         };
         for (rounded, button) in &self.corners {
-            check(button, tool == Tool::Rect, *rounded == options.rounded);
+            check(button, tool == Tool::Rect, *rounded == picks.rounded);
         }
         for (route, button) in &self.lines {
-            check(button, tool == Tool::Connector, *route == options.route);
+            check(button, tool == Tool::Connector, Some(*route) == picks.route);
         }
-        check(&self.arrow, tool == Tool::Connector, options.arrow);
+        check(&self.arrow, tool == Tool::Connector, picks.arrow);
     }
 }
 
@@ -444,5 +535,73 @@ mod tests {
             Tool::Connector.style_in(&file, &options),
             "strokeColor=#fff;"
         );
+    }
+
+    #[test]
+    fn the_ring_shows_what_a_default_style_draws() {
+        use accent_drawio::model::set_attr;
+        let mut file = accent_drawio::File::blank();
+        let options = DiagramConfig::default();
+        assert_eq!(Picks::of(&file, &options), Picks::from(options));
+        set_attr(
+            &mut file.attrs,
+            "accentStyleRect",
+            "rounded=1;whiteSpace=wrap;",
+        );
+        let routes = [
+            ("strokeColor=#f00;", Some(Route::Straight)),
+            ("curved=1;", Some(Route::Straight)),
+            (
+                "edgeStyle=orthogonalEdgeStyle;noEdgeStyle=1;",
+                Some(Route::Straight),
+            ),
+            ("edgeStyle=orthogonalEdgeStyle;", Some(Route::Orthogonal)),
+            (
+                "edgeStyle=orthogonalEdgeStyle;curved=1;",
+                Some(Route::Curved),
+            ),
+            ("edgeStyle=elbowEdgeStyle;elbow=vertical;", None),
+        ];
+        for (style, route) in routes {
+            set_attr(&mut file.attrs, "accentStyleConnector", style);
+            let picks = Picks::of(&file, &options);
+            assert_eq!(
+                (picks.rounded, picks.route, picks.arrow),
+                (true, route, true)
+            );
+        }
+        set_attr(&mut file.attrs, "accentStyleConnector", "endArrow=none;");
+        assert!(!Picks::of(&file, &options).arrow);
+    }
+
+    #[test]
+    fn a_pick_rewrites_only_its_own_keys_of_a_default_style() {
+        let elbow = "edgeStyle=elbowEdgeStyle;strokeColor=#f00;endArrow=block;";
+        let curved = Pick::Route(Route::Curved).restyle(elbow);
+        assert_eq!(
+            curved,
+            "edgeStyle=orthogonalEdgeStyle;strokeColor=#f00;endArrow=block;curved=1;orthogonalLoop=1;jettySize=auto;"
+        );
+        assert_eq!(
+            Pick::Route(Route::Straight).restyle(&curved),
+            "strokeColor=#f00;endArrow=block;"
+        );
+        assert_eq!(
+            Pick::Arrow(false).restyle(elbow),
+            "edgeStyle=elbowEdgeStyle;strokeColor=#f00;endArrow=none;"
+        );
+        assert_eq!(Pick::Arrow(true).restyle("endArrow=none;"), "");
+        assert_eq!(
+            Pick::Rounded(true).restyle("rounded=0;fillColor=#fff;"),
+            "rounded=1;fillColor=#fff;"
+        );
+        // What a pick writes is what the ring then shows.
+        let mut file = accent_drawio::File::blank();
+        for route in [Route::Straight, Route::Orthogonal, Route::Curved] {
+            let style = Pick::Route(route).restyle(elbow);
+            accent_drawio::model::set_attr(&mut file.attrs, "accentStyleConnector", &style);
+            let picks = Picks::of(&file, &DiagramConfig::default());
+            assert_eq!(picks.route, Some(route));
+        }
     }
 }

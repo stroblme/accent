@@ -35,6 +35,7 @@ use crate::editor::{SaveState, Saves};
 use crate::widgets::{Debounce, Hook};
 use geometry::{Sheet, Zoom};
 pub use tools::Tool;
+use tools::{Pick, Picks};
 use view::{DiagramView, Edit};
 
 type TabHook = Hook<dyn Fn(&Rc<DiagramTab>)>;
@@ -275,13 +276,10 @@ pub fn open(
         tab,
         move |change| tab.apply_property(change)
     ));
-    tab.ring.connect_options(glib::clone!(
+    tab.ring.connect_pick(glib::clone!(
         #[weak]
         tab,
-        move |options| {
-            tab.options.set(options);
-            tab.on_options.emit(&tab);
-        }
+        move |pick| tab.ring_pick(pick)
     ));
     tab.banner.connect_button_clicked(glib::clone!(
         #[weak]
@@ -451,8 +449,38 @@ impl DiagramTab {
     /// Draw with `options`: the config's, on opening and whenever a diagram's ring changed them.
     pub fn set_options(&self, options: DiagramConfig) {
         self.options.set(options);
-        self.ring.set_options(options);
+        self.show_picks();
         self.view.set_show_grid(options.grid);
+    }
+
+    /// A click on the ring: into the diagram's Default Style for the tool it is for where there is
+    /// one, as one undo step, else into the config's `[diagram]` for every diagram.
+    fn ring_pick(self: &Rc<Self>, pick: Pick) {
+        let key = pick.tool().default_attr().expect("a creation tool");
+        let default = {
+            let editor = self.editor.borrow();
+            accent_drawio::model::attr(&editor.file().attrs, key).map(str::to_string)
+        };
+        match default {
+            Some(before) => {
+                let after = pick.restyle(&before);
+                if after != before {
+                    self.editor.borrow_mut().set_file_attr(key, &after);
+                    self.changed();
+                }
+            }
+            None => {
+                self.options.set(pick.apply(self.options.get()));
+                self.on_options.emit(self);
+            }
+        }
+        self.show_picks();
+    }
+
+    /// Show on the ring what the next cell of each tool will be.
+    fn show_picks(&self) {
+        let picks = Picks::of(self.editor.borrow().file(), &self.options.get());
+        self.ring.set_picks(picks);
     }
 
     pub fn ring_shown(&self) -> bool {
@@ -630,6 +658,7 @@ impl DiagramTab {
         self.save.modified.set(true);
         self.set_title();
         self.refresh();
+        self.show_picks();
         self.strip.set_pages(self.editor.borrow().file());
         self.sync_web();
         self.fill_props();
@@ -1167,6 +1196,7 @@ impl DiagramTab {
         self.banner.set_revealed(false);
         self.set_title();
         self.refresh();
+        self.show_picks();
         self.strip.set_pages(self.editor.borrow().file());
         self.sync_web();
         self.fill_props();
