@@ -10,26 +10,34 @@
   <a href="https://github.com/stroblme/accent/releases/latest"><img src="https://img.shields.io/github/v/release/stroblme/accent" alt="Latest Release"></a>
 </p>
 
-Accent is an opinionated text editor for code, markdown notes, and PDFs with an integrated terminal.
+Accent is an opinionated editor for code, markdown/org notes, and PDFs.
+It features an integrated terminal (emulator) and is AI ready without being bloated.
+I use it as my daily driver to replace VSCode, Obsidian, Xournal++, draw.io, a PDF reader and terminal emulators.
+Enjoy...
 
-- Edit code with multi-line carets, inline suggestions and syntax highlighting.
-- Write notes, use templates, and browse links and tags.
-- Read and mark up PDFs; link highlighted passages back to your notes.
-- Use split panes, shortcuts, and a command palette to work productively.
-- Work with Git history, diff-views, terminal sessions, and on remote hosts over SSH.
-- Available on Linux (Gnome) with an Android companion app
+- working in vaults (workspaces) which can be any combinations of folders, files, terminals etc.. 
+- editing code with multi-line carets, inline suggestions and syntax highlighting.
+- writing notes, use templates, and browse links and tags, just like you know from [Obsidian](https://obsidian.md/).
+- reading and annotating PDFs (handwriting support) with back-links (highlights) to your notes.
+- using split panes, shortcuts, and a command palette to work productively.
+- working with Git history, diff-views, terminal sessions, and on remote hosts over SSH.
 
 Some other cool features involve (but are not limited to):
-- Focus mode, which fades out everything that is not around the caret
-- Persistent terminal sessions a la `tmux`; no panic when closing a window with an actively running shell
-- Automatic light and dark theme with a solarized option for both
-- Presentation mode to show off whatever you're working on
-- Early version of a draw.io editor (not just embedded; an actual native rust version!)
-- MCP server and [Codegraph](https://github.com/colbymchenry/codegraph)-like `explore` command to make agents more efficient
-- LaTeX (SyncTeX) PDF <-> Code sync: navigate from text to pdf and vice-versa
+- Vault-less support; you can use Accent **just** as a PDF reader, **just** as a terminal, etc..
+- Prefer modal editors? You can use [vim](https://www.vim.org/), [helix](https://helix-editor.com/) etc. seamlessly instead of the built-in editor.
+- Focus mode, which fades out everything that is not around the caret.
+- Persistent terminal sessions a la `tmux`; don't panic when closing a window with a job running.
+- Automatic light and dark theme with a solarized option for both.
+- Presentation mode to show off whatever you're working on.
+- Early version of a native rust-based draw.io editor.
+- MCP server and [Codegraph](https://github.com/colbymchenry/codegraph)-like `explore` command to make agents more efficient.
+- LaTeX (SyncTeX) PDF <-> Code sync: navigate from text to pdf and vice-versa.
 
-Accent is open source under GPL-3.0-or-later and still evolving.
-Read the [user guide](https://stroblme.github.io/accent/) for setup and everyday tasks.
+... and many more.
+I'm constantly adding new features and fixing bugs; let me know if you find some or got new ideas.
+
+Accent is open source under GPL-3.0-or-later.
+See the [device support](#device-support) for compatibility.
 
 ## Screenshots
 
@@ -43,25 +51,10 @@ Read the [user guide](https://stroblme.github.io/accent/) for setup and everyday
 
 ![A Python program paused at a breakpoint in the Solarized theme, beside its Debug Console and output](docs/screenshot-5.png)
 
-## Device support
-
-| Feature                        | Linux (native)   | Linux (Flatpak)        | macOS 15+ | Android 12+ |
-| ------------------------------ | ---------------- | ---------------------- | --------- | ----------- |
-| Notes, search, tags, backlinks | Yes              | Yes                    | Yes       | Yes         |
-| PDF reading & highlights       | Yes              | Yes                    | Yes       | Yes         |
-| PDF drawing & page editing     | Yes              | Yes                    | Yes       | No          |
-| draw.io diagrams               | Yes              | Yes                    | Yes       | No          |
-| Git                            | Yes              | Yes                    | Yes       | No          |
-| Persistent terminals           | Yes              | Yes, with host shells  | Yes       | No          |
-| Python debugging               | Yes              | Remote vaults only     | ?         | No          |
-| Notebooks                      | Yes              | Yes, with host kernels | ?         | No          |
-| Spell checking                 | Yes              | Yes                    | No        | No          |
-| Remote vaults                  | x86-64 & AArch64 | Same architecture      | Yes       | No          |
-| MCP server                     | Yes              | Yes                    | Yes       | No          |
-
-Accent has very few resource requirements for the remote deamon, allowing you to remote develop on small devices like the Raspberry Pi Zero 2 W (512 MB).
-
 ## Get started
+
+Curious? Just try it out!
+Follow the steps below and head over to the [user guide](https://stroblme.github.io/accent/) for an initial setup.
 
 ### Desktop
 
@@ -125,6 +118,26 @@ make apk
 ```
 
 Note that the Android companion app is still in a very early version; please be gentle.
+
+## Device support
+
+Some general notes on the support and availability on different platforms:
+
+| Feature                        | Linux (native)   | Linux (Flatpak)        | macOS 15+ | Android 12+ |
+| ------------------------------ | ---------------- | ---------------------- | --------- | ----------- |
+| Notes, search, tags, backlinks | Yes              | Yes                    | Yes       | Yes         |
+| PDF reading & highlights       | Yes              | Yes                    | Yes       | Yes         |
+| PDF drawing & page editing     | Yes              | Yes                    | Yes       | No          |
+| draw.io diagrams               | Yes              | Yes                    | Yes       | No          |
+| Git                            | Yes              | Yes                    | Yes       | No          |
+| Persistent terminals           | Yes              | Yes, with host shells  | Yes       | No          |
+| Python debugging               | Yes              | Remote vaults only     | ?         | No          |
+| Notebooks                      | Yes              | Yes, with host kernels | ?         | No          |
+| Spell checking                 | Yes              | Yes                    | No        | No          |
+| Remote vaults                  | x86-64 & AArch64 | Same architecture      | Yes       | No          |
+| MCP server                     | Yes              | Yes                    | Yes       | No          |
+
+Accent has very few resource requirements for the remote deamon, allowing you to remote develop on small devices like the Raspberry Pi Zero 2 W (512 MB).
 
 ## Credits
 
