@@ -2,11 +2,11 @@
 //! that does not read as a notebook opened as text saying why), the cell commands, Open as Text,
 //! and saves through the same etag gate as notes.
 
-use accent_api::Error;
-use accent_core::Error as Core;
+use accent_core::fs::Digest;
 use accent_core::notebook::{self, Kind};
 
 use super::NotebookTab;
+use crate::save::SavesModel;
 use crate::*;
 
 impl App {
@@ -78,7 +78,7 @@ impl App {
             tab.watch_file(glib::clone!(
                 #[weak(rename_to = app)]
                 self,
-                move |tab| app.notebook_changed(tab)
+                move |tab| app.model_changed(tab)
             ));
         }
         let page = tab.page.clone();
@@ -138,8 +138,8 @@ impl App {
         }));
         tab.connect_follow(on(|app, _| app.go_to_definition()));
         self.wire_notebook_places(tab);
-        tab.connect_autosave(on(|app, tab| app.save_notebook(tab, false)));
-        tab.connect_banner(on(|app, tab| app.resolve_notebook(tab)));
+        tab.connect_autosave(on(|app, tab| app.save_model(tab, false)));
+        tab.connect_banner(on(|app, tab| app.resolve_model(tab)));
         let weak = Rc::downgrade(self);
         tab.connect_zoom(move |out| {
             if let Some(app) = weak.upgrade() {
@@ -210,7 +210,7 @@ impl App {
 
     /// Open as Text: the notebook's edits written, its tab closed, and the file opened as text.
     fn open_notebook_as_text(self: &Rc<Self>, tab: &Rc<NotebookTab>) {
-        if let Err(e) = self.flush_notebook(tab) {
+        if let Err(e) = self.flush_model(tab) {
             return self.cannot("save", e);
         }
         let key = tab.key();
@@ -221,189 +221,51 @@ impl App {
         self.pending.as_text(&key);
         self.open_path(&key);
     }
+}
 
-    /// Save through `App::start_save`, gated on the known etag: one write in flight, and none
-    /// over a change on disk that edits are waiting on.
-    pub(crate) fn save_notebook(self: &Rc<Self>, tab: &Rc<NotebookTab>, explicit: bool) {
-        if !editor::may_save(tab.save.modified.get(), tab.save.disk_changed.get()) {
-            if explicit && tab.save.disk_changed.get() {
-                self.resolve_notebook(tab);
-            }
-            return;
+impl SavesModel for NotebookTab {
+    const KIND: &'static str = "Notebook";
+    type Read = Result<(notebook::Notebook, Etag, Digest), String>;
+
+    fn parse(key: &str, read: accent_api::Result<accent_core::fs::Read>) -> Self::Read {
+        match read {
+            Ok(accent_core::fs::Read::Text(text)) => notebook::read(key, &text.text)
+                .map(|nb| (nb, text.etag, text.digest()))
+                .map_err(|e| e.to_string()),
+            Ok(_) => Err("it is no longer a text file".to_string()),
+            Err(e) => Err(e.to_string()),
         }
-        let text = tab.text();
-        self.start_save(
-            tab,
-            explicit,
-            Self::save_notebook,
-            Self::land_notebook,
-            move || text,
-        );
     }
 
-    /// `App::land_flight` for a notebook: `report` is false for a write about to go after it.
-    pub(crate) fn land_notebook(
-        self: &Rc<Self>,
-        tab: &Rc<NotebookTab>,
-        report: bool,
-    ) -> Option<bool> {
-        self.land_notebook_saying(tab, report, "Saved")
-    }
-
-    /// [`land_notebook`](Self::land_notebook) saying `said` for a write asked for. A write that
-    /// landed is what the disk holds, so no question of a change there is left.
-    fn land_notebook_saying(
-        self: &Rc<Self>,
-        tab: &Rc<NotebookTab>,
-        report: bool,
-        said: &'static str,
-    ) -> Option<bool> {
-        self.land_flight(
-            tab,
-            Self::notebook_changed,
-            move |app, tab, landed, explicit| match landed {
-                editor::Landing::Clean(etag) => {
-                    tab.mark_clean(etag);
-                    tab.clear_changed();
-                    tab.language_saved();
-                    app.sync_status();
-                    if report && explicit {
-                        app.toast(said);
-                    }
-                }
-                // Landed under newer edits, which the next save writes, as a note's does.
-                editor::Landing::Behind(etag) => {
-                    tab.save.etag.set(Some(etag));
-                    tab.clear_changed();
-                    if report && explicit {
-                        app.toast(said);
-                    }
-                }
-                editor::Landing::Failed(Error::Core(Core::ChangedOnDisk { .. })) if report => {
-                    tab.show_changed();
-                    if explicit {
-                        app.resolve_notebook(tab);
-                    }
-                }
-                editor::Landing::Failed(e) if report && e.is_offline() => {
-                    app.show_offline();
-                    if explicit {
-                        app.toast("Disconnected. Changes have not been saved");
-                    }
-                }
-                editor::Landing::Failed(e) if report => app.cannot("save", e),
-                editor::Landing::Failed(_) | editor::Landing::Stale => {}
-            },
-        )
-    }
-
-    /// Write the notebook now, gated on `expected`, and hand the error back: for a tab or a
-    /// window on its way out, which has to know whether the bytes landed.
-    pub(crate) fn write_notebook(
-        self: &Rc<Self>,
-        tab: &Rc<NotebookTab>,
-        expected: Option<Etag>,
-    ) -> Result<(), Error> {
-        self.land_notebook(tab, false);
-        let (etag, digest) = self.writer(tab)(&tab.text(), expected)?;
-        tab.mark_clean(etag);
-        tab.save.digest.set(Some(digest));
-        tab.clear_changed();
-        self.sync_status();
-        Ok(())
-    }
-
-    /// [`write_notebook`](Self::write_notebook) at the tab's own etag, if it has edits.
-    pub(crate) fn flush_notebook(self: &Rc<Self>, tab: &Rc<NotebookTab>) -> Result<(), Error> {
-        self.land_notebook(tab, false);
-        if !tab.save.modified.get() {
-            return Ok(());
+    fn reloaded(app: &Rc<App>, tab: &Rc<Self>, read: Self::Read) {
+        match read {
+            Ok((nb, etag, digest)) => {
+                tab.reload(nb, etag, digest);
+                app.sync_status();
+                app.sync_history();
+            }
+            Err(why) => app.cannot("reload", why),
         }
-        self.write_notebook(tab, tab.save.etag.get())
     }
 
-    /// The watcher says the file under a notebook moved, and not by our own write: a notebook
-    /// with no edits reloads, and one with edits asks.
-    pub(crate) fn notebook_changed(self: &Rc<Self>, tab: &Rc<NotebookTab>) {
-        self.check_disk(tab, |app, tab| match tab.save.modified.get() {
-            true => tab.show_changed(),
-            false => app.reload_notebook(tab),
-        });
+    fn mark_clean(&self, etag: Etag) {
+        NotebookTab::mark_clean(self, etag);
     }
 
-    /// Read the file again into the tab, unless the tab changed while it was read
-    /// ([`editor::Reloaded`]).
-    pub(crate) fn reload_notebook(self: &Rc<Self>, tab: &Rc<NotebookTab>) {
-        let vault = self
-            .vault()
-            .filter(|_| !doc::is_loose_key(&tab.key()))
-            .cloned();
-        let (key, path) = (tab.key(), tab.path());
-        let reading = tab.save.begin_reload(&key);
-        let (app, reloading) = (Rc::downgrade(self), Rc::downgrade(tab));
-        glib::spawn_future_local(async move {
-            let read = crate::work::off_thread("notebook reader", move || {
-                let read = match vault {
-                    Some(vault) => vault.read_text(&key),
-                    None => accent_core::fs::read_text(&path).map_err(Into::into),
-                };
-                #[cfg(feature = "bench")]
-                crate::bench::hold(&crate::bench::SLOW_RELOAD_MS);
-                match read {
-                    Ok(accent_core::fs::Read::Text(text)) => notebook::read(&key, &text.text)
-                        .map(|nb| (nb, text.etag, text.digest()))
-                        .map_err(|e| e.to_string()),
-                    Ok(_) => Err("it is no longer a text file".to_string()),
-                    Err(e) => Err(e.to_string()),
-                }
-            })
-            .await;
-            let (Some(app), Some(tab)) = (app.upgrade(), reloading.upgrade()) else {
-                return;
-            };
-            match tab.save.reloaded(&reading, &tab.key()) {
-                editor::Reloaded::Adopt => {}
-                editor::Reloaded::Edited => return tab.show_changed(),
-                editor::Reloaded::Superseded => return,
-            }
-            match read {
-                Some(Ok((nb, etag, digest))) => {
-                    tab.reload(nb, etag, digest);
-                    app.sync_status();
-                    app.sync_history();
-                }
-                Some(Err(why)) => app.cannot("reload", why),
-                None => {}
-            }
-        });
+    fn show_changed(&self) {
+        NotebookTab::show_changed(self);
     }
 
-    /// Ask which version to keep when the disk changed under unsaved edits
-    /// ([`App::ask_reload_or_overwrite`]).
-    pub(crate) fn resolve_notebook(self: &Rc<Self>, tab: &Rc<NotebookTab>) {
-        let (reloaded, written) = (tab.clone(), tab.clone());
-        self.ask_reload_or_overwrite(
-            "Notebook",
-            &tab.key(),
-            move |app| app.reload_notebook(&reloaded),
-            move |app| app.overwrite_notebook(&written),
-        );
+    fn clear_changed(&self) {
+        NotebookTab::clear_changed(self);
     }
 
-    /// Overwrite: the edits written over the disk's version on a worker, as a save is.
-    fn overwrite_notebook(self: &Rc<Self>, tab: &Rc<NotebookTab>) {
-        self.land_notebook(tab, false);
-        let text = tab.text();
-        self.start_write(
-            tab,
-            true,
-            None,
-            Self::save_notebook,
-            |app, tab, report| app.land_notebook_saying(tab, report, "Overwritten"),
-            move || text,
-        );
-        // Edits made while it is out wait on the question it answers until it lands: a save
-        // is asked for after it, as one asked for meanwhile would be.
-        tab.save.save_again.set(Some(false));
+    fn discard(&self) {
+        NotebookTab::discard(self);
+    }
+
+    /// The code cells' language server hears of it, as it does of a code tab's save.
+    fn saved(self: &Rc<Self>) {
+        self.language_saved();
     }
 }

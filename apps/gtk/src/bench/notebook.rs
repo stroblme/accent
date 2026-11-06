@@ -154,7 +154,7 @@ async fn edit_drill(app: &Rc<App>, rel: &str) {
         u8::from(steps[0] && steps[1]),
         u8::from(steps[2])
     );
-    let saved = app.flush_notebook(&tab).is_ok() && !tab.save.modified.get();
+    let saved = app.flush_model(&tab).is_ok() && !tab.save.modified.get();
     let after = std::fs::read_to_string(app.root().join(rel)).unwrap_or_default();
     println!(
         "bench notebook edit typed={} inserted={} moved={} deleted={} undone={} dirty={} \
@@ -428,7 +428,7 @@ async fn marimo_drill(app: &Rc<App>, rel: &str) {
     let before = std::fs::read_to_string(app.root().join(rel)).unwrap_or_default();
     let (_, markdown, _, _) = tab.counts();
     tab.bench_type(3, "\n");
-    let _ = app.flush_notebook(&tab);
+    let _ = app.flush_model(&tab);
     let after = std::fs::read_to_string(app.root().join(rel)).unwrap_or_default();
     let header = before.split("\n\n\n").next().unwrap_or_default();
     println!(

@@ -116,10 +116,10 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
             }
             let dirty = closing.filter(|d| d.save.modified.get());
             if let Some(diagram) = dirty
-                && let Err(e) = app.flush_diagram(&diagram)
+                && let Err(e) = app.flush_model(&diagram)
             {
                 let (tabs, page) = (tabs.clone(), page.clone());
-                app.ask_unsaved_diagram(&diagram, &e, move |app, close| {
+                app.ask_unsaved_model(&diagram, &e, move |app, close| {
                     if close {
                         app.select_survivor(&page);
                         app.forget_page(&page);
@@ -134,10 +134,10 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
                 .into_iter()
                 .find(|n| &n.page == page && n.save.modified.get());
             if let Some(notebook) = dirty
-                && let Err(e) = app.flush_notebook(&notebook)
+                && let Err(e) = app.flush_model(&notebook)
             {
                 let (tabs, page) = (tabs.clone(), page.clone());
-                app.ask_unsaved_notebook(&notebook, &e, move |app, close| {
+                app.ask_unsaved_model(&notebook, &e, move |app, close| {
                     if close {
                         app.select_survivor(&page);
                         app.forget_page(&page);
@@ -1029,20 +1029,20 @@ pub fn wire_window(app: &Rc<App>) {
                 diagram.finish_label();
             }
             for diagram in diagrams.iter().filter(|d| d.save.modified.get()) {
-                let Err(e) = app.flush_diagram(diagram) else {
+                let Err(e) = app.flush_model(diagram) else {
                     continue;
                 };
-                app.ask_unsaved_diagram(diagram, &e, |app, close| match close {
+                app.ask_unsaved_model(diagram, &e, |app, close| match close {
                     true => app.window.close(),
                     false => app.keep_open(),
                 });
                 return glib::Propagation::Stop;
             }
             for notebook in app.notebooks().iter().filter(|n| n.save.modified.get()) {
-                let Err(e) = app.flush_notebook(notebook) else {
+                let Err(e) = app.flush_model(notebook) else {
                     continue;
                 };
-                app.ask_unsaved_notebook(notebook, &e, |app, close| match close {
+                app.ask_unsaved_model(notebook, &e, |app, close| match close {
                     true => app.window.close(),
                     false => app.keep_open(),
                 });

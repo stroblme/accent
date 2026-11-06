@@ -103,12 +103,12 @@ impl App {
     /// notebook's, before a rewrite reads their files from disk.
     fn flush_models(self: &Rc<Self>) {
         for diagram in self.diagrams() {
-            if let Err(e) = self.flush_diagram(&diagram) {
+            if let Err(e) = self.flush_model(&diagram) {
                 tracing::debug!("{} not written before a rewrite: {e}", diagram.key());
             }
         }
         for notebook in self.notebooks() {
-            if let Err(e) = self.flush_notebook(&notebook) {
+            if let Err(e) = self.flush_model(&notebook) {
                 tracing::debug!("{} not written before a rewrite: {e}", notebook.key());
             }
         }
@@ -119,12 +119,12 @@ impl App {
     fn models_rewritten(self: &Rc<Self>, rels: &[String]) {
         for diagram in self.diagrams() {
             if rels.contains(&diagram.key()) {
-                self.diagram_changed(&diagram);
+                self.model_changed(&diagram);
             }
         }
         for notebook in self.notebooks() {
             if rels.contains(&notebook.key()) {
-                self.notebook_changed(&notebook);
+                self.model_changed(&notebook);
             }
         }
     }

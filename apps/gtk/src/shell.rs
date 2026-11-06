@@ -1020,14 +1020,14 @@ fn written_out(from: &Rc<App>, doc: &Doc) -> Result<PathBuf, String> {
     }
     // A notebook the same way.
     if let Doc::Notebook(n) = doc
-        && let Err(e) = from.flush_notebook(n)
+        && let Err(e) = from.flush_model(n)
     {
         return Err(format!("Cannot save: {e}"));
     }
     // A diagram the same way, a label still being typed going into its cell first.
     if let Doc::Diagram(d) = doc {
         d.finish_label();
-        if let Err(e) = from.flush_diagram(d) {
+        if let Err(e) = from.flush_model(d) {
             return Err(format!("Cannot save: {e}"));
         }
     }

@@ -3,8 +3,8 @@
 
 use super::*;
 use crate::diagram::DiagramTab;
-use crate::editor::Saves;
 use crate::notebook::NotebookTab;
+use crate::save::SavesModel;
 use pdf::online;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -299,8 +299,7 @@ pub(super) fn bench_answer_doc(app: &Rc<App>, arg: &str) {
 }
 
 /// What [`doc_drill`] does to a notebook or a diagram.
-trait Probe: Saves + Sized {
-    const KIND: &'static str;
+trait Probe: SavesModel {
     /// The file holding `version` where an edit shows.
     fn file(version: &str) -> String;
     fn find(app: &App, rel: &str) -> Option<Rc<Self>>;
@@ -308,16 +307,9 @@ trait Probe: Saves + Sized {
     fn edit(self: &Rc<Self>, mark: &str);
     /// What the tab would write now.
     fn holds(&self) -> String;
-    fn reload(app: &Rc<App>, tab: &Rc<Self>);
-    fn resolve(app: &Rc<App>, tab: &Rc<Self>);
-    /// A Ctrl+S.
-    fn save(app: &Rc<App>, tab: &Rc<Self>);
-    /// The write a closing tab makes.
-    fn flush(app: &Rc<App>, tab: &Rc<Self>) -> bool;
 }
 
 impl Probe for NotebookTab {
-    const KIND: &'static str = "notebook";
     fn file(version: &str) -> String {
         format!(
             r#"{{"cells":[{{"cell_type":"markdown","metadata":{{}},"source":["{version}"]}}],"metadata":{{}},"nbformat":4,"nbformat_minor":5}}"#
@@ -332,22 +324,9 @@ impl Probe for NotebookTab {
     fn holds(&self) -> String {
         self.text()
     }
-    fn reload(app: &Rc<App>, tab: &Rc<Self>) {
-        app.reload_notebook(tab);
-    }
-    fn resolve(app: &Rc<App>, tab: &Rc<Self>) {
-        app.resolve_notebook(tab);
-    }
-    fn save(app: &Rc<App>, tab: &Rc<Self>) {
-        app.save_notebook(tab, true);
-    }
-    fn flush(app: &Rc<App>, tab: &Rc<Self>) -> bool {
-        app.flush_notebook(tab).is_ok()
-    }
 }
 
 impl Probe for DiagramTab {
-    const KIND: &'static str = "diagram";
     fn file(version: &str) -> String {
         super::diagram::SAMPLE.replace(r#"name="One""#, &format!(r#"name="{version}""#))
     }
@@ -361,22 +340,10 @@ impl Probe for DiagramTab {
     fn holds(&self) -> String {
         self.text()
     }
-    fn reload(app: &Rc<App>, tab: &Rc<Self>) {
-        app.reload_diagram(tab);
-    }
-    fn resolve(app: &Rc<App>, tab: &Rc<Self>) {
-        app.resolve_diagram(tab);
-    }
-    fn save(app: &Rc<App>, tab: &Rc<Self>) {
-        app.save_diagram(tab, true);
-    }
-    fn flush(app: &Rc<App>, tab: &Rc<Self>) -> bool {
-        app.flush_diagram(tab).is_ok()
-    }
 }
 
 async fn doc_drill<T: Probe>(app: &Rc<App>, rel: &str) {
-    let kind = T::KIND;
+    let kind = T::KIND.to_lowercase();
     let path = app.root().join(rel);
     let write = |version: &str| std::fs::write(&path, T::file(version)).is_ok();
     let cases = [
@@ -414,25 +381,25 @@ async fn doc_drill<T: Probe>(app: &Rc<App>, rel: &str) {
             "racing" => {
                 SLOW_RELOAD_MS.store(800, Ordering::Relaxed);
                 write("theirs");
-                T::reload(app, &tab);
+                app.reload_model(&tab);
                 tab.edit("mine");
             }
             "overlap" => {
                 SLOW_RELOAD_MS.store(1500, Ordering::Relaxed);
                 write("theirs A");
-                T::reload(app, &tab);
+                app.reload_model(&tab);
                 glib::timeout_future(Duration::from_millis(300)).await;
                 SLOW_RELOAD_MS.store(200, Ordering::Relaxed);
                 write("theirs B");
-                T::reload(app, &tab);
+                app.reload_model(&tab);
             }
             "during" | "flush" => {
                 tab.edit("mine");
                 SLOW_WRITE_MS.store(1500, Ordering::Relaxed);
-                T::save(app, &tab);
+                app.save_model(&tab, true);
                 tab.edit("during");
                 if case == "flush" {
-                    said = format!(" flushed={}", T::flush(app, &tab));
+                    said = format!(" flushed={}", app.flush_model(&tab).is_ok());
                 }
                 let toast = landed(app, &tab, true).await;
                 let file = std::fs::read_to_string(&path).unwrap_or_default();
@@ -446,7 +413,7 @@ async fn doc_drill<T: Probe>(app: &Rc<App>, rel: &str) {
                 tab.edit("mine");
                 // Before the watcher can say so: the write meets the change at the etag gate.
                 write("theirs");
-                T::save(app, &tab);
+                app.save_model(&tab, true);
                 let mut dialog = None;
                 for _ in 0..100 {
                     dialog = app
@@ -473,7 +440,7 @@ async fn doc_drill<T: Probe>(app: &Rc<App>, rel: &str) {
             "offline" => {
                 tab.edit("mine");
                 OFFLINE_WRITE.store(true, Ordering::Relaxed);
-                T::save(app, &tab);
+                app.save_model(&tab, true);
                 let toast = landed(app, &tab, false).await;
                 said = format!(
                     " connection={} toast={toast:?}",
@@ -499,7 +466,7 @@ async fn doc_drill<T: Probe>(app: &Rc<App>, rel: &str) {
                     "overwrite" => SLOW_WRITE_MS.store(1500, Ordering::Relaxed),
                     _ => mode(0o555),
                 }
-                T::resolve(app, &tab);
+                app.resolve_model(&tab);
                 let Some(dialog) = app
                     .window
                     .visible_dialog()

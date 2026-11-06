@@ -6,14 +6,17 @@ use accent_api::Error;
 use accent_core::Error as Core;
 use accent_core::fs::Digest;
 
+mod model;
+pub(crate) use model::SavesModel;
+
 impl App {
     pub fn save_active(self: &Rc<Self>) {
         if let Some(tab) = self.active() {
             self.save_tab(&tab, true);
         } else if let Some(diagram) = self.active_diagram() {
-            self.save_diagram(&diagram, true);
+            self.save_model(&diagram, true);
         } else if let Some(notebook) = self.active_notebook() {
-            self.save_notebook(&notebook, true);
+            self.save_model(&notebook, true);
         }
     }
 
@@ -516,79 +519,6 @@ impl App {
         );
     }
 
-    /// The same question for a diagram on its way out.
-    pub(crate) fn ask_unsaved_diagram(
-        self: &Rc<Self>,
-        tab: &Rc<crate::diagram::DiagramTab>,
-        error: &Error,
-        after: impl Fn(&Rc<Self>, bool) + 'static,
-    ) {
-        let (discarded, written) = (tab.clone(), tab.clone());
-        self.ask_unsaved_about(
-            &tab.key(),
-            error,
-            move || discarded.discard(),
-            move |app| app.write_diagram(&written, None),
-            after,
-        );
-    }
-
-    /// The same question for a notebook on its way out.
-    pub(crate) fn ask_unsaved_notebook(
-        self: &Rc<Self>,
-        tab: &Rc<crate::notebook::NotebookTab>,
-        error: &Error,
-        after: impl Fn(&Rc<Self>, bool) + 'static,
-    ) {
-        let (discarded, written) = (tab.clone(), tab.clone());
-        self.ask_unsaved_about(
-            &tab.key(),
-            error,
-            move || discarded.discard(),
-            move |app| app.write_notebook(&written, None),
-            after,
-        );
-    }
-
-    /// Ask which version to keep when the disk changed under a diagram's or a notebook's unsaved
-    /// edits, `kind` saying which: there is no comparison of two of them to offer, as there is
-    /// of two notes, so `reload` throws the edits away and `overwrite` the disk's version.
-    pub(crate) fn ask_reload_or_overwrite(
-        self: &Rc<Self>,
-        kind: &str,
-        key: &str,
-        reload: impl FnOnce(&Rc<Self>) + 'static,
-        overwrite: impl FnOnce(&Rc<Self>) + 'static,
-    ) {
-        let dialog = dialogs::alert(
-            &format!("{kind} Changed on Disk"),
-            &format!(
-                "{} changed outside Accent. Reload to discard your edits, or overwrite the saved version.",
-                doc::file_name(key)
-            ),
-            &[
-                ("cancel", "Cancel", adw::ResponseAppearance::Default),
-                ("reload", "Reload", adw::ResponseAppearance::Destructive),
-                (
-                    "overwrite",
-                    "Overwrite",
-                    adw::ResponseAppearance::Destructive,
-                ),
-            ],
-            "cancel",
-        );
-        let app = self.clone();
-        dialogs::choose(
-            &dialog,
-            Some(&self.window),
-            move |response| match response.as_str() {
-                "reload" => reload(&app),
-                "overwrite" => overwrite(&app),
-                _ => {}
-            },
-        );
-    }
-
     /// The question itself, whatever kind of document holds the edits: `discard` throws them
     /// away, `overwrite` writes them over whatever is on disk.
     fn ask_unsaved_about(
@@ -651,7 +581,7 @@ impl App {
         // font that only closing the editor lets go of.
         if let Some(Doc::Diagram(d)) = self.doc_for_page(page) {
             d.finish_label();
-            if let Err(e) = self.flush_diagram(&d) {
+            if let Err(e) = self.flush_model(&d) {
                 tracing::debug!("a closing diagram was not written: {e}");
             }
         }
@@ -659,7 +589,7 @@ impl App {
         // ends with its tab.
         if let Some(Doc::Notebook(n)) = self.doc_for_page(page) {
             self.stop_kernel(&n);
-            if let Err(e) = self.flush_notebook(&n) {
+            if let Err(e) = self.flush_model(&n) {
                 tracing::debug!("a closing notebook was not written: {e}");
             }
         }
@@ -1054,7 +984,7 @@ impl App {
                 (Contents::Text(tab.for_disk(), note), tab.save.edits.get())
             }
             Doc::Diagram(diagram) => {
-                self.land_diagram(diagram, false);
+                self.land_model(diagram, false);
                 diagram.finish_label();
                 (
                     Contents::Text(diagram.for_disk(), false),
@@ -1062,7 +992,7 @@ impl App {
                 )
             }
             Doc::Notebook(notebook) => {
-                self.land_notebook(notebook, false);
+                self.land_model(notebook, false);
                 (
                     Contents::Text(notebook.for_disk(), false),
                     notebook.save.edits.get(),

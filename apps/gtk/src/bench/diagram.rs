@@ -420,7 +420,7 @@ fn edit_round(app: &Rc<App>, tab: &Rc<crate::diagram::DiagramTab>) {
     );
     tab.redo();
     let etag = tab.save.etag.get();
-    let flushed = app.flush_diagram(tab);
+    let flushed = app.flush_model(tab);
     println!(
         "bench diagram flush {:?} modified={} etag_moved={}",
         flushed.map_err(|e| e.to_string()),
@@ -1170,7 +1170,7 @@ fn layers(app: &Rc<App>, rel: &str) {
         tab.redo();
         press("2", "Lock Layer");
         press(&added, "Hide Layer");
-        let flushed = app.flush_diagram(&tab);
+        let flushed = app.flush_model(&tab);
         let disk = std::fs::read(tab.path()).expect("the file");
         let back = accent_drawio::File::from_bytes(&disk).expect("it reads back");
         let written: Vec<String> = back.pages[0]
@@ -1373,7 +1373,7 @@ fn strip(app: &Rc<App>, rel: &str) {
                 );
                 glib::timeout_future(Duration::from_secs(2)).await;
             }
-            let _ = app.flush_diagram(&tab);
+            let _ = app.flush_model(&tab);
             let file = std::fs::read(app.root().join(&rel)).unwrap_or_default();
             let names: Vec<String> = accent_drawio::File::from_bytes(&file)
                 .map(|f| f.pages.iter().map(|p| p.name().to_string()).collect())

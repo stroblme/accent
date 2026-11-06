@@ -2,18 +2,18 @@
 //! the same etag gate as notes.
 
 use accent_api::Error;
-use accent_core::Error as Core;
 use accent_core::fs::{Digest, Etag};
 use accent_drawio::File;
 
 use super::{DiagramTab, Tool};
+use crate::save::SavesModel;
 use crate::*;
 
 /// Embedded-image size limit; base64 adds a third to the diagram file size.
 const MAX_IMAGE: usize = 2 * 1024 * 1024;
 
 /// What reading a diagram off the disk came to.
-enum Parsed {
+pub(crate) enum Parsed {
     Diagram(File, Etag, Digest),
     /// Not something to draw on, and why: a status page's title and sentence.
     Refused(&'static str, String),
@@ -118,7 +118,7 @@ impl App {
             tab.watch_file(glib::clone!(
                 #[weak(rename_to = app)]
                 self,
-                move |tab| app.diagram_changed(tab)
+                move |tab| app.model_changed(tab)
             ));
         }
         {
@@ -183,9 +183,9 @@ impl App {
                 app.sync_status();
             }
         }));
-        tab.connect_autosave(on(|app, tab| app.save_diagram(tab, false)));
+        tab.connect_autosave(on(|app, tab| app.save_model(tab, false)));
         tab.connect_image(on(|app, tab| app.pick_image(tab)));
-        tab.connect_banner(on(|app, tab| app.resolve_diagram(tab)));
+        tab.connect_banner(on(|app, tab| app.resolve_model(tab)));
         // Load: remembered for the file, and the note in the preview drawn again with them.
         tab.connect_web(on(|app, tab| {
             app.web_images.borrow_mut().insert(tab.key());
@@ -355,185 +355,6 @@ impl App {
         });
     }
 
-    /// Save through `App::start_save`, gated on the known etag. Allow one in-flight
-    /// write and pause on disk conflicts with unsaved edits.
-    pub(crate) fn save_diagram(self: &Rc<Self>, tab: &Rc<DiagramTab>, explicit: bool) {
-        if !editor::may_save(tab.save.modified.get(), tab.save.disk_changed.get()) {
-            if explicit && tab.save.disk_changed.get() {
-                self.resolve_diagram(tab);
-            }
-            return;
-        }
-        let file = tab.file();
-        self.start_save(
-            tab,
-            explicit,
-            Self::save_diagram,
-            Self::land_diagram,
-            move || file.to_xml(),
-        );
-    }
-
-    /// `App::land_flight` for a diagram: `report` is false for a write about to go after it.
-    pub(crate) fn land_diagram(
-        self: &Rc<Self>,
-        tab: &Rc<DiagramTab>,
-        report: bool,
-    ) -> Option<bool> {
-        self.land_diagram_saying(tab, report, "Saved")
-    }
-
-    /// [`land_diagram`](Self::land_diagram) saying `said` for a write asked for. A write that
-    /// landed is what the disk holds, so no question of a change there is left.
-    fn land_diagram_saying(
-        self: &Rc<Self>,
-        tab: &Rc<DiagramTab>,
-        report: bool,
-        said: &'static str,
-    ) -> Option<bool> {
-        self.land_flight(
-            tab,
-            Self::diagram_changed,
-            move |app, tab, landed, explicit| match landed {
-                editor::Landing::Clean(etag) => {
-                    tab.mark_clean(etag);
-                    tab.clear_changed();
-                    app.sync_status();
-                    if report && explicit {
-                        app.toast(said);
-                    }
-                }
-                // Landed under newer edits, which the next save writes, as a note's does.
-                editor::Landing::Behind(etag) => {
-                    tab.save.etag.set(Some(etag));
-                    tab.clear_changed();
-                    if report && explicit {
-                        app.toast(said);
-                    }
-                }
-                editor::Landing::Failed(Error::Core(Core::ChangedOnDisk { .. })) if report => {
-                    tab.show_changed();
-                    if explicit {
-                        app.resolve_diagram(tab);
-                    }
-                }
-                editor::Landing::Failed(e) if report && e.is_offline() => {
-                    app.show_offline();
-                    if explicit {
-                        app.toast("Disconnected. Changes have not been saved");
-                    }
-                }
-                editor::Landing::Failed(e) if report => app.cannot("save", e),
-                editor::Landing::Failed(_) | editor::Landing::Stale => {}
-            },
-        )
-    }
-
-    /// Write the diagram now, gated on `expected`, and hand the error back: for a tab or a
-    /// window on its way out, which has to know whether the bytes landed.
-    pub(crate) fn write_diagram(
-        self: &Rc<Self>,
-        tab: &Rc<DiagramTab>,
-        expected: Option<Etag>,
-    ) -> Result<(), Error> {
-        self.land_diagram(tab, false);
-        let (etag, digest) = self.writer(tab)(&tab.text(), expected)?;
-        tab.mark_clean(etag);
-        tab.save.digest.set(Some(digest));
-        tab.clear_changed();
-        self.sync_status();
-        Ok(())
-    }
-
-    /// [`write_diagram`](Self::write_diagram) at the tab's own etag, if it has anything to
-    /// write.
-    pub(crate) fn flush_diagram(self: &Rc<Self>, tab: &Rc<DiagramTab>) -> Result<(), Error> {
-        self.land_diagram(tab, false);
-        if !tab.save.modified.get() {
-            return Ok(());
-        }
-        self.write_diagram(tab, tab.save.etag.get())
-    }
-
-    /// The watcher says the file under a diagram moved, and it is not our own write
-    /// (`App::check_disk`): a diagram with no edits reloads, and one with edits asks.
-    pub(crate) fn diagram_changed(self: &Rc<Self>, tab: &Rc<DiagramTab>) {
-        self.check_disk(tab, |app, tab| match tab.save.modified.get() {
-            true => tab.show_changed(),
-            false => app.reload_diagram(tab),
-        });
-    }
-
-    /// Read the file again into the tab, unless the tab changed while it was read
-    /// ([`editor::Reloaded`]).
-    pub(crate) fn reload_diagram(self: &Rc<Self>, tab: &Rc<DiagramTab>) {
-        let vault = self
-            .vault()
-            .filter(|_| !doc::is_loose_key(&tab.key()))
-            .cloned();
-        let (key, path) = (tab.key(), tab.path());
-        let reading = tab.save.begin_reload(&key);
-        let (app, reloading) = (Rc::downgrade(self), Rc::downgrade(tab));
-        glib::spawn_future_local(async move {
-            let parsed = crate::work::off_thread("diagram reader", move || {
-                let read = match vault {
-                    Some(vault) => vault.read_text(&key),
-                    None => accent_core::fs::read_text(&path).map_err(Into::into),
-                };
-                #[cfg(feature = "bench")]
-                crate::bench::hold(&crate::bench::SLOW_RELOAD_MS);
-                parse(read)
-            })
-            .await;
-            let (Some(app), Some(tab)) = (app.upgrade(), reloading.upgrade()) else {
-                return;
-            };
-            match tab.save.reloaded(&reading, &tab.key()) {
-                editor::Reloaded::Adopt => {}
-                editor::Reloaded::Edited => return tab.show_changed(),
-                editor::Reloaded::Superseded => return,
-            }
-            match parsed {
-                Some(Parsed::Diagram(file, etag, digest)) => {
-                    tab.reload(file, etag, digest);
-                    app.sync_status();
-                }
-                Some(Parsed::Refused(_, why)) => app.cannot("reload", why),
-                Some(Parsed::Failed(e)) => app.cannot("reload", e),
-                None => {}
-            }
-        });
-    }
-
-    /// Ask which version to keep when the disk changed under unsaved edits
-    /// ([`App::ask_reload_or_overwrite`]).
-    pub(crate) fn resolve_diagram(self: &Rc<Self>, tab: &Rc<DiagramTab>) {
-        let (reloaded, written) = (tab.clone(), tab.clone());
-        self.ask_reload_or_overwrite(
-            "Diagram",
-            &tab.key(),
-            move |app| app.reload_diagram(&reloaded),
-            move |app| app.overwrite_diagram(&written),
-        );
-    }
-
-    /// Overwrite: the edits written over the disk's version on a worker, as a save is.
-    fn overwrite_diagram(self: &Rc<Self>, tab: &Rc<DiagramTab>) {
-        self.land_diagram(tab, false);
-        let file = tab.file();
-        self.start_write(
-            tab,
-            true,
-            None,
-            Self::save_diagram,
-            |app, tab, report| app.land_diagram_saying(tab, report, "Overwritten"),
-            move || file.to_xml(),
-        );
-        // Edits made while it is out wait on the question it answers until it lands: a save
-        // is asked for after it, as one asked for meanwhile would be.
-        tab.save.save_again.set(Some(false));
-    }
-
     /// Paste into a diagram: text first, as GTK's own paste reads it, a diagram in it or a text
     /// cell (`DiagramTab::paste_text`); else a picture, embedded as Add Image embeds one.
     fn paste_diagram(self: &Rc<Self>, tab: &Rc<DiagramTab>) {
@@ -634,5 +455,47 @@ impl App {
             };
             tab.add_image(&mime, &bytes, size);
         });
+    }
+}
+
+impl SavesModel for DiagramTab {
+    const KIND: &'static str = "Diagram";
+    type Read = Parsed;
+
+    /// The model as it is now, written out on the worker: up to 16 MiB of XML.
+    fn contents(&self) -> impl FnOnce() -> String + Send + 'static {
+        let file = self.file();
+        move || file.to_xml()
+    }
+
+    fn parse(_: &str, read: accent_api::Result<accent_core::fs::Read>) -> Parsed {
+        parse(read)
+    }
+
+    fn reloaded(app: &Rc<App>, tab: &Rc<Self>, read: Parsed) {
+        match read {
+            Parsed::Diagram(file, etag, digest) => {
+                tab.reload(file, etag, digest);
+                app.sync_status();
+            }
+            Parsed::Refused(_, why) => app.cannot("reload", why),
+            Parsed::Failed(e) => app.cannot("reload", e),
+        }
+    }
+
+    fn mark_clean(&self, etag: Etag) {
+        DiagramTab::mark_clean(self, etag);
+    }
+
+    fn show_changed(&self) {
+        DiagramTab::show_changed(self);
+    }
+
+    fn clear_changed(&self) {
+        DiagramTab::clear_changed(self);
+    }
+
+    fn discard(&self) {
+        DiagramTab::discard(self);
     }
 }
