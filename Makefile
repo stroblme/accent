@@ -22,6 +22,9 @@ DARWIN    := $(filter Darwin,$(shell uname -s))
 APPSDIR   ?= $(HOME)/Applications
 # The workspace's, for Accent.app's Info.plist and the disk image's name.
 VERSION   := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml)
+# Honours CARGO_TARGET_DIR, which parallel worktrees must each set to a directory of their
+# own: without this `smoke` and `install` look for a binary cargo never wrote there.
+TARGET_ROOT := $(or $(CARGO_TARGET_DIR),target)
 
 # libpdfium is a 7 MB binary, so it is not in git: `make pdfium` fetches the matching build from
 # bblanchon/pdfium-binaries. Bump PDFIUM_BUILD and every checksum below it together; the release
@@ -37,9 +40,9 @@ PDFIUM_SHA256_linux-arm64 := d7247b33ae5545615a5e877235dd97afc879e3a8805689684f5
 PDFIUM_SHA256_mac-x64     := 40865f34642c34d82cc336132df9e0347133f4692cd46776647af160f9a5cca9
 PDFIUM_SHA256_mac-arm64   := 0d6781fe08906baff3d82c90953e519fbc4eb253fe76431e5ed53b157763b97c
 PDFIUM_SHA256 := $(PDFIUM_SHA256_$(PDFIUM_OS)-$(PDFIUM_ARCH))
-PDFIUM_LIB    := vendor/pdfium/libpdfium.$(if $(filter mac,$(PDFIUM_OS)),dylib,so)
+PDFIUM_LIB    := vendor/pdfium/libpdfium.$(if $(DARWIN),dylib,so)
 # macOS has `shasum`, not `sha256sum`.
-SHA256_CHECK  := $(if $(filter mac,$(PDFIUM_OS)),shasum -a 256 -c -,sha256sum -c -)
+SHA256_CHECK  := $(if $(DARWIN),shasum -a 256 -c -,sha256sum -c -)
 
 # Android. The two ABIs the APK ships: the phone, and the emulator this machine can run.
 # `jniLibs/<abi>` is where Gradle packs a bare `.so` into the APK, and where Android's linker
@@ -59,7 +62,7 @@ ANDROID_PROFILE_FLAG := $(if $(filter release,$(PROFILE)),--profile android,)
 # uniffi keeps its metadata in the symbol table, which that profile strips, so the bindings are
 # read out of a host build of the same crate — the flow uniffi documents. Dev profile, because
 # that is the one the generator itself is built with.
-HOST_FFI_LIB := $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR),target)/debug/libaccent_android.so
+HOST_FFI_LIB := $(TARGET_ROOT)/debug/libaccent_android.so
 # The NDK's own readelf, for the 16 KB page-size check; the host's would do, but the NDK is what
 # a machine building for Android is guaranteed to have.
 ANDROID_NDK_HOME ?= $(firstword $(wildcard $(HOME)/Android/Sdk/ndk/*))
@@ -69,13 +72,11 @@ READELF ?= $(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-re
 # once per machine `uname -m` names, and a connection uploads the one its host runs. Its name on
 # the remote is the builds' blake3, so a rebuild re-provisions exactly once.
 SERVER_ARCHES := x86_64 aarch64
-SERVER_BIN     = $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR),target)/$(1)-unknown-linux-musl/$(PROFILE)/accent-cli
+SERVER_BIN     = $(TARGET_ROOT)/$(1)-unknown-linux-musl/$(PROFILE)/accent-cli
 
 # `cargo build` puts a release build under target/release and a dev build under target/debug.
 CARGO_PROFILE_FLAG := $(if $(filter release,$(PROFILE)),--release,)
-# Honours CARGO_TARGET_DIR, which parallel worktrees must each set to a directory of their
-# own: without this `smoke` and `install` look for a binary cargo never wrote there.
-TARGET_DIR := $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR),target)/$(PROFILE)
+TARGET_DIR := $(TARGET_ROOT)/$(PROFILE)
 
 # The vault used by every test and benchmark. Never point these at a real vault.
 VAULT     ?= testvault
@@ -84,12 +85,8 @@ VAULT_FILES ?= 40000
 # Repo tooling rather than a CLI subcommand, so the fixtures are not a public feature of the app.
 GEN_VAULT := crates/core/examples/gen-vault.rs
 
-# Headless runs need an X server; :99 is what CI uses. GDK_BACKEND=x11 because
-# DISPLAY alone leaves GTK on a Wayland session; cairo because llvmpipe, Xvfb's GL, costs more CPU
-# and memory; no a11y because the private bus has no registry; fatal-criticals so a GTK critical
-# fails the check.
-DISPLAY_NUM ?= 99
-XVFB_ENV := DISPLAY=:$(DISPLAY_NUM) GDK_BACKEND=x11 GSK_RENDERER=cairo GTK_A11Y=none G_DEBUG=fatal-criticals
+# Headless runs need an X server; :99 is what CI uses. build-aux/headless.sh launches on it.
+export DISPLAY_NUM ?= 99
 
 .DEFAULT_GOAL := all
 .PHONY: all core gtk gtk-bench clean distclean install uninstall test test-pdf check fmt fmt-check \
@@ -123,10 +120,9 @@ gtk-bench:
 #
 # One line per missing item; `install-requirements` installs them per distro. The library
 # floors are what the binding features in apps/gtk/Cargo.toml ask pkg-config for (`v4_18` is
-# gtk4 >= 4.18), HarfBuzz's what crates/math/build.rs asks for, and Rust's is the workspace's
-# `rust-version` in Cargo.toml.
+# gtk4 >= 4.18) and HarfBuzz's what crates/math/build.rs asks for.
 # An optional item only warns: the app runs without it and lacks the feature it names.
-RUST_MIN := 1.95
+RUST_MIN := $(shell sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)
 # On macOS VTE 0.78 is optional, as `gtk` builds without what it is for there.
 GTK_LIBS := gtk4:4.18 libadwaita-1:1.8 gtksourceview-5:5.18 harfbuzz:8.3.1 libsoup-3.0:3.0 \
             $(if $(DARWIN),vte-2.91-gtk4:0.76,vte-2.91-gtk4:0.78) libspelling-1:0.1
@@ -199,8 +195,6 @@ test-pdf: pdfium
 ## pdfium: fetch libpdfium into vendor/pdfium (does nothing if it is already there)
 pdfium: | $(PDFIUM_LIB)
 $(PDFIUM_LIB):
-	@test -n "$(PDFIUM_SHA256)" || \
-		{ echo "PDFIUM_SHA256 is empty: refusing to install an unverified libpdfium"; exit 1; }
 	@mkdir -p $(dir $(PDFIUM_LIB))
 	curl -fL --retry 3 -o $(PDFIUM_LIB).tgz "$(PDFIUM_URL)"
 	echo "$(PDFIUM_SHA256)  $(PDFIUM_LIB).tgz" | $(SHA256_CHECK)
@@ -239,22 +233,13 @@ bindings:
 		--language kotlin --out-dir android/app/build/generated/uniffi
 
 ## pdfium-android: fetch libpdfium for every Android ABI into the APK's jniLibs
-pdfium-android: $(foreach abi,$(ANDROID_ABIS),$(JNI_LIBS)/$(abi)/libpdfium.so)
-
-# One rule per ABI: the checksum and the asset name both depend on which one it is, and a static
-# pattern rule cannot reach either.
-define pdfium-android-rule
-$(JNI_LIBS)/$(1)/libpdfium.so:
-	@test -n "$(PDFIUM_SHA256_android_$(1))" || \
-		{ echo "no sha256 for pdfium-android-$(PDFIUM_ASSET_$(1)): refusing to install it unverified"; exit 1; }
-	@mkdir -p $(JNI_LIBS)/$(1)
-	curl -fL --retry 3 -o $(JNI_LIBS)/$(1)/pdfium.tgz \
-		"$(PDFIUM_RELEASE)/pdfium-android-$(PDFIUM_ASSET_$(1)).tgz"
-	echo "$(PDFIUM_SHA256_android_$(1))  $(JNI_LIBS)/$(1)/pdfium.tgz" | sha256sum -c -
-	tar -xzf $(JNI_LIBS)/$(1)/pdfium.tgz -C $(JNI_LIBS)/$(1) --strip-components=1 lib/libpdfium.so
-	rm -f $(JNI_LIBS)/$(1)/pdfium.tgz
-endef
-$(foreach abi,$(ANDROID_ABIS),$(eval $(call pdfium-android-rule,$(abi))))
+pdfium-android: $(ANDROID_ABIS:%=$(JNI_LIBS)/%/libpdfium.so)
+$(JNI_LIBS)/%/libpdfium.so:
+	@mkdir -p $(@D)
+	curl -fL --retry 3 -o $(@D)/pdfium.tgz "$(PDFIUM_RELEASE)/pdfium-android-$(PDFIUM_ASSET_$*).tgz"
+	echo "$(PDFIUM_SHA256_android_$*)  $(@D)/pdfium.tgz" | sha256sum -c -
+	tar -xzf $(@D)/pdfium.tgz -C $(@D) --strip-components=1 lib/libpdfium.so
+	rm -f $(@D)/pdfium.tgz
 
 ## android-test: run the app's own unit tests (needs a JDK and the SDK)
 android-test:
@@ -320,6 +305,7 @@ check: fmt-check clippy test drills
 doc:
 	$(CARGO) doc --workspace --no-deps --open
 
+## docs: serve the mdBook in docs/ and open it (needs mdbook)
 docs:
 	mdbook serve docs --open
 
@@ -337,191 +323,21 @@ $(VAULT): $(GEN_VAULT)
 	$(CARGO) run $(CARGO_PROFILE_FLAG) -p accent-core --example gen-vault -- \
 		$(VAULT) --notes $(VAULT_NOTES) --files $(VAULT_FILES) --force
 
-# The start of a headless launch's command line. A private session bus per run: accent is a
-# single-instance GApplication, so without one a second invocation forwards its arguments to
-# whatever instance is already up and exits 0, which makes a check pass while proving nothing.
-# It starts no services, for the reasons build-aux/headless-bus.conf gives.
-# The XDG dirs point at a scratch directory: a check must neither read the user's config nor
-# write a session and an index.
-# TMPDIR as well, where the terminal holder listens and every start sweeps for orphaned shells;
-# under /tmp whatever the caller's is, because a unix socket path is at most 108 bytes.
-# A keyfile there sets the accent colour and the monospace font, which the drills print and a
-# distribution may change (Ubuntu: orange, Ubuntu Sans Mono); libadwaita reads the accent from
-# GSettings only with ADW_DISABLE_PORTAL. DejaVu Sans Mono is as wide as GNOME's Adwaita Mono,
-# which Debian and Ubuntu do not package.
-HEADLESS = xdg=$$(mktemp -d /tmp/accent-headless-XXXXXX) && trap 'rm -rf "$$xdg"' EXIT && \
-	mkdir -p "$$xdg/tmp" "$$xdg/vault" "$$xdg/config/glib-2.0/settings" && \
-	printf "[org/gnome/desktop/interface]\naccent-color='blue'\nmonospace-font-name='DejaVu Sans Mono 11'\n" \
-		>"$$xdg/config/glib-2.0/settings/keyfile" && \
-	env XDG_CONFIG_HOME="$$xdg/config" XDG_CACHE_HOME="$$xdg/cache" \
-		XDG_STATE_HOME="$$xdg/state" XDG_DATA_HOME="$$xdg/data" TMPDIR="$$xdg/tmp" \
-		GSETTINGS_BACKEND=keyfile ADW_DISABLE_PORTAL=1 \
-	dbus-run-session --config-file=$(CURDIR)/build-aux/headless-bus.conf -- env $(XVFB_ENV)
-
 ## xvfb: start the X server the headless checks draw on, unless it is already up
 xvfb:
 	@command -v Xvfb >/dev/null || { echo "Xvfb is not installed"; exit 1; }
 	@# The pid in the display's lock file, not its socket, which a server that died uncleanly
 	@# leaves behind, nor `pgrep -f "Xvfb :N"`, which matches the shell running it.
-	@kill -0 $$(cat /tmp/.X$(DISPLAY_NUM)-lock 2>/dev/null) 2>/dev/null || (Xvfb :$(DISPLAY_NUM) -screen 0 1400x900x24 >/dev/null 2>&1 &)
-	@sleep 2
+	@kill -0 $$(cat /tmp/.X$(DISPLAY_NUM)-lock 2>/dev/null) 2>/dev/null || \
+		{ (Xvfb :$(DISPLAY_NUM) -screen 0 1400x900x24 >/dev/null 2>&1 &); sleep 2; }
 
 ## smoke: headless start-up check, fails on any GTK critical
 smoke: gtk-bench vault xvfb
-	$(HEADLESS) ACCENT_BENCH_SWITCHER=meeting timeout 60 $(TARGET_DIR)/accent $(VAULT)
+	build-aux/headless.sh ACCENT_BENCH_SWITCHER=meeting timeout 60 $(TARGET_DIR)/accent $(VAULT)
 
-## drills: run the drills that assert under Xvfb, each against the lines kept beside it
-#
-# `ACCENT_BENCH_KEYS=1` is multi-caret's regression cover: the key semantics, the carets and the
-# selections, in a view of its own, so an empty scratch vault is all it needs. Written to a file
-# first, so a run that crashes or times out fails on its exit status as well.
-#
-# `ACCENT_BENCH_CLOSE=1` exits 1 when a closed window leaves its vault referenced, which on a
-# remote vault keeps its `serve` and forwards up. One note in the vault, so a tab is open too.
-#
-# `ACCENT_BENCH_COMPLETE` types completions into a note and into a C file answered by
-# `build-aux/fake-lsp.py`, configured for the scratch vault, and is held against `complete.expected`.
-#
-# `ACCENT_BENCH_QUICKFIX` opens Quick Fix's menu on a C file and a notebook's code cell, which
-# `build-aux/fake-lsp.py --actions` answers, and applies each kind of code action, held against
-# `quickfix.expected`.
-#
-# `ACCENT_BENCH_SWITCHER=goto:…` exits 1 when a note picked in Go to File, from the Files tree or
-# from a note, has not taken the keyboard; the keys are real, through XTEST.
-#
-# `ACCENT_BENCH_TABS=toggle:…` exits 1 when a real `Ctrl+M`, pressed from a note, its preview tab,
-# the Files tree, a pane beside or a tab looked at, leaves another tab in front or the keyboard
-# outside it.
-#
-# `ACCENT_BENCH_TABS=commands` opens Run Command over a note and a PDF it writes, and exits 1 where
-# one lists a command of the other's or leaves out one of its own. Skipped without libpdfium, which
-# opens the PDF.
-#
-# `ACCENT_BENCH_DEBUG` debugs a small Python program with debugpy, held against `debug.expected`,
-# and is skipped where `python3` has no debugpy. Its program runs in a terminal tab, so under a
-# scratch HOME.
-#
-# `ACCENT_BENCH_KERNEL` writes a Jupyter notebook and runs it on an ipykernel, held against
-# `kernel.expected`, and is skipped where `python3` has no ipykernel; under a scratch HOME too,
-# since IPython keeps its history in `~/.ipython`. `ACCENT_BENCH_KERNEL=spec:` runs notebooks of
-# another language on fake kernelspecs it writes into a scratch `JUPYTER_PATH`, which run
-# ipykernel, held against `kernelspec.expected`.
-#
-# `ACCENT_BENCH_NOTEBOOK_LSP` writes two notebooks whose code cells `fake-lsp.py --notebook`
-# answers, configured for the scratch vault, and is held against `notebook-lsp.expected`.
-#
-# `ACCENT_BENCH_SEARCH=pdf:` writes a PDF that names a word on its third page, waits for the PDF
-# text pass to read it, and opens its Search row, which has to land on page 3 with the match
-# marked; then Ctrl+Shift+F, through XTEST, has to take a selection on the page and one in the
-# find bar's box to Search, and leave Search's query alone from that box with nothing selected.
-# Skipped without libpdfium, which reads the text and shows the page.
-#
-# `ACCENT_BENCH_COMMANDS` runs the user's commands from Run Command and by their shortcuts, through
-# XTEST, puts back after a restart only the one still running, and adds, renames and removes one
-# in Preferences, held against `commands.expected`. Its shells are real, so under a scratch HOME,
-# running `true`, `false`, `pwd` and `sleep`.
-#
-# `ACCENT_BENCH_EDITOR` opens files in a terminal editor, held against `editor.expected`. Its
-# shells are real, so under a scratch HOME, and its editor is `build-aux/fake-editor.sh` alone,
-# linked in as `nano` and `kak` ahead of the system's on the login shell's PATH.
-#
-# `ACCENT_BENCH_PREVIEW=saved` writes a note holding a saved search for a tag and a second note
-# with the tag, then a third, follows the note's link to a search's results into the Search pane
-# and makes the query one that cannot be read, held against `saved.expected`: the rows each time,
-# the note itself never among them, and the Search pane's query and rows.
-#
-# `ACCENT_BENCH_TEMPLATE=open` makes a note from a template with two stops as a window's first tab,
-# whose caret has to be on screen: a snippet pushed into a view before its first size left it past
-# the end of a short note in about half the runs.
+## drills: run the drills that assert under Xvfb, each against what it has to print (build-aux/drills.sh)
 drills: gtk-bench xvfb
-	$(HEADLESS) ACCENT_BENCH_BIBLIOGRAPHY=1 timeout 90 $(TARGET_DIR)/accent "$$xdg/vault"
-	$(HEADLESS) ACCENT_BENCH_KEYS=1 timeout 60 $(TARGET_DIR)/accent "$$xdg/vault" >"$$xdg/keys" && \
-	grep '^bench ' "$$xdg/keys" | diff -u apps/gtk/src/bench/keys.expected -
-	$(HEADLESS) sh -c 'echo "# Note" >"$$0/note.md" && \
-		ACCENT_BENCH_CLOSE=1 exec timeout 60 $(TARGET_DIR)/accent "$$0"' "$$xdg/vault"
-	$(HEADLESS) sh -c 'echo "# Alpha" >"$$0/alpha.md" && echo "# Beta" >"$$0/beta.md" && \
-		ACCENT_BENCH_SWITCHER=goto:alpha.md,beta.md exec timeout 60 $(TARGET_DIR)/accent "$$0"' \
-		"$$xdg/vault"
-	$(HEADLESS) sh -c 'echo "# Alpha" >"$$0/alpha.md" && echo "# Beta" >"$$0/beta.md" && \
-		ACCENT_BENCH_TABS=toggle:alpha.md,beta.md exec timeout 90 $(TARGET_DIR)/accent "$$0"' \
-		"$$xdg/vault"
-	$(HEADLESS) sh -c '{ test -e "$(PDFIUM_LIB)" || { echo "SKIPPED the Run Command drill: no libpdfium"; exit 0; }; } && \
-		ACCENT_BENCH_TABS=commands exec timeout 60 $(TARGET_DIR)/accent "$$0"' "$$xdg/vault"
-	$(HEADLESS) sh -c 'echo "# Note" >"$$0/note.md" && mkdir -p "$$XDG_CONFIG_HOME/accent" && \
-		printf "[vaults.\"%s\".lsp.servers]\nc = [\"python3\", \"%s\"]\n" "$$0" "$(CURDIR)/build-aux/fake-lsp.py" \
-			>"$$XDG_CONFIG_HOME/accent/config.toml" && \
-		ACCENT_BENCH_COMPLETE=note:note.md timeout 60 $(TARGET_DIR)/accent "$$0" && \
-		ACCENT_BENCH_COMPLETE=code:complete.c timeout 60 $(TARGET_DIR)/accent "$$0"' \
-		"$$xdg/vault" >"$$xdg/complete" && \
-	grep '^bench ' "$$xdg/complete" | diff -u apps/gtk/src/bench/complete.expected -
-	$(HEADLESS) sh -c 'mkdir -p "$$XDG_CONFIG_HOME/accent" && \
-		printf "[vaults.\"%s\".lsp.servers]\nc = [\"python3\", \"%s\", \"--actions\"]\npython3 = [\"python3\", \"%s\", \"--notebook\", \"--actions\"]\n" \
-			"$$0" "$(CURDIR)/build-aux/fake-lsp.py" "$(CURDIR)/build-aux/fake-lsp.py" >"$$XDG_CONFIG_HOME/accent/config.toml" && \
-		ACCENT_BENCH_QUICKFIX=fix.c,fix.ipynb timeout 60 $(TARGET_DIR)/accent "$$0"' \
-		"$$xdg/vault" >"$$xdg/quickfix" && \
-	grep '^bench ' "$$xdg/quickfix" | diff -u apps/gtk/src/bench/quickfix.expected -
-	$(HEADLESS) sh -c 'export HOME="$$0/home" && mkdir "$$HOME" && \
-		{ python3 -c "import debugpy" 2>/dev/null || { echo "SKIPPED the debugger drill: no debugpy"; exit 0; }; } && \
-		printf "def double(x):\n    y = x * 2\n    return y\n\ntotal = double(21)\nprint(\"total\", total)\n" \
-			>"$$0/vault/demo.py" && \
-		ACCENT_BENCH_DEBUG=demo.py:2 timeout 60 $(TARGET_DIR)/accent "$$0/vault" >"$$0/debug" && \
-		grep "^bench debug " "$$0/debug" | diff -u apps/gtk/src/bench/debug.expected -' "$$xdg"
-	$(HEADLESS) sh -c 'export HOME="$$0/home" && mkdir "$$HOME" && \
-		{ python3 -c "import ipykernel" 2>/dev/null || { echo "SKIPPED the kernel drill: no ipykernel"; exit 0; }; } && \
-		ACCENT_BENCH_KERNEL=run.ipynb timeout 90 $(TARGET_DIR)/accent "$$0/vault" >"$$0/kernel" && \
-		grep "^bench kernel " "$$0/kernel" | diff -u apps/gtk/src/bench/kernel.expected -' "$$xdg"
-	$(HEADLESS) sh -c 'export HOME="$$0/home" JUPYTER_PATH="$$0/jupyter" && mkdir "$$HOME" && \
-		{ python3 -c "import ipykernel" 2>/dev/null || { echo "SKIPPED the kernelspec drill: no ipykernel"; exit 0; }; } && \
-		ACCENT_BENCH_KERNEL=spec:spec.ipynb timeout 90 $(TARGET_DIR)/accent "$$0/vault" >"$$0/kernelspec" && \
-		grep "^bench kernel " "$$0/kernelspec" | diff -u apps/gtk/src/bench/kernelspec.expected -' "$$xdg"
-	$(HEADLESS) sh -c 'mkdir -p "$$XDG_CONFIG_HOME/accent" && \
-		printf "[vaults.\"%s\".lsp.servers]\npython3 = [\"python3\", \"%s\", \"--notebook\"]\n" "$$0" \
-			"$(CURDIR)/build-aux/fake-lsp.py" >"$$XDG_CONFIG_HOME/accent/config.toml" && \
-		ACCENT_BENCH_NOTEBOOK_LSP=lsp.ipynb,lsp_marimo.py timeout 60 $(TARGET_DIR)/accent "$$0"' \
-		"$$xdg/vault" >"$$xdg/notebook-lsp" && \
-	grep '^bench ' "$$xdg/notebook-lsp" | diff -u apps/gtk/src/bench/notebook-lsp.expected -
-	$(HEADLESS) sh -c '{ test -e "$(PDFIUM_LIB)" || { echo "SKIPPED the PDF search drill: no libpdfium"; exit 0; }; } && \
-		ACCENT_BENCH_SEARCH=pdf:zebrafish timeout 60 $(TARGET_DIR)/accent "$$0/vault" >"$$0/pdf-search" && \
-		grep -qx "bench search label=pdf rows=\[\"accent-bench-search.pdf | p. 3\"\]" "$$0/pdf-search" && \
-		grep -qx "bench search pdf opened page=3 matches=1 of 1" "$$0/pdf-search" && \
-		grep -qx "bench search pdf seeded \"The third\"" "$$0/pdf-search" && \
-		grep -qx "bench search find seeded \"names\"" "$$0/pdf-search" && \
-		grep -qx "bench search find kept \"old query\"" "$$0/pdf-search" || \
-		{ cat "$$0/pdf-search"; exit 1; }' "$$xdg"
-	$(HEADLESS) sh -c 'export HOME="$$0/home" SHELL=/bin/sh && mkdir "$$HOME" && \
-		ACCENT_BENCH_COMMANDS=run timeout 60 $(TARGET_DIR)/accent "$$0/vault" >"$$0/commands" && \
-		ACCENT_BENCH_COMMANDS=open timeout 60 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/commands" && \
-		sleep 3 && ACCENT_BENCH_COMMANDS=back timeout 60 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/commands" && \
-		ACCENT_BENCH_COMMANDS=prefs timeout 60 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/commands" && \
-		grep "^bench commands " "$$0/commands" | diff -u apps/gtk/src/bench/commands.expected -' "$$xdg"
-	$(HEADLESS) sh -c 'export HOME="$$0/home" SHELL=/bin/sh && mkdir -p "$$HOME/bin" && \
-		ln -s "$(CURDIR)/build-aux/fake-editor.sh" "$$HOME/bin/nano" && \
-		ln -s "$(CURDIR)/build-aux/fake-editor.sh" "$$HOME/bin/kak" && \
-		echo "PATH=\"\$$HOME/bin:\$$PATH\"" >"$$HOME/.profile" && \
-		ACCENT_BENCH_EDITOR=prefs timeout 60 $(TARGET_DIR)/accent "$$0/vault" >"$$0/editor" && \
-		ACCENT_BENCH_EDITOR=open timeout 90 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/editor" && \
-		ACCENT_BENCH_EDITOR=keys ACCENT_FAKE_EDITOR=keys timeout 90 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/editor" && \
-		ACCENT_BENCH_EDITOR=accent timeout 60 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/editor" && \
-		ACCENT_BENCH_EDITOR=line timeout 60 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/editor" && \
-		ACCENT_BENCH_EDITOR=panes timeout 60 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/editor" && \
-		ACCENT_BENCH_EDITOR=hold timeout 60 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/editor" && \
-		ACCENT_BENCH_EDITOR=back timeout 60 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/editor" && \
-		{ fuser -k "$$TMPDIR/accent-$$(id -u)/hold-3.lock" >/dev/null 2>&1; sleep 1; } && \
-		ACCENT_BENCH_EDITOR=back timeout 60 $(TARGET_DIR)/accent "$$0/vault" >>"$$0/editor" && \
-		{ fuser -k "$$TMPDIR/accent-$$(id -u)/hold-3.lock" >/dev/null 2>&1; true; } && \
-		grep "^bench editor " "$$0/editor" | diff -u apps/gtk/src/bench/editor.expected -' "$$xdg"
-	$(HEADLESS) sh -c 'ACCENT_BENCH_PREVIEW=render timeout 60 \
-		$(TARGET_DIR)/accent "$$0/vault" >"$$0/preview" && \
-		grep "^bench preview " "$$0/preview" | diff -u apps/gtk/src/bench/preview.expected -' "$$xdg"
-	$(HEADLESS) sh -c 'ACCENT_BENCH_PREVIEW=saved timeout 60 \
-		$(TARGET_DIR)/accent "$$0/vault" >"$$0/saved" && \
-		grep "^bench preview saved " "$$0/saved" | diff -u apps/gtk/src/bench/saved.expected -' "$$xdg"
-	$(HEADLESS) sh -c 'mkdir "$$0/vault/Templates" && \
-		printf "%s\n" --- "accent-target: Meta.md" "tags: {{cursor}}" "aliases: {{cursor}}" --- \
-			>"$$0/vault/Templates/Meta.md" && \
-		ACCENT_BENCH_TEMPLATE=open timeout 60 $(TARGET_DIR)/accent "$$0/vault" >"$$0/template" && \
-		grep -qx "bench template_caret Meta.md on_screen=true" "$$0/template" || \
-		{ cat "$$0/template"; exit 1; }' "$$xdg"
+	build-aux/drills.sh $(TARGET_DIR)/accent $(PDFIUM_LIB)
 
 ## screenshots: regenerate docs/screenshot-1..5.png and data/screenshots (needs magick, htop, Xvfb, debugpy)
 #
@@ -542,9 +358,8 @@ server:
 		echo "make server needs cargo-zigbuild and zig (no root needed):"; \
 		echo "    uv tool install cargo-zigbuild && ln -s \$$HOME/.local/share/uv/tools/cargo-zigbuild/bin/python-zig \$$HOME/.local/bin/zig"; \
 		exit 1; }
+	rustup target add $(SERVER_ARCHES:%=%-unknown-linux-musl)
 	@for arch in $(SERVER_ARCHES); do \
-		rustup target list --installed | grep -qx "$$arch-unknown-linux-musl" \
-			|| rustup target add "$$arch-unknown-linux-musl" || exit 1; \
 		$(CARGO) zigbuild -p accent-cli $(CARGO_PROFILE_FLAG) --target "$$arch-unknown-linux-musl" \
 			|| exit 1; \
 		python3 build-aux/compress-server.py "$(call SERVER_BIN,$$arch)" || exit 1; \
@@ -592,7 +407,7 @@ release:
 DEBUG_FILE = $(DESTDIR)$(LIBDIR)/debug/.build-id/$$(readelf -n $(1) | sed -n 's|.*Build ID: \(..\)|\1/|p').debug
 # Installs the build $(1) as $(2) stripped, its symbols kept in its DEBUG_FILE, while target/ keeps
 # the build whole. The copy it replaces takes its symbols along, so a reinstall leaves none behind.
-INSTALL_STRIPPED = { test ! -f $(2) || rm -f $(call DEBUG_FILE,$(2)); } && install -m755 $(1) $(2) && \
+INSTALL_STRIPPED = { test ! -f $(2) || rm -f $(call DEBUG_FILE,$(2)); } && install -Dm755 $(1) $(2) && \
 	debug=$(call DEBUG_FILE,$(2)) && mkdir -p $$(dirname $$debug) && \
 	objcopy --only-keep-debug $(2) $$debug && chmod 644 $$debug && strip --strip-unneeded $(2)
 
@@ -610,30 +425,24 @@ ifdef DARWIN
 			>$(DESTDIR)$(BINDIR)/$$bin && chmod 755 $(DESTDIR)$(BINDIR)/$$bin || exit 1; \
 	done
 else
-	mkdir -p $(DESTDIR)$(BINDIR) $(DESTDIR)$(DATADIR)/icons/hicolor/scalable/apps \
-		$(DESTDIR)$(DATADIR)/icons/hicolor/symbolic/apps
 	$(call INSTALL_STRIPPED,$(TARGET_DIR)/accent,$(DESTDIR)$(BINDIR)/accent)
 	$(call INSTALL_STRIPPED,$(TARGET_DIR)/accent-cli,$(DESTDIR)$(BINDIR)/accent-cli)
-	mkdir -p $(DESTDIR)$(DATADIR)/applications $(DESTDIR)$(DATADIR)/metainfo
-	install -m644 data/$(APP_ID).desktop \
-		$(DESTDIR)$(DATADIR)/applications/$(APP_ID).desktop
-	install -m644 data/$(APP_ID).metainfo.xml \
-		$(DESTDIR)$(DATADIR)/metainfo/$(APP_ID).metainfo.xml
-	install -m644 data/icons/hicolor/scalable/apps/$(APP_ID).svg \
+	install -Dm644 data/$(APP_ID).desktop $(DESTDIR)$(DATADIR)/applications/$(APP_ID).desktop
+	install -Dm644 data/$(APP_ID).metainfo.xml $(DESTDIR)$(DATADIR)/metainfo/$(APP_ID).metainfo.xml
+	install -Dm644 data/icons/hicolor/scalable/apps/$(APP_ID).svg \
 		$(DESTDIR)$(DATADIR)/icons/hicolor/scalable/apps/$(APP_ID).svg
-	install -m644 data/icons/hicolor/symbolic/apps/$(APP_ID)-symbolic.svg \
+	install -Dm644 data/icons/hicolor/symbolic/apps/$(APP_ID)-symbolic.svg \
 		$(DESTDIR)$(DATADIR)/icons/hicolor/symbolic/apps/$(APP_ID)-symbolic.svg
 	@# Best effort: `make pdfium` may never have run, and the PDF tab degrades to a status page
 	@# without the library. $(LIBDIR)/accent is `../lib/accent` seen from the binary in $(BINDIR),
 	@# which is the second place crates/core/src/pdf.rs looks.
-	-@test -f $(PDFIUM_LIB) && mkdir -p $(DESTDIR)$(LIBDIR)/accent && \
+	-@test -f $(PDFIUM_LIB) && \
 		$(call INSTALL_STRIPPED,$(PDFIUM_LIB),$(DESTDIR)$(LIBDIR)/accent/$(notdir $(PDFIUM_LIB)))
 	@# Also best effort: `make server` needs a musl toolchain, and everything but opening a vault
 	@# on another machine works without it. Same `../lib/accent` the app looks in for libpdfium.
 	-@for arch in $(SERVER_ARCHES); do \
 		test -f $(call SERVER_BIN,$$arch) || continue; \
-		mkdir -p $(DESTDIR)$(LIBDIR)/accent && \
-			install -m755 $(call SERVER_BIN,$$arch) $(DESTDIR)$(LIBDIR)/accent/accent-cli-$$arch; \
+		install -Dm755 $(call SERVER_BIN,$$arch) $(DESTDIR)$(LIBDIR)/accent/accent-cli-$$arch; \
 		for suffix in .xz .xz.sha256; do \
 			test ! -f $(call SERVER_BIN,$$arch)$$suffix || \
 				install -m644 $(call SERVER_BIN,$$arch)$$suffix $(DESTDIR)$(LIBDIR)/accent/accent-cli-$$arch$$suffix; \
@@ -660,19 +469,20 @@ ifndef DARWIN
 	done; rmdir $(DESTDIR)$(LIBDIR)/debug/.build-id/* $(DESTDIR)$(LIBDIR)/debug/.build-id \
 		$(DESTDIR)$(LIBDIR)/debug 2>/dev/null; true
 endif
-	rm -f $(DESTDIR)$(BINDIR)/accent $(DESTDIR)$(BINDIR)/accent-cli
-	rm -f $(DESTDIR)$(DATADIR)/applications/$(APP_ID).desktop
-	rm -f $(DESTDIR)$(DATADIR)/metainfo/$(APP_ID).metainfo.xml
-	rm -f $(DESTDIR)$(DATADIR)/icons/hicolor/scalable/apps/$(APP_ID).svg
-	rm -f $(DESTDIR)$(DATADIR)/icons/hicolor/symbolic/apps/$(APP_ID)-symbolic.svg
-	rm -f $(DESTDIR)$(LIBDIR)/accent/$(notdir $(PDFIUM_LIB))
-	rm -f $(foreach arch,$(SERVER_ARCHES),$(DESTDIR)$(LIBDIR)/accent/accent-cli-$(arch))
-	rm -f $(foreach arch,$(SERVER_ARCHES),$(DESTDIR)$(LIBDIR)/accent/accent-cli-$(arch).xz $(DESTDIR)$(LIBDIR)/accent/accent-cli-$(arch).xz.sha256)
+	rm -f $(DESTDIR)$(BINDIR)/accent $(DESTDIR)$(BINDIR)/accent-cli \
+		$(DESTDIR)$(DATADIR)/applications/$(APP_ID).desktop \
+		$(DESTDIR)$(DATADIR)/metainfo/$(APP_ID).metainfo.xml \
+		$(DESTDIR)$(DATADIR)/icons/hicolor/scalable/apps/$(APP_ID).svg \
+		$(DESTDIR)$(DATADIR)/icons/hicolor/symbolic/apps/$(APP_ID)-symbolic.svg \
+		$(DESTDIR)$(LIBDIR)/accent/$(notdir $(PDFIUM_LIB)) $(DESTDIR)$(LIBDIR)/accent/accent-cli-*
 	-@rmdir $(DESTDIR)$(LIBDIR)/accent 2>/dev/null
 ifdef DARWIN
 	rm -rf $(DESTDIR)$(APPSDIR)/Accent.app
 endif
-	-@update-desktop-database $(DESTDIR)$(DATADIR)/applications 2>/dev/null
+	@# Only where install refreshed it: never a DESTDIR's, and macOS has none.
+ifeq ($(DARWIN)$(DESTDIR),)
+	-@update-desktop-database $(DATADIR)/applications 2>/dev/null
+endif
 	@echo "Uninstalled from $(DESTDIR)$(PREFIX)"
 
 # What a .deb or .rpm packs: the files `install` puts under /usr, with libpdfium and both servers
