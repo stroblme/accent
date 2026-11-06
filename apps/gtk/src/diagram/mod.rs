@@ -7,6 +7,7 @@
 
 pub mod embed;
 pub mod export;
+mod face;
 mod geometry;
 mod input;
 pub mod label;

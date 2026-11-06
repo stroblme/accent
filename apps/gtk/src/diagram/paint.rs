@@ -838,7 +838,7 @@ fn lay_out(widget: &gtk::Widget, prim: &Prim, scale: f64, tint: Tint) -> Option<
     let layout = widget.create_pango_layout(Some(&text));
     let px = |size: f64| (size * scale * f64::from(pango::SCALE)) as i32;
     let mut desc = pango::FontDescription::new();
-    desc.set_family(&font.family);
+    desc.set_family(&face(widget, &font.family));
     desc.set_absolute_size(f64::from(px(font.size)));
     if font.bold {
         desc.set_weight(pango::Weight::Bold);
@@ -938,6 +938,26 @@ fn lay_out(widget: &gtk::Widget, prim: &Prim, scale: f64, tint: Tint) -> Option<
         scale,
         layout,
         formulas,
+    })
+}
+
+/// The family the CSS family list `css` is drawn in (`super::face`), asked of Pango once a list.
+fn face(widget: &gtk::Widget, css: &str) -> String {
+    thread_local! {
+        static CHOSEN: RefCell<HashMap<String, String>> = RefCell::default();
+    }
+    CHOSEN.with_borrow_mut(|chosen| {
+        let context = widget.pango_context();
+        let matched = |family: &str| {
+            let mut desc = pango::FontDescription::new();
+            desc.set_family(family);
+            desc.set_absolute_size(f64::from(12 * pango::SCALE));
+            let font = context.load_font(&desc)?;
+            Some(font.describe().family()?.to_string())
+        };
+        let face = chosen.entry(css.to_string());
+        let face = face.or_insert_with(|| super::face::chosen(css, matched));
+        face.clone()
     })
 }
 
