@@ -220,26 +220,11 @@ impl DiagramView {
                 );
                 outline(&r);
             }
-            Drag::Draw { tool, from } => {
-                let r = frame.rect(&Rect::from_corners(*from, pointer));
-                let builder = gsk::PathBuilder::new();
-                match tool {
-                    Tool::Ellipse => builder.add_rounded_rect(&gsk::RoundedRect::from_rect(
-                        paint::grect(&r),
-                        (r.w.min(r.h) / 2.0) as f32,
-                    )),
-                    _ => builder.add_rect(&paint::grect(&r)),
+            // The shape being drawn is on the page, framed as it will be once selected.
+            Drag::Draw { .. } => {
+                if let Some(Edit::Add { rect, .. }) = shown {
+                    outline(&frame.rect(rect));
                 }
-                snapshot.append_stroke(&builder.to_path(), &gsk::Stroke::new(1.0), &accent);
-            }
-            Drag::Connect { from } => {
-                let (tolerance, reach) = (TOLERANCE / frame.scale, HANDLE / frame.scale);
-                let (s, t) = sheet.connect_ends(*from, pointer, tolerance, reach);
-                let (a, b) = (frame.to_content(s.1), frame.to_content(t.1));
-                let builder = gsk::PathBuilder::new();
-                builder.move_to(a.x as f32, a.y as f32);
-                builder.line_to(b.x as f32, b.y as f32);
-                snapshot.append_stroke(&builder.to_path(), &gsk::Stroke::new(1.0), &accent);
             }
             Drag::Resize {
                 from,
@@ -256,6 +241,7 @@ impl DiagramView {
                 guide_lines(snapshot, frame, &lines, &accent);
             }
             Drag::Rotate { .. }
+            | Drag::Connect { .. }
             | Drag::End { .. }
             | Drag::Knob { .. }
             | Drag::Label { .. }

@@ -358,10 +358,24 @@ impl DiagramView {
         Some(geometry::grid_step(grid, self.scale()))
     }
 
-    /// What a move, a resize or a turn asks for with the pointer at `p`: the edit its release
-    /// makes, and the one the live preview shows meanwhile. `None` for any other drag.
+    /// What a move, a resize, a turn or a drawing asks for with the pointer at `p`: the edit its
+    /// release makes, and the one the live preview shows meanwhile. `None` for any other drag.
     pub(super) fn drag_edit(&self, drag: &Drag, p: Point, free: bool) -> Option<Edit> {
         match drag {
+            Drag::Draw { tool, from } => {
+                let snap = |q: Point| match self.grid(free) {
+                    Some(g) => Point::new(geometry::snap(q.x, g), geometry::snap(q.y, g)),
+                    None => q,
+                };
+                let rect = Rect::from_corners(snap(*from), snap(p));
+                (rect.w >= 1.0 && rect.h >= 1.0).then_some(Edit::Add { tool: *tool, rect })
+            }
+            Drag::Connect { from } => {
+                let (sheet, scale) = (self.sheet()?, self.scale());
+                let (source, target) =
+                    sheet.connect_ends(*from, p, TOLERANCE / scale, HANDLE / scale);
+                Some(Edit::Connect { source, target })
+            }
             Drag::Move {
                 from,
                 ids,
@@ -494,10 +508,6 @@ impl DiagramView {
     pub(super) fn end_drag(&self, drag: Drag, x: f64, y: f64, moved: bool, free: bool) {
         let p = self.page_at(x, y);
         let Some(sheet) = self.sheet() else { return };
-        let snap = |q: Point| match self.grid(free) {
-            Some(g) => Point::new(geometry::snap(q.x, g), geometry::snap(q.y, g)),
-            None => q,
-        };
         if let Some(edit) = self.drag_edit(&drag, p, free).filter(|_| moved) {
             return self.emit(self.settled(&drag, edit, p, free));
         }
@@ -518,24 +528,20 @@ impl DiagramView {
                 }
                 self.emit(Edit::Select(ids));
             }
-            Drag::Draw { tool, from } => {
-                let rect = match moved {
-                    true => Rect::from_corners(snap(from), snap(p)),
-                    false => {
-                        let c = snap(from);
-                        let (w, h) = DEFAULT_SIZE;
-                        Rect::new(c.x - w / 2.0, c.y - h / 2.0, w, h)
-                    }
+            // A click draws a shape of draw.io's size around it.
+            Drag::Draw { tool, from } if !moved => {
+                let c = match self.grid(free) {
+                    Some(g) => Point::new(geometry::snap(from.x, g), geometry::snap(from.y, g)),
+                    None => from,
                 };
-                if rect.w >= 1.0 && rect.h >= 1.0 {
-                    self.emit(Edit::Add { tool, rect });
-                }
+                let (w, h) = DEFAULT_SIZE;
+                let rect = Rect::new(c.x - w / 2.0, c.y - h / 2.0, w, h);
+                self.emit(Edit::Add { tool, rect });
             }
-            Drag::Connect { from } if moved => {
-                let scale = self.scale();
-                let (source, target) =
-                    sheet.connect_ends(from, p, TOLERANCE / scale, HANDLE / scale);
-                self.emit(Edit::Connect { source, target });
+            // A click with the connector selects the cell under it, and over empty page lets go
+            // of the selection, the arrow just drawn too.
+            Drag::Connect { .. } if !moved => {
+                self.emit(Edit::Select(self.cell_at(x, y).into_iter().collect()));
             }
             _ => {}
         }

@@ -147,21 +147,16 @@ impl Editor {
         let current = self.current.clone();
         self.edit(page, |p, ids| {
             let parent = match parent {
-                Some(id) => check(p, [id]).map(|()| id.to_string())?,
+                Some(id) => id.to_string(),
                 None => default_layer(p, current.as_deref())?,
             };
-            // A layer has no rectangle and places its children from the page origin.
-            let origin = p.absolute_rect(&parent).unwrap_or_default();
             let id = ids.fresh(p);
-            let local = rect.translate(-origin.x, -origin.y);
-            p.cells
-                .push(Cell::new_vertex(&id, &parent, local, style, label));
+            add_vertex(p, &id, &parent, rect, style, label)?;
             Ok(id)
         })
     }
 
-    /// An edge in the layer new cells go into. An end without a cell dangles at its point; an
-    /// end with one keeps the point too, as draw.io writes it.
+    /// [`add_edge`] in the layer new cells go into, under a fresh id.
     pub fn add_edge(
         &mut self,
         page: usize,
@@ -171,13 +166,17 @@ impl Editor {
     ) -> Result<CellId, Error> {
         let current = self.current.clone();
         self.edit(page, |p, ids| {
-            check(p, [source.0, target.0].into_iter().flatten())?;
             let layer = default_layer(p, current.as_deref())?;
             let id = ids.fresh(p);
-            p.cells
-                .push(Cell::new_edge(&id, &layer, source, target, style));
+            add_edge(p, &id, &layer, source, target, style)?;
             Ok(id)
         })
+    }
+
+    /// The layer [`Editor::add_vertex`] and [`Editor::add_edge`] put a new cell on page `page`
+    /// into.
+    pub fn insert_layer(&self, page: usize) -> Result<CellId, Error> {
+        default_layer(self.file.page(page)?, self.current.as_deref())
     }
 
     /// [`move_cells`] on page `page`, drawn as `drawn`.
@@ -993,6 +992,40 @@ impl Moving {
             }
         }
     }
+}
+
+/// A vertex `id` at `rect` (absolute) inside `parent`.
+pub fn add_vertex(
+    page: &mut Page,
+    id: &str,
+    parent: &str,
+    rect: Rect,
+    style: &str,
+    label: &str,
+) -> Result<(), Error> {
+    check(page, [parent])?;
+    // A layer has no rectangle and places its children from the page origin.
+    let origin = page.absolute_rect(parent).unwrap_or_default();
+    let local = rect.translate(-origin.x, -origin.y);
+    page.cells
+        .push(Cell::new_vertex(id, parent, local, style, label));
+    Ok(())
+}
+
+/// An edge `id` in `layer`. An end without a cell dangles at its point; an end with one keeps
+/// the point too, as draw.io writes it.
+pub fn add_edge(
+    page: &mut Page,
+    id: &str,
+    layer: &str,
+    source: (Option<&str>, Point),
+    target: (Option<&str>, Point),
+    style: &str,
+) -> Result<(), Error> {
+    check(page, [source.0, target.0].into_iter().flatten())?;
+    page.cells
+        .push(Cell::new_edge(id, layer, source, target, style));
+    Ok(())
 }
 
 /// Give vertex `id` the absolute rectangle `rect`.

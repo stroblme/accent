@@ -621,14 +621,18 @@ pub mod presets {
         Curved,
     }
 
-    /// A connector's style; `arrow` false ends it plainly.
+    /// A connector's style; `arrow` false ends it plainly. Curved is draw.io's: the orthogonal
+    /// route smoothed, since `curved=1` alone bends only through waypoints (Menus.js
+    /// `edgeStyle`).
     pub fn edge(kind: EdgeKind, arrow: bool) -> String {
         let route = match kind {
             EdgeKind::Straight => "",
             EdgeKind::Orthogonal => {
                 "edgeStyle=orthogonalEdgeStyle;orthogonalLoop=1;jettySize=auto;"
             }
-            EdgeKind::Curved => "curved=1;",
+            EdgeKind::Curved => {
+                "edgeStyle=orthogonalEdgeStyle;curved=1;orthogonalLoop=1;jettySize=auto;"
+            }
         };
         let end = if arrow { "" } else { "endArrow=none;" };
         format!("{route}rounded=0;{end}html=1;")

@@ -72,6 +72,16 @@ pub enum Edit {
     },
 }
 
+/// The layer and the style the tab gives the cell an [`Edit::Add`] or an [`Edit::Connect`] makes
+/// ([`DiagramView::connect_new_cell`]).
+#[derive(Debug, Clone)]
+pub struct NewCell {
+    pub layer: CellId,
+    pub style: String,
+}
+
+type MakeCell = Box<dyn Fn(&Edit) -> Option<NewCell>>;
+
 glib::wrapper! {
     pub struct DiagramView(ObjectSubclass<imp::DiagramView>)
         @extends gtk::Widget,
@@ -313,6 +323,12 @@ impl DiagramView {
         *self.imp().on_zoom.borrow_mut() = Some(Box::new(f));
     }
 
+    /// Ask `f` what the cell a drawing drag adds is made of, so the drag shows it as its release
+    /// will leave it.
+    pub fn connect_new_cell(&self, f: impl Fn(&Edit) -> Option<NewCell> + 'static) {
+        *self.imp().new_cell.borrow_mut() = Some(Box::new(f));
+    }
+
     fn emit(&self, edit: Edit) {
         if let Some(f) = self.imp().on_edit.borrow().as_ref() {
             f(edit);
@@ -420,6 +436,7 @@ mod imp {
         pub tint: Cell<Tint>,
         pub on_edit: RefCell<Option<OnEdit>>,
         pub on_zoom: RefCell<Option<OnZoom>>,
+        pub new_cell: RefCell<Option<MakeCell>>,
     }
 
     // `gtk::ScrollablePolicy` has no `Default`, so the struct spells its own out.
@@ -449,6 +466,7 @@ mod imp {
                 tint: Cell::new(Tint::FILE),
                 on_edit: RefCell::new(None),
                 on_zoom: RefCell::new(None),
+                new_cell: RefCell::new(None),
             }
         }
     }

@@ -230,6 +230,13 @@ pub fn open(
         tab,
         move |edit| tab.apply(edit)
     ));
+    tab.view.connect_new_cell(glib::clone!(
+        #[weak]
+        tab,
+        #[upgrade_or]
+        None,
+        move |edit| tab.new_cell(edit)
+    ));
     tab.view.connect_zoom(glib::clone!(
         #[weak]
         tab,
@@ -650,6 +657,32 @@ impl DiagramTab {
         self.strip.set_framed(self.page_index.get());
     }
 
+    /// The style of the cell an `Add` or a `Connect` makes: its tool's, a connector's ends
+    /// pinned where they were dropped on connection points.
+    fn new_style(&self, edit: &Edit) -> String {
+        let editor = self.editor.borrow();
+        let style = |tool: Tool| tool.style_in(editor.file(), &self.options.get());
+        match edit {
+            Edit::Add { tool, .. } => style(*tool),
+            Edit::Connect { source, target } => accent_drawio::presets::constrained(
+                &style(Tool::Connector),
+                source.2.as_ref(),
+                target.2.as_ref(),
+            ),
+            _ => String::new(),
+        }
+    }
+
+    /// The layer and the style of the cell an `Add` or a `Connect` makes, for a drawing drag to
+    /// show it as its release will leave it.
+    fn new_cell(&self, edit: &Edit) -> Option<view::NewCell> {
+        let layer = self.editor.borrow().insert_layer(self.page_index.get());
+        Some(view::NewCell {
+            layer: layer.ok()?,
+            style: self.new_style(edit),
+        })
+    }
+
     /// What a gesture on the canvas asked for.
     fn apply(self: &Rc<Self>, edit: Edit) {
         match edit {
@@ -657,7 +690,7 @@ impl DiagramTab {
             Edit::Move { ids, delta } => self.move_cells(&ids, delta.x, delta.y),
             Edit::Resize { id, rect } => self.edit(|e, page| e.resize(page, &id, rect)),
             Edit::Add { tool, rect } => {
-                let style = tool.style_in(self.editor.borrow().file(), &self.options.get());
+                let style = self.new_style(&edit);
                 let mut added = None;
                 self.edit(|e, page| {
                     added = Some(e.add_vertex(page, None, rect, &style, tool.label())?);
@@ -673,14 +706,11 @@ impl DiagramTab {
                     }
                 }
             }
-            Edit::Connect { source, target } => {
-                let style =
-                    Tool::Connector.style_in(self.editor.borrow().file(), &self.options.get());
-                let style = accent_drawio::presets::constrained(
-                    &style,
-                    source.2.as_ref(),
-                    target.2.as_ref(),
-                );
+            Edit::Connect {
+                ref source,
+                ref target,
+            } => {
+                let style = self.new_style(&edit);
                 let mut added = None;
                 self.edit(|e, page| {
                     let (s, t) = (

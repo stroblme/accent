@@ -1035,6 +1035,28 @@ mod tests {
     }
 
     #[test]
+    fn each_connector_preset_is_drawn_as_draw_io_s_waypoints_of_that_name() {
+        use crate::style::presets::{EdgeKind, edge};
+        let drawn = |kind| {
+            let (a, b) = (Point::new(0.0, 0.0), Point::new(100.0, 60.0));
+            let e = Cell::new_edge("e", "1", (None, a), (None, b), &edge(kind, true));
+            let s = scene(&page(vec![e]));
+            let curved = s.prims.iter().any(|p| match p {
+                Prim::Path { path, .. } => path
+                    .iter()
+                    .any(|c| matches!(c, PathCmd::QuadTo(..) | PathCmd::CurveTo(..))),
+                _ => false,
+            });
+            let bent = s.route("e").is_some_and(|r| r.len() > 2);
+            (bent, curved)
+        };
+        assert_eq!(drawn(EdgeKind::Straight), (false, false));
+        assert_eq!(drawn(EdgeKind::Orthogonal), (true, false));
+        // draw.io's Curved is the orthogonal route smoothed (Menus.js `edgeStyle`).
+        assert_eq!(drawn(EdgeKind::Curved), (true, true));
+    }
+
+    #[test]
     fn hidden_cells_and_their_children_are_not_painted() {
         let mut hidden = Cell::new_vertex("h", "1", Rect::new(0.0, 0.0, 10.0, 10.0), "", "");
         hidden.attrs.push(("visible".into(), "0".into()));

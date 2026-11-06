@@ -1,13 +1,13 @@
-//! Show geometry edits live during moves, resizes and rotations, rerouting edges
+//! Show geometry edits live during moves, resizes, rotations and drawing, rerouting edges
 //! on a copied page once per pointer-changing frame (`mxGraphHandler.livePreview`,
-//! `mxVertexHandler.livePreview`). Moves above [`MAX_LIVE`] cells show only a box,
-//! matching draw.io, to bound preview work.
+//! `mxVertexHandler.livePreview`, `mxConnectionHandler.livePreview`, Graph.js 33981). Moves
+//! above [`MAX_LIVE`] cells show only a box, matching draw.io, to bound preview work.
 
 use accent_drawio::edit::{self, Moving};
 use accent_drawio::{Page, Point, Rect, Scene};
 use gtk::subclass::prelude::*;
 
-use super::{DiagramView, Edit};
+use super::{DiagramView, Edit, MakeCell, NewCell};
 use crate::diagram::geometry::Sheet;
 use crate::diagram::paint::Cache;
 use crate::diagram::props;
@@ -15,6 +15,9 @@ use crate::diagram::props;
 /// The most cells a move shows live, those inside the moved ones counted
 /// (`mxGraphHandler.maxLivePreview`, Graph.js 26825).
 const MAX_LIVE: usize = 32;
+
+/// The id a cell being drawn has until its release gives it one, which no draw.io id is.
+const DRAFT: &str = "accent-draft";
 
 /// What a drag shows from its first frame past the slop to its release.
 pub(super) enum Preview {
@@ -62,13 +65,22 @@ impl Preview {
 
 impl Live {
     /// Skip unchanged edits when grid snapping holds the pointer in place. Reuse
-    /// layouts from the previous frame, or sheet on the first, for unchanged prims.
-    fn show(&mut self, edit: &Edit, sheet: &Sheet, sheet_cache: &Cache) {
+    /// layouts from the previous frame, or sheet on the first, for unchanged prims. A new cell
+    /// is made as `new_cell` says the tab will make it.
+    fn show(
+        &mut self,
+        edit: &Edit,
+        sheet: &Sheet,
+        sheet_cache: &Cache,
+        new_cell: Option<&MakeCell>,
+    ) {
         if self.shown.as_ref() == Some(edit) {
             return;
         }
         let mut page = self.base.clone();
-        if let Err(e) = apply(&mut page, edit, self.moving.as_ref(), &sheet.scene) {
+        let new = new_cell.and_then(|f| f(edit));
+        let applied = apply(&mut page, edit, self.moving.as_ref(), &sheet.scene, new);
+        if let Err(e) = applied {
             tracing::debug!("diagram preview refused: {e}");
         }
         let scene = accent_drawio::scene_with(&page, &sheet.ctx);
@@ -84,14 +96,25 @@ impl Live {
 }
 
 /// What the tab does to the page on the drag's release (`DiagramTab::apply`), on a copy: a move
-/// as the second half `start_move` left for it.
+/// as the second half `start_move` left for it, a new cell `new` under an id of its own.
 fn apply(
     page: &mut Page,
     edit: &Edit,
     moving: Option<&Moving>,
     drawn: &Scene,
+    new: Option<NewCell>,
 ) -> Result<(), accent_drawio::Error> {
     match edit {
+        Edit::Add { tool, rect } => new.map_or(Ok(()), |n| {
+            edit::add_vertex(page, DRAFT, &n.layer, *rect, &n.style, tool.label())
+        }),
+        Edit::Connect { source, target } => new.map_or(Ok(()), |n| {
+            let (s, t) = (
+                (source.0.as_deref(), source.1),
+                (target.0.as_deref(), target.1),
+            );
+            edit::add_edge(page, DRAFT, &n.layer, s, t, &n.style)
+        }),
         Edit::Move { delta, .. } => {
             if let Some(moving) = moving {
                 moving.shift(page, delta.x, delta.y);
@@ -127,12 +150,12 @@ impl DiagramView {
         let Preview::Live(live) = preview else {
             return None;
         };
-        live.show(edit, &sheet, &imp.cache);
+        live.show(edit, &sheet, &imp.cache, imp.new_cell.borrow().as_ref());
         live.scene.route(id).map(<[Point]>::to_vec)
     }
 
     /// Bring the preview up to the pointer, once a frame: started on the first frame a move, a
-    /// resize or a turn is past the slop, gone once none is.
+    /// resize, a turn or a drawing is past the slop, gone once none is.
     pub(super) fn update_preview(&self, sheet: &Sheet) {
         let imp = self.imp();
         let edit = match imp.drag.borrow().as_ref() {
@@ -148,7 +171,7 @@ impl DiagramView {
         };
         let preview = preview.get_or_insert_with(|| Preview::start(sheet, &edit));
         if let Preview::Live(live) = preview {
-            live.show(&edit, sheet, &imp.cache);
+            live.show(&edit, sheet, &imp.cache, imp.new_cell.borrow().as_ref());
         }
     }
 }
