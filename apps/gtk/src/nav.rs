@@ -763,11 +763,22 @@ impl App {
     }
 
     /// The window a row is being dragged out of, when it is another window: the row names a file
-    /// in that window's vault, so here only a tree takes it, as a copy.
+    /// in that window's vault, which a tree here copies in and a pane opens from outside this vault.
     pub fn dragged_from(&self) -> Option<Rc<App>> {
         let shell = self.shell.upgrade()?;
         let from = shell.tree_drag.borrow().as_ref()?.upgrade()?;
         (!std::ptr::eq(Rc::as_ptr(&from), self)).then_some(from)
+    }
+
+    /// The key a dragged Files row's path `rel` opens under here: `rel` itself from this window's
+    /// tree, the file's absolute path from another window's, and `None` from a remote vault's,
+    /// whose file cannot be reopened elsewhere, as its tab cannot (DESIGN.md, Tabs).
+    pub fn row_key(&self, rel: String) -> Option<String> {
+        let Some(from) = self.dragged_from() else {
+            return Some(rel);
+        };
+        let vault = from.vault().filter(|vault| !vault.is_remote())?;
+        Some(self.key_for(&vault.root().join(rel)))
     }
 
     /// A tab or a vault path let go over `pane`. `true` when it was taken; a tab is taken but
@@ -785,7 +796,7 @@ impl App {
             }
             return true;
         }
-        let Ok(rel) = value.get::<String>() else {
+        let Some(rel) = value.get::<String>().ok().and_then(|rel| self.row_key(rel)) else {
             return false;
         };
         match zone {

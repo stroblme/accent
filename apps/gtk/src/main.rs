@@ -589,9 +589,11 @@ impl App {
     }
 
     /// The key `path` opens under in this window: vault-relative inside the vault, absolute
-    /// outside it, which is what a file from another window's vault always is.
+    /// outside it, which is what a file from another window's vault always is. A remote vault's
+    /// root is a path on its host, so a file of this machine is never inside it.
     fn key_for(&self, path: &Path) -> String {
         self.vault()
+            .filter(|vault| !vault.is_remote())
             .and_then(|vault| path.strip_prefix(vault.root()).ok())
             .and_then(Path::to_str)
             .map(str::to_string)

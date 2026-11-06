@@ -687,8 +687,8 @@ impl Shell {
     }
 
     /// A drag out of `from`'s tree starting (`on`) or over. Every window's drop sheets go up with
-    /// it, as a tab drag's do: over another window's panes the row is refused, which leaves no
-    /// note view there to take its path as text.
+    /// it, as a tab drag's do: over another window's panes the row opens as a file from outside
+    /// that vault (`App::row_key`), and no note view there takes its path as text.
     pub fn tree_drag(&self, from: &Rc<App>, on: bool) {
         *self.tree_drag.borrow_mut() = on.then(|| Rc::downgrade(from));
         for app in self.windows.borrow().iter() {

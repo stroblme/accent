@@ -453,18 +453,18 @@ fn wire_pane_drops(app: &Rc<App>, pane: &Rc<Pane>) {
         #[upgrade_or]
         gdk::DragAction::empty(),
         move |target, x, y| {
-            // A row from another window's tree names a file in that window's vault: no pane here
-            // opens it.
-            let drop = target.current_drop();
-            let Some(drop) = drop.filter(|_| app.dragged_from().is_none()) else {
+            let Some(drop) = target.current_drop() else {
                 pane.show_zone(None);
                 return gdk::DragAction::empty();
             };
             let (w, h) = pane.size();
             let zone = panes::zone(x, y, w, h);
+            // A row from another window's tree names a file from outside this vault, which opens
+            // here as a tab dragged in would and goes into nothing the pane shows.
+            let middle = zone == Zone::Here && app.dragged_from().is_none();
             // Files rows over what takes a reference to them: with Shift a caret where it would
             // go, in place of the shade; without, the shade and a hint that Shift writes one.
-            let reference = (zone == Zone::Here)
+            let reference = middle
                 .then(|| app.reference_at(&pane, &drop, (x, y)))
                 .flatten();
             let caret = reference
@@ -480,20 +480,21 @@ fn wire_pane_drops(app: &Rc<App>, pane: &Rc<Pane>) {
             );
             // A PDF from the tree over the middle of another PDF goes in between its pages: a
             // line there says where, in place of the shade.
-            let gap = (zone == Zone::Here && caret.is_none())
+            let gap = (middle && caret.is_none())
                 .then(|| app.pdf_drop(&pane, target, None, (x, y)))
                 .flatten()
                 .map(|(_, _, gap)| gap);
             app.show_pdf_drop(&pane, gap);
             // An image from the tree over a PDF's page lands on it as a picture, under the
             // pointer: no shade says it would open.
-            let picture = (zone == Zone::Here && caret.is_none())
+            let picture = (middle && caret.is_none())
                 .then(|| app.picture_drop(&pane, target, None, (x, y)))
                 .flatten()
                 .is_some();
             // A folder or a marked set opens in no pane: only a reference takes one.
             let tab = drop.formats().contains_type(adw::TabPage::static_type());
-            let opens = tab || refer::one_file(&drop).is_some();
+            let row = refer::one_file(&drop).and_then(|rel| app.row_key(rel));
+            let opens = tab || row.is_some();
             let shade = opens && gap.is_none() && !picture && caret.is_none();
             pane.show_zone(shade.then_some(zone));
             if !opens && caret.is_none() {
@@ -525,16 +526,20 @@ fn wire_pane_drops(app: &Rc<App>, pane: &Rc<Pane>) {
     // "over there" and the one libadwaita already draws an insertion point for.
     pane.bar
         .setup_extra_drop_target(gdk::DragAction::COPY, &[String::static_type()]);
-    // Preloaded only for the answer below, which refuses another window's row while it hovers.
+    // Preloaded only for the answer below, which refuses a remote vault's row of another window
+    // while it hovers.
     pane.bar.set_extra_drag_preload(true);
     pane.bar.connect_extra_drag_value(glib::clone!(
         #[weak]
         app,
         #[upgrade_or]
         gdk::DragAction::empty(),
-        move |_, _, _| match app.dragged_from() {
-            Some(_) => gdk::DragAction::empty(),
-            None => gdk::DragAction::COPY,
+        move |_, _, value| {
+            let rel = value.and_then(|value| value.get::<String>().ok());
+            match rel.and_then(|rel| app.row_key(rel)) {
+                Some(_) => gdk::DragAction::COPY,
+                None => gdk::DragAction::empty(),
+            }
         }
     ));
     pane.bar.connect_extra_drag_drop(glib::clone!(
@@ -546,7 +551,7 @@ fn wire_pane_drops(app: &Rc<App>, pane: &Rc<Pane>) {
         false,
         move |_, _, value| {
             let rel = value.get::<String>().ok();
-            let Some(rel) = rel.filter(|_| app.dragged_from().is_none()) else {
+            let Some(rel) = rel.and_then(|rel| app.row_key(rel)) else {
                 return false;
             };
             // As a drop on the pane's middle does (`App::dropped`).
@@ -565,16 +570,15 @@ fn wire_pane_drops(app: &Rc<App>, pane: &Rc<Pane>) {
         #[upgrade_or]
         false,
         move |target, value, x, y| {
-            if app.dragged_from().is_some() {
-                return false;
-            }
             let (w, h) = pane.size();
             let zone = panes::zone(x, y, w, h);
             // Belt and braces: the drag is over whatever the source has to say about it, and a
             // sheet left up would swallow every click meant for the editor under it.
             app.set_drop_active(false);
             app.show_pdf_drop(&pane, None);
-            let reference = (zone == Zone::Here)
+            // As over it: another window's row only opens (`App::row_key`).
+            let middle = zone == Zone::Here && app.dragged_from().is_none();
+            let reference = middle
                 .then(|| target.current_drop())
                 .flatten()
                 .and_then(|drop| app.reference_at(&pane, &drop, (x, y)))
@@ -588,14 +592,14 @@ fn wire_pane_drops(app: &Rc<App>, pane: &Rc<Pane>) {
             if value.get::<adw::TabPage>().is_err() && file.is_none() {
                 return false;
             }
-            let into = (zone == Zone::Here)
+            let into = middle
                 .then(|| app.pdf_drop(&pane, target, Some(value), (x, y)))
                 .flatten();
             if let Some((pdf, from, gap)) = into {
                 app.import_pdf(&pdf, Some(gap), &from);
                 return true;
             }
-            let picture = (zone == Zone::Here)
+            let picture = middle
                 .then(|| app.picture_drop(&pane, target, Some(value), (x, y)))
                 .flatten();
             if let Some((pdf, from, under)) = picture {
@@ -607,22 +611,27 @@ fn wire_pane_drops(app: &Rc<App>, pane: &Rc<Pane>) {
     ));
 }
 
-/// A window showing No File Open has no pane on screen to take a dragged tab: its placeholder
-/// takes one into the pane behind it, as that pane's middle would (`App::dropped`).
+/// A window showing No File Open has no pane on screen to take a dragged tab or a file's row: its
+/// placeholder takes one into the pane behind it, as that pane's middle would (`App::dropped`).
 ///
 /// On the stack rather than the placeholder: the tab landing swaps the placeholder out, and a
 /// drop target unmapped during its drop finishes the drop a second time, which libadwaita takes
 /// as a second landing of the same tab.
 fn wire_empty_drop(app: &Rc<App>) {
-    let drop = gtk::DropTarget::new(adw::TabPage::static_type(), gdk::DragAction::MOVE);
+    let drop = gtk::DropTarget::new(
+        glib::Type::INVALID,
+        gdk::DragAction::MOVE | gdk::DragAction::COPY,
+    );
+    drop.set_types(&[adw::TabPage::static_type(), String::static_type()]);
     drop.connect_accept(glib::clone!(
         #[weak]
         app,
         #[upgrade_or]
         false,
         move |_, drop| {
-            app.content.visible_child_name().as_deref() == Some("empty")
-                && drop.formats().contains_type(adw::TabPage::static_type())
+            let tab = drop.formats().contains_type(adw::TabPage::static_type());
+            let row = || refer::one_file(drop).and_then(|rel| app.row_key(rel));
+            app.content.visible_child_name().as_deref() == Some("empty") && (tab || row().is_some())
         }
     ));
     drop.connect_drop(glib::clone!(

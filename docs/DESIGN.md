@@ -299,6 +299,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A move or a trash lets the marks go, since it may have taken what they named.
 - Files is a drag surface both ways: a row dropped into a pane opens there, on a pane's edge splits it; dropped in the tree it moves — onto a folder into it, onto a file beside it, onto the vault label or the blank area below the rows into the root.
   Folders drag too, but can never be dropped into a pane and opened as a note.
+  A window showing No File Open takes a file's row anywhere on that page, as it takes a tab.
 - **With Shift a row writes a reference to itself instead** (user decision 2026-10-27): let go over the middle of text, it goes in where it lands as that text names a file — in a note or a notebook's markdown cell a link, `[[…]]` as a dropped image's embed is spelled (`![[…]]` for what a note draws, an image or a diagram; `[[file:…]]` in org), in code the path from the file, at a shell's prompt the quoted absolute path, the host's on a remote vault, typed and not run — a marked set one a line (a space apart at a shell) as one undo step, and the pane and the text take the keyboard.
   Shift because it is the one modifier a drag carries on X11 and under Mutter alike, both turning it into a move, a row otherwise asking only for a copy; while it is up the shade over such text says "Hold Shift to insert a link" (or a path), and while it is down an accent caret at the insertion point takes the shade's place, as the line between a PDF's pages does.
   What takes no reference — a PDF, an image, a diagram, a comparison, a read-only or presented document, a file from outside the vault — opens or splits as without Shift; a folder's row gives code and a shell its path and a note nothing, a note following no link to a folder.
@@ -317,7 +318,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Pages continue after the last filename, so removing an earlier entry does not skip later ones; the stateless server rescans direct names on each page and keeps only one page of candidates in memory.
   The names already there are asked about once for the batch, as Upload Files… asks, Cancel copying nothing; a folder already there takes what is carried into it.
   The receiving window's status bar counts the copy to one toast.
-  Its path names a file in its own vault, so every window's drop sheets go up while it is dragged and another window's panes and tab bar refuse it.
+  Every window's drop sheets go up while it is dragged, and another window's panes, tab bar and No File Open open a file's row as a tab dragged in would, as a file from outside that vault (user decision 2026-11-06).
+  So with Shift it writes no reference there and goes between no PDF's pages, and a remote vault's row is refused, as its tab would be sent back.
 - **One PDF dropped onto another PDF's row puts its pages after that PDF's last page** (user decision 2026-10-07), a row or a file from another application alike, in the other's tab, opened for it if it is not, so its Undo takes them out again (PDF).
   A marked set, a PDF onto its own row and a file manager's move (Shift) do what they did before.
 - A drag resting over a shut folder opens it after a second, so a file reaches a folder that was not on screen; nothing shuts it again.
