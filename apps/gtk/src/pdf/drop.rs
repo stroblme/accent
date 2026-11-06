@@ -1,11 +1,12 @@
-//! Insert pages from a dropped PDF at the gap under the pointer, marked by a drop line, and put
-//! dropped pictures on the page under it.
+//! Insert pages from a dropped PDF at the gap under the pointer, marked by a drop line, put
+//! dropped pictures on the page under it, and copy a page for the strip's Paste Page Here.
 //!
 //! Handle external files here. Files-tree rows use the pane drop (`App::pdf_drop`,
 //! `App::picture_drop`), whose target covers the pages during a tree drag.
 
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::mpsc::channel;
 
 use accent_core::markdown::is_image;
 use accent_core::pdf::{Clip, IDENTITY};
@@ -18,6 +19,7 @@ use super::pictures::Incoming;
 use super::protocol::Request;
 use super::tab::PdfTab;
 use crate::doc::{self, Kind};
+use crate::organize::{self, Copied};
 
 /// What a drop from another application carries onto the pages.
 enum Dropped {
@@ -30,11 +32,23 @@ enum Dropped {
 }
 
 impl PdfTab {
-    /// Put every page of the PDF at `source`, a file on this machine called `name`, in at page
-    /// `at`, after the last page for `None`: one step Undo takes back, saved as a page edit is. A
-    /// document still opening is handed it once its render thread starts.
-    pub fn import_pages(&self, at: Option<usize>, source: PathBuf, name: String) {
-        let request = Request::Import { at, source, name };
+    /// Put every page of the PDF at `source`, a file on this machine called `name`, or page
+    /// `page` of it alone, in at page `at`, after the last page for `None`: one step Undo takes
+    /// back, saved as a page edit is. A document still opening is handed it once its render
+    /// thread starts.
+    pub fn import_pages(
+        &self,
+        at: Option<usize>,
+        source: PathBuf,
+        page: Option<usize>,
+        name: String,
+    ) {
+        let request = Request::Import {
+            at,
+            source,
+            page,
+            name,
+        };
         match self.tx.borrow().as_ref() {
             Some(tx) => {
                 let _ = tx.send(request);
@@ -107,7 +121,7 @@ impl PdfTab {
                             return false;
                         };
                         let name = doc::file_name(&source.to_string_lossy()).to_string();
-                        tab.import_pages(Some(gap), source, name);
+                        tab.import_pages(Some(gap), source, None, name);
                     }
                     (Some(Dropped::Pictures(files)), Some((page, x, y))) => {
                         let read = move || files.iter().map(|f| Incoming::file(f)).collect();
@@ -123,6 +137,60 @@ impl PdfTab {
             }
         ));
         self.view.add_controller(target);
+    }
+
+    /// The strip's Copy Page and Paste Page Here: a page copied is pasted as a dropped PDF's pages
+    /// go in, from a copy of its document.
+    pub(super) fn wire_paste(self: &Rc<Self>) {
+        self.organize.connect_copy(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move |page| tab.copy_page(page)
+        ));
+        self.organize.connect_paste(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move |at, copied| {
+                if let Copied::Pdf { file, page, name } = copied {
+                    tab.import_pages(Some(at), file.clone(), Some(*page), name.clone());
+                }
+            }
+        ));
+    }
+
+    /// Hold `page` for Paste Page Here, in this PDF's strip or another's. The document as it now
+    /// stands, strokes not yet saved included, is copied into the cache first, so the page pasted
+    /// is the one copied whatever the document goes through since. Nothing is held while the
+    /// copy is written over the last one.
+    fn copy_page(self: &Rc<Self>, page: usize) {
+        organize::hold(None);
+        let dir = glib::user_cache_dir().join("accent");
+        let file = dir.join("copied-page.pdf");
+        let name = doc::file_name(&self.key()).to_string();
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            return tracing::warn!("copying a page of {name}: {e}");
+        }
+        let (done, answer) = channel();
+        // Without the notes' highlights, which are the vault's and not the page's.
+        self.ask(Request::Copy {
+            links: Vec::new(),
+            color: [0; 3],
+            dest: file.clone(),
+            done,
+        });
+        let tab = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            match crate::work::off_thread("page copy", move || answer.recv()).await {
+                Some(Ok(Ok(()))) => {
+                    organize::hold(Some(Copied::Pdf { file, page, name }));
+                    if let Some(tab) = tab.upgrade() {
+                        tab.organize.hover();
+                    }
+                }
+                Some(Ok(Err(e))) => tracing::warn!("copying a page of {name}: {e}"),
+                _ => {}
+            }
+        });
     }
 
     /// The page under `(x, y)` of `over` and the point on it, while the pointer is over a page:

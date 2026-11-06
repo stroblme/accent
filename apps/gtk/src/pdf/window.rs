@@ -243,7 +243,7 @@ impl App {
         self.local_copy(&key, &path, move |app, copy| {
             let Some(into) = into.upgrade() else { return };
             match copy {
-                Ok(copy) => into.import_pages(at, copy, name),
+                Ok(copy) => into.import_pages(at, copy, None, name),
                 Err(e) => app.cannot(&format!("insert the pages of {name}"), e),
             }
         });

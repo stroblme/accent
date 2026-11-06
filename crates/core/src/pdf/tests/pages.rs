@@ -152,7 +152,7 @@ fn an_imported_page_saves_once_its_document_has_closed() {
         return;
     };
     let (_src, source) = open_pdf(&commented_pdf()).unwrap();
-    assert_eq!(doc.import_pages(&source, 1).unwrap(), 1);
+    assert_eq!(doc.import_pages(&source, 0..1, 1).unwrap(), 1);
     drop(source);
     let doc = reopen(&dir, &doc);
     assert_eq!(page_texts(&doc), ["Hello accent", "", "Second page"]);

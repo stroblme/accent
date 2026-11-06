@@ -2,6 +2,7 @@
 //! this ledger defines the operations without widgets, channels or threads.
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use accent_pdf::Ref;
@@ -375,17 +376,18 @@ impl Ink {
         Ok(id)
     }
 
-    /// Put every page of `source` in at `at`, after the last page for `None`, as one step. Undo
-    /// takes the pages out and keeps them, as it keeps a deleted page, so Redo puts them back
-    /// without reading `source` again. The edit the pages made, and the step's id.
+    /// Put the pages `pages` of `source` in at `at`, after the last page for `None`, as one
+    /// step. Undo takes the pages out and keeps them, as it keeps a deleted page, so Redo puts
+    /// them back without reading `source` again. The edit the pages made, and the step's id.
     pub fn import_pages(
         &mut self,
         doc: &mut PdfDoc,
         at: Option<usize>,
         source: &PdfDoc,
+        pages: Range<usize>,
     ) -> Result<(PageEdit, u32)> {
         let at = at.unwrap_or_else(|| doc.page_count());
-        let count = doc.import_pages(source, at)?;
+        let count = doc.import_pages(source, pages, at)?;
         let edit = PageEdit::Insert { at, count };
         self.paged = true;
         let id = fresh_id();
@@ -823,7 +825,7 @@ mod tests {
         };
         let source = reopen(&dir, &doc);
         let mut ink = Ink::default();
-        let (edit, id) = ink.import_pages(&mut doc, Some(1), &source).unwrap();
+        let (edit, id) = ink.import_pages(&mut doc, Some(1), &source, 0..2).unwrap();
         drop(source);
         assert_eq!(edit, PageEdit::Insert { at: 1, count: 2 });
         let imported = ["Hello accent", "Hello accent", "Second page", "Second page"];
@@ -840,9 +842,32 @@ mod tests {
 
         // With no place given, after the last page.
         let source = reopen(&dir, &doc);
-        let (edit, _) = ink.import_pages(&mut doc, None, &source).unwrap();
+        let (edit, _) = ink.import_pages(&mut doc, None, &source, 0..4).unwrap();
         assert_eq!(edit, PageEdit::Insert { at: 4, count: 4 });
         assert_eq!(doc.page_count(), 8);
+    }
+
+    /// One page of another document goes in alone, as Paste Page puts one: its link into a page
+    /// that did not come leads nowhere, and Undo takes it out again.
+    #[test]
+    fn one_page_of_another_document_goes_in_alone() {
+        let Some((dir, mut doc)) = open_tiny() else {
+            return;
+        };
+        let source = reopen(&dir, &doc);
+        let mut ink = Ink::default();
+        let (edit, id) = ink.import_pages(&mut doc, Some(2), &source, 0..1).unwrap();
+        assert_eq!(edit, PageEdit::insert(2));
+        let texts = ["Hello accent", "Second page", "Hello accent"];
+        assert_eq!(page_texts(&doc), texts);
+        assert_eq!(doc.links(0).unwrap().len(), 1);
+        assert!(doc.links(2).unwrap().is_empty());
+        assert_eq!(
+            ink.walk(&mut doc, false),
+            [Walked::Pages(edit.inverse(), id)]
+        );
+        assert_eq!(page_texts(&doc), ["Hello accent", "Second page"]);
+        assert!(ink.import_pages(&mut doc, None, &source, 1..3).is_err());
     }
 
     /// Strokes and page edits walk back in the order they were made, through one history: a

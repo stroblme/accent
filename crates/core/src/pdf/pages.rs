@@ -1,6 +1,7 @@
 //! Page insertion, deletion, movement and import, written into the page tree of the session.
 
 use std::collections::HashMap;
+use std::ops::Range;
 
 use accent_pdf::{Dict, Object, Ref, Stream, Update};
 
@@ -63,18 +64,26 @@ impl PdfDoc {
         self.reopen()
     }
 
-    /// Insert all pages of `source` at `at` in order, returning their count. `at` may equal the
-    /// page count to append. Each page comes with everything it uses — text, annotations, ink —
-    /// and links between the pages that came lead to the copies; a link to anything else and the
-    /// bookmarks of `source` do not come. A form widget is cut loose from its field.
-    pub fn import_pages(&mut self, source: &PdfDoc, at: usize) -> Result<usize> {
+    /// Insert the pages `pages` of `source` at `at` in order, returning their count. `at` may
+    /// equal the page count to append. Each page comes with everything it uses — text,
+    /// annotations, ink — and links between the pages that came lead to the copies; a link to
+    /// anything else and the bookmarks of `source` do not come. A form widget is cut loose from
+    /// its field.
+    pub fn import_pages(
+        &mut self,
+        source: &PdfDoc,
+        pages: Range<usize>,
+        at: usize,
+    ) -> Result<usize> {
         let count = self.cos.pages.len();
-        if at > count {
+        let from = source.cos.pages.get(pages.clone());
+        let (Some(from), true) = (from, at <= count) else {
             return Err(Error::Invalid(format!(
-                "cannot import pages at {at} of {count}"
+                "cannot import pages {pages:?} of {} at {at} of {count}",
+                source.cos.pages.len()
             )));
-        }
-        let added = self.cos.import(&source.cos, at)?;
+        };
+        let added = self.cos.import(&source.cos, from, at)?;
         self.reopen()?;
         Ok(added)
     }
@@ -151,8 +160,8 @@ impl Objects {
         self.repage(|pages| pages.insert(at, page))
     }
 
-    /// Every page of `source` copied in at `at`, and how many.
-    fn import(&mut self, source: &Objects, at: usize) -> Result<usize> {
+    /// The pages `wanted` of `source` copied in at `at`, and how many.
+    fn import(&mut self, source: &Objects, wanted: &[Ref], at: usize) -> Result<usize> {
         let root = self.flatten()?;
         let mut copy = Copier {
             from: source,
@@ -161,14 +170,14 @@ impl Objects {
             todo: Vec::new(),
         };
         // Numbered first, so a link from one page to another that comes too finds its copy.
-        let pages: Vec<Ref> = (source.pages.iter())
+        let pages: Vec<Ref> = (wanted.iter())
             .map(|&page| {
                 let made = copy.into.add(Object::Null);
                 copy.made.insert(page, made);
                 made
             })
             .collect();
-        for (&from, &to) in source.pages.iter().zip(&pages) {
+        for (&from, &to) in wanted.iter().zip(&pages) {
             let mut page = source.dict(from)?;
             for key in INHERITED {
                 if page.get(key).is_none()

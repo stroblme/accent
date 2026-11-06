@@ -495,6 +495,16 @@ impl Editor {
         Ok(at)
     }
 
+    /// A copy of `page`, from this diagram or another, put in at index `at`, up to the page
+    /// count; returns `at`.
+    pub fn paste_page(&mut self, at: usize, page: &Page) -> Result<usize, Error> {
+        if at > self.file.pages.len() {
+            return Err(Error::NoPage(at));
+        }
+        self.edit_pages(|pages| pages.insert(at, page_copy(page)));
+        Ok(at)
+    }
+
     /// Move page `from` so that it is page `to` afterwards, as draw.io's `MovePage` does.
     pub fn move_page(&mut self, from: usize, to: usize) -> Result<(), Error> {
         let count = self.file.pages.len();
@@ -657,6 +667,24 @@ fn page_name(pages: &[Page]) -> String {
         .map(|n| format!("Page-{n}"))
         .find(|name| pages.iter().all(|p| p.name() != name))
         .expect("an unbounded range")
+}
+
+/// `page` as draw.io's Duplicate Page copies one: called "Copy of" its name, under a fresh page
+/// id, and every cell, the root and the layers too, renumbered `<guid>-<n>` from 0 in the order
+/// draw.io writes them, its parent, source and target following. draw.io also points the ids in
+/// a `data:action/json` link at the copies, a link accent does not follow.
+// diagramly/Pages.js 1460-1515 (`duplicatePage`), mxGraphModel.js 554-565 and 705-775
+fn page_copy(page: &Page) -> Page {
+    let prefix = guid();
+    let cells = page.cells.iter().enumerate();
+    let fresh = cells
+        .map(|(n, c)| (c.id.clone(), format!("{prefix}-{n}")))
+        .collect();
+    let mut copy = page.clone();
+    copy.cells = page.cells.iter().map(|c| copy_of(c, &fresh)).collect();
+    copy.set_id(&guid());
+    copy.set_name(&format!("Copy of {}", page.name()));
+    copy
 }
 
 /// Import a clipboard page with fresh cell ids (`importGraphModel`). A single

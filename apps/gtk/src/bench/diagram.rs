@@ -1343,9 +1343,9 @@ fn web(app: &Rc<App>, rel: &str, url: &str) {
     });
 }
 
-/// The thumbnail strip held on screen for 40 s: the Outline pane up, and the pages, the one
-/// shown, the strip's buttons and the window's offset on the screen printed every two seconds;
-/// then the pages the file on disk holds.
+/// The thumbnail strip held on screen for 40 s: the Outline pane up, and the diagram in front,
+/// which Go to File may change, its pages, the one shown, its strip's buttons and the window's
+/// offset on the screen printed every two seconds; then the pages `rel` on disk holds.
 fn strip(app: &Rc<App>, rel: &str) {
     let path = app.root().join(rel);
     if !path.exists() {
@@ -1362,12 +1362,14 @@ fn strip(app: &Rc<App>, rel: &str) {
             };
             app.show_pane("outline");
             for _ in 0..20 {
+                let front = app.active_diagram().unwrap_or_else(|| tab.clone());
                 let (sx, sy) = app.window.surface_transform();
                 println!(
-                    "bench strip pages={:?} page={} {} surface={sx},{sy}",
-                    tab.page_names(),
-                    tab.page_index(),
-                    tab.strip_buttons(app.window.upcast_ref())
+                    "bench strip file={} pages={:?} page={} {} surface={sx},{sy}",
+                    front.key(),
+                    front.page_names(),
+                    front.page_index(),
+                    front.strip_buttons(app.window.upcast_ref())
                 );
                 glib::timeout_future(Duration::from_secs(2)).await;
             }

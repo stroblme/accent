@@ -27,7 +27,7 @@ use std::rc::Rc;
 use accent_core::config::{DiagramConfig, DiagramPlace};
 use accent_core::fs::{Digest, Etag};
 use accent_core::page_edit::PageEdit;
-use accent_drawio::{CellId, Editor, File, Point};
+use accent_drawio::{CellId, Editor, File, Page, Point};
 use adw::prelude::*;
 use gtk::{gio, glib};
 
@@ -165,6 +165,7 @@ pub fn open(
             strip,
             move |page| strip.picture(page)
         ),
+        crate::doc::Kind::Diagram,
     );
     let pages = file.pages.len();
     let tab = Rc::new(DiagramTab {
@@ -219,6 +220,20 @@ pub fn open(
         #[weak]
         tab,
         move |edit| tab.edit_pages(edit)
+    ));
+    tab.organize.connect_copy(glib::clone!(
+        #[weak]
+        tab,
+        move |page| tab.copy_page(page)
+    ));
+    tab.organize.connect_paste(glib::clone!(
+        #[weak]
+        tab,
+        move |at, copied| {
+            if let crate::organize::Copied::Diagram(page) = copied {
+                tab.paste_page(at, page);
+            }
+        }
     ));
     let zoom = place.zoom.map_or(Zoom::Fit, Zoom::Scale);
     tab.view.restore(zoom, (place.x, place.y));
@@ -1011,18 +1026,41 @@ impl DiagramTab {
     /// drag and the page commands, one page at a time. The reader lands on a page put in, and
     /// otherwise stays on the page they were reading, or the one that took its place.
     pub fn edit_pages(self: &Rc<Self>, edit: PageEdit) {
+        self.change_pages(edit, |editor| match edit {
+            PageEdit::Insert { at, .. } => editor.insert_page(at).map(drop),
+            PageEdit::Delete { at, .. } => editor.delete_page(at),
+            PageEdit::Move { from, to } => editor.move_page(from, to),
+        });
+    }
+
+    /// Hold page `page` as it now is for Paste Page Here, in this diagram's strip or another's.
+    fn copy_page(self: &Rc<Self>, page: usize) {
+        self.props.flush();
+        self.finish_label();
+        if let Ok(page) = self.editor.borrow().page(page) {
+            crate::organize::hold(Some(crate::organize::Copied::Diagram(page.clone())));
+        }
+    }
+
+    /// A copy of `page`, of this diagram or another, put in at `at` as one undo step: Paste Page
+    /// Here. The reader lands on it, as on a page put in.
+    fn paste_page(self: &Rc<Self>, at: usize, page: &Page) {
+        self.change_pages(PageEdit::insert(at), |editor| {
+            editor.paste_page(at, page).map(drop)
+        });
+    }
+
+    /// Make `edit` through `change`, then follow the pages through it.
+    fn change_pages(
+        self: &Rc<Self>,
+        edit: PageEdit,
+        change: impl FnOnce(&mut Editor) -> Result<(), accent_drawio::Error>,
+    ) {
         // What the Properties pane or the label editor holds is the page's as it was.
         self.props.flush();
         self.finish_label();
         let before = self.page_ids();
-        let done = {
-            let mut editor = self.editor.borrow_mut();
-            match edit {
-                PageEdit::Insert { at, .. } => editor.insert_page(at).map(drop),
-                PageEdit::Delete { at, .. } => editor.delete_page(at),
-                PageEdit::Move { from, to } => editor.move_page(from, to),
-            }
-        };
+        let done = change(&mut self.editor.borrow_mut());
         if let Err(e) = done {
             return tracing::info!("diagram page edit refused: {e}");
         }

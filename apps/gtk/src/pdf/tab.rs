@@ -310,6 +310,7 @@ pub fn open(
                     low.map(|low| low.upcast())
                 }
             ),
+            crate::doc::Kind::Pdf,
         ),
         tx: RefCell::new(None),
         waiting: RefCell::default(),
@@ -409,6 +410,7 @@ pub fn open(
         move |edit| tab.edit_pages(edit)
     ));
     tab.wire_drop();
+    tab.wire_paste();
     tab.ring.connect_choice(glib::clone!(
         #[weak]
         tab,

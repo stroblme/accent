@@ -1,17 +1,21 @@
-//! Move, delete and insert pages through a thumbnail strip: a PDF's or a diagram's.
+//! Move, delete, insert, copy and paste pages through a thumbnail strip: a PDF's or a diagram's.
 //!
 //! The strip is one canvas in a scrolled window, so its page layout determines thumbnail targets.
-//! Overlay buttons provide Delete Page and Insert Page Here, fading in like Git row actions.
+//! Overlay buttons provide Copy Page, Delete Page, Insert Page Here and Paste Page Here, fading in
+//! like Git row actions. A copied page is held for the whole app until the next copy, so it pastes
+//! into any strip of its kind.
 //! Points are taken in the scrolled window's coordinates, which are the same for a canvas that
 //! scrolls itself (`PdfView`) and one a viewport scrolls (the diagram's strip).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 
 use accent_core::page_edit::PageEdit;
 use adw::prelude::*;
 use gtk::{gdk, glib, graphene};
 
+use crate::doc::Kind;
 use crate::pdf::geometry::{Layout, gap_at, gap_middle, move_to, page_at};
 use crate::widgets::Hook;
 
@@ -20,8 +24,48 @@ use crate::widgets::Hook;
 const EDGE: f64 = 40.0;
 const EDGE_SPEED: f64 = 12.0;
 
-/// How far the trash button sits inside its thumbnail's corner.
+/// How far the trash and copy buttons sit inside their thumbnail's corners, and how far apart
+/// the insert and paste buttons stand.
 const INSET: f32 = 6.0;
+
+/// A page Copy Page holds for Paste Page Here.
+pub enum Copied {
+    /// The diagram's page as it was.
+    Diagram(accent_drawio::Page),
+    /// Page `page` of `file`, a copy of the PDF called `name` as it was.
+    Pdf {
+        file: PathBuf,
+        page: usize,
+        name: String,
+    },
+}
+
+impl Copied {
+    fn kind(&self) -> Kind {
+        match self {
+            Copied::Diagram(_) => Kind::Diagram,
+            Copied::Pdf { .. } => Kind::Pdf,
+        }
+    }
+}
+
+thread_local! {
+    /// What Copy Page holds, one page for every strip of every window.
+    static COPIED: RefCell<Option<Rc<Copied>>> = const { RefCell::new(None) };
+}
+
+/// Hold `copied` for Paste Page Here, or nothing.
+pub fn hold(copied: Option<Copied>) {
+    COPIED.set(copied.map(Rc::new));
+}
+
+/// What Copy Page holds, if it is a page of `kind`.
+fn held(kind: Kind) -> Option<Rc<Copied>> {
+    COPIED.with_borrow(|c| c.clone().filter(|c| c.kind() == kind))
+}
+
+/// Called with the gap a paste goes into and the page held.
+type PasteHook = Hook<dyn Fn(usize, &Copied)>;
 
 /// The strip's overlay and what it knows about the pointer over it.
 pub struct Organize {
@@ -34,9 +78,16 @@ pub struct Organize {
     layout: Box<dyn Fn() -> Layout>,
     /// The picture a drag of a page holds.
     icon: Box<dyn Fn(usize) -> Option<gdk::Texture>>,
+    /// The pages a paste here takes.
+    kind: Kind,
     on_edit: Hook<dyn Fn(PageEdit)>,
+    on_copy: Hook<dyn Fn(usize)>,
+    on_paste: PasteHook,
     trash: gtk::Revealer,
+    copy: gtk::Revealer,
+    /// Insert Page Here, with Paste Page Here beside it while a page of this kind is held.
     insert: gtk::Revealer,
+    paste: gtk::Button,
     /// The line in the gap a dragged page would be dropped into.
     bar: gtk::Box,
     /// The page the buttons are over: the one under the pointer, or above the gap it is in.
@@ -53,15 +104,10 @@ pub struct Organize {
     ticking: Cell<bool>,
 }
 
-/// A round button that floats over a thumbnail, in a revealer that fades it in and out.
-fn floating(icon: &str, tooltip: &str) -> gtk::Revealer {
-    let button = gtk::Button::builder()
-        .icon_name(icon)
-        .tooltip_text(tooltip)
-        .css_classes(["opaque", "accent-floating", "circular"])
-        .build();
+/// Round buttons that float over a thumbnail, in a revealer that fades them in and out.
+fn floating(child: &impl IsA<gtk::Widget>) -> gtk::Revealer {
     gtk::Revealer::builder()
-        .child(&button)
+        .child(child)
         .transition_type(gtk::RevealerTransitionType::Crossfade)
         .halign(gtk::Align::Start)
         .valign(gtk::Align::Start)
@@ -84,46 +130,80 @@ fn edge_speed(y: f64, height: f64) -> f64 {
 }
 
 impl Organize {
-    /// The organizer of `canvas`, the pages `layout` places, in `strip`. Every handler holds it
-    /// weakly: the widgets they are on outlive nothing it does not.
+    /// The organizer of `canvas`, the pages of `kind` that `layout` places, in `strip`. Every
+    /// handler holds it weakly: the widgets they are on outlive nothing it does not.
     pub fn new(
         strip: &gtk::ScrolledWindow,
         canvas: &impl IsA<gtk::Widget>,
         layout: impl Fn() -> Layout + 'static,
         icon: impl Fn(usize) -> Option<gdk::Texture> + 'static,
+        kind: Kind,
     ) -> Rc<Organize> {
         // Clipped, so a button over a thumbnail scrolled half out of the strip stays inside it.
         let pane = gtk::Overlay::builder()
             .child(strip)
             .overflow(gtk::Overflow::Hidden)
             .build();
-        let trash = floating("user-trash-symbolic", "Delete Page");
-        let insert = floating("list-add-symbolic", "Insert Page Here");
-        let bar = gtk::Box::builder()
-            .height_request(3)
-            .can_target(false)
-            .visible(false)
-            .css_classes(["accent-drop-bar"])
-            .build();
-        pane.add_overlay(&trash);
-        pane.add_overlay(&insert);
-        pane.add_overlay(&bar);
-        let o = Rc::new(Organize {
-            pane,
-            strip: strip.clone(),
-            canvas: canvas.clone().upcast(),
-            layout: Box::new(layout),
-            icon: Box::new(icon),
-            on_edit: Hook::default(),
-            trash,
-            insert,
-            bar,
-            hovered: Cell::new(None),
-            pointer: Cell::new(None),
-            dragged: Cell::new(None),
-            gap: Cell::new(None),
-            speed: Cell::new(0.0),
-            ticking: Cell::new(false),
+        let o = Rc::new_cyclic(|weak: &Weak<Organize>| {
+            // A button that does `act` to the page the buttons are over.
+            let button = |icon: &str, tooltip: &str, act: fn(&Organize, usize)| {
+                let button = gtk::Button::builder()
+                    .icon_name(icon)
+                    .tooltip_text(tooltip)
+                    .css_classes(["opaque", "accent-floating", "circular"])
+                    .build();
+                let weak = weak.clone();
+                button.connect_clicked(move |_| {
+                    if let Some(o) = weak.upgrade()
+                        && let Some(page) = o.hovered.get()
+                    {
+                        act(&o, page);
+                    }
+                });
+                button
+            };
+            let delete = |o: &Organize, page| o.edit(PageEdit::delete(page));
+            let trash = floating(&button("user-trash-symbolic", "Delete Page", delete));
+            let copy = floating(&button("edit-copy-symbolic", "Copy Page", Organize::copy));
+            let add = |o: &Organize, page| o.edit(PageEdit::insert(page + 1));
+            let gap = gtk::Box::new(gtk::Orientation::Horizontal, INSET as i32);
+            gap.append(&button("list-add-symbolic", "Insert Page Here", add));
+            let paste = button("edit-paste-symbolic", "Paste Page Here", Organize::paste);
+            paste.set_visible(false);
+            gap.append(&paste);
+            let insert = floating(&gap);
+            let bar = gtk::Box::builder()
+                .height_request(3)
+                .can_target(false)
+                .visible(false)
+                .css_classes(["accent-drop-bar"])
+                .build();
+            pane.add_overlay(&trash);
+            pane.add_overlay(&copy);
+            pane.add_overlay(&insert);
+            pane.add_overlay(&bar);
+            Organize {
+                pane,
+                strip: strip.clone(),
+                canvas: canvas.clone().upcast(),
+                layout: Box::new(layout),
+                icon: Box::new(icon),
+                kind,
+                on_edit: Hook::default(),
+                on_copy: Hook::default(),
+                on_paste: Hook::default(),
+                trash,
+                copy,
+                insert,
+                paste,
+                bar,
+                hovered: Cell::new(None),
+                pointer: Cell::new(None),
+                dragged: Cell::new(None),
+                gap: Cell::new(None),
+                speed: Cell::new(0.0),
+                ticking: Cell::new(false),
+            }
         });
         o.wire();
         o
@@ -132,6 +212,32 @@ impl Organize {
     /// Called with what a button or a drop asks of the document.
     pub fn connect_edit(&self, f: impl Fn(PageEdit) + 'static) {
         self.on_edit.set(Rc::new(f));
+    }
+
+    /// Called with the page Copy Page was pressed on, for the document to [`hold`] it.
+    pub fn connect_copy(&self, f: impl Fn(usize) + 'static) {
+        self.on_copy.set(Rc::new(f));
+    }
+
+    /// Called with the gap Paste Page Here was pressed on, gap `g` being before page `g`, and the
+    /// page held, which is of this strip's kind.
+    pub fn connect_paste(&self, f: impl Fn(usize, &Copied) + 'static) {
+        self.on_paste.set(Rc::new(f));
+    }
+
+    /// Copy Page on `page`: the document holds it, and a page held here shows Paste at once.
+    fn copy(&self, page: usize) {
+        if let Some(f) = self.on_copy.get() {
+            f(page);
+        }
+        self.hover();
+    }
+
+    /// Paste Page Here on the gap below `page`.
+    fn paste(&self, page: usize) {
+        if let (Some(f), Some(copied)) = (self.on_paste.get(), held(self.kind)) {
+            f(page + 1, &copied);
+        }
     }
 
     fn edit(&self, edit: PageEdit) {
@@ -160,20 +266,6 @@ impl Organize {
         // The drop bar says where a page lands; the outline Adwaita draws round a drop target
         // would say only that the whole strip is one.
         self.canvas.add_css_class("accent-page-strip");
-        for (revealer, delete) in [(&self.trash, true), (&self.insert, false)] {
-            let Some(button) = revealer.child().and_downcast::<gtk::Button>() else {
-                continue;
-            };
-            let weak = Rc::downgrade(self);
-            button.connect_clicked(move |_| {
-                let Some(o) = weak.upgrade() else { return };
-                let Some(page) = o.hovered.get() else { return };
-                o.edit(match delete {
-                    true => PageEdit::delete(page),
-                    false => PageEdit::insert(page + 1),
-                });
-            });
-        }
         let weak = Rc::downgrade(self);
         self.pane.connect_get_child_position(move |_, child| {
             weak.upgrade().and_then(|o| o.place_on_strip(child))
@@ -185,10 +277,11 @@ impl Organize {
             let Some(o) = weak.upgrade() else { return };
             // On one of the buttons, they stay where they are: the one on the gap reaches onto
             // the next page, which would otherwise take them from under the pointer.
-            let on_button = o
-                .pane
-                .pick(x, y, gtk::PickFlags::DEFAULT)
-                .is_some_and(|w| w.is_ancestor(&o.trash) || w.is_ancestor(&o.insert));
+            let on_button = (o.pane.pick(x, y, gtk::PickFlags::DEFAULT)).is_some_and(|w| {
+                [&o.trash, &o.copy, &o.insert]
+                    .into_iter()
+                    .any(|buttons| w.is_ancestor(buttons))
+            });
             if !on_button {
                 o.pointer.set(Some(o.on_strip(&o.pane, x, y).1));
                 o.hover();
@@ -285,8 +378,8 @@ impl Organize {
         self.canvas.add_controller(target);
     }
 
-    /// Where the strip and its insert button are in `window`, and whether each button is out:
-    /// what the strip drills print for XTEST to aim at.
+    /// Where the strip and its insert, copy and paste buttons are in `window`, and whether each
+    /// button is out: what the strip drills print for XTEST to aim at.
     #[cfg(feature = "bench")]
     pub fn buttons(&self, window: &gtk::Widget) -> String {
         let at = |w: &gtk::Widget| {
@@ -296,16 +389,21 @@ impl Organize {
             })
         };
         format!(
-            "strip={:?} insert={:?} out=trash:{},insert:{}",
+            "strip={:?} insert={:?} copy={:?} paste={:?} out=trash:{},insert:{},copy:{},paste:{}",
             at(self.pane.upcast_ref()),
             at(self.insert.upcast_ref()),
+            at(self.copy.upcast_ref()),
+            at(self.paste.upcast_ref()),
             self.trash.reveals_child(),
-            self.insert.reveals_child()
+            self.insert.reveals_child(),
+            self.copy.reveals_child(),
+            self.paste.is_visible()
         )
     }
 
     /// Show the buttons over the page under the pointer, or put them away: with the pointer gone,
-    /// while a page is being dragged, and the trash on a document of one page, which keeps it.
+    /// while a page is being dragged, the trash on a document of one page, which keeps it, and
+    /// Paste while no page of this kind is held.
     pub fn hover(&self) {
         let layout = (self.layout)();
         let top = self.scrolled().1;
@@ -321,7 +419,9 @@ impl Organize {
             self.hovered.set(page);
         }
         reveal(&self.trash, page.is_some() && layout.pages.len() > 1);
+        reveal(&self.copy, page.is_some());
         reveal(&self.insert, page.is_some());
+        self.paste.set_visible(held(self.kind).is_some());
         self.pane.queue_allocate();
     }
 
@@ -373,8 +473,8 @@ impl Organize {
     }
 
     /// Where one of the overlay's floating children goes, in the overlay's coordinates: the trash
-    /// in the hovered thumbnail's top-right corner, the insert button centred on the gap below it,
-    /// and the bar across the gap a drop would land in.
+    /// in the hovered thumbnail's top-right corner and Copy in its top-left, the insert and paste
+    /// buttons centred on the gap below it, and the bar across the gap a drop would land in.
     fn place_on_strip(&self, child: &gtk::Widget) -> Option<gdk::Rectangle> {
         let layout = (self.layout)();
         let origin = graphene::Point::zero();
@@ -394,13 +494,18 @@ impl Organize {
         } else {
             let page = self.hovered.get()?;
             let rect = layout.pages.get(page)?;
-            match child == self.trash.upcast_ref::<gtk::Widget>() {
+            let left = child == self.copy.upcast_ref::<gtk::Widget>();
+            match left || child == self.trash.upcast_ref::<gtk::Widget>() {
                 // In the corner of what shows of the thumbnail, so a page scrolled half out of
-                // the strip keeps its trash in reach.
+                // the strip keeps its trash and its copy button in reach.
                 true => {
                     let shown = (rect.y - top).max(origin.y());
                     let y = (shown + INSET).min(rect.y + rect.h - top - h - INSET);
-                    (rect.x + rect.w - w - INSET, y, w)
+                    let x = match left {
+                        true => rect.x + INSET,
+                        false => rect.x + rect.w - w - INSET,
+                    };
+                    (x, y, w)
                 }
                 false => (
                     rect.x + (rect.w - w) / 2.0,

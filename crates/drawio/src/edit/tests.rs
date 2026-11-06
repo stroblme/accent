@@ -755,3 +755,44 @@ fn a_pictures_fill_and_line_are_its_background_and_border() {
     );
     assert_eq!(style("r"), "fillColor=#ff0000;strokeColor=#00ff00;");
 }
+
+#[test]
+fn a_pasted_page_is_a_copy_with_ids_of_its_own() {
+    let mut e = editor();
+    e.set_page_attr(0, "background", Some("#ff0000")).unwrap();
+    let copied = e.page(0).unwrap().clone();
+    assert_eq!(e.paste_page(1, &copied).unwrap(), 1);
+    assert_eq!(e.paste_page(2, &copied).unwrap(), 2);
+    let pages = &e.file().pages;
+    let names: Vec<_> = pages.iter().map(Page::name).collect();
+    assert_eq!(names, ["P", "Copy of P", "Copy of P"]);
+    let page_ids: HashSet<_> = pages
+        .iter()
+        .map(|p| crate::model::attr(&p.attrs, "id"))
+        .collect();
+    assert_eq!(page_ids.len(), 3);
+    let cell_ids: HashSet<_> = pages.iter().flat_map(|p| &p.cells).map(|c| &c.id).collect();
+    assert_eq!(
+        cell_ids.len(),
+        3 * copied.cells.len(),
+        "no id twice in the file"
+    );
+    // Renumbered from the root as draw.io's Duplicate Page does, the edge on the copies of its
+    // boxes, and the page's attributes, styles and geometry kept.
+    let paste = &pages[1];
+    let prefix = paste.cells[0].id.strip_suffix("-0").unwrap();
+    assert_eq!(prefix.len(), 20);
+    let edge = paste.cells.iter().find(|c| c.edge).unwrap();
+    let id = |n: usize| Some(format!("{prefix}-{n}"));
+    assert_eq!(
+        (&edge.parent, &edge.source, &edge.target),
+        (&id(1), &id(2), &id(3))
+    );
+    assert_eq!(paste.model_attrs, copied.model_attrs);
+    for (copy, cell) in paste.cells.iter().zip(&copied.cells) {
+        assert_eq!((&copy.style, &copy.geometry), (&cell.style, &cell.geometry));
+    }
+    assert!(e.undo());
+    assert_eq!(e.file().pages.len(), 2, "one paste, one step");
+    assert!(matches!(e.paste_page(3, &copied), Err(Error::NoPage(3))));
+}

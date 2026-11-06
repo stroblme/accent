@@ -1196,7 +1196,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Insert Sketch puts a blank A4 page beside the note, embeds it and hands it the pen; New Drawing makes one where the tree says, and so does New File given a name ending `.pdf` (Keyboard, Notes).
   Both write through the vault, on the host for a remote one, off the main loop.
 - **The thumbnail strip organises pages:** dragging a thumbnail moves its page, an accent bar marks the destination gap, and the strip scrolls near an edge.
-  The thumbnail under the pointer carries two round buttons, opaque as the ring's are: Delete Page (absent on a one-page document, which a PDF keeps) and Insert Page Here on the gap below.
+  The thumbnail under the pointer carries round buttons, opaque as the ring's are, with Copy Page in its top-left corner, Delete Page in its top-right (absent on a one-page document, which a PDF keeps) and Insert Page Here on the gap below.
+  A copied page stays held for the whole app until the next copy, and while it is a PDF's, every PDF's strip shows Paste Page Here beside Insert Page Here (user decision 2026-11-06).
+  It goes in as a dropped PDF's pages do, toast included, from a copy of its document taken at the copy, so whatever happens to that document afterwards the page pasted is the one copied.
   A click goes to its page on release, a press being how a drag begins.
 - The page's menu has Add Page Before, Add Page After and Delete Page for the page it was opened on; the status bar's page count and the palette have them for the page being read, and the palette Move Page Up and Move Page Down.
   A document grows at its end by Add Page After on its last page, never by itself: the view clamps a stroke to the page under it, so running off the end is no gesture to observe.
@@ -1320,8 +1322,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   In a label a formula's room is kept by one placeholder character Pango sizes to it, so wrapping, alignment, bullets and line height stay Pango's; a display formula takes a line of its own, with an em of room above and below it as MathJax gives one, and a formula that does not parse shows its TeX, dimmed.
   A formula is laid out once at its label's font size and kept by its TeX and size for the app's life, so a zoom lays out only the label again; it is painted in its label's colour, a `\color` through the same remap, and is not clipped to its box, which a stretched accent may overhang as in TeX.
   A notebook's LaTeX output is the same layout at 16 px in a widget of its own, painted in the widget's colour.
-- Pages are the Outline pane's rows, the one shown selected, over a thumbnail strip that organises them as a PDF's does (PDF): a click goes to the page, dragging a thumbnail moves its page, and the thumbnail under the pointer carries Delete Page (absent on a diagram of one page, which keeps it) and Insert Page Here.
+- Pages are the Outline pane's rows, the one shown selected, over a thumbnail strip that organises them as a PDF's does (PDF): a click goes to the page, dragging a thumbnail moves its page, and the thumbnail under the pointer carries Copy Page, Delete Page (absent on a diagram of one page, which keeps it) and Insert Page Here, with Paste Page Here beside it while a diagram's page is held.
   A page put in is blank and named as draw.io names one, the first `Page-N` from the page count on that no page has.
+  A page pasted is the one copied, from this diagram or another, called "Copy of" its name with a page id of its own and every cell renumbered, as draw.io's Duplicate Page makes one.
   A thumbnail is its page in the canvas's colours, painted when it first comes on screen and again only once an edit has changed it.
 - A page edit is one undo step: the reader lands on a page put in, and otherwise stays on the page they were reading, wherever it went, or the one that took its place, Undo and Redo included, and the pane's Back and Forward places follow the pages.
   A note names a diagram's page by its name, so no link changes with one.

@@ -359,7 +359,8 @@ pub(super) fn value_drop(widget: &gtk::Widget, value: glib::Value, (x, y): (f32,
 }
 
 /// The thumbnail strip held on screen for XTEST to hover and drag along: the Outline pane up, and
-/// the page being read and the file's pages printed every two seconds for 40 s.
+/// the PDF in front, which Go to File may change, its page being read and its file's pages
+/// printed every two seconds for 40 s.
 pub(super) fn bench_pdf_strip(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
@@ -369,8 +370,13 @@ pub(super) fn bench_pdf_strip(app: &Rc<App>, rel: &str) {
         };
         app.show_pane("outline");
         for _ in 0..20 {
-            let buttons = pdf.strip_buttons(app.window.upcast_ref());
-            println!("bench strip {} {buttons}", pages_read(&pdf));
+            let front = app.active_pdf().unwrap_or_else(|| pdf.clone());
+            let buttons = front.strip_buttons(app.window.upcast_ref());
+            println!(
+                "bench strip file={} {} {buttons}",
+                front.key(),
+                pages_read(&front)
+            );
             glib::timeout_future(Duration::from_secs(2)).await;
         }
         bench_quit(&app);

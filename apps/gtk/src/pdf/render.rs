@@ -459,13 +459,19 @@ fn render_loop(
                     }
                     Err(e) => tracing::warn!("{edit:?}: {e:#}"),
                 },
-                Request::Import { at, source, name } => {
+                Request::Import {
+                    at,
+                    source,
+                    page,
+                    name,
+                } => {
                     let before = doc.page_count();
                     // pdfium's reason goes to the log; the reader can only drop another file.
                     let imported = PdfDoc::open(&source)
                         .map_err(|e| (e, "it does not open as a PDF"))
                         .and_then(|source| {
-                            let made = ink.import_pages(&mut doc, at, &source);
+                            let pages = page.map_or(0..source.page_count(), |p| p..p + 1);
+                            let made = ink.import_pages(&mut doc, at, &source, pages);
                             made.map_err(|e| (e, "its pages would not copy"))
                         });
                     let pages = match imported {

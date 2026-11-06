@@ -268,11 +268,13 @@ pub enum Request {
     },
     /// Put a blank page in, take one out, or move one.
     Pages(pdf::PageEdit),
-    /// Put every page of the PDF at `source`, called `name`, in at page `at`, after the last
-    /// page for `None`: a PDF dropped onto this one.
+    /// Put the pages of the PDF at `source`, called `name`, in at page `at`, after the last
+    /// page for `None`: every page of a PDF dropped onto this one, or page `page` alone of one a
+    /// page was copied from.
     Import {
         at: Option<usize>,
         source: PathBuf,
+        page: Option<usize>,
         name: String,
     },
     /// Take back the last step drawn, erased or moved, or the last page edit, in this session.
