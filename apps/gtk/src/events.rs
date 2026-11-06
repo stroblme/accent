@@ -513,8 +513,9 @@ impl App {
                     }
                 }
             }
-            Event::Diagnostics { rel, items } => {
+            Event::Diagnostics { rel, items, stale } => {
                 if let Some(tab) = self.tab_for(&rel) {
+                    tab.lang.doc.published(stale);
                     tab.set_diagnostics(items);
                     // The count lives in the status bar, which only speaks for the active tab.
                     if self.is_active(&tab) {
@@ -523,7 +524,7 @@ impl App {
                 } else if let Some(notebook) =
                     self.notebooks().into_iter().find(|n| n.has_document(&rel))
                 {
-                    notebook.set_diagnostics(&rel, items);
+                    notebook.set_diagnostics(&rel, items, stale);
                     if self
                         .active_notebook()
                         .is_some_and(|n| Rc::ptr_eq(&n, &notebook))

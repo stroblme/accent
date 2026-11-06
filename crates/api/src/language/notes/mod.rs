@@ -123,6 +123,7 @@ impl Notes {
         let _ = self.events.send(Event::Diagnostics {
             rel: rel.to_string(),
             items,
+            stale: false,
         });
     }
 
@@ -374,6 +375,7 @@ impl Language for Notes {
         let _ = self.events.send(Event::Diagnostics {
             rel: rel.to_string(),
             items: Vec::new(),
+            stale: false,
         });
     }
 

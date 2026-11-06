@@ -215,10 +215,11 @@ async fn forward_notifications(
                 let Some(rel) = rel_of(&params.uri, &vault_root) else {
                     continue;
                 };
-                let Some(text) = locked(&docs).get_mut(&rel).map(|d| {
+                let Some((text, stale)) = locked(&docs).get_mut(&rel).map(|d| {
                     d.diagnostics =
                         serde_json::from_value(raw.unwrap_or_default()).unwrap_or_default();
-                    d.text.clone()
+                    let stale = params.version.is_some_and(|v| v < d.version);
+                    (d.text.clone(), stale)
                 }) else {
                     continue;
                 };
@@ -227,7 +228,10 @@ async fn forward_notifications(
                     true => painted.remove(&rel),
                     false => painted.insert(rel.clone()),
                 };
-                if events.send(Event::Diagnostics { rel, items }).is_err() {
+                if events
+                    .send(Event::Diagnostics { rel, items, stale })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -288,6 +292,7 @@ async fn forward_notifications(
         let _ = events.send(Event::Diagnostics {
             rel,
             items: Vec::new(),
+            stale: false,
         });
     }
     // Nor will it finish checking a file it was in the middle of.
@@ -1237,11 +1242,53 @@ mod tests {
         ));
 
         let painted = seen.recv().expect("the diagnostic the server published");
-        assert!(matches!(painted, Event::Diagnostics { ref rel, ref items }
-            if rel == "a.c" && items.len() == 1));
+        assert!(
+            matches!(painted, Event::Diagnostics { ref rel, ref items, .. }
+            if rel == "a.c" && items.len() == 1)
+        );
         let cleared = seen.recv().expect("the server's exit clears its marks");
-        assert!(matches!(cleared, Event::Diagnostics { ref rel, ref items }
-            if rel == "a.c" && items.is_empty()));
+        assert!(
+            matches!(cleared, Event::Diagnostics { ref rel, ref items, .. }
+            if rel == "a.c" && items.is_empty())
+        );
+    }
+
+    /// A publish the server says is for an older text than the one it was sent last is stale; one
+    /// for that text, or one that does not say, is not.
+    #[test]
+    fn a_publish_for_an_older_text_is_stale() {
+        let (server, notifications) = tokio::sync::mpsc::unbounded_channel();
+        let (events, seen) = std::sync::mpsc::channel();
+        let docs: Docs = Arc::new(Mutex::new(HashMap::from([(
+            "a.c".to_string(),
+            Doc {
+                version: 2,
+                ..Doc::default()
+            },
+        )])));
+        for version in [json!(1), json!(2), json!(null)] {
+            let params = json!({"uri": "file:///vault/a.c", "version": version, "diagnostics": []});
+            let method = "textDocument/publishDiagnostics".to_string();
+            server
+                .send(accent_lsp::Notification { method, params })
+                .unwrap();
+        }
+        drop(server);
+
+        accent_lsp::runtime().block_on(forward_notifications(
+            notifications,
+            docs,
+            PathBuf::from("/vault"),
+            Encoding::Utf16,
+            None,
+            events,
+        ));
+
+        let stale: Vec<bool> = seen
+            .try_iter()
+            .map(|e| matches!(e, Event::Diagnostics { stale: true, .. }))
+            .collect();
+        assert_eq!(stale, [true, false, false]);
     }
 
     // ------------------------------------------------------------ with a real server
@@ -1320,7 +1367,7 @@ mod tests {
             let Ok(event) = events.recv_timeout(std::time::Duration::from_millis(500)) else {
                 continue;
             };
-            if let Event::Diagnostics { rel, items } = event
+            if let Event::Diagnostics { rel, items, .. } = event
                 && rel == "main.c"
             {
                 error = items.into_iter().find(|d| d.severity == Severity::Error);
@@ -1394,7 +1441,7 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         let mut error = None;
         while error.is_none() && std::time::Instant::now() < deadline {
-            if let Ok(Event::Diagnostics { rel, items }) =
+            if let Ok(Event::Diagnostics { rel, items, .. }) =
                 events.recv_timeout(std::time::Duration::from_millis(500))
                 && rel == "fix.c"
             {
@@ -1941,7 +1988,7 @@ mod tests {
             let Ok(event) = events.recv_timeout(std::time::Duration::from_millis(500)) else {
                 continue;
             };
-            if let crate::Event::Diagnostics { rel, items } = event
+            if let crate::Event::Diagnostics { rel, items, .. } = event
                 && rel == "src/main.rs"
             {
                 errors = items

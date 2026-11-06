@@ -1297,6 +1297,20 @@ fn bench_pump() {
     }
 }
 
+/// Until what `doc`'s server last published is about its text as it is
+/// ([`crate::lang::Document::diagnosed`]), checked every 50 ms for ten seconds, past which
+/// `bench <drill> timeout diagnostics <key>` says so. Code actions are asked with the diagnostics
+/// last published, so a drill waits here after an edit before asking again.
+async fn diagnosed(drill: &str, doc: &crate::lang::Document) {
+    let t = Instant::now();
+    while !doc.diagnosed() {
+        if t.elapsed() > Duration::from_secs(10) {
+            return println!("bench {drill} timeout diagnostics {}", doc.key());
+        }
+        glib::timeout_future(Duration::from_millis(50)).await;
+    }
+}
+
 /// Exit 2 unless the vault is under `/tmp` (`make vault VAULT=/tmp/<name>`).
 /// Typing drills autosave, so they must never use `testvault/` or real notes.
 fn scratch_only(app: &Rc<App>, drill: &str) {

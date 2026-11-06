@@ -332,7 +332,7 @@ async fn bench_keys(tab: &Rc<Tab>, text: &str) {
 /// Until the idles queued before this one have run. `completion::install` looks at a keystroke
 /// from an idle queued as it lands, and GLib runs idles of one priority in the order they were
 /// queued, so whatever that look asked is in flight once this returns.
-async fn bench_idle() {
+pub(super) async fn bench_idle() {
     let (done, idle) = futures_channel::oneshot::channel();
     glib::idle_add_local_once(move || {
         let _ = done.send(());

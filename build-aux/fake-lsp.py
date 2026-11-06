@@ -6,8 +6,9 @@ hierarchy from that file, which `apps/cli/tests/mcp.rs` holds `explore`'s `preci
 With `--inline TEXT` it suggests TEXT as ghost text wherever it is asked, standing in for merl-rt
 in `make screenshots`. With `--notebook` it keeps what it is sent and answers about it, for
 `ACCENT_BENCH_NOTEBOOK_LSP`: an error over each `oops` and pyright's unused-expression warning on
-each line that is a name alone, after every change; `NAME at LINE:COLUMN` as the hover; the first
-`NAME =` or `def NAME` as the definition; and `f(a, b)` as the signature, on `(`.
+each line that is a name alone, after every change and naming the version they are for; `NAME at
+LINE:COLUMN` as the hover; the first `NAME =` or `def NAME` as the definition; and `f(a, b)` as the
+signature, on `(`.
 
 With `--actions` it keeps what it is sent too, an error over each `oops`, and offers the code
 actions `ACCENT_BENCH_QUICKFIX` applies, one of each shape a real server sends: "Replace oops with
@@ -78,7 +79,7 @@ def publish(uri):
             items.append({"range": span(n, name.end(1), name.end(2)), "severity": 2,
                           "code": "reportUnusedExpression", "message": "Expression value is unused"})
     send({"method": "textDocument/publishDiagnostics",
-          "params": {"uri": uri, "diagnostics": items}})
+          "params": {"uri": uri, "version": VERSIONS[uri], "diagnostics": items}})
 
 
 def actions(params):

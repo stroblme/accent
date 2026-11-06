@@ -1067,7 +1067,7 @@ mod tests {
         let _: () = w.client.call("settle", json!(["a.md"])).unwrap();
 
         assert!(
-            w.wait(|e| matches!(e, Event::Diagnostics { rel, items }
+            w.wait(|e| matches!(e, Event::Diagnostics { rel, items, .. }
                 if rel == "a.md" && items.len() == 1)),
             "the dangling link has to reach the client as a notification"
         );

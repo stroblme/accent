@@ -1242,7 +1242,7 @@ mod tests {
         ));
         assert_eq!(support.unwrap().completion_triggers, ['[', '#', '(']);
 
-        let Some(Event::Diagnostics { rel, items }) =
+        let Some(Event::Diagnostics { rel, items, .. }) =
             f.wait(|e| matches!(e, Event::Diagnostics { .. }))
         else {
             panic!("opening a note has to say what is wrong with it");

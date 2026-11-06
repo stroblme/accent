@@ -69,6 +69,9 @@ pub struct Document {
     /// Versions distinguish an in-flight flush from text the server actually received.
     version: Cell<u64>,
     sent: Cell<u64>,
+    /// The last publish is about the text sent last: the server did not say it is about an older
+    /// one, and nothing was sent since.
+    diagnosed: Cell<bool>,
     /// The callers waiting out the flush in flight, `None` while there is none: the next caller
     /// waits for it rather than starting a second one.
     waiting: RefCell<Option<Vec<oneshot::Sender<()>>>>,
@@ -116,6 +119,18 @@ impl Document {
     /// Whether the server holds the text as it is: every change sent.
     pub fn in_step(&self) -> bool {
         self.sent.get() >= self.version.get()
+    }
+
+    /// A publish came, `stale` where the server said it is about an older text than it was sent.
+    pub fn published(&self, stale: bool) {
+        self.diagnosed.set(!stale);
+    }
+
+    /// Whether what the server last published is about the text as it is: every change sent,
+    /// and a publish about the last one in. A drill waits for it before asking about them.
+    #[cfg(feature = "bench")]
+    pub fn diagnosed(&self) -> bool {
+        self.in_step() && self.diagnosed.get()
     }
 
     /// Open as `key` in `language` (a GtkSourceView id) holding `text`, the key and the vault
@@ -199,6 +214,7 @@ impl Document {
             return true;
         };
         tracing::debug!("changed {key}, {} chars", text.chars().count());
+        self.diagnosed.set(false);
         let flushing = Flushing::new(self.clone());
         let sent = vault.change_document(&key, text).await;
         drop(flushing);

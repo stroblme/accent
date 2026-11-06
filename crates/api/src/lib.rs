@@ -111,9 +111,11 @@ pub enum Event {
     Refused(String),
     Error(String),
     /// What a language provider has to say about an open document, whole: an empty list clears.
+    /// `stale` where the server said they are about an older text than the one it was sent last.
     Diagnostics {
         rel: String,
         items: Vec<Diagnostic>,
+        stale: bool,
     },
     /// Language-provider background progress, currently ghost-index rebuilds.
     /// `what` labels the job; `message` carries its progress text (for example,

@@ -283,7 +283,7 @@ async fn complete_markdown(tab: &Rc<NotebookTab>) {
     };
     tab.bench_select(0);
     // The popup is made in an idle once the cell is selected.
-    glib::timeout_future(Duration::from_millis(50)).await;
+    super::complete::bench_idle().await;
     let Some(session) = cell.completion() else {
         return println!("bench notebook_lsp markdown no_popup");
     };
@@ -311,7 +311,7 @@ async fn complete_markdown(tab: &Rc<NotebookTab>) {
 async fn complete(tab: &Rc<NotebookTab>, cell: &Rc<dyn crate::lang::Editor>) {
     tab.bench_select(2);
     // The popup is made in an idle once the cell is selected.
-    glib::timeout_future(Duration::from_millis(50)).await;
+    super::complete::bench_idle().await;
     let Some(session) = cell.completion() else {
         return println!("bench notebook_lsp complete no_popup");
     };

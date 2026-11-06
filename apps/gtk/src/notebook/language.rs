@@ -493,12 +493,13 @@ impl NotebookTab {
     }
 
     /// A publish for the document open under `key`: each of its cells' share painted in the
-    /// cell's editor, or kept for when it has one.
-    pub fn set_diagnostics(&self, key: &str, items: Vec<Diagnostic>) {
+    /// cell's editor, or kept for when it has one. `stale` as [`lang::Document::published`] has it.
+    pub fn set_diagnostics(&self, key: &str, items: Vec<Diagnostic>, stale: bool) {
         let Some(kind) = self.kind_of(key) else {
             return;
         };
         let layer = self.lang.layer(kind);
+        layer.doc.published(stale);
         let mut cells = cells_of(&layer.sent.borrow().program, items);
         let editors: Vec<Rc<CellEditor>> = self.lang.editors.borrow().values().cloned().collect();
         for cell in editors.into_iter().filter(|c| c.kind == kind) {

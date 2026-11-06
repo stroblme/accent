@@ -474,7 +474,7 @@ fn an_indexed_note_clears_the_link_that_was_waiting_for_it() {
     });
     assert!(
         f.wait(
-            |e| matches!(e, Event::Diagnostics { rel, items } if rel == "a.md" && items.len() == 1)
+            |e| matches!(e, Event::Diagnostics { rel, items, .. } if rel == "a.md" && items.len() == 1)
         )
         .is_some(),
         "the link is dangling while Beta does not exist"
@@ -485,7 +485,7 @@ fn an_indexed_note_clears_the_link_that_was_waiting_for_it() {
     rt.block_on(async { f.vault.rediagnose("a.md").await.unwrap() });
     assert!(
         f.wait(
-            |e| matches!(e, Event::Diagnostics { rel, items } if rel == "a.md" && items.is_empty())
+            |e| matches!(e, Event::Diagnostics { rel, items, .. } if rel == "a.md" && items.is_empty())
         )
         .is_some(),
         "the link resolves now, so the hint goes"
@@ -503,10 +503,11 @@ fn a_diagnostics_event_survives_the_wire() {
             source: Some("accent".into()),
             code: None,
         }],
+        stale: true,
     };
     let json = serde_json::to_string(&event).unwrap();
     let back: Event = serde_json::from_str(&json).unwrap();
-    assert!(matches!(back, Event::Diagnostics { items, .. } if items.len() == 1));
+    assert!(matches!(back, Event::Diagnostics { items, stale: true, .. } if items.len() == 1));
 }
 
 /// Ghost Text off ends `merl-rt` under an open note, and on starts it again, re-indexed,

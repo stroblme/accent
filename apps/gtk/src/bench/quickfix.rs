@@ -110,6 +110,7 @@ async fn bench_fixes(app: &Rc<App>, rel: &str) {
             println!("bench quickfix undone={pick} text={:?}", tab.text());
         }
         crate::lang::flush(tab.clone()).await;
+        diagnosed("quickfix", &tab.lang.doc).await;
     }
     let before = tab.text();
     app.source_action();
@@ -139,6 +140,7 @@ async fn bench_fixes(app: &Rc<App>, rel: &str) {
         tab.text()
     );
     crate::lang::flush(tab.clone()).await;
+    diagnosed("quickfix", &tab.lang.doc).await;
     let context = tab.view.extra_menu().map(|m| fileops::labels(&m));
     println!("bench quickfix context_menu {context:?}");
 
@@ -226,6 +228,7 @@ async fn bench_cell_fixes(app: &Rc<App>, rel: &str) {
             );
         }
         cell.clone().flush().await;
+        diagnosed("quickfix", &cell.document()).await;
     }
 }
 
