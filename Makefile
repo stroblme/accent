@@ -339,7 +339,7 @@ smoke: gtk-bench vault xvfb
 drills: gtk-bench xvfb
 	build-aux/drills.sh $(TARGET_DIR)/accent $(PDFIUM_LIB)
 
-## screenshots: regenerate docs/screenshot-1..5.png and data/screenshots (needs magick, htop, Xvfb, debugpy)
+## screenshots: regenerate docs/screenshot-1..7.png and data/screenshots (needs magick, helix, Xvfb, debugpy)
 #
 # On a vault and repository of their own, made afresh each run; build-aux/screenshots.sh says how.
 screenshots: core gtk-bench pdfium

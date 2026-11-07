@@ -1,0 +1,164 @@
+<mxfile host="accent">
+  <diagram name="Readout chain" id="chain">
+    <mxGraphModel grid="1" gridSize="10" page="1" pageWidth="800" pageHeight="640" math="1">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="warm" value="300 K" style="rounded=1;arcSize=4;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;align=left;verticalAlign=top;spacingLeft=12;spacingTop=4;fontStyle=1;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="20" y="20" width="760" height="200" as="geometry" />
+        </mxCell>
+        <mxCell id="still" value="4 K" style="rounded=1;arcSize=5;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;align=left;verticalAlign=top;spacingLeft=12;spacingTop=4;fontStyle=1;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="20" y="230" width="760" height="140" as="geometry" />
+        </mxCell>
+        <mxCell id="cold" value="10 mK" style="rounded=1;arcSize=4;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;verticalAlign=top;spacingLeft=12;spacingTop=4;fontStyle=1;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="20" y="380" width="760" height="240" as="geometry" />
+        </mxCell>
+        <mxCell id="awg" value="AWG" style="rounded=1;whiteSpace=wrap;html=1;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="170" y="50" width="120" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="lo" value="LO 7.2 GHz" style="rounded=1;whiteSpace=wrap;html=1;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="40" y="135" width="100" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="mixer" value="×" style="ellipse;whiteSpace=wrap;html=1;fontSize=22;" parent="1" vertex="1">
+          <mxGeometry x="205" y="130" width="50" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="att1" value="−20 dB" style="rounded=0;whiteSpace=wrap;html=1;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="180" y="282" width="100" height="36" as="geometry" />
+        </mxCell>
+        <mxCell id="att2" value="−20 dB" style="rounded=0;whiteSpace=wrap;html=1;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="180" y="420" width="100" height="36" as="geometry" />
+        </mxCell>
+        <mxCell id="chip" value="&lt;b&gt;Qubit chip&lt;/b&gt;&lt;br&gt;q0 – q3, readout resonators" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="300" y="520" width="200" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="twpa" value="TWPA" style="triangle;direction=north;whiteSpace=wrap;html=1;labelPosition=right;verticalLabelPosition=middle;align=left;verticalAlign=middle;spacingLeft=8;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="530" y="410" width="50" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="hemt" value="HEMT" style="triangle;direction=north;whiteSpace=wrap;html=1;labelPosition=right;verticalLabelPosition=middle;align=left;verticalAlign=middle;spacingLeft=8;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="530" y="275" width="50" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="amp" value="Amplifier" style="triangle;direction=north;whiteSpace=wrap;html=1;labelPosition=right;verticalLabelPosition=middle;align=left;verticalAlign=middle;spacingLeft=8;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="530" y="130" width="50" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="digitizer" value="Digitizer" style="rounded=1;whiteSpace=wrap;html=1;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="495" y="50" width="120" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="fpga" value="FPGA demod" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="645" y="50" width="115" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="f" value="$$F = 1 - \frac{P_{1|0} + P_{0|1}}{2}$$" style="text;html=1;align=center;verticalAlign=middle;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="300" y="120" width="190" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;" parent="1" source="awg" target="mixer" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;" parent="1" source="lo" target="mixer" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;" parent="1" source="mixer" target="att1" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;" parent="1" source="att1" target="att2" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;exitX=0.5;exitY=1;entryX=0;entryY=0.5;" parent="1" source="att2" target="chip" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;endArrow=block;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" parent="1" source="chip" target="twpa" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" parent="1" source="twpa" target="hemt" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;exitX=1;exitY=0.5;entryX=0;entryY=0.5;" parent="1" source="hemt" target="amp" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;exitX=1;exitY=0.5;" parent="1" source="amp" target="digitizer" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e10" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;endArrow=block;endFill=1;" parent="1" source="digitizer" target="fpga" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram name="Pulse sequence" id="pulses">
+    <mxGraphModel grid="1" gridSize="10" page="1" pageWidth="800" pageHeight="640">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="l1" value="q3 drive" style="text;html=1;align=right;verticalAlign=middle;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="20" y="140" width="110" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="l2" value="Readout" style="text;html=1;align=right;verticalAlign=middle;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="20" y="260" width="110" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="l3" value="Acquire" style="text;html=1;align=right;verticalAlign=middle;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="20" y="380" width="110" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="w1" style="endArrow=none;html=1;strokeColor=#999999;" parent="1" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="150" y="180" as="sourcePoint" />
+            <mxPoint x="760" y="180" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="w2" style="endArrow=none;html=1;strokeColor=#999999;" parent="1" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="150" y="300" as="sourcePoint" />
+            <mxPoint x="760" y="300" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="w3" style="endArrow=none;html=1;strokeColor=#999999;" parent="1" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="150" y="420" as="sourcePoint" />
+            <mxPoint x="760" y="420" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="pi" value="π" style="rounded=1;arcSize=50;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=16;" parent="1" vertex="1">
+          <mxGeometry x="180" y="130" width="50" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="ro" value="2 µs at 0.60" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="250" y="260" width="360" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="acq" value="1.8 µs window" style="rounded=0;whiteSpace=wrap;html=1;dashed=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="290" y="380" width="320" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="t" value="t" style="endArrow=block;endFill=1;html=1;fontSize=14;labelPosition=right;align=left;" parent="1" edge="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="150" y="500" as="sourcePoint" />
+            <mxPoint x="760" y="500" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram name="Analysis" id="analysis">
+    <mxGraphModel grid="1" gridSize="10" page="1" pageWidth="800" pageHeight="640">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="h5" value="shots.h5" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;size=12;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="60" y="250" width="110" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="py" value="analyze.py" style="shape=document;whiteSpace=wrap;html=1;boundedLbl=1;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="240" y="260" width="120" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="nb" value="calibration.ipynb" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="430" y="265" width="140" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="fig" value="Grant figures" style="shape=document;whiteSpace=wrap;html=1;boundedLbl=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=14;" parent="1" vertex="1">
+          <mxGeometry x="630" y="260" width="120" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="a1" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;" parent="1" source="h5" target="py" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="a2" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;" parent="1" source="py" target="nb" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="a3" style="edgeStyle=orthogonalEdgeStyle;html=1;endArrow=block;endFill=1;" parent="1" source="nb" target="fig" edge="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

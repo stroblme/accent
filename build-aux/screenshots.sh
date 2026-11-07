@@ -9,9 +9,10 @@
 # Usage: build-aux/screenshots.sh <directory holding accent and accent-cli>
 set -eu
 [ $# -eq 1 ] || { echo "usage: $0 <bin_dir>" >&2; exit 2; }
-for tool in magick htop Xvfb dbus-run-session fuser git python3; do
+for tool in magick Xvfb dbus-run-session fuser git python3; do
 	command -v "$tool" >/dev/null || { echo "$0 needs $tool" >&2; exit 1; }
 done
+command -v hx >/dev/null || command -v helix >/dev/null || { echo "$0 needs helix for scene 3" >&2; exit 1; }
 python3 -c 'import debugpy' 2>/dev/null || { echo "$0 needs debugpy for scene 5" >&2; exit 1; }
 bin=$(cd "$1" && pwd)
 test -x "$bin/accent" && test -x "$bin/accent-cli" ||
@@ -22,7 +23,7 @@ root=$repo/target/screenshots
 vault=$root/testvault
 test -d "$vault" || { echo "no $vault: make screenshots generates it" >&2; exit 1; }
 
-# Git, the shell and htop read nothing of the user's.
+# Git, the shell and Helix read nothing of the user's.
 export HOME="$root" GIT_CONFIG_NOSYSTEM=1
 mkdir -p "$root/bin" "$root/out" "$root/xdg/config/accent" "$root/xdg/config/gtk-4.0"
 cp "$here/bashrc" "$root/.bashrc"
@@ -38,11 +39,16 @@ printf 'line_numbers = true\ncolumn_width = 85\nword_suggestions = false\n' \
 printf '[Settings]\ngtk-font-name=Adwaita Sans 11\ngtk-cursor-blink=false\n%s\n%s\n' \
 	gtk-enable-animations=false gtk-decoration-layout=:minimize,maximize,close \
 	>"$root/xdg/config/gtk-4.0/settings.ini"
+# Scene 3's Helix in its light theme of the terminal's colours, which the scene swaps for the dark.
+mkdir -p "$root/xdg/config/helix"
+echo 'theme = "term16_light"' >"$root/xdg/config/helix/config.toml"
 
 # The vault is its own repository: a history of a few days in real chunks, a branch merged back
 # in, an upstream four commits behind, and Code/analyze.py staged and changed again since.
-echo "(Persistent) Split Terminals" >"$vault/whatelse"
 cp "$here/analyze.py" "$here/readout.py" "$vault/Code/"
+cp "$here/calibration.ipynb" "$vault/Notebooks/"
+# Kept as .xml in the repository, which ignores *.drawio.
+cp "$here/readout-chain.drawio.xml" "$vault/Submissions/grant-2026/figures/readout-chain.drawio"
 git -C "$vault" init -q -b main
 export GIT_AUTHOR_NAME="Alex Example" GIT_AUTHOR_EMAIL=alex@example.org \
 	GIT_COMMITTER_NAME="Alex Example" GIT_COMMITTER_EMAIL=alex@example.org
@@ -98,7 +104,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do test -S "$socket" && break; sleep 0.5; done
 # is not.
 mkdir -p "$repo/data/screenshots"
 n=0
-for name in files git terminals focus debug; do
+for name in files git editor focus debug diagram notebook; do
 	n=$((n + 1))
 	tmp=$(mktemp -d /tmp/accent-shot-XXXXXX)
 	rm -rf "$root/xdg/state"
@@ -111,7 +117,7 @@ for name in files git terminals focus debug; do
 		env DISPLAY="$display" GDK_BACKEND=x11 GDK_SCALE=2 GSK_RENDERER=cairo \
 		GTK_A11Y=none G_DEBUG=fatal-criticals \
 		ACCENT_BENCH_SHOT="$n:$root/out" timeout 300 "$bin/accent" "$vault" || status=$?
-	# Scene 3 ends its shells, and the holder leaves with the last; one a failed scene left behind
+	# Scene 3 ends Helix, and the holder leaves with its last shell; one a failed scene left behind
 	# still has its socket. Bounded: fuser stats every mount, and hangs on an unreachable one.
 	held=$tmp/accent-$(id -u)
 	test ! -S "$held/hold-3.sock" || timeout 60 fuser -k "$held/hold-3.lock" >/dev/null 2>&1 || true

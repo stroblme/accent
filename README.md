@@ -45,11 +45,15 @@ See the [device support](#device-support) for compatibility.
 
 ![The Git pane beside a file's changes since it was staged](docs/screenshot-2.png)
 
-![Two terminals beside a PDF annotated by hand](docs/screenshot-3.png)
+![A script open in Helix beside a PDF annotated by hand](docs/screenshot-3.png)
 
 ![Focus mode in the Solarized theme while another note is linked](docs/screenshot-4.png)
 
 ![A Python program paused at a breakpoint in the Solarized theme, beside its Debug Console and output](docs/screenshot-5.png)
+
+![A draw.io diagram beside its pages in the Outline](docs/screenshot-6.png)
+
+![A Jupyter notebook's code and plot beside its headings in the Outline](docs/screenshot-7.png)
 
 ## Get started
 

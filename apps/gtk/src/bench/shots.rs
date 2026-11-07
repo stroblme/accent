@@ -1,7 +1,7 @@
-//! The README's five screenshots, each taken light and dark (`make screenshots`).
+//! The README's seven screenshots, each taken light and dark (`make screenshots`).
 
 use super::*;
-use accent_core::config::Theme;
+use accent_core::config::{Editor, Theme};
 use accent_core::pdf::{InkStyle, PdfDoc};
 use vte4::TerminalExt as _;
 
@@ -42,11 +42,13 @@ pub(super) fn bench_shot(app: &Rc<App>, arg: &str) {
         match shot.n.as_str() {
             "1" => scene_files(&app, &shot).await,
             "2" => scene_git(&app, &shot).await,
-            "3" => scene_terminals(&app, &shot).await,
+            "3" => scene_editor(&app, &shot).await,
             "4" => scene_focus(&app, &shot).await,
             "5" => scene_debug(&app, &shot).await,
+            "6" => scene_diagram(&app, &shot).await,
+            "7" => scene_notebook(&app, &shot).await,
             n => {
-                eprintln!("ACCENT_BENCH_SHOT has scenes 1 to 5, not {n}");
+                eprintln!("ACCENT_BENCH_SHOT has scenes 1 to 7, not {n}");
                 std::process::exit(2);
             }
         }
@@ -198,8 +200,13 @@ async fn scene_git(app: &Rc<App>, shot: &Shot) {
     }
 }
 
-/// Scene 3: two shells beside an annotated PDF with its tool ring out, the sidebar hidden.
-async fn scene_terminals(app: &Rc<App>, shot: &Shot) {
+/// Scene 3's script, opened in Helix at the function its unstaged change adds.
+const SCRIPT: &str = "Code/analyze.py";
+const SCRIPT_LINE: u32 = 37;
+
+/// Scene 3: Helix, picked as the text editor, on a script beside an annotated PDF with its tool
+/// ring out, the sidebar hidden.
+async fn scene_editor(app: &Rc<App>, shot: &Shot) {
     let pdf = "Attachments/2019-03/file-17474.pdf";
     // Drawn before the PDF opens, and the file put back as it was once both halves are taken.
     let path = app.root().join(pdf);
@@ -210,34 +217,30 @@ async fn scene_terminals(app: &Rc<App>, shot: &Shot) {
     };
     app.restore_sidebar(false, 250);
     open_all(app, &[pdf]).await;
-    app.open_terminal();
-    app.open_terminal();
-    until("terminals", 10_000, || app.terminals().len() == 2).await;
-    let terms = app.terminals();
-    let (top, shell) = (&terms[0], &terms[1]);
-    for term in [top, shell] {
-        term.set_zoom(1.0);
-    }
-
-    // Pane A keeps the first shell, the second goes below it and the PDF to their right.
-    let a = app.pane();
-    app.split_page(&a, Side::Right, &page(app, pdf));
-    app.split_page(&a, Side::Down, &shell.page);
-    glib::timeout_future(Duration::from_millis(300)).await;
-    divide(&a, 0.5);
-    divide(&pane_of(app, pdf), 0.4);
-
-    let text = |term: &terminal::Term| term.view.text_format(vte4::Format::Text);
-    let prompts =
-        |term: &terminal::Term| text(term).map_or(0, |t| t.matches("testvault $").count());
-    until("prompt", 20_000, || prompts(top) > 0 && prompts(shell) > 0).await;
-    top.view.feed_child(b"htop -u nobody\n");
-    shell.view.feed_child(b"cat whatelse\n");
-    until("htop", 10_000, || {
-        text(top).is_some_and(|t| t.contains("Tasks:"))
+    // As Preferences picks it, but kept out of the config file the next scenes read.
+    app.config.borrow_mut().editor = Editor::Helix;
+    app.edit_at(SCRIPT, (SCRIPT_LINE, None), Opened::Kept);
+    let text = |term: &terminal::Term| {
+        let text = term.view.text_format(vte4::Format::Text);
+        text.map(|t| t.to_string()).unwrap_or_default()
+    };
+    // Helix's status line once it has drawn the file.
+    until("helix", 20_000, || {
+        app.editor_of(SCRIPT)
+            .is_some_and(|term| text(&term).contains("NOR"))
     })
     .await;
-    until("cat", 10_000, || prompts(shell) > 1).await;
+    let Some(helix) = app.editor_of(SCRIPT) else {
+        return println!("bench shot no_helix");
+    };
+    // More of each line, as a code tab beside another document has.
+    helix.set_zoom(0.8);
+
+    // Helix keeps the first pane, the PDF goes to its right.
+    let a = app.pane();
+    app.split_page(&a, Side::Right, &page(app, pdf));
+    glib::timeout_future(Duration::from_millis(300)).await;
+    divide(&pane_of(app, pdf), 0.5);
 
     focus(app, &pane_of(app, pdf)).await;
     app.set_drawing(true);
@@ -246,11 +249,27 @@ async fn scene_terminals(app: &Rc<App>, shot: &Shot) {
         pdf_tab.as_ref().is_some_and(|p| p.ring_visible())
     })
     .await;
-    // The shell is what the reader was last typing in, as in the original.
-    if let Some(pane) = app.pane_of(&shell.page) {
+    // Dragged from its top corner to the bottom one, off the handwriting of a page this narrow.
+    style::bench_painted(&app.window, String::new).await;
+    let ring = pdf_tab.as_ref().map(|p| p.ring().widget().clone());
+    if let Some(ring) = ring
+        && let Some(overlay) = ring.parent()
+        && let Some(corner) = ring.compute_point(&overlay, &graphene::Point::zero())
+    {
+        let bottom = overlay.height() - ring.height() - corner.y() as i32;
+        app.ring_at
+            .set(Some((f64::from(corner.x()), f64::from(bottom))));
+        app.set_drawing(true);
+    }
+    // Helix is what the reader was last typing in.
+    if let Some(pane) = app.pane_of(&helix.page) {
         focus(app, &pane).await;
     }
     for dark in [false, true] {
+        if dark {
+            // Helix's themes in the terminal's colours, which it does not swap by itself.
+            helix.view.feed_child(b":theme term16_dark\r");
+        }
         set_dark(app, dark).await;
         until("tiles", 10_000, || {
             pdf_tab
@@ -265,10 +284,11 @@ async fn scene_terminals(app: &Rc<App>, shot: &Shot) {
         println!("bench shot pdf_not_restored {e}");
     }
     // The holder leaves with its last shell, so nothing of the scene outlives its launch.
-    for term in &terms {
-        term.kill();
-    }
-    until("shells", 10_000, || app.terminals().is_empty()).await;
+    helix.kill();
+    until("helix_ended", 10_000, || {
+        app.terminals().iter().all(|term| term.ended())
+    })
+    .await;
 }
 
 /// Scene 4: Solarized, Focus Mode High with the chrome faded, and the link popup over a note.
@@ -421,6 +441,65 @@ async fn scene_debug(app: &Rc<App>, shot: &Shot) {
     until("ended", 30_000, || !app.debugger.running()).await;
 }
 
+/// Scene 6's diagram, `build-aux/screenshots/readout-chain.drawio.xml`.
+const DIAGRAM: &str = "Submissions/grant-2026/figures/readout-chain.drawio";
+
+/// Scene 6: a draw.io diagram of a readout chain, its pages in the Outline over their
+/// thumbnails, the drawing tools put away.
+async fn scene_diagram(app: &Rc<App>, shot: &Shot) {
+    open_all(app, &[DIAGRAM]).await;
+    until("diagram", 10_000, || {
+        app.active_diagram().is_some_and(|tab| tab.laid_out())
+    })
+    .await;
+    // Out by default, the ring would cover the page's top corner.
+    app.set_drawing(false);
+    app.show_pane("outline");
+    for dark in [false, true] {
+        set_dark(app, dark).await;
+        app.show_chrome();
+        capture(app, shot, dark).await;
+    }
+}
+
+/// Scene 7's notebook, `build-aux/screenshots/calibration.ipynb`, its outputs stored as a run
+/// left them.
+const NOTEBOOK: &str = "Notebooks/calibration.ipynb";
+
+/// Scene 7: a notebook on its sweep's code and plot, reached through the sweep's heading in the
+/// Outline.
+async fn scene_notebook(app: &Rc<App>, shot: &Shot) {
+    // A cell of code and its plot together, in a 1000 px window.
+    app.set_zoom(0.8);
+    open_all(app, &[NOTEBOOK]).await;
+    let (Some(tab), Some(sidebar)) = (app.active_notebook(), app.sidebar.get()) else {
+        return println!("bench shot no_notebook");
+    };
+    app.show_pane("outline");
+    until("outline", 10_000, || sidebar.outline_lines(None).len() == 4).await;
+    // As a click on the heading does, and a scroll on until its cell is at the top, so the plot
+    // under it shows whole.
+    sidebar.outline_lines(Some(2));
+    let page = tab.bench_range().1;
+    let shown = || tab.bench_cell_y(4).filter(|y| (0.0..page).contains(y));
+    until("jump", 5_000, || shown().is_some()).await;
+    if let Some(y) = shown() {
+        tab.bench_scroll_by((y - 12.0) / page);
+    }
+    for dark in [false, true] {
+        set_dark(app, dark).await;
+        // The plot is decoded on a worker, and again in the dark half's colours.
+        until("plot", 10_000, || {
+            let c = tab.counts().3;
+            let drawn = tab.bench_pictures().iter().any(|&(w, h, _)| w > 0 && h > 0);
+            drawn && c.pictures > 0 && (c.recoloured == c.pictures) == dark
+        })
+        .await;
+        app.show_chrome();
+        capture(app, shot, dark).await;
+    }
+}
+
 /// Write the strokes [`INK`] lists into the PDF at `path`.
 fn draw_ink(path: &Path) -> anyhow::Result<()> {
     let mut doc = PdfDoc::open(path)?;
@@ -480,6 +559,16 @@ async fn capture(app: &Rc<App>, shot: &Shot, dark: bool) {
         println!("bench shot toasts {toasts:?}");
         app.toasts.dismiss_all();
     }
+    // Nothing on the bar's busy line, "Indexing…" above all. The reading of the PDFs' text would
+    // go on for some 15 minutes over the vault's 12 975 PDFs, so it is stopped as its Stop does.
+    until("status", 60_000, || {
+        let busy = app.statusbar.progress_text();
+        if busy.starts_with("Indexing PDF text") {
+            app.statusbar.pdf_text_control().emit_clicked();
+        }
+        busy.is_empty()
+    })
+    .await;
     // GTK's cairo renderer repaints only what changed since the last frame, and a line repainted
     // on its own cuts the glyphs of its neighbours where line heights are fractional. A frame at
     // another opacity changes every pixel, so the one after it is painted whole.
