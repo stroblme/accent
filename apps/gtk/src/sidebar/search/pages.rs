@@ -3,6 +3,7 @@
 
 use crate::widgets::{scroller, status_page};
 use gtk::glib;
+use gtk::prelude::*;
 
 /// What the prompt says: the query language at a glance, before anything is typed.
 const PROMPT: &str = "Words are found in any order. Narrow them with #tag, path:, kind:pdf, \
@@ -37,7 +38,12 @@ pub(super) fn body(view: &gtk::ListView) -> (gtk::Stack, adw::StatusPage) {
     );
     let unread = status_page("dialog-warning-symbolic", "Invalid Search", "");
     body.add_named(&unread, Some("invalid-search"));
-    body.add_named(&scroller(view), Some("results"));
+    // The rows' scroller in a page of its own, so a changed query can hide it while the page
+    // stays (`Search::clear_for_changed_query`): a stack turns to another page when the child it
+    // shows is hidden.
+    let results = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    results.append(&scroller(view));
+    body.add_named(&results, Some("results"));
     body.set_visible_child_name("prompt");
     (body, unread)
 }

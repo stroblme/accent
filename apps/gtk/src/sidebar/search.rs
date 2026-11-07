@@ -477,6 +477,9 @@ struct Search {
     filter: gtk::MenuButton,
     view: gtk::ListView,
     results: gio::ListStore,
+    /// Draw every row on the list again from the object it holds, which GTK does only for a list
+    /// item handed another object: what [`Search::put`] needs once it gave an object new content.
+    redraw: Box<dyn Fn()>,
     /// Atomic query generation. Drop answers superseded by newer text rather than holding later
     /// keystrokes behind a slow worker; walk threads also read it to stop early.
     generation: Arc<AtomicU64>,
@@ -545,11 +548,24 @@ impl Search {
         self.running.get() > 0 || self.replacing.get()
     }
 
-    /// Remove rows for a question the entry no longer asks, before its debounce has elapsed.
-    /// Supersede workers now too, or one could repopulate the old rows in that gap.
+    /// Take the rows for a question the entry no longer asks off the screen, before its debounce
+    /// has elapsed. Supersede workers now too, or one could repopulate the old rows in that gap.
+    ///
+    /// The list's scroller is hidden rather than the list emptied, so the next answer draws into
+    /// the widgets the list has ([`Search::put`]) instead of GTK destroying a hundred of them here
+    /// and making a hundred anew there; hiding the list itself would do the same, as a hidden
+    /// `GtkListView` lets its widgets go. Off the screen, no row can be clicked or reached with
+    /// the keys, and the list comes back with nothing selected and at its top, as an emptied one
+    /// would.
     fn clear_for_changed_query(&self) -> u64 {
         let mine = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
-        self.results.remove_all();
+        if let Some(selection) = self.view.model().and_downcast::<gtk::SingleSelection>() {
+            selection.set_selected(gtk::INVALID_LIST_POSITION);
+        }
+        if let Some(scroll) = self.view.vadjustment() {
+            scroll.set_value(0.0);
+        }
+        self.show_rows(false);
         self.body.set_visible_child_name("results");
         self.count.set_text("");
         self.set_total(0);
@@ -573,7 +589,6 @@ impl Search {
         // it pulsing, and the one that lands after the box was cleared takes it down through here.
         if key.text.trim().is_empty() {
             self.entry.remove_css_class("error");
-            self.results.remove_all();
             self.opened.replace(Default::default());
             self.body.set_visible_child_name("prompt");
             self.set_busy(self.busy());
@@ -874,9 +889,7 @@ impl Search {
         // Opened before they are listed, not after: a question asked again then lists as many
         // rows as it replaces, and a list whose rows are all replaced keeps its place by position.
         let rows = open_tails(rows, bodies, &accent);
-        let objects: Vec<glib::BoxedAnyObject> =
-            rows.into_iter().map(glib::BoxedAnyObject::new).collect();
-        self.splice(0, self.results.n_items(), &objects);
+        let objects = self.put(rows);
         let mut opened = self.opened.borrow_mut();
         if opened.0.as_ref() != Some(key) {
             *opened = (Some(key.clone()), HashSet::new());
@@ -896,8 +909,10 @@ impl Search {
 
     /// Expand a tail row in place with matches after its last listed byte, preserving rows above
     /// and pointer position. Read the file on a worker, including remote transfer. Locate the
-    /// tail by identity and discard results if a newer answer removed it.
+    /// tail by identity and discard results if a newer answer came since: it may have removed
+    /// the tail, or drawn another row into its object ([`Search::put`]).
     fn expand(self: &Rc<Self>, tail: glib::BoxedAnyObject) {
+        let mine = self.generation.load(Ordering::Relaxed);
         let (rel, more) = {
             let row = tail.borrow::<Row>();
             let Some(more) = row.more.clone() else {
@@ -919,7 +934,8 @@ impl Search {
             .flatten();
             search.running.set(search.running.get() - 1);
             search.set_busy(search.busy());
-            let Some(rows) = rows else {
+            let Some(rows) = rows.filter(|_| search.generation.load(Ordering::Relaxed) == mine)
+            else {
                 return;
             };
             let at = (0..search.results.n_items())
@@ -953,6 +969,49 @@ impl Search {
         if focused {
             self.view.grab_focus();
         }
+    }
+
+    /// Put `rows` on the list in place of the rows there, and bring the list back if a changed
+    /// query hid it. A `GtkListView` holds a widget for each of up to 200 rows, makes one anew for
+    /// every object it is handed and destroys the widget of every object it loses, which for a
+    /// hundred rows cost the main thread more than the query did. So the objects already listed
+    /// take the first rows and are drawn again where they are, and only the rows past them are
+    /// spliced in or out.
+    ///
+    /// A question asked again keeps the list's place, the keyboard and the selection by
+    /// position, since none of the rows it keeps is taken away; a new one finds the list as
+    /// [`clear_for_changed_query`](Self::clear_for_changed_query) left it.
+    fn put(&self, mut rows: Vec<Row>) -> Vec<glib::BoxedAnyObject> {
+        let listed = self.results.n_items();
+        let kept = listed.min(rows.len() as u32);
+        let added: Vec<glib::BoxedAnyObject> = (rows.split_off(kept as usize).into_iter())
+            .map(glib::BoxedAnyObject::new)
+            .collect();
+        let mut objects: Vec<glib::BoxedAnyObject> = (0..kept)
+            .filter_map(|i| self.results.item(i).and_downcast())
+            .collect();
+        for (object, row) in objects.iter().zip(rows) {
+            object.replace(row);
+        }
+        self.splice(kept, listed - kept, &added);
+        (self.redraw)();
+        self.show_rows(true);
+        objects.extend(added);
+        objects
+    }
+
+    /// Show or hide the list's scroller, which a changed query hides until its answer is drawn.
+    fn show_rows(&self, shown: bool) {
+        if let Some(scroller) = self.view.parent() {
+            scroller.set_visible(shown);
+        }
+    }
+
+    /// Whether the rows on the list are on the screen: not while a changed query is asked.
+    fn rows_shown(&self) -> bool {
+        self.view
+            .parent()
+            .is_some_and(|scroller| scroller.is_visible())
     }
 
     /// Open the tail rows the rows just listed brought back shut: a file opened under this
@@ -1249,6 +1308,9 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen, dragging: &Rc<dyn Fn(bool)
         dragging: dragging.clone(),
     };
 
+    // Every list item the factory set up, which `redraw` draws again.
+    let drawn: Rc<RefCell<Vec<glib::WeakRef<gtk::ListItem>>>> = Rc::default();
+    let set_up = drawn.clone();
     let factory = crate::widgets::factory(
         move |item| {
             let name = gtk::Label::builder()
@@ -1286,6 +1348,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen, dragging: &Rc<dyn Fn(bool)
             row.append(&head);
             row.append(&snippet);
             drag.attach(&row, item);
+            set_up.borrow_mut().push(item.downgrade());
             row
         },
         {
@@ -1315,12 +1378,20 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen, dragging: &Rc<dyn Fn(bool)
                 let heading = hit.rel_path.is_empty();
                 item.set_activatable(!heading);
                 item.set_selectable(!heading);
-                name.set_css_classes(match heading {
-                    true => &["heading", "dimmed"],
-                    false => &["heading"],
-                });
+                // What a row shows already is not set again, so drawing one that did not change
+                // invalidates nothing (`redraw`): a label's setters compare for themselves, but an
+                // image's and the classes' do not.
+                if name.has_css_class("dimmed") != heading {
+                    name.set_css_classes(match heading {
+                        true => &["heading", "dimmed"],
+                        false => &["heading"],
+                    });
+                }
                 // A tail row has no name, and no icon either: it continues the file above it.
-                icon.set_icon_name(Some(crate::doc::icon_for(&hit.rel_path)));
+                let icon_name = crate::doc::icon_for(&hit.rel_path);
+                if icon.icon_name().as_deref() != Some(icon_name) {
+                    icon.set_icon_name(Some(icon_name));
+                }
                 icon.set_visible(!hit.name.is_empty() && !heading);
                 name.set_text(&hit.name);
                 // A diagram's row names the page its match is on rather than a line of its labels,
@@ -1340,6 +1411,20 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen, dragging: &Rc<dyn Fn(bool)
             }
         },
     );
+    // The factory's own bind, run again on every list item still set up, which is all a bind
+    // does with a list item whose object took new content.
+    let redraw = Box::new({
+        let factory = factory.clone();
+        move || {
+            drawn.borrow_mut().retain(|item| {
+                let Some(item) = item.upgrade() else {
+                    return false;
+                };
+                factory.emit_by_name::<()>("bind", &[&item]);
+                true
+            })
+        }
+    });
 
     // Nothing is selected until a row is pointed at or reached with the keys: an answer opening
     // with a heading would otherwise draw the heading selected, `set_selectable` stopping a click
@@ -1474,6 +1559,7 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen, dragging: &Rc<dyn Fn(bool)
         filter: filter.clone(),
         view: view.clone(),
         results,
+        redraw,
         generation: Arc::new(AtomicU64::new(0)),
         running: Cell::new(0),
         replacing: Cell::new(false),
@@ -1494,6 +1580,10 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen, dragging: &Rc<dyn Fn(bool)
             #[weak]
             search,
             move |view, pos| {
+                // Rows off the screen answer a question the box no longer asks.
+                if !search.rows_shown() {
+                    return;
+                }
                 let Some(boxed) = view
                     .model()
                     .and_then(|m| m.item(pos))
@@ -1635,6 +1725,8 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen, dragging: &Rc<dyn Fn(bool)
                         .map(|name| name.to_string())
                         .unwrap_or_default(),
                     (0..search.results.n_items())
+                        // Rows off the screen answer a question the box no longer asks.
+                        .filter(|_| search.rows_shown())
                         .filter_map(|i| {
                             search
                                 .results
