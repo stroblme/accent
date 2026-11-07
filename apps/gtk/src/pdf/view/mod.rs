@@ -798,6 +798,17 @@ impl PdfView {
         self.queue_draw();
     }
 
+    /// The line of text Show in PDF marks, drawn as the current match is; `None` takes it off.
+    pub fn set_spot(&self, spot: Option<(usize, accent_core::pdf::Rect)>) {
+        self.imp().spot.set(spot);
+        self.queue_draw();
+    }
+
+    /// What [`PdfView::set_spot`] was handed last.
+    pub fn spot(&self) -> Option<(usize, accent_core::pdf::Rect)> {
+        self.imp().spot.get()
+    }
+
     /// Draw the line in the gap a dropped PDF's pages would go into, or none.
     pub fn set_drop_gap(&self, gap: Option<usize>) {
         if self.imp().drop_gap.replace(gap) != gap {
@@ -815,13 +826,6 @@ impl PdfView {
     pub fn set_selection(&self, selection: Vec<(usize, Vec<accent_core::pdf::Rect>)>) {
         *self.imp().selection.borrow_mut() = selection;
         self.queue_draw();
-    }
-
-    /// The boxes the selection paints, as [`PdfView::set_selection`] was handed them. Only drills
-    /// ask.
-    #[cfg(feature = "bench")]
-    pub fn selection(&self) -> Vec<(usize, Vec<accent_core::pdf::Rect>)> {
-        self.imp().selection.borrow().clone()
     }
 
     /// Called with the page and the point a drag started and ended on, which need not be the
@@ -991,6 +995,8 @@ mod imp {
         /// Where the pointer is over the view, until it leaves: what a Ctrl+wheel zooms around.
         pub over: Cell<Option<(f64, f64)>>,
         pub current_mark: Cell<Option<(usize, usize)>>,
+        /// The line of text Show in PDF marks, while it is marked.
+        pub spot: Cell<Option<(usize, accent_core::pdf::Rect)>>,
         /// A jump asked for before the first layout, made by it. See
         /// [`super::PdfView::after_layout`].
         pub jump: RefCell<Option<Jump>>,
@@ -1082,6 +1088,7 @@ mod imp {
                 eraser: Cell::new(false),
                 over: Cell::new(None),
                 current_mark: Cell::new(None),
+                spot: Cell::new(None),
                 jump: RefCell::new(None),
                 drop_gap: Cell::new(None),
                 asked: RefCell::new(Vec::new()),

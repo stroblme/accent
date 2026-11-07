@@ -280,6 +280,10 @@ impl imp::PdfView {
                     snapshot.append_color(&colour, &layout.rect_of(rect, mark));
                 }
             }
+            if let Some((_, spot)) = self.spot.get().filter(|(at, _)| *at == index) {
+                let colour = theme::at(accent, theme::CURRENT_MARK_ALPHA);
+                snapshot.append_color(&colour, &layout.rect_of(rect, &spot));
+            }
             snapshot.restore();
         }
         // A PDF dragged over the pages: the line across the gap its pages would go into.

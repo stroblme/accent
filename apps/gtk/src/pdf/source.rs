@@ -28,8 +28,8 @@ impl PdfTab {
         self.without_synctex.set(missing);
     }
 
-    /// Bring `rect` of `page` into view and mark it as a selection is drawn, until [`MARK`] has
-    /// passed or a selection replaces it. A jump, so Back returns to where the reader was; a
+    /// Bring `rect` of `page` into view and mark it as the find bar's current match is drawn,
+    /// until [`MARK`] has passed. A jump, so Back returns to where the reader was; a
     /// document still opening does it once its pages are known ([`PdfTab::show_pending_spot`]),
     /// and pages not laid out yet, the view never having had a size (it was behind the spinner),
     /// on the first frame after it has one.
@@ -54,8 +54,7 @@ impl PdfTab {
             return;
         }
         self.jumping();
-        self.clear_selection();
-        self.view.set_selection(vec![(page, vec![rect])]);
+        self.view.set_spot(Some((page, rect)));
         self.view.reveal(page, rect);
         glib::timeout_add_local_once(
             MARK,
@@ -63,8 +62,9 @@ impl PdfTab {
                 #[weak(rename_to = tab)]
                 self,
                 move || {
-                    if tab.selected.borrow().is_empty() {
-                        tab.view.set_selection(Vec::new());
+                    // Unless a Show in PDF since has marked another line.
+                    if tab.view.spot() == Some((page, rect)) {
+                        tab.view.set_spot(None);
                     }
                 }
             ),
@@ -93,9 +93,7 @@ impl PdfTab {
     /// The line of text Show in PDF marks, while it is marked. Only drills ask.
     #[cfg(feature = "bench")]
     pub fn marked(&self) -> Option<(usize, pdf::Rect)> {
-        let marked = self.view.selection();
-        let (page, rects) = marked.first()?;
-        Some((*page, *rects.first()?))
+        self.view.spot()
     }
 
     /// What Show in PDF asked for while the document was opening, now its pages are there.
