@@ -32,6 +32,7 @@ Some other cool features involve (but are not limited to):
 - Early version of a native rust-based draw.io editor.
 - MCP server and [Codegraph](https://github.com/colbymchenry/codegraph)-like `explore` command to make agents more efficient.
 - LaTeX (SyncTeX) PDF <-> Code sync: navigate from text to pdf and vice-versa.
+- Typst with tinymist: completion, diagnostics and a PDF rebuilt on every save.
 
 ... and many more.
 I'm constantly adding new features and fixing bugs; let me know if you find some or got new ideas.

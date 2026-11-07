@@ -140,6 +140,7 @@ fn a_language_gets_the_server_it_has() {
 fn a_server_is_named_by_its_program() {
     let none = LspConfig::default();
     assert_eq!(server_name(&none, "lean").as_deref(), Some("lake"));
+    assert_eq!(server_name(&none, "typst").as_deref(), Some("tinymist"));
     assert_eq!(server_name(&none, "python3"), None, "pyright or pylsp");
     assert_eq!(server_name(&none, "markdown"), None);
     let mine = configured("python3", &["/opt/bin/pylsp", "-v"]);
@@ -193,6 +194,16 @@ fn a_session_is_rooted_at_the_nearest_checkout() {
     assert_eq!(
         session_root(root, &mathlib.join("Mathlib/X.lean"), markers),
         lean
+    );
+
+    // A Typst package below the checkout is rooted at its `typst.toml`.
+    let package = root.join("proj/paper");
+    std::fs::create_dir_all(package.join("chapters")).unwrap();
+    std::fs::write(package.join("typst.toml"), "").unwrap();
+    let chapter = package.join("chapters/one.typ");
+    assert_eq!(
+        session_root(root, &chapter, super::markers("typst")),
+        package
     );
 }
 

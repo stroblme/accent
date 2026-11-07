@@ -18,7 +18,7 @@ For a bird's-eye view, enable Minimap in [Preferences](preferences.md) or run **
 
 Install a language server on the computer that holds your [vault](vaults.md).
 Accent starts a supported server when you open a file.
-For example, it tries `rust-analyzer` for Rust, `pyright` or `pylsp` for Python, and `texlab` for LaTeX.
+For example, it tries `rust-analyzer` for Rust, `pyright` or `pylsp` for Python, `texlab` for LaTeX and `tinymist` for Typst.
 On a [remote vault](remote.md), install the server on the host.
 
 Completion appears as you type, or you can request it with `Ctrl+Space`.
@@ -54,6 +54,10 @@ They are unavailable for remote vaults and for PDFs whose pages you have rearran
 ## Typst
 
 Accent edits `.typ` files with syntax highlighting, and the Outline lists their headings even without a language server.
+With `tinymist` installed, it also completes labels and citations, shows errors and builds the PDF whenever you save.
+The PDF goes beside the main document, the file that includes the one you are editing, so saving a chapter rebuilds the whole document.
+Open the PDF from the Files pane once, and it reloads after every build.
+While the main document does not compile, the status bar names it.
 
 ## Lean
 

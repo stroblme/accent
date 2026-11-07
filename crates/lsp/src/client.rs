@@ -165,6 +165,22 @@ impl Client {
         }))
     }
 
+    /// Ask the server to do something without waiting for the answer, which is let go: the
+    /// request goes out at once, in order with the notifications around it, as tinymist's
+    /// `pinMain` has to reach it before the `didOpen` or `didSave` whose build it decides.
+    pub fn request_unanswered(&self, method: &str, params: impl Serialize) -> Result<(), Error> {
+        if self.is_dead() {
+            return Err(Error::Closed);
+        }
+        let id = self.inner.next_id.fetch_add(1, Ordering::SeqCst);
+        self.inner.send(&json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": serde_json::to_value(params)?,
+        }))
+    }
+
     /// Ask the server something and wait up to [`DEADLINE`] for its answer.
     ///
     /// Dropping the returned future — a superseded completion, an aborted `Task` — cancels the

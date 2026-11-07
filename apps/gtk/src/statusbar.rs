@@ -45,6 +45,8 @@ pub struct Bar {
     /// Delayed language-server startup and subsequent checking progress for the active tab.
     starting: RefCell<Option<String>>,
     checking: RefCell<Option<String>>,
+    /// The documents a language server builds on save whose last build failed, the latest last.
+    failed_builds: RefCell<Vec<String>>,
     /// How far the reading of the vault's PDFs' text has got, while it runs.
     pdf_text: RefCell<Option<String>>,
     provider_busy: RefCell<Option<String>>,
@@ -154,6 +156,7 @@ impl Bar {
             transfers: RefCell::new(Vec::new()),
             starting: RefCell::new(None),
             checking: RefCell::new(None),
+            failed_builds: RefCell::new(Vec::new()),
             pdf_text: RefCell::new(None),
             provider_busy: RefCell::new(None),
             index,
@@ -240,6 +243,20 @@ impl Bar {
         self.show_busy();
     }
 
+    /// Whether the last build of `rel`, a document a language server builds on save, failed: the
+    /// latest of those failing is said after the servers' lines, "thesis/main.typ did not
+    /// compile", until it builds.
+    pub fn set_compiled(&self, rel: &str, failed: bool) {
+        {
+            let mut builds = self.failed_builds.borrow_mut();
+            builds.retain(|build| build != rel);
+            if failed {
+                builds.push(rel.to_string());
+            }
+        }
+        self.show_busy();
+    }
+
     /// How far the reading of the vault's PDFs' text has got, `done` of `total` files, or `None`
     /// once it has ended: "Indexing PDF text… 12/80 files", after the language servers' lines and
     /// before the suggestion index, with its Stop.
@@ -312,7 +329,7 @@ impl Bar {
     }
 
     /// Choose progress text by priority: vault work, an open, newest transfer, active server
-    /// startup/checking, the PDF text, then suggestions.
+    /// startup/checking, a failed build, the PDF text, then suggestions.
     /// Keep user-requested work ahead of background conveniences.
     fn show_busy(&self) {
         let vault = self.vault_busy.borrow();
@@ -321,6 +338,8 @@ impl Bar {
         let checking = self.checking.borrow();
         let pdf_text = self.pdf_text.borrow();
         let provider = self.provider_busy.borrow();
+        let failed =
+            (self.failed_builds.borrow().last()).map(|rel| format!("{rel} did not compile"));
         let ahead = vault.is_some() || self.opening.get();
         let transfer = transfers.last().filter(|_| !ahead);
         let before = vault
@@ -328,7 +347,8 @@ impl Bar {
             .or(self.opening.get().then_some(OPENING))
             .or(transfer.map(|(line, _)| line.as_str()))
             .or(starting.as_deref())
-            .or(checking.as_deref());
+            .or(checking.as_deref())
+            .or(failed.as_deref());
         let pdf_text = pdf_text.as_deref().filter(|_| before.is_none());
         set(&self.progress, before.or(pdf_text).or(provider.as_deref()));
         self.pdf_stop.set_visible(pdf_text.is_some());

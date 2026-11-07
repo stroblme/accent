@@ -85,6 +85,7 @@ pub(crate) fn narrow(e: crate::Event) -> Option<Event> {
         | crate::Event::Busy { .. }
         | crate::Event::PdfText { .. }
         | crate::Event::Checking { .. }
+        | crate::Event::Compiled { .. }
         | crate::Event::Debug { .. }
         | crate::Event::Kernel { .. } => return None,
     })

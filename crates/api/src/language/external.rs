@@ -71,6 +71,9 @@ pub(crate) struct External {
     lean: bool,
     /// The builds' tables of contents that number texlab's outline.
     tocs: super::latex::Tocs,
+    /// The server is tinymist, told before each open and save which document the file belongs
+    /// to ([`super::typst`]).
+    mains: Option<super::typst::Mains>,
     /// Whether [`Language::calls`] has found a declaration. Before the first
     /// success, an empty result may mean the project is still loading.
     found_one: AtomicBool,
@@ -101,12 +104,17 @@ pub(crate) async fn start_configured(
     python: Option<String>,
 ) -> Result<Arc<dyn Language>> {
     let name = argv.first().cloned().unwrap_or_default();
-    let settings = python.map_or(Value::Null, |python| {
-        json!({
+    let tinymist = Path::new(&name)
+        .file_stem()
+        .is_some_and(|stem| stem == "tinymist");
+    let settings = match python {
+        Some(python) => json!({
             "python": {"pythonPath": python},
             "pylsp": {"plugins": {"jedi": {"environment": python}}},
-        })
-    });
+        }),
+        None if tinymist => super::typst::settings(),
+        None => Value::Null,
+    };
     let (client, notifications) = Client::spawn_configured(&argv, &root, settings)
         .map_err(|e| Error::Language(format!("cannot start {name}: {e}")))?;
     let caps = client.initialize(&root).await?;
@@ -119,6 +127,7 @@ pub(crate) async fn start_configured(
     accent_lsp::runtime().spawn(forward_notifications(
         notifications,
         docs.clone(),
+        root.clone(),
         vault_root.clone(),
         encoding,
         busy,
@@ -139,6 +148,7 @@ pub(crate) async fn start_configured(
             .file_name()
             .is_some_and(|file| file == "lake" || file == "lean"),
         tocs: Default::default(),
+        mains: tinymist.then(|| super::typst::Mains::new(root)),
         found_one: AtomicBool::new(false),
         named: Default::default(),
     }))
@@ -171,9 +181,11 @@ impl Busy {
 /// Map published diagnostics to open tabs and progress to [`Event`]s for
 /// servers with `busy`. Drop diagnostics for unopened files, since
 /// servers may publish for an entire project and no tab can display them.
+/// `root` is the server's, which tinymist names a built document from.
 async fn forward_notifications(
     mut notifications: Notifications,
     docs: Docs,
+    root: PathBuf,
     vault_root: PathBuf,
     encoding: Encoding,
     busy: Option<Busy>,
@@ -186,6 +198,8 @@ async fn forward_notifications(
     let mut working = false;
     // How far each file's check has got, and so the files to say done with when it exits.
     let mut checking: HashMap<String, Check> = HashMap::new();
+    // The documents whose last build failed, and so the ones to say built when it exits.
+    let mut failing: HashSet<String> = HashSet::new();
     loop {
         // A line held back goes on at the end of its interval, whether the server says more by
         // then or not.
@@ -276,6 +290,20 @@ async fn forward_notifications(
                     break;
                 }
             }
+            // tinymist says so of every compile, a keystroke's too: only a change is news.
+            "tinymist/compileStatus" => {
+                let Some((rel, failed)) = super::typst::compiled(&n.params, &root, &vault_root)
+                else {
+                    continue;
+                };
+                let news = match failed {
+                    true => failing.insert(rel.clone()),
+                    false => failing.remove(&rel),
+                };
+                if news && events.send(Event::Compiled { rel, failed }).is_err() {
+                    break;
+                }
+            }
             _ => continue,
         }
     }
@@ -296,12 +324,15 @@ async fn forward_notifications(
             stale: false,
         });
     }
-    // Nor will it finish checking a file it was in the middle of.
+    // Nor will it finish checking a file it was in the middle of, or build one again.
     for rel in checking.into_keys() {
         let _ = events.send(Event::Checking {
             rel,
             lines: Vec::new(),
         });
+    }
+    for rel in failing {
+        let _ = events.send(Event::Compiled { rel, failed: false });
     }
 }
 
@@ -503,6 +534,23 @@ impl External {
         })
     }
 
+    /// Tell tinymist which document `rel` belongs to, where that is news, before it is opened or
+    /// saved: its next build is that document's. A file outside the vault is a package's.
+    fn pin(&self, rel: &str) -> Result<()> {
+        let Some(mains) = self
+            .mains
+            .as_ref()
+            .filter(|_| !Path::new(rel).is_absolute())
+        else {
+            return Ok(());
+        };
+        if let Some(pin) = mains.pin(&Local::join(&self.root, rel)?) {
+            self.client
+                .request_unanswered("workspace/executeCommand", pin)?;
+        }
+        Ok(())
+    }
+
     fn support(&self) -> Support {
         let firsts =
             |triggers: &[String]| triggers.iter().filter_map(|t| t.chars().next()).collect();
@@ -616,6 +664,7 @@ impl External {
 impl Language for External {
     fn open(&self, rel: &str, language_id: &str, text: String) -> Result<Support> {
         let uri = self.uri(rel)?;
+        self.pin(rel)?;
         self.client.notify(
             "textDocument/didOpen",
             json!({"textDocument": {
@@ -629,6 +678,7 @@ impl Language for External {
 
     fn saved(&self, rel: &str) -> Result<()> {
         let uri = self.uri(rel)?;
+        self.pin(rel)?;
         self.client.notify(
             "textDocument/didSave",
             json!({"textDocument": {"uri": uri}}),
@@ -930,6 +980,11 @@ impl Language for External {
                         super::latex::tidy(rows, &text, own.as_deref(), &near, self.encoding);
                     Some(DocumentSymbolResponse::Nested(rows))
                 }
+                Some(DocumentSymbolResponse::Nested(mut rows)) if self.mains.is_some() => {
+                    let last = text.lines().count().saturating_sub(1) as u32;
+                    super::typst::tidy(&mut rows, last);
+                    Some(DocumentSymbolResponse::Nested(rows))
+                }
                 answer => answer,
             };
             Ok(symbols_of(answer, &text, self.encoding))
@@ -1106,6 +1161,7 @@ mod tests {
                 notifications,
                 docs,
                 PathBuf::from("/vault"),
+                PathBuf::from("/vault"),
                 Encoding::Utf16,
                 Some(busy),
                 events,
@@ -1248,6 +1304,7 @@ mod tests {
             notifications,
             docs,
             PathBuf::from("/vault"),
+            PathBuf::from("/vault"),
             Encoding::Utf16,
             None,
             events,
@@ -1290,6 +1347,7 @@ mod tests {
         accent_lsp::runtime().block_on(forward_notifications(
             notifications,
             docs,
+            PathBuf::from("/vault"),
             PathBuf::from("/vault"),
             Encoding::Utf16,
             None,

@@ -28,6 +28,7 @@ use crate::{Event, FileEdits, Local, LspConfig, Vault, VaultConfig, locked};
 pub(crate) mod external;
 mod latex;
 pub(crate) mod notes;
+mod typst;
 pub(crate) mod words;
 
 use notes::Notes;
@@ -1163,6 +1164,7 @@ const SERVERS: &[(&str, &str, &[&[&str]])] = &[
     ("typescript", "typescript", TYPESCRIPT),
     ("typescript-jsx", "typescriptreact", TYPESCRIPT),
     ("latex", "latex", &[&["texlab"]]),
+    ("typst", "typst", &[&["tinymist"]]),
     ("toml", "toml", &[&["taplo", "lsp", "stdio"]]),
     ("go", "go", &[&["gopls"]]),
     // elan installs `lake` under `~/.elan/bin`, which a desktop session's PATH does not hold.
@@ -1174,11 +1176,15 @@ const SERVERS: &[(&str, &str, &[&[&str]])] = &[
 ];
 
 /// The files that mark a project's root for a language's server, besides `.git`
-/// ([`session_root`]): a Lean project's lakefile often sits below the checkout holding it.
-const ROOTS: &[(&str, &[&str])] = &[(
-    "lean",
-    &["lakefile.toml", "lakefile.lean", "lean-toolchain"],
-)];
+/// ([`session_root`]): a Lean project's lakefile often sits below the checkout holding it, and
+/// a Typst package's `typst.toml` is where its `/` paths start.
+const ROOTS: &[(&str, &[&str])] = &[
+    (
+        "lean",
+        &["lakefile.toml", "lakefile.lean", "lean-toolchain"],
+    ),
+    ("typst", &["typst.toml"]),
+];
 
 /// The root markers of a GtkSourceView language id, none for most.
 fn markers(language: &str) -> &'static [&'static str] {

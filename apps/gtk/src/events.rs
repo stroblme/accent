@@ -531,6 +531,8 @@ impl App {
                     }
                 }
             }
+            // Window-wide, naming the document, until it builds again.
+            Event::Compiled { rel, failed } => self.statusbar.set_compiled(&rel, failed),
             Event::Diagnostics { rel, items, stale } => {
                 if let Some(tab) = self.tab_for(&rel) {
                     tab.lang.doc.published(stale);
