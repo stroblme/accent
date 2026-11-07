@@ -82,6 +82,8 @@ pub(super) fn bench_indent(view: &multicaret::View) {
     press("string", gdk::Key::Return);
     set(None, "Notes:");
     press("no_language", gdk::Key::Return);
+    set(Some("typst"), "It holds:");
+    press("typst_colon", gdk::Key::Return);
     set(Some("rust"), "fn f() {}");
     buffer.place_cursor(&at(&buffer, 0, 8));
     press("pair", gdk::Key::Return);
@@ -155,6 +157,10 @@ pub(super) fn bench_code_pairs(view: &multicaret::View) {
     press("wrap", gdk::Key::bracketleft);
     set("x", 1);
     press("quote", gdk::Key::quotedbl);
+    let typst = sourceview5::LanguageManager::default().language("typst");
+    source.set_language(typst.as_ref());
+    set("// a", 4);
+    press("typst_comment", gdk::Key::parenleft);
     source.set_language(None);
 }
 

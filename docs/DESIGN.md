@@ -41,6 +41,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - **Code declarations**: `accent_core::code` scans supported languages without shipping tree-sitter grammars to remote hosts.
   It indexes declarations with their files; call relationships are resolved by name on demand, while MCP's `precise` mode asks a language server.
   Lean's static declarations give a file an outline before `lake serve` answers; namespace spans nest their members, and comments and strings are masked before scanning.
+  Typst's are its `=` headings, each spanning its section, which give a `.typ` file an outline and a sticky title without tinymist and in a terminal editor (user decision 2026-11-07).
+  One pass tells its markup from code, math, raw text and comments as Typst's own lexer does, and against tinymist's outline of the 928 files in tinymist's sources it missed only the headings that open a content block (`[= Title]`).
 - **Mid-word search**: a second FTS5 table, `notes_tri` (trigram tokenizer, `detail='none'`), finds a query in the middle of a word — a term index answers "starts with", never "contains".
   It folds case and Latin diacritics as the ranked path does (`remove_diacritics 1`, so `cafe` finds `Unicafé`), and the query is literal: the files holding all of its trigrams that its qualifiers leave are read for it, never matched with a `LIKE`, whose `%` and `_` are wildcards.
   A query the prefix index cannot answer at all is answered from it at once; below one it can (while its rows leave room under the list's cap and the query has three characters or more), its files are listed after the prefix hits, once the box has been still for 400 ms, in its own order (a title holding the query first, then the shortest file), and never twice.
@@ -670,6 +672,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A keyword after a `.` (`Nat.rec`) is a name.
 - TSX is coloured by accent's own `typescript-jsx.lang` beside them: GtkSourceView 5.20's, with an arrow function's type parameter list that starts on the line after its `<`, as Prettier wraps a long one, read as one; the stock one takes it for a JSX element that never closes and leaves the rest of the file one colour.
   A `.mts` or `.cts` file is TypeScript, which GtkSourceView has no glob for.
+- Typst is coloured by Typesetter's `typst.lang` beside them, GtkSourceView shipping none, with its comments and strings given the `comment` and `string` classes the Return and bracket rules read.
+  A `:` ending a Typst line opens no level, since Typst's blocks are brackets and its prose ends many a line with a colon.
 - It wraps as prose does: nothing in a document scrolls sideways.
   A wrapped row starts one indent level deeper than its line (VS Code's `wrappingIndent: "indent"`), so it cannot pass for the next line; a note does the same, hanging a list item's rows under its text (its marker measured in the note's font as drawn, so a proportional face's `-` is not taken for a space), except in a fenced block, whose lines wrap as code's do whatever they open with.
   `Alt+Z` unwraps one tab for as long as it is open, for a generated file whose columns are the point.

@@ -23,6 +23,10 @@ const OPENERS: [(char, Option<char>); 4] = [
     (':', None),
 ];
 
+/// The languages in which a `:` opens nothing: Typst's blocks are brackets, and its prose ends
+/// many a line with a colon.
+const NO_COLON: [&str; 1] = ["typst"];
+
 /// Return or a closer in a code tab with a language; the rest is left to the view.
 pub(crate) fn on_key(
     view: &sourceview5::View,
@@ -144,7 +148,13 @@ fn opened(buffer: &sourceview5::Buffer, end: &gtk::TextIter) -> Option<(char, Op
         if buffer.iter_has_context_class(&iter, "string") {
             return None;
         }
-        return OPENERS.into_iter().find(|(open, _)| *open == iter.char());
+        let colon = || {
+            let language = buffer.language();
+            !language.is_some_and(|l| NO_COLON.contains(&l.id().as_str()))
+        };
+        return OPENERS
+            .into_iter()
+            .find(|(open, _)| *open == iter.char() && (*open != ':' || colon()));
     }
     None
 }

@@ -50,8 +50,8 @@ pub enum FileType {
 const CODE_EXT: &[&str] = &[
     "rs", "py", "c", "h", "cc", "cpp", "hpp", "js", "mjs", "jsx", "ts", "tsx", "go", "java", "kt",
     "swift", "rb", "php", "lua", "sh", "bash", "zsh", "fish", "r", "jl", "hs", "ml", "scala", "cs",
-    "zig", "sql", "html", "css", "scss", "vue", "svelte", "tex", "vim", "el", "nix", "mk", "cmake",
-    "lean",
+    "zig", "sql", "html", "css", "scss", "vue", "svelte", "tex", "typ", "vim", "el", "nix", "mk",
+    "cmake", "lean",
 ];
 /// Source files named for the tool that reads them rather than by an extension.
 const CODE_NAMES: &[&str] = &[
@@ -341,6 +341,7 @@ mod tests {
             ("tool.py", FileType::Code),
             ("Makefile", FileType::Code),
             ("sub/justfile", FileType::Code),
+            ("thesis/main.typ", FileType::Code),
             ("package.json", FileType::Config),
             ("Cargo.toml", FileType::Config),
             ("notes.txt", FileType::Text),

@@ -71,10 +71,11 @@
     <!-- GtkSourceView's LaTeX with its listings in the language they name, its Lean with Lean
          4's keywords, and its TypeScript JSX with a wrapped type parameter list read as one, each
          read ahead of the one GtkSourceView ships: `install_icons` puts this folder first on its
-         search path. -->
+         search path. Typst is Typesetter's, GtkSourceView shipping none. -->
     <file compressed="true">language-specs/latex.lang</file>
     <file compressed="true">language-specs/lean.lang</file>
     <file compressed="true">language-specs/typescript-jsx.lang</file>
+    <file compressed="true">language-specs/typst.lang</file>
     <file compressed="true">language-specs/accent-search.lang</file>
     <!-- GtkSourceView's four style schemes with no draw-spaces colour (`theme::scheme_id`). -->
     <file compressed="true">styles/accent-Adwaita.xml</file>

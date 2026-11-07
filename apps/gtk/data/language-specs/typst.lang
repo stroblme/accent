@@ -1,0 +1,538 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-FileCopyrightText: 2025 Haydn Trowell -->
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<!--
+  accent's copy of Typesetter's data/languages/typst.lang (https://codeberg.org/haydn/typesetter,
+  commit 181ade5e3c16b7ef42c28198caecd5b7f9f2ec91, the file as it stands at f742b6ea), read ahead of
+  the language manager's own specs as latex.lang is: GtkSourceView ships no Typst. Three changes:
+  the section is Markup and the mime types are shared-mime-info's, and the comments and string
+  literals carry the `comment` and `string` classes, which is how the editor's Return and bracket
+  rules tell them from code. Everything else is upstream's, to diff against a newer Typesetter.
+-->
+<language id="typst" name="Typst" version="2.0" _section="Markup">
+  <metadata>
+    <property name="mimetypes">text/vnd.typst;text/x-typst</property>
+    <property name="globs">*.typ</property>
+    <property name="line-comment-start">//</property>
+    <property name="block-comment-start">/*</property>
+    <property name="block-comment-end">*/</property>
+    <property name="suggested-suffix">.typ</property>
+  </metadata>
+  <styles>
+    <style id="comment" name="Comment" map-to="def:comment"/>
+    <style id="keyword" name="Keyword" map-to="def:keyword"/>
+    <style id="net-address" name="Net Address" map-to="def:net-address"/>
+    <style id="non-printing-character" name="Non-Printing Character" map-to="def:comment"/>
+    <style id="comment-note" name="Comment Note" map-to="def:note"/>
+    <style id="comment-note-meta" name="Comment Note Meta" map-to="def:comment"/>
+    <style id="comment-todo" name="Comment Todo" map-to="def:note"/>
+    <style id="comment-todo-meta" name="Comment Todo Meta" map-to="def:comment"/>
+    <style id="comment-fixme" name="Comment Fixme" map-to="def:note"/>
+    <style id="comment-fixme-meta" name="Comment Fixme Meta" map-to="def:comment"/>
+    <style id="comment-check" name="Comment Check" map-to="def:note"/>
+    <style id="comment-check-meta" name="Comment Check Meta" map-to="def:comment"/>
+  </styles>
+  <definitions>
+    <!-- Main Typst context -->
+    <context id="typst">
+      <include>
+        <!-- Markup context -->
+        <context id="markup" class="markup">
+          <include>
+            <!-- #let/#set/#show/#import/#include/#export block -->
+            <context id="hash-statement" end-at-line-end="true" class="no-spell-check code">
+              <start>(#)(let|set|show|import|include|export)(?=\s|\:)</start>
+              <end>(\;|\)|$|(?=]))</end>
+              <include>
+                <context sub-pattern="1" where="start" style-ref="non-printing-character"/>
+                <context sub-pattern="2" where="start" style-ref="keyword"/>
+                <context sub-pattern="1" where="end" style-ref="non-printing-character"/>
+                <context ref="variable-argument-separator"/>
+                <context ref="code"/>
+              </include>
+            </context>
+            <!-- #if block -->
+            <context id="hash-if" end-at-line-end="true" class="no-spell-check code">
+              <start>(#)(if)\b</start>
+              <end>(?=])|(?&lt;=}|])</end>
+              <include>
+                <context sub-pattern="1" where="start" style-ref="non-printing-character"/>
+                <context sub-pattern="2" where="start" style-ref="keyword"/>
+                <context ref="code"/>
+              </include>
+            </context>
+            <!-- `else` after } or ] -->
+            <context id="hash-else" end-at-line-end="true" class="no-spell-check code">
+              <start>(?&lt;=\}|\])(?:\s*)(else)\b</start>
+              <end>(?=])|(?&lt;=}|])</end>
+              <include>
+                <context sub-pattern="1" where="start" style-ref="keyword"/>
+                <context sub-pattern="1" where="end" style-ref="non-printing-character"/>
+                <context ref="code"/>
+              </include>
+            </context>
+            <!-- `else if` after } or ] -->
+            <context id="hash-else-if" end-at-line-end="true" class="no-spell-check code">
+              <start>(?&lt;=\}|\])(?:\s*)(else)(?:\s+)(if)\b</start>
+              <end>(?=])|(?&lt;=}|])</end>
+              <include>
+                <context sub-pattern="1" where="start" style-ref="keyword"/> <!-- else -->
+                <context sub-pattern="2" where="start" style-ref="keyword"/> <!-- if -->
+                <context sub-pattern="1" where="end" style-ref="non-printing-character"/>
+                <context ref="code"/>
+              </include>
+            </context>
+            <!-- #while block -->
+            <context id="hash-while" end-at-line-end="true" class="no-spell-check code">
+              <start>(#)(while)\b</start>
+              <end>(?=])|(?&lt;=}|])</end>
+              <include>
+                <context sub-pattern="1" where="start" style-ref="non-printing-character"/>
+                <context sub-pattern="2" where="start" style-ref="keyword"/>
+                <context ref="code"/>
+              </include>
+            </context>
+            <!-- #for block -->
+            <context id="hash-for" end-at-line-end="true" class="no-spell-check code">
+              <start>(#)(for)\b</start>
+              <end>(?=])|(?&lt;=}|])</end>
+              <include>
+                <context sub-pattern="1" where="start" style-ref="non-printing-character"/>
+                <context sub-pattern="2" where="start" style-ref="keyword"/>
+                <context ref="code"/>
+              </include>
+            </context>
+            <!-- # expression block -->
+            <context id="hash-code-expression" class="no-spell-check code">
+              <start>(\#)</start>
+              <include>
+                <context sub-pattern="1" where="start" style-ref="non-printing-character"/>
+                <!-- End after a semicolon -->
+                <context end-parent="true" style-ref="non-printing-character">
+                  <match>;</match>
+                </context>
+                <!-- End after identifier/delimiter followed by whitespace/quote -->
+                <context end-parent="true">
+                  <match>(?&lt;=[a-zA-Z0-9_\)\]\}])(?=[^a-zA-Z0-9_\(\[\{"&gt;\.]|\.(?!\w)|$)</match>
+                </context>
+                <!-- End before a quote that follows an identifier (markup quote, not a string) -->
+                <context end-parent="true">
+                  <match>(?&lt;=[a-zA-Z0-9_\)\]\}])(?=\s*")</match>
+                </context>
+                <!-- End after a closing quote (string just finished) -->
+                <context end-parent="true">
+                  <match>(?&lt;=")(?=\s|$|.)</match>
+                </context>
+                <!-- End after a dot followed by a quote -->
+                <context end-parent="true">
+                  <match>(?&lt;=\.)(?=")</match>
+                </context>
+                <context ref="variable-argument-separator"/>
+                <context ref="code"/>
+              </include>
+            </context>
+            <!-- *...* strong emphasis (bold) -->
+            <context id="strong-emphasis" style-ref="def:strong-emphasis">
+              <start>(^\*|\*$|((?&lt;=[\W\p{Han}\p{Hangul}\p{Katakana}\p{Hiragana}])\*)|(\*(?=[\W\p{Han}\p{Hangul}\p{Katakana}\p{Hiragana}])))</start>
+              <end>(^\*|\*$|((?&lt;=[\W\p{Han}\p{Hangul}\p{Katakana}\p{Hiragana}])\*)|(\*(?=[\W\p{Han}\p{Hangul}\p{Katakana}\p{Hiragana}])))|$|(?=\])</end>
+              <include>
+                <context sub-pattern="0" where="start" style-ref="non-printing-character"/>
+                <context sub-pattern="0" where="end" style-ref="non-printing-character"/>
+                <context ref="unicode-escape"/>
+                <context ref="character-escape"/>
+                <context ref="emphasis"/>
+                <context ref="content-block"/>
+                <context ref="hash-code-expression"/>
+              </include>
+            </context>
+            <!-- _..._ emphasis (italics) -->
+            <context id="emphasis" style-ref="def:emphasis">
+              <start>(^\_|\_$|((?&lt;=[\W\p{Han}\p{Hangul}\p{Katakana}\p{Hiragana}])\_)|(\_(?=[\W\p{Han}\p{Hangul}\p{Katakana}\p{Hiragana}])))</start>
+              <end>(^\_|\_$|((?&lt;=[\W\p{Han}\p{Hangul}\p{Katakana}\p{Hiragana}])\_)|(\_(?=[\W\p{Han}\p{Hangul}\p{Katakana}\p{Hiragana}])))|$|(?=\])</end>
+              <include>
+                <context sub-pattern="0" where="start" style-ref="non-printing-character"/>
+                <context sub-pattern="0" where="end" style-ref="non-printing-character"/>
+                <context ref="unicode-escape"/>
+                <context ref="character-escape"/>
+                <context ref="strong-emphasis"/>
+                <context ref="content-block"/>
+                <context ref="hash-code-expression"/>
+              </include>
+            </context>
+            <!-- ```...``` preformatted code block -->
+            <context id="preformatted-code-block" style-ref="def:preformatted-section" class="no-spell-check code">
+              <start>(```)([\p{XID_Start}_][\p{XID_Continue}\-]*)?</start>
+              <end>(```)</end>
+              <include>
+                <context sub-pattern="1" where="start" style-ref="non-printing-character"/>
+                <context sub-pattern="1" where="end" style-ref="non-printing-character"/>
+                <context sub-pattern="2" where="start" style-ref="non-printing-character"/>
+              </include>
+            </context>
+            <!-- `...` inline code block -->
+            <context id="inline-code-block" style-ref="def:inline-code" end-at-line-end="true">
+              <start>(\`)</start>
+              <end>(\`)</end>
+              <include>
+                <context sub-pattern="1" where="start" style-ref="non-printing-character"/>
+                <context sub-pattern="1" where="end" style-ref="non-printing-character"/>
+              </include>
+            </context>
+            <!-- links -->
+            <context id="link" style-ref="net-address" class="no-spell-check code">
+              <match>(https?):\/\/[^\s\]\)\}>,;\"']*[^\s\]\)\}>,;\"']</match>
+            </context>
+            <!-- <...> labels -->
+            <context id="label" style-ref="def:identifier" class="no-spell-check code">
+              <match>&lt;[\p{XID_Start}_\p{Nd}][\p{XID_Continue}\-]*&gt;</match>
+            </context>
+            <!-- @... references -->
+            <context id="reference" style-ref="def:identifier" class="no-spell-check code">
+              <start>(@[\p{XID_Start}_\p{Nd}][\p{XID_Continue}\-]*)</start>
+              <end>(?=\s|$|[^\[])</end>
+              <include>
+                <context sub-pattern="1" where="start" style-ref="def:identifier"/>
+                <context ref="content-block"/>
+              </include>
+            </context>
+            <!-- TODO: This needs updating to include italics, escaped characters, etc. -->
+            <!-- = ... headings -->
+            <context id="heading">
+              <match>^\s*(=+)\s*(.*?)(\s*&lt;[^&gt;]*>)?\s*$</match>
+              <include>
+                <context sub-pattern="1" style-ref="non-printing-character"/>
+                <context sub-pattern="2" style-ref="def:heading"/>
+                <context sub-pattern="3" style-ref="def:identifier"/>
+              </include>
+            </context>
+            <!-- - ... bullet list -->
+            <context id="bullet-list">
+              <match>^(\s*-\s+)</match>
+              <include>
+                <context sub-pattern="1" style-ref="def:list-marker"/>
+              </include>
+            </context>
+            <!-- + ... numbered list -->
+            <context id="numbered-list">
+              <match>^\s*(\+|\d+\.)\s+</match>
+              <include>
+                <context sub-pattern="1" style-ref="def:list-marker"/>
+              </include>
+            </context>
+            <!-- term list -->
+            <context id="term-list">
+              <match>^\s*(\/)\s+(.*?)\s*(\:)</match>
+              <include>
+                <context sub-pattern="1" style-ref="non-printing-character"/>
+                <context sub-pattern="2" style-ref="def:strong-emphasis"/>
+                <context sub-pattern="3" style-ref="non-printing-character"/>
+              </include>
+            </context>
+            <!-- $ ... $ inline math -->
+            <context id="math-block" class="no-spell-check math">
+              <start>(\$)</start>
+              <end>(\$)</end>
+              <include>
+                <context sub-pattern="1" where="start" style-ref="def:string"/>
+                <context sub-pattern="1" where="end" style-ref="def:string"/>
+                <context ref="math"/>
+              </include>
+            </context>
+            <!-- en and em dashes -->
+            <context id="dashes" style-ref="def:special-char">
+              <match>\-\-\-|\-\-</match>
+            </context>
+            <!-- non-printing symbols -->
+            <context id="non-printing-symbol" style-ref="def:special-char">
+              <match>\~|\-\?</match>
+            </context>
+            <!-- \ line break -->
+            <context id="line-break" style-ref="non-printing-character">
+              <match>\\(?:\s+|$)</match>
+            </context>
+            <!-- \u{...} unicode escapes -->
+            <context id="unicode-escape" class="no-spell-check code">
+              <match>(\\)(u\{[0-9A-Fa-f]+\})</match>
+              <include>
+                <context sub-pattern="1" style-ref="non-printing-character"/>
+                <context sub-pattern="2" style-ref="def:special-char"/>
+              </include>
+            </context>
+            <!-- \... character escapes -->
+            <context id="character-escape" class="no-spell-check markup escape">
+              <match>(\\)(\S)</match>
+              <include>
+                <context sub-pattern="1" style-ref="non-printing-character"/>
+                <context sub-pattern="2"/>
+              </include>
+            </context>
+            <!-- // NOTE/TODO/FIXME/CHECK/QUESTION: ... comments -->
+            <context id="metadata-comment" style-ref="comment-note" class="comment no-spell-check markup">
+              <match>(//)\s*(NOTE|COMMENT)\s*((?:\([^)]*\))?:)\s*(.+)</match>
+              <include>
+                <context sub-pattern="1" style-ref="comment-note-meta"/>
+                <context sub-pattern="2" style-ref="def:note"/>
+                <context sub-pattern="3" style-ref="comment-note-meta"/>
+              </include>
+            </context>
+            <context id="metadata-comment-todo" style-ref="comment-todo" class="comment no-spell-check markup">
+              <match>(//)\s*(TODO)\s*((?:\([^)]*\))?:)\s*(.+)</match>
+              <include>
+                <context sub-pattern="1" style-ref="comment-todo-meta"/>
+                <context sub-pattern="2" style-ref="def:note"/>
+                <context sub-pattern="3" style-ref="comment-todo-meta"/>
+              </include>
+            </context>
+            <context id="metadata-comment-fixme" style-ref="comment-fixme" class="comment no-spell-check markup">
+              <match>(//)\s*(FIXME|HACK)\s*((?:\([^)]*\))?:)\s*(.+)</match>
+              <include>
+                <context sub-pattern="1" style-ref="comment-fixme-meta"/>
+                <context sub-pattern="2" style-ref="def:note"/>
+                <context sub-pattern="3" style-ref="comment-fixme-meta"/>
+              </include>
+            </context>
+            <context id="metadata-comment-check" style-ref="comment-check" class="comment no-spell-check markup">
+              <match>(//)\s*(CHECK|QUESTION)\s*((?:\([^)]*\))?:)\s*(.+)</match>
+              <include>
+                <context sub-pattern="1" style-ref="comment-check-meta"/>
+                <context sub-pattern="2" style-ref="def:note"/>
+                <context sub-pattern="3" style-ref="comment-check-meta"/>
+              </include>
+            </context>
+            <!-- // ... single-line comment -->
+            <context id="single-line-comment" style-ref="comment" end-at-line-end="true" class="comment no-spell-check markup">
+              <start>//</start>
+              <end>$</end>
+              <include>
+                <context ref="link"/>
+              </include>
+            </context>
+            <!-- /* ... */ multi-line comment -->
+            <context id="multi-line-comment" style-ref="comment" class="comment no-spell-check markup">
+              <start>\/\*</start>
+              <end>\*\/</end>
+              <include>
+                <context ref="link"/>
+                <context ref="multi-line-comment"/>
+              </include>
+            </context>
+          </include>
+        </context>
+      </include>
+    </context>
+    <!-- code context -->
+    <context id="code" class="code">
+      <include>
+        <!-- // ... single-line comment -->
+        <context ref="single-line-comment"/>
+        <!-- /* ... */ multi-line comment -->
+        <context ref="multi-line-comment"/>
+        <!-- keywords: none -->
+        <context id="none" style-ref="keyword">
+          <keyword>none</keyword>
+        </context>
+        <!-- keywords: auto -->
+        <context id="auto" style-ref="keyword">
+          <keyword>auto</keyword>
+        </context>
+        <!-- keywords: false, true (boolean literals) -->
+        <context id="boolean" style-ref="def:boolean">
+          <keyword>false</keyword>
+          <keyword>true</keyword>
+        </context>
+        <!-- keywords: else, if (conditionals) -->
+        <context id="conditional" style-ref="keyword">
+          <keyword>else</keyword>
+          <keyword>if</keyword>
+        </context>
+        <!-- keywords: for, while (loops) -->
+        <context id="loop" style-ref="keyword">
+          <keyword>for</keyword>
+          <keyword>while</keyword>
+        </context>
+        <!-- keywords: continue, break (control flow) -->
+        <context id="control-flow" style-ref="keyword">
+          <keyword>continue</keyword>
+          <keyword>break</keyword>
+        </context>
+        <!-- keywords: return -->
+        <context id="return" style-ref="keyword">
+          <keyword>return</keyword>
+        </context>
+        <!-- general keywords -->
+        <context id="keyword" style-ref="keyword">
+          <match>(let|set|show|context|import|in|not|and|or)(?=\s|\:)</match>
+        </context>
+        <!-- base-N integers -->
+        <context id="base-n-integer" style-ref="def:base-n-integer">
+          <match>\b(?:0[xX][0-9A-Fa-f]+|0[oO][0-7]+|0[bB][01]+)(pt|mm|cm|in|em|fr|deg|rad|%)?\b</match>
+        </context>
+        <!-- measurements -->
+        <context id="measurement" style-ref="def:number">
+          <match>(?&lt;![\w])-?(?:[0-9]+(?:\.[0-9]*(?:e[+-]?[0-9]+)?)?|\.[0-9]+(?:e[+-]?[0-9]+)?)(?:%|(?:pt|mm|cm|in|em|deg|rad|fr)\b)</match>
+        </context>
+        <!-- floats -->
+        <context id="float" style-ref="def:number">
+          <match>(?&lt;![\w])-?[0-9]+\.[0-9]+(?:e[+-]?[0-9]+)?\b</match>
+        </context>
+        <!-- integers -->
+        <context id="integer" style-ref="def:number">
+          <match>(?&lt;![\w])-?[0-9]+\b</match>
+        </context>
+        <!-- string literals -->
+        <context id="string" style-ref="def:string" class="string">
+          <start>"</start>
+          <end>"</end>
+          <include>
+            <context ref="unicode-escape"/>
+            <context ref="character-escape"/>
+          </include>
+        </context>
+
+        <context ref="label"/>
+        <context ref="math-block"/>
+        <!-- `...` inline code block -->
+        <context ref="inline-code-block"/>
+
+        <context id="parentheses-identifier">
+          <start>(?&lt;=\.)?([A-Za-z_][A-Za-z0-9_-]*)(\()</start>
+          <end>(\))</end>
+          <include>
+            <context sub-pattern="1" where="start" style-ref="def:function"/>
+            <context sub-pattern="2" where="start" style-ref="non-printing-character"/>
+            <context sub-pattern="1" where="end" style-ref="non-printing-character"/>
+            <context id="argument-separator" style-ref="non-printing-character">
+              <match>\.|,|;|:</match>
+            </context>
+            <context ref="code"/>
+          </include>
+        </context>
+
+        <context id="brackets-identifier">
+          <start>(?&lt;=\.)?([A-Za-z_][A-Za-z0-9_-]*)(\[)</start>
+          <end>(\])</end>
+          <include>
+            <context sub-pattern="1" where="start" style-ref="def:function"/>
+            <context sub-pattern="2" where="start" style-ref="non-printing-character"/>
+            <context sub-pattern="1" where="end" style-ref="non-printing-character"/>
+            <context ref="markup"/>
+          </include>
+        </context>
+        <!-- { ... } braces block -->
+        <context id="braces-block" class="no-spell-check code">
+          <start>(\{)</start>
+          <end>(\})</end>
+          <include>
+            <context sub-pattern="1" where="start" style-ref="non-printing-character"/>
+            <context sub-pattern="1" where="end" style-ref="non-printing-character"/>
+            <context ref="argument-separator"/>
+            <context ref="code"/>
+          </include>
+        </context>
+        <!-- [ ... ] brackets block -->
+        <context id="content-block" class="markup">
+          <start>(\[)</start>
+          <end>(\])</end>
+          <include>
+            <context sub-pattern="1" where="start" style-ref="non-printing-character"/>
+            <context sub-pattern="1" where="end" style-ref="non-printing-character"/>
+            <context ref="markup"/>
+          </include>
+        </context>
+
+        <context id="variable" class="no-spell-check code">
+          <start>(?&lt;=#|\.)\b([a-zA-Z_-][a-zA-Z0-9_-]*)\b</start>
+          <end>(?=\s|$|\.\s|\.$||[^\w.])</end>
+          <include>
+            <context sub-pattern="1" where="start" style-ref="def:operator"/>
+            <context id="variable-argument-separator" style-ref="non-printing-character">
+              <match>\.(?=\w)</match>
+            </context>
+          </include>
+        </context>
+        <!-- ( ... ) parentheses block -->
+        <context id="parentheses-block" class="no-spell-check code">
+          <start>(\()</start>
+          <end>(\))</end>
+          <include>
+            <context sub-pattern="1" where="start" style-ref="non-printing-character"/>
+            <context sub-pattern="1" where="end" style-ref="non-printing-character"/>
+            <context ref="argument-separator"/>
+            <context ref="code"/>
+          </include>
+        </context>
+
+        <context id="property">
+          <match>\b([A-Za-z0-9_-]+)\s*(?=:)</match>
+          <include>
+            <context sub-pattern="1" style-ref="def:constant"/>
+          </include>
+        </context>
+
+        <context id="code-operators" style-ref="non-printing-character">
+          <match>(?:\-|\+|\*|\/|\=\=|\!\=|&lt;\=|&gt;\=|&lt;|&gt;|\+\=|\-\=|\*\=|\/\=|=(?!=)|\.\.|:)</match>
+        </context>
+        <!-- everything else -->
+        <context id="catch-all" style-ref="def:statement">
+          <match>[A-Za-z0-9_-]+</match>
+        </context>
+      </include>
+    </context>
+    <!-- Math context -->
+    <context id="math" class="math">
+      <include>
+        <context ref="multi-line-comment"/>
+        <context ref="single-line-comment"/>
+
+        <!-- Math-specific operators -->
+        <context id="math-operators" style-ref="def:identifier">
+          <match>[\^\-\+\*\/\=!&lt;&gt;_]</match>
+        </context>
+
+        <!-- Math identifiers and functions -->
+        <context id="math-function" style-ref="def:statement">
+          <match>\b[a-zA-Z]+\b(?=\s|\$|[^\w]|$)</match>
+        </context>
+
+        <context ref="base-n-integer"/>
+        <context ref="measurement"/>
+        <context ref="float"/>
+        <context ref="integer"/>
+        <context ref="string"/>
+        <context ref="inline-code-block"/>
+        <context ref="line-break"/>
+
+        <!-- # expression block in math -->
+        <context id="math-hash-code-expression" class="no-spell-check code">
+          <start>(\#)</start>
+          <include>
+            <context sub-pattern="1" where="start" style-ref="non-printing-character"/>
+            <!-- End after a semicolon -->
+            <context end-parent="true" style-ref="non-printing-character">
+              <match>;</match>
+            </context>
+            <!-- End after identifier/delimiter followed by non-continuing character -->
+            <context end-parent="true">
+              <match>(?&lt;=[a-zA-Z0-9_\)\]\}])(?=[^a-zA-Z0-9_\(\[\{"&gt;\.]|\.(?!\w)|$)</match>
+            </context>
+            <!-- End after a closing quote (string just finished) -->
+            <context end-parent="true">
+              <match>(?&lt;=")(?=\s|$|.)</match>
+            </context>
+            <!-- End after a dot followed by a quote -->
+            <context end-parent="true">
+              <match>(?&lt;=\.)(?=")</match>
+            </context>
+            <context ref="variable-argument-separator"/>
+            <context ref="code"/>
+          </include>
+        </context>
+
+        <!-- Escaped characters in math -->
+        <context id="math-escape" style-ref="def:special-char">
+          <match>\\[\\\/\$\[\]{}]</match>
+        </context>
+      </include>
+    </context>
+  </definitions>
+</language>

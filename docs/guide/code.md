@@ -51,6 +51,10 @@ To go the other way, `Ctrl`+click the PDF page or choose **Go to Source** from i
 Both commands need a matching local build with `.synctex` or `.synctex.gz` data.
 They are unavailable for remote vaults and for PDFs whose pages you have rearranged since building.
 
+## Typst
+
+Accent edits `.typ` files with syntax highlighting, and the Outline lists their headings even without a language server.
+
 ## Lean
 
 Open a `.lean` file in a Lean project with `lake serve` available.

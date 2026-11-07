@@ -2,7 +2,7 @@
 //!
 //! This scanner masks comments and literals while preserving byte offsets and newlines. Brace
 //! languages use block headers and semicolon-terminated statements; Python uses indentation,
-//! and Lean uses its `namespace`/`end` scopes.
+//! Lean uses its `namespace`/`end` scopes, and Typst's declarations are its headings ([`typst`]).
 //! Language patterns determine which declarations are recognised, so macro-generated or
 //! preprocessor-hidden declarations may be missed. Tests compare its results with CodeGraph's
 //! tree-sitter parse of this repository.
@@ -11,6 +11,8 @@ use regex::{Regex, RegexSet};
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
 use std::sync::LazyLock;
+
+pub mod typst;
 
 /// The languages the scanner reads. TypeScript is read as JavaScript, C++ as C.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -23,6 +25,7 @@ pub enum Lang {
     Go,
     C,
     Lean,
+    Typst,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -115,6 +118,7 @@ pub fn lang_of(rel: &str) -> Option<Lang> {
         "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "mts" | "cts" => Lang::Script,
         "go" => Lang::Go,
         "lean" => Lang::Lean,
+        "typ" => Lang::Typst,
         "c" | "h" | "cc" | "cpp" | "cxx" | "hh" | "hpp" | "hxx" | "c++" | "h++" => Lang::C,
         _ => return None,
     })
@@ -147,6 +151,7 @@ pub fn symbols(lang: Lang, text: &str) -> Vec<Decl> {
     let mut out = match lang {
         Lang::Python => indented(&masked, text),
         Lang::Lean => lean(&masked, text),
+        Lang::Typst => typst::headings(&masked, text),
         _ => braced(lang, &masked, text),
     };
     if lang == Lang::C {
@@ -209,6 +214,9 @@ fn line_starts(text: &str) -> Vec<usize> {
 /// `text` with every comment and string or character literal blanked to spaces, newlines and
 /// byte offsets kept: what the scanner reads, so that a `{` or a `fn` in one is not code.
 pub fn mask(lang: Lang, text: &str) -> String {
+    if lang == Lang::Typst {
+        return typst::mask(text);
+    }
     let b = text.as_bytes();
     let mut out = b.to_vec();
     let mut i = 0;
@@ -1073,7 +1081,7 @@ fn find_decl(lang: Lang, masked: &str, range: Range<usize>, top: &Open) -> Optio
         Lang::Script => &SCRIPT,
         Lang::Go => &GO,
         Lang::C => &C,
-        Lang::Python | Lang::Lean => return None,
+        Lang::Python | Lang::Lean | Lang::Typst => return None,
     };
     let head = &masked[range.clone()];
     let mut best: Option<Found> = None;
@@ -2015,6 +2023,7 @@ double geo::Shape::half() const {
     fn languages_and_test_files_by_path() {
         assert_eq!(lang_of("src/main.rs"), Some(Lang::Rust));
         assert_eq!(lang_of("Math/Algebra.lean"), Some(Lang::Lean));
+        assert_eq!(lang_of("thesis/main.typ"), Some(Lang::Typst));
         assert_eq!(lang_of("app/x.TSX"), Some(Lang::Script));
         assert_eq!(lang_of("notes/a.md"), None);
         assert_eq!(lang_of("Makefile"), None);
