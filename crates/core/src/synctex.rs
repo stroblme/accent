@@ -23,9 +23,9 @@ const RC_FILES: [&str; 2] = ["latexmkrc", ".latexmkrc"];
 /// What a SyncTeX file is called beside its PDF, compressed first.
 const EXTENSIONS: [&str; 2] = [".synctex.gz", ".synctex"];
 
-/// What tells a PDF is a LaTeX build where it has no SyncTeX file: its source, or what a run
-/// leaves beside it whatever its flags (`latexmk -pdf` without `-synctex=1`).
-const RUN_FILES: [&str; 4] = [".tex", ".aux", ".fls", ".fdb_latexmk"];
+/// What tells a PDF is a build where it has no SyncTeX file: its source, LaTeX's or Typst's, or
+/// what a LaTeX run leaves beside it whatever its flags (`latexmk -pdf` without `-synctex=1`).
+const RUN_FILES: [&str; 5] = [".tex", ".typ", ".aux", ".fls", ".fdb_latexmk"];
 
 /// The most SyncTeX files [`near`] offers: each may have to be read whole to know whether it
 /// lists a source.
@@ -520,8 +520,8 @@ pub fn near(root: &Path, tex: &Path, build: impl Fn(&Path) -> Option<PathBuf>) -
     found
 }
 
-/// Whether the PDF at `pdf` is a LaTeX build, SyncTeX file or not: a `.tex` of its name, or the
-/// files a run leaves ([`RUN_FILES`]), beside it or in the folders [`build_dirs`] names.
+/// Whether the PDF at `pdf` is a build, SyncTeX file or not: a `.tex` or `.typ` of its name, or
+/// the files a run leaves ([`RUN_FILES`]), beside it or in the folders [`build_dirs`] names.
 pub fn is_build(root: &Path, pdf: &Path) -> bool {
     let (Some(dir), Some(stem)) = (pdf.parent(), pdf.file_stem()) else {
         return false;
@@ -772,6 +772,35 @@ mod tests {
         assert_eq!(pdf_near(root, &main), Some(main_pdf));
         assert_eq!(pdf_near(root, &report), Some(report_pdf));
         assert_eq!(pdf_near(root, &write("paper/notes.tex")), None);
+        // Typst's PDF is beside its main document.
+        let typst = write("essay/essay.typ");
+        let typst_pdf = write("essay/essay.pdf");
+        assert!(is_build(root, &typst_pdf));
+        assert_eq!(pdf_near(root, &typst), Some(typst_pdf));
+    }
+
+    /// A SyncTeX file listing a Typst source (tinymist's `--synctex`, in pdfTeX's format) is found
+    /// and read as a LaTeX build's is.
+    #[test]
+    fn a_synctex_file_naming_a_typst_source_is_read_alike() {
+        let dir = tempfile::tempdir().unwrap();
+        let typ = dir.path().join("essay.typ");
+        std::fs::write(&typ, "= Essay\n\nText.\n").unwrap();
+        std::fs::write(dir.path().join("essay.pdf"), "").unwrap();
+        let synctex = dir.path().join("essay.synctex");
+        let records = format!(
+            "SyncTeX Version:1\nInput:1:{}\nMagnification:1000\nUnit:1\nX Offset:0\nY Offset:0\n\
+             Content:\n{{1\nh1,3:65781760,65781760:6578176,657817,0\n}}1\nPostamble:\n",
+            typ.display()
+        );
+        std::fs::write(&synctex, records).unwrap();
+        assert_eq!(
+            near(dir.path(), &typ, beside),
+            std::slice::from_ref(&synctex)
+        );
+        let read = Synctex::read(&synctex).unwrap();
+        let spot = read.view(&typ, 3).expect("the line is typeset");
+        assert_eq!((spot.page, spot.left.round()), (0, 1000.0));
     }
 
     /// A latexmk rc file's `$out_dir` and `$aux_dir` are read where each is a plain string, the

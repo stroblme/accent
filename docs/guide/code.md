@@ -58,6 +58,7 @@ With `tinymist` installed, it also completes labels and citations, shows errors 
 The PDF goes beside the main document, the file that includes the one you are editing, so saving a chapter rebuilds the whole document.
 Open the PDF from the Files pane once, and it reloads after every build.
 While the main document does not compile, the status bar names it.
+Typst writes no SyncTeX data yet, so **Show in PDF** and **Go to Source** stay greyed for its documents.
 
 ## Lean
 

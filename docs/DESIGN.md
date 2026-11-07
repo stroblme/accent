@@ -181,6 +181,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Without libpdfium a PDF tab is a status page and the build still passes.
 - **SyncTeX** is read by a parser of our own in core (`accent_core::synctex`): texlab maps no position between a PDF and its sources, and the `synctex` tool and its library come with a TeX installation accent must not need.
   It reads what pdfTeX, XeTeX and LuaTeX write with `-synctex=1`, inflates a `.synctex.gz` with the `miniz_oxide` the diagrams already compile in, and parses a page's records only when that page is asked about.
+  Typst writes none yet, and once tinymist writes one in pdfTeX's format (its pull request 2766) a Typst build's is read the same (user decision 2026-11-07).
 - **PDF highlights live in the notes**: an Obsidian-compatible `[[f.pdf#page=N&selection=a,b,c,d|quote]]` link, found through the index's `links` table and its `alias` column, with no annotation table of its own, and rewritten where the notes are (the host, on a remote vault) when a page edit moves its page; export to real `/Highlight` annotations is optional — rewriting the PDF per highlight is Syncthing conflicts and binary churn (Zotero's reasoning), and only what the notes hold survives an index rebuild.
 - **Ink geometry** lives in the annotation's appearance stream, which every viewer renders, drawn in the page's own space, and in its `/InkList`, the flattened path another editor reshapes it by; a stroke is ours by its `/NM`, `accent-` and its object number.
   The tools know each stroke and text by its object, which every move, erase and Undo keeps, so an annotation written into a page's `/Annots` itself rather than as an object of its own, as ISO 32000-1 asks, is out of the eraser's and Select's reach (user decision 2026-10-29).
@@ -1246,8 +1247,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   What accent wrote is remembered while it runs, through a tab closed and opened again, and not across a restart, after which an annotated build waits for the next.
   A line of a file outside the vault, a class's or a package's, is named in a toast instead of being opened.
   The file is read off the main loop, and the last two read are kept until a build rewrites them.
-- A LaTeX build without a SyncTeX file (`latexmk -pdf` without `-synctex=1`) shows both greyed rather than not at all, saying why: a PDF is one by a `.tex` of its name, or the `.aux`, `.fls` or `.fdb_latexmk` a run leaves, beside it or in the folders its build is looked for in, and a `.tex` by its build's PDF there.
-  The page's menu and the `.tex` tab's menu end the item in "(no SyncTeX data)", a menu item carrying no tooltip, and the palette's row says "This build has no SyncTeX data: build with -synctex=1" under its name.
+- A build without a SyncTeX file (`latexmk -pdf` without `-synctex=1`, and every Typst build until tinymist writes one) shows both greyed rather than not at all, saying why: a PDF is one by a `.tex` or `.typ` of its name, or the `.aux`, `.fls` or `.fdb_latexmk` a run leaves, beside it or in the folders its build is looked for in, and a `.tex` or `.typ` by its build's PDF there.
+  The page's menu and the source tab's menu end the item in "(no SyncTeX data)", a menu item carrying no tooltip, and the palette's row says "This build has no SyncTeX data: build with -synctex=1" under its name, or "This build has no SyncTeX data: Typst does not write it yet" for Typst.
   A plain PDF shows neither.
 
 ### Image

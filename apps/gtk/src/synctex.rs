@@ -1,6 +1,6 @@
-//! SyncTeX navigation between a local LaTeX PDF and its sources (DESIGN.md, PDF).
-//! Go to Source starts from a page; Show in PDF starts from a `.tex` tab. Remote PDFs use
-//! local copies without adjacent SyncTeX data, while their sources remain on the host.
+//! SyncTeX navigation between a local LaTeX or Typst PDF and its sources (DESIGN.md, PDF).
+//! Go to Source starts from a page; Show in PDF starts from a `.tex` or `.typ` tab. Remote PDFs
+//! use local copies without adjacent SyncTeX data, while their sources remain on the host.
 
 use super::*;
 use accent_core::synctex::{self, Synctex};
@@ -9,8 +9,10 @@ use std::time::SystemTime;
 /// Maximum recently used SyncTeX files retained whole, bounding memory for large documents.
 const KEEP: usize = 2;
 
-/// Disabled-action explanation for LaTeX builds missing SyncTeX; menu items use the shorter label below.
-pub(crate) const NO_SYNCTEX: &str = "This build has no SyncTeX data: build with -synctex=1";
+/// Disabled-action explanation for builds missing SyncTeX, LaTeX's and Typst's ([`App::no_synctex`]);
+/// menu items use the shorter label below.
+const NO_SYNCTEX: &str = "This build has no SyncTeX data: build with -synctex=1";
+const NO_SYNCTEX_TYPST: &str = "This build has no SyncTeX data: Typst does not write it yet";
 const NO_SYNCTEX_LABEL: &str = "(no SyncTeX data)";
 
 thread_local! {
@@ -94,11 +96,11 @@ pub(crate) fn menu_item(action: &str, missing: bool) -> gio::MenuItem {
     item
 }
 
-/// Whether `key` names a LaTeX source, the one kind of file Show in PDF goes from.
-fn is_tex(key: &str) -> bool {
+/// Whether `key` names a LaTeX or Typst source, the kinds of file Show in PDF goes from.
+fn is_source(key: &str) -> bool {
     Path::new(key)
         .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("tex"))
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("tex") || ext.eq_ignore_ascii_case("typ"))
 }
 
 impl App {
@@ -154,7 +156,7 @@ impl App {
         let Some(tab) = self.active() else {
             return;
         };
-        let Some(tex) = self.local_tex(&tab.rel()) else {
+        let Some(tex) = self.local_source(&tab.rel()) else {
             return;
         };
         let line = tab.cursor_line();
@@ -182,7 +184,7 @@ impl App {
             };
             let name = doc::file_name(&tab.rel()).to_string();
             let Some((file, spot)) = found else {
-                return app.cannot("show in PDF", format!("no LaTeX build here lists {name}"));
+                return app.cannot("show in PDF", format!("no build here lists {name}"));
             };
             let Some(key) = synctex::pdf_of(&file).and_then(|pdf| app.vault_key(&pdf)) else {
                 return;
@@ -212,7 +214,7 @@ impl App {
             .and_then(Doc::pdf)
             .is_some_and(|pdf| self.synctex_of(pdf).is_some());
         let show = (doc.as_ref().and_then(Doc::tab))
-            .and_then(|tab| self.local_tex(&tab.rel()))
+            .and_then(|tab| self.local_source(&tab.rel()))
             .is_some_and(|tex| !synctex::near(&self.root(), &tex, build_of).is_empty());
         for (name, on) in [("pdf-go-to-source", source), ("show-in-pdf", show)] {
             let action = self.window.lookup_action(name);
@@ -261,7 +263,7 @@ impl App {
     /// Add Show in PDF after editor menu items when available.
     /// Recheck on secondary press because builds or active panes may have changed.
     pub(crate) fn offer_show_in_pdf(self: &Rc<Self>, tab: &Rc<Tab>) {
-        if self.local_tex(&tab.rel()).is_none() {
+        if self.local_source(&tab.rel()).is_none() {
             return;
         }
         let section = gio::Menu::new();
@@ -292,21 +294,36 @@ impl App {
         tab.view.add_controller(press);
     }
 
-    /// Whether `doc` lacks only SyncTeX: a local LaTeX PDF build or .tex file with a nearby PDF
-    /// that was built without `-synctex=1`.
+    /// Whether `doc` lacks only SyncTeX: a local PDF build, or a `.tex` or `.typ` file with a
+    /// nearby PDF, that was built without it.
     pub(crate) fn synctex_missing(&self, doc: Option<&Doc>) -> (bool, bool) {
         let root = self.root();
         let source = (doc.and_then(Doc::pdf))
             .filter(|pdf| self.is_local_pdf(pdf))
             .is_some_and(|pdf| without_synctex(&root, &pdf.path()));
         let show = (doc.and_then(Doc::tab))
-            .and_then(|tab| self.local_tex(&tab.rel()))
+            .and_then(|tab| self.local_source(&tab.rel()))
             .is_some_and(|tex| {
                 synctex::near(&root, &tex, build_of).is_empty()
                     && synctex::pdf_near(&root, &tex)
                         .is_some_and(|pdf| without_synctex(&root, &pdf))
             });
         (source, show)
+    }
+
+    /// Why [`synctex_missing`](Self::synctex_missing) greys the pair over `doc`: a Typst tab, or a
+    /// PDF beside a Typst source, cannot have been built with SyncTeX data yet.
+    pub(crate) fn no_synctex(&self, doc: Option<&Doc>) -> &'static str {
+        let typ = |path: &Path| path.extension().is_some_and(|ext| ext == "typ");
+        let typst = match doc {
+            Some(Doc::Pdf(pdf)) => pdf.path().with_extension("typ").is_file(),
+            Some(doc) => doc.tab().is_some_and(|tab| typ(Path::new(&tab.rel()))),
+            None => false,
+        };
+        match typst {
+            true => NO_SYNCTEX_TYPST,
+            false => NO_SYNCTEX,
+        }
     }
 
     /// Preserve build trust after Accent writes ink or highlights; page edits invalidate it.
@@ -342,10 +359,10 @@ impl App {
         !doc::is_loose_key(&key) && !self.on_host(&key)
     }
 
-    /// The path of `key` on this machine, where it is a `.tex` of a local vault.
-    fn local_tex(&self, key: &str) -> Option<PathBuf> {
+    /// The path of `key` on this machine, where it is a `.tex` or `.typ` of a local vault.
+    fn local_source(&self, key: &str) -> Option<PathBuf> {
         let local = self.vault().is_some() && !doc::is_loose_key(key) && !self.on_host(key);
-        (local && is_tex(key)).then(|| self.root().join(key))
+        (local && is_source(key)).then(|| self.root().join(key))
     }
 
     /// The key of `path` in this vault, read through the root as the vault names it or as the

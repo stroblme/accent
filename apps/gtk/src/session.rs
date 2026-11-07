@@ -170,11 +170,12 @@ impl App {
         // What the SyncTeX pair cannot run for over a LaTeX build without a SyncTeX file, and
         // Initialize Git Repository in a repository: listed greyed, saying why.
         let (source, show) = self.synctex_missing(self.active_doc().as_ref());
+        let no_synctex = self.no_synctex(self.active_doc().as_ref());
         let repository =
             self.vault().is_some() && self.git.get().is_some_and(|git| git.vault_in_repository());
         let why = |action: &str| match action {
-            "win.pdf-go-to-source" if source => Some(synctex::NO_SYNCTEX.to_string()),
-            "win.show-in-pdf" if show => Some(synctex::NO_SYNCTEX.to_string()),
+            "win.pdf-go-to-source" if source => Some(no_synctex.to_string()),
+            "win.show-in-pdf" if show => Some(no_synctex.to_string()),
             "win.git-init" if repository => Some("The vault is in a Git repository".to_string()),
             _ => None,
         };
