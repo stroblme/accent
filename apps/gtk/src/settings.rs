@@ -558,9 +558,7 @@ fn font_row(
     let button = gtk::FontDialogButton::new(Some(gtk::FontDialog::new()));
     button.set_level(gtk::FontLevel::Font);
     button.set_valign(gtk::Align::Center);
-    button.set_font_desc(&pango::FontDescription::from_string(
-        &chosen.clone().unwrap_or_else(default),
-    ));
+    button.set_font_desc(&drawn(&button, &chosen.clone().unwrap_or_else(default)));
 
     // An icon rather than the word: the row already carries a font button whose label is the
     // whole font name, and two text buttons beside it leave the name nowhere to go on a narrow
@@ -613,7 +611,7 @@ fn font_row(
             // ponytail: GtkFontDialogButton has no "unset", so Reset shows the system font while
             // the config says None. Both mean the same thing to the view.
             resetting.set(true);
-            button.set_font_desc(&pango::FontDescription::from_string(&default()));
+            button.set_font_desc(&drawn(&button, &default()));
             resetting.set(false);
             row.set_subtitle(&font_subtitle(None, default));
             // The keyboard stays in the row rather than leaving with the hidden button.
@@ -627,6 +625,17 @@ fn font_row(
     row.add_suffix(&reset);
     row.add_suffix(&button);
     row
+}
+
+/// `font` in the family Pango draws it with: a family the font map lacks falls back to another,
+/// and the button would otherwise read "None" for the one it cannot find.
+fn drawn(button: &gtk::FontDialogButton, font: &str) -> pango::FontDescription {
+    let mut desc = pango::FontDescription::from_string(font);
+    let used = button.pango_context().load_font(&desc);
+    if let Some(family) = used.and_then(|font| font.describe().family()) {
+        desc.set_family(&family);
+    }
+    desc
 }
 
 /// What the font row says under its title: the chosen font, or the default it follows.
