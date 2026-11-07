@@ -274,6 +274,7 @@ impl Client {
                     "documentSymbol": {"hierarchicalDocumentSymbolSupport": true},
                     "foldingRange": {"lineFoldingOnly": true},
                     "callHierarchy": {},
+                    "implementation": {},
                     "publishDiagnostics": {},
                     // Literals, resolved for their edit once picked; no `disabled` ones.
                     "codeAction": {

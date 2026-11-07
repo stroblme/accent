@@ -267,15 +267,28 @@ pub struct ActionEdits {
     pub then: Option<CodeAction>,
 }
 
-/// A language-server call-hierarchy edge relative to the queried declaration.
+/// A language-server call-hierarchy edge relative to the queried declaration, or one of its
+/// implementations.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Call {
     /// The caller for incoming calls or callee for outgoing calls, located by its
-    /// name range inside the vault.
+    /// name range inside the vault; an implementation where the server points at it
+    /// (rust-analyzer: the type of an `impl` block).
     pub decl: Location,
+    /// Empty for an implementation, which the server does not name.
     pub name: String,
-    /// The lines the calls are written on, in the caller's file, 0-based.
+    /// The lines the calls are written on, in the caller's file, 0-based; an
+    /// implementation's own line.
     pub lines: Vec<u32>,
+}
+
+/// What [`Language::calls`] asks of a declaration: who calls it, what it calls, or what
+/// implements it (`textDocument/implementation`, a Rust trait's `impl` blocks).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Related {
+    Callers,
+    Callees,
+    Implementations,
 }
 
 /// Lines that can be hidden behind their first one.
@@ -443,15 +456,15 @@ pub(crate) trait Language: Send + Sync {
     fn will_rename(&self, _moves: Vec<(String, String)>) -> Fut<'_, Vec<FileEdits>> {
         Box::pin(async { Ok(Vec::new()) })
     }
-    /// Incoming or outgoing calls for the declaration named at `pos`. Use the
-    /// open buffer when available, otherwise disk. `None` means no declaration;
+    /// The declarations `related` to the one named at `pos`. Use the open buffer when
+    /// available, otherwise disk. `None` means no declaration, or no answer to that question;
     /// [`Error::NotYet`] means the provider cannot answer yet.
     fn calls(
         &self,
         _rel: &str,
         _language_id: &str,
         _pos: Pos,
-        _incoming: bool,
+        _related: Related,
     ) -> Fut<'_, Option<Vec<Call>>> {
         Box::pin(async { Ok(None) })
     }
@@ -817,7 +830,7 @@ impl Languages {
         self: &Arc<Self>,
         rel: String,
         pos: Pos,
-        incoming: bool,
+        related: Related,
         cfg: &LspConfig,
         waits: Waits,
     ) -> Task<Option<Vec<Call>>> {
@@ -859,7 +872,7 @@ impl Languages {
                     false => waits.starting,
                 };
                 let deadline = asked_at + wait;
-                let asked = session.calls(&rel, &language_id, pos, incoming);
+                let asked = session.calls(&rel, &language_id, pos, related);
                 match tokio::time::timeout_at(deadline, asked).await {
                     Ok(Ok(found)) => return Ok(found),
                     Ok(Err(e)) if !matches!(e, Error::NotYet(_)) => {
@@ -1340,7 +1353,7 @@ impl Vault {
         }
     }
 
-    /// Incoming or outgoing calls for the declaration named at `pos` in `rel`.
+    /// The declarations `related` to the one named at `pos` in `rel`.
     /// No open tab is required: the configured server can read from disk.
     /// `None` means no declaration. `waits` controls startup, request and idle waits.
     /// Local vaults only, for `accent-cli mcp` running beside the files.
@@ -1348,13 +1361,13 @@ impl Vault {
         &self,
         rel: &str,
         pos: Pos,
-        incoming: bool,
+        related: Related,
         waits: Waits,
     ) -> Task<Option<Vec<Call>>> {
         match &self.backend {
             Backend::Local(v) => {
                 v.lang
-                    .calls(rel.to_string(), pos, incoming, &v.config().lsp, waits)
+                    .calls(rel.to_string(), pos, related, &v.config().lsp, waits)
             }
             Backend::Remote(_) => {
                 Task::spawn(async { Err(Error::Language("not on a remote vault".to_string())) })

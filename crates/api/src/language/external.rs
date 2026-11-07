@@ -18,13 +18,14 @@ use serde_json::{Value, json};
 
 use accent_lsp::types::{
     self, CallHierarchyIncomingCall, CallHierarchyItem, CallHierarchyOutgoingCall, CompletionItem,
-    DocumentSymbolResponse, PublishDiagnosticsParams, ServerCapabilities, SignatureHelp, on,
+    DocumentSymbolResponse, GotoDefinitionResponse, PublishDiagnosticsParams, ServerCapabilities,
+    SignatureHelp, on,
 };
 use accent_lsp::{Client, Notifications, from_uri, to_uri};
 
 use super::{
     ActionEdits, Call, CodeAction, Completion, Completions, Fold, Fut, Goals, Hover, Language,
-    Location, Pos, Signature, Support, Symbol,
+    Location, Pos, Related, Signature, Support, Symbol,
 };
 use crate::{Event, FileEdits, Local, locked};
 use map::{
@@ -32,6 +33,10 @@ use map::{
     hover_text, inline_of, raw_range, rel_of, rename_filters, renamed_by, signature_of, symbols_of,
     targets_of,
 };
+
+/// A declaration [`External::related`] reaches: its URI, the range of its name, the name, and the
+/// ranges of the calls between them (an implementation's own range, it having no name).
+type Far = (String, types::Range, String, Vec<types::Range>);
 
 /// Content-modified response: the document changed after the request,
 /// as expected during typing.
@@ -66,7 +71,7 @@ pub(crate) struct External {
     lean: bool,
     /// The builds' tables of contents that number texlab's outline.
     tocs: super::latex::Tocs,
-    /// Whether call hierarchy has found a declaration. Before the first
+    /// Whether [`Language::calls`] has found a declaration. Before the first
     /// success, an empty result may mean the project is still loading.
     found_one: AtomicBool,
     /// The files outside the vault its answers have named: the dependencies it answers for.
@@ -520,19 +525,29 @@ impl External {
     }
 
     /// The declarations at the far end of the calls into or out of the one at `pos`, with the
-    /// ranges of those calls; `None` where the server finds no declaration there.
-    async fn hierarchy(
+    /// ranges of those calls, or where it is implemented; `None` where the server finds no
+    /// declaration there.
+    async fn related(
         &self,
         uri: &str,
         text: &str,
         pos: Pos,
-        incoming: bool,
-    ) -> Result<Option<Vec<(CallHierarchyItem, Vec<types::Range>)>>, accent_lsp::Error> {
+        related: Related,
+    ) -> Result<Option<Vec<Far>>, accent_lsp::Error> {
         let p = self.encoding.lsp_pos(text, pos);
         let params = json!({
             "textDocument": {"uri": uri},
             "position": {"line": p.line, "character": p.character},
         });
+        if related == Related::Implementations {
+            let found: Option<GotoDefinitionResponse> = self
+                .client
+                .request("textDocument/implementation", params)
+                .await?;
+            // `null` where it finds no declaration, `[]` where nothing implements it.
+            let far = |(uri, at)| (uri, at, String::new(), vec![at]);
+            return Ok(found.map(|f| targets_of(Some(f)).into_iter().map(far).collect()));
+        }
         let items: Option<Vec<CallHierarchyItem>> = self
             .client
             .request("textDocument/prepareCallHierarchy", params)
@@ -544,9 +559,12 @@ impl External {
         // Each item there: a name in a macro's arguments is every function the macro writes
         // with it.
         let mut far = Vec::new();
+        let edge = |item: CallHierarchyItem, ranges| -> Far {
+            (item.uri, item.selection_range, item.name, ranges)
+        };
         for item in items {
             let item = json!({"item": item});
-            match incoming {
+            match related == Related::Callers {
                 true => far.extend(
                     self.client
                         .request::<Option<Vec<CallHierarchyIncomingCall>>>(
@@ -556,7 +574,7 @@ impl External {
                         .await?
                         .unwrap_or_default()
                         .into_iter()
-                        .map(|c| (c.from, c.from_ranges)),
+                        .map(|c| edge(c.from, c.from_ranges)),
                 ),
                 false => far.extend(
                     self.client
@@ -567,7 +585,7 @@ impl External {
                         .await?
                         .unwrap_or_default()
                         .into_iter()
-                        .map(|c| (c.to, c.from_ranges)),
+                        .map(|c| edge(c.to, c.from_ranges)),
                 ),
             }
         }
@@ -949,12 +967,19 @@ impl Language for External {
         rel: &str,
         language_id: &str,
         pos: Pos,
-        incoming: bool,
+        related: Related,
     ) -> Fut<'_, Option<Vec<Call>>> {
         let (rel, language_id) = (rel.to_string(), language_id.to_string());
         Box::pin(async move {
-            if !on(&self.caps.call_hierarchy_provider) {
-                return Err(Error::Language("no call hierarchy".to_string()));
+            // A server without implementations still answers its call hierarchy.
+            match related {
+                Related::Implementations if !on(&self.caps.implementation_provider) => {
+                    return Ok(None);
+                }
+                Related::Callers | Related::Callees if !on(&self.caps.call_hierarchy_provider) => {
+                    return Err(Error::Language("no call hierarchy".to_string()));
+                }
+                _ => {}
             }
             let open = self.text_of(&rel).ok();
             let text = match &open {
@@ -963,12 +988,12 @@ impl Language for External {
                     .map_err(|e| accent_core::Error::io(&rel, e))?,
             };
             let uri = self.uri(&rel)?;
-            let far = match self.hierarchy(&uri, &text, pos, incoming).await {
+            let far = match self.related(&uri, &text, pos, related).await {
                 Err(accent_lsp::Error::Response { code, .. })
                     if code == INVALID_PARAMS && open.is_none() =>
                 {
                     let _shown = Shown::open(&self.client, uri.clone(), &language_id, &text)?;
-                    self.hierarchy(&uri, &text, pos, incoming).await
+                    self.related(&uri, &text, pos, related).await
                 }
                 answer => answer,
             };
@@ -984,11 +1009,11 @@ impl Language for External {
                 |uri: &str| rel_of(uri, &self.root).is_some_and(|r| Path::new(&r).is_relative());
             Ok(Some(
                 far.into_iter()
-                    .filter(|(item, _)| inside(&item.uri))
-                    .filter_map(|(item, ranges)| {
+                    .filter(|(uri, ..)| inside(uri))
+                    .filter_map(|(uri, at, name, ranges)| {
                         Some(Call {
-                            decl: self.location(&item.uri, item.selection_range)?,
-                            name: item.name,
+                            decl: self.location(&uri, at)?,
+                            name,
                             lines: ranges.iter().map(|r| r.start.line).collect(),
                         })
                     })

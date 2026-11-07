@@ -1,14 +1,15 @@
-//! Resolve explore callers and callees through the file's language server, mapping results to
-//! indexed declarations. Unavailable answers fall back to name matching in `graph.rs`, with the
-//! reason reported once.
+//! Resolve explore callers, callees and a trait's implementations through the file's language
+//! server, mapping results to indexed declarations. Unavailable answers fall back to name matching
+//! in `graph.rs`, with the reason reported once.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use accent_api::{Call, CodeSymbol, Mention, Waits};
+use accent_api::{Call, CodeSymbol, Mention, Related, Waits};
 use accent_core::code::{self, Lang, SymbolKind};
 
 use super::Shared;
+use super::graph::Subtype;
 
 /// Timeouts for startup, requests, and idle shutdown of language servers.
 const WAITS: Waits = Waits {
@@ -49,7 +50,7 @@ impl<'a> Precise<'a> {
 
     /// Return callers of `sym` and their containing declarations, or `None` to match by name.
     pub fn callers(&mut self, sym: &CodeSymbol) -> Option<Vec<Mention>> {
-        let calls = self.ask(sym, true)?;
+        let calls = self.ask(sym, Related::Callers)?;
         let mut out: Vec<Mention> = Vec::new();
         for c in calls {
             let rel = &c.decl.path;
@@ -84,7 +85,7 @@ impl<'a> Precise<'a> {
 
     /// Return vault declarations called by `sym`, or `None` to match by name.
     pub fn callees(&mut self, sym: &CodeSymbol) -> Option<Vec<CodeSymbol>> {
-        let calls = self.ask(sym, false)?;
+        let calls = self.ask(sym, Related::Callees)?;
         let mut out: Vec<CodeSymbol> = Vec::new();
         for c in calls {
             let line = c.decl.range.start.line + 1;
@@ -102,10 +103,38 @@ impl<'a> Precise<'a> {
         Some(out)
     }
 
+    /// Return the types implementing the trait `sym`, or `None` to match by name: a server
+    /// answers a trait's `impl` blocks, not its subtraits.
+    pub fn subtypes(&mut self, sym: &CodeSymbol) -> Option<Vec<Subtype>> {
+        let mut out: Vec<Subtype> = Vec::new();
+        for c in self.ask(sym, Related::Implementations)? {
+            let Some((text, _)) = file(&mut self.files, self.s, &c.decl.path) else {
+                continue;
+            };
+            // What the server points at names the type: rust-analyzer's the `impl`'s.
+            let at = c.decl.range;
+            let byte = |pos| accent_api::language::byte_of(text, pos);
+            let span = byte(at.start).zip(byte(at.end));
+            let ty = span.and_then(|(a, b)| text.get(a..b)).unwrap_or_default();
+            let ty = ty.lines().next().unwrap_or_default().trim().to_string();
+            out.push((ty, c.decl.path, at.start.line + 1));
+        }
+        out.sort_by(|a, b| (&a.1, a.2).cmp(&(&b.1, b.2)));
+        // A server that answers nothing leaves the index's rows.
+        (!out.is_empty()).then_some(out)
+    }
+
     /// Query the server for `sym`; return `None` to match by name.
-    fn ask(&mut self, sym: &CodeSymbol, incoming: bool) -> Option<Vec<Call>> {
-        // What a type or a macro is called from is where its name is written.
-        if !matches!(sym.kind, SymbolKind::Function | SymbolKind::Method) {
+    fn ask(&mut self, sym: &CodeSymbol, related: Related) -> Option<Vec<Call>> {
+        // What a type or a macro is called from is where its name is written, and what
+        // implements a struct is its own `impl` blocks: only a trait's are asked.
+        let asks = match related {
+            Related::Implementations => sym.kind == SymbolKind::Trait,
+            Related::Callers | Related::Callees => {
+                matches!(sym.kind, SymbolKind::Function | SymbolKind::Method)
+            }
+        };
+        if !asks {
             return None;
         }
         let lang = code::lang_of(&sym.rel_path)?;
@@ -120,7 +149,7 @@ impl<'a> Precise<'a> {
             let at = code::name_at(text, span.clone(), &sym.name).or(made.then_some(span.start));
             accent_api::language::pos_of(text, at?)
         };
-        let asked = self.s.vault.calls(&sym.rel_path, pos, incoming, WAITS);
+        let asked = self.s.vault.calls(&sym.rel_path, pos, related, WAITS);
         match accent_lsp::runtime().block_on(asked) {
             Ok(Some(found)) => Some(found),
             // One the index found is left to its name; one the server made up and cannot find

@@ -835,8 +835,8 @@ fn explore_follows_code_by_name() {
     c.close();
 }
 
-/// Use `build-aux/fake-lsp.py` to test precise language-server callers and fallback
-/// when a server is unavailable or still loading.
+/// Use `build-aux/fake-lsp.py` to test precise language-server callers and a trait's
+/// implementations, and fallback when a server is unavailable, still loading or answers nothing.
 #[test]
 fn explore_asks_the_language_server_when_precise() {
     let scratch = Scratch::new("precise");
@@ -856,13 +856,21 @@ fn explore_asks_the_language_server_when_precise() {
         "vault/tool.py",
         "def tally():\n    return 0\n\ndef use():\n    return tally()\n",
     );
-    // 0-based lines: `backlinks` is called by `counts` and calls `helper`.
+    write(
+        "vault/shape.rs",
+        "pub trait Shape {}\n\npub struct Circle;\n\nimpl Shape for Circle {}\n\n\
+         pub trait Round: Shape {}\n\npub trait Area {}\n\nimpl Area for Circle {}\n",
+    );
+    // 0-based lines: `backlinks` is called by `counts` and calls `helper`; `Shape` is implemented
+    // for `Circle`, and the server says nothing implements `Area`.
     write(
         "calls.json",
         r#"{"lib.rs:3": {"incoming": [["lib.rs", 15, "counts", [16]]],
                          "outgoing": [["lib.rs", 8, "helper", [4]]]},
             "lib.rs:8": {"incoming": [["lib.rs", 3, "backlinks", [4]]]},
-            "lib.rs:15": {"outgoing": [["lib.rs", 3, "backlinks", [16]]]}}"#,
+            "lib.rs:15": {"outgoing": [["lib.rs", 3, "backlinks", [16]]]},
+            "shape.rs:0": {"implementations": [["shape.rs", 4, "Circle"]]},
+            "shape.rs:8": {"implementations": []}}"#,
     );
     let fake = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build-aux/fake-lsp.py");
     let calls = scratch.dir.join("calls.json");
@@ -896,6 +904,19 @@ fn explore_asks_the_language_server_when_precise() {
         "- `helper` fn (lib.rs:9) — 1 call; tested via `backlinks` (lib.rs)\n  lib.rs:5 \
          (Index::backlinks) helper()\n",
         "**Call paths**\n- `Index::backlinks` → `helper`",
+    ] {
+        assert!(said[0].contains(row), "{row:?} not in {}", said[0]);
+    }
+
+    // By name a trait's subtypes are its subtraits too; the server's are its `impl` blocks, and
+    // where it answers nothing the scanner's rows stand, said to be by name.
+    let (said, _) = c.call("explore", json!({"query": "Shape"}));
+    let row = "  subtypes `Circle` (shape.rs:5), `Round` (shape.rs:7)\n";
+    assert!(said[0].contains(row), "{row:?} not in {}", said[0]);
+    let (said, _) = c.call("explore", json!({"query": "Shape Area", "precise": true}));
+    for row in [
+        "  subtypes `Circle` (shape.rs:5)\n",
+        "  subtypes `Circle` (shape.rs:11); by name\n",
     ] {
         assert!(said[0].contains(row), "{row:?} not in {}", said[0]);
     }

@@ -54,7 +54,7 @@ Diagram rendering also needs the Accent app and a graphical display where the se
 Ask `explore` about names, paths, words, `[[links]]` or `#tags` to get ranked source excerpts with line numbers, outlines, links and call paths.
 Its default code relationships match names within the same language.
 It quotes call sites and lists implementations or subtypes where the scanner finds them.
-Set `precise` to request a language server's call hierarchy when available.
+Set `precise` to request a language server's call hierarchy and a trait's implementations when available.
 
 `read_note` reads Markdown and Org sections, and returns a text file's etag for subsequent writes.
 For a PDF, it returns indexed text under page headings without a write etag.

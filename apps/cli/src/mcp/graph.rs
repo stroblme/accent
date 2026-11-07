@@ -1,8 +1,8 @@
 //! Call relationships for explore, using indexed declarations and names or language-server call
-//! hierarchy (`precise.rs`). Name matches do not resolve individual declarations; ambiguous
-//! names are reported. By name, a callable is used where its name is called in its own language,
-//! and a type wherever its name is written there; a bare call in a file that declares a function
-//! of that name is that one's.
+//! hierarchy and implementations (`precise.rs`). Name matches do not resolve individual
+//! declarations; ambiguous names are reported. By name, a callable is used where its name is
+//! called in its own language, and a type wherever its name is written there; a bare call in a
+//! file that declares a function of that name is that one's.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -29,6 +29,9 @@ const PER_HOP: usize = 8;
 /// Call-path depth and total declarations traversed.
 const PATH_HOPS: usize = 3;
 const PATH_NODES: usize = 150;
+
+/// A type implementing or extending another, with the file and line that say so.
+pub(super) type Subtype = (String, String, u32);
 
 /// A declaration named in the question.
 pub(super) struct Seed {
@@ -142,7 +145,8 @@ pub(super) fn graph(
         lines.push(line);
         lines.extend(sites(&callers));
         if !sym.kind.callable() {
-            lines.extend(subtypes(s, sym)?);
+            let (found, by_name) = edges.subtypes(sym)?;
+            lines.extend(subtypes(&found, by_name && precise));
         }
         let callees = edges.callees(sym)?;
         let mut called: Vec<String> = Vec::new();
@@ -212,6 +216,22 @@ impl Edges<'_> {
             return Ok(found);
         }
         self.code.callees(sym)
+    }
+
+    /// Return what implements or extends the type `sym` in its language, and whether matching
+    /// used names.
+    fn subtypes(&mut self, sym: &CodeSymbol) -> Result<(Vec<Subtype>, bool), String> {
+        if let Some(found) = self.precise.as_mut().and_then(|p| p.subtypes(sym)) {
+            return Ok((found, false));
+        }
+        let s = self.s;
+        let found = s.vault.subtypes(&sym.name, 50).map_err(fail)?;
+        let found = found
+            .into_iter()
+            .filter(|c| same_lang(c, sym) && s.shown(&c.rel_path))
+            .map(|c| (c.container.unwrap_or_default(), c.rel_path, c.line))
+            .collect();
+        Ok((found, true))
     }
 
     /// Identify one declaration; name matching conflates declarations with the same name.
@@ -348,29 +368,23 @@ fn sites(callers: &[Mention]) -> Vec<String> {
     out
 }
 
-/// What implements or extends the type `sym` in its language: each type and where it says so.
-fn subtypes(s: &Shared, sym: &CodeSymbol) -> Result<Option<String>, String> {
-    let found = s.vault.subtypes(&sym.name, 50).map_err(fail)?;
-    let found: Vec<CodeSymbol> = found
-        .into_iter()
-        .filter(|c| same_lang(c, sym) && s.shown(&c.rel_path))
-        .collect();
+/// List the subtypes `found`, each type and where it says so, marked `by_name` where `precise`
+/// fell back to the scanner's rows.
+fn subtypes(found: &[Subtype], by_name: bool) -> Option<String> {
     if found.is_empty() {
-        return Ok(None);
+        return None;
     }
     let named: Vec<String> = found
         .iter()
         .take(SUBTYPES)
-        .map(|c| {
-            let ty = c.container.as_deref().unwrap_or_default();
-            format!("`{ty}` ({}:{})", c.rel_path, c.line)
-        })
+        .map(|(ty, rel, line)| format!("`{ty}` ({rel}:{line})"))
         .collect();
     let more = match found.len() - named.len() {
         0 => String::new(),
         n => format!(" +{n}"),
     };
-    Ok(Some(format!("  subtypes {}{more}", named.join(", "))))
+    let by_name = if by_name { "; by name" } else { "" };
+    Some(format!("  subtypes {}{more}{by_name}", named.join(", ")))
 }
 
 /// Whether a test reaches `sym` within [`HOPS`] caller hops.

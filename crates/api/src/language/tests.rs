@@ -434,9 +434,13 @@ fn a_server_started_for_calls_is_waited_for_then_stopped_when_idle() {
         line: 0,
         character: 3,
     };
-    let asked = vault
-        .lang
-        .calls("lib.rs".to_string(), at, true, &vault.config().lsp, waits);
+    let asked = vault.lang.calls(
+        "lib.rs".to_string(),
+        at,
+        Related::Callers,
+        &vault.config().lsp,
+        waits,
+    );
     let found = accent_lsp::runtime().block_on(asked).unwrap().unwrap();
     assert_eq!(
         (found[0].name.as_str(), found[0].lines.as_slice()),

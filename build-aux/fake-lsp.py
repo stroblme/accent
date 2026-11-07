@@ -2,7 +2,8 @@
 """A language server answering completion, the same three items wherever it is asked: what
 `ACCENT_BENCH_COMPLETE=code:` drives the popup against, so the drill does not depend on a real
 server's ranking, its indexing or its version. With `--calls FILE` it also answers a call
-hierarchy from that file, which `apps/cli/tests/mcp.rs` holds `explore`'s `precise` mode against.
+hierarchy and implementations from that file, which `apps/cli/tests/mcp.rs` holds `explore`'s
+`precise` mode against.
 With `--inline TEXT` it suggests TEXT as ghost text wherever it is asked, standing in for merl-rt
 in `make screenshots`. With `--notebook` it keeps what it is sent and answers about it, for
 `ACCENT_BENCH_NOTEBOOK_LSP`: an error over each `oops` and pyright's unused-expression warning on
@@ -52,8 +53,10 @@ IMPORT = {"range": TOP, "newText": '#include "gamma.h"\n'}
 inbox, pending = b"", []
 
 # The call hierarchy, `{"file:line": {"incoming": [[file, line, name, [call lines]]], "outgoing":
-# [...]}}`, lines 0-based: a declaration is the one whose name is on that line. The first
-# `--loading N` questions about it are refused, as rust-analyzer refuses them while it loads.
+# [...], "implementations": [[file, line, name]]}}`, lines 0-based: a declaration is the one whose
+# name is on that line, and an implementation is answered at its type's name, as rust-analyzer
+# answers an `impl` block. The first `--loading N` questions about the call hierarchy are refused,
+# as rust-analyzer refuses them while it loads.
 CALLS = json.load(open(sys.argv[sys.argv.index("--calls") + 1])) if "--calls" in sys.argv else None
 LOADING = [int(sys.argv[sys.argv.index("--loading") + 1]) if "--loading" in sys.argv else 0]
 ROOT = [""]
@@ -172,6 +175,7 @@ def answer(message):
             "completionProvider": {"triggerCharacters": ["."], "resolveProvider": True,
                                    "allCommitCharacters": [";"]},
             "callHierarchyProvider": CALLS is not None,
+            "implementationProvider": CALLS is not None,
             "inlineCompletionProvider": INLINE is not None,
             **(ANSWERS if NOTEBOOK else {}),
             **({"codeActionProvider": {"resolveProvider": True},
@@ -230,6 +234,13 @@ def answer(message):
         send({"id": id, "result": [declared(rel, line, word)] if key in CALLS else []})
     elif method in ("callHierarchy/incomingCalls", "callHierarchy/outgoingCalls"):
         send({"id": id, "result": calls(method.split("/")[1][:8], message["params"]["item"]["data"])})
+    elif method == "textDocument/implementation":
+        p = message["params"]
+        rel = os.path.relpath(unquote(p["textDocument"]["uri"][len("file://"):]), ROOT[0])
+        found = CALLS.get(f"{rel}:{p['position']['line']}", {}).get("implementations")
+        send({"id": id, "result": found and [
+            {"uri": d["uri"], "range": d["selectionRange"]}
+            for d in (declared(*at) for at in found)]})
     elif method == "textDocument/completion":
         pending.append((time.monotonic() + DELAY, id, {"isIncomplete": False, "items": ITEMS}))
     elif method == "textDocument/inlineCompletion":

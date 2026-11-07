@@ -581,7 +581,7 @@ impl Server {
 
     /// Explore words, names, paths, `[[links]]`, and `#tags`. Return ranked Markdown cards
     /// with line-numbered excerpts and omitted file names. A path alone returns its whole
-    /// card. `precise` requests slower language-server call hierarchy.
+    /// card. `precise` requests slower language-server call hierarchy and implementations.
     #[tool(annotations(read_only_hint = true))]
     async fn explore(
         &self,

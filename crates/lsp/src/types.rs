@@ -108,6 +108,7 @@ pub struct ServerCapabilities {
     pub folding_range_provider: Option<Value>,
     pub inline_completion_provider: Option<Value>,
     pub call_hierarchy_provider: Option<Value>,
+    pub implementation_provider: Option<Value>,
     /// `true` or `{"codeActionKinds": […], "resolveProvider": true}`.
     pub code_action_provider: Option<Value>,
     pub workspace: Option<WorkspaceServerCapabilities>,

@@ -69,9 +69,10 @@ pub(super) struct ExploreArgs {
     query: String,
     /// Most characters to answer with: 16000 when left out, 4000 to 24000.
     max_chars: Option<usize>,
-    /// Use language-server call hierarchy for named declarations when available. This is more
-    /// precise than name matching but can take up to 10 seconds on first use; fall back to
-    /// names when the server is unavailable. Defaults to false.
+    /// Use language-server call hierarchy, and a trait's implementations, for named
+    /// declarations when available. This is more precise than name matching but can take up to
+    /// 10 seconds on first use; fall back to names when the server is unavailable. Defaults to
+    /// false.
     precise: Option<bool>,
 }
 
