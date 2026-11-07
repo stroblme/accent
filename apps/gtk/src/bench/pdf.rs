@@ -518,7 +518,7 @@ pub(super) fn bench_pdf_broken(app: &Rc<App>, arg: &str) {
         let t0 = Instant::now();
         app.open_path(&arg);
         let failed = || app.active_pdf().filter(|pdf| pdf.waiting().0.is_some());
-        let Some(pdf) = until(failed).await else {
+        let Some(pdf) = until("pdf", "broken wait", 10_000, failed).await else {
             println!("bench pdf broken never_waited");
             return bench_quit(&app);
         };
@@ -532,7 +532,10 @@ pub(super) fn bench_pdf_broken(app: &Rc<App>, arg: &str) {
             }
         }
         let written = Instant::now();
-        until(|| (pdf.page_count() > 0).then_some(())).await;
+        until("pdf", "written", 10_000, || {
+            (pdf.page_count() > 0).then_some(())
+        })
+        .await;
         say(&pdf, "written", written);
         pdf.goto_page(pdf.page_count() / 2);
         glib::timeout_future(Duration::from_secs(1)).await;
@@ -541,25 +544,17 @@ pub(super) fn bench_pdf_broken(app: &Rc<App>, arg: &str) {
         // A reader still reading, whose next page is what finds the file changed under it where
         // no watcher says so.
         pdf.goto_page(pdf.current_page() + 5);
-        until(|| pdf.waiting().0.map(drop)).await;
+        until("pdf", "broken", 10_000, || pdf.waiting().0.map(drop)).await;
         say(&pdf, "broken", broken);
         let _ = std::fs::write(&file, &whole);
         let mended = Instant::now();
-        until(|| (pdf.page_count() > 0).then_some(())).await;
+        until("pdf", "mended", 10_000, || {
+            (pdf.page_count() > 0).then_some(())
+        })
+        .await;
         say(&pdf, "mended", mended);
         bench_quit(&app);
     });
-}
-
-/// What `ready` hands back, once it does, checked every 50 ms for ten seconds.
-pub(super) async fn until<T>(ready: impl Fn() -> Option<T>) -> Option<T> {
-    for _ in 0..200 {
-        if let Some(found) = ready() {
-            return Some(found);
-        }
-        glib::timeout_future(Duration::from_millis(50)).await;
-    }
-    None
 }
 
 /// Wait for both views of `pdf` to have painted everything they want and print how long that

@@ -1,6 +1,6 @@
 //! PDF drills for the Outline pane's bookmarks and comments.
 
-use super::pdf::{labels, online, opened, render_threads, settled, until, written};
+use super::pdf::{labels, online, opened, render_threads, settled, written};
 use super::*;
 
 /// The Outline pane following the reader: the bookmark the page is under as `rel` is scrolled
@@ -118,7 +118,7 @@ pub(super) fn bench_pdf_comments(app: &Rc<App>, rel: &str) {
             if let Err(e) = vault.save(&note, &text, None) {
                 println!("bench comments note_not_written {e:?}");
             }
-            let linked = until(|| {
+            let linked = until("comments", "backlink", 10_000, || {
                 let links = vault.backlinks(&rel).ok()?;
                 links.iter().any(|b| b.src_rel_path == note).then_some(())
             });
@@ -138,7 +138,7 @@ pub(super) fn bench_pdf_comments(app: &Rc<App>, rel: &str) {
         };
         // "Ada", where the note's highlight lands.
         let ada = at((52.0, 46.0));
-        let landed = until(|| {
+        let landed = until("comments", "highlight", 10_000, || {
             let (x, y) = ada?;
             view.highlight_at(x, y)?;
             pdf.page_comments(0)
@@ -188,12 +188,14 @@ pub(super) fn bench_pdf_comments(app: &Rc<App>, rel: &str) {
         );
         pdf.set_mode(pdfview::Mode::Read);
         probe("note", ada);
-        let opened = until(|| app.tab_for(&note)).await.is_some();
+        let opened = until("comments", "note", 10_000, || app.tab_for(&note))
+            .await
+            .is_some();
         println!("bench comments note_opened={opened}");
         // Export Highlights writes the note's quote into the file: a comment from then on.
         app.open_path(&rel);
         let _ = WidgetExt::activate_action(&app.window, "win.pdf-export-highlights", None);
-        let more = until(|| {
+        let more = until("comments", "exported", 10_000, || {
             pdf.page_comments(0)
                 .filter(|now| now.len() > comments.len())
         });
@@ -208,7 +210,7 @@ pub(super) fn bench_pdf_comments(app: &Rc<App>, rel: &str) {
         let Some(sidebar) = app.sidebar.get() else {
             return bench_quit(&app);
         };
-        let lines = until(|| {
+        let lines = until("comments", "outline", 10_000, || {
             let lines = sidebar.outline_lines(None);
             let read = lines.iter().any(|l| l.contains("Second thoughts"));
             read.then_some(lines)

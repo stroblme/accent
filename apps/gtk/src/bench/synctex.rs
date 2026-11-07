@@ -14,6 +14,9 @@ const POINTS: [(usize, f32, f32); 6] = [
     (1, 40.0, 168.0),
 ];
 
+/// How long a step may take, in ms: a toast waits for the one before it.
+const WAIT: u64 = 12_000;
+
 /// Probe Go to Source and Show in PDF at [`POINTS`], printing source caret positions
 /// and reverse PDF highlights. Use a scratch LaTeX build with `-synctex=1`; external
 /// `\input` targets produce a toast. [`without_synctex`] checks unavailable-command
@@ -35,21 +38,23 @@ pub(super) fn bench_synctex(app: &Rc<App>, rel: &str) {
         }
         for (page, x, y) in POINTS {
             app.open_path(&rel);
-            let Some(pdf) = until(|| app.active_pdf()).await else {
+            let Some(pdf) = until("synctex", "pdf", WAIT, || app.active_pdf()).await else {
                 println!("bench synctex no_pdf");
                 break;
             };
             let toasted = app.toasted.get();
             pdf.point_at(page, x, y);
             let _ = WidgetExt::activate_action(&app.window, "win.pdf-go-to-source", None);
-            let landed = until(|| match app.toasted.get() == toasted {
-                true => app.active().map(Some),
-                false => Some(None),
+            let landed = until("synctex", "source", WAIT, || {
+                match app.toasted.get() == toasted {
+                    true => app.active().map(Some),
+                    false => Some(None),
+                }
             });
             let at = format!("page={page} x={x} y={y}");
             let Some(Some(tab)) = landed.await else {
                 // Queued behind the vault's "Indexed …" toast while that is up.
-                let said = until(|| bench_said(&app)).await;
+                let said = until("synctex", "toast", WAIT, || bench_said(&app)).await;
                 println!("bench synctex edit {at} said={said:?}");
                 continue;
             };
@@ -61,7 +66,8 @@ pub(super) fn bench_synctex(app: &Rc<App>, rel: &str) {
             );
             // Back from that line to the PDF: the same page, and a line of text near the point.
             let _ = WidgetExt::activate_action(&app.window, "win.show-in-pdf", None);
-            let marked = until(|| app.active_pdf().and_then(|pdf| pdf.marked())).await;
+            let mark = || app.active_pdf().and_then(|pdf| pdf.marked());
+            let marked = until("synctex", "view", WAIT, mark).await;
             let Some((back, rect)) = marked else {
                 println!(
                     "bench synctex view {}:{line} said={:?}",
@@ -82,9 +88,11 @@ pub(super) fn bench_synctex(app: &Rc<App>, rel: &str) {
         if let Some(pdf) = app.doc_for(&rel).and_then(|doc| doc.pdf().cloned()) {
             app.close_page(&pdf.page);
         }
-        let tex = until(|| app.active().filter(|_| app.doc_for(&rel).is_none())).await;
+        let left = || app.active().filter(|_| app.doc_for(&rel).is_none());
+        let tex = until("synctex", "reopened tex", WAIT, left).await;
         let _ = WidgetExt::activate_action(&app.window, "win.show-in-pdf", None);
-        let marked = until(|| app.active_pdf().and_then(|pdf| pdf.marked())).await;
+        let mark = || app.active_pdf().and_then(|pdf| pdf.marked());
+        let marked = until("synctex", "reopened view", WAIT, mark).await;
         println!(
             "bench synctex reopened from={:?} marked={marked:?} {:?}",
             tex.map(|tab| format!("{}:{}", tab.rel(), tab.cursor_line())),
@@ -135,7 +143,8 @@ async fn without_synctex(app: &Rc<App>, rel: &str) {
     );
     let tex = format!("{}.tex", rel.trim_end_matches(".pdf"));
     app.open_path(&tex);
-    let Some(tab) = until(|| app.active().filter(|tab| tab.rel() == tex)).await else {
+    let opened = || app.active().filter(|tab| tab.rel() == tex);
+    let Some(tab) = until("synctex", "tex", WAIT, opened).await else {
         return println!("bench synctex no_tex {tex}");
     };
     println!(
@@ -192,15 +201,4 @@ fn offered(app: &Rc<App>) -> String {
         on("pdf-go-to-source"),
         on("show-in-pdf")
     )
-}
-
-/// `found` once it answers, polled for twelve seconds: a toast waits for the one before it.
-async fn until<T>(found: impl Fn() -> Option<T>) -> Option<T> {
-    for _ in 0..240 {
-        if let Some(it) = found() {
-            return Some(it);
-        }
-        glib::timeout_future(Duration::from_millis(50)).await;
-    }
-    None
 }

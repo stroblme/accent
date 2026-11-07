@@ -64,13 +64,13 @@ pub(super) fn bench_git_init(app: &Rc<App>, command: bool) {
     glib::spawn_future_local(async move {
         // The first refresh has to have landed, or the pane would be hidden for not having been
         // asked yet rather than for having no repository; a remote vault connects first.
-        wait_for(|| app.reconciled.get(), 60000).await;
+        until("git", "init reconciled", 60000, || app.reconciled.get()).await;
         glib::timeout_future(Duration::from_millis(2500)).await;
         println!("bench git_pane {}", has_git_pane(&app));
         if command {
             let t = Instant::now();
             let _ = WidgetExt::activate_action(&app.window, "win.git-init", None);
-            wait_for(|| has_git_pane(&app), 10000).await;
+            until("git", "init pane", 10000, || has_git_pane(&app)).await;
             let said = find_widget(app.window.upcast_ref(), &|w| {
                 w.downcast_ref::<gtk::Label>()
                     .is_some_and(|l| l.label() == "Initialized a Git repository")
@@ -111,11 +111,8 @@ pub(super) fn bench_git_init(app: &Rc<App>, command: bool) {
 pub(super) fn bench_git_switch(app: &Rc<App>) {
     let app = app.clone();
     glib::spawn_future_local(async move {
-        wait_for(
-            || app.git.get().is_some_and(|git| git.log_rows() > 0),
-            30000,
-        )
-        .await;
+        let rows = || app.git.get().is_some_and(|git| git.log_rows() > 0);
+        until("git", "switch rows", 30000, rows).await;
         let Some(git) = app.git.get().cloned() else {
             return bench_quit(&app);
         };
@@ -151,7 +148,7 @@ pub(super) fn bench_git_switch(app: &Rc<App>) {
             let pick = t.elapsed().as_secs_f64() * 1000.0;
             let (rows, branch) = (git.log_rows(), git.shown_branch());
             git.activate_log_row(0);
-            wait_for(|| git.log_rows() > 0, 10000).await;
+            until("git", "switch log", 10000, || git.log_rows() > 0).await;
             let shown = t.elapsed().as_millis();
             glib::timeout_future(Duration::from_millis(1500)).await;
             beat.remove();
@@ -622,7 +619,7 @@ pub(super) fn bench_git_focus(app: &Rc<App>) {
         say("key_up");
         // GTK's visible focus outlasts a key by three seconds; the buttons stay out past it.
         let keys_shown = || app.window.gets_focus_visible();
-        wait_for(|| !keys_shown(), 5000).await;
+        until("git", "focus keys idle", 5000, || !keys_shown()).await;
         say("key_idle");
         xtest("key Tab").await;
         say("key_tab");
@@ -638,7 +635,10 @@ pub(super) fn bench_git_focus(app: &Rc<App>) {
         // The release folds it in place, so the row keeps the focus and the mark the press left,
         // and its buttons go with the pointer. Past the keys' visible focus first, which the
         // folder steps would otherwise read set or not by how long the steps above took.
-        wait_for(|| !keys_shown(), 5000).await;
+        until("git", "focus keys idle before folder", 5000, || {
+            !keys_shown()
+        })
+        .await;
         xtest(&format!("move {}; down", spot(folder()))).await;
         say("folder_down");
         xtest(&format!("move {off}; up")).await;
@@ -930,7 +930,10 @@ pub(super) fn bench_git_close(app: &Rc<App>, phase: &str) {
         let _hold = gtk_app.hold();
         // A remote vault's pane and its repository come with the host's answers, which on a slow
         // link take their time: waited for, not timed.
-        wait_for(|| app.git.get().is_some_and(|git| git.has_repos()), REPOS).await;
+        until("git", "close repos", REPOS, || {
+            app.git.get().is_some_and(|git| git.has_repos())
+        })
+        .await;
         let Some(git) = app.git.get().cloned() else {
             return bench_quit(&app);
         };
@@ -939,16 +942,17 @@ pub(super) fn bench_git_close(app: &Rc<App>, phase: &str) {
         // Polled rather than a `destroy` handler: this drill holds the window, so a closed one is
         // hidden and kept, and hiding it notifies nothing.
         let open = || app.window.is_visible();
-        wait_for(|| running("fetch"), 3000).await;
+        until("git", "close fetch", 3000, || running("fetch")).await;
         if phase != "fetch" {
-            wait_for(|| !running("fetch"), 10000).await;
+            until("git", "close fetch done", 10000, || !running("fetch")).await;
             git.sync(None);
             match phase.as_str() {
                 // The pane's flag goes up just before git starts, and a local push is waited for
                 // until git has it, so what is stopped is a push already running.
                 "push" => {
                     let remote = app.vault().is_some_and(|v| v.is_remote());
-                    wait_for(|| git.pushing() && (remote || running("push")), 20000).await
+                    let pushing = || git.pushing() && (remote || running("push"));
+                    until("git", "close push", 20000, pushing).await;
                 }
                 _ => glib::timeout_future(Duration::from_millis(800)).await,
             }
@@ -981,7 +985,7 @@ pub(super) fn bench_git_close(app: &Rc<App>, phase: &str) {
             glib::timeout_future(Duration::from_millis(1000)).await;
             println!("bench git_close_waiting open={}", open());
         }
-        wait_for(|| !open(), 20000).await;
+        until("git", "close window", 20000, || !open()).await;
         let said = app
             .window
             .visible_dialog()
@@ -993,7 +997,7 @@ pub(super) fn bench_git_close(app: &Rc<App>, phase: &str) {
             said.and_then(|d| d.heading())
         );
         let t = Instant::now();
-        wait_for(|| working_in(&dir) == 0, 5000).await;
+        until("git", "close left", 5000, || working_in(&dir) == 0).await;
         println!(
             "bench git_close_left {} after_ms={:.0}",
             working_in(&dir),
@@ -1010,13 +1014,16 @@ pub(super) fn bench_git_close(app: &Rc<App>, phase: &str) {
 pub(super) fn bench_git_sync_over_fetch(app: &Rc<App>) {
     let app = app.clone();
     glib::spawn_future_local(async move {
-        wait_for(|| app.git.get().is_some_and(|git| git.has_repos()), REPOS).await;
+        until("git", "sync_over_fetch repos", REPOS, || {
+            app.git.get().is_some_and(|git| git.has_repos())
+        })
+        .await;
         let Some(git) = app.git.get().cloned() else {
             return bench_quit(&app);
         };
         let root = app.root().canonicalize().unwrap_or_else(|_| app.root());
         let fetching = || accent_api::git::running(&root, "fetch");
-        wait_for(fetching, 3000).await;
+        until("git", "sync_over_fetch fetch", 3000, fetching).await;
         let asked_while = fetching();
         git.sync(None);
         let mut pulled_early = false;
@@ -1025,7 +1032,10 @@ pub(super) fn bench_git_sync_over_fetch(app: &Rc<App>) {
             glib::timeout_future(Duration::from_millis(20)).await;
         }
         // The whole Sync, push included: `busy` leaves a push out, a close not waiting for one.
-        wait_for(|| !git.busy() && !git.pushing(), 20000).await;
+        until("git", "sync_over_fetch done", 20000, || {
+            !git.busy() && !git.pushing()
+        })
+        .await;
         glib::timeout_future(Duration::from_millis(300)).await;
         // A toast may be queued behind another, so what the Sync did is read off the repository:
         // nothing left to pull is a pull that went through, and a refusal of several lines is a
@@ -1073,7 +1083,10 @@ fn pulling(dir: &Path) -> bool {
 pub(super) fn bench_git_rebase(app: &Rc<App>) {
     let app = app.clone();
     glib::spawn_future_local(async move {
-        wait_for(|| app.git.get().is_some_and(|git| git.has_repos()), REPOS).await;
+        until("git", "rebase repos", REPOS, || {
+            app.git.get().is_some_and(|git| git.has_repos())
+        })
+        .await;
         let Some(git) = app.git.get().cloned() else {
             return bench_quit(&app);
         };
@@ -1090,7 +1103,7 @@ pub(super) fn bench_git_rebase(app: &Rc<App>) {
         for press in ["first", "second"] {
             say(press);
             git.press_commit();
-            wait_for(|| !git.busy(), 20000).await;
+            until("git", "rebase commit", 20000, || !git.busy()).await;
             // The refresh the command brings, and a toast's worth of the watcher's after it.
             glib::timeout_future(Duration::from_millis(1500)).await;
             if press == "first" {
@@ -1112,13 +1125,6 @@ pub(super) fn bench_git_rebase(app: &Rc<App>) {
 /// How long a drill waits for the pane to find a repository, in ms: a host on a slow link has
 /// been seen to take past 30 s over its first index, and the wait ends as soon as it has.
 const REPOS: u64 = 120_000;
-
-async fn wait_for(done: impl Fn() -> bool, ms: u64) {
-    let t = Instant::now();
-    while !done() && t.elapsed() < Duration::from_millis(ms) {
-        glib::timeout_future(Duration::from_millis(50)).await;
-    }
-}
 
 /// How many processes other than this one are working in `dir` or below it: git, its hooks, and
 /// what they started. A zombie has no working directory left to read, so it does not count.
@@ -1260,7 +1266,10 @@ pub(super) fn bench_git_markers(app: &Rc<App>, rel: &str) {
 pub(super) fn bench_git_branch(app: &Rc<App>) {
     let app = app.clone();
     glib::spawn_future_local(async move {
-        wait_for(|| app.git.get().is_some_and(|git| git.has_repos()), REPOS).await;
+        until("git", "branch repos", REPOS, || {
+            app.git.get().is_some_and(|git| git.has_repos())
+        })
+        .await;
         let Some(git) = app.git.get().cloned() else {
             return bench_quit(&app);
         };
@@ -1300,7 +1309,7 @@ pub(super) fn bench_git_branch(app: &Rc<App>) {
         glib::timeout_future(Duration::from_millis(1000)).await;
         dialog.emit_by_name::<()>("response", &[&crate::dialogs::CONFIRM]);
         dialog.close();
-        wait_for(|| !git.busy(), 20000).await;
+        until("git", "branch switch", 20000, || !git.busy()).await;
         let head = std::process::Command::new("git")
             .arg("-C")
             .arg(app.root())
@@ -1385,7 +1394,7 @@ async fn bench_branch_popover(app: &Rc<App>, git: &Rc<crate::git::Panel>) {
         return println!("bench git_branch_delete no_beta");
     };
     beta.emit_clicked();
-    wait_for(|| !git.busy(), 20000).await;
+    until("git", "branch popover switch", 20000, || !git.busy()).await;
     glib::timeout_future(Duration::from_millis(300)).await;
     let dialog = app
         .window
@@ -1410,7 +1419,10 @@ pub(super) fn bench_git_sync_all(app: &Rc<App>) {
     app.show_pane("git");
     let app = app.clone();
     glib::spawn_future_local(async move {
-        wait_for(|| app.git.get().is_some_and(|git| git.has_repos()), REPOS).await;
+        until("git", "sync_all repos", REPOS, || {
+            app.git.get().is_some_and(|git| git.has_repos())
+        })
+        .await;
         // The first refresh finds the vault root's repository; discovery adds the nested ones.
         glib::timeout_future(Duration::from_millis(3000)).await;
         app.show_pane("git");
@@ -1427,13 +1439,16 @@ pub(super) fn bench_git_sync_all(app: &Rc<App>) {
             return bench_quit(&app);
         };
         // The first index's toast would hold the one this ends with back in the queue.
-        wait_for(|| super::compare::bench_toast(&app).is_none(), 10000).await;
+        until("git", "sync_all toast gone", 10000, || {
+            super::compare::bench_toast(&app).is_none()
+        })
+        .await;
         let said = app.toasted.get();
         button.emit_clicked();
         glib::timeout_future(Duration::from_millis(50)).await;
         println!("bench git_sync_all {} busy={}", git.held_hint(), git.busy());
-        wait_for(|| !git.busy(), 60000).await;
-        wait_for(|| app.toasted.get() > said, 5000).await;
+        until("git", "sync_all done", 60000, || !git.busy()).await;
+        until("git", "sync_all toast", 5000, || app.toasted.get() > said).await;
         println!(
             "bench git_sync_all said={:?}",
             super::compare::bench_toast(&app)

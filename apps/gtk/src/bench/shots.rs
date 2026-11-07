@@ -601,15 +601,10 @@ async fn capture(app: &Rc<App>, shot: &Shot, dark: bool) {
     println!("bench shot {} {half} {path}", shot.n);
 }
 
-/// Poll `ready` every 50 ms; past `ms`, say what never came and exit 1.
+/// Wait for `ready` up to `ms` ([`super::until`]); past that, exit 1.
 async fn until(what: &str, ms: u64, ready: impl Fn() -> bool) {
-    let t = Instant::now();
-    while !ready() {
-        if t.elapsed() > Duration::from_millis(ms) {
-            println!("bench shot timeout {what}");
-            std::process::exit(1);
-        }
-        glib::timeout_future(Duration::from_millis(50)).await;
+    if super::until("shot", what, ms, ready).await.is_none() {
+        std::process::exit(1);
     }
 }
 

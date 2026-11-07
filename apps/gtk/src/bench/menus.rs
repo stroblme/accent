@@ -1,7 +1,7 @@
 //! The file menus' drill: a file's tab icon, Reveal in Sidebar into folders not listed yet, a
 //! double-click on a tab, and what Open does on a file that is no text.
 
-use super::files::until;
+use super::files::WAIT;
 use super::git::xtest;
 use super::*;
 
@@ -38,7 +38,7 @@ pub(super) fn bench_menus(app: &Rc<App>, arg: &str) {
             std::fs::write(&path, text).unwrap();
         }
         let tree = app.tree.get().expect("a tree");
-        until(|| app.reconciled.get()).await;
+        until("menus", "reconciled", WAIT, || app.reconciled.get()).await;
 
         let opened = [
             note.as_str(),
@@ -51,7 +51,10 @@ pub(super) fn bench_menus(app: &Rc<App>, arg: &str) {
             app.open_path(rel);
         }
         app.open_terminal();
-        until(|| opened.iter().all(|rel| app.doc_for(rel).is_some())).await;
+        until("menus", "terminal", WAIT, || {
+            opened.iter().all(|rel| app.doc_for(rel).is_some())
+        })
+        .await;
         glib::timeout_future(Duration::from_millis(600)).await;
         for doc in app.docs() {
             let icon = doc.page().icon().and_then(|i| IconExt::to_string(&i));
@@ -77,7 +80,10 @@ pub(super) fn bench_menus(app: &Rc<App>, arg: &str) {
                 .iter()
                 .any(|t| t.contains("not in the sidebar"))
         };
-        until(|| outlined(tree) == [deep] || refused()).await;
+        until("menus", "reveal", WAIT, || {
+            outlined(tree) == [deep] || refused()
+        })
+        .await;
         println!(
             "bench menus reveal outlined={:?} toasts={:?}",
             outlined(tree),
@@ -86,7 +92,10 @@ pub(super) fn bench_menus(app: &Rc<App>, arg: &str) {
 
         // A preview's tab double-clicked keeps it, the kept tab double-clicked reveals it.
         app.open_preview("menus/b.md");
-        until(|| app.doc_for("menus/b.md").is_some()).await;
+        until("menus", "preview", WAIT, || {
+            app.doc_for("menus/b.md").is_some()
+        })
+        .await;
         glib::timeout_future(Duration::from_millis(600)).await;
         if let Some(sidebar) = app.sidebar.get() {
             sidebar.show_pane("search");
@@ -114,7 +123,10 @@ pub(super) fn bench_menus(app: &Rc<App>, arg: &str) {
         if let Some(at) = double("menus/b.md") {
             xtest(&format!("move {at}; down; up; down; up")).await;
         }
-        until(|| outlined(tree) == ["menus/b.md"]).await;
+        until("menus", "double click", WAIT, || {
+            outlined(tree) == ["menus/b.md"]
+        })
+        .await;
         let focus = gtk::prelude::GtkWindowExt::focus(&app.window);
         println!(
             "bench menus double kept pane={} outlined={:?} tree_focus={} focus={:?}",
@@ -134,7 +146,7 @@ pub(super) fn bench_menus(app: &Rc<App>, arg: &str) {
         let _ = tree
             .widget()
             .activate_action("fileops.open", Some(&pdf.to_variant()));
-        until(|| app.doc_for(pdf).is_some()).await;
+        until("menus", "pdf", WAIT, || app.doc_for(pdf).is_some()).await;
         glib::timeout_future(Duration::from_millis(600)).await;
         println!(
             "bench menus open pdf opened={} toasts={:?}",
@@ -154,7 +166,10 @@ pub(super) fn bench_menus(app: &Rc<App>, arg: &str) {
             menu.popdown();
         }
         app.open_terminal();
-        until(|| app.docs().iter().any(|doc| doc.terminal().is_some())).await;
+        until("menus", "terminal again", WAIT, || {
+            app.docs().iter().any(|doc| doc.terminal().is_some())
+        })
+        .await;
         let tabs = app.pane().tabs.clone();
         for doc in app.docs() {
             tabs.emit_by_name::<()>("setup-menu", &[&Some(doc.page())]);
@@ -177,7 +192,7 @@ pub(super) fn bench_menus(app: &Rc<App>, arg: &str) {
         let _ = tree
             .widget()
             .activate_action("fileops.print", Some(&closed.to_variant()));
-        until(|| app.doc_for(closed).is_some()).await;
+        until("menus", "print", WAIT, || app.doc_for(closed).is_some()).await;
         let mut dialog = None;
         let mut busy = None;
         for _ in 0..200 {
@@ -210,7 +225,10 @@ pub(super) fn bench_menus(app: &Rc<App>, arg: &str) {
         std::fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
         std::fs::write(root.join(dependency), "module.exports = 1;\n").unwrap();
         app.open_path(dependency);
-        until(|| app.doc_for(dependency).is_some()).await;
+        until("menus", "dependency", WAIT, || {
+            app.doc_for(dependency).is_some()
+        })
+        .await;
         if let Some(doc) = app.doc_for(dependency) {
             tabs.emit_by_name::<()>("setup-menu", &[&Some(doc.page())]);
             println!(
@@ -246,14 +264,20 @@ pub(super) fn bench_menus(app: &Rc<App>, arg: &str) {
             .collect();
         println!("bench menus palette enabled={enabled:?}");
         app.reveal_rel(&note, false);
-        until(|| tree.selected().is_some_and(|row| row.rel == note)).await;
+        until("menus", "reveal note", WAIT, || {
+            tree.selected().is_some_and(|row| row.rel == note)
+        })
+        .await;
         let _ = WidgetExt::activate_action(&app.window, "win.copy-file", None);
         glib::timeout_future(Duration::from_millis(400)).await;
         app.reveal_rel("menus/inner", false);
-        until(|| tree.selected().is_some_and(|row| row.rel == "menus/inner")).await;
+        until("menus", "reveal folder", WAIT, || {
+            tree.selected().is_some_and(|row| row.rel == "menus/inner")
+        })
+        .await;
         let _ = WidgetExt::activate_action(&app.window, "win.paste-files", None);
         let pasted = root.join("menus/inner").join(doc::file_name(&note));
-        until(|| pasted.exists()).await;
+        until("menus", "paste", WAIT, || pasted.exists()).await;
         println!("bench menus palette pasted={}", pasted.exists());
 
         // Real right-clicks, as the reader makes them: a tab, a tree row and a Git row.
@@ -279,7 +303,10 @@ pub(super) fn bench_menus(app: &Rc<App>, arg: &str) {
             let list = list.as_ref()?;
             super::git::change_row(list, path)
         };
-        until(|| row(&note).is_some() && row(gone).is_some()).await;
+        until("menus", "changes", WAIT, || {
+            row(&note).is_some() && row(gone).is_some()
+        })
+        .await;
         glib::timeout_future(Duration::from_millis(600)).await;
         for path in [note.as_str(), gone] {
             let at = row(path).and_then(|row| {

@@ -96,7 +96,7 @@ async fn opened(app: &Rc<App>, rel: &str) -> Option<Rc<NotebookTab>> {
         let tab = app.doc_for(rel).and_then(|d| d.notebook().cloned());
         if let Some(tab) = tab.filter(|t| t.bench_supported()) {
             // The first publish follows the opening.
-            glib::timeout_future(Duration::from_millis(300)).await;
+            diagnosed("notebook_lsp", &tab.language_document()).await;
             return Some(tab);
         }
         glib::timeout_future(Duration::from_millis(50)).await;

@@ -72,20 +72,23 @@ pub(super) fn bench_loose(app: &Rc<App>, pdf: &str) {
             };
             println!("bench loose_image before size={:?}", size());
             let _ = std::fs::write(dir.join("n/dot.png"), png(6, 5));
-            until(|| size().as_deref() == Some("6x5"), 3000).await;
+            until("loose", "image reload", 3000, || {
+                size().as_deref() == Some("6x5")
+            })
+            .await;
             println!("bench loose_image after size={:?}", size());
             let pages = |app: &Rc<App>, key: &str| app.doc_for(key)?.pdf().map(|p| p.page_count());
             let key = app.root().join(&pdf).to_string_lossy().into_owned();
-            until(
-                || pages(&app, &pdf) > Some(0) && pages(&read, &key) > Some(0),
-                5000,
-            )
-            .await;
+            let both = || pages(&app, &pdf) > Some(0) && pages(&read, &key) > Some(0);
+            until("loose", "pdf pages", 5000, both).await;
             let before = pages(&read, &key);
             if let Some(tab) = app.doc_for(&pdf).and_then(|doc| doc.pdf().cloned()) {
                 tab.add_page(true);
             }
-            until(|| pages(&read, &key) != before, 8000).await;
+            until("loose", "pdf page there", 8000, || {
+                pages(&read, &key) != before
+            })
+            .await;
             println!(
                 "bench loose_pdf pages={before:?}->{:?} here={:?}",
                 pages(&read, &key),
@@ -96,7 +99,10 @@ pub(super) fn bench_loose(app: &Rc<App>, pdf: &str) {
             if let Some(tab) = read.doc_for(&key).and_then(|doc| doc.pdf().cloned()) {
                 tab.add_page(true);
             }
-            until(|| pages(&app, &pdf) != before, 8000).await;
+            until("loose", "pdf page back", 8000, || {
+                pages(&app, &pdf) != before
+            })
+            .await;
             glib::timeout_future(Duration::from_millis(1000)).await;
             println!(
                 "bench loose_pdf back here={before:?}->{:?} there={:?}",
@@ -107,16 +113,6 @@ pub(super) fn bench_loose(app: &Rc<App>, pdf: &str) {
         let _ = std::fs::remove_dir_all(dir);
         bench_quit(&app);
     });
-}
-
-/// Wait for `done`, up to `ms`.
-async fn until(done: impl Fn() -> bool, ms: u64) {
-    for _ in 0..ms / 50 {
-        if done() {
-            return;
-        }
-        glib::timeout_future(Duration::from_millis(50)).await;
-    }
 }
 
 /// The window Open in New Window on `rel`'s tree row builds, once the file has opened there.

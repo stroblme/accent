@@ -477,7 +477,7 @@ pub(super) fn bench_clip(app: &Rc<App>, rel: &str) {
         };
         fileops::clipboard::copy(&ops, &rel, false);
         fileops::clipboard::paste(&ops, &dir);
-        until(|| vault.exists(&copied)).await;
+        until("clip", "copy", WAIT, || vault.exists(&copied)).await;
         println!(
             "bench clip_copied {copied} there={} source_kept={}",
             u8::from(vault.exists(&copied)),
@@ -500,7 +500,10 @@ pub(super) fn bench_clip(app: &Rc<App>, rel: &str) {
 
         let moved = accent_core::path::basename(&copied).to_string();
         fileops::clipboard::paste(&ops, "");
-        until(|| vault.exists(&moved) && !vault.exists(&copied)).await;
+        until("clip", "move", WAIT, || {
+            vault.exists(&moved) && !vault.exists(&copied)
+        })
+        .await;
         println!(
             "bench clip_moved to={moved} there={} source_gone={}",
             u8::from(vault.exists(&moved)),
@@ -532,10 +535,13 @@ pub(super) fn bench_clip(app: &Rc<App>, rel: &str) {
                 .iter()
                 .map(|(rel, _)| accent_core::path::basename(rel))
                 .collect();
-            until(|| names.iter().all(|name| vault.exists(name))).await;
+            until("clip", "copy many", WAIT, || {
+                names.iter().all(|name| vault.exists(name))
+            })
+            .await;
             // The one toast comes once both have landed, a moment after the second does; a
             // second toast, which would be wrong, is given half a second to show itself.
-            until(|| app.toasted.get() > said).await;
+            until("clip", "copy many toast", WAIT, || app.toasted.get() > said).await;
             glib::timeout_future(Duration::from_millis(500)).await;
             let landed: Vec<(String, bool)> = both
                 .iter()
@@ -560,14 +566,9 @@ pub(super) fn bench_clip(app: &Rc<App>, rel: &str) {
     });
 }
 
-/// Wait until `done`, or a minute: long enough for a paste over a slow link, where every name a
-/// copy tries is a `stat` on the host, and the drill then prints what did not happen.
-pub(super) async fn until(done: impl Fn() -> bool) {
-    let t = Instant::now();
-    while !done() && t.elapsed() < Duration::from_secs(60) {
-        glib::timeout_future(Duration::from_millis(200)).await;
-    }
-}
+/// How long a step waits, in ms: a minute, long enough for a paste over a slow link, where every
+/// name a copy tries is a `stat` on the host, and the drill then prints what did not happen.
+pub(super) const WAIT: u64 = 60_000;
 
 /// A folder and a file from this machine pasted into `dir` of the vault ("" is the root), put on
 /// the clipboard in GNOME Files' own format: the folder is walked and made again file by file,
@@ -643,7 +644,8 @@ pub(super) fn bench_clip_outside(app: &Rc<App>, dir: &str) {
             glib::timeout_future(Duration::from_millis(50)).await;
         }
         println!("bench clip_outside_lines {lines:?}");
-        until(|| vault.exists(&deepest) && vault.exists(&one)).await;
+        let landed = || vault.exists(&deepest) && vault.exists(&one);
+        until("clip_outside", "landed", WAIT, landed).await;
         let landed_ms = ms_since(t);
         let mut said = None;
         for _ in 0..300 {
@@ -692,7 +694,7 @@ pub(super) fn bench_clip_stop(app: &Rc<App>, dir: &str) {
     };
     let (app, dir) = (app.clone(), dir.to_string());
     glib::spawn_future_local(async move {
-        until(|| app.reconciled.get()).await;
+        until("clip_stop", "reconciled", WAIT, || app.reconciled.get()).await;
         fileops::import(&ops, &dir, vec![folder.clone()], false);
         let stop = app.statusbar.transfer_stop().clone();
         // "Copying Many… 12/20000 files": some have landed and the rest have not.
@@ -719,7 +721,7 @@ pub(super) fn bench_clip_stop(app: &Rc<App>, dir: &str) {
                 .into_iter()
                 .find(|t| t.starts_with("Cop"))
         };
-        until(|| copied().is_some()).await;
+        until("clip_stop", "toast", WAIT, || copied().is_some()).await;
         let toast = copied().unwrap_or_default();
         let landed = vault
             .resolve(&carried)
@@ -754,7 +756,8 @@ pub(super) fn bench_transfer(app: &Rc<App>, rel: &str) {
     };
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
-        until(|| app.reconciled.get() && vault.list_dir("").is_ok()).await;
+        let listed = || app.reconciled.get() && vault.list_dir("").is_ok();
+        until("transfer", "reconciled", WAIT, listed).await;
         let size = |path: &std::path::Path| std::fs::metadata(path).map_or(0, |m| m.len());
         let host = vault.stat(&rel).ok().flatten().map_or(0, |etag| etag.size);
 
@@ -810,13 +813,14 @@ pub(super) fn bench_carry(app: &Rc<App>, local: &str) {
     let gtk_app = app.window.application().and_downcast::<adw::Application>();
     let (app, root) = (app.clone(), PathBuf::from(local));
     glib::spawn_future_local(async move {
-        until(|| app.reconciled.get() && vault.list_dir("").is_ok()).await;
+        let listed = || app.reconciled.get() && vault.list_dir("").is_ok();
+        until("carry", "reconciled", WAIT, listed).await;
         shell.open_vault(
             gtk_app.as_ref().expect("an application"),
             root.clone(),
             None,
         );
-        until(|| {
+        until("carry", "local window", WAIT, || {
             shell
                 .app_for(&root)
                 .is_some_and(|here| here.reconciled.get())
@@ -852,7 +856,10 @@ pub(super) fn bench_carry(app: &Rc<App>, local: &str) {
             .expect("a note");
         here.open_path(note);
         let pane = here.pane();
-        until(|| pane.tabs.selected_page().is_some()).await;
+        until("carry", "note tab", WAIT, || {
+            pane.tabs.selected_page().is_some()
+        })
+        .await;
         let page = pane.tabs.selected_page().expect("the note's tab");
         let path = || boxed(&"carry".to_value());
         shell.tree_drag(&app, true);
@@ -943,8 +950,9 @@ pub(super) fn bench_carry(app: &Rc<App>, local: &str) {
         // Shift from here: the local file goes to the trash once it is on the host.
         let said = app.toasted.get();
         carry(&ops, &here_ops, "carry/sub/two.md", "", true);
-        until(|| app.toasted.get() > said && !here_vault.root().join("carry/sub/two.md").exists())
-            .await;
+        let moved =
+            || app.toasted.get() > said && !here_vault.root().join("carry/sub/two.md").exists();
+        until("carry", "move up", WAIT, moved).await;
         println!(
             "bench carry_move_up toast={:?} host={} here_left={} here_toast={:?}",
             app.toasts.shown().first(),
@@ -968,7 +976,10 @@ pub(super) fn bench_carry(app: &Rc<App>, local: &str) {
         );
         dialog.emit_by_name::<()>("response", &[&crate::dialogs::CONFIRM]);
         dialog.close();
-        until(|| !vault.exists("carry/one.bin")).await;
+        until("carry", "move down", WAIT, || {
+            !vault.exists("carry/one.bin")
+        })
+        .await;
         println!(
             "bench carry_move_down here={} host_left={}",
             here_size("one.bin"),
@@ -983,10 +994,13 @@ pub(super) fn bench_carry(app: &Rc<App>, local: &str) {
         let said = here.toasted.get();
         let (t, stop) = (Instant::now(), here.statusbar.transfer_stop().clone());
         carry(&here_ops, &ops, "walk", "", false);
-        until(|| stop.is_visible()).await;
+        until("carry", "walk stop", WAIT, || stop.is_visible()).await;
         let (line, pressed_ms) = (here.statusbar.progress_text(), t.elapsed().as_millis());
         stop.emit_clicked();
-        until(|| here.toasted.get() > said).await;
+        until("carry", "walk stop toast", WAIT, || {
+            here.toasted.get() > said
+        })
+        .await;
         println!(
             "bench carry_walk_stop line={line:?} pressed_ms={pressed_ms} toast_ms={} toast={:?} \
              landed={}",

@@ -1355,7 +1355,10 @@ fn strip(app: &Rc<App>, rel: &str) {
     glib::timeout_add_local_once(Duration::from_millis(1500), move || {
         app.open_path(&rel);
         glib::spawn_future_local(async move {
-            files::until(|| app.active_diagram().is_some_and(|tab| tab.laid_out())).await;
+            until("strip", "laid out", files::WAIT, || {
+                app.active_diagram().is_some_and(|tab| tab.laid_out())
+            })
+            .await;
             let Some(tab) = app.active_diagram() else {
                 println!("bench strip no_tab");
                 return bench_quit(&app);
@@ -1395,7 +1398,10 @@ fn hold(app: &Rc<App>, rel: &str, tool: &str) {
         glib::spawn_future_local(async move {
             // Once the page is laid out at the canvas's size: before, the shapes are not where
             // the pointer will find them (`scale=1.000`).
-            files::until(|| app.active_diagram().is_some_and(|tab| tab.laid_out())).await;
+            until("diagram", "laid out", files::WAIT, || {
+                app.active_diagram().is_some_and(|tab| tab.laid_out())
+            })
+            .await;
             let Some(tab) = app.active_diagram() else {
                 println!("bench diagram no_tab");
                 return bench_quit(&app);

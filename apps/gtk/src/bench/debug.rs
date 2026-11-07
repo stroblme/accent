@@ -5,8 +5,9 @@ use crate::debug::breakpoints;
 use sourceview5::prelude::BufferExt as _;
 use vte4::TerminalExt as _;
 
-/// How long each step may take; on a remote vault the adapter and the program start on the host.
-const WAIT: Duration = Duration::from_secs(30);
+/// How long each step may take, in ms; on a remote vault the adapter and the program start on
+/// the host.
+const WAIT: u64 = 30_000;
 
 /// What the Debug Console is asked while the program is paused.
 const REPL: &str = "x * 2";
@@ -204,7 +205,7 @@ pub(super) fn bench_debug(app: &Rc<App>, arg: &str) {
             println!("bench debug timeout hover");
             return bench_quit(&app);
         };
-        match glib::future_with_timeout(WAIT, asked).await {
+        match glib::future_with_timeout(Duration::from_millis(WAIT), asked).await {
             Ok(Ok(value)) => println!("bench debug hover {expression} = {}", value.result),
             Ok(Err(e)) => println!("bench debug hover {expression} failed: {e}"),
             Err(_) => {
@@ -307,21 +308,13 @@ pub(super) fn bench_debug(app: &Rc<App>, arg: &str) {
     });
 }
 
-/// `ready`'s answer once it has one, polled every 50 ms for [`WAIT`]; past that, say what never
-/// came and quit.
+/// `ready`'s answer once it has one, for [`WAIT`] ([`super::until`]); past that, quit.
 async fn until<T>(app: &Rc<App>, what: &str, ready: impl Fn() -> Option<T>) -> Option<T> {
-    let t = Instant::now();
-    loop {
-        if let Some(it) = ready() {
-            return Some(it);
-        }
-        if t.elapsed() > WAIT {
-            println!("bench debug timeout {what}");
-            bench_quit(app);
-            return None;
-        }
-        glib::timeout_future(Duration::from_millis(50)).await;
+    let found = super::until("debug", what, WAIT, ready).await;
+    if found.is_none() {
+        bench_quit(app);
     }
+    found
 }
 
 /// The line the paused program's mark is on.

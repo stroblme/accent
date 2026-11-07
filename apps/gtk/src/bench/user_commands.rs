@@ -38,17 +38,6 @@ fn set(app: &Rc<App>, commands: Vec<CustomCommand>) {
     app.config_changed();
 }
 
-/// Wait up to `ms` for `done`.
-async fn until(done: impl Fn() -> bool, ms: u64) -> bool {
-    for _ in 0..ms / 50 {
-        if done() {
-            return true;
-        }
-        glib::timeout_future(Duration::from_millis(50)).await;
-    }
-    done()
-}
-
 fn text(term: &crate::terminal::Term) -> String {
     term.view
         .text_format(vte4::Format::Text)
@@ -83,7 +72,9 @@ async fn run(app: &Rc<App>) {
 
     super::git::xtest("move 700 450; focus; key ctrl+p").await;
     super::git::xtest("type Pass; sleep 0.3; key Return").await;
-    let closed = until(|| left() == 0, 5000).await;
+    let closed = until("commands", "palette", 5000, || left() == 0)
+        .await
+        .is_some();
     println!(
         "bench commands palette opened={:?} closed={closed} used={:?}",
         titles(&opened),
@@ -91,15 +82,12 @@ async fn run(app: &Rc<App>) {
     );
 
     super::git::xtest("key ctrl+shift+m").await;
-    let fail = until(
-        || {
-            app.terminals()
-                .first()
-                .is_some_and(|t| text(t).contains("[Exited"))
-        },
-        5000,
-    )
-    .await;
+    let exited = || {
+        app.terminals()
+            .first()
+            .is_some_and(|t| text(t).contains("[Exited"))
+    };
+    let fail = until("commands", "shortcut", 5000, exited).await.is_some();
     let root = app.vault().map(|v| v.root().display().to_string());
     let (said, at_root) = match app.terminals().first() {
         Some(term) => {
@@ -119,7 +107,9 @@ async fn run(app: &Rc<App>) {
 
     // From the shell that has the keyboard: a Ctrl+Shift chord is the window's there.
     super::git::xtest("key ctrl+shift+k").await;
-    let closed = until(|| left() == 1, 5000).await;
+    let closed = until("commands", "from_shell", 5000, || left() == 1)
+        .await
+        .is_some();
     println!(
         "bench commands from_shell opened={:?} closed={closed} left={}",
         titles(&opened),
@@ -154,18 +144,25 @@ async fn folder_terminal(app: &Rc<App>) {
     let before: Vec<String> = app.terminals().iter().map(|t| t.key()).collect();
     let _ = WidgetExt::activate_action(tree.widget(), "fileops.terminal", Some(&dir.to_variant()));
     let new = || (app.terminals().into_iter()).find(|t| !before.contains(&t.key()));
-    let (opened, term) = (until(|| new().is_some(), 5000).await, new());
+    let opened = until("commands", "folder", 5000, || new().is_some())
+        .await
+        .is_some();
+    let term = new();
     let mut pwd = false;
     if let Some(term) = &term {
-        until(|| !text(term).trim().is_empty(), 5000).await;
+        until("commands", "folder prompt", 5000, || {
+            !text(term).trim().is_empty()
+        })
+        .await;
         term.view.feed_child(b"pwd\n");
         let path = app.root().join(dir).display().to_string();
-        pwd = until(|| text(term).lines().any(|l| l.trim_end() == path), 5000).await;
+        let said = || text(term).lines().any(|l| l.trim_end() == path);
+        pwd = until("commands", "folder pwd", 5000, said).await.is_some();
     }
     let focused = term.as_ref().is_some_and(|t| t.view.has_focus());
     println!("bench commands folder first={first:?} opened={opened} pwd={pwd} focused={focused}");
     let _ = WidgetExt::activate_action(&app.window, "win.close-tab", None);
-    until(|| new().is_none(), 5000).await;
+    until("commands", "folder closed", 5000, || new().is_none()).await;
 }
 
 async fn open(app: &Rc<App>) {
@@ -192,7 +189,7 @@ async fn open(app: &Rc<App>) {
 
 async fn back(app: &Rc<App>) {
     // The restored tabs settle: Quick finds nothing to take up and goes.
-    until(|| app.terminals().len() == 1, 5000).await;
+    until("commands", "back", 5000, || app.terminals().len() == 1).await;
     glib::timeout_future(Duration::from_millis(500)).await;
     let titles: Vec<String> = app
         .terminals()

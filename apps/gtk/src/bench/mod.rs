@@ -1302,18 +1302,54 @@ fn bench_pump() {
     }
 }
 
-/// Until what `doc`'s server last published is about its text as it is
-/// ([`crate::lang::Document::diagnosed`]), checked every 50 ms for ten seconds, past which
-/// `bench <drill> timeout diagnostics <key>` says so. Code actions are asked with the diagnostics
-/// last published, so a drill waits here after an edit before asking again.
-async fn diagnosed(drill: &str, doc: &crate::lang::Document) {
+/// What `ready` answers once it has an answer, asked every 50 ms for up to `ms`, past which
+/// `bench <drill> timeout <what>` says what never came.
+async fn until<R: Ready>(
+    drill: &str,
+    what: &str,
+    ms: u64,
+    ready: impl Fn() -> R,
+) -> Option<R::Found> {
     let t = Instant::now();
-    while !doc.diagnosed() {
-        if t.elapsed() > Duration::from_secs(10) {
-            return println!("bench {drill} timeout diagnostics {}", doc.key());
+    loop {
+        if let Some(found) = ready().found() {
+            return Some(found);
+        }
+        if t.elapsed() > Duration::from_millis(ms) {
+            println!("bench {drill} timeout {what}");
+            return None;
         }
         glib::timeout_future(Duration::from_millis(50)).await;
     }
+}
+
+/// What [`until`] waits on: an `Option` that turns `Some`, or a `bool` that turns true.
+trait Ready {
+    type Found;
+    fn found(self) -> Option<Self::Found>;
+}
+
+impl Ready for bool {
+    type Found = ();
+    fn found(self) -> Option<()> {
+        self.then_some(())
+    }
+}
+
+impl<T> Ready for Option<T> {
+    type Found = T;
+    fn found(self) -> Option<T> {
+        self
+    }
+}
+
+/// Until what `doc`'s server last published is about its text as it is
+/// ([`crate::lang::Document::diagnosed`]), for ten seconds, past which
+/// `bench <drill> timeout diagnostics <key>` says so. Code actions are asked with the diagnostics
+/// last published, so a drill waits here after an edit before asking again.
+async fn diagnosed(drill: &str, doc: &crate::lang::Document) {
+    let what = format!("diagnostics {}", doc.key());
+    until(drill, &what, 10_000, || doc.diagnosed()).await;
 }
 
 /// Exit 2 unless the vault is under `/tmp` (`make vault VAULT=/tmp/<name>`).

@@ -1,6 +1,6 @@
 //! The Replace All drill: what the Search pane lists once the vault has been rewritten under it.
 
-use super::files::until;
+use super::files::WAIT;
 use super::*;
 
 /// Unique fixture word restricting replacement to one note, avoiding the multi-file
@@ -30,7 +30,7 @@ pub(super) fn bench_replace(app: &Rc<App>) {
     glib::spawn_future_local(async move {
         // The index answers the search, and a cold one takes the note in only once its first walk
         // is over: many seconds on `make vault`.
-        until(|| app.reconciled.get()).await;
+        until("replace", "reconciled", WAIT, || app.reconciled.get()).await;
         let Some(sidebar) = app.sidebar.get() else {
             return bench_replace_done(&app, &path);
         };
@@ -39,7 +39,10 @@ pub(super) fn bench_replace(app: &Rc<App>) {
         sidebar.set_replace_text("zzreplaced");
         // Until the note's row is listed: a query asked before the worker took the note in gets it
         // from the requery the note's update brings.
-        until(|| sidebar.search_state().0 == "results").await;
+        until("replace", "results", WAIT, || {
+            sidebar.search_state().0 == "results"
+        })
+        .await;
         bench_replace_print(&app, &path, "before");
         sidebar.press_replace_all();
         glib::timeout_add_local_once(SETTLE, move || {

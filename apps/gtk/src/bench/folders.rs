@@ -1,6 +1,6 @@
 //! Files-tree drills for menus, marked rows, folders, external drops and Move to….
 
-use super::files::until;
+use super::files::WAIT;
 use super::git::xtest;
 use super::*;
 
@@ -305,7 +305,10 @@ fn bench_hover(app: &Rc<App>, rel: &str) {
         let tree = app.tree.get().expect("a tree");
         app.open_path("b.md");
         app.open_path(&rel);
-        until(|| centre(&app, tree, "c.md").is_some() && app.tab_for(&rel).is_some()).await;
+        until("hover", "open", WAIT, || {
+            centre(&app, tree, "c.md").is_some() && app.tab_for(&rel).is_some()
+        })
+        .await;
         glib::timeout_future(Duration::from_millis(800)).await;
         let selected = || tree.selected().map(|row| row.rel);
         let (sx, sy) = app.window.surface_transform();
@@ -353,7 +356,10 @@ fn bench_hover(app: &Rc<App>, rel: &str) {
         println!("bench hover folder_f2 renaming={:?}", renaming());
         glib::timeout_future(Duration::from_millis(300)).await;
         xtest("key ctrl+Tab").await;
-        until(|| app.active().is_some_and(|tab| tab.rel() == "b.md")).await;
+        until("hover", "ctrl+Tab", WAIT, || {
+            app.active().is_some_and(|tab| tab.rel() == "b.md")
+        })
+        .await;
         println!(
             "bench hover next_tab active={:?} selected={:?}",
             app.active().map(|tab| tab.rel()),
@@ -412,7 +418,10 @@ fn bench_hover(app: &Rc<App>, rel: &str) {
         );
 
         xtest(&format!("move {}; down; up", at("b.md"))).await;
-        until(|| app.active().is_some_and(|tab| tab.rel() == "b.md")).await;
+        until("hover", "click", WAIT, || {
+            app.active().is_some_and(|tab| tab.rel() == "b.md")
+        })
+        .await;
         println!(
             "bench hover click_file active={:?} selected={:?}",
             app.active().map(|tab| tab.rel()),
@@ -432,7 +441,7 @@ fn bench_hover(app: &Rc<App>, rel: &str) {
         let (from, to) = (point("c.md"), point("folder"));
         let (began, ..) = drag_row(&app, from, from, "c.md").await;
         let (onto, ..) = drag_row(&app, from, to, "folder").await;
-        until(|| root.join("folder/c.md").exists()).await;
+        until("hover", "drag", WAIT, || root.join("folder/c.md").exists()).await;
         println!(
             "bench hover drag began={began},{onto} moved={} opened={} selected={:?}",
             root.join("folder/c.md").exists(),
@@ -451,7 +460,7 @@ fn bench_hover(app: &Rc<App>, rel: &str) {
 
         tree.view().grab_focus();
         xtest("key Delete").await;
-        until(|| !root.join("b.md").exists()).await;
+        until("hover", "delete", WAIT, || !root.join("b.md").exists()).await;
         glib::timeout_future(Duration::from_millis(500)).await;
         println!(
             "bench hover delete gone={} active={:?} selected={:?}",
@@ -474,7 +483,10 @@ fn bench_hover(app: &Rc<App>, rel: &str) {
 
         // A double click keeps the file it opens, and toggles a folder once.
         xtest(&format!("move {}; down; up; down; up", at("folder/c.md"))).await;
-        until(|| app.active().is_some_and(|tab| tab.rel() == "folder/c.md")).await;
+        until("hover", "double click", WAIT, || {
+            app.active().is_some_and(|tab| tab.rel() == "folder/c.md")
+        })
+        .await;
         let kept = app
             .tab_for("folder/c.md")
             .is_some_and(|tab| app.pane().preview().is_none_or(|page| page != tab.page));
@@ -727,7 +739,10 @@ pub(super) fn bench_drag_out(app: &Rc<App>, arg: &str) {
     let (app, file, folder) = (app.clone(), file.to_string(), folder.to_string());
     glib::spawn_future_local(async move {
         let tree = app.tree.get().expect("a tree");
-        until(|| app.reconciled.get() && tree.reveal(&file) && tree.reveal(&folder)).await;
+        until("drag_out", "revealed", WAIT, || {
+            app.reconciled.get() && tree.reveal(&file) && tree.reveal(&folder)
+        })
+        .await;
         glib::timeout_future(Duration::from_millis(400)).await;
         let root = vault.root();
         println!("bench drag_out row {}", offered(tree, &root, &file).await);
@@ -770,7 +785,7 @@ pub(super) fn bench_drag_out(app: &Rc<App>, arg: &str) {
         );
         let (began, lit, ended) = drag_row(&app, from, to, &folder).await;
         let moved = format!("{folder}/{}", accent_core::path::basename(&file));
-        until(|| vault.exists(&moved)).await;
+        until("drag_out", "moved", WAIT, || vault.exists(&moved)).await;
         println!(
             "bench drag_out onto_folder began={began} lit={lit} ended={ended} moved={} left={} \
              copies={}",
@@ -1038,7 +1053,10 @@ fn bench_unfold_race(app: &Rc<App>, dir: &str) {
             &app,
             &format!("mkdir {quoted} && echo 1 > {quoted}/first.md"),
         );
-        until(|| tree::find_row(tree.model(), &race).is_some()).await;
+        until("unfold_race", "row", WAIT, || {
+            tree::find_row(tree.model(), &race).is_some()
+        })
+        .await;
         let _ = vault.rescan();
         if let Some(row) = tree::find_row(tree.model(), &race) {
             row.set_expanded(true);
@@ -1114,7 +1132,7 @@ fn bench_unfold_tab(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
         // A remote vault opens nothing before its host has answered.
-        until(|| app.reconciled.get()).await;
+        until("unfold_tab", "reconciled", WAIT, || app.reconciled.get()).await;
         app.open_path(&rel);
         let mut tab = None;
         for _ in 0..100 {
@@ -1154,9 +1172,12 @@ fn bench_unfold_down(app: &Rc<App>, rel: &str) {
             return bench_quit(&app);
         };
         let connected = || remote.state() == accent_api::remote::State::Connected;
-        until(|| app.reconciled.get() && connected()).await;
+        until("unfold_down", "connected", WAIT, || {
+            app.reconciled.get() && connected()
+        })
+        .await;
         app.open_path(&rel);
-        until(|| app.tab_for(&rel).is_some()).await;
+        until("unfold_down", "tab", WAIT, || app.tab_for(&rel).is_some()).await;
         let Some(tab) = app.tab_for(&rel) else {
             println!("bench unfold_down no_tab");
             return bench_quit(&app);
@@ -1177,7 +1198,7 @@ fn bench_unfold_down(app: &Rc<App>, rel: &str) {
             let wrote =
                 scroll::in_vault(&app, &format!("printf '{round}\\n' > {quoted} && {then}"));
             app.reconnect_now();
-            until(connected).await;
+            until("unfold_down", "reconnected", WAIT, connected).await;
             glib::timeout_future(Duration::from_secs(3)).await;
             println!(
                 "bench unfold_down {round} ended={ended} wrote={wrote} {:?}",
@@ -1200,10 +1221,13 @@ fn bench_unfold_reload(app: &Rc<App>, dir: &str) {
     let (app, dir) = (app.clone(), dir.to_string());
     glib::spawn_future_local(async move {
         let tree = app.tree.get().expect("a tree");
-        until(|| app.reconciled.get()).await;
+        until("unfold_reload", "reconciled", WAIT, || app.reconciled.get()).await;
         unfold(tree, &dir).await;
         // The first walk's own toast gone, so one seen later is the Reload's.
-        until(|| indexed_said(&app).is_none()).await;
+        until("unfold_reload", "indexed toast gone", WAIT, || {
+            indexed_said(&app).is_none()
+        })
+        .await;
         let at = gdk::Rectangle::new(0, 0, 1, 1);
         let menu = fileops::context_menu(&ops, tree.widget(), Some((&dir, true)), &[], at);
         let offered = menu
@@ -1293,7 +1317,7 @@ pub(super) fn bench_move(app: &Rc<App>, arg: &str) {
     let app = app.clone();
     glib::spawn_future_local(async move {
         // A move asks the index what links to it, which the first reconcile has to have filled.
-        until(|| app.reconciled.get()).await;
+        until("move", "reconciled", WAIT, || app.reconciled.get()).await;
         let set = |rels: &[String]| -> Vec<(String, bool)> {
             rels.iter()
                 .map(|rel| {
@@ -1373,6 +1397,6 @@ async fn move_through(app: &Rc<App>, dir: &str) -> Option<String> {
         update.emit_by_name::<()>("response", &[&"update"]);
         update.close();
     }
-    until(|| app.toasted.get() > said).await;
+    until("move", "toast", WAIT, || app.toasted.get() > said).await;
     compare::bench_toast(app)
 }

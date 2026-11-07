@@ -1,6 +1,6 @@
 //! PDF drawing drills for the pen, its ring, New Drawing and Insert Sketch.
 
-use super::pdf::{online, opened, render_cpu_ms, until, vault_pages, written};
+use super::pdf::{online, opened, render_cpu_ms, vault_pages, written};
 use super::*;
 
 /// The drawing ring with the pen in hand: the tool and options it shows while the pen's eraser
@@ -366,10 +366,15 @@ pub(super) fn bench_pdf_pen(app: &Rc<App>, arg: &str) {
         // tool in hand, by a render thread that opened it afresh.
         let whole = std::fs::read(pdf.path()).unwrap_or_default();
         let _ = std::fs::write(pdf.path(), b"");
-        let waited = until(|| pdf.waiting().0.map(drop)).await.is_some();
+        let waited = until("pen", "broken", 10_000, || pdf.waiting().0.map(drop))
+            .await
+            .is_some();
         println!("bench pen broken waited={waited}");
         let _ = std::fs::write(pdf.path(), &whole);
-        until(|| pdf.waiting().0.is_none().then_some(())).await;
+        until("pen", "reopened", 10_000, || {
+            pdf.waiting().0.is_none().then_some(())
+        })
+        .await;
         glib::timeout_future(Duration::from_secs(2)).await;
         agree("reopened");
         bench_quit(&app);
@@ -526,7 +531,7 @@ pub(super) fn bench_sketch(app: &Rc<App>, rel: &str) {
     glib::spawn_future_local(async move {
         online(&app).await;
         app.open_path(&rel);
-        let Some(tab) = until(|| app.tab_for(&rel)).await else {
+        let Some(tab) = until("sketch", "note", 10_000, || app.tab_for(&rel)).await else {
             println!("bench sketch no_note");
             return bench_quit(&app);
         };
@@ -534,7 +539,8 @@ pub(super) fn bench_sketch(app: &Rc<App>, rel: &str) {
         let started = Instant::now();
         let _ = WidgetExt::activate_action(&app.window, "win.insert-sketch", None);
         let held = started.elapsed().as_millis();
-        let pdf = until(|| app.active_pdf().filter(|pdf| pdf.page_count() > 0)).await;
+        let sketch = || app.active_pdf().filter(|pdf| pdf.page_count() > 0);
+        let pdf = until("sketch", "tab", 10_000, sketch).await;
         let Some(pdf) = pdf else {
             println!(
                 "bench sketch no_tab held_ms={held} note_changed={} said={} {:?}",

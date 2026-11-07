@@ -291,7 +291,10 @@ async fn hit_drill(app: &Rc<App>, ipynb: &str, marimo: &str) {
     let copy = "Notebooks/hit.ipynb";
     let toasted = app.toasted.get();
     let _ = std::fs::copy(app.root().join(ipynb), app.root().join(copy));
-    super::files::until(|| app.reconciled.get()).await;
+    until("notebook", "reconciled", super::files::WAIT, || {
+        app.reconciled.get()
+    })
+    .await;
     let indexed = |rel: &str| {
         let hits = app.vault()?.search("binomial", 20, false).ok()?;
         hits.into_iter().find(|h| h.rel_path == rel)?.at

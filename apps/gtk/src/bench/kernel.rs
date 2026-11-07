@@ -4,8 +4,9 @@ use super::*;
 use crate::notebook::NotebookTab;
 use accent_core::notebook::output::{Data, Output};
 
-/// How long each step may take: a kernel's start is given a minute, and a remote one the link.
-const WAIT: Duration = Duration::from_secs(90);
+/// How long each step may take, in ms: a kernel's start is given a minute, and a remote one the
+/// link.
+const WAIT: u64 = 90_000;
 
 /// The notebook the drill writes and runs: a print, a result, `input()`, a sleep to interrupt,
 /// a cell an interrupt leaves unrun, one of a stream that grows across two flushes, an 80 × 40
@@ -751,26 +752,19 @@ fn kernel_gone() -> bool {
     !folder_left && !process_left
 }
 
-/// `ready`'s answer once it has one, polled every 50 ms for [`WAIT`]; past that, say what never
-/// came and quit, the kernels stopped first: a quit drops no vault, so nothing else would.
+/// `ready`'s answer once it has one, for [`WAIT`] ([`super::until`]); past that, say what the
+/// toasts said and quit, the kernels stopped first: a quit drops no vault, so nothing else would.
 async fn until<T>(app: &Rc<App>, what: &str, ready: impl Fn() -> Option<T>) -> Option<T> {
-    let t = Instant::now();
-    loop {
-        if let Some(it) = ready() {
-            return Some(it);
+    let found = super::until("kernel", what, WAIT, ready).await;
+    if found.is_none() {
+        for said in app.toasts.shown() {
+            println!("bench kernel toast {said}");
         }
-        if t.elapsed() > WAIT {
-            println!("bench kernel timeout {what}");
-            for said in app.toasts.shown() {
-                println!("bench kernel toast {said}");
-            }
-            for tab in app.notebooks() {
-                app.stop_kernel(&tab);
-            }
-            glib::timeout_future(Duration::from_millis(2500)).await;
-            bench_quit(app);
-            return None;
+        for tab in app.notebooks() {
+            app.stop_kernel(&tab);
         }
-        glib::timeout_future(Duration::from_millis(50)).await;
+        glib::timeout_future(Duration::from_millis(2500)).await;
+        bench_quit(app);
     }
+    found
 }

@@ -39,7 +39,10 @@ async fn preview(app: &Rc<App>) {
         let (figures, _) = preview.as_ref()?.figures();
         figures.first()?.playing
     };
-    if !until(2000, || playing().is_some()).await {
+    if until("animation", "preview", 2000, || playing().is_some())
+        .await
+        .is_none()
+    {
         return println!("bench animation preview none");
     }
     let shown = moves(playing).await;
@@ -65,7 +68,10 @@ async fn tab(app: &Rc<App>) {
             .paintable()
             .and_downcast::<Animated>()
     };
-    if !until(2000, || animated().is_some()).await {
+    if until("animation", "tab", 2000, || animated().is_some())
+        .await
+        .is_none()
+    {
         return println!("bench animation tab none");
     }
     let playing = || animated().map(|a| a.playing());
@@ -99,16 +105,4 @@ async fn moves(playing: impl Fn() -> Option<(usize, bool)>) -> u32 {
         last = now;
     }
     moved
-}
-
-/// Poll `ready` every 20 ms for up to `ms`; whether it came.
-async fn until(ms: u64, ready: impl Fn() -> bool) -> bool {
-    let t = Instant::now();
-    while !ready() {
-        if t.elapsed() > Duration::from_millis(ms) {
-            return false;
-        }
-        glib::timeout_future(Duration::from_millis(20)).await;
-    }
-    true
 }

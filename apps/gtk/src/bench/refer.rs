@@ -1,6 +1,6 @@
 //! Files rows dropped with Shift into what a pane shows (`ACCENT_BENCH_DROP=refer:`).
 
-use super::files::until;
+use super::files::WAIT;
 use super::*;
 use vte4::TerminalExt as _;
 
@@ -50,7 +50,7 @@ pub(super) fn bench_refer(app: &Rc<App>, _arg: &str) {
         let Some(tree) = app.tree.get() else {
             return bench_quit(&app);
         };
-        until(|| {
+        until("refer", "revealed", WAIT, || {
             app.reconciled.get()
                 && [ROW, IMAGE, FOLDER, CODE]
                     .iter()
@@ -58,7 +58,7 @@ pub(super) fn bench_refer(app: &Rc<App>, _arg: &str) {
         })
         .await;
         app.open_path(NOTE);
-        until(|| app.tab_for(NOTE).is_some()).await;
+        until("refer", "note", WAIT, || app.tab_for(NOTE).is_some()).await;
         glib::timeout_future(Duration::from_millis(600)).await;
         super::git::xtest("move 700 400; focus").await;
         // Screen coordinates: the window at 0,0, its client-side shadow a margin in.
@@ -101,7 +101,10 @@ pub(super) fn bench_refer(app: &Rc<App>, _arg: &str) {
         if let Some(page) = app.doc_for(ROW).map(|d| d.page().clone()) {
             app.close_page(&page);
         }
-        until(|| front().as_deref() == Some(NOTE)).await;
+        until("refer", "note front", WAIT, || {
+            front().as_deref() == Some(NOTE)
+        })
+        .await;
 
         // With Shift the caret takes the shade's place and the link goes in, the note taking
         // the keyboard.
@@ -153,7 +156,10 @@ pub(super) fn bench_refer(app: &Rc<App>, _arg: &str) {
             glib::timeout_future(Duration::from_millis(800))
         };
         shown("outline").await;
-        until(|| label_at(&app, |t| t == "Note").is_some()).await;
+        until("refer", "note label", WAIT, || {
+            label_at(&app, |t| t == "Note").is_some()
+        })
+        .await;
         let row = label_at(&app, |t| t == "Note").unwrap_or_default();
         let before = note();
         let seen = drag(&app, row, to, false).await;
@@ -170,7 +176,7 @@ pub(super) fn bench_refer(app: &Rc<App>, _arg: &str) {
         shown("search").await;
         sidebar.set_search_text("Target");
         let hit = |t: &str| t == "target.md";
-        until(|| label_at(&app, hit).is_some()).await;
+        until("refer", "hit", WAIT, || label_at(&app, hit).is_some()).await;
         glib::timeout_future(Duration::from_millis(800)).await;
         let before = links("[[target]]");
         let seen = drag(&app, label_at(&app, hit).unwrap_or_default(), to, true).await;
@@ -178,7 +184,10 @@ pub(super) fn bench_refer(app: &Rc<App>, _arg: &str) {
         check("search_shift", links("[[target]]") == before + 1);
         shown("info").await;
         let backlink = |t: &str| t.starts_with(ROW) && t.contains(':');
-        until(|| label_at(&app, backlink).is_some()).await;
+        until("refer", "backlink", WAIT, || {
+            label_at(&app, backlink).is_some()
+        })
+        .await;
         let seen = drag(&app, label_at(&app, backlink).unwrap_or_default(), to, true).await;
         println!("bench refer references {seen:?} text={:?}", note());
         check("references_shift", links("[[target]]") == before + 2);
@@ -186,7 +195,7 @@ pub(super) fn bench_refer(app: &Rc<App>, _arg: &str) {
 
         // A code file: the row's path from the file's folder, a folder's too.
         app.open_path(CODE);
-        until(|| front().as_deref() == Some(CODE)).await;
+        until("refer", "code", WAIT, || front().as_deref() == Some(CODE)).await;
         glib::timeout_future(Duration::from_millis(400)).await;
         let code = || app.tab_for(CODE).map(|t| t.text()).unwrap_or_default();
         let seen = drag(&app, row_at(&app, ROW).await, to, true).await;
@@ -201,7 +210,10 @@ pub(super) fn bench_refer(app: &Rc<App>, _arg: &str) {
 
         // A notebook: a link in a markdown cell, the path from the notebook in a code cell.
         app.open_path(NOTEBOOK);
-        until(|| front().as_deref() == Some(NOTEBOOK)).await;
+        until("refer", "notebook", WAIT, || {
+            front().as_deref() == Some(NOTEBOOK)
+        })
+        .await;
         let Some(book) = app.notebook_of(&app.pane()) else {
             return bench_quit(&app);
         };
@@ -233,7 +245,7 @@ pub(super) fn bench_refer(app: &Rc<App>, _arg: &str) {
 
         // A shell: the quoted absolute path, typed at the prompt and not run.
         app.open_terminal();
-        until(|| app.terminals().len() == 1).await;
+        until("refer", "terminal", WAIT, || app.terminals().len() == 1).await;
         glib::timeout_future(Duration::from_millis(1500)).await;
         drag(&app, row_at(&app, ROW).await, to, true).await;
         glib::timeout_future(Duration::from_millis(500)).await;
@@ -252,7 +264,7 @@ pub(super) fn bench_refer(app: &Rc<App>, _arg: &str) {
 
         // A PDF takes no reference: with Shift the row opens there, as without it.
         app.open_path(PDF);
-        until(|| front().as_deref() == Some(PDF)).await;
+        until("refer", "pdf", WAIT, || front().as_deref() == Some(PDF)).await;
         glib::timeout_future(Duration::from_millis(400)).await;
         let seen = drag(&app, row_at(&app, ROW).await, to, true).await;
         println!("bench refer pdf {seen:?} front={:?}", front());

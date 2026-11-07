@@ -53,7 +53,10 @@ async fn started(app: &Rc<App>, rel: &str) -> Option<Rc<Term>> {
         app.editor_of(rel)
             .filter(|term| text(term).contains("fake-editor"))
     };
-    until(|| fake().is_some(), 10_000).await;
+    until("editor", &format!("started {rel}"), 10_000, || {
+        fake().is_some()
+    })
+    .await;
     fake()
 }
 
@@ -96,13 +99,13 @@ async fn open(app: &Rc<App>) {
         std::fs::write(root.join(rel), text).unwrap();
     }
     std::fs::write(root.join("anim.gif"), crate::look::TWO_FRAMES).unwrap();
-    until(|| app.reconciled.get(), 30_000).await;
+    until("editor", "open reconciled", 30_000, || app.reconciled.get()).await;
     // Listed, so the tree has a row to light for the tab.
     let listed = || {
         let tree = app.tree.get();
         tree.is_some_and(|tree| crate::tree::find_row(tree.model(), "note.md").is_some())
     };
-    until(listed, 10_000).await;
+    until("editor", "open listed", 10_000, listed).await;
     pick(app, Editor::Nano);
 
     app.open_path("note.md");
@@ -133,7 +136,10 @@ async fn open(app: &Rc<App>) {
         app.open_path(rel);
     }
     let kinds = || ["note.md", "flow.drawio", "book.ipynb", "anim.gif"].map(|r| kind_of(app, r));
-    until(|| !kinds().contains(&"none"), 10_000).await;
+    until("editor", "open again", 10_000, || {
+        !kinds().contains(&"none")
+    })
+    .await;
     println!(
         "bench editor open again terminals={} kinds={:?}",
         app.terminals().len(),
@@ -141,7 +147,9 @@ async fn open(app: &Rc<App>) {
     );
 
     term.view.feed_child(b"0\n");
-    let closed = until(|| app.terminals().is_empty(), 10_000).await;
+    let closed = until("editor", "exit0", 10_000, || app.terminals().is_empty())
+        .await
+        .is_some();
     let edited = std::fs::read_to_string(root.join("note.md")).unwrap_or_default();
     println!(
         "bench editor exit0 closed={closed} edited={}",
@@ -151,7 +159,11 @@ async fn open(app: &Rc<App>) {
     app.open_path("kept.md");
     if let Some(term) = started(app, "kept.md").await {
         term.view.feed_child(b"1\n");
-        let said = until(|| text(&term).contains("[Exited"), 10_000).await;
+        let said = until("editor", "exit1", 10_000, || {
+            text(&term).contains("[Exited")
+        })
+        .await
+        .is_some();
         let line = text(&term)
             .lines()
             .rfind(|l| l.starts_with('['))
@@ -166,7 +178,10 @@ async fn open(app: &Rc<App>) {
     pick(app, Editor::Kakoune);
     let toasts = app.toasted.get();
     app.open_path("gone.md");
-    until(|| kind_of(app, "gone.md") == "text", 10_000).await;
+    until("editor", "missing", 10_000, || {
+        kind_of(app, "gone.md") == "text"
+    })
+    .await;
     println!(
         "bench editor missing kind={} toasted={}",
         kind_of(app, "gone.md"),
@@ -188,7 +203,10 @@ async fn open(app: &Rc<App>) {
     for term in app.terminals() {
         term.view.feed_child(b"0\n");
     }
-    until(|| app.terminals().iter().all(|t| t.ended()), 10_000).await;
+    until("editor", "preview ended", 10_000, || {
+        app.terminals().iter().all(|t| t.ended())
+    })
+    .await;
 }
 
 async fn keys(app: &Rc<App>) {
@@ -196,12 +214,15 @@ async fn keys(app: &Rc<App>) {
     for rel in ["note.md", "other.md", "third.md", "fourth.md"] {
         std::fs::write(root.join(rel), "# Keys\n").unwrap();
     }
-    until(|| app.reconciled.get(), 30_000).await;
+    until("editor", "keys reconciled", 30_000, || app.reconciled.get()).await;
     pick(app, Editor::Nano);
     // A tab of accent's own to leave the editor's for.
     app.pending.in_accent("other.md");
     app.open_path("other.md");
-    until(|| kind_of(app, "other.md") == "text", 10_000).await;
+    until("editor", "keys other", 10_000, || {
+        kind_of(app, "other.md") == "text"
+    })
+    .await;
     app.open_path("note.md");
     let Some(term) = started(app, "note.md").await else {
         return println!("bench editor keys started=false");
@@ -213,7 +234,7 @@ async fn keys(app: &Rc<App>) {
     super::git::xtest("key ctrl+w; key ctrl+e; key ctrl+j").await;
     let log = glib::home_dir().join("editor-keys");
     let read = || std::fs::read_to_string(&log).unwrap_or_default();
-    until(|| !read().trim().is_empty(), 5000).await;
+    until("editor", "keys bytes", 5000, || !read().trim().is_empty()).await;
     println!("bench editor keys at={at:?} bytes={}", read().trim());
 
     let front = || {
@@ -258,13 +279,19 @@ async fn keys(app: &Rc<App>) {
     for term in app.terminals() {
         term.view.feed_child(b"xyz");
     }
-    until(|| app.terminals().iter().all(|t| t.ended()), 10_000).await;
+    until("editor", "keys ended", 10_000, || {
+        app.terminals().iter().all(|t| t.ended())
+    })
+    .await;
 }
 
 async fn accent(app: &Rc<App>) {
     let root = app.root();
     std::fs::write(root.join("look.md"), "# Look\n").unwrap();
-    until(|| app.reconciled.get(), 30_000).await;
+    until("editor", "accent reconciled", 30_000, || {
+        app.reconciled.get()
+    })
+    .await;
     pick(app, Editor::Nano);
     app.open_preview("look.md");
     let Some(term) = started(app, "look.md").await else {
@@ -278,7 +305,10 @@ async fn accent(app: &Rc<App>) {
         pane.set_preview(&term.page);
     }
     let _ = WidgetExt::activate_action(&app.window, "win.open-in-accent", None);
-    until(|| kind_of(app, "look.md") == "text", 10_000).await;
+    until("editor", "accent kind", 10_000, || {
+        kind_of(app, "look.md") == "text"
+    })
+    .await;
     println!(
         "bench editor accent preview_asks={preview_asks} kept_asks={kept_asks} kind={} editors={}",
         kind_of(app, "look.md"),
@@ -301,7 +331,7 @@ async fn line(app: &Rc<App>) {
     std::fs::write(root.join("deep.md"), "# Deep\n\nthe zebrafish swims\n").unwrap();
     std::fs::write(root.join("code.rs"), "\nfn alpha() {}\n").unwrap();
     std::fs::write(root.join("custom.md"), "# Custom\n\nline two\n").unwrap();
-    until(|| app.reconciled.get(), 30_000).await;
+    until("editor", "line reconciled", 30_000, || app.reconciled.get()).await;
     pick(app, Editor::Nano);
     let hit = sidebar::Target::Range(12..21, Some(3));
     app.open_note_at("deep.md", Some(hit));
@@ -342,7 +372,10 @@ async fn line(app: &Rc<App>) {
     for term in app.terminals() {
         term.view.feed_child(b"0\n");
     }
-    until(|| app.terminals().iter().all(|t| t.ended()), 10_000).await;
+    until("editor", "line ended", 10_000, || {
+        app.terminals().iter().all(|t| t.ended())
+    })
+    .await;
 }
 
 async fn panes(app: &Rc<App>) {
@@ -350,7 +383,10 @@ async fn panes(app: &Rc<App>) {
     let before = "# Panes\n\n## First\n\nBefore the save.\n";
     std::fs::write(root.join("panes.md"), before).unwrap();
     std::fs::write(root.join("linker.md"), "# Linker\n\nSee [[panes]].\n").unwrap();
-    until(|| app.reconciled.get(), 30_000).await;
+    until("editor", "panes reconciled", 30_000, || {
+        app.reconciled.get()
+    })
+    .await;
     pick(app, Editor::Nano);
     app.show_pane("outline");
     app.open_path("panes.md");
@@ -374,7 +410,10 @@ async fn panes(app: &Rc<App>) {
     };
     let says = |text: &str| shown().is_some_and(|shown| shown.contains(text));
     let outline = || sidebar.outline_lines(None);
-    until(|| says("Before") && outline().len() == 2, 10_000).await;
+    until("editor", "panes before", 10_000, || {
+        says("Before") && outline().len() == 2
+    })
+    .await;
     let front = app.active_doc().is_some_and(|doc| doc.rendered().is_some());
     println!(
         "bench editor panes view_mode={view_mode} preview_front={front} before={} outline={:?}",
@@ -387,7 +426,11 @@ async fn panes(app: &Rc<App>) {
         before.replace("Before", "Still")
     );
     std::fs::write(root.join("panes.md"), after).unwrap();
-    let saved = until(|| says("After") && outline().len() == 3, 10_000).await;
+    let saved = until("editor", "panes saved", 10_000, || {
+        says("After") && outline().len() == 3
+    })
+    .await
+    .is_some();
     println!(
         "bench editor panes saved={saved} before={} outline={:?}",
         says("Before"),
@@ -397,7 +440,10 @@ async fn panes(app: &Rc<App>) {
     app.reveal_page(&term.page);
     sidebar.show_section("references");
     let links = || sidebar.info_state().0;
-    until(|| links().contains("Links:open(1)"), 10_000).await;
+    until("editor", "panes references", 10_000, || {
+        links().contains("Links:open(1)")
+    })
+    .await;
     let section = links()
         .split(' ')
         .find(|s| s.starts_with("Links"))
@@ -405,7 +451,11 @@ async fn panes(app: &Rc<App>) {
     println!("bench editor panes references={section:?}");
     shoot(app, "editor-panes-links.png");
     term.view.feed_child(b"0\n");
-    let closed = until(|| app.terminals().is_empty(), 10_000).await;
+    let closed = until("editor", "panes closed", 10_000, || {
+        app.terminals().is_empty()
+    })
+    .await
+    .is_some();
     println!(
         "bench editor panes closed={closed} previews={}",
         app.rendereds().len()
@@ -451,7 +501,7 @@ async fn hold(app: &Rc<App>) {
     // Counted from here: the steps before started editors of their own.
     let _ = std::fs::remove_file(glib::home_dir().join("editor-starts"));
     std::fs::write(app.root().join("held.md"), "# Held\n").unwrap();
-    until(|| app.reconciled.get(), 30_000).await;
+    until("editor", "hold reconciled", 30_000, || app.reconciled.get()).await;
     pick(app, Editor::Nano);
     app.open_path("held.md");
     let started = started(app, "held.md").await;
@@ -459,7 +509,10 @@ async fn hold(app: &Rc<App>) {
     // shell put back behind another tab attaches only once it is shown.
     if let Some(term) = &started {
         app.toggle_preview();
-        until(|| app.rendered_of(&term.page).is_some(), 5_000).await;
+        until("editor", "hold preview", 5_000, || {
+            app.rendered_of(&term.page).is_some()
+        })
+        .await;
         app.reveal_page(&term.page);
     }
     println!(
@@ -481,17 +534,6 @@ async fn back(app: &Rc<App>) {
         starts()
     );
     quit(app);
-}
-
-/// Wait up to `ms` for `done`.
-async fn until(done: impl Fn() -> bool, ms: u64) -> bool {
-    for _ in 0..ms / 50 {
-        if done() {
-            return true;
-        }
-        glib::timeout_future(Duration::from_millis(50)).await;
-    }
-    done()
 }
 
 /// Every widget under `root` of type `T`, in order.
@@ -529,7 +571,7 @@ async fn prefs(app: &Rc<App>) {
         return println!("bench editor prefs row=none");
     };
     let listed = |name: &str| names(&row).iter().filter(|n| *n == name).count();
-    until(|| listed("Nano") > 0, 10_000).await;
+    until("editor", "prefs nano", 10_000, || listed("Nano") > 0).await;
     if let Some(at) = names(&row).iter().position(|n| n == "Nano") {
         row.set_selected(at as u32);
     }
