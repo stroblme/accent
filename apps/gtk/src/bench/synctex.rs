@@ -59,8 +59,15 @@ pub(super) fn bench_synctex(app: &Rc<App>, rel: &str) {
                 continue;
             };
             let line = tab.cursor_line();
+            // Marked as Go to Line marks it.
+            let marked = until("synctex", "marked", WAIT, || {
+                let (on, tag) = tab.reveal_highlight();
+                let start = tab.buffer.iter_at_line(line as i32 - 1);
+                on && start.is_some_and(|at| at.has_tag(&tag))
+            });
+            let marked = marked.await.is_some();
             println!(
-                "bench synctex edit {at} -> {}:{line} {}",
+                "bench synctex edit {at} -> {}:{line} marked={marked} {}",
                 tab.rel(),
                 offered(&app)
             );

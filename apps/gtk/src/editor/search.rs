@@ -782,7 +782,8 @@ impl Tab {
         );
     }
 
-    /// Whether the reveal is up, and the tag it paints with. Only `ACCENT_BENCH_REVEAL` reads it.
+    /// Whether the reveal is up, and the tag it paints with. Only `ACCENT_BENCH_REVEAL` and the
+    /// SyncTeX drill read it.
     #[cfg(feature = "bench")]
     pub fn reveal_highlight(&self) -> (bool, gtk::TextTag) {
         (self.revealed.get(), self.reveal_tag.clone())

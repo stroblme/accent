@@ -102,7 +102,8 @@ fn is_tex(key: &str) -> bool {
 }
 
 impl App {
-    /// Open the source line at [`PdfTab::source_point`](pdftab::PdfTab::source_point).
+    /// Open the source line at [`PdfTab::source_point`](pdftab::PdfTab::source_point), marked as
+    /// Go to Line marks the line it lands on, or in the terminal editor picked, at the line.
     /// Files outside the vault are reported in a toast instead of opened as vault notes.
     pub(crate) fn go_to_source(self: &Rc<Self>) {
         let Some(pdf) = self.active_pdf() else {
@@ -133,14 +134,16 @@ impl App {
                 let file = crate::start::abbreviate(&hit.file, Some(&glib::home_dir()));
                 return app.cannot("go to the source", format!("{file} is outside this vault"));
             };
-            let at = accent_api::Pos {
-                line: hit.line.saturating_sub(1),
-                character: 0,
-            };
-            app.open_at(&Location {
-                path: key,
-                range: accent_api::Range { start: at, end: at },
-                ..Default::default()
+            // Where the caret was, so Back returns to it.
+            app.mark();
+            let line = hit.line.max(1);
+            if app.edit_at(&key, (line, Some(1)), Opened::Preview) {
+                return;
+            }
+            let line = i32::try_from(line).unwrap_or(i32::MAX);
+            app.with_tab(&key, Opened::Preview, "go to", move |_, tab| {
+                tab.goto_line(line, 1);
+                tab.reveal_line(line);
             });
         });
     }
