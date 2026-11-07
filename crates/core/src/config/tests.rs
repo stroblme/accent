@@ -1,4 +1,4 @@
-use super::file::{edited, merge, retired_daily, theirs, unknown_keys};
+use super::file::{edited, fields, merge, retired_daily, theirs, unknown_keys};
 use super::*;
 use crate::git::Comparison;
 use std::path::Path;
@@ -459,6 +459,25 @@ daily_dir = "Daily"
         ["new_note_dir", "vaults./v.new_note_dir"]
     );
     assert!(unknown_keys(&EXAMPLE.parse().unwrap()).is_empty());
+}
+
+/// Every key the config reads is known, at both levels and whatever its value: a field written
+/// only while it is not empty is read all the same.
+#[test]
+fn every_field_read_is_known() {
+    let table: toml::Table = "bibliography_unpaywall_email = \"me@example.org\""
+        .parse()
+        .unwrap();
+    assert_eq!(unknown_keys(&table), Vec::<String>::new());
+
+    let each = |names: &[&str]| -> toml::Table {
+        names.iter().map(|n| (n.to_string(), true.into())).collect()
+    };
+    let mut table = each(fields::<Config>());
+    let vault = toml::Table::from_iter([("/v".to_string(), each(fields::<VaultConfig>()).into())]);
+    table.insert("vaults".into(), vault.into());
+    assert!(table.contains_key("bibliography_unpaywall_email"));
+    assert_eq!(unknown_keys(&table), Vec::<String>::new());
 }
 
 fn config_path_exists(base: &Path) -> bool {

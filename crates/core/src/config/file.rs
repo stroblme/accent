@@ -1,9 +1,8 @@
 //! Where config and state live, and how `config.toml` is read, merged with a hand edit and written.
 
-use super::{Config, CustomCommand, DebugConfig, Editor, LspConfig, VaultConfig};
+use super::{Config, VaultConfig};
 use crate::{Error, Result};
-use serde::Serialize;
-use std::collections::BTreeMap;
+use serde::de::{Deserialize, Deserializer, Visitor};
 use std::path::{Path, PathBuf};
 
 impl Config {
@@ -162,50 +161,58 @@ impl Config {
 /// Unknown or retired `config.toml` keys. Compare the raw top-level and vault tables with known
 /// fields before Serde discards extras. Leave `daily_*` keys to [`daily_keys`] for migration advice.
 pub(super) fn unknown_keys(table: &toml::Table) -> Vec<String> {
-    // The struct's own field names, read off a serialised value rather than kept as a second
-    // list. The fonts are skipped when `None`, the editor when accent's own, its command and the
-    // maps when empty, so each is filled in to be seen.
-    fn names<T: Serialize>(v: T) -> Vec<String> {
-        toml::Value::try_from(v)
-            .ok()
-            .and_then(|v| v.as_table().map(|t| t.keys().cloned().collect()))
-            .unwrap_or_default()
-    }
-    let one = || BTreeMap::from([(String::new(), Vec::new())]);
-    let debug = || DebugConfig {
-        adapters: one(),
-        ..DebugConfig::default()
-    };
-    let vault = VaultConfig {
-        lsp: LspConfig { servers: one() },
-        debug: debug(),
-        ..VaultConfig::default()
-    };
-    let top = names(Config {
-        editor_font: Some(String::new()),
-        preview_font: Some(String::new()),
-        editor: Editor::Helix,
-        editor_command: "x".into(),
-        shortcuts: one(),
-        commands: vec![CustomCommand::default()],
-        lsp: LspConfig { servers: one() },
-        debug: debug(),
-        vaults: BTreeMap::from([(String::new(), vault.clone())]),
-        ..Config::default()
-    });
-    let vault = names(vault);
-    let mut out: Vec<String> = table.keys().filter(|k| !top.contains(k)).cloned().collect();
+    let (top, vault) = (fields::<Config>(), fields::<VaultConfig>());
+    let mut out: Vec<String> = table
+        .keys()
+        .filter(|k| !top.contains(&k.as_str()))
+        .cloned()
+        .collect();
     if let Some(vaults) = table.get("vaults").and_then(toml::Value::as_table) {
         for (name, v) in vaults {
             let Some(v) = v.as_table() else { continue };
             out.extend(
                 v.keys()
-                    .filter(|k| !vault.contains(k) && !k.starts_with("daily_"))
+                    .filter(|k| !vault.contains(&k.as_str()) && !k.starts_with("daily_"))
                     .map(|k| format!("vaults.{name}.{k}")),
             );
         }
     }
     out
+}
+
+/// The keys `T` reads: the field names its derived `Deserialize` hands the deserializer, which
+/// [`Names`] keeps and then refuses. Taken from the struct itself, so a field written only while
+/// it is not empty is known all the same.
+pub(super) fn fields<'de, T: Deserialize<'de>>() -> &'static [&'static str] {
+    let mut names = Names(&[]);
+    let _ = T::deserialize(&mut names);
+    names.0
+}
+
+/// A deserializer that reads nothing and keeps the field names a struct asks it for.
+struct Names(&'static [&'static str]);
+
+impl<'de> Deserializer<'de> for &mut Names {
+    type Error = serde::de::value::Error;
+
+    fn deserialize_struct<V: Visitor<'de>>(
+        self,
+        _: &'static str,
+        fields: &'static [&'static str],
+        visitor: V,
+    ) -> std::result::Result<V::Value, Self::Error> {
+        self.0 = fields;
+        self.deserialize_any(visitor)
+    }
+
+    fn deserialize_any<V: Visitor<'de>>(self, _: V) -> std::result::Result<V::Value, Self::Error> {
+        Err(serde::de::Error::custom("only the field names are read"))
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes byte_buf option
+        unit unit_struct newtype_struct seq tuple tuple_struct map enum identifier ignored_any
+    }
 }
 
 /// A change to `config.toml` taken in by [`Config::reread`].
