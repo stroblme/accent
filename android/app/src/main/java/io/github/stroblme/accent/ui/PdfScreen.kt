@@ -82,7 +82,8 @@ import io.github.stroblme.accent.ffi.Point
 import io.github.stroblme.accent.ffi.Rect
 import io.github.stroblme.accent.ffi.Theme
 import java.io.File
-import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.transform
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -445,17 +446,15 @@ private fun Pages(
     // again. The zoom, the pan, the viewport and the map above all are; the tool in hand is not.
     val inHand by rememberUpdatedState(tool)
 
-    /** Render scale and visible column region, updated after a gesture settles. */
-    var settled by remember { mutableStateOf(Settled(1f, IntRect.Zero)) }
+    /** Render scale and visible column region, following the screen while it moves. */
+    var followed by remember { mutableStateOf(Followed(1f, IntRect.Zero)) }
     LaunchedEffect(pages, viewport) {
-        snapshotFlow {
+        fun screen(): Followed {
             val top = pages.above(list, viewport.width, zoom).roundToInt()
             val left = (-panX).roundToInt()
-            Settled(zoom, IntRect(left, top, left + viewport.width, top + viewport.height))
-        }.collectLatest {
-            delay(RESHARPEN_MS)
-            settled = it
+            return Followed(zoom, IntRect(left, top, left + viewport.width, top + viewport.height))
         }
+        snapshotFlow(::screen).following(RESHARPEN_MS, ::screen).collect { followed = it }
     }
 
     // Where the reader is, said as it changes: a backlink followed out of the document keeps it,
@@ -849,13 +848,13 @@ private fun Pages(
                             pageWidth = size.width,
                             pageHeight = size.height,
                             shownPx = (viewport.width * zoom).toInt(),
-                            renderPx = (viewport.width * settled.zoom).toInt(),
-                            // The settled screen in this page's own pixels: a page is exactly as
+                            renderPx = (viewport.width * followed.zoom).toInt(),
+                            // The followed screen in this page's own pixels: a page is exactly as
                             // wide as the column, so the only difference is where the page starts
                             // down it.
-                            window = settled.window.translate(
+                            window = followed.window.translate(
                                 0,
-                                -pages.top(index, viewport.width, settled.zoom).roundToInt(),
+                                -pages.top(index, viewport.width, followed.zoom).roundToInt(),
                             ),
                             theme = theme,
                             tool = tool,
@@ -1065,14 +1064,27 @@ private const val MAX_ZOOM = 8f
 /** How long the typing rests before a find starts over. */
 private const val FIND_AFTER_MS = 150L
 
-/** How long the hands rest before the pages are drawn again at where they left them. */
+/** How often the pages are drawn again where the screen has got to, while it moves and after. */
 private const val RESHARPEN_MS = 180L
 
 /** Render whole pages up to 8 Mpx (32 MB ARGB); use visible tiles beyond that. */
 private const val WHOLE_PAGE_PX = 8_000_000L
 
-/** Where the reader had got to when the hands stopped: the zoom, and the column rect on screen. */
-private data class Settled(val zoom: Float, val window: IntRect)
+/** Where the screen was when the pages last followed it: the zoom, and the column rect on it. */
+private data class Followed(val zoom: Float, val window: IntRect)
+
+/**
+ * What [now] says, [period] after each change this flow reports: a screen that keeps moving is
+ * followed once every [period], at where it has got to by then, and one that stops is caught up
+ * with a [period] later. Not a debounce, which a fling's frames kept putting off until its last,
+ * seconds of blank page later; nor every frame, each of which would be a render. The flow keeps
+ * only its latest change while the wait runs, as [snapshotFlow] does, or the waits would queue.
+ */
+internal fun <T> Flow<T>.following(period: Long, now: () -> T): Flow<T> =
+    transform {
+        delay(period)
+        emit(now())
+    }
 
 /** Clamp [MAX_ZOOM] so Compose constraints stay within 32766 px width and 65534 px height. */
 internal fun ceiling(viewport: IntSize): Float =
@@ -1119,15 +1131,21 @@ private fun Page(
     val colors = MaterialTheme.colorScheme
 
     val whole = IntRect(0, 0, renderPx, (pageHeight * renderPx / pageWidth).toInt())
-    val want = visible(whole, window)
-    LaunchedEffect(index, renderPx, theme, generation, want) {
-        // Nothing of it on screen and too big to draw whole: keep whatever it has until it is.
-        if (want.isEmpty) return@LaunchedEffect
+    val wanted by rememberUpdatedState(visible(whole, window))
+    // Another zoom, theme or edit puts the render in flight out of date, so it starts over. The
+    // screen moving on does not: that render is still this page where the screen just was, so it
+    // lands, and the part the screen has got to is drawn next. Started over at every move, a
+    // render slower than the screen's moves would land only once they stopped.
+    LaunchedEffect(index, renderPx, theme, generation) {
         val perPoint = renderPx / pageWidth
-        val image =
-            if (want == whole) doc.page(index, perPoint, theme)
-            else doc.tile(index, perPoint, want.left, want.top, want.width, want.height, theme)
-        if (image != null) sheet = Sheet(image, want, renderPx)
+        snapshotFlow { wanted }.collect { want ->
+            // Nothing of it on screen and too big to draw whole: keep whatever it has until it is.
+            if (want.isEmpty) return@collect
+            val image =
+                if (want == whole) doc.page(index, perPoint, theme)
+                else doc.tile(index, perPoint, want.left, want.top, want.width, want.height, theme)
+            if (image != null) sheet = Sheet(image, want, renderPx)
+        }
     }
 
     // What is being drawn right now, in view pixels, before the core has it.
