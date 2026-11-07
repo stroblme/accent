@@ -222,5 +222,6 @@ The shared architecture is in [DESIGN.md](DESIGN.md).
 ## What is not here, and why
 
 - Git, language servers, ghost text, word suggestions, remote vaults, the terminal, the draw.io editor, splits, comparison, Replace All, the minimap, focus levels and presentation mode remain desktop features.
+  A Typst source opens as text, and the PDF the desktop builds from it opens as any other PDF (user decision 2026-11-07).
   Add a phone feature only when it helps read the vault, make a small edit or work with a PDF.
 - Deferred features include a native Compose renderer in place of the WebView, a separate Export Highlights command, and the desktop PDF drawing tools, including Text, Select and pictures.

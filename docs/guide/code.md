@@ -20,6 +20,7 @@ Install a language server on the computer that holds your [vault](vaults.md).
 Accent starts a supported server when you open a file.
 For example, it tries `rust-analyzer` for Rust, `pyright` or `pylsp` for Python, `texlab` for LaTeX and `tinymist` for Typst.
 On a [remote vault](remote.md), install the server on the host.
+The Flatpak starts a local vault's servers inside its sandbox, so it does not find the ones installed on your computer.
 
 Completion appears as you type, or you can request it with `Ctrl+Space`.
 Choose a suggestion with the arrow keys, then press `Tab` or `Return`.

@@ -1559,6 +1559,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The main document is the one pinned where it brings the file in, else the file including it, looked for in its folder and then each folder above it inside the root, nearest first, up to one nothing includes.
   Unpinned, a chapter's save exported the chapter alone, and its labels named nothing.
   Its outline holds the headings with their labels, `#let`s and loop variables inside, each heading spanning its title alone, so accent runs each to the next heading beside it, as the sticky title reads a section, and leaves out the `<anonymous>` row it gives a show rule's function.
+- In the Flatpak a local vault's servers start inside the sandbox, which ships none, so texlab, tinymist and the rest are not found there (user decision 2026-11-07), while a remote vault's are the host's.
 - Which server answers for which language is a table in the app, overridden in `config.toml` for every vault on this machine (`[lsp.servers]`) and per vault (`[vaults."<root>".lsp.servers]`), the vault's own winning key by key; a remote vault takes its own table alone, the host's servers being the host's.
   No preference, the answer being whether it is installed.
 - **Ghost text** (Architecture) is the rest of the line as the vault has written it, in prose, painted dim after the caret; `Tab` accepts and `Esc` dismisses.
