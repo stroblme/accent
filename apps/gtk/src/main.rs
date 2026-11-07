@@ -42,6 +42,7 @@ mod highlight;
 mod hover;
 mod lang;
 mod layout;
+mod loading;
 mod look;
 mod malloc;
 mod marks;
@@ -873,7 +874,7 @@ impl App {
             // A shell and a comparison are no file, and take the pane's own "Open a file…".
             let none = match doc {
                 Doc::Image(_) => Some("An image has no headings or bookmarks."),
-                Doc::Status(_) => Some("This file has nothing to outline."),
+                Doc::Status(_) | Doc::Loading(_) => Some("This file has nothing to outline."),
                 _ => None,
             };
             let note = none.map(|body| sidebar::outline_note("No Outline", body));
@@ -1016,7 +1017,7 @@ impl App {
             Some(Doc::Image(_)) => (Some("Image".to_string()), None),
             Some(Doc::Terminal(_)) => (Some("Terminal".to_string()), None),
             Some(Doc::Rendered(_)) => (Some("Preview".to_string()), None),
-            Some(Doc::Status(_)) | Some(Doc::Diff(_)) | None => (None, None),
+            Some(Doc::Status(_) | Doc::Loading(_)) | Some(Doc::Diff(_)) | None => (None, None),
         };
         self.statusbar.set_kind(kind.as_deref());
         let starting = doc
@@ -1604,12 +1605,15 @@ impl App {
         });
     }
 
-    /// Tell the status bar whether the active tab is a PDF still being opened.
+    /// Tell the status bar whether the active tab is a PDF still being opened: not one whose bytes
+    /// are on their way, which the status bar counts, nor one whose fetch failed.
     fn sync_opening(self: &Rc<Self>) {
         let opening = self
             .active_doc()
             .and_then(|doc| doc.pdf().cloned())
-            .is_some_and(|pdf| pdf.opening() && !self.fetching.borrow().contains(&pdf.key()));
+            .is_some_and(|pdf| {
+                pdf.opening() && !pdf.fetch_failed() && !self.fetching.borrow().contains(&pdf.key())
+            });
         self.statusbar.set_opening(opening);
     }
 

@@ -6,6 +6,7 @@
 use super::protocol::Request;
 use super::ring;
 use super::{self as pdfview, Anchor, PdfView, PdfZoom, Span, render};
+use crate::loading;
 use crate::widgets::{Debounce, Hook};
 use accent_api::PdfLink;
 use accent_core::pdf;
@@ -220,7 +221,8 @@ pub struct PdfTab {
 }
 
 /// A new tab of `tabs` for the PDF at `path`, showing itself opening until [`PdfTab::load`] is
-/// handed the bytes. Never fails: a document that will not open is a tab holding the reason.
+/// handed the bytes, which on a remote vault come from `remote`. Never fails: a document that
+/// will not open is a tab holding the reason.
 pub fn open(
     path: &Path,
     key: &str,
@@ -228,6 +230,7 @@ pub fn open(
     tooltip: &str,
     tabs: &adw::TabView,
     place: Place,
+    remote: Option<&str>,
 ) -> Rc<PdfTab> {
     let view = PdfView::new();
     let thumbs = PdfView::thumbnails();
@@ -257,14 +260,8 @@ pub fn open(
         .build();
     stack.add_named(&host, Some("view"));
     stack.add_named(&status, Some("status"));
-    // In place of the empty pages while a document is slow to open: see [`OPENING`].
-    let spinner = adw::Spinner::builder()
-        .width_request(32)
-        .height_request(32)
-        .halign(gtk::Align::Center)
-        .valign(gtk::Align::Center)
-        .build();
-    stack.add_named(&spinner, Some("opening"));
+    // In place of the empty pages while a document is slow to open: see `loading::OPENING`.
+    stack.add_named(&loading::page(title, remote), Some(loading::LOADING));
 
     let page = tabs.append(&stack);
     page.set_title(title);
@@ -438,24 +435,20 @@ pub fn open(
     // thread reports back, so the window is on screen in the time it takes to build a widget.
     tab.stack.set_visible_child_name("view");
     glib::timeout_add_local_once(
-        OPENING,
+        loading::OPENING,
         glib::clone!(
             #[weak]
             tab,
             move || {
                 let empty = tab.stack.visible_child_name().as_deref() == Some("view");
                 if empty && tab.pending.get().is_some() {
-                    tab.stack.set_visible_child_name("opening");
+                    tab.stack.set_visible_child_name(loading::LOADING);
                 }
             }
         ),
     );
     tab
 }
-
-/// Opening delay before showing the spinner, matching search progress timing (DESIGN.md,
-/// Loading) to avoid flashing on quick opens.
-const OPENING: std::time::Duration = std::time::Duration::from_millis(160);
 
 impl PdfTab {
     pub fn key(&self) -> String {
@@ -470,6 +463,11 @@ impl PdfTab {
     /// vault's copy once the fetch has landed.
     pub fn load(self: &Rc<Self>, path: &Path) {
         *self.path.borrow_mut() = path.to_path_buf();
+        // Its bytes are here: the loading page waits for pdfium now, not for a host.
+        let page = self.stack.child_by_name(loading::LOADING);
+        if let Some(page) = page.and_downcast::<adw::StatusPage>() {
+            page.set_description(None);
+        }
         if let Err(message) = self.start() {
             self.fail(&message);
         }
@@ -1089,6 +1087,17 @@ impl PdfTab {
     /// Called once the document is open and its pages are known, and again after a reload.
     pub fn connect_opened(self: &Rc<Self>, f: impl Fn(&Rc<PdfTab>) + 'static) {
         self.on_open.set(Rc::new(f));
+    }
+
+    /// Whether the document was handed its bytes: not while they are on their way from a host,
+    /// nor after their fetch failed.
+    pub fn started(&self) -> bool {
+        self.tx.borrow().is_some()
+    }
+
+    /// Whether the tab says its bytes did not come (`App::fetch_failed`).
+    pub fn fetch_failed(&self) -> bool {
+        self.stack.visible_child_name().as_deref() == Some(loading::FAILED)
     }
 
     /// Whether the render thread is still opening the document.

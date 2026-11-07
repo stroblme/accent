@@ -56,6 +56,8 @@ impl App {
             let parsed = crate::work::off_thread("diagram reader", {
                 let (key, path) = (key.clone(), path.clone());
                 move || {
+                    #[cfg(feature = "bench")]
+                    crate::bench::hold(&crate::bench::SLOW_READ_MS);
                     parse(match vault {
                         Some(vault) => vault.read_text(&key),
                         None => accent_core::fs::read_text(&path).map_err(Into::into),
@@ -63,10 +65,10 @@ impl App {
                 }
             })
             .await;
-            let Some(app) = weak.upgrade() else { return };
-            if app.doc_for(&key).is_some() {
+            // Its tab closed while it was on its way, or holds what an earlier read brought.
+            let Some(app) = weak.upgrade().filter(|app| app.holds(&key)) else {
                 return;
-            }
+            };
             if let Some(parsed) = parsed {
                 app.adopt_diagram(&key, &path, parsed, how);
             }
@@ -96,7 +98,10 @@ impl App {
         let (file, etag, digest) = match parsed {
             Parsed::Diagram(file, etag, digest) => (file, etag, digest),
             Parsed::Refused(title, body) => return self.open_status(key, title, &body, how),
-            Parsed::Failed(e) => return self.cannot_open(key, e),
+            Parsed::Failed(e) => return self.read_failed(key, e),
+        };
+        let Some(held) = self.take_held(key) else {
+            return;
         };
         let place = self
             .vault()
@@ -107,7 +112,7 @@ impl App {
             path,
             doc::file_name(key),
             &fileops::display_path(&self.root(), key),
-            &self.tabs_for(key),
+            &held,
             (file, etag, digest),
             place,
         );
@@ -131,9 +136,7 @@ impl App {
         self.mark_loose(&page, key);
         self.watch_folder_of(key);
         self.docs.borrow_mut().push(Doc::Diagram(tab));
-        self.select_new_page(&page, how);
-        self.mark_opened(&page, how);
-        self.save_session_soon();
+        self.landed(&page, how);
     }
 
     fn wire_diagram(self: &Rc<Self>, tab: &Rc<DiagramTab>) {

@@ -11,6 +11,7 @@ use super::Anchor;
 use super::protocol::{Reply, Request};
 use super::selection::pages_of;
 use super::tab::PdfTab;
+use crate::loading;
 
 impl PdfTab {
     /// Clear strokes, links, glyphs and selections after document changes so stale indices
@@ -295,7 +296,7 @@ impl PdfTab {
             Some(place) => {
                 self.view.goto_page(place.page, None);
                 match self.stack.visible_child_name().as_deref() {
-                    Some("opening") => self.stack.set_visible_child_name("view"),
+                    Some(loading::LOADING) => self.stack.set_visible_child_name("view"),
                     _ => crate::widgets::fade_in(&self.view),
                 }
             }

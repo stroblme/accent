@@ -37,7 +37,7 @@ fn front_of(doc: &Doc) -> Front {
         Doc::Terminal(_) => Front::Terminal,
         Doc::Diff(_) => Front::Diff,
         Doc::Rendered(_) => Front::Preview,
-        Doc::Status(_) => Front::Status,
+        Doc::Status(_) | Doc::Loading(_) => Front::Status,
     }
 }
 
@@ -825,7 +825,7 @@ impl App {
                 "zoom-out" => d.zoom_step(true),
                 _ => d.fit_page(),
             },
-            Some(Doc::Status(_)) | None => {}
+            Some(Doc::Status(_) | Doc::Loading(_)) | None => {}
         }
     }
 

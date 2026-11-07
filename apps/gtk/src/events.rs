@@ -22,6 +22,14 @@ impl App {
             };
             doc.retarget(&self.root(), &moved);
             self.watch_folder_of(&moved);
+            // A file still on its way is read again under its new name: the read in flight
+            // finds no tab under the old one when it lands.
+            if let Doc::Loading(held) = &doc
+                && !held.failed()
+                && let Some((key, path)) = self.locate(&moved)
+            {
+                self.read(&key, &path, Opened::Kept);
+            }
         }
         accent_core::config::rename_in(&mut self.recent_files.borrow_mut(), from, to);
         self.nav.borrow_mut().rename(from, to);
@@ -81,7 +89,7 @@ impl App {
                 self.local_copy(rel, &self.root().join(rel), move |app, copy| {
                     match (image.upgrade(), copy) {
                         (Some(image), Ok(copy)) => app.show_image(&image, Some(copy)),
-                        (Some(_), Err(e)) => app.cannot("reload", e),
+                        (Some(image), Err(e)) => app.image_failed(&image, e),
                         (None, _) => {}
                     }
                 });
@@ -89,6 +97,13 @@ impl App {
             // What was drawn and has not reached the host goes up instead, beside the host's
             // file if that has moved on: a fetch would write over it.
             Doc::Pdf(pdf) if pdf.unsent() => self.push_pdf(pdf),
+            // One whose fetch failed is fetched again; one whose bytes are on their way is left
+            // to them.
+            Doc::Pdf(pdf) if !pdf.started() => {
+                if pdf.fetch_failed() {
+                    self.load_pdf(pdf);
+                }
+            }
             // A rebuilt PDF, which is what a LaTeX loop produces: re-read it in place
             // rather than sending the reader back to page one. On a remote vault the
             // reader has a cached copy open, which is fetched again first.
@@ -104,6 +119,9 @@ impl App {
             }
             Doc::Diagram(d) => self.model_changed(d),
             Doc::Notebook(n) => self.model_changed(n),
+            // A read that failed, the link down perhaps, is tried again; one on its way reads
+            // the file as it is when it gets there.
+            Doc::Loading(held) => self.read_again(held),
             // Neither a diff nor a shell is keyed by a path, so a file changing under one
             // reaches none of these; a preview is rendered again from its note's tab.
             Doc::Status(_) | Doc::Diff(_) | Doc::Terminal(_) | Doc::Rendered(_) => {}

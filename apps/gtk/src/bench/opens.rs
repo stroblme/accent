@@ -90,16 +90,19 @@ pub(super) fn bench_opens(app: &Rc<App>) {
         app.pending.as_text(py);
         app.pending.in_accent(py);
         app.open_note_at(py, Some(sidebar::Target::Range(0..1, None)));
-        until("opens", "hit", 5000, || app.doc_for(py).is_some()).await;
+        until("opens", "hit", 5000, || read_in(&app, py)).await;
         let tab = super::terminal_editor::kind_of(&app, py);
         println!("bench opens hit tab={tab} once={:?}", app.pending.once(py));
         app.toasts.dismiss_all();
         let notebook = "opens-unread.ipynb";
         app.pending.as_text(notebook);
         app.open_path(notebook);
-        until("opens", "as_text toast", 5000, || {
-            !app.toasts.shown().is_empty()
-        })
+        until(
+            "opens",
+            "as_text failed",
+            5000,
+            || matches!(app.doc_for(notebook), Some(Doc::Loading(held)) if held.failed()),
+        )
         .await;
         let once = app.pending.once(notebook);
         println!("bench opens as_text said={:?} once={once:?}", said(&app));
@@ -110,22 +113,24 @@ pub(super) fn bench_opens(app: &Rc<App>) {
         let path = root.join(notebook);
         let _ = std::fs::remove_dir(&path).and_then(|()| std::fs::write(&path, cells));
         app.open_preview(notebook);
-        until("opens", "as_text_next", 5000, || {
-            app.doc_for(notebook).is_some()
-        })
-        .await;
+        until("opens", "as_text_next", 5000, || read_in(&app, notebook)).await;
         let tab = super::terminal_editor::kind_of(&app, notebook);
         println!("bench opens as_text_next tab={tab}");
         let unread = root.join("opens-unread.md");
         let _ = std::fs::remove_dir(&unread).and_then(|()| std::fs::write(&unread, "# Read\n"));
         app.open_preview("opens-unread.md");
         until("opens", "readable", 5000, || {
-            app.doc_for("opens-unread.md").is_some()
+            read_in(&app, "opens-unread.md")
         })
         .await;
         println!("bench opens readable {}", landed(&app, "opens-unread.md"));
         bench_quit(&app);
     });
+}
+
+/// Whether `rel`'s document is in its tab, its read landed.
+fn read_in(app: &Rc<App>, rel: &str) -> bool {
+    !matches!(app.doc_for(rel), None | Some(Doc::Loading(_)))
 }
 
 /// The toasts standing, the vault's path in them spelt `<vault>`: a drill's is a scratch folder.

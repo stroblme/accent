@@ -29,6 +29,7 @@ mod keys;
 mod keys_typing;
 mod keys_xtest;
 mod listed;
+mod loading;
 mod loose;
 mod memory;
 mod menus;
@@ -107,6 +108,7 @@ use info::bench_info;
 use keys::bench_keys;
 use keys_typing::bench_list;
 use keys_xtest::{bench_box_drag, bench_menu_caret, bench_occurrence_keys};
+pub(crate) use loading::SLOW_READ_MS;
 use minimap::bench_minimap;
 use notebook::bench_notebook;
 use outline::bench_outline;
@@ -293,10 +295,13 @@ use user_commands::bench_commands;
 ///   (loose-file readers/assets; creates/removes `loose-drill/`), `toggle:<a>,<b>`
 ///   (XTEST `Ctrl+M` between `a` and its preview tab, `toggle::bench_toggle`), `commands`
 ///   (Run Command's rows over a note and a PDF it writes, `listed::bench_listed`), `opens`
-///   (failed opens, other kinds and requests during an open, `opens::bench_opens`). Remote
-///   pin-window/apart modes verify tabs cannot move off the host.
-/// - `ACCENT_BENCH_SLOW_READ=<ms>`: delay text reads on workers to reproduce
-///   double-clicks before tabs arrive in the `TABS=tree:` drill.
+///   (failed opens, other kinds and requests during an open, `opens::bench_opens`),
+///   `loading` (tabs up before their files arrive, each kind's, `loading::bench_loading`; writes
+///   `loading*` files), `opening:<rel>,…` (on a remote
+///   vault, ms until each file's tab is up and its document in, `loading::bench_opening`).
+///   Remote pin-window/apart modes verify tabs cannot move off the host.
+/// - `ACCENT_BENCH_SLOW_READ=<ms>`: delay reads and fetches on workers, as a slow host would, for
+///   double-clicks in the `TABS=tree:` drill (`TABS=loading` sets its own).
 /// - `ACCENT_BENCH_FOLLOW=<rel_note>`: Ctrl-hover, missing targets and anchors;
 ///   `hover:<rel_note>`: XTEST hover size and wheel behavior; `click:<rel_note>`: an XTEST
 ///   Ctrl+click jump within the note leaves nothing selected.
@@ -406,6 +411,12 @@ use user_commands::bench_commands;
 /// - `ACCENT_BENCH_SHOT=<n>:<dir>`: README screenshot `n`, light and dark, into `<dir>`. Only
 ///   on the vault and launch `build-aux/screenshots.sh` makes (`make screenshots`).
 pub fn install_bench_hooks(app: &Rc<App>) {
+    if let Some(ms) = std::env::var("ACCENT_BENCH_SLOW_READ")
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+    {
+        SLOW_READ_MS.store(ms, std::sync::atomic::Ordering::Relaxed);
+    }
     if std::env::var_os("ACCENT_BENCH_BIBLIOGRAPHY").is_some() {
         scratch_only(app, "ACCENT_BENCH_BIBLIOGRAPHY");
         crate::bibliography::bench::run(app);
@@ -845,6 +856,12 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if rels == "opens" {
                 return opens::bench_opens(&app);
+            }
+            if rels == "loading" {
+                return loading::bench_loading(&app);
+            }
+            if let Some(rels) = rels.strip_prefix("opening:") {
+                return loading::bench_opening(&app, rels);
             }
             if let Some(rels) = rels.strip_prefix("pinwin:") {
                 return bench_pin_window(&app, rels);

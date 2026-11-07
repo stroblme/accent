@@ -1,10 +1,10 @@
 bench opens gone said=["Cannot open opens-gone.md: not in this vault"] ran=false waiting=0 tab=none once=(false, false)
-bench opens unreadable said=["Cannot open opens-unread.md: <vault>/opens-unread.md: not a regular file"] ran=false waiting=0 tab=none once=(false, false)
+bench opens unreadable said=["Cannot go to opens-unread.md: <vault>/opens-unread.md: not a regular file"] ran=false waiting=0 tab=loading once=(false, false)
 bench opens binary said=["Cannot go to opens-blob.txt: binary file"] ran=false waiting=0 tab=other once=(false, false)
 bench opens diagram said=["Cannot go to opens-diagram.xml: a diagram, not a text file"] ran=false waiting=0 tab=diagram once=(false, false)
 bench opens during said=[] ran=true waiting=0 tabs=1 preview=Some(false) once=(false, false)
 bench opens again once=(false, false)
 bench opens hit tab=text once=(false, false)
-bench opens as_text said=["Cannot open opens-unread.ipynb: <vault>/opens-unread.ipynb: not a regular file"] once=(false, false)
+bench opens as_text said=[] once=(false, false)
 bench opens as_text_next tab=notebook
-bench opens readable tabs=1 preview=Some(true)
+bench opens readable tabs=1 preview=Some(false)

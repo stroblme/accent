@@ -90,7 +90,8 @@ fn zoom_around(app: &Rc<App>, rel: &str) {
             println!("bench image anchor no_tab");
             return bench_quit(&app);
         };
-        let Ok(scroller) = image.page.child().downcast::<gtk::ScrolledWindow>() else {
+        let Ok(scroller) = crate::loading::content(&image.page).downcast::<gtk::ScrolledWindow>()
+        else {
             return bench_quit(&app);
         };
         let at = (

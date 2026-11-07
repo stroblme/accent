@@ -73,7 +73,12 @@ impl App {
         }
         let Some(key) = self
             .active_doc()
-            .filter(|doc| matches!(doc, Doc::Pdf(_) | Doc::Image(_) | Doc::Status(_)))
+            .filter(|doc| {
+                matches!(
+                    doc,
+                    Doc::Pdf(_) | Doc::Image(_) | Doc::Status(_) | Doc::Loading(_)
+                )
+            })
             .map(|doc| doc.key())
         else {
             return;

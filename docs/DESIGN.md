@@ -874,7 +874,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The window comes back in the pane the reader was in, on the tab that was in front, a comparison with git included (Comparison).
 - A debugged program's terminal and the Debug Console are a debug session's, not the vault's: neither is put back, and as any shell each stays in its window.
   The console opens right after the program's tab in its pane, behind it, and the next session reuses it where it is.
-- Tabs land one read at a time; a pane the reader picks a tab in, opens a note into or moves the keyboard to meanwhile is theirs, and what lands there does not change what it shows.
+- A restore puts every tab back at once, each showing the loading page until its file arrives (Loading), and their documents land one read at a time.
+  A pane the reader picks a tab in, opens a note into or moves the keyboard to meanwhile is theirs, and what lands there does not change what it shows.
   A file named on the command line is such an opening, whether or not the session holds it: it comes to the front.
 - A restored window has an empty Back and Forward: a restore's selections are not places.
   A first opening, or a session without a layout, is one pane; a split's share is kept to 10–90 %.
@@ -1673,6 +1674,14 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Between queries its place says what the answer holds — "12 results in 3 files", `+` on a number the cap may have cut — in `.caption` `.dimmed`.
 - **A bar belongs to the surface it is about to fill**, which allows one more: a remote vault's first connection, across the top of the document column and inset from its edges as the tab bar insets its tabs, since that wait makes the whole column usable and can take seconds.
   It measures the upload of the server binary and pulses through the rest, fading in as the connection starts; a local vault's window never shows it.
+- **A file's tab is up at once** (user request 2026-11-07), however slow the host.
+  A click, the palette or a restore puts it in its pane, titled and with its file's icon, before a byte has arrived, and the document takes its place once its read or fetch lands.
+  Until then the tab is blank, and once the open has taken 160 ms it shows the loading page, a status page as the PDF's "Cannot Open This PDF" is, with libadwaita's spinner for its icon, "Opening paper.pdf" and on a remote vault "Waiting for host.".
+  It crossfades in and out of it, and a local note or a cached copy lands before it would show, so a quick open never flashes it.
+  A note, a diagram or a notebook is read before its tab can be built, so its tab is held for it until then (`loading::Held`), and an image's and a PDF's tab, built at once, holds its picture or its pages back the same way.
+  Opened again meanwhile it comes to the front and stays one tab, and closed meanwhile it lets go of what was read, so nothing is built and nothing written.
+  A read or a fetch that fails says so in the tab, "Cannot Open paper.pdf" over the reason, with Retry as a failed upload's toast offers it, and opening the file again or the link coming back tries again too, while what waited on the tab, a jump to a match say, is told in a toast.
+  A file that is not there closes its tab instead, as it would never have had one, and the toast names it.
 - Elsewhere a 16 px `AdwSpinner` beside the control that started the work, unless that would move the layout: a Git command's spinner takes the place of its button's icon or label, at the button's size, so the row keeps its width (Git pane), crossfading in once the command has taken 160 ms and back out, so a quick command does not blink the button; the Code pane's strips keep the spinner's room while it is away (Sidebar, Code).
   The status bar's branch, the same action as Sync, greys out while a sync runs.
 
@@ -2269,7 +2278,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 ## Motion
 
 - Every fade, crossfade and slide takes 250 ms and eases out, libadwaita's ease-out cubic (`widgets::FADE_MS`, user decision 2026-10-28): GtkRevealer's own default, which a revealer keeps and a stack is set to, a stylesheet transition writing the easing out (`widgets::CSS_EASING`).
-  Switches crossfade and new pages fade in: the sidebar's panes, a tab picked in the pane the reader is in (a newly opened one too), a PDF's pages on their first open, or the spinner that took their place once the open had taken 160 ms, the PDF's "Cannot Open" page, the card a held `Ctrl+Tab` shows, and each new output of a notebook's run (Notebook).
+  Switches crossfade and new pages fade in: the sidebar's panes, a tab picked in the pane the reader is in (a newly opened one too), a PDF's pages on their first open, a file's loading page once its open has taken 160 ms and its document crossfading in from it (Loading), the PDF's "Cannot Open" page, the card a held `Ctrl+Tab` shows, and each new output of a notebook's run (Notebook).
   A toast slides into the pile and out of it, and the toasts slide out of the status bar's way in presentation mode.
 - Buttons a hover brings slide in where they take room (a list row's, Sidebar) and fade where they keep it or lie over something (a branch's trash, a page thumbnail's round buttons, a notebook's add strips); the Search pane's replace row and a folder field's list slide open.
   The line numbers brighten as the pointer comes into the gutter and dim again as it leaves, one fade that turns round where it is (Typography).
@@ -2298,7 +2307,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 | Every fade, crossfade, slide and turn above, the toasts' lift over the status bar too | 250 ms | `widgets.rs::FADE_MS` |
 | Focus mode's fades: the chrome, the receding panes, the line fade, a notebook's outputs | 250 ms | `fade.rs::RAMP_MS` |
 | A wheel notch's scroll | 200 ms | `widgets.rs::WHEEL_MS` |
-| A PDF still opening shows a spinner | 160 ms | `pdf/tab.rs::OPENING` |
+| A file still opening shows its loading page | 160 ms | `loading.rs::OPENING` |
 | A Git command still running shows its button's spinner | 160 ms | `git/mod.rs::SPIN_AFTER` |
 | A held `Ctrl+Tab` shows its card | 200 ms | `switcher.rs::DELAY` |
 | End-of-line messages cut again after a width change | 150 ms | `editor/mod.rs::DEBOUNCE` |

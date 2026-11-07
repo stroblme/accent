@@ -39,9 +39,10 @@ impl App {
         let zoom = zoom.map(clamp_scale);
         image.zoom.set(zoom);
         let size = set_image_zoom(&picture, zoom);
-        if let (Some(size), Ok(scroller)) =
-            (size, image.page.child().downcast::<gtk::ScrolledWindow>())
-        {
+        if let (Some(size), Ok(scroller)) = (
+            size,
+            crate::loading::content(&image.page).downcast::<gtk::ScrolledWindow>(),
+        ) {
             let middle = (
                 f64::from(scroller.width()) / 2.0,
                 f64::from(scroller.height()) / 2.0,
@@ -101,7 +102,7 @@ impl App {
                 (zoom != 1.0).then(|| format!("{} %", (zoom * 100.0).round() as i32))
             }
             Some(Doc::Image(image)) => Some(image_zoom_label(&image)),
-            Some(Doc::Status(_)) | None => None,
+            Some(Doc::Status(_) | Doc::Loading(_)) | None => None,
         };
         self.statusbar.set_zoom(label.as_deref());
     }
@@ -184,8 +185,7 @@ fn keep_under(scroller: &gtk::ScrolledWindow, size: (i32, i32), at: (f64, f64)) 
 /// Through the viewport: a picture is not a `GtkScrollable`, so the scroller puts one in between,
 /// and the `child` property hands that back rather than what was put in it.
 pub fn picture_of(page: &adw::TabPage) -> Option<gtk::Picture> {
-    let child = page
-        .child()
+    let child = crate::loading::content(page)
         .downcast::<gtk::ScrolledWindow>()
         .ok()?
         .child()?;

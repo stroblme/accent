@@ -1,0 +1,24 @@
+bench loading open loading-note.md now=loading/blank title=Some("loading-note.md") icon=Some("filetype-markdown-symbolic")
+bench loading open loading-note.md waiting=loading/loading
+bench loading open loading-note.md landed=text/doc
+bench loading open loading.pdf now=pdf/view title=Some("loading.pdf") icon=Some("filetype-pdf-symbolic")
+bench loading open loading.pdf waiting=pdf/loading
+bench loading open loading.pdf landed=pdf/view
+bench loading open loading.png now=image/blank title=Some("loading.png") icon=Some("filetype-image-symbolic")
+bench loading open loading.png waiting=image/loading
+bench loading open loading.png landed=image/doc
+bench loading open loading.drawio now=loading/blank title=Some("loading.drawio") icon=Some("filetype-diagram-symbolic")
+bench loading open loading.drawio waiting=loading/loading
+bench loading open loading.drawio landed=diagram/doc
+bench loading open loading.ipynb now=loading/blank title=Some("loading.ipynb") icon=Some("filetype-notebook-symbolic")
+bench loading open loading.ipynb waiting=loading/loading
+bench loading open loading.ipynb landed=notebook/doc
+bench loading twice text/doc tabs=1 preview=Some(false)
+bench loading closed tabs=0 preview=None unwritten=true
+bench loading fast text/doc loading_shown=false
+bench loading failed loading/failed said=["Cannot go to loading-fail.md: <vault>/loading-fail.md: not a regular file"] retry=true
+bench loading retrying loading/loading
+bench loading retried text/doc ran=false tabs=1 preview=Some(false)
+bench loading reload [loading-note.md:text/doc loading.pdf:pdf/view loading.png:image/doc loading.drawio:diagram/doc loading.ipynb:notebook/doc loading-twice.md:text/doc loading-fast.md:text/doc *loading-fail.md:text/doc]
+bench loading restored [loading-note.md:loading/loading loading.pdf:pdf/loading loading.png:image/loading loading.drawio:loading/loading loading.ipynb:loading/loading loading-twice.md:loading/loading loading-fast.md:loading/loading *loading-fail.md:loading/loading]
+bench loading restored landed [loading-note.md:text/doc loading.pdf:pdf/view loading.png:image/doc loading.drawio:diagram/doc loading.ipynb:notebook/doc loading-twice.md:text/doc loading-fast.md:text/doc *loading-fail.md:text/doc]

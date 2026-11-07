@@ -30,14 +30,15 @@ impl App {
             let (Some(app), Some((read, text))) = (weak.upgrade(), read) else {
                 return;
             };
-            if app.doc_for(&key).is_some() {
+            if !app.holds(&key) {
                 return;
             }
             match read {
                 Ok(nb) => app.adopt_notebook(&key, nb, text, how),
                 Err(e) => {
-                    let tab = app.adopt_text_tab(&key, text, flavour, how);
-                    tab.show_unread(&e.to_string());
+                    if let Some(tab) = app.adopt_text_tab(&key, text, flavour, how) {
+                        tab.show_unread(&e.to_string());
+                    }
                 }
             }
         });
@@ -50,13 +51,16 @@ impl App {
         text: accent_core::fs::Text,
         how: Opened,
     ) {
+        let Some(held) = self.take_held(key) else {
+            return;
+        };
         let path = self.root().join(key);
         let tab = super::open(
             key,
             &path,
             doc::file_name(key),
             &fileops::display_path(&self.root(), key),
-            &self.tabs_for(key),
+            &held,
             (nb, text.etag, text.digest()),
         );
         self.wire_notebook(&tab);
@@ -85,9 +89,7 @@ impl App {
         self.mark_loose(&page, key);
         self.watch_folder_of(key);
         self.docs.borrow_mut().push(Doc::Notebook(tab));
-        self.select_new_page(&page, how);
-        self.mark_opened(&page, how);
-        self.save_session_soon();
+        self.landed(&page, how);
     }
 
     fn wire_notebook(self: &Rc<Self>, tab: &Rc<NotebookTab>) {

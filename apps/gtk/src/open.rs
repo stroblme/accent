@@ -55,8 +55,14 @@ impl App {
             return self.cannot(&format!("open {shown}"), "not in this vault");
         };
         // A note that is already open keeps whatever it is: looking at a real tab again does not
-        // demote it, and looking at the preview again does not promote it.
+        // demote it, and looking at the preview again does not promote it. One whose read failed
+        // is read again, as its Retry does.
         if let Some(doc) = self.doc_for(&key) {
+            if let Doc::Loading(held) = &doc {
+                self.read_again(held);
+                self.reveal_page(&held.page);
+                return self.focus_picked(&held.page, how);
+            }
             self.drop_awaiting(&key, "not a text file");
             // Open as Text and Open in Accent's Editor asked of it end on that tab too.
             self.pending.take_as_text(&key);
@@ -75,20 +81,127 @@ impl App {
             self.drop_awaiting(&key, "not a text file");
         }
         match kind {
-            Kind::Note => self.open_text(&key, &path, Flavour::Note(Syntax::Markdown), how),
             Kind::Image => self.open_image(&key, &path, how),
             Kind::Pdf => self.open_pdf(&key, &path, how),
-            Kind::Diagram => self.open_diagram(&key, &path, how),
-            // Read as text first, whose bytes say whether it reads as a notebook.
-            Kind::Notebook | Kind::Text => self.open_text(&key, &path, flavour_of(&key), how),
+            // Read before their tab can be built, so the tab is held up at once and the
+            // document goes into it once it is read.
+            Kind::Note | Kind::Diagram | Kind::Notebook | Kind::Text => {
+                self.hold(&key, how);
+                self.read(&key, &path, how);
+            }
         }
     }
 
-    /// Adopt an arriving preview, replacing the pane's previous one and applying keep or pin state.
-    ///
-    /// Insert the new tab before closing the old one so the pane cannot close while briefly
-    /// empty. Earlier tree double-clicks keep the arriving tab; launch tabs retain named order.
+    /// Put up the tab `key` will be read into, in its pane and placed as `how` says, before the
+    /// read: a click shows its tab at once, however slow the host (DESIGN.md, Loading).
+    fn hold(self: &Rc<Self>, key: &str, how: Opened) {
+        let tooltip = match doc::host_file_path(key) {
+            Some(path) => format!("{path} (remote host)"),
+            None => fileops::display_path(&self.root(), key),
+        };
+        let host = self.on_host(key).then(|| self.host());
+        let held = loading::Held::new(key, &self.tabs_for(key), &tooltip, host.as_deref());
+        self.mark_loose(&held.page, key);
+        let page = held.page.clone();
+        self.docs.borrow_mut().push(Doc::Loading(held));
+        self.select_new_page(&page, how);
+        self.place_opened(&page, how);
+        self.save_session_soon();
+    }
+
+    /// Read `key` into its held tab as the kind its name says.
+    pub(crate) fn read(self: &Rc<Self>, key: &str, path: &Path, how: Opened) {
+        match doc::kind_of(key) {
+            Kind::Note => self.open_text(key, path, Flavour::Note(Syntax::Markdown), how),
+            Kind::Diagram => self.open_diagram(key, path, how),
+            // Read as text first, whose bytes say whether it reads as a notebook.
+            _ => self.open_text(key, path, flavour_of(key), how),
+        }
+    }
+
+    /// Read a held tab's file again, after its read failed: its Retry, its file opened again, or
+    /// the link back.
+    pub(crate) fn read_again(self: &Rc<Self>, held: &loading::Held) {
+        if !held.failed() {
+            return;
+        }
+        let Some((key, path)) = self.locate(&held.key()) else {
+            return self.close_page(&held.page);
+        };
+        held.again();
+        self.read(&key, &path, Opened::Kept);
+    }
+
+    /// Whether `key` has a held tab waiting for a read: one closed since, or filled by an earlier
+    /// read, has none.
+    pub(crate) fn holds(&self, key: &str) -> bool {
+        matches!(self.doc_for(key), Some(Doc::Loading(held)) if !held.failed())
+    }
+
+    /// Take the held tab of `key` out of the documents for the document read into it, which takes
+    /// its place there; `None` once it has been closed.
+    pub(crate) fn take_held(&self, key: &str) -> Option<Rc<loading::Held>> {
+        let mut docs = self.docs.borrow_mut();
+        let at = docs
+            .iter()
+            .position(|doc| matches!(doc, Doc::Loading(held) if held.key() == key))?;
+        match docs.remove(at) {
+            Doc::Loading(held) => Some(held),
+            _ => None,
+        }
+    }
+
+    /// A held tab's document is in, in the place its tab was put up in: what waited on it runs,
+    /// and the window catches up with it where it is in front. Its pane's selection is left as
+    /// the reader left it meanwhile.
+    pub(crate) fn landed(self: &Rc<Self>, page: &adw::TabPage, how: Opened) {
+        self.reveal_waiting(page);
+        // A keep asked for meanwhile of the file rather than of its tab.
+        if self
+            .doc_for_page(page)
+            .is_some_and(|doc| self.pending.take_keep(&doc.key()))
+        {
+            self.promote(page);
+        }
+        if self
+            .pane_of(page)
+            .is_some_and(|pane| pane.tabs.selected_page().as_ref() == Some(page))
+        {
+            self.sync_active();
+        }
+        self.focus_picked(page, how);
+        self.save_session_soon();
+    }
+
+    /// The read of a held tab failed: a file that is not there has no tab, as it never had one,
+    /// and any other failure stays in its tab with Retry. What waited on the tab is told.
+    pub(crate) fn read_failed(self: &Rc<Self>, key: &str, e: Error) {
+        let Some(Doc::Loading(held)) = self.doc_for(key) else {
+            return;
+        };
+        if matches!(e, Error::Core(Core::NotFound(_))) {
+            self.close_page(&held.page);
+            return self.cannot_open(key, e);
+        }
+        let why = e.to_string();
+        self.drop_awaiting(key, &why);
+        self.pending.fail(key);
+        let (app, retried) = (Rc::downgrade(self), Rc::downgrade(&held));
+        held.fail(&loading::sentence(&why), move || {
+            if let (Some(app), Some(held)) = (app.upgrade(), retried.upgrade()) {
+                app.read_again(&held);
+            }
+        });
+    }
+
+    /// A new tab with its document in: show what waited for it, and put it where `how` says.
     pub(crate) fn mark_opened(self: &Rc<Self>, page: &adw::TabPage, how: Opened) {
+        self.reveal_waiting(page);
+        self.place_opened(page, how);
+    }
+
+    /// Show in `page`'s document what waited for it to open.
+    fn reveal_waiting(self: &Rc<Self>, page: &adw::TabPage) {
         // A label or a page a diagram waits to show, or a notebook's search hit, which a file
         // that turned out to be text drops.
         if let Some(doc) = self.doc_for_page(page) {
@@ -130,6 +243,14 @@ impl App {
                 _ => {}
             }
         }
+    }
+
+    /// Put a new `page` where `how` says: pinned, in the command line's order, split off, or as
+    /// its pane's preview, replacing the previous one and applying keep state.
+    ///
+    /// Insert the new tab before closing the old one so the pane cannot close while briefly
+    /// empty. Earlier tree double-clicks keep the arriving tab; launch tabs retain named order.
+    fn place_opened(self: &Rc<Self>, page: &adw::TabPage, how: Opened) {
         // A double click in the Files tree whose second press came before the tab did.
         let keep = self
             .doc_for_page(page)
@@ -215,14 +336,9 @@ impl App {
             let read = crate::work::off_thread("reader", {
                 let key = key.clone();
                 move || {
-                    // A slow host, for the double clicks of `ACCENT_BENCH_TABS=tree:`.
+                    // A slow host, for `ACCENT_BENCH_TABS=loading` and `tree:`.
                     #[cfg(feature = "bench")]
-                    if let Some(ms) = std::env::var("ACCENT_BENCH_SLOW_READ")
-                        .ok()
-                        .and_then(|ms| ms.parse().ok())
-                    {
-                        std::thread::sleep(std::time::Duration::from_millis(ms));
-                    }
+                    crate::bench::hold(&crate::bench::SLOW_READ_MS);
                     match vault {
                         Some(vault) if doc::host_file_path(&key).is_some() => {
                             vault.read_named(doc::host_file_path(&key).unwrap())
@@ -233,18 +349,11 @@ impl App {
                 }
             })
             .await;
-            let Some(app) = weak.upgrade() else { return };
-            // A second open while the first read was in flight — two clicks on the same row, or
-            // the command line naming a note the session restores: the tab exists now, and comes
-            // to the front as an open file does.
-            let open = app.doc_for(&key).map(|doc| doc.page().clone());
-            if let Some(page) = open.or_else(|| app.editing(&key)) {
-                if how != Opened::Restored {
-                    app.reveal_page(&page);
-                    app.focus_picked(&page, how);
-                }
+            // Its tab closed while it was on its way, or an earlier read of the file, whose tab
+            // was closed, filled the tab this one was for: nothing is built and nothing written.
+            let Some(app) = weak.upgrade().filter(|app| app.holds(&key)) else {
                 return;
-            }
+            };
             // A worker that panicked is one more way for the read to fail, and is said as the others
             // are: the open named in a toast, and whatever was waiting on the tab let go with it.
             let read = read.unwrap_or_else(|| Err(Core::Io("the worker stopped".into()).into()));
@@ -294,7 +403,7 @@ impl App {
                     how,
                 );
             }
-            Err(e) => return self.cannot_open(key, e),
+            Err(e) => return self.read_failed(key, e),
         };
         // An `.xml` that draw.io wrote is a diagram, whatever its name says: known by its bytes.
         // A search hit in it waits for the diagram instead of the text tab it asked for.
@@ -315,33 +424,32 @@ impl App {
             }
             return self.open_notebook_text(key, text, flavour, how);
         }
+        // In a terminal editor's tab instead, which takes the held one's place.
         if !as_text && self.open_in_editor(key, how, in_accent) {
+            if let Some(held) = self.take_held(key) {
+                self.close_page(&held.page);
+            }
             return;
         }
         self.adopt_text_tab(key, text, flavour, how);
     }
 
-    /// A text tab of `text`, opened and wired into the window.
+    /// A text tab of `text`, read into its held tab and wired into the window; `None` once that
+    /// tab has been closed.
     pub(crate) fn adopt_text_tab(
         self: &Rc<Self>,
         key: &str,
         text: accent_core::fs::Text,
         flavour: Flavour,
         how: Opened,
-    ) -> Rc<Tab> {
+    ) -> Option<Rc<Tab>> {
+        let held = self.take_held(key)?;
         let prefs = self.prefs();
-        let tab = editor::open(
-            &self.root(),
-            key,
-            text,
-            flavour,
-            &self.tabs_for(key),
-            &prefs,
-        );
+        let tab = editor::open(&self.root(), key, text, flavour, &held, &prefs);
         self.watch_bibliography(&tab);
         self.adopt(tab.clone(), how);
         self.sync_conflict_banner(key, None);
-        tab
+        Some(tab)
     }
 
     /// Insert Template…: a template's text at the caret of the active note, whose stem is what
@@ -381,7 +489,12 @@ impl App {
             .child(&picture)
             .build();
         crate::widgets::smooth_wheel(&scroller);
-        let image = self.adopt_viewer(Doc::Image, key, &scroller, doc::icon_for(key), how);
+        // Held back until it is decoded, the loading page up meanwhile once the open has taken a
+        // moment: on a remote vault its bytes come first.
+        let host = self.on_host(key).then(|| self.host());
+        let holder = loading::holder(doc::file_name(key), host.as_deref());
+        loading::put(&holder, &scroller);
+        let image = self.adopt_viewer(Doc::Image, key, &holder, doc::icon_for(key), how);
         *image.monitor.borrow_mut() = self.watch_loose(key, path);
         // An SVG is drawn at the display's scale, so a window moved onto another display draws it
         // again (`show_image` asks for the scale with the look).
@@ -443,9 +556,50 @@ impl App {
             };
             match copy {
                 Ok(copy) => app.show_image(&image, Some(copy)),
-                Err(e) => app.gone(image.key(), &image.page, e),
+                Err(e) => app.image_failed(&image, e),
             }
         });
+    }
+
+    /// An image's bytes did not come. One that never showed says so in its tab, its Retry
+    /// fetching it again as a change on the host does; one on screen keeps what it shows.
+    pub(crate) fn image_failed(self: &Rc<Self>, image: &Rc<doc::Viewer>, e: Error) {
+        let Some(holder) = loading::holder_of(&image.page).filter(|_| image.size.get().is_none())
+        else {
+            return self.cannot("reload", e);
+        };
+        let (key, retry) = (image.key(), Rc::downgrade(self));
+        let again = key.clone();
+        self.fetch_failed(&holder, &key, &image.page, e, move || {
+            if let Some(app) = retry.upgrade() {
+                app.changed_on_disk(&again);
+            }
+        });
+    }
+
+    /// A viewer's bytes did not come: a file that is not there closes its tab, as a note that is
+    /// not there never has one, and any other failure stays in the tab, in `stack`, with Retry.
+    pub(crate) fn fetch_failed(
+        self: &Rc<Self>,
+        stack: &gtk::Stack,
+        key: &str,
+        page: &adw::TabPage,
+        e: Error,
+        retry: impl Fn() + 'static,
+    ) {
+        if matches!(e, Error::Core(Core::NotFound(_))) {
+            return self.gone(key.to_string(), page, e);
+        }
+        let why = loading::sentence(&e.to_string());
+        let stacked = stack.downgrade();
+        loading::fail(stack, doc::file_name(key), &why, move || {
+            if let Some(stack) = stacked.upgrade() {
+                loading::again(&stack);
+            }
+            retry();
+        });
+        // A PDF's status bar said it was opening.
+        self.sync_opening();
     }
 
     /// Decode or recolour an image off-thread using `read` or its cached texture.
@@ -496,6 +650,10 @@ impl App {
             match shown {
                 Some(Ok(shown)) => {
                     picture.set_paintable(Some(&shown.paintable()));
+                    // In place of the loading page, the first time.
+                    if let Some(holder) = loading::holder_of(&image.page) {
+                        loading::show(&holder);
+                    }
                     // The size a zoomed picture asks for is worked out from its paintable, so a
                     // file of another size would be drawn at its own while the readout kept the
                     // old percentage. Asked again of this one, so the zoom means the same thing
@@ -508,13 +666,11 @@ impl App {
                     *image.image.borrow_mut() = Some((path, shown.original));
                     app.show_image(&image, None);
                 }
-                // A file that never showed goes the way one that never arrived does; one that
-                // did keeps its last contents up.
-                Some(Err(e)) if picture.paintable().is_none() => app.gone(
-                    image.key(),
-                    &image.page,
-                    Core::Invalid(e.to_string()).into(),
-                ),
+                // A file that never showed says why in its tab, as one that never arrived does;
+                // one that did keeps its last contents up.
+                Some(Err(e)) if picture.paintable().is_none() => {
+                    app.image_failed(&image, Core::Invalid(e.to_string()).into())
+                }
                 Some(Err(e)) => app.cannot("reload", e),
                 None => app.cannot("reload", "the image worker stopped"),
             }
@@ -567,9 +723,15 @@ impl App {
         glib::spawn_future_local(async move {
             let work = crate::work::off_thread("fetch", {
                 let (key, bytes) = (key.clone(), bytes.clone());
-                move || match vault {
-                    Some(vault) => vault.fetch_with(&key, &|done, total| bytes.set(done, total)),
-                    None => Ok(path),
+                move || {
+                    #[cfg(feature = "bench")]
+                    crate::bench::hold(&crate::bench::SLOW_READ_MS);
+                    match vault {
+                        Some(vault) => {
+                            vault.fetch_with(&key, &|done, total| bytes.set(done, total))
+                        }
+                        None => Ok(path),
+                    }
                 }
             });
             let (say, retell) = (weak.clone(), weak.clone());
@@ -607,9 +769,12 @@ impl App {
     }
 
     /// A file we decline to open, as a page saying why (DESIGN.md, States: a status page with one
-    /// sentence and at most one button).
+    /// sentence and at most one button), in its held tab.
     pub(crate) fn open_status(self: &Rc<Self>, key: &str, title: &str, body: &str, how: Opened) {
         self.drop_awaiting(key, &title.to_lowercase());
+        let Some(held) = self.take_held(key) else {
+            return;
+        };
         let key = key.to_string();
         let status = adw::StatusPage::builder()
             .icon_name("dialog-warning-symbolic")
@@ -645,7 +810,13 @@ impl App {
             ));
             status.set_child(Some(&button));
         }
-        self.adopt_viewer(Doc::Status, &key, &status, "dialog-warning-symbolic", how);
+        let page = held.fill(&status);
+        page.set_icon(Some(&gio::ThemedIcon::new("dialog-warning-symbolic")));
+        self.watch_folder_of(&key);
+        self.docs
+            .borrow_mut()
+            .push(Doc::Status(doc::Viewer::new(&key, page.clone())));
+        self.landed(&page, how);
     }
 
     /// Open or refresh a blob comparison keyed by `key`, using `file` for syntax styling.
@@ -695,8 +866,7 @@ impl App {
         tab
     }
 
-    /// Put a tab with no buffer into the window: the shared half of [`App::open_image`] and
-    /// [`App::open_status`].
+    /// Put a tab with no buffer into the window: [`App::open_image`]'s.
     fn adopt_viewer(
         self: &Rc<Self>,
         wrap: fn(Rc<doc::Viewer>) -> Doc,
@@ -1243,9 +1413,7 @@ impl App {
         }
         self.watch_folder_of(&tab.rel());
         self.docs.borrow_mut().push(Doc::Text(tab.clone()));
-        self.select_new_page(&page, how);
-        self.mark_opened(&page, how);
-        self.save_session_soon();
+        self.landed(&page, how);
         // Taken out first: the borrow of an `if let`'s scrutinee lasts through its body, and the
         // restore's `put_back` asks what else is still waiting.
         let waiting = self.pending.take_work(&tab.rel());

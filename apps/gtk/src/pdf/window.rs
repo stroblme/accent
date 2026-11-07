@@ -12,6 +12,7 @@ impl App {
             .vault()
             .and_then(|v| v.session().pdf.get(key).copied())
             .unwrap_or_default();
+        let host = self.on_host(key).then(|| self.host());
         let pdf = pdftab::open(
             path,
             key,
@@ -19,6 +20,7 @@ impl App {
             &fileops::display_path(&self.root(), key),
             &self.tabs_for(key),
             place,
+            host.as_deref(),
         );
         pdf.set_drawing_config(self.config.borrow().drawing.clone());
         // Out as the session left them, which a tab in another pane shows before it is in front.
@@ -203,22 +205,35 @@ impl App {
         let page = pdf.page.clone();
         self.mark_loose(&page, key);
         *pdf.monitor.borrow_mut() = self.watch_loose(key, path);
-        let reader = Rc::downgrade(&pdf);
         self.watch_folder_of(key);
-        self.docs.borrow_mut().push(Doc::Pdf(pdf));
+        self.docs.borrow_mut().push(Doc::Pdf(pdf.clone()));
         self.select_new_page(&page, how);
         self.mark_opened(&page, how);
         self.save_session_soon();
-        // The tab is up and says it is opening; the bytes follow, which on a remote vault is a
-        // transfer of however long the file takes.
-        self.local_copy(key, path, move |app, copy| {
+        self.load_pdf(&pdf);
+    }
+
+    /// Hand `pdf` its bytes: the tab is up and says it is opening, and the bytes follow, which on
+    /// a remote vault is a transfer of however long the file takes. One that fails says so in
+    /// the tab, its Retry fetching again.
+    pub(crate) fn load_pdf(self: &Rc<Self>, pdf: &Rc<pdftab::PdfTab>) {
+        crate::loading::again(&pdf.stack);
+        let reader = Rc::downgrade(pdf);
+        self.local_copy(&pdf.key(), &pdf.path(), move |app, copy| {
             let Some(pdf) = reader.upgrade() else { return };
             match copy {
                 Ok(copy) => {
                     pdf.load(&copy);
                     app.push_pdf(&pdf);
                 }
-                Err(e) => app.gone(pdf.key(), &pdf.page, e),
+                Err(e) => {
+                    let (retry, again) = (Rc::downgrade(app), Rc::downgrade(&pdf));
+                    app.fetch_failed(&pdf.stack, &pdf.key(), &pdf.page, e, move || {
+                        if let (Some(app), Some(pdf)) = (retry.upgrade(), again.upgrade()) {
+                            app.load_pdf(&pdf);
+                        }
+                    });
+                }
             }
         });
     }

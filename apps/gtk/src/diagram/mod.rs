@@ -112,14 +112,14 @@ pub struct DiagramTab {
     on_toast: TextHook,
 }
 
-/// A new tab of `tabs` showing `file` as it was read, at its etag and digest, where the session
-/// last left it.
+/// The tab `held` up for `key`, showing `file` as it was read, at its etag and digest, where the
+/// session last left it.
 pub fn open(
     key: &str,
     path: &Path,
     title: &str,
     tooltip: &str,
-    tabs: &adw::TabView,
+    held: &crate::loading::Held,
     (file, etag, digest): (File, Etag, Digest),
     place: DiagramPlace,
 ) -> Rc<DiagramTab> {
@@ -148,7 +148,7 @@ pub fn open(
     host.append(&web_banner);
     host.append(&overlay);
 
-    let page = tabs.append(&host);
+    let page = held.fill(&host);
     page.set_title(title);
     page.set_tooltip(tooltip);
     crate::doc::set_file_icon(&page, key);

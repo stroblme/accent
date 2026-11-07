@@ -77,6 +77,7 @@ pub(super) fn kind_of(app: &Rc<App>, rel: &str) -> &'static str {
         Some(Doc::Diagram(_)) => "diagram",
         Some(Doc::Notebook(_)) => "notebook",
         Some(Doc::Image(_)) => "image",
+        Some(Doc::Loading(_)) => "loading",
         Some(_) => "other",
         None => "none",
     }
@@ -137,7 +138,7 @@ async fn open(app: &Rc<App>) {
     }
     let kinds = || ["note.md", "flow.drawio", "book.ipynb", "anim.gif"].map(|r| kind_of(app, r));
     until("editor", "open again", 10_000, || {
-        !kinds().contains(&"none")
+        !kinds().iter().any(|k| ["none", "loading"].contains(k))
     })
     .await;
     println!(

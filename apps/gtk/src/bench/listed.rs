@@ -56,8 +56,9 @@ pub(super) fn bench_listed(app: &Rc<App>) {
             glib::timeout_future(Duration::from_millis(200)).await;
         }
         app.open_path(note);
+        // Its tab is up at once, and its document once read.
         for _ in 0..50 {
-            if app.active_key().as_deref() == Some(note) {
+            if app.active_key().as_deref() == Some(note) && app.tab_for(note).is_some() {
                 break;
             }
             glib::timeout_future(Duration::from_millis(100)).await;

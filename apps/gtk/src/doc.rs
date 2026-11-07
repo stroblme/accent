@@ -76,6 +76,8 @@ pub enum Doc {
     Notebook(Rc<crate::notebook::NotebookTab>),
     /// A note's rendered preview, which goes with the note's own tab.
     Rendered(Rc<crate::rendered::Rendered>),
+    /// A file's tab whose document is still being read, or whose read failed (`loading`).
+    Loading(Rc<crate::loading::Held>),
 }
 
 impl Doc {
@@ -90,6 +92,7 @@ impl Doc {
             Doc::Diagram(d) => d.key(),
             Doc::Notebook(n) => n.key(),
             Doc::Rendered(r) => r.key(),
+            Doc::Loading(held) => held.key(),
         }
     }
 
@@ -127,6 +130,7 @@ impl Doc {
             Doc::Diagram(d) => &d.page,
             Doc::Notebook(n) => &n.page,
             Doc::Rendered(r) => &r.page,
+            Doc::Loading(held) => &held.page,
         }
     }
 
@@ -219,12 +223,22 @@ impl Doc {
                 v.page.set_title(file_name(key));
                 v.page.set_tooltip(&fileops::display_path(root, key));
             }
+            Doc::Loading(held) => {
+                held.retarget(key);
+                held.page.set_title(file_name(key));
+                held.page.set_tooltip(&fileops::display_path(root, key));
+            }
         }
         // The icon is the file's type, which a new extension can change; a file that would not
         // open keeps its warning.
         if matches!(
             self,
-            Doc::Text(_) | Doc::Pdf(_) | Doc::Diagram(_) | Doc::Notebook(_) | Doc::Image(_)
+            Doc::Text(_)
+                | Doc::Pdf(_)
+                | Doc::Diagram(_)
+                | Doc::Notebook(_)
+                | Doc::Image(_)
+                | Doc::Loading(_)
         ) {
             set_file_icon(self.page(), key);
         }

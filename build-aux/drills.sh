@@ -69,6 +69,13 @@ drill_opens() {
 	expect opens opens
 }
 
+# Every kind's tab up before its file arrives from a slow host, each read and fetch held 800 ms.
+drill_loading() {
+	test -e "$pdfium" || { echo "SKIPPED the loading drill: no libpdfium"; return 0; }
+	launch 90 ACCENT_BENCH_TABS=loading >"$dir/loading"
+	expect loading loading
+}
+
 drill_run_command() {
 	test -e "$pdfium" || { echo "SKIPPED the Run Command drill: no libpdfium"; return 0; }
 	launch 60 ACCENT_BENCH_TABS=commands

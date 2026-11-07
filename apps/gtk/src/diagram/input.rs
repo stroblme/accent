@@ -84,7 +84,7 @@ impl DiagramTab {
         }
         // Parented to the tab's box, not the canvas, which allocates itself: a popover on it
         // would never be presented again (DESIGN.md, States).
-        let Some(host) = self.page.child().downcast::<gtk::Box>().ok() else {
+        let Some(host) = self.overlay.parent().and_downcast::<gtk::Box>() else {
             return;
         };
         let at = gtk::graphene::Point::new(x as f32, y as f32);

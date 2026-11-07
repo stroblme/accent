@@ -330,7 +330,7 @@ impl App {
                 }
             }
             // An image's scroller pages it with the keys a document scrolls by.
-            Some(Doc::Image(image)) => image.page.child(),
+            Some(Doc::Image(image)) => crate::loading::content(&image.page),
             _ => return self.focus_document(&self.pane()),
         };
         // From an idle, as `focus_document` does: the preview has only just been laid over the

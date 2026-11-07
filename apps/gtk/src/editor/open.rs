@@ -98,7 +98,7 @@ pub(crate) fn interact(view: &sourceview5::View, flavour: Flavour) -> glib::Sign
     paste::link_paste(view, flavour)
 }
 
-/// Build a tab for `key` with already-read `text`.
+/// Build a tab for `key` with already-read `text`, in the tab `held` up for it.
 ///
 /// The caller reads bytes to choose text, binary or oversized document handling before this
 /// point. `key` is vault-relative, local absolute, or a remote host-file key; `root` supplies
@@ -108,7 +108,7 @@ pub fn open(
     key: &str,
     text: fs::Text,
     flavour: Flavour,
-    tabs: &adw::TabView,
+    held: &crate::loading::Held,
     prefs: &Prefs,
 ) -> Rc<Tab> {
     let path = crate::doc::host_file_path(key)
@@ -150,7 +150,7 @@ pub fn open(
     let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
     column.append(&banner);
     column.append(&document);
-    let page = tabs.append(&column);
+    let page = held.fill(&column);
     page.set_title(crate::doc::file_name(key));
     crate::doc::set_file_icon(&page, key);
     // The title is only the file name, so where the note really lives is a hover away.

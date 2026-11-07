@@ -142,13 +142,13 @@ pub struct NotebookTab {
     focus: focus::State,
 }
 
-/// A new tab of `tabs` showing `notebook` as it was read, at its etag and digest.
+/// The tab `held` up for `key`, showing `notebook` as it was read, at its etag and digest.
 pub fn open(
     key: &str,
     path: &Path,
     title: &str,
     tooltip: &str,
-    tabs: &adw::TabView,
+    held: &crate::loading::Held,
     (notebook, etag, digest): (Notebook, Etag, Digest),
 ) -> Rc<NotebookTab> {
     cell::install_css();
@@ -181,7 +181,7 @@ pub fn open(
     let host = gtk::Box::new(gtk::Orientation::Vertical, 0);
     host.append(&banner);
     host.append(&scroller);
-    let page = tabs.append(&host);
+    let page = held.fill(&host);
     page.set_title(title);
     page.set_tooltip(tooltip);
     crate::doc::set_file_icon(&page, key);
