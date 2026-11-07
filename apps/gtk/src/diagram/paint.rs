@@ -354,14 +354,15 @@ pub fn prim(
             let (_, logical) = layout.extents();
             let unit = |v: i32| f64::from(v) / f64::from(pango::SCALE) / frame.scale;
             let block = (unit(logical.width()), unit(logical.height()));
-            let lines = layout.line_count() as usize;
-            let origin = prim.text_origin(block, unit(layout.baseline()), lines);
-            let origin = origin.unwrap_or_default();
+            let baseline = unit(layout.baseline());
+            let origin = prim.text_origin(block, baseline, &laid.tops, laid.metrics);
+            let (origin, down) = origin.unwrap_or_default();
             // A wrapped label's lines are aligned across its layout, an unwrapped one's block
             // starts at its widest line.
             let left = if *wrap { 0.0 } else { unit(logical.x()) };
             let placed = Placed {
                 origin: frame.to_content(Point::new(origin.x - left, origin.y)),
+                down: down * frame.scale,
                 anchor: frame.to_content(*anchor),
             };
             let block = label(snapshot, &laid, &placed, *rotation, font.color, look, tint);
@@ -689,19 +690,23 @@ impl Look {
     }
 }
 
-/// Where a label goes, in content coordinates: its layout's top-left, and the point it is turned
-/// about.
+/// Where a label goes, in content coordinates: its layout's top-left, how far below that its
+/// lines are drawn, and the point it is turned about.
 struct Placed {
     origin: Point,
+    down: f64,
     anchor: Point,
 }
 
-/// A label laid out at a scale, with its formulas where Pango set their placeholders.
+/// A label laid out at a scale, with its formulas where Pango set their placeholders, and in page
+/// units each line's top and its font's ascent and descent.
 #[derive(Clone)]
 struct Laid {
     scale: f64,
     layout: pango::Layout,
     formulas: Rc<[Set]>,
+    tops: Rc<[f64]>,
+    metrics: (f64, f64),
 }
 
 /// A formula in a laid-out label, and the left end of its baseline in the layout's pixels.
@@ -735,7 +740,7 @@ fn label(
         with_opacity(snapshot, look.opacity, || {
             look.frame(snapshot, &block, tint);
             snapshot.save();
-            snapshot.translate(&graphene::Point::new(x as f32, y as f32));
+            snapshot.translate(&graphene::Point::new(x as f32, (y + at.down) as f32));
             let ink = tint.rgba(colour);
             snapshot.append_layout(layout, &ink);
             let colour = |c: accent_math::Color| {
@@ -943,10 +948,20 @@ fn lay_out(widget: &gtk::Widget, prim: &Prim, scale: f64, tint: Tint) -> Option<
         Align::Right => pango::Alignment::Right,
     });
     let formulas = set(&layout, &spans);
+    let unit = |v: i32| f64::from(v) / f64::from(pango::SCALE) / scale;
+    let mut iter = layout.iter();
+    let mut tops = vec![unit(iter.line_yrange().0)];
+    while iter.next_line() {
+        tops.push(unit(iter.line_yrange().0));
+    }
+    let metrics = layout.context().load_font(&desc).map(|f| f.metrics(None));
+    let metrics = metrics.map_or((0.0, 0.0), |m| (unit(m.ascent()), unit(m.descent())));
     Some(Laid {
         scale,
         layout,
         formulas,
+        tops: tops.into(),
+        metrics,
     })
 }
 

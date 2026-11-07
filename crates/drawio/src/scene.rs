@@ -226,16 +226,28 @@ impl Prim {
 
     /// Where a label's laid-out text goes, as draw.io's canvas sets it (`mxSvgCanvas2D`), in page
     /// units: the top of its block, and the left of the box a wrapped label's lines are aligned
-    /// across ([`wrap_width`]) or else of its widest line. `block` is the text's widest line
-    /// across and its lines down, `baseline` its first baseline below its top. `None` for anything
-    /// but a label.
+    /// across ([`wrap_width`]) or else of its widest line, and how far below the block's top its
+    /// lines are drawn. `block` is the text's widest line across and its lines down, `baseline`
+    /// its first baseline and `tops` each line's top below its top, and `metrics` its font's
+    /// ascent and descent. `None` for anything but a label.
     ///
     /// An HTML label is a block aligned, overflowing as it must, in a flex box a unit square at
     /// the anchor rounded to whole units, or as wide as it wraps (`updateTextNodes`, `createCss`).
+    /// Chromium draws each of its lines' tops on a whole unit (`TextFragmentPainter`), and the
+    /// baseline below it by the font's ascent and the leading above that, each in whole units
+    /// (`FontMetrics::AscentDescentWithHacks`, `CalculateLeadingSpace`), on boxes measured in
+    /// 64ths of a unit (`LayoutUnit`). The toolkit sets its lines evenly, so they are drawn down
+    /// together by how far they are from Chromium's on average, a one-line label's onto it.
     /// SVG text has its first baseline a font size less one below the anchor, less half the
     /// text's height middle-aligned and all of it and one more bottom-aligned, the text a font
     /// size tall and a line more for every line after the first (`plainText`).
-    pub fn text_origin(&self, block: (f64, f64), baseline: f64, lines: usize) -> Option<Point> {
+    pub fn text_origin(
+        &self,
+        block: (f64, f64),
+        baseline: f64,
+        tops: &[f64],
+        metrics: (f64, f64),
+    ) -> Option<(Point, f64)> {
         let Prim::Text {
             rect,
             anchor,
@@ -261,14 +273,15 @@ impl Prim {
         };
         let (w, h) = block;
         if !html {
-            let text = font.size + lines.saturating_sub(1) as f64 * line_height(font.size, false);
+            let lines = tops.len().saturating_sub(1) as f64;
+            let text = font.size + lines * line_height(font.size, false);
             let above = match valign {
                 VAlign::Top => 0.0,
                 VAlign::Middle => text / 2.0,
                 VAlign::Bottom => text + 1.0,
             };
             let first = anchor.y + font.size - 1.0 - above;
-            return Some(Point::new(anchor.x - mx * w, first - baseline));
+            return Some((Point::new(anchor.x - mx * w, first - baseline), 0.0));
         }
         // JavaScript's `Math.round`, halves up.
         let round = |v: f64| (v + 0.5).floor();
@@ -276,7 +289,20 @@ impl Prim {
             true => round(anchor.x - mx * (rect.w + FOREIGN_OBJECT_PADDING)),
             false => round(anchor.x) + mx * (1.0 - w),
         };
-        Some(Point::new(left, round(anchor.y) + my * (1.0 - h)))
+        // A `LayoutUnit` cut toward zero, as Chromium's are from a float or halved, and the
+        // toolkit's lengths snapped to one.
+        let fixed = |v: f64| (v * 64.0).trunc() / 64.0;
+        let snap = |v: f64| (v * 64.0).round() / 64.0;
+        // The baseline below a line's top: Chromium's, and the toolkit's half the leading above
+        // the ascent.
+        let line = line_height(font.size, true);
+        let (ascent, descent) = (metrics.0.round(), metrics.1.round());
+        let chromium = fixed((line - ascent - descent) / 2.0).floor() + ascent;
+        let ours = (line - metrics.0 - metrics.1) / 2.0 + metrics.0;
+        let top = round(anchor.y) + fixed(my * (1.0 - snap(h)));
+        let rounded = |t: f64| round(top + snap(t)) - (top + snap(t));
+        let mean = tops.iter().map(|&t| rounded(t)).sum::<f64>() / tops.len().max(1) as f64;
+        Some((Point::new(left, top), mean + chromium - ours))
     }
 }
 
@@ -297,11 +323,13 @@ pub const LINE_HEIGHT: f64 = 1.2;
 /// How much wider than its room draw.io lays an HTML label out (`foreignObjectPadding`).
 const FOREIGN_OBJECT_PADDING: f64 = 2.0;
 
-/// How far apart a label's lines at font `size` are set: an HTML label's 1.2 sizes, SVG text's
+/// How far apart a label's lines at font `size` are set: an HTML label's 1.2 sizes in 64ths of a
+/// unit, cut as Chromium cuts them (`ComputedStyle::ComputedLineHeightAsFixed`), SVG text's
 /// rounded to whole units (`mxSvgCanvas2D.plainText`).
 pub fn line_height(size: f64, html: bool) -> f64 {
     match html {
-        true => LINE_HEIGHT * size,
+        // As a percentage of the size, which keeps a whole 64th exact.
+        true => (size * 120.0 / 100.0 * 64.0).trunc() / 64.0,
         false => (LINE_HEIGHT * size).round(),
     }
 }
@@ -1113,20 +1141,51 @@ mod tests {
             cell("svg", 200.0, "", "C\nD"),
         ]);
         let s = scene(&p);
-        let origin = |id: &str, block, lines| {
+        let origin = |id: &str, block, tops: &[f64]| {
             let mut label = s.prims.iter().filter(|p| p.cell() == id);
-            label.find_map(|p| p.text_origin(block, 11.0, lines))
+            label.find_map(|p| p.text_origin(block, 11.0, tops, (11.0, 3.0)))
         };
-        // An HTML label's block is centred on a box a unit square at its anchor, (60, 30).
-        let at = origin("html", (30.0, 15.0), 1);
+        // An HTML label's block is centred on a box a unit square at its anchor, (60, 30), its
+        // lines drawn down it as the next test has them.
+        let at = origin("html", (30.0, 15.0), &[0.0]).map(|(at, _)| at);
         assert_eq!(at, Some(Point::new(60.0 + 0.5 - 15.0, 30.0 + 0.5 - 7.5)));
         // Wrapped, its lines are aligned across its room and 2 more, from that box's left.
-        let at = origin("wrap", (30.0, 15.0), 1);
+        let at = origin("wrap", (30.0, 15.0), &[0.0]).map(|(at, _)| at);
         assert_eq!(at, Some(Point::new(60.0 - 118.0 / 2.0, 130.0 + 0.5 - 7.5)));
         // SVG text's 12 px lines are 14 apart, the first baseline 11 below the anchor less half
         // of 12 + 14.
         let (x, y) = (60.0 - 15.0, 230.0 + 11.0 - 13.0 - 11.0);
-        assert_eq!(origin("svg", (30.0, 28.0), 2), Some(Point::new(x, y)));
+        let at = origin("svg", (30.0, 28.0), &[0.0, 14.0]);
+        assert_eq!(at, Some((Point::new(x, y), 0.0)));
+    }
+
+    #[test]
+    fn an_html_label_s_lines_are_set_on_whole_units_as_chromium_sets_them() {
+        // Liberation Sans, and where draw.io desktop's exports put its baselines below the
+        // anchor of a middle-aligned label: one line's at 12, 16 and 24 px, three at 12 px.
+        let set = |size: f64, tops: &[f64]| {
+            let style = format!("html=1;fontSize={size};");
+            let cell = Cell::new_vertex("a", "1", Rect::new(0.0, 0.0, 160.0, 100.0), &style, "A");
+            let s = scene(&page(vec![cell]));
+            let metrics = (size * 1854.0 / 2048.0, size * 434.0 / 2048.0);
+            let line = line_height(size, true);
+            // Pango's first baseline, half the leading above the ascent.
+            let baseline = (line - metrics.0 - metrics.1) / 2.0 + metrics.0;
+            let block = (30.0, tops.len() as f64 * line);
+            let origin = |p: &Prim| p.text_origin(block, baseline, tops, metrics);
+            let (at, down) = s.prims.iter().find_map(origin).expect("a label");
+            let lines = tops.iter().map(|top| at.y + down + top + baseline - 50.0);
+            lines.collect::<Vec<_>>()
+        };
+        for (size, below) in [(12.0, 4.0), (16.0, 6.0), (24.0, 8.0)] {
+            assert!((set(size, &[0.0])[0] - below).abs() < 1e-9, "{size} px");
+        }
+        // Pango's lines are evenly spaced, so each is within half a unit of Chromium's.
+        let line = line_height(12.0, true);
+        let three = set(12.0, &[0.0, line, 2.0 * line]);
+        for (at, chromium) in three.iter().zip([-10.0, 4.0, 19.0]) {
+            assert!((at - chromium).abs() < 0.5, "{three:?}");
+        }
     }
 
     #[test]
