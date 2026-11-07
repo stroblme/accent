@@ -51,8 +51,9 @@ jobs:
     steps:
       # Before checkout: the base image has no git, so actions/checkout would fall back to the API.
       # make runs the next step; tar is for `make pdfium` (the image already carries it); the rest
-      # is the headless run's: dbus-daemon for `make smoke`'s dbus-run-session.
-      - run: dnf install -y git make tar xorg-x11-server-Xvfb dbus-daemon dejavu-sans-fonts
+      # is the headless run's: dbus-daemon for `make smoke`'s dbus-run-session, and psmisc for the
+      # fuser that ends the editor drill's shell holder.
+      - run: dnf install -y git make tar xorg-x11-server-Xvfb dbus-daemon dejavu-sans-fonts psmisc
       - uses: actions/checkout@v7
       # The build requirements, from the Makefile's one list; as root, without sudo.
       - run: make install-requirements

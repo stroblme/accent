@@ -437,7 +437,7 @@ async fn panes(app: &Rc<App>) {
         says("Before"),
         outline()
     );
-    shoot(app, "editor-panes-saved.png");
+    shoot(app, "editor-panes-saved.png").await;
     app.reveal_page(&term.page);
     sidebar.show_section("references");
     let links = || sidebar.info_state().0;
@@ -450,7 +450,7 @@ async fn panes(app: &Rc<App>) {
         .find(|s| s.starts_with("Links"))
         .map(str::to_string);
     println!("bench editor panes references={section:?}");
-    shoot(app, "editor-panes-links.png");
+    shoot(app, "editor-panes-links.png").await;
     term.view.feed_child(b"0\n");
     let closed = until("editor", "panes closed", 10_000, || {
         app.terminals().is_empty()
@@ -463,10 +463,23 @@ async fn panes(app: &Rc<App>) {
     );
 }
 
-/// The window as it is, pictured into `$TMPDIR` as `name`.
-fn shoot(app: &App, name: &str) {
+/// The window as its next frame lays it out, pictured into `$TMPDIR` as `name`. Waited for, not
+/// pumped: iterating the main loop from inside this future polls whichever other future is ready
+/// from inside it, which glib refuses with a panic (`EnterError`).
+async fn shoot(app: &App, name: &str) {
     let dir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
-    bench_pump();
+    let framed = Rc::new(Cell::new(false));
+    app.window.add_tick_callback({
+        let framed = framed.clone();
+        move |_, _| {
+            framed.set(true);
+            glib::ControlFlow::Break
+        }
+    });
+    until("editor", &format!("frame for {name}"), 5000, || {
+        framed.get()
+    })
+    .await;
     super::diagram::shoot(
         app.window.upcast_ref(),
         &std::path::Path::new(&dir).join(name),

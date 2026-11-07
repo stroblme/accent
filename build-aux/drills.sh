@@ -184,7 +184,9 @@ drill_editor() {
 	for step in accent line panes hold back; do
 		launch 60 ACCENT_BENCH_EDITOR=$step >>"$dir/editor"
 	done
-	fuser -k "$TMPDIR/accent-$(id -u)/hold-3.lock" >/dev/null 2>&1 || true
+	# The holder has to end here, or the second `back` finds its editor still held (starts=1).
+	fuser -sk "$TMPDIR/accent-$(id -u)/hold-3.lock" ||
+		{ echo "the editor drill could not end the shell holder: is fuser (psmisc) installed?"; return 1; }
 	sleep 1
 	launch 60 ACCENT_BENCH_EDITOR=back >>"$dir/editor"
 	fuser -k "$TMPDIR/accent-$(id -u)/hold-3.lock" >/dev/null 2>&1 || true
