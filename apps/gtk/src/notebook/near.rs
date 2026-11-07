@@ -1,14 +1,65 @@
 //! The cells near the view: their editors and outputs built as they near it, and what shows kept
-//! still as the cells above it change height.
+//! still as the cells above it change height, and through a zoom.
 
 use std::rc::Rc;
 
 use accent_core::notebook::CellId;
 use adw::prelude::*;
-use gtk::{gdk, glib};
+use gtk::{gdk, glib, graphene};
 
 use super::NotebookTab;
 use super::cell::CellView;
+use super::selection::line_in;
+
+/// What a zoom keeps where it was in the view: what was at a point of it, the pointer's for a
+/// Ctrl+scroll, the middle of the top for a chord, as the cells take their new heights.
+pub(super) struct ZoomAnchor {
+    /// How far down the view it is kept.
+    at: f64,
+    spot: Spot,
+    /// The scroll the notebook left the view at, which a scroll of the reader's changes.
+    value: f64,
+}
+
+/// What was at a point of the view.
+enum Spot {
+    /// A character of a text view, a cell's source or an output's text, and how far down the
+    /// display line starting there the point was, in the line's heights.
+    Text(gtk::TextView, i32, f64),
+    /// Any other widget, a picture say, and how far down it the point was, in its heights.
+    Part(gtk::Widget, f64),
+}
+
+impl Spot {
+    /// Where the point is now in `content`, while it is still in the notebook.
+    fn y_in(&self, content: &gtk::Widget) -> Option<f64> {
+        match self {
+            Spot::Text(view, offset, down) => {
+                let iter = view.buffer().iter_at_offset(*offset);
+                let (top, height) = line_in(view, &iter, content)?;
+                Some(top + down * height)
+            }
+            Spot::Part(widget, down) => {
+                let bounds = widget.compute_bounds(content)?;
+                Some(f64::from(bounds.y()) + down * f64::from(bounds.height()))
+            }
+        }
+    }
+}
+
+/// The start of the display line at buffer height `y` in `view`: [`gtk::TextView::line_at_y`]
+/// gives the start of the paragraph, which may wrap over several.
+fn display_line_at(view: &gtk::TextView, y: i32) -> gtk::TextIter {
+    let (mut iter, _) = view.line_at_y(y);
+    let mut next = iter;
+    while view.forward_display_line(&mut next)
+        && next.line() == iter.line()
+        && view.iter_location(&next).y() <= y
+    {
+        iter = next;
+    }
+    iter
+}
 
 impl NotebookTab {
     /// After each layout of the window, what shows stays put as cells change height
@@ -134,11 +185,18 @@ impl NotebookTab {
     /// Keep what shows where it is when the cells above it change height, an editor built in its
     /// placeholder's place or a picture decoded: the first cell in view (or the one shown) moved
     /// in the content since the last layout, so the view moves as far. Not at the top, where what
-    /// is added above shows.
+    /// is added above shows. After a zoom, what the zoom holds is kept instead ([`ZoomAnchor`]),
+    /// which a cell growing around it would otherwise move.
     pub(super) fn keep_anchor(&self) {
         let adjustment = self.scroller.vadjustment();
         let value = adjustment.value();
-        let (Some((id, was)), Some(content)) = (self.anchor.get(), self.content()) else {
+        let Some(content) = self.content() else {
+            return;
+        };
+        if self.keep_zoom_anchor(&content) {
+            return;
+        }
+        let Some((id, was)) = self.anchor.get() else {
             return;
         };
         let now = self
@@ -150,6 +208,56 @@ impl NotebookTab {
         {
             adjustment.set_value(value + now - was);
         }
+    }
+
+    /// What is at `at` in the view, else at the middle of its top, for the zoom about to be laid
+    /// out to keep there ([`ZoomAnchor`]): a line of text is the character starting it, so a line
+    /// wrapped again keeps that.
+    pub(super) fn zoom_anchor_at(&self, at: Option<(f64, f64)>) -> Option<ZoomAnchor> {
+        let content = self.content()?;
+        let (x, at) = at.unwrap_or((f64::from(self.scroller.width()) / 2.0, 0.0));
+        let value = self.scroller.vadjustment().value();
+        let (x, y) = (x + self.scroller.hadjustment().value(), at + value);
+        let picked = content.pick(x, y, gtk::PickFlags::DEFAULT)?;
+        let spot = match picked.ancestor(gtk::TextView::static_type()) {
+            Some(view) => {
+                let view = view.downcast::<gtk::TextView>().ok()?;
+                let point = graphene::Point::new(x as f32, y as f32);
+                let point = content.compute_point(&view, &point)?;
+                let (_, by) = view.window_to_buffer_coords(
+                    gtk::TextWindowType::Widget,
+                    point.x() as i32,
+                    point.y() as i32,
+                );
+                let iter = display_line_at(&view, by);
+                let (top, height) = line_in(&view, &iter, &content)?;
+                Spot::Text(view, iter.offset(), (y - top) / height.max(1.0))
+            }
+            None => {
+                let bounds = picked.compute_bounds(&content)?;
+                let down = (y - f64::from(bounds.y())) / f64::from(bounds.height()).max(1.0);
+                Spot::Part(picked, down)
+            }
+        };
+        Some(ZoomAnchor { at, spot, value })
+    }
+
+    /// Keep what the last zoom holds at its height in the view, saying whether there is one: a
+    /// scroll of the reader's since, or what it holds gone from the notebook, lets go of it.
+    fn keep_zoom_anchor(&self, content: &gtk::Widget) -> bool {
+        let adjustment = self.scroller.vadjustment();
+        let kept = (self.zoom_anchor.borrow().as_ref())
+            .filter(|anchor| anchor.value == adjustment.value())
+            .and_then(|anchor| Some(anchor.spot.y_in(content)? - anchor.at));
+        let Some(value) = kept else {
+            self.zoom_anchor.replace(None);
+            return false;
+        };
+        adjustment.set_value(value);
+        if let Some(anchor) = self.zoom_anchor.borrow_mut().as_mut() {
+            anchor.value = adjustment.value();
+        }
+        true
     }
 
     /// Cell `id`, and its top in the content.

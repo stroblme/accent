@@ -3,10 +3,10 @@
 //! show, an edit of each kind with its undo and the save that follows, the view kept still by a
 //! click and following the arrows, the marimo notebook kept as written, the long notebook's open
 //! time, memory and editors built, the view kept still as more are built above what shows, its
-//! outputs built as they near the view in the place of placeholders as tall, and a
-//! presented notebook's read-only, and a notebook of its own written beside them taking a text
-//! tab's editing chords, occurrences, heading markers, spelling and links in its cells. All under
-//! Dark, which recolours the pictures.
+//! outputs built as they near the view in the place of placeholders as tall, what a zoom keeps
+//! still, and a presented notebook's read-only, and a notebook of its own written beside them
+//! taking a text tab's editing chords, occurrences, heading markers, spelling and links in its
+//! cells. All under Dark, which recolours the pictures.
 //! `ACCENT_BENCH_NOTEBOOK_SHOT=<png>` adds a picture of the window with the first notebook open,
 //! for looking at rather than asserting on.
 
@@ -41,6 +41,7 @@ pub(super) fn bench_notebook(app: &Rc<App>, arg: &str) {
         marimo_drill(&app, &marimo).await;
         big_drill(&app, &big).await;
         lazy_drill(&app, &big).await;
+        zoom_drill(&app, &big).await;
         present_drill(&app).await;
         text_drill(&app, &ipynb).await;
         parity_drill(&app, &marimo).await;
@@ -641,6 +642,91 @@ async fn lazy_drill(app: &Rc<App>, rel: &str) {
         u8::from(held),
         outputs.len()
     );
+}
+
+/// What a zoom keeps where the reader was looking in the long notebook: a chord the text at the
+/// top of the view and a wheel notch the text under the pointer, in and out, and a chord a picture
+/// at the top. How far each moved in the view once the cells had taken their new heights.
+async fn zoom_drill(app: &Rc<App>, rel: &str) {
+    let Some(tab) = reopened(app, rel).await else {
+        return;
+    };
+    let page = tab.bench_range().1;
+    // Cell 31 is a code cell of two lines, its outputs a line of text and a picture: its second
+    // line, which does not wrap.
+    let second = tab
+        .bench_source(31)
+        .find('\n')
+        .map_or(0, |at| at as i32 + 1);
+    let text = || tab.bench_line(31, second);
+    for (how, at) in [("chord", 0.0), ("wheel", page / 2.0)] {
+        for out in [false, true] {
+            let drift = kept(&tab, at, &text, || match how {
+                "chord" => {
+                    let name = if out { "win.zoom-out" } else { "win.zoom-in" };
+                    let _ = WidgetExt::activate_action(&app.window, name, None);
+                }
+                _ => tab.bench_wheel_zoom(at, out),
+            })
+            .await;
+            let way = if out { "out" } else { "in" };
+            println!("bench notebook zoom {how} {way} text drift_px={drift:.1}");
+        }
+    }
+    // Cell 31's second output is a picture.
+    if let Some(picture) = tab.bench_output_widget(31, 1) {
+        let part = || tab.bench_bounds(&picture);
+        let drift = kept(&tab, 0.0, &part, || {
+            let _ = WidgetExt::activate_action(&app.window, "win.zoom-in", None);
+        })
+        .await;
+        println!("bench notebook zoom chord in picture drift_px={drift:.1}");
+    }
+    app.set_zoom(1.0);
+}
+
+/// How far the point `at` down the view was in what `place` reads moved once `zoom` has settled:
+/// `place` reads the top and the height of a line or of a part of a cell in the view, and its
+/// middle is brought to `at` first.
+async fn kept(
+    tab: &Rc<NotebookTab>,
+    at: f64,
+    place: &dyn Fn() -> Option<(f64, f64)>,
+    zoom: impl FnOnce(),
+) -> f64 {
+    let page = tab.bench_range().1;
+    // Twice: the cells built around it on the way take their heights.
+    for _ in 0..2 {
+        let Some((top, height)) = place() else {
+            return f64::NAN;
+        };
+        tab.bench_scroll_by((top + height / 2.0 - at) / page);
+        settled(tab, place).await;
+    }
+    let Some((top, height)) = place() else {
+        return f64::NAN;
+    };
+    let down = (at - top) / height;
+    zoom();
+    settled(tab, place).await;
+    place().map_or(f64::NAN, |(top, height)| top + down * height - at)
+}
+
+/// Until the notebook has taken the heights a change gave its cells: its height, its scroll and
+/// what `place` reads the same over five looks 50 ms apart, for five seconds at most.
+async fn settled(tab: &Rc<NotebookTab>, place: &dyn Fn() -> Option<(f64, f64)>) {
+    let look = || (tab.bench_range().0, tab.bench_scrolled(), place());
+    let (mut last, mut same) = (look(), 0);
+    for _ in 0..100 {
+        glib::timeout_future(Duration::from_millis(50)).await;
+        let now = look();
+        same = if now == last { same + 1 } else { 0 };
+        last = now;
+        if same == 5 {
+            return;
+        }
+    }
+    println!("bench notebook zoom unsettled");
 }
 
 /// The window made `w` by `h`, once the X server has resized it.

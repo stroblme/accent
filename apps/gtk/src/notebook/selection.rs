@@ -298,18 +298,9 @@ impl NotebookTab {
     /// measured, so a scroll not yet laid out does not move it.
     pub(super) fn caret_at(&self, editor: &Editor) -> Option<(f64, f64)> {
         let buffer = &editor.buffer;
-        let rect = editor
-            .view
-            .iter_location(&buffer.iter_at_mark(&buffer.get_insert()));
-        let (x, y) =
-            editor
-                .view
-                .buffer_to_window_coords(gtk::TextWindowType::Widget, rect.x(), rect.y());
-        let point = editor
-            .view
-            .compute_point(&self.content()?, &graphene::Point::new(x as f32, y as f32))?;
-        let top = f64::from(point.y());
-        Some((top, top + f64::from(rect.height())))
+        let insert = buffer.iter_at_mark(&buffer.get_insert());
+        let (top, height) = line_in(editor.view.upcast_ref(), &insert, &self.content()?)?;
+        Some((top, top + height))
     }
 
     /// The scrolled content, in whose coordinates the scroll's value is measured: the scroller's
@@ -320,4 +311,17 @@ impl NotebookTab {
             .and_downcast::<gtk::Viewport>()?
             .child()
     }
+}
+
+/// The top and the height of the display line holding `iter` in `view`, in the scrolled
+/// `content`'s coordinates.
+pub(super) fn line_in(
+    view: &gtk::TextView,
+    iter: &gtk::TextIter,
+    content: &gtk::Widget,
+) -> Option<(f64, f64)> {
+    let rect = view.iter_location(iter);
+    let (x, y) = view.buffer_to_window_coords(gtk::TextWindowType::Widget, rect.x(), rect.y());
+    let point = view.compute_point(content, &graphene::Point::new(x as f32, y as f32))?;
+    Some((f64::from(point.y()), f64::from(rect.height())))
 }

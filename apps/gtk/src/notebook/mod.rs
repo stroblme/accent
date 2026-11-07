@@ -75,6 +75,11 @@ pub struct NotebookTab {
     /// first cell in it until it is scrolled otherwise or another cell is selected, and the
     /// scroll it was left at.
     shown: Cell<Option<(CellId, f64)>>,
+    /// What the last zoom keeps where it was in the view, in place of the first cell in it, until
+    /// the notebook is scrolled otherwise or changed.
+    zoom_anchor: RefCell<Option<near::ZoomAnchor>>,
+    /// Where in the view the pointer of the Ctrl+scroll asking for the zoom under way is.
+    zoom_at: Cell<Option<(f64, f64)>>,
     layout_hook: RefCell<Option<(gdk::FrameClock, glib::SignalHandlerId)>>,
     model: RefCell<Notebook>,
     /// A view per cell, in the model's order.
@@ -201,6 +206,8 @@ pub fn open(
         anchor: Cell::new(None),
         reveal: Cell::new(None),
         shown: Cell::new(None),
+        zoom_anchor: RefCell::default(),
+        zoom_at: Cell::new(None),
         layout_hook: RefCell::default(),
         model: RefCell::new(notebook),
         views: RefCell::default(),
@@ -271,17 +278,14 @@ pub fn open(
     tab.wire_building();
     tab.wire_keys(&host);
     tab.wire_outside();
+    let pointer = crate::zoom::track_pointer(&tab.scroller);
     crate::zoom::zoom_on_wheel(
         &tab.scroller,
         gtk::PropagationPhase::Capture,
         glib::clone!(
             #[weak]
             tab,
-            move |out| {
-                if let Some(f) = tab.on_zoom.get() {
-                    f(out);
-                }
-            }
+            move |out| tab.wheel_zoom(pointer.get(), out)
         ),
     );
     tab
@@ -736,6 +740,7 @@ impl NotebookTab {
 
     /// Mark a run's output changed without scheduling a write on every stream flush.
     fn mark_changed(self: &Rc<Self>) {
+        self.zoom_anchor.replace(None);
         self.save.edits.set(self.save.edits.get() + 1);
         self.save.modified.set(true);
         self.set_title();
@@ -1167,6 +1172,13 @@ impl NotebookTab {
 
     /// The editor font and the document zoom, one rule for every cell.
     pub fn set_font(&self, font: Option<&str>, zoom: f64) {
+        // What shows stays where it is as the cells take the heights of a new zoom, read while
+        // they still have the old ones.
+        let at = self.zoom_at.take();
+        if zoom != self.zoom.get() {
+            let anchor = self.zoom_anchor_at(at);
+            self.zoom_anchor.replace(anchor);
+        }
         let Some(display) = gdk::Display::default() else {
             return;
         };
@@ -1381,6 +1393,15 @@ impl NotebookTab {
         self.on_zoom.set(Rc::new(f));
     }
 
+    /// Zoom as a Ctrl+scroll notch with the pointer at `at` in the view does, keeping what is
+    /// under the pointer there.
+    fn wheel_zoom(&self, at: Option<(f64, f64)>, out: bool) {
+        if let Some(f) = self.on_zoom.get() {
+            self.zoom_at.set(at);
+            f(out);
+        }
+    }
+
     pub fn connect_leap(&self, f: impl Fn(&gtk::TextIter) + 'static) {
         self.on_leap.set(Rc::new(f));
     }
@@ -1570,6 +1591,27 @@ impl NotebookTab {
             let top = f64::from(bounds.y());
             (top + f64::from(bounds.height()) > value).then_some((n, top - value))
         })
+    }
+
+    /// Where the display line holding character `offset` of cell `n`'s source is in the view: its
+    /// top, and its height.
+    pub fn bench_line(self: &Rc<Self>, n: usize, offset: i32) -> Option<(f64, f64)> {
+        let view = self.bench_view(n)?;
+        let iter = view.buffer().iter_at_offset(offset);
+        let (top, height) = selection::line_in(view.upcast_ref(), &iter, &self.content()?)?;
+        Some((top - self.scroller.vadjustment().value(), height))
+    }
+
+    /// Where `widget` is in the view: its top, and its height.
+    pub fn bench_bounds(&self, widget: &gtk::Widget) -> Option<(f64, f64)> {
+        let bounds = widget.compute_bounds(&self.content()?)?;
+        let top = f64::from(bounds.y()) - self.scroller.vadjustment().value();
+        Some((top, f64::from(bounds.height())))
+    }
+
+    /// A Ctrl+scroll notch with the pointer over the middle of the view's width, `y` down it.
+    pub fn bench_wheel_zoom(&self, y: f64, out: bool) {
+        self.wheel_zoom(Some((f64::from(self.scroller.width()) / 2.0, y)), out);
     }
 
     /// Where cell `n`'s top is in the view.
