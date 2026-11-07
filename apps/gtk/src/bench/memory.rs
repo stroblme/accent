@@ -293,8 +293,8 @@ impl Block {
     fn round(&mut self, watch: &Watch) {
         self.alive.extend(living(watch));
         self.after.push(rss());
-        // SAFETY: glibc's own call, which only hands free pages back to the kernel.
-        unsafe { malloc_trim(0) };
+        // Free pages handed back, so what stays resident is what is still allocated.
+        accent_core::malloc::trim();
         self.trimmed.push(rss());
     }
 
@@ -317,11 +317,6 @@ impl Block {
             alive.join(",")
         );
     }
-}
-
-unsafe extern "C" {
-    /// Return free malloc pages to the kernel to distinguish live allocation from cached pages.
-    fn malloc_trim(pad: usize) -> i32;
 }
 
 /// This process's threads by name, with how many there are of each.
