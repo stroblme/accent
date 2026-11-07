@@ -87,6 +87,10 @@ class PdfModel(private val session: PdfSession) : AutoCloseable {
                 ?.also { pages.put(key, it) }
     }
 
+    /** A whole page at [scale] if the cache holds one, at once and never rendered for it. */
+    fun cached(index: Int, scale: Float, theme: Theme): ImageBitmap? =
+        pages[Drawn(index, scale, theme)]
+
     suspend fun tile(index: Int, scale: Float, x: Int, y: Int, w: Int, h: Int, theme: Theme): ImageBitmap? =
         on {
             runCatching { session.renderTile(index.toUInt(), scale, x, y, w, h, theme).bitmap() }

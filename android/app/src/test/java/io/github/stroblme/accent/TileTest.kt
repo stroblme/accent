@@ -3,6 +3,7 @@ package io.github.stroblme.accent
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import io.github.stroblme.accent.ui.ceiling
+import io.github.stroblme.accent.ui.landing
 import io.github.stroblme.accent.ui.visible
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -42,6 +43,23 @@ class TileTest {
     @Test
     fun `a page the screen has left has nothing to draw`() {
         assertTrue(visible(poster, IntRect(0, -30000, 1080, -27600)).isEmpty)
+    }
+
+    @Test
+    fun `a tile lands where on the page it came from`() {
+        val window = IntRect(2000, 9000, 3080, 11400)
+        assertEquals(window, landing(window, window.size, poster.width, poster.width.toFloat()))
+    }
+
+    @Test
+    fun `a sheet from another zoom covers what it covered, stretched with the page`() {
+        // Drawn at 4× and shown at 8×, a tile covers twice its pixels; the stand-in shows beyond.
+        assertEquals(
+            IntRect(4000, 18000, 6160, 22800),
+            landing(IntRect(2000, 9000, 3080, 11400), IntSize(1080, 2400), 4320, 8640f),
+        )
+        // A whole page covers all of its page at any zoom, which leaves the stand-in nothing.
+        assertEquals(IntRect(0, 0, 8640, 12224), landing(a4, a4.size, a4.width, 8640f))
     }
 
     @Test

@@ -200,6 +200,8 @@ The shared architecture is in [DESIGN.md](DESIGN.md).
 - **Foreground indexing**: hold an `IndexingService` of type `dataSync` while walking, with a quiet, ongoing progress notification that returns to the app when tapped.
   Stop the service when the walk ends or pauses; no notification permission is required for the service to run.
 - **PDF rules**: use the shared core for highlights, links and annotation data; Compose handles gestures and drawing.
+- **A page zoomed past 8 Mpx is drawn as one tile of the screen**, drawn again every 180 ms while a pan or fling moves it, over the page's fit-width render stretched to the zoom, so the edge the screen reaches before its tile is blurred, as on the desktop, and never blank.
+  That stand-in comes from the page cache, or is rendered once after the tile when the cache has let it go, and costs one fit-width bitmap per page on screen.
 - **A PDF from another app is read from a copy** in `cacheDir/pdf`, deleted as soon as the core has it open, so the document never sits in memory whole and the session reads its own file until it closes.
   The provider's descriptor is not read directly, because a pipe has no offsets to read at and the write-back truncates the file pdfium would be reading.
 - **Recents are Android-local** (`Recents.kt`, `SharedPreferences`); vault, note and command history is kept separately from desktop window sessions.

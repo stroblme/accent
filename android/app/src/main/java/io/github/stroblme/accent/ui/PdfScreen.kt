@@ -37,12 +37,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.ClipOp
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.pointerInput
@@ -849,6 +851,7 @@ private fun Pages(
                             pageHeight = size.height,
                             shownPx = (viewport.width * zoom).toInt(),
                             renderPx = (viewport.width * followed.zoom).toInt(),
+                            fitPx = viewport.width,
                             // The followed screen in this page's own pixels: a page is exactly as
                             // wide as the column, so the only difference is where the page starts
                             // down it.
@@ -1094,6 +1097,19 @@ internal fun ceiling(viewport: IntSize): Float =
 internal fun visible(page: IntRect, window: IntRect): IntRect =
     if (page.width.toLong() * page.height <= WHOLE_PAGE_PX) page else page.intersect(window)
 
+/**
+ * Where a sheet of [image]'s size lands on its page shown [width] wide, drawn at [px] over [at]:
+ * where on the page it came from, stretched as the page is. A whole page covers all of it at any
+ * zoom; a tile covers its part, and the stand-in shows round it.
+ */
+internal fun landing(at: IntRect, image: IntSize, px: Int, width: Float): IntRect {
+    val stretch = width / px
+    return IntRect(
+        IntOffset((at.left * stretch).roundToInt(), (at.top * stretch).roundToInt()),
+        IntSize((image.width * stretch).roundToInt(), (image.height * stretch).roundToInt()),
+    )
+}
+
 @Composable
 private fun Page(
     doc: PdfModel,
@@ -1104,6 +1120,8 @@ private fun Page(
     shownPx: Int,
     /** The width its bitmap was drawn at, which follows the pinch once it settles. */
     renderPx: Int,
+    /** Its width at fit width, which the stand-in under a tile was drawn at. */
+    fitPx: Int,
     /** What the screen covers of this page, in its own pixels at [renderPx]. */
     window: IntRect,
     theme: Theme,
@@ -1127,6 +1145,11 @@ private fun Page(
     val heightPx = (pageHeight * scale).toInt()
     var sheet by remember(index, theme) { mutableStateOf<Sheet?>(null) }
     var generation by remember(index) { mutableIntStateOf(0) }
+    /**
+     * The page as drawn at fit width, in the same colours, under a tile: stretched, and so blurred,
+     * where the tile does not reach, which is the edge a pan or fling brings in before its tile.
+     */
+    var standIn by remember(index, theme, generation) { mutableStateOf<ImageBitmap?>(null) }
     val scope = rememberCoroutineScope()
     val colors = MaterialTheme.colorScheme
 
@@ -1138,13 +1161,23 @@ private fun Page(
     // render slower than the screen's moves would land only once they stopped.
     LaunchedEffect(index, renderPx, theme, generation) {
         val perPoint = renderPx / pageWidth
+        // Worked out as [perPoint] is at fit width, so the cache knows it as that render.
+        val fit = fitPx / pageWidth
         snapshotFlow { wanted }.collect { want ->
             // Nothing of it on screen and too big to draw whole: keep whatever it has until it is.
             if (want.isEmpty) return@collect
-            val image =
-                if (want == whole) doc.page(index, perPoint, theme)
-                else doc.tile(index, perPoint, want.left, want.top, want.width, want.height, theme)
-            if (image != null) sheet = Sheet(image, want, renderPx)
+            if (want == whole) {
+                // All of the page, which leaves its stand-in nothing to show once it lands.
+                sheet = Sheet(doc.page(index, perPoint, theme) ?: return@collect, want, renderPx)
+                standIn = null
+                return@collect
+            }
+            // The cache's at once if it has one; if not, drawn after the tile, which is what the
+            // screen is waiting for, and cached for the next zoom.
+            if (standIn == null) standIn = doc.cached(index, fit, theme)
+            doc.tile(index, perPoint, want.left, want.top, want.width, want.height, theme)
+                ?.let { sheet = Sheet(it, want, renderPx) }
+            if (standIn == null) standIn = doc.page(index, fit, theme)
         }
     }
 
@@ -1213,25 +1246,32 @@ private fun Page(
                 )
             },
     ) {
-        sheet?.let { (image, at, px) ->
+        val shown = sheet
+        val under = standIn
+        if (shown != null || under != null) {
             Canvas(Modifier.fillMaxSize()) {
                 // Stretched from the pixels it was drawn in to the ones it is shown at rather than
                 // drawn 1:1, so a pinch moves the page with the fingers and the sharper render
-                // catches up afterwards. A tile lands where on the page it came from; a whole
-                // page's rectangle is the page, so it covers the lot as it always did.
-                val stretch = size.width / px
-                drawImage(
-                    image = image,
-                    srcSize = IntSize(image.width, image.height),
-                    dstOffset = IntOffset(
-                        (at.left * stretch).roundToInt(),
-                        (at.top * stretch).roundToInt(),
-                    ),
-                    dstSize = IntSize(
-                        (image.width * stretch).roundToInt(),
-                        (image.height * stretch).roundToInt(),
-                    ),
-                )
+                // catches up afterwards.
+                val over = shown?.let { (image, at, px) ->
+                    landing(at, IntSize(image.width, image.height), px, size.width)
+                }
+                // The stand-in fills the page wherever the sheet is not and nowhere it is, so the
+                // sharp edge meets the blurred one; with no sheet yet, the empty cut leaves it all.
+                if (under != null) {
+                    val cut = over ?: IntRect.Zero
+                    val all = IntSize(size.width.roundToInt(), size.height.roundToInt())
+                    clipRect(
+                        cut.left.toFloat(),
+                        cut.top.toFloat(),
+                        cut.right.toFloat(),
+                        cut.bottom.toFloat(),
+                        ClipOp.Difference,
+                    ) { drawImage(under, dstSize = all) }
+                }
+                if (shown != null && over != null) {
+                    drawImage(shown.image, dstOffset = over.topLeft, dstSize = over.size)
+                }
                 if (wet.size > 1) {
                     val path = Path().apply {
                         moveTo(wet[0].x, wet[0].y)
@@ -1244,7 +1284,7 @@ private fun Page(
                     )
                 }
             }
-        } ?: Box(
+        } else Box(
             Modifier.fillMaxSize(),
             Alignment.Center,
         ) { Text("${index + 1}", color = colors.onSurfaceVariant) }
