@@ -4,7 +4,7 @@ mod files;
 mod keys;
 mod transfer;
 pub use files::{Attachment, attachment_path, rebase_files};
-pub use keys::PATTERN;
+pub use keys::{PATTERN, citation};
 
 use crate::{Error, Result};
 use std::collections::{HashMap, HashSet};

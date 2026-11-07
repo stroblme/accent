@@ -52,21 +52,24 @@ impl App {
         let keys = selected
             .iter()
             .filter_map(|i| library.entries.get(*i).map(|e| e.key.as_str()))
-            .collect::<Vec<_>>()
-            .join(",");
+            .collect::<Vec<_>>();
         if insert {
-            let Some(tab) = self.active().filter(|t| t.rel().ends_with(".tex")) else {
-                return self.toast("Open a LaTeX document to insert the selected citation");
+            let source = |rel: String| rel.ends_with(".tex") || rel.ends_with(".typ");
+            let Some(tab) = self.active().filter(|t| source(t.rel())) else {
+                return self
+                    .toast("Open a LaTeX or Typst document to insert the selected citation");
             };
             if !tab.view.is_editable() {
                 return self.toast("This document is read-only");
             }
+            let typst = tab.rel().ends_with(".typ");
             tab.buffer.begin_user_action();
-            tab.buffer.insert_at_cursor(&format!("\\cite{{{keys}}}"));
+            tab.buffer
+                .insert_at_cursor(&accent_core::bib::citation(&keys, typst));
             tab.buffer.end_user_action();
             tab.view.grab_focus();
         } else {
-            self.window.clipboard().set_text(&keys);
+            self.window.clipboard().set_text(&keys.join(","));
             self.toast(if selected.len() == 1 {
                 "Copied citation key"
             } else {

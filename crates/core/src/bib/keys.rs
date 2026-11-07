@@ -69,3 +69,26 @@ impl Library {
 }
 
 pub use DEFAULT_PATTERN as PATTERN;
+
+/// How a document cites `keys`: LaTeX's `\cite{a,b}`, or Typst's `@a @b`, a key its references
+/// cannot spell (a `/` in it, a `.` or `:` at its end) as `#cite(label("key"))`.
+pub fn citation(keys: &[&str], typst: bool) -> String {
+    if !typst {
+        return format!("\\cite{{{}}}", keys.join(","));
+    }
+    let cite = |key: &&str| match referable(key) {
+        true => format!("@{key}"),
+        false => {
+            let quoted = key.replace('\\', "\\\\").replace('"', "\\\"");
+            format!("#cite(label(\"{quoted}\"))")
+        }
+    };
+    keys.iter().map(cite).collect::<Vec<_>>().join(" ")
+}
+
+/// Whether `@key` reads as a reference to `key`: Typst takes letters, digits, `_`, `-`, `.` and
+/// `:` after an `@`, and leaves a `.` or `:` at the end to the sentence.
+fn referable(key: &str) -> bool {
+    let allowed = |c: char| c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | ':');
+    !key.is_empty() && key.chars().all(allowed) && !key.ends_with(['.', ':'])
+}

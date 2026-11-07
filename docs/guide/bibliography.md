@@ -20,7 +20,7 @@ If a file has syntax errors, edit its source before using structured changes.
 ## Cite, check and share
 
 Use a reference's row menu to copy its citation key, refresh metadata, open its PDF or find usages.
-**Insert Citation** writes `\cite{keys}` into the active LaTeX document.
+**Insert Citation** writes `\cite{keys}` into the active LaTeX document and `@key` for each key into a Typst document.
 **Copy Citation Keys** also works when writing in another application.
 
 The pane's **More** menu offers **Check** and **Merge Duplicates**.

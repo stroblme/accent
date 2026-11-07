@@ -110,3 +110,17 @@ fn attachment_rebasing_normalizes_destination() {
     assert_eq!(rebased[0].path, "library/paper.pdf");
     assert!(rebase_files("library/main.bib", "../refs.bib", &files).is_err());
 }
+
+#[test]
+fn a_citation_is_written_as_the_document_reads_one() {
+    assert_eq!(citation(&["a", "b:2"], false), "\\cite{a,b:2}");
+    assert_eq!(
+        citation(&["knuth84", "doe:2020"], true),
+        "@knuth84 @doe:2020"
+    );
+    // A key `@` cannot spell is cited by its label, quoted as a Typst string.
+    assert_eq!(
+        citation(&["10.1000/x", "end.", "a\"b"], true),
+        "#cite(label(\"10.1000/x\")) #cite(label(\"end.\")) #cite(label(\"a\\\"b\"))"
+    );
+}
