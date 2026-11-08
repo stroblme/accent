@@ -414,6 +414,7 @@ use user_commands::bench_commands;
 /// - `ACCENT_BENCH_SHOT=<n>:<dir>`: README screenshot `n`, light and dark, into `<dir>`. Only
 ///   on the vault and launch `build-aux/screenshots.sh` makes (`make screenshots`).
 pub fn install_bench_hooks(app: &Rc<App>) {
+    loading::open_early(app);
     if let Some(ms) = std::env::var("ACCENT_BENCH_SLOW_READ")
         .ok()
         .and_then(|ms| ms.parse().ok())

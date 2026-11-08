@@ -20,5 +20,5 @@ bench loading failed loading/failed said=["Cannot go to loading-fail.md: <vault>
 bench loading retrying loading/loading
 bench loading retried text/doc ran=false tabs=1 preview=Some(false)
 bench loading reload [loading-note.md:text/doc loading.pdf:pdf/view loading.png:image/doc loading.drawio:diagram/doc loading.ipynb:notebook/doc loading-twice.md:text/doc loading-fast.md:text/doc *loading-fail.md:text/doc]
-bench loading restored [loading-note.md:loading/loading loading.pdf:pdf/loading loading.png:image/loading loading.drawio:loading/loading loading.ipynb:loading/loading loading-twice.md:loading/loading loading-fast.md:loading/loading *loading-fail.md:loading/loading]
-bench loading restored landed [loading-note.md:text/doc loading.pdf:pdf/view loading.png:image/doc loading.drawio:diagram/doc loading.ipynb:notebook/doc loading-twice.md:text/doc loading-fast.md:text/doc *loading-fail.md:text/doc]
+bench loading restored [*loading-note.md:loading/loading loading.pdf:pdf/loading loading.png:image/loading loading.drawio:loading/loading loading.ipynb:loading/loading loading-twice.md:loading/loading loading-fast.md:loading/loading loading-fail.md:loading/loading]
+bench loading restored landed [*loading-note.md:text/doc loading.pdf:pdf/view loading.png:image/doc loading.drawio:diagram/doc loading.ipynb:notebook/doc loading-twice.md:text/doc loading-fast.md:text/doc loading-fail.md:text/doc]

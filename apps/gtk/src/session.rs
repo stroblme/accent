@@ -836,6 +836,12 @@ impl App {
     /// Restore splits before opening tabs, recording destinations in [`App::pending`].
     /// Worker reads finish later, so [`App::tabs_for`] chooses the pane when each tab arrives.
     fn restore_panes(self: &Rc<Self>, layout: Layout, session: &Session) {
+        // A pane something was opened into before the restore began is the reader's already, as
+        // one picked meanwhile is: a file named while a remote vault was still connecting, say.
+        // The pane they are in goes last, where `reader_in` keeps it.
+        let (mut taken, reader_was) = (self.panes.borrow().clone(), self.pane());
+        taken.retain(|pane| pane.tabs.n_pages() > 0);
+        taken.sort_by_key(|pane| Rc::ptr_eq(pane, &reader_was));
         let active = session.active.clone();
         let (mut placed, mut splits) = (Vec::new(), Vec::new());
         self.arrange(&self.pane(), layout, &mut placed, &mut splits);
@@ -852,7 +858,7 @@ impl App {
             placed,
             active,
             pinned: session.pinned.clone(),
-            taken: RefCell::default(),
+            taken: RefCell::new(taken.iter().map(Rc::downgrade).collect()),
             selecting: Cell::new(false),
         });
         // Weak: the work waiting on each tab holds it, so it goes once the last one has settled.

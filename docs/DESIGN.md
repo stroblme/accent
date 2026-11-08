@@ -891,6 +891,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - A restore puts every tab back at once, each showing the loading page until its file arrives (Loading), and their documents land one read at a time.
   A pane the reader picks a tab in, opens a note into or moves the keyboard to meanwhile is theirs, and what lands there does not change what it shows.
   A file named on the command line is such an opening, whether or not the session holds it: it comes to the front.
+  So is a file opened before the restore begins, as one is while a remote vault connects.
 - A restored window has an empty Back and Forward: a restore's selections are not places.
   A first opening, or a session without a layout, is one pane; a split's share is kept to 10–90 %.
 - A tab on a file outside the window's vault carries `document-open-symbolic` in its indicator slot, tooltipped Outside this vault, so saving it is never a surprise and it is plain why it has no backlinks.

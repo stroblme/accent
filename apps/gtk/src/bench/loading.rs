@@ -17,6 +17,16 @@ thread_local! {
     /// Whether this process has reloaded its window, so the window that comes back looks at the
     /// tabs it restored rather than reloading again.
     static RELOADED: Cell<bool> = const { Cell::new(false) };
+    /// What the window Reload Window brings back opens as it is built, before its session is put
+    /// back, as a file named while a remote vault is still connecting is opened.
+    static EARLY: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Open what [`EARLY`] names: called as the window is built, ahead of the session's restore.
+pub(super) fn open_early(app: &Rc<App>) {
+    if let Some(rel) = EARLY.take() {
+        app.open_path(&rel);
+    }
 }
 
 /// `ACCENT_BENCH_TABS=loading`, each read and fetch held 800 ms: a note's, a PDF's, an image's,
@@ -26,7 +36,8 @@ thread_local! {
 /// way (no tab, nothing written), a quick open (no loading page), and a folder named as a note:
 /// its tab says it cannot open, with Retry, what waited on it is told, and Retry opens the note
 /// written there since. Last Reload Window, whose restored tabs are all up at once, in their
-/// order, before any lands. Writes `loading*` files into the vault root.
+/// order, before any lands, but for the first, opened before the restore began, which is the
+/// reader's and so stays in front. Writes `loading*` files into the vault root.
 pub(super) fn bench_loading(app: &Rc<App>) {
     let app = app.clone();
     if RELOADED.replace(true) {
@@ -155,6 +166,7 @@ pub(super) fn bench_loading(app: &Rc<App>) {
 
         SLOW_READ_MS.store(800, Ordering::Relaxed);
         println!("bench loading reload {}", bar(&app));
+        EARLY.set(Some("loading-note.md".to_string()));
         let _ = WidgetExt::activate_action(&app.window, "win.reload-window", None);
     });
 }
