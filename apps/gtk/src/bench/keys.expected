@@ -134,6 +134,7 @@ bench indent_colon "def f():  # x\n    " (1, 4) Stop
 bench indent_string "    x = \"(\"" (0, 11) Proceed
 bench indent_no_language "Notes:" (0, 6) Proceed
 bench indent_typst_colon "It holds:" (0, 9) Proceed
+bench indent_latex_colon "as follows:" (0, 11) Proceed
 bench indent_pair "fn f() {\n    \n}" (1, 4) Stop
 bench indent_pair_undo "fn f() {}"
 bench indent_closer "fn f() {\n    a();\n}" (2, 1) Stop

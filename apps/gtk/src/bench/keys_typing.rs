@@ -84,6 +84,8 @@ pub(super) fn bench_indent(view: &multicaret::View) {
     press("no_language", gdk::Key::Return);
     set(Some("typst"), "It holds:");
     press("typst_colon", gdk::Key::Return);
+    set(Some("latex"), "as follows:");
+    press("latex_colon", gdk::Key::Return);
     set(Some("rust"), "fn f() {}");
     buffer.place_cursor(&at(&buffer, 0, 8));
     press("pair", gdk::Key::Return);

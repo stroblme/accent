@@ -23,9 +23,9 @@ const OPENERS: [(char, Option<char>); 4] = [
     (':', None),
 ];
 
-/// The languages in which a `:` opens nothing: Typst's blocks are brackets, and its prose ends
-/// many a line with a colon.
-const NO_COLON: [&str; 1] = ["typst"];
+/// The languages in which a `:` opens nothing: Typst's blocks are brackets and LaTeX's are
+/// environments, and the prose of both ends many a line with a colon.
+const NO_COLON: [&str; 2] = ["typst", "latex"];
 
 /// Return or a closer in a code tab with a language; the rest is left to the view.
 pub(crate) fn on_key(

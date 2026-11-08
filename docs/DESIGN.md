@@ -679,7 +679,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - TSX is coloured by accent's own `typescript-jsx.lang` beside them: GtkSourceView 5.20's, with an arrow function's type parameter list that starts on the line after its `<`, as Prettier wraps a long one, read as one; the stock one takes it for a JSX element that never closes and leaves the rest of the file one colour.
   A `.mts` or `.cts` file is TypeScript, which GtkSourceView has no glob for.
 - Typst is coloured by Typesetter's `typst.lang` beside them, GtkSourceView shipping none, with its comments and strings given the `comment` and `string` classes the Return and bracket rules read.
-  A `:` ending a Typst line opens no level, since Typst's blocks are brackets and its prose ends many a line with a colon.
+  A `:` ending a Typst or LaTeX line opens no level, since Typst's blocks are brackets and LaTeX's environments, and the prose of both ends many a line with a colon (user decision 2026-11-08).
 - It wraps as prose does: nothing in a document scrolls sideways.
   A wrapped row starts one indent level deeper than its line (VS Code's `wrappingIndent: "indent"`), so it cannot pass for the next line; a note does the same, hanging a list item's rows under its text (its marker measured in the note's font as drawn, so a proportional face's `-` is not taken for a space), except in a fenced block, whose lines wrap as code's do whatever they open with.
   `Alt+Z` unwraps one tab for as long as it is open, for a generated file whose columns are the point.
