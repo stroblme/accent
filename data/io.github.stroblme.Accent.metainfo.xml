@@ -30,24 +30,32 @@
 
   <screenshots>
     <screenshot type="default">
-      <image>https://raw.githubusercontent.com/stroblme/accent/9c37f808b39d48c952551727fc94219002df6196/data/screenshots/files.png</image>
+      <image>https://raw.githubusercontent.com/stroblme/accent/e3d37e85e538a9453e290c09683194a415534fb2/data/screenshots/files.png</image>
       <caption>A note with an inline suggestion beside the vault's files</caption>
     </screenshot>
     <screenshot>
-      <image>https://raw.githubusercontent.com/stroblme/accent/9c37f808b39d48c952551727fc94219002df6196/data/screenshots/git.png</image>
+      <image>https://raw.githubusercontent.com/stroblme/accent/e3d37e85e538a9453e290c09683194a415534fb2/data/screenshots/git.png</image>
       <caption>The Git pane beside a file's changes since it was staged</caption>
     </screenshot>
     <screenshot>
-      <image>https://raw.githubusercontent.com/stroblme/accent/9c37f808b39d48c952551727fc94219002df6196/data/screenshots/terminals.png</image>
-      <caption>Two terminals beside a PDF annotated by hand</caption>
+      <image>https://raw.githubusercontent.com/stroblme/accent/e3d37e85e538a9453e290c09683194a415534fb2/data/screenshots/editor.png</image>
+      <caption>A script open in Helix beside a PDF annotated by hand</caption>
     </screenshot>
     <screenshot>
-      <image>https://raw.githubusercontent.com/stroblme/accent/9c37f808b39d48c952551727fc94219002df6196/data/screenshots/focus.png</image>
+      <image>https://raw.githubusercontent.com/stroblme/accent/e3d37e85e538a9453e290c09683194a415534fb2/data/screenshots/focus.png</image>
       <caption>Focus mode in the Solarized theme while another note is linked</caption>
     </screenshot>
     <screenshot>
-      <image>https://raw.githubusercontent.com/stroblme/accent/9c37f808b39d48c952551727fc94219002df6196/data/screenshots/debug.png</image>
+      <image>https://raw.githubusercontent.com/stroblme/accent/e3d37e85e538a9453e290c09683194a415534fb2/data/screenshots/debug.png</image>
       <caption>A Python program paused at a breakpoint in the Solarized theme, beside its Debug Console and output</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/stroblme/accent/e3d37e85e538a9453e290c09683194a415534fb2/data/screenshots/diagram.png</image>
+      <caption>A draw.io diagram beside the Properties of its selected shape</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/stroblme/accent/e3d37e85e538a9453e290c09683194a415534fb2/data/screenshots/notebook.png</image>
+      <caption>A Jupyter notebook's code cell and plot beside its kernel in the Code pane</caption>
     </screenshot>
   </screenshots>
 
