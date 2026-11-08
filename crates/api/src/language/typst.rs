@@ -70,7 +70,9 @@ impl Mains {
     /// where nothing does, and where the includes go round.
     fn main_of(&self, file: &Path) -> PathBuf {
         let pinned = locked(&self.pinned).clone();
-        if let Some(pinned) = pinned.filter(|pinned| self.reaches(pinned, file)) {
+        if let Some(pinned) =
+            pinned.filter(|pinned| self.document(pinned).iter().any(|f| f == file))
+        {
             return pinned;
         }
         let mut main = file.to_path_buf();
@@ -105,18 +107,40 @@ impl Mains {
             })
     }
 
-    /// Whether `main` brings `file` in, at any depth.
-    fn reaches(&self, main: &Path, file: &Path) -> bool {
-        let (mut todo, mut seen) = (vec![main.to_path_buf()], HashSet::new());
+    /// The files `main` is built from: itself and every file it brings in, at any depth, once each.
+    fn document(&self, main: &Path) -> Vec<PathBuf> {
+        let (mut todo, mut seen) = (vec![main.to_path_buf()], Vec::new());
         while let Some(at) = todo.pop() {
-            if at == file {
-                return true;
-            }
-            if seen.insert(at.clone()) {
+            if !seen.contains(&at) {
                 todo.extend(self.includes(&at).iter().cloned());
+                seen.push(at);
             }
         }
-        false
+        seen
+    }
+
+    /// What a `tinymist/compileStatus` says of a build: the main document built, as a vault path
+    /// (tinymist names it from the root, `/main.typ`), whether the build failed, and then the vault
+    /// paths of the files it is built from, whose tabs say so; `None` while one is compiling, and
+    /// for a document outside the vault.
+    pub(super) fn compiled(
+        &self,
+        params: &Value,
+        vault_root: &Path,
+    ) -> Option<(String, bool, Vec<String>)> {
+        let failed = match params.get("status")?.as_str()? {
+            "compileSuccess" => false,
+            "compileError" => true,
+            _ => return None,
+        };
+        let path = params.get("path")?.as_str()?;
+        let main = Local::join(&self.root, path.trim_start_matches('/')).ok()?;
+        let rel = |abs: &Path| Some(abs.strip_prefix(vault_root).ok()?.to_str()?.to_string());
+        let files = match failed {
+            true => self.document(&main).iter().filter_map(|f| rel(f)).collect(),
+            false => Vec::new(),
+        };
+        Some((rel(&main)?, failed, files))
     }
 
     /// The files `file` includes or imports: from its folder, or from the root where the path
@@ -175,21 +199,6 @@ pub(super) fn tidy(rows: &mut Vec<DocumentSymbol>, last: u32) {
             tidy(children, row.range.end.line);
         }
     }
-}
-
-/// What a `tinymist/compileStatus` says of a build: the main document built, as a vault path
-/// (tinymist names it from the session's root, `/main.typ`), and whether the build failed;
-/// `None` while one is compiling, and for a document outside the vault.
-pub(super) fn compiled(params: &Value, root: &Path, vault_root: &Path) -> Option<(String, bool)> {
-    let failed = match params.get("status")?.as_str()? {
-        "compileSuccess" => false,
-        "compileError" => true,
-        _ => return None,
-    };
-    let path = params.get("path")?.as_str()?;
-    let abs = Local::join(root, path.trim_start_matches('/')).ok()?;
-    let rel = abs.strip_prefix(vault_root).ok()?.to_str()?;
-    Some((rel.to_string(), failed))
 }
 
 #[cfg(test)]
@@ -294,22 +303,26 @@ mod tests {
     }
 
     #[test]
-    fn a_build_is_named_by_its_main_document() {
-        let (root, vault) = (Path::new("/v/thesis"), Path::new("/v"));
+    fn a_build_is_named_by_its_main_document_and_a_failed_one_by_its_files() {
+        let dir = vault(&[
+            ("thesis/main.typ", "#include \"ch.typ\"\n"),
+            ("thesis/ch.typ", "= Chapter\n"),
+            ("thesis/other.typ", "= Other\n"),
+        ]);
+        let mains = Mains::new(dir.path().join("thesis"));
         let status = |status: &str| json!({"path": "/main.typ", "status": status, "pageCount": 1});
+        let main = || "thesis/main.typ".to_string();
         assert_eq!(
-            compiled(&status("compileError"), root, vault),
-            Some(("thesis/main.typ".to_string(), true))
+            mains.compiled(&status("compileError"), dir.path()),
+            Some((main(), true, vec![main(), "thesis/ch.typ".to_string()]))
         );
         assert_eq!(
-            compiled(&status("compileSuccess"), root, vault),
-            Some(("thesis/main.typ".to_string(), false))
+            mains.compiled(&status("compileSuccess"), dir.path()),
+            Some((main(), false, Vec::new()))
         );
-        assert_eq!(compiled(&status("compiling"), root, vault), None);
-        assert_eq!(
-            compiled(&status("compileError"), root, Path::new("/w")),
-            None
-        );
+        assert_eq!(mains.compiled(&status("compiling"), dir.path()), None);
+        let elsewhere = Path::new("/elsewhere");
+        assert_eq!(mains.compiled(&status("compileError"), elsewhere), None);
     }
 
     /// tinymist end to end, skipped where it is not installed: a chapter opened alone is answered
@@ -386,8 +399,17 @@ mod tests {
             _ => None,
         });
         assert!(said.last().is_none_or(|items| items.is_empty()));
-        // A main that does not compile, and again once it does.
-        let built = |failed: bool| move |e: &crate::Event| matches!(e, crate::Event::Compiled { rel, failed: f } if rel == "main.typ" && *f == failed);
+        // A main that does not compile, named with the chapter it includes, and again once it does.
+        let built = |failed: bool| {
+            move |e: &crate::Event| match e {
+                crate::Event::Compiled {
+                    rel,
+                    failed: f,
+                    files,
+                } => rel == "main.typ" && *f == failed && files.len() == if failed { 2 } else { 0 },
+                _ => false,
+            }
+        };
         accent_lsp::runtime().block_on(async {
             vault
                 .open_document("main.typ", "typst", main.to_string())

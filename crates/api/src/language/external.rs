@@ -73,7 +73,7 @@ pub(crate) struct External {
     tocs: super::latex::Tocs,
     /// The server is tinymist, told before each open and save which document the file belongs
     /// to ([`super::typst`]).
-    mains: Option<super::typst::Mains>,
+    mains: Option<Arc<super::typst::Mains>>,
     /// Whether [`Language::calls`] has found a declaration. Before the first
     /// success, an empty result may mean the project is still loading.
     found_one: AtomicBool,
@@ -122,12 +122,13 @@ pub(crate) async fn start_configured(
     tracing::debug!("{name} started in {} ({encoding:?})", root.display());
 
     let docs: Docs = Arc::new(Mutex::new(HashMap::new()));
+    let mains = tinymist.then(|| Arc::new(super::typst::Mains::new(root.clone())));
     // The task holds the documents and the channel, never the provider: it has to end when the
     // server's reader drops the sender, not when the last tab lets go of the session.
     accent_lsp::runtime().spawn(forward_notifications(
         notifications,
         docs.clone(),
-        root.clone(),
+        mains.clone(),
         vault_root.clone(),
         encoding,
         busy,
@@ -148,7 +149,7 @@ pub(crate) async fn start_configured(
             .file_name()
             .is_some_and(|file| file == "lake" || file == "lean"),
         tocs: Default::default(),
-        mains: tinymist.then(|| super::typst::Mains::new(root)),
+        mains,
         found_one: AtomicBool::new(false),
         named: Default::default(),
     }))
@@ -181,11 +182,11 @@ impl Busy {
 /// Map published diagnostics to open tabs and progress to [`Event`]s for
 /// servers with `busy`. Drop diagnostics for unopened files, since
 /// servers may publish for an entire project and no tab can display them.
-/// `root` is the server's, which tinymist names a built document from.
+/// `mains` are tinymist's, which name a build's files.
 async fn forward_notifications(
     mut notifications: Notifications,
     docs: Docs,
-    root: PathBuf,
+    mains: Option<Arc<super::typst::Mains>>,
     vault_root: PathBuf,
     encoding: Encoding,
     busy: Option<Busy>,
@@ -198,8 +199,9 @@ async fn forward_notifications(
     let mut working = false;
     // How far each file's check has got, and so the files to say done with when it exits.
     let mut checking: HashMap<String, Check> = HashMap::new();
-    // The documents whose last build failed, and so the ones to say built when it exits.
-    let mut failing: HashSet<String> = HashSet::new();
+    // The documents whose last build failed, with their files, and so the ones to say built when
+    // it exits.
+    let mut failing: HashMap<String, Vec<String>> = HashMap::new();
     loop {
         // A line held back goes on at the end of its interval, whether the server says more by
         // then or not.
@@ -292,15 +294,18 @@ async fn forward_notifications(
             }
             // tinymist says so of every compile, a keystroke's too: only a change is news.
             "tinymist/compileStatus" => {
-                let Some((rel, failed)) = super::typst::compiled(&n.params, &root, &vault_root)
-                else {
+                let Some(built) = mains.as_ref() else {
+                    continue;
+                };
+                let Some((rel, failed, files)) = built.compiled(&n.params, &vault_root) else {
                     continue;
                 };
                 let news = match failed {
-                    true => failing.insert(rel.clone()),
-                    false => failing.remove(&rel),
+                    true => failing.insert(rel.clone(), files.clone()).as_ref() != Some(&files),
+                    false => failing.remove(&rel).is_some(),
                 };
-                if news && events.send(Event::Compiled { rel, failed }).is_err() {
+                let compiled = Event::Compiled { rel, failed, files };
+                if news && events.send(compiled).is_err() {
                     break;
                 }
             }
@@ -331,8 +336,13 @@ async fn forward_notifications(
             lines: Vec::new(),
         });
     }
-    for rel in failing {
-        let _ = events.send(Event::Compiled { rel, failed: false });
+    for rel in failing.into_keys() {
+        let files = Vec::new();
+        let _ = events.send(Event::Compiled {
+            rel,
+            failed: false,
+            files,
+        });
     }
 }
 
@@ -1160,7 +1170,7 @@ mod tests {
             let task = accent_lsp::runtime().spawn(forward_notifications(
                 notifications,
                 docs,
-                PathBuf::from("/vault"),
+                None,
                 PathBuf::from("/vault"),
                 Encoding::Utf16,
                 Some(busy),
@@ -1303,7 +1313,7 @@ mod tests {
         accent_lsp::runtime().block_on(forward_notifications(
             notifications,
             docs,
-            PathBuf::from("/vault"),
+            None,
             PathBuf::from("/vault"),
             Encoding::Utf16,
             None,
@@ -1347,7 +1357,7 @@ mod tests {
         accent_lsp::runtime().block_on(forward_notifications(
             notifications,
             docs,
-            PathBuf::from("/vault"),
+            None,
             PathBuf::from("/vault"),
             Encoding::Utf16,
             None,

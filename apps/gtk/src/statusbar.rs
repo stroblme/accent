@@ -45,8 +45,10 @@ pub struct Bar {
     /// Delayed language-server startup and subsequent checking progress for the active tab.
     starting: RefCell<Option<String>>,
     checking: RefCell<Option<String>>,
-    /// The documents a language server builds on save whose last build failed, the latest last.
-    failed_builds: RefCell<Vec<String>>,
+    /// The documents a language server builds on save whose last build failed, each with the
+    /// files it is built from, the latest last; and the file in front, whose document's is said.
+    failed_builds: RefCell<Vec<(String, Vec<String>)>>,
+    front: RefCell<Option<String>>,
     /// How far the reading of the vault's PDFs' text has got, while it runs.
     pdf_text: RefCell<Option<String>>,
     provider_busy: RefCell<Option<String>>,
@@ -157,6 +159,7 @@ impl Bar {
             starting: RefCell::new(None),
             checking: RefCell::new(None),
             failed_builds: RefCell::new(Vec::new()),
+            front: RefCell::new(None),
             pdf_text: RefCell::new(None),
             provider_busy: RefCell::new(None),
             index,
@@ -243,17 +246,23 @@ impl Bar {
         self.show_busy();
     }
 
-    /// Whether the last build of `rel`, a document a language server builds on save, failed: the
-    /// latest of those failing is said after the servers' lines, "thesis/main.typ did not
-    /// compile", until it builds.
-    pub fn set_compiled(&self, rel: &str, failed: bool) {
+    /// Whether the last build of `rel`, a document a language server builds on save from `files`,
+    /// failed: said after the servers' lines while one of its files is in front, "thesis/main.typ
+    /// did not compile", until it builds.
+    pub fn set_compiled(&self, rel: &str, failed: bool, files: Vec<String>) {
         {
             let mut builds = self.failed_builds.borrow_mut();
-            builds.retain(|build| build != rel);
+            builds.retain(|(build, _)| build != rel);
             if failed {
-                builds.push(rel.to_string());
+                builds.push((rel.to_string(), files));
             }
         }
+        self.show_busy();
+    }
+
+    /// The file of the text tab in front, or `None`: a failed build is said over its own files.
+    pub fn set_front(&self, rel: Option<&str>) {
+        *self.front.borrow_mut() = rel.map(str::to_string);
         self.show_busy();
     }
 
@@ -338,8 +347,11 @@ impl Bar {
         let checking = self.checking.borrow();
         let pdf_text = self.pdf_text.borrow();
         let provider = self.provider_busy.borrow();
-        let failed =
-            (self.failed_builds.borrow().last()).map(|rel| format!("{rel} did not compile"));
+        let front = self.front.borrow();
+        let builds = self.failed_builds.borrow();
+        let failed = (builds.iter().rev())
+            .find(|(_, files)| front.as_ref().is_some_and(|front| files.contains(front)))
+            .map(|(rel, _)| format!("{rel} did not compile"));
         let ahead = vault.is_some() || self.opening.get();
         let transfer = transfers.last().filter(|_| !ahead);
         let before = vault

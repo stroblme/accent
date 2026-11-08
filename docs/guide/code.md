@@ -58,7 +58,7 @@ Accent edits `.typ` files with syntax highlighting, and the Outline lists their 
 With `tinymist` installed, it also completes labels and citations, shows errors and builds the PDF whenever you save.
 The PDF goes beside the main document, the file that includes the one you are editing, so saving a chapter rebuilds the whole document.
 Open the PDF from the Files pane once, and it reloads after every build.
-While the main document does not compile, the status bar names it.
+While the main document does not compile, the status bar names it over the tabs of its files.
 Typst writes no SyncTeX data yet, so **Show in PDF** and **Go to Source** stay greyed for its documents.
 
 ## Lean

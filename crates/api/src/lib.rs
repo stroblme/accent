@@ -142,11 +142,13 @@ pub enum Event {
         lines: Vec<std::ops::Range<u32>>,
     },
     /// Whether the last build of `rel`, a main document a language server builds as it is saved
-    /// (tinymist's Typst export), failed: sent when that changes, and as built once the server
-    /// has exited.
+    /// (tinymist's Typst export), failed, with `files`, the vault paths it is built from, itself
+    /// among them, while it has: sent when either changes, and as built once the server has
+    /// exited.
     Compiled {
         rel: String,
         failed: bool,
+        files: Vec<String>,
     },
     /// What debug session `session`, the number [`Vault::debug_start`] was given, has to say.
     Debug {

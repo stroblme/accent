@@ -1027,6 +1027,8 @@ impl App {
         self.statusbar.set_starting(starting.as_deref());
         self.statusbar
             .set_checking(self.active().and_then(|tab| tab.lang.checking.get()));
+        self.statusbar
+            .set_front(self.active().map(|tab| tab.rel()).as_deref());
         // The count of what is wrong with a document is also the switch that keeps it out of the
         // text, and a PDF's page count opens the page commands for that page; every other count
         // is a readout with nothing to press.
