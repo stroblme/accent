@@ -398,7 +398,7 @@ fn bench_kernelspec(app: &Rc<App>, rel: &str) {
         if let Ok(path) = std::env::var("ACCENT_BENCH_KERNEL_SHOT") {
             app.show_pane("code");
             glib::timeout_future(Duration::from_millis(300)).await;
-            bench_pump();
+            pumped().await;
             super::diagram::shoot(app.window.upcast_ref(), Path::new(&path));
         }
 
@@ -592,7 +592,7 @@ async fn interrupt(app: &Rc<App>, tab: &NotebookTab, n: usize, say: bool) -> boo
         );
         // `ACCENT_BENCH_KERNEL_SHOT=<png>`: the window as the run has left it, for looking at.
         if let Ok(path) = std::env::var("ACCENT_BENCH_KERNEL_SHOT") {
-            bench_pump();
+            pumped().await;
             super::diagram::shoot(app.window.upcast_ref(), Path::new(&path));
         }
     }

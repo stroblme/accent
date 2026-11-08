@@ -1323,6 +1323,21 @@ fn bench_pump() {
     }
 }
 
+/// [`bench_pump`] for a drill that is a future: until the main loop has run what it has ready,
+/// told by a low-priority idle, which runs once nothing above it is left. A pump there would poll
+/// whichever other future is ready from inside this one, which glib refuses (`EnterError`).
+async fn pumped() {
+    let (done, idle) = futures_channel::oneshot::channel();
+    let mut done = Some(done);
+    glib::idle_add_local_full(glib::Priority::LOW, move || {
+        if let Some(done) = done.take() {
+            let _ = done.send(());
+        }
+        glib::ControlFlow::Break
+    });
+    let _ = idle.await;
+}
+
 /// What `ready` answers once it has an answer, asked every 50 ms for up to `ms`, past which
 /// `bench <drill> timeout <what>` says what never came.
 async fn until<R: Ready>(

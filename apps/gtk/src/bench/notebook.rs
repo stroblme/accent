@@ -87,7 +87,7 @@ async fn open_drill(app: &Rc<App>, rel: &str) {
         for n in 0..8 {
             tab.bench_scroll(n);
             glib::timeout_future(Duration::from_millis(300)).await;
-            bench_pump();
+            pumped().await;
             let path = match n {
                 0 => path.clone(),
                 n => path.replace(".png", &format!("-{n}.png")),
@@ -1083,8 +1083,8 @@ async fn look_drill(app: &Rc<App>, rel: &str, dir: &Path) {
     let _ = std::fs::create_dir_all(dir);
     hover_probe(app, &tab).await;
     let (width, height) = (app.window.default_width(), app.window.default_height());
-    let shoot = |shot: String| {
-        bench_pump();
+    let shoot = |shot: String| async move {
+        pumped().await;
         super::diagram::shoot(app.window.upcast_ref(), &dir.join(shot));
     };
     for (theme, name) in [
@@ -1101,7 +1101,7 @@ async fn look_drill(app: &Rc<App>, rel: &str, dir: &Path) {
                 tab.bench_pick(1);
                 // The outputs coming into view are built, and their pictures decoded on workers.
                 glib::timeout_future(Duration::from_millis(800)).await;
-                shoot(format!("{name}-{:.0}-{screen}.png", zoom * 100.0));
+                shoot(format!("{name}-{:.0}-{screen}.png", zoom * 100.0)).await;
             }
             println!(
                 "bench notebook look {name} zoom={:.0} pictures={:?}",
@@ -1113,11 +1113,11 @@ async fn look_drill(app: &Rc<App>, rel: &str, dir: &Path) {
         resized(app, NARROW, height).await;
         tab.bench_scroll(0);
         glib::timeout_future(Duration::from_millis(800)).await;
-        shoot(format!("{name}-narrow-top.png"));
+        shoot(format!("{name}-narrow-top.png")).await;
         tab.bench_pick(tab.cell_count() - 1);
         tab.bench_scroll(1000);
         glib::timeout_future(Duration::from_millis(800)).await;
-        shoot(format!("{name}-narrow-end.png"));
+        shoot(format!("{name}-narrow-end.png")).await;
         resized(app, width, height).await;
     }
 }

@@ -327,7 +327,7 @@ fn look(app: &Rc<App>, rel: &str, dir: &Path) {
                 tab.select(vec!["a".to_string()]);
                 let props_fill = tab.props_fill();
                 tab.select(Vec::new());
-                bench_pump();
+                pumped().await;
                 let canvas = tab.key_target();
                 let Some(shot) = picture(&canvas) else {
                     println!("bench diagram look no_picture");
@@ -1386,7 +1386,7 @@ fn web(app: &Rc<App>, rel: &str, url: &str) {
                 svg.map_or(0, |s| s.matches("<image").count())
             }
         };
-        bench_pump();
+        pumped().await;
         state("opened");
         let allowed = app.web_images.borrow().contains(&rel);
         println!("bench diagram web embed pictures={}", embed(allowed).await);
@@ -1398,7 +1398,7 @@ fn web(app: &Rc<App>, rel: &str, url: &str) {
                 glib::timeout_future(Duration::from_millis(50)).await;
             }
             glib::timeout_future(Duration::from_millis(300)).await;
-            bench_pump();
+            pumped().await;
             state("loaded");
             let allowed = app.web_images.borrow().contains(&rel);
             println!("bench diagram web embed pictures={}", embed(allowed).await);

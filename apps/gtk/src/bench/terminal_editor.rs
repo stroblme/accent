@@ -463,23 +463,10 @@ async fn panes(app: &Rc<App>) {
     );
 }
 
-/// The window as its next frame lays it out, pictured into `$TMPDIR` as `name`. Waited for, not
-/// pumped: iterating the main loop from inside this future polls whichever other future is ready
-/// from inside it, which glib refuses with a panic (`EnterError`).
+/// The window as it is, pictured into `$TMPDIR` as `name`.
 async fn shoot(app: &App, name: &str) {
     let dir = std::env::var("TMPDIR").unwrap_or_else(|_| "/tmp".to_string());
-    let framed = Rc::new(Cell::new(false));
-    app.window.add_tick_callback({
-        let framed = framed.clone();
-        move |_, _| {
-            framed.set(true);
-            glib::ControlFlow::Break
-        }
-    });
-    until("editor", &format!("frame for {name}"), 5000, || {
-        framed.get()
-    })
-    .await;
+    pumped().await;
     super::diagram::shoot(
         app.window.upcast_ref(),
         &std::path::Path::new(&dir).join(name),
