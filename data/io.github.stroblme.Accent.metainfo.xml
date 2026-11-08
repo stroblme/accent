@@ -76,6 +76,7 @@
   </branding>
 
   <releases>
+    <release version="3.0.2" date="2026-11-08"/>
     <release version="3.0.1" date="2026-11-04"/>
     <release version="3.0.0" date="2026-11-03"/>
     <release version="2.0.0" date="2026-09-27"/>
