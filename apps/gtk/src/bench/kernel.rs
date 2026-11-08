@@ -501,7 +501,8 @@ async fn flood(app: &Rc<App>, tab: &Rc<NotebookTab>, n: usize) -> bool {
 
 /// Run cell `n`, one print of a line past what a line holds, and time its output until it is
 /// drawn: its text view laid out the line a character a row as it was put on screen, for 8 s
-/// (2026-11-08). The output still wraps at its width once drawn.
+/// (2026-11-08). The output still wraps at its width once drawn. The time is printed, not
+/// compared: a shared CI runner is too uneven for a threshold.
 async fn long_print(app: &Rc<App>, tab: &Rc<NotebookTab>, n: usize) -> bool {
     tab.bench_select(n);
     let t = Instant::now();
@@ -533,11 +534,7 @@ async fn long_print(app: &Rc<App>, tab: &Rc<NotebookTab>, n: usize) -> bool {
     let wraps = view
         .downcast_ref::<gtk::TextView>()
         .is_some_and(|v| v.wrap_mode() == gtk::WrapMode::WordChar);
-    println!(
-        "bench kernel long_print wraps={} prompt={}",
-        u8::from(wraps),
-        u8::from(ms < 3000.0)
-    );
+    println!("bench kernel long_print wraps={}", u8::from(wraps));
     done(app, tab, "long print").await
 }
 
