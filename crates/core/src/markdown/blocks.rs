@@ -84,8 +84,12 @@ fn marked(text: &str, run: Range<usize>, open: &[Open]) -> Option<BlockId> {
         .take_while(|b| b.is_ascii_alphanumeric() || *b == b'-')
         .count();
     let caret = s.len().checked_sub(len + 1).filter(|_| len > 0)?;
-    let spaced = s[..caret].ends_with(char::is_whitespace) || caret == 0;
-    if s.as_bytes()[caret] != b'^' || !spaced {
+    // The byte before the id may sit inside a character such as `°`: only a `^` there, which is
+    // ASCII, puts `caret` on a character boundary to slice at.
+    if s.as_bytes()[caret] != b'^' {
+        return None;
+    }
+    if caret > 0 && !s[..caret].ends_with(char::is_whitespace) {
         return None;
     }
     let marker = run.start + caret..run.end;
@@ -184,6 +188,8 @@ mod tests {
             "escaped \\^no\n",
             "under_score ^no_\n",
             "---\ntitle: a ^no\n---\n",
+            "x^2, then heat to 20°C\n",
+            "| 2^3 | 20°C | 5€x |\n|---|---|---|\n| ½a | b | c |\n",
         ] {
             assert_eq!(block_ids(text), [], "{text:?}");
         }
