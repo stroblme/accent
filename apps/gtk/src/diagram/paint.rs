@@ -153,7 +153,7 @@ fn hash(s: &str) -> u64 {
     h.finish()
 }
 
-/// A picture's bytes, of type `mime`, decoded.
+/// A picture's bytes, of type `mime`, decoded under the raster allowance (`look::picture`).
 fn decode(bytes: Vec<u8>, mime: &str) -> Option<Rc<Picture>> {
     // As the image tab takes them: an SVG is line art, an animation its own content.
     let document = match mime {
@@ -161,7 +161,7 @@ fn decode(bytes: Vec<u8>, mime: &str) -> Option<Rc<Picture>> {
         _ if accent_core::animation::animated(&bytes[..]) => OnceCell::from(false),
         _ => OnceCell::new(),
     };
-    let texture = gdk::Texture::from_bytes(&glib::Bytes::from_owned(bytes)).ok()?;
+    let texture = crate::look::picture(&glib::Bytes::from_owned(bytes), mime).ok()?;
     Some(Rc::new(Picture { texture, document }))
 }
 

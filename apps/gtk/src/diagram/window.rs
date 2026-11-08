@@ -450,8 +450,11 @@ impl App {
             if bytes.len() > MAX_IMAGE {
                 return app.toast("Choose an image no larger than 2 MiB");
             }
-            let size = match gdk::Texture::from_bytes(&glib::Bytes::from(&bytes)) {
+            let size = match crate::look::picture(&glib::Bytes::from(&bytes), &mime) {
                 Ok(t) => (f64::from(t.width()), f64::from(t.height())),
+                Err(e) if e.matches(gdk::TextureError::TooLarge) => {
+                    return app.cannot("add the picture", e.message());
+                }
                 Err(_) => {
                     return app.cannot("add the picture", "it is not an image accent can read");
                 }

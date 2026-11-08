@@ -281,13 +281,19 @@ fn show_svg(
 }
 
 /// SVG zoom budget: 16 megapixels or 64 MB. Beyond it, enlarge the existing render.
-/// Display scale alone is never reduced.
+/// Display scale alone is never reduced, but for a drawing past [`MAX_DECODED`].
 const MAX_ZOOMED: f64 = 16e6;
 
-/// `zoom`, at least 1, as far as [`MAX_ZOOMED`] lets a drawing of `size` go at `scale`.
+/// `zoom`, at least 1, as far as [`MAX_ZOOMED`] lets a drawing of `size` go at `scale`. One that
+/// would take more than [`MAX_DECODED`] at its own size is drawn at [`MAX_ZOOMED`] whatever the
+/// zoom, as a raster that large would not be decoded at all.
 fn capped(zoom: f64, (width, height): (i32, i32), scale: i32) -> f64 {
     let pixels = f64::from(width) * f64::from(height) * f64::from(scale * scale);
-    zoom.min((MAX_ZOOMED / pixels).sqrt()).max(1.0)
+    let budget = (MAX_ZOOMED / pixels).sqrt();
+    match pixels * 4.0 > MAX_DECODED as f64 {
+        true => budget,
+        false => zoom.min(budget).max(1.0),
+    }
 }
 
 /// Rasterise an SVG through gdk-pixbuf at display `scale` and capped `zoom`, returning its intrinsic size.
@@ -392,6 +398,17 @@ fn allowed(mut file: impl Read + Seek) -> Result<(), glib::Error> {
 /// [`allowed`] for the file at `path`, leaving one that does not open to the decoder to report.
 fn allowed_file(path: &Path) -> Result<(), glib::Error> {
     std::fs::File::open(path).map_or(Ok(()), allowed)
+}
+
+/// A diagram's picture, `bytes` of type `mime`, decoded under the allowance an image file is: a
+/// raster past [`MAX_DECODED`] refused ([`allowed`]), an SVG drawn at its own size, or smaller
+/// past it ([`capped`]).
+pub(crate) fn picture(bytes: &glib::Bytes, mime: &str) -> Result<gdk::Texture, glib::Error> {
+    if mime == "image/svg+xml" {
+        return rasterise(bytes, 1, 1.0).map(|(texture, _)| texture);
+    }
+    allowed(std::io::Cursor::new(&bytes[..]))?;
+    gdk::Texture::from_bytes(bytes)
 }
 
 /// `path` decoded by GDK and turned the way up its EXIF says, which GDK's decoders ignore. One
@@ -1037,11 +1054,44 @@ pub(crate) mod tests {
         std::fs::remove_file(&path).unwrap();
 
         let bytes = show_bytes(&png, false, Look::paper(), 1, 1.0).err();
-        for e in [shown, decoded, bytes] {
+        let picture = picture(&glib::Bytes::from(&png[..]), "image/png").err();
+        for e in [shown, decoded, bytes, picture] {
             let e = e.expect("refused");
             assert!(e.matches(gdk::TextureError::TooLarge), "{e}");
             assert_eq!(e.message(), "60000 × 60000 pixels is too large to show");
         }
+    }
+
+    /// An SVG is drawn at its own size and the display's scale, zoomed up to [`MAX_ZOOMED`]; one
+    /// that would take more than [`MAX_DECODED`] at its own size is drawn within [`MAX_ZOOMED`]
+    /// whatever the zoom, a diagram's picture too, still the size it declares.
+    #[test]
+    fn an_svg_past_the_allowance_is_drawn_within_the_zoom_budget() {
+        let across = |zoom, size: (i32, i32), scale| {
+            let times = f64::from(scale) * capped(zoom, size, scale);
+            (f64::from(size.0) * times).round() as i32
+        };
+        assert_eq!(across(1.0, (800, 600), 2), 1600, "at the display's scale");
+        assert_eq!(
+            across(8.0, (1000, 1000), 1),
+            4000,
+            "zoomed within the budget"
+        );
+        assert_eq!(
+            across(1.0, (6000, 6000), 2),
+            12000,
+            "at its own size past the budget"
+        );
+        assert_eq!(across(4.0, (60000, 60000), 1), 4000, "past the allowance");
+
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="60000" height="60000"><rect width="60000" height="60000" fill="red"/></svg>"#;
+        let (texture, size) = rasterise(svg, 1, 1.0).unwrap();
+        assert_eq!(
+            (texture.width(), texture.height(), size),
+            (4000, 4000, (60000, 60000))
+        );
+        let picture = picture(&glib::Bytes::from_static(svg), "image/svg+xml").unwrap();
+        assert_eq!((picture.width(), picture.height()), (4000, 4000));
     }
 
     /// A preview's column gets a raster reduced to it and a quarter, upright, its size the file's

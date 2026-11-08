@@ -1270,6 +1270,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Transparency is judged over white, and kept on the window's own page.
   An image over 64 megapixels is left alone rather than held twice.
   A PNG, JPEG, GIF, WebP or TIFF whose header declares more than a gigabyte of pixels, at four bytes each, is not decoded and shows as a file that does not read.
+  An SVG that would take more than that at its own size is drawn at 16 megapixels instead, whatever the zoom, and a diagram's pictures are held to the same, one past it drawn as its dashed box.
   `accent_core::dimensions` reads that header, because gdk-pixbuf's own size query decodes the image under glycin.
 - Invert Image Colours does to one file what Invert PDF Colours does to a document: whatever it shows, it goes onto the other half's page — from Light onto Dark's, from either Solarized half onto the other's — and under Dark, whose other half is Light, it shows as it is.
   With Images switched off it goes onto the theme's own page instead, whatever it shows.
