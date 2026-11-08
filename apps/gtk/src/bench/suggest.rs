@@ -200,7 +200,7 @@ pub(super) fn bench_suggest_words(app: &Rc<App>, rel: &str) {
 }
 
 /// `=ghost:<rel>` probes cold indexing and Ghost Text toggles. Print busy lines,
-/// `merl-rt` child processes/RSS, suggestion visibility and shutdown latency.
+/// `accent-cli ghost` child processes/RSS, suggestion visibility and shutdown latency.
 /// Reenable and request a suggestion to check restart. Disable during indexing and
 /// while a request waits (`mid`, `mid_asked`): neither may leave "Indexing suggestions…".
 /// Finally reenable while the vault scans to check overlapping busy state.
@@ -292,7 +292,7 @@ fn bench_ghost_switch(app: &Rc<App>, on: bool) {
     app.config_changed();
 }
 
-/// How long until no `merl-rt` of this process is left, polled for up to 4 s.
+/// How long until no `accent-cli ghost` of this process is left, polled for up to 4 s.
 async fn bench_merl_gone() -> Option<u128> {
     let since = Instant::now();
     while since.elapsed() < Duration::from_secs(4) {
@@ -371,7 +371,8 @@ fn prose_line(dir: &Path, skip: &Path) -> Option<String> {
     })
 }
 
-/// The `merl-rt` processes this process started, each as `pid:<resident MB>`, read from `/proc`.
+/// The `accent-cli ghost` processes this process started, each as `pid:<resident MB>`, read
+/// from `/proc`.
 fn merl_processes() -> String {
     let me = std::process::id().to_string();
     let found: Vec<String> = std::fs::read_dir("/proc")
@@ -382,9 +383,11 @@ fn merl_processes() -> String {
             let pid = e.file_name().to_string_lossy().to_string();
             let stat = std::fs::read_to_string(e.path().join("stat")).ok()?;
             // `pid (comm) state ppid …`; the name may hold spaces, so it is cut at the last ')'.
-            let (head, tail) = stat.rsplit_once(')')?;
+            let (_, tail) = stat.rsplit_once(')')?;
             let ppid = tail.split_whitespace().nth(1)?;
-            (head.ends_with("(merl-rt") && ppid == me).then_some(pid)
+            let cmdline = std::fs::read(e.path().join("cmdline")).ok()?;
+            let ghost = cmdline.split(|&b| b == 0).nth(1) == Some(&b"ghost"[..]);
+            (ghost && ppid == me).then_some(pid)
         })
         .map(|pid| {
             let rss = std::fs::read_to_string(format!("/proc/{pid}/status"))

@@ -517,6 +517,10 @@ fn a_local_vault_takes_the_global_servers_under_its_own() {
     assert_eq!(c.vault(notes).lsp.servers.len(), 1);
     let other = c.local_vault(Path::new("/elsewhere"));
     assert_eq!(other.lsp, c.lsp);
+    assert_eq!(
+        c.local_vault(notes).lsp.ghost,
+        argv(&["~/merl/build/merl-rt"])
+    );
 
     // The debugger's table merges the same way; the interpreter is the vault's when it says one.
     let debug = c.local_vault(notes).debug;

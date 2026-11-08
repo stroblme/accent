@@ -39,7 +39,12 @@
                 ./data
               ];
             };
-            cargoLock.lockFile = ./Cargo.lock;
+            cargoLock = {
+              lockFile = ./Cargo.lock;
+              # merl-sys is a git dependency, fetched by the NAR hash of its tree at the rev
+              # apps/cli/Cargo.toml pins, so a new rev needs a new hash.
+              outputHashes."merl-sys-0.1.0" = "sha256-USweIpjIH9mVEiGpBc08uqHtPb8dMIKRQA+nRT+oYVI=";
+            };
 
             # The GTK app is not a default workspace member, so both binaries are named.
             cargoBuildFlags = [

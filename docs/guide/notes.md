@@ -78,6 +78,8 @@ Use a [`search` fence](search.md#saved-searches) to show live vault results in t
 Right-click a note's tab or its row in the Files pane and choose **Print…** or **Export as HTML…** when you want to share it.
 The HTML export includes local images, so it works as one file.
 Printing opens the rendered page in your system browser, whose print dialog can also save a PDF.
-If `merl-rt` is installed, Accent can suggest the rest of a line as faint **ghost text**.
+Accent suggests the rest of a line as faint **ghost text**, from what your vault has written before.
 Press `Tab` to accept it, `Ctrl+Right` to take one word, or `Esc` to dismiss it.
 Turn **Ghost Text** on or off under [Preferences → Editor](preferences.md#editor-and-files).
+The suggestions come from [merl](https://github.com/stroblme/merl), which is built into Accent.
+To try a merl build of your own, set `ghost = ["/path/to/merl-rt"]` under `[lsp]` in `~/.config/accent/config.toml`.

@@ -77,6 +77,7 @@ dependencies = [
  "chrono",
  "clap",
  "libc",
+ "merl-sys",
  "rmcp",
  "serde",
  "serde_json",
@@ -1558,6 +1559,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "merl-sys"
+version = "0.1.0"
+source = "git+https://github.com/stroblme/merl?rev=98dad783b6e84efaf4af3fcd5d95c0c909aa0362#98dad783b6e84efaf4af3fcd5d95c0c909aa0362"
+dependencies = [
+ "cc",
+ "libc",
 ]
 
 [[package]]

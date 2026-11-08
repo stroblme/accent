@@ -250,7 +250,7 @@ pub(crate) struct Layered {
     /// The ghost session the document is open on, if it has one.
     ghost: Mutex<Option<Arc<dyn Language>>>,
     /// The vault's ghost session, asked for whenever [`Layered::ghost`] holds no live one;
-    /// `None` where there is no ghost text to be had at all (no `merl-rt`).
+    /// `None` where there is no ghost text to be had at all (no merl to run).
     respawn: Option<Respawn>,
     /// The protocol's name for the document's language, to open it on a fresh ghost session.
     language_id: OnceLock<String>,
@@ -306,7 +306,7 @@ impl Layered {
     }
 
     /// Notify a live ghost session. Log failures without propagating them,
-    /// so an exited `merl-rt` cannot disrupt the primary provider.
+    /// so an exited merl cannot disrupt the primary provider.
     fn tell_ghost(&self, tell: impl FnOnce(&dyn Language) -> Result<()>) {
         let ghost = locked(&self.ghost).clone();
         if let Some(ghost) = ghost.filter(|g| !g.is_dead())
@@ -813,7 +813,7 @@ mod tests {
         assert_eq!(third.heard(), ["open a.md one two"]);
     }
 
-    /// Without a ghost session to be had at all (merl not installed, or not prose), nothing is
+    /// Without a ghost session to be had at all (no merl to run, or not prose), nothing is
     /// armed.
     #[test]
     fn no_ghost_session_arms_nothing() {

@@ -1,5 +1,11 @@
 [
     {
+        "type": "git",
+        "url": "https://github.com/stroblme/merl",
+        "commit": "98dad783b6e84efaf4af3fcd5d95c0c909aa0362",
+        "dest": "flatpak-cargo/git/merl-98dad78"
+    },
+    {
         "type": "archive",
         "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/adler2/adler2-2.0.1.crate",
@@ -1817,6 +1823,24 @@
         "type": "inline",
         "contents": "{\"package\": \"488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a\", \"files\": {}}",
         "dest": "cargo/vendor/memoffset-0.9.1",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "shell",
+        "commands": [
+            "cp -r --reflink=auto \"flatpak-cargo/git/merl-98dad78/.\" \"cargo/vendor/merl-sys\""
+        ]
+    },
+    {
+        "type": "inline",
+        "contents": "[package]\nname = \"merl-sys\"\nversion = \"0.1.0\"\nedition = \"2024\"\ndescription = \"merl's C runtime compiled into a Rust program, which runs it as merl-rt\"\nrepository = \"https://github.com/stroblme/merl\"\nlicense = \"MIT AND Apache-2.0\"\ninclude = [\"build.rs\", \"src/lib.rs\", \"runtime/*\", \"LICENSE\"]\n\n[dependencies]\nlibc = \"0.2\"\n\n[build-dependencies]\ncc = \"1\"\n",
+        "dest": "cargo/vendor/merl-sys",
+        "dest-filename": "Cargo.toml"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": null, \"files\": {}}",
+        "dest": "cargo/vendor/merl-sys",
         "dest-filename": ".cargo-checksum.json"
     },
     {
@@ -3758,7 +3782,7 @@
     },
     {
         "type": "inline",
-        "contents": "[source.vendored-sources]\ndirectory = \"cargo/vendor\"\n\n[source.crates-io]\nreplace-with = \"vendored-sources\"\n",
+        "contents": "[source.vendored-sources]\ndirectory = \"cargo/vendor\"\n\n[source.crates-io]\nreplace-with = \"vendored-sources\"\n\n[source.\"https://github.com/stroblme/merl\"]\ngit = \"https://github.com/stroblme/merl\"\nreplace-with = \"vendored-sources\"\nrev = \"98dad783b6e84efaf4af3fcd5d95c0c909aa0362\"\n",
         "dest": "cargo",
         "dest-filename": "config"
     }

@@ -123,11 +123,14 @@ impl Config {
     }
 
     /// What a vault on this machine opens with: its entry, its own servers and debug adapters over
-    /// the global `[lsp.servers]` and `[debug.adapters]` key by key, and its interpreter if it
-    /// names one. A remote vault takes [`Self::vault`] alone, its host's servers being the host's
-    /// own.
+    /// the global `[lsp.servers]` and `[debug.adapters]` key by key, and its ghost-text server and
+    /// interpreter if it names them. A remote vault takes [`Self::vault`] alone, its host's servers
+    /// being the host's own.
     pub fn local_vault(&self, root: &Path) -> VaultConfig {
         let mut cfg = self.vault(root);
+        if cfg.lsp.ghost.is_empty() {
+            cfg.lsp.ghost = self.lsp.ghost.clone();
+        }
         for (language, argv) in &self.lsp.servers {
             cfg.lsp
                 .servers

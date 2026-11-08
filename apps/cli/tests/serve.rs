@@ -34,6 +34,8 @@ impl Drop for Scratch {
 #[test]
 fn serve_answers_over_the_pipe_and_stops_when_it_closes() {
     let scratch = Scratch::new("pipe");
+    let seen = "The kettle was already boiling.\n";
+    std::fs::write(scratch.vault().join("c.md"), format!("{seen}{seen}")).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_accent-cli"))
         .arg("serve")
         .arg("--vault")
@@ -91,6 +93,26 @@ fn serve_answers_over_the_pipe_and_stops_when_it_closes() {
     ask(2, "resolve_link", r#"["b"]"#);
     let answer = next(Some(2));
     assert_eq!(answer["result"], "b.md", "{answer}");
+
+    // Ghost text on the host is this binary's own `ghost`, merl compiled in, which answers once
+    // its index is built.
+    ask(
+        3,
+        "open_document",
+        r#"["d.md", "markdown", "The kettle was"]"#,
+    );
+    next(Some(3));
+    let ghost = (4..104).find_map(|id| {
+        ask(
+            id,
+            "inline_completion",
+            r#"["d.md", {"line": 0, "character": 14}]"#,
+        );
+        let answer = next(Some(id.into()));
+        std::thread::sleep(Duration::from_millis(50));
+        answer["result"].as_str().map(str::to_string)
+    });
+    assert_eq!(ghost.as_deref(), Some(" already boiling."));
 
     // The window closed. Nothing else tells the server to stop.
     drop(input);

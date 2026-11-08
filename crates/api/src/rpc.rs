@@ -1147,8 +1147,8 @@ mod tests {
         assert_eq!(symbols.len(), 1);
         assert_eq!(symbols[0].name, "Title");
 
-        // Ghost text crosses the wire like everything else. Whether merl is installed on the
-        // host decides whether there is an answer, so only the round trip is asserted here.
+        // Ghost text crosses the wire like everything else. This host names no `accent-cli` to
+        // run merl, so only the round trip is asserted here; `apps/cli/tests/serve.rs` has merl.
         let at = crate::Pos {
             line: 2,
             character: 3,

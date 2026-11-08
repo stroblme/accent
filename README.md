@@ -148,3 +148,4 @@ Accent has very few resource requirements for the remote deamon, allowing you to
 
 Accent is inspired by awesome software projects like [Apostrophe](https://github.com/ApostropheEditor/Apostrophe), [Obsidian](https://obsidian.md/), and [VSCodium](https://vscodium.com/). 
 Icons come from [Tabler](https://github.com/tabler/tabler-icons).
+Ghost text comes from [merl](https://github.com/stroblme/merl) (MIT), which builds on [libsais](https://github.com/IlyaGrebnov/libsais) (Apache-2.0) and [jsmn](https://github.com/zserge/jsmn) (MIT).

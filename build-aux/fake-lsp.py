@@ -4,8 +4,8 @@
 server's ranking, its indexing or its version. With `--calls FILE` it also answers a call
 hierarchy and implementations from that file, which `apps/cli/tests/mcp.rs` holds `explore`'s
 `precise` mode against.
-With `--inline TEXT` it suggests TEXT as ghost text wherever it is asked, standing in for merl-rt
-in `make screenshots`. With `--notebook` it keeps what it is sent and answers about it, for
+With `--inline TEXT` it suggests TEXT as ghost text wherever it is asked, standing in for merl
+in `make screenshots` and the ghost on/off test. With `--notebook` it keeps what it is sent and answers about it, for
 `ACCENT_BENCH_NOTEBOOK_LSP`: an error over each `oops` and pyright's unused-expression warning on
 each line that is a name alone, after every change and naming the version they are for; `NAME at
 LINE:COLUMN` as the hover; the first `NAME =` or `def NAME` as the definition; and `f(a, b)` as the

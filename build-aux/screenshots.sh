@@ -3,7 +3,7 @@
 # ACCENT_BENCH_SHOT drill on private Xvfb in light and dark themes at scale 2. Join the pair for
 # the README, use light alone for metainfo, and add GNOME corners and shadow.
 #
-# Build an isolated home, merl-rt stand-in, Git history, and stock GNOME settings under
+# Build an isolated home, ghost-text stand-in, Git history, and stock GNOME settings under
 # target/screenshots.
 #
 # Usage: build-aux/screenshots.sh <directory holding accent and accent-cli>
@@ -27,13 +27,13 @@ test -d "$vault" || { echo "no $vault: make screenshots generates it" >&2; exit 
 export HOME="$root" GIT_CONFIG_NOSYSTEM=1
 mkdir -p "$root/bin" "$root/out" "$root/xdg/config/accent" "$root/xdg/config/gtk-4.0"
 cp "$here/bashrc" "$root/.bashrc"
-# merl-rt is found on PATH, and what it suggests depends on the whole vault: the stand-in answers
-# one fixed sentence.
+# What merl suggests depends on the whole vault: the stand-in, the config's ghost-text server in
+# place of the bundled one, answers one fixed sentence.
 printf '#!/bin/sh\nexec python3 "%s" --inline "Calibration follows."\n' \
-	"$repo/build-aux/fake-lsp.py" >"$root/bin/merl-rt"
-chmod +x "$root/bin/merl-rt"
-printf 'line_numbers = true\ncolumn_width = 85\nword_suggestions = false\n' \
-	>"$root/xdg/config/accent/config.toml"
+	"$repo/build-aux/fake-lsp.py" >"$root/bin/ghost"
+chmod +x "$root/bin/ghost"
+printf 'line_numbers = true\ncolumn_width = 85\nword_suggestions = false\n\n[lsp]\nghost = ["%s"]\n' \
+	"$root/bin/ghost" >"$root/xdg/config/accent/config.toml"
 # GNOME's interface font, which no settings daemon tells GTK under Xvfb, and no caret blink or
 # animation to be caught half way.
 printf '[Settings]\ngtk-font-name=Adwaita Sans 11\ngtk-cursor-blink=false\n%s\n%s\n' \
@@ -109,7 +109,7 @@ for name in files git editor focus debug diagram notebook; do
 	tmp=$(mktemp -d /tmp/accent-shot-XXXXXX)
 	rm -rf "$root/xdg/state"
 	status=0
-	env SHELL=/bin/bash PATH="$root/bin:$PATH" TMPDIR="$tmp" \
+	env SHELL=/bin/bash TMPDIR="$tmp" \
 		XDG_CONFIG_HOME="$root/xdg/config" XDG_CACHE_HOME="$root/xdg/cache" \
 		XDG_STATE_HOME="$root/xdg/state" XDG_DATA_HOME="$root/xdg/data" \
 		GSETTINGS_BACKEND=memory ADW_DISABLE_PORTAL=1 \

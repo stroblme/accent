@@ -74,6 +74,7 @@ fn configured(language: &str, argv: &[&str]) -> LspConfig {
         )]
         .into_iter()
         .collect(),
+        ..LspConfig::default()
     }
 }
 
@@ -564,24 +565,39 @@ fn a_code_action_after_an_edit_above_sends_the_moved_diagnostic() {
     assert_eq!(edit["range"], moved);
 }
 
-/// Ghost Text off ends `merl-rt` under an open note, and on starts it again, re-indexed,
-/// without the note being opened again.
+/// The configured ghost-text server wins over the bundled `accent-cli ghost`, which runs
+/// otherwise; one configured that is not there is no ghost text rather than the bundled one.
 #[test]
-fn ghost_text_off_ends_merl_and_on_starts_it_again() {
-    if !in_path(GHOST) {
-        eprintln!("merl-rt is not installed: skipping the ghost on/off test");
-        return;
-    }
+fn ghost_text_runs_the_configured_server_else_the_bundled_one() {
+    let me = std::env::current_exe().unwrap();
+    let ghost = |argv: &[&str]| LspConfig {
+        ghost: argv.iter().map(|a| a.to_string()).collect(),
+        ..LspConfig::default()
+    };
+    let cli = Path::new("/opt/accent/accent-cli");
+    assert_eq!(
+        ghost_command(&ghost(&[]), Some(cli)).unwrap(),
+        ["/opt/accent/accent-cli", "ghost"]
+    );
+    assert_eq!(ghost_command(&ghost(&[]), None), None);
+    let dev = [me.to_str().unwrap(), "--flag"];
+    assert_eq!(ghost_command(&ghost(&dev), Some(cli)).unwrap(), dev);
+    assert_eq!(ghost_command(&ghost(&["/no/merl-rt"]), Some(cli)), None);
+}
+
+/// Ghost Text off ends the ghost-text server under an open note, and on starts it again without
+/// the note being opened again: here `fake-lsp.py`, configured as `[lsp] ghost`.
+#[test]
+fn ghost_text_off_ends_its_server_and_on_starts_it_again() {
     let root = tempfile::tempdir().unwrap();
     let cache = tempfile::tempdir().unwrap();
-    let seen = "The kettle was already boiling.\n";
-    std::fs::write(root.path().join("a.md"), format!("{seen}{seen}")).unwrap();
-    let (vault, _events) = Local::open_at(
-        root.path(),
-        &cache.path().join("index.db"),
-        crate::VaultConfig::default(),
-    )
-    .unwrap();
+    let fake = concat!(env!("CARGO_MANIFEST_DIR"), "/../../build-aux/fake-lsp.py");
+    let mut cfg = crate::VaultConfig::default();
+    cfg.lsp.ghost = ["python3", fake, "--inline", " already boiling."]
+        .map(String::from)
+        .to_vec();
+    let (vault, _events) =
+        Local::open_at(root.path(), &cache.path().join("index.db"), cfg).unwrap();
     let typed = "The kettle was";
     let at = Pos {
         line: 0,
@@ -609,16 +625,16 @@ fn ghost_text_off_ends_merl_and_on_starts_it_again() {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         assert_eq!(first, Some(" already boiling.".to_string()));
-        let merl = running().expect("merl runs");
+        let server = running().expect("the server runs");
 
         vault.set_ghost(false);
         for _ in 0..100 {
-            if merl.is_dead() {
+            if server.is_dead() {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(merl.is_dead(), "merl-rt has exited");
+        assert!(server.is_dead(), "the server has exited");
         assert!(running().is_none());
         assert_eq!(suggest().await, None, "nothing while it is off");
 
@@ -634,9 +650,9 @@ fn ghost_text_off_ends_merl_and_on_starts_it_again() {
         assert_eq!(
             got,
             Some(" already boiling.".to_string()),
-            "a fresh merl answers"
+            "a fresh one answers"
         );
-        assert!(running().is_some_and(|fresh| !Arc::ptr_eq(&fresh, &merl)));
+        assert!(running().is_some_and(|fresh| !Arc::ptr_eq(&fresh, &server)));
     });
 }
 
@@ -662,5 +678,5 @@ fn a_ghost_session_that_keeps_exiting_is_given_up_on_once() {
             _ => None,
         })
         .collect();
-    assert_eq!(said, ["Ghost text stopped: merl-rt keeps exiting"]);
+    assert_eq!(said, ["Ghost text stopped: merl keeps exiting"]);
 }

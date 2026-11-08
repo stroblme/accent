@@ -1658,80 +1658,6 @@ mod tests {
         drop(vault);
     }
 
-    /// Verify texlab supplies `\ref` and `\cite` completion without
-    /// additional accent-side implementation.
-    #[test]
-    fn merl_suggests_the_rest_of_a_line_the_vault_has_written_before() {
-        if !super::super::in_path("merl-rt") {
-            eprintln!("merl-rt is not installed: skipping the ghost-text end-to-end test");
-            return;
-        }
-        let root = tempfile::tempdir().unwrap();
-        let cache = tempfile::tempdir().unwrap();
-        // Twice, because a match has to have been seen more than once to be offered.
-        let seen = "The kettle was already boiling.\n";
-        std::fs::write(root.path().join("a.md"), format!("{seen}{seen}")).unwrap();
-        let (vault, _events) = crate::Vault::open_at(
-            root.path(),
-            &cache.path().join("index.db"),
-            crate::VaultConfig::default(),
-        )
-        .unwrap();
-
-        let typed = "The kettle was";
-        accent_lsp::runtime().block_on(async {
-            let support = vault
-                .open_document("b.md", "markdown", typed.to_string())
-                .await
-                .unwrap();
-            assert!(support.inline, "merl answers for a note");
-            let at = Pos {
-                line: 0,
-                character: typed.chars().count() as u32,
-            };
-            let mut first = None;
-            for _ in 0..100 {
-                first = vault.inline_completion("b.md", at).await.unwrap();
-                if first.is_some() {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-            assert_eq!(first, Some(" already boiling.".to_string()));
-
-            // A note written after the session started is not in the index until the document
-            // it was typed in settles.
-            let later = "Rhubarb crumble needs custard.\n";
-            std::fs::write(root.path().join("c.md"), format!("{later}{later}")).unwrap();
-            let typed = "Rhubarb crumble";
-            let at = Pos {
-                line: 0,
-                character: typed.chars().count() as u32,
-            };
-            vault
-                .change_document("b.md", typed.to_string())
-                .await
-                .unwrap();
-            assert_eq!(vault.inline_completion("b.md", at).await.unwrap(), None);
-            vault.save_document("b.md").await.unwrap();
-            vault.settle("b.md").await.unwrap();
-            // The rebuild runs on a thread of merl's own, so the answer arrives once it lands.
-            let mut got = None;
-            for _ in 0..100 {
-                got = vault.inline_completion("b.md", at).await.unwrap();
-                if got.is_some() {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
-            assert_eq!(
-                got,
-                Some(" needs custard.".to_string()),
-                "settle re-indexed"
-            );
-        });
-    }
-
     /// The goals of a core-only proof, from `lean --server` as a vault would configure it: the
     /// hypotheses and target inside the proof, none at its end. Skipped where elan has not
     /// installed Lean.
@@ -1755,6 +1681,7 @@ mod tests {
                     vec![lean.to_string(), "--server".to_string()],
                 )]
                 .into(),
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -1819,6 +1746,8 @@ mod tests {
         assert!(replaced[0].text.starts_with("exact "), "{replaced:?}");
     }
 
+    /// Verify texlab supplies `\ref` and `\cite` completion without
+    /// additional accent-side implementation.
     #[test]
     fn texlab_completes_labels_and_citations() {
         if !super::super::in_path("texlab") {

@@ -64,6 +64,9 @@ route = "curved"
 arrow = false
 grid = true
 
+[lsp]
+ghost = ["~/merl/build/merl-rt"]
+
 [lsp.servers]
 python3 = ["pyright-langserver", "--stdio"]
 rust = ["rust-analyzer"]
@@ -186,8 +189,8 @@ pub struct Config {
     pub spellcheck: bool,
     /// Offer words as one is typed in prose: the document's own, then the system dictionary's.
     pub word_suggestions: bool,
-    /// Suggest the rest of the line as the caret sits, from what the vault already says. Needs
-    /// `merl-rt` on the path; the switch only says whether to ask for it.
+    /// Suggest the rest of the line as the caret sits, from what the vault already says, by the
+    /// merl compiled into `accent-cli` ([`LspConfig::ghost`] names another).
     pub ghost_text: bool,
     /// A code map beside the document instead of the scrollbar.
     pub minimap: bool,
@@ -440,13 +443,17 @@ pub struct VaultConfig {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LspConfig {
+    /// The ghost-text server's command line, `--vault <root>` added, in place of the bundled
+    /// `accent-cli ghost`: a merl build of one's own.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ghost: Vec<String>,
     pub servers: BTreeMap<String, Vec<String>>,
 }
 
 impl LspConfig {
     /// Nothing chosen: written as nothing, rather than as a bare `lsp.servers` header.
     fn is_empty(&self) -> bool {
-        self.servers.is_empty()
+        self.ghost.is_empty() && self.servers.is_empty()
     }
 }
 

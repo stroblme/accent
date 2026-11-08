@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -313,8 +313,8 @@ pub struct Support {
     pub signature_triggers: Vec<char>,
     /// The language server accent looked for and did not find, so the UI can say so when asked.
     pub missing: Option<String>,
-    /// Whether prose ghost text is available (`merl-rt` is installed), allowing
-    /// the UI to enable inline suggestions when the preference is on.
+    /// Whether prose ghost text is available (merl, bundled or [`LspConfig::ghost`], is there to
+    /// run), allowing the UI to enable inline suggestions when the preference is on.
     pub inline: bool,
     /// The provider answers [`Vault::goals`]: a proof assistant's server.
     pub goals: bool,
@@ -523,6 +523,9 @@ pub(crate) struct Languages {
     /// Whether the vault runs a ghost-text session; the preference behind it is global, so a
     /// vault is told it once and every document follows.
     pub(crate) ghost: AtomicBool,
+    /// The ghost-text server's command line ([`ghost_command`]) as the vault's config said it when
+    /// a prose document last opened; `None` where there is none to run.
+    ghost_command: Mutex<Option<Vec<String>>>,
     /// Serializes ghost progress with toggles and replacement sessions.
     ghost_busy: Arc<Mutex<u64>>,
     /// When the ghost session was started within the last [`GHOST_WINDOW`]; `None` once the
@@ -574,6 +577,7 @@ impl Languages {
             closed: AtomicBool::new(false),
             docs: Mutex::new(HashMap::new()),
             ghost: AtomicBool::new(true),
+            ghost_command: Mutex::new(None),
             ghost_busy: Arc::new(Mutex::new(0)),
             ghost_starts: Mutex::new(Some(Vec::new())),
             words: Arc::new(AtomicBool::new(true)),
@@ -667,11 +671,8 @@ impl Languages {
     async fn ghost_session(self: &Arc<Self>) -> Option<Arc<dyn Language>> {
         let root = self.root.clone();
         let key = (GHOST.to_string(), root.clone());
-        let argv = vec![
-            GHOST.to_string(),
-            "--vault".to_string(),
-            root.to_string_lossy().into_owned(),
-        ];
+        let mut argv = locked(&self.ghost_command).clone()?;
+        argv.extend(["--vault".to_string(), root.to_string_lossy().into_owned()]);
         let start = async {
             if !self.ghost.load(Ordering::Relaxed) {
                 return Err(Error::Language("Ghost Text is off".to_string()));
@@ -917,6 +918,7 @@ impl Languages {
     ) -> Task<Support> {
         let me = self.clone();
         let which = server(&cfg.lsp, &language);
+        let ghost_command = ghost_command(&cfg.lsp, CLI.get().map(PathBuf::as_path));
         let configured_python = cfg.debug.python.clone();
         Task::spawn(async move {
             // Outside the vault: a dependency a running server's answer led to is that server's
@@ -1001,10 +1003,13 @@ impl Languages {
             };
             let prose = words::PROSE.contains(&language.as_str());
             // Ghost text rides beside the primary for prose: one merl for the whole vault,
-            // started when it is installed and wanted. A binary that is not there is a debug
-            // line and never a `missing`, because this is optional where a language server is
-            // expected: nothing about the tab stops working without it.
-            let respawn = (prose && in_path(GHOST)).then(|| me.respawn());
+            // started when it is there to run and wanted. One that is not is never a `missing`,
+            // because this is optional where a language server is expected: nothing about the
+            // tab stops working without it.
+            if prose {
+                *locked(&me.ghost_command) = ghost_command;
+            }
+            let respawn = (prose && locked(&me.ghost_command).is_some()).then(|| me.respawn());
             let ghost = match respawn.is_some() && me.ghost.load(Ordering::Relaxed) {
                 true => me.ghost_session().await,
                 false => None,
@@ -1076,9 +1081,35 @@ impl Languages {
     }
 }
 
-/// One vault-wide ghost-text process serving `textDocument/inlineCompletion`
-/// from notes. Separate from `SERVERS` so it supplements a language provider.
-const GHOST: &str = "merl-rt";
+/// The key of the one vault-wide ghost-text process serving `textDocument/inlineCompletion`
+/// from notes, and its name to the user. Separate from `SERVERS` so it supplements a language
+/// provider.
+const GHOST: &str = "merl";
+
+/// The `accent-cli` whose `ghost` subcommand runs the merl compiled into it ([`set_cli`]).
+static CLI: OnceLock<PathBuf> = OnceLock::new();
+
+/// Name the `accent-cli` ghost text runs as `accent-cli ghost`: the app's own beside it, or this
+/// process where it is accent-cli, as `serve` is on a remote host. Called once, at startup; without
+/// it the only ghost text is a configured one ([`LspConfig::ghost`]).
+pub fn set_cli(exe: PathBuf) {
+    let _ = CLI.set(exe);
+}
+
+/// The ghost-text server's command line, its `--vault` still to come: `[lsp] ghost` where the
+/// config names one, else the bundled `accent-cli ghost`, a `merl-rt` on `PATH` mattering to
+/// neither. `None` where the one configured is not there, or no `accent-cli` was named.
+fn ghost_command(cfg: &LspConfig, cli: Option<&Path>) -> Option<Vec<String>> {
+    let Some((program, args)) = cfg.ghost.split_first() else {
+        return cli.map(|cli| vec![cli.to_string_lossy().into_owned(), "ghost".to_string()]);
+    };
+    // Read where the server runs, as a language server's command line is (`server`).
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    let program = home_relative(program, Path::new(&home))
+        .to_string_lossy()
+        .into_owned();
+    in_path(&program).then(|| [vec![program], args.to_vec()].concat())
+}
 
 /// How long a server still loading its project is left before it is asked again.
 const AGAIN: Duration = Duration::from_millis(250);

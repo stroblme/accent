@@ -179,7 +179,16 @@ fn main() -> glib::ExitCode {
     // in `accent-cli serve`, whose binary has neither mode.
     if let Ok(exe) = std::env::current_exe() {
         accent_core::git::set_askpass(exe.clone());
-        accent_core::pdf_text::set_reader(exe);
+        accent_core::pdf_text::set_reader(exe.clone());
+        // So is the `accent-cli` whose `ghost` runs ghost text: the one beside this binary, or
+        // the static one in `lib/accent` where there is none, as in the Flatpak, inside whose
+        // sandbox it runs as a local vault's language servers do.
+        let cli = Some(exe.with_file_name("accent-cli"))
+            .filter(|cli| cli.is_file())
+            .or_else(|| accent_api::ssh::server_binary(std::env::consts::ARCH));
+        if let Some(cli) = cli {
+            accent_api::language::set_cli(cli);
+        }
     }
     // `--help` and the like are answered here, never reaching a running instance; so is a page
     // `accent-cli mcp` asks to have drawn.

@@ -181,6 +181,11 @@ enum Cmd {
 }
 
 fn main() -> Result<()> {
+    // `ghost`, hidden: the merl compiled in, the LSP server ghost text runs as `merl-rt` would, so
+    // nothing of ours runs before it.
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == "ghost") {
+        std::process::exit(merl_sys::run(std::env::args_os().skip(1)));
+    }
     accent_core::malloc::tune();
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -189,6 +194,10 @@ fn main() -> Result<()> {
         )
         .with_writer(std::io::stderr)
         .init();
+    // A vault served from here (`serve` on a remote host) runs its ghost text as this binary's.
+    if let Ok(exe) = std::env::current_exe() {
+        accent_api::language::set_cli(exe);
+    }
 
     match Cli::parse().cmd {
         Cmd::Index { common, progress } => {

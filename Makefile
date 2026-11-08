@@ -152,7 +152,6 @@ requirements:
 		echo "optional: cargo-zigbuild and zig, for make server, which remote vaults need"; \
 	python3 -c 'import lzma' >/dev/null 2>&1 || \
 		echo "optional: Python 3 with lzma, for make server's compressed uploads"; \
-	command -v merl-rt >/dev/null || echo "optional: merl-rt, for ghost text"; \
 	fc-list -q "DejaVu Sans Mono" 2>/dev/null || echo "optional: DejaVu Sans Mono, which make drills is written against"; \
 	if test $$missing = 0; then echo "All requirements met."; \
 	else echo "make install-requirements installs them on openSUSE, Fedora, Debian, Ubuntu and Arch."; exit 1; fi
