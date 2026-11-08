@@ -298,7 +298,8 @@ use user_commands::bench_commands;
 ///   (failed opens, other kinds and requests during an open, `opens::bench_opens`),
 ///   `loading` (tabs up before their files arrive, each kind's, `loading::bench_loading`; writes
 ///   `loading*` files), `opening:<rel>,…` (on a remote
-///   vault, ms until each file's tab is up and its document in, `loading::bench_opening`).
+///   vault, ms until each file's tab is up and its document in, and a text file's save after a
+///   line typed, `loading::bench_opening`; writes those files).
 ///   Remote pin-window/apart modes verify tabs cannot move off the host.
 /// - `ACCENT_BENCH_SLOW_READ=<ms>`: delay reads and fetches on workers, as a slow host would, for
 ///   double-clicks in the `TABS=tree:` drill (`TABS=loading` sets its own).

@@ -1,7 +1,8 @@
 //! JSON-RPC 2.0 over stdio for remote vaults, one JSON object per line. Requests and responses
 //! have IDs; vault [`Event`]s are notifications. File bytes travel separately over SSH. Calls have
 //! deadlines, and clients ping every [`PING`]; after the first ping, a server exits on [`SILENCE`]
-//! without input.
+//! without input. Both are counted from the last byte either side read, not the last whole line:
+//! a 16 MiB note crossing a slow link is minutes of one line, and the link is busy, not gone.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -29,6 +30,11 @@ pub const PING: Duration = Duration::from_secs(10);
 /// Silence timeout after the first ping: nine missed pings, allowing transient
 /// VPN outages and exceeding SSH's 15 s ServerAlive timeout.
 pub const SILENCE: Duration = Duration::from_secs(90);
+
+/// How often a host says a request line is still arriving (`receiving`). The client's writer
+/// returns while ssh still holds up to its 2 MB channel window of the line, minutes over a slow
+/// link, and the call's deadline starts there: without word from the host it would run out.
+const ARRIVING: Duration = Duration::from_secs(1);
 
 /// The longest line a host reads, its newline included: four times the longest note a tab opens,
 /// which leaves room for JSON's escapes in a save's text (two bytes for a newline or a quote). A
@@ -107,10 +113,13 @@ pub struct Client {
     /// Set by [`close`](Self::close) before the pipe goes, so the reader can tell the end it was
     /// asked for from a link that was lost.
     closing: Arc<AtomicBool>,
-    /// Stops the heartbeat. The reader sends on it too: a server that is gone needs no pings.
-    stop: Sender<()>,
+    /// What the heartbeat writes besides its pings, a cancel the writer was busy for, and `None`,
+    /// which stops it. The reader sends that too: a server that is gone needs no pings.
+    notes: Sender<Option<Vec<u8>>>,
     /// The reader and the heartbeat.
     threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
+    /// When the reader last read a byte, which a call's deadline counts from.
+    heard: Arc<Mutex<Instant>>,
 }
 
 impl Client {
@@ -127,13 +136,19 @@ impl Client {
         let pending: Waiting = Arc::new(Mutex::new(HashMap::new()));
         let dead = Arc::new(AtomicBool::new(false));
         let closing = Arc::new(AtomicBool::new(false));
-        let (stop, stopped) = channel();
+        let (notes, noted) = channel::<Option<Vec<u8>>>();
+        let heard = Arc::new(Mutex::new(Instant::now()));
+        let input = Heard {
+            input,
+            at: heard.clone(),
+            arriving: || {},
+        };
 
         let reader = std::thread::Builder::new()
             .name("accent-rpc".to_string())
             .spawn({
                 let (pending, dead) = (pending.clone(), dead.clone());
-                let (closing, stop) = (closing.clone(), stop.clone());
+                let (closing, stop) = (closing.clone(), notes.clone());
                 move || {
                     for line in BufReader::new(input).lines() {
                         let Ok(line) = line else { break };
@@ -149,7 +164,7 @@ impl Client {
                     // their sender dropped, rather than each of them spending the full deadline.
                     dead.store(true, Ordering::SeqCst);
                     locked(&pending).clear();
-                    let _ = stop.send(());
+                    let _ = stop.send(None);
                     if !closing.load(Ordering::SeqCst) {
                         on_lost();
                     }
@@ -165,9 +180,22 @@ impl Client {
                 let out = out.clone();
                 move || {
                     let ping = encode(&json!({"jsonrpc": "2.0", "method": "ping"}));
-                    while emit(&out, &ping).is_ok() {
-                        if !matches!(stopped.recv_timeout(PING), Err(RecvTimeoutError::Timeout)) {
-                            break;
+                    let mut due = Instant::now();
+                    loop {
+                        if due <= Instant::now() {
+                            if emit(&out, &ping).is_err() {
+                                break;
+                            }
+                            due = Instant::now() + PING;
+                        }
+                        match noted.recv_timeout(due.saturating_duration_since(Instant::now())) {
+                            Ok(Some(line)) => {
+                                if emit(&out, &line).is_err() {
+                                    break;
+                                }
+                            }
+                            Ok(None) | Err(RecvTimeoutError::Disconnected) => break,
+                            Err(RecvTimeoutError::Timeout) => {}
                         }
                     }
                 }
@@ -180,8 +208,9 @@ impl Client {
             pending,
             dead,
             closing,
-            stop,
+            notes,
             threads: Mutex::new(reader.into_iter().chain(heartbeat).collect()),
+            heard,
         }
     }
 
@@ -189,13 +218,21 @@ impl Client {
         self.dead.load(Ordering::SeqCst)
     }
 
+    /// How long nothing has come from the server: no answer, no event, no word of a request
+    /// still arriving.
+    pub fn quiet(&self) -> Duration {
+        locked(&self.heard).elapsed()
+    }
+
     /// Ask, and wait up to [`DEADLINE`] for the answer.
     pub fn call<T: DeserializeOwned>(&self, method: &str, params: Value) -> Result<T> {
         self.call_tracked(method, params, &Mutex::new(None), DEADLINE)
     }
 
-    /// Wait up to `deadline`, storing the request id in `asked` so a caller
-    /// can [`cancel`](Self::cancel) when the answer becomes stale.
+    /// Wait until the link has been quiet for `deadline` since the request went, storing the
+    /// request id in `asked` so a caller can [`cancel`](Self::cancel) when the answer becomes
+    /// stale. Any byte from the server counts: an answer still arriving, and the answers and
+    /// events its one writer sends ahead of this one, which this answer waits behind.
     pub fn call_tracked<T: DeserializeOwned>(
         &self,
         method: &str,
@@ -211,14 +248,23 @@ impl Client {
     /// Notify the server that the request is cancelled; finished requests are ignored.
     /// Release the caller immediately with "cancelled", avoiding accumulated blocking
     /// threads for stale ghost-text requests on slow links.
+    ///
+    /// Never waits on the link: a request is dropped on whatever thread lets go of it, the
+    /// window's own among them, and a 16 MiB save can hold the writer for minutes, so a cancel
+    /// that finds it busy goes after it from the heartbeat's thread.
     pub fn cancel(&self, id: u64) {
         if let Some(waiter) = locked(&self.pending).remove(&id) {
             let _ = waiter.send(Err(accent_core::Error::Cancelled.into()));
         }
-        let _ = emit(
-            &self.out,
-            &encode(&json!({"jsonrpc": "2.0", "method": "cancel", "params": [id]})),
-        );
+        let line = encode(&json!({"jsonrpc": "2.0", "method": "cancel", "params": [id]}));
+        match self.out.try_lock() {
+            Ok(mut out) => {
+                let _ = out.write_all(&line).and_then(|()| out.flush());
+            }
+            Err(_) => {
+                let _ = self.notes.send(Some(line));
+            }
+        }
     }
 
     fn call_value(
@@ -250,19 +296,25 @@ impl Client {
             return Err(Error::Offline(format!("cannot reach the server: {e}")));
         }
 
-        match rx.recv_timeout(deadline) {
-            Ok(answer) => answer,
-            // The sender was dropped: the reader thread saw EOF and cleared the map.
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                Err(Error::Lost("the connection closed".to_string()))
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                locked(&self.pending).remove(&id);
-                // Nobody is left to read this one, and the server is still working on it: the
-                // same notification a dropped `Task` sends, said here because a caller that gives
-                // up on a timeout has no `Asked` of its own to cancel through.
-                self.cancel(id);
-                Err(Error::Remote(format!("{method} timed out")))
+        let sent = Instant::now();
+        let quiet = || (*locked(&self.heard)).max(sent).elapsed();
+        loop {
+            match rx.recv_timeout(deadline.saturating_sub(quiet())) {
+                Ok(answer) => return answer,
+                // The sender was dropped: the reader thread saw EOF and cleared the map.
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(Error::Lost("the connection closed".to_string()));
+                }
+                // Something came meanwhile: the deadline starts again from it.
+                Err(RecvTimeoutError::Timeout) if quiet() < deadline => {}
+                Err(RecvTimeoutError::Timeout) => {
+                    locked(&self.pending).remove(&id);
+                    // Nobody is left to read this one, and the server is still working on it:
+                    // the same notification a dropped `Task` sends, said here because a caller
+                    // that gives up on a timeout has no `Asked` of its own to cancel through.
+                    self.cancel(id);
+                    return Err(Error::Remote(format!("{method} timed out")));
+                }
             }
         }
     }
@@ -272,7 +324,7 @@ impl Client {
     /// child before joining the reader, which needs stdout to close.
     pub fn close(&self) {
         self.closing.store(true, Ordering::SeqCst);
-        let _ = self.stop.send(());
+        let _ = self.notes.send(None);
         *locked(&self.out) = Box::new(std::io::sink());
     }
 
@@ -422,8 +474,26 @@ pub(crate) fn serve_local(
         })
         .ok();
 
-    // stdin on a thread of its own, so the loop below can notice it has gone quiet.
+    // stdin on a thread of its own, so the loop below can notice it has gone quiet. A request
+    // line still arriving is the client being there, and is told to it once a second.
     let (tx, lines) = sync_channel(1);
+    let heard = Arc::new(Mutex::new(Instant::now()));
+    let mut told: Option<Instant> = None;
+    let receiving = encode(&json!({"jsonrpc": "2.0", "method": "receiving"}));
+    let input = Heard {
+        input,
+        at: heard.clone(),
+        arriving: {
+            let out = out.clone();
+            move || {
+                if told.is_none_or(|told| told.elapsed() >= ARRIVING) {
+                    told = Some(Instant::now());
+                    // Never waited for: the reading must not wait on the writer.
+                    let _ = out.try_send(receiving.clone());
+                }
+            }
+        },
+    };
     let _ = std::thread::Builder::new()
         .name("accent-stdin".to_string())
         .spawn(move || {
@@ -439,13 +509,16 @@ pub(crate) fn serve_local(
     let mut workers: Vec<std::thread::JoinHandle<()>> = Vec::new();
     let mut pinged = false;
     loop {
+        let quiet = || locked(&heard).elapsed();
         let line = match pinged {
-            true => lines.recv_timeout(silence),
+            true => lines.recv_timeout(silence.saturating_sub(quiet())),
             false => lines.recv().map_err(RecvTimeoutError::from),
         };
         let line = match line {
             Ok(line) => line,
             Err(RecvTimeoutError::Disconnected) => break,
+            // Part of a line came meanwhile: the silence starts again from it.
+            Err(RecvTimeoutError::Timeout) if quiet() < silence => continue,
             Err(RecvTimeoutError::Timeout) => {
                 // The link died without closing. Nobody reads what the threads still have to
                 // write, so joining them could wait on a full pipe for good. A commit or a sync
@@ -627,6 +700,27 @@ fn capped_lines(input: impl Read) -> impl Iterator<Item = Vec<u8>> {
             }
         }
     })
+}
+
+/// A reader that stamps `at` with every read that brings bytes, and runs `arriving` when one
+/// ends inside a line: the peer is there while any of its line is still coming.
+struct Heard<R, F> {
+    input: R,
+    at: Arc<Mutex<Instant>>,
+    arriving: F,
+}
+
+impl<R: Read, F: FnMut()> Read for Heard<R, F> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.input.read(buf)?;
+        if read > 0 {
+            *locked(&self.at) = Instant::now();
+            if buf[read - 1] != b'\n' {
+                (self.arriving)();
+            }
+        }
+        Ok(read)
+    }
 }
 
 /// `msg` as the line it is sent as.
@@ -1421,6 +1515,132 @@ mod tests {
             "the request given up on"
         );
         client.shutdown();
+        server.join().unwrap();
+    }
+
+    /// An answer still arriving holds its call past the deadline, which counts from the last byte
+    /// read rather than from the request: a note read over a slow link is one long line.
+    #[test]
+    fn an_answer_still_arriving_holds_its_call_past_the_deadline() {
+        let (server_in, client_out) = std::io::pipe().unwrap();
+        let (client_in, mut server_out) = std::io::pipe().unwrap();
+        // A host that sends each answer in twelve pieces, 50 ms apart.
+        let server = std::thread::spawn(move || {
+            for line in BufReader::new(server_in)
+                .lines()
+                .map_while(std::result::Result::ok)
+            {
+                let message = serde_json::from_str::<Value>(&line).unwrap();
+                let Some(id) = message.get("id").cloned() else {
+                    continue;
+                };
+                let answer =
+                    encode(&json!({"jsonrpc": "2.0", "id": id, "result": "x".repeat(600)}));
+                for piece in answer.chunks(answer.len().div_ceil(12)) {
+                    std::thread::sleep(Duration::from_millis(50));
+                    if server_out.write_all(piece).is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+        let client = Client::new(
+            Box::new(client_out),
+            Box::new(client_in),
+            channel().0,
+            Box::new(|| {}),
+        );
+        let t = Instant::now();
+        let deadline = Duration::from_millis(200);
+        let answer = client.call_tracked::<String>("read", json!([]), &Mutex::new(None), deadline);
+        assert_eq!(answer.map(|text| text.len()), Ok(600));
+        assert!(t.elapsed() > 2 * deadline, "it took {:?}", t.elapsed());
+        client.shutdown();
+        server.join().unwrap();
+    }
+
+    /// A cancel never waits on the link: the window drops requests on its own thread, and a
+    /// long request may hold the writer for minutes. The one that found it busy follows it.
+    #[test]
+    fn a_cancel_does_not_wait_behind_a_request_still_being_sent() {
+        let (server_in, client_out) = std::io::pipe().unwrap();
+        let (client_in, server_out) = std::io::pipe().unwrap();
+        let client = Arc::new(Client::new(
+            Box::new(client_out),
+            Box::new(client_in),
+            channel().0,
+            Box::new(|| {}),
+        ));
+        // A request far longer than the pipe holds, which nobody reads yet.
+        let sending = std::thread::spawn({
+            let client = client.clone();
+            move || client.call::<Value>("save", json!(["x".repeat(1 << 20)]))
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        let t = Instant::now();
+        client.cancel(42);
+        assert!(
+            t.elapsed() < Duration::from_millis(100),
+            "{:?}",
+            t.elapsed()
+        );
+        // Read now: the cancel comes after the request it waited behind.
+        let cancel = BufReader::new(server_in)
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(&line.unwrap()).unwrap())
+            .find(|msg| msg["method"] == "cancel")
+            .unwrap();
+        assert_eq!(cancel["params"], json!([42]));
+        drop(server_out);
+        let _ = sending.join().unwrap();
+        client.shutdown();
+    }
+
+    /// A request line still arriving keeps the host from its silence, the client's pings waiting
+    /// behind it, and the host says once a second that it is still receiving, which the client's
+    /// deadline counts from once its writer has handed ssh the rest.
+    #[test]
+    fn a_request_still_arriving_keeps_the_host_listening_and_says_so() {
+        let silence = Duration::from_millis(300);
+        let dir = tempfile::tempdir().unwrap();
+        let (vault, events) = Local::open_at(
+            dir.path(),
+            &dir.path().join("index.db"),
+            VaultConfig::default(),
+        )
+        .unwrap();
+        let (server_in, mut input) = std::io::pipe().unwrap();
+        let (output, server_out) = std::io::pipe().unwrap();
+        let server = std::thread::spawn(move || {
+            serve_local(vault, events, server_in, server_out, silence);
+        });
+        writeln!(input, "{PING_LINE}").unwrap();
+        let request = encode(
+            &json!({"jsonrpc": "2.0", "id": 1, "method": "nonesuch", "params": ["x".repeat(4000)]}),
+        );
+        // Twice the host's silence in pieces, 50 ms apart, the last with the newline.
+        let writer = std::thread::spawn(move || {
+            for piece in request.chunks(request.len().div_ceil(48)) {
+                std::thread::sleep(Duration::from_millis(50));
+                input.write_all(piece).unwrap();
+            }
+            input
+        });
+        let mut said = BufReader::new(output)
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(&line.unwrap()).unwrap())
+            .filter(|msg| msg.get("method") != Some(&json!("event")));
+        let mut receiving = 0;
+        let answer = loop {
+            let msg = said.next().expect("the host stopped mid-request");
+            if msg.get("id").is_some() {
+                break msg;
+            }
+            receiving += usize::from(msg["method"] == "receiving");
+        };
+        assert_eq!(answer["id"], 1, "{answer}");
+        assert!(receiving >= 2, "{receiving} notes for 2.4 s of a line");
+        drop(writer.join().unwrap());
         server.join().unwrap();
     }
 

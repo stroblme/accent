@@ -160,8 +160,10 @@ pub(super) fn bench_loading(app: &Rc<App>) {
 }
 
 /// `ACCENT_BENCH_TABS=opening:<rel>,…`, on a remote vault once its first walk is in: each file
-/// opened as a preview, and how long its tab took to be up and its document to land, and the
-/// longest the main loop went without a turn meanwhile. Times only.
+/// opened as a preview, how long its tab took to be up and its document to land or its read to
+/// fail, and what it shows then; for a text file, a line typed at its end and saved, how long the
+/// save took and whether it landed; and the longest the main loop went without a turn. Times
+/// only, waiting up to ten minutes a step, which a 16 MiB note over a slow link takes.
 pub(super) fn bench_opening(app: &Rc<App>, rels: &str) {
     let app = app.clone();
     let rels: Vec<String> = rels.split(',').map(str::to_string).collect();
@@ -179,12 +181,27 @@ pub(super) fn bench_opening(app: &Rc<App>, rels: &str) {
             app.open_preview(rel);
             let at_once = app.doc_for(rel).is_some();
             let tab = settle(|| app.doc_for(rel).is_some()).await;
-            let doc = settle(|| landed(&app, rel)).await;
+            let failed = || matches!(app.doc_for(rel), Some(Doc::Loading(held)) if held.failed());
+            let doc = settle(|| landed(&app, rel) || failed()).await;
+            let saved = match app.tab_for(rel) {
+                Some(text) => {
+                    let (asked, said) = (Instant::now(), app.toasted.get());
+                    text.buffer.insert(&mut text.buffer.end_iter(), "saved\n");
+                    app.save_tab(&text, true);
+                    let done =
+                        settle(|| !text.save.modified.get() || app.toasted.get() > said).await;
+                    let landed = !text.save.modified.get();
+                    format!("save_ms={} saved={landed}", (done - asked).as_millis())
+                }
+                None => String::new(),
+            };
             tick.remove();
             println!(
-                "bench opening {rel} at_once={at_once} tab_ms={} doc_ms={} stall_ms={}",
+                "bench opening {rel} at_once={at_once} tab_ms={} doc_ms={} shows={} {saved} \
+                 stall_ms={}",
                 (tab - t).as_millis(),
                 (doc - t).as_millis(),
+                shows(&app, rel),
                 stall.get().as_millis()
             );
         }
@@ -192,10 +209,10 @@ pub(super) fn bench_opening(app: &Rc<App>, rels: &str) {
     });
 }
 
-/// When `done` first held, looked at every 5 ms for a minute.
+/// When `done` first held, looked at every 5 ms for ten minutes.
 async fn settle(done: impl Fn() -> bool) -> Instant {
     let t = Instant::now();
-    while !done() && t.elapsed() < Duration::from_secs(60) {
+    while !done() && t.elapsed() < Duration::from_secs(600) {
         glib::timeout_future(Duration::from_millis(5)).await;
     }
     Instant::now()

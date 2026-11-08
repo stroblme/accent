@@ -112,7 +112,8 @@ impl RemoteGit {
             Box::new(|| {}),
         ));
         // Client::call_tracked writes synchronously before its own receive timeout starts.
-        // Bound the write too, then kill SSH to release a blocked pipe writer.
+        // Bound the write too, as the call is, by how long the host has been quiet, then kill
+        // SSH to release a blocked pipe writer.
         let (sent, received) = channel();
         let worker = {
             let client = client.clone();
@@ -127,11 +128,16 @@ impl RemoteGit {
                 let _ = sent.send(answer);
             })
         };
-        let answer = match received.recv_timeout(deadline) {
-            Ok(answer) => answer,
-            Err(RecvTimeoutError::Timeout) => Err(Error::Remote(format!("{method} timed out"))),
-            Err(RecvTimeoutError::Disconnected) => {
-                Err(Error::Lost("the request worker closed".into()))
+        let answer = loop {
+            match received.recv_timeout(deadline.saturating_sub(client.quiet())) {
+                Ok(answer) => break answer,
+                Err(RecvTimeoutError::Timeout) if client.quiet() < deadline => {}
+                Err(RecvTimeoutError::Timeout) => {
+                    break Err(Error::Remote(format!("{method} timed out")));
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    break Err(Error::Lost("the request worker closed".into()));
+                }
             }
         };
         // A timeout must not leave a writer or reader waiting on the SSH child.
