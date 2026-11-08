@@ -444,8 +444,8 @@ async fn scene_debug(app: &Rc<App>, shot: &Shot) {
 /// Scene 6's diagram, `build-aux/screenshots/readout-chain.drawio.xml`.
 const DIAGRAM: &str = "Submissions/grant-2026/figures/readout-chain.drawio";
 
-/// Scene 6: a draw.io diagram of a readout chain, its pages in the Outline over their
-/// thumbnails, the drawing tools put away.
+/// Scene 6: a draw.io diagram of a readout chain, its qubit chip selected and the Properties
+/// pane on it, the drawing tools put away.
 async fn scene_diagram(app: &Rc<App>, shot: &Shot) {
     open_all(app, &[DIAGRAM]).await;
     until("diagram", 10_000, || {
@@ -454,7 +454,14 @@ async fn scene_diagram(app: &Rc<App>, shot: &Shot) {
     .await;
     // Out by default, the ring would cover the page's top corner.
     app.set_drawing(false);
-    app.show_pane("outline");
+    until("properties", 5_000, || {
+        app.sidebar.get().is_some_and(|s| s.has_pane("properties"))
+    })
+    .await;
+    app.show_pane("properties");
+    if let Some(tab) = app.active_diagram() {
+        tab.select(vec!["chip".to_string()]);
+    }
     for dark in [false, true] {
         set_dark(app, dark).await;
         app.show_chrome();
@@ -466,25 +473,36 @@ async fn scene_diagram(app: &Rc<App>, shot: &Shot) {
 /// left them.
 const NOTEBOOK: &str = "Notebooks/calibration.ipynb";
 
-/// Scene 7: a notebook on its sweep's code and plot, reached through the sweep's heading in the
-/// Outline.
+/// The sweep's code cell in scene 7's notebook, the one whose output is the plot.
+const SWEEP: usize = 5;
+
+/// Scene 7: a notebook's sweep, its code cell given the keyboard with its buttons beside it and
+/// its plot under it, the Code pane on the notebook's kernel.
 async fn scene_notebook(app: &Rc<App>, shot: &Shot) {
     // A cell of code and its plot together, in a 1000 px window.
     app.set_zoom(0.8);
     open_all(app, &[NOTEBOOK]).await;
-    let (Some(tab), Some(sidebar)) = (app.active_notebook(), app.sidebar.get()) else {
+    let Some(tab) = app.active_notebook() else {
         return println!("bench shot no_notebook");
     };
-    app.show_pane("outline");
-    until("outline", 10_000, || sidebar.outline_lines(None).len() == 4).await;
-    // As a click on the heading does, and a scroll on until its cell is at the top, so the plot
-    // under it shows whole.
-    sidebar.outline_lines(Some(2));
-    let page = tab.bench_range().1;
-    let shown = || tab.bench_cell_y(4).filter(|y| (0.0..page).contains(y));
-    until("jump", 5_000, || shown().is_some()).await;
-    if let Some(y) = shown() {
-        tab.bench_scroll_by((y - 12.0) / page);
+    until("code", 5_000, || {
+        app.sidebar.get().is_some_and(|s| s.has_pane("code"))
+    })
+    .await;
+    app.show_pane("code");
+    // Given the keyboard as a click into it does, and scrolled until it is at the top, so the plot
+    // under it shows whole: again once the cells coming into view are built.
+    tab.bench_select(SWEEP);
+    for _ in 0..2 {
+        let page = || tab.bench_range().1;
+        until("cell", 5_000, || {
+            page() > 0.0 && tab.bench_cell_y(SWEEP).is_some()
+        })
+        .await;
+        if let Some(y) = tab.bench_cell_y(SWEEP) {
+            tab.bench_scroll_by((y - 12.0) / page());
+        }
+        style::bench_painted(&app.window, String::new).await;
     }
     for dark in [false, true] {
         set_dark(app, dark).await;
@@ -608,15 +626,17 @@ async fn until(what: &str, ms: u64, ready: impl Fn() -> bool) {
     }
 }
 
-/// Open every one of `rels` and wait until each has a tab.
+/// Open every one of `rels` and wait until each has its document, not the loading page its tab
+/// shows while the file is read.
 async fn open_all(app: &Rc<App>, rels: &[&str]) {
     for rel in rels {
         app.open_path(rel);
     }
-    until("open", 20_000, || {
-        rels.iter().all(|rel| app.doc_for(rel).is_some())
-    })
-    .await;
+    let read = |rel: &&str| {
+        app.doc_for(rel)
+            .is_some_and(|doc| !matches!(doc, Doc::Loading(_)))
+    };
+    until("open", 20_000, || rels.iter().all(read)).await;
 }
 
 /// Give `pane`'s document the keyboard, as a click into it does, and with it the active pane.

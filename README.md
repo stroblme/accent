@@ -52,9 +52,9 @@ See the [device support](#device-support) for compatibility.
 
 ![A Python program paused at a breakpoint in the Solarized theme, beside its Debug Console and output](docs/screenshot-5.png)
 
-![A draw.io diagram beside its pages in the Outline](docs/screenshot-6.png)
+![A draw.io diagram beside the Properties of its selected shape](docs/screenshot-6.png)
 
-![A Jupyter notebook's code and plot beside its headings in the Outline](docs/screenshot-7.png)
+![A Jupyter notebook's code cell and plot beside its kernel in the Code pane](docs/screenshot-7.png)
 
 ## Get started
 
