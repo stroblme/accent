@@ -221,8 +221,7 @@ pub struct PdfTab {
 }
 
 /// A new tab of `tabs` for the PDF at `path`, showing itself opening until [`PdfTab::load`] is
-/// handed the bytes, which on a remote vault come from `remote`. Never fails: a document that
-/// will not open is a tab holding the reason.
+/// handed the bytes. Never fails: a document that will not open is a tab holding the reason.
 pub fn open(
     path: &Path,
     key: &str,
@@ -230,7 +229,6 @@ pub fn open(
     tooltip: &str,
     tabs: &adw::TabView,
     place: Place,
-    remote: Option<&str>,
 ) -> Rc<PdfTab> {
     let view = PdfView::new();
     let thumbs = PdfView::thumbnails();
@@ -261,7 +259,7 @@ pub fn open(
     stack.add_named(&host, Some("view"));
     stack.add_named(&status, Some("status"));
     // In place of the empty pages while a document is slow to open: see `loading::OPENING`.
-    stack.add_named(&loading::page(title, remote), Some(loading::LOADING));
+    stack.add_named(&loading::page(), Some(loading::LOADING));
 
     let page = tabs.append(&stack);
     page.set_title(title);
@@ -463,11 +461,6 @@ impl PdfTab {
     /// vault's copy once the fetch has landed.
     pub fn load(self: &Rc<Self>, path: &Path) {
         *self.path.borrow_mut() = path.to_path_buf();
-        // Its bytes are here: the loading page waits for pdfium now, not for a host.
-        let page = self.stack.child_by_name(loading::LOADING);
-        if let Some(page) = page.and_downcast::<adw::StatusPage>() {
-            page.set_description(None);
-        }
         if let Err(message) = self.start() {
             self.fail(&message);
         }

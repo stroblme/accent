@@ -12,7 +12,6 @@ impl App {
             .vault()
             .and_then(|v| v.session().pdf.get(key).copied())
             .unwrap_or_default();
-        let host = self.on_host(key).then(|| self.host());
         let pdf = pdftab::open(
             path,
             key,
@@ -20,7 +19,6 @@ impl App {
             &fileops::display_path(&self.root(), key),
             &self.tabs_for(key),
             place,
-            host.as_deref(),
         );
         pdf.set_drawing_config(self.config.borrow().drawing.clone());
         // Out as the session left them, which a tab in another pane shows before it is in front.

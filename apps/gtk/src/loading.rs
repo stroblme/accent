@@ -28,29 +28,26 @@ const DOC: &str = "doc";
 /// The failure page's name, in a holder or a PDF's stack.
 pub(crate) const FAILED: &str = "failed";
 
-/// The page a tab shows while its file is on its way: libadwaita's spinner over the file's
-/// name, a status page as a PDF's "Cannot Open This PDF" is, and on a remote vault the host
-/// being waited for.
-pub(crate) fn page(name: &str, host: Option<&str>) -> adw::StatusPage {
-    let page = adw::StatusPage::builder()
-        .title(format!("Opening {name}"))
-        .build();
-    page.set_paintable(Some(&adw::SpinnerPaintable::new(Some(&page))));
-    if let Some(host) = host {
-        page.set_description(Some(&format!("Waiting for {host}.")));
-    }
-    page
+/// The page a tab shows while its file is on its way: a spinner, centred, and nothing else (user
+/// decision 2026-11-07).
+pub(crate) fn page() -> adw::Spinner {
+    adw::Spinner::builder()
+        .width_request(32)
+        .height_request(32)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .build()
 }
 
 /// The child of a tab whose document is not in yet: blank, then the loading [`page`] once
 /// [`OPENING`] has passed, crossfading in.
-pub(crate) fn holder(name: &str, host: Option<&str>) -> gtk::Stack {
+pub(crate) fn holder() -> gtk::Stack {
     let holder = gtk::Stack::builder()
         .transition_type(gtk::StackTransitionType::Crossfade)
         .transition_duration(crate::widgets::FADE_MS)
         .build();
     holder.add_named(&adw::Bin::new(), Some(BLANK));
-    holder.add_named(&page(name, host), Some(LOADING));
+    holder.add_named(&page(), Some(LOADING));
     glib::timeout_add_local_once(
         OPENING,
         glib::clone!(
@@ -158,11 +155,10 @@ pub struct Held {
 
 impl Held {
     /// A new tab of `tabs` for `key`, titled and with the icon its file will have.
-    pub fn new(key: &str, tabs: &adw::TabView, tooltip: &str, host: Option<&str>) -> Rc<Held> {
-        let name = crate::doc::file_name(key);
-        let holder = holder(name, host);
+    pub fn new(key: &str, tabs: &adw::TabView, tooltip: &str) -> Rc<Held> {
+        let holder = holder();
         let page = tabs.append(&holder);
-        page.set_title(name);
+        page.set_title(crate::doc::file_name(key));
         page.set_tooltip(tooltip);
         crate::doc::set_file_icon(&page, key);
         Rc::new(Held {

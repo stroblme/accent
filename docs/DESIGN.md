@@ -1691,7 +1691,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   It measures the upload of the server binary and pulses through the rest, fading in as the connection starts; a local vault's window never shows it.
 - **A file's tab is up at once** (user request 2026-11-07), however slow the host.
   A click, the palette or a restore puts it in its pane, titled and with its file's icon, before a byte has arrived, and the document takes its place once its read or fetch lands.
-  Until then the tab is blank, and once the open has taken 160 ms it shows the loading page, a status page as the PDF's "Cannot Open This PDF" is, with libadwaita's spinner for its icon, "Opening paper.pdf" and on a remote vault "Waiting for host.".
+  Until then the tab is blank, and once the open has taken 160 ms it shows the loading page, a centred 32 px `AdwSpinner` and nothing else (user decision 2026-11-07).
   It crossfades in and out of it, and a local note or a cached copy lands before it would show, so a quick open never flashes it.
   A note, a diagram or a notebook is read before its tab can be built, so its tab is held for it until then (`loading::Held`), and an image's and a PDF's tab, built at once, holds its picture or its pages back the same way.
   Opened again meanwhile it comes to the front and stays one tab, and closed meanwhile it lets go of what was read, so nothing is built and nothing written.

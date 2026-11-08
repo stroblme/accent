@@ -99,8 +99,7 @@ impl App {
             Some(path) => format!("{path} (remote host)"),
             None => fileops::display_path(&self.root(), key),
         };
-        let host = self.on_host(key).then(|| self.host());
-        let held = loading::Held::new(key, &self.tabs_for(key), &tooltip, host.as_deref());
+        let held = loading::Held::new(key, &self.tabs_for(key), &tooltip);
         self.mark_loose(&held.page, key);
         let page = held.page.clone();
         self.docs.borrow_mut().push(Doc::Loading(held));
@@ -491,8 +490,7 @@ impl App {
         crate::widgets::smooth_wheel(&scroller);
         // Held back until it is decoded, the loading page up meanwhile once the open has taken a
         // moment: on a remote vault its bytes come first.
-        let host = self.on_host(key).then(|| self.host());
-        let holder = loading::holder(doc::file_name(key), host.as_deref());
+        let holder = loading::holder();
         loading::put(&holder, &scroller);
         let image = self.adopt_viewer(Doc::Image, key, &holder, doc::icon_for(key), how);
         *image.monitor.borrow_mut() = self.watch_loose(key, path);
