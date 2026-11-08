@@ -29,6 +29,7 @@ pub mod pdf_text;
 pub mod query;
 pub mod recolour;
 pub mod search;
+pub mod shrink;
 pub mod synctex;
 pub mod template;
 pub mod walk;

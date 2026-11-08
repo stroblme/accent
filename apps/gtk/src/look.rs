@@ -16,6 +16,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use accent_core::recolour::{self, Verdict};
+use accent_core::shrink::Shrink;
 use accent_core::{animation, dimensions, orientation};
 use gtk::prelude::*;
 use gtk::subclass::prelude::ObjectSubclassIsExt;
@@ -125,6 +126,13 @@ impl Decoded {
         self.size
             .is_none_or(|(width, _)| self.texture.width() >= need.min(width))
     }
+
+    /// What recolouring may work on: nothing for a file past [`recolour::MAX_PIXELS`], which is
+    /// left alone however small the copy held of it, as its tab leaves it.
+    fn recolourable(&self) -> Option<gdk::Texture> {
+        let (width, height) = (self.size).unwrap_or((self.texture.width(), self.texture.height()));
+        (width as u64 * height as u64 <= recolour::MAX_PIXELS).then(|| self.texture.clone())
+    }
 }
 
 /// A frame of an animation, and how long it shows: `None` for good, the last of one that plays
@@ -183,7 +191,7 @@ pub fn show(
         Some(decoded) => decoded,
         None => reduced(path, decode(path)?, fit),
     };
-    let texture = recoloured(path, look, inverted, || Some(original.texture.clone()))
+    let texture = recoloured(path, look, inverted, || original.recolourable())
         .map_or_else(|| original.texture.clone(), |t| t.upcast());
     Ok(Shown {
         size: original.size,
@@ -196,7 +204,8 @@ pub fn show(
 /// `texture`, the file at `path` decoded whole, reduced for a column `fit` device pixels wide
 /// where it is wider than that and a quarter, the quarter sparing a column that grows a little a
 /// read. Its verdict is taken on every pixel first, so the preview recolours it as the tab
-/// does; one past [`recolour::MAX_PIXELS`] is held whole, as recolouring leaves it.
+/// does, and it is reduced a band of rows at a time ([`bands`]), so even a scan past
+/// [`recolour::MAX_PIXELS`] is held at the column's size without being held twice meanwhile.
 fn reduced(path: &Path, texture: gdk::Texture, fit: Option<i32>) -> Decoded {
     let (width, height) = (texture.width(), texture.height());
     let Some(wide) = fit
@@ -205,30 +214,41 @@ fn reduced(path: &Path, texture: gdk::Texture, fit: Option<i32>) -> Decoded {
     else {
         return Decoded::whole(texture);
     };
-    let Some(p) = pixels(&texture) else {
-        return Decoded::whole(texture);
+    classified(path, || Some(measure(&texture)));
+    let high = ((f64::from(height) * f64::from(wide) / f64::from(width)).round() as i32).max(1);
+    let mut shrink = Shrink::new(width as u32, height as u32, wide as u32, high as u32);
+    bands(&texture, |rows| shrink.rows(rows));
+    let small = Pixels {
+        data: shrink.finish(),
+        width: wide as u32,
+        height: high as u32,
     };
-    drop(texture);
-    classified(path, || {
-        Some(recolour::classify(&p.data, p.width, p.height))
-    });
-    let high = (f64::from(height) * f64::from(wide) / f64::from(width)).round() as i32;
-    let whole = gdk_pixbuf::Pixbuf::from_bytes(
-        &glib::Bytes::from_owned(p.data),
-        gdk_pixbuf::Colorspace::Rgb,
-        true,
-        8,
-        width,
-        height,
-        width * 4,
-    );
-    // Bilinear reduces by averaging every pixel each one covers, as a box filter does.
-    match whole.scale_simple(wide, high.max(1), gdk_pixbuf::InterpType::Bilinear) {
-        Some(small) => Decoded {
-            texture: self::texture(&small, &small.read_pixel_bytes()),
-            size: Some((width, height)),
-        },
-        None => Decoded::whole(self::texture(&whole, &whole.read_pixel_bytes())),
+    Decoded {
+        texture: small.texture().upcast(),
+        size: Some((width, height)),
+    }
+}
+
+/// How many pixels [`bands`] converts at a time: 16 MB of them.
+const BAND: i32 = 4_000_000;
+
+/// `texture`'s pixels handed to `each` as straight RGBA8 a band of whole rows at a time, each
+/// band converted from the texture's own bytes, which a memory texture hands over as they are.
+fn bands(texture: &gdk::Texture, mut each: impl FnMut(&[u8])) {
+    let format = texture.format();
+    let mut downloader = gdk::TextureDownloader::new(texture);
+    downloader.set_format(format);
+    let (bytes, stride) = downloader.download_bytes();
+    let (width, height) = (texture.width(), texture.height());
+    let rows = (BAND / width).clamp(1, height) as usize;
+    for top in (0..height as usize).step_by(rows) {
+        let band = rows.min(height as usize - top);
+        let end = ((top + band) * stride).min(bytes.len());
+        let slice = glib::Bytes::from_bytes(&bytes, top * stride..end);
+        let band = gdk::MemoryTexture::new(width, band as i32, format, &slice, stride);
+        if let Some(p) = pixels(band.upcast_ref()) {
+            each(&p.data);
+        }
     }
 }
 
