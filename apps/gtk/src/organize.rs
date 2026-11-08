@@ -88,7 +88,7 @@ pub struct Organize {
     on_paste: PasteHook,
     trash: gtk::Revealer,
     copy: gtk::Revealer,
-    /// Insert Page Here, with Paste Page Here beside it while a page of this kind is held.
+    /// Insert Page Here, with Paste Page Here before it while a page of this kind is held.
     insert: gtk::Revealer,
     paste: gtk::Button,
     /// The line in the gap a dragged page would be dropped into.
@@ -173,10 +173,10 @@ impl Organize {
             let copy = floating(&button("edit-copy-symbolic", "Copy Page", Organize::copy));
             let add = |o: &Organize, page| o.edit(PageEdit::insert(page + 1));
             let gap = gtk::Box::new(gtk::Orientation::Horizontal, INSET as i32);
-            gap.append(&button("list-add-symbolic", "Insert Page Here", add));
             let paste = button("edit-paste-symbolic", "Paste Page Here", Organize::paste);
             paste.set_visible(false);
             gap.append(&paste);
+            gap.append(&button("list-add-symbolic", "Insert Page Here", add));
             let insert = floating(&gap);
             let bar = gtk::Box::builder()
                 .height_request(3)
