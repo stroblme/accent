@@ -73,7 +73,7 @@ mod toggle;
 mod user_commands;
 mod wheel;
 
-pub(crate) use answer::{OFFLINE_WRITE, SLOW_RELOAD_MS, SLOW_WRITE_MS, hold};
+pub(crate) use answer::{OFFLINE_WRITE, REFUSED_WRITE, SLOW_RELOAD_MS, SLOW_WRITE_MS, hold};
 use answer::{bench_answer, bench_answer_doc, bench_answer_same};
 use attach::bench_attach;
 use chrome::{bench_chrome, bench_chrome_find, bench_chrome_keys};

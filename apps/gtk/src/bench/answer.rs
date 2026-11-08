@@ -16,6 +16,10 @@ pub(crate) static SLOW_WRITE_MS: AtomicU64 = AtomicU64::new(0);
 /// Whether a save's write fails as one over a dropped link does, before it reaches the disk: set
 /// by `ACCENT_BENCH_ANSWER=doc:` for its `offline` case, there being no host to disconnect.
 pub(crate) static OFFLINE_WRITE: AtomicBool = AtomicBool::new(false);
+/// Whether a save's write is refused as a folder that may not be written refuses it: set by
+/// `ACCENT_BENCH_ANSWER=doc:` for its `failed`, `close` and `quit` cases. A folder made read only
+/// refuses a user, but root writes through it, and CI's container runs the drills as root.
+pub(crate) static REFUSED_WRITE: AtomicBool = AtomicBool::new(false);
 
 /// Wait as long as `slow` says, on the worker it is called from.
 pub(crate) fn hold(slow: &AtomicU64) {
@@ -272,14 +276,14 @@ pub(super) fn bench_answer_same(app: &Rc<App>, rel: &str) {
 /// the banner asks. `overlap`: of two reloads out at once, the newer one's read is what the tab
 /// holds, though the older is answered last. `overwrite`: the conflict dialog's Overwrite holds
 /// the main loop for no write (`held_ms`), and an edit made during it is written after it.
-/// `failed`: a write the folder refuses says so, the edits and the banner kept. `during`: an edit
-/// made while a Ctrl+S is written is saved after it. `flush`: a flush, as a close does, waits for
-/// that write and then writes the edit. `conflict`: a Ctrl+S over a change on disk the watcher
-/// has not reported yet is refused by the etag gate and asks, and Reload takes the disk's version.
+/// `failed`: a refused write (`REFUSED_WRITE`) says so, the edits and the banner kept. `during`:
+/// an edit made while a Ctrl+S is written is saved after it. `flush`: a flush, as a close does,
+/// waits for that write and then writes the edit. `conflict`: a Ctrl+S over a change on disk the
+/// watcher has not reported yet is refused by the etag gate and asks, and Reload takes the disk's
+/// version.
 /// `offline`: a write over a dropped link (`OFFLINE_WRITE`) says so and raises the window's
 /// banner, the edits kept. `close` and `quit`: a tab's close and the window's, the write refused,
-/// ask Unsaved Changes, Cancel keeping the tab and the window. Writes files, and makes the folder
-/// read only for a moment; use a scratch vault.
+/// ask Unsaved Changes, Cancel keeping the tab and the window. Writes files; use a scratch vault.
 pub(super) fn bench_answer_doc(app: &Rc<App>, arg: &str) {
     let Some((notebook, diagram)) = arg.split_once(',') else {
         eprintln!("ACCENT_BENCH_ANSWER=doc:<rel_ipynb>,<rel_drawio>");
@@ -347,11 +351,7 @@ async fn doc_drill<T: Probe>(app: &Rc<App>, rel: &str) {
     let kind = T::KIND.to_lowercase();
     let path = app.root().join(rel);
     let write = |version: &str| std::fs::write(&path, T::file(version)).is_ok();
-    let folder = path.parent().unwrap_or(&path).to_path_buf();
-    let mode = |mode| {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(mode));
-    };
+    let refused = |refused| REFUSED_WRITE.store(refused, Ordering::Relaxed);
     let cases = [
         "racing",
         "overlap",
@@ -455,15 +455,15 @@ async fn doc_drill<T: Probe>(app: &Rc<App>, rel: &str) {
                     app.connection.is_revealed()
                 );
             }
-            // A close the folder refuses to write for asks, and Cancel keeps the tab; once the
-            // folder takes the write, the close goes through.
+            // A close whose write is refused asks, and Cancel keeps the tab; once the write is
+            // taken, the close goes through.
             "close" => {
                 tab.edit("mine");
-                mode(0o555);
+                refused(true);
                 app.close_page(&doc_page(app, rel));
                 let asked = cancelled(app);
                 let kept = app.doc_for(rel).is_some();
-                mode(0o755);
+                refused(false);
                 if let Some(doc) = app.doc_for(rel) {
                     app.close_page(doc.page());
                 }
@@ -478,10 +478,10 @@ async fn doc_drill<T: Probe>(app: &Rc<App>, rel: &str) {
             // The window closing asks the same, and Cancel keeps it open.
             "quit" => {
                 tab.edit("mine");
-                mode(0o555);
+                refused(true);
                 app.window.close();
                 let asked = cancelled(app);
-                mode(0o755);
+                refused(false);
                 said = format!(" asked={asked:?} open={}", app.window.is_visible());
             }
             _ => {
@@ -495,7 +495,7 @@ async fn doc_drill<T: Probe>(app: &Rc<App>, rel: &str) {
                 }
                 match case {
                     "overwrite" => SLOW_WRITE_MS.store(1500, Ordering::Relaxed),
-                    _ => mode(0o555),
+                    _ => refused(true),
                 }
                 app.resolve_model(&tab);
                 let Some(dialog) = app
@@ -504,7 +504,7 @@ async fn doc_drill<T: Probe>(app: &Rc<App>, rel: &str) {
                     .and_downcast::<adw::AlertDialog>()
                 else {
                     println!("bench answer doc {kind} {case} no_dialog");
-                    mode(0o755);
+                    refused(false);
                     return;
                 };
                 let t = Instant::now();
@@ -528,7 +528,7 @@ async fn doc_drill<T: Probe>(app: &Rc<App>, rel: &str) {
                         break;
                     }
                 }
-                mode(0o755);
+                refused(false);
                 let file = std::fs::read_to_string(&path).unwrap_or_default();
                 said += &format!(
                     " file_mine={} file_during={} toast={:?}",

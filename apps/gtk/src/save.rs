@@ -238,6 +238,11 @@ impl App {
             if crate::bench::OFFLINE_WRITE.load(std::sync::atomic::Ordering::Relaxed) {
                 return Err(Error::Offline("not connected".to_string()));
             }
+            #[cfg(feature = "bench")]
+            if crate::bench::REFUSED_WRITE.load(std::sync::atomic::Ordering::Relaxed) {
+                let refused = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+                return Err(Core::io(path.display(), refused).into());
+            }
             let write = |expected| match &vault {
                 Some(vault) => vault.save(&rel, text, expected),
                 None => accent_core::fs::write_note(&path, text, expected).map_err(Into::into),
