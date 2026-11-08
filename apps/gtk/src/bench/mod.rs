@@ -339,6 +339,8 @@ use user_commands::bench_commands;
 ///   `menus:<rel_note>[:<dir>]`: tab icons, Reveal into unlisted folders, a tab double-clicked,
 ///   Open on a PDF, every file menu, Print from the tree, right-clicks with screenshots into
 ///   `<dir>`, in a scratch vault that is a repository of its own (`menus::bench_menus`).
+///   `reveal:<rel>[,<rel>…]`: where each revealed row lands against the list's middle, a `!<rel>`
+///   from the Search pane.
 /// - `ACCENT_BENCH_TAGS=<rel_note>`: tag-list updates after edits.
 /// - `ACCENT_BENCH_INFO=<rel>[,<rel>…]`: per-file Info sections; `terminal`
 ///   opens a shell instead.

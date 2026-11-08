@@ -289,7 +289,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The row clicked takes the selection, a folder's too as in VS Code, until another is clicked or the tab in front changes (user decision 2026-10-29).
   The arrow keys move the selection, and Delete, F2 and Menu act on the selected row.
   Only among rows on screen: no folder opens and nothing scrolls, which is Reveal in Sidebar's job.
-- Reveal in Sidebar, from a file's menu or the palette, outlines the row it lands on in the accent for a second, which then fades over two (Motion), so the eye finds it in a long listing.
+- Reveal in Sidebar, from a file's menu or the palette, scrolls the row it lands on to the middle of the list, as far as the list scrolls, and outlines it in the accent for a second, which then fades over two (Motion), so the eye finds it in a long listing.
   The folders above the row are listed off the main thread as it opens them, so it goes on as each listing lands and says the file is not in the sidebar only after three seconds without it.
 - A change on disk or in git refills the tree in place: the open folders stay open and the list stays where it is.
   A row that goes while it has the keyboard hands it to the row now in its place, not to the window's first widget, which would scroll the list to its top (`widgets::set_model`).

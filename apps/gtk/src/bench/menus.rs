@@ -323,6 +323,56 @@ pub(super) fn bench_menus(app: &Rc<App>, arg: &str) {
     });
 }
 
+/// `ACCENT_BENCH_MENU=reveal:<rel>[,<rel>…]` reveals each file in turn, as Reveal in Sidebar does,
+/// and prints how far its row's middle lands below the list's (`off`, negative above it) and
+/// where the list is scrolled, out of how far it scrolls (`value`, `max`). A `<rel>` after a `!`
+/// is revealed with the Search pane in front, so Files comes back for it.
+pub(super) fn bench_reveal(app: &Rc<App>, arg: &str) {
+    let (app, rels) = (
+        app.clone(),
+        arg.split(',').map(str::to_string).collect::<Vec<_>>(),
+    );
+    glib::spawn_future_local(async move {
+        let tree = app.tree.get().expect("a tree");
+        until("reveal", "reconciled", WAIT, || app.reconciled.get()).await;
+        for rel in rels {
+            let (searching, rel) = match rel.strip_prefix('!') {
+                Some(rel) => (true, rel.to_string()),
+                None => (false, rel),
+            };
+            if let Some(sidebar) = app.sidebar.get().filter(|_| searching) {
+                sidebar.show_pane("search");
+                glib::timeout_future(Duration::from_millis(300)).await;
+            }
+            app.reveal_rel(&rel, true);
+            until("reveal", "outlined", WAIT, || {
+                outlined(tree) == [rel.as_str()]
+            })
+            .await;
+            // Past the frames the list takes to settle under a far jump.
+            glib::timeout_future(Duration::from_millis(1000)).await;
+            let view = tree.view();
+            let a = view.vadjustment().expect("a scrolled tree");
+            let row = tree::expanders(view)
+                .into_iter()
+                .find(|e| {
+                    e.list_row()
+                        .and_then(|r| tree::decode(&r.item()?))
+                        .is_some_and(|r| r.rel == rel)
+                })
+                .and_then(|e| e.compute_bounds(view));
+            let off = row.map(|b| f64::from(b.y() + b.height() / 2.0) - a.page_size() / 2.0);
+            println!(
+                "bench reveal {rel} off={:?} value={} max={}",
+                off.map(f64::round),
+                a.value().round(),
+                (a.upper() - a.page_size()).round()
+            );
+        }
+        bench_quit(&app);
+    });
+}
+
 /// Every label a menu model offers, its sections walked through.
 fn labels_of(menu: Option<gio::MenuModel>) -> Vec<String> {
     menu.map(|m| fileops::labels(&m)).unwrap_or_default()

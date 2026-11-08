@@ -15,6 +15,9 @@ pub(super) fn bench_menu(app: &Rc<App>, rel: &str) {
     if let Some(arg) = rel.strip_prefix("menus:") {
         return super::menus::bench_menus(app, arg);
     }
+    if let Some(arg) = rel.strip_prefix("reveal:") {
+        return super::menus::bench_reveal(app, arg);
+    }
     let Some(ops) = app.ops().cloned() else {
         return bench_quit(app);
     };

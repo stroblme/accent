@@ -485,8 +485,8 @@ const LISTING_WAIT: Duration = Duration::from_secs(3);
 /// What [`Tree::reveal_when_listed`] calls once, when the row is reached or the wait is over.
 type Waiting = Rc<RefCell<Option<Box<dyn FnOnce(bool)>>>>;
 
-/// Expand the folders above `rel` as far as they are listed, then select its row and scroll to
-/// it, with `focus` giving it the keyboard. False while the row is not listed.
+/// Expand the folders above `rel` as far as they are listed, then select its row and scroll it to
+/// the middle of the list, with `focus` giving it the keyboard. False while the row is not listed.
 fn show_row(
     model: &gtk::TreeListModel,
     view: &gtk::ListView,
@@ -510,7 +510,52 @@ fn show_row(
         false => gtk::ListScrollFlags::SELECT,
     };
     view.scroll_to(row.position(), flags, None);
+    centre(view, row);
     true
+}
+
+/// How many frames [`centre`] has to bring its row to the middle and see it stay there.
+const CENTRE_FRAMES: u32 = 10;
+
+/// Scroll `row` to the middle of `view`, as far as the list scrolls, once a frame has laid it out:
+/// `scroll_to` stops a row at the nearest edge, where the eye easily misses it, and leaves a list
+/// not laid out yet (a pane just shown) wherever it lands. GTK places a row it has only estimated,
+/// one far off or just listed, a row or more from where it lands, even out of view, so the row is
+/// put right from where it was laid out, every frame until it stays.
+fn centre(view: &gtk::ListView, row: gtk::TreeListRow) {
+    let frames = Cell::new(0);
+    view.add_tick_callback(move |view, _| {
+        frames.set(frames.get() + 1);
+        let Some(a) = view.vadjustment().filter(|_| frames.get() <= CENTRE_FRAMES) else {
+            return glib::ControlFlow::Break;
+        };
+        let page = a.page_size();
+        // In the list's own coordinates, which the adjustment's value is the top of.
+        let laid_out = expanders(view)
+            .into_iter()
+            .find(|e| e.list_row().as_ref() == Some(&row))
+            .and_then(|e| e.compute_bounds(view))
+            .map(|b| (f64::from(b.y()), f64::from(b.height())))
+            .filter(|&(_, height)| page > 0.0 && height > 0.0);
+        let Some((top, height)) = laid_out else {
+            return glib::ControlFlow::Continue;
+        };
+        let to = centred(a.value(), page, a.lower(), a.upper(), top, height);
+        if (to - a.value()).abs() < 1.0 {
+            return glib::ControlFlow::Break;
+        }
+        a.set_value(to);
+        // Which scrolls no further, the row now being in view, but has GTK hold the list by the
+        // row where it now is rather than by one it estimated.
+        view.scroll_to(row.position(), gtk::ListScrollFlags::NONE, None);
+        glib::ControlFlow::Continue
+    });
+}
+
+/// The scroll value that brings a row `top..top + height` down a `page` tall view scrolled to
+/// `value` to its middle, kept within the `lower..upper` the list scrolls over.
+fn centred(value: f64, page: f64, lower: f64, upper: f64, top: f64, height: f64) -> f64 {
+    (value + top + height / 2.0 - page / 2.0).clamp(lower, (upper - page).max(lower))
 }
 
 /// Separate ignored directories and individual files when Git status arrives.
@@ -1661,6 +1706,17 @@ mod tests {
         // A note at the vault root has nothing above it to expand.
         assert_eq!(dirs("c.md"), [] as [&str; 0]);
         assert_eq!(dirs(""), [] as [&str; 0]);
+    }
+
+    #[test]
+    fn a_revealed_row_is_centred_as_far_as_the_list_scrolls() {
+        // A 20 px row 150 px down a 200 px view scrolled to 100 moves up to the middle.
+        assert_eq!(centred(100.0, 200.0, 0.0, 1000.0, 150.0, 20.0), 160.0);
+        // Near the top or the bottom the list stops where it ends.
+        assert_eq!(centred(0.0, 200.0, 0.0, 1000.0, 20.0, 20.0), 0.0);
+        assert_eq!(centred(800.0, 200.0, 0.0, 1000.0, 180.0, 20.0), 800.0);
+        // A list shorter than the view does not scroll at all.
+        assert_eq!(centred(0.0, 200.0, 0.0, 150.0, 100.0, 20.0), 0.0);
     }
 
     #[test]
