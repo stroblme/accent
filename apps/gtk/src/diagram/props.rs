@@ -1,7 +1,8 @@
 //! Properties for selected cells, or the page when nothing is selected.
 //!
-//! Each change uses the tab's undo path; spin rows debounce bursts, and a change still held
-//! lands before any other (`Props::flush`). `filling` prevents model-to-widget notifications
+//! Each change uses the tab's undo path; spin rows debounce bursts, entry rows hold what is typed
+//! until Return or the keyboard leaves them, and a change still held lands before any other
+//! (`Props::flush`). `filling` prevents model-to-widget notifications
 //! from becoming edits. Geometry and style groups reveal Copy/Paste buttons on hover or focus
 //! (`widgets::reveal_on_hover`).
 
@@ -244,8 +245,9 @@ const DIRECTIONS: [(&str, &str); 5] = [
 type OnChange = Rc<RefCell<Option<Box<dyn Fn(Change)>>>>;
 /// Style keys and the values a menu entry gives them.
 type Pairs = &'static [(&'static str, Option<&'static str>)];
-/// Spin rows' changes waiting for their burst to settle, one a slot (the four geometry rows
-/// share one), in the order they were made.
+/// Spin rows' changes waiting for their burst to settle, and entry rows' text waiting for Return
+/// or the keyboard leaving them, one a slot (the four geometry rows share one), in the order
+/// they were made.
 type Held = RefCell<Vec<(&'static str, Box<dyn FnOnce()>)>>;
 
 /// A colour a cell may also have none of: a switch for whether it has one, and the colour.
@@ -398,14 +400,15 @@ pub struct Props {
     held: Held,
 }
 
-/// Apply an entry on Return or its button. Hide the idle pencil because clicking
-/// the row already starts editing.
+/// An entry with no apply button, what is typed being applied on Return or as the keyboard leaves
+/// it (`Props::typed`). Hide the idle pencil because clicking the row already starts editing, and
+/// the apply button and the indicator it shares a place with, whose room an entry row keeps at
+/// the text's end even while neither shows.
 pub(super) fn entry_row(title: &str) -> adw::EntryRow {
-    let row = adw::EntryRow::builder()
-        .title(title)
-        .show_apply_button(true)
-        .build();
-    hide_part(&row, "edit-icon");
+    let row = adw::EntryRow::builder().title(title).build();
+    for part in ["edit-icon", "apply-button", "indicator"] {
+        hide_part(&row, part);
+    }
     row
 }
 
@@ -983,8 +986,8 @@ impl Props {
             }
         });
         let dash_send = send.clone();
-        self.dash_pattern.connect_apply(move |row| {
-            let numbers = row.text().split_whitespace().collect::<Vec<_>>().join(" ");
+        self.typed(&self.dash_pattern, "dash pattern", move |text| {
+            let numbers = text.split_whitespace().collect::<Vec<_>>().join(" ");
             let pattern = (!numbers.is_empty()).then_some(numbers);
             dash_send(Change::Style(vec![
                 ("dashed", Some("1".to_string())),
@@ -1042,13 +1045,45 @@ impl Props {
         );
 
         let raw_send = send.clone();
-        self.raw
-            .connect_apply(move |row| raw_send(Change::Raw(row.text().to_string())));
+        self.typed(&self.raw, "style", move |text| raw_send(Change::Raw(text)));
         let send_default = send.clone();
         self.default_style
             .connect_clicked(move |_| send_default(Change::DefaultStyle));
-        self.page_name
-            .connect_apply(move |row| send(Change::PageName(row.text().to_string())));
+        self.typed(&self.page_name, "page name", move |text| {
+            send(Change::PageName(text))
+        });
+    }
+
+    /// Hold what is typed into `row` as `slot`'s change, `apply` made of its text, until Return or
+    /// the keyboard leaving the row lands it; anything else that flushes first lands it on the
+    /// cells or the page it was typed for.
+    fn typed(
+        self: &Rc<Self>,
+        row: &adw::EntryRow,
+        slot: &'static str,
+        apply: impl Fn(String) + 'static,
+    ) {
+        let (me, apply) = (Rc::downgrade(self), Rc::new(apply));
+        row.connect_changed(move |row| {
+            let Some(me) = me.upgrade().filter(|me| !me.filling.get()) else {
+                return;
+            };
+            let (apply, text) = (apply.clone(), row.text().to_string());
+            me.keep(slot, move || apply(text));
+        });
+        let me = Rc::downgrade(self);
+        row.connect_entry_activated(move |_| {
+            if let Some(me) = me.upgrade() {
+                me.flush();
+            }
+        });
+        let (me, focus) = (Rc::downgrade(self), gtk::EventControllerFocus::new());
+        focus.connect_leave(move |_| {
+            if let Some(me) = me.upgrade() {
+                me.flush();
+            }
+        });
+        row.add_controller(focus);
     }
 
     /// Show `target`, writing nothing back.
@@ -1305,16 +1340,20 @@ impl Props {
     /// Hold `f` as `slot`'s change until the rows have been still for a moment, in place of the
     /// one held for it: a burst of steps is one change.
     fn hold(self: &Rc<Self>, slot: &'static str, f: impl FnOnce() + 'static) {
-        let mut held = self.held.borrow_mut();
-        held.retain(|(s, _)| *s != slot);
-        held.push((slot, Box::new(f)));
-        drop(held);
+        self.keep(slot, f);
         let me = Rc::downgrade(self);
         self.debounce.call(move || {
             if let Some(me) = me.upgrade() {
                 me.flush();
             }
         });
+    }
+
+    /// Hold `f` as `slot`'s change, in place of the one held for it, until the next flush.
+    fn keep(&self, slot: &'static str, f: impl FnOnce() + 'static) {
+        let mut held = self.held.borrow_mut();
+        held.retain(|(s, _)| *s != slot);
+        held.push((slot, Box::new(f)));
     }
 
     /// Make the held changes now, each its own step: before any other change, a refill, or

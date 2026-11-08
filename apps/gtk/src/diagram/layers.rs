@@ -133,14 +133,9 @@ impl Layers {
     /// always there.
     fn row(&self, id: &CellId) -> Row {
         let row = super::props::entry_row("");
-        // No apply button, nor the indicator it shares a place with: an entry row keeps their room
-        // at the name's end even while neither shows, which the hover buttons would leave the name
-        // none of. Nor the title over a name, which with none ("") still holds the name below the
-        // row's middle; an unnamed layer's "Background" is the row's empty title, which stays.
-        row.set_show_apply_button(false);
-        for part in ["apply-button", "indicator", "subtitle"] {
-            super::props::hide_part(&row, part);
-        }
+        // No title over a name, which with none ("") still holds the name below the row's middle;
+        // an unnamed layer's "Background" is the row's empty title, which stays.
+        super::props::hide_part(&row, "subtitle");
         let send = |change: fn(CellId) -> LayerChange| {
             let (send, id) = (self.send.clone(), id.clone());
             move |_: &gtk::Button| send(change(id.clone()))

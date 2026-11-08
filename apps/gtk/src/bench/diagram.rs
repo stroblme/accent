@@ -831,7 +831,7 @@ fn props(app: &Rc<App>, rel: &str) {
         );
         if let Some(dash) = &dash {
             dash.set_text("6 2 1 2");
-            dash.emit_by_name::<()>("apply", &[]);
+            dash.emit_by_name::<()>("entry-activated", &[]);
         }
         set("Perimeter", 4.0);
         set("Arc Size", 30.0);
@@ -973,6 +973,23 @@ fn props(app: &Rc<App>, rel: &str) {
             Some([style("a"), style("e"), style(&flex), style(&lane)])
         });
         println!("bench diagram props line saved={saved:?}");
+        // A style typed and not entered lands on the cell it was typed for, before another is
+        // selected.
+        tab.select(vec!["a".to_string()]);
+        // The entry, not the Text group's row of the same title.
+        let raw = find_widget(&pane, &|w| {
+            w.downcast_ref::<adw::EntryRow>()
+                .is_some_and(|r| r.title() == "Style")
+        });
+        if let Some(raw) = raw.and_downcast::<adw::EntryRow>() {
+            raw.set_text("rounded=1;");
+        }
+        tab.select(vec!["b".to_string()]);
+        println!(
+            "bench diagram props unentered a={:?} b={:?}",
+            style("a"),
+            style("b")
+        );
         bench_quit(&app);
     });
 }
@@ -1258,6 +1275,56 @@ fn layers(app: &Rc<App>, rel: &str) {
         );
         tab.undo();
         println!("bench diagram layers left_undo rows={:?}", rows());
+        // The page's Name has no apply button: Escape leaves what is typed, a click elsewhere
+        // renames the page, as Return does.
+        tab.select(Vec::new());
+        let name = find_widget(&tab.properties(), &|w| {
+            w.downcast_ref::<adw::EntryRow>()
+                .is_some_and(|r| r.title() == "Name")
+        });
+        let at = name.as_ref().and_then(|name| {
+            let scroller = name.ancestor(gtk::ScrolledWindow::static_type())?;
+            let scroller = scroller.downcast_ref::<gtk::ScrolledWindow>()?;
+            let top = name.compute_point(&scroller.child()?, &graphene::Point::zero())?;
+            scroller.vadjustment().set_value(f64::from(top.y()) - 100.0);
+            Some(name.clone())
+        });
+        glib::timeout_future(Duration::from_millis(300)).await;
+        let on_page_name = at.and_then(|name| {
+            let at = name.compute_point(&app.window, &graphene::Point::new(40.0, 20.0))?;
+            Some(format!(
+                "{} {}",
+                f64::from(at.x()) + dx,
+                f64::from(at.y()) + dy
+            ))
+        });
+        let named = || {
+            let applies = name.as_ref().and_then(|n| {
+                find_widget(n, &|w| w.has_css_class("apply-button")).map(|b| b.is_mapped())
+            });
+            let editing = name
+                .as_ref()
+                .is_some_and(|n| n.state_flags().contains(gtk::StateFlags::FOCUS_WITHIN));
+            format!(
+                "pages={:?} apply_button={applies:?} editing={editing}",
+                tab.page_names()
+            )
+        };
+        if let (Some(on_name), Some(on_layer)) = (on_page_name, on_name("2")) {
+            let edit = format!("move {on_name}; down; up; sleep 0.3; key ctrl+a; type Renamed");
+            super::git::xtest(&format!("{edit}; sleep 0.2")).await;
+            println!("bench diagram page_name typed {}", named());
+            super::git::xtest("key Escape; sleep 0.2").await;
+            println!("bench diagram page_name escaped {}", named());
+            super::git::xtest(&format!("move {on_layer}; down; up; sleep 0.3")).await;
+            println!("bench diagram page_name left {}", named());
+            tab.undo();
+            println!("bench diagram page_name left_undo {}", named());
+            pause().await;
+            let edit = format!("move {on_name}; down; up; sleep 0.3; key ctrl+a; type Entered");
+            super::git::xtest(&format!("{edit}; key Return; sleep 0.3")).await;
+            println!("bench diagram page_name entered {}", named());
+        }
         // A picture of the group, for looking at rather than asserting on.
         if let Ok(path) = std::env::var("ACCENT_BENCH_DIAGRAM_SHOT") {
             tab.undo();
