@@ -977,16 +977,19 @@ fn shown(text: &str) -> &str {
         .trim_end_matches('\n')
 }
 
-/// A read-only monospace view of `text`, selectable.
+/// A read-only monospace view of `text`, selectable, which wraps once it is realized: GTK's
+/// realize lays out the caret's line before the view has a width, a character a row when it
+/// wraps, and Pango takes 8 s to wrap a 10,000-character word so (ISSUES.md).
 fn output_view(text: &str) -> gtk::TextView {
     let view = gtk::TextView::builder()
         .editable(false)
         .cursor_visible(false)
         .monospace(true)
-        .wrap_mode(gtk::WrapMode::WordChar)
         .build();
     view.add_css_class("notebook-output");
     view.buffer().set_text(text);
+    // After GTK's own realize, which a signal handler follows.
+    view.connect_realize(|view| view.set_wrap_mode(gtk::WrapMode::WordChar));
     view
 }
 

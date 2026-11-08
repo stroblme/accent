@@ -11,7 +11,8 @@ const WAIT: u64 = 90_000;
 /// The notebook the drill writes and runs: a print, a result, `input()`, a sleep to interrupt,
 /// a cell an interrupt leaves unrun, one of a stream that grows across two flushes, an 80 × 40
 /// PNG, a table with a plain text of its own and a traceback, a markdown cell with the PNG
-/// attached, for Copy Output, and a flood: a line past what a line holds, then a print loop.
+/// attached, for Copy Output, a flood: a line past what a line holds, then a print loop, and that
+/// line printed alone.
 const NOTEBOOK: &str = r#"{
  "cells": [
   {"cell_type": "code", "execution_count": null, "id": "a1", "metadata": {}, "outputs": [],
@@ -33,7 +34,9 @@ const NOTEBOOK: &str = r#"{
   {"cell_type": "markdown", "id": "a7", "metadata": {}, "source": ["![dot](attachment:dot.png)"],
    "attachments": {"dot.png": {"image/png": "iVBORw0KGgoAAAANSUhEUgAAAFAAAAAoCAIAAADmAupWAAAARElEQVR42u3PQQ0AAAgEoItiVKMaxRZ+ZKMAqZ5XIiwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsLCwsfGsBdbbBD06BAAwAAAAASUVORK5CYII="}}},
   {"cell_type": "code", "execution_count": null, "id": "a8", "metadata": {}, "outputs": [],
-   "source": ["print('x' * 100_000)\n", "while True: print('x' * 1000)"]}
+   "source": ["print('x' * 100_000)\n", "while True: print('x' * 1000)"]},
+  {"cell_type": "code", "execution_count": null, "id": "a9", "metadata": {}, "outputs": [],
+   "source": ["print('x' * 100_000)"]}
  ],
  "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
   "language_info": {"name": "python"}},
@@ -46,10 +49,10 @@ const NOTEBOOK: &str = r#"{
 /// Insert Line Below's chord, Run Cell and Advance, `input()` answered, an interrupt, Run All
 /// stopped by one, the last run's outputs dimmed until the new ones replace them, Restart, a run
 /// with no output clearing its cell, new outputs fading in, Copy Output on a right-click on each
-/// kind of output, a flood stopped, Clear Outputs and its undo, the save, and the tab closed
-/// with its kernel. It prints `bench kernel …` lines as the window shows each cell, timings on
-/// `bench kernel_ms …` and opacities on `bench kernel_fade …`; a step that never comes prints
-/// `bench kernel timeout <what>` and quits.
+/// kind of output, a long line timed until it is drawn, a flood stopped, Clear Outputs and its
+/// undo, the save, and the tab closed with its kernel. It prints `bench kernel …` lines as the
+/// window shows each cell, timings on `bench kernel_ms …` and opacities on `bench kernel_fade …`;
+/// a step that never comes prints `bench kernel timeout <what>` and quits.
 pub(super) fn bench_kernel(app: &Rc<App>, rel: &str) {
     scratch_only(app, "ACCENT_BENCH_KERNEL");
     if let Some(rel) = rel.strip_prefix("spec:") {
@@ -227,7 +230,7 @@ pub(super) fn bench_kernel(app: &Rc<App>, rel: &str) {
             copy_output(&app, &tab, 5, n, what).await;
         }
         copy_output(&app, &tab, 6, 0, "attachment").await;
-        if !flood(&app, &tab, 7).await {
+        if !long_print(&app, &tab, 8).await || !flood(&app, &tab, 7).await {
             return;
         }
         tab.bench_select(0);
@@ -494,6 +497,48 @@ async fn flood(app: &Rc<App>, tab: &Rc<NotebookTab>, n: usize) -> bool {
         u8::from(ms < 10_000.0)
     );
     true
+}
+
+/// Run cell `n`, one print of a line past what a line holds, and time its output until it is
+/// drawn: its text view laid out the line a character a row as it was put on screen, for 8 s
+/// (2026-11-08). The output still wraps at its width once drawn.
+async fn long_print(app: &Rc<App>, tab: &Rc<NotebookTab>, n: usize) -> bool {
+    tab.bench_select(n);
+    let t = Instant::now();
+    let _ = WidgetExt::activate_action(&app.window, "win.notebook-run-cell", None);
+    let shown = || tab.bench_output_widget(n, 0);
+    let Some(view) = until(app, "long print", shown).await else {
+        return false;
+    };
+    let (painted, frame) = futures_channel::oneshot::channel();
+    if let Some(clock) = app.window.frame_clock() {
+        let (painted, handler) = (Cell::new(Some(painted)), Rc::new(Cell::new(None)));
+        let id = clock.connect_after_paint({
+            let handler = handler.clone();
+            move |clock| {
+                if let Some(id) = handler.take() {
+                    clock.disconnect(id);
+                }
+                if let Some(painted) = painted.take() {
+                    let _ = painted.send(());
+                }
+            }
+        });
+        handler.set(Some(id));
+        clock.request_phase(gdk::FrameClockPhase::PAINT);
+    }
+    let _ = frame.await;
+    let ms = ms_since(t);
+    println!("bench kernel_ms long_print {ms:.0}");
+    let wraps = view
+        .downcast_ref::<gtk::TextView>()
+        .is_some_and(|v| v.wrap_mode() == gtk::WrapMode::WordChar);
+    println!(
+        "bench kernel long_print wraps={} prompt={}",
+        u8::from(wraps),
+        u8::from(ms < 3000.0)
+    );
+    done(app, tab, "long print").await
 }
 
 /// Wait until no run waits or runs, saying `what` timed out otherwise.
