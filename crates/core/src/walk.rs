@@ -449,6 +449,8 @@ pub fn ignored_files(root: &Path, dirs: Option<&[String]>) -> Vec<String> {
     if let Some(dirs) = dirs {
         let mut out: Vec<String> = dirs
             .iter()
+            // A gitignored link is one of those directory symlinks too.
+            .filter(|dir| !root.join(dir).is_symlink())
             .flat_map(|dir| {
                 scan_until(root, dir, &[], &opts, &|| false, &AtomicUsize::new(0)).files
             })
@@ -738,10 +740,8 @@ fn walk_pass(
                 Err(_) => return WalkState::Continue,
             };
             // A directory git ignores is not walked; the file tree opens it a level at a time
-            // (`unindexed_children`), and `ignored_files` walks it, told which it is. Real
-            // directories only — a directory *symlink* is admitted
-            // below and then walked as its own pass, which honours the target's own ignore files
-            // whole, so the tree behind it is pruned there instead.
+            // (`unindexed_children`), and `ignored_files` walks it, told which it is. A directory
+            // *symlink* is weighed below, once its target says it is one.
             if let Some(ignores) = ignores.as_mut()
                 && entry.file_type().is_some_and(|t| t.is_dir())
                 && ignores.matched(&rel_path, true).is_ignore()
@@ -767,6 +767,26 @@ fn walk_pass(
                 match std::fs::metadata(path) {
                     Ok(m) => {
                         if m.is_dir() {
+                            // A link the vault's git ignores is skipped as an ignored folder is,
+                            // and one to a dependency tree (a linked venv) as that tree is: a
+                            // gitignored link into a data tree of tens of gigabytes once made a
+                            // 15 GB index. ripgrep, and so VS Code's search, skips it alike.
+                            let refused = if ignores
+                                .as_mut()
+                                .is_some_and(|i| i.matched(&rel_path, true).is_ignore())
+                            {
+                                Some(SkipReason::GitIgnored)
+                            } else {
+                                (skip_deps && is_dependency_tree(path))
+                                    .then_some(SkipReason::DependencyTree)
+                            };
+                            if let Some(reason) = refused {
+                                let _ = tx.send(Msg::Skip(Skipped {
+                                    path: path.to_path_buf(),
+                                    reason,
+                                }));
+                                return WalkState::Skip;
+                            }
                             if !follow_links {
                                 return WalkState::Skip;
                             }

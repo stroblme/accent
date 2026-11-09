@@ -431,6 +431,42 @@ fn a_scan_still_running_says_how_many_files_it_has_found() {
     assert!(scans[0].done <= last.done);
 }
 
+/// A link git ignores is skipped as an ignored folder is, and so is a link to a venv; a file
+/// opened through the ignored link still joins the index, and the next walk keeps it.
+#[test]
+fn a_gitignored_link_is_not_walked_but_a_file_opened_in_it_is_indexed() {
+    let (vault, db) = fixture();
+    let outside = tempfile::tempdir().unwrap();
+    for dir in ["data/run", "venv", "kept"] {
+        fs::create_dir_all(outside.path().join(dir)).unwrap();
+    }
+    fs::write(outside.path().join("data/run/a.csv"), "zorblat,1\n").unwrap();
+    fs::write(outside.path().join("venv/pyvenv.cfg"), "home = /usr\n").unwrap();
+    fs::write(outside.path().join("venv/mod.py"), "zorblat = 1\n").unwrap();
+    fs::write(outside.path().join("kept/k.md"), "zorblat\n").unwrap();
+    for name in ["data", "venv", "kept"] {
+        std::os::unix::fs::symlink(outside.path().join(name), vault.path().join(name)).unwrap();
+    }
+    fs::write(vault.path().join(".gitignore"), "data\n").unwrap();
+    let mut ix = open(&db);
+    ix.reconcile(vault.path(), |_| {}).unwrap();
+    let held = |ix: &Index| {
+        let mut paths: Vec<_> = ix
+            .search("zorblat", 10, true)
+            .unwrap()
+            .into_iter()
+            .map(|h| h.rel_path)
+            .collect();
+        paths.sort();
+        paths
+    };
+    assert_eq!(held(&ix), ["kept/k.md"]);
+
+    ix.keep_opened(vault.path(), "data/run/a.csv").unwrap();
+    ix.reconcile(vault.path(), |_| {}).unwrap();
+    assert_eq!(held(&ix), ["data/run/a.csv", "kept/k.md"]);
+}
+
 #[test]
 fn first_pass_indexes_then_second_pass_is_a_no_op() {
     let (vault, db) = fixture();
