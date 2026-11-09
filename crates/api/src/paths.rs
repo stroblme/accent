@@ -43,14 +43,19 @@ pub fn conflict_original_rel(copy: &str) -> Option<String> {
 }
 
 /// Name the version [`crate::Vault::adopt_conflict`] replaces using Syncthing's format,
-/// with `accent` as the device id, so the vault recognizes it as a conflict copy.
-pub(crate) fn accent_conflict_name(name: &str, now: chrono::NaiveDateTime) -> String {
+/// with `accent` as the device id, so the vault recognizes it as a conflict copy. The `n`th
+/// version replaced within one second is `accent-n` from the second on.
+pub(crate) fn accent_conflict_name(name: &str, now: chrono::NaiveDateTime, n: u32) -> String {
     let (stem, ext) = match name.rsplit_once('.') {
         Some((stem, ext)) if !stem.is_empty() => (stem, format!(".{ext}")),
         _ => (name, String::new()),
     };
+    let device = match n {
+        1 => "accent".to_string(),
+        n => format!("accent-{n}"),
+    };
     format!(
-        "{stem}.sync-conflict-{}-accent{ext}",
+        "{stem}.sync-conflict-{}-{device}{ext}",
         now.format("%Y%m%d-%H%M%S")
     )
 }

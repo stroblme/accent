@@ -791,21 +791,46 @@ impl Local {
         Ok(report)
     }
 
-    /// Keep theirs by force-writing the conflict copy over the original after
-    /// UI comparison and choice. First preserve the original in a sibling
+    /// Keep theirs by writing the conflict copy over the original after UI
+    /// comparison and choice. First preserve the original in a sibling
     /// `*.sync-conflict-<timestamp>-accent.md` so the dialog can offer it back.
     /// Leave the winning copy for system-trash cleanup. Keeping mine only
     /// trashes the conflict copy and needs no call here.
     pub fn adopt_conflict(&self, original: &str, conflict: &str) -> Result<Etag> {
+        self.adopt_conflict_at(original, conflict, chrono::Local::now().naive_local())
+    }
+
+    /// [`adopt_conflict`](Self::adopt_conflict), its backup named for the time `now`.
+    fn adopt_conflict_at(
+        &self,
+        original: &str,
+        conflict: &str,
+        now: chrono::NaiveDateTime,
+    ) -> Result<Etag> {
         let (text, _) = fs::read_note(&self.resolve(conflict)?).map_err(named(conflict))?;
         let target = self.resolve(original)?;
-        let name = accent_conflict_name(basename(original), chrono::Local::now().naive_local());
-        let keep = target.with_file_name(&name);
-        // ponytail: a second adopt within the same second overwrites the first copy, because the
-        // name only carries whole seconds. Add a counter suffix if that ever costs anyone a note.
-        std::fs::copy(&target, &keep).map_err(|e| accent_core::Error::io(original, e))?;
-        let etag = Etag::of(&target).map_err(named(original))?;
-        let written = fs::write_note(&target, &text, Some(etag))?;
+        let failed = |e| accent_core::Error::io(original, e);
+        // The backup and the write's gate are one version of the original: the etag comes from
+        // the handle the backup is copied from, so an edit landing meanwhile refuses the write.
+        let (src, _) = open_file(&target).map_err(failed)?;
+        let seen = src.metadata().map_err(failed)?;
+        let (name, backup) =
+            claim_backup(&target, basename(original), now, &seen).map_err(failed)?;
+        let written = copy_chunks(&src, &backup, &|| false)
+            .and_then(|()| backup.sync_all())
+            .map_err(failed)
+            .and_then(|()| {
+                #[cfg(test)]
+                if let Some(edit) = BACKED_UP.take() {
+                    edit(&target);
+                }
+                fs::write_note(&target, &text, Some(Etag::from_meta(&seen)))
+            })
+            // Whatever failed, the note is as it was, so the backup goes: it may hold a version
+            // the note no longer does.
+            .inspect_err(|_| {
+                let _ = std::fs::remove_file(target.with_file_name(&name));
+            })?;
         // The kept version too, so the banner offering it back is up at once, not a watcher
         // debounce later.
         let kept = match parent_dir(original) {
@@ -1000,6 +1025,39 @@ fn replace_file(
         .inspect_err(|_| {
             let _ = std::fs::remove_file(&part);
         })
+}
+
+/// Create the backup [`Local::adopt_conflict`] makes at `now` beside `target`, the note called
+/// `note`, with `seen`'s mode. It takes the first of [`accent_conflict_name`]'s names nothing
+/// holds, `create_new` claiming it in the step that finds it free, so a second adopt within one
+/// second keeps its backup beside the first one's.
+fn claim_backup(
+    target: &std::path::Path,
+    note: &str,
+    now: chrono::NaiveDateTime,
+    seen: &std::fs::Metadata,
+) -> io::Result<(String, std::fs::File)> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mut n = 1;
+    loop {
+        let kept = accent_conflict_name(note, now, n);
+        let claimed = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(seen.permissions().mode() & 0o777)
+            .open(target.with_file_name(&kept));
+        match claimed {
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => n += 1,
+            claimed => return claimed.map(|file| (kept, file)),
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's edit of the note, made once [`Local::adopt_conflict`] has copied its backup.
+    static BACKED_UP: std::cell::Cell<Option<fn(&std::path::Path)>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// `from` opened for a copy, once it is known to be a file: opening a FIFO would wait for a
@@ -1874,5 +1932,68 @@ mod tests {
                 .unwrap()
                 .contains(&backups[0])
         );
+    }
+
+    /// Two adopts within one second each keep the version they replaced, under names of their own.
+    #[test]
+    fn adopts_within_one_second_keep_every_replaced_version() {
+        let f = Fixture::open(VaultConfig::default());
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 11, 9)
+            .and_then(|day| day.and_hms_opt(10, 15, 0))
+            .unwrap();
+        f.write("Note.md", "mine\n");
+
+        for theirs in ["first\n", "second\n"] {
+            f.write(CONFLICT, theirs);
+            local_of(&f)
+                .adopt_conflict_at("Note.md", CONFLICT, now)
+                .unwrap();
+        }
+
+        assert_eq!(f.read("Note.md"), "second\n");
+        assert_eq!(kept(&f), ["first\n", "mine\n"]);
+    }
+
+    /// The backup and the write are of one version: an edit landing once the backup is copied
+    /// refuses the adopt, and the note keeps it with no backup of what it replaced left over.
+    #[test]
+    fn an_edit_after_the_backup_refuses_the_adopt() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write("Note.md", "mine\n");
+        f.write(CONFLICT, "theirs\n");
+
+        super::BACKED_UP.set(Some(|note| {
+            fs::write_note(note, "next\n", None).unwrap();
+        }));
+        let refused = local_of(&f).adopt_conflict("Note.md", CONFLICT);
+
+        assert!(
+            matches!(
+                refused,
+                Err(crate::Error::Core(accent_core::Error::ChangedOnDisk { .. }))
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(f.read("Note.md"), "next\n");
+        assert!(kept(&f).is_empty());
+    }
+
+    fn local_of(f: &Fixture) -> &super::Local {
+        let crate::vault::Backend::Local(local) = &f.vault.backend else {
+            panic!("the fixture opens a local vault");
+        };
+        local
+    }
+
+    /// What the backups adopts left beside `Note.md` hold, sorted.
+    fn kept(f: &Fixture) -> Vec<String> {
+        let mut kept: Vec<String> = std::fs::read_dir(f.vault.root())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| fs::is_sync_conflict(n) && n != CONFLICT)
+            .map(|n| f.read(&n))
+            .collect();
+        kept.sort();
+        kept
     }
 }
