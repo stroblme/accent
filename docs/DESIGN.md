@@ -33,7 +33,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - **Never block the UI** on the index, a save or the network: a vault's index and watcher run on one worker thread and report through events, and the window paints from the stored index while the reconcile runs behind it — which is why startup does not depend on vault size.
   A worker that panics says so on its way out (`Event::WorkerGone`, its reason an error before it), and the apps end the walk on screen and keep a banner up until a new worker runs (States): the language providers keep the event channel open, so its end would otherwise go unheard.
 - **Index**: use bundled SQLite with FTS5 and WAL so large vaults open from a persistent cache.
-  Run `VACUUM` after a schema rebuild to reclaim dropped tables.
+  A schema bump deletes the index file and starts a new one, as damage does, which costs the same however large the file is.
+  Dropping a 15 GB index's tables instead read all of it under the write lock for minutes, and a second open failed meanwhile with "database is locked".
 - **A walk reads on a pool and writes on one thread**: each file's read, hash and parse (its markdown, its declarations) run on a thread per core, and the vault's worker writes the rows in the walk's order — SQLite takes one writer, and the walk's order is what writes a folder's row before its children's.
   The writer never waits on the pool (generated vault, 2026-10-14), so a first index costs what its writes cost, about half of it the full-text insert.
   A file named as a binary format (a picture, an archive, an office document) is never opened: a NUL byte said the same of it, but only once a 200 KB picture had been read whole.
@@ -67,7 +68,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A row is written as the transaction writing it finds it, never as the walk's diff saw it, so a note the other process indexed in between is rewritten rather than added twice; and the watcher's news of a file whose row is already up to date reaches the window unless the file is as this process's own last write left it (`Worker::mine`), the other process having taken the change in first.
   A save hands the worker the etag it left, which the worker holds before it reads anything else in the batch: a late echo of an earlier change, read after the save landed, finds the save and is no news either.
   Which of a new or an edited file it was the index cannot say, so its folder's listing is news as well.
-  An index a newer build wrote is refused rather than dropped under it, and a build whose index a newer one has rebuilt since writes nothing more into it: a schema bump costs the older build an error until it is restarted, never a cache of mixed rows.
+  An index a newer build wrote is refused and never deleted under it.
+  An older build still holding an index a newer one has replaced goes on reading and writing its own unlinked copy until it is restarted, and a connection it opens anew is refused, so a schema bump never mixes rows in one file.
+  One opener at a time decides whether the file stays, under a lock beside it, so two openers of a stale index never delete each other's new one.
 - **Saves**: `canonicalize` → temp file in the same directory, created with the mode of the file it replaces → fsync → mode, uid and gid kept → rename, gated on an etag `(mtime_ns, size, ino)`, which a read takes through the handle it reads — safe under Syncthing, and never over a change nobody has seen (States, Saving never answers a question).
   The etag is checked right before the rename, the saves of one file in the process taking turns at the two; a write by another process between them is the one still lost, Linux having no rename that replaces only the file checked.
 - **A new file** takes the mode a new note gets from the umask, not a temp file's 0600 — an image or a drawing nobody else on a shared vault could open.

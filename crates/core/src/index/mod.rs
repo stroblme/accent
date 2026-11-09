@@ -22,7 +22,7 @@ pub use rusqlite::InterruptHandle;
 use rusqlite::functions::FunctionFlags;
 use rusqlite::{Connection, OptionalExtension};
 pub(crate) use schema::MAX_INDEXED_BODY;
-use schema::{BODIES, DROP_ALL, SCHEMA, SCHEMA_VERSION};
+use schema::{BODIES, SCHEMA, SCHEMA_VERSION};
 pub use search::MIN_INFIX;
 use search::{first_of, fold, holds_all, snippet_window};
 use serde::{Deserialize, Serialize};
@@ -51,8 +51,9 @@ fn unsynced_marker(db_path: &Path) -> PathBuf {
 }
 
 /// Lock the file beside an index that one process at a time holds while it decides whether the
-/// index stays ([`Index::open_or_rebuild`]) or makes its [`unsynced_marker`]: an opener could
-/// otherwise find a marker before its boot id is in it.
+/// index stays ([`Index::open_or_rebuild`]) or makes its [`unsynced_marker`]: two openers of one
+/// stale index would otherwise each delete the other's new one, and an opener could find a
+/// marker before its boot id is in it.
 fn lock_beside(db_path: &Path) -> Result<std::fs::File> {
     let path = beside(db_path, "-lock");
     let file = std::fs::File::create(&path).map_err(|e| Error::io(path.display(), e))?;
@@ -272,11 +273,13 @@ impl Index {
         Self::from_conn(conn)
     }
 
-    /// [`open`](Self::open), unless the file is not a database SQLite can read (a disk's damage)
-    /// or is a first index, which does not sync its writes, cut short by the machine stopping.
-    /// Its files are then deleted and a new index started in their place, the index being only
-    /// what the vault's files say, and the second value says what was wrong with it. Nothing on
-    /// this path reads the whole file: checking every page of a 2.2 GB index took 93 s.
+    /// [`open`](Self::open), unless the index is not one this build can use: a file SQLite cannot
+    /// read (a disk's damage), one an older build wrote, or a first index, which does not sync its
+    /// writes, cut short by the machine stopping. Its files are then deleted and a new index
+    /// started in their place, the index being only what the vault's files say, and the second
+    /// value says what was wrong with it. Deleting costs the same however large the file is,
+    /// where dropping the tables of a 15 GB index read all of it under the write lock for minutes
+    /// and checking every page of one took as long.
     pub fn open_or_rebuild(db_path: &Path) -> Result<(Self, Option<String>)> {
         if let Some(parent) = db_path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent).map_err(|e| Error::io(parent.display(), e))?;
@@ -298,7 +301,7 @@ impl Index {
             Some(started) if boot_id().is_none_or(|id| started.trim() != id) => {
                 Some("a first index was cut short by the machine stopping".into())
             }
-            _ => damage(db_path),
+            _ => unusable(db_path),
         };
         if let Some(why) = &damage {
             tracing::warn!("{}: {why}, building a new index", db_path.display());
@@ -392,25 +395,26 @@ impl Index {
             |ctx| Ok(fold(ctx.get_raw(0).as_str()?)),
         )?;
 
-        // It's a cache: rebuilding is cheaper than writing migrations. Asked once outside a
-        // transaction, so an open never queues behind another process's walk, and again inside
-        // the one that rebuilds, which a second build opening the same stale index waits for.
+        // A new file gets the schema. An index an older build wrote is never migrated in place:
+        // `open_or_rebuild` deletes it before a connection reaches it, a cache being cheaper to
+        // build anew than to migrate. Asked once outside a transaction, so an open never queues
+        // behind another process's walk, and again inside the one that creates it, which a
+        // second opener of the same new file waits for.
         if !current(&conn)? {
             let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let rebuild = !current(&tx)?;
-            if rebuild {
-                tx.execute_batch(DROP_ALL)?;
+            if !current(&tx)? {
+                let tables: i64 =
+                    tx.query_row("SELECT count(*) FROM sqlite_schema", [], |r| r.get(0))?;
+                if tables > 0 {
+                    return Err(Error::Index(format!(
+                        "the index was built by an older accent (schema {})",
+                        schema_version(&tx)?
+                    )));
+                }
                 tx.execute_batch(SCHEMA)?;
                 tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             }
             tx.commit()?;
-            // The dropped tables' pages stay in the file as free pages, which nothing gives
-            // back: this repository's index was 1.56 GB with 23 MB of it live. Empty now, the
-            // file is rewritten in moments. Another connection reading it keeps it as it is,
-            // which costs space and nothing else.
-            if rebuild && let Err(e) = conn.execute_batch("VACUUM") {
-                tracing::debug!("the rebuilt index keeps its free pages: {e}");
-            }
         }
         conn.execute_batch(BODIES)?;
         Ok(Index {
@@ -431,37 +435,34 @@ impl Index {
     /// Begin an immediate write transaction so lock contention waits under the busy timeout.
     /// Deferred transactions that read before writing can fail immediately with `SQLITE_BUSY`
     /// during lock promotion.
-    ///
-    /// Recheck the schema because another build sharing the cache may have rebuilt it since this
-    /// connection opened.
     fn write_tx(&mut self) -> Result<rusqlite::Transaction<'_>> {
-        let tx = self
+        Ok(self
             .conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        let version = schema_version(&tx)?;
-        if version != SCHEMA_VERSION {
-            return Err(Error::Index(format!(
-                "the index was rebuilt by another accent build (schema {version}, this one \
-                 writes {SCHEMA_VERSION}): restart this one"
-            )));
-        }
-        Ok(tx)
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?)
     }
 }
 
-/// What makes the index at `db_path` one SQLite cannot read, if anything: its header and schema,
-/// which is where garbage shows. `None` as well for a file that cannot be opened at all, which
+/// What makes the index at `db_path` one this build cannot use, if anything: a header or schema
+/// SQLite cannot read, which is where garbage shows, or the tables of an older build. `None` for
+/// a new file, for one a newer build wrote, which [`Index::open`] refuses rather than this
+/// deleting it under that build, and for a file that cannot be opened at all, which
 /// [`Index::open`] reports as itself.
-fn damage(db_path: &Path) -> Option<String> {
+fn unusable(db_path: &Path) -> Option<String> {
     let conn = Connection::open(db_path).ok()?;
-    let e = conn
-        .query_row("SELECT count(*) FROM sqlite_schema", [], |_| Ok(()))
-        .err()?;
-    matches!(
-        e.sqlite_error_code(),
-        Some(rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
-    )
-    .then(|| e.to_string())
+    match conn.query_row("SELECT count(*) FROM sqlite_schema", [], |r| {
+        r.get::<_, i64>(0)
+    }) {
+        Err(e) => matches!(
+            e.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
+        )
+        .then(|| e.to_string()),
+        Ok(0) => None,
+        Ok(_) => matches!(current(&conn), Ok(false)).then(|| {
+            let version = schema_version(&conn).unwrap_or_default();
+            format!("it was built by an older accent (schema {version})")
+        }),
+    }
 }
 
 fn schema_version(conn: &Connection) -> Result<i64> {
@@ -569,20 +570,16 @@ mod tests {
         );
     }
 
-    /// An old cache must rebuild completely, including tables required by the new queries;
-    /// `user_version` must not describe a partially rebuilt schema.
+    /// An index an older build wrote is deleted and a new one started, which costs the same
+    /// however large it is, and a connection that meets one never migrates it in place.
     #[test]
-    fn an_index_from_the_previous_schema_is_rebuilt_whole() {
+    fn an_index_from_the_previous_schema_is_replaced_by_a_new_one() {
         let (vault, db) = fixture();
-        // Pages enough that the empty schema cannot take them all up again.
-        for i in 0..50 {
-            fs::write(vault.path().join(format!("n{i}.md")), "word ".repeat(400)).unwrap();
-        }
         let path = db.path().join("i.db");
-        {
-            let mut ix = Index::open(&path).unwrap();
-            ix.reconcile(vault.path(), |_| {}).unwrap();
-        }
+        Index::open(&path)
+            .unwrap()
+            .reconcile(vault.path(), |_| {})
+            .unwrap();
         // What a schema-9 database is: everything this one holds, minus the table version 10 added.
         {
             let c = Connection::open(&path).unwrap();
@@ -590,22 +587,15 @@ mod tests {
             c.pragma_update(None, "user_version", SCHEMA_VERSION - 1)
                 .unwrap();
         }
+        assert!(Index::open(&path).is_err(), "a plain open took it as it is");
 
-        let mut ix = Index::open(&path).unwrap();
-        assert_eq!(
-            ix.stats().unwrap().files,
-            0,
-            "the old cache must be dropped"
-        );
-        let free: i64 = ix
-            .conn
-            .query_row("PRAGMA freelist_count", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(free, 0, "the dropped pages are given back");
+        let (mut ix, why) = Index::open_or_rebuild(&path).unwrap();
+        assert!(why.is_some_and(|why| why.contains("older")));
+        assert_eq!(ix.stats().unwrap().files, 0, "a new index");
         ix.reconcile(vault.path(), |_| {}).unwrap();
         assert!(
             ix.note_aliases().is_ok(),
-            "the rebuilt index has the aliases table"
+            "the new index has the aliases table"
         );
     }
 
@@ -635,32 +625,27 @@ mod tests {
     }
 
     /// Two builds can share one index, the app and an `accent-cli mcp` from another build, so an
-    /// index a newer one wrote is refused rather than dropped under it, and a connection whose
-    /// index another build has rebuilt since writes nothing more into it.
+    /// index a newer one wrote is refused rather than deleted under it.
     #[test]
-    fn an_index_another_build_owns_is_never_written() {
+    fn an_index_a_newer_build_wrote_is_refused() {
         let (vault, db) = fixture();
         let path = db.path().join("i.db");
-        let mut ix = Index::open(&path).unwrap();
-        ix.reconcile(vault.path(), |_| {}).unwrap();
-        let files = ix.stats().unwrap().files;
-        // A newer build's rebuild, as far as this one can tell.
-        Connection::open(&path)
+        Index::open(&path)
             .unwrap()
+            .reconcile(vault.path(), |_| {})
+            .unwrap();
+        let newer = Connection::open(&path).unwrap();
+        newer
             .pragma_update(None, "user_version", SCHEMA_VERSION + 1)
             .unwrap();
 
-        let refused = Index::open(&path).err().expect("a newer index was opened");
+        let refused = Index::open_or_rebuild(&path)
+            .err()
+            .expect("a newer index was opened");
         assert!(format!("{refused:#}").contains("newer"), "{refused:#}");
-        fs::write(vault.path().join("new.md"), "# New\n").unwrap();
-        assert!(
-            ix.update_file(vault.path(), "new.md").is_err(),
-            "an older build wrote into a newer index"
-        );
-        assert_eq!(
-            ix.stats().unwrap().files,
-            files,
-            "nothing dropped, nothing added"
-        );
+        let files: i64 = newer
+            .query_row("SELECT count(*) FROM files", [], |r| r.get(0))
+            .unwrap();
+        assert!(files > 0, "it was deleted");
     }
 }

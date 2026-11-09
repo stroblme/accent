@@ -1,6 +1,6 @@
 //! The tables, and the knobs that shape how they are filled.
 
-/// Bump on any schema change: `open` then drops and recreates the cache.
+/// Bump on any schema change: `Index::open_or_rebuild` then deletes the cache and starts a new one.
 pub(super) const SCHEMA_VERSION: i64 = 20;
 
 /// Maximum indexed body size for non-markdown files. Stricter than [`crate::fs::MAX_TEXT`]
@@ -197,22 +197,4 @@ CREATE INDEX idx_files_unread   ON files(mtime_ns DESC) WHERE kind = 2 AND text_
 /// table, so it is the connection's own and never in the file.
 pub(super) const BODIES: &str = r#"
 CREATE TEMP TABLE bodies(file_id INTEGER PRIMARY KEY, body TEXT, title TEXT);
-"#;
-
-pub(super) const DROP_ALL: &str = r#"
-DROP TRIGGER IF EXISTS notes_ai;
-DROP TRIGGER IF EXISTS notes_ad;
-DROP TRIGGER IF EXISTS notes_au;
-DROP TABLE IF EXISTS notes_fts;
-DROP TABLE IF EXISTS notes_tri;
-DROP TABLE IF EXISTS notes;
-DROP TABLE IF EXISTS headings;
-DROP TABLE IF EXISTS symbols;
-DROP TABLE IF EXISTS note_aliases;
-DROP TABLE IF EXISTS tags;
-DROP TABLE IF EXISTS links;
-DROP TABLE IF EXISTS file_keys;
-DROP TABLE IF EXISTS aliases;
-DROP TABLE IF EXISTS opened;
-DROP TABLE IF EXISTS files;
 "#;
