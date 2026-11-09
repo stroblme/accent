@@ -8,7 +8,8 @@ use crate::lang::Editor as _;
 ///
 /// `note:` creates completion fixtures, narrows `[[` and `#c` suggestions, accepts
 /// with Down/Tab and undoes. Bracket completion must consume the existing `]]` exactly once.
-/// The caret then moves inside a `[[` link, which keeps the popup until it is past the `[[`.
+/// The caret then moves inside a `[[` link, which keeps the popup until it is past the `[[`, and
+/// a letter deleted inside a link written before opens it.
 /// `code:` types `typed` (default `s.g`) into a blank line, creating a C fixture if
 /// absent. Print rows, selected documentation, accepted imports and undo results, then type it
 /// again and commit the first row with `;`.
@@ -81,8 +82,8 @@ async fn bench_complete_note(app: &Rc<App>, rel: &str) {
     println!("bench complete_link_undo {:?}", bench_line(&tab, 0));
 
     // The caret moved inside the link, as a click or an arrow does, keeps the popup, narrowed by
-    // all of the link's text, a letter deleted there too; Tab replaces all of it. A caret past
-    // the `[[` has left it.
+    // the link's text up to the caret, a letter deleted there too; Tab replaces all of it. A
+    // caret past the `[[` has left it.
     tab.set_text("");
     bench_type(&tab, &session, "complete_inside_open", "[[complete-t").await;
     bench_caret(&tab, &session, "complete_inside_moved", 4).await;
@@ -95,6 +96,17 @@ async fn bench_complete_note(app: &Rc<App>, rel: &str) {
     bench_keys(&tab, "[[complete-t").await;
     bench_settle(&session).await;
     bench_caret(&tab, &session, "complete_inside_left", 1).await;
+
+    // A letter deleted inside a link written before opens the popup on what is left up to the
+    // caret, `[[complete|-two]]` offering both notes; Tab replaces the whole target.
+    tab.set_text("[[completeX-two]]");
+    bench_caret(&tab, &session, "complete_reopen_at", 11).await;
+    let mut at = tab.buffer.iter_at_offset(11);
+    tab.buffer.backspace(&mut at, true, true);
+    bench_caret(&tab, &session, "complete_reopen_deleted", 10).await;
+    bench_key(&tab, &session, "complete_reopen_down", gdk::Key::Down).await;
+    bench_key(&tab, &session, "complete_reopen_next", gdk::Key::Down).await;
+    bench_key(&tab, &session, "complete_reopen_tab", gdk::Key::Tab).await;
 
     tab.set_text("");
     bench_type(&tab, &session, "complete_tag_open", "#").await;

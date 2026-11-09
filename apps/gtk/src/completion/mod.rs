@@ -1,7 +1,8 @@
 //! Text completion through one [`Source`] interface.
 //!
 //! A [`Session`] holds an answer and its popup. [`Anchor`] marks track the fragment it completes,
-//! which the caret may move about in. [`rank`] narrows complete answers locally by all of it;
+//! which the caret may move about in. [`rank`] narrows complete answers locally by what of it
+//! lies before the caret;
 //! incomplete answers request updates per edit while the current list narrows. [`apply::Moved`]
 //! tracks each item's range through edits.
 //!
@@ -401,8 +402,8 @@ impl Session {
         self.asked.get() != Some(self.edits.get())
     }
 
-    /// Filter the answer by its whole fragment as it now reads, preserving `selected`, or end
-    /// completion once the caret has left the fragment.
+    /// Filter the answer by its fragment up to the caret as it now reads, preserving `selected`,
+    /// or end completion once the caret has left the fragment.
     fn refresh(&self, selected: Option<String>) {
         let buffer = self.view.buffer();
         let caret = caret(&buffer);
@@ -415,11 +416,10 @@ impl Session {
             drop(guard);
             return self.close();
         };
-        let to = shown.anchor.to(&buffer);
-        let line: Vec<char> = line_prefix(&buffer, &to).chars().collect();
-        let to = lang::pos_of(&to);
-        // What is typed from each distinct start to the fragment's end, read once per start: an
-        // answer's items mostly share one.
+        let line: Vec<char> = line_prefix(&buffer, &caret).chars().collect();
+        let to = lang::pos_of(&caret);
+        // What is typed from each distinct start to the caret, read once per start: an answer's
+        // items mostly share one.
         let mut typed: Vec<(Pos, String)> = Vec::new();
         let starts: Vec<Pos> = shown
             .items
@@ -809,8 +809,8 @@ impl Session {
     }
 }
 
-/// Read the text from `start` to `to`, the fragment's end, from `line`, its line up to there,
-/// when both positions share a line.
+/// Read the text from `start` to `to`, the caret, from `line`, its line up to there, when both
+/// positions share a line.
 fn typed_since(buffer: &gtk::TextBuffer, line: &[char], start: Pos, to: Pos) -> String {
     if start.line == to.line {
         let from = (start.character as usize).min(line.len());
@@ -996,8 +996,8 @@ fn moved_range(range: Range, to: impl Fn(Pos) -> Option<Pos>) -> Option<Range> {
 }
 
 /// Complete Lean backslash abbreviations locally ([`abbrev`]); the server
-/// has no answer for this input prefix. The name runs on past the caret to its end, all of it
-/// matched and replaced, the backslash opening it being no part of the fragment.
+/// has no answer for this input prefix. The name runs on past the caret to its end, matched up
+/// to the caret and replaced all of it, the backslash opening it being no part of the fragment.
 fn abbreviations(editor: &dyn Editor, at: Pos) -> Option<Completions> {
     if editor.language_id() != abbrev::LANGUAGE {
         return None;
@@ -1020,7 +1020,7 @@ fn abbreviations(editor: &dyn Editor, at: Pos) -> Option<Completions> {
             end,
         }),
         ..abbrev::rows(
-            &format!("{typed}{rest}"),
+            typed,
             Range {
                 start: at_char(start),
                 end,
@@ -1054,6 +1054,24 @@ pub(crate) fn install(editor: &Rc<dyn Editor>, source: Box<dyn Source>) -> Rc<Se
                 glib::idle_add_local_once(move || typed(editor.as_ref(), first));
             }
         });
+    // A character deleted at the caret, by Backspace or Delete, is looked at the same way.
+    let weak = Rc::downgrade(editor);
+    editor
+        .view()
+        .buffer()
+        .connect_delete_range(move |buffer, start, end| {
+            let Some(editor) = weak.upgrade() else {
+                return;
+            };
+            let caret = caret(buffer).offset();
+            let quiet = editor.is_loading()
+                || end.offset() - start.offset() != 1
+                || (start.offset() != caret && end.offset() != caret)
+                || editor.completion().is_none_or(|s| s.muted.get());
+            if !quiet {
+                glib::idle_add_local_once(move || typed(editor.as_ref(), None));
+            }
+        });
     made
 }
 
@@ -1064,7 +1082,8 @@ pub(crate) fn session(tab: &Tab) -> Option<Rc<Session>> {
 
 /// Handle typed completion triggers ([`rank::opens`]) only while focused
 /// and without a caret column, matching ghost-text eligibility. `typed` is
-/// the character the keystroke typed.
+/// the character the keystroke typed, `None` for one it deleted, which opens the popup only
+/// where a trigger leads the caret: `[[AB` of `[[ABC]]` once its `C` is gone.
 fn typed(editor: &dyn Editor, typed: Option<char>) {
     let Some(session) = editor.completion() else {
         return;
@@ -1084,9 +1103,11 @@ fn typed(editor: &dyn Editor, typed: Option<char>) {
     if language == abbrev::LANGUAGE {
         triggers.push('\\');
     }
-    let min_word = match accent_api::language::is_prose(&language) {
-        true => 2,
-        false => 1,
+    // A word shortened is no reason to open, unless a trigger leads it.
+    let min_word = match (typed, accent_api::language::is_prose(&language)) {
+        (None, _) => usize::MAX,
+        (Some(_), true) => 2,
+        (Some(_), false) => 1,
     };
     let buffer = view.buffer();
     let before = line_prefix(&buffer, &caret(&buffer));

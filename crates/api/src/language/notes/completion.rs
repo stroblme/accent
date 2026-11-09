@@ -73,7 +73,7 @@ impl Notes {
         }
         .trim_end();
         let tags = self.tags_for(&locked(&self.index), rel, text)?;
-        let (hits, more) = tag_candidates(&tags, &text[start..caret + rest.len()]);
+        let (hits, more) = tag_candidates(&tags, &text[start..caret]);
         let line_start = text[..caret].rfind('\n').map_or(0, |i| i + 1);
         let replace = Range {
             start: Pos {
@@ -175,12 +175,13 @@ impl Notes {
         }
         let line_start = text[..caret].rfind('\n').map_or(0, |i| i + 1);
         let line_end = text[caret..].find('\n').map_or(text.len(), |i| caret + i);
-        // The rows complete the whole fragment, what of it follows the caret too.
+        // The rows are matched by the fragment up to the caret, and replace all of it, what of it
+        // follows the caret too.
         let line = &text[line_start..line_end];
-        let head = &line[..fragment_end(line, caret - line_start, context, markdown::is_tag_char)];
-        let Some((trigger, start, prefix)) = context(head) else {
+        let Some((trigger, start, prefix)) = context(&line[..caret - line_start]) else {
             return self.front_tags(rel, &text, caret, pos);
         };
+        let head = &line[..fragment_end(line, caret - line_start, context, markdown::is_tag_char)];
         let at = |byte: usize| Pos {
             line: pos.line,
             character: head[..byte].chars().count() as u32,
@@ -412,10 +413,10 @@ impl Notes {
         let line_start = text[..caret].rfind('\n').map_or(0, |i| i + 1);
         let line_end = text[caret..].find('\n').map_or(text.len(), |i| caret + i);
         let line = &text[line_start..line_end];
-        let head = &line[..fragment_end(line, caret - line_start, org_context, org::is_tag_char)];
-        let Some((trigger, start, prefix)) = org_context(head) else {
+        let Some((trigger, start, prefix)) = org_context(&line[..caret - line_start]) else {
             return Ok(Completions::default());
         };
+        let head = &line[..fragment_end(line, caret - line_start, org_context, org::is_tag_char)];
         let at = |byte: usize| Pos {
             line: pos.line,
             character: head[..byte].chars().count() as u32,

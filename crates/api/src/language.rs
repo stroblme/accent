@@ -167,8 +167,8 @@ pub struct Completions {
     pub items: Vec<Completion>,
     pub incomplete: bool,
     /// The text the rows complete, inside its delimiters (`De` of `[[De]]`, `ta` of `#ta`), past
-    /// the caret too: the popup stays while the caret is in it, and matches each row by all of it
-    /// from the row's start. `None` is from where the rows start to the caret.
+    /// the caret too: the popup stays while the caret is in it, and matches each row by the text
+    /// from the row's start to the caret. `None` is from where the rows start to the caret.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fragment: Option<Range>,
 }

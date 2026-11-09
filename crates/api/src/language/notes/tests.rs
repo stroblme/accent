@@ -133,13 +133,20 @@ fn a_fragment_runs_past_the_caret_to_its_end() {
     assert_eq!(org("[[file:a|b.org]]"), "[[file:ab.org");
 }
 
-/// Asked inside a fragment, the rows are what all of it completes and replace all of it, the
-/// `]]` after it too; the fragment the answer names is its text, past its `[[` or its `#`.
+/// Asked inside a fragment, the rows are what its text up to the caret completes and replace
+/// all of it, the `]]` after it too: `[[AB|.pdf]]` offers `ABCD.md` as well as `ABC.pdf`. The
+/// fragment the answer names is its text, past its `[[` or its `#`.
 #[test]
-fn a_completion_asked_inside_a_fragment_takes_all_of_it() {
+fn a_completion_asked_inside_a_fragment_matches_up_to_the_caret_and_takes_all_of_it() {
     let vault = tempfile::tempdir().unwrap();
     std::fs::write(vault.path().join("Deep.md"), "# Deep\n#deep-work\n").unwrap();
-    std::fs::write(vault.path().join("a.md"), "[[Deep]]\n#deep-wo\n").unwrap();
+    std::fs::write(vault.path().join("ABC.pdf"), "%PDF-1.4\n").unwrap();
+    std::fs::write(vault.path().join("ABCD.md"), "# ABCD\n").unwrap();
+    std::fs::write(
+        vault.path().join("a.md"),
+        "[[Deep]]\n#deep-wo\n[[AB.pdf]]\n",
+    )
+    .unwrap();
     let cache = tempfile::tempdir().unwrap();
     let db = cache.path().join("i.db");
     Index::open(&db)
@@ -173,6 +180,10 @@ fn a_completion_asked_inside_a_fragment_takes_all_of_it() {
     assert!(tag.items.iter().any(|i| i.insert == "#deep-work"));
     assert!(tag.items.iter().all(|i| line(i.replace) == (0, 8)));
     assert_eq!(tag.fragment.map(line), Some((1, 8)));
+    let pdf = ask(2, 4);
+    let inserts: Vec<&str> = pdf.items.iter().map(|i| i.insert.as_str()).collect();
+    assert!(inserts.contains(&"[[ABC.pdf]]") && inserts.contains(&"[[ABCD]]"));
+    assert!(pdf.items.iter().all(|i| line(i.replace) == (0, 10)));
 }
 
 #[test]
