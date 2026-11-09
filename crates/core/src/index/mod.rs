@@ -44,9 +44,28 @@ fn beside(db_path: &Path, suffix: &str) -> PathBuf {
 }
 
 /// The file beside an index that a first index holds locked while it writes without syncing
-/// (`Index::sync_writes`). Found unlocked, it is a first index a crash ended.
+/// (`Index::sync_writes`), holding the [`boot_id`] it was made in. Found unlocked, it is a first
+/// index a crash ended.
 fn unsynced_marker(db_path: &Path) -> PathBuf {
     beside(db_path, "-unsynced")
+}
+
+/// Lock the file beside an index that one process at a time holds while it decides whether the
+/// index stays ([`Index::open_or_rebuild`]) or makes its [`unsynced_marker`]: an opener could
+/// otherwise find a marker before its boot id is in it.
+fn lock_beside(db_path: &Path) -> Result<std::fs::File> {
+    let path = beside(db_path, "-lock");
+    let file = std::fs::File::create(&path).map_err(|e| Error::io(path.display(), e))?;
+    file.lock().map_err(|e| Error::io(path.display(), e))?;
+    Ok(file)
+}
+
+/// The kernel's id for this boot. Writes left unsynced are lost when the machine stops, never
+/// when a process does, so a first index a crash ended within this boot is whole. `None` where
+/// the kernel does not say, as on macOS.
+fn boot_id() -> Option<String> {
+    let id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+    Some(id.trim().to_string())
 }
 
 /// `$XDG_CACHE_HOME/accent/<blake3 of the canonical vault path>.db`.
@@ -253,17 +272,34 @@ impl Index {
         Self::from_conn(conn)
     }
 
-    /// [`open`](Self::open), unless the file is not a database SQLite can read — a power cut in
-    /// the middle of a first index, which does not sync its writes, or a disk's damage. Its files
-    /// are then deleted and a new index started in their place, the index being only what the
-    /// vault's files say, and the second value says what was wrong with it.
+    /// [`open`](Self::open), unless the file is not a database SQLite can read (a disk's damage)
+    /// or is a first index, which does not sync its writes, cut short by the machine stopping.
+    /// Its files are then deleted and a new index started in their place, the index being only
+    /// what the vault's files say, and the second value says what was wrong with it. Nothing on
+    /// this path reads the whole file: checking every page of a 2.2 GB index took 93 s.
     pub fn open_or_rebuild(db_path: &Path) -> Result<(Self, Option<String>)> {
-        // A first index a crash ended can have left any page damaged, so every one is checked
-        // then (about a second for 300 MB), and only then: a first index still running elsewhere
-        // holds the marker's lock.
+        if let Some(parent) = db_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent).map_err(|e| Error::io(parent.display(), e))?;
+        }
+        let _deciding = lock_beside(db_path)?;
+        // A first index still running elsewhere holds the marker's lock; this one keeps it while
+        // it decides.
         let marker = unsynced_marker(db_path);
-        let unfinished = std::fs::File::open(&marker).is_ok_and(|f| f.try_lock().is_ok());
-        let damage = damage(db_path, unfinished);
+        let unfinished = std::fs::File::open(&marker)
+            .ok()
+            .filter(|f| f.try_lock().is_ok());
+        let started = unfinished
+            .as_ref()
+            .map(|f| std::io::read_to_string(f).unwrap_or_default());
+        let damage = match started {
+            // A marker from this boot is a process's crash, which loses no write, so the index
+            // stays and the walk that follows carries on from it. From another boot, or where
+            // the kernel names none, any page of it may be damaged.
+            Some(started) if boot_id().is_none_or(|id| started.trim() != id) => {
+                Some("a first index was cut short by the machine stopping".into())
+            }
+            _ => damage(db_path),
+        };
         if let Some(why) = &damage {
             tracing::warn!("{}: {why}, building a new index", db_path.display());
             for suffix in ["", "-wal", "-shm"] {
@@ -276,7 +312,7 @@ impl Index {
                 }
             }
         }
-        if unfinished {
+        if unfinished.is_some() {
             let _ = std::fs::remove_file(&marker);
         }
         Ok((Self::open(db_path)?, damage))
@@ -414,32 +450,18 @@ impl Index {
 }
 
 /// What makes the index at `db_path` one SQLite cannot read, if anything: its header and schema,
-/// which is where garbage shows, and with `every_page` the rest of it too. `None` as well for a
-/// file that cannot be opened at all, which [`Index::open`] reports as itself.
-fn damage(db_path: &Path, every_page: bool) -> Option<String> {
+/// which is where garbage shows. `None` as well for a file that cannot be opened at all, which
+/// [`Index::open`] reports as itself.
+fn damage(db_path: &Path) -> Option<String> {
     let conn = Connection::open(db_path).ok()?;
-    let damaged = |e: rusqlite::Error| {
-        matches!(
-            e.sqlite_error_code(),
-            Some(rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
-        )
-        .then(|| e.to_string())
-    };
-    if let Err(e) = conn.query_row("SELECT count(*) FROM sqlite_schema", [], |_| Ok(())) {
-        return damaged(e);
-    }
-    if !every_page {
-        return None;
-    }
-    match conn.query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0)) {
-        Ok(ok) if ok == "ok" => None,
-        // The check's own words, page by page, are for the log.
-        Ok(why) => {
-            tracing::warn!("{}: {why}", db_path.display());
-            Some("a first index a crash ended left it damaged".into())
-        }
-        Err(e) => damaged(e),
-    }
+    let e = conn
+        .query_row("SELECT count(*) FROM sqlite_schema", [], |_| Ok(()))
+        .err()?;
+    matches!(
+        e.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
+    )
+    .then(|| e.to_string())
 }
 
 fn schema_version(conn: &Connection) -> Result<i64> {
@@ -587,32 +609,29 @@ mod tests {
         );
     }
 
-    /// A first index a crash ended wrote without syncing, so any page of it can be damaged, not
-    /// only the header and schema every open reads: the marker it leaves has every page checked.
+    /// A first index writes without syncing, which only the machine stopping can cost: one a
+    /// crash ended within this boot is kept as it is, one from another boot is deleted unread.
     #[test]
-    fn a_first_index_a_crash_ended_is_checked_whole() {
+    fn a_first_index_a_crash_ended_is_kept_within_its_boot() {
         let (vault, db) = fixture();
-        for i in 0..50 {
-            fs::write(vault.path().join(format!("n{i}.md")), "word ".repeat(400)).unwrap();
-        }
         let path = db.path().join("i.db");
-        Index::open(&path)
-            .unwrap()
-            .reconcile(vault.path(), |_| {})
-            .unwrap();
-        let mut bytes = fs::read(&path).unwrap();
-        let end = bytes.len();
-        bytes[end - 4096..].fill(0x5a);
-        fs::write(&path, bytes).unwrap();
-        assert_eq!(damage(&path, false), None, "a page past the schema's");
+        let mut ix = Index::open(&path).unwrap();
+        ix.reconcile(vault.path(), |_| {}).unwrap();
+        let files = ix.stats().unwrap().files;
+        drop(ix);
+        // Where the kernel names no boot, as on macOS, every such index is deleted.
+        let kept = boot_id().map_or(0, |_| files);
 
-        fs::write(unsynced_marker(&path), "").unwrap();
-        let (mut ix, why) = Index::open_or_rebuild(&path).unwrap();
+        fs::write(unsynced_marker(&path), boot_id().unwrap_or_default()).unwrap();
+        let (ix, _) = Index::open_or_rebuild(&path).unwrap();
+        assert_eq!(ix.stats().unwrap().files, kept);
+        assert!(!unsynced_marker(&path).exists());
+
+        fs::write(unsynced_marker(&path), "another boot").unwrap();
+        let (ix, why) = Index::open_or_rebuild(&path).unwrap();
         assert!(why.is_some());
         assert_eq!(ix.stats().unwrap().files, 0, "a new index");
         assert!(!unsynced_marker(&path).exists());
-        ix.reconcile(vault.path(), |_| {}).unwrap();
-        assert!(ix.stats().unwrap().notes > 50);
     }
 
     /// Two builds can share one index, the app and an `accent-cli mcp` from another build, so an

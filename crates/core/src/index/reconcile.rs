@@ -10,6 +10,7 @@ use crate::{Error, Result};
 use crate::{markdown, path};
 use rusqlite::{OptionalExtension, params};
 use std::collections::{HashMap, HashSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -331,9 +332,10 @@ impl Index {
     }
 
     /// Set whether commits wait for disk sync. Initial indexing skips syncs for speed. It holds
-    /// [`unsynced_marker`](super::unsynced_marker) locked and persists its name before unsynced
-    /// writes. After a crash, [`Index::open_or_rebuild`] checks an unlocked marker and rebuilds
-    /// a damaged index. Re-enabling sync persists the index before removing the marker.
+    /// [`unsynced_marker`](super::unsynced_marker) locked and persists it, with the boot it was
+    /// made in, before unsynced writes. After a crash, [`Index::open_or_rebuild`] keeps an index
+    /// whose unlocked marker names this boot and deletes one from another. Re-enabling sync
+    /// persists the index before removing the marker.
     fn sync_writes(&mut self, sync: bool) -> Result<()> {
         let db = PathBuf::from(self.conn.path().unwrap_or_default());
         let marker = super::unsynced_marker(&db);
@@ -349,8 +351,15 @@ impl Index {
                 std::fs::remove_file(&marker).map_err(|e| io(&marker, e))?;
             }
         } else {
-            let file = std::fs::File::create(&marker).map_err(|e| io(&marker, e))?;
+            let _deciding = super::lock_beside(&db)?;
+            let mut file = std::fs::File::create(&marker).map_err(|e| io(&marker, e))?;
             file.lock().map_err(|e| io(&marker, e))?;
+            // The boot it is made in, on the disk before a write it covers: a crash within this
+            // boot leaves the index whole (`Index::open_or_rebuild`).
+            let id = super::boot_id().unwrap_or_default();
+            file.write_all(id.as_bytes())
+                .and_then(|()| file.sync_all())
+                .map_err(|e| io(&marker, e))?;
             // The marker's name in its folder is on the disk too, or it may not be found.
             if let Some(dir) = marker.parent() {
                 std::fs::File::open(dir)
