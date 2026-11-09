@@ -376,14 +376,7 @@ impl App {
         let (app, watched) = (Rc::downgrade(self), Rc::downgrade(tab));
         glib::spawn_future_local(async move {
             let looked = crate::work::off_thread("stat", move || {
-                let disk = match &vault {
-                    Some(vault) => vault.stat(&rel)?,
-                    None => match Etag::of(&path) {
-                        Ok(etag) => Some(etag),
-                        Err(Core::NotFound(_)) => None,
-                        Err(e) => return Err(e.into()),
-                    },
-                };
+                let disk = stat(vault.as_deref(), &rel, &path)?;
                 Ok(match disk {
                     Some(_) if disk != ours => {
                         let same = unchanged(vault.as_deref(), &rel, &path, base);
@@ -477,33 +470,58 @@ impl App {
     }
 
     fn ask_overwrite(self: &Rc<Self>, tab: &Rc<Tab>) {
-        // Compare rather than Reload: reloading threw the buffer away on one click, and the
-        // resolver shows both sides and now lets them be merged by hand.
-        let dialog = dialogs::alert(
-            "File Changed Outside Accent",
-            &format!("{} changed outside Accent.", tab.rel()),
-            &[
-                ("cancel", "Cancel", adw::ResponseAppearance::Default),
-                ("compare", "Compare", adw::ResponseAppearance::Default),
-                (
-                    "overwrite",
-                    "Overwrite",
-                    adw::ResponseAppearance::Destructive,
-                ),
-            ],
-            "cancel",
-        );
+        self.ask_at_disk(tab, |app, tab, disk| {
+            // Compare rather than Reload: reloading threw the buffer away on one click, and the
+            // resolver shows both sides and now lets them be merged by hand.
+            let dialog = dialogs::alert(
+                "File Changed Outside Accent",
+                &format!("{} changed outside Accent.", tab.rel()),
+                &[
+                    ("cancel", "Cancel", adw::ResponseAppearance::Default),
+                    ("compare", "Compare", adw::ResponseAppearance::Default),
+                    (
+                        "overwrite",
+                        "Overwrite",
+                        adw::ResponseAppearance::Destructive,
+                    ),
+                ],
+                "cancel",
+            );
 
-        let (app, tab) = (self.clone(), tab.clone());
-        dialogs::choose(
-            &dialog,
-            Some(&self.window),
-            move |response| match response.as_str() {
-                "compare" => app.compare_with_disk(&tab),
-                "overwrite" => app.write_answer(&tab, None, "Overwritten"),
-                _ => {}
-            },
-        );
+            let (window, app, tab) = (app.window.clone(), app.clone(), tab.clone());
+            dialogs::choose(&dialog, Some(&window), move |response| {
+                match response.as_str() {
+                    "compare" => app.compare_with_disk(&tab),
+                    "overwrite" => app.write_answer(&tab, disk, "Overwritten"),
+                    _ => {}
+                }
+            });
+        });
+    }
+
+    /// Call `ask` with the etag `tab`'s file has as a question about it comes up, read on a
+    /// worker: the version the question shows, which its Overwrite is gated on, so a write to
+    /// the file while the question waits or the answer is written is refused rather than lost.
+    pub(crate) fn ask_at_disk<T: Saves>(
+        self: &Rc<Self>,
+        tab: &Rc<T>,
+        ask: impl FnOnce(&Rc<Self>, &Rc<T>, Option<Etag>) + 'static,
+    ) {
+        let (rel, path) = (tab.key(), tab.path());
+        let vault = self.vault().filter(|_| !doc::is_loose_key(&rel)).cloned();
+        let (app, asked) = (Rc::downgrade(self), Rc::downgrade(tab));
+        glib::spawn_future_local(async move {
+            let what = format!("read {rel} from disk");
+            let disk = crate::work::attempt(&what, move || stat(vault.as_deref(), &rel, &path));
+            let disk = disk.await;
+            let (Some(app), Some(tab)) = (app.upgrade(), asked.upgrade()) else {
+                return;
+            };
+            match disk {
+                Ok(disk) => ask(&app, &tab, disk),
+                Err(why) => app.toast(&why),
+            }
+        });
     }
 
     /// Ask whether an unsavable closing tab may leave, then call `after` with the decision.
@@ -519,26 +537,28 @@ impl App {
             &tab.rel(),
             error,
             move || discarded.discard(),
-            move |app| app.write_tab(&written, None),
+            move |app, disk| app.write_tab(&written, disk),
             after,
         );
     }
 
     /// The question itself, whatever kind of document holds the edits: `discard` throws them
-    /// away, `overwrite` writes them over whatever is on disk.
+    /// away, `overwrite` writes them over the version on disk the refusal named, and over
+    /// whatever is there after any other failure.
     fn ask_unsaved_about(
         self: &Rc<Self>,
         rel: &str,
         error: &Error,
         discard: impl FnOnce() + 'static,
-        overwrite: impl FnOnce(&Rc<Self>) -> Result<(), Error> + 'static,
+        overwrite: impl FnOnce(&Rc<Self>, Option<Etag>) -> Result<(), Error> + 'static,
         after: impl Fn(&Rc<Self>, bool) + 'static,
     ) {
-        let body = match error {
-            Error::Core(Core::ChangedOnDisk { .. }) => {
-                format!("{rel} changed outside Accent. Your changes have not been saved.")
-            }
-            e => format!("{rel} could not be saved: {e}"),
+        let (body, disk) = match error {
+            Error::Core(Core::ChangedOnDisk { current }) => (
+                format!("{rel} changed outside Accent. Your changes have not been saved."),
+                Some(*current),
+            ),
+            e => (format!("{rel} could not be saved: {e}"), None),
         };
         // Overwriting means writing again, which is the very thing that just failed for want of a
         // connection: offering it would be offering nothing.
@@ -558,7 +578,7 @@ impl App {
                     discard();
                     true
                 }
-                "overwrite" => match overwrite(&app) {
+                "overwrite" => match overwrite(&app, disk) {
                     Ok(()) => true,
                     Err(e) => {
                         app.cannot("save", e);
@@ -1171,6 +1191,18 @@ fn copy_pdf(
             .upload(local, to, !free)
             .and_then(|()| vault.fetch(to))
             .map(drop),
+    }
+}
+
+/// The etag of the file at `rel` (at `path` outside a vault), `None` if it is not there.
+fn stat(vault: Option<&Vault>, rel: &str, path: &Path) -> accent_api::Result<Option<Etag>> {
+    match vault {
+        Some(vault) => vault.stat(rel),
+        None => match Etag::of(path) {
+            Ok(etag) => Ok(Some(etag)),
+            Err(Core::NotFound(_)) => Ok(None),
+            Err(e) => Err(e.into()),
+        },
     }
 }
 

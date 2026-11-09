@@ -1,6 +1,7 @@
 bench answer doc notebook racing modified=true banner=true mine=true theirs=none
 bench answer doc notebook overlap modified=false banner=false mine=false theirs=theirs B
 bench answer doc notebook overwrite modified=false banner=false mine=true theirs=none file_mine=true file_during=true toast="Overwritten"
+bench answer doc notebook again modified=true banner=true mine=true theirs=none asked="Notebook Changed on Disk" file_mine=false file_during=false toast=""
 bench answer doc notebook failed modified=true banner=true mine=true theirs=none file_mine=false file_during=false toast="Cannot save"
 bench answer doc notebook during modified=false banner=false mine=true theirs=none file_mine=true file_during=true toast="Saved"
 bench answer doc notebook flush modified=false banner=false mine=true theirs=none flushed=true file_mine=true file_during=true toast=""
@@ -11,6 +12,7 @@ bench answer doc notebook quit modified=false banner=false mine=true theirs=none
 bench answer doc diagram racing modified=true banner=true mine=true theirs=none
 bench answer doc diagram overlap modified=false banner=false mine=false theirs=theirs B
 bench answer doc diagram overwrite modified=false banner=false mine=true theirs=none file_mine=true file_during=true toast="Overwritten"
+bench answer doc diagram again modified=true banner=true mine=true theirs=none asked="Diagram Changed on Disk" file_mine=false file_during=false toast=""
 bench answer doc diagram failed modified=true banner=true mine=true theirs=none file_mine=false file_during=false toast="Cannot save"
 bench answer doc diagram during modified=false banner=false mine=true theirs=none file_mine=true file_during=true toast="Saved"
 bench answer doc diagram flush modified=false banner=false mine=true theirs=none flushed=true file_mine=true file_during=true toast=""

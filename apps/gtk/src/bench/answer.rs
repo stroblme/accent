@@ -34,7 +34,8 @@ pub(crate) fn hold(slow: &AtomicU64) {
 /// remote) and type into the tab, then answer on a slow host (`SLOW_WRITE_MS`) and type
 /// again while the answer is written. Report main-loop blocking, time to become clean,
 /// final line, which is what was typed during the write once the save after it lands,
-/// and remaining banner. Writes files; use a scratch vault.
+/// and remaining banner. `again` changes the file a second time while Overwrite is asked,
+/// which keeps that change and the banner. Writes files; use a scratch vault.
 pub(super) fn bench_answer(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
@@ -67,7 +68,7 @@ pub(super) fn bench_answer(app: &Rc<App>, rel: &str) {
             println!("bench answer write_failed {e}");
             return bench_quit(&app);
         }
-        for case in ["overwrite", "keep_mine", "restore"] {
+        for case in ["overwrite", "keep_mine", "restore", "again"] {
             let script = match case {
                 "restore" => "rm -f {}".to_string(),
                 _ => format!("printf '{case} theirs\\n' > {{}}"),
@@ -109,16 +110,22 @@ pub(super) fn bench_answer(app: &Rc<App>, rel: &str) {
             }
             SLOW_WRITE_MS.store(1500, Ordering::Relaxed);
             let held = match case {
-                "overwrite" => {
+                "overwrite" | "again" => {
                     app.save_tab(&tab, true);
-                    let Some(dialog) = app
-                        .window
-                        .visible_dialog()
-                        .and_downcast::<adw::AlertDialog>()
-                    else {
-                        println!("bench answer overwrite no_dialog");
+                    let Some(dialog) = asked(&app, None).await else {
+                        println!("bench answer {case} no_dialog");
                         return bench_quit(&app);
                     };
+                    // A second change on disk while the question waits, which the answer was
+                    // not about: the write is refused and the file keeps it.
+                    if case == "again" {
+                        let script = "printf 'again theirs later\\n' > {}";
+                        crate::work::off_thread("bench", {
+                            let (vault, rel) = (vault.clone(), rel.clone());
+                            move || behind(&vault, &rel, script)
+                        })
+                        .await;
+                    }
                     let t = Instant::now();
                     dialog.emit_by_name::<()>("response", &[&"overwrite"]);
                     let held = ms_since(t);
@@ -276,7 +283,8 @@ pub(super) fn bench_answer_same(app: &Rc<App>, rel: &str) {
 /// the banner asks. `overlap`: of two reloads out at once, the newer one's read is what the tab
 /// holds, though the older is answered last. `overwrite`: the conflict dialog's Overwrite holds
 /// the main loop for no write (`held_ms`), and an edit made during it is written after it.
-/// `failed`: a refused write (`REFUSED_WRITE`) says so, the edits and the banner kept. `during`:
+/// `again`: a second change on disk while Overwrite is asked refuses the answer's write, which
+/// asks again. `failed`: a refused write (`REFUSED_WRITE`) says so, the edits and the banner kept. `during`:
 /// an edit made while a Ctrl+S is written is saved after it. `flush`: a flush, as a close does,
 /// waits for that write and then writes the edit. `conflict`: a Ctrl+S over a change on disk the
 /// watcher has not reported yet is refused by the etag gate and asks, and Reload takes the disk's
@@ -356,6 +364,7 @@ async fn doc_drill<T: Probe>(app: &Rc<App>, rel: &str) {
         "racing",
         "overlap",
         "overwrite",
+        "again",
         "failed",
         "during",
         "flush",
@@ -422,17 +431,7 @@ async fn doc_drill<T: Probe>(app: &Rc<App>, rel: &str) {
                 // Before the watcher can say so: the write meets the change at the etag gate.
                 write("theirs");
                 app.save_model(&tab, true);
-                let mut dialog = None;
-                for _ in 0..100 {
-                    dialog = app
-                        .window
-                        .visible_dialog()
-                        .and_downcast::<adw::AlertDialog>();
-                    if dialog.is_some() {
-                        break;
-                    }
-                    glib::timeout_future(Duration::from_millis(50)).await;
-                }
+                let dialog = asked(app, None).await;
                 said = format!(
                     " dialog={:?}",
                     dialog
@@ -495,24 +494,36 @@ async fn doc_drill<T: Probe>(app: &Rc<App>, rel: &str) {
                 }
                 match case {
                     "overwrite" => SLOW_WRITE_MS.store(1500, Ordering::Relaxed),
-                    _ => refused(true),
+                    "failed" => refused(true),
+                    _ => {}
                 }
                 app.resolve_model(&tab);
-                let Some(dialog) = app
-                    .window
-                    .visible_dialog()
-                    .and_downcast::<adw::AlertDialog>()
-                else {
+                let Some(dialog) = asked(app, None).await else {
                     println!("bench answer doc {kind} {case} no_dialog");
                     refused(false);
                     return;
                 };
+                if case == "again" {
+                    write("theirs again");
+                }
                 let t = Instant::now();
                 dialog.emit_by_name::<()>("response", &[&"overwrite"]);
                 said = format!(" held_ms={:.0}", ms_since(t));
                 dialog.close();
                 if case == "overwrite" {
                     tab.edit("during");
+                }
+                // Refused, the write asks again, now about the version it met.
+                if case == "again" {
+                    let again = asked(app, Some(&dialog)).await;
+                    said += &format!(
+                        " asked={:?}",
+                        again.as_ref().and_then(|d| d.heading()).unwrap_or_default()
+                    );
+                    if let Some(again) = again {
+                        again.emit_by_name::<()>("response", &[&"cancel"]);
+                        again.close();
+                    }
                 }
                 let t = Instant::now();
                 // The first toast standing while it lands, which outlasts no wait.
@@ -524,7 +535,7 @@ async fn doc_drill<T: Probe>(app: &Rc<App>, rel: &str) {
                     if toast.is_empty() {
                         toast = app.toasts.shown().into_iter().next().unwrap_or_default();
                     }
-                    if case == "failed" && tab.save_state().flight.borrow().is_none() {
+                    if case != "overwrite" && tab.save_state().flight.borrow().is_none() {
                         break;
                     }
                 }
@@ -560,6 +571,18 @@ async fn doc_drill<T: Probe>(app: &Rc<App>, rel: &str) {
     }
     SLOW_RELOAD_MS.store(0, Ordering::Relaxed);
     SLOW_WRITE_MS.store(0, Ordering::Relaxed);
+}
+
+/// The alert dialog standing within 5 s, other than `but`: a conflict question comes up once a
+/// worker has read the file's etag (`App::ask_at_disk`).
+async fn asked(app: &App, but: Option<&adw::AlertDialog>) -> Option<adw::AlertDialog> {
+    until("answer", "dialog", 5000, || {
+        app.window
+            .visible_dialog()
+            .and_downcast::<adw::AlertDialog>()
+            .filter(|dialog| Some(dialog) != but)
+    })
+    .await
 }
 
 /// The heading of the dialog standing, answered Cancel.

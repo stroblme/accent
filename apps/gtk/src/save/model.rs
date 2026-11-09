@@ -189,43 +189,46 @@ impl App {
     /// comparison of two diagrams or two notebooks to offer, as there is of two notes, so Reload
     /// throws the edits away and Overwrite the disk's version.
     pub(crate) fn resolve_model<T: SavesModel>(self: &Rc<Self>, tab: &Rc<T>) {
-        let dialog = dialogs::alert(
-            &format!("{} Changed on Disk", T::KIND),
-            &format!(
-                "{} changed outside Accent. Reload to discard your edits, or overwrite the saved version.",
-                doc::file_name(&tab.key())
-            ),
-            &[
-                ("cancel", "Cancel", adw::ResponseAppearance::Default),
-                ("reload", "Reload", adw::ResponseAppearance::Destructive),
-                (
-                    "overwrite",
-                    "Overwrite",
-                    adw::ResponseAppearance::Destructive,
+        self.ask_at_disk(tab, |app, tab, disk| {
+            let dialog = dialogs::alert(
+                &format!("{} Changed on Disk", T::KIND),
+                &format!(
+                    "{} changed outside Accent. Reload to discard your edits, or overwrite the saved version.",
+                    doc::file_name(&tab.key())
                 ),
-            ],
-            "cancel",
-        );
-        let (app, tab) = (self.clone(), tab.clone());
-        dialogs::choose(
-            &dialog,
-            Some(&self.window),
-            move |response| match response.as_str() {
-                "reload" => app.reload_model(&tab),
-                "overwrite" => app.overwrite_model(&tab),
-                _ => {}
-            },
-        );
+                &[
+                    ("cancel", "Cancel", adw::ResponseAppearance::Default),
+                    ("reload", "Reload", adw::ResponseAppearance::Destructive),
+                    (
+                        "overwrite",
+                        "Overwrite",
+                        adw::ResponseAppearance::Destructive,
+                    ),
+                ],
+                "cancel",
+            );
+            let (window, app, tab) = (app.window.clone(), app.clone(), tab.clone());
+            dialogs::choose(
+                &dialog,
+                Some(&window),
+                move |response| match response.as_str() {
+                    "reload" => app.reload_model(&tab),
+                    "overwrite" => app.overwrite_model(&tab, disk),
+                    _ => {}
+                },
+            );
+        });
     }
 
-    /// Overwrite: the edits written over the disk's version on a worker, as a save is.
-    fn overwrite_model<T: SavesModel>(self: &Rc<Self>, tab: &Rc<T>) {
+    /// Overwrite: the edits written over `disk`, the version the question showed, on a worker,
+    /// as a save is.
+    fn overwrite_model<T: SavesModel>(self: &Rc<Self>, tab: &Rc<T>, disk: Option<Etag>) {
         self.land_model(tab, false);
         let contents = tab.contents();
         self.start_write(
             tab,
             true,
-            None,
+            disk,
             Self::save_model,
             |app, tab, report| app.land_model_saying(tab, report, "Overwritten"),
             contents,
@@ -247,7 +250,7 @@ impl App {
             &tab.key(),
             error,
             move || discarded.discard(),
-            move |app| app.write_model(&written, None),
+            move |app, disk| app.write_model(&written, disk),
             after,
         );
     }

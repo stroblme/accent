@@ -64,6 +64,8 @@ data class Open(
     val etag: Etag? = null,
     /** Somebody else wrote the file while it was open and dirty: autosave has stopped. */
     val changedOnDisk: Boolean = false,
+    /** The version on disk [changedOnDisk] is about, which Keep mine writes over ([gate]). */
+    val theirs: Etag? = null,
     /** Conflict copies Syncthing left beside it. */
     val conflicts: List<String> = emptyList(),
     /** Search query to highlight once when the opened note appears ([found]). */
@@ -88,6 +90,12 @@ data class Open(
 
     /** Whether leaving would lose [typed] edits while saving is paused. */
     fun wouldLose(typed: CharSequence): Boolean = changedOnDisk && dirty(typed)
+
+    /**
+     * The etag a write is gated on: the one read or written last, or for Keep mine ([force]) the
+     * version the banner showed, so a change made since is refused rather than written over.
+     */
+    fun gate(force: Boolean): Etag? = if (force) theirs ?: etag else etag
 }
 
 /** Open PDF path, starting position, find state, and pending print request. */
@@ -288,8 +296,8 @@ fun reread(asked: Open, now: Open?, read: Note, typed: CharSequence): Open? {
         now.etag != null && now.text == read.text -> now.copy(etag = read.etag)
         // Nothing was typed here, so taking the new text loses nothing.
         now.text != read.text && !now.dirty(typed) ->
-            now.copy(text = read.text, etag = read.etag, changedOnDisk = false)
-        else -> now.copy(changedOnDisk = true)
+            now.copy(text = read.text, etag = read.etag, changedOnDisk = false, theirs = null)
+        else -> now.copy(changedOnDisk = true, theirs = read.etag)
     }
 }
 
@@ -901,7 +909,10 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         data class Failed(val why: String) : Saved
     }
 
-    /** Save the buffer, serializing writes; preserve it and show a banner on content conflicts. */
+    /**
+     * Save the buffer, serializing writes; preserve it and show a banner on content conflicts.
+     * [force] is Keep mine, written over the version the banner showed ([Open.gate]).
+     */
     private suspend fun write(text: String, force: Boolean = false): Saved = writing.withLock {
         val v = vault ?: return@withLock Saved.Written
         val open = _state.value.note ?: return@withLock Saved.Written
@@ -910,7 +921,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         withContext(NonCancellable) {
             val written = withContext(Dispatchers.IO) {
                 runCatching {
-                    saveOver(if (force) null else open.etag, open.text, { v.read(open.rel) }) {
+                    saveOver(open.gate(force), open.text, { v.read(open.rel) }) {
                         v.save(open.rel, text, it)
                     }
                 }
@@ -921,7 +932,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
                     // choose between.
                     if (vault === v) _state.update { s ->
                         s.withNote(open.rel) {
-                            it.copy(text = text, etag = etag, changedOnDisk = false)
+                            it.copy(text = text, etag = etag, changedOnDisk = false, theirs = null)
                         }
                     }
                     Saved.Written
@@ -930,7 +941,9 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
                     when (e) {
                         is AccentException.ChangedOnDisk -> {
                             if (vault === v) _state.update { s ->
-                                s.withNote(open.rel) { it.copy(changedOnDisk = true) }
+                                s.withNote(open.rel) {
+                                    it.copy(changedOnDisk = true, theirs = e.current)
+                                }
                             }
                             Saved.Paused
                         }
@@ -981,8 +994,14 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Keep mine: write the buffer over the version on disk. */
-    fun overwrite() = viewModelScope.launch { tell(write(buffer.text.toString(), force = true)) }
+    /** Keep mine: write the buffer over the version on disk the banner showed. */
+    fun overwrite() = viewModelScope.launch {
+        when (val saved = write(buffer.text.toString(), force = true)) {
+            // Changed again since: the banner stays, now about that version.
+            Saved.Paused -> said("This note changed outside Accent again")
+            else -> tell(saved)
+        }
+    }
 
     /** Say why a write failed, where nothing is waiting on it to ask instead. */
     private fun tell(saved: Saved) {

@@ -7,7 +7,10 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
 import org.junit.Test
 
-/** [saveOver] treats a changed etag with identical text as no conflict. */
+/**
+ * [saveOver] treats a changed etag with identical text as no conflict, and Keep mine writes over
+ * the version the banner showed ([Open.gate]) and nothing newer.
+ */
 class SaveTest {
     private val read = Etag(1, 7uL, 1uL)
     private val touched = Etag(2, 7uL, 1uL)
@@ -20,6 +23,8 @@ class SaveTest {
             etag = etag.copy(mtimeNs = etag.mtimeNs + 1)
             return etag
         }
+
+        fun note() = Note(text, etag)
     }
 
     @Test
@@ -36,5 +41,22 @@ class SaveTest {
             saveOver(read, "on disk", { Note(disk.text, disk.etag) }) { disk.save("typed", it) }
         }
         assertEquals("theirs", disk.text)
+    }
+
+    @Test
+    fun `keep mine writes over the version the banner showed and nothing newer`() {
+        val asked = Open("a.md", "on disk", read)
+        val disk = Disk("theirs", Etag(2, 6uL, 1uL))
+        val banner = reread(asked, asked, disk.note(), "on disk and typed")!!
+        // Written again before the answer lands: the answer was not about this version.
+        disk.save("theirs again", disk.etag)
+        assertThrows(AccentException.ChangedOnDisk::class.java) {
+            saveOver(banner.gate(force = true), banner.text, disk::note) { disk.save("typed", it) }
+        }
+        assertEquals("theirs again", disk.text)
+
+        val asking = banner.copy(theirs = disk.etag)
+        saveOver(asking.gate(force = true), asking.text, disk::note) { disk.save("typed", it) }
+        assertEquals("typed", disk.text)
     }
 }
