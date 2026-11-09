@@ -188,6 +188,8 @@ impl Tab {
     /// Show `other` (title, text) beside the editor at `side`. Preserve editor
     /// text so user edits form the merge. `hunk_buttons` adds Take/Keep Both
     /// to the peer; `below` holds host controls and `label` names the comparison.
+    /// One with a question below is left unanswered by Stop Comparing, and one without, the
+    /// working tree's, is finished by Done.
     pub fn compare(
         self: &Rc<Self>,
         mine: &str,
@@ -197,7 +199,8 @@ impl Tab {
         below: Option<gtk::Widget>,
         label: &str,
     ) -> Rc<diff::Compare> {
-        let hosted = self.host(mine, "Stop Comparing", below, label, |tab, editor| {
+        let stop = below.is_some().then_some("Stop Comparing");
+        let hosted = self.host(mine, stop, below, label, |tab, editor| {
             // A comparison is a merge of its own, with its own tints and buttons over these lines.
             tab.conflicts.set_enabled(false);
             let companion = diff::pane(
@@ -239,7 +242,7 @@ impl Tab {
             title("Incoming", labels.as_ref().map(|l| &l.1)),
         ];
         let name = crate::doc::file_name(&self.rel()).to_string();
-        let hosted = self.host(&name, "Stop Merging", None, "Merge", |tab, editor| {
+        let hosted = self.host(&name, Some("Stop Merging"), None, "Merge", |tab, editor| {
             // The blocks keep their tints; their buttons go beside them, in every column.
             tab.conflicts.set_band(false);
             let side = |stage: usize| {
@@ -274,12 +277,13 @@ impl Tab {
         }
     }
 
-    /// Wrap the editor with `make`, a `mine` title and leave button (`stop`
-    /// tooltip). Place `below` under columns and `label` in the tab title.
+    /// Wrap the editor with `make`, a `mine` title and leave button: a close button tooltipped
+    /// `stop`, or Done where there is none. Place `below` under columns and `label` in the tab
+    /// title.
     fn host(
         self: &Rc<Self>,
         mine: &str,
-        stop: &str,
+        stop: Option<&str>,
         below: Option<gtk::Widget>,
         label: &str,
         make: impl FnOnce(&Rc<Self>, diff::Pane) -> Hosted,
@@ -292,14 +296,32 @@ impl Tab {
         self.numbers.set_visible(true);
         let minimap = self.map.is_visible();
         self.show_minimap(false);
-        let close = gtk::Button::from_icon_name("window-close-symbolic");
-        close.add_css_class("flat");
+        // Done saves at once what the autosave would a second later, so the edits read as
+        // confirmed (user decision 2026-11-09).
+        let close = match stop {
+            Some(stop) => {
+                let close = gtk::Button::from_icon_name("window-close-symbolic");
+                close.add_css_class("flat");
+                close.set_tooltip_text(Some(stop));
+                close
+            }
+            None => gtk::Button::builder()
+                .label("Done")
+                .tooltip_text("Save and stop comparing")
+                .css_classes(["suggested-action"])
+                .build(),
+        };
         close.add_css_class("chrome-fade");
-        close.set_tooltip_text(Some(stop));
+        let done = stop.is_none();
         close.connect_clicked(glib::clone!(
             #[weak(rename_to = tab)]
             self,
-            move |_| tab.leave_compare()
+            move |_| {
+                if done {
+                    tab.autosave_now();
+                }
+                tab.leave_compare();
+            }
         ));
         let holder = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let header = diff::header(mine, Some(close.upcast_ref()));

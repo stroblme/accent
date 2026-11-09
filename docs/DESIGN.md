@@ -1466,7 +1466,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Opening a run keeps the view where it was: the rows above stay, and the run opens downwards from its button's row, the one at the top of a file too.
 - A run opened — from its button, by Go to Line or by a jump into it — stays open through the edits made in and around it: a line changed inside it leaves both halves shown, and the run is whole again once the line is changed back.
 - Lines staged, unstaged or reverted, a hunk taken and a side read again leave every line shown or hidden as it was: the lines worked on stay where they are read, unchanged now, and the runs either side stay shut rather than join over them, to open whole around the caret or shut over what was just staged.
-- Show All Unchanged Lines, a toggle with GitHub's unfold arrows in the title row beside Stop Comparing (at the end of the right column's in a tab of two texts), opens every run while it is down, those an edit makes too; letting it go hides them all again, those opened one by one included, but for the run holding the caret.
+- Show All Unchanged Lines, a toggle with GitHub's unfold arrows in the title row beside Stop Comparing or Done (at the end of the right column's in a tab of two texts), opens every run while it is down, those an edit makes too; letting it go hides them all again, those opened one by one included, but for the run holding the caret.
   The caret's line stays where it is on screen, or, with the caret off it, the first change on screen, the runs above it opening upwards and shutting towards it, so the diff being read stays in view; with no change on screen, the line at the top of the view, and where letting go hides it, the nearest line still shown.
   It is the comparison's own, never saved: each comparison opens with it up, and it is insensitive while there is no run to hide.
 - A new width — a divider dragged, the sidebar toggled, the window resized — keeps the line at the top of the view there: every line wraps again, and left to GTK each column keeps its own top line on the one scroll they share.
@@ -1505,6 +1505,10 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Stage is Stage Selected Lines over exactly that hunk, and Revert puts the index's lines back in its place in the editor, the same one edit as Revert Selected Lines.
   Their tooltips say what they do, and are their accessible descriptions.
   Stage Hunk, Revert Hunk, Take Hunk and Keep Both Versions from the palette act on the hunk holding the caret, or the deletion just above its line.
+- The working-tree comparison ends with Done, a text button in the accent colour where another comparison has Stop Comparing, at the end of the Working Tree's title row (user decision 2026-11-09).
+  An edit there is saved a second after the last key as any edit is, and Done saves it at once and stops comparing, staging nothing, so the edits read as confirmed where a bare close button read as dropping them.
+  A comparison that asks something under its columns, Keep Theirs or Keep Mine, keeps Stop Comparing, which leaves the question unanswered.
+  Done fades with the other title-row buttons while the reader types and comes back with the chrome (Chrome auto-hide), and it has no palette entry, as Stop Comparing has none, Escape stopping either comparison.
 - Every comparison follows the document zoom, page margins included.
   A read-only side beside the editor takes the editor's page whatever moves it: its heading markers hang in the same margin, and a tab is as wide as the Indent Width makes it there.
 - The sticky block title stays off while a comparison is up: the other side has none, and one over the editor's first row alone puts the two first rows out of level.
