@@ -617,6 +617,8 @@ impl App {
     /// Forget a page that is really closing. Called on every path that closes one, because
     /// `close_page_finish` does not come back through the `close-page` handler.
     pub fn forget_page(self: &Rc<Self>, page: &adw::TabPage) {
+        // A large file opened by mistake on a slow link leaves the link with its tab.
+        self.stop_fetches_for(page);
         // A drawn-on document leaving: the write lands after the tab has gone from the window,
         // and on a remote vault still goes up.
         if let Some(Doc::Pdf(pdf)) = self.doc_for_page(page) {

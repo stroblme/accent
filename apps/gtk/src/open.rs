@@ -3,6 +3,7 @@
 
 use super::*;
 use accent_api::Error;
+use accent_api::link::Stop;
 use accent_core::Error as Core;
 use accent_core::note::Syntax;
 
@@ -29,6 +30,50 @@ pub enum Opened {
     /// Kept, and given the keyboard once in front: picked in the palette, which gives the keyboard
     /// back to where it was opened from (the Files tree, say) before the tab lands.
     Picked,
+}
+
+/// One file's bytes on their way from a host ([`App::local_copy`]), however many copies of them
+/// were asked for: one transfer, which the tabs waiting on it share and the last of them to close
+/// stops. A copy asked for meanwhile waits for that transfer rather than starting another, the
+/// file's stamp letting one through at a time (`Remote::fetch_with`), so a tab closing never
+/// throws away what another still waits on.
+#[derive(Default)]
+pub(crate) struct Fetching {
+    stop: Stop,
+    /// The tab of each copy on its way, a tab asking twice in it twice.
+    waiting: Vec<adw::TabPage>,
+    /// The copies on their way, their tabs closed or not, until each has ended.
+    copies: usize,
+}
+
+impl Fetching {
+    /// Another copy, for `page`: the stop it runs under. A transfer every tab has left is ending,
+    /// so a copy asked for after that gets one of its own.
+    fn join(&mut self, page: &adw::TabPage) -> Stop {
+        if self.stop.stopped() {
+            self.stop = Stop::default();
+        }
+        self.waiting.push(page.clone());
+        self.copies += 1;
+        self.stop.clone()
+    }
+
+    /// A copy for `page` has ended, landed, failed or stopped: whether it was the last.
+    fn leave(&mut self, page: &adw::TabPage) -> bool {
+        if let Some(at) = self.waiting.iter().position(|p| p == page) {
+            self.waiting.remove(at);
+        }
+        self.copies -= 1;
+        self.copies == 0
+    }
+
+    /// `page` is closing, and the transfer stops if no other tab waits on it.
+    fn closed(&mut self, page: &adw::TabPage) {
+        self.waiting.retain(|p| p != page);
+        if self.waiting.is_empty() {
+            self.stop.stop();
+        }
+    }
 }
 
 impl App {
@@ -548,7 +593,7 @@ impl App {
         );
         // The decoder needs real bytes, and the protocol deliberately carries none.
         let viewer = Rc::downgrade(&image);
-        self.local_copy(key, path, move |app, copy| {
+        self.local_copy(key, path, &image.page, move |app, copy| {
             let Some(image) = viewer.upgrade() else {
                 return;
             };
@@ -702,17 +747,28 @@ impl App {
     ///
     /// Local and loose files need no transfer; remote files download on a worker with status
     /// progress. Current cached copies are silent. PDF opening waits until the download finishes.
+    /// The download is for the tab `page`, and ends once that tab and every other one waiting on
+    /// the same file have closed, `landed` never called (see [`Fetching`]).
     pub(crate) fn local_copy(
         self: &Rc<Self>,
         key: &str,
         path: &Path,
+        page: &adw::TabPage,
         landed: impl FnOnce(&Rc<App>, accent_api::Result<PathBuf>) + 'static,
     ) {
         let vault = self.vault().filter(|_| !doc::is_loose_key(key)).cloned();
         let remote = vault.as_ref().is_some_and(|v| v.is_remote());
-        let (key, path) = (key.to_string(), path.to_path_buf());
+        let (key, path, page) = (key.to_string(), path.to_path_buf(), page.clone());
+        let stop = match remote {
+            true => self
+                .fetching
+                .borrow_mut()
+                .entry(key.clone())
+                .or_default()
+                .join(&page),
+            false => Stop::default(),
+        };
         if remote {
-            self.fetching.borrow_mut().insert(key.clone());
             self.sync_opening();
         }
         let bytes = Arc::new(statusbar::Bytes::default());
@@ -720,14 +776,13 @@ impl App {
         let weak = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let work = crate::work::off_thread("fetch", {
-                let (key, bytes) = (key.clone(), bytes.clone());
+                let (key, bytes, stop) = (key.clone(), bytes.clone(), stop.clone());
                 move || {
                     #[cfg(feature = "bench")]
                     crate::bench::hold(&crate::bench::SLOW_READ_MS);
+                    let progress = |done, total| bytes.set(done, total);
                     match vault {
-                        Some(vault) => {
-                            vault.fetch_with(&key, &|done, total| bytes.set(done, total))
-                        }
+                        Some(vault) => vault.fetch_with(&key, &progress, &stop),
                         None => Ok(path),
                     }
                 }
@@ -751,12 +806,33 @@ impl App {
             .unwrap_or_else(|| Err(Core::Io("the fetch stopped".into()).into()));
             if let Some(app) = weak.upgrade() {
                 if remote {
-                    app.fetching.borrow_mut().remove(&key);
+                    let mut fetching = app.fetching.borrow_mut();
+                    if fetching.get_mut(&key).is_some_and(|f| f.leave(&page)) {
+                        fetching.remove(&key);
+                    }
+                    drop(fetching);
                     app.sync_opening();
                 }
-                landed(&app, copy);
+                // Stopped: no tab is left to show it.
+                if !stop.stopped() {
+                    landed(&app, copy);
+                }
             }
         });
+    }
+
+    /// End the downloads `page` was the last tab waiting on: it is closing.
+    pub(crate) fn stop_fetches_for(&self, page: &adw::TabPage) {
+        for fetching in self.fetching.borrow_mut().values_mut() {
+            fetching.closed(page);
+        }
+    }
+
+    /// End every download on its way: the window is closing, and its tabs with it.
+    pub(crate) fn stop_fetches(&self) {
+        for fetching in self.fetching.borrow().values() {
+            fetching.stop.stop();
+        }
     }
 
     /// A viewer whose bytes never came: its tab goes, the way a note that would not open never

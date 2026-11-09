@@ -217,7 +217,7 @@ impl App {
     pub(crate) fn load_pdf(self: &Rc<Self>, pdf: &Rc<pdftab::PdfTab>) {
         crate::loading::again(&pdf.stack);
         let reader = Rc::downgrade(pdf);
-        self.local_copy(&pdf.key(), &pdf.path(), move |app, copy| {
+        self.local_copy(&pdf.key(), &pdf.path(), &pdf.page, move |app, copy| {
             let Some(pdf) = reader.upgrade() else { return };
             match copy {
                 Ok(copy) => {
@@ -252,8 +252,8 @@ impl App {
         if key == into.key() {
             return;
         }
-        let into = Rc::downgrade(into);
-        self.local_copy(&key, &path, move |app, copy| {
+        let (page, into) = (into.page.clone(), Rc::downgrade(into));
+        self.local_copy(&key, &path, &page, move |app, copy| {
             let Some(into) = into.upgrade() else { return };
             match copy {
                 Ok(copy) => into.import_pages(at, copy, None, name),
@@ -320,8 +320,8 @@ impl App {
         let Some((key, path)) = self.locate(from) else {
             return self.cannot(&format!("insert {name}"), "not in this vault");
         };
-        let into = Rc::downgrade(into);
-        self.local_copy(&key, &path, move |app, copy| {
+        let (tab, into) = (into.page.clone(), Rc::downgrade(into));
+        self.local_copy(&key, &path, &tab, move |app, copy| {
             let Some(into) = into.upgrade() else { return };
             match copy {
                 Ok(copy) => into.drop_pictures(page, at, move || vec![Incoming::file(&copy)]),

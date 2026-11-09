@@ -623,12 +623,17 @@ impl Vault {
     /// Local vaults return the file itself; remote vaults fetch a cached copy over SSH.
     /// Both return `NotFound` for a missing file.
     pub fn fetch(&self, rel: &str) -> Result<PathBuf> {
-        self.fetch_with(rel, &|_, _| ())
+        self.fetch_with(rel, &|_, _| (), &Stop::default())
     }
 
     /// [`fetch`](Self::fetch) with received and total byte counts during remote
-    /// downloads. Local files do not report progress.
-    pub fn fetch_with(&self, rel: &str, progress: &dyn Fn(u64, u64)) -> Result<PathBuf> {
+    /// downloads, until `stop`. Local files do not report progress, and need no stop.
+    pub fn fetch_with(
+        &self,
+        rel: &str,
+        progress: &dyn Fn(u64, u64),
+        stop: &Stop,
+    ) -> Result<PathBuf> {
         match &self.backend {
             Backend::Local(v) => {
                 let path = v.resolve(rel)?;
@@ -637,7 +642,7 @@ impl Vault {
                     Err(e) => Err(accent_core::Error::io(rel, e).into()),
                 }
             }
-            Backend::Remote(r) => r.fetch_with(rel, progress),
+            Backend::Remote(r) => r.fetch_with(rel, progress, stop),
         }
     }
 

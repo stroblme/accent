@@ -740,8 +740,10 @@ pub(super) fn bench_clip_stop(app: &Rc<App>, dir: &str) {
 /// A remote vault's bytes counted on the status bar three ways: `rel`, a PDF, opened in a tab and
 /// fetched into the ssh cache; the same file through Download… to `$TMPDIR`; and a 16 MB file
 /// of this machine's pasted into the vault root. Prints each one's lines with when they came and
-/// the sizes that landed, and takes the download and the pasted file back out. Point it at a
-/// large PDF with a fresh `XDG_CACHE_HOME`, or its copy is current and nothing moves.
+/// the sizes that landed, and takes the download and the pasted file back out. First the tab is
+/// closed a second into its download, and how long the transfer took to end and whether anything
+/// was left cached is printed. Point it at a large PDF with a fresh `XDG_CACHE_HOME`, or its copy
+/// is current and nothing moves.
 pub(super) fn bench_transfer(app: &Rc<App>, rel: &str) {
     let (Some(ops), Some(vault)) = (app.ops().cloned(), app.vault().cloned()) else {
         return bench_quit(app);
@@ -752,6 +754,24 @@ pub(super) fn bench_transfer(app: &Rc<App>, rel: &str) {
         until("transfer", "reconciled", WAIT, listed).await;
         let size = |path: &std::path::Path| std::fs::metadata(path).map_or(0, |m| m.len());
         let host = vault.stat(&rel).ok().flatten().map_or(0, |etag| etag.size);
+
+        // Closed a second into its download, which on a link slower than the file a second ends
+        // the transfer at once and leaves nothing cached.
+        let cached = vault
+            .remote()
+            .and_then(|r| accent_api::ssh::cache_path(r.url(), &rel));
+        app.open_path(&rel);
+        glib::timeout_future(Duration::from_secs(1)).await;
+        if let Some(pdf) = app.active_pdf() {
+            let (t, fetching) = (Instant::now(), || app.fetching.borrow().contains_key(&rel));
+            app.close_page(&pdf.page);
+            until("transfer", "closed", WAIT, || !fetching()).await;
+            println!(
+                "bench transfer_closed stopped_ms={} cached={}",
+                t.elapsed().as_millis(),
+                cached.as_ref().is_some_and(|c| c.exists())
+            );
+        }
 
         app.open_path(&rel);
         let lines = lines_until(&app, || app.active_pdf().is_some_and(|p| !p.opening())).await;

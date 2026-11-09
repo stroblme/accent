@@ -135,8 +135,9 @@ impl App {
             // redrawing alone would show them again. The file is found as opening it
             // was, which on a remote vault fetches a fresh copy.
             Doc::Image(image) => {
-                let image = Rc::downgrade(image);
-                self.local_copy(rel, &self.root().join(rel), move |app, copy| {
+                let (page, image) = (image.page.clone(), Rc::downgrade(image));
+                let path = self.root().join(rel);
+                self.local_copy(rel, &path, &page, move |app, copy| {
                     match (image.upgrade(), copy) {
                         (Some(image), Ok(copy)) => app.show_image(&image, Some(copy)),
                         (Some(image), Err(e)) => app.image_failed(&image, e),
@@ -158,8 +159,9 @@ impl App {
             // rather than sending the reader back to page one. On a remote vault the
             // reader has a cached copy open, which is fetched again first.
             Doc::Pdf(pdf) => {
-                let pdf = Rc::downgrade(pdf);
-                self.local_copy(rel, &self.root().join(rel), move |app, copy| {
+                let (page, pdf) = (pdf.page.clone(), Rc::downgrade(pdf));
+                let path = self.root().join(rel);
+                self.local_copy(rel, &path, &page, move |app, copy| {
                     match (pdf.upgrade(), copy) {
                         (Some(pdf), Ok(_)) => pdf.refresh(),
                         (Some(_), Err(e)) => app.cannot("reload", e),

@@ -388,7 +388,7 @@ struct App {
     reconciled: Cell<bool>,
     /// The keys whose bytes are on their way from a host ([`App::local_copy`]). Their count is the
     /// status bar's line meanwhile, so a PDF among them is not yet "Opening the document…".
-    fetching: RefCell<HashSet<String>>,
+    fetching: RefCell<HashMap<String, open::Fetching>>,
     /// Pending PDF link rewrites owned by document key so they survive tab closure ([`relink::Relinks`]).
     relinks: RefCell<HashMap<String, Rc<RefCell<relink::Relinks>>>>,
     /// Restore tabs after the first remote connection; prevent subsequent reconnects from duplicating them.
@@ -1623,7 +1623,9 @@ impl App {
             .active_doc()
             .and_then(|doc| doc.pdf().cloned())
             .is_some_and(|pdf| {
-                pdf.opening() && !pdf.fetch_failed() && !self.fetching.borrow().contains(&pdf.key())
+                pdf.opening()
+                    && !pdf.fetch_failed()
+                    && !self.fetching.borrow().contains_key(&pdf.key())
             });
         self.statusbar.set_opening(opening);
     }

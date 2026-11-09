@@ -1011,6 +1011,7 @@ pub fn wire_window(app: &Rc<App>) {
             if let Some(git) = app.git.get() {
                 git.stop();
             }
+            app.stop_fetches();
             app.save_session();
             app.release_shells();
             glib::Propagation::Proceed

@@ -622,12 +622,18 @@ impl Remote {
     /// copies by host etag. Preserve copies edited since fetch or push: their
     /// unsent bytes must survive until [`push`](Self::push), including conflicts.
     pub fn fetch(&self, rel: &str) -> Result<PathBuf> {
-        self.fetch_with(rel, &|_, _| ())
+        self.fetch_with(rel, &|_, _| (), &link::Stop::default())
     }
 
-    /// [`fetch`](Self::fetch) with received and total byte counts during transfer.
+    /// [`fetch`](Self::fetch) with received and total byte counts during transfer, until `stop`,
+    /// which leaves the copy cached before, if any, and its stamp as they were.
     /// Current cached copies report no progress.
-    pub fn fetch_with(&self, rel: &str, progress: &dyn Fn(u64, u64)) -> Result<PathBuf> {
+    pub fn fetch_with(
+        &self,
+        rel: &str,
+        progress: &dyn Fn(u64, u64),
+        stop: &link::Stop,
+    ) -> Result<PathBuf> {
         let (Some(dest), Some(stamp)) = (
             ssh::cache_path(&self.url, rel),
             ssh::stamp_path(&self.url, rel),
@@ -652,14 +658,7 @@ impl Remote {
         if let Some(dir) = dest.parent() {
             std::fs::create_dir_all(dir).map_err(|e| cached(dir, e))?;
         }
-        self.receive(
-            rel,
-            &dest,
-            current.size,
-            true,
-            progress,
-            &link::Stop::default(),
-        )?;
+        self.receive(rel, &dest, current.size, true, progress, stop)?;
         // A copy fetched afresh holds no page edit made here, so none waits on it for the notes.
         if let Some(edits) = ssh::relink_path(&self.url, rel) {
             let _ = std::fs::remove_file(edits);

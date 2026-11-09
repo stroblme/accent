@@ -324,7 +324,8 @@ use user_commands::bench_commands;
 ///   waits up to a minute per paste. `outside:<dir>`: external folder/file
 ///   paste, with empty `<dir>` meaning root. `stop:<dir>`: an external
 ///   paste stopped from the status bar.
-/// - `ACCENT_BENCH_TRANSFER=<rel_pdf>`: remote open/download/upload byte counts.
+/// - `ACCENT_BENCH_TRANSFER=<rel_pdf>`: remote open/download/upload byte counts, after a tab
+///   closed a second into its download, which over a link slower than the file stops it.
 /// - `ACCENT_BENCH_CARRY=<local vault>`: on a remote vault, rows carried to and from a second
 ///   window on the local vault, as another window's tree drop hands them over.
 /// - `ACCENT_BENCH_ATTACH=<rel_note>,<rel_vault_png>,<rel_code>`: image paste/drop.

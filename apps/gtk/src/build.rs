@@ -342,7 +342,7 @@ pub fn build_window(
         chrome_hidden: Cell::new(false),
         navigating: Cell::new(false),
         reconciled: Cell::new(false),
-        fetching: RefCell::new(HashSet::new()),
+        fetching: RefCell::default(),
         relinks: RefCell::default(),
         restored: Cell::new(false),
         reloading: Cell::new(false),
