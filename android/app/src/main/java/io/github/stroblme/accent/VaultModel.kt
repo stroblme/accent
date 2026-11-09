@@ -26,13 +26,14 @@ import io.github.stroblme.accent.ffi.anchorId
 import io.github.stroblme.accent.ffi.isAnimated
 import io.github.stroblme.accent.ffi.pdfAnchor
 import io.github.stroblme.accent.ui.imageKind
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.map
@@ -367,6 +368,36 @@ suspend fun settle(typed: () -> String, write: suspend (String) -> Saved): Saved
 }
 
 /**
+ * Autosave: [save] what was typed once the typing has paused for [after] ms, in [scope]. A file's
+ * text replacing the buffer ([loaded]) drops the save still waiting, whose words belong to the
+ * note the buffer held before, so they never land in the note loaded after them.
+ */
+class Autosave(
+    private val scope: CoroutineScope,
+    private val after: Long,
+    private val save: suspend (String) -> Unit,
+) {
+    private var waiting: Job? = null
+
+    /** The buffer holds [text] now, a keystroke dropping the wait the one before it began. */
+    fun typed(text: String) {
+        waiting?.cancel()
+        waiting = scope.launch {
+            delay(after)
+            save(text)
+        }
+    }
+
+    /**
+     * A file's text is going into the buffer. A save already writing goes on, having read its
+     * note before this; one waiting for the write lock is cancelled with it, lock and all.
+     */
+    fun loaded() {
+        waiting?.cancel()
+    }
+}
+
+/**
  * Vault state and open note. Blocking core calls use [Dispatchers.IO]; filesystem updates use [rescan].
  */
 class VaultModel(app: Application) : AndroidViewModel(app) {
@@ -405,19 +436,20 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     /** When the tree last caught up with a running walk. */
     private var lastRelist = 0L
 
+    /** Every file's text the buffer takes goes through [loadBuffer], which tells it. */
+    private val autosave = Autosave(viewModelScope, SAVE_AFTER_MS) { tell(write(it)) }
+
     init {
-        // Autosave: a pause in the typing, not a queue of them — `collectLatest` drops the wait
-        // the moment the next keystroke lands, though not a write already under way ([write]).
-        // It runs for as long as the model does rather than for as long as the editor is
-        // composed, so leaving the editor inside that second no longer needs a write of its own,
-        // and what it is compared against is read when the wait is over: typing a word and
-        // taking it back again saves nothing, and a note replaced under it (a reload, another
-        // note) is left alone.
+        // Autosave: a pause in the typing, not a queue of them, though not a write already under
+        // way ([write]). It runs for as long as the model does rather than for as long as the
+        // editor is composed, so leaving the editor inside that second no longer needs a write of
+        // its own, and what it is compared against is read when the wait is over: typing a word
+        // and taking it back again saves nothing. A note replaced under it (a reload, another
+        // note) drops the wait at once ([loadBuffer]), not a frame later when the snapshot says
+        // so: a wait ending in that frame wrote the words typed into the note before over the new
+        // one.
         viewModelScope.launch {
-            snapshotFlow { buffer.text.toString() }.collectLatest { text ->
-                delay(SAVE_AFTER_MS)
-                tell(write(text))
-            }
+            snapshotFlow { buffer.text.toString() }.collect { autosave.typed(it) }
         }
         // The foreground service a walk holds ([IndexingService]): started as one starts, its
         // count kept, and stopped as it ends.
@@ -763,7 +795,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
                 recents.touch(Recents.Kind.Notes, rel)
                 // The buffer and the state in one step, so nothing composes a note's name over
                 // another note's text.
-                if (doc is Open) buffer.load(doc.text)
+                if (doc is Open) loadBuffer(doc.text)
                 _state.update { it.copy(doc = doc) }
                 viewModelScope.launch(Dispatchers.IO) {
                     runCatching { v.keepOpened(rel) }
@@ -1179,9 +1211,15 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
             val next = reread(asked, now, note, buffer.text) ?: return@launch
             // The buffer and the state in one step, as a note is opened. The conflicts are
             // refreshed off this thread meanwhile, so they are kept as they now stand.
-            if (next.text != now?.text) buffer.load(next.text)
+            if (next.text != now?.text) loadBuffer(next.text)
             _state.update { s -> s.withNote(rel) { next.copy(conflicts = it.conflicts) } }
         }
+    }
+
+    /** Put a file's [text] in the buffer, the save of what was typed before it dropped. */
+    private fun loadBuffer(text: String) {
+        autosave.loaded()
+        buffer.load(text)
     }
 
     /**
