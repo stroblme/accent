@@ -884,6 +884,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Close Tab, the splits, the title, the find bar and focus mode all go by it; `Ctrl+Tab` and Back and Forward reach every pane (below, and History).
 - A tab is titled with the file's whole name, `.md` included: a vault holds more than notes, and `todo` beside `todo.txt` should not be told apart by an icon.
 - **A file's tab carries the file-type icon its row has in the file lists** (user decision 2026-11-03), so a tab and its row look alike, and a rename to another extension changes it (Iconography).
+  The tab follows such a rename as the file's new kind, in place while it stays the same kind of page, a note in markdown or org, code in any language or a table, which keeps its edits and undo.
+  Any other change, a note becoming code or a text becoming a PDF, opens the file anew in the tab's place, a text tab's caret going along and its undo starting over.
   A shell, a comparison, a note's preview and a file that would not open keep an icon of their own, and a terminal editor's tab is its file's (Terminal).
 - A pane is split from the tab or tree menu, `win.split-*`, or by dropping a tab or a tree row on one of its four edges.
   A tab dropped on the middle of another pane moves to the end of its bar, taking the keyboard.

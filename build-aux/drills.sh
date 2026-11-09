@@ -239,6 +239,19 @@ EOF
 	has "$dir/template" "bench template_caret Meta.md on_screen=true"
 }
 
+# An open note renamed to other extensions: the same tab while it stays the same kind of page, its
+# place in the bar otherwise.
+drill_retype() {
+	printf '# Retype\n\nSome text.\n' >"$vault/retype.md"
+	echo "# Other" >"$vault/other.md"
+	launch 60 ACCENT_BENCH_RETYPE=1 >"$dir/retype"
+	has "$dir/retype" \
+		'bench retype retype.org doc=text flavour=Some(Note(Org)) language=Some("org") same=true undo=true at=Some(0)' \
+		'bench retype retype.txt doc=text flavour=Some(Code) language=Some("text") same=false undo=false at=Some(0)' \
+		'bench retype retype.py doc=text flavour=Some(Code) language=Some("python3") same=true undo=true at=Some(0)' \
+		'bench retype retype.png doc=image flavour=None language=None same=false undo=false at=Some(0)'
+}
+
 # The vault's root in each sort, with a folder left open staying open. Each file's creation time
 # is the order it was written in, c, a then B, apart by more than a coarse clock's tick.
 drill_sort() {

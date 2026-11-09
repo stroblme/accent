@@ -470,7 +470,7 @@ impl Tab {
         self.set_page(zoom);
         install_font(
             &self.font,
-            self.flavour,
+            self.flavour(),
             font,
             zoom,
             &self.view.widget_name(),
@@ -518,7 +518,7 @@ impl Tab {
             #[weak(rename_to = tab)]
             self,
             move || {
-                remeasure(&tab.view, tab.flavour);
+                remeasure(&tab.view, tab.flavour());
                 tab.map.relayout();
                 // A comparison's companion is set in the same font, and takes the page with it.
                 if let Some(hosted) = tab.hosted() {
@@ -638,7 +638,7 @@ impl Tab {
     /// Note headings and fences use existing tag-toggle indices, avoiding a parse or backward
     /// scan. Source files use language-server symbols; CSV has no blocks.
     pub fn update_sticky(&self) {
-        if matches!(self.flavour, Flavour::Csv(_)) {
+        if matches!(self.flavour(), Flavour::Csv(_)) {
             return;
         }
         // The other column of a comparison has no such bar, and one over the editor's first row
@@ -656,7 +656,7 @@ impl Tab {
         }
         let (first, _) = self.view.line_at_y(self.view.visible_rect().y());
         let top = first.line();
-        let line = match self.flavour {
+        let line = match self.flavour() {
             Flavour::Note(_) => self.sticky_note_line(first, top),
             Flavour::Code => {
                 lang::innermost(&self.lang.symbols(), top.max(0) as u32).map(|line| line as i32)

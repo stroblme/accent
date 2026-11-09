@@ -312,9 +312,9 @@ pub struct Tab {
     /// something is scrolled out of sight above the first visible line.
     sticky: gtk::Label,
     sticky_bar: gtk::Box,
-    /// Fixed text flavour, gating Markdown styling, completion, spelling,
-    /// column cap and hanging markers.
-    flavour: Flavour,
+    /// Text flavour, gating Markdown styling, completion, spelling, column cap and hanging
+    /// markers. Its kind is fixed, and only a rename changes its syntax ([`Tab::set_syntax`]).
+    flavour: Cell<Flavour>,
     /// Original CRLF endings, normalized in the buffer and restored on save
     /// to avoid rewriting every unchanged line.
     crlf: Cell<bool>,
@@ -480,7 +480,7 @@ impl Tab {
     }
 
     pub fn flavour(&self) -> Flavour {
-        self.flavour
+        self.flavour.get()
     }
 
     /// Set committed text for git change bars, or clear with `None`. The Git
@@ -532,7 +532,7 @@ impl Tab {
         fs::for_disk(
             &self.text(),
             self.crlf.get(),
-            !self.flavour.is_note() && !crate::bibliography::is_bib(&self.rel()),
+            !self.flavour().is_note() && !crate::bibliography::is_bib(&self.rel()),
         )
     }
 
@@ -555,7 +555,8 @@ impl Tab {
         }
     }
 
-    /// A rename landed: point the tab at the new path without losing the buffer.
+    /// A rename landed: point the tab at the new path without losing the buffer, in the syntax
+    /// the new name gives it, which is the same kind of page ([`crate::open::same_page`]).
     pub fn retarget(self: &Rc<Self>, root: &Path, new_rel: &str) {
         let old_rel = self.rel();
         *self.rel.borrow_mut() = new_rel.to_string();
@@ -563,9 +564,35 @@ impl Tab {
         self.page.set_title(&self.tab_title());
         self.page
             .set_tooltip(&crate::fileops::display_path(root, new_rel));
+        if crate::doc::opens_differently(&old_rel, new_rel)
+            && let Some(flavour) = crate::open::text_flavour(new_rel)
+        {
+            self.set_syntax(flavour);
+        }
         // A language server keys its documents by URI and knows nothing of the move, so the old
-        // path is closed and the new one opened.
+        // path is closed and the new one opened, in the language the new name gives it.
         lang::retarget(self, &old_rel);
+    }
+
+    /// Take `flavour`, another syntax of the same kind of page — a language, a table's
+    /// delimiter, org for markdown — in place: the buffer, its edits and its undo are kept.
+    fn set_syntax(&self, flavour: Flavour) {
+        self.flavour.set(flavour);
+        let language = match flavour {
+            Flavour::Code => guess_language(&self.path(), &self.text()),
+            Flavour::Note(_) | Flavour::Csv(_) => None,
+        };
+        if language.is_some() {
+            // As `open::build` has it: everything but a makefile indents with spaces.
+            let tabs_are_syntax = language.as_ref().is_some_and(|l| l.id() == "makefile");
+            self.view
+                .set_insert_spaces_instead_of_tabs(!tabs_are_syntax);
+        }
+        self.buffer.set_language(language.as_ref());
+        // A new delimiter retags every record, which an incremental pass would not.
+        self.csv.reset();
+        self.analyse();
+        self.restyle();
     }
 
     pub fn text(&self) -> String {
@@ -707,7 +734,7 @@ impl Tab {
         mute(&self.buffer, &self.occurrence_tag);
         matched(&self.buffer, &self.reveal_tag);
         self.find.restyle();
-        match self.flavour {
+        match self.flavour() {
             Flavour::Note(syntax) => restyle_note(&self.view, &self.buffer, syntax),
             // The column hues are rotated from the accent, which the theme can change under us.
             Flavour::Csv(_) => highlight::restyle_csv(&self.buffer),
@@ -980,7 +1007,7 @@ impl Tab {
 
     pub fn set_spellcheck(&self, on: bool) {
         // Prose only. A checker over identifiers and keywords is a wall of red squiggles.
-        if self.flavour.is_note() {
+        if self.flavour().is_note() {
             set_spelling(&self.spell, &self.buffer, &self.view, on);
         }
     }
@@ -1134,7 +1161,7 @@ impl Tab {
         let instant = self.buffer.char_count() <= INSTANT;
         if instant {
             self.reanalyse();
-        } else if let Flavour::Note(syntax) = self.flavour {
+        } else if let Flavour::Note(syntax) = self.flavour() {
             // Too long for a full pass inside a frame, so the line under the caret is styled now
             // and everything else waits: what a typist watches change is the line they are typing.
             let line = caret(&self.buffer).line();
@@ -1177,7 +1204,7 @@ impl Tab {
     /// Apply immediate note styling and link updates within the typing budget.
     /// Code uses language-scheme highlighting and needs no corresponding pass.
     fn analyse_text(&self) {
-        match self.flavour {
+        match self.flavour() {
             Flavour::Note(syntax) => {
                 let (analysis, offsets) = style_note(&self.view, &self.buffer, syntax);
                 *self.links.borrow_mut() = analysis

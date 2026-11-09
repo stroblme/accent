@@ -711,6 +711,12 @@ impl Csv {
         csv
     }
 
+    /// Forget the last pass, so the next reads every record again.
+    pub fn reset(&self) {
+        self.rows.take();
+        self.edited.take();
+    }
+
     fn edit(&self, before: i32, after: i32) {
         let (b, a) = self.edited.get().unwrap_or((before, after));
         self.edited.set(Some((b.min(before), a.min(after))));

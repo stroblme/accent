@@ -1557,6 +1557,27 @@ fn flavour_of(key: &str) -> Flavour {
     }
 }
 
+/// The flavour a text tab on `key` opens in, `None` for a file that opens as another document.
+pub(crate) fn text_flavour(key: &str) -> Option<Flavour> {
+    match doc::kind_of(key) {
+        Kind::Note => Some(Flavour::Note(Syntax::Markdown)),
+        Kind::Text => Some(flavour_of(key)),
+        Kind::Image | Kind::Pdf | Kind::Diagram | Kind::Notebook => None,
+    }
+}
+
+/// Whether a document open on `from` is the same kind of page on `to`, which a rename then
+/// changes in place: a note in markdown or org, code in any language, a table, or the same kind
+/// of other document. A note's page and a code page are built differently, so a rename between
+/// them opens the file anew.
+pub(crate) fn same_page(from: &str, to: &str) -> bool {
+    match (text_flavour(from), text_flavour(to)) {
+        (Some(a), Some(b)) => std::mem::discriminant(&a) == std::mem::discriminant(&b),
+        (None, None) => doc::kind_of(from) == doc::kind_of(to),
+        _ => false,
+    }
+}
+
 /// A byte count as a person reads it, in the decimal units GNOME shows in Files.
 fn human(bytes: u64) -> String {
     const UNITS: [&str; 4] = ["bytes", "kB", "MB", "GB"];
@@ -1569,5 +1590,24 @@ fn human(bytes: u64) -> String {
     match unit {
         0 => format!("{bytes} bytes"),
         _ => format!("{size:.1} {}", UNITS[unit]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_rename_keeps_the_page_only_within_its_kind() {
+        // Another syntax of the same page: a language, a delimiter, org for markdown.
+        assert!(same_page("a.txt", "a.py"));
+        assert!(same_page("a.csv", "a.tsv"));
+        assert!(same_page("a.md", "a.org"));
+        assert!(same_page("a.png", "a.jpg"));
+        // A note's page and a code page are built differently, and a PDF is no text at all.
+        assert!(!same_page("a.md", "a.txt"));
+        assert!(!same_page("a.txt", "a.csv"));
+        assert!(!same_page("a.md", "a.pdf"));
+        assert!(!same_page("a.pdf", "a.png"));
     }
 }

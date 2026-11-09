@@ -56,6 +56,7 @@ mod quickfix;
 mod recent;
 mod refer;
 mod replace;
+mod retype;
 mod scroll;
 mod search;
 mod shells;
@@ -376,6 +377,8 @@ use user_commands::bench_commands;
 /// - `ACCENT_BENCH_HIDDEN=1`: hidden-file visibility and git row colours.
 /// - `ACCENT_BENCH_SORT=1`: the Files tree's sorts and folders among files; `shot:<dir>` the
 ///   Sort Files menu, light and dark (`sort::bench_sort`).
+/// - `ACCENT_BENCH_RETYPE=1`: an open tab following a rename to another extension
+///   (`retype::bench_retype`). Saves: a scratch vault under `/tmp`.
 /// - `ACCENT_BENCH_UNFOLD=<rel>,<rel>,…`: folder expansion; `race:<dir>`,
 ///   `renew:<dir>`, `again:<dir>` and `tab:<rel>`: external unindexed changes;
 ///   `down:<rel>`: a remote tab's file rewritten while the link is down.
@@ -440,6 +443,10 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     }
     if let Ok(arg) = std::env::var("ACCENT_BENCH_SORT") {
         return sort::bench_sort(app, &arg);
+    }
+    if std::env::var_os("ACCENT_BENCH_RETYPE").is_some() {
+        scratch_only(app, "ACCENT_BENCH_RETYPE");
+        return retype::bench_retype(app);
     }
     let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
     let minimap = std::env::var("ACCENT_BENCH_MINIMAP").ok();

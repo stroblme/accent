@@ -20,6 +20,11 @@ impl App {
                 Some(rest) => format!("{to}/{rest}"),
                 None => continue,
             };
+            // A new extension that makes it another kind of page opens it anew in its place.
+            if !open::same_page(&key, &moved) && !matches!(doc, Doc::Loading(_)) {
+                self.reopen_renamed(&doc, &moved);
+                continue;
+            }
             doc.retarget(&self.root(), &moved);
             self.watch_folder_of(&moved);
             // A file still on its way is read again under its new name: the read in flight
@@ -36,6 +41,51 @@ impl App {
         self.debugger.renamed(from, to);
         self.relinks_renamed(from, to);
         self.sync_active();
+    }
+
+    /// Open `to` in the place of `doc`, which a rename made another kind of page: in its pane, at
+    /// its place in the bar, pinned if it was. A text tab's caret goes along to a text tab, and
+    /// so does its text if it was typed into after the rename wrote it out (`fileops::apply`);
+    /// its undo starts over.
+    fn reopen_renamed(self: &Rc<Self>, doc: &Doc, to: &str) {
+        let page = doc.page().clone();
+        let Some(pane) = self.pane_of(&page) else {
+            return;
+        };
+        let at = pane.tabs.page_position(&page);
+        let how = match self.is_pinned(&page) {
+            true => Opened::Pinned,
+            false => Opened::Kept,
+        };
+        let carried = doc.tab().map(|tab| {
+            let unsaved = tab.save.modified.get().then(|| tab.text());
+            (unsaved, tab.buffer.cursor_position())
+        });
+        // Its file has gone, so there is nothing to write what it holds into.
+        match doc {
+            Doc::Text(tab) => tab.discard(),
+            Doc::Diagram(diagram) => diagram.discard(),
+            Doc::Notebook(notebook) => notebook.discard(),
+            _ => {}
+        }
+        self.pending.place(to, &pane);
+        match (carried, open::text_flavour(to)) {
+            (Some((unsaved, caret)), Some(_)) => {
+                self.with_tab(to, how, "open", move |_, tab| {
+                    if let Some(text) = unsaved {
+                        tab.buffer.set_text(&text);
+                    }
+                    tab.buffer.place_cursor(&tab.buffer.iter_at_offset(caret));
+                    tab.view
+                        .scroll_to_mark(&tab.buffer.get_insert(), 0.0, true, 0.0, 0.5);
+                });
+            }
+            _ => self.open_as(to, how),
+        }
+        if let Some(new) = self.doc_for(to) {
+            pane.tabs.reorder_page(new.page(), at);
+        }
+        self.close_page(&page);
     }
 
     /// Watch `key`'s parent folder for changes the index does not walk, and have the index keep

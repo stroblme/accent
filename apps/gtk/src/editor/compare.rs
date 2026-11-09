@@ -202,7 +202,7 @@ impl Tab {
             tab.conflicts.set_enabled(false);
             let companion = diff::pane(
                 other.0,
-                tab.flavour,
+                tab.flavour(),
                 other.1,
                 &tab.view.widget_name(),
                 tab.buffer.language().as_ref(),
@@ -245,7 +245,7 @@ impl Tab {
             let side = |stage: usize| {
                 diff::pane(
                     &titles[stage],
-                    tab.flavour,
+                    tab.flavour(),
                     &stages[stage],
                     &tab.view.widget_name(),
                     tab.buffer.language().as_ref(),
@@ -320,7 +320,7 @@ impl Tab {
             view: self.view.clone(),
             buffer: self.buffer.clone(),
             scroller: self.scroller.clone(),
-            flavour: self.flavour,
+            flavour: self.flavour(),
             pool: self.overlays.clone(),
             finder: self.find.clone(),
         };

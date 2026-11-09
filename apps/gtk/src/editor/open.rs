@@ -182,7 +182,7 @@ pub fn open(
         sticky_bar: sticky_bar.clone(),
         head: RefCell::new(None),
         marks: marks.clone(),
-        flavour,
+        flavour: Cell::new(flavour),
         crlf: Cell::new(text.crlf),
         lossy: Cell::new(text.lossy),
         page,
