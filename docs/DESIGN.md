@@ -1382,7 +1382,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A notebook's LaTeX output is the same layout at 16 px in a widget of its own, painted in the widget's colour.
 - Pages are the Outline pane's rows, the one shown selected, over a thumbnail strip that organises them as a PDF's does (PDF): a click goes to the page, dragging a thumbnail moves its page, and the thumbnail under the pointer carries Copy Page, Delete Page (absent on a diagram of one page, which keeps it) and Insert Page Here, with Paste Page Here before it while a diagram's page is held.
   A page put in is blank and named as draw.io names one, the first `Page-N` from the page count on that no page has.
-  A page pasted is the one copied, from this diagram or another, called "Copy of" its name with a page id of its own and every cell renumbered, as draw.io's Duplicate Page makes one.
+  A page pasted is the one copied, from this diagram or another, with a page id of its own and every cell renumbered, as draw.io's Duplicate Page makes one, and keeps its name without draw.io's "Copy of", since a draw.io file may hold a name twice (user decision 2026-11-09).
   A thumbnail is its page in the canvas's colours, painted when it first comes on screen and again only once an edit has changed it, and its corners are rounded as a PDF thumbnail's are.
 - A page edit is one undo step: the reader lands on a page put in, and otherwise stays on the page they were reading, wherever it went, or the one that took its place, Undo and Redo included, and the pane's Back and Forward places follow the pages.
   A note names a diagram's page by its name, so no link changes with one.

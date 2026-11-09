@@ -669,10 +669,11 @@ fn page_name(pages: &[Page]) -> String {
         .expect("an unbounded range")
 }
 
-/// `page` as draw.io's Duplicate Page copies one: called "Copy of" its name, under a fresh page
-/// id, and every cell, the root and the layers too, renumbered `<guid>-<n>` from 0 in the order
-/// draw.io writes them, its parent, source and target following. draw.io also points the ids in
-/// a `data:action/json` link at the copies, a link accent does not follow.
+/// `page` as draw.io's Duplicate Page copies one, under a fresh page id, and every cell, the root
+/// and the layers too, renumbered `<guid>-<n>` from 0 in the order draw.io writes them, its
+/// parent, source and target following. It keeps its name where draw.io's calls it "Copy of" the
+/// name, since a file may hold one name twice. draw.io also points the ids in a
+/// `data:action/json` link at the copies, a link accent does not follow.
 // diagramly/Pages.js 1460-1515 (`duplicatePage`), mxGraphModel.js 554-565 and 705-775
 fn page_copy(page: &Page) -> Page {
     let prefix = guid();
@@ -683,7 +684,6 @@ fn page_copy(page: &Page) -> Page {
     let mut copy = page.clone();
     copy.cells = page.cells.iter().map(|c| copy_of(c, &fresh)).collect();
     copy.set_id(&guid());
-    copy.set_name(&format!("Copy of {}", page.name()));
     copy
 }
 

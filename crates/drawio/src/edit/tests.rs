@@ -765,7 +765,7 @@ fn a_pasted_page_is_a_copy_with_ids_of_its_own() {
     assert_eq!(e.paste_page(2, &copied).unwrap(), 2);
     let pages = &e.file().pages;
     let names: Vec<_> = pages.iter().map(Page::name).collect();
-    assert_eq!(names, ["P", "Copy of P", "Copy of P"]);
+    assert_eq!(names, ["P", "P", "P"], "draw.io allows a name twice");
     let page_ids: HashSet<_> = pages
         .iter()
         .map(|p| crate::model::attr(&p.attrs, "id"))
