@@ -259,7 +259,7 @@ fn a_document_is_opened_and_answered_for_across_the_wire() {
     let text = "# Title\n\nsee [[nope]]\n";
     let support: crate::Support = w
         .client
-        .call("open_document", json!(["a.md", "markdown", text]))
+        .call("open_document", json!(["a.md", "markdown", text, 1]))
         .unwrap();
     assert_eq!(support.completion_triggers, ['[', '#', '(']);
 

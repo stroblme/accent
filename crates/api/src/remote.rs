@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use serde_json::json;
 
+use crate::language::synced::{self, Change};
 use crate::link;
 use crate::rpc::{Client, Hello};
 use crate::ssh::{self, Forward, Url};
@@ -305,6 +306,25 @@ impl Stamp {
     }
 }
 
+/// An open document as the window last told the host of it.
+struct Doc {
+    language: String,
+    text: String,
+    /// The version the last message about it gave it ([`next_version`]).
+    version: u64,
+    /// Whether the host answered that message, so it holds `text` at `version` and the next change
+    /// can be an edit of it.
+    answered: bool,
+}
+
+/// A version no document was given before, by any window: the host's language layer takes an
+/// edit only of the version it holds, so one made to a text it held before, sent again or late,
+/// can never apply ([`synced`](crate::language::synced)).
+fn next_version() -> u64 {
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    LAST.fetch_add(1, Ordering::Relaxed) + 1
+}
+
 /// One vault on a remote host.
 pub struct Remote {
     url: Url,
@@ -320,10 +340,10 @@ pub struct Remote {
     /// Held while a preference change's `hello` is read and sent ([`Remote::send_hello`]).
     hellos: Mutex<()>,
     client: Mutex<Option<Arc<Client>>>,
-    /// Open documents with their language and last sent text. Replay on reconnect
+    /// Open documents as the host was last told of them. Replay on reconnect
     /// so the fresh server can answer existing tabs without reopening them.
     /// Stored here because only `Remote` knows the connection was replaced.
-    docs: Mutex<HashMap<String, (String, String)>>,
+    docs: Mutex<HashMap<String, Doc>>,
     /// The unindexed folders the window asked to have watched, which a new server has to be
     /// asked again for the same reason. See [`Vault::watch_unindexed`](crate::Vault::watch_unindexed).
     unindexed: Mutex<BTreeSet<String>>,
@@ -519,7 +539,9 @@ impl Remote {
     }
 
     /// Remember document and watch state for reconnect, even if the call fails.
-    /// A document opened offline still needs to be registered on the next server.
+    /// A document opened offline still needs to be registered on the next server, which
+    /// [`opening`](Self::opening) does, as [`change_document`](Self::change_document) notes a
+    /// change.
     fn remember(&self, method: &str, params: &serde_json::Value) {
         if method.ends_with("watch_unindexed") {
             let dirs: Vec<String> = params
@@ -535,30 +557,70 @@ impl Remote {
             }
             return;
         }
-        if !method.ends_with("_document") {
-            return;
+        if method == "close_document"
+            && let Some(rel) = params.get(0).and_then(serde_json::Value::as_str)
+        {
+            self.locked(&self.docs).remove(rel);
         }
-        let at = |n: usize| params.get(n).and_then(serde_json::Value::as_str);
-        let Some(rel) = at(0).map(str::to_string) else {
-            return;
+    }
+
+    /// Note `rel` as opening with `text`, giving it a version: what the host holds once it has
+    /// answered ([`answered`](Self::answered)), and what a reconnect opens it with again.
+    pub(crate) fn opening(&self, rel: &str, language: &str, text: &str) -> u64 {
+        let doc = Doc {
+            language: language.to_string(),
+            text: text.to_string(),
+            version: next_version(),
+            answered: false,
         };
-        let mut docs = self.locked(&self.docs);
-        match method {
-            "open_document" => {
-                if let (Some(language), Some(text)) = (at(1), at(2)) {
-                    docs.insert(rel, (language.to_string(), text.to_string()));
-                }
-            }
-            "change_document" => {
-                if let (Some(text), Some(held)) = (at(1), docs.get_mut(&rel)) {
-                    held.1 = text.to_string();
-                }
-            }
-            "close_document" => {
-                docs.remove(&rel);
-            }
-            _ => {}
+        let version = doc.version;
+        self.locked(&self.docs).insert(rel.to_string(), doc);
+        version
+    }
+
+    /// The host answered the message that gave `rel` `version`: it holds the text sent with it,
+    /// unless another message has given it a later one since.
+    pub(crate) fn answered(&self, rel: &str, version: u64) {
+        if let Some(doc) = self.locked(&self.docs).get_mut(rel)
+            && doc.version == version
+        {
+            doc.answered = true;
         }
+    }
+
+    /// Send the host's language layer what changed in `rel`, `text` being all of it now: the
+    /// edit from the text the host holds ([`synced`](crate::language::synced)), or the whole
+    /// text where it may hold another, which it also asks for by refusing an edit.
+    pub(crate) fn change_document(&self, rel: &str, text: String) -> Result<()> {
+        let closed = || Error::Language(format!("{rel} is not open"));
+        let (version, change) = {
+            let mut docs = self.locked(&self.docs);
+            let doc = docs.get_mut(rel).ok_or_else(closed)?;
+            let change = match doc.answered {
+                true => Change::Edit {
+                    from: doc.version,
+                    edit: synced::edit_between(&doc.text, &text),
+                },
+                false => Change::Whole(text.clone()),
+            };
+            (doc.text, doc.version, doc.answered) = (text, next_version(), false);
+            (doc.version, change)
+        };
+        if self.call("change_document", json!([rel, version, change]))? {
+            self.answered(rel, version);
+            return Ok(());
+        }
+        let (version, whole) = {
+            let mut docs = self.locked(&self.docs);
+            let doc = docs.get_mut(rel).ok_or_else(closed)?;
+            doc.version = next_version();
+            (doc.version, Change::Whole(doc.text.clone()))
+        };
+        if !self.call("change_document", json!([rel, version, whole]))? {
+            return Err(Error::Language(format!("{rel} is not open on the host")));
+        }
+        self.answered(rel, version);
+        Ok(())
     }
 
     /// Replay open documents and watched folders to a fresh server. Send
@@ -571,10 +633,19 @@ impl Remote {
         {
             tracing::warn!("watching the unindexed folders on the new server: {e}");
         }
-        let open: Vec<(String, String, String)> = self
+        // A version of their own, which the new server holds each at once it has answered.
+        let open: Vec<(String, String, String, u64)> = self
             .locked(&self.docs)
-            .iter()
-            .map(|(rel, (language, text))| (rel.clone(), language.clone(), text.clone()))
+            .iter_mut()
+            .map(|(rel, doc)| {
+                (doc.version, doc.answered) = (next_version(), false);
+                (
+                    rel.clone(),
+                    doc.language.clone(),
+                    doc.text.clone(),
+                    doc.version,
+                )
+            })
             .collect();
         if open.is_empty() {
             return;
@@ -585,16 +656,17 @@ impl Remote {
             for _ in 0..REOPENING.min(open.len()) {
                 s.spawn(|| {
                     loop {
-                        let Some((rel, language, text)) = self.locked(&next).next() else {
+                        let Some((rel, language, text, version)) = self.locked(&next).next() else {
                             break;
                         };
                         // One that will not reopen is one tab without a language, not a failed
                         // connection.
-                        if let Err(e) = client.call::<serde_json::Value>(
+                        match client.call::<serde_json::Value>(
                             "open_document",
-                            json!([rel, language, text]),
+                            json!([rel, language, text, version]),
                         ) {
-                            tracing::warn!("reopening {rel} on the new server: {e}");
+                            Ok(_) => self.answered(rel, *version),
+                            Err(e) => tracing::warn!("reopening {rel} on the new server: {e}"),
                         }
                     }
                 });

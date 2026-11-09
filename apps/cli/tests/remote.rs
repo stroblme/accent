@@ -479,11 +479,7 @@ fn a_remote_vault_connects_indexes_and_answers() {
     // own retries are, so nothing on the way may prompt.
     let docs: Vec<String> = (1..=20).map(|n| format!("Doc{n}")).collect();
     for name in &docs {
-        remote
-            .call::<serde_json::Value>(
-                "open_document",
-                serde_json::json!([format!("{name}.md"), "markdown", format!("# {name}\n")]),
-            )
+        wait(vault.open_document(&format!("{name}.md"), "markdown", format!("# {name}\n")))
             .unwrap();
     }
     kill_master(&url, remote.control_path());
@@ -525,7 +521,7 @@ fn a_remote_vault_connects_indexes_and_answers() {
     remote
         .call::<serde_json::Value>(
             "open_document",
-            serde_json::json!(["c.md", "markdown", links]),
+            serde_json::json!(["c.md", "markdown", links, 1]),
         )
         .unwrap();
     for (line, path, missing) in [
@@ -563,7 +559,7 @@ fn a_remote_vault_connects_indexes_and_answers() {
         remote
             .call::<serde_json::Value>(
                 "open_document",
-                serde_json::json!(["d.md", "markdown", typed]),
+                serde_json::json!(["d.md", "markdown", typed, 1]),
             )
             .unwrap();
         let at = accent_api::Pos {

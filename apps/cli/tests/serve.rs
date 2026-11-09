@@ -99,7 +99,7 @@ fn serve_answers_over_the_pipe_and_stops_when_it_closes() {
     ask(
         3,
         "open_document",
-        r#"["d.md", "markdown", "The kettle was"]"#,
+        r#"["d.md", "markdown", "The kettle was", 1]"#,
     );
     next(Some(3));
     let ghost = (4..104).find_map(|id| {

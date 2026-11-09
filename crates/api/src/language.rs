@@ -28,6 +28,7 @@ use crate::{Event, FileEdits, Local, LspConfig, Vault, VaultConfig, locked};
 pub(crate) mod external;
 mod latex;
 pub(crate) mod notes;
+pub(crate) mod synced;
 mod typst;
 pub(crate) mod words;
 
@@ -543,6 +544,8 @@ pub(crate) struct Languages {
     pub(crate) used: Arc<Mutex<Vec<String>>>,
     /// When each session [`Self::calls`] used was last asked, for its idle stop.
     asked: Mutex<HashMap<Key, tokio::time::Instant>>,
+    /// The open documents' texts a remote vault's window edits ([`Self::sync_document`]).
+    pub(crate) held: synced::Held,
 }
 
 /// Folder listings for path completion, using [`crate::local::list_dir`] and
@@ -588,6 +591,7 @@ impl Languages {
             ignored,
             used: Arc::default(),
             asked: Mutex::new(HashMap::new()),
+            held: synced::Held::default(),
         })
     }
 
@@ -1062,6 +1066,7 @@ impl Languages {
     /// pays a cold start rather than retaining an unused server. The vault-wide
     /// ghost session is separate and ends with the vault or Ghost Text preference.
     pub(crate) fn close_document(&self, rel: String) -> Task<()> {
+        self.held.close(&rel);
         let (key, provider) = match locked(&self.docs).remove(&rel) {
             Some((key, provider, _)) => (key, Some(provider)),
             None => (None, None),
@@ -1081,6 +1086,33 @@ impl Languages {
                 let _ = session.shutdown().await;
             }
             Ok(())
+        })
+    }
+
+    /// What the editor did to the document, as its whole text: nothing to answer, and nothing to
+    /// await inside.
+    pub(crate) fn change_document(&self, rel: String, text: String) -> Task<()> {
+        let provider = self.provider(&rel);
+        Task::spawn(async move { provider?.change(&rel, text) })
+    }
+
+    /// [`change_document`](Self::change_document) on a remote vault's host, the window sending
+    /// what changed ([`synced`]): `false`, changing nothing, where it is an edit of a version of
+    /// the text this host does not hold, and the window sends the whole text instead.
+    pub(crate) fn sync_document(
+        &self,
+        rel: String,
+        version: u64,
+        change: synced::Change,
+    ) -> Task<bool> {
+        let provider = self.provider(&rel);
+        let text = self.held.change(&rel, version, change);
+        Task::spawn(async move {
+            let provider = provider?;
+            match text {
+                Some(text) => provider.change(&rel, text).map(|()| true),
+                None => Ok(false),
+            }
         })
     }
 }
@@ -1369,13 +1401,33 @@ impl Vault {
         match &self.backend {
             Backend::Local(v) => v.open_document(rel, language_id, text),
             // The host may be starting the file's server, which has `STARTING` to answer.
-            Backend::Remote(r) => remote_task_then(
-                r.clone(),
-                "open_document",
-                json!([rel, language_id, text]),
-                accent_lsp::STARTING + crate::rpc::DEADLINE,
-                |_, answer| Ok(answer),
-            ),
+            Backend::Remote(r) => {
+                let version = r.opening(rel, language_id, &text);
+                let params = json!([rel, language_id, text, version]);
+                let rel = rel.to_string();
+                remote_task_then(
+                    r.clone(),
+                    "open_document",
+                    params,
+                    accent_lsp::STARTING + crate::rpc::DEADLINE,
+                    move |r, answer| {
+                        r.answered(&rel, version);
+                        Ok(answer)
+                    },
+                )
+            }
+        }
+    }
+
+    /// What the editor did to the document, `text` being all of it now. A remote vault's host is
+    /// sent only what changed since the text it holds (`language::synced`).
+    pub fn change_document(&self, rel: &str, text: String) -> Task<()> {
+        match &self.backend {
+            Backend::Local(v) => v.change_document(rel, text),
+            Backend::Remote(r) => {
+                let (r, rel) = (r.clone(), rel.to_string());
+                Task::blocking(move || r.change_document(&rel, text))
+            }
         }
     }
 
@@ -1503,8 +1555,6 @@ requests! {
     /// tasks is the normal cancellation path.
     inline_completion => inline_completion(pos: Pos) -> Option<String>;
 
-    // What the editor did to the document: nothing to answer, and nothing to await inside.
-    change_document => change(text: String);
     /// The buffer was written; a server that checks on save is told.
     save_document => saved();
     /// Notify that the user left the document. The ghost provider rereads the
@@ -1535,7 +1585,7 @@ pub(crate) fn remote_task_then<T: DeserializeOwned + Send + 'static>(
     method: &'static str,
     params: Value,
     deadline: Duration,
-    then: fn(&Remote, T) -> Result<T>,
+    then: impl FnOnce(&Remote, T) -> Result<T> + Send + 'static,
 ) -> Task<T> {
     let asked: Arc<crate::remote::Asked> = Arc::default();
     Task::blocking({
@@ -1548,7 +1598,7 @@ pub(crate) fn remote_task_then<T: DeserializeOwned + Send + 'static>(
     .cancelled_by(move || r.cancel(&asked))
 }
 
-/// The two lifecycle calls the macros do not write, where the vault is.
+/// The lifecycle calls the macros do not write, where the vault is.
 impl Local {
     pub fn open_document(&self, rel: &str, language_id: &str, text: String) -> Task<Support> {
         self.lang.open_document(
@@ -1559,8 +1609,35 @@ impl Local {
         )
     }
 
+    pub fn change_document(&self, rel: &str, text: String) -> Task<()> {
+        self.lang.change_document(rel.to_string(), text)
+    }
+
     pub fn close_document(&self, rel: &str) -> Task<()> {
         self.lang.close_document(rel.to_string())
+    }
+
+    /// The host's [`open_document`](Self::open_document) for a remote vault's window, which
+    /// gives the text `version` and sends what changes in it from then on
+    /// ([`sync_document`](Self::sync_document)).
+    pub(crate) fn open_synced(
+        &self,
+        rel: &str,
+        language_id: &str,
+        text: String,
+        version: u64,
+    ) -> Task<Support> {
+        self.lang.held.open(rel, version, text.clone());
+        self.open_document(rel, language_id, text)
+    }
+
+    pub(crate) fn sync_document(
+        &self,
+        rel: &str,
+        version: u64,
+        change: synced::Change,
+    ) -> Task<bool> {
+        self.lang.sync_document(rel.to_string(), version, change)
     }
 }
 
