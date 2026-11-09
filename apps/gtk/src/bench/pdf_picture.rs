@@ -289,12 +289,10 @@ pub(super) fn bench_pdf_picture(app: &Rc<App>, rel: &str) {
         // An image row of the Files tree dragged onto the page: in as a picture, opening no tab.
         let row = "picture-drill.png";
         let _ = std::fs::copy(&png, app.root().join(row));
-        for _ in 0..50 {
-            if tree_row(&app, row).is_some() {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(100)).await;
-        }
+        until("picture", "tree row", 5000, || {
+            tree_row(&app, row).is_some()
+        })
+        .await;
         let count = filed(&path).len();
         let from = tree_row(&app, row).map(|(x, y)| (f64::from(x) + sx, f64::from(y) + sy));
         if let Some((x, y)) = from {

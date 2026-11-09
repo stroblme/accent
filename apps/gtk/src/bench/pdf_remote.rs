@@ -198,12 +198,7 @@ pub(super) async fn link_down(app: &Rc<App>, remote: &accent_api::remote::Remote
         .status()
         .is_ok_and(|s| s.success());
     // The banner is up once the window has heard; that is when its countdown can go.
-    for _ in 0..50 {
-        if app.connection.is_revealed() {
-            break;
-        }
-        glib::timeout_future(Duration::from_millis(100)).await;
-    }
+    until("pdf", "link banner", 5000, || app.connection.is_revealed()).await;
     app.connection_refused("the drill holds the link down");
     ended
 }

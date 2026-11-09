@@ -32,12 +32,10 @@ pub(super) fn bench_notebook_lsp(app: &Rc<App>, arg: &str) {
     };
     let app = app.clone();
     glib::spawn_future_local(async move {
-        for _ in 0..300 {
-            if app.reconciled.get() {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(100)).await;
-        }
+        until("notebook_lsp", "reconciled", 30_000, || {
+            app.reconciled.get()
+        })
+        .await;
         if write(&app, &ipynb, &marimo) {
             ipynb_drill(&app, &ipynb, saves.as_deref()).await;
             marimo_drill(&app, &marimo).await;
@@ -92,17 +90,14 @@ fn write(app: &Rc<App>, ipynb: &str, marimo: &str) -> bool {
 /// `rel` opened, once its server has answered and said what is wrong with it.
 async fn opened(app: &Rc<App>, rel: &str) -> Option<Rc<NotebookTab>> {
     app.open_path(rel);
-    for _ in 0..300 {
+    let supported = || {
         let tab = app.doc_for(rel).and_then(|d| d.notebook().cloned());
-        if let Some(tab) = tab.filter(|t| t.bench_supported()) {
-            // The first publish follows the opening.
-            diagnosed("notebook_lsp", &tab.language_document()).await;
-            return Some(tab);
-        }
-        glib::timeout_future(Duration::from_millis(50)).await;
-    }
-    println!("bench notebook_lsp no_server {rel}");
-    None
+        tab.filter(|t| t.bench_supported())
+    };
+    let tab = until("notebook_lsp", &format!("server {rel}"), 15_000, supported).await?;
+    // The first publish follows the opening.
+    diagnosed("notebook_lsp", &tab.language_document()).await;
+    Some(tab)
 }
 
 async fn ipynb_drill(app: &Rc<App>, rel: &str, saves: Option<&str>) {
@@ -263,12 +258,10 @@ async fn saved(app: &Rc<App>, tab: &Rc<NotebookTab>, saves: &Path) {
                 let path = app.root().join(tab.key());
                 let disk = std::fs::read_to_string(&path).unwrap_or_default();
                 let _ = std::fs::write(&path, disk + "\n");
-                for _ in 0..100 {
-                    if tab.save.disk_changed.get() {
-                        break;
-                    }
-                    glib::timeout_future(Duration::from_millis(50)).await;
-                }
+                until("notebook_lsp", "change on disk", 5000, || {
+                    tab.save.disk_changed.get()
+                })
+                .await;
                 // Past the autosave the edit asked for, which the change on disk refuses.
                 glib::timeout_future(Duration::from_millis(1500)).await;
                 let refused: accent_api::Error = accent_core::Error::Io("refused".into()).into();

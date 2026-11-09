@@ -317,12 +317,7 @@ fn bench_seed(app: &Rc<App>, rel: &str) {
         // The real chord and the real keys after it, once the window has the X input focus
         // (`build-aux/xtest.py :N "move 700 400; focus"`): what is typed replaces the query.
         println!("bench seed focus_window");
-        for _ in 0..50 {
-            if app.window.is_active() {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(100)).await;
-        }
+        until("seed", "focus", 5000, || app.window.is_active()).await;
         tab.view.grab_focus();
         tab.buffer.place_cursor(&tab.buffer.start_iter());
         settle().await;

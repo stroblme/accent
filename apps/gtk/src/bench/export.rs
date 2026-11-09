@@ -38,25 +38,17 @@ fn bench_export_pdf(app: &Rc<App>, rel: &str) {
         if let Err(e) = vault.save(note, &text, None) {
             println!("bench export_pdf note_not_written {e:?}");
         }
-        for _ in 0..100 {
-            let linked = vault
+        let linked = || {
+            vault
                 .backlinks(&rel)
-                .is_ok_and(|links| links.iter().any(|b| b.src_rel_path == note));
-            if linked {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(100)).await;
-        }
+                .is_ok_and(|links| links.iter().any(|b| b.src_rel_path == note))
+        };
+        until("export_pdf", "backlink", 10_000, linked).await;
         let Some(pdf) = super::pdf::opened(&app, &rel).await else {
             println!("bench export_pdf no_tab");
             return bench_quit(&app);
         };
-        for _ in 0..50 {
-            if pdf.has_note_links() {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(100)).await;
-        }
+        until("export_pdf", "note links", 5000, || pdf.has_note_links()).await;
         let before = std::fs::read(&source).unwrap_or_default();
         let unchanged = || std::fs::read(&source).is_ok_and(|now| now == before);
         let (pages, highlights, ink) = counts(&source);

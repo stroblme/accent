@@ -14,12 +14,7 @@ pub(super) fn bench_toggle(app: &Rc<App>, rels: &str) {
     };
     let (app, a, b) = (app.clone(), a.to_string(), b.to_string());
     glib::spawn_future_local(async move {
-        for _ in 0..600 {
-            if app.reconciled.get() {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(200)).await;
-        }
+        until("toggle", "reconciled", 120_000, || app.reconciled.get()).await;
         glib::timeout_future(Duration::from_millis(1000)).await;
         // No window manager gives the window the keyboard.
         super::git::xtest("move 700 400; focus").await;

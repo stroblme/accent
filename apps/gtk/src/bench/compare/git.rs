@@ -805,12 +805,7 @@ async fn typed(
         move |_| changes.set(changes.get() + 1)
     });
     println!("bench compare_typing xtest {steps}");
-    for _ in 0..100 {
-        if changes.get() >= keys {
-            break;
-        }
-        glib::timeout_future(Duration::from_millis(50)).await;
-    }
+    until("compare_typing", "keys", 5000, || changes.get() >= keys).await;
     glib::timeout_future(Duration::from_millis(1500)).await;
     clock.disconnect(painted);
     buffer.disconnect(changed);

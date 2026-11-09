@@ -26,12 +26,10 @@ pub(super) fn bench_menu(app: &Rc<App>, rel: &str) {
         let tree = app.tree.get().expect("a tree");
         // The root listing lands from a worker thread and each folder above the row is listed
         // again as it is expanded, so the path is not in the model on the first frame.
-        for _ in 0..50 {
-            if tree.reveal(&rel) {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(200)).await;
-        }
+        until("menu", &format!("reveal {rel}"), 10_000, || {
+            tree.reveal(&rel)
+        })
+        .await;
         glib::timeout_future(Duration::from_millis(400)).await;
         let row = tree.selected();
         println!("bench menu_row {:?}", row.as_ref().map(|row| &row.rel));
@@ -232,12 +230,10 @@ pub(super) fn bench_menu_press(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
         let tree = app.tree.get().expect("a tree");
-        for _ in 0..50 {
-            if tree.reveal(&rel) {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(200)).await;
-        }
+        until("menu_press", &format!("reveal {rel}"), 10_000, || {
+            tree.reveal(&rel)
+        })
+        .await;
         glib::timeout_future(Duration::from_millis(400)).await;
         match centre(&app, tree, &rel) {
             Some(at) => println!("bench menu_press {} {}", at.x() as i32, at.y() as i32),
@@ -667,12 +663,10 @@ pub(super) fn bench_drop(app: &Rc<App>, arg: &str) {
     let app = app.clone();
     glib::spawn_future_local(async move {
         let tree = app.tree.get().expect("a tree");
-        for _ in 0..50 {
-            if tree.reveal(&dir) {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(200)).await;
-        }
+        until("drop", &format!("reveal {dir}"), 10_000, || {
+            tree.reveal(&dir)
+        })
+        .await;
         glib::timeout_future(Duration::from_millis(400)).await;
 
         // Shut again, so the spring has something to open.
@@ -950,12 +944,10 @@ pub(super) fn bench_watch(app: &Rc<App>, arg: &str) {
     glib::spawn_future_local(async move {
         let tree = app.tree.get().expect("a tree");
         for dir in [&ignored, &dependency] {
-            for _ in 0..50 {
-                if tree.reveal(dir) {
-                    break;
-                }
-                glib::timeout_future(Duration::from_millis(200)).await;
-            }
+            until("watch", &format!("reveal {dir}"), 10_000, || {
+                tree.reveal(dir)
+            })
+            .await;
             if let Some(row) = tree::find_row(tree.model(), dir) {
                 row.set_expanded(true);
             }
@@ -1276,12 +1268,10 @@ fn indexed_said(app: &Rc<App>) -> Option<String> {
 
 /// Open `dir`'s row and every row above it, as clicks would, and give its listing a second.
 async fn unfold(tree: &tree::Tree, dir: &str) {
-    for _ in 0..50 {
-        if tree.reveal(dir) {
-            break;
-        }
-        glib::timeout_future(Duration::from_millis(200)).await;
-    }
+    until("unfold", &format!("reveal {dir}"), 10_000, || {
+        tree.reveal(dir)
+    })
+    .await;
     if let Some(row) = tree::find_row(tree.model(), dir) {
         row.set_expanded(true);
     }

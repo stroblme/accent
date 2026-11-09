@@ -14,12 +14,7 @@ pub(super) fn bench_box_drag(app: &Rc<App>, rel: &str) {
     let app = app.clone();
     glib::spawn_future_local(async move {
         println!("bench box focus_window");
-        for _ in 0..100 {
-            if app.window.is_active() {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(100)).await;
-        }
+        until("box", "focus", 10_000, || app.window.is_active()).await;
         glib::timeout_future(Duration::from_millis(300)).await;
         let Some(tab) = app.active() else {
             println!("bench box no_tab");
@@ -115,12 +110,7 @@ pub(super) fn bench_occurrence_keys(app: &Rc<App>, rel: &str) {
     let app = app.clone();
     glib::spawn_future_local(async move {
         println!("bench occur focus_window");
-        for _ in 0..100 {
-            if app.window.is_active() {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(100)).await;
-        }
+        until("occur", "focus", 10_000, || app.window.is_active()).await;
         glib::timeout_future(Duration::from_millis(300)).await;
         let Some(tab) = app.active() else {
             return bench_quit(&app);
@@ -203,12 +193,7 @@ pub(super) fn bench_menu_caret(app: &Rc<App>, rel: &str) {
     let app = app.clone();
     glib::spawn_future_local(async move {
         println!("bench menu focus_window");
-        for _ in 0..100 {
-            if app.window.is_active() {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(100)).await;
-        }
+        until("menu", "focus", 10_000, || app.window.is_active()).await;
         glib::timeout_future(Duration::from_millis(300)).await;
         let Some(tab) = app.active() else {
             return bench_quit(&app);

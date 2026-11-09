@@ -127,12 +127,7 @@ fn is_padded(tab: &Rc<Tab>, at: &gtk::TextIter) -> bool {
 /// seconds, and then for the frame that allocates its buttons where the last relayout put them. A
 /// drill's scroll made before that is taken back once the rows are laid.
 pub(super) async fn settled(compare: &diff::Compare) {
-    for _ in 0..200 {
-        if compare.settled() {
-            break;
-        }
-        glib::timeout_future(Duration::from_millis(50)).await;
-    }
+    until("compare", "settled", 10_000, || compare.settled()).await;
     let Some(clock) = compare.widget().frame_clock() else {
         return;
     };

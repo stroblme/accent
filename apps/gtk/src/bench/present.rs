@@ -181,12 +181,7 @@ pub(super) fn bench_present(app: &Rc<App>, rels: &str) {
         // on the tab it stepped to.
         app.set_presenting(true);
         println!("bench present xtest move 500 400; focus");
-        for _ in 0..100 {
-            if app.window.is_active() {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(100)).await;
-        }
+        until("present", "focus", 10_000, || app.window.is_active()).await;
         glib::timeout_future(Duration::from_millis(500)).await;
         println!(
             "bench present xtest keydown ctrl; key Tab; key Tab; sleep 0.6; key Escape; keyup ctrl; \

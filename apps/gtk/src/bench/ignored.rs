@@ -13,12 +13,7 @@ pub(super) fn bench_ignored(app: &Rc<App>, rel: &str) {
     };
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
-        for _ in 0..600 {
-            if app.reconciled.get() {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(200)).await;
-        }
+        until("ignored", "reconciled", 120_000, || app.reconciled.get()).await;
         // For the palette's list, which the reconcile asked for, to land: it is what the dialog
         // shows on opening.
         glib::timeout_future(Duration::from_millis(1000)).await;

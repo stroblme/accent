@@ -49,20 +49,13 @@ pub(super) fn bench_listed(app: &Rc<App>) {
     }
     let app = app.clone();
     glib::spawn_future_local(async move {
-        for _ in 0..600 {
-            if app.reconciled.get() {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(200)).await;
-        }
+        until("listed", "reconciled", 120_000, || app.reconciled.get()).await;
         app.open_path(note);
         // Its tab is up at once, and its document once read.
-        for _ in 0..50 {
-            if app.active_key().as_deref() == Some(note) && app.tab_for(note).is_some() {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(100)).await;
-        }
+        until("listed", "note tab", 5000, || {
+            app.active_key().as_deref() == Some(note) && app.tab_for(note).is_some()
+        })
+        .await;
         let over_note = rows(&app).await;
         if super::pdf::opened(&app, pdf).await.is_none() {
             println!("bench listed no_pdf");

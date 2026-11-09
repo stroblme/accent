@@ -584,12 +584,10 @@ fn median(mut values: Vec<f64>) -> f64 {
 /// Stage 2's budget (plan §3.10): a patch ≤16 ms on the 207 KB bench note, ≤30 ms on the 1 MB
 /// one; scrolling the 1 MB one, no stall over 50 ms.
 async fn time(app: &Rc<App>, rel: &str) {
-    for _ in 0..600 {
-        if app.reconciled.get() {
-            break;
-        }
-        glib::timeout_future(Duration::from_millis(100)).await;
-    }
+    until("preview time", "reconciled", 60_000, || {
+        app.reconciled.get()
+    })
+    .await;
     let Ok(text) = std::fs::read_to_string(app.root().join(rel)) else {
         return println!("bench preview time no_note {rel}");
     };

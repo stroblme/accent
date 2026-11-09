@@ -301,12 +301,7 @@ async fn hit_drill(app: &Rc<App>, ipynb: &str, marimo: &str) {
         hits.into_iter().find(|h| h.rel_path == rel)?.at
     };
     // The copy is the watcher's to index, a moment after the walk.
-    for _ in 0..50 {
-        if indexed(copy).is_some() {
-            break;
-        }
-        glib::timeout_future(Duration::from_millis(100)).await;
-    }
+    until("notebook", "copy indexed", 5000, || indexed(copy).is_some()).await;
     let text = std::fs::read_to_string(app.root().join(marimo)).unwrap_or_default();
     let marimo_at = text
         .find("best_amplitude")

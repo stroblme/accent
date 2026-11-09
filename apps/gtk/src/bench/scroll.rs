@@ -30,12 +30,10 @@ pub(super) fn bench_scroll(app: &Rc<App>, dir: &str) {
         let tree = app.tree.get().expect("a tree");
         app.show_pane("files");
         // A minute: a remote vault may still be uploading its server.
-        for _ in 0..300 {
-            if tree.reveal(&dir) {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(200)).await;
-        }
+        until("scroll", &format!("reveal {dir}"), 60_000, || {
+            tree.reveal(&dir)
+        })
+        .await;
         if let Some(row) = tree::find_row(tree.model(), &dir) {
             row.set_expanded(true);
         }

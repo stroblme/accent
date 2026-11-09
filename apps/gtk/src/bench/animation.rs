@@ -18,12 +18,7 @@ pub(super) fn bench_animation(app: &Rc<App>) {
     }
     let app = app.clone();
     glib::spawn_future_local(async move {
-        for _ in 0..600 {
-            if app.reconciled.get() {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(100)).await;
-        }
+        until("animation", "reconciled", 60_000, || app.reconciled.get()).await;
         app.open_path("anim.md");
         super::preview::beside(&app).await;
         preview(&app).await;

@@ -1103,12 +1103,7 @@ pub(super) fn bench_cycle(app: &Rc<App>, rels: &str) {
         app.open_terminal();
         glib::spawn_future_local(async move {
             println!("bench cycle focus_window");
-            for _ in 0..100 {
-                if app.window.is_active() {
-                    break;
-                }
-                glib::timeout_future(Duration::from_millis(100)).await;
-            }
+            until("cycle", "focus", 10_000, || app.window.is_active()).await;
             glib::timeout_future(Duration::from_millis(800)).await;
             println!("bench cycle ready");
             let (mut last, mut since, mut aimed) = (String::new(), None, false);

@@ -26,12 +26,7 @@ pub(super) fn bench_wheel(app: &Rc<App>, rel: &str) {
 
         app.show_pane("files");
         let tree = app.tree.get().expect("a tree");
-        for _ in 0..50 {
-            if tree.reveal("Daily") {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(200)).await;
-        }
+        until("wheel", "reveal Daily", 10_000, || tree.reveal("Daily")).await;
         if let Some(row) = tree::find_row(tree.model(), "Daily") {
             row.set_expanded(true);
         }

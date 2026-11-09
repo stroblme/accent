@@ -161,12 +161,7 @@ pub(super) fn bench_chrome_keys(app: &Rc<App>, rels: &str) {
     let (app, note, pdf) = (app.clone(), note.to_string(), pdf.to_string());
     glib::spawn_future_local(async move {
         println!("bench chrome_keys focus_window");
-        for _ in 0..100 {
-            if app.window.is_active() {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(100)).await;
-        }
+        until("chrome_keys", "focus", 10_000, || app.window.is_active()).await;
         app.open_path(&note);
         glib::timeout_future(Duration::from_millis(500)).await;
         let Some(tab) = app.active() else {

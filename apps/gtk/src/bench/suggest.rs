@@ -20,12 +20,7 @@ pub(super) fn bench_suggest_escape(app: &Rc<App>, rel: &str) {
         bench_connected(&app).await;
         app.open_path(&rel);
         println!("bench suggest focus_window");
-        for _ in 0..100 {
-            if app.window.is_active() {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(100)).await;
-        }
+        until("suggest", "focus", 10_000, || app.window.is_active()).await;
         glib::timeout_future(Duration::from_millis(300)).await;
         let Some(tab) = app.open_tabs().into_iter().find(|tab| tab.rel() == rel) else {
             return bench_quit(&app);
@@ -132,12 +127,7 @@ pub(super) fn bench_suggest_words(app: &Rc<App>, rel: &str) {
         bench_connected(&app).await;
         app.open_path(&rel);
         println!("bench suggest focus_window");
-        for _ in 0..100 {
-            if app.window.is_active() {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(100)).await;
-        }
+        until("suggest", "focus", 10_000, || app.window.is_active()).await;
         glib::timeout_future(Duration::from_millis(300)).await;
         let (Some(tab), Some(vault)) = (
             app.open_tabs().into_iter().find(|tab| tab.rel() == rel),
@@ -277,12 +267,7 @@ pub(super) fn bench_suggest_ghost(app: &Rc<App>, rel: &str) {
 
 /// A remote vault answering, waited for up to 30 s; a local one is answering from the start.
 async fn bench_connected(app: &Rc<App>) {
-    for _ in 0..300 {
-        if !app.offline() {
-            return;
-        }
-        glib::timeout_future(Duration::from_millis(100)).await;
-    }
+    until("suggest", "online", 30_000, || !app.offline()).await;
 }
 
 /// Ghost Text switched as the Preferences row does: the config changed and put into effect in

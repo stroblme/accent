@@ -22,12 +22,7 @@ pub(super) fn bench_complete(app: &Rc<App>, arg: &str) {
     scratch_only(app, "ACCENT_BENCH_COMPLETE");
     let (app, arg) = (app.clone(), arg.to_string());
     glib::spawn_future_local(async move {
-        for _ in 0..300 {
-            if app.reconciled.get() {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(100)).await;
-        }
+        until("complete", "reconciled", 30_000, || app.reconciled.get()).await;
         match arg.split_once(':') {
             Some(("note", rel)) => bench_complete_note(&app, rel).await,
             Some(("code", rest)) => {

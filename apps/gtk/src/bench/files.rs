@@ -404,12 +404,10 @@ pub(super) fn bench_hidden(app: &Rc<App>) {
     let app = app.clone();
     glib::spawn_future_local(async move {
         // The first git answer, which is what the tints and the ignored dims come from.
-        for _ in 0..100 {
-            if app.excluded.borrow().is_some() {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(100)).await;
-        }
+        until("show_hidden", "git", 10_000, || {
+            app.excluded.borrow().is_some()
+        })
+        .await;
         for step in 0..3 {
             if step > 0 {
                 let _ = WidgetExt::activate_action(&app.window, "win.show-hidden-files", None);
@@ -521,12 +519,10 @@ pub(super) fn bench_clip(app: &Rc<App>, rel: &str) {
         if let Some(second) = second {
             // One toast for the two, once both have landed: a toast still up from the steps
             // before would hold it back in the queue, where nothing can read it.
-            for _ in 0..150 {
-                if compare::bench_toast(&app).is_none() {
-                    break;
-                }
-                glib::timeout_future(Duration::from_millis(100)).await;
-            }
+            until("clip", "no toast", 15_000, || {
+                compare::bench_toast(&app).is_none()
+            })
+            .await;
             let said = app.toasted.get();
             let both = [(rel.clone(), false), (second, false)];
             fileops::clipboard::copy_all(&ops, &both);
@@ -603,12 +599,8 @@ pub(super) fn bench_clip_outside(app: &Rc<App>, dir: &str) {
     glib::spawn_future_local(async move {
         // Connected as well as indexed: a remote vault refuses a call while it is still
         // connecting, and the paste's folders are made by one.
-        for _ in 0..600 {
-            if app.reconciled.get() && vault.list_dir("").is_ok() {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(200)).await;
-        }
+        let listed = || app.reconciled.get() && vault.list_dir("").is_ok();
+        until("clip_outside", "reconciled", 120_000, listed).await;
         // What GNOME Files writes for a Copy, spelled out rather than taken from our own Copy, so
         // what is checked is the reading of Files' format.
         let uris: Vec<String> = [&folder, &lone]
@@ -1108,12 +1100,10 @@ async fn bench_cut_many(app: &Rc<App>, ops: &Rc<fileops::Ops>, vault: &Arc<Vault
         let _ = vault.save(rel, text, None);
     }
     // Saved through the vault, so the index has them within a worker batch.
-    for _ in 0..50 {
-        if vault.backlinks("clip-b.md").is_ok_and(|b| b.len() >= 2) {
-            break;
-        }
-        glib::timeout_future(Duration::from_millis(100)).await;
-    }
+    until("clip_cut_many", "backlinks", 5000, || {
+        vault.backlinks("clip-b.md").is_ok_and(|b| b.len() >= 2)
+    })
+    .await;
     let both = [
         ("clip-a.md".to_string(), false),
         ("clip-b.md".to_string(), false),

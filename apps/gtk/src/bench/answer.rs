@@ -41,12 +41,7 @@ pub(super) fn bench_answer(app: &Rc<App>, rel: &str) {
     glib::spawn_future_local(async move {
         online(&app).await;
         // Past the first walk, whose traffic a host answers a save behind.
-        for _ in 0..600 {
-            if app.reconciled.get() {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(100)).await;
-        }
+        until("answer", "reconciled", 60_000, || app.reconciled.get()).await;
         let Some(vault) = app.vault().cloned() else {
             return bench_quit(&app);
         };
@@ -195,12 +190,7 @@ pub(super) fn bench_answer_same(app: &Rc<App>, rel: &str) {
     scratch_only(app, "ACCENT_BENCH_ANSWER");
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
-        for _ in 0..600 {
-            if app.reconciled.get() {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(100)).await;
-        }
+        until("answer same", "reconciled", 60_000, || app.reconciled.get()).await;
         let Some(vault) = app.vault().cloned() else {
             return bench_quit(&app);
         };
@@ -299,12 +289,7 @@ pub(super) fn bench_answer_doc(app: &Rc<App>, arg: &str) {
     };
     let (app, notebook, diagram) = (app.clone(), notebook.to_string(), diagram.to_string());
     glib::spawn_future_local(async move {
-        for _ in 0..600 {
-            if app.reconciled.get() {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(100)).await;
-        }
+        until("answer doc", "reconciled", 60_000, || app.reconciled.get()).await;
         doc_drill::<NotebookTab>(&app, &notebook).await;
         doc_drill::<DiagramTab>(&app, &diagram).await;
         bench_quit(&app);
@@ -486,12 +471,10 @@ async fn doc_drill<T: Probe>(app: &Rc<App>, rel: &str) {
             _ => {
                 tab.edit("mine");
                 write("theirs");
-                for _ in 0..100 {
-                    if tab.save_state().disk_changed.get() {
-                        break;
-                    }
-                    glib::timeout_future(Duration::from_millis(50)).await;
-                }
+                until("answer doc", "change on disk", 5000, || {
+                    tab.save_state().disk_changed.get()
+                })
+                .await;
                 match case {
                     "overwrite" => SLOW_WRITE_MS.store(1500, Ordering::Relaxed),
                     "failed" => refused(true),

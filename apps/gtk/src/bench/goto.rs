@@ -13,12 +13,7 @@ pub(super) fn bench_goto(app: &Rc<App>, rels: &str) {
     };
     let (app, a, b) = (app.clone(), a.to_string(), b.to_string());
     glib::spawn_future_local(async move {
-        for _ in 0..600 {
-            if app.reconciled.get() {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(200)).await;
-        }
+        until("goto", "reconciled", 120_000, || app.reconciled.get()).await;
         // For the palette's list, which the reconcile asked for, to land.
         glib::timeout_future(Duration::from_millis(1000)).await;
         // No window manager gives the window the keyboard.
@@ -41,12 +36,10 @@ pub(super) fn bench_goto(app: &Rc<App>, rels: &str) {
                 "key ctrl+e; sleep 0.5; type {stem}; sleep 0.8; key Return"
             ))
             .await;
-            for _ in 0..50 {
-                if app.active_key().as_deref() == Some(rel.as_str()) {
-                    break;
-                }
-                glib::timeout_future(Duration::from_millis(100)).await;
-            }
+            until("goto", &format!("{case} {rel}"), 5000, || {
+                app.active_key().as_deref() == Some(rel.as_str())
+            })
+            .await;
             // The palette's closing, and the idles that follow a landing.
             glib::timeout_future(Duration::from_millis(800)).await;
             let focus = app.focused();

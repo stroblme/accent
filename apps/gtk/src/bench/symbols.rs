@@ -8,12 +8,7 @@ use super::*;
 pub(super) fn bench_symbol(app: &Rc<App>, query: &str) {
     let (app, query) = (app.clone(), query.to_string());
     glib::spawn_future_local(async move {
-        for _ in 0..600 {
-            if app.reconciled.get() {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(200)).await;
-        }
+        until("symbol", "reconciled", 120_000, || app.reconciled.get()).await;
         let _ = WidgetExt::activate_action(&app.window, "win.palette-tags", None);
         glib::timeout_future(Duration::from_millis(500)).await;
         let rows = app.window.visible_dialog().and_then(|d| {

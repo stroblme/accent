@@ -105,12 +105,7 @@ pub(super) fn bench_pdf_pen(app: &Rc<App>, arg: &str) {
             let _ = vault.stop_pdf_text();
         }
         // The pass starts behind the walk.
-        for _ in 0..600 {
-            if app.reconciled.get() {
-                break;
-            }
-            glib::timeout_future(Duration::from_millis(100)).await;
-        }
+        until("pen", "reconciled", 60_000, || app.reconciled.get()).await;
         app.pdf_mode(pdfview::Mode::Pen);
         glib::timeout_future(Duration::from_secs(2)).await;
         // The file's strokes and their points.

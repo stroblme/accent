@@ -627,24 +627,17 @@ pub(super) async fn linked_note(app: &Rc<App>, pdf: &str) -> String {
     if let Err(e) = vault.save(&note, &text, None) {
         println!("bench pages note_not_written {e:?}");
     }
-    for _ in 0..100 {
+    let linked = || {
         let linked = vault
             .backlinks(pdf)
             .is_ok_and(|links| links.iter().any(|b| b.src_rel_path == note));
         // A vault still being indexed has it only once the walk is done, which the page edits'
         // rewrites wait for themselves.
-        if linked || !app.reconciled.get() {
-            break;
-        }
-        glib::timeout_future(Duration::from_millis(100)).await;
-    }
+        linked || !app.reconciled.get()
+    };
+    until("pages", "backlink", 10_000, linked).await;
     app.open_path(&note);
-    for _ in 0..50 {
-        if app.tab_for(&note).is_some() {
-            break;
-        }
-        glib::timeout_future(Duration::from_millis(100)).await;
-    }
+    until("pages", "note tab", 5000, || app.tab_for(&note).is_some()).await;
     note
 }
 
@@ -831,10 +824,5 @@ pub(super) fn labels(w: &gtk::Widget) -> Vec<String> {
 
 /// Once a remote vault answers; a local one at once.
 pub(super) async fn online(app: &Rc<App>) {
-    for _ in 0..150 {
-        if !app.offline() {
-            return;
-        }
-        glib::timeout_future(Duration::from_millis(100)).await;
-    }
+    until("remote", "online", 15_000, || !app.offline()).await;
 }
