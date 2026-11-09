@@ -286,19 +286,26 @@ pub(super) fn has_headings(rel: &str) -> bool {
 /// Rank path candidates using [`fuzzy::Query::as_typed`], preserving word
 /// order while allowing noncontiguous matches anywhere in the path. Prefer
 /// prefixes, then the files in `recent` (used lately, the latest first) in that order, as
-/// [`fuzzy::rank`] does for Go to File, then match quality, then shorter paths. Return whether
-/// the list was capped so the popup requeries as typing narrows the candidates.
+/// [`fuzzy::rank`] does for Go to File, then match quality, then shorter paths. `own`, the note
+/// being written, is left out: a link to itself is rarely what is wanted. Return whether the
+/// list was capped so the popup requeries as typing narrows the candidates.
 pub(crate) fn path_candidates(
     paths: &[String],
     recent: &[String],
     query: &str,
+    own: &str,
 ) -> (Vec<String>, bool) {
-    let (hits, more) = ranked_paths(paths, recent, query);
+    let (hits, more) = ranked_paths(paths, recent, query, own);
     (hits.into_iter().map(|i| paths[i].clone()).collect(), more)
 }
 
 /// [`path_candidates`] by index into `paths`, for a caller whose list holds more than paths.
-pub(super) fn ranked_paths(paths: &[String], recent: &[String], query: &str) -> (Vec<usize>, bool) {
+pub(super) fn ranked_paths(
+    paths: &[String],
+    recent: &[String],
+    query: &str,
+    own: &str,
+) -> (Vec<usize>, bool) {
     let mut matcher = fuzzy::Query::as_typed(query, fuzzy::Corpus::Paths);
     let query = query.to_lowercase();
     let used: HashMap<&str, usize> = recent
@@ -309,6 +316,7 @@ pub(super) fn ranked_paths(paths: &[String], recent: &[String], query: &str) -> 
     let mut hits: Vec<(bool, usize, Reverse<u32>, usize, usize)> = paths
         .iter()
         .enumerate()
+        .filter(|(_, rel)| *rel != own)
         .filter_map(|(i, rel)| {
             let score = matcher.score(rel)?;
             // Lowercased only for what matched: it is an allocation per path otherwise. The whole

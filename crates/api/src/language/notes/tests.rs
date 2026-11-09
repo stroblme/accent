@@ -101,7 +101,7 @@ fn tag_completion_puts_the_tags_of_similar_notes_first() {
 
 /// `[[` and `#` rank as Go to File does: the files the window used lead their tier, the latest
 /// first, and before anything is typed the files changed last follow them; `#` lists the tags
-/// those notes carry first. The note being written is not one of them.
+/// those notes carry first. The note being written is offered nowhere.
 #[test]
 fn link_and_tag_completion_put_what_was_used_lately_first() {
     let vault = tempfile::tempdir().unwrap();
@@ -111,7 +111,11 @@ fn link_and_tag_completion_put_what_was_used_lately_first() {
         (5, "x.md", "# X\n"),
         (4, "note-a.md", "#alpha\n"),
         (3, "zz/note-c.md", "#gamma\n"),
-        (2, "a.md", "[[x]]\n[[note-a]]\nsee #\n#delta\n"),
+        (
+            2,
+            "a.md",
+            "[[x]]\n[[note-a]]\nsee #\n#delta\n![[x]]\n[t](x.md)\n",
+        ),
         (1, "note-b.md", "#beta\n"),
     ] {
         let path = vault.path().join(rel);
@@ -143,16 +147,20 @@ fn link_and_tag_completion_put_what_was_used_lately_first() {
     // Nothing used yet: what changed last leads, and in a vault this small that is all of it.
     assert_eq!(
         rows(0, 2),
-        ["[[note-b]]", "[[note-c]]", "[[note-a]]", "[[x]]", "[[a]]"]
+        ["[[note-b]]", "[[note-c]]", "[[note-a]]", "[[x]]"]
     );
     *used.lock().unwrap() = vec!["a.md".into(), "zz/note-c.md".into(), "note-a.md".into()];
     assert_eq!(
-        rows(0, 2)[..4],
+        rows(0, 2),
         ["[[note-c]]", "[[note-a]]", "[[note-b]]", "[[x]]"]
     );
     // Typed, what was used leads its tier, and what changed last no longer counts.
     assert_eq!(rows(1, 4), ["[[note-c]]", "[[note-a]]", "[[note-b]]"]);
     assert_eq!(rows(2, 5)[..3], ["#gamma", "#alpha", "#beta"]);
+    // An embed and a link's destination leave the note out too.
+    let (embed, path) = (rows(4, 3), rows(5, 4));
+    assert!(embed.contains(&"[[x]]".to_string()) && !embed.contains(&"[[a]]".to_string()));
+    assert!(path.contains(&"x.md".to_string()) && !path.contains(&"a.md".to_string()));
 }
 
 #[test]
@@ -874,15 +882,18 @@ fn path_candidates_prefer_the_shortest_path_and_tags_keep_their_order() {
         .into();
 
     assert_eq!(
-        path_candidates(&paths, &[], "alp").0,
+        path_candidates(&paths, &[], "alp", "").0,
         ["Alpha.md", "sub/Alphabet.md"]
     );
-    assert_eq!(path_candidates(&paths, &[], "sub/").0, ["sub/Alphabet.md"]);
-    assert!(path_candidates(&paths, &[], "zzz").0.is_empty());
+    assert_eq!(
+        path_candidates(&paths, &[], "sub/", "").0,
+        ["sub/Alphabet.md"]
+    );
+    assert!(path_candidates(&paths, &[], "zzz", "").0.is_empty());
     // A typed extension still opens the name.
     let files: Vec<String> = ["b/xlogo.png", "a/deep/logo.png"].map(String::from).into();
     assert_eq!(
-        path_candidates(&files, &[], "logo.p").0,
+        path_candidates(&files, &[], "logo.p", "").0,
         ["a/deep/logo.png", "b/xlogo.png"]
     );
 
@@ -903,7 +914,7 @@ fn a_query_matches_anywhere_and_a_full_list_says_it_is_not_all_of_them() {
         .map(String::from)
         .into();
 
-    let (hits, more) = path_candidates(&paths, &[], "work");
+    let (hits, more) = path_candidates(&paths, &[], "work", "");
     assert_eq!(
         hits,
         ["Rework.md", "Projects/Groundwork.md"],
@@ -912,13 +923,16 @@ fn a_query_matches_anywhere_and_a_full_list_says_it_is_not_all_of_them() {
     assert!(!more, "everything that matched fits");
     // Nor does it have to be contiguous, since the matcher is the palette's.
     let scattered: Vec<String> = ["a-bc.md", "Deep-Work.md"].map(String::from).into();
-    assert_eq!(path_candidates(&scattered, &[], "bc").0, ["a-bc.md"]);
-    assert_eq!(path_candidates(&scattered, &[], "dpwk").0, ["Deep-Work.md"]);
+    assert_eq!(path_candidates(&scattered, &[], "bc", "").0, ["a-bc.md"]);
+    assert_eq!(
+        path_candidates(&scattered, &[], "dpwk", "").0,
+        ["Deep-Work.md"]
+    );
 
     let many: Vec<String> = (0..COMPLETIONS + 5)
         .map(|n| format!("Note{n}.md"))
         .collect();
-    let (hits, more) = path_candidates(&many, &[], "note");
+    let (hits, more) = path_candidates(&many, &[], "note", "");
     assert_eq!(hits.len(), COMPLETIONS);
     assert!(more, "the popup has to ask again as the word grows");
 }

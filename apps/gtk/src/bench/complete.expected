@@ -1,4 +1,4 @@
-bench complete_link_open ["complete-two", "complete-one", "note"] shown=true
+bench complete_link_open ["complete-two", "complete-one"] shown=true
 bench complete_link_narrow ["complete-two"] shown=true
 bench complete_link_down Stop "[[complete-t]]" selected=Some(0) shown=true
 bench complete_link_tab Stop "[[complete-two]]" selected=None shown=false

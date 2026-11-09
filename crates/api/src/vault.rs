@@ -1433,8 +1433,9 @@ mod tests {
             inserts.sort();
             assert_eq!(
                 inserts,
-                ["[[My Logo.png]]", "[[b/c/x]]", "[[n]]", "[[x]]"],
-                "`x` reaches a/x.md, the shorter path, so b/c/x.md is written out"
+                ["[[My Logo.png]]", "[[b/c/x]]", "[[x]]"],
+                "`x` reaches a/x.md, the shorter path, so b/c/x.md is written out, and the \
+                 note itself is no row"
             );
             assert_eq!(
                 items[0].replace,

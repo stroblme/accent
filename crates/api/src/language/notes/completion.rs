@@ -22,7 +22,7 @@ use crate::{Local, locked};
 impl Notes {
     /// The files a completion in the note at `rel` ranks first, the latest first, as Go to File
     /// does: those the window used, then, while nothing is `typed`, the [`RECENT`] changed last.
-    /// The note itself is none of them, since a link to it is rarely what is wanted.
+    /// The note itself is none of them, since no row offers it ([`ranked_paths`]).
     fn recent(&self, index: &Index, rel: &str, typed: bool) -> Result<Vec<String>> {
         let mut recent = locked(&self.used).clone();
         if !typed {
@@ -254,20 +254,24 @@ impl Notes {
                     aliases,
                 } = &*corpus;
                 let recent = self.recent(&index, rel, !prefix.is_empty())?;
-                let (ranked, more) = ranked_paths(paths, &recent, prefix);
+                let (ranked, more) = ranked_paths(paths, &recent, prefix, rel);
                 let mut items = Vec::with_capacity(ranked.len());
                 for i in ranked {
                     // The link names the file, as any other row writes it, and reads as the
                     // alias: an alias is a name to find a note by, never a link target.
-                    if let Some((alias, rel)) = i.checked_sub(*named).map(|j| &aliases[j]) {
-                        let (name, path) = link_names(rel);
-                        let target = match index.resolve_target(&name)?.as_ref() == Some(rel) {
+                    if let Some((alias, note)) = i.checked_sub(*named).map(|j| &aliases[j]) {
+                        // An alias names a note, and the note being written is no row.
+                        if note == rel {
+                            continue;
+                        }
+                        let (name, path) = link_names(note);
+                        let target = match index.resolve_target(&name)?.as_ref() == Some(note) {
                             true => name,
                             false => path,
                         };
                         items.push(Completion {
                             insert: format!("[[{target}|{alias}]]"),
-                            detail: Some(rel.clone()),
+                            detail: Some(note.clone()),
                             filter: Some(format!("[[{alias}")),
                             label: alias.clone(),
                             kind: Kind::File,
@@ -384,7 +388,7 @@ impl Notes {
                 let query = markdown::percent_decode(prefix);
                 let query = query.trim_start_matches(['.', '/']);
                 let recent = self.recent(&index, rel, !query.is_empty())?;
-                let (hits, more) = path_candidates(&files.paths, &recent, query);
+                let (hits, more) = path_candidates(&files.paths, &recent, query, rel);
                 let dir = parent_dir(rel);
                 let items = hits
                     .into_iter()
@@ -504,7 +508,7 @@ impl Notes {
         let query = prefix.strip_prefix("file:").unwrap_or(prefix);
         let query = query.trim_start_matches(['.', '/']);
         let recent = self.recent(&index, rel, !query.is_empty())?;
-        let (hits, more) = path_candidates(&files.paths, &recent, query);
+        let (hits, more) = path_candidates(&files.paths, &recent, query, rel);
         let dir = parent_dir(rel);
         let mut items = Vec::with_capacity(hits.len());
         for hit in hits {

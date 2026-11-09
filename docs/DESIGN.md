@@ -1531,7 +1531,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - In a note, `[[` offers notes and `![[` every file; both write a note by its stem and anything else by its whole name, or by its path where the name would resolve to another file first.
 - **Files rank as Go to File ranks them** in `[[`, `![[` and a link's `(` (user decision 2026-11-09).
   The files the window used lately lead their tier, the latest first, and before anything is typed the files changed last follow them, so an empty `[[` lists what was just worked on.
-  The note being written is not one of them, since a link to itself is rarely wanted.
+  The note being written is never offered, here or in an org file's `[[`, since a link to itself is rarely wanted.
   The popup keeps the provider's order inside a path's tier, where a name starting with what was typed counts as the path starting with it.
 - `[[` also offers the notes in the folders git ignores, after the indexed ones and marked ignored, and a link to one opens it with no dangling hint (Architecture, Gitignored folders).
 - `[[` also offers a note only linked to so far, after the real ones, by its path from the vault root and marked not created, so a second link reaches the same file once it is written; and a note by each front matter alias, written `[[Note|alias]]` because a link resolves by the file's name alone.
