@@ -56,30 +56,23 @@ Its default code relationships match names within the same language.
 It quotes call sites and lists implementations or subtypes where the scanner finds them.
 Set `precise` to request a language server's call hierarchy and a trait's implementations when available.
 
+Comparing the same method with [CodeGraph](https://github.com/colbymchenry/codegraph) on seven questions about this repository yields following benchmark results:
+
+|                                  | accent       | CodeGraph    |
+| -------------------------------- | ------------ | ------------ |
+| Index build                      | 3.0 s        | 11.0 s       |
+| Index size                       | 47 MB        | 95 MB        |
+| Median answer                    | 3,800 tokens | 6,200 tokens |
+| Median answer time               | 90 ms        | 300 ms       |
+| Answers that need no second call | 6 of 7       | 3 of 7       |
+
+You can run the benchmark yourself via `build-aux/explore-bench.py`.
+
 `read_note` reads Markdown and Org sections, and returns a text file's etag for subsequent writes.
 For a PDF, it returns indexed text under page headings without a write etag.
 A Jupyter notebook returns cell sources by default, while `view: "raw"` returns its editable JSON and etag.
 `write_note` needs the returned etag to replace an existing file.
 
-## Compared with CodeGraph
-
-`explore` answers the same kind of question as [CodeGraph](https://github.com/colbymchenry/codegraph)'s `codegraph_explore`, with notes, PDFs, links and tags in the same index.
-We asked both seven questions about this repository, among them a function, a trait, a file path and a Kotlin method.
-The numbers below come from accent 3.0.2 and CodeGraph 1.6.0 on a Xeon E5-2683 v4 server with 20 virtual cores in November 2026.
-
-| | accent | CodeGraph |
-|---|---|---|
-| Index build | 3.0 s | 11.0 s |
-| Index size | 47 MB | 95 MB |
-| Median answer | 3,800 tokens | 6,200 tokens |
-| Median answer time | 90 ms | 300 ms |
-| Answers that need no second call | 6 of 7 | 3 of 7 |
-
-An answer needs no second call when it quotes both the declaration and the use the question asks about.
-Both tools fill a fixed budget, so answer size mostly reflects their defaults of 16,000 and about 25,000 characters, counted here at four characters per token.
-Matching by name, accent counted four callers of `Edges::callers` where rust-analyzer and CodeGraph found two, and `precise` closes that gap.
-These questions come from the codebase accent's scanner is tested on, while CodeGraph's tree-sitter parsers cover more than 30 languages against the scanner's nine.
-`build-aux/explore-bench.py` repeats the measurement on a checkout of this repository.
 
 ## Jobs and shared terminals
 
