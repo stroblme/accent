@@ -585,8 +585,80 @@ pub(super) fn bench_wrap(app: &Rc<App>, rels: &str) {
         if let Some(tab) = last {
             bench_wrap_cost(&tab);
         }
+        bench_wrap_long(&app).await;
         bench_quit(&app);
     });
+}
+
+/// A line of 30,000 hex digits, which Pango finds nowhere to break, alone in a text file of its
+/// own: the time its tab takes to open and draw, a keystroke in the line until drawn (median and
+/// worst of ten), the main loop's worst stall and busy time over both, whether the line wraps
+/// between characters, and the rows it takes wrapped and with Alt+Z's wrap off.
+async fn bench_wrap_long(app: &Rc<App>) {
+    const REL: &str = "long-line.txt";
+    let Some(vault) = app.vault().cloned() else {
+        return;
+    };
+    let text = format!("{}\n", "0123456789abcdef".repeat(30_000 / 16));
+    let written =
+        crate::work::off_thread("wrap drill", move || vault.save(REL, &text, None).map(drop));
+    if !matches!(written.await, Some(Ok(()))) {
+        return println!("bench wrap_long unwritten");
+    }
+    let (t, beat) = (Instant::now(), super::native::Beat::start());
+    app.open_path(REL);
+    let opened = || {
+        (app.open_tabs().into_iter()).find(|tab| tab.rel() == REL && tab.buffer.char_count() > 0)
+    };
+    let mut tab = None;
+    for _ in 0..1000 {
+        tab = opened();
+        if tab.is_some() {
+            break;
+        }
+        glib::timeout_future(Duration::from_millis(5)).await;
+    }
+    let Some(tab) = tab else {
+        return println!("bench wrap_long not_open");
+    };
+    pumped().await;
+    super::kernel::painted(app).await;
+    let open = ms_since(t);
+    let mut keys = Vec::new();
+    for i in 0..10 {
+        let mut at = tab.buffer.start_iter();
+        at.forward_chars(15_000 + i);
+        tab.buffer.place_cursor(&at);
+        let t = Instant::now();
+        tab.buffer.insert_at_cursor("f");
+        super::kernel::painted(app).await;
+        keys.push(ms_since(t));
+    }
+    let (stall, busy) = beat.stop();
+    keys.sort_by(f64::total_cmp);
+    println!(
+        "bench wrap_long open_ms={open:.0} key_ms={:.0} key_max_ms={:.0} stall_ms={stall:.0} \
+         busy_ms={busy:.0}",
+        keys[keys.len() / 2],
+        keys[keys.len() - 1]
+    );
+    let start = tab.buffer.start_iter();
+    let by_char = (start.tags().iter()).any(|t| t.wrap_mode() == gtk::WrapMode::Char);
+    let rows = || {
+        let (mut at, mut rows) = (tab.buffer.start_iter(), 1);
+        while tab.view.forward_display_line(&mut at) && at.line() == 0 {
+            rows += 1;
+        }
+        rows
+    };
+    let wrapped = rows();
+    tab.toggle_wrap();
+    let unwrapped = rows();
+    tab.toggle_wrap();
+    println!(
+        "bench wrap_long char={} rows={wrapped} unwrapped_rows={unwrapped}",
+        u8::from(by_char)
+    );
 }
 
 fn bench_wrap_line(tab: &Rc<Tab>, line: i32) -> String {

@@ -74,7 +74,6 @@ impl Placeholder {
         // A text view wraps a pixel short of its width, which it keeps for the cursor; with no
         // width given, nothing wraps.
         let fit = (width > 0).then(|| (width - 1 - margins.left - margins.right).max(1));
-        layout.set_wrap(pango::WrapMode::WordChar);
         // GtkSourceView's tab stops: as wide as the tab width's spaces (`editor::build`).
         let space = self.create_pango_layout(Some(" ")).size().0;
         let tab = self
@@ -116,6 +115,11 @@ impl Placeholder {
                 layout.set_width((fit + out) * pango::SCALE);
             }
             layout.set_indent(-hang * pango::SCALE);
+            // As the editor's `char-wrap` tag wraps an unbroken line (`wrap::char_wrap`).
+            layout.set_wrap(match crate::wrap::unbroken(text) {
+                true => pango::WrapMode::Char,
+                false => pango::WrapMode::WordChar,
+            });
             layout.set_text(text);
             top += LINE_SPACING;
             line(&layout, margins.left - out, top);

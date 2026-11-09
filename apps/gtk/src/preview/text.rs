@@ -95,6 +95,10 @@ impl Tags {
             f(&t);
             t
         };
+        // Below every other tag: a code block's wraps by character already.
+        set(crate::wrap::CHAR_WRAP, &|t| {
+            t.set_wrap_mode(gtk::WrapMode::Char)
+        });
         Tags {
             prose: tag("prose"),
             gap: tag("gap"),
@@ -871,6 +875,7 @@ pub(super) fn write(
     }
     let first = buffer.iter_at_offset(start);
     buffer.apply_tag(&page.tags.prose, &first, at);
+    crate::wrap::char_wrap(buffer.upcast_ref(), first.line(), at.line());
     (buffer.create_mark(None, &first, false), facts)
 }
 

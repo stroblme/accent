@@ -549,7 +549,7 @@ async fn long_print(app: &Rc<App>, tab: &Rc<NotebookTab>, n: usize) -> bool {
 }
 
 /// Once the window has painted a frame asked for now.
-async fn painted(app: &Rc<App>) {
+pub(super) async fn painted(app: &Rc<App>) {
     let (painted, frame) = futures_channel::oneshot::channel();
     if let Some(clock) = app.window.frame_clock() {
         let (painted, handler) = (Cell::new(Some(painted)), Rc::new(Cell::new(None)));

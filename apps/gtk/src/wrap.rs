@@ -7,6 +7,10 @@
 //!
 //! Paragraph properties come from the first character, so tags cover whole lines. [`follow`]
 //! retags only edited lines; [`refence`] updates fenced lines after styling changes.
+//!
+//! A line holding a long run Pango finds nowhere to break wraps between any two characters
+//! ([`unbroken`], [`CHAR_WRAP`]), in a text tab, a notebook's outputs and cell placeholders, and
+//! the native preview alike.
 
 use crate::{highlight, typing};
 use gtk::pango;
@@ -57,6 +61,87 @@ pub fn install(buffer: &sourceview5::Buffer) {
     for column in 1..=COLUMNS {
         if table.lookup(&name(column)).is_none() {
             table.add(&gtk::TextTag::new(Some(&name(column))));
+        }
+    }
+    if table.lookup(CHAR_WRAP).is_none() {
+        table.add(&gtk::TextTag::new(Some(CHAR_WRAP)));
+    }
+}
+
+/// The characters a run Pango finds nowhere to break may hold before its line wraps between any
+/// two characters: Pango's word wrap walks the rest of such a run for every row it fills, its time
+/// growing with the square of the run (473 ms for 30,000 characters at 800 px, 33 by character,
+/// ISSUES.md), and breaks it between characters all the same.
+pub(crate) const UNBROKEN: usize = 1_000;
+
+/// The tag an [`unbroken`] line wraps by, its wrap given as its view wraps; it covers whole lines,
+/// since a paragraph's wrap is its first character's.
+pub(crate) const CHAR_WRAP: &str = "char-wrap";
+
+/// Whether `line` holds a run of more than [`UNBROKEN`] characters that Pango's line breaking finds
+/// nowhere to break. A space nearly always allows a break, so only a line with a longer run free of
+/// them is asked of Pango.
+pub(crate) fn unbroken(line: &str) -> bool {
+    let long = |run: &str| run.len() > UNBROKEN && run.chars().nth(UNBROKEN).is_some();
+    line.len() > UNBROKEN && line.split(' ').any(long) && longest_run(line) > UNBROKEN
+}
+
+/// The most characters of `text` in a row that Pango may not break a line between.
+fn longest_run(text: &str) -> usize {
+    let attrs = log_attrs(text);
+    // One per character, then one for the end.
+    let (mut run, mut longest) = (0, 0);
+    for attr in &attrs[..attrs.len() - 1] {
+        run = if attr & 1 == 1 { 1 } else { run + 1 };
+        longest = longest.max(run);
+    }
+    longest
+}
+
+/// Pango's `PangoLogAttr` of each character of `text` and of its end, which pango-rs does not
+/// bind: one-bit `guint` fields that share one 32-bit word, `is_line_break` in its lowest bit, a
+/// layout `log_attrs_share_a_word_with_the_line_break_first` pins.
+fn log_attrs(text: &str) -> Vec<u32> {
+    let mut attrs = vec![0u32; text.chars().count() + 1];
+    // SAFETY: `text` is `text.len()` bytes of UTF-8 (well under `i32::MAX`, a file's text being
+    // capped far below it), and Pango writes as many attributes as `text` has characters, plus one,
+    // which `attrs` holds; the language is Pango's own, which it never frees.
+    unsafe {
+        pango::ffi::pango_get_log_attrs(
+            text.as_ptr().cast(),
+            text.len() as i32,
+            -1,
+            pango::ffi::pango_language_get_default(),
+            attrs.as_mut_ptr().cast(),
+            attrs.len() as i32,
+        );
+    }
+    attrs
+}
+
+/// Give the [`unbroken`] ones of `buffer`'s lines `first..=last` the [`CHAR_WRAP`] tag and take it
+/// off the rest, touching only the lines that change, as a tag put on or taken off lays its range
+/// out again. Only a line of more than [`UNBROKEN`] characters is read.
+pub(crate) fn char_wrap(buffer: &gtk::TextBuffer, first: i32, last: i32) {
+    let Some(tag) = buffer.tag_table().lookup(CHAR_WRAP) else {
+        return;
+    };
+    for line in first..=last {
+        let Some(start) = buffer.iter_at_line(line) else {
+            break;
+        };
+        let mut end = start;
+        if !end.ends_line() {
+            end.forward_to_line_end();
+        }
+        let long = end.line_offset() > UNBROKEN as i32;
+        match (
+            long && unbroken(&buffer.text(&start, &end, true)),
+            start.has_tag(&tag),
+        ) {
+            (true, false) => buffer.apply_tag(&tag, &start, &end),
+            (false, true) => buffer.remove_tag(&tag, &start, &end),
+            _ => {}
         }
     }
 }
@@ -177,6 +262,18 @@ fn marker_tag(
 pub fn follow(view: &sourceview5::View, markers: bool) {
     let buffer = view.buffer();
     let tags = tags(&buffer);
+    // An unbroken line wraps by character while the view wraps at all, and not once Alt+Z has
+    // turned wrapping off, which the tag's own wrap would override.
+    let by_char = |view: &sourceview5::View| {
+        if let Some(tag) = view.buffer().tag_table().lookup(CHAR_WRAP) {
+            tag.set_wrap_mode(match view.wrap_mode() {
+                gtk::WrapMode::None => gtk::WrapMode::None,
+                _ => gtk::WrapMode::Char,
+            });
+        }
+    };
+    by_char(view);
+    view.connect_wrap_mode_notify(by_char);
     retag(view, &tags, markers, 0, buffer.line_count() - 1);
     // After the default handlers, which leave the insertion's iter behind the inserted text and a
     // deletion's two on the join. Weak: the view holds the buffer, which holds these closures.
@@ -274,6 +371,7 @@ fn moved<'a>(
 /// runs of equal indentation, which is cheaper beyond the number of tags.
 fn retag(view: &sourceview5::View, tags: &[gtk::TextTag], markers: bool, first: i32, last: i32) {
     let buffer = view.buffer();
+    char_wrap(buffer.upcast_ref(), first, last);
     let tab_width = view.tab_width() as usize;
     // GtkSourceView's own "one indent": the indent width, or the tab width while that is unset.
     let level = match view.indent_width() {
@@ -373,6 +471,32 @@ fn retag(view: &sourceview5::View, tags: &[gtk::TextTag], markers: bool, first: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `PangoLogAttr`'s one-bit fields read from one 32-bit word each: in `ab cd` a line may break
+    /// only before `c` and at the end (bit 0), anywhere by character (bit 2), and the space and the
+    /// end are white (bit 3). A layout that moved them, or a struct grown past a word, reads otherwise.
+    #[test]
+    fn log_attrs_share_a_word_with_the_line_break_first() {
+        let bit = |n: u32| -> Vec<u32> { log_attrs("ab cd").iter().map(|a| a >> n & 1).collect() };
+        assert_eq!(bit(0), [0, 0, 0, 1, 0, 1]);
+        assert_eq!(bit(2), [1; 6]);
+        assert_eq!(bit(3), [0, 0, 1, 0, 0, 1]);
+    }
+
+    /// Only a run Pango cannot break counts: hex digits, but not base64, whose `/` and `+` let a
+    /// line break, nor a paragraph of CJK, which breaks between its characters, nor words.
+    #[test]
+    fn a_run_pango_cannot_break_is_unbroken() {
+        let long = |piece: &str| piece.repeat(2_000 / piece.chars().count());
+        assert!(unbroken(&format!("x = {}", long("0123456789abcdef"))));
+        assert!(!unbroken(&long("QUJD/+ZW")));
+        assert!(!unbroken(&long("日本語の文章です。")));
+        assert!(!unbroken(&long("lorem ipsum ")));
+        assert!(
+            !unbroken(&"f".repeat(UNBROKEN)),
+            "a run of exactly the limit"
+        );
+    }
 
     /// A tab hangs a row from GtkSourceView's stop, whole pixels after the last, not from as many
     /// spaces: under Adwaita Sans 11 a space is 4.125 px, four of them 16.5 and the stop 17, so

@@ -24,7 +24,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::editor::Flavour;
 use crate::math;
-use crate::{highlight, look, theme, widgets};
+use crate::{highlight, look, theme, widgets, wrap};
 
 /// What the drill counts of a notebook's outputs.
 #[cfg(feature = "bench")]
@@ -239,7 +239,8 @@ impl Outputs {
                     buffer.delete(&mut start, &mut end);
                     let from = start.offset();
                     buffer.insert(&mut start, piece);
-                    wrap_unbroken(&buffer, &buffer.iter_at_offset(from), &start);
+                    let first = buffer.iter_at_offset(from).line();
+                    wrap::char_wrap(&buffer, first, start.line());
                 }
                 raw.clone_from(text);
                 if let Some(Copied::Text(copy)) = &mut slot.copy {
@@ -552,6 +553,9 @@ struct Shape {
     picture: (i32, i32),
     /// Room of a fixed height besides: a table's spacing.
     gaps: i32,
+    /// The lines of its text that wrap by character ([`wrap::unbroken`]), found once, as Pango
+    /// is asked of a long one.
+    by_char: Vec<usize>,
 }
 
 /// `output`'s shape, in the form [`Outputs::add`] draws it. A table's rows and notes, markdown
@@ -574,6 +578,7 @@ fn shape(output: &Output) -> Shape {
                     text: Some("\n".repeat(lines.saturating_sub(1))),
                     picture: (0, 0),
                     gaps,
+                    by_char: Vec::new(),
                 }
             }
             Some(Form::Markdown(text) | Form::Latex(text) | Form::Text(text)) => text_shape(text),
@@ -585,8 +590,14 @@ fn shape(output: &Output) -> Shape {
 
 /// Text as [`Outputs::text`] shows it, its escape sequences gone.
 fn text_shape(text: &str) -> Shape {
+    let text = plain(text);
+    let lines = text.split('\n').enumerate();
+    let by_char = lines
+        .filter(|(_, line)| wrap::unbroken(line))
+        .map(|(n, _)| n);
     Shape {
-        text: Some(plain(text)),
+        by_char: by_char.collect(),
+        text: Some(text),
         picture: (0, 0),
         gaps: 0,
     }
@@ -752,14 +763,15 @@ fn picture_shape((mime, data): (&str, &str)) -> Shape {
         text: None,
         picture: picture_size(mime, data).unwrap_or((0, 0)),
         gaps: 0,
+        by_char: Vec::new(),
     }
 }
 
 /// How many rows `line` takes wrapped at `fit` columns, as pango wraps a text view's words: as
 /// many to a row as fit, the spaces after them hanging past its end, and a word wider than a row
-/// broken between its characters; an [`unbroken`] line between any two characters.
-fn rows(line: &str, fit: u32) -> u32 {
-    if unbroken(line) {
+/// broken between its characters; a line `by_char` between any two characters.
+fn rows(line: &str, fit: u32, by_char: bool) -> u32 {
+    if by_char {
         return (line.width() as u32).div_ceil(fit).max(1);
     }
     let (mut rows, mut used) = (1, 0);
@@ -893,18 +905,20 @@ impl Held {
             false => u32::MAX,
         };
         let scale = i64::from(pango::SCALE);
-        let tall = |text: &str| -> i32 {
-            let lines = text.split('\n');
-            let each =
-                lines.map(|l| (i64::from(rows(l, fit)) * i64::from(line) + scale / 2) / scale);
+        let tall = |shape: &Shape| -> i32 {
+            let Some(text) = &shape.text else {
+                return 0;
+            };
+            let each = text.split('\n').enumerate().map(|(n, l)| {
+                let rows = rows(l, fit, shape.by_char.binary_search(&n).is_ok());
+                (i64::from(rows) * i64::from(line) + scale / 2) / scale
+            });
             each.sum::<i64>() as i32
         };
         let zoom = self.imp().zoom.borrow().get();
         let parts: i32 = shapes
             .iter()
-            .map(|s| {
-                s.text.as_deref().map_or(0, tall) + shown_size(s.picture, zoom, width).1 + s.gaps
-            })
+            .map(|s| tall(s) + shown_size(s.picture, zoom, width).1 + s.gaps)
             .sum();
         parts + SPACING * (shapes.len() as i32 - 1)
     }
@@ -985,7 +999,7 @@ fn shown(text: &str) -> &str {
 /// A read-only monospace view of `text`, selectable, which wraps once it is realized: GTK's
 /// realize lays out the caret's line before the view has a width, a character a row when it
 /// wraps, and Pango takes 8 s to wrap a 10,000-character word so (ISSUES.md). Its
-/// [`unbroken`] lines wrap between any two characters ([`CHAR_WRAP`]).
+/// [`wrap::unbroken`] lines wrap between any two characters.
 fn output_view(text: &str) -> gtk::TextView {
     let view = gtk::TextView::builder()
         .editable(false)
@@ -995,54 +1009,15 @@ fn output_view(text: &str) -> gtk::TextView {
     view.add_css_class("notebook-output");
     let buffer = view.buffer();
     buffer.set_text(text);
-    let by_char = gtk::TextTag::new(Some(CHAR_WRAP));
+    let by_char = gtk::TextTag::new(Some(wrap::CHAR_WRAP));
     buffer.tag_table().add(&by_char);
-    wrap_unbroken(&buffer, &buffer.start_iter(), &buffer.end_iter());
+    wrap::char_wrap(&buffer, 0, buffer.line_count() - 1);
     // After GTK's own realize, which a signal handler follows.
     view.connect_realize(move |view| {
         view.set_wrap_mode(gtk::WrapMode::WordChar);
         by_char.set_wrap_mode(gtk::WrapMode::Char);
     });
     view
-}
-
-/// The characters past which a run with no space in it wraps its line between any two
-/// characters: Pango's word wrap walks the rest of such a run for every row it fills, 55 ms for
-/// 10,000 characters at 800 px where a character wrap takes 10 (AMCOMP, 2026-11-09, ISSUES.md),
-/// and breaks it between its characters all the same.
-const UNBROKEN: usize = 1_000;
-
-/// The tag an output's [`unbroken`] lines wrap by, given its wrap once the view is realized, as
-/// the view is given its own.
-const CHAR_WRAP: &str = "char-wrap";
-
-/// Whether `line` holds a run of more than [`UNBROKEN`] characters with no space in it.
-fn unbroken(line: &str) -> bool {
-    let long = |run: &str| run.len() > UNBROKEN && run.chars().nth(UNBROKEN).is_some();
-    line.len() > UNBROKEN && line.split(' ').any(long)
-}
-
-/// Tag the [`unbroken`] ones of the lines from `from`'s to `to`'s with [`CHAR_WRAP`], which a
-/// text view reads at a line's start.
-fn wrap_unbroken(buffer: &gtk::TextBuffer, from: &gtk::TextIter, to: &gtk::TextIter) {
-    let (mut line, mut last) = (*from, *to);
-    line.set_line_offset(0);
-    if !last.ends_line() {
-        last.forward_to_line_end();
-    }
-    buffer.remove_tag_by_name(CHAR_WRAP, &line, &last);
-    loop {
-        let mut end = line;
-        if !end.ends_line() {
-            end.forward_to_line_end();
-        }
-        if unbroken(&buffer.text(&line, &end, false)) {
-            buffer.apply_tag_by_name(CHAR_WRAP, &line, &end);
-        }
-        if !line.forward_line() || line > last {
-            break;
-        }
-    }
 }
 
 /// The terminal's sixteen colours on `view`'s tags, for the theme in force.
@@ -1264,14 +1239,12 @@ mod tests {
             text: "\u{1b}[31mred\u{1b}[0m\n50%\r100%\n".into(),
         };
         assert_eq!(shape(&stream).text.as_deref(), Some("red\n100%"));
-        assert_eq!(rows("", 4), 1);
-        assert_eq!(rows("aaa bbb ccc", 7), 2);
-        assert_eq!(rows("abcdefghij", 4), 3);
-        assert_eq!(rows("全角 全角", 4), 2);
-        // A run past `UNBROKEN` wraps its line between characters, its label's row included.
-        let labelled = format!("x = {}", "y".repeat(1_045));
-        assert!(unbroken(&labelled) && !unbroken(&"y ".repeat(1_000)));
-        assert_eq!(rows(&labelled, 100), 11);
+        assert_eq!(rows("", 4, false), 1);
+        assert_eq!(rows("aaa bbb ccc", 7, false), 2);
+        assert_eq!(rows("abcdefghij", 4, false), 3);
+        assert_eq!(rows("全角 全角", 4, false), 2);
+        // A line wrapped by character fills its label's row too.
+        assert_eq!(rows(&format!("x = {}", "y".repeat(1_045)), 100, true), 11);
     }
 
     #[test]
