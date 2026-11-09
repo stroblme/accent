@@ -347,6 +347,48 @@ fn a_held_command_ends_with_its_status_and_is_not_run_again() {
     holder.assert_gone();
 }
 
+/// A command's attach that loses its holder once it has heard from it ends with the failure
+/// status, rather than starting a holder that would run the command a second time.
+#[test]
+fn a_command_whose_holder_died_is_not_run_again() {
+    let Some(mut holder) = Holder::start("lost") else {
+        return;
+    };
+    let starts = holder.tmp.join("starts");
+    let run = format!(
+        "echo start >>'{}'; echo up-$((40+2)); sleep 20",
+        starts.display()
+    );
+    let mut attach = cli(&holder.tmp)
+        .env("HOME", &holder.tmp)
+        .env("SHELL", "/bin/sh")
+        .args(["attach", "--owner", OWNER, "--run", &run, "cmd-lost"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Held open, as a tab's pty is: the end of input is a detach.
+    let _input = attach.stdin.take();
+    let mut out = attach.stdout.take().unwrap();
+    let (mut seen, mut bytes) = (String::new(), [0; 4096]);
+    while !seen.contains("up-42") {
+        let n = out.read(&mut bytes).unwrap();
+        assert!(n > 0, "the command never ran: {seen:?}");
+        seen.push_str(&String::from_utf8_lossy(&bytes[..n]));
+    }
+    holder.child.kill().unwrap();
+    holder.child.wait().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while attach.try_wait().unwrap().is_none() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = attach.kill();
+    let status = attach.wait().unwrap();
+    let starts = std::fs::read_to_string(&starts).unwrap_or_default();
+    assert_eq!(starts.lines().count(), 1, "the command ran again");
+    assert_eq!(status.code(), Some(254));
+}
+
 #[test]
 fn attach_existing_rejects_missing_and_other_vault_shells_without_creating() {
     let Some(mut holder) = Holder::start("existing") else {

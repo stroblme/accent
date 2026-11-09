@@ -126,14 +126,15 @@ pub(super) fn holder() -> io::Result<Option<UnixStream>> {
 }
 
 /// Relay until shell exit or takeover. Reattach after an unexpected disconnect, restarting a
-/// crashed current holder if needed; never move a legacy session to another holder.
+/// crashed current holder if needed; never move a legacy session to another holder. A command
+/// heard from is only taken up again (`--existing`): a holder that lost it would start it anew.
 fn relay(
     id: &str,
     cwd: &Path,
     owner: &str,
     run: Option<String>,
     winch: libc::sigset_t,
-    existing: bool,
+    mut existing: bool,
 ) -> i32 {
     let legacy = if existing {
         None
@@ -155,14 +156,15 @@ fn relay(
             UnixStream::connect(socket)
         } else if existing {
             holder().and_then(|conn| {
-                conn.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no terminal holder"))
+                conn.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "it is not running"))
             })
         } else {
             connect()
         } {
             Ok(conn) => conn,
             Err(e) => {
-                eprintln!("accent-cli: cannot start the terminal holder: {e}");
+                let what = if existing { "reach" } else { "start" };
+                eprintln!("accent-cli: cannot {what} the terminal holder: {e}");
                 return FAILED;
             }
         };
@@ -227,6 +229,7 @@ fn relay(
             }
         }
         shown |= heard;
+        existing |= heard && run.is_some();
         silent = if heard { 0 } else { silent + 1 };
     }
     eprintln!("accent-cli: the terminal holder keeps going away");
