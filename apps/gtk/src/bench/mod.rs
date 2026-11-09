@@ -1121,8 +1121,8 @@ fn cpu() -> u64 {
         .unwrap_or(0)
 }
 
-/// Time four Preferences presentations, the last after another vault was opened, which needs no
-/// new page: `open_ms`, `first_frame_ms`, frame count,
+/// Time five Preferences presentations, the fourth after another vault was opened, which needs no
+/// new page, and the fifth after a value it shows moved: `open_ms`, `first_frame_ms`, frame count,
 /// `worst_frame_ms`, total `layout_ms` and median `paint_ms`. Cairo paints the
 /// whole window in software under Xvfb. Verify external config changes update
 /// the retained dialog while closed or open, and Restore Defaults reuses it.
@@ -1135,12 +1135,17 @@ fn bench_prefs(app: &Rc<App>) {
         let Some(clock) = app.window.frame_clock() else {
             return bench_quit(&app);
         };
-        for round in 0..4 {
-            // The last opening follows a change the dialog does not show: another vault opened.
+        for round in 0..5 {
+            // The fourth opening follows a change the dialog does not show, another vault opened,
+            // and the fifth one it does, as Toggle Minimap is.
             if round == 3 {
                 app.config
                     .borrow_mut()
                     .touch_recent(Path::new("/tmp/accent-bench-other"));
+            }
+            if round == 4 {
+                let minimap = app.config.borrow().minimap;
+                app.config.borrow_mut().minimap = !minimap;
             }
             // Each phase's end, by its first letter: connected after GTK's own handlers, so an
             // update's mark is where the frame's styling and layout start, a layout's where they
@@ -1148,17 +1153,18 @@ fn bench_prefs(app: &Rc<App>) {
             let marks = Rc::new(RefCell::new(Vec::new()));
             let mark = |phase: char| {
                 let marks = marks.clone();
-                move |_: &gdk::FrameClock| marks.borrow_mut().push((phase, Instant::now()))
+                move |_: &gdk::FrameClock| marks.borrow_mut().push((phase, Instant::now(), cpu()))
             };
             let handlers = [
                 clock.connect_update(mark('u')),
                 clock.connect_layout(mark('l')),
                 clock.connect_paint(mark('p')),
             ];
-            let t0 = Instant::now();
+            let (t0, cpu0) = (Instant::now(), cpu());
             let _ = WidgetExt::activate_action(&app.window, "win.preferences", None);
-            let open = ms_since(t0);
+            let (open, open_cpu) = (ms_since(t0), (cpu() - cpu0) as f64 / 1e6);
             glib::timeout_future(ANIMATION).await;
+            let animation_cpu = (cpu() - cpu0) as f64 / 1e6;
             for handler in handlers {
                 clock.disconnect(handler);
             }
@@ -1173,6 +1179,8 @@ fn bench_prefs(app: &Rc<App>) {
             };
             let paints: Vec<Instant> = marks.iter().filter(|m| m.0 == 'p').map(|m| m.1).collect();
             let first = paints.first().map_or(f64::NAN, |&t| ms(t0, t));
+            let first_cpu =
+                (marks.iter().find(|m| m.0 == 'p')).map_or(f64::NAN, |m| (m.2 - cpu0) as f64 / 1e6);
             let gap = paints
                 .windows(2)
                 .map(|w| ms(w[0], w[1]))
@@ -1181,7 +1189,9 @@ fn bench_prefs(app: &Rc<App>) {
             painting.sort_by(f64::total_cmp);
             println!(
                 "bench prefs round={round} open_ms={open:.1} first_frame_ms={first:.1} \
-                 frames={} worst_frame_ms={gap:.1} layout_ms={:.1} paint_ms={:.1}",
+                 frames={} worst_frame_ms={gap:.1} layout_ms={:.1} paint_ms={:.1} \
+                 open_cpu_ms={open_cpu:.1} first_frame_cpu_ms={first_cpu:.1} \
+                 cpu_ms={animation_cpu:.1}",
                 paints.len(),
                 between('u', 'l').iter().sum::<f64>(),
                 painting

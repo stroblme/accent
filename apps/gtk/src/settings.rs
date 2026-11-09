@@ -5,12 +5,12 @@
 
 use crate::editors;
 use accent_core::config::{
-    Config, CustomCommand, DebugTerminal, DiagramConfig, DrawingConfig, Editor, FocusMode,
-    RecolourConfig, Theme, VaultConfig,
+    Config, CustomCommand, DebugTerminal, Editor, FocusMode, Theme, VaultConfig,
 };
 use adw::prelude::*;
 use gtk::{gio, glib, pango};
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -55,10 +55,7 @@ const DEBUG_TERMINALS: [(DebugTerminal, &str); 5] = [
 /// work during the presentation animation (`ACCENT_BENCH_SWITCHER=prefs`).
 pub struct Preferences {
     dialog: adw::PreferencesDialog,
-    config: Rc<RefCell<Config>>,
-    /// What the rows showed of the config ([`on_page`]) while closed, `None` while shown. Rebuild
-    /// rows if it changed between openings because each row reads its initial value only once.
-    shown: Rc<RefCell<Option<Config>>>,
+    rows: Rc<Rows>,
 }
 
 impl Preferences {
@@ -73,61 +70,76 @@ impl Preferences {
         let dialog = adw::PreferencesDialog::builder()
             .title("Preferences")
             .build();
-        fill(&dialog, &config, &root, &on_change);
+        let rows = fill(&dialog, &config, &root, &on_change);
 
-        // A config taken in from the file is a new page in the same dialog, for the reason a
-        // reset is: every row is built reading its new value, so no row's handler runs and
-        // nothing is written back. Weak: the action hangs off the dialog.
+        // A config taken in from the file sets the rows whose values it moved, as a reset does.
+        // The action hangs off the dialog, and the rows hold their widgets weakly.
         let action = gio::SimpleAction::new("reload", None);
         action.connect_activate({
-            let (weak, config) = (dialog.downgrade(), config.clone());
-            move |_, _| {
-                if let Some(dialog) = weak.upgrade() {
-                    fill(&dialog, &config, &root, &on_change);
-                }
-            }
+            let rows = rows.clone();
+            move |_, _| rows.refresh()
         });
         let actions = gio::SimpleActionGroup::new();
         actions.add_action(&action);
         dialog.insert_action_group("preferences", Some(&actions));
-
-        let shown = Rc::new(RefCell::new(Some(on_page(&config.borrow()))));
-        dialog.connect_closed({
-            let (config, shown) = (config.clone(), shown.clone());
-            move |_| {
-                shown.replace(Some(on_page(&config.borrow())));
-            }
-        });
         crate::dialogs::close_on_outside_press(dialog.upcast_ref());
-        Preferences {
-            dialog,
-            config,
-            shown,
-        }
+        Preferences { dialog, rows }
     }
 
+    /// Show the dialog, its rows set to the config first: a value moved while it was shut, by a
+    /// hand edit or the palette, shows as it now is.
     pub fn present(&self, parent: &impl IsA<gtk::Widget>) {
-        let shown = self.shown.take();
-        if shown.is_some_and(|shown| shown != on_page(&self.config.borrow())) {
-            reload(self.dialog.upcast_ref());
-        }
+        self.rows.refresh();
         self.dialog.present(Some(parent));
     }
 }
 
-/// `config` less what no row shows and using accent moves: the recent vaults (a vault opened),
-/// the drawing ring's pens and a diagram's tools. A new page costs the opening its build and first
-/// layout, as the first opening did, where a page shown before takes about 5 ms
-/// (`ACCENT_BENCH_SWITCHER=prefs`).
-fn on_page(config: &Config) -> Config {
-    Config {
-        recent_vaults: Vec::new(),
-        drawing: DrawingConfig {
-            mouse: config.drawing.mouse,
-            ..DrawingConfig::default()
-        },
-        diagram: DiagramConfig::default(),
-        ..config.clone()
+/// What the rows are built from and write to, and how each is set from the config again. A row
+/// reads its value as it is built and follows the config from then on, so a value moved elsewhere
+/// changes only the rows showing it, where a new page of rows cost an opening as much as the
+/// first one did (`ACCENT_BENCH_SWITCHER=prefs`).
+struct Rows {
+    config: Rc<RefCell<Config>>,
+    save: Rc<dyn Fn()>,
+    /// Set while the rows are set from the config, when what a row's handler would write is
+    /// already there.
+    quiet: Cell<bool>,
+    /// What sets each row from the config, holding it weakly: its handlers hold these rows.
+    setters: RefCell<Vec<Setter>>,
+}
+
+/// Sets a row from the config.
+type Setter = Box<dyn Fn(&mut Config)>;
+
+impl Rows {
+    /// Change the config as a row asks and write it, unless the row is being set from it.
+    fn set(&self, change: impl FnOnce(&mut Config)) {
+        if self.quiet.get() {
+            return;
+        }
+        change(&mut self.config.borrow_mut());
+        (self.save)();
+    }
+
+    /// Set `row` from the config through `show` at each [`refresh`](Self::refresh).
+    fn follow<W: IsA<glib::Object>>(&self, row: &W, show: impl Fn(&W, &mut Config) + 'static) {
+        let row = row.downgrade();
+        self.setters.borrow_mut().push(Box::new(move |config| {
+            if let Some(row) = row.upgrade() {
+                show(&row, config);
+            }
+        }));
+    }
+
+    /// Set every row to what the config holds, writing nothing back. A row given the value it
+    /// shows changes nothing, so only the rows whose value moved are drawn again.
+    fn refresh(&self) {
+        let mut config = self.config.borrow().clone();
+        self.quiet.set(true);
+        for set in self.setters.borrow().iter() {
+            set(&mut config);
+        }
+        self.quiet.set(false);
     }
 }
 
@@ -143,23 +155,26 @@ pub fn save(config: &Config) {
     }
 }
 
-/// The action a Preferences dialog answers by building its rows again ([`reload`]).
+/// The action a Preferences dialog answers by setting its rows from the config ([`reload`]).
 const RELOAD: &str = "preferences.reload";
 
-/// Rebuild Preferences rows after a config change, on an open dialog or before
-/// reopening a cached one. Ignore dialogs without the reload action.
+/// Set an open Preferences dialog's rows from a config taken in from the file. Ignore dialogs
+/// without the reload action.
 pub fn reload(dialog: &adw::Dialog) {
     let _ = dialog.activate_action(RELOAD, None);
 }
 
-/// Replace the page from `config`: rows read values only at construction, so reset
-/// and external changes rebuild them rather than retain individual row handles.
+/// How many groups the dialog's first opening shows in the frame that shows it: Appearance and
+/// Match Colours, what the top of the dialog holds.
+const SHOWN_FIRST: usize = 2;
+
+/// Build the dialog's one page from `config`; from then on its rows follow the config ([`Rows`]).
 fn fill(
     dialog: &adw::PreferencesDialog,
     config: &Rc<RefCell<Config>>,
     root: &Option<PathBuf>,
     on_change: &Rc<dyn Fn(&Config)>,
-) {
+) -> Rc<Rows> {
     // The config is cloned out of the cell before saving, so `on_change` is free to borrow it
     // again without meeting an outstanding borrow of ours.
     let save: Rc<dyn Fn()> = Rc::new({
@@ -170,67 +185,70 @@ fn fill(
             on_change(&snapshot);
         }
     });
-
-    let page = adw::PreferencesPage::new();
-    page.add(&appearance_group(config, &save));
-    page.add(&recolour_group(config, &save));
-    page.add(&editor_group(config, &save));
-    page.add(&files_group(config, &save));
-    page.add(&git_group(config, &save));
-    page.add(&pdf_group(config, &save));
-    page.add(&terminal_group(config, &save));
-    page.add(&commands_group(config, &save));
-    if let Some(root) = root {
-        page.add(&vault_group(config, root, &save));
-    }
-    page.add(&reset_group(dialog, config, root, &save, on_change));
-    crate::widgets::smooth_wheels(page.upcast_ref());
-
-    // The new page opens where the old one was scrolled to: a hand edit or a reset is not the
-    // reader scrolling back to the top.
-    let top = dialog.visible_page().map(|old| {
-        let top = scroll(&old).map_or(0.0, |adjustment| adjustment.value());
-        dialog.remove(&old);
-        top
+    let rows = Rc::new(Rows {
+        config: config.clone(),
+        save,
+        quiet: Cell::new(false),
+        setters: RefCell::default(),
     });
-    dialog.add(&page);
-    if let (Some(top), Some(adjustment)) = (top.filter(|top| *top > 0.0), scroll(&page)) {
-        scroll_once_laid_out(&adjustment, top);
+
+    let mut groups = vec![
+        appearance_group(&rows),
+        recolour_group(&rows),
+        editor_group(&rows),
+        files_group(&rows),
+        git_group(&rows),
+        pdf_group(&rows),
+        terminal_group(&rows),
+        commands_group(&rows),
+    ];
+    if let Some(root) = root {
+        groups.push(vault_group(&rows, root));
     }
+    groups.push(reset_group(dialog, &rows));
+    let page = adw::PreferencesPage::new();
+    for group in &groups {
+        page.add(group);
+    }
+    stage(&page, &groups[SHOWN_FIRST..]);
+    crate::widgets::smooth_wheels(page.upcast_ref());
+    dialog.add(&page);
+    rows
 }
 
-/// A page's vertical scroll: its one child is the scrolled window it holds its groups in, which
-/// AdwPreferencesPage has no getter for.
-fn scroll(page: &adw::PreferencesPage) -> Option<gtk::Adjustment> {
-    let scroller = page.first_child().and_downcast::<gtk::ScrolledWindow>()?;
-    Some(scroller.vadjustment())
-}
-
-/// Scroll to `top` once the page has a height: until it is laid out the adjustment's range is
-/// empty and would clamp the value to 0.
-fn scroll_once_laid_out(adjustment: &gtk::Adjustment, top: f64) {
-    let handler = Rc::new(RefCell::new(None));
-    let id = adjustment.connect_changed({
-        let handler = handler.clone();
-        move |adjustment| {
-            if adjustment.page_size() <= 0.0 {
-                return;
+/// Hide `later` until the page's first frame is drawn, then show one a frame. GTK styles and lays
+/// out a page never shown in the frame that shows it, which held the dialog's first opening about
+/// three times as long as a reopening before its animation could run (main-thread CPU,
+/// `ACCENT_BENCH_SWITCHER=prefs`); the groups below the first screen come in while it fades in.
+fn stage(page: &adw::PreferencesPage, later: &[adw::PreferencesGroup]) {
+    for group in later {
+        group.set_visible(false);
+    }
+    let later: RefCell<Vec<_>> = RefCell::new(later.iter().rev().map(|g| g.downgrade()).collect());
+    let first = Cell::new(true);
+    // A tick callback runs from the frame that shows the page first, its first opening.
+    page.add_tick_callback(move |_, _| {
+        if first.replace(false) {
+            return glib::ControlFlow::Continue;
+        }
+        match later.borrow_mut().pop() {
+            Some(group) => {
+                if let Some(group) = group.upgrade() {
+                    group.set_visible(true);
+                }
+                glib::ControlFlow::Continue
             }
-            if let Some(id) = handler.take() {
-                adjustment.disconnect(id);
-            }
-            adjustment.set_value(top);
+            None => glib::ControlFlow::Break,
         }
     });
-    handler.replace(Some(id));
 }
 
 // ------------------------------------------------------------------------------- appearance
 
-fn appearance_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::PreferencesGroup {
+fn appearance_group(rows: &Rc<Rows>) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder().title("Appearance").build();
 
-    let chosen = config.borrow().theme;
+    let chosen = rows.config.borrow().theme;
     let names: Vec<&str> = THEMES.iter().map(|(_, name)| *name).collect();
     let row = adw::ComboRow::builder()
         .title("Theme")
@@ -239,19 +257,19 @@ fn appearance_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::P
         .selected(index_of(chosen))
         .build();
     row.connect_selected_notify({
-        let (config, save) = (config.clone(), save.clone());
+        let rows = rows.clone();
         move |r| {
             let Some((theme, _)) = THEMES.get(r.selected() as usize) else {
                 return;
             };
-            config.borrow_mut().theme = *theme;
-            save();
+            rows.set(|c| c.theme = *theme);
         }
     });
+    rows.follow(&row, |row, c| row.set_selected(index_of(c.theme)));
     group.add(&row);
 
     // The subtitle follows the pick, so the row says what the chosen level will fade.
-    let chosen = focus_index(config.borrow().focus_mode);
+    let chosen = focus_index(rows.config.borrow().focus_mode);
     let names: Vec<&str> = FOCUS_MODES.iter().map(|(_, name, _)| *name).collect();
     let focus = adw::ComboRow::builder()
         .title("Focus Mode")
@@ -260,57 +278,66 @@ fn appearance_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::P
         .selected(chosen)
         .build();
     focus.connect_selected_notify({
-        let (config, save) = (config.clone(), save.clone());
+        let rows = rows.clone();
         move |r| {
             let Some((mode, _, what)) = FOCUS_MODES.get(r.selected() as usize) else {
                 return;
             };
             r.set_subtitle(what);
-            config.borrow_mut().focus_mode = *mode;
-            save();
+            rows.set(|c| c.focus_mode = *mode);
         }
     });
+    rows.follow(&focus, |row, c| row.set_selected(focus_index(c.focus_mode)));
     group.add(&focus);
     group
 }
 
 /// A switch for each kind of file a dark or Solarized theme recolours. Off, a kind's files show as
 /// they are, and its Invert command recolours one of them instead.
-fn recolour_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::PreferencesGroup {
+fn recolour_group(rows: &Rc<Rows>) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder()
         .title("Match Colours to Theme")
         .build();
-    type Switch = fn(&mut RecolourConfig) -> &mut bool;
-    let rows: [(&str, Option<&str>, Switch); 3] = [
+    let switches: [(&str, Option<&str>, Switch); 3] = [
         (
             "Images",
             Some("Scans, plots and screenshots. Photos keep their colours"),
-            |k| &mut k.images,
+            |c| &mut c.recolour.images,
         ),
-        ("PDFs", None, |k| &mut k.pdfs),
-        ("Diagrams", Some("On the canvas and in notes"), |k| {
-            &mut k.diagrams
+        ("PDFs", None, |c| &mut c.recolour.pdfs),
+        ("Diagrams", Some("On the canvas and in notes"), |c| {
+            &mut c.recolour.diagrams
         }),
     ];
-    let mut kinds = config.borrow().recolour;
-    for (title, subtitle, switch) in rows {
-        let row = adw::SwitchRow::builder()
-            .title(title)
-            .active(*switch(&mut kinds))
-            .build();
-        if let Some(subtitle) = subtitle {
-            row.set_subtitle(subtitle);
-        }
-        row.connect_active_notify({
-            let (config, save) = (config.clone(), save.clone());
-            move |r| {
-                *switch(&mut config.borrow_mut().recolour) = r.is_active();
-                save();
-            }
-        });
-        group.add(&row);
+    for (title, subtitle, field) in switches {
+        group.add(&switch_row(rows, title, subtitle, field));
     }
     group
+}
+
+/// A switch's value in the config.
+type Switch = fn(&mut Config) -> &mut bool;
+
+/// A switch row for `field`.
+fn switch_row(
+    rows: &Rc<Rows>,
+    title: &str,
+    subtitle: Option<&str>,
+    field: Switch,
+) -> adw::SwitchRow {
+    let row = adw::SwitchRow::builder()
+        .title(title)
+        .active(*field(&mut rows.config.borrow_mut()))
+        .build();
+    if let Some(subtitle) = subtitle {
+        row.set_subtitle(subtitle);
+    }
+    row.connect_active_notify({
+        let rows = rows.clone();
+        move |r| rows.set(|c| *field(c) = r.is_active())
+    });
+    rows.follow(&row, move |row, c| row.set_active(*field(c)));
+    row
 }
 
 /// Return `theme`'s index in [`THEMES`] for the selected row.
@@ -332,7 +359,7 @@ fn focus_index(mode: FocusMode) -> u32 {
 /// where the shell finds no such program; a custom command, which only `config.toml` sets, is
 /// listed while it is picked. The shell is asked once the row is first shown
 /// ([`editors::installed`]), so a window that never opens Preferences never asks it.
-fn text_editor_row(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::ComboRow {
+fn text_editor_row(rows: &Rc<Rows>) -> adw::ComboRow {
     let row = adw::ComboRow::builder()
         .title("Text Editor")
         .subtitle("A terminal editor opens files in a terminal tab")
@@ -341,8 +368,10 @@ fn text_editor_row(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Co
     // selection changes say nothing about the reader's pick.
     let listed: Rc<RefCell<Vec<Editor>>> = Rc::default();
     let filling = Rc::new(Cell::new(false));
+    // The shell's answer, once it has given one, which a pick moved elsewhere is listed against.
+    let found: Rc<RefCell<Option<Vec<editors::Found>>>> = Rc::default();
     let fill = Rc::new({
-        let (config, listed, filling) = (config.clone(), listed.clone(), filling.clone());
+        let (config, listed, filling) = (rows.config.clone(), listed.clone(), filling.clone());
         move |row: &adw::ComboRow, found: Option<&[editors::Found]>| {
             let chosen = config.borrow().editor;
             let mut items = vec![(Editor::Accent, editors::name(Editor::Accent).to_string())];
@@ -375,14 +404,21 @@ fn text_editor_row(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Co
     });
     fill(&row, None);
     row.connect_selected_notify({
-        let (config, save) = (config.clone(), save.clone());
+        let (rows, listed) = (rows.clone(), listed.clone());
         move |r| {
             let picked = listed.borrow().get(r.selected() as usize).copied();
-            if filling.get() || picked.is_none_or(|e| e == config.borrow().editor) {
+            if filling.get() || picked.is_none_or(|e| e == rows.config.borrow().editor) {
                 return;
             }
-            config.borrow_mut().editor = picked.unwrap_or_default();
-            save();
+            rows.set(|c| c.editor = picked.unwrap_or_default());
+        }
+    });
+    rows.follow(&row, {
+        let (fill, found) = (fill.clone(), found.clone());
+        move |row, c| {
+            if listed.borrow().get(row.selected() as usize) != Some(&c.editor) {
+                fill(row, found.borrow().as_deref());
+            }
         }
     });
     let asked = Cell::new(false);
@@ -390,31 +426,30 @@ fn text_editor_row(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Co
         if asked.replace(true) {
             return;
         }
-        let (row, fill) = (row.downgrade(), fill.clone());
-        editors::installed(None, move |found| {
+        let (row, fill, found) = (row.downgrade(), fill.clone(), found.clone());
+        editors::installed(None, move |answer| {
+            found.replace(Some(answer.to_vec()));
             if let Some(row) = row.upgrade() {
-                fill(&row, Some(found));
+                fill(&row, Some(answer));
             }
         });
     });
     row
 }
 
-fn editor_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::PreferencesGroup {
+fn editor_group(rows: &Rc<Rows>) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder().title("Editor").build();
 
-    group.add(&text_editor_row(config, save));
+    group.add(&text_editor_row(rows));
     group.add(&font_row(
+        rows,
         "Document Font",
-        config,
-        save,
         |c| &mut c.editor_font,
         crate::editor::default_font,
     ));
     group.add(&font_row(
+        rows,
         "Preview Font",
-        config,
-        save,
         |c| &mut c.preview_font,
         crate::platform::document_font,
     ));
@@ -423,131 +458,90 @@ fn editor_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Prefe
     // a wide monitor, and the editor is not the window (the sidebar and the preview take theirs).
     // The minimum is 30 % because below that the editor's own floor takes over and the number
     // would stop meaning anything.
-    let width = adw::SpinRow::with_range(30.0, 100.0, 5.0);
-    width.set_title("Column Width");
-    width.set_subtitle("Document width as a percentage of the editor");
-    width.set_value(f64::from(config.borrow().column_width));
-    width.connect_value_notify({
-        let (config, save) = (config.clone(), save.clone());
-        move |r| {
-            config.borrow_mut().column_width = r.value().round() as u32;
-            save();
-        }
-    });
-    group.add(&width);
-
-    let full = adw::SwitchRow::builder()
-        .title("Full-Width Preview")
-        .subtitle("Use the full preview width")
-        .active(config.borrow().full_width_preview)
-        .build();
-    full.connect_active_notify({
-        let (config, save) = (config.clone(), save.clone());
-        move |r| {
-            config.borrow_mut().full_width_preview = r.is_active();
-            save();
-        }
-    });
-    group.add(&full);
-
+    group.add(&spin_row(
+        rows,
+        (
+            "Column Width",
+            "Document width as a percentage of the editor",
+        ),
+        (30.0, 100.0, 5.0),
+        |c| &mut c.column_width,
+    ));
+    group.add(&switch_row(
+        rows,
+        "Full-Width Preview",
+        Some("Use the full preview width"),
+        |c| &mut c.full_width_preview,
+    ));
     // Columns rather than a choice of 2/4/8: the number is what a tab character is worth on
     // screen, and a language whose house style is three of them is not ours to rule out.
-    let indent = adw::SpinRow::with_range(1.0, 16.0, 1.0);
-    indent.set_title("Indent Width");
-    indent.set_subtitle("Columns per indent");
-    indent.set_value(f64::from(config.borrow().indent_width));
-    indent.connect_value_notify({
-        let (config, save) = (config.clone(), save.clone());
-        move |r| {
-            config.borrow_mut().indent_width = r.value().round() as u32;
-            save();
-        }
-    });
-    group.add(&indent);
-
-    let spell = adw::SwitchRow::builder()
-        .title("Spell Checking")
-        .subtitle("Underline misspelled words as you type")
-        .active(config.borrow().spellcheck)
-        .build();
-    spell.connect_active_notify({
-        let (config, save) = (config.clone(), save.clone());
-        move |r| {
-            config.borrow_mut().spellcheck = r.is_active();
-            save();
-        }
-    });
-    group.add(&spell);
-
-    let words = adw::SwitchRow::builder()
-        .title("Word Suggestions")
-        .subtitle("Suggest words from the document and dictionary")
-        .active(config.borrow().word_suggestions)
-        .build();
-    words.connect_active_notify({
-        let (config, save) = (config.clone(), save.clone());
-        move |r| {
-            config.borrow_mut().word_suggestions = r.is_active();
-            save();
-        }
-    });
-    group.add(&words);
-
-    let ghost = adw::SwitchRow::builder()
-        .title("Ghost Text")
-        .subtitle("Complete lines using your vault. Press Tab to accept")
-        .active(config.borrow().ghost_text)
-        .build();
-    ghost.connect_active_notify({
-        let (config, save) = (config.clone(), save.clone());
-        move |r| {
-            config.borrow_mut().ghost_text = r.is_active();
-            save();
-        }
-    });
-    group.add(&ghost);
-
-    let numbers = adw::SwitchRow::builder()
-        .title("Line Numbers")
-        .subtitle("Show line numbers beside the document")
-        .active(config.borrow().line_numbers)
-        .build();
-    numbers.connect_active_notify({
-        let (config, save) = (config.clone(), save.clone());
-        move |r| {
-            config.borrow_mut().line_numbers = r.is_active();
-            save();
-        }
-    });
-    group.add(&numbers);
-
-    let minimap = adw::SwitchRow::builder()
-        .title("Minimap")
-        .subtitle("Replace the scrollbar with a document overview")
-        .active(config.borrow().minimap)
-        .build();
-    minimap.connect_active_notify({
-        let (config, save) = (config.clone(), save.clone());
-        move |r| {
-            config.borrow_mut().minimap = r.is_active();
-            save();
-        }
-    });
-    group.add(&minimap);
-
+    group.add(&spin_row(
+        rows,
+        ("Indent Width", "Columns per indent"),
+        (1.0, 16.0, 1.0),
+        |c| &mut c.indent_width,
+    ));
+    let switches: [(&str, &str, Switch); 5] = [
+        (
+            "Spell Checking",
+            "Underline misspelled words as you type",
+            |c| &mut c.spellcheck,
+        ),
+        (
+            "Word Suggestions",
+            "Suggest words from the document and dictionary",
+            |c| &mut c.word_suggestions,
+        ),
+        (
+            "Ghost Text",
+            "Complete lines using your vault. Press Tab to accept",
+            |c| &mut c.ghost_text,
+        ),
+        (
+            "Line Numbers",
+            "Show line numbers beside the document",
+            |c| &mut c.line_numbers,
+        ),
+        (
+            "Minimap",
+            "Replace the scrollbar with a document overview",
+            |c| &mut c.minimap,
+        ),
+    ];
+    for (title, subtitle, field) in switches {
+        group.add(&switch_row(rows, title, Some(subtitle), field));
+    }
     group
+}
+
+/// A spin row for `field`, titled and subtitled, over a range and step.
+fn spin_row(
+    rows: &Rc<Rows>,
+    (title, subtitle): (&str, &str),
+    (min, max, step): (f64, f64, f64),
+    field: fn(&mut Config) -> &mut u32,
+) -> adw::SpinRow {
+    let row = adw::SpinRow::with_range(min, max, step);
+    row.set_title(title);
+    row.set_subtitle(subtitle);
+    row.set_value(f64::from(*field(&mut rows.config.borrow_mut())));
+    row.connect_value_notify({
+        let rows = rows.clone();
+        move |r| rows.set(|c| *field(c) = r.value().round() as u32)
+    });
+    rows.follow(&row, move |row, c| row.set_value(f64::from(*field(c))));
+    row
 }
 
 /// A font row: `field` of the config, a font button and a Reset back to `default`, which
 /// `None` stands for.
 fn font_row(
+    rows: &Rc<Rows>,
     title: &str,
-    config: &Rc<RefCell<Config>>,
-    save: &Rc<dyn Fn()>,
     field: fn(&mut Config) -> &mut Option<String>,
     default: fn() -> String,
 ) -> adw::ActionRow {
-    let chosen = field(&mut config.borrow_mut()).clone();
+    let chosen = field(&mut rows.config.borrow_mut()).clone();
     let row = adw::ActionRow::builder()
         .title(title)
         .subtitle(font_subtitle(chosen.as_deref(), default))
@@ -574,50 +568,73 @@ fn font_row(
         .build();
     reset.add_css_class("flat");
 
-    // Set while Reset writes the system font back into the button, so the ::font-desc
-    // notification that follows is not stored as a deliberate choice.
-    let resetting = Rc::new(Cell::new(false));
+    // Set while the button is handed a font rather than one picked in it, the system font by
+    // Reset or the config's by a refresh, so the ::font-desc notification that follows is not
+    // stored as a deliberate choice.
+    let setting = Rc::new(Cell::new(false));
+    // The font the row shows, `None` for the default, which a refresh sets the row from the
+    // config only where it differs from: a family drawn in another one's place is not a change.
+    let shown = Rc::new(RefCell::new(chosen));
 
     button.connect_font_desc_notify({
-        let (config, save, row, reset, resetting) = (
-            config.clone(),
-            save.clone(),
+        let (rows, row, reset, setting, shown) = (
+            rows.clone(),
             row.clone(),
             reset.clone(),
-            resetting.clone(),
+            setting.clone(),
+            shown.clone(),
         );
         move |b| {
-            let Some(desc) = b.font_desc().filter(|_| !resetting.get()) else {
+            let Some(desc) = b.font_desc().filter(|_| !setting.get()) else {
                 return;
             };
             let font = desc.to_str().to_string();
-            *field(&mut config.borrow_mut()) = Some(font.clone());
+            shown.replace(Some(font.clone()));
             row.set_subtitle(&font_subtitle(Some(&font), default));
             reset.set_visible(true);
-            save();
+            rows.set(|c| *field(c) = Some(font));
         }
     });
 
     reset.connect_clicked({
-        let (config, save, row, button, resetting) = (
-            config.clone(),
-            save.clone(),
+        let (rows, row, button, setting, shown) = (
+            rows.clone(),
             row.clone(),
             button.clone(),
-            resetting.clone(),
+            setting.clone(),
+            shown.clone(),
         );
         move |b| {
-            *field(&mut config.borrow_mut()) = None;
+            shown.replace(None);
             // ponytail: GtkFontDialogButton has no "unset", so Reset shows the system font while
             // the config says None. Both mean the same thing to the view.
-            resetting.set(true);
+            setting.set(true);
             button.set_font_desc(&drawn(&button, &default()));
-            resetting.set(false);
+            setting.set(false);
             row.set_subtitle(&font_subtitle(None, default));
             // The keyboard stays in the row rather than leaving with the hidden button.
             button.grab_focus();
             b.set_visible(false);
-            save();
+            rows.set(|c| *field(c) = None);
+        }
+    });
+
+    rows.follow(&row, {
+        let (button, reset) = (button.downgrade(), reset.downgrade());
+        move |row, c| {
+            let font = field(c).clone();
+            let (Some(button), Some(reset)) = (button.upgrade(), reset.upgrade()) else {
+                return;
+            };
+            if *shown.borrow() == font {
+                return;
+            }
+            setting.set(true);
+            button.set_font_desc(&drawn(&button, &font.clone().unwrap_or_else(default)));
+            setting.set(false);
+            row.set_subtitle(&font_subtitle(font.as_deref(), default));
+            reset.set_visible(font.is_some());
+            shown.replace(font);
         }
     });
 
@@ -648,144 +665,94 @@ fn font_subtitle(font: Option<&str>, default: fn() -> String) -> String {
 
 // ------------------------------------------------------------------------------------ files
 
-fn files_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::PreferencesGroup {
+fn files_group(rows: &Rc<Rows>) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder().title("Files").build();
 
     // How the tree lists, which is no single row's business — so it is a preference rather than
     // an item on the menu a right-click over one row opens. `win.show-hidden-files` in the
     // palette toggles the same value.
-    let hidden = adw::SwitchRow::builder()
-        .title("Show Hidden Files")
-        .subtitle("Show files and folders with names starting with a dot")
-        .active(config.borrow().show_hidden)
-        .build();
-    hidden.connect_active_notify({
-        let (config, save) = (config.clone(), save.clone());
-        move |r| {
-            config.borrow_mut().show_hidden = r.is_active();
-            save();
-        }
-    });
-    group.add(&hidden);
-
+    group.add(&switch_row(
+        rows,
+        "Show Hidden Files",
+        Some("Show files and folders with names starting with a dot"),
+        |c| &mut c.show_hidden,
+    ));
     // Every vault's: the sort itself is the vault's, picked on the tree's Sort Files menu.
-    let among = adw::SwitchRow::builder()
-        .title("Sort Folders Among Files")
-        .subtitle("Order folders like files instead of keeping them on top")
-        .active(config.borrow().folders_among_files)
-        .build();
-    among.connect_active_notify({
-        let (config, save) = (config.clone(), save.clone());
-        move |r| {
-            config.borrow_mut().folders_among_files = r.is_active();
-            save();
-        }
-    });
-    group.add(&among);
-
-    let tint = adw::SwitchRow::builder()
-        .title("Colour Changed Files")
-        .subtitle("Use the accent colour for changes and green for new files")
-        .active(config.borrow().git_tint)
-        .build();
-    tint.connect_active_notify({
-        let (config, save) = (config.clone(), save.clone());
-        move |r| {
-            config.borrow_mut().git_tint = r.is_active();
-            save();
-        }
-    });
-    group.add(&tint);
-
+    group.add(&switch_row(
+        rows,
+        "Sort Folders Among Files",
+        Some("Order folders like files instead of keeping them on top"),
+        |c| &mut c.folders_among_files,
+    ));
+    group.add(&switch_row(
+        rows,
+        "Colour Changed Files",
+        Some("Use the accent colour for changes and green for new files"),
+        |c| &mut c.git_tint,
+    ));
     group
 }
 
 // -------------------------------------------------------------------------------------- git
 
-fn git_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::PreferencesGroup {
+fn git_group(rows: &Rc<Rows>) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder().title("Git").build();
-
-    let tree = adw::SwitchRow::builder()
-        .title("Group Changes by Folder")
-        .subtitle("Organise changes by folder in the Git pane")
-        .active(config.borrow().git_tree)
-        .build();
-    tree.connect_active_notify({
-        let (config, save) = (config.clone(), save.clone());
-        move |r| {
-            config.borrow_mut().git_tree = r.is_active();
-            save();
-        }
-    });
-    group.add(&tree);
-
+    group.add(&switch_row(
+        rows,
+        "Group Changes by Folder",
+        Some("Organise changes by folder in the Git pane"),
+        |c| &mut c.git_tree,
+    ));
     group
 }
 
 // -------------------------------------------------------------------------------------- pdf
 
-fn pdf_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::PreferencesGroup {
+fn pdf_group(rows: &Rc<Rows>) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder().title("PDF").build();
-
-    let mouse = adw::SwitchRow::builder()
-        .title("Draw with the Mouse")
-        .subtitle("Even when a pen is attached")
-        .active(config.borrow().drawing.mouse)
-        .build();
-    mouse.connect_active_notify({
-        let (config, save) = (config.clone(), save.clone());
-        move |r| {
-            config.borrow_mut().drawing.mouse = r.is_active();
-            save();
-        }
-    });
-    group.add(&mouse);
-
+    group.add(&switch_row(
+        rows,
+        "Draw with the Mouse",
+        Some("Even when a pen is attached"),
+        |c| &mut c.drawing.mouse,
+    ));
     group
 }
 
 // --------------------------------------------------------------------------------- terminal
 
-fn terminal_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::PreferencesGroup {
+fn terminal_group(rows: &Rc<Rows>) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder().title("Terminal").build();
 
     // Off, a focused shell leaves the window a small reserved set of chords (`actions::kept`).
-    let forward = adw::SwitchRow::builder()
-        .title("Forward All Keys")
-        .subtitle("Send all keys except copy, paste and Ctrl+Page Up/Down")
-        .active(config.borrow().forward_keys_to_terminal)
-        .build();
-    forward.connect_active_notify({
-        let (config, save) = (config.clone(), save.clone());
-        move |r| {
-            config.borrow_mut().forward_keys_to_terminal = r.is_active();
-            save();
-        }
-    });
-    group.add(&forward);
+    group.add(&switch_row(
+        rows,
+        "Forward All Keys",
+        Some("Send all keys except copy, paste and Ctrl+Page Up/Down"),
+        |c| &mut c.forward_keys_to_terminal,
+    ));
 
-    let chosen = config.borrow().debug_terminal;
+    let at = |place: DebugTerminal| {
+        (DEBUG_TERMINALS.iter())
+            .position(|(p, _)| *p == place)
+            .unwrap_or(0) as u32
+    };
     let names: Vec<&str> = DEBUG_TERMINALS.iter().map(|(_, name)| *name).collect();
     let place = adw::ComboRow::builder()
         .title("Debug Terminal")
         .subtitle("Pane for the debug terminal and console")
         .model(&gtk::StringList::new(&names))
-        .selected(
-            DEBUG_TERMINALS
-                .iter()
-                .position(|(p, _)| *p == chosen)
-                .unwrap_or(0) as u32,
-        )
+        .selected(at(rows.config.borrow().debug_terminal))
         .build();
     place.connect_selected_notify({
-        let (config, save) = (config.clone(), save.clone());
+        let rows = rows.clone();
         move |r| {
             if let Some((place, _)) = DEBUG_TERMINALS.get(r.selected() as usize) {
-                config.borrow_mut().debug_terminal = *place;
-                save();
+                rows.set(|c| c.debug_terminal = *place);
             }
         }
     });
+    rows.follow(&place, move |row, c| row.set_selected(at(c.debug_terminal)));
     group.add(&place);
 
     group
@@ -795,10 +762,33 @@ fn terminal_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Pre
 
 /// The user's own commands (`[[commands]]`): a row each, its name over its command line, opening
 /// on the two, its shortcut and Remove; Add Command puts a new one at the end, opened.
-fn commands_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::PreferencesGroup {
+fn commands_group(rows: &Rc<Rows>) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder().title("Commands").build();
-    command_rows(&group, &Rc::default(), config, save, None);
+    let shown: Rc<RefCell<Drawn>> = Rc::default();
+    command_rows(&group, &shown, rows, None);
+    // Drawn again only once the commands or a shortcut moved elsewhere, so an opened row stays
+    // open. Weak: the rows hold this.
+    let weak = Rc::downgrade(rows);
+    rows.follow(&group, move |group, c| {
+        if let Some(rows) = weak.upgrade()
+            && shown.borrow().from != drawn_from(c)
+        {
+            command_rows(group, &shown, &rows, None);
+        }
+    });
     group
+}
+
+/// The command rows on the page, and what of the config they show.
+#[derive(Default)]
+struct Drawn {
+    rows: Vec<glib::WeakRef<gtk::Widget>>,
+    from: (Vec<CustomCommand>, BTreeMap<String, Vec<String>>),
+}
+
+/// What the command rows show: the commands, and the shortcuts a clash is marked against.
+fn drawn_from(config: &Config) -> (Vec<CustomCommand>, BTreeMap<String, Vec<String>>) {
+    (config.commands.clone(), config.shortcuts.clone())
 }
 
 /// Change the commands, write them and draw their rows again, the one at the index opened.
@@ -809,33 +799,33 @@ type Redo = dyn Fn(&dyn Fn(&mut Vec<CustomCommand>), Option<usize>);
 /// handlers hold what redraws them.
 fn command_rows(
     group: &adw::PreferencesGroup,
-    shown: &Rc<RefCell<Vec<glib::WeakRef<gtk::Widget>>>>,
-    config: &Rc<RefCell<Config>>,
-    save: &Rc<dyn Fn()>,
+    shown: &Rc<RefCell<Drawn>>,
+    rows: &Rc<Rows>,
     open: Option<usize>,
 ) {
-    for row in shown.borrow_mut().drain(..).filter_map(|row| row.upgrade()) {
+    let drawn = std::mem::take(&mut shown.borrow_mut().rows);
+    for row in drawn.iter().filter_map(|row| row.upgrade()) {
         group.remove(&row);
     }
+    shown.borrow_mut().from = drawn_from(&rows.config.borrow());
     // What the rows' buttons do: change the config, write it and draw the rows again.
     let redo: Rc<Redo> = Rc::new({
-        let (group, shown) = (group.downgrade(), shown.clone());
-        let (config, save) = (config.clone(), save.clone());
+        let (group, shown, rows) = (group.downgrade(), shown.clone(), rows.clone());
         move |change, open| {
-            change(&mut config.borrow_mut().commands);
-            save();
+            rows.set(|c| change(&mut c.commands));
             if let Some(group) = group.upgrade() {
-                command_rows(&group, &shown, &config, &save, open);
+                command_rows(&group, &shown, &rows, open);
             }
         }
     });
-    let count = config.borrow().commands.len();
+    let count = rows.config.borrow().commands.len();
     for i in 0..count {
-        let row = command_row(config, save, &redo, i);
+        let row = command_row(rows, shown, &redo, i);
         row.set_expanded(open == Some(i));
         group.add(&row);
         shown
             .borrow_mut()
+            .rows
             .push(row.upcast_ref::<gtk::Widget>().downgrade());
     }
     let add = adw::ButtonRow::builder()
@@ -852,17 +842,19 @@ fn command_rows(
     group.add(&add);
     shown
         .borrow_mut()
+        .rows
         .push(add.upcast_ref::<gtk::Widget>().downgrade());
 }
 
 /// The command at `i`: its name and command line edited as typed, its shortcut recorded as the
 /// palette records one, refusing a chord in use by name, and a clash from a hand edit marked.
 fn command_row(
-    config: &Rc<RefCell<Config>>,
-    save: &Rc<dyn Fn()>,
+    rows: &Rc<Rows>,
+    shown: &Rc<RefCell<Drawn>>,
     redo: &Rc<Redo>,
     i: usize,
 ) -> adw::ExpanderRow {
+    let config = &rows.config;
     let command = config.borrow().commands[i].clone();
     // Names and command lines are plain text, not Pango markup.
     let row = adw::ExpanderRow::builder()
@@ -880,19 +872,21 @@ fn command_row(
         let entry = adw::EntryRow::builder().title(title).text(value).build();
         // ponytail: written on every keystroke, as the vault's folder rows are.
         entry.connect_changed({
-            let (config, save, row) = (config.clone(), save.clone(), row.downgrade());
+            let (rows, shown, row) = (rows.clone(), shown.clone(), row.downgrade());
             move |entry| {
                 let text = entry.text().to_string();
-                if let Some(command) = config.borrow_mut().commands.get_mut(i) {
-                    *field(command) = text.clone();
-                }
                 if let Some(row) = row.upgrade() {
                     match title {
                         "Name" => row.set_title(&text),
                         _ => row.set_subtitle(&text),
                     }
                 }
-                save();
+                rows.set(|c| {
+                    if let Some(command) = c.commands.get_mut(i) {
+                        *field(command) = text;
+                    }
+                });
+                shown.borrow_mut().from = drawn_from(&rows.config.borrow());
             }
         });
         row.add_row(&entry);
@@ -960,66 +954,45 @@ fn command_row(
 
 // ------------------------------------------------------------------------------- this vault
 
-fn vault_group(
-    config: &Rc<RefCell<Config>>,
-    root: &Path,
-    save: &Rc<dyn Fn()>,
-) -> adw::PreferencesGroup {
+fn vault_group(rows: &Rc<Rows>, root: &Path) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder().title("This Vault").build();
-    let vault = config.borrow().vault(root);
-
     group.add(&entry_row(
-        "Templates Folder",
-        None,
-        &vault.templates_dir,
-        config,
+        rows,
+        ("Templates Folder", None),
         root,
-        save,
-        |cfg, text| cfg.templates_dir = folder(text),
+        |vault| &vault.templates_dir,
+        |vault, text| vault.templates_dir = folder(text),
     ));
     group.add(&entry_row(
-        "New Files Folder",
-        Some("Leave empty to use the vault root"),
-        &vault.new_file_dir,
-        config,
+        rows,
+        (
+            "New Files Folder",
+            Some("Leave empty to use the vault root"),
+        ),
         root,
-        save,
-        |cfg, text| cfg.new_file_dir = folder(text),
+        |vault| &vault.new_file_dir,
+        |vault, text| vault.new_file_dir = folder(text),
     ));
     // Kept as typed but for spaces at the ends: `/` is the vault root and `./` the note's folder.
     group.add(&entry_row(
-        "Attachments Folder",
-        Some("Folder for pasted and dropped images. Leave empty for the note's folder, or use ./name for a subfolder"),
-        &vault.attachment_folder,
-        config,
+        rows,
+        ("Attachments Folder", Some("Folder for pasted and dropped images. Leave empty for the note's folder, or use ./name for a subfolder")),
         root,
-        save,
-        |cfg, text| cfg.attachment_folder = text.trim().to_string(),
+        |vault| &vault.attachment_folder,
+        |vault, text| vault.attachment_folder = text.trim().to_string(),
     ));
-
     group
 }
 
 // ---------------------------------------------------------------------------- restore defaults
 
 /// Confirm resetting settings because it changes values beyond those shown; name preserved settings.
-fn reset_group(
-    dialog: &adw::PreferencesDialog,
-    config: &Rc<RefCell<Config>>,
-    root: &Option<PathBuf>,
-    save: &Rc<dyn Fn()>,
-    on_change: &Rc<dyn Fn(&Config)>,
-) -> adw::PreferencesGroup {
+fn reset_group(dialog: &adw::PreferencesDialog, rows: &Rc<Rows>) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::new();
     let row = adw::ButtonRow::builder().title("Restore Defaults").build();
     row.add_css_class("destructive-action");
     row.connect_activated({
-        let (config, root, save, on_change) = (
-            config.clone(),
-            root.clone(),
-            save.clone(),
-            on_change.clone(),
-        );
+        let rows = rows.clone();
         // Weak: this closure hangs off a row inside the dialog, and a strong handle back to it is
         // the cycle that would keep the dialog alive past its window. Nothing here holds the
         // window either: the window holds the dialog.
@@ -1028,13 +1001,7 @@ fn reset_group(
             let Some(dialog) = dialog.upgrade() else {
                 return;
             };
-            let (config, root, save, on_change) = (
-                config.clone(),
-                root.clone(),
-                save.clone(),
-                on_change.clone(),
-            );
-            let weak = dialog.downgrade();
+            let rows = rows.clone();
             crate::dialogs::confirm(
                 &dialog,
                 "Restore Default Preferences?",
@@ -1043,11 +1010,7 @@ fn reset_group(
                 "Restore",
                 true,
                 move || {
-                    let Some(dialog) = weak.upgrade() else {
-                        return;
-                    };
-                    {
-                        let mut cfg = config.borrow_mut();
+                    rows.set(|cfg| {
                         let keep = std::mem::take(&mut cfg.recent_vaults);
                         let commands = std::mem::take(&mut cfg.commands);
                         *cfg = Config {
@@ -1055,9 +1018,8 @@ fn reset_group(
                             commands,
                             ..Config::default()
                         };
-                    }
-                    save();
-                    fill(&dialog, &config, &root, &on_change);
+                    });
+                    rows.refresh();
                 },
             );
         }
@@ -1066,32 +1028,46 @@ fn reset_group(
     group
 }
 
-/// Bind an entry to vault config through `set`, preserving typed text and caret position.
+/// Bind an entry to the vault's config: `get` reads its value and `set` writes what is typed,
+/// preserving typed text and caret position.
 fn entry_row(
-    title: &str,
-    tooltip: Option<&str>,
-    value: &str,
-    config: &Rc<RefCell<Config>>,
+    rows: &Rc<Rows>,
+    (title, tooltip): (&str, Option<&str>),
     root: &Path,
-    save: &Rc<dyn Fn()>,
-    set: impl Fn(&mut VaultConfig, &str) + 'static,
+    get: fn(&VaultConfig) -> &String,
+    set: fn(&mut VaultConfig, &str),
 ) -> adw::EntryRow {
-    let row = adw::EntryRow::builder().title(title).text(value).build();
+    let vault = rows.config.borrow().vault(root);
+    let row = adw::EntryRow::builder()
+        .title(title)
+        .text(get(&vault))
+        .build();
     row.set_tooltip_text(tooltip);
 
-    let (config, root, save) = (config.clone(), root.to_path_buf(), save.clone());
+    let root = root.to_path_buf();
     // ponytail: writes and saves on every keystroke. The file is about a kilobyte and this is a
     // dialog, so a debounce timer per row would cost more than it saves; add one if typing here
     // ever stutters on a slow disk.
-    row.connect_changed(move |r| {
-        let text = r.text().to_string();
-        {
-            let mut cfg = config.borrow_mut();
-            let mut vault = cfg.vault(&root);
-            set(&mut vault, &text);
-            cfg.set_vault(&root, vault);
+    row.connect_changed({
+        let (rows, root) = (rows.clone(), root.clone());
+        move |r| {
+            let text = r.text().to_string();
+            rows.set(|cfg| {
+                let mut vault = cfg.vault(&root);
+                set(&mut vault, &text);
+                cfg.set_vault(&root, vault);
+            });
         }
-        save();
+    });
+    // Set only where what the row says no longer comes to the config's value, so a folder typed
+    // as `/Daily/` stays as typed.
+    rows.follow(&row, move |row, c| {
+        let vault = c.vault(&root);
+        let mut typed = vault.clone();
+        set(&mut typed, &row.text());
+        if typed != vault {
+            row.set_text(get(&vault));
+        }
     });
     row
 }
@@ -1126,23 +1102,5 @@ mod tests {
         assert_eq!(folder("/ Templates/Daily "), "Templates/Daily");
         assert_eq!(folder(""), "");
         assert_eq!(folder("   "), "");
-    }
-
-    #[test]
-    fn only_what_a_row_shows_needs_a_new_page() {
-        let before = Config::default();
-        let mut used = before.clone();
-        used.recent_vaults.push("/elsewhere".into());
-        used.drawing.pen_width += 1.0;
-        used.diagram.grid = !used.diagram.grid;
-        assert_eq!(on_page(&used), on_page(&before));
-        for shown in [
-            |c: &mut Config| c.minimap = !c.minimap,
-            |c: &mut Config| c.drawing.mouse = !c.drawing.mouse,
-        ] {
-            let mut moved = before.clone();
-            shown(&mut moved);
-            assert_ne!(on_page(&moved), on_page(&before));
-        }
     }
 }

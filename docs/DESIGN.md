@@ -1084,8 +1084,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Files holds Show Hidden Files and Colour Changed Files, both on, and Sort Folders Among Files, off; the second tints the tree's changed names and leaves its dims alone (Sidebar → Files).
 - Commands holds the user's own commands (Terminal), each an `AdwExpanderRow` of its name over its command line, opening on Name, Command, its Shortcut (recorded as the palette records one, refusing a chord in use by name, a clash from a hand edit marked) and Remove Command; Add Command puts a new one at the end, opened. Restore Defaults keeps them, as it keeps the recent vaults: they are the user's, not settings with a default.
 - Each window builds its dialog once, on idle after it opens, and presents that one again: an open held the main thread about 60 ms before its animation could run, a stutter, and a dialog shown before holds it about 30 (release, Xvfb, `ACCENT_BENCH_SWITCHER=prefs`).
-  A config that moved while it was closed (a hand edit, the palette) gives it a new page before it shows, and Restore Defaults gives it one in place.
-  What using accent moves and no row shows, the recent vaults, the drawing ring's pens and a diagram's tools, gives it none (`settings::on_page`), since a new page costs the opening as much as the first one did.
+  Its rows follow the config rather than being built again (`settings::Rows`): a value moved while it was closed (a hand edit, the palette) is set in the row showing it as the dialog opens, and Restore Defaults sets its rows in place, since a new page cost an opening as much as the first one did.
+  Its first opening draws Appearance and Match Colours in the frame that shows it and the groups below one a frame after, as it fades in, since GTK styles and lays out a page never shown in the frame that shows it (`settings::stage`).
 - This Vault holds three folder rows: Templates, New Files and Attachments.
   The Attachments row keeps `./` and `/` as typed, those being the note's folder and the vault root.
 - A font's Reset is an icon button (`edit-clear-symbolic`, as GNOME Settings' Reset Shortcut is) left of its font button: the font button already shows the whole font name, and a text button would leave it nowhere to go.
@@ -1093,7 +1093,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - There is one config per process, so a change made anywhere — the dialog, the palette, the drawing ring, a rebound shortcut, Leave Out of Search — takes effect in every window at once, redoing only what it moved, and is written a second later, so a run of picks is one write.
 - `config.toml` is watched: a hand edit is taken in as it lands and never written over. accent's own unsaved changes stay on top key by key; where both changed one key the file wins, and the log says so.
   accent's own write changes only the keys it changed, through `toml_edit` (user decision 2026-10-28), so the file's comments, order and formatting stay as the user wrote them; a key at its default the file leaves out stays out, and a key the config does not hold (a retired one) goes.
-  An open Preferences dialog is given a new page of rows reading what was taken in, as Restore Defaults' is, so no row writes back what it was built with.
+  An open Preferences dialog has its rows set to what was taken in, as Restore Defaults does, and a row set so writes nothing back.
 - A file that does not parse is neither taken in nor written over: a toast and a log line say so once, accent keeps its running settings, and what changes meanwhile is written once the file parses again, or lost if accent quits first.
   Only a file that fails to parse at startup is moved aside to `config.toml.broken`.
 
