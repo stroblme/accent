@@ -341,6 +341,31 @@ fun saveOver(expected: Etag?, last: String, read: () -> Note, save: (Etag?) -> E
         save(now.etag)
     }
 
+/** What came of a note's write. */
+sealed interface Saved {
+    /** The vault has the text: written now, or nothing to write. */
+    data object Written : Saved
+
+    /** Not written, because the file moved under the note: saving is paused, the banner up. */
+    data object Paused : Saved
+
+    /** Not written, for [why], worded as [failure] words it. */
+    data class Failed(val why: String) : Saved
+}
+
+/**
+ * [write] what [typed] holds, and again for as long as it was typed into while a write was out,
+ * returning the last outcome: a note closed or swapped once the first write lands would otherwise
+ * take the words typed during it away with the buffer.
+ */
+suspend fun settle(typed: () -> String, write: suspend (String) -> Saved): Saved {
+    while (true) {
+        val text = typed()
+        val saved = write(text)
+        if (saved != Saved.Written || typed() == text) return saved
+    }
+}
+
 /**
  * Vault state and open note. Blocking core calls use [Dispatchers.IO]; filesystem updates use [rescan].
  */
@@ -897,18 +922,6 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** What came of a [write]. */
-    private sealed interface Saved {
-        /** The vault has the text: written now, or nothing to write. */
-        data object Written : Saved
-
-        /** Not written, because the file moved under the note: saving is paused, the banner up. */
-        data object Paused : Saved
-
-        /** Not written, for [why], worded as [fail] words it. */
-        data class Failed(val why: String) : Saved
-    }
-
     /**
      * Save the buffer, serializing writes; preserve it and show a banner on content conflicts.
      * [force] is Keep mine, written over the version the banner showed ([Open.gate]).
@@ -955,9 +968,10 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * Save before an exit can discard the buffer; leave paused conflicts for the reader to resolve.
+     * Save before an exit can discard the buffer, words typed while it is written included
+     * ([settle]); leave paused conflicts for the reader to resolve.
      */
-    private suspend fun flush(): Saved = write(buffer.text.toString())
+    private suspend fun flush(): Saved = settle({ buffer.text.toString() }) { write(it) }
 
     /**
      * Take the buffer away — for another note, for none, or with the vault — once [flush] has
@@ -989,7 +1003,11 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
         _state.update { s -> s.withNote { it.copy(leaving = false, unsaved = null) } }
         when (keep) {
             null -> {}
-            true -> exit(write(buffer.text.toString(), force = true), then)
+            // Then what was typed while it was written, as any exit writes it ([flush]).
+            true -> {
+                val kept = write(buffer.text.toString(), force = true)
+                exit(if (kept == Saved.Written) flush() else kept, then)
+            }
             false -> then()
         }
     }
