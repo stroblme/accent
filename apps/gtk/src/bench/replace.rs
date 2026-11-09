@@ -37,10 +37,12 @@ pub(super) fn bench_replace(app: &Rc<App>) {
         sidebar.show_replace();
         sidebar.set_search_text(MARKER);
         sidebar.set_replace_text("zzreplaced");
-        // Until the note's row is listed: a query asked before the worker took the note in gets it
-        // from the requery the note's update brings.
+        // Until the note's row is listed: a changed query shows the results page before its answer
+        // lands, and one asked before the worker took the note in gets it from the requery the
+        // note's update brings.
         until("replace", "results", WAIT, || {
-            sidebar.search_state().0 == "results"
+            let (page, rows, _) = sidebar.search_state();
+            page == "results" && !rows.is_empty()
         })
         .await;
         bench_replace_print(&app, &path, "before");
