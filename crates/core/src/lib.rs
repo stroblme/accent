@@ -19,6 +19,7 @@ pub mod malloc;
 pub mod markdown;
 pub mod note;
 pub mod notebook;
+pub mod order;
 pub mod org;
 pub mod orientation;
 pub mod page_edit;

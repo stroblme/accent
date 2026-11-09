@@ -358,6 +358,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.minimap", "Toggle Minimap", &[]),
     // No chord: `Ctrl+H`, the file managers' own, is Replace here.
     ("win.show-hidden-files", "Show Hidden Files", &[]),
+    ("win.sort-files-menu", "Sort Files…", &[]),
     ("win.copy-name", "Copy Name", &[]),
     ("win.copy-relative-path", "Copy Relative Path", &[]),
     ("win.copy-absolute-path", "Copy Absolute Path", &[]),

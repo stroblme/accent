@@ -155,6 +155,7 @@ pub fn applies(action: &str, cx: &Context) -> bool {
         | "win.git-init"
         | "win.palette-symbols"
         | "win.palette-tags"
+        | "win.sort-files-menu"
         | "app.close-vault" => vault,
         "win.upload" | "win.terminal-local" | "win.delete" | "win.download-file" => remote,
         // Neither is a host's: it has no trash, and a window with no vault opens a file by its

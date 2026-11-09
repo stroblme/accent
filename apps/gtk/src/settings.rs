@@ -668,6 +668,21 @@ fn files_group(config: &Rc<RefCell<Config>>, save: &Rc<dyn Fn()>) -> adw::Prefer
     });
     group.add(&hidden);
 
+    // Every vault's: the sort itself is the vault's, picked on the tree's Sort Files menu.
+    let among = adw::SwitchRow::builder()
+        .title("Sort Folders Among Files")
+        .subtitle("Order folders like files instead of keeping them on top")
+        .active(config.borrow().folders_among_files)
+        .build();
+    among.connect_active_notify({
+        let (config, save) = (config.clone(), save.clone());
+        move |r| {
+            config.borrow_mut().folders_among_files = r.is_active();
+            save();
+        }
+    });
+    group.add(&among);
+
     let tint = adw::SwitchRow::builder()
         .title("Colour Changed Files")
         .subtitle("Use the accent colour for changes and green for new files")

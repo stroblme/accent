@@ -407,6 +407,7 @@ impl App {
             // hid is saved as it was.
             sidebar,
             sidebar_width: sidebar_width(width),
+            file_order: self.tree.get().map(|t| t.order().sort).unwrap_or_default(),
             info: self
                 .sidebar
                 .get()
@@ -797,6 +798,13 @@ impl App {
         // every time. A window that came back on Search or Git left the reader looking at the
         // answer to a question they asked in another sitting.
         self.restore_sidebar(session.sidebar, sidebar_width(session.sidebar_width));
+        // The tree was listed in the stored sort already; a reloaded window's may be newer.
+        let sort = session.file_order.name().to_variant();
+        if let Some(action) = self.window.lookup_action("sort-files")
+            && action.state().as_ref() != Some(&sort)
+        {
+            action.change_state(&sort);
+        }
         if let Some(sidebar) = self.sidebar.get() {
             sidebar.restore_info(&session.info);
             sidebar.restore_code(&session.code);
@@ -1237,6 +1245,7 @@ fn unrestored(mut stored: Session, now: Session) -> Session {
         }
     }
     stored.active = stored.active.or(now.active);
+    stored.file_order = now.file_order;
     for rel in now.recent_files.iter().rev() {
         accent_core::config::touch(&mut stored.recent_files, rel, RECENT_FILES);
     }

@@ -1831,6 +1831,10 @@ impl App {
         }
         if let Some(tree) = self.tree.get() {
             tree.set_show_hidden(config.show_hidden);
+            tree.set_order(accent_core::order::Order {
+                folders_among_files: config.folders_among_files,
+                ..tree.order()
+            });
         }
         if let Some(action) = self.window.lookup_action("show-hidden-files") {
             action.change_state(&config.show_hidden.to_variant());

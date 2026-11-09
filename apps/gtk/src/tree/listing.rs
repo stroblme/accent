@@ -61,9 +61,15 @@ pub fn dot_named(rel: &str) -> bool {
 /// responses cannot restore removed rows.
 pub(super) type Asked = Rc<RefCell<HashMap<String, u64>>>;
 
-/// Shared Show Hidden Files preference, read when responses land so
-/// in-flight listings honor toggles made after the request.
-pub(super) type ShowHidden = Rc<Cell<bool>>;
+/// What shapes a listing: Show Hidden Files, read when a response lands so a listing in flight
+/// honours a toggle made after the request, and the order the vault asks for.
+#[derive(Clone, Copy)]
+pub(super) struct Shape {
+    pub show_hidden: bool,
+    pub order: Order,
+}
+
+pub(super) type Shaped = Rc<Cell<Shape>>;
 
 /// Run when a listing of the root lands, whether or not it changed the store.
 pub(super) type Landed = Option<Rc<dyn Fn()>>;
@@ -71,14 +77,17 @@ pub(super) type Landed = Option<Rc<dyn Fn()>>;
 /// Update `store` with direct children of `prefix` on a worker, then call `landed`.
 ///
 /// The store may remain empty briefly so remote expansion never blocks on a round trip.
-/// `list_dir` already sorts directories first and names case-insensitively.
+/// `list_dir_sorted` sorts where the files are, in the order `shape` holds when it is asked.
+/// `model` is the tree the store is listed in, whose folders the refill keeps open; `None` for a
+/// first listing, which has none.
 pub(super) fn fill(
     store: &gio::ListStore,
     vault: &Arc<Vault>,
     asked: &Asked,
-    show_hidden: &ShowHidden,
+    shape: &Shaped,
     prefix: &str,
     landed: Landed,
+    model: Option<&gtk::TreeListModel>,
 ) {
     let ticket = {
         let mut asked = asked.borrow_mut();
@@ -86,17 +95,12 @@ pub(super) fn fill(
         *n += 1;
         *n
     };
-    let (store, vault, asked, show_hidden) = (
-        store.clone(),
-        vault.clone(),
-        asked.clone(),
-        show_hidden.clone(),
-    );
-    let dir = prefix.to_string();
+    let (store, vault, asked, shape) = (store.clone(), vault.clone(), asked.clone(), shape.clone());
+    let (dir, order, model) = (prefix.to_string(), shape.get().order, model.cloned());
     glib::spawn_future_local(async move {
         let listed = crate::work::off_thread("tree", {
             let dir = dir.clone();
-            move || vault.list_dir(&dir)
+            move || vault.list_dir_sorted(&dir, order)
         })
         .await;
         // A newer listing of this directory was asked for while this one was on its way.
@@ -105,7 +109,7 @@ pub(super) fn fill(
         }
         match listed {
             Some(Ok(rows)) => {
-                splice(&store, rows, show_hidden.get());
+                splice(&store, rows, shape.get().show_hidden, model.as_ref(), &dir);
                 if let Some(landed) = landed {
                     landed();
                 }
@@ -118,8 +122,14 @@ pub(super) fn fill(
     });
 }
 
-/// The rows the listing produced, against the ones the store already holds.
-fn splice(store: &gio::ListStore, rows: Vec<accent_api::FileRow>, show_hidden: bool) {
+/// The rows the listing of `dir` produced, against the ones the store already holds.
+fn splice(
+    store: &gio::ListStore,
+    rows: Vec<accent_api::FileRow>,
+    show_hidden: bool,
+    model: Option<&gtk::TreeListModel>,
+    dir: &str,
+) {
     let items: Vec<String> = rows
         .into_iter()
         // `id == 0` is `Vault::list_dir` saying this row came off the disk rather than out of
@@ -134,9 +144,59 @@ fn splice(store: &gio::ListStore, rows: Vec<accent_api::FileRow>, show_hidden: b
         .iter()
         .map(|s| gtk::StringObject::new(s))
         .collect();
+    // A row taken out and put back is a new row, shut: a sort, or a folder a time sort moves,
+    // would shut every folder open in the span.
+    let open = model
+        .filter(|_| removed > 0)
+        .map(|model| open_in(model, dir, at, removed));
     // One splice, one `items-changed`. Appending row by row made a 2 400-child directory emit
     // 2 400 signals out through TreeListModel -> SingleSelection -> ListView.
     store.splice(at as u32, removed as u32, &new);
+    if let (Some(model), Some(open)) = (model, open) {
+        for rel in open {
+            if let Some(row) = super::find_row(model, &rel) {
+                row.set_expanded(true);
+            }
+        }
+    }
+}
+
+/// The folders open at or under rows `at..at + n` of `dir`'s listing in `model`, outermost first.
+fn open_in(model: &gtk::TreeListModel, dir: &str, at: usize, n: usize) -> Vec<String> {
+    let parent = match dir {
+        "" => None,
+        dir => match super::find_row(model, dir) {
+            Some(row) => Some(row),
+            // Shut, or not listed: nothing under it is open.
+            None => return Vec::new(),
+        },
+    };
+    let mut open = Vec::new();
+    for i in at..at + n {
+        let row = match &parent {
+            Some(parent) => parent.child_row(i as u32),
+            None => model.child_row(i as u32),
+        };
+        let Some(row) = row.filter(|row| row.is_expanded()) else {
+            continue;
+        };
+        // The rows under it follow it in the model, deeper than it, in order.
+        let depth = row.depth();
+        for position in row.position().. {
+            let Some(below) = model.item(position).and_downcast::<gtk::TreeListRow>() else {
+                break;
+            };
+            if position > row.position() && below.depth() <= depth {
+                break;
+            }
+            if below.is_expanded()
+                && let Some(item) = below.item().as_ref().and_then(decode)
+            {
+                open.push(item.rel);
+            }
+        }
+    }
+    open
 }
 
 /// The encoded value of every row currently in `store`.
@@ -193,7 +253,7 @@ pub(super) fn children_model(
     vault: &Arc<Vault>,
     cache: &Rc<RefCell<HashMap<String, gio::ListStore>>>,
     asked: &Asked,
-    show_hidden: &ShowHidden,
+    shape: &Shaped,
     rel: &str,
 ) -> gio::ListStore {
     // Cloned out so the cache borrow cannot still be live during `fill`.
@@ -203,7 +263,7 @@ pub(super) fn children_model(
     }
     let t0 = Instant::now();
     let store = gio::ListStore::new::<gtk::StringObject>();
-    fill(&store, vault, asked, show_hidden, rel, None);
+    fill(&store, vault, asked, shape, rel, None, None);
     cache.borrow_mut().insert(rel.to_string(), store.clone());
     tracing::debug!(
         dir = rel,

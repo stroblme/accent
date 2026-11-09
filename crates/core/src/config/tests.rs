@@ -69,6 +69,7 @@ fn config_roundtrip_parses_the_documented_example() {
     assert!(!c.line_numbers);
     assert!(c.git_tree);
     assert!(!c.show_hidden);
+    assert!(c.folders_among_files);
     assert!(!c.git_tint);
     assert_eq!(c.column_width, 50);
     assert!(c.full_width_preview);
@@ -573,6 +574,7 @@ fn session_roundtrips_as_json() {
         )),
         sidebar: false,
         sidebar_width: 320,
+        file_order: crate::order::Sort::CreatedOld,
         info: InfoPane {
             references: false,
             tags: true,
@@ -683,6 +685,7 @@ fn session_roundtrips_as_json() {
         assert_eq!(back.diagram, s.diagram);
         assert!(!back.sidebar);
         assert_eq!(back.sidebar_width, 320);
+        assert_eq!(back.file_order, s.file_order);
         assert_eq!(back.info, s.info);
         assert_eq!(back.code, s.code);
         assert_eq!(back.zoom, 1.2);

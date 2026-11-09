@@ -10,6 +10,7 @@ use crate::Result;
 
 use accent_core::code::Lang;
 use accent_core::index::Index;
+use accent_core::order::Order;
 use accent_core::walk::{self, FileKind};
 use accent_core::{git, notebook, search};
 
@@ -29,6 +30,14 @@ impl Local {
     /// without indexing, watching or searching them.
     pub fn list_dir(&self, rel: &str) -> Result<Vec<FileRow>> {
         list_dir(&self.index(), &self.root, rel)
+    }
+
+    /// [`list_dir`](Local::list_dir) in the file tree's `order`, the times it sorts by read off
+    /// this disk.
+    pub fn list_dir_sorted(&self, rel: &str, order: Order) -> Result<Vec<FileRow>> {
+        let mut rows = self.list_dir(rel)?;
+        order.sort(&self.root, &mut rows);
+        Ok(rows)
     }
 
     /// See [`Vault::indexed_text`](crate::Vault::indexed_text).
@@ -578,6 +587,43 @@ mod tests {
         assert_eq!(
             names(&f.vault.list_dir("").unwrap()),
             [".obsidian", ".gitignore"]
+        );
+    }
+
+    /// A time sort reads each row's time off the disk, a folder the index never walked included.
+    #[test]
+    fn list_dir_sorted_reads_the_times_off_the_disk() {
+        use accent_core::order::{Order, Sort};
+        let f = Fixture::open(VaultConfig::default());
+        f.write("old.md", "a");
+        f.write("new.md", "b");
+        f.write("node_modules/pkg.js", "c");
+        let at = |rel: &str, secs| {
+            // A folder's times are set through a handle that only reads, as a file's can be.
+            let file = std::fs::File::open(f.vault.root().join(rel)).unwrap();
+            let time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+            file.set_modified(time).unwrap();
+        };
+        at("old.md", 1_000);
+        at("new.md", 3_000);
+        at("node_modules", 2_000);
+        f.vault.rescan().unwrap();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        let listed = |sort, folders_among_files| {
+            let order = Order {
+                sort,
+                folders_among_files,
+            };
+            names(&f.vault.list_dir_sorted("", order).unwrap())
+        };
+        assert_eq!(
+            listed(Sort::NameDesc, false),
+            ["node_modules", "old.md", "new.md"]
+        );
+        assert_eq!(
+            listed(Sort::ModifiedNew, true),
+            ["new.md", "node_modules", "old.md"]
         );
     }
 

@@ -5,6 +5,7 @@ use crate::doc::{FOLDER_ICON, icon_for};
 use crate::widgets::{scroller, set_class, status_page};
 use accent_api::Vault;
 use accent_core::fs::is_sync_conflict;
+use accent_core::order::{Order, Sort};
 use accent_core::path::basename;
 use accent_core::walk::FileKind;
 use gtk::prelude::*;
@@ -21,7 +22,7 @@ mod listing;
 
 pub use drag::dropped_paths;
 use drag::{Append, Carry, Import, Move, files_content, import_target, move_content, move_target};
-use listing::{Asked, ShowHidden, Watches, children_model, fill, watch_unindexed};
+use listing::{Asked, Shape, Shaped, Watches, children_model, fill, watch_unindexed};
 pub use listing::{changed_span, decode, dot_named};
 
 /// CSS class for Ctrl-click marked rows (`build::install_chrome_css`).
@@ -84,11 +85,13 @@ pub struct Tree {
     model: gtk::TreeListModel,
     vault: Arc<Vault>,
     root: gio::ListStore,
+    /// The Sort Files button on the vault's row.
+    sort: gtk::MenuButton,
     cache: Rc<RefCell<HashMap<String, gio::ListStore>>>,
     /// What keeps the listings the index does not walk fresh. See [`watch_unindexed`].
     watches: Watches,
     asked: Asked,
-    show_hidden: ShowHidden,
+    shape: Shaped,
     /// The root's [`Landed`](listing::Landed), which tells the empty page the host has answered.
     landed: Rc<dyn Fn()>,
     /// Shared ignored-path set so row binding uses setters and lookup,
@@ -234,9 +237,32 @@ impl Tree {
     /// Toggle hidden rows and relist cached levels because excluded names
     /// are absent from stores. Ignore unchanged preferences.
     pub fn set_show_hidden(&self, on: bool) {
-        if self.show_hidden.replace(on) != on {
+        let shape = self.shape.get();
+        if shape.show_hidden != on {
+            self.shape.set(Shape {
+                show_hidden: on,
+                ..shape
+            });
             self.refresh();
         }
+    }
+
+    /// Sort every listed level again in `order`, the folders open staying open.
+    pub fn set_order(&self, order: Order) {
+        let shape = self.shape.get();
+        if shape.order != order {
+            self.shape.set(Shape { order, ..shape });
+            self.refresh();
+        }
+    }
+
+    pub fn order(&self) -> Order {
+        self.shape.get().order
+    }
+
+    /// Open the Sort Files menu, as its button does.
+    pub fn show_sort_menu(&self) {
+        self.sort.popup();
     }
 
     pub fn view(&self) -> &gtk::ListView {
@@ -300,9 +326,10 @@ impl Tree {
                     &store,
                     &self.vault,
                     &self.asked,
-                    &self.show_hidden,
+                    &self.shape,
                     dir,
                     landed,
+                    Some(&self.model),
                 );
                 continue;
             }
@@ -311,13 +338,14 @@ impl Tree {
             // of the vault rather than of this disk, which on a remote vault is not where the
             // files are — and asked on a worker thread, because on that vault it is one round
             // trip per invalidated directory and a reindex invalidates a handful at a time.
-            let (vault, cache, watches, asked, show_hidden) = (
+            let (vault, cache, watches, asked, shape) = (
                 self.vault.clone(),
                 self.cache.clone(),
                 self.watches.clone(),
                 self.asked.clone(),
-                self.show_hidden.clone(),
+                self.shape.clone(),
             );
+            let model = self.model.clone();
             let dir = dir.clone();
             glib::spawn_future_local(async move {
                 let there = crate::work::off_thread("tree", {
@@ -326,7 +354,9 @@ impl Tree {
                 })
                 .await;
                 match there {
-                    Some(Ok(Some(_))) => fill(&store, &vault, &asked, &show_hidden, &dir, None),
+                    Some(Ok(Some(_))) => {
+                        fill(&store, &vault, &asked, &shape, &dir, None, Some(&model))
+                    }
                     Some(Ok(None)) => {
                         cache.borrow_mut().remove(&dir);
                         if watches.borrow_mut().remove(&dir) {
@@ -854,11 +884,11 @@ pub fn find_row(model: &gtk::TreeListModel, rel: &str) -> Option<gtk::TreeListRo
     })
 }
 
-/// Build the always-visible vault label and root drop zone above the tree.
+/// Build the always-visible vault label and root drop zone above the tree, `sort` at its end.
 ///
 /// Scrolled trees may have no blank area for root drops. A label has nothing to expand;
 /// 6 px margin and a 34 px row align it with Search and Git controls.
-fn root_row(label: &str) -> gtk::Box {
+fn root_row(label: &str, sort: &gtk::MenuButton) -> gtk::Box {
     let row = gtk::Box::builder()
         .spacing(6)
         .margin_start(12)
@@ -878,15 +908,55 @@ fn root_row(label: &str) -> gtk::Box {
         &gtk::Label::builder()
             .label(basename(label))
             .xalign(0.0)
+            .hexpand(true)
             .valign(gtk::Align::Center)
             .ellipsize(gtk::pango::EllipsizeMode::Middle)
             .css_classes(["heading"])
             .build(),
     );
+    row.append(sort);
     row
 }
 
-/// Build the tree with `show_hidden` and activation, drag, move, import and PDF-append hooks.
+/// The Sort Files button: a menu of the [`Sort`]s in Obsidian's three pairs, radio items of the
+/// window's `win.sort-files`, whose state is the vault's sort.
+fn sort_button() -> gtk::MenuButton {
+    let menu = gio::Menu::new();
+    for pair in Sort::ALL.chunks(2) {
+        let section = gio::Menu::new();
+        for &sort in pair {
+            let item = gio::MenuItem::new(Some(sort_label(sort)), None);
+            item.set_action_and_target_value(
+                Some("win.sort-files"),
+                Some(&sort.name().to_variant()),
+            );
+            section.append_item(&item);
+        }
+        menu.append_section(None, &section);
+    }
+    let button = gtk::MenuButton::builder()
+        .icon_name("view-sort-descending-symbolic")
+        .tooltip_text("Sort Files")
+        .menu_model(&menu)
+        .valign(gtk::Align::Center)
+        .build();
+    button.add_css_class("flat");
+    button
+}
+
+fn sort_label(sort: Sort) -> &'static str {
+    match sort {
+        Sort::NameAsc => "File Name (A to Z)",
+        Sort::NameDesc => "File Name (Z to A)",
+        Sort::ModifiedNew => "Modified Time (New to Old)",
+        Sort::ModifiedOld => "Modified Time (Old to New)",
+        Sort::CreatedNew => "Created Time (New to Old)",
+        Sort::CreatedOld => "Created Time (Old to New)",
+    }
+}
+
+/// Build the tree with `show_hidden`, listed in `order`, and activation, drag, move, import and
+/// PDF-append hooks.
 ///
 /// `on_activate` receives the file key and double-click flag. `on_drag` tracks outgoing drags;
 /// `on_move` receives paths and destination; `on_import` receives local files, folder and
@@ -898,6 +968,7 @@ pub fn build(
     vault: Arc<Vault>,
     root: &gio::ListStore,
     show_hidden: bool,
+    order: Order,
     on_activate: impl Fn(char, &str, bool) + 'static,
     on_drag: impl Fn(bool) + 'static,
     on_move: impl Fn(Vec<(String, String)>) + 'static,
@@ -908,14 +979,14 @@ pub fn build(
 ) -> Tree {
     let cache: Rc<RefCell<HashMap<String, gio::ListStore>>> = Rc::new(RefCell::new(HashMap::new()));
     let asked = Asked::default();
-    let show_hidden = ShowHidden::new(Cell::new(show_hidden));
+    let shape = Shaped::new(Cell::new(Shape { show_hidden, order }));
     let ignored: Rc<RefCell<Ignored>> = Rc::new(RefCell::new(Ignored::default()));
     let changed: Rc<RefCell<HashMap<String, Change>>> = Rc::default();
     let cut: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(HashSet::new()));
     let marked: Rc<RefCell<Marks>> = Rc::new(RefCell::new(Marks::new()));
     let start = Start::default();
     let watches = Watches::default();
-    let model = tree_model(root, &vault, &cache, &asked, &show_hidden, &watches);
+    let model = tree_model(root, &vault, &cache, &asked, &shape, &watches);
 
     // Abbreviated once rather than per row: neither the vault root nor `$HOME` moves while the
     // window is open, and the label is only ever a prefix of a tooltip.
@@ -930,7 +1001,8 @@ pub fn build(
         foreign: Rc::new(foreign),
         drop: Rc::new(on_carry),
     };
-    let vault_row = root_row(&root_label);
+    let sort = sort_button();
+    let vault_row = root_row(&root_label, &sort);
     vault_row.add_controller(move_target(&moves, &appends, &carries, |_, _, _| {
         Some(String::new())
     }));
@@ -957,12 +1029,13 @@ pub fn build(
     // was missed — changed before its watch was in place, or with no watch to be had — would open
     // onto what it held the first time, however often it was opened.
     let relist: Rc<dyn Fn(&str)> = Rc::new({
-        let (vault, cache, asked, show_hidden, opened) = (
+        let (vault, cache, asked, shape, opened, model) = (
             vault.clone(),
             cache.clone(),
             asked.clone(),
-            show_hidden.clone(),
+            shape.clone(),
             opened.clone(),
+            model.clone(),
         );
         move |rel| {
             let store = cache.borrow().get(rel).cloned();
@@ -975,7 +1048,15 @@ pub fn build(
                         opened.folder = None;
                     }
                 });
-                fill(&store, &vault, &asked, &show_hidden, rel, Some(landed));
+                fill(
+                    &store,
+                    &vault,
+                    &asked,
+                    &shape,
+                    rel,
+                    Some(landed),
+                    Some(&model),
+                );
             }
         }
     });
@@ -1068,7 +1149,7 @@ pub fn build(
 
     let (body, landed) = body_stack(&view, &vault, root);
     // Populated straight from the index: the window must be up before the reconcile finishes.
-    fill(root, &vault, &asked, &show_hidden, "", Some(landed.clone()));
+    fill(root, &vault, &asked, &shape, "", Some(landed.clone()), None);
 
     let host = gtk::Box::new(gtk::Orientation::Vertical, 0);
     host.append(&vault_row);
@@ -1079,10 +1160,11 @@ pub fn build(
         model,
         vault,
         root: root.clone(),
+        sort,
         cache,
         watches,
         asked,
-        show_hidden,
+        shape,
         landed,
         ignored,
         changed,
@@ -1156,15 +1238,15 @@ fn tree_model(
     vault: &Arc<Vault>,
     cache: &Rc<RefCell<HashMap<String, gio::ListStore>>>,
     asked: &Asked,
-    show_hidden: &ShowHidden,
+    shape: &Shaped,
     watches: &Watches,
 ) -> gtk::TreeListModel {
     gtk::TreeListModel::new(root.clone(), false, false, {
-        let (vault, cache, asked, show_hidden, watches) = (
+        let (vault, cache, asked, shape, watches) = (
             vault.clone(),
             cache.clone(),
             asked.clone(),
-            show_hidden.clone(),
+            shape.clone(),
             watches.clone(),
         );
         move |obj| {
@@ -1172,7 +1254,7 @@ fn tree_model(
             if !row.is_dir() {
                 return None;
             }
-            let store = children_model(&vault, &cache, &asked, &show_hidden, &row.rel);
+            let store = children_model(&vault, &cache, &asked, &shape, &row.rel);
             // A gitignored folder is one the reader opened on purpose and one the index does not
             // walk, so its listing has nothing keeping it fresh but this.
             if !row.indexed && !row.dependency {

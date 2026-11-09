@@ -483,6 +483,16 @@ impl App {
                 .set_visible(!self.sidebar_column.is_visible()),
             "pane-bibliography" => self.show_pane("bibliography"),
             "pane-files" => self.show_pane("files"),
+            "sort-files-menu" => {
+                self.show_pane("files");
+                // Once the pane it is on has been laid out, a sidebar that was hidden included.
+                let app = Rc::downgrade(self);
+                glib::idle_add_local_once(move || {
+                    if let Some(tree) = app.upgrade().as_ref().and_then(|app| app.tree.get()) {
+                        tree.show_sort_menu();
+                    }
+                });
+            }
             "pane-search" => {
                 self.seed_search();
                 self.show_pane("search");

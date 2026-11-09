@@ -3,6 +3,7 @@
 use super::file::{replace, state_dir, state_path, unreadable};
 use crate::Result;
 use crate::git::Comparison;
+use crate::order::Sort;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -130,6 +131,8 @@ pub struct Session {
     pub layout: Option<Layout>,
     pub sidebar: bool,
     pub sidebar_width: i32,
+    /// What the Files tree sorts each folder by.
+    pub file_order: Sort,
     pub info: InfoPane,
     pub code: CodePane,
     /// Document zoom, 1.0 being the font as GNOME sets it.
@@ -218,6 +221,7 @@ impl Default for Session {
             layout: None,
             sidebar: true,
             sidebar_width: 280,
+            file_order: Sort::default(),
             info: InfoPane::default(),
             code: CodePane::default(),
             zoom: 1.0,

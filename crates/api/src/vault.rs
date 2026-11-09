@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use accent_core::code::Lang;
+use accent_core::order::Order;
 use accent_core::path::linked_path;
 
 use crate::link::Stop;
@@ -457,6 +458,9 @@ methods! {
 
     // ------------------------------------------------------------ index reads
     list_dir(rel: ref str) -> Vec<FileRow>;
+    /// [`list_dir`](Vault::list_dir) in the file tree's `order`, its times read where the files
+    /// are: a host's musl server keeps no creation time, which then sorts by modification.
+    list_dir_sorted(rel: ref str, order: val Order) -> Vec<FileRow>;
     /// Watch direct children of unindexed folders until
     /// [`unwatch_unindexed`](Vault::unwatch_unindexed). Creates, removals and renames
     /// emit [`Event::UnindexedChanged`]; subtrees are not watched.

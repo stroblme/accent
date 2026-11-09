@@ -108,7 +108,7 @@ fn section(action: &str) -> Option<&'static str> {
         _ if starts(&["zoom-"]) => "Zoom",
         "save-session" | "close-session" => "Terminal",
         _ if starts(&["terminal"]) => "Terminal",
-        "sidebar" | "show-hidden-files" | "file-details" => "Panes",
+        "sidebar" | "show-hidden-files" | "sort-files-menu" | "file-details" => "Panes",
         _ if starts(&["pane-"]) => "Panes",
         "merge-resolved" => "Git",
         _ if starts(&["git-", "conflict-", "hunk-"]) => "Git",

@@ -239,6 +239,31 @@ EOF
 	has "$dir/template" "bench template_caret Meta.md on_screen=true"
 }
 
+# The vault's root in each sort, with a folder left open staying open. Each file's creation time
+# is the order it was written in, c, a then B, apart by more than a coarse clock's tick.
+drill_sort() {
+	mkdir "$vault/Alpha" "$vault/beta"
+	for f in c a B beta/inner; do
+		echo "# $f" >"$vault/$f.md"
+		sleep 0.1
+	done
+	touch -m -d @3000 "$vault/a.md"
+	touch -m -d @1000 "$vault/B.md"
+	touch -m -d @2000 "$vault/c.md"
+	touch -m -d @500 "$vault/Alpha"
+	touch -m -d @4000 "$vault/beta"
+	launch 60 ACCENT_BENCH_SORT=1 >"$dir/sort"
+	has "$dir/sort" \
+		'bench sort name-asc ["Alpha", "beta", "a.md", "B.md", "c.md"] open=true' \
+		'bench sort name-desc ["beta", "Alpha", "c.md", "B.md", "a.md"] open=true' \
+		'bench sort modified-new ["Alpha", "beta", "a.md", "c.md", "B.md"] open=true' \
+		'bench sort modified-old ["Alpha", "beta", "B.md", "c.md", "a.md"] open=true' \
+		'bench sort created-new ["Alpha", "beta", "B.md", "a.md", "c.md"] open=true' \
+		'bench sort created-old ["Alpha", "beta", "c.md", "a.md", "B.md"] open=true' \
+		'bench sort among ["beta", "a.md", "c.md", "B.md", "Alpha"] open=true' \
+		'bench sort session modified-new'
+}
+
 if [ -n "${HEADLESS_DIR-}" ]; then
 	# Inside the launch headless.sh set up for the one drill named.
 	dir=$HEADLESS_DIR vault=$HEADLESS_DIR/vault

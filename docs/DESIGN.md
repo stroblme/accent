@@ -264,6 +264,12 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 **Files**
 
 - The vault's name sits above the tree as a plain label with a folder icon: it is what the listing is of, and a root drop zone that stays on screen however deep the tree is scrolled.
+- **Sort Files** is a flat menu button at the end of the vault's row (user decision 2026-11-09), holding Obsidian's six orders as radio items, by file name, modified time or created time, each either way.
+  The vault's session keeps the one picked, and file name A to Z is where every vault starts.
+  Folders stay on top, by name and Z to A only when the files are, unless Sort Folders Among Files (Preferences → Files) sorts them by the same order.
+  The order is applied where the files are, the host for a remote vault, and a time order reads each row's time off the disk there.
+  Where nothing keeps a creation time (a host's musl server, a filesystem without one) the created orders go by the modified time, and since a save replaces the file, a file's creation time is that of its last save (Info, Details).
+  A folder open in the tree stays open as its row moves.
 - A folder's expander arrow is drawn at Adwaita's `dimmed` opacity (`--dim-opacity`), whatever the row's own dim (user decision 2026-10-19): the folder's icon and name say what the row is, the arrow only that it opens.
 - Every folder is listed, the ones the index does not walk included (`node_modules`, a `.venv`, a cargo `target/`): a listing that silently leaves a folder out cannot be trusted.
   Those rows are read off the disk one level per expansion, stay out of the index and every query, and are dimmed, search not reaching them.
@@ -1061,7 +1067,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Editor holds Preview Font under Document Font, each a font button with a Reset, and Full-Width Preview under Column Width, off, since the preview's page follows that width (Preview).
 - Editor leads with Text Editor, which lists Accent and the terminal editors the login shell finds, marks a picked one it no longer finds as not found, and lists Custom Command while `config.toml` picks one, which only the file sets (Terminal).
   The shell is asked once a process, when the row is first shown or a window opens with a terminal editor picked, and never while Accent is picked and Preferences stays shut.
-- Files holds Show Hidden Files and Colour Changed Files, both on; the second tints the tree's changed names and leaves its dims alone (Sidebar → Files).
+- Files holds Show Hidden Files and Colour Changed Files, both on, and Sort Folders Among Files, off; the second tints the tree's changed names and leaves its dims alone (Sidebar → Files).
 - Commands holds the user's own commands (Terminal), each an `AdwExpanderRow` of its name over its command line, opening on Name, Command, its Shortcut (recorded as the palette records one, refusing a chord in use by name, a clash from a hand edit marked) and Remove Command; Add Command puts a new one at the end, opened. Restore Defaults keeps them, as it keeps the recent vaults: they are the user's, not settings with a default.
 - Each window builds its dialog once, on idle after it opens, and presents that one again: an open held the main thread about 60 ms before its animation could run, a stutter, and a dialog shown before holds it about 30 (release, Xvfb, `ACCENT_BENCH_SWITCHER=prefs`).
   A config that moved while it was closed (a hand edit, the palette) gives it a new page before it shows, and Restore Defaults gives it one in place.
@@ -2068,7 +2074,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 
 ### Panes
 
-- Sidebar `F9`, Files / Search `Ctrl+Shift+E` / `Ctrl+Shift+F`, Info `Ctrl+Shift+B`, Git `Ctrl+Shift+G`, Outline `Ctrl+Shift+W`, Properties `Ctrl+Shift+A` (a diagram's), Show Hidden Files (unbound, also in Preferences → Files).
+- Sidebar `F9`, Files / Search `Ctrl+Shift+E` / `Ctrl+Shift+F`, Info `Ctrl+Shift+B`, Git `Ctrl+Shift+G`, Outline `Ctrl+Shift+W`, Properties `Ctrl+Shift+A` (a diagram's), Show Hidden Files (unbound, also in Preferences → Files), Sort Files… (unbound, the Files pane's menu).
 - The pane chords carry Control and Shift, so they stay the window's while a shell has the keyboard and open their pane from a shell too, unless Forward All Keys gives the shell them as well.
 
 ### Git

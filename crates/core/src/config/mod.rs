@@ -19,6 +19,7 @@ minimap = false
 line_numbers = false
 git_tree = true
 show_hidden = false
+folders_among_files = true
 git_tint = false
 column_width = 50
 full_width_preview = true
@@ -203,6 +204,9 @@ pub struct Config {
     /// List dot-named files and folders in the Files pane, dimmed. On by default: `.gitignore`
     /// and `.python-version` are files people edit. `.git` and `.trash` are never listed.
     pub show_hidden: bool,
+    /// Sort folders among the files in the Files pane, by the vault's sort; off keeps them on
+    /// top, by name.
+    pub folders_among_files: bool,
     /// Tint changed Files entries and their ancestors with the accent, and new files green.
     /// Enabled by default; ignored entries are always dimmed.
     pub git_tint: bool,
@@ -398,6 +402,7 @@ impl Default for Config {
             line_numbers: false,
             git_tree: true,
             show_hidden: true,
+            folders_among_files: false,
             git_tint: true,
             column_width: 50,
             full_width_preview: false,

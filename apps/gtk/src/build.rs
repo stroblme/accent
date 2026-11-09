@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::shell::{Loose, WindowKey};
+use accent_core::order::{Order, Sort};
 
 pub fn build_window(
     gtk_app: &adw::Application,
@@ -471,10 +472,16 @@ pub fn build_window(
 
 /// The sidebar for a window with a vault: the tree, the index panes and the outline.
 fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
+    // Listed in its order from the first listing, before the session is put back.
+    let order = Order {
+        sort: vault.session().file_order,
+        folders_among_files: app.config.borrow().folders_among_files,
+    };
     let tree = tree::build(
         vault.clone(),
         rows,
         app.config.borrow().show_hidden,
+        order,
         // The row's kind used to decide what opened. `open_path` reads the name itself, so the
         // tree no longer has to agree with it about what a file is. A row opens as a preview:
         // one click is looking, not keeping. A double click keeps the tab its first click opened,
@@ -554,6 +561,7 @@ fn build_sidebar(app: &Rc<App>, rows: &gio::ListStore, vault: &Arc<Vault>) {
     // The tree owns its scroller now, wrapped in a box the context menu can parent itself to.
     let files = tree.widget().clone();
     let _ = app.tree.set(tree);
+    sort_action(app, order.sort);
 
     let data = sidebar::Data {
         search: search_data(app, vault),
@@ -1265,6 +1273,34 @@ fn build_ops(app: &Rc<App>, vault: &Arc<Vault>) -> Rc<fileops::Ops> {
             }
         }),
     })
+}
+
+/// `win.sort-files`, the radio items of the Files tree's Sort Files menu, its state the vault's
+/// sort, which the session keeps.
+fn sort_action(app: &Rc<App>, sort: Sort) {
+    let action = gio::SimpleAction::new_stateful(
+        "sort-files",
+        Some(glib::VariantTy::STRING),
+        &sort.name().to_variant(),
+    );
+    action.connect_change_state(glib::clone!(
+        #[weak]
+        app,
+        move |action, value| {
+            let Some(sort) = value.and_then(|v| v.str()).and_then(Sort::from_name) else {
+                return;
+            };
+            action.set_state(&sort.name().to_variant());
+            if let Some(tree) = app.tree.get() {
+                tree.set_order(Order {
+                    sort,
+                    ..tree.order()
+                });
+            }
+            app.save_session_soon();
+        }
+    ));
+    app.window.add_action(&action);
 }
 
 /// Install the platform monospace at the document-font size for all editors.

@@ -60,6 +60,7 @@ mod scroll;
 mod search;
 mod shells;
 mod shots;
+mod sort;
 mod start;
 mod style;
 mod suggest;
@@ -373,6 +374,8 @@ use user_commands::bench_commands;
 ///   `seed:<rel_note>`: XTEST search/replace shortcuts and box focus;
 ///   `filter:[<query>;…]`: qualifier queries' pages, rows and counts (writes and removes a note).
 /// - `ACCENT_BENCH_HIDDEN=1`: hidden-file visibility and git row colours.
+/// - `ACCENT_BENCH_SORT=1`: the Files tree's sorts and folders among files; `shot:<dir>` the
+///   Sort Files menu, light and dark (`sort::bench_sort`).
 /// - `ACCENT_BENCH_UNFOLD=<rel>,<rel>,…`: folder expansion; `race:<dir>`,
 ///   `renew:<dir>`, `again:<dir>` and `tab:<rel>`: external unindexed changes;
 ///   `down:<rel>`: a remote tab's file rewritten while the link is down.
@@ -434,6 +437,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     }
     if let Ok(step) = std::env::var("ACCENT_BENCH_EDITOR") {
         return terminal_editor::bench_editor(app, &step);
+    }
+    if let Ok(arg) = std::env::var("ACCENT_BENCH_SORT") {
+        return sort::bench_sort(app, &arg);
     }
     let expand = std::env::var("ACCENT_BENCH_EXPAND").ok();
     let minimap = std::env::var("ACCENT_BENCH_MINIMAP").ok();
