@@ -368,21 +368,19 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_multi_argument_python_command_reports_its_executable() {
-        use std::os::unix::fs::PermissionsExt;
-
         let root = tempfile::tempdir().unwrap();
         let shim = root.path().join("python-shim");
         std::fs::write(
             &shim,
-            "#!/bin/sh\n[ \"$1\" = --isolated ] || exit 1\n[ \"$2\" = -c ] || exit 1\nprintf '/tmp/python-from-shim\\n'\n",
+            "[ \"$1\" = --isolated ] || exit 1\n[ \"$2\" = -c ] || exit 1\nprintf '/tmp/python-from-shim\\n'\n",
         )
         .unwrap();
-        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Read by `sh`, never executed itself: a child another test thread forks meanwhile holds
+        // this process's write descriptor until it execs, and executing the script then fails
+        // with ETXTBSY.
+        let command = ["/bin/sh", &*shim.to_string_lossy(), "--isolated"].map(String::from);
         assert_eq!(
-            executable(
-                root.path(),
-                &[shim.to_string_lossy().into_owned(), "--isolated".into()]
-            ),
+            executable(root.path(), &command),
             Some("/tmp/python-from-shim".into())
         );
     }
