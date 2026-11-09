@@ -1245,6 +1245,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Both write through the vault, on the host for a remote one, off the main loop.
 - **The thumbnail strip organises pages:** dragging a thumbnail moves its page, an accent bar marks the destination gap, and the strip scrolls near an edge.
   The thumbnail under the pointer carries round buttons, opaque as the ring's are, with Copy Page in its top-left corner, Delete Page in its top-right (absent on a one-page document, which a PDF keeps) and Insert Page Here on the gap below.
+  A thumbnail's corners are as round as those buttons, 17 px, and each corner button is centred on its corner's arc, so it fills the corner (user decision 2026-11-09).
   A press on one of them, as a page dropped into a gap, hands the keyboard to the page, so `Ctrl+Z` right after it takes the edit back.
   A copied page stays held for the whole app until the next copy, and while it is a PDF's, every PDF's strip shows Paste Page Here before Insert Page Here (user decision 2026-11-06).
   It goes in as a dropped PDF's pages do, toast included, from a copy of its document taken at the copy, so whatever happens to that document afterwards the page pasted is the one copied.
@@ -1382,7 +1383,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - Pages are the Outline pane's rows, the one shown selected, over a thumbnail strip that organises them as a PDF's does (PDF): a click goes to the page, dragging a thumbnail moves its page, and the thumbnail under the pointer carries Copy Page, Delete Page (absent on a diagram of one page, which keeps it) and Insert Page Here, with Paste Page Here before it while a diagram's page is held.
   A page put in is blank and named as draw.io names one, the first `Page-N` from the page count on that no page has.
   A page pasted is the one copied, from this diagram or another, called "Copy of" its name with a page id of its own and every cell renumbered, as draw.io's Duplicate Page makes one.
-  A thumbnail is its page in the canvas's colours, painted when it first comes on screen and again only once an edit has changed it.
+  A thumbnail is its page in the canvas's colours, painted when it first comes on screen and again only once an edit has changed it, and its corners are rounded as a PDF thumbnail's are.
 - A page edit is one undo step: the reader lands on a page put in, and otherwise stays on the page they were reading, wherever it went, or the one that took its place, Undo and Redo included, and the pane's Back and Forward places follow the pages.
   A note names a diagram's page by its name, so no link changes with one.
 - Group puts the selected cells that share the first one's parent, two at least, into a transparent `group` cell sized to them and in front of its siblings, as draw.io's does; they stay where they are, and the group is selected.

@@ -24,9 +24,12 @@ use crate::widgets::Hook;
 const EDGE: f64 = 40.0;
 const EDGE_SPEED: f64 = 12.0;
 
-/// How far the trash and copy buttons sit inside their thumbnail's corners, and how far apart
-/// the insert and paste buttons stand.
+/// How far apart the insert and paste buttons stand.
 const INSET: f32 = 6.0;
+
+/// How round a thumbnail's corners are: a round button's radius (libadwaita's `.circular` is
+/// 34 px), so the copy and trash buttons each sit in their corner, centred where its arc is.
+pub const CORNER: f32 = 17.0;
 
 /// A page Copy Page holds for Paste Page Here.
 pub enum Copied {
@@ -504,16 +507,16 @@ impl Organize {
             let rect = layout.pages.get(page)?;
             let left = child == self.copy.upcast_ref::<gtk::Widget>();
             match left || child == self.trash.upcast_ref::<gtk::Widget>() {
-                // In the corner of what shows of the thumbnail, so a page scrolled half out of
-                // the strip keeps its trash and its copy button in reach.
+                // Centred on the arc of a corner of what shows of the thumbnail, so a page
+                // scrolled half out of the strip keeps its trash and its copy button in reach.
                 true => {
                     let shown = (rect.y - top).max(origin.y());
-                    let y = (shown + INSET).min(rect.y + rect.h - top - h - INSET);
+                    let y = (shown + CORNER).min(rect.y + rect.h - top - CORNER) - h / 2.0;
                     let x = match left {
-                        true => rect.x + INSET,
-                        false => rect.x + rect.w - w - INSET,
+                        true => rect.x + CORNER,
+                        false => rect.x + rect.w - CORNER,
                     };
-                    (x, y, w)
+                    (x - w / 2.0, y, w)
                 }
                 false => (
                     rect.x + (rect.w - w) / 2.0,

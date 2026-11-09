@@ -255,11 +255,13 @@ impl PageStrip {
             thumb.painted = true;
         }
         let bounds = graphene::Rect::new(rect.x, rect.y, rect.w, rect.h);
+        // As round as the buttons over its corners (`organize::CORNER`).
+        let outline = gsk::RoundedRect::from_rect(bounds, crate::organize::CORNER);
+        snapshot.push_rounded_clip(&outline);
         let paper = thumb.scene().background.unwrap_or(Color::WHITE);
         snapshot.append_color(&tint.rgba(paper), &bounds);
         if let Some(node) = &thumb.node {
             let scale = rect.w / thumb.area.w.max(1.0) as f32;
-            snapshot.push_clip(&bounds);
             snapshot.save();
             snapshot.translate(&graphene::Point::new(rect.x, rect.y));
             snapshot.scale(scale, scale);
@@ -267,11 +269,10 @@ impl PageStrip {
             snapshot.translate(&graphene::Point::new(origin.0, origin.1));
             snapshot.append_node(node);
             snapshot.restore();
-            snapshot.pop();
         }
+        snapshot.pop();
         // A hairline, so a white page on a light background still reads as a page.
         let edge = theme::at(self.color(), theme::PAGE_EDGE_ALPHA);
-        let outline = gsk::RoundedRect::from_rect(bounds, 0.0);
         snapshot.append_border(&outline, &[1.0; 4], &[edge; 4]);
         if framed {
             snapshot.append_border(&outline, &[2.0; 4], &[theme::accent(); 4]);

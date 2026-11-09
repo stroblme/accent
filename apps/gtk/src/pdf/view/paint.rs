@@ -231,23 +231,29 @@ impl imp::PdfView {
                 }
                 page_node = next.to_node();
             }
+            // A thumbnail's corners are as round as the buttons over them (`organize::CORNER`).
+            let corner = if thumbnails {
+                crate::organize::CORNER
+            } else {
+                0.0
+            };
+            let outline = gsk::RoundedRect::from_rect(bounds, corner);
+            if thumbnails {
+                snapshot.push_rounded_clip(&outline);
+            }
             if let Some(node) = page_node {
                 snapshot.append_node(&node);
             }
 
             // A hairline, so a white page on a light background still reads as a page.
             snapshot.append_border(
-                &gsk::RoundedRect::from_rect(bounds, 0.0),
+                &outline,
                 &[1.0; 4],
                 &[theme::at(frame, theme::PAGE_EDGE_ALPHA); 4],
             );
 
             if thumbnails && self.page.get() == index {
-                snapshot.append_border(
-                    &gsk::RoundedRect::from_rect(bounds, 0.0),
-                    &[2.0; 4],
-                    &[accent; 4],
-                );
+                snapshot.append_border(&outline, &[2.0; 4], &[accent; 4]);
             }
 
             // Under the selection and the search marks: a highlight is what the page says,
@@ -283,6 +289,9 @@ impl imp::PdfView {
             if let Some((_, spot)) = self.spot.get().filter(|(at, _)| *at == index) {
                 let colour = theme::at(accent, theme::CURRENT_MARK_ALPHA);
                 snapshot.append_color(&colour, &layout.rect_of(rect, &spot));
+            }
+            if thumbnails {
+                snapshot.pop();
             }
             snapshot.restore();
         }
