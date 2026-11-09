@@ -409,15 +409,61 @@ pub fn create_note(path: &Path, text: &str) -> Result<Etag> {
     write_note(path, text, None)
 }
 
-/// Move a file or directory without overwriting an existing target. Symlinks themselves move,
-/// preserving external targets.
-///
-/// The existence check can race a concurrent create. Cross-mount moves fail with `EXDEV`.
+/// Move a file or directory without overwriting an existing target, as [`rename_new`] moves it.
+/// Symlinks themselves move, preserving external targets. Cross-mount moves fail with `EXDEV`.
 pub fn rename(from: &Path, to: &Path) -> Result<()> {
-    if to.symlink_metadata().is_ok() {
-        return Err(Error::AlreadyExists(to.display().to_string()));
+    rename_new(from, to).map_err(|e| match e.kind() {
+        io::ErrorKind::AlreadyExists => Error::AlreadyExists(to.display().to_string()),
+        _ => Error::io(from.display(), e),
+    })
+}
+
+/// Rename `from` to `to` unless something holds `to`, a dangling link included. The rename itself
+/// refuses a taken name (`renameat2`'s `RENAME_NOREPLACE`, `renamex_np`'s `RENAME_EXCL` on macOS),
+/// so a file made there a moment before is never written over.
+///
+/// Where the filesystem or the kernel cannot refuse it (NFS, a FUSE daemon without the flag, Linux
+/// before 3.15, SMB on macOS), a check goes first instead, which a file made in between still beats.
+pub fn rename_new(from: &Path, to: &Path) -> io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = |path: &Path| std::ffi::CString::new(path.as_os_str().as_bytes());
+    let (c_from, c_to) = (c(from)?, c(to)?);
+    #[cfg(test)]
+    if let Some(take) = BEFORE_RENAME.take() {
+        take(to);
     }
-    std::fs::rename(from, to).map_err(|e| Error::io(from.display(), e))
+    // SAFETY: both paths are NUL-terminated and outlive the call. The system call goes direct,
+    // since the musl a static `accent-cli` links has no `renameat2` wrapper.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    let (done, unsupported) = unsafe {
+        let (at, flags) = (libc::AT_FDCWD, libc::RENAME_NOREPLACE);
+        let (old, new) = (c_from.as_ptr(), c_to.as_ptr());
+        let done = libc::syscall(libc::SYS_renameat2, at, old, at, new, flags);
+        (done, [libc::EINVAL, libc::ENOSYS])
+    };
+    // SAFETY: as above.
+    #[cfg(target_os = "macos")]
+    let (done, unsupported) = unsafe {
+        let done = libc::renamex_np(c_from.as_ptr(), c_to.as_ptr(), libc::RENAME_EXCL);
+        (done, [libc::ENOTSUP])
+    };
+    if done == 0 {
+        return Ok(());
+    }
+    let e = io::Error::last_os_error();
+    if !unsupported.contains(&e.raw_os_error().unwrap_or_default()) {
+        return Err(e);
+    }
+    if to.symlink_metadata().is_ok() {
+        return Err(io::ErrorKind::AlreadyExists.into());
+    }
+    std::fs::rename(from, to)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What a test has happen right before [`rename_new`]'s rename: another program taking `to`.
+    static BEFORE_RENAME: std::cell::Cell<Option<fn(&Path)>> = const { std::cell::Cell::new(None) };
 }
 
 /// Whether the symlink `link`, inside a folder being copied whole whose real path is `root`, is
@@ -863,6 +909,20 @@ mod tests {
         assert!(std::fs::symlink_metadata(&link).is_err());
         assert!(target.exists(), "the target stayed where it was");
         assert_eq!(std::fs::read_to_string(&moved).unwrap(), "one");
+    }
+
+    /// A name another program takes right before the rename is refused by the rename itself, for
+    /// a vault's moves (`Local::rename`, here and on a host) and a remote transfer's landing alike.
+    #[test]
+    fn rename_refuses_a_name_taken_just_before_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (from, to) = (dir.path().join("a.md"), dir.path().join("b.md"));
+        std::fs::write(&from, "moved").unwrap();
+
+        BEFORE_RENAME.set(Some(|to| std::fs::write(to, "theirs").unwrap()));
+        assert!(matches!(rename(&from, &to), Err(Error::AlreadyExists(_))));
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "theirs");
+        assert_eq!(std::fs::read_to_string(&from).unwrap(), "moved");
     }
 
     #[test]

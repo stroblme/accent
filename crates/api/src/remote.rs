@@ -102,7 +102,9 @@ fn land(part: &Path, dest: &Path, replace: bool) -> Result<()> {
         return std::fs::rename(part, dest).map_err(|e| cached(dest, e));
     }
     let landed = match std::fs::hard_link(part, dest) {
-        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => rename_new(part, dest),
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => {
+            accent_core::fs::rename_new(part, dest)
+        }
         linked => linked,
     };
     let _ = std::fs::remove_file(part);
@@ -184,30 +186,6 @@ fn staged_name() -> String {
     use std::hash::BuildHasher;
     let random = std::collections::hash_map::RandomState::new().hash_one(());
     format!(".accent-up-{random:016x}")
-}
-
-/// Rename `from` to `to` unless something holds `to`, a dangling link included.
-#[cfg(target_os = "linux")]
-fn rename_new(from: &Path, to: &Path) -> std::io::Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-    let c = |path: &Path| std::ffi::CString::new(path.as_os_str().as_bytes());
-    let (from, to) = (c(from)?, c(to)?);
-    let (at, flags) = (libc::AT_FDCWD, libc::RENAME_NOREPLACE);
-    // SAFETY: both paths are NUL-terminated and outlive the call.
-    match unsafe { libc::renameat2(at, from.as_ptr(), at, to.as_ptr(), flags) } {
-        0 => Ok(()),
-        _ => Err(std::io::Error::last_os_error()),
-    }
-}
-
-/// Rename `from` to `to` unless something holds `to`. Racy: a name taken between the check and
-/// the rename is written over.
-#[cfg(not(target_os = "linux"))]
-fn rename_new(from: &Path, to: &Path) -> std::io::Result<()> {
-    if to.symlink_metadata().is_ok() {
-        return Err(std::io::ErrorKind::AlreadyExists.into());
-    }
-    std::fs::rename(from, to)
 }
 
 /// Move a cached file or folder with its host original, creating destination
@@ -1258,9 +1236,9 @@ fn drain(stream: impl Read + Send + 'static) {
 #[cfg(test)]
 mod tests {
     use super::{
-        Stamp, Stamped, carry, edited_name, kept_path, land, receive_from, rename_new, uncache,
-        unsent,
+        Stamp, Stamped, carry, edited_name, kept_path, land, receive_from, uncache, unsent,
     };
+    use accent_core::fs::rename_new;
     use std::path::Path;
     use std::time::Duration;
 
