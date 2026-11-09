@@ -13,11 +13,11 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import android.content.Context
 import io.github.stroblme.accent.PdfModel
+import io.github.stroblme.accent.R
 import io.github.stroblme.accent.ffi.Etag
 import io.github.stroblme.accent.ffi.analyzeUtf16
 import java.text.DateFormat
@@ -37,10 +37,12 @@ data class DetailGroup(val title: String, val facts: List<Pair<String, String>>)
 fun DetailsMenu(onDetails: () -> Unit) {
     var expanded by remember { mutableStateOf(false) }
     Box {
-        TextButton(
+        // Material's top bar action, a 24 dp icon on a 48 dp target, in the accent the bar's
+        // words are in: a "⋮" in a text button is only as large as the label's type.
+        IconButton(
             onClick = { expanded = true },
-            modifier = Modifier.semantics { contentDescription = "More" },
-        ) { Text("⋮") }
+            colors = IconButtonDefaults.iconButtonColors(contentColor = MaterialTheme.colorScheme.primary),
+        ) { Icon(painterResource(R.drawable.ic_more_vert), contentDescription = "More") }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             DropdownMenuItem(text = { Text("Details") }, onClick = {
                 expanded = false
