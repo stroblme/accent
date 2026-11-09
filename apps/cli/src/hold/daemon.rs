@@ -409,10 +409,13 @@ impl Daemon {
         self.gone(id, shell, code);
     }
 
-    /// Forget an ended shell, notify its terminal, and exit if it was the last.
+    /// Notify an ended shell's terminal, forget the shell, and exit if it was the last. Notified
+    /// while still held: another shell ending meanwhile would otherwise find none left and exit
+    /// first, and a terminal that never heard how its shell ended attaches again, to a new holder
+    /// that starts its command anew.
     fn gone(&self, id: &str, shell: &Shell, code: i32) {
-        lock(&self.shells).live.remove(id);
         shell.ended(code);
+        lock(&self.shells).live.remove(id);
         self.leave_if_idle();
     }
 

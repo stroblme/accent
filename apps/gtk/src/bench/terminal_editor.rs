@@ -201,13 +201,7 @@ async fn open(app: &Rc<App>) {
         kind_of(app, "second.md")
     );
     // Every editor still running ends, so nothing is left held behind the drill.
-    for term in app.terminals() {
-        term.view.feed_child(b"0\n");
-    }
-    until("editor", "preview ended", 10_000, || {
-        app.terminals().iter().all(|t| t.ended())
-    })
-    .await;
+    end_all(app, "preview ended", b"0\n").await;
 }
 
 async fn keys(app: &Rc<App>) {
@@ -277,13 +271,7 @@ async fn keys(app: &Rc<App>) {
     }
     println!("bench editor keys {}", lines.join(" "));
     // Three keys end each fake still waiting.
-    for term in app.terminals() {
-        term.view.feed_child(b"xyz");
-    }
-    until("editor", "keys ended", 10_000, || {
-        app.terminals().iter().all(|t| t.ended())
-    })
-    .await;
+    end_all(app, "keys ended", b"xyz").await;
 }
 
 async fn accent(app: &Rc<App>) {
@@ -370,13 +358,7 @@ async fn line(app: &Rc<App>) {
         "bench editor custom args={:?}",
         custom.as_ref().and_then(|term| args(app, term))
     );
-    for term in app.terminals() {
-        term.view.feed_child(b"0\n");
-    }
-    until("editor", "line ended", 10_000, || {
-        app.terminals().iter().all(|t| t.ended())
-    })
-    .await;
+    end_all(app, "line ended", b"0\n").await;
 }
 
 async fn panes(app: &Rc<App>) {
@@ -461,6 +443,69 @@ async fn panes(app: &Rc<App>) {
         "bench editor panes closed={closed} previews={}",
         app.rendereds().len()
     );
+}
+
+/// Feed every fake still running `answer`, which ends it, and wait for their tabs to hear so.
+/// One that has not ten seconds on (`bench editor timeout <what>`) is told apart by
+/// [`unended`]: a fake that never got its answer, one started again, or a tab that never heard
+/// its fake end.
+async fn end_all(app: &Rc<App>, what: &str, answer: &[u8]) {
+    for term in app.terminals() {
+        term.view.feed_child(answer);
+    }
+    let ended = || app.terminals().iter().all(|t| t.ended());
+    if until("editor", what, 10_000, ended).await.is_none() {
+        unended(app);
+    }
+}
+
+/// What each tab that has not heard its editor end shows last, the pid of every fake started
+/// under this `HOME`, the shells the holder still holds, and each process of this launch (its
+/// `TMPDIR` in its environment, which the holder, the shells and the fakes inherit), with its
+/// state and what it waits in.
+fn unended(app: &Rc<App>) {
+    for term in app.terminals().iter().filter(|t| !t.ended()) {
+        let text = text(term);
+        let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+        let last = &lines[lines.len().saturating_sub(3)..];
+        println!("bench editor unended {} lines={last:?}", term.key());
+    }
+    // A fake started again after its tab had fed it is one more pid here than tabs were opened.
+    let starts = std::fs::read_to_string(glib::home_dir().join("editor-starts"));
+    let starts: Vec<String> = starts
+        .unwrap_or_default()
+        .lines()
+        .map(String::from)
+        .collect();
+    println!("bench editor unended starts={starts:?}");
+    let cli = std::env::current_exe().map(|exe| exe.with_file_name("accent-cli"));
+    if let Ok(held) = cli.and_then(|cli| std::process::Command::new(cli).arg("held").output()) {
+        for shell in String::from_utf8_lossy(&held.stdout).lines() {
+            println!("bench editor unended held {shell}");
+        }
+    }
+    let ours = format!("TMPDIR={}", std::env::var("TMPDIR").unwrap_or_default());
+    for proc in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let (pid, proc) = (proc.file_name(), proc.path());
+        let environ = std::fs::read(proc.join("environ")).unwrap_or_default();
+        if !environ.split(|b| *b == 0).any(|var| var == ours.as_bytes()) {
+            continue;
+        }
+        let read = |name| std::fs::read_to_string(proc.join(name)).unwrap_or_default();
+        let stat = read("stat");
+        // After the command's name, which may hold spaces: the state, then the parent.
+        let mut after = stat
+            .rsplit_once(") ")
+            .map_or("", |(_, rest)| rest)
+            .split(' ');
+        let (state, parent) = (after.next().unwrap_or("?"), after.next().unwrap_or("?"));
+        println!(
+            "bench editor unended process {} parent={parent} state={state} wchan={} {:?}",
+            pid.display(),
+            read("wchan"),
+            read("cmdline").replace('\0', " ").trim_end()
+        );
+    }
 }
 
 /// The window as it is, pictured into `$TMPDIR` as `name`.
