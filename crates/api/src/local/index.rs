@@ -291,6 +291,12 @@ impl Local {
         Ok(self.index().recent_files(limit)?)
     }
 
+    /// See [`Vault::used_files`](crate::Vault::used_files).
+    pub fn used_files(&self, files: &[String]) -> Result<()> {
+        *locked(&self.lang.used) = files.to_vec();
+        Ok(())
+    }
+
     /// The note a wikilink target points at, or `None` when it dangles and the UI can offer to
     /// create it.
     pub fn resolve_link(&self, target: &str) -> Result<Option<String>> {

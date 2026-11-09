@@ -538,6 +538,9 @@ pub(crate) struct Languages {
     listing: Arc<Listing>,
     /// The files in the folders git ignores, which the notes provider and the vault both ask.
     pub(crate) ignored: Arc<Ignored>,
+    /// The files the window used last, the latest first ([`crate::Vault::used_files`]), which
+    /// the notes provider ranks first.
+    pub(crate) used: Arc<Mutex<Vec<String>>>,
     /// When each session [`Self::calls`] used was last asked, for its idle stop.
     asked: Mutex<HashMap<Key, tokio::time::Instant>>,
 }
@@ -583,6 +586,7 @@ impl Languages {
             words: Arc::new(AtomicBool::new(true)),
             listing,
             ignored,
+            used: Arc::default(),
             asked: Mutex::new(HashMap::new()),
         })
     }
@@ -962,9 +966,9 @@ impl Languages {
                     // One notes provider per vault, whatever the note: they share the index.
                     let key = ("accent".to_string(), me.root.clone());
                     let (root, db, events) = (me.root.clone(), me.db.clone(), me.events.clone());
-                    let ignored = me.ignored.clone();
+                    let (ignored, used) = (me.ignored.clone(), me.used.clone());
                     let start = async move {
-                        Ok(Arc::new(Notes::open_at(root, &db, events, ignored)?) as _)
+                        Ok(Arc::new(Notes::open_at(root, &db, events, ignored, used)?) as _)
                     };
                     (
                         Some(me.session(key.clone(), start).await?),

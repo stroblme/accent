@@ -19,6 +19,10 @@ pub(super) struct Candidate<'a> {
 /// Rank matching candidate indices by prefix, match quality, then provider
 /// order (server rank or note path length). [`Query::as_typed`] preserves
 /// typed order while ignoring case and matching `cafe` to `café`.
+///
+/// A path's prefix is its name's too, and its provider's order stands for the match quality: the
+/// notes provider ranks the files used lately first as Go to File does, which the popup cannot
+/// see.
 pub(super) fn rank(candidates: &[Candidate]) -> Vec<usize> {
     // One query per distinct text typed, which is one or two however many items there are: the
     // items of an answer mostly start where the word does.
@@ -36,11 +40,21 @@ pub(super) fn rank(candidates: &[Candidate]) -> Vec<usize> {
             }
         };
         if let Some(score) = queries[q].2.score(c.filter) {
-            hits.push((!starts_with(c.filter, c.typed), std::cmp::Reverse(score), i));
+            let opens = starts_with(c.filter, c.typed);
+            let (opens, score) = match c.corpus {
+                Corpus::Paths => (opens || starts_with(name(c.filter), name(c.typed)), 0),
+                Corpus::Words => (opens, score),
+            };
+            hits.push((!opens, std::cmp::Reverse(score), i));
         }
     }
     hits.sort_unstable();
     hits.into_iter().map(|(_, _, i)| i).collect()
+}
+
+/// What of `path` follows its last folder, or the `[[` or `(` opening a link.
+fn name(path: &str) -> &str {
+    path.rsplit(['/', '[', '(']).next().unwrap_or(path)
 }
 
 /// Whether `text` starts with `prefix`, case aside.

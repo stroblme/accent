@@ -233,6 +233,25 @@ impl Index {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The tags the files `rels` carry, each once, the first file's first in the order it writes
+    /// them: what `#` completion offers first for the notes used lately.
+    pub fn tags_of(&self, rels: &[String]) -> Result<Vec<String>> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT t.name FROM tags t JOIN files f ON f.id = t.file_id
+              WHERE f.rel_path = ?1 ORDER BY t.byte_start",
+        )?;
+        let mut tags: Vec<String> = Vec::new();
+        for rel in rels {
+            for name in st.query_map([rel], |r| r.get::<_, String>(0))? {
+                let name = name?;
+                if !tags.contains(&name) {
+                    tags.push(name);
+                }
+            }
+        }
+        Ok(tags)
+    }
+
     /// The headings holding any of `words`, folded as search folds them, those holding the most
     /// first, at most `limit`: the sections a question names in so many words.
     ///

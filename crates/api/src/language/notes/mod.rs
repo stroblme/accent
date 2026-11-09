@@ -32,6 +32,9 @@ pub(crate) use pure::{folds_of, placed, symbols_of};
 
 /// Rows the popup offers before the user has to type more.
 const COMPLETIONS: usize = 20;
+/// How many of the files changed last an empty `[[` or `#` ranks first, after those the window
+/// used: as many as Go to File lists.
+const RECENT: usize = 50;
 /// How much of a linked note a hover shows.
 const HOVER_LINES: usize = 8;
 
@@ -49,6 +52,8 @@ pub(crate) struct Notes {
     suggested: Mutex<Suggested>,
     /// The files in the folders git ignores, which a link finds when the index does not.
     ignored: Arc<Ignored>,
+    /// The files the window used last, the latest first: what a completion ranks first.
+    used: Arc<Mutex<Vec<String>>>,
 }
 
 /// Each note's suggested tags, as the index held them at its [`Index::data_version`].
@@ -82,6 +87,7 @@ impl Notes {
         db: &Path,
         events: Sender<Event>,
         ignored: Arc<Ignored>,
+        used: Arc<Mutex<Vec<String>>>,
     ) -> Result<Notes> {
         Ok(Notes {
             root,
@@ -91,6 +97,7 @@ impl Notes {
             corpora: Mutex::default(),
             suggested: Mutex::default(),
             ignored,
+            used,
         })
     }
 

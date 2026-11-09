@@ -31,7 +31,8 @@ fn a_front_matter_tag_is_an_item_of_the_tags_list() {
 
 /// Tag completion lists the tags of the notes most like this one first, then the rest by use,
 /// in the body and in the front matter's `tags:` list alike, where an item is written without
-/// a `#`. A note like no other keeps the order by use.
+/// a `#`. A note like no other keeps the order by use. Something is typed, since before that the
+/// tags of the notes changed last lead, which here are all of them.
 #[test]
 fn tag_completion_puts_the_tags_of_similar_notes_first() {
     let vault = tempfile::tempdir().unwrap();
@@ -68,8 +69,23 @@ fn tag_completion_puts_the_tags_of_similar_notes_first() {
         &db,
         std::sync::mpsc::channel().0,
         Arc::new(Ignored::new(vault.path().to_path_buf())),
+        Arc::default(),
     )
     .unwrap();
+    // An `a` typed after each, in the editor so the index holds no tag `a`.
+    for (rel, text) in [
+        (
+            "a.md",
+            "---\ntags: [lab, a\n---\nThe transmon qubit lost coherence; see #a\n",
+        ),
+        (
+            "c.md",
+            "---\ntags:\n  - lab\n  - a\n---\nTransmon qubit readout and coherence.\n",
+        ),
+        ("d.md", "Zebra quokka #a\n"),
+    ] {
+        locked(&notes.docs).insert(rel.to_string(), text.to_string());
+    }
     let first = |rel: &str, line, character| {
         let items = notes
             .completion(rel, Pos { line, character })
@@ -77,10 +93,66 @@ fn tag_completion_puts_the_tags_of_similar_notes_first() {
             .items;
         items.first().map(|i| i.insert.clone())
     };
-    assert_eq!(first("a.md", 3, 40).as_deref(), Some("#hardware"));
-    assert_eq!(first("a.md", 1, 12).as_deref(), Some("hardware"));
-    assert_eq!(first("c.md", 3, 4).as_deref(), Some("hardware"));
-    assert_eq!(first("d.md", 0, 14).as_deref(), Some("#admin"));
+    assert_eq!(first("a.md", 3, 41).as_deref(), Some("#hardware"));
+    assert_eq!(first("a.md", 1, 13).as_deref(), Some("hardware"));
+    assert_eq!(first("c.md", 3, 5).as_deref(), Some("hardware"));
+    assert_eq!(first("d.md", 0, 15).as_deref(), Some("#admin"));
+}
+
+/// `[[` and `#` rank as Go to File does: the files the window used lead their tier, the latest
+/// first, and before anything is typed the files changed last follow them; `#` lists the tags
+/// those notes carry first. The note being written is not one of them.
+#[test]
+fn link_and_tag_completion_put_what_was_used_lately_first() {
+    let vault = tempfile::tempdir().unwrap();
+    // Changed an hour apart, `note-b.md` last.
+    let now = std::time::SystemTime::now();
+    for (hours, rel, text) in [
+        (5, "x.md", "# X\n"),
+        (4, "note-a.md", "#alpha\n"),
+        (3, "zz/note-c.md", "#gamma\n"),
+        (2, "a.md", "[[x]]\n[[note-a]]\nsee #\n#delta\n"),
+        (1, "note-b.md", "#beta\n"),
+    ] {
+        let path = vault.path().join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, text).unwrap();
+        let file = std::fs::File::options().write(true).open(&path).unwrap();
+        file.set_modified(now - std::time::Duration::from_secs(hours * 3600))
+            .unwrap();
+    }
+    let cache = tempfile::tempdir().unwrap();
+    let db = cache.path().join("i.db");
+    Index::open(&db)
+        .unwrap()
+        .reconcile(vault.path(), |_| {})
+        .unwrap();
+    let used: Arc<Mutex<Vec<String>>> = Arc::default();
+    let notes = Notes::open_at(
+        vault.path().to_path_buf(),
+        &db,
+        std::sync::mpsc::channel().0,
+        Arc::new(Ignored::new(vault.path().to_path_buf())),
+        used.clone(),
+    )
+    .unwrap();
+    let rows = |line, character| -> Vec<String> {
+        let answer = notes.completion("a.md", Pos { line, character }).unwrap();
+        answer.items.into_iter().map(|i| i.insert).collect()
+    };
+    // Nothing used yet: what changed last leads, and in a vault this small that is all of it.
+    assert_eq!(
+        rows(0, 2),
+        ["[[note-b]]", "[[note-c]]", "[[note-a]]", "[[x]]", "[[a]]"]
+    );
+    *used.lock().unwrap() = vec!["a.md".into(), "zz/note-c.md".into(), "note-a.md".into()];
+    assert_eq!(
+        rows(0, 2)[..4],
+        ["[[note-c]]", "[[note-a]]", "[[note-b]]", "[[x]]"]
+    );
+    // Typed, what was used leads its tier, and what changed last no longer counts.
+    assert_eq!(rows(1, 4), ["[[note-c]]", "[[note-a]]", "[[note-b]]"]);
+    assert_eq!(rows(2, 5)[..3], ["#gamma", "#alpha", "#beta"]);
 }
 
 #[test]
@@ -158,6 +230,7 @@ fn a_completion_asked_inside_a_fragment_matches_up_to_the_caret_and_takes_all_of
         &db,
         std::sync::mpsc::channel().0,
         Arc::new(Ignored::new(vault.path().to_path_buf())),
+        Arc::default(),
     )
     .unwrap();
     let ask = |line, character| notes.completion("a.md", Pos { line, character }).unwrap();
@@ -224,6 +297,7 @@ fn org_completes_file_links_and_tags_as_org_writes_them() {
         &db,
         std::sync::mpsc::channel().0,
         Arc::new(Ignored::new(vault.path().to_path_buf())),
+        Arc::default(),
     )
     .unwrap();
     let ask = |line, character| {
@@ -361,6 +435,7 @@ fn a_wikilink_completes_to_a_note_not_written_yet() {
         &db,
         std::sync::mpsc::channel().0,
         Arc::new(Ignored::new(vault.path().to_path_buf())),
+        Arc::default(),
     )
     .unwrap();
     let caret = Pos {
@@ -401,6 +476,7 @@ fn an_org_file_links_digits_are_a_line() {
         &db,
         std::sync::mpsc::channel().0,
         Arc::new(Ignored::new(vault.path().to_path_buf())),
+        Arc::default(),
     )
     .unwrap();
     let landed = |line, character| {
@@ -438,6 +514,7 @@ fn a_block_anchor_is_followed_and_completed() {
         &db,
         std::sync::mpsc::channel().0,
         Arc::new(Ignored::new(vault.path().to_path_buf())),
+        Arc::default(),
     )
     .unwrap();
     let at = |line, character| Pos { line, character };
@@ -485,6 +562,7 @@ fn a_note_answers_whatever_its_extension_case_or_spelling() {
         &db,
         std::sync::mpsc::channel().0,
         Arc::new(Ignored::new(vault.path().to_path_buf())),
+        Arc::default(),
     )
     .unwrap();
     let at = |line, character| Pos { line, character };
@@ -514,6 +592,7 @@ fn a_completion_reads_the_paths_again_once_the_index_changes() {
         &db,
         std::sync::mpsc::channel().0,
         Arc::new(Ignored::new(vault.path().to_path_buf())),
+        Arc::default(),
     )
     .unwrap();
     let caret = Pos {
@@ -550,6 +629,7 @@ fn a_typed_extension_keeps_the_note_row() {
         &db,
         std::sync::mpsc::channel().0,
         Arc::new(Ignored::new(vault.path().to_path_buf())),
+        Arc::default(),
     )
     .unwrap();
     let caret = Pos {
@@ -591,6 +671,7 @@ fn a_link_destination_row_survives_the_popup_typed_either_way() {
         &db,
         std::sync::mpsc::channel().0,
         Arc::new(Ignored::new(vault.path().to_path_buf())),
+        Arc::default(),
     )
     .unwrap();
     for (line, character, typed) in [(0, 7, "Übe"), (1, 15, "sub/%C3%9Cb")] {
@@ -631,6 +712,7 @@ fn a_wikilink_completes_an_alias_to_its_note() {
         &db,
         std::sync::mpsc::channel().0,
         Arc::new(Ignored::new(vault.path().to_path_buf())),
+        Arc::default(),
     )
     .unwrap();
     let caret = Pos {
@@ -672,6 +754,7 @@ fn a_wiki_anchor_into_a_pdf_offers_its_bookmarks() {
         &db,
         std::sync::mpsc::channel().0,
         Arc::new(Ignored::new(vault.path().to_path_buf())),
+        Arc::default(),
     )
     .unwrap();
     let items = notes
@@ -791,15 +874,15 @@ fn path_candidates_prefer_the_shortest_path_and_tags_keep_their_order() {
         .into();
 
     assert_eq!(
-        path_candidates(&paths, "alp").0,
+        path_candidates(&paths, &[], "alp").0,
         ["Alpha.md", "sub/Alphabet.md"]
     );
-    assert_eq!(path_candidates(&paths, "sub/").0, ["sub/Alphabet.md"]);
-    assert!(path_candidates(&paths, "zzz").0.is_empty());
+    assert_eq!(path_candidates(&paths, &[], "sub/").0, ["sub/Alphabet.md"]);
+    assert!(path_candidates(&paths, &[], "zzz").0.is_empty());
     // A typed extension still opens the name.
     let files: Vec<String> = ["b/xlogo.png", "a/deep/logo.png"].map(String::from).into();
     assert_eq!(
-        path_candidates(&files, "logo.p").0,
+        path_candidates(&files, &[], "logo.p").0,
         ["a/deep/logo.png", "b/xlogo.png"]
     );
 
@@ -820,7 +903,7 @@ fn a_query_matches_anywhere_and_a_full_list_says_it_is_not_all_of_them() {
         .map(String::from)
         .into();
 
-    let (hits, more) = path_candidates(&paths, "work");
+    let (hits, more) = path_candidates(&paths, &[], "work");
     assert_eq!(
         hits,
         ["Rework.md", "Projects/Groundwork.md"],
@@ -829,13 +912,13 @@ fn a_query_matches_anywhere_and_a_full_list_says_it_is_not_all_of_them() {
     assert!(!more, "everything that matched fits");
     // Nor does it have to be contiguous, since the matcher is the palette's.
     let scattered: Vec<String> = ["a-bc.md", "Deep-Work.md"].map(String::from).into();
-    assert_eq!(path_candidates(&scattered, "bc").0, ["a-bc.md"]);
-    assert_eq!(path_candidates(&scattered, "dpwk").0, ["Deep-Work.md"]);
+    assert_eq!(path_candidates(&scattered, &[], "bc").0, ["a-bc.md"]);
+    assert_eq!(path_candidates(&scattered, &[], "dpwk").0, ["Deep-Work.md"]);
 
     let many: Vec<String> = (0..COMPLETIONS + 5)
         .map(|n| format!("Note{n}.md"))
         .collect();
-    let (hits, more) = path_candidates(&many, "note");
+    let (hits, more) = path_candidates(&many, &[], "note");
     assert_eq!(hits.len(), COMPLETIONS);
     assert!(more, "the popup has to ask again as the word grows");
 }

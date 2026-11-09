@@ -15,16 +15,40 @@ use super::pure::{
     Trigger, block_links, context, fragment_end, front_tag, has_headings, heading_names,
     link_names, org_context, page_links, path_candidates, ranked_paths, tag_candidates, yaml_item,
 };
-use super::{Corpora, Corpus, Notes, empty_item, pdf_outline};
+use super::{Corpora, Corpus, Notes, RECENT, empty_item, pdf_outline};
 use crate::language::{Completion, Completions, Kind, Pos, Range, byte_of};
 use crate::{Local, locked};
 
 impl Notes {
-    /// Every tag a completion offers in the note at `rel`, which holds `text`: those the notes
-    /// most like it carry first ([`Index::similar_tags`]), less the ones it has already, then the
-    /// rest by use. The suggestions are worked out once a note until [`Index::data_version`]
-    /// changes, about 50 ms on a vault of 3600 notes, not at each keystroke.
-    fn tags_for(&self, index: &Index, rel: &str, text: &str) -> Result<Vec<(String, i64)>> {
+    /// The files a completion in the note at `rel` ranks first, the latest first, as Go to File
+    /// does: those the window used, then, while nothing is `typed`, the [`RECENT`] changed last.
+    /// The note itself is none of them, since a link to it is rarely what is wanted.
+    fn recent(&self, index: &Index, rel: &str, typed: bool) -> Result<Vec<String>> {
+        let mut recent = locked(&self.used).clone();
+        if !typed {
+            for changed in index.recent_files(RECENT)? {
+                if !recent.contains(&changed) {
+                    recent.push(changed);
+                }
+            }
+        }
+        recent.retain(|used| used != rel);
+        Ok(recent)
+    }
+
+    /// Every tag a completion offers in the note at `rel`, which holds `text`, `typed` being what
+    /// the tag has so far: those the notes used lately carry first ([`Notes::recent`]), then those
+    /// the notes most like it carry ([`Index::similar_tags`]), less the ones it has already in
+    /// both, then the rest by use.
+    /// The suggestions are worked out once a note until [`Index::data_version`] changes, about
+    /// 50 ms on a vault of 3600 notes, not at each keystroke.
+    fn tags_for(
+        &self,
+        index: &Index,
+        rel: &str,
+        text: &str,
+        typed: &str,
+    ) -> Result<Vec<(String, i64)>> {
         let version = index.data_version()?;
         let suggested = {
             let mut cache = locked(&self.suggested);
@@ -46,14 +70,17 @@ impl Notes {
             .into_iter()
             .map(|tag| tag.name)
             .collect();
+        let used = index.tags_of(&self.recent(index, rel, !typed.is_empty())?)?;
         let mut tags = index.tags()?;
         // A stable sort: the rest keep their order by use behind the suggestions.
         tags.sort_by_cached_key(|(name, _)| {
-            suggested
-                .iter()
-                .position(|s| s == name)
-                .filter(|_| !own.contains(name))
-                .unwrap_or(usize::MAX)
+            let first = |list: &[String]| {
+                list.iter()
+                    .position(|s| s == name)
+                    .filter(|_| !own.contains(name))
+                    .unwrap_or(usize::MAX)
+            };
+            (first(&used), first(&suggested))
         });
         Ok(tags)
     }
@@ -72,8 +99,9 @@ impl Notes {
             false => after,
         }
         .trim_end();
-        let tags = self.tags_for(&locked(&self.index), rel, text)?;
-        let (hits, more) = tag_candidates(&tags, &text[start..caret]);
+        let typed = &text[start..caret];
+        let tags = self.tags_for(&locked(&self.index), rel, text, typed)?;
+        let (hits, more) = tag_candidates(&tags, typed);
         let line_start = text[..caret].rfind('\n').map_or(0, |i| i + 1);
         let replace = Range {
             start: Pos {
@@ -225,7 +253,8 @@ impl Notes {
                     missing,
                     aliases,
                 } = &*corpus;
-                let (ranked, more) = ranked_paths(paths, prefix);
+                let recent = self.recent(&index, rel, !prefix.is_empty())?;
+                let (ranked, more) = ranked_paths(paths, &recent, prefix);
                 let mut items = Vec::with_capacity(ranked.len());
                 for i in ranked {
                     // The link names the file, as any other row writes it, and reads as the
@@ -348,12 +377,14 @@ impl Notes {
                 })
             }
             Trigger::Path => {
-                let files = self.corpus(&locked(&self.index), false)?;
+                let index = locked(&self.index);
+                let files = self.corpus(&index, false)?;
                 // Matched against vault paths, so what was typed loses its encoding, and the `./`
                 // and `../` a relative link opens with, which say where from rather than what.
                 let query = markdown::percent_decode(prefix);
-                let (hits, more) =
-                    path_candidates(&files.paths, query.trim_start_matches(['.', '/']));
+                let query = query.trim_start_matches(['.', '/']);
+                let recent = self.recent(&index, rel, !query.is_empty())?;
+                let (hits, more) = path_candidates(&files.paths, &recent, query);
                 let dir = parent_dir(rel);
                 let items = hits
                     .into_iter()
@@ -386,7 +417,7 @@ impl Notes {
                 })
             }
             Trigger::Tag => {
-                let tags = self.tags_for(&locked(&self.index), rel, &text)?;
+                let tags = self.tags_for(&locked(&self.index), rel, &text, prefix)?;
                 let (hits, more) = tag_candidates(&tags, prefix);
                 Ok(Completions {
                     items: hits
@@ -438,7 +469,7 @@ impl Notes {
         let index = locked(&self.index);
         if trigger == Trigger::Tag {
             let tags: Vec<(String, i64)> = self
-                .tags_for(&index, rel, text)?
+                .tags_for(&index, rel, text, prefix)?
                 .into_iter()
                 .filter(|(name, _)| name.chars().all(org::is_tag_char))
                 .collect();
@@ -471,7 +502,9 @@ impl Notes {
         replace.end.character += eaten as u32;
         let files = self.corpus(&index, false)?;
         let query = prefix.strip_prefix("file:").unwrap_or(prefix);
-        let (hits, more) = path_candidates(&files.paths, query.trim_start_matches(['.', '/']));
+        let query = query.trim_start_matches(['.', '/']);
+        let recent = self.recent(&index, rel, !query.is_empty())?;
+        let (hits, more) = path_candidates(&files.paths, &recent, query);
         let dir = parent_dir(rel);
         let mut items = Vec::with_capacity(hits.len());
         for hit in hits {

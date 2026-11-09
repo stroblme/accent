@@ -522,6 +522,9 @@ methods! {
     file_paths(include_ignored: val bool) -> Vec<String>;
     set_excluded(entries: ref [String]) -> ();
     recent_files(limit: val usize) -> Vec<String>;
+    /// The files the window used last, the latest first (`App::recent_files`): what `[[` and `#`
+    /// completion rank first, as Go to File does.
+    used_files(files: ref [String]) -> ();
     resolve_link(target: ref str) -> Option<String>;
     /// What Go to File and `[[` completion offer to write.
     missing_notes() -> Vec<String>;

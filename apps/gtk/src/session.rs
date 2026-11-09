@@ -41,6 +41,8 @@ impl App {
         let Some(vault) = self.vault().cloned() else {
             return;
         };
+        // Told again with the lists, so a vault opened or a link come back has it too.
+        self.share_used();
         // A file from outside the vault has no path in it to ask about.
         let opened: Vec<String> = self
             .recent_files
@@ -334,6 +336,28 @@ impl App {
         }
         accent_core::config::touch(&mut self.recent_files.borrow_mut(), rel, RECENT_FILES);
         self.save_session_soon();
+        self.share_used();
+    }
+
+    /// Tell the vault the files this window used last, which `[[` and `#` completion rank first
+    /// as Go to File does: off the main loop, since a remote vault takes a round trip.
+    fn share_used(&self) {
+        let Some(vault) = self.vault().cloned() else {
+            return;
+        };
+        // A file from outside the vault has no path in it.
+        let used: Vec<String> = self
+            .recent_files
+            .borrow()
+            .iter()
+            .filter(|rel| !doc::is_loose_key(rel))
+            .cloned()
+            .collect();
+        gio::spawn_blocking(move || {
+            if let Err(e) = vault.used_files(&used) {
+                tracing::debug!("sharing the files used: {e:#}");
+            }
+        });
     }
 
     /// Remember a command by full action name, whichever surface fired it.

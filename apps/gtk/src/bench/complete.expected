@@ -1,4 +1,4 @@
-bench complete_link_open ["note", "complete-one", "complete-two"] shown=true
+bench complete_link_open ["complete-two", "complete-one", "note"] shown=true
 bench complete_link_narrow ["complete-two"] shown=true
 bench complete_link_down Stop "[[complete-t]]" selected=Some(0) shown=true
 bench complete_link_tab Stop "[[complete-two]]" selected=None shown=false
@@ -10,10 +10,10 @@ bench complete_inside_down Stop "[[cmplete-t]]" selected=Some(0) shown=true
 bench complete_inside_tab Stop "[[complete-two]]" selected=None shown=false
 bench complete_inside_left "[|[complete-t]]" [] shown=false
 bench complete_reopen_at "[[completeX|-two]]" [] shown=false
-bench complete_reopen_deleted "[[complete|-two]]" ["complete-one", "complete-two"] shown=true
+bench complete_reopen_deleted "[[complete|-two]]" ["complete-two", "complete-one"] shown=true
 bench complete_reopen_down Stop "[[complete-two]]" selected=Some(0) shown=true
 bench complete_reopen_next Stop "[[complete-two]]" selected=Some(1) shown=true
-bench complete_reopen_tab Stop "[[complete-two]]" selected=None shown=false
+bench complete_reopen_tab Stop "[[complete-one]]" selected=None shown=false
 bench complete_tag_open [] shown=false
 bench complete_tag_narrow ["#complete-tag"] shown=true
 bench complete_tag_down Stop "#c" selected=Some(0) shown=true

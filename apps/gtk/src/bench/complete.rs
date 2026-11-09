@@ -6,8 +6,9 @@ use crate::lang::Editor as _;
 
 /// `=note:<rel>` and `=code:<rel>[,<typed>]` type into files in a scratch vault under `/tmp`.
 ///
-/// `note:` creates completion fixtures, narrows `[[` and `#c` suggestions, accepts
-/// with Down/Tab and undoes. Bracket completion must consume the existing `]]` exactly once.
+/// `note:` creates completion fixtures and opens one before the note, which an empty `[[` then
+/// lists first, narrows `[[` and `#c` suggestions, accepts with Down/Tab and undoes. Bracket
+/// completion must consume the existing `]]` exactly once.
 /// The caret then moves inside a `[[` link, which keeps the popup until it is past the `[[`, and
 /// a letter deleted inside a link written before opens it.
 /// `code:` types `typed` (default `s.g`) into a blank line, creating a C fixture if
@@ -50,6 +51,10 @@ async fn bench_complete_note(app: &Rc<App>, rel: &str) {
         if let Err(e) = vault.save(note, text, None) {
             println!("bench complete write_failed {note} {e:?}");
         }
+    }
+    // Opened before the note, so an empty `[[` lists it first, the note changed last after it.
+    if bench_complete_open(app, "complete-two.md").await.is_none() {
+        return;
     }
     let Some((tab, session)) = bench_complete_open(app, rel).await else {
         return;
