@@ -22,6 +22,7 @@ mod web;
 mod window;
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -80,6 +81,10 @@ pub struct DiagramTab {
     editor: RefCell<Editor>,
     page_index: Cell<usize>,
     selection: RefCell<Vec<CellId>>,
+    /// What was selected on each page the reader left, by its page id, selected again when they
+    /// come back. It lasts as long as the tab and is never written; a page without an id keeps
+    /// nothing.
+    kept: RefCell<HashMap<String, Vec<CellId>>>,
     tool: Cell<Tool>,
     /// How the tools draw: the config's `[diagram]`, which the ring's outer orbit changes.
     options: Cell<DiagramConfig>,
@@ -193,6 +198,7 @@ pub fn open(
         editor: RefCell::new(Editor::new(file)),
         page_index: Cell::new(place.page.min(pages.saturating_sub(1))),
         selection: RefCell::new(Vec::new()),
+        kept: RefCell::default(),
         tool: Cell::new(Tool::Select),
         options: Cell::new(DiagramConfig::default()),
         pasted: RefCell::new((None, 0)),
@@ -413,8 +419,18 @@ impl DiagramTab {
         // A change the Properties pane holds is this page's.
         self.props.flush();
         self.finish_label();
+        // What was selected on page `i` comes back, as far as it is still there (`refresh`).
+        // A presentation selects nothing, and what each page had waits for its end.
+        let selected = match self.presenting.get() {
+            Some(_) => Vec::new(),
+            None => {
+                let left = self.selection.take();
+                let (from, to) = (self.page_id(self.page_index.get()), self.page_id(i));
+                swap_kept(&mut self.kept.borrow_mut(), from, to, left)
+            }
+        };
+        *self.selection.borrow_mut() = selected;
         self.page_index.set(i);
-        self.selection.borrow_mut().clear();
         // A layer picked on one page is not one of another's.
         self.editor.borrow_mut().set_current_layer(None);
         self.refresh();
@@ -1112,6 +1128,13 @@ impl DiagramTab {
             .collect()
     }
 
+    /// Page `i`'s id, which what was selected on it is kept by.
+    fn page_id(&self, i: usize) -> Option<String> {
+        let editor = self.editor.borrow();
+        let page = editor.file().pages.get(i)?;
+        accent_drawio::model::attr(&page.attrs, "id").map(str::to_string)
+    }
+
     /// The pages were `before` and may have changed, by an edit or a walk of the history: the
     /// reader stays on the page they were reading wherever it went, or is on the one that took its
     /// place, and the window hears where every page went.
@@ -1125,8 +1148,13 @@ impl DiagramTab {
         match went(reading) {
             Some(at) => self.page_index.set(at),
             None => {
-                self.page_index.set(reading.min(last));
-                self.selection.borrow_mut().clear();
+                let at = reading.min(last);
+                self.page_index.set(at);
+                // The page in its place has what was selected on it back.
+                let kept = self
+                    .page_id(at)
+                    .and_then(|id| self.kept.borrow_mut().remove(&id));
+                *self.selection.borrow_mut() = kept.unwrap_or_default();
                 self.editor.borrow_mut().set_current_layer(None);
             }
         }
@@ -1431,6 +1459,20 @@ fn moved(before: &[Option<String>], now: &[Option<String>], page: usize) -> Opti
     }
 }
 
+/// Leave the page with the id `from` for the one with the id `to`: `selected` is kept as the
+/// first's, and what the second had when it was left is taken back out, to be selected again.
+fn swap_kept(
+    kept: &mut HashMap<String, Vec<CellId>>,
+    from: Option<String>,
+    to: Option<String>,
+    selected: Vec<CellId>,
+) -> Vec<CellId> {
+    if let Some(from) = from {
+        kept.insert(from, selected);
+    }
+    to.and_then(|to| kept.remove(&to)).unwrap_or_default()
+}
+
 /// The page of `file` called `name`, as `![[x.drawio#name]]` and `[[x.drawio#name]]` name one.
 pub fn page_named(file: &File, name: &str) -> Option<usize> {
     file.page_names().iter().position(|n| n == name.trim())
@@ -1468,5 +1510,24 @@ mod tests {
         let bare = ids(&["", "b", "b"]);
         assert_eq!(moved(&bare, &ids(&["", "b", "b"]), 2), Some(2));
         assert_eq!(moved(&bare, &ids(&["", "b"]), 0), None);
+    }
+
+    #[test]
+    fn a_page_left_has_its_selection_back_on_coming_back() {
+        let ids = |ids: &[&str]| -> Vec<CellId> { ids.iter().map(|i| i.to_string()).collect() };
+        let page = |id: &str| Some(id.to_string());
+        let mut kept = HashMap::new();
+        // A on page one, to page two, which had nothing, B picked there, and back.
+        let two = swap_kept(&mut kept, page("one"), page("two"), ids(&["a"]));
+        assert!(two.is_empty());
+        let one = swap_kept(&mut kept, page("two"), page("one"), ids(&["b"]));
+        assert_eq!(one, ids(&["a"]));
+        assert_eq!(
+            swap_kept(&mut kept, page("one"), page("two"), one),
+            ids(&["b"])
+        );
+        // Shown again where it is, a page keeps what it has.
+        let again = swap_kept(&mut kept, page("two"), page("two"), ids(&["b"]));
+        assert_eq!(again, ids(&["b"]));
     }
 }
