@@ -74,6 +74,14 @@ val cargoNdk = tasks.register<Exec>("cargoNdk") {
     commandLine("make", "android")
     inputs.dir(repo.resolve("crates"))
     inputs.dir(repo.resolve("android/ffi"))
+    // The workspace's dependencies, profiles and linker flags, and the rule itself: a change to
+    // any of them changes the library without touching a crate.
+    inputs.files(
+        repo.resolve("Cargo.toml"),
+        repo.resolve("Cargo.lock"),
+        repo.resolve(".cargo/config.toml"),
+        repo.resolve("Makefile"),
+    )
     outputs.dir(repo.resolve("android/app/src/main/jniLibs"))
 }
 
