@@ -143,8 +143,9 @@ Provide a visible control for each action that otherwise depends on a gesture.
 
 ## The document
 
-- Notes, PDFs and images use the same `DocumentBar` and `DocumentGap` (`ui/Common.kt`).
+- Notes, PDFs and images use the same `DocumentBar` (`ui/Common.kt`).
 - Overlay the bar on reading content (`DocumentFrame`) so showing it does not change the reader's scroll or zoom position; a tap can hide it when it covers the start of a document.
+- Let the document fill that frame to its edges, since an inset one is cut off short of the screen and shows a band of page colour above and below it once the bar fades.
 - Keep the editor's persistent bar outside its scroll area and place decision banners above it.
 - The bar's button is a note's Edit and Done.
   A PDF's are Find and Contents, the document's bookmarks; on a file with none, Contents is there and disabled: a gap where a control belongs is worse than a control that says it has nothing to offer.

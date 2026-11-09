@@ -67,9 +67,6 @@ fun flatRow() = ListItemDefaults.colors(containerColor = MaterialTheme.colorSche
 /** The gutter every screen keeps at its sides. */
 val Gutter: Dp = 16.dp
 
-/** Shared top and bottom inset for note and PDF content. */
-val DocumentGap: Dp = 8.dp
-
 /**
  * Transition timing for arrival, exit, and sideways navigation, respecting system motion settings.
  */
@@ -212,7 +209,11 @@ fun FadingBar(visible: Boolean, content: @Composable () -> Unit) {
     }
 }
 
-/** Overlay [bar] without moving the document; pass its height to [content] for clearance. */
+/**
+ * Overlay [bar] without moving the document; pass its height to [content] for clearance.
+ * The document runs to the frame's edges: one inset from them is cut off short of the screen,
+ * a band of page colour above and below it once the bar fades.
+ */
 @Composable
 fun DocumentFrame(
     barShown: Boolean,
@@ -224,7 +225,7 @@ fun DocumentFrame(
     // Kept when the bar goes: the height it had is the height it comes back with.
     var height by remember { mutableStateOf(0.dp) }
     Box(modifier.fillMaxSize()) {
-        Box(Modifier.fillMaxSize().padding(vertical = DocumentGap)) { content(height) }
+        content(height)
         FadingBar(visible = barShown) {
             // Opaque, and where a pointer stops: over the document the bar needs a ground of its
             // own to be read off, and a press it let through would be a press the document reads
