@@ -696,20 +696,21 @@ async fn kept(
             return f64::NAN;
         };
         tab.bench_scroll_by((top + height / 2.0 - at) / page);
-        settled(tab, place).await;
+        settled(tab, "zoom", place).await;
     }
     let Some((top, height)) = place() else {
         return f64::NAN;
     };
     let down = (at - top) / height;
     zoom();
-    settled(tab, place).await;
+    settled(tab, "zoom", place).await;
     place().map_or(f64::NAN, |(top, height)| top + down * height - at)
 }
 
 /// Until the notebook has taken the heights a change gave its cells: its height, its scroll and
-/// what `place` reads the same over five looks 50 ms apart, for five seconds at most.
-async fn settled(tab: &Rc<NotebookTab>, place: &dyn Fn() -> Option<(f64, f64)>) {
+/// what `place` reads the same over five looks 50 ms apart, for five seconds at most, past which
+/// `bench notebook <what> unsettled` says so.
+async fn settled(tab: &Rc<NotebookTab>, what: &str, place: &dyn Fn() -> Option<(f64, f64)>) {
     let look = || (tab.bench_range().0, tab.bench_scrolled(), place());
     let (mut last, mut same) = (look(), 0);
     for _ in 0..100 {
@@ -721,7 +722,7 @@ async fn settled(tab: &Rc<NotebookTab>, place: &dyn Fn() -> Option<(f64, f64)>) 
             return;
         }
     }
-    println!("bench notebook zoom unsettled");
+    println!("bench notebook {what} unsettled");
 }
 
 /// The window made `w` by `h`, once the X server has resized it.
@@ -736,7 +737,8 @@ async fn resized(app: &Rc<App>, w: i32, h: i32) {
     }
 }
 
-/// `rel` closed and opened again, so nothing is built but what shows, and settled.
+/// `rel` closed and opened again, so nothing is built but what shows, and settled: a loaded
+/// machine may still be laying its cells out at the window's new width after half a second.
 async fn reopened(app: &Rc<App>, rel: &str) -> Option<Rc<NotebookTab>> {
     if let Some(doc) = app.doc_for(rel) {
         app.close_page(&doc.page().clone());
@@ -744,6 +746,7 @@ async fn reopened(app: &Rc<App>, rel: &str) -> Option<Rc<NotebookTab>> {
     }
     let (tab, _) = opened(app, rel).await?;
     glib::timeout_future(Duration::from_millis(500)).await;
+    settled(&tab, "reopened", &|| None).await;
     Some(tab)
 }
 
