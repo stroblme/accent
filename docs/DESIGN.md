@@ -743,6 +743,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A jump — such a link, an Outline row, the note's caret beside it — lands at once, not eased.
 - A preview out of sight for five minutes is let go, its text and pictures with it; showing it again builds another and renders the note at the caret, as any render does, a moment slower.
   Five minutes, so going back and forth between a note and its preview finds it there.
+- A render that panics shows "Cannot Preview Note.md" in the page's place, over what the panic said and with Retry, as a file that fails to load does (Loading).
+  Any later render of the note tries again too, and the page comes back once one goes through.
 - A click on a link into the vault is followed as a link is; one out of it goes to the system when Go to Definition's would (`markdown::is_url`); either only on a release that selected nothing.
 - A wikilink without an alias reads as in Obsidian's reading view, its target's headings and block apart: `[[Note#Part#Sub]]` as `Note > Part > Sub`, `[[#Part]]` as `Part`; printouts, the HTML export and Android's rendered note show it so too.
 - A `#tag` is a link to the tag, drawn as the editor draws a tag, in the accent without a link's underline; a click shows the Info pane's Tags section with that tag picked, as the palette's tag does.

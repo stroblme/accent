@@ -72,9 +72,17 @@ impl PartialEq for Laid {
     }
 }
 
+/// Whether the render's worker panics, for a drill to see the failure page.
+#[cfg(feature = "bench")]
+pub static PANIC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// `text`'s page, in the syntax `rel` is written in. Footnotes are numbered as pulldown-cmark's
 /// HTML writer numbers them: in the order a reference or a definition first names each.
 fn lay(rel: &str, text: &str) -> Vec<Laid> {
+    #[cfg(feature = "bench")]
+    if PANIC.load(std::sync::atomic::Ordering::Relaxed) {
+        panic!("a panic the drill asked for");
+    }
     let mut numbers: HashMap<String, usize> = HashMap::new();
     Syntax::of(rel)
         .page(text)
@@ -126,6 +134,8 @@ struct Page {
     saved_soon: crate::widgets::Debounce,
     clamp: adw::ClampScrollable,
     scroller: gtk::ScrolledWindow,
+    /// The page, or the failure page in its place once a render's worker panicked.
+    frame: gtk::Stack,
     pub zoom: Cell<f64>,
     /// The share of the view in percent, `None` under Full-Width Preview.
     column: Cell<Option<u32>>,
@@ -152,8 +162,9 @@ struct Page {
 }
 
 pub struct Preview {
-    /// The editor's frame (`editor/open.rs`): an overlay over the scroller, with a zero-size area
-    /// laid over it that reports the width the column is a share of.
+    /// [`Page::frame`], the page in the editor's frame (`editor/open.rs`): an overlay over the
+    /// scroller, with a zero-size area laid over it that reports the width the column is a share
+    /// of.
     root: gtk::Widget,
     page: Rc<Page>,
     find: Find,
@@ -197,6 +208,11 @@ impl Preview {
             .build();
         let overlay = gtk::Overlay::builder().child(&scroller).build();
         overlay.add_overlay(&width);
+        let frame = gtk::Stack::builder()
+            .transition_type(gtk::StackTransitionType::Crossfade)
+            .transition_duration(crate::widgets::FADE_MS)
+            .build();
+        crate::loading::put(&frame, &overlay);
 
         let figures = figure::Figures::new(&view, resolve, inverted, web, on_invert);
         let page = Rc::new(Page {
@@ -215,6 +231,7 @@ impl Preview {
             saved_soon: crate::widgets::Debounce::new(saved::SETTLE),
             clamp,
             scroller,
+            frame,
             zoom: Cell::new(1.0),
             column: Cell::new(None),
             prose_font: RefCell::default(),
@@ -287,7 +304,7 @@ impl Preview {
         page.set_zoom(1.0);
         page.restyle();
         Preview {
-            root: overlay.upcast(),
+            root: page.frame.clone().upcast(),
             find: Find::new(&page),
             page,
         }
@@ -507,19 +524,39 @@ impl Page {
         let (rel, text) = (rel.to_string(), text.to_string());
         let page = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let laid = crate::work::off_thread("preview page", move || lay(&rel, &text)).await;
-            let (Some(laid), Some(page)) = (laid, page.upgrade()) else {
+            let laid = crate::work::caught("preview page", move || lay(&rel, &text)).await;
+            let Some(page) = page.upgrade() else {
                 return;
             };
             if page.generation.get() != generation {
                 return;
             }
+            let laid = match laid {
+                Ok(laid) => laid,
+                Err(why) => return page.fail(&why),
+            };
+            crate::loading::show(&page.frame);
             match another || !page.whole.get() {
                 true => page.show(laid, source, generation),
                 false => {
                     page.patch(laid, &source);
                     page.settle();
                 }
+            }
+        });
+    }
+
+    /// The render's worker panicked: the failure page in the page's place, saying what the panic
+    /// said, as a file that fails to load does (DESIGN.md, Loading). Retry renders the note again,
+    /// and so does any render of it, which takes the failure page down once it goes through.
+    fn fail(self: &Rc<Self>, why: &str) {
+        let (rel, text) = self.note.replace((String::new(), "".into()));
+        let title = format!("Cannot Preview {}", crate::doc::file_name(&rel));
+        let page = Rc::downgrade(self);
+        let why = crate::loading::sentence(why);
+        crate::loading::failed(&self.frame, &title, &why, move || {
+            if let Some(page) = page.upgrade() {
+                page.render(&rel, &text);
             }
         });
     }
@@ -953,6 +990,25 @@ fn wire(page: &Rc<Page>) {
 impl Preview {
     pub fn settled(&self) -> bool {
         self.page.settled.get()
+    }
+
+    /// The failure page's title and description, while it is the one shown.
+    pub fn failure(&self) -> Option<(String, String)> {
+        let frame = &self.page.frame;
+        if frame.visible_child_name().as_deref() != Some(crate::loading::FAILED) {
+            return None;
+        }
+        let status = frame.visible_child().and_downcast::<adw::StatusPage>()?;
+        Some((status.title().into(), status.description()?.into()))
+    }
+
+    /// The failure page's Retry, clicked.
+    pub fn retry(&self) {
+        let failed = self.page.frame.child_by_name(crate::loading::FAILED);
+        let status = failed.and_downcast::<adw::StatusPage>();
+        if let Some(button) = status.and_then(|s| s.child()).and_downcast::<gtk::Button>() {
+            button.emit_clicked();
+        }
     }
 
     pub fn scroll_y(&self) -> f64 {

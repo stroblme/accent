@@ -108,3 +108,5 @@ bench preview find typed "1 of 2" selected="side"
 bench preview find cells ["1 of 2", "2 of 2", "1 of 2"] selected=Some("second") painted=1 page="second"
 bench preview code busy coloured=["fn", "u8", "1"]
 bench preview table rules end at its last column=true
+bench preview panic page=Some(("Cannot Preview panic.md", "a panic the drill asked for."))
+bench preview panic retried back=true blocks=Some(1)

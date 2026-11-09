@@ -92,6 +92,11 @@ pub(crate) fn fill(holder: &gtk::Stack, content: &impl IsA<gtk::Widget>) {
 /// Say in `holder` why `name` did not come, with Retry: a transfer that failed is tried again as
 /// a failed upload is (`App::retry_upload`).
 pub(crate) fn fail(holder: &gtk::Stack, name: &str, why: &str, retry: impl Fn() + 'static) {
+    failed(holder, &format!("Cannot Open {name}"), why, retry);
+}
+
+/// [`fail`] under `title`, for what failed other than an open: a preview's page.
+pub(crate) fn failed(holder: &gtk::Stack, title: &str, why: &str, retry: impl Fn() + 'static) {
     let button = gtk::Button::builder()
         .label("Retry")
         .halign(gtk::Align::Center)
@@ -100,7 +105,7 @@ pub(crate) fn fail(holder: &gtk::Stack, name: &str, why: &str, retry: impl Fn() 
     button.connect_clicked(move |_| retry());
     let page = adw::StatusPage::builder()
         .icon_name("dialog-warning-symbolic")
-        .title(format!("Cannot Open {name}"))
+        .title(title)
         .description(why)
         .child(&button)
         .build();

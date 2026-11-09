@@ -375,6 +375,7 @@ async fn render(app: &Rc<App>) {
     find(&rendered, &tab).await;
     busy(&rendered).await;
     narrow(&rendered).await;
+    panicked(&rendered).await;
 }
 
 /// A fence no editor has coloured, rendered while the main loop never goes idle below
@@ -423,6 +424,33 @@ async fn narrow(rendered: &crate::rendered::Rendered) {
         let ends = (right(&widget) - last).abs() <= 1.0;
         println!("bench preview table rules end at its last column={ends}");
     }
+}
+
+/// A render whose worker panics: the failure page in the page's place, saying what the panic
+/// said, then Retry putting the page back once the render goes through.
+async fn panicked(rendered: &crate::rendered::Rendered) {
+    use std::sync::atomic::Ordering::Relaxed;
+    let failure = || rendered.preview().as_ref().and_then(|p| p.failure());
+    crate::preview::PANIC.store(true, Relaxed);
+    if let Some(preview) = rendered.preview().as_ref() {
+        preview.render("panic.md", "# Panic\n");
+    }
+    let page = until("preview", "panic page", 5000, failure).await;
+    crate::preview::PANIC.store(false, Relaxed);
+    println!("bench preview panic page={page:?}");
+    if let Some(preview) = rendered.preview().as_ref() {
+        preview.retry();
+    }
+    let back = until("preview", "panic retried", 5000, || {
+        let preview = rendered.preview();
+        preview
+            .as_ref()
+            .is_some_and(|p| p.failure().is_none() && p.settled())
+    })
+    .await
+    .is_some();
+    let blocks = (rendered.preview().as_ref()).map(|p| p.blocks().len());
+    println!("bench preview panic retried back={back} blocks={blocks:?}");
 }
 
 /// Find from the page's top: the readout after a search, a step each way and Match Whole Word,
