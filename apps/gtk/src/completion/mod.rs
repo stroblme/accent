@@ -80,6 +80,8 @@ pub(crate) trait Source {
 struct Anchor {
     /// Where it was when asked, in the coordinates of the answer's ranges.
     asked: Range,
+    /// The caret when asked, which the answer's rows were matched up to.
+    at: Pos,
     from: gtk::TextMark,
     to: gtk::TextMark,
 }
@@ -89,6 +91,7 @@ impl Anchor {
         let at = lang::pos_of(caret);
         Anchor {
             asked: Range { start: at, end: at },
+            at,
             from: buffer.create_mark(None, caret, true),
             to: buffer.create_mark(None, caret, false),
         }
@@ -390,7 +393,16 @@ impl Session {
 
     fn moved(self: &Rc<Self>) {
         let short = self.shown.borrow().as_ref().is_some_and(|s| s.incomplete);
-        if short && self.typed_since_asked() {
+        // Back before where the answer was asked, by an arrow, a click or a delete: the rows are
+        // matched by less than the provider was asked with, so one it left out may match now.
+        // Asked again, as VS Code does when the caret goes left of where it asked.
+        let at = lang::pos_of(&caret(&self.view.buffer()));
+        let back = self
+            .shown
+            .borrow()
+            .as_ref()
+            .is_some_and(|s| at < s.anchor.at);
+        if back || (short && self.typed_since_asked()) {
             self.ask(None);
         }
         let selected = self.selected_label();

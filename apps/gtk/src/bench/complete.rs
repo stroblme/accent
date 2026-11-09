@@ -82,8 +82,9 @@ async fn bench_complete_note(app: &Rc<App>, rel: &str) {
     println!("bench complete_link_undo {:?}", bench_line(&tab, 0));
 
     // The caret moved inside the link, as a click or an arrow does, keeps the popup, narrowed by
-    // the link's text up to the caret, a letter deleted there too; Tab replaces all of it. A
-    // caret past the `[[` has left it.
+    // the link's text up to the caret, a letter deleted there too, and asked again once it is
+    // before where it was asked, so `[[co` offers both notes; Tab replaces all of it. A caret past
+    // the `[[` has left it.
     tab.set_text("");
     bench_type(&tab, &session, "complete_inside_open", "[[complete-t").await;
     bench_caret(&tab, &session, "complete_inside_moved", 4).await;
