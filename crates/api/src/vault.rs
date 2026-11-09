@@ -1733,7 +1733,11 @@ mod tests {
     fn an_unwatched_vault_hears_nothing_until_it_is_asked_to_rescan() {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("Note.md"), "one\n").unwrap();
-        let (vault, events) = Vault::open_unwatched(root.path(), VaultConfig::default()).unwrap();
+        // An index of its own, never one in the user's cache.
+        let db = tempfile::tempdir().unwrap();
+        let (vault, events) =
+            Vault::open_unwatched_at(root.path(), &db.path().join("i.db"), VaultConfig::default())
+                .unwrap();
         assert!(
             crate::tests::wait_for(&events, |e| matches!(e, Event::Reconciled(_)), BUDGET)
                 .is_some(),
