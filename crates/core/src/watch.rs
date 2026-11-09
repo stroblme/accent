@@ -5,12 +5,12 @@
 //! inotify and prevents directory-open events from overflowing the queue and causing scan loops.
 //! macOS has one FSEvents stream over the root that reports the same ([`fsevents`]).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use notify::event::{DataChange, EventKind, ModifyKind, RenameMode};
+use notify::event::{DataChange, EventKind, ModifyKind, RemoveKind, RenameMode};
 use notify::{Event, EventHandler, RecursiveMode};
 use notify_debouncer_full::{
     DebounceEventResult, Debouncer, FileIdCache, RecommendedCache, new_debouncer_opt,
@@ -104,31 +104,21 @@ enum Backend {
 /// A file moved in from outside the watch set, over a file or not, is such a create too: a
 /// rename-to whose tracker (inotify's cookie) is not the last rename-from's, the one the debouncer
 /// would pair it with.
+///
+/// A remove of a file renamed within the window costs the debouncer the rename's source too: it
+/// replaces the queue holding `a → b` with `b`'s removal, and `a`'s row would outlive its file.
+/// So such a remove is handed on behind a remove of each source that is gone ([`Renames`]).
 struct Kept<W>(W);
 
 impl<W: notify::Watcher> notify::Watcher for Kept<W> {
     fn new<F: EventHandler>(mut handler: F, config: notify::Config) -> notify::Result<Self> {
-        let mut from = None;
-        let written = move |result: notify::Result<Event>| {
-            handler.handle_event(result.map(|mut ev| {
-                let created = match ev.kind {
-                    EventKind::Create(_) => true,
-                    EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
-                        from = ev.tracker();
-                        false
-                    }
-                    // The debouncer forgets its rename-from at any rename-to, paired or not.
-                    EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
-                        let paired = from.take();
-                        ev.tracker().is_some_and(|to| paired != Some(to))
-                    }
-                    _ => false,
-                };
-                if created {
-                    ev.kind = EventKind::Modify(ModifyKind::Data(DataChange::Any));
-                }
-                ev
-            }))
+        let mut renames = Renames::default();
+        let written = move |result: notify::Result<Event>| match result {
+            Ok(ev) => renames
+                .pass(ev)
+                .into_iter()
+                .for_each(|ev| handler.handle_event(Ok(ev))),
+            Err(e) => handler.handle_event(Err(e)),
         };
         W::new(written, config).map(Kept)
     }
@@ -152,6 +142,71 @@ impl<W: notify::Watcher> notify::Watcher for Kept<W> {
     fn kind() -> notify::WatcherKind {
         W::kind()
     }
+}
+
+/// How long [`Renames`] keeps a rename's source, past the longest a debouncer window holds it.
+const RENAMED_FOR: Duration = Duration::from_secs(1);
+
+/// What [`Kept`] remembers of the renames it hands on.
+#[derive(Default)]
+struct Renames {
+    /// The last rename-from's tracker and path, which the debouncer pairs the next rename-to with.
+    from: Option<(Option<usize>, PathBuf)>,
+    /// Each path renamed to within [`RENAMED_FOR`], with the path it was renamed from first.
+    sources: HashMap<PathBuf, (PathBuf, Instant)>,
+}
+
+impl Renames {
+    /// `ev` as the debouncer is to have it, behind the removals it would otherwise lose.
+    fn pass(&mut self, mut ev: Event) -> Vec<Event> {
+        let mut lost = Vec::new();
+        let path = ev.paths.first().cloned().unwrap_or_default();
+        match ev.kind {
+            EventKind::Create(_) => written(&mut ev),
+            EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
+                self.from = Some((ev.tracker(), path));
+            }
+            // The debouncer forgets its rename-from at any rename-to, paired or not.
+            EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
+                match (self.from.take(), ev.tracker()) {
+                    (Some((Some(t), source)), Some(to)) if t == to => self.paired(source, path),
+                    (_, Some(_)) => written(&mut ev),
+                    (_, None) => {}
+                }
+            }
+            EventKind::Remove(_) => {
+                let renamed: Vec<PathBuf> = (self.sources.keys())
+                    .filter(|to| to.starts_with(&path))
+                    .cloned()
+                    .collect();
+                for to in renamed {
+                    let Some((source, _)) = self.sources.remove(&to) else {
+                        continue;
+                    };
+                    // A source made again since, as an editor's backup rename leaves it, stands.
+                    if source.symlink_metadata().is_err() {
+                        lost.push(Event::new(EventKind::Remove(RemoveKind::Any)).add_path(source));
+                    }
+                }
+            }
+            _ => {}
+        }
+        lost.push(ev);
+        lost
+    }
+
+    /// Remember `to` as renamed from `source`, or from where `source` was renamed from in turn.
+    fn paired(&mut self, source: PathBuf, to: PathBuf) {
+        let first = self.sources.remove(&source).map(|(first, _)| first);
+        self.sources.retain(|_, (_, at)| at.elapsed() < RENAMED_FOR);
+        self.sources
+            .insert(to, (first.unwrap_or(source), Instant::now()));
+    }
+}
+
+/// `ev`, a creation, as a write ([`Kept`]).
+fn written(ev: &mut Event) {
+    ev.kind = EventKind::Modify(ModifyKind::Data(DataChange::Any));
 }
 
 /// Whether watching `dir_count` directories would take more than 80% of the inotify budget, which
@@ -654,6 +709,29 @@ mod tests {
         std::fs::remove_file(&note).unwrap();
 
         let events = drain(&rx, Duration::from_secs(5));
+        let last = events
+            .iter()
+            .rfind(|e| touches(std::slice::from_ref(e), "Note.md"));
+        assert_eq!(last, Some(&VaultEvent::Removed(note)), "{events:?}");
+    }
+
+    /// A file renamed over a note and deleted under its new name inside one debounce window is
+    /// reported gone under both names, or the old name's row would outlive it: the debouncer takes
+    /// the rename's place in the new name's queue for the delete.
+    #[test]
+    fn a_delete_right_after_a_rename_is_reported_for_both_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let (a, note) = (root.join("A.md"), root.join("Note.md"));
+        std::fs::write(&a, "a").unwrap();
+        std::fs::write(&note, "one").unwrap();
+        let (_w, rx) = start(&root);
+
+        std::fs::rename(&a, &note).unwrap();
+        std::fs::remove_file(&note).unwrap();
+
+        let events = drain(&rx, Duration::from_secs(5));
+        assert!(events.contains(&VaultEvent::Removed(a)), "{events:?}");
         let last = events
             .iter()
             .rfind(|e| touches(std::slice::from_ref(e), "Note.md"));
