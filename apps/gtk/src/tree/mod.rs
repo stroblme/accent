@@ -887,12 +887,13 @@ pub fn find_row(model: &gtk::TreeListModel, rel: &str) -> Option<gtk::TreeListRo
 /// Build the always-visible vault label and root drop zone above the tree, `sort` at its end.
 ///
 /// Scrolled trees may have no blank area for root drops. A label has nothing to expand;
-/// 6 px margin and a 34 px row align it with Search and Git controls.
+/// 6 px margin and a 34 px row align it with Search and Git controls, and the 6 px end margin
+/// puts Sort Files under the Search pane's Filter button.
 fn root_row(label: &str, sort: &gtk::MenuButton) -> gtk::Box {
     let row = gtk::Box::builder()
         .spacing(6)
         .margin_start(12)
-        .margin_end(12)
+        .margin_end(6)
         .margin_top(6)
         .margin_bottom(6)
         .height_request(34)
@@ -934,8 +935,10 @@ fn sort_button() -> gtk::MenuButton {
         }
         menu.append_section(None, &section);
     }
+    // Shipped (tabler's `sort-descending`): the theme's glyph is a solid arrow filling its grid,
+    // heavier than the outlined glyphs beside it.
     let button = gtk::MenuButton::builder()
-        .icon_name("view-sort-descending-symbolic")
+        .icon_name("files-sort-symbolic")
         .tooltip_text("Sort Files")
         .menu_model(&menu)
         .valign(gtk::Align::Center)
