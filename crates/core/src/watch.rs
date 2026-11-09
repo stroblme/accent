@@ -100,13 +100,31 @@ enum Backend {
 /// create in one window for a file that never was and drops both, but a create is also how a file
 /// replaced by a rename reaches it (a save of ours, and most editors'): a delete right after such
 /// a save went unheard. As a write, the remove after it stands, the last state of the path.
+///
+/// A file moved in from outside the watch set, over a file or not, is such a create too: a
+/// rename-to whose tracker (inotify's cookie) is not the last rename-from's, the one the debouncer
+/// would pair it with.
 struct Kept<W>(W);
 
 impl<W: notify::Watcher> notify::Watcher for Kept<W> {
     fn new<F: EventHandler>(mut handler: F, config: notify::Config) -> notify::Result<Self> {
+        let mut from = None;
         let written = move |result: notify::Result<Event>| {
             handler.handle_event(result.map(|mut ev| {
-                if let EventKind::Create(_) = ev.kind {
+                let created = match ev.kind {
+                    EventKind::Create(_) => true,
+                    EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
+                        from = ev.tracker();
+                        false
+                    }
+                    // The debouncer forgets its rename-from at any rename-to, paired or not.
+                    EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
+                        let paired = from.take();
+                        ev.tracker().is_some_and(|to| paired != Some(to))
+                    }
+                    _ => false,
+                };
+                if created {
                     ev.kind = EventKind::Modify(ModifyKind::Data(DataChange::Any));
                 }
                 ev
@@ -608,6 +626,31 @@ mod tests {
         let (_w, rx) = start(&root);
 
         crate::fs::write_note(&note, "two", None).unwrap();
+        std::fs::remove_file(&note).unwrap();
+
+        let events = drain(&rx, Duration::from_secs(5));
+        let last = events
+            .iter()
+            .rfind(|e| touches(std::slice::from_ref(e), "Note.md"));
+        assert_eq!(last, Some(&VaultEvent::Removed(note)), "{events:?}");
+    }
+
+    /// A file moved in from outside the watch set over a note and deleted inside one debounce
+    /// window is reported gone, or the note's row would outlive it: the move is a rename-to with
+    /// no rename-from, which the debouncer takes for a creation the delete cancels.
+    #[test]
+    fn a_delete_right_after_a_move_in_over_a_note_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let (root, outside) = (dir.path().join("vault"), dir.path().join("outside"));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let root = root.canonicalize().unwrap();
+        let note = root.join("Note.md");
+        std::fs::write(&note, "one").unwrap();
+        std::fs::write(outside.join("Note.md"), "two").unwrap();
+        let (_w, rx) = start(&root);
+
+        std::fs::rename(outside.join("Note.md"), &note).unwrap();
         std::fs::remove_file(&note).unwrap();
 
         let events = drain(&rx, Duration::from_secs(5));
