@@ -13,14 +13,15 @@ directory under DIR (the system's temporary one when left out), never the user's
 import json, os, re, shutil, subprocess, sys, tempfile, time
 
 # What a question is, what its answer must hold to need no second call, and the subtypes a type
-# has. `holds` are regexes over explore's answer.
+# has, its subtraits apart since only a by-name answer lists them (a server answers with a trait's
+# `impl` blocks). `holds` are regexes over explore's answer.
 QUERIES = [
     {"query": "seeds", "what": "a function",
      "holds": [r"\tpub\(super\) fn seeds\(", r"explore\.rs:\d+ \(rank\)"]},
     {"query": "Edges::callers", "what": "a method",
      "holds": [r"\t\s*fn callers\(&mut self", r"\(graph\) let \(callers, by_name\) = edges\.callers"]},
-    {"query": "Saves", "what": "a trait", "subtypes": ["Tab", "NotebookTab", "DiagramTab", "Probe"],
-     "holds": [r"\tpub trait Saves", r"subtypes `"]},
+    {"query": "Saves", "what": "a trait", "subtypes": ["Tab", "NotebookTab", "DiagramTab"],
+     "subtraits": ["SavesModel"], "holds": [r"\tpub trait Saves", r"subtypes `"]},
     {"query": "CodeSymbol", "what": "a struct", "holds": [r"\tpub struct CodeSymbol", r"\d+ references"]},
     {"query": "how does explore find the callers of a declaration", "what": "a flow question",
      "holds": [r"fn callers\(|`callers`:", r"fn mentions\(|`Index::mentions`:"]},
@@ -137,7 +138,8 @@ def main():
                              "radius": radius(said), "subtypes": subtypes(said),
                              "holds": all(re.search(h, said) for h in q["holds"])}
             if "subtypes" in q:
-                row["subtypes"] = q["subtypes"]
+                row["subtypes"] = {"name": q["subtypes"] + q.get("subtraits", []),
+                                   "precise": q["subtypes"]}
             if use_codegraph:
                 said, took = codegraph(vault, q["query"])
                 row["codegraph"] = {"chars": len(said), "ms": round(took * 1000), "text": said,
@@ -163,10 +165,10 @@ def main():
             cg_n = r.get("codegraph", {}).get("radius", {}).get(label.split("::")[-1], "-")
             print(f"| `{label}` | {n} / {p_n} / {cg_n} | {tested} | {p_tested} |")
     for r in rows:
-        if "subtypes" in r:
-            found = r["name"]["subtypes"]
-            missed = [t for t in r["subtypes"] if t not in found]
-            print(f"\nsubtypes of {r['query']}: {', '.join(found) or 'none'}; missed: "
+        for mode, known in r.get("subtypes", {}).items():
+            found = r[mode]["subtypes"]
+            missed = [t for t in known if t not in found]
+            print(f"\nsubtypes of {r['query']} ({mode}): {', '.join(found) or 'none'}; missed: "
                   f"{', '.join(missed) or 'none'}")
     if out_json:
         with open(out_json, "w") as f:
