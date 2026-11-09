@@ -122,7 +122,7 @@ impl App {
         expected: Option<Etag>,
     ) -> Result<(), Error> {
         self.land_model(tab, false);
-        let (etag, digest) = self.writer(tab)(&tab.for_disk(), expected)?;
+        let (etag, digest) = self.writer(tab)(&tab.for_disk(), Over::File(expected))?;
         tab.mark_clean(etag);
         tab.save_state().digest.set(Some(digest));
         tab.clear_changed();

@@ -204,7 +204,14 @@ pub fn write_note(path: &Path, text: &str, expected: Option<Etag>) -> Result<Eta
 /// Another process can still replace the file between check and rename; Linux offers no
 /// conditional replacement rename.
 pub fn write_bytes(path: &Path, bytes: &[u8], expected: Option<Etag>) -> Result<Etag> {
-    write_with(path, expected, |tmp| tmp.write_all(bytes))
+    write_with(path, Gate::Etag(expected), |tmp| tmp.write_all(bytes))
+}
+
+/// Write `text` to `path` atomically where nothing is, as a save over a note deleted under its
+/// tab writes it back: a file made there meanwhile, a dangling link included, refuses the write
+/// with [`Error::ChangedOnDisk`] and keeps what it holds.
+pub fn write_new(path: &Path, text: &str) -> Result<Etag> {
+    write_with(path, Gate::Free, |tmp| tmp.write_all(text.as_bytes()))
 }
 
 /// A PDF saved as [`write_bytes`] saves one: the first `base_len` bytes of `base`, the file its
@@ -220,17 +227,23 @@ pub fn write_appended(
     section: &[u8],
     expected: Option<Etag>,
 ) -> Result<Etag> {
-    write_with(path, expected, |tmp| {
+    write_with(path, Gate::Etag(expected), |tmp| {
         copy_range(base, tmp, base_len)?;
         tmp.write_all(section)
     })
 }
 
-/// The body of every atomic save: `fill` writes the temp file, which is synced and renamed over
-/// `path` if it still has `expected`'s etag.
+/// What an atomic save may land on: the file an etag names, any with `None`, or a free name.
+enum Gate {
+    Etag(Option<Etag>),
+    Free,
+}
+
+/// The body of every atomic save: `fill` writes the temp file, which is synced and renamed to
+/// `path` where `gate` lets it land.
 fn write_with(
     path: &Path,
-    expected: Option<Etag>,
+    gate: Gate,
     fill: impl FnOnce(&mut std::fs::File) -> io::Result<()>,
 ) -> Result<Etag> {
     let failed = |e| Error::io(path.display(), e);
@@ -251,14 +264,31 @@ fn write_with(
     }
 
     let _turn = turn(&canonical);
-    if let Some(exp) = expected {
-        unchanged(&canonical, path, exp)?;
-    }
-
     // ponytail: no directory fsync after the rename. The rename itself is atomic, so a crash can
     // only lose the whole save, never half of it. Add `File::open(parent)?.sync_all()` here if
     // crash-consistency (as opposed to torn-write safety) ever matters.
-    let file = tmp.persist(&canonical).map_err(|e| failed(e.error))?;
+    let landed = match gate {
+        Gate::Etag(expected) => {
+            if let Some(exp) = expected {
+                unchanged(&canonical, path, exp)?;
+            }
+            tmp.persist(&canonical).map_err(|e| e.error)
+        }
+        Gate::Free => {
+            let (file, temp) = tmp.into_parts();
+            rename_new(&temp, &canonical).map(|()| {
+                let _ = temp.keep();
+                file
+            })
+        }
+    };
+    // A free name taken meanwhile is a change on disk, as a moved etag is.
+    let file = landed.map_err(|e| match std::fs::metadata(&canonical) {
+        Ok(m) if e.kind() == io::ErrorKind::AlreadyExists => Error::ChangedOnDisk {
+            current: Etag::from_meta(&m),
+        },
+        _ => failed(e),
+    })?;
     Ok(Etag::from_meta(&file.metadata().map_err(failed)?))
 }
 
@@ -923,6 +953,25 @@ mod tests {
         assert!(matches!(rename(&from, &to), Err(Error::AlreadyExists(_))));
         assert_eq!(std::fs::read_to_string(&to).unwrap(), "theirs");
         assert_eq!(std::fs::read_to_string(&from).unwrap(), "moved");
+    }
+
+    /// A write where nothing is refuses a file made just before it lands, as a change on disk,
+    /// and leaves no temporary behind.
+    #[test]
+    fn a_write_where_nothing_is_refuses_a_file_made_meanwhile() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("Note.md");
+        assert_eq!(write_new(&note, "mine").unwrap(), Etag::of(&note).unwrap());
+
+        let other = dir.path().join("Other.md");
+        BEFORE_RENAME.set(Some(|to| std::fs::write(to, "theirs").unwrap()));
+        let refused = write_new(&other, "mine");
+        assert!(
+            matches!(refused, Err(Error::ChangedOnDisk { .. })),
+            "{refused:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&other).unwrap(), "theirs");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
     }
 
     #[test]

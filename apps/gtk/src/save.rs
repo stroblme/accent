@@ -9,6 +9,14 @@ use accent_core::fs::Digest;
 mod model;
 pub(crate) use model::SavesModel;
 
+/// What a write may land on: the file at an etag, whatever is there with `None`, or only a name
+/// nothing holds.
+#[derive(Clone, Copy)]
+pub(crate) enum Over {
+    File(Option<Etag>),
+    Nothing,
+}
+
 impl App {
     pub fn save_active(self: &Rc<Self>) {
         if let Some(tab) = self.active() {
@@ -65,7 +73,8 @@ impl App {
         self.start_write(tab, explicit, expected, again, land, contents);
     }
 
-    /// [`Self::start_save`] gated on `expected` rather than the tab's own etag.
+    /// [`Self::start_save`] gated on `expected` rather than the tab's own etag: the version a
+    /// question showed, `None` being no file at all, so the write lands only where nothing is.
     pub(crate) fn start_write<T: Saves>(
         self: &Rc<Self>,
         tab: &Rc<T>,
@@ -94,7 +103,8 @@ impl App {
         // write that has to wait for this one may be asked for in this same turn, and would wait
         // on a worker that had not begun. The answer goes through the channel; the worker's own
         // end is only the news that it is there.
-        let worker = gio::spawn_blocking(move || tx.send(write(&contents(), expected)));
+        let over = expected.map_or(Over::Nothing, |etag| Over::File(Some(etag)));
+        let worker = gio::spawn_blocking(move || tx.send(write(&contents(), over)));
         let (app, saved) = (Rc::downgrade(self), Rc::downgrade(tab));
         glib::spawn_future_local(async move {
             let _ = worker.await;
@@ -227,11 +237,11 @@ impl App {
     pub(crate) fn writer<T: Saves>(
         &self,
         tab: &Rc<T>,
-    ) -> impl FnOnce(&str, Option<Etag>) -> Result<(Etag, Digest), Error> + Send + 'static {
+    ) -> impl FnOnce(&str, Over) -> Result<(Etag, Digest), Error> + Send + 'static {
         let (rel, path) = (tab.key(), tab.path());
         let vault = self.vault().filter(|_| !doc::is_loose_key(&rel)).cloned();
         let base = tab.save_state().digest.get();
-        move |text, expected| {
+        move |text, over| {
             #[cfg(feature = "bench")]
             crate::bench::hold(&crate::bench::SLOW_WRITE_MS);
             #[cfg(feature = "bench")]
@@ -243,15 +253,21 @@ impl App {
                 let refused = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
                 return Err(Core::io(path.display(), refused).into());
             }
-            let write = |expected| match &vault {
-                Some(vault) => vault.save(&rel, text, expected),
-                None => accent_core::fs::write_note(&path, text, expected).map_err(Into::into),
+            let write = |over| match (&vault, over) {
+                (Some(vault), Over::File(expected)) => vault.save(&rel, text, expected),
+                (Some(vault), Over::Nothing) => vault.save_new(&rel, text),
+                (None, Over::File(expected)) => {
+                    accent_core::fs::write_note(&path, text, expected).map_err(Into::into)
+                }
+                (None, Over::Nothing) => {
+                    accent_core::fs::write_new(&path, text).map_err(Into::into)
+                }
             };
-            let mut written = write(expected);
+            let mut written = write(over);
             if let Err(Error::Core(Core::ChangedOnDisk { .. })) = written
                 && let Some(etag) = unchanged(vault.as_deref(), &rel, &path, base)
             {
-                written = write(Some(etag));
+                written = write(Over::File(Some(etag)));
             }
             written.map(|etag| (etag, accent_core::fs::digest(text)))
         }
@@ -280,7 +296,7 @@ impl App {
     /// Return errors to callers making the buffer unreachable so they can prevent data loss.
     pub fn write_tab(self: &Rc<Self>, tab: &Rc<Tab>, expected: Option<Etag>) -> Result<(), Error> {
         self.land_save(tab, false);
-        let written = self.writer(tab)(&tab.for_disk(), expected);
+        let written = self.writer(tab)(&tab.for_disk(), Over::File(expected));
         log_write(&tab.rel(), expected, &written);
         let (etag, digest) = written?;
         tab.save.digest.set(Some(digest));
@@ -288,7 +304,8 @@ impl App {
         Ok(())
     }
 
-    /// Write the buffer as the banner's explicit answer, gated on `expected` or any current etag with `None`.
+    /// Write the buffer as the banner's explicit answer, gated on `expected`, the version the
+    /// question showed, `None` being no file at all ([`Self::start_write`]).
     /// Land prior saves first, write on a worker, and show `said` after success.
     fn write_answer(self: &Rc<Self>, tab: &Rc<Tab>, expected: Option<Etag>, said: &'static str) {
         self.land_save(tab, false);
@@ -322,6 +339,12 @@ impl App {
                     }
                 }
                 editor::Landing::Failed(Error::Core(Core::ChangedOnDisk { .. })) if report => {
+                    // A Save over a deleted note that found a file there again asks what a
+                    // change on disk asks.
+                    if tab.alert() == Some(Alert::Restore) {
+                        tab.clear_alert(Alert::Restore);
+                        tab.show_alert(Alert::Compare);
+                    }
                     app.toast(&format!("{} changed on disk again", tab.rel()));
                 }
                 editor::Landing::Failed(e) if report => app.cannot("save", e),

@@ -35,7 +35,9 @@ pub(crate) fn hold(slow: &AtomicU64) {
 /// again while the answer is written. Report main-loop blocking, time to become clean,
 /// final line, which is what was typed during the write once the save after it lands,
 /// and remaining banner. `again` changes the file a second time while Overwrite is asked,
-/// which keeps that change and the banner. Writes files; use a scratch vault.
+/// which keeps that change and the banner, and `reborn` makes a file where the deleted one was
+/// while its Save is written, which keeps that file and asks as a change on disk. Writes files;
+/// use a scratch vault.
 pub(super) fn bench_answer(app: &Rc<App>, rel: &str) {
     let (app, rel) = (app.clone(), rel.to_string());
     glib::spawn_future_local(async move {
@@ -63,14 +65,15 @@ pub(super) fn bench_answer(app: &Rc<App>, rel: &str) {
             println!("bench answer write_failed {e}");
             return bench_quit(&app);
         }
-        for case in ["overwrite", "keep_mine", "restore", "again"] {
+        for case in ["overwrite", "keep_mine", "restore", "again", "reborn"] {
             let script = match case {
-                "restore" => "rm -f {}".to_string(),
+                "restore" | "reborn" => "rm -f {}".to_string(),
                 _ => format!("printf '{case} theirs\\n' > {{}}"),
             };
             // Typed first where the file goes: a clean tab closes with its file.
             let typed = format!("{case} mine\n");
-            if case == "restore" {
+            let deletes = matches!(case, "restore" | "reborn");
+            if deletes {
                 tab.buffer.insert(&mut tab.buffer.end_iter(), &typed);
             }
             let changed = crate::work::off_thread("bench", {
@@ -78,12 +81,12 @@ pub(super) fn bench_answer(app: &Rc<App>, rel: &str) {
                 move || behind(&vault, &rel, &script)
             })
             .await;
-            if case != "restore" {
+            if !deletes {
                 tab.buffer.insert(&mut tab.buffer.end_iter(), &typed);
             }
-            let wanted = match case {
-                "restore" => Alert::Restore,
-                _ => Alert::Compare,
+            let wanted = match deletes {
+                true => Alert::Restore,
+                false => Alert::Compare,
             };
             for _ in 0..100 {
                 if tab.alert() == Some(wanted) {
@@ -152,7 +155,18 @@ pub(super) fn bench_answer(app: &Rc<App>, rel: &str) {
                 _ => {
                     let t = Instant::now();
                     app.answer_banner(&tab);
-                    ms_since(t)
+                    let held = ms_since(t);
+                    // A file made at the name while the Save is written: the write lands only
+                    // where nothing is, so it is refused and the file keeps what it holds.
+                    if case == "reborn" {
+                        let script = "printf 'reborn theirs\\n' > {}";
+                        crate::work::off_thread("bench", {
+                            let (vault, rel) = (vault.clone(), rel.clone());
+                            move || behind(&vault, &rel, script)
+                        })
+                        .await;
+                    }
+                    held
                 }
             };
             tab.buffer

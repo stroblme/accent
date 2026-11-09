@@ -47,6 +47,18 @@ impl Local {
         Ok(etag)
     }
 
+    /// [`save`](Self::save) where nothing is: a file made at `rel` meanwhile refuses the write
+    /// with `ChangedOnDisk` and keeps what it holds.
+    pub fn save_new(&self, rel: &str, text: &str) -> Result<Etag> {
+        let etag = fs::write_new(&self.resolve(rel)?, text).map_err(named(rel))?;
+        self.post(Msg::Saved {
+            rel: rel.to_string(),
+            etag,
+            same_text: false,
+        });
+        Ok(etag)
+    }
+
     /// Tell the worker that `rel` was written by this vault outside [`save`](Self::save), and left
     /// at `etag`: a PDF's render thread writes its own file. Its watcher echo is then ours, and
     /// with `same_text`, ink drawn and no page edited, the index keeps the text it read of it.

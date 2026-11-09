@@ -409,6 +409,9 @@ methods! {
     /// Read an absolute dependency file only if a live host language session named it.
     read_named(abs: ref str) -> fs::Read;
     stat(rel: ref str) -> Option<Etag>;
+    /// Write a note where nothing is, as a Save over a note deleted under its tab writes it back:
+    /// a file made at `rel` meanwhile refuses the write with `ChangedOnDisk`.
+    save_new(rel: ref str, text: ref str) -> Etag;
     /// Permanently delete a remote file or directory after UI confirmation.
     /// Local deletion uses the desktop system trash.
     delete(rel: ref str) -> ();
