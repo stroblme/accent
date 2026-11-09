@@ -11,8 +11,8 @@ const WAIT: u64 = 90_000;
 /// The notebook the drill writes and runs: a print, a result, `input()`, a sleep to interrupt,
 /// a cell an interrupt leaves unrun, one of a stream that grows across two flushes, an 80 × 40
 /// PNG, a table with a plain text of its own and a traceback, a markdown cell with the PNG
-/// attached, for Copy Output, a flood: a line past what a line holds, then a print loop, and that
-/// line printed alone.
+/// attached, for Copy Output, a flood: a line past what a line holds, then a print loop, and a
+/// hundred such lines printed alone, in two flushes.
 const NOTEBOOK: &str = r#"{
  "cells": [
   {"cell_type": "code", "execution_count": null, "id": "a1", "metadata": {}, "outputs": [],
@@ -36,7 +36,8 @@ const NOTEBOOK: &str = r#"{
   {"cell_type": "code", "execution_count": null, "id": "a8", "metadata": {}, "outputs": [],
    "source": ["print('x' * 100_000)\n", "while True: print('x' * 1000)"]},
   {"cell_type": "code", "execution_count": null, "id": "a9", "metadata": {}, "outputs": [],
-   "source": ["print('x' * 100_000)"]}
+   "source": ["import time\n", "for i in range(100):\n", "    print('x' * 20_000)\n",
+    "    if i == 49: time.sleep(0.5)"]}
  ],
  "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
   "language_info": {"name": "python"}},
@@ -499,18 +500,56 @@ async fn flood(app: &Rc<App>, tab: &Rc<NotebookTab>, n: usize) -> bool {
     true
 }
 
-/// Run cell `n`, one print of a line past what a line holds, and time its output until it is
-/// drawn: its text view laid out the line a character a row as it was put on screen, for 8 s
-/// (2026-11-08). The output still wraps at its width once drawn. The time is printed, not
-/// compared: a shared CI runner is too uneven for a threshold.
+/// Run cell `n`, a hundred prints of a line past what a line holds, and time its output until
+/// it is drawn, first and whole, with the frames that took and the main loop's worst stall and
+/// busy time: its text view laid out the first line a character a row as it was put on screen,
+/// for 8 s (2026-11-08), and Pango's word wrap walked the rest of each line for every row it
+/// filled, 55 ms a line on AMCOMP (2026-11-09). The output still wraps at its width once drawn,
+/// each of its lines between any two characters. The times are printed, not compared: a shared
+/// CI runner is too uneven for a threshold.
 async fn long_print(app: &Rc<App>, tab: &Rc<NotebookTab>, n: usize) -> bool {
     tab.bench_select(n);
-    let t = Instant::now();
+    let frame = || app.window.frame_clock().map_or(0, |c| c.frame_counter());
+    let (t, beat, frames) = (Instant::now(), super::native::Beat::start(), frame());
     let _ = WidgetExt::activate_action(&app.window, "win.notebook-run-cell", None);
     let shown = || tab.bench_output_widget(n, 0);
     let Some(view) = until(app, "long print", shown).await else {
         return false;
     };
+    painted(app).await;
+    println!("bench kernel_ms long_print {:.0}", ms_since(t));
+    if !done(app, tab, "long print").await {
+        return false;
+    }
+    // Laid out to its end, which a text view does in an idle of its own.
+    pumped().await;
+    painted(app).await;
+    let (ms, (stall, busy)) = (ms_since(t), beat.stop());
+    println!(
+        "bench kernel_ms long_lines {ms:.0} frames={} stall={stall:.0} busy={busy:.0}",
+        frame() - frames
+    );
+    let Some(view) = view.downcast_ref::<gtk::TextView>() else {
+        return false;
+    };
+    let buffer = view.buffer();
+    let by_char = |line| {
+        let tags = buffer.iter_at_line(line).map(|at| at.tags());
+        tags.unwrap_or_default()
+            .iter()
+            .any(|t| t.wrap_mode() == gtk::WrapMode::Char)
+    };
+    println!(
+        "bench kernel long_print wraps={} lines={} char={}",
+        u8::from(view.wrap_mode() == gtk::WrapMode::WordChar),
+        buffer.line_count(),
+        (0..buffer.line_count()).filter(|&l| by_char(l)).count()
+    );
+    true
+}
+
+/// Once the window has painted a frame asked for now.
+async fn painted(app: &Rc<App>) {
     let (painted, frame) = futures_channel::oneshot::channel();
     if let Some(clock) = app.window.frame_clock() {
         let (painted, handler) = (Cell::new(Some(painted)), Rc::new(Cell::new(None)));
@@ -529,13 +568,6 @@ async fn long_print(app: &Rc<App>, tab: &Rc<NotebookTab>, n: usize) -> bool {
         clock.request_phase(gdk::FrameClockPhase::PAINT);
     }
     let _ = frame.await;
-    let ms = ms_since(t);
-    println!("bench kernel_ms long_print {ms:.0}");
-    let wraps = view
-        .downcast_ref::<gtk::TextView>()
-        .is_some_and(|v| v.wrap_mode() == gtk::WrapMode::WordChar);
-    println!("bench kernel long_print wraps={}", u8::from(wraps));
-    done(app, tab, "long print").await
 }
 
 /// Wait until no run waits or runs, saying `what` timed out otherwise.

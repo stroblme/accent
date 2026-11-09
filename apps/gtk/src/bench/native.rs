@@ -524,14 +524,14 @@ fn tagged(buffer: &gtk::TextBuffer, named: impl Fn(&str) -> bool) -> Vec<String>
 
 /// The longest the main loop went without running a 1 ms timeout while the guard lives, and how
 /// long it was busy in all: every gap past 2 ms, less the 1 ms the timeout waits anyway.
-struct Beat {
+pub(super) struct Beat {
     worst: Rc<Cell<f64>>,
     busy: Rc<Cell<f64>>,
     source: Option<glib::SourceId>,
 }
 
 impl Beat {
-    fn start() -> Beat {
+    pub(super) fn start() -> Beat {
         let (worst, busy) = (Rc::new(Cell::new(0.0)), Rc::new(Cell::new(0.0)));
         let last = Cell::new(Instant::now());
         let source = glib::timeout_add_local(Duration::from_millis(1), {
@@ -553,7 +553,7 @@ impl Beat {
     }
 
     /// The worst stall and the busy total, in ms.
-    fn stop(mut self) -> (f64, f64) {
+    pub(super) fn stop(mut self) -> (f64, f64) {
         if let Some(source) = self.source.take() {
             source.remove();
         }

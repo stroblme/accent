@@ -237,7 +237,9 @@ impl Outputs {
                 for (range, piece) in changes {
                     let (mut start, mut end) = (at(range.start), at(range.end));
                     buffer.delete(&mut start, &mut end);
+                    let from = start.offset();
                     buffer.insert(&mut start, piece);
+                    wrap_unbroken(&buffer, &buffer.iter_at_offset(from), &start);
                 }
                 raw.clone_from(text);
                 if let Some(Copied::Text(copy)) = &mut slot.copy {
@@ -755,8 +757,11 @@ fn picture_shape((mime, data): (&str, &str)) -> Shape {
 
 /// How many rows `line` takes wrapped at `fit` columns, as pango wraps a text view's words: as
 /// many to a row as fit, the spaces after them hanging past its end, and a word wider than a row
-/// broken between its characters.
+/// broken between its characters; an [`unbroken`] line between any two characters.
 fn rows(line: &str, fit: u32) -> u32 {
+    if unbroken(line) {
+        return (line.width() as u32).div_ceil(fit).max(1);
+    }
     let (mut rows, mut used) = (1, 0);
     for word in line.split_inclusive(' ') {
         let glyphs = word.trim_end_matches(' ');
@@ -979,7 +984,8 @@ fn shown(text: &str) -> &str {
 
 /// A read-only monospace view of `text`, selectable, which wraps once it is realized: GTK's
 /// realize lays out the caret's line before the view has a width, a character a row when it
-/// wraps, and Pango takes 8 s to wrap a 10,000-character word so (ISSUES.md).
+/// wraps, and Pango takes 8 s to wrap a 10,000-character word so (ISSUES.md). Its
+/// [`unbroken`] lines wrap between any two characters ([`CHAR_WRAP`]).
 fn output_view(text: &str) -> gtk::TextView {
     let view = gtk::TextView::builder()
         .editable(false)
@@ -987,10 +993,56 @@ fn output_view(text: &str) -> gtk::TextView {
         .monospace(true)
         .build();
     view.add_css_class("notebook-output");
-    view.buffer().set_text(text);
+    let buffer = view.buffer();
+    buffer.set_text(text);
+    let by_char = gtk::TextTag::new(Some(CHAR_WRAP));
+    buffer.tag_table().add(&by_char);
+    wrap_unbroken(&buffer, &buffer.start_iter(), &buffer.end_iter());
     // After GTK's own realize, which a signal handler follows.
-    view.connect_realize(|view| view.set_wrap_mode(gtk::WrapMode::WordChar));
+    view.connect_realize(move |view| {
+        view.set_wrap_mode(gtk::WrapMode::WordChar);
+        by_char.set_wrap_mode(gtk::WrapMode::Char);
+    });
     view
+}
+
+/// The characters past which a run with no space in it wraps its line between any two
+/// characters: Pango's word wrap walks the rest of such a run for every row it fills, 55 ms for
+/// 10,000 characters at 800 px where a character wrap takes 10 (AMCOMP, 2026-11-09, ISSUES.md),
+/// and breaks it between its characters all the same.
+const UNBROKEN: usize = 1_000;
+
+/// The tag an output's [`unbroken`] lines wrap by, given its wrap once the view is realized, as
+/// the view is given its own.
+const CHAR_WRAP: &str = "char-wrap";
+
+/// Whether `line` holds a run of more than [`UNBROKEN`] characters with no space in it.
+fn unbroken(line: &str) -> bool {
+    let long = |run: &str| run.len() > UNBROKEN && run.chars().nth(UNBROKEN).is_some();
+    line.len() > UNBROKEN && line.split(' ').any(long)
+}
+
+/// Tag the [`unbroken`] ones of the lines from `from`'s to `to`'s with [`CHAR_WRAP`], which a
+/// text view reads at a line's start.
+fn wrap_unbroken(buffer: &gtk::TextBuffer, from: &gtk::TextIter, to: &gtk::TextIter) {
+    let (mut line, mut last) = (*from, *to);
+    line.set_line_offset(0);
+    if !last.ends_line() {
+        last.forward_to_line_end();
+    }
+    buffer.remove_tag_by_name(CHAR_WRAP, &line, &last);
+    loop {
+        let mut end = line;
+        if !end.ends_line() {
+            end.forward_to_line_end();
+        }
+        if unbroken(&buffer.text(&line, &end, false)) {
+            buffer.apply_tag_by_name(CHAR_WRAP, &line, &end);
+        }
+        if !line.forward_line() || line > last {
+            break;
+        }
+    }
 }
 
 /// The terminal's sixteen colours on `view`'s tags, for the theme in force.
@@ -1216,6 +1268,10 @@ mod tests {
         assert_eq!(rows("aaa bbb ccc", 7), 2);
         assert_eq!(rows("abcdefghij", 4), 3);
         assert_eq!(rows("全角 全角", 4), 2);
+        // A run past `UNBROKEN` wraps its line between characters, its label's row included.
+        let labelled = format!("x = {}", "y".repeat(1_045));
+        assert!(unbroken(&labelled) && !unbroken(&"y ".repeat(1_000)));
+        assert_eq!(rows(&labelled, 100), 11);
     }
 
     #[test]

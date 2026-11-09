@@ -24,7 +24,7 @@ bench kernel copy picture menus=1 picture=80x40
 bench kernel copy table menus=1 text="   a\n0  1"
 bench kernel copy error menus=1 last="ZeroDivisionError: division by zero" escapes model=1 copied=0
 bench kernel copy attachment menus=1 picture=80x40
-bench kernel long_print wraps=1
+bench kernel long_print wraps=1 lines=100 char=100
 bench kernel flood interrupted=1 bounded=1 cut=1 responsive=1
 bench kernel clear outputs=0 undo outputs=1
 bench kernel saved cells=9 counted=7 outputs=10
