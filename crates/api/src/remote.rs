@@ -240,6 +240,30 @@ fn remove_any(path: &Path) {
 struct Stamped {
     host: crate::Etag,
     copy: crate::Etag,
+    /// The `host` and `copy` of a write-back whose commit has not answered, for the next push to
+    /// [settle](Self::settled): the etag of the file it staged, which the commit's rename keeps,
+    /// and the copy's it sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    landing: Option<(crate::Etag, crate::Etag)>,
+}
+
+impl Stamped {
+    /// The stamp once the host's file is found at `current`. A commit whose answer never came
+    /// landed where that file is the one it staged, which no other write leaves there; anything
+    /// else leaves the stamp as it was before the push.
+    fn settled(self, current: crate::Etag) -> Stamped {
+        match self.landing {
+            Some((host, copy)) if host == current => Stamped {
+                host,
+                copy,
+                landing: None,
+            },
+            _ => Stamped {
+                landing: None,
+                ..self
+            },
+        }
+    }
 }
 
 /// Whether `dest` changed locally since `stamped`. An unstamped copy is
@@ -644,6 +668,7 @@ impl Remote {
             let _ = stamp.set(&Stamped {
                 host: current,
                 copy,
+                landing: None,
             });
         }
         Ok(dest)
@@ -658,6 +683,8 @@ impl Remote {
     /// Return `NotFound` for a moved or deleted host file rather than recreating
     /// it under its old name; readers following a rename retry at the new path.
     /// `same_text` when no page edit goes up with it, so the host's index keeps the text it read.
+    /// A commit whose answer is lost, past its deadline or with the link, is found landed by the
+    /// next push where the host's file is the one it staged.
     pub fn push(&self, rel: &str, same_text: bool) -> Result<Pushed> {
         let (Some(dest), Some(stamp)) = (
             ssh::cache_path(&self.url, rel),
@@ -674,16 +701,35 @@ impl Remote {
         let Some(current) = current else {
             return Err(accent_core::Error::NotFound(rel.to_string()).into());
         };
-        if Some(current) != stamped.map(|s| s.host) {
+        let settled = stamped.map(|s| s.settled(current));
+        let Some(stamped) = settled.filter(|s| s.host == current) else {
             return Ok(self.push_beside(&dest, rel));
+        };
+        // A landing found, and nothing drawn since.
+        if !unsent(&dest, Some(stamped)) {
+            let _ = stamp.set(&stamped);
+            return Ok(Pushed::Sent);
         }
         let staged = staged_name();
         let path = self.remote_path(rel);
         let stage = |size| ssh::run(&self.url, &self.ctl, &ssh::stage_cmd(&path, &staged, size));
         let copy = self.send(&dest, stage, &|_, _| (), &link::Stop::default())?;
+        // Asked before the commit, which takes the staged file's name away, and no commit is
+        // asked of a host that does not answer this. A file that is a link stages beside its
+        // target, out of the vault's sight: none is found, and a lost answer then leaves a
+        // conflict copy as before.
+        let beside = accent_core::path::resolve(accent_core::path::parent_dir(rel), &staged);
+        if let Some(host) = self.call::<Option<crate::Etag>>("stat", json!([beside]))? {
+            let landing = Some((host, copy));
+            let _ = stamp.set(&Stamped { landing, ..stamped });
+        }
         match self.call("commit", json!([rel, staged, current, same_text])) {
             Ok(host) => {
-                let _ = stamp.set(&Stamped { host, copy });
+                let _ = stamp.set(&Stamped {
+                    host,
+                    copy,
+                    landing: None,
+                });
                 Ok(Pushed::Sent)
             }
             // Edited on the host while the bytes were on their way.
@@ -756,7 +802,11 @@ impl Remote {
         };
         carry(dest, &to);
         if let Ok(Some(host)) = self.call::<Option<crate::Etag>>("stat", json!([name])) {
-            let _ = stamp.set(&Stamped { host, copy });
+            let _ = stamp.set(&Stamped {
+                host,
+                copy,
+                landing: None,
+            });
         }
     }
 
@@ -1329,6 +1379,7 @@ mod tests {
                 .set(&Stamped {
                     host: fetched,
                     copy: fetched,
+                    landing: None,
                 })
                 .unwrap();
             if drawn_on {
@@ -1459,10 +1510,12 @@ mod tests {
         let long = Stamped {
             host: etag(1_000_000_000_000),
             copy: etag(1_000_000_000_000),
+            landing: Some((etag(1_000_000_000_000), etag(1_000_000_000_000))),
         };
         let short = Stamped {
             host: etag(1),
             copy: etag(2),
+            landing: None,
         };
         first.set(&long).unwrap();
         // Written in place, so a shorter one leaves nothing of the longer behind.
@@ -1485,6 +1538,7 @@ mod tests {
         let stamped = Some(Stamped {
             host: fetched,
             copy: fetched,
+            landing: None,
         });
         assert!(!unsent(&dest, stamped));
         assert!(!unsent(&dest, None));
@@ -1497,6 +1551,42 @@ mod tests {
         std::fs::write(&saved, "drawn on").unwrap();
         std::fs::rename(&saved, &moved).unwrap();
         assert!(unsent(&moved, stamped));
+    }
+
+    /// A write-back whose commit landed on the host after the window stopped waiting for the
+    /// answer is found there by the next push, the host's file having the etag of the file it
+    /// staged, and is no edit of someone else's to go beside as a conflict copy.
+    #[test]
+    fn a_commit_answered_too_late_is_found_landed() {
+        let etag = |n| crate::Etag {
+            mtime_ns: n,
+            size: n as u64,
+            ino: n as u64,
+        };
+        let (fetched, staged, drawn, theirs) = (etag(1), etag(2), etag(3), etag(4));
+        let waiting = Stamped {
+            host: fetched,
+            copy: fetched,
+            landing: Some((staged, drawn)),
+        };
+        let landed = Stamped {
+            host: staged,
+            copy: drawn,
+            landing: None,
+        };
+        assert_eq!(waiting.settled(staged), landed);
+        // Never landed, or landed and then written over by someone else: the stamp as it was.
+        for current in [fetched, theirs] {
+            let settled = waiting.settled(current);
+            assert_eq!((settled.host, settled.landing), (fetched, None));
+        }
+        // An old stamp, written before there was a landing to keep, still reads.
+        let old: Stamped = serde_json::from_value(serde_json::json!({
+            "host": fetched,
+            "copy": fetched,
+        }))
+        .unwrap();
+        assert_eq!(old.landing, None);
     }
 
     /// The copy a refused upload leaves behind keeps its extension, so whatever reads that kind

@@ -113,6 +113,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The stamp keeps the copy's own etag beside the host's, so a copy written here since — the pen, a page edit — is never fetched over, and a push of one that was not sends nothing.
   A push checks the host's etag before its first byte and again once its last is there: the bytes are staged beside the file and the host's server lands them as a save lands (Saves), or, the file having been edited meanwhile, drops them and the push goes beside it as the conflict copy.
   A link lost between the two leaves the staged file, which the next push into that folder removes once it is an hour old, as no staging in progress is.
+  A commit whose answer never comes, past its deadline or with the link, is found by the next push, since the host's file then carries the etag of the staged one, which the push asks for and keeps in the stamp before it commits.
+  A host that does not answer that question is not asked to commit, so the window's own bytes never come back as a conflict copy.
   A copy between two vaults streams the same way, straight from one machine to the other: down into a `.part` linked to its name only while nothing holds it, and host to host through this machine, one host's `cat` piped into the other's upload, neither host reaching the other.
 - **Remote lifetime**: one `serve` per window, ending on stdin EOF or after 90 s in which nothing came from the window once it has been pinged; closing stops it and cancels the forwards but leaves the master its 60 s ControlPersist — no zombies after a link that dies without closing, and a reopen within the minute skips the handshake and the passphrase.
   Its kernels end with it, as its debug sessions do.
