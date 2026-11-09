@@ -23,7 +23,8 @@ const DRAIN: Duration = Duration::from_secs(30);
 /// 0; exact Replace All counts match, while ranked remains disabled at 0.
 ///
 /// `type:<query>` types faster than debounce and reports prefix results, later mid-word results,
-/// `last_key running` and drained timings. `walk:<query>` enables All, appends `Not Indexed` and
+/// `last_key running`, drained timings and the frames since the last key that took a millisecond
+/// or more of the main thread. `walk:<query>` enables All, appends `Not Indexed` and
 /// reports `all_off` afterward. `RUST_LOG=accent=debug` shows per-query timing and one `sidebar
 /// pass` per full-query pass.
 pub(super) fn bench_search(app: &Rc<App>, arg: &str) {
@@ -69,6 +70,15 @@ pub(super) fn bench_search(app: &Rc<App>, arg: &str) {
         let query = query.to_string();
         return bench_search_indexed(app.clone(), Instant::now(), move |app| {
             bench_more(app, query, lines, click)
+        });
+    }
+    if let Some(queries) = arg.strip_prefix("answers:") {
+        let queries: Vec<String> = queries.split(';').map(str::to_string).collect();
+        return bench_search_indexed(app.clone(), Instant::now(), move |app| {
+            if let Some(sidebar) = app.sidebar.get() {
+                sidebar.show_pane("search");
+            }
+            glib::spawn_future_local(bench_answers(app, queries));
         });
     }
     let typed = arg
@@ -542,6 +552,7 @@ fn bench_type(app: Rc<App>, typed: Vec<String>, i: usize, all: bool) {
     let typed_at = Instant::now();
     // Queries for prefixes the box has moved past that are still on a worker thread.
     println!("bench search last_key running={}", sidebar.search_running());
+    let frames = frames(&app.window);
     let seen = RefCell::new(sidebar.search_state());
     // When the rows last changed, and since when nothing has been running.
     let (changed, drained) = (Cell::new(0), Cell::new(None));
@@ -566,6 +577,7 @@ fn bench_type(app: Rc<App>, typed: Vec<String>, i: usize, all: bool) {
             changed.get(),
             drained.get()
         );
+        print_frames(&app, typed_at, &frames);
         let Some(sidebar) = app.sidebar.get().filter(|_| all) else {
             bench_quit(&app);
             return glib::ControlFlow::Break;
@@ -581,6 +593,79 @@ fn bench_type(app: Rc<App>, typed: Vec<String>, i: usize, all: bool) {
         });
         glib::ControlFlow::Break
     });
+}
+
+/// `answers:<query>;<query>;…` puts each query in the box whole, after the window's first git
+/// refreshes are in, and once its answer has settled says how many rows it drew and the main
+/// thread's CPU time over the wait and in each frame that took a millisecond or more: the first
+/// query's rows are made, the next ones' drawn into the rows already listed.
+async fn bench_answers(app: Rc<App>, queries: Vec<String>) {
+    glib::timeout_future(SETTLE).await;
+    for query in queries {
+        let Some(sidebar) = app.sidebar.get() else {
+            break;
+        };
+        let frames = frames(&app.window);
+        let asked = cpu();
+        sidebar.set_search_text(&query);
+        glib::timeout_future(SETTLE).await;
+        let (_, rows, _) = sidebar.search_state();
+        let costs = frame_costs(&frames.borrow());
+        let worst = costs.iter().map(|(_, cpu)| *cpu).fold(0.0, f64::max);
+        let shown: Vec<String> = costs.iter().map(|(_, cpu)| format!("{cpu:.0}")).collect();
+        println!(
+            "bench search answer query={query:?} rows={} frames_cpu_ms={shown:?} \
+             worst_cpu_ms={worst:.1} cpu_ms={:.0}",
+            rows.len(),
+            (cpu() - asked) as f64 / 1e6,
+        );
+    }
+    bench_quit(&app);
+}
+
+/// A frame phase's end: its first letter, when, and the main thread's CPU time then.
+type Mark = (char, Instant, u64);
+
+/// The window's frame phases from now on: connected after GTK's own handlers, a before-paint's
+/// mark is where a frame starts its animations, styling and layout (the toplevel's compute-size
+/// among them), a layout's where they end and painting starts, and a paint's where that ends.
+/// Every frame has the first, which a frame with no animation to step has no update for.
+fn frames(window: &impl IsA<gtk::Widget>) -> Rc<RefCell<Vec<Mark>>> {
+    let marks = Rc::new(RefCell::new(Vec::new()));
+    if let Some(clock) = window.frame_clock() {
+        let mark = |phase: char| {
+            let marks = marks.clone();
+            move |_: &gdk::FrameClock| marks.borrow_mut().push((phase, Instant::now(), cpu()))
+        };
+        clock.connect_before_paint(mark('b'));
+        clock.connect_layout(mark('l'));
+        clock.connect_paint(mark('p'));
+    }
+    marks
+}
+
+/// Each frame that took a millisecond or more of the main thread's CPU time: when it started,
+/// and that time in milliseconds.
+fn frame_costs(marks: &[Mark]) -> Vec<(Instant, f64)> {
+    (marks.windows(3))
+        .filter_map(|w| match w {
+            [('b', at, b), ('l', ..), ('p', _, p)] => Some((*at, (p - b) as f64 / 1e6)),
+            _ => None,
+        })
+        .filter(|(_, cpu)| *cpu >= 1.0)
+        .collect()
+}
+
+/// Each frame since the last keystroke that took a millisecond or more of the main thread, and
+/// how many widgets the list held for its rows at the end.
+fn print_frames(app: &Rc<App>, typed_at: Instant, frames: &RefCell<Vec<Mark>>) {
+    for (at, cpu) in frame_costs(&frames.borrow()) {
+        let at = (at - typed_at).as_secs_f64() * 1000.0;
+        println!("bench search frame at_ms={at:.0} cpu_ms={cpu:.1}");
+    }
+    let view = app.sidebar.get().and_then(|s| s.search_view());
+    let widgets = view.map_or(0, |view| view.observe_children().n_items());
+    println!("bench search list_widgets={widgets}");
 }
 
 /// One change of the rows: every name while they fit on a line, the first and last few past that.

@@ -369,7 +369,8 @@ use user_commands::bench_commands;
 ///   action, against `fake-lsp.py --actions`, and a note's Create note fix
 ///   (`quickfix::bench_quickfix`). Writes files; a scratch vault.
 /// - `ACCENT_BENCH_SEARCH=<query>[:<n>]`: result refresh after external writes;
-///   `type:<query>`: ranked timing; `walk:<query>`: All/unindexed timing;
+///   `type:<query>`: ranked timing; `walk:<query>`: All/unindexed timing; `answers:<q>;<q>;…`:
+///   each whole query's rows and the main thread's CPU time per answer and frame;
 ///   `more:<query>[:<n>]`: expanded per-file results; `click:`: wait for XTEST;
 ///   `label:<query>` or `label:<query>:xml`: diagram-label navigation; `pdf:<word>`: a PDF's
 ///   page row, opened on its page with the match marked (writes a PDF; a scratch vault);
@@ -1109,6 +1110,15 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             bench_quit(&app)
         });
     });
+}
+
+/// The main thread's CPU time in nanoseconds, which another process taking the core does not
+/// inflate as it does a wall-clock time.
+fn cpu() -> u64 {
+    std::fs::read_to_string("/proc/thread-self/schedstat")
+        .ok()
+        .and_then(|s| s.split_whitespace().next()?.parse::<u64>().ok())
+        .unwrap_or(0)
 }
 
 /// Time four Preferences presentations, the last after another vault was opened, which needs no

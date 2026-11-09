@@ -515,6 +515,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - A search result row is a match, not a file: each quotes its line with the match marked and the file and line dim beside it, and past five rows from one file the rest gather into a "+N more in this file" row, so no file takes the list.
   A hit opens on its place with the match marked.
   Changing the query clears those rows immediately, before the next answer arrives.
+  Its answer hands the list a screenful of rows and the rest a screenful a frame after, since GTK makes a widget for each of up to 200 rows whatever the pane shows, and making one costs a frame many times what drawing another answer into it does (`ACCENT_BENCH_SEARCH=answers:`).
 - The "+N more" row opens nothing: a click lists those matches in its place, the first where the row was, so the pointer rests on a match and the list does not move.
   A hundred come at a time, any rest behind a "+N more" row again, so a file with thousands of matches is walked rather than poured into the list.
   The file stays open through the vault changing under the same query, and a new query lists it shut; there is no collapse.

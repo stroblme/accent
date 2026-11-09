@@ -44,6 +44,9 @@ const SHOW_AFTER: u32 = 2;
 /// Delay slower mid-word and unindexed passes until the ranked answer settles. Skip them if
 /// typing supersedes the query, avoiding expensive work on every keystroke.
 const WIDEN_AFTER: Duration = Duration::from_millis(350);
+/// The shortest row the list draws, in pixels: a heading's or a tail row's one line of text
+/// between the 6 px margins every row has.
+const SHORTEST_ROW: i32 = 24;
 /// The heading over the rows All's walk found past the index.
 const NOT_INDEXED: &str = "Not Indexed";
 /// The heading over the rows that hold a ranked query inside a word, which says where the prefix
@@ -477,6 +480,11 @@ struct Search {
     filter: gtk::MenuButton,
     view: gtk::ListView,
     results: gio::ListStore,
+    /// The first of `results`, which the view has a widget for each of: all of them but while a
+    /// new answer is handed over a screenful a frame ([`Search::grow`]).
+    slice: gtk::SliceListModel,
+    /// Whether [`Search::grow`] is handing the view rows.
+    growing: Cell<bool>,
     /// Draw every row on the list again from the object it holds, which GTK does only for a list
     /// item handed another object: what [`Search::put`] needs once it gave an object new content.
     redraw: Box<dyn Fn()>,
@@ -972,16 +980,22 @@ impl Search {
     }
 
     /// Put `rows` on the list in place of the rows there, and bring the list back if a changed
-    /// query hid it. A `GtkListView` holds a widget for each of up to 200 rows, makes one anew for
-    /// every object it is handed and destroys the widget of every object it loses, which for a
-    /// hundred rows cost the main thread more than the query did. So the objects already listed
-    /// take the first rows and are drawn again where they are, and only the rows past them are
-    /// spliced in or out.
+    /// query hid it. A `GtkListView` holds a widget for each of up to 200 rows whatever the pane
+    /// shows (`GTK_LIST_VIEW_MAX_LIST_ITEMS`), makes one anew for every object it is handed and
+    /// destroys the widget of every object it loses, and making one costs many times what drawing
+    /// another answer into it does. So the objects already listed take the first rows and are
+    /// drawn again where they are, only the rows past them are spliced in or out, and of a new
+    /// answer's rows past those, all but a screenful wait for [`grow`](Self::grow) to hand them
+    /// over after the frame that shows it.
     ///
     /// A question asked again keeps the list's place, the keyboard and the selection by
     /// position, since none of the rows it keeps is taken away; a new one finds the list as
     /// [`clear_for_changed_query`](Self::clear_for_changed_query) left it.
-    fn put(&self, mut rows: Vec<Row>) -> Vec<glib::BoxedAnyObject> {
+    fn put(self: &Rc<Self>, mut rows: Vec<Row>) -> Vec<glib::BoxedAnyObject> {
+        if !self.rows_shown() {
+            self.slice
+                .set_size(self.slice.n_items().max(self.screenful()));
+        }
         let listed = self.results.n_items();
         let kept = listed.min(rows.len() as u32);
         let added: Vec<glib::BoxedAnyObject> = (rows.split_off(kept as usize).into_iter())
@@ -996,8 +1010,55 @@ impl Search {
         self.splice(kept, listed - kept, &added);
         (self.redraw)();
         self.show_rows(true);
+        self.grow();
         objects.extend(added);
         objects
+    }
+
+    /// About how many rows fill the pane: its height over the shortest row, so the rows handed
+    /// over reach past its bottom. A pane not laid out yet goes by the window's height.
+    fn screenful(&self) -> u32 {
+        let height = match self.body.height() {
+            0 => self.view.root().map_or(0, |root| root.height()),
+            height => height,
+        };
+        (height / SHORTEST_ROW).max(0) as u32 + 1
+    }
+
+    /// From the frame after this one, hand the view a screenful more of the rows each frame until
+    /// it has them all, then every row as it comes. Each step runs after its frame is drawn: rows
+    /// made in a frame's update cost it about three times as much as rows made between frames
+    /// (`ACCENT_BENCH_SEARCH=answers:`). A changed query stops it, and its answer starts it again.
+    fn grow(self: &Rc<Self>) {
+        if self.growing.replace(true) {
+            return;
+        }
+        let search = Rc::downgrade(self);
+        // The frame this is asked in lays out the rows handed over now.
+        let first = Cell::new(true);
+        self.view.add_tick_callback(move |_, _| {
+            let Some(search) = search.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            if first.replace(false) {
+                return glib::ControlFlow::Continue;
+            }
+            let (handed, all) = (search.slice.n_items(), search.results.n_items());
+            if handed >= all || !search.rows_shown() {
+                if search.rows_shown() {
+                    search.slice.set_size(u32::MAX);
+                }
+                search.growing.set(false);
+                return glib::ControlFlow::Break;
+            }
+            let more = handed.saturating_add(search.screenful());
+            glib::idle_add_local_once(move || {
+                if search.rows_shown() {
+                    search.slice.set_size(search.slice.size().max(more));
+                }
+            });
+            glib::ControlFlow::Continue
+        });
     }
 
     /// Show or hide the list's scroller, which a changed query hides until its answer is drawn.
@@ -1429,8 +1490,9 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen, dragging: &Rc<dyn Fn(bool)
     // Nothing is selected until a row is pointed at or reached with the keys: an answer opening
     // with a heading would otherwise draw the heading selected, `set_selectable` stopping a click
     // and not autoselect.
+    let slice = gtk::SliceListModel::new(Some(results.clone()), 0, u32::MAX);
     let selection = gtk::SingleSelection::builder()
-        .model(&results)
+        .model(&slice)
         .autoselect(false)
         .build();
     let view = gtk::ListView::new(Some(selection), Some(factory));
@@ -1559,6 +1621,8 @@ pub(super) fn pane(data: &Rc<Data>, on_open: &OnOpen, dragging: &Rc<dyn Fn(bool)
         filter: filter.clone(),
         view: view.clone(),
         results,
+        slice,
+        growing: Cell::new(false),
         redraw,
         generation: Arc::new(AtomicU64::new(0)),
         running: Cell::new(0),
