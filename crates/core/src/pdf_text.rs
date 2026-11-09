@@ -205,17 +205,21 @@ fn piped(
     let child = Mutex::new(child);
     let read = AtomicBool::new(false);
     let stopped = std::thread::scope(|s| {
+        // The stop is looked at before the read's end: a reader done before this thread first ran,
+        // as one may be on a loaded machine, would otherwise never hear a stop asked before it.
         let watch = s.spawn(|| {
             let start = Instant::now();
-            while !read.load(Ordering::Relaxed) {
+            loop {
                 let cancel = stop();
                 if cancel || start.elapsed() > DEADLINE {
                     let _ = child.lock().unwrap_or_else(|e| e.into_inner()).kill();
                     return cancel;
                 }
+                if read.load(Ordering::Relaxed) {
+                    return false;
+                }
                 std::thread::sleep(TICK);
             }
-            false
         });
         let (mut pending, mut chunk) = (Vec::new(), vec![0u8; 64 * 1024]);
         'read: while let Ok(n @ 1..) = stdout.read(&mut chunk) {
