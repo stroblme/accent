@@ -165,7 +165,7 @@ pub(in crate::bench) fn bench_compare_row(app: &Rc<App>, rel: &str) {
                 println!("bench compare_row tops {}", bench_tops(compare));
                 println!("bench compare_row scrolled {}", bench_scroll(compare).await);
                 if mode == "commit" {
-                    bench_alone(&diff).await;
+                    bench_alone(&app, &diff).await;
                 }
             }
             // The refusal is a toast, and it asks git again, so the row it refused goes too. A
@@ -200,8 +200,9 @@ pub(in crate::bench) fn bench_compare_row(app: &Rc<App>, rel: &str) {
 
 /// Let Show Changes go on a commit's file and press it again over the text alone, as clicks do,
 /// and print what each shows: the commit's text alone, from the line the right column had at its
-/// top, then the comparison again.
-async fn bench_alone(diff: &crate::difftab::DiffTab) {
+/// top, then the comparison again. Then run Show Changes from the palette, which has to list it,
+/// and print what that shows and the value the action carries.
+async fn bench_alone(app: &Rc<App>, diff: &crate::difftab::DiffTab) {
     let Some(changes) = diff.changes_toggle() else {
         return println!("bench compare_row alone offered=false");
     };
@@ -235,6 +236,21 @@ async fn bench_alone(diff: &crate::difftab::DiffTab) {
         "bench compare_row alone pressed shown={} down={}",
         *diff.view() != right,
         changes.is_active()
+    );
+    // As the palette lists its commands: read afresh.
+    app.sync_applicable();
+    let listed = (app.listed())("win.diff-show-changes");
+    let ran = WidgetExt::activate_action(&app.window, "win.diff-show-changes", None).is_ok();
+    glib::timeout_future(Duration::from_millis(300)).await;
+    app.sync_applicable();
+    let state = app
+        .window
+        .lookup_action("diff-show-changes")
+        .and_then(|action| action.state())
+        .and_then(|state| state.get::<bool>());
+    println!(
+        "bench compare_row alone action listed={listed} ran={ran} shown={} state={state:?}",
+        *diff.view() != right
     );
 }
 

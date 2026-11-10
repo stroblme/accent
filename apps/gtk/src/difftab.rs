@@ -129,6 +129,18 @@ impl DiffTab {
         let _ = self.changes.set(changes);
     }
 
+    /// Whether Show Changes is down, where the tab offers it.
+    pub fn changes_shown(&self) -> Option<bool> {
+        self.changes.get().map(|changes| changes.is_active())
+    }
+
+    /// Show Changes from the palette: the toggle pressed, or let go.
+    pub fn toggle_changes(&self) {
+        if let Some(changes) = self.changes.get() {
+            changes.set_active(!changes.is_active());
+        }
+    }
+
     /// The comparison, or the right text alone from where the right column is. The keyboard goes
     /// along with it if it was in the tab, the column it was in being out of sight now.
     fn show_changes(self: &Rc<Self>, on: bool) {

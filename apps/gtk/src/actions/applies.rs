@@ -58,6 +58,8 @@ pub struct Context {
     pub conflicts: bool,
     pub comparing: bool,
     pub merge: bool,
+    /// The comparison in front offers Show Changes, a commit's file's: `Some(down)`.
+    pub changes: Option<bool>,
     /// The Code pane holds a notebook, whose kernel strip acts with another tab in front.
     pub kernel: bool,
     /// A bibliography is selected in its pane or in front.
@@ -239,6 +241,7 @@ pub fn applies(action: &str, cx: &Context) -> bool {
         a if a.starts_with("win.conflict-") => text && cx.conflicts,
         "win.merge-resolved" => cx.merge,
         a if a.starts_with("win.hunk-") => cx.comparing,
+        "win.diff-show-changes" => cx.changes.is_some(),
 
         // A bibliography's commands need one; New Bibliography and Add Reference make one.
         "win.bib-new" | "win.bib-add" => vault,
@@ -319,6 +322,18 @@ mod tests {
             );
         }
         assert!(!org.contains(&"win.insert-sketch"));
+    }
+
+    /// Show Changes is a commit's file's, in front: a staged change's comparison has no toggle.
+    #[test]
+    fn show_changes_applies_only_where_the_comparison_offers_it() {
+        let diff = |changes| Context {
+            front: Some(Front::Diff),
+            changes,
+            ..Context::default()
+        };
+        assert!(applies("win.diff-show-changes", &diff(Some(false))));
+        assert!(!applies("win.diff-show-changes", &diff(None)));
     }
 
     /// Without a vault what could only say "Open a local folder" is gone, and a remote vault's

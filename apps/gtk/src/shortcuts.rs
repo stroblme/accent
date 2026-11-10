@@ -110,7 +110,7 @@ fn section(action: &str) -> Option<&'static str> {
         _ if starts(&["terminal"]) => "Terminal",
         "sidebar" | "show-hidden-files" | "sort-files-menu" | "file-details" => "Panes",
         _ if starts(&["pane-"]) => "Panes",
-        "merge-resolved" => "Git",
+        "merge-resolved" | "diff-show-changes" => "Git",
         _ if starts(&["git-", "conflict-", "hunk-"]) => "Git",
         "rename" | "trash" | "delete" | "new-from-template" | "insert-template" => "Notes",
         "follow-link" | "quick-fix" | "source-action" | "fold" | "unfold" | "fold-all"

@@ -203,7 +203,8 @@ drill_find_compare() {
 }
 
 # A file from the history, Show Changes let go, shows the commit's version alone from the line the
-# comparison had at its top, and the comparison again once it is pressed.
+# comparison had at its top, and the comparison again once it is pressed, and the palette's Show
+# Changes lets it go again.
 drill_history_file() {
 	note() { awk -v at="$1" 'BEGIN { for (i = 1; i <= 80; i++) print (i % at ? "Line " i : "Changed " i) ".\n" }'; }
 	commit() { git -C "$vault" -c user.name=drill -c user.email=drill@invalid -c commit.gpgsign=false commit -qam "$1"; }
@@ -218,7 +219,8 @@ drill_history_file() {
 	launch 60 ACCENT_BENCH_COMPARE=row:commit:note.md >"$dir/history-file"
 	grep -Eqx 'bench compare_row alone offered=true shown=true text=true top=([0-9]+)->\1' "$dir/history-file" ||
 		{ cat "$dir/history-file"; return 1; }
-	has "$dir/history-file" 'bench compare_row alone pressed shown=false down=true'
+	has "$dir/history-file" 'bench compare_row alone pressed shown=false down=true' \
+		'bench compare_row alone action listed=true ran=true shown=true state=Some(false)'
 }
 
 drill_preview() {

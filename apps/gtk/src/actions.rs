@@ -78,6 +78,10 @@ impl App {
             conflicts: tab.is_some_and(|tab| tab.conflicts().any()),
             comparing: tab.is_some_and(|tab| tab.comparison().is_some()),
             merge: tab.is_some_and(|tab| tab.merging().is_some()),
+            changes: doc
+                .as_ref()
+                .and_then(Doc::diff)
+                .and_then(|d| d.changes_shown()),
             kernel: self.code_doc().is_some_and(|doc| doc.notebook().is_some()),
             bibliography: tab.is_some_and(|tab| bibliography::is_bib(&tab.rel()))
                 || self
@@ -121,6 +125,10 @@ impl App {
             if let Some(action) = action.and_downcast::<gio::SimpleAction>() {
                 action.set_enabled(applies::applies(full, &cx));
             }
+        }
+        let action = self.window.lookup_action("diff-show-changes");
+        if let Some(action) = action.and_downcast::<gio::SimpleAction>() {
+            action.set_state(&cx.changes.unwrap_or(true).to_variant());
         }
     }
 
@@ -619,6 +627,11 @@ impl App {
                 let compare = self.active().and_then(|tab| tab.comparison());
                 if !compare.is_some_and(|c| c.act_at_caret(label)) {
                     self.toast("No hunk at the caret");
+                }
+            }
+            "diff-show-changes" => {
+                if let Some(Doc::Diff(diff)) = self.active_doc() {
+                    diff.toggle_changes();
                 }
             }
             "merge-resolved" => match self.active().filter(|tab| tab.merging().is_some()) {
@@ -1132,7 +1145,8 @@ pub fn install_actions(app: &Rc<App>) {
         if let Some(name) = full.strip_prefix("win.") {
             // Show Hidden Files and Show Grid carry their values, so a menu draws them as check
             // items. Activating one runs the handler below like any other; the value follows the
-            // preference in `App::apply_config`.
+            // preference in `App::apply_config`, and Show Changes' the comparison in front's in
+            // `App::sync_applicable`.
             let action = match name {
                 "show-hidden-files" => gio::SimpleAction::new_stateful(
                     name,
@@ -1144,6 +1158,9 @@ pub fn install_actions(app: &Rc<App>) {
                     None,
                     &app.config.borrow().diagram.grid.to_variant(),
                 ),
+                "diff-show-changes" => {
+                    gio::SimpleAction::new_stateful(name, None, &true.to_variant())
+                }
                 _ => gio::SimpleAction::new(name, None),
             };
             action.connect_activate(glib::clone!(

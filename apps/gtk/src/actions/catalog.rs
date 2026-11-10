@@ -213,6 +213,8 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.hunk-revert", "Revert Hunk", &[]),
     ("win.hunk-take", "Take Hunk", &[]),
     ("win.hunk-both", "Keep Both Versions", &[]),
+    // The toggle a commit's file has at the end of its title row, as unbound.
+    ("win.diff-show-changes", "Show Changes", &[]),
     ("win.conflict-next", "Next Conflict", &[]),
     ("win.conflict-previous", "Previous Conflict", &[]),
     ("win.pane-outline", "Outline Pane", &["<Primary><Shift>w"]),
