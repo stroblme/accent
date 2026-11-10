@@ -155,7 +155,8 @@ impl DiagramView {
     }
 
     /// Bring the preview up to the pointer, once a frame: started on the first frame a move, a
-    /// resize, a turn or a drawing is past the slop, gone once none is.
+    /// resize, a turn or a drawing is past the slop, gone once none is. With no drag it shows
+    /// what a Properties row holds.
     pub(super) fn update_preview(&self, sheet: &Sheet) {
         let imp = self.imp();
         let edit = match imp.drag.borrow().as_ref() {
@@ -164,6 +165,14 @@ impl DiagramView {
             }
             _ => None,
         };
+        if let Some(f) = imp.on_drag.borrow().as_ref() {
+            f(edit.as_ref());
+        }
+        // A drag takes over from the row's change, whose preview was started for it alone.
+        if edit.is_some() && imp.held.take().is_some() {
+            imp.preview.take();
+        }
+        let edit = edit.or_else(|| imp.held.borrow().clone());
         let mut preview = imp.preview.borrow_mut();
         let Some(edit) = edit else {
             *preview = None;

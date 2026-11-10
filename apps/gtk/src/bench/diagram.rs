@@ -715,6 +715,102 @@ fn props(app: &Rc<App>, rel: &str) {
         }
         println!("bench diagram props grid clicked={:?}", grid_state());
 
+        // Live geometry. A move and a resize by XTEST show in the rows while the button is still
+        // down, the model the same until the drop, which is one step; X stepped shows on the
+        // canvas at once and lands when the burst settles, and digits typed into it as they are
+        // typed, landing with Return as one step.
+        tab.select(vec!["m".to_string()]);
+        let started = tab.frame_of("m");
+        let point = |at: Option<String>, dx: f64, dy: f64| {
+            let at = at?;
+            let (x, y) = at.split_once(' ')?;
+            let (x, y) = (x.parse::<f64>().ok()?, y.parse::<f64>().ok()?);
+            Some(format!("{} {}", x + dx, y + dy))
+        };
+        for name in ["move", "resize"] {
+            // The middle of m, then its right side's handle, where the move left it.
+            let at = (tab.frame_of("m"))
+                .map(|r| match name {
+                    "move" => r,
+                    _ => accent_drawio::Rect::new(r.x + r.w, r.y, 0.0, r.h),
+                })
+                .and_then(screen);
+            let (Some(from), Some(on), Some(to)) = (
+                point(at.clone(), 0.0, 0.0),
+                point(at.clone(), 20.0, 10.0),
+                point(at, 40.0, 20.0),
+            ) else {
+                continue;
+            };
+            super::git::xtest(&format!(
+                "move {from}; down; move {on}; sleep 0.1; move {to}"
+            ))
+            .await;
+            println!(
+                "bench diagram props live {name} rows={:?} model={:?}",
+                rows(),
+                tab.frame_of("m")
+            );
+            super::git::xtest("up").await;
+            println!(
+                "bench diagram props live {name} dropped rows={:?} model={:?}",
+                rows(),
+                tab.frame_of("m")
+            );
+        }
+        tab.undo();
+        tab.undo();
+        println!(
+            "bench diagram props live undone={}",
+            tab.frame_of("m") == started
+        );
+        if let Some(x) = spin("X") {
+            x.set_value(x.value() + 30.0);
+        }
+        println!(
+            "bench diagram props live stepped held={:?} model={:?}",
+            tab.held(),
+            tab.frame_of("m")
+        );
+        glib::timeout_future(Duration::from_millis(600)).await;
+        println!(
+            "bench diagram props live settled held={:?} model={:?}",
+            tab.held(),
+            tab.frame_of("m")
+        );
+        let settled = tab.frame_of("m");
+        let text = spin("X").and_then(|x| {
+            let text = find_widget(x.upcast_ref(), &|w| w.is::<gtk::Text>())?;
+            middle_on_screen(&app, &text)
+        });
+        if let Some(at) = text {
+            super::git::xtest(&format!("move {at}; focus; down; up; key ctrl+a; type 333")).await;
+            println!(
+                "bench diagram props live typed held={:?} model={:?}",
+                tab.held(),
+                tab.frame_of("m")
+            );
+            if let Ok(path) = std::env::var("ACCENT_BENCH_DIAGRAM_SHOT") {
+                let path = Path::new(&path).with_extension("typed.png");
+                println!(
+                    "bench diagram props shot typed {}",
+                    shoot(app.window.upcast_ref(), &path)
+                );
+            }
+            super::git::xtest("key Return").await;
+            println!(
+                "bench diagram props live entered held={:?} model={:?}",
+                tab.held(),
+                tab.frame_of("m")
+            );
+            tab.undo();
+            println!(
+                "bench diagram props live typed_undone={}",
+                tab.frame_of("m") == settled
+            );
+        }
+        tab.key_target().grab_focus();
+
         // An arrow's line takes the outline's rows, and the file keeps what they write. A spin
         // row's held change lands before a switch's right after it, and on the cells it was
         // made on when the selection changes before it settles.
@@ -1783,6 +1879,47 @@ fn preview(app: &Rc<App>, rel: &str) {
         run("still", &[], false);
         run("live", std::slice::from_ref(&busiest), true);
         run("boxed", &top, true);
+        // The live drag again with the Properties pane out, the canvas drawn again and the main
+        // loop run after each frame as a motion has them: with the busiest shape selected its
+        // rows follow the drag, against nothing selected.
+        app.show_pane("properties");
+        let x_row = || {
+            let row = find_widget(&tab.properties(), &|w| {
+                w.downcast_ref::<adw::SpinRow>()
+                    .is_some_and(|r| r.title() == "X")
+            });
+            row.and_downcast::<adw::SpinRow>()
+                .map(|r| r.text().to_string())
+        };
+        let pumped = |selected: bool| {
+            tab.select(match selected {
+                true => vec![busiest.clone()],
+                false => Vec::new(),
+            });
+            bench_pump();
+            let mut ms: Vec<f64> = (1..=30)
+                .map(|i| {
+                    let delta = accent_drawio::Point::new(f64::from(i) * 7.0, f64::from(i) * 3.0);
+                    let started = Instant::now();
+                    tab.bench_move(std::slice::from_ref(&busiest), Some(delta));
+                    tab.key_target().queue_draw();
+                    bench_pump();
+                    started.elapsed().as_secs_f64() * 1e3
+                })
+                .collect();
+            let shown = x_row();
+            tab.bench_move(&[], None);
+            bench_pump();
+            ms.sort_by(f64::total_cmp);
+            (ms[ms.len() / 2], ms[ms.len() - 1], shown)
+        };
+        for _ in 0..2 {
+            let (with, without) = (pumped(true), pumped(false));
+            println!(
+                "bench diagram preview rows median_ms={:.2} max_ms={:.2} x={:?} without median_ms={:.2} max_ms={:.2} x={:?}",
+                with.0, with.1, with.2, without.0, without.1, without.2
+            );
+        }
         bench_quit(&app);
     });
 }

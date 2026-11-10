@@ -331,6 +331,27 @@ impl DiagramView {
         *self.imp().new_cell.borrow_mut() = Some(Box::new(f));
     }
 
+    /// Tell `f`, each frame the page is drawn, what the drag under way would do on its release,
+    /// or `None` while there is none.
+    pub fn connect_drag_preview(&self, f: impl Fn(Option<&Edit>) + 'static) {
+        *self.imp().on_drag.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// Show `edit` on the page as a drag's live preview is shown, until it is made or `None`
+    /// takes it away: a change a Properties row holds until it lands.
+    pub fn show_held(&self, edit: Option<Edit>) {
+        if *self.imp().held.borrow() != edit {
+            self.imp().held.replace(edit);
+            self.queue_draw();
+        }
+    }
+
+    /// What [`DiagramView::show_held`] shows, for a drill.
+    #[cfg(feature = "bench")]
+    pub fn held(&self) -> Option<Edit> {
+        self.imp().held.borrow().clone()
+    }
+
     fn emit(&self, edit: Edit) {
         if let Some(f) = self.imp().on_edit.borrow().as_ref() {
             f(edit);
@@ -401,6 +422,7 @@ mod imp {
 
     type OnEdit = Box<dyn Fn(Edit)>;
     type OnZoom = Box<dyn Fn()>;
+    type OnDrag = Box<dyn Fn(Option<&Edit>)>;
 
     #[derive(glib::Properties)]
     #[properties(wrapper_type = super::DiagramView)]
@@ -439,6 +461,10 @@ mod imp {
         pub on_edit: RefCell<Option<OnEdit>>,
         pub on_zoom: RefCell<Option<OnZoom>>,
         pub new_cell: RefCell<Option<MakeCell>>,
+        /// Told what the drag would do, each frame (`DiagramView::connect_drag_preview`).
+        pub on_drag: RefCell<Option<OnDrag>>,
+        /// A Properties row's change held until it lands, shown as a drag's would be.
+        pub held: RefCell<Option<Edit>>,
     }
 
     // `gtk::ScrollablePolicy` has no `Default`, so the struct spells its own out.
@@ -469,6 +495,8 @@ mod imp {
                 on_edit: RefCell::new(None),
                 on_zoom: RefCell::new(None),
                 new_cell: RefCell::new(None),
+                on_drag: RefCell::new(None),
+                held: RefCell::new(None),
             }
         }
     }

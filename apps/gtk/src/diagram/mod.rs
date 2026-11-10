@@ -240,6 +240,11 @@ pub fn open(
         tab,
         move |edit| tab.apply(edit)
     ));
+    tab.view.connect_drag_preview(glib::clone!(
+        #[weak]
+        tab,
+        move |edit| tab.drag_preview(edit)
+    ));
     tab.view.connect_new_cell(glib::clone!(
         #[weak]
         tab,

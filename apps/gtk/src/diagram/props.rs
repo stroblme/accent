@@ -14,6 +14,7 @@ use accent_drawio::{CellId, Color, Rect, Resolved};
 use adw::prelude::*;
 use gtk::glib;
 
+use super::view::Edit;
 use super::{DiagramTab, Tool};
 use crate::widgets::{Debounce, hover_revealer, icon_button, reveal_on_hover};
 
@@ -64,6 +65,16 @@ pub enum Change {
     Paste(Clip),
     /// A row of the Layers group.
     Layer(super::layers::LayerChange),
+    /// What a Position, Size or Rotation row holds, for the canvas to show until it lands.
+    Held(Placed),
+}
+
+/// The one shape's place and size in its parent, or its turn in degrees: what a drag under way
+/// gives it, or what a row holds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Placed {
+    Frame(Rect),
+    Turn(f64),
 }
 
 /// What a Copy or Paste button carries: `x, y`, `w, h`, or the style string.
@@ -376,6 +387,8 @@ pub struct Props {
     aspect: adw::SwitchRow,
     /// The size the Width and Height rows had, which Constrain Proportions scales from.
     size_was: Cell<(f64, f64)>,
+    /// Whether a drag is under way on the canvas, which the rows show rather than the model.
+    dragging: Cell<bool>,
     font: adw::ComboRow,
     font_size: adw::SpinRow,
     font_colour: Rc<ColourRow>,
@@ -733,6 +746,7 @@ impl Props {
             flip,
             aspect,
             size_was: Cell::new((0.0, 0.0)),
+            dragging: Cell::new(false),
             font,
             font_size,
             font_colour,
@@ -902,8 +916,25 @@ impl Props {
                         false => Change::Style(pairs),
                     })
                 });
+                if key == "rotation" {
+                    me.held(Placed::Turn(value));
+                }
             });
         }
+        // Degrees typed into Rotation show on the canvas as they are typed, and land as the
+        // geometry rows' digits do.
+        let (me, rotation_send) = (Rc::downgrade(self), send.clone());
+        self.rotation.connect_changed(move |row| {
+            let Some(me) = me.upgrade().filter(|me| !me.filling.get()) else {
+                return;
+            };
+            let Some(degrees) = typed(row) else { return };
+            let send = rotation_send.clone();
+            me.keep("rotation", move || {
+                send(Change::Style(vec![("rotation", rotation(degrees))]))
+            });
+            me.held(Placed::Turn(degrees));
+        });
         for (row, key) in [
             (&self.page_width, "pageWidth"),
             (&self.page_height, "pageHeight"),
@@ -922,7 +953,7 @@ impl Props {
         }
 
         // The four read together when the burst settles, so a second row changed meanwhile
-        // does not take back the first one's change.
+        // does not take back the first one's change; the canvas shows them at once.
         for row in [&self.x, &self.y, &self.width, &self.height] {
             let (me, send) = (Rc::downgrade(self), send.clone());
             row.connect_value_notify(move |_| {
@@ -936,11 +967,33 @@ impl Props {
                 let (weak, send) = (Rc::downgrade(&me), send.clone());
                 me.hold("geometry", move || {
                     if let Some(me) = weak.upgrade() {
-                        let (x, y) = (me.x.value(), me.y.value());
-                        let (w, h) = (me.width.value(), me.height.value());
-                        send(Change::Geometry(Rect::new(x, y, w, h)));
+                        send(Change::Geometry(me.frame()));
                     }
                 });
+                me.held(Placed::Frame(me.frame()));
+            });
+        }
+        // Digits typed into one show on the canvas as they are typed, and land as Return or the
+        // keyboard leaving the row has the spin button read them, one step.
+        for (i, row) in [&self.x, &self.y, &self.width, &self.height]
+            .into_iter()
+            .enumerate()
+        {
+            let (me, send) = (Rc::downgrade(self), send.clone());
+            row.connect_changed(move |row| {
+                let Some(me) = me.upgrade().filter(|me| !me.filling.get()) else {
+                    return;
+                };
+                let Some(v) = typed(row) else { return };
+                let r = me.frame();
+                let mut at = [r.x, r.y, r.w, r.h];
+                at[i] = v;
+                if i > 1 && me.aspect.is_active() {
+                    (at[2], at[3]) = proportioned(me.size_was.get(), (at[2], at[3]));
+                }
+                let (r, send) = (Rect::new(at[0], at[1], at[2], at[3]), send.clone());
+                me.keep("geometry", move || send(Change::Geometry(r)));
+                me.held(Placed::Frame(r));
             });
         }
         let set = style("aspect");
@@ -1400,18 +1453,40 @@ impl Props {
     /// Width or Height changed under Constrain Proportions: the other follows, scaled to a
     /// hundredth as draw.io's Arrange panel scales it (Format.js 3183-3230).
     fn keep_proportions(&self) {
-        let (w0, h0) = self.size_was.get();
-        let (w, h) = (self.width.value(), self.height.value());
-        let hundredth = |v: f64| (v * 100.0).round() / 100.0;
-        let (w, h) = match (w != w0, h != h0) {
-            (true, false) if w0 > 0.0 => (w, hundredth(h0 * w / w0)),
-            (false, true) if h0 > 0.0 => (hundredth(w0 * h / h0), h),
-            _ => (w, h),
-        };
+        let size = (self.width.value(), self.height.value());
+        let (w, h) = proportioned(self.size_was.get(), size);
         self.size_was.set((w, h));
         self.filling.set(true);
         self.width.set_value(w);
         self.height.set_value(h);
+        self.filling.set(false);
+    }
+
+    /// The four geometry rows as they stand.
+    fn frame(&self) -> Rect {
+        let (x, y) = (self.x.value(), self.y.value());
+        Rect::new(x, y, self.width.value(), self.height.value())
+    }
+
+    /// Have the canvas show what a row holds, nothing landing first ([`Change::Held`]).
+    fn held(&self, placed: Placed) {
+        if let Some(f) = self.on_change.borrow().as_ref() {
+            f(Change::Held(placed));
+        }
+    }
+
+    /// Show a drag under way in the Position and Size rows, or in Rotation, writing nothing back.
+    fn show_drag(&self, placed: Placed) {
+        self.filling.set(true);
+        match placed {
+            Placed::Frame(r) => {
+                let rows = [&self.x, &self.y, &self.width, &self.height];
+                for (row, v) in rows.into_iter().zip([r.x, r.y, r.w, r.h]) {
+                    row.set_value(v);
+                }
+            }
+            Placed::Turn(degrees) => self.rotation.set_value(degrees),
+        }
         self.filling.set(false);
     }
 
@@ -1437,6 +1512,36 @@ impl Props {
         self.arc_size
             .set_visible(self.rounded.is_visible() && self.rounded.is_active());
     }
+}
+
+/// Width and height `size` under Constrain Proportions, from `was` before: the side left alone
+/// follows the one changed, scaled to a hundredth as draw.io's Arrange panel scales it (Format.js
+/// 3183-3230).
+fn proportioned(was: (f64, f64), size: (f64, f64)) -> (f64, f64) {
+    let ((w0, h0), (w, h)) = (was, size);
+    let hundredth = |v: f64| (v * 100.0).round() / 100.0;
+    match (w != w0, h != h0) {
+        (true, false) if w0 > 0.0 => (w, hundredth(h0 * w / w0)),
+        (false, true) if h0 > 0.0 => (hundredth(w0 * h / h0), h),
+        _ => (w, h),
+    }
+}
+
+/// The number being typed into `row`, within its range, while the keyboard is in it: its own
+/// value where the text is that value as the row rounds it, `None` for text that is no number.
+fn typed(row: &adw::SpinRow) -> Option<f64> {
+    if !row.state_flags().contains(gtk::StateFlags::FOCUS_WITHIN) {
+        return None;
+    }
+    let typed = row.text().trim().parse::<f64>().ok()?;
+    let value = row.value();
+    if (typed - value).abs() <= 0.5 / 10f64.powi(row.digits() as i32) {
+        return Some(value);
+    }
+    let range = row.adjustment();
+    typed
+        .is_finite()
+        .then(|| typed.clamp(range.lower(), range.upper()))
 }
 
 /// Style pairs as a [`Change`] carries them.
@@ -1534,6 +1639,11 @@ impl DiagramTab {
 
     /// A row of the Properties pane changed.
     pub(super) fn apply_property(self: &Rc<Self>, change: Change) {
+        if let Change::Held(placed) = change {
+            return self.show_held(placed);
+        }
+        // What lands is the held change, or comes after it has landed.
+        self.view.show_held(None);
         let ids = self.selection();
         match change {
             Change::Style(pairs) if !ids.is_empty() => {
@@ -1634,6 +1744,90 @@ impl DiagramTab {
             }
             L::Delete(id) => self.edit(|e, page| e.delete_layer(page, &id)),
         }
+    }
+
+    /// Show on the canvas what a Position, Size or Rotation row holds for the one shape.
+    fn show_held(&self, placed: Placed) {
+        let held = {
+            let selection = self.selection.borrow();
+            let [id] = selection.as_slice() else { return };
+            let editor = self.editor.borrow();
+            let Ok(page) = editor.page(self.page_index.get()) else {
+                return;
+            };
+            let id = id.clone();
+            match placed {
+                Placed::Frame(r) => {
+                    let o = page.origin_of(&id);
+                    Edit::Resize {
+                        id,
+                        rect: r.translate(o.x, o.y),
+                    }
+                }
+                Placed::Turn(degrees) => Edit::Rotate { id, degrees },
+            }
+        };
+        self.view.show_held(Some(held));
+    }
+
+    /// A drag under way in the one shape's Position and Size rows, or in Rotation, every frame
+    /// of it and nothing written until the drop; once it is over, the model again. What a row
+    /// still holds lands as the drag begins, so the drag starts from it. Called as the canvas
+    /// paints, so the rows change right after.
+    pub(super) fn drag_preview(self: &Rc<Self>, edit: Option<&Edit>) {
+        let was = self.props.dragging.replace(edit.is_some());
+        let placed = edit.and_then(|edit| self.placed(edit));
+        let (began, over) = (!was && edit.is_some(), was && edit.is_none());
+        if !began && !over && placed.is_none() {
+            return;
+        }
+        let tab = Rc::downgrade(self);
+        glib::idle_add_local_full(glib::Priority::HIGH_IDLE, move || {
+            let Some(tab) = tab.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            if began {
+                tab.props.flush();
+            }
+            match placed {
+                Some(placed) => tab.props.show_drag(placed),
+                None if over => tab.fill_props(),
+                None => {}
+            }
+            glib::ControlFlow::Break
+        });
+    }
+
+    /// What a drag's `edit` makes of the one shape selected, as its rows show it.
+    fn placed(&self, edit: &Edit) -> Option<Placed> {
+        let selection = self.selection.borrow();
+        let [id] = selection.as_slice() else {
+            return None;
+        };
+        let editor = self.editor.borrow();
+        let page = editor.page(self.page_index.get()).ok()?;
+        let cell = page.cell(id).filter(|c| c.vertex)?;
+        let g = cell.geometry.as_ref().filter(|g| !g.relative)?.rect();
+        match edit {
+            Edit::Move { ids, delta } if ids.contains(id) => {
+                Some(Placed::Frame(g.translate(delta.x, delta.y)))
+            }
+            Edit::Resize { id: resized, rect } if resized == id => {
+                let o = page.origin_of(id);
+                Some(Placed::Frame(rect.translate(-o.x, -o.y)))
+            }
+            Edit::Rotate {
+                id: turned,
+                degrees,
+            } if turned == id => Some(Placed::Turn(*degrees)),
+            _ => None,
+        }
+    }
+
+    /// What the canvas shows of a Properties row's held change, for a drill.
+    #[cfg(feature = "bench")]
+    pub fn held(&self) -> Option<String> {
+        self.view.held().map(|edit| format!("{edit:?}"))
     }
 
     /// Give shape `id` the place and size `rect` in its parent, as the file has them.
@@ -1738,6 +1932,19 @@ mod tests {
         assert_eq!(super::number(1.5), "1.5");
         let c = gtk::gdk::RGBA::new(0.0, 150.0 / 255.0, 130.0 / 255.0, 1.0);
         assert_eq!(super::hex(c), "#009682");
+    }
+
+    #[test]
+    fn constrained_proportions_follow_the_side_changed() {
+        assert_eq!(
+            super::proportioned((120.0, 60.0), (240.0, 60.0)),
+            (240.0, 120.0)
+        );
+        assert_eq!(
+            super::proportioned((120.0, 60.0), (120.0, 20.0)),
+            (40.0, 20.0)
+        );
+        assert_eq!(super::proportioned((0.0, 60.0), (30.0, 60.0)), (30.0, 60.0));
     }
 
     #[test]
