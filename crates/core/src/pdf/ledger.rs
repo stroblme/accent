@@ -983,7 +983,7 @@ mod tests {
             let links = doc.links(0).unwrap();
             let link = links.iter().find_map(|l| match l.target {
                 pdf::LinkTarget::Page { page, .. } => Some(page),
-                pdf::LinkTarget::Uri(_) => None,
+                _ => None,
             });
             let marks: Vec<_> = doc.outline().unwrap().iter().map(|o| o.page).collect();
             (link, marks)

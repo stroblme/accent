@@ -42,6 +42,14 @@ impl PdfTab {
                 }
             }
             Reply::Text(page, glyphs) => self.text_landed(page, glyphs),
+            Reply::Destination(dest, found) => match found {
+                Some((page, top)) => self.view.goto_page(page, top),
+                None => {
+                    if let Some(f) = self.on_nowhere.get() {
+                        f(self, &dest);
+                    }
+                }
+            },
             Reply::Outline(outline, info) => {
                 *self.outline.borrow_mut() = outline;
                 *self.info.borrow_mut() = info;
@@ -322,6 +330,10 @@ impl PdfTab {
         // Or a search hit on one of its pages.
         if let Some((page, text)) = self.pending_hit.take() {
             self.show_hit(page, &text);
+        }
+        // Or a link from another PDF, which opened it.
+        if let Some(dest) = self.pending_dest.take() {
+            self.ask(Request::Destination(dest));
         }
         self.on_open.emit(self);
     }

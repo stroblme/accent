@@ -17,7 +17,8 @@ use accent_pdf::{Pdf, Ref, Source};
 use pdfium_render::prelude::*;
 
 use super::{
-    Glyph, Info, Link, LinkTarget, Outline, Rect, RgbaImage, Theme, lock, parse_date, pdfium,
+    Glyph, Info, Link, LinkTarget, Outline, Rect, Remote, RgbaImage, Theme, lock, parse_date,
+    pdfium,
 };
 use crate::fs::Etag;
 use crate::recolour::recolour;
@@ -454,8 +455,8 @@ impl PdfDoc {
         }
     }
 
-    /// The `/Link` annotations of a page that lead to a page of the document or to a URI, in
-    /// `/Annots` order.
+    /// The `/Link` annotations of a page that lead to a page of the document or of another PDF,
+    /// or to a URI, in `/Annots` order.
     pub fn links(&self, page: usize) -> Result<Vec<Link>> {
         let at = self.cos.page(page)?;
         let links = self.reading(|doc| doc.links(at))?;
@@ -479,10 +480,37 @@ impl PdfDoc {
                             top: dest.top.map(|y| height_of(dest.page) - y),
                         },
                         accent_pdf::Target::Uri(uri) => LinkTarget::Uri(uri),
+                        accent_pdf::Target::File { file, dest } => LinkTarget::File {
+                            file,
+                            dest: match dest {
+                                accent_pdf::Remote::Page(dest) => Remote::Page {
+                                    page: dest.page,
+                                    y: dest.top,
+                                },
+                                accent_pdf::Remote::Named(name) => Remote::Named(name),
+                            },
+                        },
                     },
                 }
             })
             .collect())
+    }
+
+    /// Where a link from another PDF leads in this one: a page and the y to scroll to, as
+    /// [`LinkTarget::Page`] has them; `None` for a page or a name this document has not.
+    pub fn destination(&self, dest: &Remote) -> Result<Option<(usize, Option<f32>)>> {
+        let (page, y) = match dest {
+            Remote::Page { page, y } => (*page, *y),
+            Remote::Named(name) => match self.reading(|doc| doc.destination(name))? {
+                Some(dest) => (dest.page, dest.top),
+                None => return Ok(None),
+            },
+        };
+        if page >= self.page_count() {
+            return Ok(None);
+        }
+        let (_, height) = self.page_size(page)?;
+        Ok(Some((page, y.map(|y| height - y))))
     }
 
     /// The document outline (`/Outlines`), flattened depth-first.

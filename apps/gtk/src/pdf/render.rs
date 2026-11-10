@@ -240,6 +240,10 @@ fn render_loop(
                         send(view, Reply::Text(page, found.clone()));
                     }
                 }
+                Request::Destination(dest) => {
+                    let found = doc.destination(&dest).ok().flatten();
+                    send(view, Reply::Destination(dest, found));
+                }
                 Request::Outline => {
                     if let Ok(outline) = doc.outline() {
                         send(view, Reply::Outline(outline, doc.info()));

@@ -561,7 +561,7 @@ fn outlined(b: &mut Build) {
     b.obj(2, TWO_PAGES);
     b.obj(
         3,
-        "<</Type/Page/Parent 2 0 R/Annots[30 0 R 31 0 R 32 0 R 33 0 R]>>",
+        "<</Type/Page/Parent 2 0 R/Annots[30 0 R 31 0 R 32 0 R 33 0 R 34 0 R 35 0 R]>>",
     );
     b.obj(4, "<</Type/Page/Parent 2 0 R>>");
     b.obj(10, "<</Type/Outlines/First 11 0 R/Last 13 0 R>>");
@@ -594,6 +594,15 @@ fn outlined(b: &mut Build) {
     );
     b.obj(33, "<</Subtype/Link/Rect[0 0 5 5]/Dest[99 0 R/Fit]>>");
     b.obj(
+        34,
+        "<</Subtype/Link/Rect[0 0 5 5]/A<</S/GoToR/F(sub/other.pdf)/D[1/XYZ 0 700 0]>>>>",
+    );
+    b.obj(
+        35,
+        "<</Subtype/Link/Rect[0 0 5 5]/A<</S/GoToR/F<</F(old.pdf)/UF<FEFF00DC002E007000640066>>>\
+         /D/chap>>>>",
+    );
+    b.obj(
         40,
         "<</Title( Hello )/Author()/ModDate(D:20261029120000Z)>>",
     );
@@ -615,8 +624,10 @@ fn expected_outline() -> Vec<(usize, String, Option<usize>)> {
 }
 
 /// The outline, depth first and cut where it loops; where each entry and link leads, by an
-/// explicit, a named or an old-style destination or a GoTo action, another file's leading
-/// nowhere; and what the information dictionary says.
+/// explicit, a named or an old-style destination or a GoTo action, an entry into another file
+/// leading nowhere and a link into one to its page or its named destination there; the
+/// destinations it names, as a link from another file finds them; and what the information
+/// dictionary says.
 #[test]
 fn a_document_reads_its_outline_links_and_information() {
     let mut b = Build::new();
@@ -641,8 +652,30 @@ fn a_document_reads_its_outline_links_and_information() {
             ),
             ([0.0, 0.0, 10.0, 10.0], page(1, Some(60.0))),
             ([0.0, 0.0, 5.0, 5.0], uri("https://x")),
+            (
+                [0.0, 0.0, 5.0, 5.0],
+                Target::File {
+                    file: "sub/other.pdf".to_string(),
+                    dest: Remote::Page(Dest {
+                        page: 1,
+                        top: Some(700.0)
+                    }),
+                }
+            ),
+            (
+                [0.0, 0.0, 5.0, 5.0],
+                Target::File {
+                    file: "Ü.pdf".to_string(),
+                    dest: Remote::Named(b"chap".to_vec()),
+                }
+            ),
         ]
     );
+    let named = |name: &[u8]| doc.destination(name).unwrap();
+    let at = |page, top| Some(Dest { page, top });
+    assert_eq!(named(b"chap"), at(1, Some(50.0)));
+    assert_eq!(named(b"old"), at(1, None));
+    assert_eq!(named(b"gone"), None);
     let info = doc.info().unwrap();
     assert_eq!(info.title.as_deref(), Some("Hello"));
     assert_eq!((info.author, info.created), (None, None));

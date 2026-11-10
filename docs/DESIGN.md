@@ -1143,6 +1143,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Clicking one opens the note holding it; following one from a note goes to the page and shows the selection.
   A link whose numbers no longer fit falls back to the text its alias quotes, then to the page.
 - Export Highlights writes them into the file as real `/Highlight` annotations in the accent, skipping quads it already has.
+- **A link into another PDF** (`/GoToR`) opens that file at the page or the named destination it gives, in the tab showing it or in a preview tab as a followed link opens one, and Back returns to the link.
+  The link names the file from its own PDF's folder, and a file outside the vault opens as a loose file, which a remote vault cannot do.
+  A file that is not there or is not a PDF is said in a toast and nothing opens, while a page or a destination the file lacks is said over the page it opened on, as a diagram says a missing page.
 - **Other readers' comments are read, never written.** pdfium paints their marks as it draws them, a highlight, an underline, a strike-out, a rectangle, a sticky note's icon and typed text (`/FreeText`) even without an appearance stream of their own, but never their popups, open or not.
   What pdfium generates into such a mark to paint it stays in pdfium, which never writes the file, so a save leaves the mark as it was read.
   What a mark says (`/Contents`) is the page's tooltip over it, under its author (`/T`), as in Evince; a click that was not a drag pins the same in a popover, where the text can be selected and copied, and `Escape` or a click elsewhere closes it.
@@ -2008,7 +2011,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 - Next Page and Previous Page are palette commands with no accelerator, fired by those keys as the tab's own: each is a typing key, and an application accelerator is dispatched at the window ahead of whatever has the keyboard, so `Space` in the table would be taken from the editor, the terminal and every entry.
 - Back and Forward are the window's (History): a PDF keeps no stack of its own.
   Only jumps go in — a link, an outline row, a page typed into Go to Line, a search's first step; paging is reading, and a history of single steps would have nothing to go back to.
-- Ctrl held over a link previews where it leads without following it: a band of the target page around the destination, or an external link's address.
+- Ctrl held over a link previews where it leads without following it: a band of the target page around the destination, another PDF's name and page, or an external link's address.
   Ctrl+click on a link follows it; anywhere else on a LaTeX build's page it is Go to Source.
 - Fit Width and Fit Height from the zoom readout's right-click and the palette; Invert PDF Colours from the palette, and over an image Invert Image Colours.
 - Drawing `Ctrl+Shift+I` opens the ring.

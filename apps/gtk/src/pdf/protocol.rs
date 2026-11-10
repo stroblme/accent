@@ -50,6 +50,9 @@ pub enum Reply {
     Comments(usize, Vec<pdf::Comment>),
     /// One page's glyphs and their boxes, for selecting text on it.
     Text(usize, Vec<accent_core::pdf::Glyph>),
+    /// Where a link from another PDF leads in this one, the page and the y down it; `None` for
+    /// a place it has not.
+    Destination(pdf::Remote, Option<(usize, Option<f32>)>),
     /// The bookmarks, and what the document says about itself, which changes with them: on
     /// opening, a read and a page edit.
     Outline(Vec<accent_core::pdf::Outline>, accent_core::pdf::Info),
@@ -162,6 +165,8 @@ pub enum Request {
     Comments(usize),
     /// The glyphs of one page, so text on it can be selected.
     Text(usize),
+    /// Where a link from another PDF leads in this one.
+    Destination(pdf::Remote),
     Outline,
     Search {
         query: u64,

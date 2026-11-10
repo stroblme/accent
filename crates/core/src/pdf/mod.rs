@@ -344,6 +344,21 @@ pub enum LinkTarget {
         top: Option<f32>,
     },
     Uri(String),
+    /// A place in another PDF (`/GoToR`): the file as the link names it, relative to this
+    /// document's folder unless absolute, and where in it, which that file's
+    /// [`PdfDoc::destination`] reads.
+    File {
+        file: String,
+        dest: Remote,
+    },
+}
+
+/// Where in another PDF a link leads: a page of it and the y its view wants at the top, in that
+/// page's own space (y up), its height being that file's to know; or a destination it names.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Remote {
+    Page { page: usize, y: Option<f32> },
+    Named(Vec<u8>),
 }
 
 /// A `/Link` annotation: the clickable box and where it leads.

@@ -199,6 +199,57 @@ fn links_read_dest_and_uri() {
     );
 }
 
+/// A link into another PDF names that file and a page of it or a destination it names, which
+/// the other file reads as a page and a y down it, its own page's height turning the y over.
+#[test]
+fn a_link_into_another_pdf_lands_where_that_file_says() {
+    if !available() {
+        return eprintln!("skipping: no libpdfium");
+    }
+    let linking = pdf_of(&[
+        "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]/Annots[4 0 R 5 0 R]>>".to_string(),
+        "<</Subtype/Link/Rect[0 0 10 10]/A<</S/GoToR/F(../other.pdf)/D[1/XYZ 0 100 0]>>>>"
+            .to_string(),
+        "<</Subtype/Link/Rect[0 0 10 10]/A<</S/GoToR/F(../other.pdf)/D(end)>>>>".to_string(),
+    ]);
+    let other = pdf_of(&[
+        "<</Type/Catalog/Pages 2 0 R/Names<</Dests 5 0 R>>>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R 4 0 R]/Count 2>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 100]>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 300]>>".to_string(),
+        "<</Names[(end)[4 0 R/XYZ 0 40 0]]>>".to_string(),
+    ]);
+    let dests: Vec<_> = (doc_of(linking).unwrap().links(0).unwrap().into_iter())
+        .map(|link| match link.target {
+            LinkTarget::File { file, dest } => (file, dest),
+            target => panic!("{target:?}"),
+        })
+        .collect();
+    let file = "../other.pdf".to_string();
+    assert_eq!(
+        dests,
+        [
+            (
+                file.clone(),
+                Remote::Page {
+                    page: 1,
+                    y: Some(100.0)
+                }
+            ),
+            (file, Remote::Named(b"end".to_vec())),
+        ]
+    );
+    let other = doc_of(other).unwrap();
+    let lands = |dest: &Remote| other.destination(dest).unwrap();
+    // The second page is 300 pt tall: y 100 is 200 down it, and y 40 is 260 down.
+    assert_eq!(lands(&dests[0].1), Some((1, Some(200.0))));
+    assert_eq!(lands(&dests[1].1), Some((1, Some(260.0))));
+    assert_eq!(lands(&Remote::Named(b"gone".to_vec())), None);
+    assert_eq!(lands(&Remote::Page { page: 2, y: None }), None);
+}
+
 #[test]
 fn outline_is_flat_with_depths() {
     let Some((_d, doc)) = open_tiny() else { return };

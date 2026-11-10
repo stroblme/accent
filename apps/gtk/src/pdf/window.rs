@@ -1,7 +1,7 @@
 //! Window integration for PDF tabs: opening, remote saves, note highlights and commands.
 
 use crate::*;
-use accent_core::pdf::PageEdit;
+use accent_core::pdf::{PageEdit, Remote};
 
 use super::pictures::Incoming;
 
@@ -200,6 +200,25 @@ impl App {
                 launcher.launch(Some(&app.window), gio::Cancellable::NONE, |_| {});
             }
         ));
+        pdf.connect_file(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |pdf, file, dest| app.follow_into(pdf, file, dest.clone())
+        ));
+        // As a diagram's link to a page it has not says so (DESIGN.md, Diagram).
+        pdf.connect_nowhere(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |pdf, dest| {
+                let what = match dest {
+                    Remote::Page { page, .. } => format!("page {}", page + 1),
+                    Remote::Named(name) => {
+                        format!("destination {}", String::from_utf8_lossy(name))
+                    }
+                };
+                app.toast(&format!("No {what} in {}", doc::file_name(&pdf.key())));
+            }
+        ));
         let page = pdf.page.clone();
         self.mark_loose(&page, key);
         *pdf.monitor.borrow_mut() = self.watch_loose(key, path);
@@ -232,6 +251,48 @@ impl App {
                         }
                     });
                 }
+            }
+        });
+    }
+
+    /// Follow a link of `from` into another PDF, `file` as the link names it: in the tab showing
+    /// that file, or one opened for it as a followed link opens one, at `dest`, Back returning to
+    /// the link. A file that is not there, or not a PDF, is said in a toast and opens nothing.
+    fn follow_into(self: &Rc<Self>, from: &Rc<pdftab::PdfTab>, file: &str, dest: Remote) {
+        let what = format!("open {}", doc::file_name(file));
+        let vault = self.vault().map(|v| (v.root(), v.is_remote()));
+        let vault = vault
+            .as_ref()
+            .map(|(root, remote)| (root.as_path(), *remote));
+        let Some(key) = linked_key(vault, &from.key(), file) else {
+            return self.cannot(&what, "not in this vault");
+        };
+        if doc::kind_of(&key) != Kind::Pdf {
+            return self.cannot(&what, "not a PDF");
+        }
+        self.mark_page(&from.page);
+        // Asked on a worker, a remote vault's of its host; a loose file's open looks for it.
+        let vault = self.vault().filter(|_| !doc::is_loose_key(&key)).cloned();
+        let weak = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            let there = match vault {
+                Some(vault) => {
+                    let rel = key.clone();
+                    let etag = crate::work::attempt(&what, move || vault.stat(&rel)).await;
+                    etag.map(|etag| etag.is_some())
+                }
+                None => Ok(true),
+            };
+            let Some(app) = weak.upgrade() else { return };
+            match there {
+                Ok(true) => {
+                    app.open_preview(&key);
+                    if let Some(Doc::Pdf(pdf)) = app.doc_for(&key) {
+                        pdf.show_destination(dest);
+                    }
+                }
+                Ok(false) => app.cannot(&what, "not in this vault"),
+                Err(why) => app.toast(&why),
             }
         });
     }
@@ -897,4 +958,50 @@ fn dragged(target: &gtk::DropTarget, value: Option<&glib::Value>) -> Option<Stri
         }
     };
     carried.get::<String>().ok()
+}
+
+/// The key of the file a link in the document `from` names as `file`, relative to `from`'s folder
+/// unless absolute: its path in the vault, `vault` being its root and whether it is remote, or
+/// outside it its absolute path, a loose file, which a remote vault has no way to open.
+fn linked_key(vault: Option<(&Path, bool)>, from: &str, file: &str) -> Option<String> {
+    let dir = match (doc::is_loose_key(from), vault) {
+        (false, Some((root, _))) => root.join(accent_core::path::parent_dir(from)),
+        _ => Path::new(from).parent()?.to_path_buf(),
+    };
+    let resolved = accent_core::path::resolve(dir.to_str()?, file);
+    let path = PathBuf::from(format!("/{resolved}"));
+    let inside = vault.and_then(|(root, _)| path.strip_prefix(root).ok());
+    match (inside, vault) {
+        (Some(rel), _) => rel.to_str().map(str::to_string),
+        (None, Some((_, true))) => None,
+        (None, _) => path.to_str().map(str::to_string),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::linked_key;
+    use std::path::Path;
+
+    /// A link names its file from the linking PDF's folder, or absolutely: by its vault path
+    /// inside the vault, and outside it by the absolute path only a local vault opens.
+    #[test]
+    fn a_linked_file_is_named_from_the_linking_folder() {
+        let local = Some((Path::new("/v"), false));
+        let remote = Some((Path::new("/v"), true));
+        for (vault, from, file, key) in [
+            (local, "doc/index.pdf", "etc/a.pdf", Some("doc/etc/a.pdf")),
+            (local, "doc/index.pdf", "../b.pdf", Some("b.pdf")),
+            (remote, "doc/index.pdf", "/v/c.pdf", Some("c.pdf")),
+            (local, "index.pdf", "../out.pdf", Some("/out.pdf")),
+            (remote, "index.pdf", "../out.pdf", None),
+            (None, "/home/me/index.pdf", "a.pdf", Some("/home/me/a.pdf")),
+        ] {
+            assert_eq!(
+                linked_key(vault, from, file).as_deref(),
+                key,
+                "{file} from {from}"
+            );
+        }
+    }
 }

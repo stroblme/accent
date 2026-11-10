@@ -43,6 +43,10 @@ type FailHook = Hook<dyn Fn(&Rc<PdfTab>, String)>;
 /// A width or a colour was picked on the ring for a tool.
 type ChoiceHook = Hook<dyn Fn(&Rc<PdfTab>, pdfview::Mode, ring::Choice)>;
 type UriHook = Hook<dyn Fn(&str)>;
+/// A link into another PDF was followed: the file it names and where in it.
+type FileHook = Hook<dyn Fn(&Rc<PdfTab>, &str, &pdf::Remote)>;
+/// A link from another PDF named a place this one has not.
+type NowhereHook = Hook<dyn Fn(&Rc<PdfTab>, &pdf::Remote)>;
 /// The pages were edited, or an edit walked by Undo or Redo: the edit made, and its step.
 type RepageHook = Hook<dyn Fn(&Rc<PdfTab>, pdf::PageEdit, u32)>;
 /// Another PDF's pages went in: its name, and how many or why they could not.
@@ -140,6 +144,8 @@ pub struct PdfTab {
     pub(super) pending_show: Cell<Option<(usize, Option<[usize; 4]>)>>,
     /// A search hit to show once the document is open: its page and the text matched there.
     pub(super) pending_hit: RefCell<Option<(usize, String)>>,
+    /// Where a link from another PDF leads in this one, to go once the document is open.
+    pub(super) pending_dest: RefCell<Option<pdf::Remote>>,
     /// The page and point the page's menu was opened on or Ctrl was clicked at, for Go to Source
     /// and the page commands, until the menu has gone. See [`PdfTab::source_point`] and
     /// [`PdfTab::command_page`].
@@ -202,6 +208,8 @@ pub struct PdfTab {
     pub(super) on_open: TabHook,
     pub(super) on_matches: TabHook,
     pub(super) on_uri: UriHook,
+    pub(super) on_file: FileHook,
+    pub(super) on_nowhere: NowhereHook,
     pub(super) on_mode: TabHook,
     pub(super) on_history: TabHook,
     /// Fired when what the Select tool holds changes.
@@ -322,6 +330,7 @@ pub fn open(
         notes: RefCell::new(Vec::new()),
         pending_show: Cell::new(None),
         pending_hit: RefCell::default(),
+        pending_dest: RefCell::default(),
         pointed: Cell::new(None),
         without_synctex: Cell::new(false),
         spot: Cell::new(None),
@@ -349,6 +358,8 @@ pub fn open(
         on_open: Hook::default(),
         on_matches: Hook::default(),
         on_uri: Hook::default(),
+        on_file: Hook::default(),
+        on_nowhere: Hook::default(),
         on_mode: Hook::default(),
         on_history: Hook::default(),
         on_picked: Hook::default(),
@@ -978,6 +989,18 @@ impl PdfTab {
         self.find_from(text, Options::default(), true, page);
     }
 
+    /// Go where a link from another PDF leads in this one, a page or a destination it names,
+    /// which the render thread reads. A document still opening goes there once it has, with no
+    /// place of its own yet for Back to return to.
+    pub fn show_destination(self: &Rc<Self>, dest: pdf::Remote) {
+        if self.view.page_count() == 0 {
+            *self.pending_dest.borrow_mut() = Some(dest);
+            return;
+        }
+        self.jumping();
+        self.ask(Request::Destination(dest));
+    }
+
     /// [`find`](Self::find) from page `from` on, and round.
     fn find_from(self: &Rc<Self>, text: &str, options: Options, jump: bool, from: usize) {
         *self.searched.borrow_mut() = (text.to_string(), options);
@@ -1093,6 +1116,17 @@ impl PdfTab {
 
     pub fn connect_uri(&self, f: impl Fn(&str) + 'static) {
         self.on_uri.set(Rc::new(f));
+    }
+
+    /// Called when a link into another PDF is followed, with the file it names, relative to this
+    /// one's folder unless absolute, and where in it.
+    pub fn connect_file(&self, f: impl Fn(&Rc<PdfTab>, &str, &pdf::Remote) + 'static) {
+        self.on_file.set(Rc::new(f));
+    }
+
+    /// Called when a link from another PDF names a page or a destination this one has not.
+    pub fn connect_nowhere(&self, f: impl Fn(&Rc<PdfTab>, &pdf::Remote) + 'static) {
+        self.on_nowhere.set(Rc::new(f));
     }
 
     /// Called after every page edit, Undo and Redo included, with the edit made and its step:

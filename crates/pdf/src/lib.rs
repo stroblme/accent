@@ -25,7 +25,7 @@ mod xref;
 pub mod fixtures;
 
 pub use content::{Content, form};
-pub use document::{Bookmark, Dest, Document, Info, Link, Target};
+pub use document::{Bookmark, Dest, Document, Info, Link, Remote, Target};
 pub use font::{helvetica_width, winansi};
 pub use pdf::{Pdf, read};
 pub use source::Source;

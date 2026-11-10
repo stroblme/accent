@@ -219,7 +219,10 @@ impl PdfSession {
     }
 
     pub fn links(&self, page: u32) -> Answer<Vec<PdfLinkBox>> {
-        self.with(|s| Ok(convert::all(s.doc.links(page as usize)?)))
+        self.with(|s| {
+            let links = s.doc.links(page as usize)?.into_iter();
+            Ok(links.filter_map(|l| l.try_into().ok()).collect())
+        })
     }
 
     pub fn outline(&self) -> Answer<Vec<Outline>> {

@@ -60,7 +60,7 @@ fn by_pdfium(doc: &PdfDocument<'_>) -> Pdfium {
                     continue;
                 };
                 // Another file's destination: pdfium takes its page number for one of this
-                // document's, `accent_pdf` makes no link of it.
+                // document's and gives no file, so it says nothing of `accent_pdf`'s.
                 if matches!(
                     link.action(),
                     Some(PdfAction::RemoteDestination(_) | PdfAction::EmbeddedDestination(_))
@@ -160,7 +160,8 @@ fn host_outline(bytes: Vec<u8>) -> accent_pdf::Result<Vec<Outline>> {
 
 /// How the window's reading of a document differs from pdfium's, one line a difference, and how
 /// many links it found that pdfium missed: a destination named in UTF-8, which pdfium decodes as
-/// PDFDocEncoding before looking it up and so misses in a name tree sorted by its bytes.
+/// PDFDocEncoding before looking it up and so misses in a name tree sorted by its bytes. Links
+/// into other files are left out, pdfium having none to hold them to.
 fn differences(doc: &PdfDoc, pdfium: &Pdfium) -> (Vec<String>, usize) {
     let (mut out, mut more) = (Vec::new(), 0);
     match doc.outline() {
@@ -224,8 +225,12 @@ fn differences(doc: &PdfDoc, pdfium: &Pdfium) -> (Vec<String>, usize) {
             .filter(|l| matches!(l.target, LinkTarget::Page { .. }))
             .count()
     };
+    let here = |links: Vec<Link>| -> Vec<Link> {
+        let here = |l: &Link| !matches!(l.target, LinkTarget::File { .. });
+        links.into_iter().filter(here).collect()
+    };
     for (page, theirs) in pdfium.links.iter().enumerate() {
-        match doc.links(page) {
+        match doc.links(page).map(here) {
             Ok(ours)
                 if ours.len() == theirs.len()
                     && ours.iter().zip(theirs).all(|(a, b)| same(a, b)) => {}
@@ -324,6 +329,7 @@ fn the_corpus_reads_its_outlines_links_and_information_as_pdfium_does() {
     let mut found = Vec::new();
     pdfs(&root, &mut found);
     let (mut read, mut marks, mut links, mut more, mut differ) = (0, 0, 0, 0, Vec::new());
+    let mut into_others = 0;
     for path in &found {
         let bytes = std::fs::read(path).unwrap();
         let Some(pdfium) = pdfium_reads(&bytes) else {
@@ -336,6 +342,10 @@ fn the_corpus_reads_its_outlines_links_and_information_as_pdfium_does() {
             Ok(doc) => {
                 let (lines, found) = differences(&doc, &pdfium);
                 more += found;
+                into_others += (0..doc.page_count())
+                    .flat_map(|page| doc.links(page).unwrap_or_default())
+                    .filter(|l| matches!(l.target, LinkTarget::File { .. }))
+                    .count();
                 lines
             }
             Err(e) => vec![format!("open {e:#}")],
@@ -356,7 +366,7 @@ fn the_corpus_reads_its_outlines_links_and_information_as_pdfium_does() {
     }
     eprintln!(
         "{read} PDFs pdfium reads, {marks} bookmarks, {links} links: {} differences, {more} links \
-         pdfium misses",
+         pdfium misses, {into_others} into other files",
         differ.len()
     );
     assert!(differ.is_empty());

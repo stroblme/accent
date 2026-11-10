@@ -1,7 +1,8 @@
 //! What a document says of itself and where it leads: its outline (ISO 32000-1 §12.3.3), its
-//! information dictionary (§14.3.3) and its pages' links (§12.5.6.5), read from its objects, a
-//! session's update over them included. Where a file is ambiguous these read it as pdfium does,
-//! which the accent-core corpus test holds them to.
+//! information dictionary (§14.3.3), its pages' links (§12.5.6.5) and the destinations it names
+//! for links from other files (§12.3.2.3), read from its objects, a session's update over them
+//! included. Where a file is ambiguous these read it as pdfium does, which the accent-core corpus
+//! test holds them to.
 
 use std::collections::{HashMap, HashSet};
 
@@ -35,6 +36,20 @@ pub struct Bookmark {
 pub enum Target {
     Page(Dest),
     Uri(String),
+    /// A place in another file, a GoToR action's (§12.6.4.3): the file as its specification
+    /// names it (§7.11), relative to this one's folder unless absolute, and where in it.
+    File {
+        file: String,
+        dest: Remote,
+    },
+}
+
+/// Where in another file a link leads: a page of that file, numbered from 0, its top in that
+/// page's own space, or a destination it names ([`Document::destination`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Remote {
+    Page(Dest),
+    Named(Vec<u8>),
 }
 
 /// A `/Link` annotation: its `/Rect`, `[left, bottom, right, top]` in the page's space, and where
@@ -150,7 +165,7 @@ impl<'a> Document<'a> {
     }
 
     /// The links of page `page`, in its `/Annots` order: those leading to a page of this
-    /// document or to a URI.
+    /// document or of another file, or to a URI.
     pub fn links(&self, page: Ref) -> Result<Vec<Link>> {
         let page = self.get(page)?;
         let annots = self.resolve(page.as_dict().and_then(|p| p.get(b"Annots")))?;
@@ -171,9 +186,10 @@ impl<'a> Document<'a> {
                     Some(dest) => Target::Page(dest),
                     None => continue,
                 },
-                None => match self.uri(&annot)? {
-                    Some(uri) => Target::Uri(uri),
-                    None => continue,
+                None => match (self.remote(&annot)?, self.uri(&annot)?) {
+                    (Some(file), _) => file,
+                    (None, Some(uri)) => Target::Uri(uri),
+                    (None, None) => continue,
                 },
             };
             out.push(Link { rect, target });
@@ -224,8 +240,17 @@ impl<'a> Document<'a> {
         }
     }
 
+    /// Where the destination `name` of this document leads, as a link from another file names
+    /// it; `None` for a name it does not define.
+    pub fn destination(&self, name: &[u8]) -> Result<Option<Dest>> {
+        match self.explicit(Some(&Object::String(name.to_vec())))? {
+            Some(dest) => self.dest(&dest),
+            None => Ok(None),
+        }
+    }
+
     /// The destination array of an outline item or a link: its `/Dest`, named or explicit, or
-    /// its `/A` GoTo action's `/D`. Another file's (GoToR) leads nowhere here.
+    /// its `/A` GoTo action's `/D`. Another file's (GoToR) is [`Document::remote`]'s.
     fn dest_array(&self, item: &Dict) -> Result<Option<Vec<Object>>> {
         if let Some(dest) = self.explicit(item.get(b"Dest"))? {
             return Ok(Some(dest));
@@ -309,27 +334,75 @@ impl<'a> Document<'a> {
     }
 
     /// The page `dest` names, by its object, or by its number as some writers put it, and the y
-    /// its view wants at the top: an XYZ's top, a FitH's or a FitR's.
+    /// its view wants at the top.
     fn dest(&self, dest: &[Object]) -> Result<Option<Dest>> {
         let page = match dest.first() {
             Some(&Object::Ref(r)) => self.pages.get(&r.num).copied(),
             Some(&Object::Int(n)) => usize::try_from(n).ok(),
             _ => None,
         };
-        let Some(page) = page else {
-            return Ok(None);
-        };
+        match page {
+            Some(page) => Ok(Some(Dest {
+                page,
+                top: self.top(dest)?,
+            })),
+            None => Ok(None),
+        }
+    }
+
+    /// The y the view of `dest` wants at the top: an XYZ's top, a FitH's or a FitR's.
+    fn top(&self, dest: &[Object]) -> Result<Option<f32>> {
         let at = match dest.get(1).and_then(Object::as_name) {
             Some(b"XYZ") => 3,
             Some(b"FitH") => 2,
             Some(b"FitR") => 5,
             _ => 0,
         };
-        let top = match at {
+        Ok(match at {
             0 => None,
             at => number(&self.resolve(dest.get(at))?),
+        })
+    }
+
+    /// A GoToR action's file and where in it: a page array, whose first element is a page
+    /// number of that file, or a name it defines.
+    fn remote(&self, annot: &Dict) -> Result<Option<Target>> {
+        let action = self.dict(annot, b"A")?;
+        if action.get(b"S").and_then(Object::as_name) != Some(b"GoToR") {
+            return Ok(None);
+        }
+        let Some(file) = self.file(action.get(b"F"))? else {
+            return Ok(None);
         };
-        Ok(Some(Dest { page, top }))
+        let dest = match self.resolve(action.get(b"D"))? {
+            Object::Array(dest) => match dest.first() {
+                Some(&Object::Int(page)) if page >= 0 => Remote::Page(Dest {
+                    page: page as usize,
+                    top: self.top(&dest)?,
+                }),
+                _ => return Ok(None),
+            },
+            Object::Name(name) | Object::String(name) => Remote::Named(name),
+            _ => return Ok(None),
+        };
+        Ok(Some(Target::File { file, dest }))
+    }
+
+    /// The path a file specification names (§7.11): a string, or a dictionary's `/UF`, a text
+    /// string, else its `/F`.
+    fn file(&self, spec: Option<&Object>) -> Result<Option<String>> {
+        let name = match self.resolve(spec)? {
+            Object::Dict(spec) => match self.resolve(spec.get(b"UF"))? {
+                Object::String(uf) => Some(text_string(&uf)),
+                _ => match self.resolve(spec.get(b"F"))? {
+                    Object::String(f) => Some(file_name(f)),
+                    _ => None,
+                },
+            },
+            Object::String(f) => Some(file_name(f)),
+            _ => None,
+        };
+        Ok(name.filter(|name| !name.is_empty()))
     }
 
     /// A URI action's URI, a relative one after the catalog's `/URI /Base`.
@@ -366,6 +439,15 @@ impl<'a> Document<'a> {
             return Ok(None);
         };
         Ok(Some([x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)]))
+    }
+}
+
+/// A file specification string's bytes as a path: UTF-8, as a Unix file system names files, or
+/// else a text string, UTF-16 after its byte order mark or PDFDocEncoding.
+fn file_name(bytes: Vec<u8>) -> String {
+    match String::from_utf8(bytes) {
+        Ok(name) => name.trim_start_matches('\u{feff}').to_string(),
+        Err(e) => text_string(e.as_bytes()),
     }
 }
 

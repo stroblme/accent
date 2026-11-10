@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use accent_core::pdf::LinkTarget;
+use accent_core::pdf::{self, LinkTarget};
 use adw::prelude::*;
 use gtk::glib;
 
@@ -91,7 +91,8 @@ impl PdfTab {
 
     /// Put a popover over the link. A page target gets a band of the page it leads to, an
     /// external one gets the address it would open, which is the thing worth knowing before
-    /// clicking it.
+    /// clicking it, and one into another PDF that file's name, and its page where the link
+    /// names one rather than a destination only that file can find.
     fn show_preview(self: &Rc<Self>, target: LinkTarget, x: f64, y: f64) {
         let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
         let band = adw::Bin::new();
@@ -116,6 +117,24 @@ impl PdfTab {
                     .xalign(0.0)
                     .build(),
             ),
+            LinkTarget::File { file, dest } => {
+                content.append(
+                    &gtk::Label::builder()
+                        .label(crate::doc::file_name(file))
+                        .css_classes(["caption"])
+                        .xalign(0.0)
+                        .build(),
+                );
+                if let pdf::Remote::Page { page, .. } = dest {
+                    content.append(
+                        &gtk::Label::builder()
+                            .label(format!("Page {}", page + 1))
+                            .css_classes(["caption", "dimmed"])
+                            .xalign(0.0)
+                            .build(),
+                    );
+                }
+            }
         }
         // Never autohide: an autohiding popover takes a grab, and this one is under the pointer
         // that is still reading the page. It cannot be targeted either, so it neither swallows a
@@ -133,7 +152,7 @@ impl PdfTab {
         popover.popup();
         let page = match target {
             LinkTarget::Page { page, top } => Some((page, top)),
-            LinkTarget::Uri(_) => None,
+            LinkTarget::Uri(_) | LinkTarget::File { .. } => None,
         };
         *self.preview.borrow_mut() = Some(Preview {
             popover,

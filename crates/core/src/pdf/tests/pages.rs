@@ -82,7 +82,7 @@ fn a_deleted_page_comes_back_with_its_links_and_bookmark() {
             .into_iter()
             .find_map(|l| match l.target {
                 LinkTarget::Page { page, .. } => Some(page),
-                LinkTarget::Uri(_) => None,
+                _ => None,
             });
         let marks: Vec<_> = doc.outline().unwrap().iter().map(|o| o.page).collect();
         (link, marks)

@@ -525,9 +525,12 @@ impl From<Theme> for pdf::Theme {
     }
 }
 
-impl From<pdf::Link> for PdfLinkBox {
-    fn from(l: pdf::Link) -> Self {
-        PdfLinkBox {
+/// A link Android can follow: one into another PDF it cannot yet.
+impl TryFrom<pdf::Link> for PdfLinkBox {
+    type Error = ();
+
+    fn try_from(l: pdf::Link) -> Result<Self, ()> {
+        Ok(PdfLinkBox {
             rect: l.rect,
             target: match l.target {
                 pdf::LinkTarget::Page { page, top } => LinkTarget::Page {
@@ -535,8 +538,9 @@ impl From<pdf::Link> for PdfLinkBox {
                     top,
                 },
                 pdf::LinkTarget::Uri(uri) => LinkTarget::Uri { uri },
+                pdf::LinkTarget::File { .. } => return Err(()),
             },
-        }
+        })
     }
 }
 
