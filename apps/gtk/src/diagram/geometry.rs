@@ -508,6 +508,8 @@ pub struct Sheet {
     anchors: HashMap<CellId, Vec<(Point, Constraint)>>,
     /// Vertices whose style says they are not to be turned (`rotatable=0`).
     unturnable: HashSet<CellId>,
+    /// Each vertex's line width, which its selection frame keeps clear of.
+    lines: HashMap<CellId, f64>,
 }
 
 impl Sheet {
@@ -574,6 +576,15 @@ impl Sheet {
             }
             if cell.style.get("rotatable") == Some("0") {
                 sheet.unturnable.insert(cell.id.clone());
+            }
+            if cell.vertex {
+                let style = cell.style.resolve(false);
+                let line = style
+                    .color("strokeColor")
+                    .map(|_| style.num("strokeWidth", 1.0));
+                sheet
+                    .lines
+                    .insert(cell.id.clone(), line.unwrap_or(0.0).max(0.0));
             }
             let connectable = !cell
                 .attrs
@@ -643,6 +654,13 @@ impl Sheet {
     /// paints.
     pub fn frame_of(&self, id: &str) -> Option<Rect> {
         self.rect(id).or_else(|| self.scene.bounds_of(id))
+    }
+
+    /// How far outside [`Sheet::frame_of`] cell `id`'s selection frame sits, in page units, as
+    /// the PDF Select tool's sits outside the ink: half a shape's line and a unit, or a unit
+    /// beyond an edge's painted box, which holds its line already.
+    pub fn padding(&self, id: &str) -> f64 {
+        self.lines.get(id).copied().unwrap_or(0.0) / 2.0 + 1.0
     }
 
     /// The box a move aligns cell `id` by (`mxGraphHandler.getStateBounds`): its frame, a
@@ -1166,6 +1184,31 @@ mod tests {
             Rect::new(120.0, 0.0, 10.0, 10.0),
         );
         assert_eq!(sheet.guide_boxes(&ids(&["c"]), "c"), [a, group, d]);
+    }
+
+    #[test]
+    fn a_selection_frame_sits_a_unit_outside_the_line() {
+        let mut page = Page::blank("P", "p");
+        let r = Rect::new(0.0, 0.0, 40.0, 20.0);
+        for (id, style) in [
+            ("plain", ""),
+            ("thick", "strokeWidth=4;"),
+            ("bare", "strokeColor=none;"),
+        ] {
+            page.cells
+                .push(accent_drawio::Cell::new_vertex(id, "1", r, style, ""));
+        }
+        let (a, b) = (Point::new(100.0, 0.0), Point::new(200.0, 0.0));
+        page.cells.push(accent_drawio::Cell::new_edge(
+            "e",
+            "1",
+            (None, a),
+            (None, b),
+            "",
+        ));
+        let sheet = Sheet::of(&page, &Context::default());
+        let pads = ["plain", "thick", "bare", "e"].map(|id| sheet.padding(id));
+        assert_eq!(pads, [1.5, 3.0, 1.0, 1.0]);
     }
 
     #[test]

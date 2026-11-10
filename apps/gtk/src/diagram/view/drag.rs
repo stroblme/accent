@@ -164,7 +164,11 @@ impl DiagramView {
                             ends: sheet.terminals(&id),
                             id,
                         },
-                        Grip::Rotate => Drag::Rotate { id, rect },
+                        // Turned from its ring, which sits beyond the frame's corner.
+                        Grip::Rotate => Drag::Rotate {
+                            rect: rect.grow(sheet.padding(&id)),
+                            id,
+                        },
                         Grip::Resize(handle) => Drag::Resize {
                             from: p,
                             handle,
@@ -251,9 +255,10 @@ impl DiagramView {
     fn grip_at(&self, sheet: &Sheet, id: &str, p: Point, alone: bool) -> Option<Grip> {
         let frame = self.imp().frame.get();
         if sheet.is_edge(id) && !sheet.is_pinned(id) {
+            let framed = |r: Rect| frame.rect(&r.grow(sheet.padding(id)));
             let ring = sheet
                 .frame_of(id)
-                .map(|r| geometry::rotate_handle(&frame.rect(&r)));
+                .map(|r| geometry::rotate_handle(&framed(r)));
             let near = |at: Point| at.distance(frame.to_content(p)) <= HANDLE;
             if alone && sheet.is_turnable(id) && ring.is_some_and(near) {
                 return Some(Grip::Rotate);
@@ -285,7 +290,8 @@ impl DiagramView {
         }
         let r = sheet.rect(id).filter(|_| !sheet.is_pinned(id))?;
         let local = frame.to_content(rotate(p, r.centre(), -sheet.rotation(id)));
-        let b = frame.rect(&r);
+        // The handles sit on the frame the overlay draws, just outside the shape.
+        let b = frame.rect(&r.grow(sheet.padding(id)));
         if sheet.is_turnable(id) && geometry::rotate_handle(&b).distance(local) <= HANDLE {
             return Some(Grip::Rotate);
         }

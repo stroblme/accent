@@ -61,9 +61,10 @@ impl DiagramView {
             }) if turned == id => (r, *degrees),
             _ => (r, sheet.rotation(id)),
         };
-        // A page rectangle turned `rotation` degrees, outlined on screen.
-        let turned = |r: &Rect, rotation: f64| {
-            if rotation == 0.0 {
+        // A page rectangle turned `rotation` degrees, outlined on screen, solid or `dashed` as
+        // the PDF Select tool dashes each of several items.
+        let turned = |r: &Rect, rotation: f64, dashed: bool| {
+            if rotation == 0.0 && !dashed {
                 return outline(&frame.rect(r));
             }
             let builder = gsk::PathBuilder::new();
@@ -78,25 +79,36 @@ impl DiagramView {
                 }
             }
             builder.close();
-            snapshot.append_stroke(&builder.to_path(), &gsk::Stroke::new(1.0), &accent);
-        };
-        for id in selection.iter() {
-            // A line being turned shows its frame turned with it, as a shape's does.
-            if let Some(Edit::Turn {
-                id: line, degrees, ..
-            }) = shown
-                && line == id
-                && let Some(r) = sheet.frame_of(id)
-            {
-                turned(&r, *degrees);
-            } else if sheet.is_edge(id) {
-                if let Some(r) = drawn.bounds_of(id) {
-                    turned(&r, 0.0);
-                }
-            } else if let Some(r) = sheet.frame_of(id) {
-                let (r, rotation) = placed(id, r);
-                turned(&r, rotation);
+            let stroke = gsk::Stroke::new(1.0);
+            if dashed {
+                stroke.set_dash(&[3.0, 3.0]);
             }
+            snapshot.append_stroke(&builder.to_path(), &stroke, &accent);
+        };
+        // Each cell's frame where it is drawn now, just outside its ink (`Sheet::padding`), and
+        // how far it is turned.
+        let framed = |id: &str| {
+            let (r, rotation) = match shown {
+                // A line being turned shows its frame turned with it, as a shape's does.
+                Some(Edit::Turn {
+                    id: line, degrees, ..
+                }) if line == id => (sheet.frame_of(id)?, *degrees),
+                _ if sheet.is_edge(id) => (drawn.bounds_of(id)?, 0.0),
+                _ => placed(id, sheet.frame_of(id)?),
+            };
+            Some((r.grow(sheet.padding(id)), rotation))
+        };
+        // As the PDF Select tool frames what it holds: one cell in a solid box, several each in a
+        // dashed one and all of them in a solid box round the lot.
+        let several = selection.len() > 1;
+        let mut all: Option<Rect> = None;
+        for (r, rotation) in selection.iter().filter_map(|id| framed(id)) {
+            turned(&r, rotation, several);
+            let around = geom::bounding_box(&r, rotation);
+            all = Some(all.map_or(around, |a| a.union(&around)));
+        }
+        if let Some(all) = all.filter(|_| several) {
+            outline(&frame.rect(&all));
         }
         let square = |at: Point| {
             let at = frame.to_content(at);
@@ -147,13 +159,13 @@ impl DiagramView {
                 dot(*at, &accent);
             }
         }
-        // A lone shape's eight handles, a line's being the dots above, and the ring of either.
+        // A lone shape's eight handles on its frame, a line's being the dots above, and the ring
+        // of either; several cells carry none (user decision 2026-11-10).
         if let [id] = selection.as_slice()
-            && let Some(r) = sheet.rect(id).or_else(|| drawn.bounds_of(id))
+            && let Some((r, rotation)) = framed(id)
             && !sheet.is_pinned(id)
             && !moving
         {
-            let (r, rotation) = placed(id, r);
             for h in Handle::ALL.into_iter().filter(|_| !sheet.is_edge(id)) {
                 square(rotate(h.at(&r), r.centre(), rotation));
             }
