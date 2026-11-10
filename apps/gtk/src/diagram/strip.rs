@@ -1,12 +1,11 @@
 //! The diagram's pages as thumbnails: what the Outline pane shows under the page names, and what
-//! `crate::organize` moves, deletes and inserts pages on.
+//! `crate::organize` picks, moves, deletes and inserts pages on.
 //!
 //! One canvas in a viewport, laid out as a PDF's strip is (`pdf::geometry::layout`). A page is
 //! painted when it first comes on screen, into a render node at a pixel a page unit that is then
 //! scaled into its thumbnail, and again only once an edit changed it.
 
 use std::cell::{Cell, RefCell};
-use std::rc::Rc;
 
 use accent_drawio::{Color, File, Page, Rect, Scene};
 use adw::prelude::*;
@@ -17,7 +16,6 @@ use super::geometry::Frame;
 use super::paint::{self, Cache, Tint};
 use crate::pdf::geometry::{Layout, PageRect, PdfZoom, fit_scale, layout, page_at};
 use crate::theme;
-use crate::widgets::Hook;
 
 /// One page's thumbnail.
 struct Thumb {
@@ -91,21 +89,6 @@ impl PageStrip {
             move |_| strip.queue_draw()
         ));
         strip.imp().adjustment.replace(Some(adjustment));
-        // A thumbnail is a button: a click goes to its page, on the release, because a press is
-        // also how a drag that moves the page begins. A drag takes the sequence, so it never gets
-        // here.
-        let click = gtk::GestureClick::builder().button(1).build();
-        click.connect_released(glib::clone!(
-            #[weak]
-            strip,
-            move |_, _, x, y| {
-                let page = strip.page_at(x as f32, y as f32);
-                if let (Some(page), Some(f)) = (page, strip.imp().on_goto.get()) {
-                    f(page);
-                }
-            }
-        ));
-        strip.add_controller(click);
         (strip, scroller)
     }
 
@@ -161,41 +144,6 @@ impl PageStrip {
         }
     }
 
-    /// Called with a page when its thumbnail is clicked.
-    pub fn connect_goto(&self, f: impl Fn(usize) + 'static) {
-        self.imp().on_goto.set(Rc::new(f));
-    }
-
-    /// Where the thumbnails are, in the strip's own coordinates, which are the scrolled content's.
-    pub fn layout(&self) -> Layout {
-        self.imp().layout.borrow().clone()
-    }
-
-    /// Page `page` as its thumbnail shows it, for a drag to hold.
-    pub fn picture(&self, page: usize) -> Option<gdk::Texture> {
-        let rect = *self.imp().layout.borrow().pages.get(page)?;
-        let snapshot = gtk::Snapshot::new();
-        snapshot.translate(&graphene::Point::new(-rect.x, -rect.y));
-        let mut thumbs = self.imp().thumbs.borrow_mut();
-        self.paint_page(&snapshot, thumbs.get_mut(page)?, rect, false);
-        let node = snapshot.to_node()?;
-        let viewport = graphene::Rect::new(0.0, 0.0, rect.w, rect.h);
-        Some(
-            self.native()?
-                .renderer()?
-                .render_texture(&node, Some(&viewport)),
-        )
-    }
-
-    /// The page whose thumbnail holds a point of the strip.
-    fn page_at(&self, x: f32, y: f32) -> Option<usize> {
-        let layout = self.imp().layout.borrow();
-        layout
-            .pages
-            .iter()
-            .position(|r| (r.x..=r.x + r.w).contains(&x) && (r.y..=r.y + r.h).contains(&y))
-    }
-
     /// The thumbnails laid out `width` wide, each page as wide as the strip allows.
     fn laid_out(&self, width: f32) -> Layout {
         let thumbs = self.imp().thumbs.borrow();
@@ -210,7 +158,8 @@ impl PageStrip {
         )
     }
 
-    /// What `snapshot` draws: the pages on screen, the one the canvas shows framed in the accent.
+    /// What `snapshot` draws: the pages on screen, the one the canvas shows, or the pages picked,
+    /// framed in the accent.
     fn paint(&self, snapshot: &gtk::Snapshot) {
         let imp = self.imp();
         let layout = imp.layout.borrow();
@@ -226,11 +175,13 @@ impl PageStrip {
             });
         let (first, last) = (page_at(&layout, top), page_at(&layout, top + height));
         let mut thumbs = imp.thumbs.borrow_mut();
+        let picked = imp.picked.borrow();
         for (i, rect) in layout.pages.iter().enumerate().take(last + 1).skip(first) {
             let Some(thumb) = thumbs.get_mut(i) else {
                 break;
             };
-            self.paint_page(snapshot, thumb, *rect, i == imp.framed.get());
+            let framed = crate::organize::framed(&picked, imp.framed.get(), i);
+            self.paint_page(snapshot, thumb, *rect, framed);
         }
     }
 
@@ -280,6 +231,41 @@ impl PageStrip {
     }
 }
 
+/// The diagram's strip, for its organizer.
+impl crate::organize::Thumbnails for PageStrip {
+    /// In the strip's own coordinates, which are the scrolled content's.
+    fn layout(&self) -> Layout {
+        self.imp().layout.borrow().clone()
+    }
+
+    /// Page `page` as its thumbnail shows it.
+    fn picture(&self, page: usize) -> Option<gdk::Texture> {
+        let rect = *self.imp().layout.borrow().pages.get(page)?;
+        let snapshot = gtk::Snapshot::new();
+        snapshot.translate(&graphene::Point::new(-rect.x, -rect.y));
+        let mut thumbs = self.imp().thumbs.borrow_mut();
+        self.paint_page(&snapshot, thumbs.get_mut(page)?, rect, false);
+        let node = snapshot.to_node()?;
+        let viewport = graphene::Rect::new(0.0, 0.0, rect.w, rect.h);
+        Some(
+            self.native()?
+                .renderer()?
+                .render_texture(&node, Some(&viewport)),
+        )
+    }
+
+    fn shown(&self) -> usize {
+        self.imp().framed.get()
+    }
+
+    fn set_picked(&self, pages: &[usize]) {
+        if *self.imp().picked.borrow() != pages {
+            *self.imp().picked.borrow_mut() = pages.to_vec();
+            self.queue_draw();
+        }
+    }
+}
+
 mod imp {
     use super::*;
 
@@ -290,10 +276,11 @@ mod imp {
         /// The scrolled window's, which says which pages are on screen.
         pub(super) adjustment: RefCell<Option<gtk::Adjustment>>,
         pub(super) framed: Cell<usize>,
+        /// The pages framed in its place, while any are picked.
+        pub(super) picked: RefCell<Vec<usize>>,
         pub(super) tint: Cell<Tint>,
         /// Label layouts and decoded pictures, kept across the pages painted.
         pub(super) cache: Cache,
-        pub(super) on_goto: Hook<dyn Fn(usize)>,
     }
 
     #[glib::object_subclass]

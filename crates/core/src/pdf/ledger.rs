@@ -2,7 +2,6 @@
 //! this ledger defines the operations without widgets, channels or threads.
 
 use std::collections::HashMap;
-use std::ops::Range;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use accent_pdf::Ref;
@@ -363,16 +362,17 @@ impl Ink {
         );
     }
 
-    /// Put a page in, take one out or move one, as a step of its own: Undo takes it back as it
-    /// takes back a stroke. A delete keeps the page it takes out of the page tree, so its Undo
-    /// puts back the page itself, with its ink and with what points at it. Nothing reaches the
-    /// disk here: [`PdfDoc::save_to`] is the second half, as it is for ink. The step's id, which
-    /// Undo and Redo hand back with it.
-    pub fn edit_pages(&mut self, doc: &mut PdfDoc, edit: PageEdit) -> Result<u32> {
+    /// Put a page in, take one out or move one, as a step of its own, or `joined` to the one
+    /// before, as several pages deleted or moved together are: Undo takes it back as it takes
+    /// back a stroke. A delete keeps the page it takes out of the page tree, so its Undo puts
+    /// back the page itself, with its ink and with what points at it. Nothing reaches the disk
+    /// here: [`PdfDoc::save_to`] is the second half, as it is for ink. The step's id, which Undo
+    /// and Redo hand back with it.
+    pub fn edit_pages(&mut self, doc: &mut PdfDoc, edit: PageEdit, joined: bool) -> Result<u32> {
         let mut kept = matches!(edit, PageEdit::Delete { .. }).then(Vec::new);
         self.edit(doc, edit, kept.as_mut())?;
         let id = fresh_id();
-        self.record(Step::Paged { edit, kept, id }, false);
+        self.record(Step::Paged { edit, kept, id }, joined);
         Ok(id)
     }
 
@@ -384,7 +384,7 @@ impl Ink {
         doc: &mut PdfDoc,
         at: Option<usize>,
         source: &PdfDoc,
-        pages: Range<usize>,
+        pages: &[usize],
     ) -> Result<(PageEdit, u32)> {
         let at = at.unwrap_or_else(|| doc.page_count());
         let count = doc.import_pages(source, pages, at)?;
@@ -791,11 +791,13 @@ mod tests {
             return;
         };
         let mut ink = Ink::default();
-        let insert = ink.edit_pages(&mut doc, PageEdit::insert(1)).unwrap();
+        let insert = ink
+            .edit_pages(&mut doc, PageEdit::insert(1), false)
+            .unwrap();
         assert!(ink.paged, "a page edit changes the text");
         ink.paged = false;
         let moved = ink
-            .edit_pages(&mut doc, PageEdit::Move { from: 2, to: 0 })
+            .edit_pages(&mut doc, PageEdit::Move { from: 2, to: 0 }, false)
             .unwrap();
         assert_eq!(page_texts(&doc), ["Second page", "Hello accent", ""]);
 
@@ -815,6 +817,32 @@ mod tests {
         assert_eq!(ink.history(), (true, false));
     }
 
+    /// Page edits joined into one gesture, as the strip's pages deleted or moved together are,
+    /// walk back last first and forward again as one.
+    #[test]
+    fn joined_page_edits_walk_as_one() {
+        let Some((_dir, mut doc)) = open_tiny() else {
+            return;
+        };
+        let mut ink = Ink::default();
+        let moved = PageEdit::Move { from: 1, to: 0 };
+        let first = ink.edit_pages(&mut doc, moved, false).unwrap();
+        let second = ink.edit_pages(&mut doc, PageEdit::insert(2), true).unwrap();
+        let made = ["Second page", "Hello accent", ""];
+        assert_eq!(page_texts(&doc), made);
+        assert_eq!(
+            ink.walk(&mut doc, false),
+            [
+                Walked::Pages(PageEdit::delete(2), second),
+                Walked::Pages(moved.inverse(), first)
+            ]
+        );
+        assert_eq!(page_texts(&doc), ["Hello accent", "Second page"]);
+        assert_eq!(ink.history(), (false, true));
+        assert_eq!(ink.walk(&mut doc, true).len(), 2);
+        assert_eq!(page_texts(&doc), made);
+    }
+
     /// Another document's pages go in where they were dropped, as one step: the bookmarks into the
     /// page they went before follow it, Undo takes them all out, Redo puts them back without the
     /// other document, and the file saved holds them.
@@ -825,7 +853,9 @@ mod tests {
         };
         let source = reopen(&dir, &doc);
         let mut ink = Ink::default();
-        let (edit, id) = ink.import_pages(&mut doc, Some(1), &source, 0..2).unwrap();
+        let (edit, id) = ink
+            .import_pages(&mut doc, Some(1), &source, &[0, 1])
+            .unwrap();
         drop(source);
         assert_eq!(edit, PageEdit::Insert { at: 1, count: 2 });
         let imported = ["Hello accent", "Hello accent", "Second page", "Second page"];
@@ -842,7 +872,9 @@ mod tests {
 
         // With no place given, after the last page.
         let source = reopen(&dir, &doc);
-        let (edit, _) = ink.import_pages(&mut doc, None, &source, 0..4).unwrap();
+        let (edit, _) = ink
+            .import_pages(&mut doc, None, &source, &[0, 1, 2, 3])
+            .unwrap();
         assert_eq!(edit, PageEdit::Insert { at: 4, count: 4 });
         assert_eq!(doc.page_count(), 8);
     }
@@ -856,7 +888,7 @@ mod tests {
         };
         let source = reopen(&dir, &doc);
         let mut ink = Ink::default();
-        let (edit, id) = ink.import_pages(&mut doc, Some(2), &source, 0..1).unwrap();
+        let (edit, id) = ink.import_pages(&mut doc, Some(2), &source, &[0]).unwrap();
         assert_eq!(edit, PageEdit::insert(2));
         let texts = ["Hello accent", "Second page", "Hello accent"];
         assert_eq!(page_texts(&doc), texts);
@@ -867,7 +899,7 @@ mod tests {
             [Walked::Pages(edit.inverse(), id)]
         );
         assert_eq!(page_texts(&doc), ["Hello accent", "Second page"]);
-        assert!(ink.import_pages(&mut doc, None, &source, 1..3).is_err());
+        assert!(ink.import_pages(&mut doc, None, &source, &[1, 2]).is_err());
     }
 
     /// Strokes and page edits walk back in the order they were made, through one history: a
@@ -901,7 +933,8 @@ mod tests {
         // number.
         draw(&mut doc, &mut ink, 0);
         draw(&mut doc, &mut ink, 1);
-        ink.edit_pages(&mut doc, PageEdit::delete(0)).unwrap();
+        ink.edit_pages(&mut doc, PageEdit::delete(0), false)
+            .unwrap();
         draw(&mut doc, &mut ink, 0);
         assert_eq!(pages(&doc), [second(2)]);
 
@@ -960,7 +993,8 @@ mod tests {
         // The second page, which the link and both bookmarks name; then the first, which holds
         // the link.
         for page in [1, 0] {
-            ink.edit_pages(&mut doc, PageEdit::delete(page)).unwrap();
+            ink.edit_pages(&mut doc, PageEdit::delete(page), false)
+                .unwrap();
             ink.walk(&mut doc, false);
             assert_eq!(targets(&doc), before, "page {page} put back");
             ink.walk(&mut doc, true);
@@ -971,7 +1005,8 @@ mod tests {
 
         // An Export Highlights made since a delete is not the delete's: it stays through its
         // Undo and Redo.
-        ink.edit_pages(&mut doc, PageEdit::delete(1)).unwrap();
+        ink.edit_pages(&mut doc, PageEdit::delete(1), false)
+            .unwrap();
         let had = doc.annotation_count(0).unwrap();
         let quads = vec![pdf::Rect::from_corners((20.0, 30.0), (90.0, 50.0))];
         let color = [255, 255, 0, 255];

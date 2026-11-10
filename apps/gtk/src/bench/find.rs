@@ -380,7 +380,7 @@ fn stepping() -> Vec<Step> {
         // The first two pages swapped, which leaves the page being read where it is.
         Box::new(move |app, _| {
             if let Some(pdf) = pdf(app) {
-                pdf.edit_pages(accent_core::pdf::PageEdit::Move { from: 0, to: 1 });
+                pdf.edit_pages([accent_core::pdf::PageEdit::Move { from: 0, to: 1 }]);
             }
         }),
         Box::new(|_, _| {}),

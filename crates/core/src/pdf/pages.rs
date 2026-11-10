@@ -1,7 +1,6 @@
 //! Page insertion, deletion, movement and import, written into the page tree of the session.
 
 use std::collections::HashMap;
-use std::ops::Range;
 
 use accent_pdf::{Dict, Object, Ref, Stream, Update};
 
@@ -64,26 +63,23 @@ impl PdfDoc {
         self.reopen()
     }
 
-    /// Insert the pages `pages` of `source` at `at` in order, returning their count. `at` may
-    /// equal the page count to append. Each page comes with everything it uses — text,
+    /// Insert the pages `pages` of `source` at `at` in their order, returning their count. `at`
+    /// may equal the page count to append. Each page comes with everything it uses — text,
     /// annotations, ink — and links between the pages that came lead to the copies; a link to
     /// anything else and the bookmarks of `source` do not come. A form widget is cut loose from
     /// its field.
-    pub fn import_pages(
-        &mut self,
-        source: &PdfDoc,
-        pages: Range<usize>,
-        at: usize,
-    ) -> Result<usize> {
+    pub fn import_pages(&mut self, source: &PdfDoc, pages: &[usize], at: usize) -> Result<usize> {
         let count = self.cos.pages.len();
-        let from = source.cos.pages.get(pages.clone());
+        let from: Option<Vec<Ref>> = (pages.iter())
+            .map(|&page| source.cos.pages.get(page).copied())
+            .collect();
         let (Some(from), true) = (from, at <= count) else {
             return Err(Error::Invalid(format!(
                 "cannot import pages {pages:?} of {} at {at} of {count}",
                 source.cos.pages.len()
             )));
         };
-        let added = self.cos.import(&source.cos, from, at)?;
+        let added = self.cos.import(&source.cos, &from, at)?;
         self.reopen()?;
         Ok(added)
     }

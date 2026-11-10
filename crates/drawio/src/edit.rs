@@ -525,6 +525,27 @@ impl Editor {
         })
     }
 
+    /// Make the page edits `change` makes, of the page list or of its pages, one undo step,
+    /// all or none: one that fails takes back those before it.
+    pub fn at_once<T>(
+        &mut self,
+        change: impl FnOnce(&mut Editor) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let before = self.file.pages.clone();
+        let (undo, redo) = (
+            std::mem::take(&mut self.undo),
+            std::mem::take(&mut self.redo),
+        );
+        let dirty = self.dirty;
+        let out = change(self);
+        (self.undo, self.redo) = (undo, redo);
+        match out.is_ok() && self.file.pages != before {
+            true => self.record(Snapshot::Pages(before)),
+            false => (self.file.pages, self.dirty) = (before, dirty),
+        }
+        out
+    }
+
     /// Refused for the last page: a file always has one.
     pub fn delete_page(&mut self, page: usize) -> Result<(), Error> {
         self.file.page(page)?;

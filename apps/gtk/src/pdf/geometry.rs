@@ -229,25 +229,13 @@ pub(crate) fn gap_middle(layout: &Layout, gap: usize) -> f32 {
     }
 }
 
-/// Where a page dragged from `from` lands when it is dropped into gap `gap`, or `None` when the
-/// two gaps either side of it would leave it where it is.
-pub(crate) fn move_to(from: usize, gap: usize) -> Option<usize> {
-    if gap == from || gap == from + 1 {
-        None
-    } else if gap > from {
-        Some(gap - 1)
-    } else {
-        Some(gap)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// Three pages 100 px tall, one gap of 12 above each and one below the last.
     #[test]
-    fn a_drop_lands_in_the_nearest_gap_and_a_gap_beside_the_page_moves_nothing() {
+    fn a_drop_lands_in_the_nearest_gap() {
         let out = layout(&[(100.0, 100.0); 3], 1.0, 200.0);
         // The top half of the second page, its bottom half, and the gap below it.
         assert_eq!(gap_at(&out, f64::from(GAP + 112.0 + 10.0)), 1);
@@ -258,9 +246,6 @@ mod tests {
         assert_eq!(gap_at(&out, f64::from(out.height)), 3);
         assert_eq!(gap_middle(&out, 0), GAP / 2.0);
         assert_eq!(gap_middle(&out, 1), GAP + 100.0 + GAP / 2.0);
-        // The second page dropped either side of itself stays; anywhere else, it moves.
-        assert_eq!((move_to(1, 1), move_to(1, 2)), (None, None));
-        assert_eq!((move_to(1, 0), move_to(1, 3)), (Some(0), Some(2)));
     }
 
     fn letter(n: usize) -> Vec<(f32, f32)> {

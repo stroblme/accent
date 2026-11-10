@@ -153,7 +153,7 @@ impl PdfTab {
         ));
     }
 
-    /// Wire render requests and page clicks shared by reading and thumbnail views. Selection,
+    /// Wire render requests shared by reading and thumbnail views. Selection,
     /// pointer and page-content handling remain exclusive to the reading view because the strip
     /// is navigation.
     pub(super) fn wire_strip(self: &Rc<Self>, view: &PdfView) {
@@ -171,11 +171,6 @@ impl PdfTab {
                     wants,
                 });
             }
-        ));
-        view.connect_goto(glib::clone!(
-            #[weak(rename_to = tab)]
-            self,
-            move |page| tab.goto_page(page)
         ));
     }
 

@@ -636,6 +636,31 @@ fn an_inserted_page_is_blank_and_named_as_draw_io_names_one() {
 }
 
 #[test]
+fn page_edits_made_at_once_are_one_step() {
+    let mut e = Editor::new(File::from_bytes(THREE.as_bytes()).unwrap());
+    let names = |e: &Editor| -> Vec<String> {
+        e.file()
+            .pages
+            .iter()
+            .map(|p| p.name().to_string())
+            .collect()
+    };
+    e.at_once(|e| {
+        e.delete_page(2)?;
+        e.delete_page(0)
+    })
+    .unwrap();
+    assert_eq!(names(&e), ["B"]);
+    assert!(e.undo() && !e.can_undo(), "one step");
+    assert_eq!(e.file().to_xml(), THREE);
+    // A refusal takes back what came before it, and leaves no step.
+    let refused = e.at_once(|e| (0..3).try_for_each(|_| e.delete_page(0)));
+    assert!(matches!(refused, Err(Error::Refused(_))));
+    assert_eq!(names(&e), ["A", "B", "C"]);
+    assert!(!e.can_undo() && e.can_redo());
+}
+
+#[test]
 fn page_ops_undo() {
     let mut e = editor();
     let before = e.file().pages.clone();

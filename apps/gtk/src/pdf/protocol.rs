@@ -266,15 +266,15 @@ pub enum Request {
         matrix: pdf::Matrix,
         names: Vec<u32>,
     },
-    /// Put a blank page in, take one out, or move one.
-    Pages(pdf::PageEdit),
+    /// Put blank pages in, take pages out or move them, one edit after another, as one step.
+    Pages(Vec<pdf::PageEdit>),
     /// Put the pages of the PDF at `source`, called `name`, in at page `at`, after the last
-    /// page for `None`: every page of a PDF dropped onto this one, or page `page` alone of one a
-    /// page was copied from.
+    /// page for `None`: every page of a PDF dropped onto this one, or the pages `pages` alone of
+    /// one pages were copied from.
     Import {
         at: Option<usize>,
         source: PathBuf,
-        page: Option<usize>,
+        pages: Option<Vec<usize>>,
         name: String,
     },
     /// Take back the last step drawn, erased or moved, or the last page edit, in this session.

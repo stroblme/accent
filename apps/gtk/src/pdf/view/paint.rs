@@ -252,7 +252,9 @@ impl imp::PdfView {
                 &[theme::at(frame, theme::PAGE_EDGE_ALPHA); 4],
             );
 
-            if thumbnails && self.page.get() == index {
+            let framed =
+                crate::organize::framed(&self.strip_picked.borrow(), self.page.get(), index);
+            if thumbnails && framed {
                 snapshot.append_border(&outline, &[2.0; 4], &[accent; 4]);
             }
 

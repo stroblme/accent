@@ -159,22 +159,8 @@ pub fn open(
     crate::doc::set_file_icon(&page, key);
 
     let (strip, thumbs) = strip::PageStrip::new();
-    let organize = crate::organize::Organize::new(
-        &thumbs,
-        &strip,
-        glib::clone!(
-            #[strong]
-            strip,
-            move || strip.layout()
-        ),
-        glib::clone!(
-            #[strong]
-            strip,
-            move |page| strip.picture(page)
-        ),
-        crate::doc::Kind::Diagram,
-        &view,
-    );
+    let organize =
+        crate::organize::Organize::new(&thumbs, &strip, crate::doc::Kind::Diagram, &view);
     let pages = file.pages.len();
     let tab = Rc::new(DiagramTab {
         key: RefCell::new(key.to_string()),
@@ -220,7 +206,7 @@ pub fn open(
         on_toast: Hook::default(),
     });
     tab.strip.set_pages(tab.editor.borrow().file());
-    tab.strip.connect_goto(glib::clone!(
+    tab.organize.connect_goto(glib::clone!(
         #[weak]
         tab,
         move |page| tab.goto_page(page)
@@ -228,19 +214,19 @@ pub fn open(
     tab.organize.connect_edit(glib::clone!(
         #[weak]
         tab,
-        move |edit| tab.edit_pages(edit)
+        move |edits| tab.edit_pages(&edits)
     ));
     tab.organize.connect_copy(glib::clone!(
         #[weak]
         tab,
-        move |page| tab.copy_page(page)
+        move |pages| tab.copy_pages(&pages)
     ));
     tab.organize.connect_paste(glib::clone!(
         #[weak]
         tab,
         move |at, copied| {
-            if let crate::organize::Copied::Diagram(page) = copied {
-                tab.paste_page(at, page);
+            if let crate::organize::Copied::Diagram(pages) = copied {
+                tab.paste_pages(at, pages);
             }
         }
     ));
@@ -1043,7 +1029,7 @@ impl DiagramTab {
 
     /// A blank page after the last, which the reader is taken to.
     pub fn add_page(self: &Rc<Self>) {
-        self.edit_pages(PageEdit::insert(self.page_count()));
+        self.edit_pages(&[PageEdit::insert(self.page_count())]);
     }
 
     pub fn rename_page(self: &Rc<Self>, name: &str) {
@@ -1054,7 +1040,7 @@ impl DiagramTab {
 
     /// Take out the page being read, unless it is the only one.
     pub fn delete_page(self: &Rc<Self>) {
-        self.edit_pages(PageEdit::delete(self.page_index.get()));
+        self.edit_pages(&[PageEdit::delete(self.page_index.get())]);
     }
 
     /// Move the page being read one place up or down, the reader with it.
@@ -1065,42 +1051,61 @@ impl DiagramTab {
             false => from.checked_sub(1),
         };
         if let Some(to) = to.filter(|to| *to < self.page_count()) {
-            self.edit_pages(PageEdit::Move { from, to });
+            self.edit_pages(&[PageEdit::Move { from, to }]);
         }
     }
 
-    /// Put a blank page in, take one out or move one, as one undo step: the strip's buttons and
-    /// drag and the page commands, one page at a time. The reader lands on a page put in, and
-    /// otherwise stays on the page they were reading, or the one that took its place.
-    pub fn edit_pages(self: &Rc<Self>, edit: PageEdit) {
-        self.change_pages(edit, |editor| match edit {
-            PageEdit::Insert { at, .. } => editor.insert_page(at).map(drop),
-            PageEdit::Delete { at, .. } => editor.delete_page(at),
-            PageEdit::Move { from, to } => editor.move_page(from, to),
+    /// Put blank pages in, take pages out or move them, one edit after another, as one undo
+    /// step: the strip's buttons and drag and the page commands. The reader lands on a page put
+    /// in, and otherwise stays on the page they were reading, or the one that took its place.
+    pub fn edit_pages(self: &Rc<Self>, edits: &[PageEdit]) {
+        let land = match edits.first() {
+            Some(PageEdit::Insert { at, .. }) => Some(*at),
+            _ => None,
+        };
+        self.change_pages(land, |editor| {
+            editor.at_once(|editor| {
+                edits.iter().try_for_each(|edit| match *edit {
+                    PageEdit::Insert { at, .. } => editor.insert_page(at).map(drop),
+                    PageEdit::Delete { at, count } => {
+                        (0..count).try_for_each(|_| editor.delete_page(at))
+                    }
+                    PageEdit::Move { from, to } => editor.move_page(from, to),
+                })
+            })
         });
     }
 
-    /// Hold page `page` as it now is for Paste Page Here, in this diagram's strip or another's.
-    fn copy_page(self: &Rc<Self>, page: usize) {
+    /// Hold the pages `pages` as they now are for Paste Page Here, in this diagram's strip or
+    /// another's.
+    fn copy_pages(self: &Rc<Self>, pages: &[usize]) {
         self.props.flush();
         self.finish_label();
-        if let Ok(page) = self.editor.borrow().page(page) {
-            crate::organize::hold(Some(crate::organize::Copied::Diagram(page.clone())));
+        let editor = self.editor.borrow();
+        let copied: Result<Vec<Page>, _> = (pages.iter())
+            .map(|&page| editor.page(page).cloned())
+            .collect();
+        if let Ok(copied) = copied {
+            crate::organize::hold(Some(crate::organize::Copied::Diagram(copied)));
         }
     }
 
-    /// A copy of `page`, of this diagram or another, put in at `at` as one undo step: Paste Page
-    /// Here. The reader lands on it, as on a page put in.
-    fn paste_page(self: &Rc<Self>, at: usize, page: &Page) {
-        self.change_pages(PageEdit::insert(at), |editor| {
-            editor.paste_page(at, page).map(drop)
+    /// Copies of `pages`, of this diagram or another, put in at `at` in their order as one undo
+    /// step: Paste Page Here. The reader lands on the first, as on a page put in.
+    fn paste_pages(self: &Rc<Self>, at: usize, pages: &[Page]) {
+        self.change_pages(Some(at), |editor| {
+            editor.at_once(|editor| {
+                (pages.iter().enumerate())
+                    .try_for_each(|(i, page)| editor.paste_page(at + i, page).map(drop))
+            })
         });
     }
 
-    /// Make `edit` through `change`, then follow the pages through it.
+    /// Make a page edit through `change`, then follow the pages through it, landing on page
+    /// `land` if it is given.
     fn change_pages(
         self: &Rc<Self>,
-        edit: PageEdit,
+        land: Option<usize>,
         change: impl FnOnce(&mut Editor) -> Result<(), accent_drawio::Error>,
     ) {
         // What the Properties pane or the label editor holds is the page's as it was.
@@ -1114,9 +1119,9 @@ impl DiagramTab {
         self.repaged(&before);
         self.changed();
         self.on_pages.emit(self);
-        match edit {
-            PageEdit::Insert { at, .. } => self.goto_page(at),
-            _ => self.on_page.emit(self),
+        match land {
+            Some(at) => self.goto_page(at),
+            None => self.on_page.emit(self),
         }
     }
 
@@ -1161,6 +1166,7 @@ impl DiagramTab {
         if let Some(f) = self.on_repaged.get() {
             f(self, &|page| went(page).unwrap_or(page).min(last));
         }
+        self.organize.repage(went);
         self.organize.hover();
     }
 
@@ -1218,6 +1224,7 @@ impl DiagramTab {
     pub fn reload(self: &Rc<Self>, file: File, etag: Etag, digest: Digest) {
         let last = file.pages.len().saturating_sub(1);
         *self.editor.borrow_mut() = Editor::new(file);
+        self.organize.unpick();
         self.page_index.set(self.page_index.get().min(last));
         self.save.etag.set(Some(etag));
         self.save.digest.set(Some(digest));

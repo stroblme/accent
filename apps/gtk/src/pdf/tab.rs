@@ -289,22 +289,6 @@ pub fn open(
         organize: crate::organize::Organize::new(
             &thumb_strip,
             &thumbs,
-            glib::clone!(
-                #[strong]
-                thumbs,
-                move || thumbs.placement().0
-            ),
-            glib::clone!(
-                #[strong]
-                thumbs,
-                move |page| {
-                    let low = thumbs
-                        .cache()
-                        .borrow_mut()
-                        .lowres(page as u32, thumbs.theme());
-                    low.map(|low| low.upcast())
-                }
-            ),
             crate::doc::Kind::Pdf,
             &view,
         ),
@@ -400,10 +384,15 @@ pub fn open(
         ));
     }
     tab.wire_strip(&thumbs);
+    tab.organize.connect_goto(glib::clone!(
+        #[weak]
+        tab,
+        move |page| tab.goto_page(page)
+    ));
     tab.organize.connect_edit(glib::clone!(
         #[weak]
         tab,
-        move |edit| tab.edit_pages(edit)
+        move |edits| tab.edit_pages(edits)
     ));
     tab.wire_drop();
     tab.wire_paste();
@@ -898,14 +887,14 @@ impl PdfTab {
     /// it. After the last page it is a notebook's answer to running out of paper.
     pub fn add_page(self: &Rc<Self>, after: bool) {
         let at = self.command_page() + usize::from(after);
-        self.edit_pages(pdf::PageEdit::insert(at));
+        self.edit_pages([pdf::PageEdit::insert(at)]);
     }
 
-    /// Request a page insertion, deletion or move as an undoable step, saving through the stroke
-    /// timer after updated sizes arrive. Deleted pages retain ink for Undo; the last page cannot
-    /// be deleted.
-    pub fn edit_pages(self: &Rc<Self>, edit: pdf::PageEdit) {
-        self.ask(Request::Pages(edit));
+    /// Request page insertions, deletions or moves, one after another, as one undoable step,
+    /// saving through the stroke timer after updated sizes arrive. Deleted pages retain ink for
+    /// Undo; the last page cannot be deleted.
+    pub fn edit_pages(self: &Rc<Self>, edits: impl IntoIterator<Item = pdf::PageEdit>) {
+        self.ask(Request::Pages(edits.into_iter().collect()));
     }
 
     /// Called when a highlight is clicked, with the note holding the link and the byte it is at.

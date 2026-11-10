@@ -294,24 +294,6 @@ impl PdfView {
                 }
             }
         ));
-        // A thumbnail is a button: clicking one goes to its page. On the release, as a button
-        // does, because a press is also how a drag that moves the page begins, and that must
-        // not send the reader to the page first. A drag takes the sequence, so it never gets
-        // here.
-        click.connect_released(glib::clone!(
-            #[weak]
-            obj,
-            move |gesture, _, x, y| {
-                if gesture.current_button() != 1 || !obj.imp().thumbnails.get() {
-                    return;
-                }
-                let page = obj.page_point(x, y).map(|(page, _, _)| page);
-                let handler = obj.imp().on_goto.borrow();
-                if let (Some(page), Some(f)) = (page, handler.as_ref()) {
-                    f(page);
-                }
-            }
-        ));
         obj.add_controller(click);
     }
 

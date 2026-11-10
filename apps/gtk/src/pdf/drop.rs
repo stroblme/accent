@@ -32,21 +32,21 @@ enum Dropped {
 }
 
 impl PdfTab {
-    /// Put every page of the PDF at `source`, a file on this machine called `name`, or page
-    /// `page` of it alone, in at page `at`, after the last page for `None`: one step Undo takes
+    /// Put every page of the PDF at `source`, a file on this machine called `name`, or the pages
+    /// `pages` of it alone, in at page `at`, after the last page for `None`: one step Undo takes
     /// back, saved as a page edit is. A document still opening is handed it once its render
     /// thread starts.
     pub fn import_pages(
         &self,
         at: Option<usize>,
         source: PathBuf,
-        page: Option<usize>,
+        pages: Option<Vec<usize>>,
         name: String,
     ) {
         let request = Request::Import {
             at,
             source,
-            page,
+            pages,
             name,
         };
         match self.tx.borrow().as_ref() {
@@ -139,30 +139,30 @@ impl PdfTab {
         self.view.add_controller(target);
     }
 
-    /// The strip's Copy Page and Paste Page Here: a page copied is pasted as a dropped PDF's pages
-    /// go in, from a copy of its document.
+    /// The strip's Copy Page and Paste Page Here: pages copied are pasted as a dropped PDF's
+    /// pages go in, from a copy of their document.
     pub(super) fn wire_paste(self: &Rc<Self>) {
         self.organize.connect_copy(glib::clone!(
             #[weak(rename_to = tab)]
             self,
-            move |page| tab.copy_page(page)
+            move |pages| tab.copy_pages(pages)
         ));
         self.organize.connect_paste(glib::clone!(
             #[weak(rename_to = tab)]
             self,
             move |at, copied| {
-                if let Copied::Pdf { file, page, name } = copied {
-                    tab.import_pages(Some(at), file.clone(), Some(*page), name.clone());
+                if let Copied::Pdf { file, pages, name } = copied {
+                    tab.import_pages(Some(at), file.clone(), Some(pages.clone()), name.clone());
                 }
             }
         ));
     }
 
-    /// Hold `page` for Paste Page Here, in this PDF's strip or another's. The document as it now
-    /// stands, strokes not yet saved included, is copied into the cache first, so the page pasted
-    /// is the one copied whatever the document goes through since. Nothing is held while the
+    /// Hold `pages` for Paste Page Here, in this PDF's strip or another's. The document as it now
+    /// stands, strokes not yet saved included, is copied into the cache first, so the pages pasted
+    /// are the ones copied whatever the document goes through since. Nothing is held while the
     /// copy is written over the last one.
-    fn copy_page(self: &Rc<Self>, page: usize) {
+    fn copy_pages(self: &Rc<Self>, pages: Vec<usize>) {
         organize::hold(None);
         let dir = glib::user_cache_dir().join("accent");
         let file = dir.join("copied-page.pdf");
@@ -182,7 +182,7 @@ impl PdfTab {
         glib::spawn_future_local(async move {
             match crate::work::off_thread("page copy", move || answer.recv()).await {
                 Some(Ok(Ok(()))) => {
-                    organize::hold(Some(Copied::Pdf { file, page, name }));
+                    organize::hold(Some(Copied::Pdf { file, pages, name }));
                     if let Some(tab) = tab.upgrade() {
                         tab.organize.hover();
                     }

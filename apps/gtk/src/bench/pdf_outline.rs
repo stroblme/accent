@@ -37,7 +37,7 @@ pub(super) fn bench_pdf_bookmarks(app: &Rc<App>, arg: &str) {
             );
         }
         // The first page goes to the end, and the reader, on it, with it.
-        pdf.edit_pages(accent_core::pdf::PageEdit::Move { from: 0, to: 4 });
+        pdf.edit_pages([accent_core::pdf::PageEdit::Move { from: 0, to: 4 }]);
         written(&app).await;
         println!(
             "bench bookmarks moved page={} kept={} {}",

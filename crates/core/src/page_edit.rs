@@ -29,6 +29,37 @@ impl PageEdit {
         PageEdit::Delete { at, count: 1 }
     }
 
+    /// The deletes that take `pages`, in order and without repeats, out: one for each run of
+    /// neighbours, the last run first, so each names its pages as they are numbered when it is
+    /// made.
+    pub fn deletes(pages: &[usize]) -> Vec<PageEdit> {
+        let mut edits: Vec<PageEdit> = Vec::new();
+        for &page in pages.iter().rev() {
+            match edits.last_mut() {
+                Some(PageEdit::Delete { at, count }) if *at == page + 1 => {
+                    *at = page;
+                    *count += 1;
+                }
+                _ => edits.push(PageEdit::delete(page)),
+            }
+        }
+        edits
+    }
+
+    /// The moves that put `pages`, in order and without repeats, together in their order into gap
+    /// `gap`, the one before page `gap`; none where they already are. Those before the gap go
+    /// down to it last first, then those after it come up first first, so no move shifts a page
+    /// still to come.
+    pub fn moves(pages: &[usize], gap: usize) -> Vec<PageEdit> {
+        let (before, after) = pages.split_at(pages.partition_point(|&page| page < gap));
+        let down = (before.iter().rev().enumerate()).map(|(i, &from)| (from, gap - 1 - i));
+        let up = (after.iter().enumerate()).map(|(i, &from)| (from, gap + i));
+        (down.chain(up))
+            .filter(|(from, to)| from != to)
+            .map(|(from, to)| PageEdit::Move { from, to })
+            .collect()
+    }
+
     /// Where the page that was at `page` is after the edit; `None` for one deleted.
     pub fn map(self, page: usize) -> Option<usize> {
         match self {
@@ -94,5 +125,56 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The pages in order once `edits` are made, one after another, to `count` pages.
+    fn made(count: usize, edits: &[PageEdit]) -> Vec<usize> {
+        let mut order: Vec<usize> = (0..count).collect();
+        for edit in edits {
+            match *edit {
+                PageEdit::Delete { at, count } => {
+                    order.drain(at..at + count);
+                }
+                PageEdit::Move { from, to } => {
+                    let page = order.remove(from);
+                    order.insert(to, page);
+                }
+                PageEdit::Insert { .. } => unreachable!("no batch inserts"),
+            }
+        }
+        order
+    }
+
+    #[test]
+    fn several_pages_go_out_or_move_together() {
+        // Runs of neighbours go at once, the last first.
+        let deletes = PageEdit::deletes(&[0, 2, 3, 6]);
+        assert_eq!(
+            deletes,
+            [
+                PageEdit::delete(6),
+                PageEdit::Delete { at: 2, count: 2 },
+                PageEdit::delete(0)
+            ]
+        );
+        assert_eq!(made(8, &deletes), [1, 4, 5, 7]);
+        // Pages from either side of a gap close up into it, in their order.
+        assert_eq!(made(6, &PageEdit::moves(&[1, 3], 5)), [0, 2, 4, 1, 3, 5]);
+        assert_eq!(made(6, &PageEdit::moves(&[1, 4], 3)), [0, 2, 1, 4, 3, 5]);
+        assert_eq!(made(6, &PageEdit::moves(&[2, 5], 0)), [2, 5, 0, 1, 3, 4]);
+        assert_eq!(made(6, &PageEdit::moves(&[0, 3], 6)), [1, 2, 4, 5, 0, 3]);
+        // A block dropped into a gap inside or beside it stays.
+        for gap in 2..=4 {
+            assert!(PageEdit::moves(&[2, 3], gap).is_empty(), "{gap}");
+        }
+        // One page moves as the strip always moved one.
+        assert_eq!(
+            PageEdit::moves(&[1], 3),
+            [PageEdit::Move { from: 1, to: 2 }]
+        );
+        assert_eq!(
+            PageEdit::moves(&[3], 0),
+            [PageEdit::Move { from: 3, to: 0 }]
+        );
     }
 }

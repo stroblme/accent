@@ -181,6 +181,7 @@ impl PdfTab {
         self.view.cache().borrow_mut().repage(map);
         self.view.repage(map);
         self.thumbs.repage(map);
+        self.organize.repage(map);
         self.forget_pages();
         let moved = std::mem::take(&mut *self.comments.borrow_mut());
         *self.comments.borrow_mut() = moved
@@ -283,6 +284,7 @@ impl PdfTab {
         let anchor = anchor.clamped(sizes.len());
         self.view.forget_textures();
         self.thumbs.forget_textures();
+        self.organize.unpick();
         self.forget_pages();
         self.comments
             .borrow_mut()

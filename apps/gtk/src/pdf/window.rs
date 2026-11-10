@@ -645,7 +645,7 @@ impl App {
         if pdf.page_count() < 2 {
             return self.cannot("delete the page", "a PDF keeps at least one page");
         }
-        pdf.edit_pages(PageEdit::delete(page));
+        pdf.edit_pages([PageEdit::delete(page)]);
     }
 
     /// Move the page being read one place towards the end (`down`) or the start of the document.
@@ -658,7 +658,7 @@ impl App {
             false => from.checked_sub(1),
         };
         match to {
-            Some(to) => pdf.edit_pages(PageEdit::Move { from, to }),
+            Some(to) => pdf.edit_pages([PageEdit::Move { from, to }]),
             None if down => self.cannot("move the page down", "it is the last page"),
             None => self.cannot("move the page up", "it is the first page"),
         }

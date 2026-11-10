@@ -449,20 +449,27 @@ fn render_loop(
                         }
                     }
                 }
-                Request::Pages(edit) => match ink.edit_pages(&mut doc, edit) {
-                    Ok(step) => {
-                        // Dirty like a stroke, so the tab's own timer writes it out: a page put
-                        // in, taken out or moved is a change to the file and nothing else would
-                        // save it.
-                        ink.dirty = true;
-                        repaged(&doc, &mut glyphs, view, edit, step);
+                Request::Pages(edits) => {
+                    for (i, edit) in edits.into_iter().enumerate() {
+                        match ink.edit_pages(&mut doc, edit, i > 0) {
+                            Ok(step) => {
+                                // Dirty like a stroke, so the tab's own timer writes it out: a
+                                // page put in, taken out or moved is a change to the file and
+                                // nothing else would save it.
+                                ink.dirty = true;
+                                repaged(&doc, &mut glyphs, view, edit, step);
+                            }
+                            Err(e) => {
+                                tracing::warn!("{edit:?}: {e:#}");
+                                break;
+                            }
+                        }
                     }
-                    Err(e) => tracing::warn!("{edit:?}: {e:#}"),
-                },
+                }
                 Request::Import {
                     at,
                     source,
-                    page,
+                    pages,
                     name,
                 } => {
                     let before = doc.page_count();
@@ -470,8 +477,9 @@ fn render_loop(
                     let imported = PdfDoc::open(&source)
                         .map_err(|e| (e, "it does not open as a PDF"))
                         .and_then(|source| {
-                            let pages = page.map_or(0..source.page_count(), |p| p..p + 1);
-                            let made = ink.import_pages(&mut doc, at, &source, pages);
+                            let all = || (0..source.page_count()).collect();
+                            let pages = pages.unwrap_or_else(all);
+                            let made = ink.import_pages(&mut doc, at, &source, &pages);
                             made.map_err(|e| (e, "its pages would not copy"))
                         });
                     let pages = match imported {

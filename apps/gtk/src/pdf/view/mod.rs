@@ -77,7 +77,7 @@ impl PdfView {
     }
 
     /// A narrow view of the same document: low-resolution pages only, with the one being read
-    /// framed, and a click to jump to a page.
+    /// framed, or the pages the strip picked (`crate::organize`).
     pub fn thumbnails() -> PdfView {
         let view: PdfView = glib::Object::new();
         view.imp().thumbnails.set(true);
@@ -271,11 +271,6 @@ impl PdfView {
     /// strip places its buttons and its drop bar by.
     pub(super) fn placement(&self) -> (Layout, f64) {
         (self.imp().layout.borrow().clone(), self.scroll_offset().1)
-    }
-
-    /// Called with a page number when a click or a key asks to go somewhere.
-    pub fn connect_goto(&self, f: impl Fn(usize) + 'static) {
-        *self.imp().on_goto.borrow_mut() = Some(Box::new(f));
     }
 
     /// Called with a widget coordinate on every primary click, for link hit-testing.
@@ -888,6 +883,29 @@ impl PdfView {
     }
 }
 
+/// A thumbnail strip's, for the strip's organizer.
+impl crate::organize::Thumbnails for PdfView {
+    fn layout(&self) -> Layout {
+        self.placement().0
+    }
+
+    fn picture(&self, page: usize) -> Option<gdk::Texture> {
+        let low = (self.cache().borrow_mut()).lowres(page as u32, self.theme());
+        low.map(|low| low.upcast())
+    }
+
+    fn shown(&self) -> usize {
+        self.imp().page.get()
+    }
+
+    fn set_picked(&self, pages: &[usize]) {
+        if *self.imp().strip_picked.borrow() != pages {
+            *self.imp().strip_picked.borrow_mut() = pages.to_vec();
+            self.queue_draw();
+        }
+    }
+}
+
 mod imp {
     use super::*;
     use crate::scrollable::Adjustments;
@@ -1026,6 +1044,8 @@ mod imp {
         #[cfg(feature = "bench")]
         pub lists: Cell<usize>,
         pub page: Cell<usize>,
+        /// The pages a thumbnail strip frames in place of `page`, while any are picked.
+        pub strip_picked: RefCell<Vec<usize>>,
         pub shown: RefCell<std::ops::RangeInclusive<usize>>,
         /// The paper colour for the scheme in force, which costs a CSS parse to work out and is
         /// the same for every page of every frame until the theme changes.
@@ -1033,7 +1053,6 @@ mod imp {
         pub on_wants: RefCell<Option<Wants>>,
         pub on_reply: RefCell<Option<OnReply>>,
         pub on_select: RefCell<Option<OnSelect>>,
-        pub on_goto: RefCell<Option<Page>>,
         pub on_pressed: RefCell<Option<Coords>>,
         pub on_clicked: RefCell<Option<Click>>,
         pub on_ink: RefCell<Option<Stroke>>,
@@ -1106,12 +1125,12 @@ mod imp {
                 #[cfg(feature = "bench")]
                 lists: Cell::new(0),
                 page: Cell::new(0),
+                strip_picked: RefCell::default(),
                 shown: RefCell::new(0..=0),
                 paper: Cell::new(None),
                 on_wants: RefCell::new(None),
                 on_reply: RefCell::new(None),
                 on_select: RefCell::new(None),
-                on_goto: RefCell::new(None),
                 on_pressed: RefCell::new(None),
                 on_clicked: RefCell::new(None),
                 on_ink: RefCell::new(None),

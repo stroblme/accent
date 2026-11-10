@@ -89,7 +89,7 @@ pub(super) fn bench_pdf_pages(app: &Rc<App>, rel: &str) {
             pages_read(&pdf),
             links()
         );
-        pdf.edit_pages(accent_core::pdf::PageEdit::Move { from: 0, to: 2 });
+        pdf.edit_pages([accent_core::pdf::PageEdit::Move { from: 0, to: 2 }]);
         written(&app).await;
         println!("bench pages moved {} {}", pages_read(&pdf), links());
         // A page edit changes the file's text, so the text pass reads it again: search finds the

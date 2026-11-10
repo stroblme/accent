@@ -4,6 +4,8 @@
 //! Overlay buttons provide Copy Page, Delete Page, Insert Page Here and Paste Page Here, fading in
 //! like Git row actions. A copied page is held for the whole app until the next copy, so it pastes
 //! into any strip of its kind.
+//! Ctrl+click and Shift+click pick several pages, which the buttons and a drag on one of them
+//! take together, as one edit.
 //! Points are taken in the scrolled window's coordinates, which are the same for a canvas that
 //! scrolls itself (`PdfView`) and one a viewport scrolls (the diagram's strip).
 
@@ -16,7 +18,7 @@ use adw::prelude::*;
 use gtk::{gdk, glib, graphene};
 
 use crate::doc::Kind;
-use crate::pdf::geometry::{Layout, gap_at, gap_middle, move_to, page_at};
+use crate::pdf::geometry::{Layout, PageRect, gap_at, gap_middle, page_at};
 use crate::widgets::Hook;
 
 /// How near the strip's top or bottom edge a drag scrolls it, and how fast at the very edge, in
@@ -31,14 +33,14 @@ const INSET: f32 = 6.0;
 /// 34 px), so the copy and trash buttons each sit in their corner, centred where its arc is.
 pub const CORNER: f32 = 17.0;
 
-/// A page Copy Page holds for Paste Page Here.
+/// The pages Copy Page holds for Paste Page Here, in their order.
 pub enum Copied {
-    /// The diagram's page as it was.
-    Diagram(accent_drawio::Page),
-    /// Page `page` of `file`, a copy of the PDF called `name` as it was.
+    /// The diagram's pages as they were.
+    Diagram(Vec<accent_drawio::Page>),
+    /// The pages `pages` of `file`, a copy of the PDF called `name` as it was.
     Pdf {
         file: PathBuf,
-        page: usize,
+        pages: Vec<usize>,
         name: String,
     },
 }
@@ -49,6 +51,96 @@ impl Copied {
             Copied::Diagram(_) => Kind::Diagram,
             Copied::Pdf { .. } => Kind::Pdf,
         }
+    }
+
+    fn count(&self) -> usize {
+        match self {
+            Copied::Diagram(pages) => pages.len(),
+            Copied::Pdf { pages, .. } => pages.len(),
+        }
+    }
+}
+
+/// What the organizer asks of the canvas a strip's thumbnails are painted on, and tells it.
+pub trait Thumbnails {
+    /// Where the pages are, in the scrolled content.
+    fn layout(&self) -> Layout;
+    /// The picture a drag of `page` holds.
+    fn picture(&self, page: usize) -> Option<gdk::Texture>;
+    /// The page the document shows, which the strip frames while no page is picked.
+    fn shown(&self) -> usize;
+    /// Frame `pages`, in order, instead, or the page shown again for none.
+    fn set_picked(&self, pages: &[usize]);
+}
+
+/// Whether a strip frames `page`: it is one of the pages `picked`, or with none picked the page
+/// `shown`.
+pub fn framed(picked: &[usize], shown: usize, page: usize) -> bool {
+    match picked.is_empty() {
+        true => page == shown,
+        false => picked.contains(&page),
+    }
+}
+
+/// The pages Ctrl+click and Shift+click picked in a strip, in order: none while the page shown
+/// stands alone, as a plain click leaves it.
+#[derive(Debug, Default, PartialEq)]
+struct Picked {
+    pages: Vec<usize>,
+    /// Where Shift+click picks from: the page last Ctrl+clicked, else the page shown.
+    anchor: Option<usize>,
+}
+
+impl Picked {
+    /// Ctrl+click on `page`, the document showing `shown`: the page clicked joins the pages
+    /// picked, the page shown first among them, or leaves them.
+    fn toggle(&mut self, page: usize, shown: usize) {
+        if self.pages.is_empty() {
+            self.pages.push(shown);
+        }
+        match self.pages.binary_search(&page) {
+            Ok(i) => {
+                self.pages.remove(i);
+            }
+            Err(i) => self.pages.insert(i, page),
+        }
+        self.anchor = Some(page);
+        if self.pages.is_empty() {
+            *self = Picked::default();
+        }
+    }
+
+    /// Shift+click on `page`: every page from the anchor to it is picked, and only those.
+    fn extend(&mut self, page: usize, shown: usize) {
+        let anchor = *self.anchor.get_or_insert(shown);
+        self.pages = (anchor.min(page)..=anchor.max(page)).collect();
+    }
+
+    /// The pages a button or a drag on `page` takes: the pages picked if it is one of them, else
+    /// it alone.
+    fn taking(&self, page: usize) -> Vec<usize> {
+        match self.pages.contains(&page) {
+            true => self.pages.clone(),
+            false => vec![page],
+        }
+    }
+
+    /// Follow a page edit, `went` saying where each page went, `None` for one taken out.
+    fn repage(&mut self, went: impl Fn(usize) -> Option<usize>) {
+        self.pages = self.pages.iter().filter_map(|&page| went(page)).collect();
+        self.pages.sort_unstable();
+        self.anchor = self.anchor.and_then(&went);
+        if self.pages.is_empty() {
+            *self = Picked::default();
+        }
+    }
+}
+
+/// A button's tooltip for `count` pages: "Delete Page", or "Delete 3 Pages".
+fn tooltip(verb: &str, count: usize, after: &str) -> String {
+    match count {
+        1 => format!("{verb} Page{after}"),
+        n => format!("{verb} {n} Pages{after}"),
     }
 }
 
@@ -75,19 +167,19 @@ pub struct Organize {
     /// The strip with the buttons and the drop bar over it: what the Outline pane is handed.
     pub pane: gtk::Overlay,
     strip: gtk::ScrolledWindow,
-    /// What the thumbnails are painted on, which the drag starts from and drops onto.
+    /// What the thumbnails are painted on, which a click lands on and a drag starts from and
+    /// drops onto.
     canvas: gtk::Widget,
-    /// Where the pages are, in the scrolled content.
-    layout: Box<dyn Fn() -> Layout>,
-    /// The picture a drag of a page holds.
-    icon: Box<dyn Fn(usize) -> Option<gdk::Texture>>,
+    /// The same canvas, which places the thumbnails and frames them.
+    thumbs: Box<dyn Thumbnails>,
     /// The pages a paste here takes.
     kind: Kind,
     /// What the document's keys reach, which a button or a drop hands the keyboard to, so
     /// `Ctrl+Z` takes back what the strip just did.
     keys: gtk::Widget,
-    on_edit: Hook<dyn Fn(PageEdit)>,
-    on_copy: Hook<dyn Fn(usize)>,
+    on_goto: Hook<dyn Fn(usize)>,
+    on_edit: Hook<dyn Fn(Vec<PageEdit>)>,
+    on_copy: Hook<dyn Fn(Vec<usize>)>,
     on_paste: PasteHook,
     trash: gtk::Revealer,
     copy: gtk::Revealer,
@@ -100,10 +192,12 @@ pub struct Organize {
     hovered: Cell<Option<usize>>,
     /// Where the pointer is over the strip, in the scrolled window's coordinates.
     pointer: Cell<Option<f64>>,
-    /// The page being dragged out of this strip, which is the only drag it takes a drop from.
-    dragged: Cell<Option<usize>>,
-    /// The gap a drop would put the dragged page into, where the bar shows. `None` where the
-    /// drop would leave the page where it is.
+    picked: RefCell<Picked>,
+    /// The pages being dragged out of this strip, which is the only drag it takes a drop from;
+    /// none while no drag is.
+    dragged: RefCell<Vec<usize>>,
+    /// The gap a drop would put the dragged pages into, where the bar shows. `None` where the
+    /// drop would leave them where they are.
     gap: Cell<Option<usize>>,
     /// How fast a drag near an edge is scrolling the strip, and whether a tick is doing it.
     speed: Cell<f64>,
@@ -136,14 +230,12 @@ fn edge_speed(y: f64, height: f64) -> f64 {
 }
 
 impl Organize {
-    /// The organizer of `canvas`, the pages of `kind` that `layout` places, in `strip`, for the
-    /// document whose keys `keys` takes. Every handler holds it weakly: the widgets they are on
-    /// outlive nothing it does not.
-    pub fn new(
+    /// The organizer of `canvas`, the thumbnails of pages of `kind`, in `strip`, for the document
+    /// whose keys `keys` takes. Every handler holds it weakly: the widgets they are on outlive
+    /// nothing it does not.
+    pub fn new<T: IsA<gtk::Widget> + Thumbnails>(
         strip: &gtk::ScrolledWindow,
-        canvas: &impl IsA<gtk::Widget>,
-        layout: impl Fn() -> Layout + 'static,
-        icon: impl Fn(usize) -> Option<gdk::Texture> + 'static,
+        canvas: &T,
         kind: Kind,
         keys: &impl IsA<gtk::Widget>,
     ) -> Rc<Organize> {
@@ -171,10 +263,10 @@ impl Organize {
                 });
                 button
             };
-            let delete = |o: &Organize, page| o.edit(PageEdit::delete(page));
+            let delete = |o: &Organize, page| o.edit(PageEdit::deletes(&o.taking(page)));
             let trash = floating(&button("user-trash-symbolic", "Delete Page", delete));
             let copy = floating(&button("edit-copy-symbolic", "Copy Page", Organize::copy));
-            let add = |o: &Organize, page| o.edit(PageEdit::insert(page + 1));
+            let add = |o: &Organize, page| o.edit(vec![PageEdit::insert(page + 1)]);
             let gap = gtk::Box::new(gtk::Orientation::Horizontal, INSET as i32);
             let paste = button("edit-paste-symbolic", "Paste Page Here", Organize::paste);
             paste.set_visible(false);
@@ -195,10 +287,10 @@ impl Organize {
                 pane,
                 strip: strip.clone(),
                 canvas: canvas.clone().upcast(),
-                layout: Box::new(layout),
-                icon: Box::new(icon),
+                thumbs: Box::new(canvas.clone()),
                 kind,
                 keys: keys.clone().upcast(),
+                on_goto: Hook::default(),
                 on_edit: Hook::default(),
                 on_copy: Hook::default(),
                 on_paste: Hook::default(),
@@ -209,7 +301,8 @@ impl Organize {
                 bar,
                 hovered: Cell::new(None),
                 pointer: Cell::new(None),
-                dragged: Cell::new(None),
+                picked: RefCell::default(),
+                dragged: RefCell::default(),
                 gap: Cell::new(None),
                 speed: Cell::new(0.0),
                 ticking: Cell::new(false),
@@ -219,26 +312,70 @@ impl Organize {
         o
     }
 
-    /// Called with what a button or a drop asks of the document.
-    pub fn connect_edit(&self, f: impl Fn(PageEdit) + 'static) {
+    /// Called with the page a plain click on its thumbnail goes to.
+    pub fn connect_goto(&self, f: impl Fn(usize) + 'static) {
+        self.on_goto.set(Rc::new(f));
+    }
+
+    /// Called with what a button or a drop asks of the document: edits made one after another,
+    /// as one step.
+    pub fn connect_edit(&self, f: impl Fn(Vec<PageEdit>) + 'static) {
         self.on_edit.set(Rc::new(f));
     }
 
-    /// Called with the page Copy Page was pressed on, for the document to [`hold`] it.
-    pub fn connect_copy(&self, f: impl Fn(usize) + 'static) {
+    /// Called with the pages Copy Page was pressed on, in order, for the document to [`hold`]
+    /// them.
+    pub fn connect_copy(&self, f: impl Fn(Vec<usize>) + 'static) {
         self.on_copy.set(Rc::new(f));
     }
 
     /// Called with the gap Paste Page Here was pressed on, gap `g` being before page `g`, and the
-    /// page held, which is of this strip's kind.
+    /// pages held, which are of this strip's kind.
     pub fn connect_paste(&self, f: impl Fn(usize, &Copied) + 'static) {
         self.on_paste.set(Rc::new(f));
     }
 
-    /// Copy Page on `page`: the document holds it, and a page held here shows Paste at once.
+    /// The pages picked follow a page edit, `went` saying where each page went, `None` for one
+    /// taken out.
+    pub fn repage(&self, went: impl Fn(usize) -> Option<usize>) {
+        self.picked.borrow_mut().repage(went);
+        self.thumbs.set_picked(&self.picked.borrow().pages);
+    }
+
+    /// Let go of the pages picked: the document was read again.
+    pub fn unpick(&self) {
+        self.repage(|_| None);
+    }
+
+    /// The pages a button or a drag on `page` takes.
+    fn taking(&self, page: usize) -> Vec<usize> {
+        self.picked.borrow().taking(page)
+    }
+
+    /// A click on the thumbnail of `page` with `state`'s modifiers: Shift picks the pages from the
+    /// anchor to it, Ctrl ([`crate::platform::PRIMARY_MODIFIER`]) picks it or lets it go, and a
+    /// plain click lets every page go and goes to it.
+    fn click(&self, page: usize, state: gdk::ModifierType) {
+        let shown = self.thumbs.shown();
+        if state.contains(gdk::ModifierType::SHIFT_MASK) {
+            self.picked.borrow_mut().extend(page, shown);
+        } else if state.contains(crate::platform::PRIMARY_MODIFIER) {
+            self.picked.borrow_mut().toggle(page, shown);
+        } else {
+            *self.picked.borrow_mut() = Picked::default();
+            if let Some(f) = self.on_goto.get() {
+                f(page);
+            }
+        }
+        self.thumbs.set_picked(&self.picked.borrow().pages);
+        self.hover();
+    }
+
+    /// Copy Page on `page`: the document holds the pages it takes, and pages held here show Paste
+    /// at once.
     fn copy(&self, page: usize) {
         if let Some(f) = self.on_copy.get() {
-            f(page);
+            f(self.taking(page));
         }
         self.hover();
     }
@@ -250,9 +387,9 @@ impl Organize {
         }
     }
 
-    fn edit(&self, edit: PageEdit) {
+    fn edit(&self, edits: Vec<PageEdit>) {
         if let Some(f) = self.on_edit.get() {
-            f(edit);
+            f(edits);
         }
     }
 
@@ -271,7 +408,27 @@ impl Organize {
         (f64::from(at.x()), f64::from(at.y()))
     }
 
-    /// Hook the buttons, the pointer and the drag up.
+    /// The page whose thumbnail holds a point of `widget`, where that thumbnail is, and the
+    /// point, all in the scrolled content.
+    fn page_under(
+        &self,
+        widget: &gtk::Widget,
+        x: f64,
+        y: f64,
+    ) -> Option<(usize, PageRect, f32, f32)> {
+        let (x, y) = self.on_strip(widget, x, y);
+        let (left, top) = self.scrolled();
+        let (x, y) = ((x + left) as f32, (y + top) as f32);
+        let layout = self.thumbs.layout();
+        let found = layout
+            .pages
+            .iter()
+            .enumerate()
+            .find(|(_, r)| (r.x..=r.x + r.w).contains(&x) && (r.y..=r.y + r.h).contains(&y));
+        found.map(|(page, rect)| (page, *rect, x, y))
+    }
+
+    /// Hook the buttons, the pointer, a click and the drag up.
     fn wire(self: &Rc<Self>) {
         // The drop bar says where a page lands; the outline Adwaita draws round a drop target
         // would say only that the whole strip is one.
@@ -305,6 +462,19 @@ impl Organize {
             }
         });
         self.pane.add_controller(motion);
+        // A thumbnail is a button: a click goes to its page or picks it, on the release, because a
+        // press is also how a drag that moves the page begins. A drag takes the sequence, so it
+        // never gets here.
+        let click = gtk::GestureClick::builder().button(1).build();
+        let weak = Rc::downgrade(self);
+        click.connect_released(move |click, _, x, y| {
+            if let Some(o) = weak.upgrade()
+                && let Some((page, ..)) = o.page_under(&o.canvas, x, y)
+            {
+                o.click(page, click.current_event_state());
+            }
+        });
+        self.canvas.add_controller(click);
         // A wheel under a pointer that stays put brings another page under it.
         let weak = Rc::downgrade(self);
         self.strip.vadjustment().connect_value_changed(move |_| {
@@ -315,9 +485,9 @@ impl Organize {
         self.wire_page_drag();
     }
 
-    /// Move a page dropped into a strip gap. Accept only this strip's drag because page numbers
-    /// belong to its document. Indicate no-op drops beside the original position during the
-    /// drag.
+    /// Move the pages dropped into a strip gap: the page taken hold of, or the pages picked with
+    /// it, as one block. Accept only this strip's drag because page numbers belong to its
+    /// document. Indicate no-op drops beside the original position during the drag.
     fn wire_page_drag(self: &Rc<Self>) {
         let source = gtk::DragSource::builder()
             .actions(gdk::DragAction::MOVE)
@@ -325,28 +495,22 @@ impl Organize {
         let weak = Rc::downgrade(self);
         source.connect_prepare(move |source, x, y| {
             let o = weak.upgrade()?;
-            let (x, y) = o.on_strip(&o.canvas, x, y);
-            let (left, top) = o.scrolled();
-            let (cx, cy) = ((x + left) as f32, (y + top) as f32);
-            let layout = (o.layout)();
-            let (page, rect) = layout.pages.iter().enumerate().find(|(_, r)| {
-                (r.x..=r.x + r.w).contains(&cx) && (r.y..=r.y + r.h).contains(&cy)
-            })?;
+            let (page, rect, cx, cy) = o.page_under(&o.canvas, x, y)?;
             // The page itself under the pointer, held where it was taken hold of.
-            if let Some(icon) = (o.icon)(page) {
+            if let Some(icon) = o.thumbs.picture(page) {
                 let grip = |at: f32, of: f32, size: i32| (at / of * size as f32) as i32;
                 let gx = grip(cx - rect.x, rect.w, icon.width());
                 let gy = grip(cy - rect.y, rect.h, icon.height());
                 source.set_icon(Some(&icon), gx, gy);
             }
-            o.dragged.set(Some(page));
+            *o.dragged.borrow_mut() = o.taking(page);
             o.hover();
             Some(gdk::ContentProvider::for_value(&(page as u32).to_value()))
         });
         let weak = Rc::downgrade(self);
         source.connect_drag_end(move |_, _, _| {
             if let Some(o) = weak.upgrade() {
-                o.dragged.set(None);
+                o.dragged.borrow_mut().clear();
                 o.aim(None);
                 o.hover();
             }
@@ -355,8 +519,10 @@ impl Organize {
 
         let target = gtk::DropTarget::new(u32::static_type(), gdk::DragAction::MOVE);
         let weak = Rc::downgrade(self);
-        target
-            .connect_accept(move |_, _| weak.upgrade().is_some_and(|o| o.dragged.get().is_some()));
+        target.connect_accept(move |_, _| {
+            weak.upgrade()
+                .is_some_and(|o| !o.dragged.borrow().is_empty())
+        });
         let aim = |weak: Weak<Organize>| {
             move |_: &gtk::DropTarget, x: f64, y: f64| match weak.upgrade() {
                 Some(o) => o.aim(Some(o.on_strip(&o.canvas, x, y).1)),
@@ -372,25 +538,27 @@ impl Organize {
             }
         });
         let weak = Rc::downgrade(self);
-        target.connect_drop(move |_, value, x, y| {
-            let (Some(o), Ok(from)) = (weak.upgrade(), value.get::<u32>()) else {
+        target.connect_drop(move |_, _, x, y| {
+            let Some(o) = weak.upgrade() else {
                 return false;
             };
             let y = o.on_strip(&o.canvas, x, y).1 + o.scrolled().1;
-            let from = from as usize;
-            let Some(to) = move_to(from, gap_at(&(o.layout)(), y)) else {
+            let gap = gap_at(&o.thumbs.layout(), y);
+            let moves = PageEdit::moves(&o.dragged.borrow(), gap);
+            if moves.is_empty() {
                 return false;
-            };
+            }
             o.aim(None);
-            o.edit(PageEdit::Move { from, to });
+            o.edit(moves);
             o.keys.grab_focus();
             true
         });
         self.canvas.add_controller(target);
     }
 
-    /// Where the strip and its insert, copy and paste buttons are in `window`, and whether each
-    /// button is out: what the strip drills print for XTEST to aim at.
+    /// Where the strip, its insert, copy and paste buttons and its thumbnails' middles are in
+    /// `window`, whether each button is out and which pages are picked: what the strip drills
+    /// print for XTEST to aim at.
     #[cfg(feature = "bench")]
     pub fn buttons(&self, window: &gtk::Widget) -> String {
         let at = |w: &gtk::Widget| {
@@ -399,8 +567,18 @@ impl Organize {
                 format!("{x},{y},{},{}", r.width().round(), r.height().round())
             })
         };
+        let origin = self.strip.compute_point(window, &graphene::Point::zero());
+        let (left, top) = self.scrolled();
+        let middles: Vec<String> = (self.thumbs.layout().pages.iter())
+            .filter_map(|r| {
+                let x = origin?.x() + r.x + r.w / 2.0 - left as f32;
+                let y = origin?.y() + r.y + r.h / 2.0 - top as f32;
+                Some(format!("{},{}", x.round(), y.round()))
+            })
+            .collect();
         format!(
-            "strip={:?} insert={:?} copy={:?} paste={:?} out=trash:{},insert:{},copy:{},paste:{}",
+            "strip={:?} insert={:?} copy={:?} paste={:?} out=trash:{},insert:{},copy:{},paste:{} \
+             picked={:?} thumbs={}",
             at(self.pane.upcast_ref()),
             at(self.insert.upcast_ref()),
             at(self.copy.upcast_ref()),
@@ -408,20 +586,23 @@ impl Organize {
             self.trash.reveals_child(),
             self.insert.reveals_child(),
             self.copy.reveals_child(),
-            self.paste.is_visible()
+            self.paste.is_visible(),
+            self.picked.borrow().pages,
+            middles.join(";")
         )
     }
 
     /// Show the buttons over the page under the pointer, or put them away: with the pointer gone,
-    /// while a page is being dragged, the trash on a document of one page, which keeps it, and
-    /// Paste while no page of this kind is held.
+    /// while pages are being dragged, the trash where it would take every page, which a document
+    /// keeps one of, and Paste while no page of this kind is held. Each says how many pages it
+    /// takes.
     pub fn hover(&self) {
-        let layout = (self.layout)();
+        let layout = self.thumbs.layout();
         let top = self.scrolled().1;
         let page = self
             .pointer
             .get()
-            .filter(|_| self.dragged.get().is_none())
+            .filter(|_| self.dragged.borrow().is_empty())
             .map(|y| y + top)
             .filter(|y| *y < f64::from(layout.height))
             .map(|y| page_at(&layout, y))
@@ -429,22 +610,34 @@ impl Organize {
         if page.is_some() {
             self.hovered.set(page);
         }
-        reveal(&self.trash, page.is_some() && layout.pages.len() > 1);
+        let taken = page.map_or(1, |page| self.taking(page).len());
+        reveal(&self.trash, page.is_some() && taken < layout.pages.len());
         reveal(&self.copy, page.is_some());
         reveal(&self.insert, page.is_some());
-        self.paste.set_visible(held(self.kind).is_some());
+        for (buttons, verb) in [(&self.trash, "Delete"), (&self.copy, "Copy")] {
+            if let Some(button) = buttons.child() {
+                button.set_tooltip_text(Some(&tooltip(verb, taken, "")));
+            }
+        }
+        let held = held(self.kind);
+        let pasted = held.as_ref().map_or(1, |held| held.count());
+        self.paste
+            .set_tooltip_text(Some(&tooltip("Paste", pasted, " Here")));
+        self.paste.set_visible(held.is_some());
         self.pane.queue_allocate();
     }
 
-    /// A drag of one of the strip's pages is at `y` over it, or has left it: show where the page
-    /// would land, scroll while the drag is near an edge, and say whether a drop here moves it.
+    /// A drag of the strip's pages is at `y` over it, or has left it: show where they would land,
+    /// scroll while the drag is near an edge, and say whether a drop here moves them.
     fn aim(self: &Rc<Self>, y: Option<f64>) -> gdk::DragAction {
-        let layout = (self.layout)();
+        let layout = self.thumbs.layout();
         let top = self.scrolled().1;
-        let gap = y.zip(self.dragged.get()).and_then(|(y, from)| {
-            let gap = gap_at(&layout, y + top);
-            move_to(from, gap).map(|_| gap)
-        });
+        let dragged = self.dragged.borrow();
+        let gap = y
+            .filter(|_| !dragged.is_empty())
+            .map(|y| gap_at(&layout, y + top))
+            .filter(|gap| !PageEdit::moves(&dragged, *gap).is_empty());
+        drop(dragged);
         self.pointer.set(y);
         self.gap.set(gap);
         self.bar.set_visible(gap.is_some());
@@ -471,7 +664,7 @@ impl Organize {
             let Some(o) = weak.upgrade() else {
                 return glib::ControlFlow::Break;
             };
-            if o.speed.get() == 0.0 || o.dragged.get().is_none() {
+            if o.speed.get() == 0.0 || o.dragged.borrow().is_empty() {
                 o.ticking.set(false);
                 return glib::ControlFlow::Break;
             }
@@ -487,7 +680,7 @@ impl Organize {
     /// in the hovered thumbnail's top-right corner and Copy in its top-left, the insert and paste
     /// buttons centred on the gap below it, and the bar across the gap a drop would land in.
     fn place_on_strip(&self, child: &gtk::Widget) -> Option<gdk::Rectangle> {
-        let layout = (self.layout)();
+        let layout = self.thumbs.layout();
         let origin = graphene::Point::zero();
         let origin = self.strip.compute_point(&self.pane, &origin)?;
         let (left, top) = self.scrolled();
@@ -532,5 +725,39 @@ impl Organize {
             w.round() as i32,
             h.round() as i32,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ctrl_and_shift_pick_pages_that_a_button_then_takes_together() {
+        let mut picked = Picked::default();
+        // Ctrl+click picks the page clicked beside the page shown.
+        picked.toggle(4, 1);
+        assert_eq!(picked.pages, [1, 4]);
+        // Shift+click picks from the page last Ctrl+clicked, and only those.
+        picked.extend(2, 1);
+        assert_eq!(picked.pages, [2, 3, 4]);
+        picked.toggle(3, 1);
+        assert_eq!(picked.pages, [2, 4]);
+        // A button on a picked page takes them all, on another that page alone.
+        assert_eq!((picked.taking(4), picked.taking(1)), (vec![2, 4], vec![1]));
+        assert!(framed(&picked.pages, 1, 4) && !framed(&picked.pages, 1, 1));
+        // They go with their pages, and once taken out the page shown stands alone again.
+        picked.repage(|page| PageEdit::Move { from: 4, to: 0 }.map(page));
+        assert_eq!(picked.pages, [0, 3]);
+        picked.repage(|_| None);
+        assert_eq!(picked, Picked::default());
+        assert!(framed(&picked.pages, 1, 1));
+        // With nothing picked, Shift+click picks from the page shown, and Ctrl+click on that page
+        // leaves nothing picked.
+        picked.extend(5, 7);
+        assert_eq!(picked.pages, [5, 6, 7]);
+        let mut alone = Picked::default();
+        alone.toggle(2, 2);
+        assert_eq!(alone, Picked::default());
     }
 }
