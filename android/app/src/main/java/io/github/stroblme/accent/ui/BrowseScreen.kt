@@ -26,12 +26,15 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.stroblme.accent.Corpus
 import io.github.stroblme.accent.Recents
+import io.github.stroblme.accent.Sorts
 import io.github.stroblme.accent.VaultModel
 import io.github.stroblme.accent.failure
 import io.github.stroblme.accent.ffi.FileKind
 import io.github.stroblme.accent.ffi.FileRow
 import io.github.stroblme.accent.ffi.LinkedFile
+import io.github.stroblme.accent.ffi.Order
 import io.github.stroblme.accent.ffi.SearchHit
+import io.github.stroblme.accent.ffi.Sort
 import io.github.stroblme.accent.ffi.TagCount
 import io.github.stroblme.accent.ffi.fuzzyRank
 import kotlinx.coroutines.Dispatchers
@@ -50,8 +53,12 @@ private enum class Mode { Search, Files, Tags, Links, Command }
 @Composable
 fun BrowseScreen(
     model: VaultModel,
+    /** The vault's root, whose name heads the tree. */
+    root: String,
     children: Map<String, List<FileRow>>,
     expanded: Set<String>,
+    /** What [children] are sorted by ([VaultState.order]). */
+    order: Order,
     results: List<SearchHit>,
     /** The query [results] answer ([VaultState.searched]). */
     searched: String,
@@ -370,7 +377,11 @@ fun BrowseScreen(
                             },
                         )
                     }
-                    query.isBlank() -> rows(children, expanded, "", 0, model, onOpen)
+                    query.isBlank() -> {
+                        // The root's own path, which none of its rows has.
+                        item(key = "") { VaultRow(File(root).name, order, model::sortFiles) }
+                        rows(children, expanded, "", 0, model, onOpen)
+                    }
                     // A file answers with one hit per occurrence, so the path alone is not a key:
                     // where in the file the hit sits is what tells two rows of one note apart.
                     else -> items(results, key = { "${it.relPath}:${it.at?.start}" }) { hit ->
@@ -419,6 +430,73 @@ fun BrowseScreen(
             modifier = Modifier.focusRequester(focus),
         )
     }
+}
+
+/**
+ * The vault's name over its tree, as the desktop's Files pane has it, and at its end a chip naming
+ * the order the tree is listed in, which opens the orders. The name gives way to the chip: a
+ * ListItem measures its end first.
+ */
+@Composable
+private fun VaultRow(name: String, order: Order, onSort: (Order) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    ListItem(
+        headlineContent = {
+            Text(
+                name,
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        },
+        trailingContent = {
+            Box {
+                val (full, short) = named(order.sort)
+                AssistChip(
+                    onClick = { open = true },
+                    label = { Text("$short ▾", maxLines = 1, softWrap = false) },
+                    modifier = Modifier.semantics { contentDescription = "Sort files: $full" },
+                )
+                DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                    for (sort in Sorts) {
+                        DropdownMenuItem(
+                            text = { Text(named(sort).first) },
+                            leadingIcon = {
+                                RadioButton(selected = sort == order.sort, onClick = null)
+                            },
+                            onClick = {
+                                open = false
+                                onSort(order.copy(sort = sort))
+                            },
+                        )
+                    }
+                    HorizontalDivider()
+                    DropdownMenuItem(
+                        text = { Text("Folders Among Files") },
+                        leadingIcon = {
+                            Checkbox(checked = order.foldersAmongFiles, onCheckedChange = null)
+                        },
+                        onClick = {
+                            open = false
+                            onSort(order.copy(foldersAmongFiles = !order.foldersAmongFiles))
+                        },
+                    )
+                }
+            }
+        },
+        colors = flatRow(),
+    )
+}
+
+/** What the sort menu calls [sort], in the desktop's words, and the chip's shorter name for it. */
+private fun named(sort: Sort): Pair<String, String> = when (sort) {
+    Sort.NAME_ASC -> "File Name (A to Z)" to "Name A–Z"
+    Sort.NAME_DESC -> "File Name (Z to A)" to "Name Z–A"
+    Sort.MODIFIED_NEW -> "Modified Time (New to Old)" to "Modified New–Old"
+    Sort.MODIFIED_OLD -> "Modified Time (Old to New)" to "Modified Old–New"
+    // Not offered here ([Sorts]), and named as the desktop names them all the same.
+    Sort.CREATED_NEW -> "Created Time (New to Old)" to "Created New–Old"
+    Sort.CREATED_OLD -> "Created Time (Old to New)" to "Created Old–New"
 }
 
 /** Show tags by use count or query rank, with counts at the row end. */

@@ -134,8 +134,10 @@ fun HomeScreen(model: VaultModel) {
                 BackHandler(enabled = screen == Screen.Browse) { screen = Screen.Home }
                 BrowseScreen(
                     model = model,
+                    root = state.root.orEmpty(),
                     children = state.children,
                     expanded = state.expanded,
+                    order = state.order,
                     results = state.results,
                     searched = state.searched,
                     searchFailed = state.searchFailed,

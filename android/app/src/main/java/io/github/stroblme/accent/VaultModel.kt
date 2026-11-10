@@ -15,11 +15,13 @@ import io.github.stroblme.accent.ffi.FileRow
 import io.github.stroblme.accent.ffi.LinkedFile
 import io.github.stroblme.accent.ffi.Note
 import io.github.stroblme.accent.ffi.NoteAlias
+import io.github.stroblme.accent.ffi.Order
 import io.github.stroblme.accent.ffi.PdfLink
 import io.github.stroblme.accent.ffi.Phase
 import io.github.stroblme.accent.ffi.Progress
 import io.github.stroblme.accent.ffi.Ranker
 import io.github.stroblme.accent.ffi.SearchHit
+import io.github.stroblme.accent.ffi.Sort
 import io.github.stroblme.accent.ffi.TagCount
 import io.github.stroblme.accent.ffi.Vault
 import io.github.stroblme.accent.ffi.anchorId
@@ -152,6 +154,8 @@ data class VaultState(
     /** The directories whose children have been listed, so the tree redraws in place. */
     val children: Map<String, List<FileRow>> = emptyMap(),
     val expanded: Set<String> = setOf(""),
+    /** What [children] are sorted by ([FileOrders]). */
+    val order: Order = Order(Sort.NAME_ASC, false),
     val results: List<SearchHit> = emptyList(),
     /** Query for [results], retained while the next search runs. */
     val searched: String = "",
@@ -405,6 +409,7 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
     val state: StateFlow<VaultState> = _state.asStateFlow()
 
     val recents = Recents(app)
+    private val orders = FileOrders(app)
 
     /** Hoisted editor buffer shared by rendering, saving, and conflict resolution. */
     val buffer = TextFieldState()
@@ -487,7 +492,8 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
                     release(vault)
                     vault = v
                     recents.touch(Recents.Kind.Vaults, root)
-                    _state.update { VaultState(root = v.root(), indexing = true) }
+                    val at = v.root()
+                    _state.update { VaultState(root = at, indexing = true, order = orders.of(at)) }
                     listen()
                     refresh()
                 }
@@ -657,14 +663,31 @@ class VaultModel(app: Application) : AndroidViewModel(app) {
      * while they were read: whether it is still the vault open.
      */
     private suspend fun relist(v: Vault, dirs: Set<String>): Boolean {
+        val order = _state.value.order
         val listed = withContext(Dispatchers.IO) {
             dirs.mapNotNull { dir ->
-                runCatching { dir to v.listDir(dir) }
+                runCatching { dir to v.listDirSorted(dir, order) }
                     .onFailure { logged("Cannot list \"$dir\"", it) }
                     .getOrNull()
             }
         }
-        return publishFor(v) { it.copy(children = it.children + listed) }
+        // A listing in the order the reader just left would put the tree back in it.
+        return publishFor(v) {
+            if (it.order == order) it.copy(children = it.children + listed) else it
+        }
+    }
+
+    /**
+     * List the tree in [order] from now on, and keep it for this vault. Only the open folders are
+     * listed again: a closed one forgets its rows and is listed afresh when it opens.
+     */
+    fun sortFiles(order: Order) {
+        val root = _state.value.root ?: return
+        orders.keep(root, order)
+        _state.update { s ->
+            s.copy(order = order, children = s.children.filterKeys { it in s.expanded })
+        }
+        refresh()
     }
 
     /**

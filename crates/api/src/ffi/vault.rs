@@ -10,6 +10,7 @@ use accent_core::config::VaultConfig;
 use accent_core::fs::Etag;
 use accent_core::index::{Backlink, FileRow, OutLink};
 use accent_core::markdown::LinkKind;
+use accent_core::order::Order;
 
 use crate::ffi::convert::{self, LinkedFile, Note, NoteAlias, PdfLink, SearchHit, TagCount};
 use crate::ffi::error::Answer;
@@ -133,9 +134,10 @@ impl Vault {
         Ok(self.inner.keep_opened(&rel)?)
     }
 
-    /// The direct children of a vault-relative directory; `""` is the root.
-    pub fn list_dir(&self, rel: String) -> Answer<Vec<FileRow>> {
-        Ok(self.inner.list_dir(&rel)?)
+    /// The direct children of a vault-relative directory (`""` is the root) in the tree's
+    /// `order`, a time order reading each row's time off the disk.
+    pub fn list_dir_sorted(&self, rel: String, order: Order) -> Answer<Vec<FileRow>> {
+        Ok(self.inner.list_dir_sorted(&rel, order)?)
     }
 
     /// Full-text search over the indexed notes, best first.
@@ -328,6 +330,54 @@ mod tests {
                 .is_empty(),
             crate::tests::BUDGET,
         ));
+    }
+
+    /// Browse's tree comes in the order picked, the times read off the disk.
+    #[test]
+    fn a_folder_lists_in_the_order_picked() {
+        use accent_core::order::Sort;
+        let root = tempfile::tempdir().unwrap();
+        let index = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("old.md"), "a").unwrap();
+        std::fs::write(root.path().join("new.md"), "b").unwrap();
+        std::fs::create_dir(root.path().join("Folder")).unwrap();
+        for (rel, secs) in [("old.md", 1_000), ("Folder", 2_000), ("new.md", 3_000)] {
+            let at = std::time::UNIX_EPOCH + Duration::from_secs(secs);
+            let file = std::fs::File::open(root.path().join(rel)).unwrap();
+            file.set_modified(at).unwrap();
+        }
+        let (inner, events) = crate::Vault::open_unwatched_at(
+            root.path(),
+            &index.path().join("index.db"),
+            VaultConfig::default(),
+        )
+        .unwrap();
+        let v = Vault {
+            inner,
+            events: Mutex::new(events),
+        };
+        let listed = |sort, folders_among_files| {
+            let order = Order {
+                sort,
+                folders_among_files,
+            };
+            let rows = v.list_dir_sorted(String::new(), order).unwrap();
+            rows.into_iter().map(|r| r.rel_path).collect::<Vec<_>>()
+        };
+        // The index lists them once the walk has written them.
+        assert!(crate::tests::poll_until(
+            || listed(Sort::NameAsc, false).len() == 3,
+            crate::tests::BUDGET,
+        ));
+        assert_eq!(listed(Sort::NameAsc, false), ["Folder", "new.md", "old.md"]);
+        assert_eq!(
+            listed(Sort::ModifiedOld, false),
+            ["Folder", "old.md", "new.md"]
+        );
+        assert_eq!(
+            listed(Sort::ModifiedNew, true),
+            ["new.md", "Folder", "old.md"]
+        );
     }
 
     /// Verify template creation returns the same path on repeated requests,

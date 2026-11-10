@@ -7,6 +7,7 @@
 use accent_core::fs::Etag;
 use accent_core::index::{self, Backlink, FileRow, Phase};
 use accent_core::markdown::{Click, LinkKind, Style};
+use accent_core::order::{Order, Sort};
 use accent_core::pdf::{self, Comment, Info, Rect, SelectionLink};
 use accent_core::walk::FileKind;
 
@@ -50,6 +51,22 @@ pub struct FileRow {
     pub size: i64,
     pub mtime_ns: i64,
     pub dependency: bool,
+}
+
+#[uniffi::remote(Enum)]
+pub enum Sort {
+    NameAsc,
+    NameDesc,
+    ModifiedNew,
+    ModifiedOld,
+    CreatedNew,
+    CreatedOld,
+}
+
+#[uniffi::remote(Record)]
+pub struct Order {
+    pub sort: Sort,
+    pub folders_among_files: bool,
 }
 
 #[uniffi::remote(Record)]
