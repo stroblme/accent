@@ -673,6 +673,17 @@ impl Props {
         page_group.add(&background.row);
         page_group.add(&page_width);
         page_group.add(&page_height);
+        // The window's preference, not the page's: the switch shows and flips the action's state.
+        let grid = gtk::Switch::builder()
+            .action_name("win.diagram-grid")
+            .valign(gtk::Align::Center)
+            .build();
+        let grid_row = adw::ActionRow::builder()
+            .title(crate::actions::label_of("win.diagram-grid"))
+            .activatable_widget(&grid)
+            .build();
+        grid_row.add_suffix(&grid);
+        page_group.add(&grid_row);
         let on_change: OnChange = Rc::new(RefCell::new(None));
         let on = on_change.clone();
         let layers = super::layers::Layers::new(move |change| {

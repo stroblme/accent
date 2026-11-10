@@ -160,7 +160,6 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
                     movable: doc.as_ref().is_some_and(|doc| shell::movable(&app, doc)),
                     pinned: page.is_some_and(|page| app.is_pinned(page)),
                     view: match &doc {
-                        Some(Doc::Diagram(_)) => Some("win.diagram-grid"),
                         Some(Doc::Notebook(_)) => Some("win.notebook-open-text"),
                         Some(Doc::Terminal(t)) if t.edits().is_some() => Some("win.open-in-accent"),
                         _ => None,

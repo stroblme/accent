@@ -1143,10 +1143,10 @@ fn fill_captured(controller: &gtk::ShortcutController, bindings: &[(&str, String
 pub fn install_actions(app: &Rc<App>) {
     for (full, _, _) in ACTIONS {
         if let Some(name) = full.strip_prefix("win.") {
-            // Show Hidden Files and Show Grid carry their values, so a menu draws them as check
-            // items. Activating one runs the handler below like any other; the value follows the
-            // preference in `App::apply_config`, and Show Changes' the comparison in front's in
-            // `App::sync_applicable`.
+            // Show Hidden Files and Show Grid carry their values, which a menu draws as a check
+            // item and a switch shows. Activating one runs the handler below like any other; the
+            // value follows the preference in `App::apply_config`, and Show Changes' the
+            // comparison in front's in `App::sync_applicable`.
             let action = match name {
                 "show-hidden-files" => gio::SimpleAction::new_stateful(
                     name,
@@ -1317,7 +1317,7 @@ pub struct TabMenu {
     pub movable: bool,
     /// Unpin Tab rather than Pin Tab.
     pub pinned: bool,
-    /// A view of the document's own, as a diagram's Show Grid or a notebook's Open as Text.
+    /// A view of the document's own, as a notebook's Open as Text.
     pub view: Option<&'static str>,
     pub file: TabFile,
 }

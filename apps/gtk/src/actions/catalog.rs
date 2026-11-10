@@ -520,7 +520,7 @@ mod tests {
     fn the_tab_menu_names_actions_that_exist() {
         let loose = TabMenu {
             movable: true,
-            view: Some("win.diagram-grid"),
+            view: Some("win.open-in-accent"),
             file: TabFile::Loose(Some(Kind::Diagram)),
             ..TabMenu::default()
         };

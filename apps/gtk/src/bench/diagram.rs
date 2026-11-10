@@ -684,6 +684,37 @@ fn props(app: &Rc<App>, rel: &str) {
             menu_labels(&app, blank.as_deref()).await
         );
 
+        // Show Grid is the Page group's switch, which follows the preference either way.
+        let grid = || {
+            let row = find_widget(&pane, &|w| {
+                w.downcast_ref::<adw::PreferencesRow>()
+                    .is_some_and(|r| r.title() == "Show Grid")
+            })?;
+            find_widget(&row, &|w| w.is::<gtk::Switch>()).and_downcast::<gtk::Switch>()
+        };
+        let grid_state = || {
+            (
+                grid().filter(|s| s.is_mapped()).map(|s| s.is_active()),
+                app.config.borrow().diagram.grid,
+            )
+        };
+        println!("bench diagram props grid off={:?}", grid_state());
+        run("win.diagram-grid");
+        println!("bench diagram props grid palette={:?}", grid_state());
+        if let Ok(path) = std::env::var("ACCENT_BENCH_DIAGRAM_SHOT") {
+            glib::timeout_future(Duration::from_millis(400)).await;
+            let path = Path::new(&path).with_extension("grid.png");
+            println!(
+                "bench diagram props shot grid {}",
+                shoot(app.window.upcast_ref(), &path)
+            );
+        }
+        let switch = grid().and_then(|s| middle_on_screen(&app, &s));
+        if let Some(at) = switch {
+            super::git::xtest(&format!("move {at}; down; up; sleep 0.4")).await;
+        }
+        println!("bench diagram props grid clicked={:?}", grid_state());
+
         // An arrow's line takes the outline's rows, and the file keeps what they write. A spin
         // row's held change lands before a switch's right after it, and on the cells it was
         // made on when the selection changes before it settles.
@@ -1055,6 +1086,12 @@ fn on_screen(app: &App, widget: &impl IsA<gtk::Widget>, x: f64, y: f64) -> Optio
         f64::from(p.x()) + sx,
         f64::from(p.y()) + sy
     ))
+}
+
+/// Where the middle of `widget` is on the screen.
+fn middle_on_screen(app: &App, widget: &impl IsA<gtk::Widget>) -> Option<String> {
+    let (w, h) = (f64::from(widget.width()), f64::from(widget.height()));
+    on_screen(app, widget, w / 2.0, h / 2.0)
 }
 
 /// Right-click the screen at `at` by XTEST: the labels of the menu that comes up, closed again,
