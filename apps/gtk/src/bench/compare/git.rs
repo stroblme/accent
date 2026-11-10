@@ -164,6 +164,9 @@ pub(in crate::bench) fn bench_compare_row(app: &Rc<App>, rel: &str) {
                 );
                 println!("bench compare_row tops {}", bench_tops(compare));
                 println!("bench compare_row scrolled {}", bench_scroll(compare).await);
+                if mode == "commit" {
+                    bench_alone(&diff).await;
+                }
             }
             // The refusal is a toast, and it asks git again, so the row it refused goes too. A
             // binary opens as the file itself, in the pane's preview, and says nothing.
@@ -193,6 +196,46 @@ pub(in crate::bench) fn bench_compare_row(app: &Rc<App>, rel: &str) {
         }
         bench_quit(&app);
     });
+}
+
+/// Let Show Changes go on a commit's file and press it again over the text alone, as clicks do,
+/// and print what each shows: the commit's text alone, from the line the right column had at its
+/// top, then the comparison again.
+async fn bench_alone(diff: &crate::difftab::DiffTab) {
+    let Some(changes) = diff.changes_toggle() else {
+        return println!("bench compare_row alone offered=false");
+    };
+    let right = diff.views()[1].clone();
+    let text = |view: &sourceview5::View| {
+        let buffer = view.buffer();
+        buffer.text(&buffer.start_iter(), &buffer.end_iter(), true)
+    };
+    let top = |view: &sourceview5::View| view.line_at_y(view.visible_rect().y()).0.line();
+    let before = top(&right);
+    changes.emit_clicked();
+    glib::timeout_future(Duration::from_millis(800)).await;
+    let alone = diff.view().clone();
+    println!(
+        "bench compare_row alone offered=true shown={} text={} top={before}->{}",
+        alone != right,
+        text(&alone) == text(&right),
+        top(&alone)
+    );
+    let stack = diff.page.child().downcast::<gtk::Stack>().ok();
+    let again = stack
+        .and_then(|stack| stack.visible_child())
+        .and_then(|shown| find_widget(&shown, &|w| w.is::<gtk::ToggleButton>()))
+        .and_downcast::<gtk::ToggleButton>();
+    let Some(again) = again else {
+        return println!("bench compare_row alone pressed=none");
+    };
+    again.emit_clicked();
+    glib::timeout_future(Duration::from_millis(300)).await;
+    println!(
+        "bench compare_row alone pressed shown={} down={}",
+        *diff.view() != right,
+        changes.is_active()
+    );
 }
 
 /// Half a page further down the comparison, as a wheel turn goes, once it has settled, and where

@@ -201,7 +201,8 @@ use user_commands::bench_commands;
 ///   Modes: `pads:<rel_path>` (paragraph padding), `lines:<rel_path>`
 ///   (line staging), `row:<repo_rel>`, `row:stale:<repo_rel>`,
 ///   `row:staged:<repo_rel>`, `row:commit:<repo_rel>` (Changes/Staged/history
-///   rows), `pick:<repo_rel>` (repository-pick race), `clicks` (row activation),
+///   rows, a history file shown alone by Show Changes), `pick:<repo_rel>`
+///   (repository-pick race), `clicks` (row activation),
 ///   `stale:<rel>` (buffer/disk mismatch), `diag:<rel_text_file>` (hidden
 ///   diagnostics), `gutter:<rel_text_file>` (hold for screenshot),
 ///   `conflict:<rel_text_file>` (sync banner), `left:<rel>` (leave comparison),

@@ -547,7 +547,7 @@ impl Finder {
 
 /// Run `scroll` now, or after the wait [`Tab::scroll_to_caret`] describes: while `view` has no
 /// size yet, or while it is `measuring` the lines a fold just showed.
-pub(super) fn when_measured(
+pub(crate) fn when_measured(
     view: &sourceview5::View,
     measuring: bool,
     scroll: impl FnOnce(&sourceview5::View) + 'static,

@@ -1496,6 +1496,10 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - A press on a button laid over the text is the button's alone: the caret and the keyboard stay where they were, as on a conflict block's band.
 - A staged change or a commit compares two texts that are not files, in a transient tab of two read-only panes keyed by what it compares, so asking twice updates one tab.
   It opens as the pane's preview, a list of changed files otherwise stacking a tab per click, and is re-read when the Git pane refreshes, the line at the top of the view staying there.
+- A commit's file also carries Show Changes, a toggle at the end of the right column's title row that is down as the tab opens.
+  Letting it go shows the file as the commit left it, alone and as its own tab would show it with the Column Width and Line Numbers preferences, from the line the right column had at its top.
+  Pressing it again brings the comparison back as it was, and like Show All Unchanged Lines it is never saved.
+  A file the commit deleted has nothing to show alone and no toggle.
 - A comparison with git is part of the session (`Session::compared`): a note compared with the index comes back compared, a merge as a merge (Merge), and a staged change's or a commit's tab comes back in its place in its pane, each read from git again.
   One that has nothing left to show comes back as the plain note, or not at all, without a word.
   A comparison with a conflict copy or with the disk comes back as the plain note: what it showed may be gone, and where a copy is still there its banner offers the comparison again.

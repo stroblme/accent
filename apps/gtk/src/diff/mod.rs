@@ -129,7 +129,7 @@ pub fn pane(
     name: &str,
     language: Option<&sourceview5::Language>,
 ) -> Pane {
-    let (view, buffer) = editor::companion(flavour, &normalise(text), name, language);
+    let (view, buffer, _) = editor::companion(flavour, &normalise(text), name, language);
     let scroller = gtk::ScrolledWindow::builder()
         .hexpand(true)
         .vexpand(true)

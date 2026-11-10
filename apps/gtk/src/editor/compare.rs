@@ -110,13 +110,18 @@ pub(super) struct Comparing {
 /// Build a read-only companion matching the editor's rendering. Use `name`
 /// to share its font and zoom CSS, keeping both diff columns consistent. It is read as the editor
 /// is (user decision 2026-11-03): a caret moved, selected and copied from with the editor's keys,
-/// a column of carets too, and nothing typed into it.
+/// a column of carets too, and nothing typed into it. Its line numbers come back too, for a
+/// column shown alone to put them where the Line Numbers preference has them.
 pub fn companion(
     flavour: Flavour,
     text: &str,
     name: &str,
     language: Option<&sourceview5::Language>,
-) -> (sourceview5::View, sourceview5::Buffer) {
+) -> (
+    sourceview5::View,
+    sourceview5::Buffer,
+    sourceview5::GutterRenderer,
+) {
     let (view, buffer) = build(flavour, language.cloned(), text);
     view.set_editable(false);
     interact(&view, flavour);
@@ -124,9 +129,10 @@ pub fn companion(
     view.set_widget_name(name);
     refont(&view);
     // A comparison is about lines, so the numbers are always on here.
-    line_numbers(&view, &buffer).set_visible(true);
+    let numbers = line_numbers(&view, &buffer);
+    numbers.set_visible(true);
     style_companion(flavour, &buffer, &view);
-    (view, buffer)
+    (view, buffer, numbers)
 }
 
 /// The text of the line `at` starts, without its newline.

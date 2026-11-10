@@ -202,6 +202,25 @@ drill_find_compare() {
 		END { exit !(n == 9 && !bad) }' "$dir/find-compare" || { cat "$dir/find-compare"; return 1; }
 }
 
+# A file from the history, Show Changes let go, shows the commit's version alone from the line the
+# comparison had at its top, and the comparison again once it is pressed.
+drill_history_file() {
+	note() { awk -v at="$1" 'BEGIN { for (i = 1; i <= 80; i++) print (i % at ? "Line " i : "Changed " i) ".\n" }'; }
+	commit() { git -C "$vault" -c user.name=drill -c user.email=drill@invalid -c commit.gpgsign=false commit -qam "$1"; }
+	git -C "$vault" init -q
+	note 1000 >"$vault/note.md"
+	git -C "$vault" add note.md
+	commit one
+	note 30 >"$vault/note.md"
+	commit two
+	# A row in Changes, which the drill waits for.
+	echo "# Untracked" >"$vault/untracked.md"
+	launch 60 ACCENT_BENCH_COMPARE=row:commit:note.md >"$dir/history-file"
+	grep -Eqx 'bench compare_row alone offered=true shown=true text=true top=([0-9]+)->\1' "$dir/history-file" ||
+		{ cat "$dir/history-file"; return 1; }
+	has "$dir/history-file" 'bench compare_row alone pressed shown=false down=true'
+}
+
 drill_preview() {
 	launch 60 ACCENT_BENCH_PREVIEW=render >"$dir/preview"
 	expect preview preview

@@ -1813,6 +1813,7 @@ impl App {
         }
         for diff in self.diffs() {
             diff.set_indent_width(config.indent_width);
+            diff.set_page(config.column_width, config.line_numbers);
         }
         for pdf in self.pdfs() {
             pdf.set_drawing_config(config.drawing.clone());

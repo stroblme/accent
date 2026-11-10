@@ -277,6 +277,9 @@ impl Panel {
                     restored,
                 );
                 if let Some(tab) = tab {
+                    if shows_alone(&what.sides, &right) {
+                        tab.offer_alone();
+                    }
                     self.offer_lines(tab.comparison(), &what);
                     self.watch(what, Target::Diff(Rc::downgrade(&tab)));
                 }
@@ -548,6 +551,12 @@ fn nothing_to_show(sides: &Sides) -> &'static str {
     }
 }
 
+/// Whether a comparison's tab offers its right side alone, Show Changes let go: a file from the
+/// history, as the commit left it, unless the commit deleted it and left nothing to show.
+fn shows_alone(sides: &Sides, right: &str) -> bool {
+    matches!(sides, Sides::Commit { .. }) && !right.is_empty()
+}
+
 /// What keys the tab, so the comparisons of one file are a tab each and asking twice reveals the
 /// one already open.
 fn tag(sides: &Sides) -> String {
@@ -706,6 +715,18 @@ mod tests {
             nothing_to_show(&Sides::Deleted),
             nothing_to_show(&Sides::Worktree)
         );
+    }
+
+    #[test]
+    fn only_a_file_a_commit_left_behind_is_shown_alone() {
+        let commit = Sides::Commit {
+            oid: "abc1234".to_string(),
+            parent: None,
+            orig: None,
+        };
+        assert!(shows_alone(&commit, "# Note\n"));
+        assert!(!shows_alone(&commit, ""), "the commit deleted it");
+        assert!(!shows_alone(&Sides::Staged { orig: None }, "# Note\n"));
     }
 
     #[test]

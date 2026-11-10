@@ -325,44 +325,13 @@ struct Frame {
 /// The page around `view`: the clamp that caps its column, the scroller, the sticky block title
 /// over the top of it and the minimap over its end.
 fn frame(view: &sourceview5::View) -> Frame {
-    // The clamp caps the line, the view's own margins keep it off the edge, and on a narrow
-    // window the clamp simply stops applying. Its maximum is a share of the editor's own width
-    // (`Config::column_width`), which `set_clamp` puts here as soon as that width is known.
-    //
-    // `AdwClampScrollable` and not `AdwClamp`, because only the scrollable one lets the view
-    // through to the scrolled window: with a plain clamp GTK inserts a `GtkViewport`, the view's
-    // adjustments are then throwaway ones nothing reads, and every `scroll_to_mark` — GTK's own
-    // caret following included — writes to a dead adjustment while the viewport scrolls to the
-    // focused widget instead (`GtkViewport:scroll-to-focus`, on by default), which is what put a
-    // scrolled note back at the top on any focus change.
-    //
-    // In pixels, the unit `set_clamp` measures the editor in: libadwaita's default, sp, scales by
-    // the text scale (`gtk-xft-dpi` over 96), which on macOS's 72 dpi took a quarter off the cap.
-    let clamp = adw::ClampScrollable::builder()
-        .child(view)
-        .unit(adw::LengthUnit::Px)
-        .build();
-
-    let scroller = gtk::ScrolledWindow::builder()
-        .hexpand(true)
-        .vexpand(true)
-        .child(&clamp)
-        .build();
-    let wheel = crate::widgets::smooth_wheel(&scroller);
-
-    // How the column learns the editor's width. The view being the scrollable child, the
-    // horizontal adjustment now reports the *column's* width rather than the scroller's, so
-    // feeding it back into `set_clamp` would collapse the column to its floor and then go quiet.
-    // GTK 4 has no signal for "my width changed" — `::size-allocate` is gone and `GtkWidget` has
-    // no width property — and `GtkDrawingArea::resize` is the one public signal that fires on
-    // every allocation, so a zero-sized one laid over the scroller is what reports it. It draws
-    // nothing, takes no input and is invisible to assistive technology.
-    let width = gtk::DrawingArea::builder()
-        .can_target(false)
-        .accessible_role(gtk::AccessibleRole::Presentation)
-        .build();
-    let overlay = gtk::Overlay::builder().child(&scroller).build();
-    overlay.add_overlay(&width);
+    let Clamped {
+        clamp,
+        scroller,
+        wheel,
+        width,
+        overlay,
+    } = clamped(view);
 
     // The sticky block title, pinned over the top of the view. The label carries the document
     // font by name and by class, so it follows both the display-wide rule and this tab's own
@@ -410,6 +379,68 @@ fn frame(view: &sourceview5::View) -> Frame {
         sticky_bar,
         map,
         document: overlay,
+    }
+}
+
+/// A clamped column from [`clamped`]: what [`frame`] builds a tab's page on, and all a text shown
+/// alone as its tab would show it needs (`DiffTab::offer_alone`).
+pub(crate) struct Clamped {
+    pub clamp: adw::ClampScrollable,
+    pub scroller: gtk::ScrolledWindow,
+    pub wheel: crate::widgets::Wheel,
+    /// Reports the width the text can take, which nothing else does; see [`clamped`].
+    pub width: gtk::DrawingArea,
+    /// The scroller, with `width` laid over it.
+    pub overlay: gtk::Overlay,
+}
+
+/// `view` in the clamp that caps its column, in a scroller.
+pub(crate) fn clamped(view: &sourceview5::View) -> Clamped {
+    // The clamp caps the line, the view's own margins keep it off the edge, and on a narrow
+    // window the clamp simply stops applying. Its maximum is a share of the editor's own width
+    // (`Config::column_width`), which `set_clamp` puts here as soon as that width is known.
+    //
+    // `AdwClampScrollable` and not `AdwClamp`, because only the scrollable one lets the view
+    // through to the scrolled window: with a plain clamp GTK inserts a `GtkViewport`, the view's
+    // adjustments are then throwaway ones nothing reads, and every `scroll_to_mark` — GTK's own
+    // caret following included — writes to a dead adjustment while the viewport scrolls to the
+    // focused widget instead (`GtkViewport:scroll-to-focus`, on by default), which is what put a
+    // scrolled note back at the top on any focus change.
+    //
+    // In pixels, the unit `set_clamp` measures the editor in: libadwaita's default, sp, scales by
+    // the text scale (`gtk-xft-dpi` over 96), which on macOS's 72 dpi took a quarter off the cap.
+    let clamp = adw::ClampScrollable::builder()
+        .child(view)
+        .unit(adw::LengthUnit::Px)
+        .build();
+
+    let scroller = gtk::ScrolledWindow::builder()
+        .hexpand(true)
+        .vexpand(true)
+        .child(&clamp)
+        .build();
+    let wheel = crate::widgets::smooth_wheel(&scroller);
+
+    // How the column learns the editor's width. The view being the scrollable child, the
+    // horizontal adjustment now reports the *column's* width rather than the scroller's, so
+    // feeding it back into `set_clamp` would collapse the column to its floor and then go quiet.
+    // GTK 4 has no signal for "my width changed" — `::size-allocate` is gone and `GtkWidget` has
+    // no width property — and `GtkDrawingArea::resize` is the one public signal that fires on
+    // every allocation, so a zero-sized one laid over the scroller is what reports it. It draws
+    // nothing, takes no input and is invisible to assistive technology.
+    let width = gtk::DrawingArea::builder()
+        .can_target(false)
+        .accessible_role(gtk::AccessibleRole::Presentation)
+        .build();
+    let overlay = gtk::Overlay::builder().child(&scroller).build();
+    overlay.add_overlay(&width);
+
+    Clamped {
+        clamp,
+        scroller,
+        wheel,
+        width,
+        overlay,
     }
 }
 

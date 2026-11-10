@@ -694,7 +694,7 @@ impl App {
         chrome.extend(self.open_tabs().iter().map(|t| t.minimap().clone()));
         let hosted = self.open_tabs().into_iter().filter_map(|t| t.hosted());
         chrome.extend(hosted.flat_map(|h| h.controls()));
-        chrome.extend(self.diffs().iter().flat_map(|d| d.comparison().controls()));
+        chrome.extend(self.diffs().iter().flat_map(|d| d.controls()));
         chrome.extend(self.notebooks().iter().flat_map(|n| n.chrome()));
         chrome
     }

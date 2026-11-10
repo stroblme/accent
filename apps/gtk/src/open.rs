@@ -929,7 +929,11 @@ impl App {
             font.as_deref(),
             self.zoom.get(),
         );
-        tab.set_indent_width(self.config.borrow().indent_width);
+        {
+            let config = self.config.borrow();
+            tab.set_indent_width(config.indent_width);
+            tab.set_page(config.column_width, config.line_numbers);
+        }
         self.docs.borrow_mut().push(Doc::Diff(tab.clone()));
         let how = match restored {
             true => Opened::Restored,

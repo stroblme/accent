@@ -32,6 +32,14 @@ pub(crate) fn column_max(available: i32, percent: u32, zoom: f64) -> i32 {
     (wanted.max(f64::from(COLUMN_FLOOR)) * zoom).round() as i32
 }
 
+/// Cap `clamp`'s column at `max` pixels.
+pub(crate) fn cap_column(clamp: &adw::ClampScrollable, max: i32) {
+    clamp.set_maximum_size(max);
+    // The 3:4 the fixed clamp had (600 of 800): under it the child simply takes the width it
+    // is given, so a window too narrow for the cap loses no text to the gutters.
+    clamp.set_tightening_threshold(max * 3 / 4);
+}
+
 // -------------------------------------------------------------------------------- line numbers
 
 /// Digit count of the last line, sized with the widest glyph so gutter
@@ -499,10 +507,7 @@ impl Tab {
             true => i32::MAX / 4,
             false => column_max(available, self.column.get(), self.zoom.get()),
         };
-        self.clamp.set_maximum_size(max);
-        // The 3:4 the fixed clamp had (600 of 800): under it the child simply takes the width it
-        // is given, so a window too narrow for the cap loses no text to the gutters.
-        self.clamp.set_tightening_threshold(max * 3 / 4);
+        cap_column(&self.clamp, max);
     }
 
     /// The document column as a percentage of the editor's width, from preferences.

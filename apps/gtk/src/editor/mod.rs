@@ -60,19 +60,19 @@ pub(crate) use lines::{
 #[cfg(feature = "bench")]
 pub(crate) use lines::{newline_below, paste_primary};
 pub use open::open;
-pub(crate) use open::{LINE_SPACING, build, interact};
+pub(crate) use open::{Clamped, LINE_SPACING, build, clamped, interact};
 pub(crate) use page::COLUMN_FLOOR;
 pub use page::default_font;
 use page::{GUTTER, line_numbers};
 pub(crate) use page::{
-    column_max, font_css, install_font, next_view_name, refont, remeasure, restyle_note,
-    set_margins, style_note,
+    cap_column, column_max, font_css, install_font, next_view_name, refont, remeasure,
+    restyle_note, set_margins, style_note,
 };
 pub(crate) use paste::paste_verbatim;
 use search::matched;
 pub(crate) use search::{
     FIND_TAG, match_style, mute, next_match, occurrence_tag, paint_occurrences,
-    selected_occurrence, selected_ranges,
+    selected_occurrence, selected_ranges, when_measured,
 };
 pub use search::{Finder, Found};
 pub(crate) use spelling::set_spelling;
