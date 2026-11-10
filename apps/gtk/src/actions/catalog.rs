@@ -298,7 +298,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.diagram-delete", "Delete Selection", &[]),
     ("win.diagram-delete-all", "Delete with Edges", &[]),
     ("win.diagram-duplicate", "Duplicate Selection", &[]),
-    ("win.diagram-cut", "Cut Shapes", &[]),
+    ("win.diagram-cut", "Cut", &[]),
     ("win.diagram-copy", "Copy", &[]),
     ("win.diagram-paste", "Paste into Diagram", &[]),
     // The one shape's size and the one cell's style, as the Properties pane's Size and Style
