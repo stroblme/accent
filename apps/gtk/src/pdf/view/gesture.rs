@@ -12,7 +12,8 @@ use crate::pdf::geometry::page_at;
 use crate::pdf::protocol::{NamedInk, NamedPicture, Pass, fresh_id};
 use crate::pdf::tools::{
     HANDLE, Hand, Handle, Lasso, Mode, PICK_RADIUS, Picked, Selection, Stroke, clamp_move,
-    drag_matrix, drag_of, handle_at, rotate_handle, shape_of, snap, turn_matrix, width_of,
+    drag_matrix, drag_of, handle_at, lock_axis, rotate_handle, shape_of, snap, turn_matrix,
+    width_of,
 };
 
 impl PdfView {
@@ -190,7 +191,11 @@ impl PdfView {
                     f();
                 }
                 if mode == Some(Mode::Select) {
-                    return obj.select_release();
+                    // The few pixels a click is allowed below, and Ctrl for a copy.
+                    let moved = dx.abs() >= 3.0 || dy.abs() >= 3.0;
+                    let state = drag.current_event_state();
+                    return obj
+                        .select_release(moved, state.contains(crate::platform::PRIMARY_MODIFIER));
                 }
                 if mode == Some(Mode::Text) {
                     return;
@@ -344,14 +349,16 @@ impl PdfView {
     /// The Select tool's press. The rotate ring, a corner or an edge of what it holds takes hold
     /// of all of it, and so does a press on one of its items or anywhere in their box; a stroke
     /// or a text of ours not held is picked alone, held by its middle, so a drag moves it at once.
-    /// With Ctrl a stroke or a text is added or let go of, and nothing is taken hold of. Anywhere
-    /// else starts a lasso, which with Ctrl adds to what is held.
+    /// With Ctrl a stroke or a text not held is added at once and one held is let go of on a
+    /// click, a drag moving or copying all that is held. Anywhere else starts a lasso, which with
+    /// Ctrl adds to what is held.
     fn select_press(&self, x: f64, y: f64, ctrl: bool) {
         let Some((page, at)) = self.nearest_page_point(x, y) else {
             return;
         };
         let handle = self.handle_under(x, y);
         let hit = self.pick_at(page, at);
+        self.imp().let_go.set(None);
         let mut picked = self.imp().picked.borrow_mut();
         let held = |id: u32| {
             (picked.as_ref().filter(|s| s.page == page))
@@ -361,13 +368,13 @@ impl PdfView {
             (Some(h), _, false) if h != Handle::Move => Some(h),
             (_, Some(item), true) => {
                 match picked.as_mut().filter(|s| s.page == page) {
-                    Some(s) => match s.items.iter().position(|i| i.id == item.id) {
-                        Some(at) => drop(s.items.remove(at)),
-                        None => s.items.push(item),
-                    },
+                    Some(s) if s.items.iter().any(|i| i.id == item.id) => {
+                        self.imp().let_go.set(Some(item.id))
+                    }
+                    Some(s) => s.items.push(item),
                     None => *picked = Some(Selection::of(page, vec![item])),
                 }
-                None
+                Some(Handle::Move)
             }
             (_, Some(item), false) if !held(item.id) => {
                 *picked = Some(Selection::of(page, vec![item]));
@@ -460,7 +467,8 @@ impl PdfView {
     }
 
     /// The drag so far: the lasso drawn on, or what the Select tool holds moved, stretched or
-    /// turned, `snap` (Shift) turning in steps of 15°. A move stops at the page's edge.
+    /// turned, `snap` (Shift) turning in steps of 15° and keeping a move to the axis it goes
+    /// furthest along. A move stops at the page's edge.
     fn select_drag(&self, gesture: &gtk::GestureDrag, dx: f64, dy: f64, snap: bool) {
         let Some((x, y)) = self.imp().drag_from.get() else {
             return;
@@ -487,6 +495,7 @@ impl PdfView {
                 },
                 Handle::Move => {
                     let size = self.page_size(s.page).unwrap_or((f32::MAX, f32::MAX));
+                    let (dx, dy) = if snap { lock_axis(dx, dy) } else { (dx, dy) };
                     clamp_move(b, drag_matrix(handle, b, dx, dy, keep), size)
                 }
                 _ => drag_matrix(handle, b, dx, dy, keep),
@@ -501,11 +510,14 @@ impl PdfView {
         self.imp().layout.borrow().to_page(page, cx, cy)
     }
 
-    /// The hand let go. A lasso holds what it took, at least half of each stroke inside it and a
-    /// text by its box, or with Ctrl adds that to what is held; a click on the paper lets go
-    /// of everything. A drag of what is held goes to the tab, and its items keep painting where
-    /// they will be until the page's fresh list confirms it.
-    fn select_release(&self) {
+    /// The hand let go, the drag having `moved` past a click or not and with Ctrl held to `copy`
+    /// or not. A lasso holds what it took, at least half of each stroke inside it and a text by
+    /// its box, or with Ctrl adds that to what is held; a click on the paper lets go of
+    /// everything, and a Ctrl+click on what is held of that alone. A drag of what is held goes
+    /// to the tab, and its items keep painting where they will be until the page's fresh list
+    /// confirms it; a move with Ctrl leaves them where they were and drops their copies there.
+    fn select_release(&self, moved: bool, copy: bool) {
+        let let_go = self.imp().let_go.take();
         if let Some(lasso) = self.imp().lasso.take() {
             // A click's lasso, a point or a shaky few, encloses nothing.
             let taken = self.lassoed(&lasso);
@@ -527,17 +539,35 @@ impl PdfView {
             drop(picked);
             return self.picked_changed();
         }
-        let m = {
+        let (m, handle) = {
             let mut picked = self.imp().picked.borrow_mut();
             let Some(s) = picked.as_mut() else {
                 return;
             };
-            s.handle = None;
-            std::mem::replace(&mut s.matrix, accent_core::pdf::IDENTITY)
+            let m = std::mem::replace(&mut s.matrix, accent_core::pdf::IDENTITY);
+            let handle = s.handle.take();
+            if let Some(id) = let_go.filter(|_| !moved) {
+                s.items.retain(|item| item.id != id);
+                if s.items.is_empty() {
+                    *picked = None;
+                }
+                drop(picked);
+                return self.picked_changed();
+            }
+            (m, handle)
         };
-        match m == accent_core::pdf::IDENTITY {
-            true => self.queue_draw(),
-            false => self.transform_picked(m),
+        // A Ctrl+click, however shaky, moves nothing.
+        match handle {
+            _ if m == accent_core::pdf::IDENTITY || (copy && !moved) => self.queue_draw(),
+            Some(Handle::Move) if copy => {
+                if let Some((page, ids)) = self.picked()
+                    && let Some(f) = self.imp().on_duplicate.borrow().as_ref()
+                {
+                    f(page, ids, (m[4], m[5]));
+                }
+                self.queue_draw();
+            }
+            _ => self.transform_picked(m),
         }
     }
 

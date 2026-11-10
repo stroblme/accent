@@ -329,6 +329,14 @@ pub fn drag_matrix(
     }
 }
 
+/// A move of `(dx, dy)` held to the axis it goes furthest along, as Shift holds a diagram's.
+pub fn lock_axis(dx: f32, dy: f32) -> (f32, f32) {
+    match dx.abs() >= dy.abs() {
+        true => (dx, 0.0),
+        false => (0.0, dy),
+    }
+}
+
 /// The translation `m` makes, cut back so that it takes `bounds` no further off a page of `size`
 /// than it already is: a selection moved stops at the paper's edge.
 pub fn clamp_move(
@@ -681,6 +689,12 @@ mod tests {
         let over = Rect { left: -5.0, ..b };
         assert_eq!(clamp_move(over, by(-3.0, 0.0), page), by(0.0, 0.0));
         assert_eq!(clamp_move(over, by(3.0, 0.0), page), by(3.0, 0.0));
+    }
+
+    #[test]
+    fn a_locked_move_keeps_to_the_axis_it_goes_furthest_along() {
+        assert_eq!(lock_axis(30.0, -10.0), (30.0, 0.0));
+        assert_eq!(lock_axis(-5.0, 20.0), (0.0, 20.0));
     }
 
     /// A selection's box holds every item; scaled by its corner, a stroke grows with it and a

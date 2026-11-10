@@ -1182,10 +1182,10 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - **Select takes hold of strokes, texts and pictures** (user decisions 2026-11-03), any ink stroke, ours or another editor's, which is what the eraser takes too, and our typed text and pictures.
   A drag on the paper draws a lasso, dashed in the accent over a highlight's fill and closed by the line back to where it began, and it takes every stroke at least half of whose length lies inside it and every text and picture whose outline does.
   A press on a stroke, within 4 pt of its edge, on a text's box or on a picture picks that one alone, the stroke first, so ink drawn over a photo stays within reach, and a drag from it moves it at once, while a press in a circle's empty middle starts a lasso.
-  With Ctrl a click adds a stroke or a text or lets go of it, and a lasso adds what it takes.
+  With Ctrl a press adds a stroke or a text, a click on one held lets go of it, and a drag from one drops a copy of all that is held where it is released, as one step, the originals staying (user decisions 2026-11-10); a lasso with Ctrl adds what it takes.
   A click on the paper lets go of everything, and so does `Escape`, a second `Escape` putting the tool down.
 - What Select holds shows one box round it all with eight handles and the diagram's ring beyond the top-right corner, and a dashed box round each item when there are two or more.
-  A drag inside the box moves the lot, stopping at the paper's edge, an edge stretches one axis, a corner scales both alike, and the ring turns them about their middle, freely, or in steps of 15° with Shift.
+  A drag inside the box moves the lot, stopping at the paper's edge and with Shift keeping to the axis it goes furthest along, an edge stretches one axis, a corner scales both alike, and the ring turns them about their middle, freely, or in steps of 15° with Shift.
   With a picture among them every handle keeps the proportions, an edge scaling both axes about the opposite edge's middle, and while the hand is on it the picture shows as its outline filled as a highlight is.
   A text only moves, its corner going where the others take it, since its size is the Text tool's and an editor typing into a turned one would set it upright again, so texts alone show their box without handles or ring.
   While it turns the box turns with it and shows no handles, as a diagram's shape does, and once let go the turn is in the strokes themselves, no angle kept beside them.
@@ -2025,7 +2025,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 - Select's Cut Selection `Ctrl+X`, Copy Selection `Ctrl+C`, Paste into PDF `Ctrl+V`, Duplicate Selection `Ctrl+D` and Delete Selection `Delete` or `Backspace` are the tab's own keys, as Copy is, and `Ctrl+D` is Duplicate Line's chord, which a PDF in front leaves to the page.
   Paste into PDF pastes another application's picture too.
   While Select holds something the arrows move it a point, ten with Shift, each press a step for Undo, and `Escape` lets go of it, the arrows paging again, once it has put away the ring's Colour swatches if they were out.
-  With Select in hand Ctrl+click adds a stroke or lets go of it, and Go to Source is the page's menu's.
+  With Select in hand Ctrl+click adds a stroke or lets go of it, Ctrl+drag copies what Select holds and Shift+drag keeps a move to one axis, and Go to Source is the page's menu's.
   The six Recolour Selection commands are in the palette, unbound.
 - `Ctrl+Z` takes back the last stroke, text, erase, move or page edit of this session, tool in hand or not, and `Ctrl+Shift+Z` or `Ctrl+Y` makes it again, as in a note; `Escape` puts the pen down, once Select has let go of what it held.
   They are the tab's own keys, like Copy, so an entry with the keyboard, the find bar's included, keeps its own undo.

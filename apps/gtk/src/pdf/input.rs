@@ -128,6 +128,11 @@ impl PdfTab {
             self,
             move |page, ids, matrix| tab.ask(Request::Transform { page, ids, matrix })
         ));
+        view.connect_duplicate(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move |page, ids, by| tab.duplicate_by(page, ids, by)
+        ));
         view.connect_picked(glib::clone!(
             #[weak(rename_to = tab)]
             self,

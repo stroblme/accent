@@ -17,14 +17,15 @@ pub type Highlights = HashMap<usize, Vec<(Vec<accent_core::pdf::Rect>, usize)>>;
 pub use accent_core::pdf::{Clip, NamedInk, NamedPicture, NamedText, fresh_id};
 
 /// What a copy of the strokes and texts the Select tool holds is for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Clipping {
     /// The clipboard.
     Copy,
     /// The clipboard, the strokes and texts copied taken off the page as one step.
     Cut,
-    /// Pasted again a step down and right of them, the clipboard left alone.
-    Duplicate,
+    /// Pasted again this far across and down from them, in page points, the clipboard left
+    /// alone: a step down and right, or where a Ctrl+drag dropped them.
+    Duplicate((f32, f32)),
 }
 
 /// One report of a partial eraser across a stroke: the line it moved along, its radius, and the

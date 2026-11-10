@@ -1,6 +1,7 @@
 //! The Select tool's drill, `ACCENT_BENCH_PDF=select:<rel>[,<n>]`: on the first page, two lines,
 //! a rectangle and a text of ours written into the file first, then through XTEST a lasso, a
-//! move and its Undo, a copy pasted a step off it, a pick and a delete, Ctrl+click, a cut pasted
+//! move and its Undo, a Ctrl+drag's copies and a Shift+drag along one axis, each undone, a copy
+//! pasted a step off it, a pick and a delete, Ctrl+click, a cut pasted
 //! in place, a click away and Escape, a group stretched by its corner, a duplicate and the arrows,
 //! the lines and the text recoloured through the ring's Colour and through the palette's Recolour
 //! Selection, each against the file. Pictures of the lasso, the group and the Colour swatches,
@@ -177,6 +178,44 @@ pub(super) fn bench_pdf_select(app: &Rc<App>, arg: &str) {
         println!("bench select moved={changed} others_same={others}");
         undo(false).await;
         println!("bench select undone one_step={}", filed(&path) == drawn);
+
+        // Dragged 40 px down by one of them with Ctrl, both are copied there and stay where they
+        // were, and one Undo takes the copies back; with Shift, a drag 60 px across and 15 down
+        // from between them (the first line lies on the box's top edge, which stretches) moves
+        // them across alone.
+        let drag_by = |key: &str, from: (f32, f32), dx: f64, dy: f64| {
+            let (x, y) = at(from)?;
+            Some(format!(
+                "keydown {key}; move {x:.0} {y:.0}; down; sleep 0.1; move {:.0} {:.0}; \
+                 sleep 0.1; move {:.0} {:.0}; sleep 0.1; up; keyup {key}",
+                x + dx / 2.0,
+                y + dy / 2.0,
+                x + dx,
+                y + dy
+            ))
+        };
+        super::git::xtest(&lasso(round_left, true)).await;
+        let on_line = (150.0, LEFT[0]);
+        super::git::xtest(&drag_by("ctrl", on_line, 0.0, 40.0).unwrap_or_default()).await;
+        save().await;
+        let copied = filed(&path);
+        let kept = drawn.iter().all(|p| copied.contains(p));
+        println!(
+            "bench select ctrl_dragged +{} originals_kept={kept} picked={}",
+            copied.len() - drawn.len(),
+            picked()
+        );
+        undo(false).await;
+        println!("bench select ctrl_undone {}", filed(&path) == drawn);
+        super::git::xtest(&lasso(round_left, true)).await;
+        let between = (150.0, (LEFT[0] + LEFT[1]) / 2.0);
+        super::git::xtest(&drag_by("shift", between, 60.0, 15.0).unwrap_or_default()).await;
+        save().await;
+        let after = filed(&path);
+        let landed: Vec<&(i32, i32)> = after.iter().filter(|p| !drawn.contains(p)).collect();
+        println!("bench select shift_dragged to={landed:?}");
+        undo(false).await;
+        println!("bench select shift_undone {}", filed(&path) == drawn);
 
         // Copied, and pasted a step down and right of it wherever the pointer is, which the
         // copies are then held as.

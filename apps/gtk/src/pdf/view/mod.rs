@@ -501,6 +501,12 @@ impl PdfView {
         *self.imp().on_transform.borrow_mut() = Some(Box::new(f));
     }
 
+    /// Called with a page, the ids of strokes and texts on it and how far across and down a
+    /// Ctrl+drag dropped their copies.
+    pub fn connect_duplicate(&self, f: impl Fn(usize, Vec<u32>, (f32, f32)) + 'static) {
+        *self.imp().on_duplicate.borrow_mut() = Some(Box::new(f));
+    }
+
     /// Called whenever what the Select tool holds changes.
     pub fn connect_picked(&self, f: impl Fn() + 'static) {
         *self.imp().on_picked.borrow_mut() = Some(Box::new(f));
@@ -930,6 +936,8 @@ mod imp {
     /// it, and whether the same drag took one before it.
     type At = Box<dyn Fn(usize, u32, Option<super::Pass>, bool)>;
     type Transform = Box<dyn Fn(usize, Vec<u32>, accent_core::pdf::Matrix)>;
+    /// A page, the ids of strokes and texts on it, and how far across and down to copy them.
+    type Duplicate = Box<dyn Fn(usize, Vec<u32>, (f32, f32))>;
     /// Where the Text tool pressed, and the text of ours there.
     type Type = Box<dyn Fn(usize, (f32, f32), Option<NamedText>)>;
     /// Whether the pen's eraser end came to the page, or another hand after it.
@@ -995,6 +1003,8 @@ mod imp {
         /// What the Select tool holds, and the lasso it is drawing.
         pub picked: RefCell<Option<super::Selection>>,
         pub lasso: RefCell<Option<super::Lasso>>,
+        /// The item a Ctrl+press on it lets go of, should the press turn out a click.
+        pub let_go: Cell<Option<u32>>,
         /// Where the eraser was last reported in the drag under way, as a page and a point on
         /// it, so the next report tests the line between the two; `None` once the drag ends.
         pub erasing: Cell<Option<(usize, (f32, f32))>>,
@@ -1059,6 +1069,7 @@ mod imp {
         pub on_erase: RefCell<Option<At>>,
         pub on_erased: RefCell<Option<Box<dyn Fn()>>>,
         pub on_transform: RefCell<Option<Transform>>,
+        pub on_duplicate: RefCell<Option<Duplicate>>,
         pub on_picked: RefCell<Option<Box<dyn Fn()>>>,
         pub on_type: RefCell<Option<Type>>,
         pub on_tile: RefCell<Option<Page>>,
@@ -1099,6 +1110,7 @@ mod imp {
                 pictures: RefCell::new(HashMap::new()),
                 picked: RefCell::new(None),
                 lasso: RefCell::new(None),
+                let_go: Cell::new(None),
                 erasing: Cell::new(None),
                 erased: Cell::new(false),
                 erases: Cell::new(0),
@@ -1137,6 +1149,7 @@ mod imp {
                 on_erase: RefCell::new(None),
                 on_erased: RefCell::new(None),
                 on_transform: RefCell::new(None),
+                on_duplicate: RefCell::new(None),
                 on_picked: RefCell::new(None),
                 on_type: RefCell::new(None),
                 on_tile: RefCell::new(None),

@@ -46,8 +46,14 @@ impl PdfTab {
     /// left alone: the copies are held after it, so another Duplicate steps on from them.
     pub fn duplicate(&self) {
         if let Some((page, ids)) = self.view.picked() {
-            self.clip(page, ids, Clipping::Duplicate);
+            self.duplicate_by(page, ids, (STEP, STEP));
         }
+    }
+
+    /// The strokes, texts and pictures `ids` of `page` pasted again `by` points across and down,
+    /// as one step, the copies held: what a Ctrl+drag of what Select holds drops.
+    pub(super) fn duplicate_by(&self, page: usize, ids: Vec<u32>, by: (f32, f32)) {
+        self.clip(page, ids, Clipping::Duplicate(by));
     }
 
     /// Take what the Select tool holds off the page, as one step.
@@ -81,7 +87,7 @@ impl PdfTab {
 
     /// Ask the render thread for the strokes and texts `ids` of `page`, for `how`.
     fn clip(&self, page: usize, ids: Vec<u32>, how: Clipping) {
-        if how != Clipping::Duplicate {
+        if !matches!(how, Clipping::Duplicate(_)) {
             self.copying.set(self.copying.get() + 1);
         }
         self.ask(Request::Clip { page, ids, how });
@@ -100,8 +106,8 @@ impl PdfTab {
     /// The render thread's copy of what the Select tool held on `page` landed. A paste asked for
     /// while it was on its way is made now, from the clipboard it just filled.
     pub(super) fn clipped(self: &Rc<Self>, page: usize, clips: Vec<Clip>, how: Clipping) {
-        if how == Clipping::Duplicate {
-            let step = [1.0, 0.0, 0.0, 1.0, STEP, STEP];
+        if let Clipping::Duplicate((dx, dy)) = how {
+            let step = [1.0, 0.0, 0.0, 1.0, dx, dy];
             let bounds = bounds_of(&clips);
             let size = self.page_size(page).unwrap_or((f32::MAX, f32::MAX));
             return self.paste_clips(page, clips, clamp_move(bounds, step, size));
