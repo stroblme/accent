@@ -629,8 +629,11 @@ impl App {
                     self.toast("No hunk at the caret");
                 }
             }
+            // On the tab its menu was opened on, as the menu enables it, else the tab in front.
             "diff-show-changes" => {
-                if let Some(Doc::Diff(diff)) = self.active_doc() {
+                let page = self.menu_page.borrow().clone();
+                let page = page.or_else(|| self.tabs().selected_page());
+                if let Some(Doc::Diff(diff)) = page.and_then(|page| self.doc_for_page(&page)) {
                     diff.toggle_changes();
                 }
             }

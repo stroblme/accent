@@ -162,6 +162,9 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
                     view: match &doc {
                         Some(Doc::Notebook(_)) => Some("win.notebook-open-text"),
                         Some(Doc::Terminal(t)) if t.edits().is_some() => Some("win.open-in-accent"),
+                        Some(Doc::Diff(d)) if d.changes_shown().is_some() => {
+                            Some("win.diff-show-changes")
+                        }
                         _ => None,
                     },
                     file: tab_file(&app, doc),

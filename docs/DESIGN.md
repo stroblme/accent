@@ -1503,7 +1503,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - A press on a button laid over the text is the button's alone: the caret and the keyboard stay where they were, as on a conflict block's band.
 - A staged change or a commit compares two texts that are not files, in a transient tab of two read-only panes keyed by what it compares, so asking twice updates one tab.
   It opens as the pane's preview, a list of changed files otherwise stacking a tab per click, and is re-read when the Git pane refreshes, the line at the top of the view staying there.
-- A commit's file also carries Show Changes, a toggle at the end of the right column's title row that is down as the tab opens and that the palette runs as an unbound command.
+- A commit's file also carries Show Changes, a toggle at the end of the right column's title row that is down as the tab opens and that the palette and the tab's menu run too, with no chord.
   Letting it go shows the file as the commit left it, alone and as its own tab would show it with the Column Width and Line Numbers preferences, from the line the right column had at its top.
   Pressing it again brings the comparison back as it was, and like Show All Unchanged Lines it is never saved.
   A file the commit deleted has nothing to show alone and no toggle.
@@ -1693,7 +1693,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A remote vault has no trash, so there Move to Trash is Delete… on every file menu and in the palette, and asks before it deletes (user decision 2026-11-03).
   Each item is a `fileops` action on the file's path, one group on the window, and takes its label from the palette's command where there is one, so the two cannot disagree.
   The tree's own commands are palette entries too (Principle 3), each named there by what it acts on, which a menu item leaves to its row: Cut File, Reload Folder (Keyboard, Files).
-- **A tab's menu leads with Split ▸ and Move Tab ▸**, each side an item of its submenu, then Move to New Window and Pin Tab or Unpin Tab, then the document's own view (a notebook's Open as Text, a terminal editor's Open in Accent's Editor), then the file part with Reveal in Sidebar after Show in Files.
+- **A tab's menu leads with Split ▸ and Move Tab ▸**, each side an item of its submenu, then Move to New Window and Pin Tab or Unpin Tab, then the document's own view (a notebook's Open as Text, a terminal editor's Open in Accent's Editor, a commit's file's Show Changes), then the file part with Reveal in Sidebar after Show in Files.
   A preview tab's file part is its note's, a terminal editor's is its file's, and a shell or a comparison has no file part at all.
 - A file's row in the Files tree offers Open in Accent's Editor under Open while a terminal editor is picked (Terminal).
   A file from outside the vault has Copy Name, Copy Absolute Path, Show in Files and its prints, which are the window's own commands, and nothing the vault does to its files.
