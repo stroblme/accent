@@ -8,6 +8,7 @@ use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 
 use super::geometry::Overshoot;
+use super::props::Clip;
 use super::{DiagramTab, Tool};
 
 impl DiagramTab {
@@ -33,8 +34,11 @@ impl DiagramTab {
     }
 
     /// The menu under the pointer, at widget `(x, y)`: the clipboard and Duplicate and Delete,
-    /// Group or Ungroup where they apply, the order, and Edit Label for one cell; over nothing
-    /// selected, Paste alone. Window actions, so the palette lists them and they can be rebound.
+    /// Copy Shape for one shape and Copy Style for one cell, Group or Ungroup where they apply,
+    /// the order, and Edit Label for one cell; over nothing selected, Paste alone. The one paste
+    /// offered is for what the clipboard holds: Paste Shape for a size, Paste Style for a style,
+    /// none for a position, and Paste for anything else. Window actions, so the palette lists
+    /// them and they can be rebound.
     fn menu_at(self: &Rc<Self>, x: f64, y: f64) {
         match self.view.cell_at(x, y) {
             Some(cell) if !self.selection.borrow().contains(&cell) => self.select(vec![cell]),
@@ -42,6 +46,7 @@ impl DiagramTab {
             None => self.select(Vec::new()),
         }
         let ids = self.selection();
+        let held = Clip::held(&self.view.clipboard());
         let menu = gio::Menu::new();
         let section = |actions: &[&str]| {
             let part = gio::Menu::new();
@@ -53,22 +58,44 @@ impl DiagramTab {
             }
         };
         if ids.is_empty() {
-            section(&["win.diagram-paste"]);
+            if held.is_none() {
+                section(&["win.diagram-paste"]);
+            }
         } else {
-            section(&[
-                "win.diagram-cut",
-                "win.diagram-copy",
-                "win.diagram-paste",
-                "win.diagram-duplicate",
-                "win.diagram-delete",
-            ]);
-            let groups = {
+            let mut clipboard = vec!["win.diagram-cut", "win.diagram-copy"];
+            if held.is_none() {
+                clipboard.push("win.diagram-paste");
+            }
+            clipboard.extend(["win.diagram-duplicate", "win.diagram-delete"]);
+            section(&clipboard);
+            let (groups, shape) = {
                 let editor = self.editor.borrow();
                 let page = editor.page(self.page_index.get());
                 let group =
                     |id: &CellId| page.as_ref().is_ok_and(|p| p.children(id).next().is_some());
-                ids.iter().any(group)
+                // The one shape whose size Position and Size show, and whether it is pinned.
+                let shape = match ids.as_slice() {
+                    [id] => (page.as_ref().ok().and_then(|p| p.cell(id)))
+                        .filter(|c| c.vertex && c.geometry.as_ref().is_some_and(|g| !g.relative))
+                        .map(|_| self.view.sheet().is_some_and(|s| s.is_pinned(id))),
+                    _ => None,
+                };
+                (ids.iter().any(group), shape)
             };
+            let mut looks = Vec::new();
+            if let Some(pinned) = shape {
+                looks.push("win.diagram-copy-shape");
+                if !pinned && held == Some(Clip::Size) {
+                    looks.push("win.diagram-paste-shape");
+                }
+            }
+            if ids.len() == 1 {
+                looks.push("win.diagram-copy-style");
+            }
+            if held == Some(Clip::Style) {
+                looks.push("win.diagram-paste-style");
+            }
+            section(&looks);
             let mut grouping = Vec::new();
             if ids.len() > 1 {
                 grouping.push("win.diagram-group");
@@ -81,6 +108,10 @@ impl DiagramTab {
             if ids.len() == 1 {
                 section(&["win.diagram-edit-label"]);
             }
+        }
+        // Over nothing selected with a position, a size or a style held, there is nothing to offer.
+        if menu.n_items() == 0 {
+            return;
         }
         // Parented to the tab's box, not the canvas, which allocates itself: a popover on it
         // would never be presented again (DESIGN.md, States).

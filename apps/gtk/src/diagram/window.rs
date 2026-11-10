@@ -5,6 +5,7 @@ use accent_api::Error;
 use accent_core::fs::{Digest, Etag};
 use accent_drawio::File;
 
+use super::props::Clip;
 use super::{DiagramTab, Tool};
 use crate::save::SavesModel;
 use crate::*;
@@ -258,6 +259,10 @@ impl App {
             "diagram-copy" => tab.copy(),
             "diagram-cut" => tab.cut(),
             "diagram-paste" => self.paste_diagram(&tab),
+            "diagram-copy-shape" => tab.copy_property(Clip::Size),
+            "diagram-paste-shape" => tab.paste_property(Clip::Size),
+            "diagram-copy-style" => tab.copy_property(Clip::Style),
+            "diagram-paste-style" => tab.paste_property(Clip::Style),
             "diagram-ungroup" => tab.ungroup(),
             "diagram-select-all" => tab.select_all(),
             "diagram-edit-label" => tab.edit_label(),

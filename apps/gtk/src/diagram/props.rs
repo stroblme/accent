@@ -75,6 +75,8 @@ pub enum Clip {
 }
 
 impl Clip {
+    const ALL: [Clip; 3] = [Clip::Position, Clip::Size, Clip::Style];
+
     /// What it carries, as a toast says it.
     pub fn noun(self) -> &'static str {
         match self {
@@ -82,6 +84,24 @@ impl Clip {
             Clip::Size => "size",
             Clip::Style => "style",
         }
+    }
+
+    /// The format of our own a copy puts beside its text, since a position and a size read
+    /// alike.
+    fn mime(self) -> &'static str {
+        match self {
+            Clip::Position => "application/x-accent-diagram-position",
+            Clip::Size => "application/x-accent-diagram-size",
+            Clip::Style => "application/x-accent-diagram-style",
+        }
+    }
+
+    /// What a Copy button put on `clipboard`, if that is what it holds.
+    pub fn held(clipboard: &gtk::gdk::Clipboard) -> Option<Clip> {
+        let formats = clipboard.formats();
+        Clip::ALL
+            .into_iter()
+            .find(|clip| formats.contain_mime_type(clip.mime()))
     }
 }
 
@@ -1614,8 +1634,8 @@ impl DiagramTab {
     }
 
     /// The one selected cell's position (`x, y`), size (`w, h`) or style string onto the
-    /// clipboard, as plain text.
-    fn copy_property(self: &Rc<Self>, clip: Clip) {
+    /// clipboard, as plain text with its kind beside it ([`Clip::held`]).
+    pub(super) fn copy_property(self: &Rc<Self>, clip: Clip) {
         let text = {
             let editor = self.editor.borrow();
             let selection = self.selection.borrow();
@@ -1635,7 +1655,17 @@ impl DiagramTab {
                 Clip::Style => cell.style.to_string(),
             }
         };
-        self.view.clipboard().set_text(&text);
+        let provider = gtk::gdk::ContentProvider::new_union(&[
+            gtk::gdk::ContentProvider::for_value(&text.to_value()),
+            gtk::gdk::ContentProvider::for_bytes(
+                clip.mime(),
+                &glib::Bytes::from_static(clip.noun().as_bytes()),
+            ),
+        ]);
+        if let Err(e) = self.view.clipboard().set_content(Some(&provider)) {
+            tracing::warn!("the clipboard would not take the {}: {e}", clip.noun());
+            return;
+        }
         // A style string can run to a line of its own; a pair is short enough to read back.
         match clip {
             Clip::Style => self.toast("Copied style"),
@@ -1645,7 +1675,7 @@ impl DiagramTab {
 
     /// The clipboard's text onto the selection: a position or a size onto the one shape, a
     /// style's look onto every cell selected, as one step (`Editor::paste_style`).
-    fn paste_property(self: &Rc<Self>, clip: Clip) {
+    pub(super) fn paste_property(self: &Rc<Self>, clip: Clip) {
         let clipboard = self.view.clipboard();
         let tab = Rc::downgrade(self);
         glib::spawn_future_local(async move {

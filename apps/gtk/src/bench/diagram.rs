@@ -633,6 +633,57 @@ fn props(app: &Rc<App>, rel: &str) {
             tab.history()
         );
 
+        // The canvas's menu, right-clicked by XTEST: the one paste it offers is for what the
+        // clipboard holds, the shapes, a size or a style, none for a position, and over empty
+        // page with a style held there is no menu.
+        let canvas = tab.key_target();
+        let screen = |r: accent_drawio::Rect| {
+            let r = tab.to_widget(&r);
+            on_screen(&app, &canvas, r.x + r.w / 2.0, r.y + r.h / 2.0)
+        };
+        // a's right end, which b, pasted to a's position above, leaves uncovered.
+        let a = (tab.frame_of("a"))
+            .map(|r| accent_drawio::Rect::new(r.x + r.w - 20.0, r.y, 0.0, r.h))
+            .and_then(screen);
+        let m = tab.frame_of("m").and_then(screen);
+        let blank = screen(accent_drawio::Rect::new(750.0, 50.0, 0.0, 0.0));
+        let run = |action: &str| {
+            let _ = WidgetExt::activate_action(&app.window, action, None);
+        };
+        tab.select(vec!["a".to_string()]);
+        tab.copy();
+        println!(
+            "bench diagram props menu shapes {:?}",
+            menu_labels(&app, a.as_deref()).await
+        );
+        run("win.diagram-copy-shape");
+        let said = super::export::toast(&app, "Copied size").await;
+        println!(
+            "bench diagram props menu size said={said:?} {:?}",
+            menu_labels(&app, m.as_deref()).await
+        );
+        run("win.diagram-paste-shape");
+        glib::timeout_future(Duration::from_millis(300)).await;
+        println!(
+            "bench diagram props paste_shape selection={:?} a={:?} m={:?}",
+            tab.selection(),
+            tab.frame_of("a"),
+            tab.frame_of("m")
+        );
+        tab.undo();
+        tab.select(vec!["a".to_string()]);
+        click("Copy Position");
+        println!(
+            "bench diagram props menu position {:?}",
+            menu_labels(&app, a.as_deref()).await
+        );
+        run("win.diagram-copy-style");
+        println!(
+            "bench diagram props menu style {:?} blank={:?}",
+            menu_labels(&app, a.as_deref()).await,
+            menu_labels(&app, blank.as_deref()).await
+        );
+
         // An arrow's line takes the outline's rows, and the file keeps what they write. A spin
         // row's held change lands before a switch's right after it, and on the cells it was
         // made on when the selection changes before it settles.
@@ -992,6 +1043,32 @@ fn props(app: &Rc<App>, rel: &str) {
         );
         bench_quit(&app);
     });
+}
+
+/// Where `(x, y)` of `widget` is on the screen, for XTEST: the window sits at 0,0 with no window
+/// manager, its client-side shadow putting the widgets a margin in from the surface's corner.
+fn on_screen(app: &App, widget: &impl IsA<gtk::Widget>, x: f64, y: f64) -> Option<String> {
+    let p = widget.compute_point(&app.window, &graphene::Point::new(x as f32, y as f32))?;
+    let (sx, sy) = app.window.surface_transform();
+    Some(format!(
+        "{} {}",
+        f64::from(p.x()) + sx,
+        f64::from(p.y()) + sy
+    ))
+}
+
+/// Right-click the screen at `at` by XTEST: the labels of the menu that comes up, closed again,
+/// or `None` for no menu.
+async fn menu_labels(app: &Rc<App>, at: Option<&str>) -> Option<Vec<String>> {
+    super::git::xtest(&format!("move {}; down 3; up 3", at?)).await;
+    let menu = find_widget(app.window.upcast_ref(), &|w| {
+        w.is::<gtk::PopoverMenu>() && w.is_visible()
+    })
+    .and_downcast::<gtk::PopoverMenu>()?;
+    let labels = menu.menu_model().map(|m| fileops::labels(&m));
+    menu.popdown();
+    glib::timeout_future(Duration::from_millis(300)).await;
+    labels
 }
 
 /// The group the row titled `title` shows in within `pane`, if it and everything above it is
