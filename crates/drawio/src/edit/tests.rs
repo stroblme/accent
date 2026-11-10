@@ -340,6 +340,25 @@ fn an_end_pins_floats_or_dangles() {
 }
 
 #[test]
+fn a_line_turns_its_ends_and_waypoints_about_a_point() {
+    let mut line = Cell::new_edge(
+        "l",
+        "1",
+        (None, Point::new(0.0, 50.0)),
+        (None, Point::new(100.0, 50.0)),
+        "",
+    );
+    line.geometry.as_mut().unwrap().points = Some(vec![Point::new(50.0, 20.0)]);
+    let mut e = open([line]);
+    e.turn_edge(0, "l", Point::new(50.0, 50.0), 90.0).unwrap();
+    let g = geometry(&e, "l");
+    assert_eq!(g.source_point, Some(Point::new(50.0, 0.0)));
+    assert_eq!(g.target_point, Some(Point::new(50.0, 100.0)));
+    assert_eq!(g.points, Some(vec![Point::new(80.0, 50.0)]));
+    assert!(e.undo() && geometry(&e, "l").source_point == Some(Point::new(0.0, 50.0)));
+}
+
+#[test]
 fn an_edge_label_moves_along_and_off_its_edge() {
     let mut e = editor();
     let route = [Point::new(0.0, 0.0), Point::new(100.0, 0.0)];

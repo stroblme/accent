@@ -741,6 +741,7 @@ impl DiagramTab {
         match edit {
             Edit::Select(ids) => self.select(ids),
             Edit::Move { ids, delta } => self.move_cells(&ids, delta.x, delta.y),
+            Edit::Copy { ids, delta } => self.copy_to(&ids, delta),
             Edit::Resize { id, rect } => self.edit(|e, page| e.resize(page, &id, rect)),
             Edit::Add { tool, rect } => {
                 let style = self.new_style(&edit);
@@ -795,7 +796,32 @@ impl DiagramTab {
                 let value = props::rotation(degrees);
                 self.edit(|e, page| e.set_style(page, &[id], "rotation", value.as_deref()));
             }
+            Edit::Turn {
+                id,
+                centre,
+                degrees,
+            } => self.edit(|e, page| e.turn_edge(page, &id, centre, degrees)),
         }
+    }
+
+    /// Copies of `ids` dropped `delta` away, selected, as one step: what a Ctrl+drag asks for,
+    /// copied as Copy copies them and pasted there, the clipboard left alone.
+    fn copy_to(self: &Rc<Self>, ids: &[CellId], delta: accent_drawio::Point) {
+        use accent_drawio::clipboard;
+        let shown = self.view.sheet().unwrap_or_default();
+        let pages = {
+            let editor = self.editor.borrow();
+            let Ok(page) = editor.page(self.page_index.get()) else {
+                return;
+            };
+            clipboard::pages_in(&clipboard::copy(page, ids, &shown.scene))
+        };
+        let mut copies = Vec::new();
+        self.edit(|e, page| {
+            copies = e.paste(page, &pages, delta.x, delta.y)?;
+            Ok(())
+        });
+        self.select(copies);
     }
 
     /// Delete selected cells, disconnecting retained edges at their drawn endpoints.

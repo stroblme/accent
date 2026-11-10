@@ -146,6 +146,37 @@ pub fn snap(v: f64, grid: f64) -> f64 {
     (v / grid).round() * grid
 }
 
+/// `p` on the grid, where there is one.
+pub fn snap_point(p: Point, grid: Option<f64>) -> Point {
+    grid.map_or(p, |g| Point::new(snap(p.x, g), snap(p.y, g)))
+}
+
+/// The steps a line's angle and a turn keep to with Shift held, in degrees: draw.io's raster
+/// near the rotate handle, the axes and the diagonals among them.
+pub const ANGLE_STEP: f64 = 15.0;
+
+/// The axes a move of `delta` may take: both, or with `lock` (Shift, draw.io's
+/// `isConstrainedEvent`) only the one the pointer has gone furthest along.
+pub fn move_axes(delta: Point, lock: bool) -> [bool; 2] {
+    let across = delta.x.abs() >= delta.y.abs();
+    [!lock || across, !lock || !across]
+}
+
+/// Where a line's end at `p` goes with Shift held, its other end at `anchor`: turned onto the
+/// nearest step of [`ANGLE_STEP`], its length on the grid where there is one. To a hundredth,
+/// which keeps float dust out of the file.
+pub fn snap_angle(anchor: Point, p: Point, grid: Option<f64>) -> Point {
+    let (dx, dy) = (p.x - anchor.x, p.y - anchor.y);
+    let angle = (dy.atan2(dx).to_degrees() / ANGLE_STEP).round() * ANGLE_STEP;
+    let length = grid.map_or(dx.hypot(dy), |g| snap(dx.hypot(dy), g));
+    let (sin, cos) = angle.to_radians().sin_cos();
+    let hundredth = |v: f64| (v * 100.0).round() / 100.0;
+    Point::new(
+        hundredth(anchor.x + length * cos),
+        hundredth(anchor.y + length * sin),
+    )
+}
+
 /// The grid a drag snaps to and the canvas draws at `scale` pixels a unit: the page's `size`
 /// halved while the half is still 8 px on screen, so snapping gets finer as the page is zoomed
 /// in, and doubled while it is under 4 px, as draw.io spaces its lines (`minGridSize`).
@@ -232,10 +263,18 @@ fn bearing(centre: Point, p: Point) -> f64 {
 
 /// Rotation from the pointer bearing relative to the initial handle, in content
 /// coordinates (`mxVertexHandler.rotateVertex`). Snap to 15°, 5° or 1° with increasing
-/// distance from the handle circle, or 0.1° with `free`. Normalize to (-180, 180].
-pub fn rotation_to(centre: Point, handle: Point, pointer: Point, free: bool) -> f64 {
+/// distance from the handle circle, or 0.1° with `free`, and to 15° wherever the pointer is
+/// with `constrained` (Shift). Normalize to (-180, 180].
+pub fn rotation_to(
+    centre: Point,
+    handle: Point,
+    pointer: Point,
+    free: bool,
+    constrained: bool,
+) -> f64 {
     let alpha = bearing(centre, pointer) - bearing(centre, handle);
     let raster = match pointer.distance(centre) - handle.distance(centre) {
+        _ if constrained => ANGLE_STEP,
         _ if free => 0.1,
         out if out < 2.0 => 15.0,
         out if out < 25.0 => 5.0,
@@ -579,9 +618,15 @@ impl Sheet {
         self.pinned.contains(id)
     }
 
-    /// Whether vertex `id` takes a rotate handle: one that can be moved and turned.
+    /// Whether cell `id` takes a rotate handle: a vertex, or a line with neither end on a shape,
+    /// whose points are all its own, that can be moved and turned.
     pub fn is_turnable(&self, id: &str) -> bool {
-        self.rects.contains_key(id) && !self.is_pinned(id) && !self.unturnable.contains(id)
+        let line = || {
+            (self.page.cell(id)).is_some_and(|c| c.edge && c.source.is_none() && c.target.is_none())
+        };
+        (self.rects.contains_key(id) || line())
+            && !self.is_pinned(id)
+            && !self.unturnable.contains(id)
     }
 
     /// How far a vertex is turned, in degrees.
@@ -995,6 +1040,29 @@ mod tests {
     }
 
     #[test]
+    fn a_locked_move_keeps_to_the_axis_it_goes_furthest_along() {
+        assert_eq!(move_axes(Point::new(30.0, -10.0), true), [true, false]);
+        assert_eq!(move_axes(Point::new(5.0, -20.0), true), [false, true]);
+        assert_eq!(move_axes(Point::new(5.0, -20.0), false), [true, true]);
+    }
+
+    #[test]
+    fn a_line_s_end_keeps_to_steps_of_fifteen_degrees_and_its_length_to_the_grid() {
+        let o = Point::new(10.0, 10.0);
+        let flat = snap_angle(o, Point::new(110.0, 16.0), None);
+        assert_eq!(flat, Point::new(110.18, 10.0));
+        let down = snap_angle(o, Point::new(13.0, 108.0), Some(10.0));
+        assert_eq!(down, Point::new(10.0, 110.0));
+        let back = snap_angle(o, Point::new(-40.0, 11.0), Some(10.0));
+        assert_eq!(back, Point::new(-40.0, 10.0));
+        // 44° is 45°, its length on the grid; 30° with its length kept.
+        let d = snap_angle(o, Point::new(80.0, 78.0), Some(10.0));
+        assert_eq!(d, Point::new(80.71, 80.71));
+        let d = snap_angle(o, Point::new(96.0, 59.0), None);
+        assert_eq!(d, Point::new(95.72, 59.49));
+    }
+
+    #[test]
     fn handles_are_found_by_their_corner_or_edge_and_nothing_else() {
         let r = Rect::new(0.0, 0.0, 100.0, 50.0);
         assert_eq!(
@@ -1101,6 +1169,23 @@ mod tests {
     }
 
     #[test]
+    fn a_line_turns_unless_an_end_is_on_a_shape() {
+        let mut page = Page::blank("P", "p");
+        let r = Rect::new(0.0, 0.0, 40.0, 20.0);
+        page.cells
+            .push(accent_drawio::Cell::new_vertex("s", "1", r, "", ""));
+        let edge = |id: &str, on: Option<&str>| {
+            let (a, b) = (Point::new(100.0, 0.0), Point::new(200.0, 0.0));
+            accent_drawio::Cell::new_edge(id, "1", (on, a), (None, b), "")
+        };
+        page.cells.push(edge("line", None));
+        page.cells.push(edge("arrow", Some("s")));
+        let sheet = Sheet::of(&page, &Context::default());
+        assert!(sheet.is_turnable("s") && sheet.is_turnable("line"));
+        assert!(!sheet.is_turnable("arrow"));
+    }
+
+    #[test]
     fn a_locked_layer_pins_its_cells_and_select_all_leaves_them_out() {
         let xml = r#"<mxfile><diagram name="P" id="p"><mxGraphModel><root>
             <mxCell id="0"/><mxCell id="L" parent="0" style="locked=1;"/><mxCell id="C" parent="0"/>
@@ -1149,21 +1234,27 @@ mod tests {
         let c = Point::new(0.0, 0.0);
         // A handle straight up, dragged a quarter round on its own circle: 90°.
         let up = Point::new(0.0, -50.0);
-        assert_eq!(rotation_to(c, up, Point::new(50.0, 0.0), false), 90.0);
+        assert_eq!(
+            rotation_to(c, up, Point::new(50.0, 0.0), false, false),
+            90.0
+        );
         // Near the circle, 15° steps; well outside it, whole degrees; free, tenths.
         let near = Point::new(50.0, -8.0);
-        assert_eq!(rotation_to(c, up, near, false), 75.0);
+        assert_eq!(rotation_to(c, up, near, false, false), 75.0);
         let far = Point::new(200.0, -32.0);
-        assert_eq!(rotation_to(c, up, far, false), 81.0);
-        assert_eq!(rotation_to(c, up, far, true), 80.9);
+        assert_eq!(rotation_to(c, up, far, false, false), 81.0);
+        assert_eq!(rotation_to(c, up, far, true, false), 80.9);
+        // Shift keeps to 15° wherever the pointer is, Alt too.
+        assert_eq!(rotation_to(c, up, far, false, true), 75.0);
+        assert_eq!(rotation_to(c, up, far, true, true), 75.0);
         // A handle to the upper right held straight down is turned past a half: -135°, not 225°.
         let corner = Point::new(50.0, -50.0);
         assert_eq!(
-            rotation_to(c, corner, Point::new(-50.0, 50.0), false),
+            rotation_to(c, corner, Point::new(-50.0, 50.0), false, false),
             180.0
         );
         assert_eq!(
-            rotation_to(c, corner, Point::new(-50.0, 0.0), false),
+            rotation_to(c, corner, Point::new(-50.0, 0.0), false, false),
             -135.0
         );
     }

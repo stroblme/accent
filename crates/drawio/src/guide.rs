@@ -27,22 +27,24 @@ pub struct Targets<'a> {
 
 /// Snap `delta` for `bounds` and return guide lines. Equal gaps take precedence
 /// over sides and centres within half the grid spacing, or [`TOLERANCE`] without a grid.
+/// Only the `axes` the move may take (x, y) snap or show a guide: the other keeps its delta.
 pub fn snap(
     bounds: &Rect,
     delta: Point,
+    axes: [bool; 2],
     targets: &Targets,
     grid: Option<f64>,
     px: f64,
 ) -> (Point, Vec<Line>) {
     let tolerance = grid.map_or(TOLERANCE, |g| g / 2.0).max(2.0 * px);
     let slack = (tolerance / 2.0).max(2.0 * px);
-    let (equal, mut lines) = distances(targets.shapes, bounds, delta, slack, px);
+    let (equal, mut lines) = distances(targets.shapes, bounds, delta, axes, slack, px);
     let starts = [bounds.x, bounds.y];
     let mut d = [equal[0].unwrap_or(delta.x), equal[1].unwrap_or(delta.y)];
     let b = bounds.translate(d[0], d[1]);
     let hits = [true, false].map(|horizontal| align(bounds, &b, targets, horizontal, tolerance));
     let mut aligned = [false; 2];
-    for k in 0..2 {
+    for k in (0..2).filter(|&k| axes[k]) {
         if let Some(hit) = &hits[k] {
             d[k] = hit.delta;
             aligned[k] = true;
@@ -157,6 +159,7 @@ fn distances(
     shapes: &[Rect],
     bounds: &Rect,
     delta: Point,
+    axes: [bool; 2],
     tolerance: f64,
     px: f64,
 ) -> ([Option<f64>; 2], Vec<Line>) {
@@ -177,7 +180,8 @@ fn distances(
     let mut equal = [None, None];
     for (k, cells) in [row, column].into_iter().enumerate() {
         let horizontal = k == 0;
-        if cells.len() > 1
+        if axes[k]
+            && cells.len() > 1
             && let Some((at, guides)) = equal_gap(cells, &b, horizontal, tolerance)
         {
             equal[k] = Some(at - span(bounds, horizontal).0);
@@ -528,7 +532,28 @@ mod tests {
             shapes,
             page: Some(PAGE),
         };
-        snap(&bounds, Point::new(delta.0, delta.1), &targets, grid, 1.0)
+        let delta = Point::new(delta.0, delta.1);
+        snap(&bounds, delta, [true, true], &targets, grid, 1.0)
+    }
+
+    #[test]
+    fn a_move_held_to_one_axis_snaps_along_it_alone() {
+        let other = Rect::new(100.0, 3.0, 80.0, 40.0);
+        let targets = Targets {
+            shapes: &[other],
+            page: None,
+        };
+        let bounds = Rect::new(0.0, 0.0, 40.0, 40.0);
+        let delta = Point::new(103.0, 0.0);
+        // Free, the top would snap onto the other's top too.
+        let (d, _) = snap(&bounds, delta, [true, true], &targets, Some(10.0), 1.0);
+        assert_eq!(d, Point::new(100.0, 3.0));
+        let (d, lines) = snap(&bounds, delta, [true, false], &targets, Some(10.0), 1.0);
+        assert_eq!(d, Point::new(100.0, 0.0));
+        assert!(
+            !lines.is_empty() && lines.iter().all(|(a, b)| a.x == b.x),
+            "{lines:?}"
+        );
     }
 
     #[test]

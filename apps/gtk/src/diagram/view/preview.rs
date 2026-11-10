@@ -23,8 +23,9 @@ const DRAFT: &str = "accent-draft";
 pub(super) enum Preview {
     /// The page as the drag would leave it.
     Live(Box<Live>),
-    /// A move of more than [`MAX_LIVE`] cells: its box moves, the cells stay.
-    Boxed,
+    /// A move of more than [`MAX_LIVE`] cells, or a `copy`, which draw.io shows no live preview
+    /// of either (`mxGraphHandler.mouseMove`): its box moves, the cells stay.
+    Boxed { copy: bool },
 }
 
 pub(super) struct Live {
@@ -48,8 +49,9 @@ impl Preview {
         let moving = match edit {
             Edit::Move { ids, .. } => match edit::start_move(&mut base, ids, &sheet.scene) {
                 Ok(moving) if moving.count <= MAX_LIVE => Some(moving),
-                _ => return Preview::Boxed,
+                _ => return Preview::Boxed { copy: false },
             },
+            Edit::Copy { .. } => return Preview::Boxed { copy: true },
             _ => None,
         };
         Preview::Live(Box::new(Live {
@@ -135,6 +137,11 @@ fn apply(
             let ids = std::slice::from_ref(id);
             edit::set_styles(page, ids, &[("rotation", value.as_deref())])
         }
+        Edit::Turn {
+            id,
+            centre,
+            degrees,
+        } => edit::turn_edge(page, id, *centre, *degrees),
         _ => Ok(()),
     }
 }
@@ -161,7 +168,7 @@ impl DiagramView {
         let imp = self.imp();
         let edit = match imp.drag.borrow().as_ref() {
             Some(drag) if imp.moved.get() => {
-                self.drag_edit(drag, imp.pointer.get(), imp.free.get())
+                self.drag_edit(drag, imp.pointer.get(), imp.mods.get())
             }
             _ => None,
         };
@@ -178,6 +185,15 @@ impl DiagramView {
             *preview = None;
             return;
         };
+        // A move turned into a copy by the primary modifier, or back, starts again.
+        let copy = matches!(edit, Edit::Copy { .. });
+        if match preview.as_ref() {
+            Some(Preview::Live(_)) => copy,
+            Some(Preview::Boxed { copy: was }) => *was != copy,
+            None => false,
+        } {
+            *preview = None;
+        }
         let preview = preview.get_or_insert_with(|| Preview::start(sheet, &edit));
         if let Preview::Live(live) = preview {
             live.show(&edit, sheet, &imp.cache, imp.new_cell.borrow().as_ref());
@@ -209,7 +225,10 @@ impl DiagramView {
                     guides: Vec::new(),
                 });
                 imp.moved.set(true);
-                imp.free.set(true);
+                imp.mods.set(super::drag::Mods {
+                    free: true,
+                    ..Default::default()
+                });
                 imp.pointer.set(delta);
             }
             None => {

@@ -4,12 +4,33 @@ use accent_drawio::geom::rotate;
 use accent_drawio::guide::{self, Neighbour};
 use accent_drawio::handle::{self, Kind, Knob, Terminal};
 use accent_drawio::{CellId, Point, Rect};
+use gtk::gdk;
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 
 use super::{DiagramView, Edit};
 use crate::diagram::geometry::{self, DEFAULT_SIZE, HANDLE, Handle, Sheet, TOLERANCE};
 use crate::diagram::tools::Tool;
+
+/// The keys a drag reads on every event, as draw.io's handlers do: Alt places freely, Shift
+/// constrains (a move to one axis, a line's end and a turn to steps of 15°), and the primary
+/// modifier makes a move drop a copy (`isCloneEvent`).
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct Mods {
+    pub free: bool,
+    pub constrained: bool,
+    pub copy: bool,
+}
+
+impl Mods {
+    pub(super) fn of(state: gdk::ModifierType) -> Mods {
+        Mods {
+            free: state.contains(gdk::ModifierType::ALT_MASK),
+            constrained: state.contains(gdk::ModifierType::SHIFT_MASK),
+            copy: state.contains(crate::platform::PRIMARY_MODIFIER),
+        }
+    }
+}
 
 /// What a press on the one selected cell's handles takes hold of.
 #[derive(Debug, Clone, Copy)]
@@ -27,13 +48,13 @@ enum Grip {
 /// A drag under way, in page units.
 #[derive(Debug, Clone)]
 pub(super) enum Drag {
-    /// Moving `ids`, whose boxes take up `bounds`, aligning them to the boxes in `guides`; a
-    /// release that did not move selects `click` instead, when there is one (a click into a
-    /// selected group).
+    /// Moving `ids`, or with the primary modifier copying them, whose boxes take up `bounds`,
+    /// aligning them to the boxes in `guides`; a release that did not move selects `click`
+    /// instead, when there is one (a click into a selected group, a Ctrl+click letting go).
     Move {
         from: Point,
         ids: Vec<CellId>,
-        click: Option<CellId>,
+        click: Option<Vec<CellId>>,
         bounds: Rect,
         guides: Vec<Rect>,
     },
@@ -50,11 +71,13 @@ pub(super) enum Drag {
         fixed: bool,
     },
     /// Dragging the source end (else the target end) of edge `id`, whose other end is at
-    /// `other`.
+    /// `other` and whose point next to the dragged end, a waypoint or the other end, is
+    /// `anchor`.
     End {
         id: CellId,
         source: bool,
         other: Point,
+        anchor: Point,
     },
     /// Dragging a handle between the ends of edge `id`, whose route, ends and waypoints were
     /// `route`, `ends` and `waypoints` when it was pressed.
@@ -71,7 +94,8 @@ pub(super) enum Drag {
         route: Vec<Point>,
         ends: [Option<Terminal>; 2],
     },
-    /// Turning shape `id`, whose unturned rectangle is `rect`, by its rotate handle.
+    /// Turning shape `id`, whose unturned rectangle is `rect`, by its rotate handle; for a line,
+    /// `rect` is its frame.
     Rotate {
         id: CellId,
         rect: Rect,
@@ -112,18 +136,20 @@ impl DiagramView {
             Tool::Select => {
                 if let Some((id, grip)) = self.grip_under(&sheet, &selection, p) {
                     let rotation = sheet.rotation(&id);
-                    let rect = sheet.rect(&id).unwrap_or_default();
+                    let rect = sheet.frame_of(&id).unwrap_or_default();
                     return Some(match grip {
                         Grip::End(source) => {
                             let route = sheet.scene.route(&id).unwrap_or_default();
-                            let other = match source {
-                                true => route.last(),
-                                false => route.first(),
+                            let (other, next) = match source {
+                                true => (route.last(), sheet.waypoints(&id).first().copied()),
+                                false => (route.first(), sheet.waypoints(&id).last().copied()),
                             };
+                            let other = other.copied().unwrap_or(p);
                             Drag::End {
                                 id,
                                 source,
-                                other: other.copied().unwrap_or(p),
+                                other,
+                                anchor: next.unwrap_or(other),
                             }
                         }
                         Grip::Knob(knob) => Drag::Knob {
@@ -161,23 +187,27 @@ impl DiagramView {
                     }
                     return Some(Drag::Band { from: p, add });
                 };
-                if add {
-                    let toggled = pick.held.clone().unwrap_or(pick.cell.clone());
-                    let mut next = selection.clone();
-                    match next.iter().position(|s| *s == toggled) {
-                        Some(i) => {
-                            next.remove(i);
-                        }
-                        None => next.push(pick.cell),
-                    }
-                    self.emit(Edit::Select(next));
-                    return None;
-                }
                 // The cell under the pointer, whose parent and edges pick the guides.
                 let pressed = pick.held.clone().unwrap_or(pick.cell.clone());
-                let (ids, click) = match &pick.held {
-                    Some(held) => (selection, (pick.cell != *held).then_some(pick.cell)),
-                    None => {
+                let (ids, click) = match (&pick.held, add) {
+                    // With Ctrl a cell not held is added at once and one held is let go of on a
+                    // click, a drag moving or copying the whole selection either way.
+                    (Some(held), true) => {
+                        let rest = selection.iter().filter(|s| *s != held).cloned();
+                        let rest = rest.collect();
+                        (selection, Some(rest))
+                    }
+                    (None, true) => {
+                        let mut next = selection;
+                        next.push(pick.cell);
+                        self.emit(Edit::Select(next.clone()));
+                        (next, None)
+                    }
+                    (Some(held), false) => {
+                        let inner = (pick.cell != *held).then(|| vec![pick.cell]);
+                        (selection, inner)
+                    }
+                    (None, false) => {
                         self.emit(Edit::Select(vec![pick.cell.clone()]));
                         (vec![pick.cell], None)
                     }
@@ -207,18 +237,27 @@ impl DiagramView {
     /// The selected cell whose handle is under page point `p`, and the handle: every selected
     /// edge's, as draw.io gives each one a handler, and a shape's when it is selected alone.
     fn grip_under(&self, sheet: &Sheet, selection: &[CellId], p: Point) -> Option<(CellId, Grip)> {
+        let alone = selection.len() == 1;
         selection
             .iter()
-            .filter(|id| selection.len() == 1 || sheet.is_edge(id))
-            .find_map(|id| Some((id.clone(), self.grip_at(sheet, id, p)?)))
+            .filter(|id| alone || sheet.is_edge(id))
+            .find_map(|id| Some((id.clone(), self.grip_at(sheet, id, p, alone)?)))
     }
 
-    /// The grip of selected cell `id` under page point `p`: an edge's ends, the handles between
-    /// them (a faded one last), and its label's handle or text; a shape's rotate handle first,
-    /// then a resize handle, found in the shape's own frame.
-    fn grip_at(&self, sheet: &Sheet, id: &str, p: Point) -> Option<Grip> {
+    /// The grip of selected cell `id`, selected `alone` or not, under page point `p`: a lone
+    /// line's rotate handle first, then an edge's ends, the handles between them (a faded one
+    /// last), and its label's handle or text; a shape's rotate handle first, then a resize
+    /// handle, found in the shape's own frame.
+    fn grip_at(&self, sheet: &Sheet, id: &str, p: Point, alone: bool) -> Option<Grip> {
         let frame = self.imp().frame.get();
         if sheet.is_edge(id) && !sheet.is_pinned(id) {
+            let ring = sheet
+                .frame_of(id)
+                .map(|r| geometry::rotate_handle(&frame.rect(&r)));
+            let near = |at: Point| at.distance(frame.to_content(p)) <= HANDLE;
+            if alone && sheet.is_turnable(id) && ring.is_some_and(near) {
+                return Some(Grip::Rotate);
+            }
             let route = sheet.scene.route(id)?;
             // The nearest handle within reach, an end before a handle between the ends and a
             // faded one last where two are as near; then the label's text.
@@ -254,47 +293,69 @@ impl DiagramView {
     }
 
     /// What an edge end dragged to `p`, its other end at `other`, lands on: as a connector's end
-    /// does ([`Sheet::end_at`]), dangling on the grid unless `free`.
-    pub(super) fn end_to(&self, p: Point, other: Point, free: bool) -> geometry::End {
+    /// does ([`Sheet::end_at`]), dangling where [`DiagramView::dangle`] puts it from `anchor`.
+    pub(super) fn end_to(
+        &self,
+        p: Point,
+        other: Point,
+        anchor: Point,
+        mods: Mods,
+    ) -> geometry::End {
         let Some(sheet) = self.sheet() else {
             return (None, p, None);
         };
         let scale = self.scale();
         let mut end = sheet.end_at(p, other, TOLERANCE / scale, HANDLE / scale);
-        if let Some(g) = self.grid(free).filter(|_| end.0.is_none()) {
-            end.1 = Point::new(geometry::snap(p.x, g), geometry::snap(p.y, g));
+        if end.0.is_none() {
+            end.1 = self.dangle(p, anchor, mods);
         }
         end
     }
 
+    /// Where a line's end on no shape goes with the pointer at `p`, the point before it at
+    /// `anchor`: on the grid unless `free`, and with Shift at a step of 15° from `anchor`.
+    fn dangle(&self, p: Point, anchor: Point, mods: Mods) -> Point {
+        let grid = self.grid(mods.free);
+        match mods.constrained {
+            true => geometry::snap_angle(anchor, p, grid),
+            false => geometry::snap_point(p, grid),
+        }
+    }
+
     /// The turn a rotate handle dragged to `pointer` gives the shape at `rect` (page units).
-    pub(super) fn turn_to(&self, rect: &Rect, pointer: Point, free: bool) -> f64 {
+    pub(super) fn turn_to(&self, rect: &Rect, pointer: Point, mods: Mods) -> f64 {
         let frame = self.imp().frame.get();
         let r = frame.rect(rect);
         let handle = geometry::rotate_handle(&r);
-        geometry::rotation_to(r.centre(), handle, frame.to_content(pointer), free)
+        let pointer = frame.to_content(pointer);
+        geometry::rotation_to(r.centre(), handle, pointer, mods.free, mods.constrained)
     }
 
     /// A move of the selection from `from` to `to`, and the guides that show where it lands:
-    /// aligned to `guides` and the page and on the grid, unless `free` — Alt, which turns both
-    /// off in draw.io (Graph.js 17465) — or the page has its guides off (`guides="0"`).
+    /// along the axis it goes furthest along with Shift, aligned to `guides` and the page and on
+    /// the grid, unless `free` — Alt, which turns both off in draw.io (Graph.js 17465) — or the
+    /// page has its guides off (`guides="0"`).
     pub(super) fn move_delta(
         &self,
         from: Point,
         to: Point,
         bounds: &Rect,
         guides: &[Rect],
-        free: bool,
+        mods: Mods,
     ) -> (Point, Vec<guide::Line>) {
         let raw = Point::new(to.x - from.x, to.y - from.y);
-        let Some(sheet) = self.sheet().filter(|_| !free) else {
+        let axes = geometry::move_axes(raw, mods.constrained);
+        let along = |v: f64, axis: bool| if axis { v } else { 0.0 };
+        let only = |d: Point| Point::new(along(d.x, axes[0]), along(d.y, axes[1]));
+        let raw = only(raw);
+        let Some(sheet) = self.sheet().filter(|_| !mods.free) else {
             return (raw, Vec::new());
         };
         if !sheet.guides {
             let origin = Point::new(bounds.x, bounds.y);
             let snapped = self
                 .grid(false)
-                .map(|g| geometry::snap_move(origin, raw, g));
+                .map(|g| only(geometry::snap_move(origin, raw, g)));
             return (snapped.unwrap_or(raw), Vec::new());
         }
         let targets = guide::Targets {
@@ -302,7 +363,7 @@ impl DiagramView {
             page: sheet.page_rect,
         };
         let px = 1.0 / self.scale();
-        guide::snap(bounds, raw, &targets, self.grid(false), px)
+        guide::snap(bounds, raw, axes, &targets, self.grid(false), px)
     }
 
     /// `rect`, turned `rotation`, resized by dragging `handle` by `delta`, and the lines that
@@ -358,23 +419,31 @@ impl DiagramView {
         Some(geometry::grid_step(grid, self.scale()))
     }
 
-    /// What a move, a resize, a turn or a drawing asks for with the pointer at `p`: the edit its
-    /// release makes, and the one the live preview shows meanwhile. `None` for any other drag.
-    pub(super) fn drag_edit(&self, drag: &Drag, p: Point, free: bool) -> Option<Edit> {
+    /// What a move, a resize, a turn or a drawing asks for with the pointer at `p` and `mods`
+    /// held: the edit its release makes, and the one the live preview shows meanwhile. `None`
+    /// for any other drag.
+    pub(super) fn drag_edit(&self, drag: &Drag, p: Point, mods: Mods) -> Option<Edit> {
+        let free = mods.free;
         match drag {
             Drag::Draw { tool, from } => {
-                let snap = |q: Point| match self.grid(free) {
-                    Some(g) => Point::new(geometry::snap(q.x, g), geometry::snap(q.y, g)),
-                    None => q,
-                };
+                let snap = |q: Point| geometry::snap_point(q, self.grid(free));
                 let rect = Rect::from_corners(snap(*from), snap(p));
                 (rect.w >= 1.0 && rect.h >= 1.0).then_some(Edit::Add { tool: *tool, rect })
             }
+            // Each end on no shape dangles as an end dragged does, the second from the first.
             Drag::Connect { from } => {
                 let (sheet, scale) = (self.sheet()?, self.scale());
-                let (source, target) =
+                let (mut source, mut target) =
                     sheet.connect_ends(*from, p, TOLERANCE / scale, HANDLE / scale);
-                Some(Edit::Connect { source, target })
+                if source.0.is_none() {
+                    source.1 = geometry::snap_point(source.1, self.grid(free));
+                }
+                if target.0.is_none() {
+                    target.1 = self.dangle(p, source.1, mods);
+                }
+                // Both ends snapped onto one point make no line.
+                let line = source.0.is_some() || target.0.is_some() || source.1 != target.1;
+                line.then_some(Edit::Connect { source, target })
             }
             Drag::Move {
                 from,
@@ -382,10 +451,16 @@ impl DiagramView {
                 bounds,
                 guides,
                 ..
-            } if !ids.is_empty() => Some(Edit::Move {
-                ids: ids.clone(),
-                delta: self.move_delta(*from, p, bounds, guides, free).0,
-            }),
+            } if !ids.is_empty() => {
+                let (ids, delta) = (
+                    ids.clone(),
+                    self.move_delta(*from, p, bounds, guides, mods).0,
+                );
+                Some(match mods.copy {
+                    true => Edit::Copy { ids, delta },
+                    false => Edit::Move { ids, delta },
+                })
+            }
             Drag::Resize {
                 from,
                 id,
@@ -403,10 +478,17 @@ impl DiagramView {
                     rect,
                 })
             }
-            Drag::Rotate { id, rect } => Some(Edit::Rotate {
-                id: id.clone(),
-                degrees: self.turn_to(rect, p, free),
-            }),
+            Drag::Rotate { id, rect } => {
+                let (id, degrees) = (id.clone(), self.turn_to(rect, p, mods));
+                Some(match self.sheet()?.is_edge(&id) {
+                    true => Edit::Turn {
+                        id,
+                        centre: rect.centre(),
+                        degrees,
+                    },
+                    false => Edit::Rotate { id, degrees },
+                })
+            }
             Drag::Knob {
                 id,
                 knob,
@@ -446,10 +528,15 @@ impl DiagramView {
                 id: id.clone(),
                 at: self.aim(p, route, *ends, free),
             }),
-            Drag::End { id, source, other } => Some(Edit::End {
+            Drag::End {
+                id,
+                source,
+                other,
+                anchor,
+            } => Some(Edit::End {
                 id: id.clone(),
                 source: *source,
-                end: self.end_to(p, *other, free),
+                end: self.end_to(p, *other, *anchor, mods),
             }),
             _ => None,
         }
@@ -482,7 +569,7 @@ impl DiagramView {
 
     /// Finalize the preview edit by converting segment waypoints to routed corners
     /// (`mxEdgeSegmentHandler.updatePreviewState`), preventing a route jump on release.
-    fn settled(&self, drag: &Drag, edit: Edit, p: Point, free: bool) -> Edit {
+    fn settled(&self, drag: &Drag, edit: Edit, p: Point, mods: Mods) -> Edit {
         let Drag::Knob {
             id,
             knob: Knob::Segment { .. },
@@ -496,7 +583,7 @@ impl DiagramView {
         let Some(routed) = self.route_after(&edit, id) else {
             return edit;
         };
-        let at = self.aim(p, route, *ends, free);
+        let at = self.aim(p, route, *ends, mods.free);
         let points = handle::merged_points(&routed, at, route, *ends, 1.0 / self.scale());
         Edit::Points {
             id: id.clone(),
@@ -505,16 +592,16 @@ impl DiagramView {
     }
 
     /// What a drag that ends at widget `(x, y)` asks for.
-    pub(super) fn end_drag(&self, drag: Drag, x: f64, y: f64, moved: bool, free: bool) {
+    pub(super) fn end_drag(&self, drag: Drag, x: f64, y: f64, moved: bool, mods: Mods) {
         let p = self.page_at(x, y);
         let Some(sheet) = self.sheet() else { return };
-        if let Some(edit) = self.drag_edit(&drag, p, free).filter(|_| moved) {
-            return self.emit(self.settled(&drag, edit, p, free));
+        if let Some(edit) = self.drag_edit(&drag, p, mods).filter(|_| moved) {
+            return self.emit(self.settled(&drag, edit, p, mods));
         }
         match drag {
             Drag::Move {
-                click: Some(cell), ..
-            } if !moved => self.emit(Edit::Select(vec![cell])),
+                click: Some(ids), ..
+            } if !moved => self.emit(Edit::Select(ids)),
             Drag::Band { from, add } if moved => {
                 let mut ids = sheet.band(Rect::from_corners(from, p));
                 if add {
@@ -530,10 +617,7 @@ impl DiagramView {
             }
             // A click draws a shape of draw.io's size around it.
             Drag::Draw { tool, from } if !moved => {
-                let c = match self.grid(free) {
-                    Some(g) => Point::new(geometry::snap(from.x, g), geometry::snap(from.y, g)),
-                    None => from,
-                };
+                let c = geometry::snap_point(from, self.grid(mods.free));
                 let (w, h) = DEFAULT_SIZE;
                 let rect = Rect::new(c.x - w / 2.0, c.y - h / 2.0, w, h);
                 self.emit(Edit::Add { tool, rect });

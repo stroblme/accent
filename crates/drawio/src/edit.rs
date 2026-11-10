@@ -224,6 +224,17 @@ impl Editor {
         self.edit(page, |p, _| resize(p, id, rect))
     }
 
+    /// [`turn_edge`] on page `page`.
+    pub fn turn_edge(
+        &mut self,
+        page: usize,
+        id: &str,
+        centre: Point,
+        degrees: f64,
+    ) -> Result<(), Error> {
+        self.edit(page, |p, _| turn_edge(p, id, centre, degrees))
+    }
+
     /// Set (or with `None` remove) one style key on every cell in `ids`, as one step.
     pub fn set_style(
         &mut self,
@@ -1229,6 +1240,31 @@ pub fn set_points(page: &mut Page, id: &str, points: &[Point]) -> Result<(), Err
         ..Geometry::default()
     });
     g.points = (!points.is_empty()).then(|| local.collect());
+    Ok(())
+}
+
+/// Turn edge `id` `degrees` clockwise about `centre` (absolute): its end points and waypoints,
+/// as `mxGeometry.rotate` turns an edge's, since an edge has no `rotation` of its own. To a
+/// hundredth, which keeps float dust out of the file; an end on a shape stays where it is.
+pub fn turn_edge(page: &mut Page, id: &str, centre: Point, degrees: f64) -> Result<(), Error> {
+    check(page, [id])?;
+    let origin = page.origin_of(id);
+    let cell = cell_mut(page, id)?;
+    if !cell.edge {
+        return Err(Error::Refused("only an edge turns by its points"));
+    }
+    let centre = Point::new(centre.x - origin.x, centre.y - origin.y);
+    let hundredth = |v: f64| (v * 100.0).round() / 100.0;
+    if let Some(g) = &mut cell.geometry {
+        let waypoints = g.points.iter_mut().flatten();
+        for p in waypoints
+            .chain(&mut g.source_point)
+            .chain(&mut g.target_point)
+        {
+            let turned = crate::geom::rotate(*p, centre, degrees);
+            *p = Point::new(hundredth(turned.x), hundredth(turned.y));
+        }
+    }
     Ok(())
 }
 

@@ -34,7 +34,7 @@ impl DiagramView {
         // Borrowed, not cloned: this runs every frame, and nothing it calls changes either.
         let drag = imp.drag.borrow();
         let pointer = imp.pointer.get();
-        let free = imp.free.get();
+        let mods = imp.mods.get();
         let selection = imp.selection.borrow();
         let moving = matches!(drag.as_ref(), Some(Drag::Move { .. } | Drag::Rotate { .. }))
             && imp.moved.get();
@@ -81,7 +81,15 @@ impl DiagramView {
             snapshot.append_stroke(&builder.to_path(), &gsk::Stroke::new(1.0), &accent);
         };
         for id in selection.iter() {
-            if sheet.is_edge(id) {
+            // A line being turned shows its frame turned with it, as a shape's does.
+            if let Some(Edit::Turn {
+                id: line, degrees, ..
+            }) = shown
+                && line == id
+                && let Some(r) = sheet.frame_of(id)
+            {
+                turned(&r, *degrees);
+            } else if sheet.is_edge(id) {
                 if let Some(r) = drawn.bounds_of(id) {
                     turned(&r, 0.0);
                 }
@@ -139,13 +147,14 @@ impl DiagramView {
                 dot(*at, &accent);
             }
         }
+        // A lone shape's eight handles, a line's being the dots above, and the ring of either.
         if let [id] = selection.as_slice()
-            && let Some(r) = sheet.rect(id)
+            && let Some(r) = sheet.rect(id).or_else(|| drawn.bounds_of(id))
             && !sheet.is_pinned(id)
             && !moving
         {
             let (r, rotation) = placed(id, r);
-            for h in Handle::ALL {
+            for h in Handle::ALL.into_iter().filter(|_| !sheet.is_edge(id)) {
                 square(rotate(h.at(&r), r.centre(), rotation));
             }
             // The rotate handle, a ring beyond the top-right corner, turned with the frame.
@@ -197,11 +206,11 @@ impl DiagramView {
                 guides,
                 ..
             } => {
-                let (d, lines) = self.move_delta(*from, pointer, bounds, guides, free);
-                // Too many cells to show live: their box moves, dashed as draw.io's preview
-                // shape is (`mxGraphHandler.createPreviewShape`).
+                let (d, lines) = self.move_delta(*from, pointer, bounds, guides, mods);
+                // A copy, or too many cells to show live: their box moves, dashed as draw.io's
+                // preview shape is (`mxGraphHandler.createPreviewShape`).
                 let moved = ids.iter().filter_map(|id| sheet.frame_of(id));
-                if matches!(*preview, Some(Preview::Boxed))
+                if matches!(*preview, Some(Preview::Boxed { .. }))
                     && let Some(r) = moved.reduce(|a, b| a.union(&b))
                 {
                     let builder = gsk::PathBuilder::new();
@@ -237,7 +246,7 @@ impl DiagramView {
             } => {
                 let delta = Point::new(pointer.x - from.x, pointer.y - from.y);
                 let (_, lines) =
-                    self.resize_to(rect, *rotation, *handle, delta, guides, free, *fixed);
+                    self.resize_to(rect, *rotation, *handle, delta, guides, mods.free, *fixed);
                 guide_lines(snapshot, frame, &lines, &accent);
             }
             Drag::Rotate { .. }

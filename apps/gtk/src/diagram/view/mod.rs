@@ -14,13 +14,13 @@ use std::rc::Rc;
 use accent_drawio::{CellId, Color, Point, Rect};
 use adw::prelude::*;
 use gtk::subclass::prelude::*;
-use gtk::{gdk, glib, graphene, gsk};
+use gtk::{glib, graphene, gsk};
 
 use super::geometry::{self, DRAG_SLOP, End, Frame, GAP, HANDLE, Sheet, TOLERANCE, Zoom};
 use super::paint::{self, Cache, Tint};
 use super::tools::Tool;
 use crate::theme;
-use drag::Drag;
+use drag::{Drag, Mods};
 use preview::Preview;
 
 /// What a gesture on the canvas asks of the diagram.
@@ -29,6 +29,12 @@ pub enum Edit {
     /// Replace the selection.
     Select(Vec<CellId>),
     Move {
+        ids: Vec<CellId>,
+        delta: Point,
+    },
+    /// Copies of `ids` dropped `delta` away, as draw.io's Ctrl+drag drops them
+    /// (`mxGraph.moveCells` with `clone`): copied as Copy copies them and pasted there.
+    Copy {
         ids: Vec<CellId>,
         delta: Point,
     },
@@ -52,6 +58,13 @@ pub enum Edit {
     /// Turn a shape to `degrees`.
     Rotate {
         id: CellId,
+        degrees: f64,
+    },
+    /// Turn line `id`'s ends and waypoints `degrees` about `centre`, in page units: a line has
+    /// no turn of its own.
+    Turn {
+        id: CellId,
+        centre: Point,
         degrees: f64,
     },
     /// Put the source end (else the target end) of edge `id` on `end`.
@@ -451,8 +464,8 @@ mod imp {
         pub moved: Cell<bool>,
         /// Where the pointer is in the drag under way, in page units.
         pub pointer: Cell<Point>,
-        /// Alt held in the drag under way: no snapping to the grid.
-        pub free: Cell<bool>,
+        /// The keys held in the drag under way.
+        pub(super) mods: Cell<Mods>,
         /// Where the pointer is over the canvas, until it leaves: what a Ctrl+wheel zooms around.
         pub over: Cell<Option<(f64, f64)>>,
         pub cache: Cache,
@@ -488,7 +501,7 @@ mod imp {
                 preview: RefCell::new(None),
                 moved: Cell::new(false),
                 pointer: Cell::new(Point::default()),
-                free: Cell::new(false),
+                mods: Cell::new(Mods::default()),
                 over: Cell::new(None),
                 cache: Cache::default(),
                 tint: Cell::new(Tint::FILE),
@@ -582,6 +595,7 @@ mod imp {
                         obj.start_drag(x, y, state.contains(crate::platform::PRIMARY_MODIFIER));
                     let imp = obj.imp();
                     imp.moved.set(false);
+                    imp.mods.set(Mods::of(state));
                     imp.pointer.set(obj.page_at(x, y));
                     if started.is_some() {
                         gesture.set_state(gtk::EventSequenceState::Claimed);
@@ -600,11 +614,7 @@ mod imp {
                     if dx.hypot(dy) > DRAG_SLOP {
                         imp.moved.set(true);
                     }
-                    imp.free.set(
-                        gesture
-                            .current_event_state()
-                            .contains(gdk::ModifierType::ALT_MASK),
-                    );
+                    imp.mods.set(Mods::of(gesture.current_event_state()));
                     let pan = match imp.drag.borrow().as_ref() {
                         Some(Drag::Pan { scroll }) => Some(*scroll),
                         _ => None,
@@ -628,10 +638,8 @@ mod imp {
                         return;
                     };
                     let moved = imp.moved.replace(false) || dx.hypot(dy) > DRAG_SLOP;
-                    let free = gesture
-                        .current_event_state()
-                        .contains(gdk::ModifierType::ALT_MASK);
-                    obj.end_drag(drag, x0 + dx, y0 + dy, moved, free);
+                    let mods = Mods::of(gesture.current_event_state());
+                    obj.end_drag(drag, x0 + dx, y0 + dy, moved, mods);
                     imp.preview.take();
                     obj.queue_draw();
                 }
@@ -745,12 +753,12 @@ mod imp {
             // Only what is on screen, a prim's box being known from when the page was shown.
             let near = frame.to_page(Point::new(sx, sy));
             let visible = Rect::new(near.x, near.y, w / frame.scale, h / frame.scale);
-            // The grid, while a move, a resize or a drawing is under way, or always with Show
-            // Grid on, except on a page presented.
+            // The grid, while anything is moved, resized, turned or drawn, an arrow's ends and
+            // bends included, or always with Show Grid on, except on a page presented.
             let placing = self.moved.get()
-                && matches!(
+                && !matches!(
                     self.drag.borrow().as_ref(),
-                    Some(Drag::Move { .. } | Drag::Resize { .. } | Drag::Draw { .. })
+                    None | Some(Drag::Band { .. } | Drag::Pan { .. })
                 );
             let shown = placing || (self.show_grid.get() && !self.read_only.get());
             if let Some(step) = obj.grid(false).filter(|_| shown)
