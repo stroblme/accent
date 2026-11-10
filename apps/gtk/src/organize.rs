@@ -475,6 +475,7 @@ impl Organize {
             }
         });
         self.canvas.add_controller(click);
+        self.wire_wheel();
         // A wheel under a pointer that stays put brings another page under it.
         let weak = Rc::downgrade(self);
         self.strip.vadjustment().connect_value_changed(move |_| {
@@ -483,6 +484,28 @@ impl Organize {
             }
         });
         self.wire_page_drag();
+    }
+
+    /// Ease a wheel's notches over the strip, and scroll it by a wheel over the buttons too, as
+    /// beside them: they float over the strip, outside its scrolled window, which hears nothing of
+    /// a scroll on them. A touchpad's pixels move it as they come.
+    fn wire_wheel(&self) {
+        let wheel = crate::widgets::smooth_wheel(&self.strip);
+        for buttons in [&self.trash, &self.copy, &self.insert] {
+            let flags = gtk::EventControllerScrollFlags::VERTICAL;
+            let scroll = gtk::EventControllerScroll::new(flags);
+            let (wheel, strip) = (wheel.clone(), self.strip.downgrade());
+            scroll.connect_scroll(move |scroll, _, dy| {
+                if scroll.unit() == gdk::ScrollUnit::Wheel {
+                    wheel.notch(dy);
+                } else if let Some(strip) = strip.upgrade() {
+                    let adjustment = strip.vadjustment();
+                    adjustment.set_value(adjustment.value() + dy);
+                }
+                glib::Propagation::Stop
+            });
+            buttons.add_controller(scroll);
+        }
     }
 
     /// Move the pages dropped into a strip gap: the page taken hold of, or the pages picked with
@@ -578,7 +601,7 @@ impl Organize {
             .collect();
         format!(
             "strip={:?} insert={:?} copy={:?} paste={:?} out=trash:{},insert:{},copy:{},paste:{} \
-             picked={:?} thumbs={}",
+             picked={:?} shown={} thumbs={}",
             at(self.pane.upcast_ref()),
             at(self.insert.upcast_ref()),
             at(self.copy.upcast_ref()),
@@ -588,6 +611,7 @@ impl Organize {
             self.copy.reveals_child(),
             self.paste.is_visible(),
             self.picked.borrow().pages,
+            self.thumbs.shown(),
             middles.join(";")
         )
     }

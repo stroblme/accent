@@ -80,7 +80,6 @@ impl PageStrip {
             .vexpand(true)
             .child(&strip)
             .build();
-        crate::widgets::smooth_wheel(&scroller);
         // Only the pages on screen are painted, so a scroll paints again.
         let adjustment = scroller.vadjustment();
         adjustment.connect_value_changed(glib::clone!(

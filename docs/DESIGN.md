@@ -1251,11 +1251,12 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Both write through the vault, on the host for a remote one, off the main loop.
 - **The thumbnail strip organises pages:** dragging a thumbnail moves its page, an accent bar marks the destination gap, and the strip scrolls near an edge.
   The thumbnail under the pointer carries round buttons, opaque as the ring's are, with Copy Page in its top-left corner, Delete Page in its top-right (absent where it would take every page, as a PDF keeps one) and Insert Page Here on the gap below.
+  A wheel over them scrolls the strip as it does beside them.
   A thumbnail's corners are as round as those buttons, 17 px, and each corner button is centred on its corner's arc, so it fills the corner (user decision 2026-11-09).
   A press on one of them, as a page dropped into a gap, hands the keyboard to the page, so `Ctrl+Z` right after it takes the edit back.
   A copied page stays held for the whole app until the next copy, and while it is a PDF's, every PDF's strip shows Paste Page Here before Insert Page Here (user decision 2026-11-06).
   It goes in as a dropped PDF's pages do, toast included, from a copy of its document taken at the copy, so whatever happens to that document afterwards the page pasted is the one copied.
-  A click goes to its page on release, a press being how a drag begins.
+  A click goes to its page on release, a press being how a drag begins, and frames that page even where the reading view cannot bring it to its middle, as in a document whose pages all fit.
   Ctrl+click picks a page or lets it go, and Shift+click picks every page from the one last Ctrl+clicked, else the one being read, to the one clicked, so the pages picked wear the accent frame in its place until a plain click goes to a page again (user decision 2026-11-10).
   Copy Page, Delete Page and a drag on a picked page take every page picked, in their order and as one Undo step, a drag moving them as one block into its gap, while on a page not picked they take that page alone.
   Their tooltips count the pages they take, and Paste Page Here's counts the pages held, which go in together in their order.

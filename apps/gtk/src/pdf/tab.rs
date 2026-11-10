@@ -279,7 +279,6 @@ pub fn open(
         .vexpand(true)
         .child(&thumbs)
         .build();
-    crate::widgets::smooth_wheel(&thumb_strip);
     let tab = Rc::new(PdfTab {
         key: RefCell::new(key.to_string()),
         path: RefCell::new(path.to_path_buf()),
@@ -395,10 +394,15 @@ pub fn open(
         ));
     }
     tab.wire_strip(&thumbs);
+    // The page clicked is the one framed, which the reading view's middle may never come to: in
+    // a document whose pages all fit, the view does not scroll and its middle stays on one page.
     tab.organize.connect_goto(glib::clone!(
         #[weak]
         tab,
-        move |page| tab.goto_page(page)
+        move |page| {
+            tab.goto_page(page);
+            tab.thumbs.set_framed(page);
+        }
     ));
     tab.organize.connect_edit(glib::clone!(
         #[weak]

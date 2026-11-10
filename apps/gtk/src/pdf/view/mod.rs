@@ -311,8 +311,8 @@ impl PdfView {
         *self.imp().on_shown.borrow_mut() = Some(Box::new(f));
     }
 
-    /// Frame `page` in a thumbnail strip: the page the reading view is on, which the strip's own
-    /// scroll has no say in.
+    /// Frame `page` in a thumbnail strip: the page the reading view is on, or the one a click on
+    /// the strip went to, which the strip's own scroll has no say in.
     pub fn set_framed(&self, page: usize) {
         if self.imp().page.replace(page) != page {
             self.queue_draw();
