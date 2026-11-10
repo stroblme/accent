@@ -12,8 +12,8 @@ use crate::pdf::geometry::page_at;
 use crate::pdf::protocol::{NamedInk, NamedPicture, Pass, fresh_id};
 use crate::pdf::tools::{
     HANDLE, Hand, Handle, Lasso, Mode, PICK_RADIUS, Picked, Selection, Stroke, clamp_move,
-    drag_matrix, drag_of, handle_at, lock_axis, rotate_handle, shape_of, snap, turn_matrix,
-    width_of,
+    drag_matrix, drag_of, handle_at, lock_axis, on_knob, rotate_handle, shape_of, snap, snap_angle,
+    turn_matrix, width_of,
 };
 
 impl PdfView {
@@ -143,6 +143,8 @@ impl PdfView {
                             _ => return,
                         };
                         let at = obj.point_on(page, x + dx, y + dy);
+                        let shift =
+                            (gesture.current_event_state()).contains(gdk::ModifierType::SHIFT_MASK);
                         let merged: Vec<(f32, f32)> = match mode.shapes() {
                             true => Vec::new(),
                             false => merged(gesture, &obj)
@@ -157,7 +159,13 @@ impl PdfView {
                             if mode.shapes() {
                                 let anchor = stroke.points[0];
                                 stroke.points.truncate(1);
+                                // With Shift a line keeps to steps of 15°, on the paper.
+                                let size = obj.page_size(page).unwrap_or((f32::MAX, f32::MAX));
+                                let on_paper = |(x, y): (f32, f32)| {
+                                    (x.clamp(0.0, size.0), y.clamp(0.0, size.1))
+                                };
                                 stroke.points.push(match mode {
+                                    Mode::Line if shift => on_paper(snap_angle(anchor, at)),
                                     Mode::Line => snap(anchor, at),
                                     _ => at,
                                 });
@@ -436,7 +444,14 @@ impl PdfView {
             return Some(Handle::Rotate);
         }
         let handle = handle_at(b, at, grip)?;
-        Some(if s.moves_only() { Handle::Move } else { handle })
+        // An edge gives way, away from its knob, to what lies along it: a press on a stroke
+        // there takes the stroke.
+        let taken = !on_knob(b, handle, at, grip) && self.pick_at(s.page, at).is_some();
+        Some(if s.moves_only() || taken {
+            Handle::Move
+        } else {
+            handle
+        })
     }
 
     /// The stroke, text or picture of ours at `at` on `page`: a stroke whose edge is within

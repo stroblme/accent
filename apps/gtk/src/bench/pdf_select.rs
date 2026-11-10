@@ -1,14 +1,14 @@
 //! The Select tool's drill, `ACCENT_BENCH_PDF=select:<rel>[,<n>]`: on the first page, two lines,
 //! a rectangle and a text of ours written into the file first, then through XTEST a lasso, a
-//! move and its Undo, a Ctrl+drag's copies and a Shift+drag along one axis, each undone, a copy
-//! pasted a step off it, a pick and a delete, Ctrl+click, a cut pasted
-//! in place, a click away and Escape, a group stretched by its corner, a duplicate and the arrows,
-//! the lines and the text recoloured through the ring's Colour and through the palette's Recolour
-//! Selection, each against the file. Pictures of the lasso, the group and the Colour swatches,
-//! light and dark, go to `$TMPDIR`. Last another
-//! editor's stroke, in a file of its own beside it, is recoloured and drawn again as ours. With
-//! `,<n>`, `n` strokes down the page's left edge first, and how long the render thread takes to
-//! move and delete them all. Writes the files.
+//! move by a line lying along the box's edge and its Undo, a Ctrl+drag's copies and a Shift+drag
+//! along one axis, each undone, a copy pasted a step off it, a pick and a delete, Ctrl+click, a
+//! cut pasted in place, a click away and Escape, a group stretched by its corner, a duplicate and
+//! the arrows, the lines and the text recoloured through the ring's Colour and through the
+//! palette's Recolour Selection, each against the file. Pictures of the lasso, the group and the
+//! Colour swatches, light and dark, go to `$TMPDIR`. Then a line drawn with Shift keeps to 45°,
+//! and last another editor's stroke, in a file of its own beside it, is recoloured and drawn again
+//! as ours. With `,<n>`, `n` strokes down the page's left edge first, and how long the render
+//! thread takes to move and delete them all. Writes the files.
 
 use super::pdf::{opened, written};
 use super::*;
@@ -161,8 +161,9 @@ pub(super) fn bench_pdf_select(app: &Rc<App>, arg: &str) {
         );
         picture(&view, "select-picked.png");
 
-        // Dragged by one of them, both go down 40 px; one Undo puts both back.
-        if let Some((x, y)) = at((150.0, LEFT[0])) {
+        // Dragged by one of them, both go down 40 px; one Undo puts both back. The first lies
+        // along the box's top edge, which gives way to it away from the edge's middle knob.
+        if let Some((x, y)) = at((120.0, LEFT[0])) {
             let steps = format!(
                 "move {x:.0} {y:.0}; down; sleep 0.1; move {x:.0} {:.0}; sleep 0.1; \
                  move {x:.0} {:.0}; sleep 0.1; up",
@@ -175,14 +176,14 @@ pub(super) fn bench_pdf_select(app: &Rc<App>, arg: &str) {
         let moved = filed(&path);
         let changed = moved.iter().filter(|p| !drawn.contains(p)).count();
         let others = [drawn[2], drawn[3]].iter().all(|p| moved.contains(p));
-        println!("bench select moved={changed} others_same={others}");
+        let landed: Vec<&(i32, i32)> = moved.iter().filter(|p| !drawn.contains(p)).collect();
+        println!("bench select moved={changed} others_same={others} to={landed:?}");
         undo(false).await;
         println!("bench select undone one_step={}", filed(&path) == drawn);
 
         // Dragged 40 px down by one of them with Ctrl, both are copied there and stay where they
         // were, and one Undo takes the copies back; with Shift, a drag 60 px across and 15 down
-        // from between them (the first line lies on the box's top edge, which stretches) moves
-        // them across alone.
+        // from between them moves them across alone.
         let drag_by = |key: &str, from: (f32, f32), dx: f64, dy: f64| {
             let (x, y) = at(from)?;
             Some(format!(
@@ -446,6 +447,36 @@ pub(super) fn bench_pdf_select(app: &Rc<App>, arg: &str) {
             super::git::xtest("up").await;
         }
         crate::theme::apply(Theme::Light);
+
+        // A line drawn with Shift 90 pt across and 80 down keeps to 45°, and one Undo takes it.
+        let inks = || pdf::PdfDoc::open(&path).ok().and_then(|d| d.inks(0).ok());
+        let before = inks().map_or(0, |inks| inks.len());
+        app.pdf_mode(pdfview::Mode::Line);
+        glib::timeout_future(Duration::from_secs(1)).await;
+        if let (Some((x0, y0)), Some((x1, y1))) = (at((300.0, 400.0)), at((390.0, 480.0))) {
+            let steps = format!(
+                "keydown shift; move {x0:.0} {y0:.0}; down; sleep 0.1; move {:.0} {:.0}; \
+                 sleep 0.1; move {x1:.0} {y1:.0}; sleep 0.1; up; keyup shift",
+                (x0 + x1) / 2.0,
+                (y0 + y1) / 2.0
+            );
+            super::git::xtest(&steps).await;
+        }
+        save().await;
+        let after = inks();
+        let added = after
+            .as_ref()
+            .map_or(0, |inks| inks.len())
+            .saturating_sub(before);
+        let ends = after.and_then(|inks| {
+            let points = &inks.last()?.points;
+            Some((*points.first()?, *points.last()?))
+        });
+        let angle =
+            ends.map(|(a, b)| ((b.1 - a.1).atan2(b.0 - a.0).to_degrees() * 10.0).round() / 10.0);
+        println!("bench select shift_line +{added} angle={angle:?}");
+        undo(false).await;
+        app.pdf_mode(pdfview::Mode::Select);
 
         if fill > 0 {
             timed(&app, &pdf, &reader, &path, fill).await;

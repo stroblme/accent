@@ -1175,7 +1175,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Another editor's stroke is cut along its `/InkList`, where it shows, its pieces drawn as ours; one without an `/InkList`, or whose paths differ in colour or width, is taken whole rather than redrawn wrong.
   Another editor's stroke leaves `/Annots` with its popup, its dictionary untouched in the file, so Undo puts both back where they were, as they were, appearance stream and dates included.
   A text of ours goes whole, under either eraser, once the pass comes within reach of its box.
-- Line, Rectangle and Circle are `/Ink` too, from press to release — a line snaps onto an axis within 4°, a circle grows from the press — because the eraser, Select and every read here know ink alone.
+- Line, Rectangle and Circle are `/Ink` too, from press to release — a line snaps onto an axis within 4° and with Shift to steps of 15°, a circle grows from the press — because the eraser, Select and every read here know ink alone.
 - **Text types onto the page** (user decision 2026-10-27), for when no pen is at hand, as Firefox's PDF editor does: a click opens a box there, the diagram's label editor, plain, in a face like Helvetica at the text's size on screen, in its colour as the page shows it and with its lines and baselines where the page will set them.
   Return starts a line, nothing wraps, and the box grows with the text; `Ctrl+Return`, `Escape` or a click elsewhere finishes it, that click opening no other, and a box left empty writes nothing.
   A click on a text of ours opens it to type again, the box never smaller than the text was, so none of it shows round it; emptied, it is erased.
@@ -1189,6 +1189,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A click on the paper lets go of everything, and so does `Escape`, a second `Escape` putting the tool down.
 - What Select holds shows one box round it all with eight handles and the diagram's ring beyond the top-right corner, and a dashed box round each item when there are two or more.
   A drag inside the box moves the lot, stopping at the paper's edge and with Shift keeping to the axis it goes furthest along, an edge stretches one axis, a corner scales both alike, and the ring turns them about their middle, freely, or in steps of 15° with Shift.
+  Away from its middle handle an edge gives way to what lies along it, so a press on a stroke there takes the stroke and a drag moves it.
   With a picture among them every handle keeps the proportions, an edge scaling both axes about the opposite edge's middle, and while the hand is on it the picture shows as its outline filled as a highlight is.
   A text only moves, its corner going where the others take it, since its size is the Text tool's and an editor typing into a turned one would set it upright again, so texts alone show their box without handles or ring.
   While it turns the box turns with it and shows no handles, as a diagram's shape does, and once let go the turn is in the strokes themselves, no angle kept beside them.

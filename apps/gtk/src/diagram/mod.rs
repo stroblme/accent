@@ -8,7 +8,7 @@
 pub mod embed;
 pub mod export;
 mod face;
-mod geometry;
+pub(crate) mod geometry;
 mod input;
 pub mod label;
 mod layers;

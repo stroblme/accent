@@ -174,6 +174,15 @@ pub fn snap(a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
     }
 }
 
+/// A line's end with Shift held: turned about its start onto the nearest step of 15°, its length
+/// kept, as a diagram's line keeps to them (`diagram::geometry::snap_angle`).
+pub fn snap_angle(a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
+    use accent_drawio::Point;
+    let point = |(x, y): (f32, f32)| Point::new(f64::from(x), f64::from(y));
+    let end = crate::diagram::geometry::snap_angle(point(a), point(b), None);
+    (end.x as f32, end.y as f32)
+}
+
 /// The shape a drag from `a` to `b` means under `mode`, or nothing for a drag too short to be
 /// one — a click in a shape mode draws nothing — and for any other mode.
 pub fn shape_of(mode: Mode, a: (f32, f32), b: (f32, f32)) -> Option<accent_core::pdf::Shape> {
@@ -244,6 +253,20 @@ pub fn handle_at(bounds: accent_core::pdf::Rect, at: (f32, f32), grip: f32) -> O
         (_, _, _, true) => Handle::Bottom,
         _ => Handle::Move,
     })
+}
+
+/// Whether `at` is on `handle`'s knob, the square drawn for it on `bounds`, within `grip`: a
+/// corner is all knob, an edge only at its middle.
+pub fn on_knob(bounds: accent_core::pdf::Rect, handle: Handle, at: (f32, f32), grip: f32) -> bool {
+    let (mx, my) = (
+        (bounds.left + bounds.right) / 2.0,
+        (bounds.top + bounds.bottom) / 2.0,
+    );
+    match handle {
+        Handle::Left | Handle::Right => (at.1 - my).abs() <= grip,
+        Handle::Top | Handle::Bottom => (at.0 - mx).abs() <= grip,
+        _ => true,
+    }
 }
 
 /// Where the rotate handle of a stroke with box `b` sits, in page points at `scale` pixels a point.
@@ -689,6 +712,28 @@ mod tests {
         let over = Rect { left: -5.0, ..b };
         assert_eq!(clamp_move(over, by(-3.0, 0.0), page), by(0.0, 0.0));
         assert_eq!(clamp_move(over, by(3.0, 0.0), page), by(3.0, 0.0));
+    }
+
+    #[test]
+    fn a_line_drawn_with_shift_keeps_to_steps_of_fifteen_degrees() {
+        assert_eq!(snap_angle((10.0, 10.0), (110.0, 16.0)), (110.18, 10.0));
+        assert_eq!(snap_angle((10.0, 10.0), (96.0, 59.0)), (95.72, 59.49));
+    }
+
+    #[test]
+    fn an_edge_s_knob_is_its_middle() {
+        use accent_core::pdf::Rect;
+        let b = Rect {
+            left: 0.0,
+            top: 0.0,
+            right: 100.0,
+            bottom: 40.0,
+        };
+        assert!(on_knob(b, Handle::Top, (52.0, 1.0), 6.0));
+        assert!(!on_knob(b, Handle::Top, (20.0, 1.0), 6.0));
+        assert!(on_knob(b, Handle::Right, (100.0, 24.0), 6.0));
+        assert!(!on_knob(b, Handle::Right, (100.0, 35.0), 6.0));
+        assert!(on_knob(b, Handle::TopLeft, (1.0, 1.0), 6.0));
     }
 
     #[test]
