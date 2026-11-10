@@ -17,8 +17,8 @@ use accent_pdf::{Pdf, Ref, Source};
 use pdfium_render::prelude::*;
 
 use super::{
-    Glyph, Info, Link, LinkTarget, Outline, Rect, Remote, RgbaImage, Theme, lock, parse_date,
-    pdfium,
+    Elsewhere, Glyph, Info, Link, LinkTarget, Outline, Rect, Remote, RgbaImage, Theme, lock,
+    parse_date, pdfium,
 };
 use crate::fs::Etag;
 use crate::recolour::recolour;
@@ -480,16 +480,7 @@ impl PdfDoc {
                             top: dest.top.map(|y| height_of(dest.page) - y),
                         },
                         accent_pdf::Target::Uri(uri) => LinkTarget::Uri(uri),
-                        accent_pdf::Target::File { file, dest } => LinkTarget::File {
-                            file,
-                            dest: match dest {
-                                accent_pdf::Remote::Page(dest) => Remote::Page {
-                                    page: dest.page,
-                                    y: dest.top,
-                                },
-                                accent_pdf::Remote::Named(name) => Remote::Named(name),
-                            },
-                        },
+                        accent_pdf::Target::File(to) => LinkTarget::File(elsewhere(to)),
                     },
                 }
             })
@@ -522,6 +513,7 @@ impl PdfDoc {
                 depth: b.depth,
                 title: b.title,
                 page: b.page,
+                file: b.file.map(elsewhere),
             })
             .collect())
     }
@@ -588,4 +580,19 @@ pub const A4: (f32, f32) = (595.28, 841.89);
 /// the result is a PDF every reader on the machine opens and our own pen draws on.
 pub fn blank_pdf(size: (f32, f32)) -> Result<Vec<u8>> {
     Ok(accent_pdf::new_document(size))
+}
+
+/// A place in another PDF as `accent_pdf` reads it, its y left in that file's page's own space.
+fn elsewhere(to: accent_pdf::Elsewhere) -> Elsewhere {
+    let dest = match to.dest {
+        accent_pdf::Remote::Page(dest) => Remote::Page {
+            page: dest.page,
+            y: dest.top,
+        },
+        accent_pdf::Remote::Named(name) => Remote::Named(name),
+    };
+    Elsewhere {
+        file: to.file,
+        dest,
+    }
 }

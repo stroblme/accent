@@ -34,6 +34,7 @@ fn by_pdfium(doc: &PdfDocument<'_>) -> Pdfium {
             page: (node.destination())
                 .and_then(|d| d.page_index().ok())
                 .map(|i| i as usize),
+            file: None,
         });
         if let Some(sibling) = node.next_sibling() {
             stack.push((sibling, depth));
@@ -153,6 +154,7 @@ fn host_outline(bytes: Vec<u8>) -> accent_pdf::Result<Vec<Outline>> {
                 depth: b.depth,
                 title: b.title,
                 page: b.page,
+                file: None,
             })
             .collect())
     })
@@ -161,10 +163,14 @@ fn host_outline(bytes: Vec<u8>) -> accent_pdf::Result<Vec<Outline>> {
 /// How the window's reading of a document differs from pdfium's, one line a difference, and how
 /// many links it found that pdfium missed: a destination named in UTF-8, which pdfium decodes as
 /// PDFDocEncoding before looking it up and so misses in a name tree sorted by its bytes. Links
-/// into other files are left out, pdfium having none to hold them to.
+/// into other files are left out, and the file a bookmark leads into, pdfium naming none.
 fn differences(doc: &PdfDoc, pdfium: &Pdfium) -> (Vec<String>, usize) {
     let (mut out, mut more) = (Vec::new(), 0);
-    match doc.outline() {
+    let outline = doc.outline().map(|marks| {
+        let here = |b: Outline| Outline { file: None, ..b };
+        marks.into_iter().map(here).collect::<Vec<_>>()
+    });
+    match outline {
         Ok(outline) if outline == pdfium.outline => {}
         outline => out.push(format!("outline {outline:?} pdfium {:?}", pdfium.outline)),
     }
@@ -226,7 +232,7 @@ fn differences(doc: &PdfDoc, pdfium: &Pdfium) -> (Vec<String>, usize) {
             .count()
     };
     let here = |links: Vec<Link>| -> Vec<Link> {
-        let here = |l: &Link| !matches!(l.target, LinkTarget::File { .. });
+        let here = |l: &Link| !matches!(l.target, LinkTarget::File(_));
         links.into_iter().filter(here).collect()
     };
     for (page, theirs) in pdfium.links.iter().enumerate() {
@@ -344,8 +350,10 @@ fn the_corpus_reads_its_outlines_links_and_information_as_pdfium_does() {
                 more += found;
                 into_others += (0..doc.page_count())
                     .flat_map(|page| doc.links(page).unwrap_or_default())
-                    .filter(|l| matches!(l.target, LinkTarget::File { .. }))
+                    .filter(|l| matches!(l.target, LinkTarget::File(_)))
                     .count();
+                let marks = doc.outline().unwrap_or_default();
+                into_others += marks.iter().filter(|b| b.file.is_some()).count();
                 lines
             }
             Err(e) => vec![format!("open {e:#}")],
@@ -366,7 +374,7 @@ fn the_corpus_reads_its_outlines_links_and_information_as_pdfium_does() {
     }
     eprintln!(
         "{read} PDFs pdfium reads, {marks} bookmarks, {links} links: {} differences, {more} links \
-         pdfium misses, {into_others} into other files",
+         pdfium misses, {into_others} links and bookmarks into other files",
         differ.len()
     );
     assert!(differ.is_empty());

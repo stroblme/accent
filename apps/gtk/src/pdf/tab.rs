@@ -34,6 +34,16 @@ pub(super) type TextEditor = crate::diagram::label::LabelEditor<super::typed::Ty
 pub use accent_core::config::PdfPlace as Place;
 
 pub(super) type TabHook = Hook<dyn Fn(&Rc<PdfTab>)>;
+
+/// Where a row of a PDF's Outline pane goes: a bookmark, by its place in [`PdfTab::outline`], a
+/// page, or a page's comment by its place on the page.
+#[derive(Debug, Clone, Copy)]
+pub enum Row {
+    Bookmark(usize),
+    Page(usize),
+    Comment(usize, usize),
+}
+
 /// A highlight was clicked: the note holding the link, and the byte it starts at.
 type NoteHook = Hook<dyn Fn(&str, usize)>;
 /// An export finished, with what it wrote or why it could not.
@@ -43,8 +53,10 @@ type FailHook = Hook<dyn Fn(&Rc<PdfTab>, String)>;
 /// A width or a colour was picked on the ring for a tool.
 type ChoiceHook = Hook<dyn Fn(&Rc<PdfTab>, pdfview::Mode, ring::Choice)>;
 type UriHook = Hook<dyn Fn(&str)>;
-/// A link into another PDF was followed: the file it names and where in it.
-type FileHook = Hook<dyn Fn(&Rc<PdfTab>, &str, &pdf::Remote)>;
+/// A link or a bookmark into another PDF was followed: the file it names and where in it.
+type FileHook = Hook<dyn Fn(&Rc<PdfTab>, &pdf::Elsewhere)>;
+/// The file on this machine a link into another PDF names, for its preview to read.
+type LocateHook = Hook<dyn Fn(&Rc<PdfTab>, &str) -> Option<PathBuf>>;
 /// A link from another PDF named a place this one has not.
 type NowhereHook = Hook<dyn Fn(&Rc<PdfTab>, &pdf::Remote)>;
 /// The pages were edited, or an edit walked by Undo or Redo: the edit made, and its step.
@@ -209,6 +221,7 @@ pub struct PdfTab {
     pub(super) on_matches: TabHook,
     pub(super) on_uri: UriHook,
     pub(super) on_file: FileHook,
+    pub(super) on_locate: LocateHook,
     pub(super) on_nowhere: NowhereHook,
     pub(super) on_mode: TabHook,
     pub(super) on_history: TabHook,
@@ -358,6 +371,7 @@ pub fn open(
         on_matches: Hook::default(),
         on_uri: Hook::default(),
         on_file: Hook::default(),
+        on_locate: Hook::default(),
         on_nowhere: Hook::default(),
         on_mode: Hook::default(),
         on_history: Hook::default(),
@@ -952,6 +966,29 @@ impl PdfTab {
         covering(&self.outline.borrow(), self.current_page())
     }
 
+    /// Go where a row of the Outline pane says: a bookmark to its page, or into the other PDF it
+    /// names as a link into one goes, a page, or a comment, which it pins.
+    pub fn go_to_row(self: &Rc<Self>, row: Row) {
+        match row {
+            Row::Bookmark(at) => {
+                let Some(mark) = self.outline.borrow().get(at).cloned() else {
+                    return;
+                };
+                match (mark.page, mark.file) {
+                    (None, Some(to)) => {
+                        if let Some(f) = self.on_file.get() {
+                            f(self, &to);
+                        }
+                    }
+                    // One that leads nowhere goes to the first page.
+                    (page, _) => self.goto_page(page.unwrap_or(0)),
+                }
+            }
+            Row::Page(page) => self.goto_page(page),
+            Row::Comment(page, at) => self.show_comment(page, at),
+        }
+    }
+
     /// The thumbnail strip, for the Outline pane to show under the bookmarks.
     ///
     /// Built once and handed out again on every refresh, so it keeps its scroll position and its
@@ -1122,10 +1159,16 @@ impl PdfTab {
         self.on_uri.set(Rc::new(f));
     }
 
-    /// Called when a link into another PDF is followed, with the file it names, relative to this
-    /// one's folder unless absolute, and where in it.
-    pub fn connect_file(&self, f: impl Fn(&Rc<PdfTab>, &str, &pdf::Remote) + 'static) {
+    /// Called when a link or a bookmark into another PDF is followed, with the file it names,
+    /// relative to this one's folder unless absolute, and where in it.
+    pub fn connect_file(&self, f: impl Fn(&Rc<PdfTab>, &pdf::Elsewhere) + 'static) {
         self.on_file.set(Rc::new(f));
+    }
+
+    /// Asked for the file on this machine that a link into another PDF names, which its preview
+    /// reads; `None` for one there is none of.
+    pub fn connect_locate(&self, f: impl Fn(&Rc<PdfTab>, &str) -> Option<PathBuf> + 'static) {
+        self.on_locate.set(Rc::new(f));
     }
 
     /// Called when a link from another PDF names a page or a destination this one has not.
@@ -1279,6 +1322,7 @@ mod tests {
             depth,
             title: String::new(),
             page,
+            file: None,
         };
         // A chapter on the second page with a section on the third, a bookmark naming no page,
         // and an appendix on the fifth.

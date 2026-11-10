@@ -800,13 +800,14 @@ impl App {
                 };
                 return sidebar.set_outline(Some(&sidebar::outline_note(title, body)));
             }
-            // A bookmark's row goes to its page, a comment's to the comment, which it pins.
-            let mut rows: Vec<(sidebar::Line, (usize, Option<usize>))> = pdf
+            // A bookmark's row goes where it leads, a comment's to the comment, which it pins.
+            let mut rows: Vec<(sidebar::Line, pdftab::Row)> = pdf
                 .outline()
                 .iter()
-                .map(|entry| {
+                .enumerate()
+                .map(|(at, entry)| {
                     let line = sidebar::Line::new(entry.depth as u8 + 1, entry.title.clone());
-                    (line, (entry.page.unwrap_or(0), None))
+                    (line, pdftab::Row::Bookmark(at))
                 })
                 .collect();
             rows.extend(pdf.comment_rows());
@@ -821,10 +822,7 @@ impl App {
             let jump = glib::clone!(
                 #[weak]
                 pdf,
-                move |(page, comment)| match comment {
-                    Some(at) => pdf.show_comment(page, at),
-                    None => pdf.goto_page(page),
-                }
+                move |row| pdf.go_to_row(row)
             );
             sidebar.set_outline_rows(&doc.key(), &rows, jump, Some(&pdf.thumbnails()));
             // The bookmarks are new, or a page edit moved them: either way the one the page being

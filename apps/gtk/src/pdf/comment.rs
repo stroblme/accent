@@ -8,7 +8,7 @@ use adw::prelude::*;
 use gtk::{gdk, glib, pango};
 
 use super::Mode;
-use super::tab::PdfTab;
+use super::tab::{PdfTab, Row};
 
 /// How many lines of a comment a tooltip shows: it is a glance, and the pinned popover has it all.
 const TIP_LINES: i32 = 12;
@@ -91,7 +91,7 @@ impl PdfTab {
     /// The Outline pane's rows for the comments of every page read so far, under a "Comments"
     /// heading and their page's row, each its author and its first line; none for a document
     /// without. Each row jumps to its page, and to a comment by its place on the page.
-    pub fn comment_rows(&self) -> Vec<(crate::sidebar::Line, (usize, Option<usize>))> {
+    pub fn comment_rows(&self) -> Vec<(crate::sidebar::Line, Row)> {
         use crate::sidebar::Line;
         let comments = self.comments.borrow();
         let mut pages: Vec<usize> = comments
@@ -103,9 +103,9 @@ impl PdfTab {
             return Vec::new();
         }
         pages.sort_unstable();
-        let mut rows = vec![(Line::new(0, "Comments".to_string()), (0, None))];
+        let mut rows = vec![(Line::new(0, "Comments".to_string()), Row::Page(0))];
         for page in pages {
-            rows.push((Line::new(1, format!("Page {}", page + 1)), (page, None)));
+            rows.push((Line::new(1, format!("Page {}", page + 1)), Row::Page(page)));
             for (at, comment) in comments[&page].iter().enumerate() {
                 let first = comment.text.lines().map(str::trim).find(|l| !l.is_empty());
                 let line = Line {
@@ -113,7 +113,7 @@ impl PdfTab {
                     lead: comment.author.clone().unwrap_or_default(),
                     text: first.unwrap_or_default().to_string(),
                 };
-                rows.push((line, (page, Some(at))));
+                rows.push((line, Row::Comment(page, at)));
             }
         }
         rows

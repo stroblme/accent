@@ -624,10 +624,9 @@ fn expected_outline() -> Vec<(usize, String, Option<usize>)> {
 }
 
 /// The outline, depth first and cut where it loops; where each entry and link leads, by an
-/// explicit, a named or an old-style destination or a GoTo action, an entry into another file
-/// leading nowhere and a link into one to its page or its named destination there; the
-/// destinations it names, as a link from another file finds them; and what the information
-/// dictionary says.
+/// explicit, a named or an old-style destination or a GoTo action, or into another file to its
+/// page or its named destination there; the destinations it names, as a link from another file
+/// finds them; and what the information dictionary says.
 #[test]
 fn a_document_reads_its_outline_links_and_information() {
     let mut b = Build::new();
@@ -638,6 +637,14 @@ fn a_document_reads_its_outline_links_and_information() {
 
     let pages = pdf.pages().unwrap();
     let doc = Document::new(&pdf, None, &pages);
+    let elsewhere = |file: &str, dest| Elsewhere {
+        file: file.to_string(),
+        dest,
+    };
+    let first = Remote::Page(Dest { page: 0, top: None });
+    let marks: Vec<_> = doc.outline().unwrap().into_iter().map(|b| b.file).collect();
+    let remote = Some(elsewhere("other.pdf", first));
+    assert_eq!(marks, [None, None, None, remote]);
     let page = |page, top| Target::Page(Dest { page, top });
     let links: Vec<_> = (doc.links(pages[0]).unwrap().into_iter())
         .map(|l| (l.rect, l.target))
@@ -654,20 +661,17 @@ fn a_document_reads_its_outline_links_and_information() {
             ([0.0, 0.0, 5.0, 5.0], uri("https://x")),
             (
                 [0.0, 0.0, 5.0, 5.0],
-                Target::File {
-                    file: "sub/other.pdf".to_string(),
-                    dest: Remote::Page(Dest {
+                Target::File(elsewhere(
+                    "sub/other.pdf",
+                    Remote::Page(Dest {
                         page: 1,
                         top: Some(700.0)
-                    }),
-                }
+                    })
+                ))
             ),
             (
                 [0.0, 0.0, 5.0, 5.0],
-                Target::File {
-                    file: "Ü.pdf".to_string(),
-                    dest: Remote::Named(b"chap".to_vec()),
-                }
+                Target::File(elsewhere("Ü.pdf", Remote::Named(b"chap".to_vec())))
             ),
         ]
     );

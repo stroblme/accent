@@ -91,22 +91,21 @@ impl PdfTab {
 
     /// Put a popover over the link. A page target gets a band of the page it leads to, an
     /// external one gets the address it would open, which is the thing worth knowing before
-    /// clicking it, and one into another PDF that file's name, and its page where the link
-    /// names one rather than a destination only that file can find.
+    /// clicking it, and one into another PDF the same band of that file's page under its name,
+    /// read once the file is ([`PdfTab::fill_band_elsewhere`]).
     fn show_preview(self: &Rc<Self>, target: LinkTarget, x: f64, y: f64) {
         let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
         let band = adw::Bin::new();
+        let caption = gtk::Label::builder()
+            .css_classes(["caption", "dimmed"])
+            .xalign(0.0)
+            .build();
         match &target {
             LinkTarget::Page { page, .. } => {
                 band.set_size_request(LOWRES_W, BAND);
                 content.append(&band);
-                content.append(
-                    &gtk::Label::builder()
-                        .label(format!("Page {}", page + 1))
-                        .css_classes(["caption", "dimmed"])
-                        .xalign(0.0)
-                        .build(),
-                );
+                caption.set_label(&format!("Page {}", page + 1));
+                content.append(&caption);
             }
             LinkTarget::Uri(uri) => content.append(
                 &gtk::Label::builder()
@@ -117,23 +116,25 @@ impl PdfTab {
                     .xalign(0.0)
                     .build(),
             ),
-            LinkTarget::File { file, dest } => {
+            LinkTarget::File(to) => {
+                if let Some(path) = self.on_locate.get().and_then(|f| f(self, &to.file)) {
+                    band.set_size_request(LOWRES_W, BAND);
+                    content.append(&band);
+                    self.fill_band_elsewhere(path, to, &band, &caption);
+                }
                 content.append(
                     &gtk::Label::builder()
-                        .label(crate::doc::file_name(file))
+                        .label(crate::doc::file_name(&to.file))
                         .css_classes(["caption"])
                         .xalign(0.0)
                         .build(),
                 );
-                if let pdf::Remote::Page { page, .. } = dest {
-                    content.append(
-                        &gtk::Label::builder()
-                            .label(format!("Page {}", page + 1))
-                            .css_classes(["caption", "dimmed"])
-                            .xalign(0.0)
-                            .build(),
-                    );
+                // A named destination's page is known once the file has been read.
+                if let pdf::Remote::Page { page, .. } = to.dest {
+                    caption.set_label(&format!("Page {}", page + 1));
                 }
+                caption.set_visible(!caption.label().is_empty());
+                content.append(&caption);
             }
         }
         // Never autohide: an autohiding popover takes a grab, and this one is under the pointer
@@ -152,7 +153,7 @@ impl PdfTab {
         popover.popup();
         let page = match target {
             LinkTarget::Page { page, top } => Some((page, top)),
-            LinkTarget::Uri(_) | LinkTarget::File { .. } => None,
+            LinkTarget::Uri(_) | LinkTarget::File(_) => None,
         };
         *self.preview.borrow_mut() = Some(Preview {
             popover,
@@ -190,15 +191,47 @@ impl PdfTab {
             return;
         };
         drop(preview);
-        if band.child().is_some() {
-            return;
+        if band.child().is_none() {
+            put_band(&band, &texture, top, page_h);
         }
-        let offset = band_offset(top, page_h, texture.height() as f32);
-        let strip = crop(&texture, offset, BAND);
-        let picture = gtk::Picture::for_paintable(&strip);
-        picture.set_size_request(strip.width(), strip.height());
-        band.set_child(Some(&picture));
     }
+
+    /// Fill `band` with the page a link into the PDF at `path` leads to, and `caption` with its
+    /// number, once the thread that reads other files has drawn it; a file that does not read
+    /// takes the band away. A popover gone meanwhile has nothing left to fill.
+    fn fill_band_elsewhere(
+        &self,
+        path: std::path::PathBuf,
+        to: &pdf::Elsewhere,
+        band: &adw::Bin,
+        caption: &gtk::Label,
+    ) {
+        let asked = super::elsewhere::page(path, to.dest.clone(), self.view.theme());
+        let (band, caption) = (band.downgrade(), caption.downgrade());
+        glib::spawn_future_local(async move {
+            // Dropped for a newer link's: that popover has taken this one's place.
+            let Ok(seen) = asked.await else { return };
+            let (Some(band), Some(caption)) = (band.upgrade(), caption.upgrade()) else {
+                return;
+            };
+            let Some(seen) = seen else {
+                return band.set_visible(false);
+            };
+            caption.set_label(&format!("Page {}", seen.page + 1));
+            caption.set_visible(true);
+            let texture = super::cache::texture(seen.image);
+            put_band(&band, &texture, seen.top, seen.height);
+        });
+    }
+}
+
+/// Show the band of a page's stand-in `texture` around `top`, points down a page `page_h` tall.
+fn put_band(band: &adw::Bin, texture: &gtk::gdk::MemoryTexture, top: Option<f32>, page_h: f32) {
+    let offset = band_offset(top, page_h, texture.height() as f32);
+    let strip = crop(texture, offset, BAND);
+    let picture = gtk::Picture::for_paintable(&strip);
+    picture.set_size_request(strip.width(), strip.height());
+    band.set_child(Some(&picture));
 }
 
 /// How far to slide a low-resolution page up so the band shows what a link points at.

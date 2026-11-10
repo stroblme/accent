@@ -223,7 +223,7 @@ fn a_link_into_another_pdf_lands_where_that_file_says() {
     ]);
     let dests: Vec<_> = (doc_of(linking).unwrap().links(0).unwrap().into_iter())
         .map(|link| match link.target {
-            LinkTarget::File { file, dest } => (file, dest),
+            LinkTarget::File(to) => (to.file, to.dest),
             target => panic!("{target:?}"),
         })
         .collect();

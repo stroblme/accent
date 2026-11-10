@@ -194,9 +194,9 @@ impl PdfTab {
                     f(&uri);
                 }
             }
-            LinkTarget::File { file, dest } => {
+            LinkTarget::File(to) => {
                 if let Some(f) = self.on_file.get() {
-                    f(self, &file, &dest);
+                    f(self, &to);
                 }
             }
         }

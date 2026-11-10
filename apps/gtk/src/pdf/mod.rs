@@ -6,7 +6,8 @@
 //! `tools` and `ring` provide drawing geometry and options, `typed` the Text tool's editor;
 //! `comment` shows annotations.
 //! `drop` and the thumbnail strip (`crate::organize`) edit pages, and `drop` and `clipboard` put
-//! pictures from outside on them, read by `pictures`; `export` writes print/export copies,
+//! pictures from outside on them, read by `pictures`; `elsewhere` reads the pages of other PDFs
+//! a link preview shows; `export` writes print/export copies,
 //! `source` supplies SyncTeX, and `window` integrates PDF tabs and commands with the app.
 //!
 //! Re-exports preserve the window's `pdfview::` and `pdftab::` names.
@@ -16,6 +17,7 @@ mod clipboard;
 mod comment;
 mod disk;
 mod drop;
+mod elsewhere;
 pub mod export;
 pub mod geometry;
 mod input;

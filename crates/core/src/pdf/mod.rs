@@ -344,13 +344,16 @@ pub enum LinkTarget {
         top: Option<f32>,
     },
     Uri(String),
-    /// A place in another PDF (`/GoToR`): the file as the link names it, relative to this
-    /// document's folder unless absolute, and where in it, which that file's
-    /// [`PdfDoc::destination`] reads.
-    File {
-        file: String,
-        dest: Remote,
-    },
+    File(Elsewhere),
+}
+
+/// A place in another PDF (`/GoToR`): the file as a link or a bookmark names it, relative to
+/// this document's folder unless absolute, and where in it, which that file's
+/// [`PdfDoc::destination`] reads.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Elsewhere {
+    pub file: String,
+    pub dest: Remote,
 }
 
 /// Where in another PDF a link leads: a page of it and the y its view wants at the top, in that
@@ -368,12 +371,14 @@ pub struct Link {
     pub target: LinkTarget,
 }
 
-/// One entry of the document outline, flattened depth-first.
+/// One entry of the document outline, flattened depth-first: the page it leads to, or the place
+/// in another PDF.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Outline {
     pub depth: usize,
     pub title: String,
     pub page: Option<usize>,
+    pub file: Option<Elsewhere>,
 }
 
 /// What a document says about itself: its information dictionary, each entry `None` where it

@@ -538,7 +538,7 @@ impl TryFrom<pdf::Link> for PdfLinkBox {
                     top,
                 },
                 pdf::LinkTarget::Uri(uri) => LinkTarget::Uri { uri },
-                pdf::LinkTarget::File { .. } => return Err(()),
+                pdf::LinkTarget::File(_) => return Err(()),
             },
         })
     }

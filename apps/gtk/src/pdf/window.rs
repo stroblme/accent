@@ -1,7 +1,7 @@
 //! Window integration for PDF tabs: opening, remote saves, note highlights and commands.
 
 use crate::*;
-use accent_core::pdf::{PageEdit, Remote};
+use accent_core::pdf::{Elsewhere, PageEdit, Remote};
 
 use super::pictures::Incoming;
 
@@ -203,7 +203,13 @@ impl App {
         pdf.connect_file(glib::clone!(
             #[weak(rename_to = app)]
             self,
-            move |pdf, file, dest| app.follow_into(pdf, file, dest.clone())
+            move |pdf, to| app.follow_into(pdf, to)
+        ));
+        pdf.connect_locate(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            #[upgrade_or_default]
+            move |pdf, file| app.linked_path(pdf, file)
         ));
         // As a diagram's link to a page it has not says so (DESIGN.md, Diagram).
         pdf.connect_nowhere(glib::clone!(
@@ -255,16 +261,12 @@ impl App {
         });
     }
 
-    /// Follow a link of `from` into another PDF, `file` as the link names it: in the tab showing
-    /// that file, or one opened for it as a followed link opens one, at `dest`, Back returning to
-    /// the link. A file that is not there, or not a PDF, is said in a toast and opens nothing.
-    fn follow_into(self: &Rc<Self>, from: &Rc<pdftab::PdfTab>, file: &str, dest: Remote) {
-        let what = format!("open {}", doc::file_name(file));
-        let vault = self.vault().map(|v| (v.root(), v.is_remote()));
-        let vault = vault
-            .as_ref()
-            .map(|(root, remote)| (root.as_path(), *remote));
-        let Some(key) = linked_key(vault, &from.key(), file) else {
+    /// Follow a link or a bookmark of `from` into another PDF: in the tab showing that file, or
+    /// one opened for it as a followed link opens one, at the place it names, Back returning to
+    /// `from`. A file that is not there, or not a PDF, is said in a toast and opens nothing.
+    fn follow_into(self: &Rc<Self>, from: &Rc<pdftab::PdfTab>, to: &Elsewhere) {
+        let what = format!("open {}", doc::file_name(&to.file));
+        let Some(key) = self.linked(from, &to.file) else {
             return self.cannot(&what, "not in this vault");
         };
         if doc::kind_of(&key) != Kind::Pdf {
@@ -273,7 +275,7 @@ impl App {
         self.mark_page(&from.page);
         // Asked on a worker, a remote vault's of its host; a loose file's open looks for it.
         let vault = self.vault().filter(|_| !doc::is_loose_key(&key)).cloned();
-        let weak = Rc::downgrade(self);
+        let (weak, dest) = (Rc::downgrade(self), to.dest.clone());
         glib::spawn_future_local(async move {
             let there = match vault {
                 Some(vault) => {
@@ -295,6 +297,28 @@ impl App {
                 Err(why) => app.toast(&why),
             }
         });
+    }
+
+    /// The key of the file a link of `from` names as `file` ([`linked_key`]).
+    fn linked(&self, from: &pdftab::PdfTab, file: &str) -> Option<String> {
+        let vault = self.vault().map(|v| (v.root(), v.is_remote()));
+        let vault = vault
+            .as_ref()
+            .map(|(root, remote)| (root.as_path(), *remote));
+        linked_key(vault, &from.key(), file)
+    }
+
+    /// The PDF on this machine a link of `from` names as `file`, for its preview to read: `None`
+    /// on a remote vault, whose copy would have to come over first.
+    fn linked_path(&self, from: &pdftab::PdfTab, file: &str) -> Option<PathBuf> {
+        let key = self.linked(from, file)?;
+        if doc::kind_of(&key) != Kind::Pdf {
+            return None;
+        }
+        match doc::is_loose_key(&key) {
+            true => Some(PathBuf::from(key)),
+            false => self.vault().filter(|v| !v.is_remote())?.resolve(&key).ok(),
+        }
     }
 
     /// Put the pages of the PDF `from`, a vault path or the absolute path of a file from outside,

@@ -24,24 +24,28 @@ pub struct Dest {
 }
 
 /// One entry of the outline, depth first: its title, blanks for control characters, and the
-/// page it leads to.
+/// page it leads to, or the place in another file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Bookmark {
     pub depth: usize,
     pub title: String,
     pub page: Option<usize>,
+    pub file: Option<Elsewhere>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Target {
     Page(Dest),
     Uri(String),
-    /// A place in another file, a GoToR action's (§12.6.4.3): the file as its specification
-    /// names it (§7.11), relative to this one's folder unless absolute, and where in it.
-    File {
-        file: String,
-        dest: Remote,
-    },
+    File(Elsewhere),
+}
+
+/// A place in another file, a GoToR action's (§12.6.4.3): the file as its specification names it
+/// (§7.11), relative to this one's folder unless absolute, and where in it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Elsewhere {
+    pub file: String,
+    pub dest: Remote,
 }
 
 /// Where in another file a link leads: a page of that file, numbered from 0, its top in that
@@ -153,6 +157,7 @@ impl<'a> Document<'a> {
                     .map(|c| if c > ' ' { c } else { ' ' })
                     .collect(),
                 page: self.goes(&item)?.map(|dest| dest.page),
+                file: self.remote(&item)?,
             });
             if let Some(next) = item.get(b"Next") {
                 stack.push((next.clone(), depth));
@@ -187,7 +192,7 @@ impl<'a> Document<'a> {
                     None => continue,
                 },
                 None => match (self.remote(&annot)?, self.uri(&annot)?) {
-                    (Some(file), _) => file,
+                    (Some(file), _) => Target::File(file),
                     (None, Some(uri)) => Target::Uri(uri),
                     (None, None) => continue,
                 },
@@ -366,8 +371,8 @@ impl<'a> Document<'a> {
 
     /// A GoToR action's file and where in it: a page array, whose first element is a page
     /// number of that file, or a name it defines.
-    fn remote(&self, annot: &Dict) -> Result<Option<Target>> {
-        let action = self.dict(annot, b"A")?;
+    fn remote(&self, item: &Dict) -> Result<Option<Elsewhere>> {
+        let action = self.dict(item, b"A")?;
         if action.get(b"S").and_then(Object::as_name) != Some(b"GoToR") {
             return Ok(None);
         }
@@ -385,7 +390,7 @@ impl<'a> Document<'a> {
             Object::Name(name) | Object::String(name) => Remote::Named(name),
             _ => return Ok(None),
         };
-        Ok(Some(Target::File { file, dest }))
+        Ok(Some(Elsewhere { file, dest }))
     }
 
     /// The path a file specification names (§7.11): a string, or a dictionary's `/UF`, a text
