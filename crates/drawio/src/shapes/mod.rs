@@ -1,16 +1,19 @@
 // Derived from draw.io mxgraph/src/shape/mxShape.js, mxgraph/src/util/mxSvgCanvas2D.js, mxgraph/src/util/mxConstants.js (Apache-2.0, Copyright (c) 2006-2026 JGraph Holdings Ltd / draw.io AG), ported to Rust and modified for accent; see crates/drawio/NOTICE.
 //! Outlines of vertex shapes and edge lines, as path commands in absolute page coordinates,
 //! before rotation. [`mxgraph`] holds the shapes mxGraph registers itself, [`grapheditor`] those
-//! draw.io adds in `Shapes.js`.
+//! draw.io adds in `Shapes.js`, and [`stencil`] draws the ones an XML program describes.
 
 mod constraints;
 mod grapheditor;
+pub mod library;
 mod mxgraph;
+mod stencil;
 
 pub use constraints::constraints;
 pub use grapheditor::flex_arrow;
 pub use mxgraph::edge_line;
 pub(crate) use mxgraph::ellipse;
+pub use stencil::{Piece, Stencil};
 
 use crate::geom::{self, PathCmd, Point, Rect};
 use crate::scene::{Cap, Join};
@@ -98,8 +101,9 @@ const RECTANGLE_ROUNDING_FACTOR: f64 = 0.15;
 const KAPPA: f64 = 4.0 / 3.0 * (std::f64::consts::SQRT_2 - 1.0);
 
 /// Whether [`vertex`] supports `shape`: mxGraph's registry and draw.io's General
-/// palette (`mxCellRenderer`, `Sidebar.addGeneralPalette`). Other shapes, including
-/// stencils, use a scene placeholder.
+/// palette (`mxCellRenderer`, `Sidebar.addGeneralPalette`). Of the others the scene draws a
+/// stencil as its program says ([`Stencil::of`]) and a placeholder for the rest, the shapes
+/// draw.io draws in code.
 // ponytail: mxGraph's `arrow` and `arrowConnector`, edge shapes older than `flexArrow`, are not
 // ported; such an edge is drawn as a plain connector.
 pub fn is_known(shape: &str) -> bool {

@@ -190,6 +190,9 @@ fn main() -> glib::ExitCode {
             accent_api::language::set_cli(cli);
         }
     }
+    // draw.io's stencil packs, where `make stencils` puts them: a diagram's library shapes are
+    // drawn from there, in the page drawn for `accent-cli mcp` too.
+    accent_drawio::shapes::library::set_dir(glib::user_data_dir().join("accent/stencils"));
     // `--help` and the like are answered here, never reaching a running instance; so is a page
     // `accent-cli mcp` asks to have drawn.
     if let Some(code) = diagram::export::render_command(std::env::args_os()) {

@@ -40,7 +40,10 @@ fn main() {
         }
         for cell in &page.cells {
             let style = cell.style.resolve(cell.edge);
-            if cell.vertex && !shapes::is_known(style.shape()) {
+            if cell.vertex
+                && !shapes::is_known(style.shape())
+                && shapes::Stencil::of(style.shape()).is_none()
+            {
                 *unknown.entry(style.shape().to_string()).or_default() += 1;
             }
             if cell.edge && !scene.prims.iter().any(|p| p.cell() == cell.id) {

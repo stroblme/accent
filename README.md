@@ -94,6 +94,7 @@ To build from source by hand, run:
 make install-requirements	# install the build requirements (openSUSE, Fedora, Debian, Ubuntu, Arch)
 make requirements	# check local dependencies
 make pdfium     	    # optional, for PDFs
+make stencils   	    # optional, for draw.io's library shapes in diagrams
 make all        	    # build the GTK app and accent-cli
 make install			# install the app user-wide
 ```

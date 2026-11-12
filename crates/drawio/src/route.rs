@@ -48,10 +48,17 @@ impl Terminal {
             .or_else(|| port_rect(page, cell))?;
         let style = cell.style.resolve(false);
         let rotation = style.num("rotation", 0.0);
+        let outline = Outline::of(&style);
+        // A fixed-aspect stencil is met and routed around where it is drawn, not at the cell's
+        // box (`mxCellState.getPerimeterBounds`, `mxGraphView.updateBoundsFromStencil`).
+        let bounds = match shapes::Stencil::of(style.shape()) {
+            Some(stencil) => stencil.perimeter_bounds(bounds, outline.direction.vertical()),
+            None => bounds,
+        };
         Some(Terminal {
             bounds,
             rotation,
-            outline: Outline::of(&style),
+            outline,
             perimeter_spacing: style.num("perimeterSpacing", 0.0),
             routing: Point::new(
                 style.num("routingCenterX", 0.0),
@@ -307,7 +314,6 @@ fn fixed_terminal_point(input: &EdgeInput, source: bool) -> Option<Point> {
 /// The terminal's bounds grown by `border` and by its own `perimeterSpacing`.
 // mxGraphView.getPerimeterBounds, mxGraphView.js 1824-1834
 fn perimeter_bounds(t: &Terminal, border: f64) -> Rect {
-    // ponytail: a fixed-aspect stencil does not shrink the bounds (mxCellState.getPerimeterBounds).
     t.bounds.grow(border + t.perimeter_spacing)
 }
 
@@ -408,7 +414,6 @@ fn is_orthogonal(style: &Resolved) -> bool {
 // mxGraphView.updatePoints, mxGraphView.js 1414-1467
 fn update_points(input: &EdgeInput, state: &State) -> Vec<Option<Point>> {
     let mut pts = vec![state.p0];
-    // ponytail: fixed-aspect stencil bounds (updateBoundsFromStencil) are not routed around.
     let (src, trg, points) = (
         input.source_port.as_ref().or(input.source.as_ref()),
         input.target_port.as_ref().or(input.target.as_ref()),

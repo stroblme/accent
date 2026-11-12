@@ -14,7 +14,7 @@ use crate::marker;
 use crate::model::{Cell, CellId, Geometry, Page};
 use crate::placeholders::{self, Context};
 use crate::route::{self, EdgeInput, Terminal};
-use crate::shapes::{self, Fill, Placement};
+use crate::shapes::{self, Fill, Piece, Placement, Stencil};
 use crate::style::{Color, Resolved};
 
 /// A page ready to paint.
@@ -69,13 +69,14 @@ pub struct Stroke {
     pub join: Join,
 }
 
-/// How a stroke's open ends are capped: butt unless a shape asks for square
+/// How a stroke's open ends are capped: butt unless a shape asks for another
 /// (`mxAbstractCanvas2D.setLineCap`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Cap {
     #[default]
     Butt,
     Square,
+    Round,
 }
 
 /// How a stroke's corners are joined (`setLineJoin`, `setMiterLimit`).
@@ -84,6 +85,7 @@ pub enum Join {
     /// Mitred up to this many times the width, bevelled beyond.
     Miter(f64),
     Round,
+    Bevel,
 }
 
 impl Default for Join {
@@ -107,6 +109,28 @@ pub enum VAlign {
     #[default]
     Middle,
     Bottom,
+}
+
+impl Align {
+    /// The side it is on in a mirror.
+    fn mirrored(self) -> Align {
+        match self {
+            Align::Left => Align::Right,
+            Align::Center => Align::Center,
+            Align::Right => Align::Left,
+        }
+    }
+}
+
+impl VAlign {
+    /// The side it is on in a mirror.
+    fn mirrored(self) -> VAlign {
+        match self {
+            VAlign::Top => VAlign::Bottom,
+            VAlign::Middle => VAlign::Middle,
+            VAlign::Bottom => VAlign::Top,
+        }
+    }
 }
 
 /// A label's font where its runs do not say otherwise.
@@ -410,11 +434,11 @@ pub const BASE_SPACING_BOTTOM: f64 = 1.0;
 
 /// Fallback font size (`mxConstants.DEFAULT_FONTSIZE`) for styles that skip the
 /// stylesheet with a leading `;`. Normal vertex and edge defaults are 12 and 11.
-const DEFAULT_FONTSIZE: f64 = 11.0;
+pub(crate) const DEFAULT_FONTSIZE: f64 = 11.0;
 
 /// Fallback font family (`mxConstants.DEFAULT_FONTFAMILY`) for styles that skip
 /// the stylesheet's Helvetica. Pango resolves the CSS list as Arial, then Helvetica.
-const DEFAULT_FONTFAMILY: &str = "Arial,Helvetica";
+pub(crate) const DEFAULT_FONTFAMILY: &str = "Arial,Helvetica";
 
 struct Builder<'a> {
     page: &'a Page,
@@ -487,10 +511,18 @@ impl<'a> Builder<'a> {
         let opacity = style.num("opacity", 100.0) / 100.0;
         let shape = style.shape();
         let known = shapes::is_known(shape);
+        let stencil = match known {
+            true => None,
+            false => Stencil::of(shape),
+        };
         let mut stroke = stroke(&style);
-        if !known && let Some(s) = stroke.as_mut() {
-            // ponytail: a stencil or a shape not ported yet is drawn as its box, dashed so it
-            // reads as a stand-in. Porting `mxStencil` is the upgrade.
+        if !known
+            && stencil.is_none()
+            && let Some(s) = stroke.as_mut()
+        {
+            // ponytail: a shape draw.io draws in code and nobody has ported, or a library
+            // stencil whose pack is not installed, is drawn as its box, dashed so it reads as a
+            // stand-in.
             s.dash = Some(vec![3.0 * s.width, 3.0 * s.width]);
         }
         let shadow = style.flag("shadow", false);
@@ -498,11 +530,15 @@ impl<'a> Builder<'a> {
         // except a group's, which leaves the clicks to what is in it.
         let hittable = style.flag("pointerEvents", true);
         let place = Placement::of(rect, &style);
+        if let Some(stencil) = &stencil {
+            self.stencil(cell, stencil, &place, &style, shadow, locked);
+        }
         let drawn = if known { shape } else { "label" };
-        for (i, mut part) in shapes::vertex(drawn, place.bounds, &style)
-            .into_iter()
-            .enumerate()
-        {
+        let parts = match stencil {
+            Some(_) => Vec::new(),
+            None => shapes::vertex(drawn, place.bounds, &style),
+        };
+        for (i, mut part) in parts.into_iter().enumerate() {
             let fill = fill(&style, part.fill, &part.path, &place);
             let stroke = part_stroke(&style, stroke.as_ref(), &part);
             if fill.is_none() && stroke.is_none() && !hittable {
@@ -535,6 +571,133 @@ impl<'a> Builder<'a> {
             rotation,
             locked,
         );
+    }
+
+    /// What a stencil draws for `cell`, put on the page as any shape is. A stencil takes clicks
+    /// on what it paints, and across its box only where the style says `pointerEvents=1`
+    /// (`mxStencil.drawShape`).
+    // ponytail: text in a mirrored stencil is set the right way round, where draw.io mirrors its
+    // letters too; the legacy `stencilFlipH`/`stencilFlipV` keys are not read; and each piece is
+    // put on whole pixels by its own line width (`screen_offset`), where draw.io moves the whole
+    // shape by the stencil's.
+    fn stencil(
+        &mut self,
+        cell: &Cell,
+        stencil: &Stencil,
+        place: &Placement,
+        style: &Resolved,
+        shadow: bool,
+        locked: bool,
+    ) {
+        let id = || cell.id.clone();
+        let opacity = style.num("opacity", 100.0) / 100.0;
+        if style.get("pointerEvents") == Some("1") {
+            let mut path = shapes::rect(place.bounds);
+            geom::map_path(&mut path, |p| place.apply(p));
+            self.prims.push(Prim::Path {
+                cell: id(),
+                locked,
+                path,
+                fill: None,
+                stroke: None,
+                opacity,
+                shadow: false,
+            });
+        }
+        let mirrored = place.flip_h != place.flip_v;
+        let mut shadow = shadow;
+        for piece in stencil.draw(place.bounds, style) {
+            match piece {
+                Piece::Path {
+                    mut path,
+                    fill: ink,
+                    stroke,
+                    opacity,
+                } => {
+                    let fill = fill(style, ink, &path, place);
+                    if fill.is_none() && stroke.is_none() {
+                        continue;
+                    }
+                    geom::map_path(&mut path, |p| place.apply(p));
+                    self.prims.push(Prim::Path {
+                        cell: id(),
+                        locked,
+                        path,
+                        fill,
+                        stroke,
+                        opacity,
+                        // Under the first thing painted, as under any shape's body.
+                        shadow: std::mem::take(&mut shadow),
+                    });
+                }
+                Piece::Text {
+                    at,
+                    text,
+                    align,
+                    valign,
+                    rotation,
+                    font,
+                    opacity,
+                } => {
+                    let anchor = place.apply(at);
+                    // A mirror turns the text the other way and swaps the side it hangs from.
+                    let (align, valign) = match (place.flip_h, place.flip_v, mirrored) {
+                        (true, _, true) => (align.mirrored(), valign),
+                        (_, true, true) => (align, valign.mirrored()),
+                        _ => (align, valign),
+                    };
+                    let rotation = match (mirrored, place.flip_h && place.flip_v) {
+                        (true, _) => place.degrees - rotation,
+                        (false, true) => place.degrees + 180.0 + rotation,
+                        (false, false) => place.degrees + rotation,
+                    };
+                    self.prims.push(Prim::Text {
+                        cell: id(),
+                        locked,
+                        rect: Rect::new(anchor.x, anchor.y, 0.0, 0.0),
+                        anchor,
+                        align,
+                        valign,
+                        wrap: false,
+                        html: false,
+                        rotation,
+                        font,
+                        runs: label::plain_to_runs(&text, false),
+                        background: None,
+                        border: None,
+                        opacity,
+                    });
+                }
+                Piece::Image {
+                    rect,
+                    src,
+                    flip_h,
+                    flip_v,
+                    opacity,
+                } => {
+                    let centre = place.apply(rect.centre());
+                    self.prims.push(Prim::Image {
+                        cell: id(),
+                        locked,
+                        rect: Rect::new(
+                            centre.x - rect.w / 2.0,
+                            centre.y - rect.h / 2.0,
+                            rect.w,
+                            rect.h,
+                        ),
+                        source: match src.starts_with("data:") {
+                            true => ImageSource::DataUri(src),
+                            false => ImageSource::Url(src),
+                        },
+                        keep_aspect: false,
+                        rotation: place.degrees,
+                        flip_h: flip_h != place.flip_h,
+                        flip_v: flip_v != place.flip_v,
+                        opacity,
+                    });
+                }
+            }
+        }
     }
 
     /// A picture cell's background, the picture, and its border (`mxImageShape`), placed as its
@@ -1544,5 +1707,40 @@ mod tests {
             Prim::Path { stroke, .. } => assert!(stroke.as_ref().unwrap().dash.is_some()),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn a_stencil_is_drawn_as_its_program_says() {
+        // A 10 by 10 stencil stroking a box over its top half, as `Graph.compress` writes it.
+        let style = "shape=stencil(UzV2Ls5ILEhVNTIoVzV2UTUyMjQAEkBuBjLX2FXV2Dktvyg1vSi/NC8Fwi9KTS4BKqyAKIRqq0ThYTfTFMxzg5hSXFKUn50K5wIZ6PYAhSBuNHYFAA==);strokeColor=#ff0000;flipV=1;";
+        let p = page(vec![Cell::new_vertex(
+            "s",
+            "1",
+            Rect::new(0.0, 0.0, 20.0, 40.0),
+            style,
+            "",
+        )]);
+        let s = scene(&p);
+        let [
+            Prim::Path {
+                path, fill, stroke, ..
+            },
+        ] = s.prims.as_slice()
+        else {
+            panic!("{:?}", s.prims)
+        };
+        assert_eq!(
+            geom::path_bounds(path),
+            Some(Rect::new(0.0, 20.0, 20.0, 20.0)),
+            "stretched over the cell and mirrored into its lower half"
+        );
+        let stroke = stroke.as_ref().unwrap();
+        assert_eq!(
+            (fill, stroke.color, &stroke.dash),
+            (&None, Color::rgb(255, 0, 0), &None)
+        );
+        // It takes a click on what it paints and none in the empty half of its box.
+        assert_eq!(s.hit(Point::new(10.0, 30.0), 1.0), Some("s"));
+        assert_eq!(s.hit(Point::new(10.0, 10.0), 1.0), None);
     }
 }

@@ -51,7 +51,7 @@ const MAX_DEPTH: usize = 64;
 
 /// The document element as a tree, attribute values and text unescaped. Text beside child
 /// elements is trimmed, which drops the indentation between them.
-fn tree(xml: &str) -> Result<Element, Error> {
+pub(crate) fn tree(xml: &str) -> Result<Element, Error> {
     let mut reader = Reader::from_str(xml);
     // The elements opened and not yet closed, innermost last.
     let mut open: Vec<Element> = Vec::new();
@@ -171,9 +171,9 @@ fn page(diagram: Element) -> Result<Page, Error> {
 /// Inflated page-size limit to bound memory use when reading compressed pages.
 const MAX_INFLATED: usize = 64 << 20;
 
-/// A compressed page's model: base64 of raw deflate of `encodeURIComponent` of the XML
-/// (`Graph.decompress`).
-fn decompress(text: &str) -> Result<String, Error> {
+/// A compressed page's model, or a stencil in a style: base64 of raw deflate of
+/// `encodeURIComponent` of the XML (`Graph.decompress`).
+pub(crate) fn decompress(text: &str) -> Result<String, Error> {
     decompress_within(text, MAX_INFLATED)
 }
 

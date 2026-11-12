@@ -501,10 +501,12 @@ pub fn stroke_of(s: &Stroke, scale: f64) -> gsk::Stroke {
             stroke.set_miter_limit(limit as f32);
         }
         Join::Round => stroke.set_line_join(gsk::LineJoin::Round),
+        Join::Bevel => stroke.set_line_join(gsk::LineJoin::Bevel),
     }
     stroke.set_line_cap(match s.cap {
         Cap::Butt => gsk::LineCap::Butt,
         Cap::Square => gsk::LineCap::Square,
+        Cap::Round => gsk::LineCap::Round,
     });
     if let Some(dash) = &s.dash {
         let dash: Vec<f32> = dash.iter().map(|d| (d * scale) as f32).collect();

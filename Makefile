@@ -92,7 +92,7 @@ export DISPLAY_NUM ?= 99
 .PHONY: all core gtk gtk-bench clean distclean install uninstall test test-pdf check fmt fmt-check \
         clippy doc run smoke drills xvfb vault validate icons flatpak cargo-sources pdfium server \
         help requirements install-requirements android android-check android-test android-tools apk apk-release \
-        pdfium-android bindings screenshots docs app dmg release pkgroot deb rpm
+        pdfium-android bindings screenshots docs app dmg release pkgroot deb rpm stencils
 
 ## all: build everything, core plus the desktop app
 all: core gtk
@@ -202,6 +202,10 @@ $(PDFIUM_LIB):
 	tar -xzf $(PDFIUM_LIB).tgz -C $(dir $(PDFIUM_LIB)) --strip-components=1 lib/$(notdir $(PDFIUM_LIB))
 	tar -xzf $(PDFIUM_LIB).tgz -C $(dir $(PDFIUM_LIB)) LICENSE VERSION
 	rm -f $(PDFIUM_LIB).tgz
+
+## stencils: fetch draw.io's stencil packs into ~/.local/share/accent/stencils (does nothing if they are already there)
+stencils:
+	build-aux/stencils.sh
 
 # --------------------------------------------------------------------------------------- Android
 #
