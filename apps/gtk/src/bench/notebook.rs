@@ -893,6 +893,7 @@ async fn present_drill(app: &Rc<App>) {
         tab.bench_rendered()
     );
     preview_drill(app, &tab).await;
+    md_output_drill(app).await;
 }
 
 /// The notebook's preview tab (Toggle Preview): read only, its markdown cells rendered, the
@@ -953,6 +954,38 @@ async fn preview_drill(app: &Rc<App>, tab: &Rc<NotebookTab>) {
         u8::from(followed),
         u8::from(away && back)
     );
+}
+
+/// A notebook of one code cell whose output is markdown (`display(Markdown(…))`), rendered in
+/// its preview tab as a markdown cell is: its text without the `**`.
+async fn md_output_drill(app: &Rc<App>) {
+    let rel = "Notebooks/md-output.ipynb";
+    let output = r#"{"output_type": "display_data", "metadata": {}, "data": {"text/markdown": ["**Bold** result"], "text/plain": ["<Markdown>"]}}"#;
+    let notebook = format!(
+        r#"{{"cells": [{{"cell_type": "code", "execution_count": 1, "id": "a", "metadata": {{}}, "outputs": [{output}], "source": ["display(Markdown('**Bold** result'))"]}}], "metadata": {{"language_info": {{"name": "python"}}}}, "nbformat": 4, "nbformat_minor": 5}}"#
+    );
+    if std::fs::write(app.root().join(rel), notebook).is_err() {
+        return println!("bench notebook md_output unwritten");
+    }
+    let Some((tab, _)) = opened(app, rel).await else {
+        return;
+    };
+    app.toggle_preview();
+    let viewer = until("notebook", "md_output preview", 5000, || {
+        app.notebook_of(&app.pane())
+            .filter(|v| !Rc::ptr_eq(v, &tab))
+    });
+    let Some(viewer) = viewer.await else {
+        return;
+    };
+    let page = until("notebook", "md_output rendered", 5000, || {
+        viewer.bench_output_pages().into_iter().next()
+    });
+    let rendered = page
+        .await
+        .is_some_and(|text| text.starts_with("Bold result"));
+    app.toggle_preview();
+    println!("bench notebook md_output rendered={}", u8::from(rendered));
 }
 
 /// The notebook the parity step writes: a markdown cell whose heading markers hang and whose link

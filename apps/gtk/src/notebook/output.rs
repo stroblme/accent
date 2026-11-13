@@ -7,7 +7,8 @@
 //! as tall as they will be holds their place ([`Held`]). Pictures and formulas are drawn at the
 //! notebook's zoom, as its text is set ([`Figure`]).
 //! A run's new output fades in ([`Outputs::show`]); a right-click on an output offers Copy Output
-//! for it alone ([`copied`]).
+//! for it alone ([`copied`]). While the notebook is read, a markdown output is rendered as a note's
+//! preview renders it ([`Outputs::set_render`]).
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
@@ -24,6 +25,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::editor::Flavour;
 use crate::math;
+use crate::preview::Preview;
 use crate::{highlight, look, theme, widgets, wrap};
 
 /// What the drill counts of a notebook's outputs.
@@ -49,7 +51,8 @@ enum Part {
         recoloured: Rc<Cell<bool>>,
     },
     Ansi(gtk::TextView),
-    Markdown(sourceview5::View, sourceview5::Buffer),
+    /// Markdown as a note's styled text, and its rendered page while the notebook is read.
+    Markdown(sourceview5::View, sourceview5::Buffer, Option<Preview>),
     Latex,
     Table,
     Placeholder,
@@ -67,6 +70,8 @@ pub struct Outputs {
     zoom: Rc<Cell<f64>>,
     /// Whether what is shown was cleared since it was drawn ([`mark_cleared`](Self::mark_cleared)).
     cleared: Cell<bool>,
+    /// What renders a markdown output's text on a page of its own while the notebook is read.
+    render: RefCell<Option<Render>>,
     /// How many outputs have faded in.
     #[cfg(feature = "bench")]
     faded: Cell<usize>,
@@ -120,8 +125,61 @@ impl Outputs {
             held: RefCell::new(held),
             zoom,
             cleared: Cell::new(false),
+            render: RefCell::default(),
             #[cfg(feature = "bench")]
             faded: Cell::new(0),
+        }
+    }
+
+    /// Render the markdown outputs through `render` while the notebook is read, each page in
+    /// place of its styled text once its render has settled; `None` takes the pages away again.
+    pub fn set_render(&self, render: Option<Render>) {
+        self.render.replace(render);
+        for slot in self.slots.borrow_mut().iter_mut() {
+            let mut added = Vec::new();
+            for part in &mut slot.parts {
+                let Part::Markdown(view, buffer, page) = part else {
+                    continue;
+                };
+                if let Some(old) = page.take() {
+                    self.widget.remove(old.widget());
+                    slot.widgets.retain(|w| w != old.widget());
+                    view.set_visible(true);
+                }
+                let (start, end) = buffer.bounds();
+                *page = self.render_page(view, &buffer.text(&start, &end, false));
+                added.extend(page.as_ref().map(|p| p.widget().clone()));
+            }
+            slot.widgets.extend(added);
+        }
+    }
+
+    /// `text` on a page after `view`, out of sight until its render has settled and it takes the
+    /// view's place; `None` while the notebook is not read.
+    fn render_page(&self, view: &sourceview5::View, text: &str) -> Option<Preview> {
+        let render = self.render.borrow().clone()?;
+        let page = render(text)?;
+        let widget = page.widget();
+        widget.set_visible(false);
+        widget.set_focusable(false);
+        widget.set_hexpand(true);
+        self.widget.insert_child_after(widget, Some(view));
+        let (shown, source) = (widget.downgrade(), view.downgrade());
+        page.connect_settled(move || {
+            if let (Some(shown), Some(source)) = (shown.upgrade(), source.upgrade()) {
+                shown.set_visible(true);
+                source.set_visible(false);
+            }
+        });
+        Some(page)
+    }
+
+    /// Run `f` on each markdown output's rendered page.
+    pub fn each_page(&self, f: &mut dyn FnMut(&Preview)) {
+        for part in self.slots.borrow().iter().flat_map(|slot| &slot.parts) {
+            if let Part::Markdown(_, _, Some(page)) = part {
+                f(page);
+            }
         }
     }
 
@@ -487,7 +545,11 @@ impl Outputs {
         highlight::apply(&buffer, Syntax::Markdown);
         highlight::restyle(&buffer, &view);
         self.put(&view);
-        self.keep(Part::Markdown(view, buffer));
+        let page = self.render_page(&view, text);
+        if let (Some(page), Some(slot)) = (&page, self.slots.borrow_mut().last_mut()) {
+            slot.widgets.push(page.widget().clone());
+        }
+        self.keep(Part::Markdown(view, buffer, page));
     }
 
     fn latex(&self, latex: &str) {
@@ -522,7 +584,7 @@ impl Outputs {
             match part {
                 Part::Picture { .. } => show_picture(part, false),
                 Part::Ansi(view) => paint_ansi(view),
-                Part::Markdown(view, buffer) => {
+                Part::Markdown(view, buffer, _) => {
                     crate::editor::sync_scheme(buffer);
                     highlight::restyle(buffer, view);
                 }
@@ -534,6 +596,9 @@ impl Outputs {
 
 /// The room between two outputs.
 const SPACING: i32 = 6;
+
+/// What renders a markdown output's text on a page of its own, `None` where it cannot.
+pub type Render = Rc<dyn Fn(&str) -> Option<Preview>>;
 
 /// The pictures a markdown cell carries: those of its attachments a widget draws.
 fn pictures(attachments: &[core::Attachment]) -> impl Iterator<Item = (&str, &str)> {

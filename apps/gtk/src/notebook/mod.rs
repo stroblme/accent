@@ -544,6 +544,10 @@ impl NotebookTab {
                 &self.zoom,
             ))
         };
+        // Read, its markdown outputs are rendered as they are built.
+        if self.reading() {
+            view.outputs.set_render(Some(self.output_render()));
+        }
         let weak = Rc::downgrade(self);
         let on = move |f: fn(&Rc<NotebookTab>, CellId)| {
             let weak = weak.clone();
@@ -1237,6 +1241,7 @@ impl NotebookTab {
         let views = self.views.borrow().clone();
         for view in &views {
             view.set_presenting(on);
+            view.outputs.set_render(on.then(|| self.output_render()));
             if !on {
                 view.drop_rendered();
             }
@@ -1312,19 +1317,45 @@ impl NotebookTab {
         self.wiring.replace(wiring);
     }
 
+    /// A page for a rendered cell or output, in the Preview Font at the notebook's zoom, a link
+    /// to a heading going to whichever cell has it; `None` before the window has wired the tab.
+    fn inline_page(self: &Rc<Self>) -> Option<crate::preview::Preview> {
+        let wiring = self.wiring.borrow().clone()?;
+        let page = crate::preview::Preview::inline(&wiring);
+        let (_, font) = self.fonts.borrow().clone();
+        page.set_font(font.as_deref());
+        page.set_zoom(self.zoom.get());
+        let weak = Rc::downgrade(self);
+        page.connect_anchor(move |anchor| {
+            if let Some(tab) = weak.upgrade() {
+                tab.goto_heading(anchor);
+            }
+        });
+        Some(page)
+    }
+
+    /// What renders a markdown output while the notebook is read: on a page of its own, as wide
+    /// as the output it stands in for.
+    fn output_render(self: &Rc<Self>) -> output::Render {
+        let weak = Rc::downgrade(self);
+        Rc::new(move |text: &str| {
+            let tab = weak.upgrade()?;
+            let page = tab.inline_page()?;
+            page.set_margins(0, 0, 0, 0);
+            page.render(&tab.key(), text);
+            Some(page)
+        })
+    }
+
     /// Render markdown cell `view` on a page of its own, if the notebook is read and it has
     /// none: its source shows until the page has settled.
     fn render_cell(self: &Rc<Self>, view: &Rc<CellView>) {
         if !self.renders(view.id) || view.has_rendered() {
             return;
         }
-        let Some(wiring) = self.wiring.borrow().clone() else {
+        let Some(page) = self.inline_page() else {
             return;
         };
-        let page = crate::preview::Preview::inline(&wiring);
-        let (_, font) = self.fonts.borrow().clone();
-        page.set_font(font.as_deref());
-        page.set_zoom(self.zoom.get());
         let (cell, tab) = (Rc::downgrade(view), Rc::downgrade(self));
         page.connect_settled(move || {
             let (Some(cell), Some(tab)) = (cell.upgrade(), tab.upgrade()) else {
@@ -1336,12 +1367,6 @@ impl NotebookTab {
                 tab.find_changed();
             });
         });
-        let weak = Rc::downgrade(self);
-        page.connect_anchor(move |anchor| {
-            if let Some(tab) = weak.upgrade() {
-                tab.goto_heading(anchor);
-            }
-        });
         let source = {
             let model = self.model.borrow();
             let at = model.position(view.id);
@@ -1350,10 +1375,11 @@ impl NotebookTab {
         view.set_rendered(page, &self.key(), &source.unwrap_or_default());
     }
 
-    /// Run `f` on each rendered cell's page: what the window does to every preview.
+    /// Run `f` on each rendered cell's and output's page: what the window does to every preview.
     pub fn each_page(&self, f: &mut dyn FnMut(&crate::preview::Preview)) {
         for view in self.views.borrow().iter() {
             view.with_rendered(|page| f(page));
+            view.outputs.each_page(f);
         }
     }
 
@@ -1986,7 +2012,6 @@ impl NotebookTab {
         Some(self.caret_at(&editor)?.0 - self.scroller.vadjustment().value())
     }
 
-    /// Whether no cell can be typed into and no cell button or add strip is out.
     /// How many markdown cells show their rendered page.
     pub fn bench_rendered(&self) -> usize {
         self.views
@@ -1996,6 +2021,25 @@ impl NotebookTab {
             .count()
     }
 
+    /// The text of each markdown output's rendered page, once it has settled.
+    pub fn bench_output_pages(&self) -> Vec<String> {
+        let mut texts = Vec::new();
+        for view in self.views.borrow().iter() {
+            view.outputs.each_page(&mut |page| {
+                if page.settled() {
+                    let buffer = page.buffer();
+                    texts.push(
+                        buffer
+                            .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                            .into(),
+                    );
+                }
+            });
+        }
+        texts
+    }
+
+    /// Whether no cell can be typed into and no cell button or add strip is out.
     pub fn bench_read_only(&self) -> bool {
         let views = self.views.borrow();
         views
