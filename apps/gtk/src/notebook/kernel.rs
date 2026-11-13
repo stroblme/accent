@@ -1071,13 +1071,13 @@ impl App {
     }
 
     /// The kernel commands as the Code pane's notebook's kernel allows them, and the pane's
-    /// strip showing what it does, unless a debug session holds the pane.
+    /// strip showing what it does, unless a debug session holds the pane or a notebook's
+    /// preview tab is in front, which runs nothing.
     pub(crate) fn sync_kernel(&self) {
         let tab = self.code_doc().and_then(|doc| doc.notebook().cloned());
         let kernel = tab.as_ref().and_then(|tab| tab.kernel());
         let started = kernel.as_ref().is_some_and(|k| k.info.borrow().is_some());
         let busy = started && kernel.as_ref().is_some_and(|k| !k.runs.borrow().is_empty());
-        // A notebook's preview tab in front runs nothing, so the strip is greyed over it.
         let reads = self.previews_notebook();
         for (action, on) in [
             ("notebook-interrupt", busy && !reads),
@@ -1096,7 +1096,7 @@ impl App {
             let face = tab.as_ref().and_then(|tab| tab.kernel_face());
             sidebar.set_kernel_face(face.as_deref());
             let shown = tab
-                .filter(|_| !self.debugger.running())
+                .filter(|_| !self.debugger.running() && !reads)
                 .map(|tab| tab.kernel_state());
             sidebar.set_kernel(shown.as_ref());
         }

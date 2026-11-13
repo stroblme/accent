@@ -402,8 +402,8 @@ impl App {
         }
     }
 
-    /// Whether a notebook's preview tab is in front, over which the Code pane's kernel commands
-    /// are greyed: the preview runs nothing, the notebook's own tab does.
+    /// Whether a notebook's preview tab is in front, over which the Code pane's kernel strip is
+    /// put away and its commands greyed: the preview runs nothing, the notebook's own tab does.
     pub(crate) fn previews_notebook(&self) -> bool {
         let rendered = self.active_doc().and_then(|doc| doc.rendered().cloned());
         rendered.is_some_and(|r| matches!(r.note(), Some(Note::Notebook(_))))
