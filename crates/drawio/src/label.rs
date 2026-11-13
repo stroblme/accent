@@ -4,6 +4,7 @@
 //! underline, bullets and formulas; [`markdown_to_html`] emits only tags that
 //! [`html_to_runs`] can read back.
 
+use crate::html::{Tag, attributes, html_char};
 use crate::model::attr;
 use crate::style::Color;
 
@@ -243,46 +244,9 @@ pub fn markdown_to_html(md: &str) -> String {
     html
 }
 
-/// A start or end tag.
-struct Tag<'a> {
-    /// Lowercased.
-    name: String,
-    close: bool,
-    /// Everything between the name and the `>`.
-    attrs: &'a str,
-}
-
-impl<'a> Tag<'a> {
-    /// The tag `s` starts with and the text after it; `None` when there is none, so that a `<`
-    /// that opens no tag stays text.
-    fn read(s: &'a str) -> Option<(Tag<'a>, &'a str)> {
-        let s = s.strip_prefix('<')?;
-        let close = s.starts_with('/');
-        let s = if close { &s[1..] } else { s };
-        if !s.starts_with(|c: char| c.is_ascii_alphabetic()) {
-            return None;
-        }
-        let name = s.find(|c: char| !c.is_ascii_alphanumeric())?;
-        // The `>` that ends the tag, not one inside a quoted attribute value.
-        let mut quote = None;
-        let (end, _) = s.char_indices().find(|&(_, c)| {
-            if quote.is_none() && (c == '"' || c == '\'') {
-                quote = Some(c);
-            } else if quote == Some(c) {
-                quote = None;
-            }
-            quote.is_none() && c == '>'
-        })?;
-        let tag = Tag {
-            name: s[..name].to_ascii_lowercase(),
-            close,
-            attrs: &s[name..end],
-        };
-        Some((tag, &s[end + 1..]))
-    }
-
+impl Tag<'_> {
     /// Change `marks` as the element changes the look of its text.
-    fn apply(&self, marks: &mut Marks) {
+    pub fn apply(&self, marks: &mut Marks) {
         let attrs = attributes(self.attrs);
         match self.name.as_str() {
             "b" | "strong" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => marks.bold = true,
@@ -314,31 +278,6 @@ fn is_block(name: &str) -> bool {
         name,
         "div" | "p" | "li" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "tr" | "blockquote" | "pre"
     )
-}
-
-/// A tag's `name=value` pairs, names lowercased, values unquoted and their references decoded.
-fn attributes(mut s: &str) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    loop {
-        s = s.trim_start_matches(|c: char| c.is_ascii_whitespace() || c == '/');
-        let end = s
-            .find(|c: char| c.is_ascii_whitespace() || c == '=' || c == '/')
-            .unwrap_or(s.len());
-        if end == 0 {
-            return out;
-        }
-        let name = s[..end].to_ascii_lowercase();
-        s = s[end..].trim_start();
-        let mut value = "";
-        if let Some(v) = s.strip_prefix('=') {
-            let v = v.trim_start();
-            (value, s) = match v.chars().next() {
-                Some(q @ ('"' | '\'')) => v[1..].split_once(q).unwrap_or((&v[1..], "")),
-                _ => v.split_at(v.find(|c: char| c.is_ascii_whitespace()).unwrap_or(v.len())),
-            };
-        }
-        out.push((name, decode(value)));
-    }
 }
 
 /// The declarations of an inline `style` that change how text looks; the rest (background,
@@ -401,44 +340,6 @@ fn font_size(value: &str) -> Option<f64> {
         n
     };
     Some(PX[step.clamp(1, 7) as usize - 1])
-}
-
-/// The first character of HTML text and the bytes it takes, a character reference decoded.
-fn html_char(s: &str) -> Option<(char, usize)> {
-    let c = s.chars().next()?;
-    Some(match c {
-        '&' => entity(s).unwrap_or((c, 1)),
-        _ => (c, c.len_utf8()),
-    })
-}
-
-/// The character reference `s` starts with, as its character and length: one of HTML's names
-/// (`&middot;`) or a number. Others stay text.
-fn entity(s: &str) -> Option<(char, usize)> {
-    // The longest name, `CounterClockwiseContourIntegral`, has 31 letters.
-    let (end, _) = s.char_indices().take(33).find(|&(_, c)| c == ';')?;
-    let name = &s[1..end];
-    let c = match name.strip_prefix('#') {
-        Some(number) => {
-            let code = match number.strip_prefix(['x', 'X']) {
-                Some(hex) => u32::from_str_radix(hex, 16).ok()?,
-                None => number.parse().ok()?,
-            };
-            char::from_u32(code)?
-        }
-        None => crate::entities::named(name)?,
-    };
-    Some((c, end + 1))
-}
-
-/// HTML text with its character references decoded.
-pub(crate) fn decode(mut s: &str) -> String {
-    let mut out = String::new();
-    while let Some((c, len)) = html_char(s) {
-        out.push(c);
-        s = &s[len..];
-    }
-    out
 }
 
 /// Add text to the runs, into the last one when its marks are the same.

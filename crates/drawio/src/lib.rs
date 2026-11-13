@@ -13,6 +13,7 @@ pub mod geom;
 pub mod guide;
 pub mod handle;
 mod hit;
+pub mod html;
 pub mod label;
 mod marker;
 pub mod model;

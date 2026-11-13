@@ -1,6 +1,7 @@
 //! Label text for search and replacement, one line per label. Searching the model excludes XML
 //! attributes, style keys, and IDs.
 
+use crate::html;
 use crate::label::{self, Run};
 use crate::model::{Cell, CellId, File};
 
@@ -106,7 +107,7 @@ fn edit_html(html: &str, edit: &mut impl FnMut(&str) -> Option<String>) -> Optio
     let mut out = String::with_capacity(html.len());
     let mut changed = false;
     for (text, piece) in label::html_pieces(html) {
-        match text.then(|| edit(&label::decode(piece))).flatten() {
+        match text.then(|| edit(&html::decode(piece))).flatten() {
             Some(new) => {
                 changed = true;
                 out.push_str(&escape(&new));
