@@ -738,7 +738,7 @@ fn collapse(text: &str) -> String {
     out
 }
 
-/// The common entities, and numeric ones.
+/// HTML's named characters (`&middot;`, by `accent_drawio::entities`), and numeric ones.
 fn decode(text: &str) -> String {
     if !text.contains('&') {
         return text.to_string();
@@ -748,26 +748,20 @@ fn decode(text: &str) -> String {
     while let Some(at) = rest.find('&') {
         out.push_str(&rest[..at]);
         rest = &rest[at..];
-        let Some(end) = rest.find(';').filter(|&e| e < 10) else {
+        // The longest name, `CounterClockwiseContourIntegral`, has 31 letters.
+        let Some(end) = rest.find(';').filter(|&e| e <= 32) else {
             out.push('&');
             rest = &rest[1..];
             continue;
         };
         let name = &rest[1..end];
-        let ch = match name {
-            "amp" => Some('&'),
-            "lt" => Some('<'),
-            "gt" => Some('>'),
-            "quot" => Some('"'),
-            "apos" => Some('\''),
-            "nbsp" => Some('\u{a0}'),
-            _ => name
-                .strip_prefix("#x")
+        let ch = accent_drawio::entities::named(name).or_else(|| {
+            name.strip_prefix("#x")
                 .or_else(|| name.strip_prefix("#X"))
                 .and_then(|h| u32::from_str_radix(h, 16).ok())
                 .or_else(|| name.strip_prefix('#').and_then(|d| d.parse().ok()))
-                .and_then(char::from_u32),
-        };
+                .and_then(char::from_u32)
+        });
         match ch {
             Some(ch) => {
                 out.push(ch);
@@ -1500,6 +1494,10 @@ mod tests {
         assert_eq!(classify("<SCRIPT>x<y</script>"), vec![]);
         assert_eq!(classify("a<br>b"), vec![text("a"), Piece::Break, text("b")]);
         assert_eq!(classify("a < b &amp; c"), vec![text("a < b & c")]);
+        assert_eq!(
+            classify("a &middot; b &CounterClockwiseContourIntegral; &foo;"),
+            vec![text("a · b ∳ &foo;")]
+        );
     }
 
     #[test]

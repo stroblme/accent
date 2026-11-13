@@ -744,6 +744,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   In the editor the fence is coloured as the query language (`accent-search.lang`).
 - A note's raw HTML is unwrapped (user decision 2026-10-22): its tags are dropped and their text shown, a `<p>` or a `<div>` breaking the paragraph; `<b>`, `<i>`, `<u>`, `<sub>`, `<sup>`, `<kbd>` and `<br>` style or break the text, `<img>` is a picture, `<iframe>` and `<video>` a link to their source, and a comment, `<style>` and `<script>` show nothing.
   A `<details>` block is always open, its summary a bold line: GtkTextView cannot hide text safely.
+  A named character in it (`&middot;`, `&mdash;`) is read as the HTML standard names it, as one in the prose and in a diagram's HTML label is.
 - A table's cells wrap, ruled and padded as the stylesheet's, each column aligned as its delimiter row says and the header bold; a cell holds the prose's inline styles, and a link, a wikilink or a tag in one is followed as on the page.
   Its columns share the page as a browser's automatic table layout shares them (CSS 2.1, user decision 2026-10-30), so a cell wraps at the words a printout's does: each column as wide as its widest cell where they all fit, otherwise its longest word and a share of the rest in proportion to what more its cells would take unwrapped.
 - Its text is one selection across blocks, and Copy writes a formula, a picture, a table and a task's box as the markdown they came from.

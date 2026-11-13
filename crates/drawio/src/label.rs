@@ -412,25 +412,21 @@ fn html_char(s: &str) -> Option<(char, usize)> {
     })
 }
 
-/// The character reference `s` starts with, as its character and length: the named ones a
-/// browser's `innerHTML` writes, and numeric ones. Others stay text.
+/// The character reference `s` starts with, as its character and length: one of HTML's names
+/// (`&middot;`) or a number. Others stay text.
 fn entity(s: &str) -> Option<(char, usize)> {
-    let (end, _) = s.char_indices().take(12).find(|&(_, c)| c == ';')?;
-    let c = match &s[1..end] {
-        "nbsp" => '\u{a0}',
-        "lt" => '<',
-        "gt" => '>',
-        "amp" => '&',
-        "quot" => '"',
-        "apos" => '\'',
-        name => {
-            let number = name.strip_prefix('#')?;
+    // The longest name, `CounterClockwiseContourIntegral`, has 31 letters.
+    let (end, _) = s.char_indices().take(33).find(|&(_, c)| c == ';')?;
+    let name = &s[1..end];
+    let c = match name.strip_prefix('#') {
+        Some(number) => {
             let code = match number.strip_prefix(['x', 'X']) {
                 Some(hex) => u32::from_str_radix(hex, 16).ok()?,
                 None => number.parse().ok()?,
             };
             char::from_u32(code)?
         }
+        None => crate::entities::named(name)?,
     };
     Some((c, end + 1))
 }
@@ -813,8 +809,8 @@ mod tests {
                 vec![m("T", "b"), Break, t("a"), Break, t("b")],
             ),
             (
-                "&lt;&amp;&gt;&quot;&#39;&#x41;&nbsp;&foo; & x",
-                vec![t("<&>\"'A\u{a0}&foo; & x")],
+                "&lt;&amp;&gt;&quot;&#39;&#x41;&nbsp;&middot;&mdash;&foo; & x",
+                vec![t("<&>\"'A\u{a0}·—&foo; & x")],
             ),
             ("  a \n\t b  <br>  c  ", vec![t("a b"), Break, t("c")]),
             (
