@@ -50,7 +50,8 @@ enum Grip {
 pub(super) enum Drag {
     /// Moving `ids`, or with the primary modifier copying them, whose boxes take up `bounds`,
     /// aligning them to the boxes in `guides`; a release that did not move selects `click`
-    /// instead, when there is one (a click into a selected group, a Ctrl+click letting go).
+    /// instead, when there is one (a click into a selected group or on one of several cells
+    /// selected, a Ctrl+click letting go).
     Move {
         from: Point,
         ids: Vec<CellId>,
@@ -207,9 +208,9 @@ impl DiagramView {
                         self.emit(Edit::Select(next.clone()));
                         (next, None)
                     }
-                    (Some(held), false) => {
-                        let inner = (pick.cell != *held).then(|| vec![pick.cell]);
-                        (selection, inner)
+                    (Some(_), false) => {
+                        let click = pick.clicked(&selection);
+                        (selection, click)
                     }
                     (None, false) => {
                         self.emit(Edit::Select(vec![pick.cell.clone()]));

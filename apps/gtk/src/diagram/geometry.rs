@@ -474,6 +474,16 @@ pub struct Pick {
     pub held: Option<CellId>,
 }
 
+impl Pick {
+    /// What a click on a selected cell selects once released where it was pressed, as draw.io's
+    /// delayed selection does (`mxGraphHandler.selectDelayed`): the cell under the pointer alone,
+    /// one level into a selected group or one of several cells selected; `None` where that is the
+    /// whole selection already.
+    pub fn clicked(&self, selection: &[CellId]) -> Option<Vec<CellId>> {
+        (selection != std::slice::from_ref(&self.cell)).then(|| vec![self.cell.clone()])
+    }
+}
+
 /// One page as the canvas needs it: the display list, the box each prim paints into, and enough
 /// of the cell tree to select groups and to know what can be moved and resized.
 #[derive(Debug, Default)]
@@ -1184,6 +1194,32 @@ mod tests {
             Rect::new(120.0, 0.0, 10.0, 10.0),
         );
         assert_eq!(sheet.guide_boxes(&ids(&["c"]), "c"), [a, group, d]);
+    }
+
+    #[test]
+    fn a_click_on_what_is_selected_selects_the_cell_under_it_alone() {
+        let xml = r#"<mxfile><diagram name="P" id="p"><mxGraphModel><root>
+            <mxCell id="0"/><mxCell id="1" parent="0"/>
+            <mxCell id="a" parent="1" vertex="1" style=""><mxGeometry x="0" y="0" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="g" parent="1" vertex="1" style="group"><mxGeometry x="100" y="0" width="50" height="50" as="geometry"/></mxCell>
+            <mxCell id="c" parent="g" vertex="1" style=""><mxGeometry x="0" y="0" width="10" height="10" as="geometry"/></mxCell>
+            </root></mxGraphModel></diagram></mxfile>"#;
+        let file = accent_drawio::File::from_bytes(xml.as_bytes()).unwrap();
+        let sheet = Sheet::of(&file.pages()[0], &Context::default());
+        let ids = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        let click = |p: Point, selected: &[&str]| {
+            let selection = ids(selected);
+            let pick = sheet.pick(p, 1.0, &selection).unwrap();
+            pick.clicked(&selection)
+        };
+        let (on_a, on_c) = (Point::new(5.0, 5.0), Point::new(105.0, 5.0));
+        // One level into the selected group.
+        assert_eq!(click(on_c, &["g"]), Some(ids(&["c"])));
+        // One of several selected, a group's shape one level into it.
+        assert_eq!(click(on_a, &["a", "g"]), Some(ids(&["a"])));
+        assert_eq!(click(on_c, &["a", "g"]), Some(ids(&["c"])));
+        // The one cell selected stays selected.
+        assert_eq!(click(on_a, &["a"]), None);
     }
 
     #[test]
