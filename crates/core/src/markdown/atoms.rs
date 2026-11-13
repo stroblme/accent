@@ -12,6 +12,8 @@
 use pulldown_latex::event::{Content, DelimiterType, Event, ScriptType, Visual};
 use pulldown_latex::{Parser, Storage};
 use std::borrow::Cow;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 
 /// The class commands pulldown-latex reads right when their argument is one character.
 const CLASSES: [&str; 7] = [
@@ -33,106 +35,239 @@ pub(super) fn atoms(tex: &str) -> Cow<'_, str> {
         "limits",
     ];
     if commands.iter().any(|c| tex.contains(c)) {
-        Cow::Owned(rewrite(tex))
+        Cow::Owned(Pass::default().rewrite(tex))
     } else {
         Cow::Borrowed(tex)
     }
 }
 
-fn rewrite(tex: &str) -> String {
-    let mut out = String::with_capacity(tex.len());
-    let mut rest = tex;
-    while let Some(i) = rest.find('\\') {
-        out.push_str(&rest[..i]);
-        // Nothing before it in its group, or an opening delimiter: no atom to space it from.
-        let first = matches!(
-            out.trim_end().chars().last(),
-            None | Some('{' | '&' | '(' | '[' | '\\')
-        );
-        let (cs, after) = control_sequence(&rest[i..]);
-        rest = match command(&cs[1..], after, first) {
-            Some((rewritten, after)) => {
-                out.push_str(&rewritten);
-                after
+/// One formula's pass: the operators `\DeclareMathOperator` has named so far, by the name a use
+/// stands for, as `\operatorname` and its argument; and how many uses it has put in, which
+/// stops a name declared as itself.
+#[derive(Default)]
+struct Pass {
+    declared: RefCell<HashMap<String, String>>,
+    expanded: Cell<u32>,
+}
+
+impl Pass {
+    /// `tex`, or an argument in it, with each command rewritten.
+    fn rewrite(&self, tex: &str) -> String {
+        let mut out = String::with_capacity(tex.len());
+        let mut rest = tex;
+        while let Some(i) = rest.find('\\') {
+            out.push_str(&rest[..i]);
+            // Nothing before it in its group, or an opening delimiter: no atom to space it from.
+            let first = matches!(
+                out.trim_end().chars().last(),
+                None | Some('{' | '&' | '(' | '[' | '\\')
+            );
+            let (cs, after) = control_sequence(&rest[i..]);
+            // A declared operator's name stands for it, read with what follows it.
+            let declared = self.declared.borrow().get(&cs[1..]).cloned();
+            if let Some(op) = declared.filter(|_| self.expanded.get() < 100) {
+                self.expanded.set(self.expanded.get() + 1);
+                out.push_str(&self.rewrite(&format!("{op}{after}")));
+                return out;
             }
-            None => {
-                out.push_str(cs);
-                after
+            rest = match self.command(&cs[1..], after, first) {
+                Some((rewritten, after)) => {
+                    out.push_str(&rewritten);
+                    after
+                }
+                None => {
+                    out.push_str(cs);
+                    after
+                }
+            };
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// The command `\name` and what follows it rewritten, or `None` where pulldown-latex reads it
+    /// right as it is; `first` where nothing stands before it to space it from.
+    fn command<'a>(&self, name: &str, after: &'a str, first: bool) -> Option<(String, &'a str)> {
+        match name {
+            "mathop" => {
+                let (arg, rest) = argument(after)?;
+                Some(self.op(arg, "mathord", "", rest))
             }
+            "operatorname" => {
+                let (star, after) = star(after);
+                let (arg, rest) = argument(after)?;
+                Some(self.operatorname(arg, star, rest))
+            }
+            // Named for what follows, which sets nothing itself.
+            "DeclareMathOperator" => {
+                let (star, after) = star(after);
+                let (cs, after) = argument(after)?;
+                let (arg, rest) = argument(after)?;
+                let name = cs.trim().strip_prefix('\\')?;
+                if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphabetic()) {
+                    return None;
+                }
+                let star = if star { "*" } else { "" };
+                let op = format!("\\operatorname{star}{{{arg}}}");
+                self.declared.borrow_mut().insert(name.to_string(), op);
+                Some((String::new(), rest))
+            }
+            _ if CLASSES.contains(&name) => {
+                let (arg, rest) = argument(after)?;
+                Some(self.class(name, arg, rest, first))
+            }
+            // `\sin\limits`: pulldown-latex takes `\limits` after `\mathop` alone of the functions.
+            _ => {
+                let next = after.trim_start();
+                let modifier = next.starts_with('\\').then(|| control_sequence(next).0);
+                if !matches!(modifier, Some("\\limits" | "\\nolimits")) {
+                    return None;
+                }
+                let function = content(&format!("\\{name}"), |c| match c {
+                    Content::Function(f) => Some(f.to_string()),
+                    _ => None,
+                })?;
+                Some((format!("\\mathop{{{function}}}"), after))
+            }
+        }
+    }
+
+    /// `\operatorname`'s argument set upright, as MathJax sets it, with its limits beside it, or
+    /// above and below in display where starred, and what follows it. A plain name without the star
+    /// pulldown-latex reads right itself.
+    fn operatorname<'a>(&self, arg: &str, star: bool, rest: &'a str) -> (String, &'a str) {
+        let arg = arg.trim();
+        if !star && plain(arg) {
+            return (format!("\\operatorname{{{arg}}}"), rest);
+        }
+        self.op(arg, "mathrm", if star { "" } else { "\\nolimits" }, rest)
+    }
+
+    /// An operator of `arg` that pulldown-latex reads right, followed by `limits`, and what follows
+    /// it. A symbol is its character, made the operator itself; a name, plain or upright, is set as
+    /// `\sin` is; anything else, a single letter too, which pulldown-latex would make an operator
+    /// symbol, is a group in `font`, whose limits `\mathop` places as it does a symbol's.
+    fn op<'a>(&self, arg: &str, font: &str, limits: &str, rest: &'a str) -> (String, &'a str) {
+        let arg = arg.trim();
+        if let Some((c, _)) = symbol(arg) {
+            return (format!("\\mathop{{{c}}}{limits}"), rest);
+        }
+        if let Some(name) = upright(arg)
+            .or(plain(arg).then_some(arg))
+            .filter(|name| name.chars().nth(1).is_some())
+        {
+            return (format!("\\mathop{{{name}}}{limits}"), rest);
+        }
+        // pulldown-latex spaces a function's name from what follows, but not a group: the thin space
+        // TeX sets between an operator and an ordinary atom goes after the group's limits.
+        let (modifiers, rest) = modifiers(rest);
+        let (scripts, rest) = self.scripts(rest);
+        let thin = if ordinary_next(rest) { "\\," } else { "" };
+        let group = self.rewrite(arg);
+        let op = format!("\\mathop\\{font}{{{group}}}{limits}{modifiers}{scripts}{thin}");
+        (op, rest)
+    }
+
+    /// `\name{arg}`, a class command but `\mathop`, and what follows it. A symbol of that class
+    /// already, or any symbol where the class takes no space, is that class's to pulldown-latex, and
+    /// one operator, as `\overset{!}{=}` is, is spaced as its core is. Anything else is an ordinary
+    /// atom with the space of the class on each side that has a neighbour, after its scripts: a run
+    /// of symbols set close, as TeX sets `:=`, or the group it is.
+    fn class<'a>(&self, name: &str, arg: &str, rest: &'a str, first: bool) -> (String, &'a str) {
+        let (before, after) = spaces(name);
+        let pieces = pieces(arg).unwrap_or_default();
+        match pieces[..] {
+            [
+                Piece {
+                    symbol: Some((c, class)),
+                    ..
+                },
+            ] if class == name || before.is_empty() && after.is_empty() => {
+                return (format!("\\{name}{{{c}}}"), rest);
+            }
+            [
+                Piece {
+                    symbol: None,
+                    operator: true,
+                },
+            ] => return (format!("\\{name}{{{}}}", self.rewrite(arg)), rest),
+            _ if before.is_empty() && after.is_empty() => {
+                return (format!("\\{name}{{{}}}", self.rewrite(arg)), rest);
+            }
+            _ => {}
+        }
+        let symbols: Option<String> = (pieces.iter())
+            .map(|p| p.symbol.map(|(c, _)| format!("\\mathord{{{c}}}")))
+            .collect();
+        let atom = symbols
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| self.rewrite(arg));
+        let (scripts, rest) = self.scripts(rest);
+        let before = if first { "" } else { before };
+        let after = if ends(rest) { "" } else { after };
+        (format!("{before}\\mathord{{{atom}}}{scripts}{after}"), rest)
+    }
+
+    /// The scripts after an atom, their arguments rewritten, and what follows them.
+    fn scripts<'a>(&self, mut rest: &'a str) -> (String, &'a str) {
+        let mut out = String::new();
+        loop {
+            let next = rest.trim_start();
+            let Some(mark) = next.chars().next().filter(|c| matches!(c, '_' | '^')) else {
+                break;
+            };
+            let Some((arg, after)) = argument(&next[1..]) else {
+                break;
+            };
+            out.push_str(&format!("{mark}{{{}}}", self.rewrite(arg)));
+            rest = after;
+        }
+        (out, rest)
+    }
+}
+
+/// The `\limits` and `\nolimits` after an operator, and what follows them.
+fn modifiers(mut rest: &str) -> (String, &str) {
+    let mut out = String::new();
+    loop {
+        let next = rest.trim_start();
+        let (cs, after) = match next.starts_with('\\') {
+            true => control_sequence(next),
+            false => break,
         };
+        if !matches!(cs, "\\limits" | "\\nolimits") {
+            break;
+        }
+        out.push_str(cs);
+        rest = after;
     }
-    out.push_str(rest);
-    out
+    (out, rest)
 }
 
-/// The command `\name` and what follows it rewritten, or `None` where pulldown-latex reads it
-/// right as it is; `first` where nothing stands before it to space it from.
-fn command<'a>(name: &str, after: &'a str, first: bool) -> Option<(String, &'a str)> {
-    match name {
-        "mathop" => {
-            let (arg, rest) = argument(after)?;
-            Some((op(arg, "mathord", ""), rest))
-        }
-        "operatorname" => {
-            let (star, after) = star(after);
-            let (arg, rest) = argument(after)?;
-            Some((operatorname(arg, star), rest))
-        }
-        // Defined for this formula only: MathJax keeps it for the page.
-        "DeclareMathOperator" => {
-            let (star, after) = star(after);
-            let (cs, after) = argument(after)?;
-            let (arg, rest) = argument(after)?;
-            let body = operatorname(arg, star);
-            // pulldown-latex wants the count of arguments, which TeX does not.
-            Some((format!("\\newcommand{{{cs}}}[0]{{{body}}}"), rest))
-        }
-        _ if CLASSES.contains(&name) => {
-            let (arg, rest) = argument(after)?;
-            Some(class(name, arg, rest, first))
-        }
-        // `\sin\limits`: pulldown-latex takes `\limits` after `\mathop` alone of the functions.
-        _ => {
-            let next = after.trim_start();
-            let modifier = next.starts_with('\\').then(|| control_sequence(next).0);
-            if !matches!(modifier, Some("\\limits" | "\\nolimits")) {
-                return None;
-            }
-            let function = content(&format!("\\{name}"), |c| match c {
-                Content::Function(f) => Some(f.to_string()),
-                _ => None,
-            })?;
-            Some((format!("\\mathop{{{function}}}"), after))
-        }
+/// Whether an ordinary atom follows, which TeX sets a thin space before after an operator: not
+/// a relation, a binary operator, a delimiter or punctuation, which space or fence themselves,
+/// nor a function's name, which pulldown-latex spaces, nor a space or the end of the group.
+fn ordinary_next(rest: &str) -> bool {
+    let next = rest.trim_start();
+    if ends(next) {
+        return false;
     }
-}
-
-/// `\operatorname`'s argument set upright, as MathJax sets it, with its limits beside it, or
-/// above and below in display where starred. A plain name without the star pulldown-latex reads
-/// right itself.
-fn operatorname(arg: &str, star: bool) -> String {
-    let arg = arg.trim();
-    if !star && plain(arg) {
-        return format!("\\operatorname{{{arg}}}");
+    if next.starts_with('{') {
+        return true;
     }
-    op(arg, "mathrm", if star { "" } else { "\\nolimits" })
-}
-
-/// An operator of `arg` that pulldown-latex reads right, followed by `limits`. A symbol is its
-/// character, made the operator itself; a name, plain or upright, is set as `\sin` is; anything
-/// else, a single letter too, which pulldown-latex would make an operator symbol, is a group in
-/// `font`, whose limits `\mathop` places as it does a symbol's.
-fn op(arg: &str, font: &str, limits: &str) -> String {
-    let arg = arg.trim();
-    if let Some((c, _)) = symbol(arg) {
-        format!("\\mathop{{{c}}}{limits}")
-    } else if let Some(name) = upright(arg)
-        .or(plain(arg).then_some(arg))
-        .filter(|name| name.chars().nth(1).is_some())
-    {
-        format!("\\mathop{{{name}}}{limits}")
-    } else {
-        format!("\\mathop\\{font}{{{}}}{limits}", rewrite(arg))
+    let Some((token, _)) = token_or_group(next) else {
+        return false;
+    };
+    let storage = Storage::new();
+    match Parser::new(token, &storage).collect::<Result<Vec<_>, _>>() {
+        // A command that takes arguments: a fraction, a root, a font, `\left`.
+        Err(_) => true,
+        Ok(events) => matches!(
+            events.first(),
+            Some(Event::Content(
+                Content::Ordinary { .. } | Content::Number(_) | Content::LargeOp { .. }
+            ))
+        ),
     }
 }
 
@@ -147,63 +282,6 @@ fn spaces(name: &str) -> (&'static str, &'static str) {
         "mathinner" => ("\\,", "\\,"),
         _ => ("", ""),
     }
-}
-
-/// `\name{arg}`, a class command but `\mathop`, and what follows it. A symbol of that class
-/// already, or any symbol where the class takes no space, is that class's to pulldown-latex, and
-/// one operator, as `\overset{!}{=}` is, is spaced as its core is. Anything else is an ordinary
-/// atom with the space of the class on each side that has a neighbour, after its scripts: a run
-/// of symbols set close, as TeX sets `:=`, or the group it is.
-fn class<'a>(name: &str, arg: &str, rest: &'a str, first: bool) -> (String, &'a str) {
-    let (before, after) = spaces(name);
-    let pieces = pieces(arg).unwrap_or_default();
-    match pieces[..] {
-        [
-            Piece {
-                symbol: Some((c, class)),
-                ..
-            },
-        ] if class == name || before.is_empty() && after.is_empty() => {
-            return (format!("\\{name}{{{c}}}"), rest);
-        }
-        [
-            Piece {
-                symbol: None,
-                operator: true,
-            },
-        ] => return (format!("\\{name}{{{}}}", rewrite(arg)), rest),
-        _ if before.is_empty() && after.is_empty() => {
-            return (format!("\\{name}{{{}}}", rewrite(arg)), rest);
-        }
-        _ => {}
-    }
-    let symbols: Option<String> = (pieces.iter())
-        .map(|p| p.symbol.map(|(c, _)| format!("\\mathord{{{c}}}")))
-        .collect();
-    let atom = symbols
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| rewrite(arg));
-    let (scripts, rest) = scripts(rest);
-    let before = if first { "" } else { before };
-    let after = if ends(rest) { "" } else { after };
-    (format!("{before}\\mathord{{{atom}}}{scripts}{after}"), rest)
-}
-
-/// The scripts after an atom, their arguments rewritten, and what follows them.
-fn scripts(mut rest: &str) -> (String, &str) {
-    let mut out = String::new();
-    loop {
-        let next = rest.trim_start();
-        let Some(mark) = next.chars().next().filter(|c| matches!(c, '_' | '^')) else {
-            break;
-        };
-        let Some((arg, after)) = argument(&next[1..]) else {
-            break;
-        };
-        out.push_str(&format!("{mark}{{{}}}", rewrite(arg)));
-        rest = after;
-    }
-    (out, rest)
 }
 
 /// Whether `rest` holds nothing more of its group to space an atom from: the end of the group,

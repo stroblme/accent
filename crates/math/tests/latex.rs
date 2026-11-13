@@ -313,6 +313,25 @@ fn a_class_command_spaces_by_its_class() {
     assert!(width(r"a\mathrel{:=}b") < width(r"a:=b"));
 }
 
+/// An operator of more than a name is spaced from what follows it, after its limits, as a
+/// function's name is: a thin space before an ordinary atom or another operator, none before an
+/// opening delimiter.
+#[test]
+fn an_operator_group_is_spaced_as_a_name() {
+    let added =
+        |op: &str, after: &str| laid(&format!("{op} {after}"), false).width - laid(op, false).width;
+    for after in ["f", r"\sum_i a_i", "(f)"] {
+        let group = added(r"\operatorname{arg\,max}_x", after);
+        let name = added(r"\operatorname{argmax}_x", after);
+        assert!(
+            (group - name).abs() < 0.01,
+            "{after}: {group} against {name}"
+        );
+    }
+    // A name declared as itself stops, as TeX would, at an error rather than a loop.
+    assert!(accent_core::markdown::mathml(r"\DeclareMathOperator{\f}{\f} \f x", false).is_none());
+}
+
 /// An operator's limits go above and below it in display or after `\limits`, and after it inline
 /// or after `\nolimits`, `\operatorname` keeping them after it unless starred.
 #[test]
