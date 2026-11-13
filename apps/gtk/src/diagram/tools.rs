@@ -292,12 +292,11 @@ const WIDTHS: [(f64, f64, &str); 3] = [
     (4.0, 15.0, "Wide Width"),
 ];
 
-/// The Select tool's commands, on the swatches' slots as the PDF ring has its own: Paste while
-/// there is something to paste, the rest while anything is selected.
-const COMMANDS: [(&str, &str); 5] = [
+/// The Select tool's commands, on the swatches' slots as the PDF ring has its own, while anything
+/// is selected. Paste is left to `Ctrl+V` and the page's menu, so Select alone puts nothing out.
+const COMMANDS: [(&str, &str); 4] = [
     ("win.diagram-cut", "edit-cut-symbolic"),
     ("win.diagram-copy", "edit-copy-symbolic"),
-    ("win.diagram-paste", "edit-paste-symbolic"),
     ("win.diagram-duplicate", "tool-duplicate-symbolic"),
     ("win.diagram-delete", "user-trash-symbolic"),
 ];
@@ -327,8 +326,6 @@ pub struct DiagramRing {
     colour: gtk::ToggleButton,
     choosing: Cell<bool>,
     held: Cell<bool>,
-    /// The clipboard's watch, which shows Paste as something to paste comes and goes.
-    clip_watch: RefCell<Option<(gtk::gdk::Clipboard, gtk::glib::SignalHandlerId)>>,
     on_pick: OnPick,
     on_colour: OnColour,
     on_width: OnWidth,
@@ -411,7 +408,6 @@ impl DiagramRing {
             colour,
             choosing: Cell::new(false),
             held: Cell::new(false),
-            clip_watch: RefCell::new(None),
             on_pick: RefCell::new(None),
             on_colour: RefCell::new(None),
             on_width: RefCell::new(None),
@@ -472,14 +468,6 @@ impl DiagramRing {
                 d.sync();
             }
         });
-        let clipboard = diagram.ring.widget().clipboard();
-        let weak = Rc::downgrade(&diagram);
-        let watch = clipboard.connect_changed(move |_| {
-            if let Some(d) = weak.upgrade() {
-                d.sync();
-            }
-        });
-        diagram.clip_watch.replace(Some((clipboard, watch)));
         diagram
     }
 
@@ -582,16 +570,6 @@ impl DiagramRing {
         open
     }
 
-    /// Whether Paste has something to paste: text or a picture, and neither the size nor the
-    /// style Paste Shape and Paste Style take, as the canvas's menu decides.
-    fn pasteable(&self) -> bool {
-        let clipboard = self.ring.widget().clipboard();
-        let formats = clipboard.formats();
-        let any = formats.contains_type(gtk::glib::Type::STRING)
-            || formats.contains_type(gtk::gdk::Texture::static_type());
-        any && super::props::Clip::held(&clipboard).is_none()
-    }
-
     fn choose_colour(&self, i: usize) {
         // A swatch picked under Select brings its commands back.
         self.choosing.set(false);
@@ -624,13 +602,8 @@ impl DiagramRing {
         let (selecting, held) = (tool == Tool::Select, self.held.get());
         let choosing = selecting && held && self.choosing.get();
         self.choosing.set(choosing);
-        let pasteable = selecting && self.pasteable();
-        for (button, (action, _)) in self.commands.iter().zip(COMMANDS) {
-            let offered = match action {
-                "win.diagram-paste" => pasteable,
-                _ => held,
-            };
-            button.set_visible(selecting && offered && !choosing);
+        for button in &self.commands {
+            button.set_visible(selecting && held && !choosing);
         }
         check(&self.colour, selecting && held, choosing);
         let colours = self.colours.borrow();
@@ -659,15 +632,6 @@ impl DiagramRing {
 /// What swatch `i` is called, on the ring and in Recolour Selection's palette rows.
 fn swatch_name(i: usize) -> String {
     format!("Swatch {}", i + 1)
-}
-
-impl Drop for DiagramRing {
-    /// The clipboard outlives every tab, so its watch goes with the ring.
-    fn drop(&mut self) {
-        if let Some((clipboard, watch)) = self.clip_watch.take() {
-            clipboard.disconnect(watch);
-        }
-    }
 }
 
 /// A small drawing of what an option does, in the foreground colour, centred in its disc at the
