@@ -11,6 +11,7 @@ fn font() -> MathFont {
 fn laid(tex: &str, display: bool) -> Layout {
     let mathml = accent_core::markdown::mathml(tex, display)
         .unwrap_or_else(|| panic!("pulldown-latex rejects {tex}"));
+    assert!(!leaks(&mathml), "{tex}: {mathml}");
     let root = parse(&mathml).unwrap_or_else(|e| panic!("{tex}: {e}\n{mathml}"));
     assert!(
         root.warnings.is_empty(),
@@ -18,6 +19,19 @@ fn laid(tex: &str, display: bool) -> Layout {
         root.warnings
     );
     layout(&root, &font(), 16.0)
+}
+
+/// Whether TeX shows as text, as `\mathop{\times}` showed `\times`: a backslash before a letter
+/// outside the text `\text{}` and `\colorbox{}` write as it is.
+fn leaks(mathml: &str) -> bool {
+    mathml
+        .split("<mtext")
+        .map(|s| s.split_once("</mtext>").map_or(s, |(_, math)| math))
+        .any(|math| {
+            math.as_bytes()
+                .windows(2)
+                .any(|w| w[0] == b'\\' && w[1].is_ascii_alphabetic())
+        })
 }
 
 /// Every extent finite and not negative, every coordinate finite.
@@ -81,6 +95,11 @@ const FORMULAS: &[&str] = &[
     r"\underline{x} \underbrace{a+b}_n",
     r"a \mskip 18mu b",
     r"\shortmid x",
+    r"\mathop{\times} \mathop{\sum}\limits_a^b \mathop{\mathbb{E}}_x",
+    r"a \mathbin{\times} b \mathrel{\to} \mathopen{\{} c \mathclose{\}}",
+    r"\operatorname*{arg\,max}_x f \operatorname{a<b}",
+    r"\DeclareMathOperator{\rank}{rank} \rank A",
+    r"\sin\limits_x",
 ];
 
 #[test]
@@ -234,6 +253,60 @@ fn lines_are_rules() {
     assert_eq!(rules(&laid(r"\fcolorbox{red}{yellow}{x}", false)), 5);
 }
 
+/// A symbol command in a class command is the character it stands for, which that command sets
+/// as MathJax does: `\mathop{\times}` is the operator ×.
+#[test]
+fn a_class_command_takes_a_symbol_command() {
+    assert_eq!(laid(r"\mathop{\times}", false), laid(r"\mathop{×}", false));
+    assert_eq!(
+        laid(r"a\mathbin{\times}b", false),
+        laid(r"a\times b", false)
+    );
+    assert_eq!(
+        laid(r"a\mathrel{\vert}b", false),
+        laid(r"a\mathrel{|}b", false)
+    );
+    for display in [false, true] {
+        assert_eq!(
+            laid(r"\mathop{\sum}_a^b", display),
+            laid(r"\sum_a^b", display)
+        );
+    }
+}
+
+/// An operator's limits go above and below it in display or after `\limits`, and after it inline
+/// or after `\nolimits`, `\operatorname` keeping them after it unless starred.
+#[test]
+fn an_operator_places_its_limits() {
+    let width = |tex, display| laid(tex, display).width;
+    let op = r"\mathop{\times}_a^b";
+    assert!(width(op, true) < width(op, false));
+    assert_eq!(laid(r"\mathop{\times}\limits_a^b", false), laid(op, true));
+    assert_eq!(laid(r"\mathop{\times}\nolimits_a^b", true), laid(op, false));
+    assert!(width(r"\sin\limits_x", false) < width(r"\sin_x", false));
+    let name = r"\operatorname{arg\,max}_x";
+    assert!(width(r"\operatorname*{arg\,max}_x", true) < width(name, true));
+    assert_eq!(laid(name, true), laid(name, false));
+}
+
+/// An operator's name is set upright, a space and all, and `\DeclareMathOperator` names it.
+#[test]
+fn an_operator_name_is_upright() {
+    assert_eq!(
+        laid(r"\operatorname{arg\,max}", false),
+        laid(r"\mathrm{arg\,max}", false)
+    );
+    for display in [false, true] {
+        assert_eq!(
+            laid(
+                r"\DeclareMathOperator*{\argmax}{arg\,max} \argmax_x f",
+                display
+            ),
+            laid(r"\operatorname*{arg\,max}_x f", display)
+        );
+    }
+}
+
 /// splitmix64, gen-vault's generator: the same formulas every run, without a dependency.
 struct Rng(u64);
 
@@ -311,6 +384,9 @@ const FRAGMENTS: &[&str] = &[
     r"\{x \mid #\}",
     r"\shortmid \smallint",
     r"\text{中} #",
+    r"\mathop{#}_{x}",
+    r"\operatorname*{#}_{i}",
+    r"a \mathbin{#} \mathrel{\leq} b",
 ];
 
 fn formula(rng: &mut Rng, depth: u32) -> String {
@@ -345,6 +421,7 @@ fn generated_formulas_never_break_the_layout() {
         let Some(mathml) = accent_core::markdown::mathml(&tex, i % 2 == 0) else {
             continue;
         };
+        assert!(!leaks(&mathml), "{tex}: {mathml}");
         let root = parse(&mathml).unwrap_or_else(|e| panic!("{tex}: {e}\n{mathml}"));
         assert!(
             root.warnings.is_empty(),

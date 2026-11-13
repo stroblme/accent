@@ -6,6 +6,7 @@
 //! layout and cell navigation for Tab and Enter; `uri` reads the preview's own addresses back
 //! for a click.
 
+mod atoms;
 mod blocks;
 mod frontmatter;
 mod html;

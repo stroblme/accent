@@ -2,6 +2,7 @@
 //! anchors, math becomes MathML, every block carries the source line it starts on, and a
 //! conflict block its sides in boxes; for an exported file, what only the app can follow goes.
 
+use super::atoms::atoms;
 use super::links::{is_external, is_url, percent_decode, percent_encode};
 use super::options;
 use super::page::{Block, Node, Side, page};
@@ -31,7 +32,7 @@ fn open_href(target: &str, anchor: Option<&str>) -> String {
 }
 
 /// A formula's LaTeX as parser events, or why it does not parse: the one test of whether a
-/// formula renders, which [`mathml`] and [`math_errors`] both ask.
+/// formula renders, which [`mathml`] and [`math_errors`] both ask of the TeX [`atoms`] rewrites.
 fn latex<'a>(src: &'a str, storage: &'a Storage) -> Result<Vec<LatexEvent<'a>>, ParserError> {
     pulldown_latex::Parser::new(src, storage).collect()
 }
@@ -47,7 +48,8 @@ pub fn mathml(src: &str, display: bool) -> Option<String> {
     use pulldown_latex::config::DisplayMode;
 
     let storage = Storage::new();
-    let events = latex(src, &storage).ok()?;
+    let tex = atoms(src);
+    let events = latex(&tex, &storage).ok()?;
     let mut out = String::new();
     pulldown_latex::push_mathml(
         &mut out,
@@ -101,7 +103,7 @@ pub fn math_errors(text: &str) -> Vec<(Range<usize>, String)> {
         .into_offset_iter()
         .filter_map(|(ev, r)| match ev {
             Event::InlineMath(src) | Event::DisplayMath(src) => {
-                let err = latex(&src, &Storage::new()).err()?;
+                let err = latex(&atoms(&src), &Storage::new()).err()?;
                 // Its `Display` draws the offending text with carets under it; the source is the
                 // reason alone, which is what fits on the end of an editor line.
                 let why = err
