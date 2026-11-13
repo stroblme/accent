@@ -257,11 +257,14 @@ fn a_document_is_opened_and_answered_for_across_the_wire() {
     assert!(w.wait(|e| matches!(e, Event::Reconciled(_))));
 
     let text = "# Title\n\nsee [[nope]]\n";
-    let support: crate::Support = w
+    let support: Option<crate::Support> = w
         .client
-        .call("open_document", json!(["a.md", "markdown", text, 1]))
+        .call(
+            "open_document",
+            json!(["a.md", "markdown", {"Whole": text}, 1]),
+        )
         .unwrap();
-    assert_eq!(support.completion_triggers, ['[', '#', '(']);
+    assert_eq!(support.unwrap().completion_triggers, ['[', '#', '(']);
 
     let symbols: Vec<crate::Symbol> = w.client.call("symbols", json!(["a.md"])).unwrap();
     assert_eq!(symbols.len(), 1);
@@ -285,6 +288,34 @@ fn a_document_is_opened_and_answered_for_across_the_wire() {
             if rel == "a.md" && items.len() == 1)),
         "the dangling link has to reach the client as a notification"
     );
+}
+
+/// A document opens by the digest of its text where the host's file holds that text, which then
+/// never crosses the link, and the host holds it as the window's from then on; a text the file
+/// does not hold opens nothing, for the window to send it whole.
+#[test]
+fn a_document_the_host_holds_opens_by_its_digest() {
+    let w = Wired::open();
+    let open = |text: &str| {
+        let digest = accent_core::fs::digest(text).to_hex().to_string();
+        w.client
+            .call::<Option<crate::Support>>(
+                "open_document",
+                json!(["a.md", "markdown", {"File": digest}, 1]),
+            )
+            .unwrap()
+    };
+    assert!(open("hello [[b]] edited\n").is_none());
+    assert!(open("hello [[b]]\n").is_some());
+    let change = crate::language::synced::Change::Edit {
+        from: 1,
+        edit: crate::language::synced::edit_between("hello [[b]]\n", "hello [[b]] more\n"),
+    };
+    let applied: bool = w
+        .client
+        .call("change_document", json!(["a.md", 2, change]))
+        .unwrap();
+    assert!(applied, "the host does not hold the file's text");
 }
 
 /// A caller branches on the kind — the open path offers to create a note that is not there —

@@ -521,7 +521,7 @@ fn a_remote_vault_connects_indexes_and_answers() {
     remote
         .call::<serde_json::Value>(
             "open_document",
-            serde_json::json!(["c.md", "markdown", links, 1]),
+            serde_json::json!(["c.md", "markdown", {"Whole": links}, 1]),
         )
         .unwrap();
     for (line, path, missing) in [
@@ -559,7 +559,7 @@ fn a_remote_vault_connects_indexes_and_answers() {
         remote
             .call::<serde_json::Value>(
                 "open_document",
-                serde_json::json!(["d.md", "markdown", typed, 1]),
+                serde_json::json!(["d.md", "markdown", {"Whole": typed}, 1]),
             )
             .unwrap();
         let at = accent_api::Pos {

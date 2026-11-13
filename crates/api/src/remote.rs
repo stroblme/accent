@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use serde_json::json;
 
-use crate::language::synced::{self, Change};
+use crate::language::synced::{self, Change, Opening};
 use crate::link;
 use crate::rpc::{Client, Hello};
 use crate::ssh::{self, Forward, Url};
@@ -325,6 +325,25 @@ fn next_version() -> u64 {
     LAST.fetch_add(1, Ordering::Relaxed) + 1
 }
 
+/// Open `rel` on the host's language layer, giving `text` its `version`: by the text's digest,
+/// which the host takes from its own file where that holds the same text, so the text stays off
+/// the link, and else whole. `ask` sends `open_document` its arguments.
+fn open_on_host(
+    rel: &str,
+    language: &str,
+    text: &str,
+    version: u64,
+    ask: impl Fn(serde_json::Value) -> Result<Option<crate::Support>>,
+) -> Result<crate::Support> {
+    let digest = accent_core::fs::digest(text).to_hex().to_string();
+    if let Some(support) = ask(json!([rel, language, Opening::File(digest), version]))? {
+        return Ok(support);
+    }
+    let whole = Opening::Whole(text.to_string());
+    ask(json!([rel, language, whole, version]))?
+        .ok_or_else(|| Error::Protocol(format!("the host would not open {rel}")))
+}
+
 /// One vault on a remote host.
 pub struct Remote {
     url: Url,
@@ -588,6 +607,25 @@ impl Remote {
         }
     }
 
+    /// Open `rel` on the host's language layer with `text`, which [`opening`](Self::opening) gave
+    /// `version`, and say it [`answered`](Self::answered). The host may be starting the file's
+    /// server, which has `STARTING` to answer.
+    pub(crate) fn open_document(
+        &self,
+        rel: &str,
+        language: &str,
+        text: &str,
+        version: u64,
+        asked: &Asked,
+    ) -> Result<crate::Support> {
+        let deadline = accent_lsp::STARTING + crate::rpc::DEADLINE;
+        let support = open_on_host(rel, language, text, version, |params| {
+            self.call_tracked("open_document", params, asked, deadline)
+        })?;
+        self.answered(rel, version);
+        Ok(support)
+    }
+
     /// Send the host's language layer what changed in `rel`, `text` being all of it now: the
     /// edit from the text the host holds ([`synced`](crate::language::synced)), or the whole
     /// text where it may hold another, which it also asks for by refusing an edit.
@@ -661,10 +699,9 @@ impl Remote {
                         };
                         // One that will not reopen is one tab without a language, not a failed
                         // connection.
-                        match client.call::<serde_json::Value>(
-                            "open_document",
-                            json!([rel, language, text, version]),
-                        ) {
+                        match open_on_host(rel, language, text, *version, |params| {
+                            client.call("open_document", params)
+                        }) {
                             Ok(_) => self.answered(rel, *version),
                             Err(e) => tracing::warn!("reopening {rel} on the new server: {e}"),
                         }

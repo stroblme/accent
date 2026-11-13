@@ -1400,21 +1400,15 @@ impl Vault {
     pub fn open_document(&self, rel: &str, language_id: &str, text: String) -> Task<Support> {
         match &self.backend {
             Backend::Local(v) => v.open_document(rel, language_id, text),
-            // The host may be starting the file's server, which has `STARTING` to answer.
             Backend::Remote(r) => {
                 let version = r.opening(rel, language_id, &text);
-                let params = json!([rel, language_id, text, version]);
-                let rel = rel.to_string();
-                remote_task_then(
-                    r.clone(),
-                    "open_document",
-                    params,
-                    accent_lsp::STARTING + crate::rpc::DEADLINE,
-                    move |r, answer| {
-                        r.answered(&rel, version);
-                        Ok(answer)
-                    },
-                )
+                let (r, rel, language_id) = (r.clone(), rel.to_string(), language_id.to_string());
+                let asked: Arc<crate::remote::Asked> = Arc::default();
+                Task::blocking({
+                    let (r, asked) = (r.clone(), asked.clone());
+                    move || r.open_document(&rel, &language_id, &text, version, &asked)
+                })
+                .cancelled_by(move || r.cancel(&asked))
             }
         }
     }
@@ -1619,16 +1613,36 @@ impl Local {
 
     /// The host's [`open_document`](Self::open_document) for a remote vault's window, which
     /// gives the text `version` and sends what changes in it from then on
-    /// ([`sync_document`](Self::sync_document)).
+    /// ([`sync_document`](Self::sync_document)). `None`, nothing opened, where the window sent
+    /// the digest of a text this host's file does not hold, which it then sends whole.
     pub(crate) fn open_synced(
         &self,
         rel: &str,
         language_id: &str,
-        text: String,
+        opening: synced::Opening,
         version: u64,
-    ) -> Task<Support> {
+    ) -> Task<Option<Support>> {
+        let text = match opening {
+            synced::Opening::Whole(text) => text,
+            synced::Opening::File(digest) => {
+                // A dependency outside the vault is read as its tab read it.
+                let read = match Path::new(rel).is_absolute() {
+                    true => self.read_named(rel),
+                    false => self.read_text(rel),
+                };
+                match read {
+                    Ok(accent_core::fs::Read::Text(file))
+                        if accent_core::fs::digest(&file.text).to_hex().as_str() == digest =>
+                    {
+                        file.text
+                    }
+                    _ => return Task::spawn(async { Ok(None) }),
+                }
+            }
+        };
         self.lang.held.open(rel, version, text.clone());
-        self.open_document(rel, language_id, text)
+        let opened = self.open_document(rel, language_id, text);
+        Task::spawn(async move { opened.await.map(Some) })
     }
 
     pub(crate) fn sync_document(

@@ -883,7 +883,8 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value> {
         }
 
         // The document's lifecycle. Opening one is the only call that reads the vault's config,
-        // a change is applied to the text the window sent (`language::synced`), and
+        // and may read its text from the file here; a change is applied to the text the host
+        // holds (`language::synced`), and
         // closing one forgets it rather than telling a provider, so none fits the table the
         // others go through.
         "open_document" => answer(block(vault.open_synced(

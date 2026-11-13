@@ -2,7 +2,8 @@
 //! rather than the whole text, as LSP's incremental sync does. Each message gives the document a
 //! version of the window's, one it never gave before, and an edit names the version it applies
 //! to, so a host holding any other (a change lost on the way, one that came late, a reconnect)
-//! refuses it and is sent the whole text.
+//! refuses it and is sent the whole text. A document opens by its text's digest, the host reading
+//! the text from its own file where that holds the same, and whole where it does not.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -18,6 +19,17 @@ pub(crate) enum Change {
     /// `edit` made to the text at version `from`.
     Edit { from: u64, edit: TextEdit },
     /// The whole text.
+    Whole(String),
+}
+
+/// The text a document opens with on the host.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) enum Opening {
+    /// The [`digest`](accent_core::fs::digest) of a text the host's file is expected to hold, in
+    /// hex: the host takes the text from its file where that digests the same, and the text never
+    /// crosses the link.
+    File(String),
+    /// The whole text, which the file did not hold: a notebook's cells, edits not saved.
     Whole(String),
 }
 
