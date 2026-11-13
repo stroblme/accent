@@ -18,6 +18,7 @@ mod link;
 mod paint;
 mod props;
 mod render;
+mod sharp;
 mod strip;
 mod tools;
 mod view;
@@ -1243,6 +1244,25 @@ impl DiagramTab {
     /// Zoom a step in or out around the middle of the view.
     pub fn zoom_step(&self, out: bool) {
         self.view.zoom_step(out, None);
+    }
+
+    /// Zoom to `scale` around the middle of the view, for a drill.
+    #[cfg(feature = "bench")]
+    pub fn zoom_to(&self, scale: f64) {
+        self.view.set_zoom(Zoom::Scale(scale));
+    }
+
+    /// Scroll the canvas by `(dx, dy)` pixels, for a drill.
+    #[cfg(feature = "bench")]
+    pub fn scroll_by(&self, dx: f64, dy: f64) {
+        let (x, y) = self.view.scroll();
+        self.view.set_scroll((x + dx, y + dy));
+    }
+
+    /// The copies of the SVG pictures on the page, for a drill (`sharp`).
+    #[cfg(feature = "bench")]
+    pub fn svg_copies(&self) -> Vec<sharp::Want> {
+        self.view.svg_copies()
     }
 
     pub fn fit_page(&self) {

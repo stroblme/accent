@@ -18,6 +18,7 @@ use gtk::{glib, graphene, gsk};
 
 use super::geometry::{self, DRAG_SLOP, End, Frame, GAP, HANDLE, Sheet, TOLERANCE, Zoom};
 use super::paint::{self, Cache, Tint};
+use super::sharp::Renders;
 use super::tools::Tool;
 use crate::theme;
 use drag::{Drag, Mods};
@@ -345,6 +346,12 @@ impl DiagramView {
         self.set_scroll((c.x + c.w / 2.0 - w / 2.0, c.y + c.h / 2.0 - h / 2.0));
     }
 
+    /// The copies of the SVG pictures drawn on the page, for a drill.
+    #[cfg(feature = "bench")]
+    pub fn svg_copies(&self) -> Vec<super::sharp::Want> {
+        self.imp().cache.svg_copies()
+    }
+
     /// Whether the page has been laid out at the canvas's size: a drill aiming at it waits.
     #[cfg(feature = "bench")]
     pub fn laid_out(&self) -> bool {
@@ -536,6 +543,8 @@ mod imp {
         /// Where the pointer is over the canvas, until it leaves: what a Ctrl+wheel zooms around.
         pub over: Cell<Option<(f64, f64)>>,
         pub cache: Cache,
+        /// The frames painted and the SVG pictures' copies they ask for (`sharp`).
+        pub renders: Renders,
         /// The colours the page is painted in.
         pub tint: Cell<Tint>,
         pub on_edit: RefCell<Option<OnEdit>>,
@@ -576,6 +585,7 @@ mod imp {
                 mods: Cell::new(Mods::default()),
                 over: Cell::new(None),
                 cache: Cache::default(),
+                renders: Renders::default(),
                 tint: Cell::new(Tint::FILE),
                 on_edit: RefCell::new(None),
                 on_zoom: RefCell::new(None),
@@ -848,11 +858,16 @@ mod imp {
                 Some(Preview::Live(live)) => (&live.scene.prims, &live.bounds, &live.cache),
                 _ => (&sheet.scene.prims, &sheet.bounds, &self.cache),
             };
+            cache.begin(
+                self.renders
+                    .frame(obj.upcast_ref(), Rect::new(sx, sy, w, h)),
+            );
             for (i, prim) in prims.iter().enumerate() {
                 if bounds[i].intersects(&visible) {
                     paint::prim(snapshot, obj.upcast_ref(), i, prim, &frame, cache, tint);
                 }
             }
+            self.renders.ask(cache.end(), obj.upcast_ref());
             obj.paint_overlays(snapshot, &sheet, &frame);
             snapshot.restore();
         }

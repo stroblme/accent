@@ -1698,6 +1698,32 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/librsvg-rebind/librsvg-rebind-0.3.0.crate",
+        "sha256": "8e29b54b27b49901092b20ef1177d42a068beec0ce5f3344a664118d586d2443",
+        "dest": "cargo/vendor/librsvg-rebind-0.3.0"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"8e29b54b27b49901092b20ef1177d42a068beec0ce5f3344a664118d586d2443\", \"files\": {}}",
+        "dest": "cargo/vendor/librsvg-rebind-0.3.0",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/librsvg-rebind-sys/librsvg-rebind-sys-0.3.0.crate",
+        "sha256": "4ab4a782ee37dfa57e9f03a169cc7ea652d20164e9e023f3df355d5d8b4e6c34",
+        "dest": "cargo/vendor/librsvg-rebind-sys-0.3.0"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"4ab4a782ee37dfa57e9f03a169cc7ea652d20164e9e023f3df355d5d8b4e6c34\", \"files\": {}}",
+        "dest": "cargo/vendor/librsvg-rebind-sys-0.3.0",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/libspelling/libspelling-0.5.0.crate",
         "sha256": "1aa3967523e0c59c89ca5695cd01538fdf9aa354a16a7dd48e2873c2b88d57ae",
         "dest": "cargo/vendor/libspelling-0.5.0"

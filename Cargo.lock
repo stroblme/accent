@@ -17,6 +17,7 @@ dependencies = [
  "glib-build-tools",
  "gtk4",
  "libadwaita",
+ "librsvg-rebind",
  "libspelling",
  "pulldown-cmark",
  "serde_json",
@@ -1468,6 +1469,35 @@ checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
 dependencies = [
  "cfg-if",
  "windows-link",
+]
+
+[[package]]
+name = "librsvg-rebind"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e29b54b27b49901092b20ef1177d42a068beec0ce5f3344a664118d586d2443"
+dependencies = [
+ "bitflags",
+ "cairo-rs",
+ "gio",
+ "glib",
+ "libc",
+ "librsvg-rebind-sys",
+]
+
+[[package]]
+name = "librsvg-rebind-sys"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ab4a782ee37dfa57e9f03a169cc7ea652d20164e9e023f3df355d5d8b4e6c34"
+dependencies = [
+ "cairo-sys-rs",
+ "gdk-pixbuf-sys",
+ "gio-sys",
+ "glib-sys",
+ "gobject-sys",
+ "libc",
+ "system-deps 7.0.8",
 ]
 
 [[package]]

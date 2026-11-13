@@ -403,7 +403,8 @@ use user_commands::bench_commands;
 ///   Files tree, the switcher and Preferences, and how far each went (`wheel::bench_wheel`).
 /// - `ACCENT_BENCH_DIAGRAM=<rel>`: diagram edits/save, creating a sample if
 ///   absent; `shot:<rel>:<dir>`: render pages; `export:<rel>:<dir>`: dark-theme
-///   PDF/PNG/SVG export and print output. `ACCENT_BENCH_DIAGRAM_SHOT=<png>` adds a picture
+///   PDF/PNG/SVG export and print output; `sharp:<rel>`: an SVG picture's copies and a frame's
+///   cost at 100, 200 and 400 %. `ACCENT_BENCH_DIAGRAM_SHOT=<png>` adds a picture
 ///   of the window (`diagram::bench_diagram`).
 /// - `ACCENT_BENCH_DIAGRAM_NAV=spring:<rel>`: a diagram's pages turned by XTEST wheel notches,
 ///   pulled off their edge while edited and at once presented; `find:<rel>`: its labels searched

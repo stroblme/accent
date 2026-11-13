@@ -6,7 +6,7 @@ use super::*;
 const ZOOM_STEP: i64 = 10;
 
 /// Debounce SVG rerendering after zoom steps, scaling the previous image while waiting.
-const ZOOM_SETTLE: Duration = Duration::from_millis(300);
+pub(crate) const ZOOM_SETTLE: Duration = Duration::from_millis(300);
 
 impl App {
     /// Step image zoom, or reset to fit with `None`.

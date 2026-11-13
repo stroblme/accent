@@ -1,6 +1,7 @@
 //! Shared diagram rendering for exports, printing and note embeds (`paint::prim`).
 //! Use file colours and paper (`Tint::FILE`) independently of the screen theme.
-//! Keep fills, strokes, text and formulas as PDF/SVG vectors; pictures remain images.
+//! Keep fills, strokes, text, formulas and SVG pictures (`sharp`) as PDF/SVG vectors; other
+//! pictures remain images.
 
 use accent_drawio::{Color, File, Prim, Rect};
 use gtk::prelude::*;
@@ -69,6 +70,7 @@ pub fn draw(file: &File, i: usize, area: Area, web: bool, pixels: f64) -> Option
     let widget = gtk::DrawingArea::new();
     let cache = Cache::default();
     cache.set_web(web);
+    cache.set_vectors(true);
     let frame = Frame {
         scale: DETAIL,
         pixels,

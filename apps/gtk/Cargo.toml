@@ -33,6 +33,9 @@ tracing-subscriber.workspace = true
 gtk = { package = "gtk4", version = "0.11", features = ["v4_18"] }
 # gtk's own cairo, with the surfaces a diagram is exported onto (`diagram::render`).
 cairo-rs = { version = "0.22", features = ["pdf", "svg", "png", "v1_16"] }
+# The system's librsvg: a diagram's SVG pictures drawn at the size shown, and as vectors in an
+# export (`diagram::sharp`).
+librsvg-rebind = "0.3"
 adw = { package = "libadwaita", version = "0.9", features = ["v1_8"] }
 sourceview5 = { version = "0.11", features = ["v5_18"] }
 # GNOME's HTTP library: the pictures a diagram links from the web (`diagram::web`) and the

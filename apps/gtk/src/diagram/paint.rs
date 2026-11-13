@@ -17,6 +17,7 @@ use gtk::prelude::*;
 use gtk::{gdk, glib, graphene, gsk, pango};
 
 use super::geometry::Frame;
+use super::sharp::{self, Canvas, Svg, Want};
 use crate::theme::gsk_matrix;
 use crate::{math, theme};
 
@@ -35,6 +36,12 @@ pub struct Cache {
     /// Whether pictures on the web are drawn, from the download cache (`super::web`): the
     /// reader said Load for this diagram.
     web: Cell<bool>,
+    /// The canvas's frame being painted, whose SVG pictures are drawn at its pixels (`sharp`).
+    canvas: Cell<Option<Canvas>>,
+    /// The copies of SVG pictures the frame asked for.
+    wants: RefCell<Vec<(Rc<Svg>, Want)>>,
+    /// Whether SVG pictures are drawn as vectors, as an export draws them.
+    vectors: Cell<bool>,
 }
 
 /// Where a label was painted, in page units: the block its text took, turned `rotation`
@@ -65,7 +72,50 @@ impl Cache {
             decoded: self.decoded.clone(),
             boxes: RefCell::default(),
             web: self.web.clone(),
+            canvas: Cell::default(),
+            wants: RefCell::default(),
+            vectors: self.vectors.clone(),
         }
+    }
+
+    /// Paint the SVG pictures of the canvas's frame `canvas` at its pixels, noting the copies it
+    /// still lacks.
+    pub fn begin(&self, canvas: Canvas) {
+        self.canvas.set(Some(canvas));
+        self.wants.borrow_mut().clear();
+    }
+
+    /// The copies the frame lacked, as many as [`sharp::BUDGET`] holds beside those it drew, once
+    /// those it did not draw are let go of.
+    pub fn end(&self) -> Vec<(Rc<Svg>, Want)> {
+        let mut room = sharp::BUDGET;
+        if let Some(canvas) = self.canvas.get() {
+            let decoded = self.decoded.borrow();
+            for svg in decoded.values().flatten().filter_map(|p| p.svg.as_ref()) {
+                svg.sweep(canvas.frame);
+                room -= svg.held(canvas.frame);
+            }
+        }
+        let wants = self.wants.take().into_iter();
+        wants
+            .filter(|(_, want)| {
+                room -= want.pixels();
+                room >= 0.0
+            })
+            .collect()
+    }
+
+    /// The copies of the SVG pictures decoded, for a drill.
+    #[cfg(feature = "bench")]
+    pub fn svg_copies(&self) -> Vec<Want> {
+        let decoded = self.decoded.borrow();
+        let svgs = decoded.values().flatten().filter_map(|p| p.svg.as_ref());
+        svgs.flat_map(|svg| svg.copies()).collect()
+    }
+
+    /// Draw SVG pictures as vectors, as an export does.
+    pub fn set_vectors(&self, on: bool) {
+        self.vectors.set(on);
     }
 
     /// Draw pictures on the web from the download cache, or as their boxes.
@@ -161,13 +211,22 @@ fn decode(bytes: Vec<u8>, mime: &str) -> Option<Rc<Picture>> {
         _ if accent_core::animation::animated(&bytes[..]) => OnceCell::from(false),
         _ => OnceCell::new(),
     };
-    let texture = crate::look::picture(&glib::Bytes::from_owned(bytes), mime).ok()?;
-    Some(Rc::new(Picture { texture, document }))
+    let bytes = glib::Bytes::from_owned(bytes);
+    let texture = crate::look::picture(&bytes, mime).ok()?;
+    let own = (f64::from(texture.width()), f64::from(texture.height()));
+    let svg = (mime == "image/svg+xml").then(|| Rc::new(Svg::new(bytes, own)));
+    Some(Rc::new(Picture {
+        texture,
+        document,
+        svg,
+    }))
 }
 
 /// A cell's picture, decoded, and whether it reads as a document.
 pub struct Picture {
     texture: gdk::Texture,
+    /// An SVG's text, which librsvg draws at the size shown (`sharp`).
+    svg: Option<Rc<Svg>>,
     /// Set for an SVG and an animation; a still raster's is measured the first time a theme
     /// that remaps documents asks (`look::measure`, on the main thread).
     document: OnceCell<bool>,
@@ -393,11 +452,25 @@ pub fn prim(
                             false => r,
                         };
                         tint.picture(|| p.document()).under(snapshot, || {
-                            snapshot.append_scaled_texture(
-                                t,
-                                gsk::ScalingFilter::Linear,
-                                &grect(&dest),
-                            )
+                            match (&p.svg, cache.canvas.get()) {
+                                (Some(svg), _) if cache.vectors.get() => {
+                                    svg.vectors(&snapshot.append_cairo(&grect(&dest)), &dest)
+                                }
+                                (Some(svg), Some(canvas)) => {
+                                    let flips = (*flip_h, *flip_v);
+                                    let need = sharp::want(&dest, *rotation, flips, &canvas);
+                                    if svg.paint(snapshot, t, &dest, need, canvas.frame)
+                                        && let Some((want, _)) = need
+                                    {
+                                        cache.wants.borrow_mut().push((svg.clone(), want));
+                                    }
+                                }
+                                _ => snapshot.append_scaled_texture(
+                                    t,
+                                    gsk::ScalingFilter::Linear,
+                                    &grect(&dest),
+                                ),
+                            }
                         });
                     }
                     None => {

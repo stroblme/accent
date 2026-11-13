@@ -125,7 +125,7 @@ gtk-bench:
 RUST_MIN := $(shell sed -n 's/^rust-version = "\(.*\)"/\1/p' Cargo.toml)
 # On macOS VTE 0.78 is optional, as `gtk` builds without what it is for there.
 GTK_LIBS := gtk4:4.18 libadwaita-1:1.8 gtksourceview-5:5.18 harfbuzz:8.3.1 libsoup-3.0:3.0 \
-            $(if $(DARWIN),vte-2.91-gtk4:0.76,vte-2.91-gtk4:0.78) libspelling-1:0.1
+            $(if $(DARWIN),vte-2.91-gtk4:0.76,vte-2.91-gtk4:0.78) libspelling-1:0.1 librsvg-2.0:2.50
 OPTIONAL_LIBS := $(if $(DARWIN),vte-2.91-gtk4:0.78:termprops)
 requirements:
 	@missing=0; \
@@ -159,14 +159,15 @@ requirements:
 # What `requirements` checks for, as each distribution packages it, plus git, ssh and curl. The one
 # list README.md, install.sh and CI rely on. GNOME 49 or newer is what has the versions above.
 PKGS_suse   := gcc make pkgconf-pkg-config glib2-devel gtk4-devel libadwaita-devel gtksourceview5-devel \
-               libsoup-devel vte-devel libspelling-devel dejavu-fonts git-core openssh-clients curl
+               libsoup-devel vte-devel libspelling-devel librsvg-devel dejavu-fonts git-core \
+               openssh-clients curl
 PKGS_fedora := gcc make pkgconf-pkg-config glib2-devel gtk4-devel libadwaita-devel gtksourceview5-devel \
-               libsoup3-devel vte291-gtk4-devel libspelling-devel dejavu-sans-mono-fonts git \
+               libsoup3-devel vte291-gtk4-devel libspelling-devel librsvg2-devel dejavu-sans-mono-fonts git \
                openssh-clients curl
 PKGS_debian := build-essential pkgconf libgio-2.0-dev-bin libgtk-4-dev libadwaita-1-dev \
                libgtksourceview-5-dev libsoup-3.0-dev libvte-2.91-gtk4-dev libspelling-1-dev \
-               fonts-dejavu-mono git openssh-client curl
-PKGS_arch   := base-devel gtk4 libadwaita gtksourceview5 libsoup3 vte4 libspelling ttf-dejavu \
+               librsvg2-dev fonts-dejavu-mono git openssh-client curl
+PKGS_arch   := base-devel gtk4 libadwaita gtksourceview5 libsoup3 vte4 libspelling librsvg ttf-dejavu \
                git openssh curl
 # Root (a CI container) installs directly; anyone else through sudo.
 SUDO := $(if $(filter 0,$(shell id -u)),,sudo)

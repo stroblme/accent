@@ -69,6 +69,7 @@
               libsoup_3
               vte-gtk4
               libspelling
+              librsvg
               glib-networking # HTTPS for libsoup
             ];
 
