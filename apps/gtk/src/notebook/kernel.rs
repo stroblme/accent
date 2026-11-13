@@ -1077,10 +1077,12 @@ impl App {
         let kernel = tab.as_ref().and_then(|tab| tab.kernel());
         let started = kernel.as_ref().is_some_and(|k| k.info.borrow().is_some());
         let busy = started && kernel.as_ref().is_some_and(|k| !k.runs.borrow().is_empty());
+        // A notebook's preview tab in front runs nothing, so the strip is greyed over it.
+        let reads = self.previews_notebook();
         for (action, on) in [
-            ("notebook-interrupt", busy),
-            ("notebook-restart", started),
-            ("notebook-shut-down", kernel.is_some()),
+            ("notebook-interrupt", busy && !reads),
+            ("notebook-restart", started && !reads),
+            ("notebook-shut-down", kernel.is_some() && !reads),
         ] {
             if let Some(action) = self
                 .window

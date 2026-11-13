@@ -82,7 +82,8 @@ impl App {
                 .as_ref()
                 .and_then(Doc::diff)
                 .and_then(|d| d.changes_shown()),
-            kernel: self.code_doc().is_some_and(|doc| doc.notebook().is_some()),
+            kernel: !self.previews_notebook()
+                && self.code_doc().is_some_and(|doc| doc.notebook().is_some()),
             bibliography: tab.is_some_and(|tab| bibliography::is_bib(&tab.rel()))
                 || self
                     .bibliography

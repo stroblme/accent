@@ -927,7 +927,15 @@ async fn preview_drill(app: &Rc<App>, tab: &Rc<NotebookTab>) {
     let (source, ..) = tab.bench_found();
     tab.find_clear();
     let read_only = viewer.bench_read_only();
+    // The Code pane's kernel commands are greyed over the preview, and back over the notebook.
+    let run_all = || {
+        app.window
+            .lookup_action("notebook-run-all")
+            .is_some_and(|a| a.is_enabled())
+    };
+    let greyed = !run_all();
     app.toggle_preview();
+    let ungreyed = run_all();
     tab.bench_type(0, " followed");
     app.toggle_preview();
     let followed = until("notebook", "preview followed", 5000, || {
@@ -937,11 +945,12 @@ async fn preview_drill(app: &Rc<App>, tab: &Rc<NotebookTab>) {
     app.toggle_preview();
     tab.undo();
     println!(
-        "bench notebook preview read_only={} rendered={} keys={} find_page={page} find_source={source} followed={} find_ms={find_ms:.0}",
+        "bench notebook preview read_only={} rendered={} keys={} find_page={page} find_source={source} followed={} kernel_greyed={} find_ms={find_ms:.0}",
         u8::from(read_only),
         u8::from(rendered),
         u8::from(keys),
-        u8::from(followed)
+        u8::from(followed),
+        u8::from(greyed && ungreyed)
     );
 }
 
