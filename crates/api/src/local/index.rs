@@ -371,9 +371,14 @@ fn searched(rel: &str, text: String) -> Option<String> {
 pub(crate) fn list_dir(index: &Index, root: &Path, rel: &str) -> Result<Vec<FileRow>> {
     let mut rows = index.list_files(rel)?;
     let held: HashSet<&str> = rows.iter().map(|r| r.rel_path.as_str()).collect();
+    // A folder reached through a link the index holds no row for lies behind a link the walk
+    // did not follow, read off the disk as an ignored folder is.
+    let linked = !rel.is_empty()
+        && index.get_file(rel)?.is_none()
+        && root.join(rel).canonicalize().ok() != root.canonicalize().ok().map(|r| r.join(rel));
     // Non-fatal: a directory that vanished mid-listing must not blank the rows the index did
     // answer for.
-    let extra = walk::unindexed_children(root, rel, &held).unwrap_or_else(|e| {
+    let extra = walk::unindexed_children(root, rel, &held, linked).unwrap_or_else(|e| {
         tracing::debug!(dir = rel, "listing the unindexed children: {e}");
         Vec::new()
     });
@@ -587,6 +592,30 @@ mod tests {
         assert_eq!(
             names(&f.vault.list_dir("").unwrap()),
             [".obsidian", ".gitignore"]
+        );
+    }
+
+    /// A folder link the walk does not follow, to a vault folder or back up to its own, is listed
+    /// off the disk as an ignored folder is, and opens to what its target holds.
+    #[test]
+    fn list_dir_lists_the_folder_links_the_walk_does_not_follow() {
+        let f = Fixture::open(VaultConfig::default());
+        f.write("Other/b.md", "b");
+        f.write("Notes/a.md", "a");
+        let root = f.vault.root();
+        std::os::unix::fs::symlink(root.join("Other"), root.join("Notes/inside")).unwrap();
+        std::os::unix::fs::symlink(&root, root.join("Notes/up")).unwrap();
+        f.vault.rescan().unwrap();
+        assert!(f.wait(|e| matches!(e, Event::Reconciled(_))).is_some());
+
+        let rows = f.vault.list_dir("Notes").unwrap();
+        let unindexed = |rel: &str| rows.iter().find(|r| r.rel_path == rel).map(|r| r.id == 0);
+        assert_eq!(names(&rows), ["Notes/inside", "Notes/up", "Notes/a.md"]);
+        assert_eq!(unindexed("Notes/inside"), Some(true));
+        assert_eq!(unindexed("Notes/up"), Some(true));
+        assert_eq!(
+            names(&f.vault.list_dir("Notes/inside").unwrap()),
+            ["Notes/inside/b.md"]
         );
     }
 

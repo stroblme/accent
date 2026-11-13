@@ -299,6 +299,18 @@ pub fn stat_one(root: &Path, rel: &str) -> crate::Result<Option<FileMeta>> {
     if !meta.is_file() && !meta.is_dir() {
         return Ok(None); // a pipe, a socket or a device, as the walk leaves them out
     }
+    // A directory link the walk does not follow: a second name for a vault folder would be
+    // watched as one, and the walk would take it out again.
+    if meta.is_dir()
+        && path.is_symlink()
+        && followable(
+            &path,
+            &root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
+        )
+        .is_err()
+    {
+        return Ok(None);
+    }
     // Last, because it is the only test that needs to know whether the path is a directory: a
     // gitignored *file* is indexed, a gitignored *directory* is not entered.
     if in_ignored_dir(&mut dir_ignores(root), rel, meta.is_dir()) {
@@ -365,16 +377,19 @@ fn is_unindexed(root: &Path, rel: &str, ignores: &mut IncrementalIgnore) -> Opti
 /// already inside one, without storing or watching them.
 ///
 /// Always omit [`ALWAYS_SKIP_DIRS`], Syncthing temporaries and save temporaries. `held` prevents
-/// duplicate rows and avoids dependency-marker stats for already-indexed directories.
+/// duplicate rows and avoids dependency-marker stats for already-indexed directories. `linked`
+/// says `rel` lies behind a directory link the walk did not follow, which the caller knows from
+/// the index holding no row for it.
 pub fn unindexed_children(
     root: &Path,
     rel: &str,
     held: &std::collections::HashSet<&str>,
+    linked: bool,
 ) -> crate::Result<Vec<(String, FileKind, Unindexed)>> {
     // One matcher for the whole listing: it caches the ignore files it reads on the way down, so
     // a directory of a thousand children asks the disk for them once.
     let mut ignores = dir_ignores(root);
-    let inside = is_unindexed(root, rel, &mut ignores);
+    let inside = is_unindexed(root, rel, &mut ignores).or(linked.then_some(Unindexed::Ignored));
     let mut out = Vec::new();
     let listed = |e| crate::Error::io(rel, e);
     for entry in std::fs::read_dir(root.join(rel)).map_err(listed)? {
@@ -394,6 +409,7 @@ pub fn unindexed_children(
         }
         let path = entry.path();
         let kind = entry.file_type().ok();
+        let link = kind.is_some_and(|t| t.is_symlink());
         let dir = match kind {
             // The dirent's own `d_type`, so an ordinary file or folder costs no syscall at all.
             Some(t) if !t.is_symlink() => t.is_dir(),
@@ -403,14 +419,16 @@ pub fn unindexed_children(
             _ => std::fs::metadata(&path).is_ok_and(|m| m.is_dir()),
         };
         // Outside a skipped tree, a child the index does not hold is only listed when it is one
-        // of the trees the walk refuses. Anything else missing from the index is missing for a
-        // reason of its own — a symlink pointing back into the vault, a file that vanished
-        // between the scan and now — and guessing at it here is not this function's business.
+        // of the trees the walk refuses. A directory link the index holds no row for is one the
+        // walk would not follow (a second way into the vault or to a linked folder, a loop, a
+        // system tree), listed as an ignored folder is so no folder is left out. Anything else
+        // missing from the index, a file that vanished between the scan and now, is not this
+        // function's business.
         let refused = dir.then(|| {
             if SKIP_DIRS.contains(&name.as_str()) || is_dependency_tree(&path) {
                 return Some(Unindexed::Dependency);
             }
-            in_ignored_dir(&mut ignores, &rel_path, true).then_some(Unindexed::Ignored)
+            (link || in_ignored_dir(&mut ignores, &rel_path, true)).then_some(Unindexed::Ignored)
         });
         // A child of an unindexed tree is of its parent's kind, unless it is a stricter tree of
         // its own: a `node_modules` under a gitignored build folder is still nobody's to edit.
@@ -844,6 +862,20 @@ fn admit_symlink(
     canonical_root: &Path,
     followed: &Mutex<Vec<PathBuf>>,
 ) -> Result<PathBuf, SkipReason> {
+    let target = followable(link, canonical_root)?;
+    let mut followed = followed
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if followed.iter().any(|t| target.starts_with(t)) {
+        return Err(SkipReason::TargetOverlapsSymlink);
+    }
+    followed.push(target.clone());
+    Ok(target)
+}
+
+/// The target of the directory symlink `link`, or why the walk never follows it, whatever else
+/// the vault links.
+fn followable(link: &Path, canonical_root: &Path) -> Result<PathBuf, SkipReason> {
     let target = link.canonicalize().map_err(|_| SkipReason::Io)?;
     // The link sits inside its own target: descending would revisit its own ancestors forever.
     let here = link
@@ -860,13 +892,6 @@ fn admit_symlink(
     if system_tree(&target) {
         return Err(SkipReason::SystemTree);
     }
-    let mut followed = followed
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if followed.iter().any(|t| target.starts_with(t)) {
-        return Err(SkipReason::TargetOverlapsSymlink);
-    }
-    followed.push(target.clone());
     Ok(target)
 }
 
@@ -964,6 +989,8 @@ mod tests {
         assert_eq!(rels(&r), vec!["real", "real/n.md"]);
         assert_eq!(r.skipped.len(), 1, "{:?}", r.skipped);
         assert_eq!(r.skipped[0].reason, SkipReason::TargetInsideVault);
+        // The watcher's news of it agrees, or it would be indexed until the next walk.
+        assert!(stat_one(vault.path(), "shortcut").unwrap().is_none());
     }
 
     #[test]
@@ -1286,7 +1313,7 @@ mod tests {
 
         // And the tree lists it beside its indexed siblings, then opens it a level at a time.
         let names = |rel: &str, held: HashSet<&str>| {
-            let mut n: Vec<String> = unindexed_children(vault.path(), rel, &held)
+            let mut n: Vec<String> = unindexed_children(vault.path(), rel, &held, false)
                 .unwrap()
                 .into_iter()
                 .map(|(rel, ..)| rel)
@@ -1445,7 +1472,7 @@ mod tests {
     fn unindexed_children_lists_the_skipped_trees_beside_indexed_siblings() {
         let vault = skipped_vault();
         let names = |rel| {
-            let mut n: Vec<String> = unindexed_children(vault.path(), rel, &HashSet::new())
+            let mut n: Vec<String> = unindexed_children(vault.path(), rel, &HashSet::new(), false)
                 .unwrap()
                 .into_iter()
                 .map(|(rel, ..)| rel)
@@ -1473,7 +1500,7 @@ mod tests {
         fs::write(at("build/node_modules/pkg/index.js"), "i").unwrap();
 
         let why = |rel: &str, name: &str| {
-            unindexed_children(vault.path(), rel, &HashSet::new())
+            unindexed_children(vault.path(), rel, &HashSet::new(), false)
                 .unwrap()
                 .into_iter()
                 .find(|(r, ..)| r == name)
@@ -1498,7 +1525,7 @@ mod tests {
         // A directory that gained its marker since the last scan is still in the index, and must
         // not come back a second time from the disk.
         let held = HashSet::from(["node_modules"]);
-        let rows = unindexed_children(vault.path(), "", &held).unwrap();
+        let rows = unindexed_children(vault.path(), "", &held, false).unwrap();
         assert_eq!(
             rows.iter().map(|(r, ..)| r.as_str()).collect::<Vec<_>>(),
             [".venv"]
@@ -1509,7 +1536,8 @@ mod tests {
     fn unindexed_children_classifies_by_name_as_the_walk_does() {
         let vault = skipped_vault();
         fs::write(vault.path().join("node_modules/README.md"), "r").unwrap();
-        let rows = unindexed_children(vault.path(), "node_modules", &HashSet::new()).unwrap();
+        let rows =
+            unindexed_children(vault.path(), "node_modules", &HashSet::new(), false).unwrap();
         let kind = |rel: &str| rows.iter().find(|(r, ..)| r == rel).map(|(_, k, _)| *k);
         assert_eq!(kind("node_modules/README.md"), Some(FileKind::Markdown));
         assert_eq!(kind("node_modules/pkg"), Some(FileKind::Dir));

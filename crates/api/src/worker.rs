@@ -1008,8 +1008,18 @@ fn watch(
         ref_dirs(&git_dir.join("refs/heads"), &mut dirs);
         ref_dirs(&git_dir.join("refs/remotes"), &mut dirs);
     }
-    // One level each, as every other directory here: never the tree under one.
-    dirs.extend(unindexed.iter().map(|rel| root.join(rel)));
+    // One level each, as every other directory here: never the tree under one. Not one reached
+    // through a link into the vault: a second name for a watched folder would rename its news,
+    // and unwatching that name would unwatch the folder.
+    let real_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    dirs.extend(
+        (unindexed.iter())
+            .filter(|rel| {
+                let real = root.join(rel).canonicalize();
+                real.is_ok_and(|real| real == real_root.join(rel) || !real.starts_with(&real_root))
+            })
+            .map(|rel| root.join(rel)),
+    );
     // A file that is a symlink of its own hears of its target in the target's folder, watched
     // for it unless that folder is watched already under its vault name: a second name for one
     // folder would rename the first's news. The worker routes the news back ([`Worker::apply_linked`]).
