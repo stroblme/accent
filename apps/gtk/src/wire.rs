@@ -20,12 +20,13 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
             #[upgrade_or]
             false,
             // A PDF and a notebook answer find and go-to themselves, whether or not anything is
-            // being presented.
+            // being presented, and a diagram go-to.
             move || {
                 app.presents_rendered(&pane)
                     || app.rendered_in(&pane).is_some()
                     || app.pdf_of(&pane).is_some()
                     || app.notebook_of(&pane).is_some()
+                    || app.diagram_of(&pane).is_some()
             }
         )),
         notebook: Box::new(glib::clone!(

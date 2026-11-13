@@ -511,6 +511,19 @@ impl App {
             }
             return;
         }
+        // A diagram goes to a page as a PDF does, and takes the keyboard back as the bar closes.
+        if let Some(diagram) = self.diagram_of(pane) {
+            match op {
+                find::PreviewOp::Line { line, commit: true } => {
+                    diagram.goto_page((line as usize).saturating_sub(1))
+                }
+                find::PreviewOp::Clear => {
+                    diagram.key_target().grab_focus();
+                }
+                _ => {}
+            }
+            return;
+        }
         // A notebook is matched as a buffer is, a cell at a time, and goes to cells.
         if let Some(nb) = self.notebook_of(pane) {
             match op {

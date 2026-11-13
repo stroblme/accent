@@ -300,10 +300,11 @@ impl App {
             "open-recent" => self.palette(palette::Mode::Vaults),
             "find" => self.open_find(find::Mode::Find),
             "replace" => self.open_find(find::Mode::Replace),
-            // `Ctrl+G` over a diagram groups the selection, as `Ctrl+D` duplicates it.
+            // `Ctrl+G` over a diagram groups the selection, as `Ctrl+D` duplicates it, and over a
+            // presented one, which edits nothing, goes to a page as it does over a PDF.
             "goto-line" => match self.active_diagram() {
-                Some(d) => d.group(),
-                None => self.open_find(find::Mode::Goto),
+                Some(d) if self.presenting.get().is_none() => d.group(),
+                _ => self.open_find(find::Mode::Goto),
             },
             "find-next" => self.pane().find.step(true),
             "find-previous" => self.pane().find.step(false),
