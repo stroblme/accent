@@ -26,7 +26,10 @@ pub use layout::{Item, Layout, layout};
 pub use parse::parse;
 
 /// STIX Two Math, the font a formula falls back to where the system has no math font
-/// (`fonts/README.md`).
+/// (`fonts/README.md`). It is embedded as it is, since deflating it would save 190 KiB of the
+/// installed binary but grow the zstd-compressed .deb by 24 KB, add 5 ms to the first formula and
+/// hold 0.8 MB of heap, where the embedded bytes are paged in only as HarfBuzz reads them
+/// (2026-11-13).
 pub const STIX_TWO_MATH: &[u8] = include_bytes!("../fonts/STIXTwoMath-Regular.otf");
 
 #[derive(Debug, thiserror::Error)]
