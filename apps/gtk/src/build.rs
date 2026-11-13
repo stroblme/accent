@@ -854,10 +854,17 @@ fn build_git(app: &Rc<App>, source: Arc<git::Source>) -> Rc<git::Panel> {
                 }
             }
         }),
-        let_go: Box::new(move |key| {
-            if let Some(app) = held.upgrade() {
-                app.let_go(key);
+        let_go: Box::new({
+            let held = held.clone();
+            move |key| {
+                if let Some(app) = held.upgrade() {
+                    app.let_go(key);
+                }
             }
+        }),
+        fail: Box::new(move |key, why, retry| {
+            held.upgrade()
+                .is_some_and(|app| app.fail_held(key, why, retry))
         }),
         compare_file: Box::new(move |key, title, text, restored, register| {
             let Some(app) = compare.upgrade() else {

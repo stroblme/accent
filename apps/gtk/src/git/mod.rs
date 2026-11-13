@@ -113,6 +113,10 @@ pub struct Hooks {
     pub hold_diff: Box<dyn Fn(&str, &str, &str, &str)>,
     /// The comparison a tab was put up for, by its key, will not come: see `App::let_go`.
     pub let_go: Box<dyn Fn(&str)>,
+    /// The comparison a tab was put up for, by its key, could not be read for the reason given:
+    /// the tab says so, with Retry running the closure. Whether a tab waited for it, which a
+    /// toast stands in for where none did.
+    pub fail: Box<dyn Fn(&str, &str, Box<dyn Fn()>) -> bool>,
     /// Put the file's tab back to the file alone, from a comparison or a merge git has moved past.
     pub leave: Box<dyn Fn(&str)>,
     /// Move vault files to the trash, with one toast for the lot, or delete them on a remote

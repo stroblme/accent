@@ -638,7 +638,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Of rows clicked faster than their files are read, the last one opens.
   Its tab is up at once, as a file's is (Loading), and shows the loading page until git has answered.
   A working tree or a merge is the file's own tab, whose read waits for the comparison so it opens on it, and anything else is a tab of its own.
-  Where no comparison comes of the click, the file's tab reads the file and a comparison's tab closes, as one put up for a row clicked past does.
+  Where git finds nothing to compare, the file's tab reads the file and a comparison's tab closes, as one put up for a row clicked past does.
+  Where its sides cannot be read, the tab says why with Retry and no toast, as a file's tab whose read fails does, and Retry asks git again (user decision 2026-11-13).
 - A binary file, whose diff would be noise, opens as it is now, as a click on it in the Files tree opens it: an image or a PDF in its viewer, anything else on its Binary File page (Unreadable file).
   One no longer on disk, deleted or moved since, has nothing to show, and a toast says so.
 - A row whose file was staged, discarded or committed since the refresh opens nothing, two identical columns being no answer: the pane says the file has no unstaged changes and asks git again, which takes the row away.

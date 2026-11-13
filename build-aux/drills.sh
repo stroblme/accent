@@ -230,15 +230,20 @@ drill_history_file() {
 
 # On a slow host, each read held 800 ms, a Git row's tab is up before git answers and shows the
 # loading page: one of its own for a file from the history, which opens with its unchanged runs
-# hidden as a quick one does, and the file's own for a change in the working tree. The commit's
+# hidden as a quick one does, and the file's own for a change in the working tree. The first read
+# of each fails, which the tab says with Retry and no toast, Retry comparing again. The commit's
 # row goes first, the second launch restoring its tab.
 drill_compare_loading() {
 	history_repo
-	launch 60 ACCENT_BENCH_SLOW_READ=800 ACCENT_BENCH_COMPARE=row:commit:note.md >"$dir/compare-loading"
-	launch 60 ACCENT_BENCH_SLOW_READ=800 ACCENT_BENCH_COMPARE=row:untracked.md >>"$dir/compare-loading"
+	export ACCENT_BENCH_SLOW_READ=800 ACCENT_BENCH_FAIL_GIT_READ=1
+	launch 60 ACCENT_BENCH_COMPARE=row:commit:note.md >"$dir/compare-loading"
+	launch 60 ACCENT_BENCH_COMPARE=row:untracked.md >>"$dir/compare-loading"
 	has "$dir/compare-loading" 'bench compare_row at_once file=None diff=Some("diff/loading")' \
-		'bench compare_row at_once file=Some("loading/loading") diff=None'
-	grep -Eq '^bench compare_row opened key=.* hidden=[1-9]' "$dir/compare-loading" ||
+		'bench compare_row failed file=None diff=Some("diff/failed") retry=true toasts=0' \
+		'bench compare_row at_once file=Some("loading/loading") diff=None' \
+		'bench compare_row failed file=Some("loading/failed") diff=None retry=true toasts=0'
+	grep -Eq '^bench compare_row opened key=.* hidden=[1-9]' "$dir/compare-loading" &&
+		grep -q '^bench compare_row opened rel="untracked.md"' "$dir/compare-loading" ||
 		{ cat "$dir/compare-loading"; return 1; }
 }
 

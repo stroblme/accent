@@ -88,6 +88,14 @@ pub(crate) fn shown(holder: &gtk::Stack) -> bool {
     holder.visible_child_name().as_deref() == Some(DOC)
 }
 
+/// Whether `holder` is still blank or loading: neither its document nor its failure is up.
+pub(crate) fn waiting(holder: &gtk::Stack) -> bool {
+    matches!(
+        holder.visible_child_name().as_deref(),
+        Some(BLANK | LOADING)
+    )
+}
+
 /// [`put`] and [`show`] at once.
 pub(crate) fn fill(holder: &gtk::Stack, content: &impl IsA<gtk::Widget>) {
     put(holder, content);
@@ -215,9 +223,12 @@ impl Held {
         again(&self.holder);
     }
 
-    /// Hold the read back until what the tab was put up for asks for it (`App::hold_unread`).
+    /// Hold the read back until what the tab was put up for asks for it (`App::hold_unread`),
+    /// back on the loading page where that failed before.
     pub fn defer(&self) {
         self.unread.set(true);
+        self.failed.set(false);
+        again(&self.holder);
     }
 
     /// Whether the tab waits for its read to be asked for.

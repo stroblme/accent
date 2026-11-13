@@ -114,6 +114,11 @@ use keys::bench_keys;
 use keys_typing::bench_list;
 use keys_xtest::{bench_box_drag, bench_menu_caret, bench_occurrence_keys};
 pub(crate) use loading::SLOW_READ_MS;
+
+/// Whether the next comparison a Git row asks for fails to read, as one over a dropped link
+/// does: `ACCENT_BENCH_FAIL_GIT_READ`.
+pub(crate) static FAIL_GIT_READ: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 use minimap::bench_minimap;
 use notebook::bench_notebook;
 use outline::bench_outline;
@@ -312,6 +317,8 @@ use user_commands::bench_commands;
 ///   Remote pin-window/apart modes verify tabs cannot move off the host.
 /// - `ACCENT_BENCH_SLOW_READ=<ms>`: delay reads and fetches on workers, as a slow host would, for
 ///   double-clicks in the `TABS=tree:` drill (`TABS=loading` sets its own).
+/// - `ACCENT_BENCH_FAIL_GIT_READ=1`: the first comparison a Git row asks for fails to read, for
+///   its tab's Retry in the `COMPARE=row:` drill.
 /// - `ACCENT_BENCH_FOLLOW=<rel_note>`: Ctrl-hover, missing targets and anchors;
 ///   `hover:<rel_note>`: XTEST hover size and wheel behavior; `click:<rel_note>`: an XTEST
 ///   Ctrl+click jump within the note leaves nothing selected.
@@ -442,6 +449,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         .and_then(|ms| ms.parse().ok())
     {
         SLOW_READ_MS.store(ms, std::sync::atomic::Ordering::Relaxed);
+    }
+    if std::env::var_os("ACCENT_BENCH_FAIL_GIT_READ").is_some() {
+        FAIL_GIT_READ.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     if std::env::var_os("ACCENT_BENCH_BIBLIOGRAPHY").is_some() {
         scratch_only(app, "ACCENT_BENCH_BIBLIOGRAPHY");

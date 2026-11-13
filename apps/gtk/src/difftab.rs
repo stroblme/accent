@@ -382,6 +382,21 @@ impl DiffTab {
         crate::loading::shown(&self.holder)
     }
 
+    /// Whether the tab still waits for its texts, neither shown nor failed.
+    pub fn waiting(&self) -> bool {
+        crate::loading::waiting(&self.holder)
+    }
+
+    /// The texts could not be read for `why`: say so in the tab, with Retry running `retry`.
+    pub fn fail(&self, why: &str, retry: impl Fn() + 'static) {
+        crate::loading::fail(&self.holder, &self.page.title(), why, retry);
+    }
+
+    /// Back from the failure page to the loading page, the texts asked for again.
+    pub fn again(&self) {
+        crate::loading::again(&self.holder);
+    }
+
     pub fn comparison(&self) -> &Rc<Compare> {
         &self.compare
     }

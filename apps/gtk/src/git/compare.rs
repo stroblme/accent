@@ -17,12 +17,16 @@ impl Panel {
                 None => return,
             }
         };
-        let what = Comparison {
+        self.compare_what(Comparison {
             repo,
             rel: rel.to_string(),
             key: key.to_string(),
             sides,
-        };
+        });
+    }
+
+    /// [`Panel::compare`] of `what`, which a failed comparison's Retry asks again.
+    fn compare_what(self: &Rc<Self>, what: Comparison) {
         let asked = self.asked.get() + 1;
         self.asked.set(asked);
         self.put_up(&what);
@@ -33,9 +37,16 @@ impl Panel {
             let read = {
                 let what = what.clone();
                 crate::work::off_thread("git", move || {
-                    // A slow host, for `ACCENT_BENCH_SLOW_READ` under `ACCENT_BENCH_COMPARE=row:`.
+                    // A slow host, for `ACCENT_BENCH_SLOW_READ` under `ACCENT_BENCH_COMPARE=row:`,
+                    // and a dropped link, for `ACCENT_BENCH_FAIL_GIT_READ`.
                     #[cfg(feature = "bench")]
-                    crate::bench::hold(&crate::bench::SLOW_READ_MS);
+                    {
+                        use std::sync::atomic::Ordering::Relaxed;
+                        crate::bench::hold(&crate::bench::SLOW_READ_MS);
+                        if crate::bench::FAIL_GIT_READ.swap(false, Relaxed) {
+                            return Err("the host did not answer".to_string());
+                        }
+                    }
                     read(&what, &vault)
                 })
                 .await
@@ -48,7 +59,9 @@ impl Panel {
                 _ if panel.source_generation.get() != generation => false,
                 Some(Ok(read)) => panel.show(what, read, false),
                 Some(Err(why)) => {
-                    (panel.hooks.toast)(&why);
+                    if !panel.fail(&key, &why, what) {
+                        (panel.hooks.toast)(&why);
+                    }
                     false
                 }
                 None => false,
@@ -57,6 +70,18 @@ impl Panel {
                 (panel.hooks.let_go)(&key);
             }
         });
+    }
+
+    /// Say in the tab keyed `key`, put up for `what`, that its sides could not be read for
+    /// `why`, its Retry comparing again; whether a tab waited for it.
+    fn fail(self: &Rc<Self>, key: &str, why: &str, what: Comparison) -> bool {
+        let panel = Rc::downgrade(self);
+        let retry = move || {
+            if let Some(panel) = panel.upgrade() {
+                panel.compare_what(what.clone());
+            }
+        };
+        (self.hooks.fail)(key, why, Box::new(retry))
     }
 
     /// Put up the tab `what` is shown in before its sides are read, so a click on a slow host
@@ -164,10 +189,21 @@ impl Panel {
                 read => {
                     let why = read.into_iter().find_map(Result::err);
                     let why = why.map(|e| format!("{e:#}")).unwrap_or_default();
-                    if asked.is_some() {
-                        (panel.hooks.let_go)(&what.key);
+                    let why = format!("Cannot read {name}'s conflict: {why}");
+                    let (weak, rel, key) = (Rc::downgrade(&panel), what.rel.clone(), what.key);
+                    let retry = {
+                        let key = key.clone();
+                        move || {
+                            if let Some(panel) = weak.upgrade() {
+                                panel.open_merge(&rel, &key);
+                            }
+                        }
+                    };
+                    let failed = asked.is_some() && (panel.hooks.fail)(&key, &why, Box::new(retry));
+                    if !failed {
+                        (panel.hooks.toast)(&why);
                     }
-                    return (panel.hooks.toast)(&format!("Cannot read {name}'s conflict: {why}"));
+                    return;
                 }
             };
             let say = |why: &str| {

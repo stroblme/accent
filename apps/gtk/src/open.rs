@@ -899,6 +899,12 @@ impl App {
     /// and a file that is no text tab opens as it would.
     pub fn hold_unread(self: &Rc<Self>, key: &str) {
         if let Some(doc) = self.doc_for(key) {
+            // Its comparison asked for again ([`App::fail_held`]).
+            if let Doc::Loading(held) = &doc
+                && held.unread()
+            {
+                held.defer();
+            }
             return self.reveal_page(doc.page());
         }
         let text = matches!(doc::kind_of(key), Kind::Note | Kind::Text);
@@ -917,7 +923,12 @@ impl App {
     /// on the loading page until [`App::open_diff`] builds the comparison in it.
     pub fn hold_diff(self: &Rc<Self>, key: &str, file: &str, title: &str, old: &str) {
         match self.doc_for(key) {
-            Some(doc) => self.reveal_page(doc.page()),
+            Some(doc) => {
+                if let Doc::Diff(tab) = &doc {
+                    tab.again();
+                }
+                self.reveal_page(doc.page());
+            }
             None => {
                 self.add_diff(key, file, title, (old, ""), (title, ""), Opened::Preview);
             }
@@ -925,13 +936,26 @@ impl App {
     }
 
     /// What a tab was put up for will not come: a file's tab reads its file, and a comparison's
-    /// tab with nothing in it closes.
+    /// tab with nothing in it closes. One saying why its comparison failed stays.
     pub fn let_go(self: &Rc<Self>, key: &str) {
         match self.doc_for(key) {
-            Some(Doc::Loading(held)) if held.unread() => self.read_again(&held),
-            Some(Doc::Diff(tab)) if !tab.filled() => self.close_page(&tab.page),
+            Some(Doc::Loading(held)) if held.unread() && !held.failed() => self.read_again(&held),
+            Some(Doc::Diff(tab)) if tab.waiting() => self.close_page(&tab.page),
             _ => {}
         }
+    }
+
+    /// The comparison a tab was put up for could not be read for `why`: the tab says so, with
+    /// Retry running `retry`, as a file's tab whose read fails does (DESIGN.md, Loading).
+    /// Whether a tab waited for it.
+    pub fn fail_held(self: &Rc<Self>, key: &str, why: &str, retry: impl Fn() + 'static) -> bool {
+        let why = loading::sentence(why);
+        match self.doc_for(key) {
+            Some(Doc::Loading(held)) if held.unread() && !held.failed() => held.fail(&why, retry),
+            Some(Doc::Diff(tab)) if tab.waiting() => tab.fail(&why, retry),
+            _ => return false,
+        }
+        true
     }
 
     /// Open or refresh a blob comparison keyed by `key`, using `file` for syntax styling.

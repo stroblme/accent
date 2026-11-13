@@ -172,8 +172,9 @@ impl App {
             Doc::Diagram(d) => self.model_changed(d),
             Doc::Notebook(n) => self.model_changed(n),
             // A read that failed, the link down perhaps, is tried again; one on its way reads
-            // the file as it is when it gets there.
-            Doc::Loading(held) => self.read_again(held),
+            // the file as it is when it gets there. One held for a comparison waits for it.
+            Doc::Loading(held) if !held.unread() => self.read_again(held),
+            Doc::Loading(_) => {}
             // Neither a diff nor a shell is keyed by a path, so a file changing under one
             // reaches none of these; a preview is rendered again from its note's tab.
             Doc::Status(_) | Doc::Diff(_) | Doc::Terminal(_) | Doc::Rendered(_) => {}

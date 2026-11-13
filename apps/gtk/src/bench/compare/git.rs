@@ -22,8 +22,23 @@ pub(in crate::bench) fn bench_compare_row(app: &Rc<App>, rel: &str) {
         _ => ("", rel),
     };
     let (app, mode, rel) = (app.clone(), mode.to_string(), rel.to_string());
+    let slow = crate::bench::SLOW_READ_MS.load(std::sync::atomic::Ordering::Relaxed) > 0;
+    let failing = crate::bench::FAIL_GIT_READ.load(std::sync::atomic::Ordering::Relaxed);
     glib::spawn_future_local(async move {
         let wait = |ms| glib::timeout_future(Duration::from_millis(ms));
+        // What a tab is and shows: its document's kind and its stack's page.
+        let shows = |key: &str| {
+            let doc = app.doc_for(key)?;
+            let kind = match doc {
+                Doc::Loading(_) => "loading",
+                Doc::Diff(_) => "diff",
+                Doc::Text(_) => "text",
+                _ => "other",
+            };
+            let stack = doc.page().child().downcast::<gtk::Stack>().ok();
+            let page = stack.and_then(|stack| stack.visible_child_name());
+            Some(format!("{kind}/{}", page.as_deref().unwrap_or("-")))
+        };
         let root = app.root();
         let git_cmd = move |args: &[&str]| {
             std::process::Command::new("git")
@@ -108,25 +123,40 @@ pub(in crate::bench) fn bench_compare_row(app: &Rc<App>, rel: &str) {
         };
         // On a slow host (`ACCENT_BENCH_SLOW_READ`), the tab the row opens is up before its sides
         // are read, showing the loading page once 160 ms have passed.
-        if crate::bench::SLOW_READ_MS.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+        if slow {
             wait(300).await;
-            let shows = |key: &str| {
-                let doc = app.doc_for(key)?;
-                let kind = match doc {
-                    Doc::Loading(_) => "loading",
-                    Doc::Diff(_) => "diff",
-                    Doc::Text(_) => "text",
-                    _ => "other",
-                };
-                let stack = doc.page().child().downcast::<gtk::Stack>().ok();
-                let page = stack.and_then(|stack| stack.visible_child_name());
-                Some(format!("{kind}/{}", page.as_deref().unwrap_or("-")))
-            };
             println!(
                 "bench compare_row at_once file={:?} diff={:?}",
                 shows(&rel),
                 shows(&key)
             );
+        }
+        // A read that fails says so in that tab, whose Retry compares again.
+        if failing {
+            let failed = |key: &str| shows(key).is_some_and(|s| s.ends_with("/failed"));
+            for _ in 0..100 {
+                if failed(&rel) || failed(&key) {
+                    break;
+                }
+                wait(100).await;
+            }
+            let page = [&rel, &key].into_iter().find(|key| failed(key));
+            let retry = page.and_then(|key| app.doc_for(key)).and_then(|doc| {
+                find_widget(&doc.page().child(), &|w| {
+                    w.downcast_ref::<gtk::Button>()
+                        .is_some_and(|b| b.label().as_deref() == Some("Retry"))
+                })
+            });
+            println!(
+                "bench compare_row failed file={:?} diff={:?} retry={} toasts={}",
+                shows(&rel),
+                shows(&key),
+                retry.is_some(),
+                app.toasted.get() - said
+            );
+            if let Some(retry) = retry.and_downcast::<gtk::Button>() {
+                retry.emit_clicked();
+            }
         }
         // Both sides are read on a worker, over the wire on a remote vault; then the comparison
         // settles.
