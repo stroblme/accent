@@ -1186,3 +1186,60 @@ fn the_session_is_not_a_remote_method() {
     let w = Wired::open();
     assert!(w.client.call::<Session>("session", json!([])).is_err());
 }
+
+/// A host whose index opens slower than the window waits on a quiet link says so once a second,
+/// which keeps `hello` waiting and tells the window what it waits for.
+#[test]
+fn a_slow_index_open_keeps_the_hello_waiting() {
+    let (root, cache) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (at, db) = (root.path().to_path_buf(), cache.path().join("index.db"));
+    let (server_in, client_out) = std::io::pipe().unwrap();
+    let (client_in, mut server_out) = std::io::pipe().unwrap();
+    let server = std::thread::spawn(move || {
+        let open = move || {
+            std::thread::sleep(Duration::from_millis(2500));
+            Local::open_at(&at, &db, VaultConfig::default())
+        };
+        let (vault, events) = opening(&mut server_out, open).unwrap().unwrap();
+        serve_local(vault, events, server_in, server_out, SILENCE);
+    });
+    let (events, said) = channel();
+    let client = Client::new(
+        Box::new(client_out),
+        Box::new(client_in),
+        events,
+        Box::new(|| {}),
+    );
+    let hello = client.call_tracked::<Hello>(
+        "hello",
+        json!([VaultConfig::default(), true, true]),
+        &Mutex::new(None),
+        Duration::from_millis(1500),
+    );
+    assert!(hello.is_ok(), "{hello:?}");
+    assert!(
+        said.try_iter()
+            .any(|e| matches!(e, Event::Connecting { what, .. } if what == "Opening the index"))
+    );
+    client.shutdown();
+    server.join().unwrap();
+}
+
+/// A window gone while the index opens ends the server at its next word, rather than leave it
+/// opening the index beside the server a reconnect starts.
+#[test]
+fn a_window_gone_while_the_index_opens_ends_the_server() {
+    struct Gone;
+    impl Write for Gone {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let t = Instant::now();
+    let opened = opening(&mut Gone, || std::thread::sleep(Duration::from_secs(3)));
+    assert!(matches!(opened, Err(Error::Lost(_))), "{opened:?}");
+    assert!(t.elapsed() < Duration::from_secs(2));
+}

@@ -34,6 +34,7 @@ pub const SILENCE: Duration = Duration::from_secs(90);
 /// How often a host says a request line is still arriving (`receiving`). The client's writer
 /// returns while ssh still holds up to its 2 MB channel window of the line, minutes over a slow
 /// link, and the call's deadline starts there: without word from the host it would run out.
+/// Also how often a host says its index is still opening ([`opening`]).
 const ARRIVING: Duration = Duration::from_secs(1);
 
 /// The longest line a host reads, its newline included: four times the longest note a tab opens,
@@ -394,13 +395,16 @@ pub fn serve(
     root: &std::path::Path,
     db: Option<&std::path::Path>,
     input: impl Read + Send + 'static,
-    output: impl Write + Send + 'static,
+    mut output: impl Write + Send + 'static,
 ) -> Result<()> {
-    let cfg = crate::VaultConfig::default();
-    let opened = match db {
-        Some(db) => Local::open_at(root, db, cfg),
-        None => Local::open(root, cfg),
-    };
+    let (root, db) = (root.to_path_buf(), db.map(std::path::Path::to_path_buf));
+    let opened = opening(&mut output, move || {
+        let cfg = crate::VaultConfig::default();
+        match db {
+            Some(db) => Local::open_at(&root, &db, cfg),
+            None => Local::open(&root, cfg),
+        }
+    })?;
     let (vault, events) = match opened {
         Ok(opened) => opened,
         Err(e) => {
@@ -410,6 +414,41 @@ pub fn serve(
     };
     serve_local(vault, events, input, output, SILENCE);
     Ok(())
+}
+
+/// What `open` answers, run on a thread of its own while this one tells `output` once a second
+/// that the index is opening. A slow disk or a large WAL to recover can make that take longer than
+/// the window waits on a quiet link for its `hello`, which any byte from here keeps waiting, and
+/// the window's banner then says what it waits for. A word that cannot be written means the window
+/// has gone, and the server ends rather than go on opening an index its reconnect's server opens.
+fn opening<T: Send + 'static>(
+    output: &mut impl Write,
+    open: impl FnOnce() -> T + Send + 'static,
+) -> Result<T> {
+    let (tx, opened) = channel();
+    std::thread::Builder::new()
+        .name("accent-open".to_string())
+        .spawn(move || {
+            let _ = tx.send(open());
+        })
+        .map_err(|e| Error::Remote(format!("cannot open the vault: {e}")))?;
+    let event = Event::Connecting {
+        what: "Opening the index".to_string(),
+        fraction: None,
+    };
+    let said = encode(&json!({"jsonrpc": "2.0", "method": "event", "params": event}));
+    loop {
+        match opened.recv_timeout(ARRIVING) {
+            Ok(opened) => return Ok(opened),
+            Err(RecvTimeoutError::Timeout) => output
+                .write_all(&said)
+                .and_then(|()| output.flush())
+                .map_err(|e| Error::Lost(format!("the window went while the index opened: {e}")))?,
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(Error::Remote("opening the vault failed".to_string()));
+            }
+        }
+    }
 }
 
 /// Reply to the opening `hello` with the vault failure. Exiting alone would
