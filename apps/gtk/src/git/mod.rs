@@ -109,8 +109,9 @@ pub struct Hooks {
     /// comparison is read: its file is read once `compare_file` or `merge_file` asks for it.
     pub hold_file: Box<dyn Fn(&str)>,
     /// Put up a comparison's tab of two texts that are not files before they are read: key, the
-    /// file name behind it, the tab title and the left side's title. `open_diff` fills it.
-    pub hold_diff: Box<dyn Fn(&str, &str, &str, &str)>,
+    /// file name behind it, the tab title, the left side's title and whether a session restore is
+    /// putting it back. `open_diff` fills it. Hands the tab back so the session keeps it meanwhile.
+    pub hold_diff: Box<dyn Fn(&str, &str, &str, &str, bool) -> Option<Rc<DiffTab>>>,
     /// The comparison a tab was put up for, by its key, will not come: see `App::let_go`.
     pub let_go: Box<dyn Fn(&str)>,
     /// The comparison a tab was put up for, by its key, could not be read for the reason given:

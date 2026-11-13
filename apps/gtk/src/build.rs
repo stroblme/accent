@@ -848,10 +848,8 @@ fn build_git(app: &Rc<App>, source: Arc<git::Source>) -> Rc<git::Panel> {
         }),
         hold_diff: Box::new({
             let held = held.clone();
-            move |key, file, title, old| {
-                if let Some(app) = held.upgrade() {
-                    app.hold_diff(key, file, title, old);
-                }
+            move |key, file, title, old, restored| {
+                (held.upgrade()).and_then(|app| app.hold_diff(key, file, title, old, restored))
             }
         }),
         let_go: Box::new({

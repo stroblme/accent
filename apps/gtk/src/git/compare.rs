@@ -96,8 +96,18 @@ impl Panel {
         if self.in_file_tab(&what.sides) {
             return (self.hooks.hold_file)(&key);
         }
+        self.hold_diff(what, false);
+    }
+
+    /// Put up the tab of its own `what` is shown in, on the loading page until its sides are
+    /// read, and keep it for the session meanwhile.
+    fn hold_diff(&self, what: &Comparison, restored: bool) {
         let (left, right) = titles(what);
-        (self.hooks.hold_diff)(&key, split_name(&what.rel).1, &right, &left);
+        let name = split_name(&what.rel).1;
+        let key = self.tab_key(what);
+        if let Some(tab) = (self.hooks.hold_diff)(&key, name, &right, &left, restored) {
+            self.watch(what.clone(), Target::Diff(Rc::downgrade(&tab)));
+        }
     }
 
     /// Whether `sides` are compared in the file's own tab, its editor the working tree: a merge,
@@ -239,29 +249,56 @@ impl Panel {
     }
 
     /// Open `what` again as a session restore puts it back: into the pane the restore keeps for
-    /// its tab, in front of nothing, and saying nothing where there is nothing left to show. `done`
-    /// runs once it is open or given up.
+    /// its tab, in front of nothing, and saying nothing where there is nothing left to show. A
+    /// tab of its own is back at once, on the loading page until git answers, as a row's click
+    /// puts it up; a file's own tab is back already. `done` runs once it is in its place or
+    /// given up.
     pub fn restore(self: &Rc<Self>, what: Comparison, done: impl FnOnce() + 'static) {
         if what.sides == Sides::Merge {
             self.show_merge(what, None);
             return done();
         }
+        let held = !self.in_file_tab(&what.sides);
+        let mut done = Some(done);
+        if held {
+            self.hold_diff(&what, true);
+            if let Some(done) = done.take() {
+                done();
+            }
+        }
         let (panel, vault, generation) =
             (self.clone(), self.source(), self.source_generation.get());
+        let key = self.tab_key(&what);
         glib::spawn_future_local(async move {
             let read = {
                 let what = what.clone();
-                crate::work::off_thread("git", move || read(&what, &vault)).await
+                crate::work::off_thread("git", move || {
+                    #[cfg(feature = "bench")]
+                    crate::bench::hold(&crate::bench::SLOW_READ_MS);
+                    read(&what, &vault)
+                })
+                .await
             };
-            match read {
+            let shown = match read {
                 Some(Ok(read)) if panel.source_generation.get() == generation => {
-                    panel.show(what, read, true);
+                    panel.show(what, read, true)
                 }
-                Some(Ok(_)) => {}
-                Some(Err(why)) => tracing::debug!("{why}"),
-                None => {}
+                Some(Err(why)) if held => {
+                    panel.fail(&key, &why, what);
+                    false
+                }
+                Some(Err(why)) => {
+                    tracing::debug!("{why}");
+                    false
+                }
+                _ => false,
+            };
+            if held && !shown {
+                (panel.hooks.let_go)(&key);
             }
-            done();
+            if let Some(done) = done {
+                done();
+            }
         });
     }
 

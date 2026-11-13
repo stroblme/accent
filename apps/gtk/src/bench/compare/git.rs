@@ -39,6 +39,21 @@ pub(in crate::bench) fn bench_compare_row(app: &Rc<App>, rel: &str) {
             let page = stack.and_then(|stack| stack.visible_child_name());
             Some(format!("{kind}/{}", page.as_deref().unwrap_or("-")))
         };
+        // On a slow host, a comparison the session restores is back at once, on the loading page.
+        if slow {
+            for _ in 0..200 {
+                if app.restored.get() {
+                    break;
+                }
+                wait(10).await;
+            }
+            wait(300).await;
+            for doc in app.docs() {
+                if matches!(doc, Doc::Diff(_)) {
+                    println!("bench compare_row restored {:?}", shows(&doc.key()));
+                }
+            }
+        }
         let root = app.root();
         let git_cmd = move |args: &[&str]| {
             std::process::Command::new("git")

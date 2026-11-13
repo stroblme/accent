@@ -920,17 +920,34 @@ impl App {
     }
 
     /// [`App::hold_unread`] for a comparison of two texts that are not files: its tab, titled,
-    /// on the loading page until [`App::open_diff`] builds the comparison in it.
-    pub fn hold_diff(self: &Rc<Self>, key: &str, file: &str, title: &str, old: &str) {
+    /// on the loading page until [`App::open_diff`] builds the comparison in it. A `restored` one
+    /// goes where the session restore keeps it, behind what its pane shows.
+    pub fn hold_diff(
+        self: &Rc<Self>,
+        key: &str,
+        file: &str,
+        title: &str,
+        old: &str,
+        restored: bool,
+    ) -> Option<Rc<difftab::DiffTab>> {
         match self.doc_for(key) {
-            Some(doc) => {
-                if let Doc::Diff(tab) = &doc {
-                    tab.again();
+            Some(Doc::Diff(tab)) => {
+                tab.again();
+                if !restored {
+                    self.reveal_page(&tab.page);
                 }
+                Some(tab)
+            }
+            Some(doc) => {
                 self.reveal_page(doc.page());
+                None
             }
             None => {
-                self.add_diff(key, file, title, (old, ""), (title, ""), Opened::Preview);
+                let how = match restored {
+                    true => Opened::Restored,
+                    false => Opened::Preview,
+                };
+                Some(self.add_diff(key, file, title, (old, ""), (title, ""), how))
             }
         }
     }

@@ -1568,7 +1568,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Letting it go shows the file as the commit left it, alone and as its own tab would show it with the Column Width and Line Numbers preferences, from the line the right column had at its top.
   Pressing it again brings the comparison back as it was, and like Show All Unchanged Lines it is never saved.
   A file the commit deleted has nothing to show alone and no toggle.
-- A comparison with git is part of the session (`Session::compared`): a note compared with the index comes back compared, a merge as a merge (Merge), and a staged change's or a commit's tab comes back in its place in its pane, each read from git again.
+- A comparison with git is part of the session (`Session::compared`): a note compared with the index comes back compared, a merge as a merge (Merge), and a staged change's or a commit's tab comes back in its place in its pane at once, on the loading page until git has answered (Loading), each read from git again.
   One that has nothing left to show comes back as the plain note, or not at all, without a word.
   A comparison with a conflict copy or with the disk comes back as the plain note: what it showed may be gone, and where a copy is still there its banner offers the comparison again.
 - A selection in the working-tree comparison puts Stage Selected Lines and Revert Selected Lines on the view's menu, in a section of their own, and one in a staged comparison Unstage Selected Lines: exactly the changed rows the selection covers go in or out, a row with no line on the selection's side going with the line above it.

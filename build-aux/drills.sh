@@ -232,7 +232,7 @@ drill_history_file() {
 # loading page: one of its own for a file from the history, which opens with its unchanged runs
 # hidden as a quick one does, and the file's own for a change in the working tree. The first read
 # of each fails, which the tab says with Retry and no toast, Retry comparing again. The commit's
-# row goes first, the second launch restoring its tab.
+# row goes first, the second launch restoring its tab on the loading page.
 drill_compare_loading() {
 	history_repo
 	export ACCENT_BENCH_SLOW_READ=800 ACCENT_BENCH_FAIL_GIT_READ=1
@@ -240,6 +240,7 @@ drill_compare_loading() {
 	launch 60 ACCENT_BENCH_COMPARE=row:untracked.md >>"$dir/compare-loading"
 	has "$dir/compare-loading" 'bench compare_row at_once file=None diff=Some("diff/loading")' \
 		'bench compare_row failed file=None diff=Some("diff/failed") retry=true toasts=0' \
+		'bench compare_row restored Some("diff/loading")' \
 		'bench compare_row at_once file=Some("loading/loading") diff=None' \
 		'bench compare_row failed file=Some("loading/failed") diff=None retry=true toasts=0'
 	grep -Eq '^bench compare_row opened key=.* hidden=[1-9]' "$dir/compare-loading" &&
