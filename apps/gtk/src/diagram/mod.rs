@@ -465,13 +465,13 @@ impl DiagramTab {
     /// A click on the ring: into the diagram's Default Style for the tool it is for where there is
     /// one, as one undo step, else into the config's `[diagram]` for every diagram.
     fn ring_pick(self: &Rc<Self>, pick: Pick) {
-        let key = pick.tool().default_attr().expect("a creation tool");
-        let default = {
+        let default = pick.default_attr().and_then(|key| {
             let editor = self.editor.borrow();
-            accent_drawio::model::attr(&editor.file().attrs, key).map(str::to_string)
-        };
+            let style = accent_drawio::model::attr(&editor.file().attrs, key)?;
+            Some((key, style.to_string()))
+        });
         match default {
-            Some(before) => {
+            Some((key, before)) => {
                 let after = pick.restyle(&before);
                 if after != before {
                     self.editor.borrow_mut().set_file_attr(key, &after);
@@ -747,7 +747,7 @@ impl DiagramTab {
                 let style = self.new_style(&edit);
                 let mut added = None;
                 self.edit(|e, page| {
-                    added = Some(e.add_vertex(page, None, rect, &style, tool.label())?);
+                    added = Some(e.add_vertex(page, None, rect, &style, tools::label(&style))?);
                     Ok(())
                 });
                 self.set_tool(Tool::Select);

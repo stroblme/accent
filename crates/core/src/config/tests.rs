@@ -106,6 +106,7 @@ fn config_roundtrip_parses_the_documented_example() {
     assert!(c.drawing.eraser_partial);
     let diagram = DiagramConfig {
         rounded: true,
+        note: true,
         route: Route::Curved,
         arrow: false,
         grid: true,

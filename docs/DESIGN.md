@@ -1390,7 +1390,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - A move snaps to guides as in draw.io: the moved box's sides and middle to those of the shapes it sits among (its siblings, its group, the shapes an arrow joins it to) and to the page's middle, within half the grid, and its gaps to its neighbours in a row or a column to the gap they keep; each snap shows as a 1 px accent line, an equal gap as one with a tick at either end.
   A resize snaps the size its handle changes to that of a shape nearby, marked across both, and where no size snaps, an unturned shape's dragged side to another's side or middle.
   Alt moves and resizes free of guides and grid alike, and a page saying `guides="0"` has none.
-- The ring is the PDF's, with select, rectangle, ellipse, text, connector and image, and the tool's options on its outer orbit (square or rounded corners; a connector's route and arrow), each pick kept in the config's `[diagram]` for every diagram.
+- The ring is the PDF's, with select, rectangle, ellipse, text, connector and image, and the tool's options on its outer orbit (square or rounded corners; plain text or a Note; a connector's route and arrow), each pick kept in the config's `[diagram]` for every diagram.
+  With Note picked the text tool draws draw.io's Note from its General palette, a sheet with a folded corner, empty and with its label open for typing.
+  A text box's Default Style does not apply to a Note, so that pick always goes to the config.
   It is out whenever a diagram is in front unless the Drawing toggle or presentation put it away; select is its resting tool and dims nothing, and a shape drawn or dropped puts the tool down again, a connector staying in hand.
   A click with the connector in hand selects what is under it and over empty page lets the selection go.
 - With the connector in hand the shape under the pointer shows its connection points as small accent crosses, the one in reach lit, and an end dropped on one is pinned there.

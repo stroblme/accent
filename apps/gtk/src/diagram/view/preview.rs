@@ -107,8 +107,9 @@ fn apply(
     new: Option<NewCell>,
 ) -> Result<(), accent_drawio::Error> {
     match edit {
-        Edit::Add { tool, rect } => new.map_or(Ok(()), |n| {
-            edit::add_vertex(page, DRAFT, &n.layer, *rect, &n.style, tool.label())
+        Edit::Add { rect, .. } => new.map_or(Ok(()), |n| {
+            let label = crate::diagram::tools::label(&n.style);
+            edit::add_vertex(page, DRAFT, &n.layer, *rect, &n.style, label)
         }),
         Edit::Connect { source, target } => new.map_or(Ok(()), |n| {
             let (s, t) = (

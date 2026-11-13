@@ -61,6 +61,7 @@ eraser_partial = true
 
 [diagram]
 rounded = true
+note = true
 route = "curved"
 arrow = false
 grid = true
@@ -357,6 +358,8 @@ impl Default for DrawingConfig {
 pub struct DiagramConfig {
     /// A rectangle's corners are rounded.
     pub rounded: bool,
+    /// The text tool draws draw.io's Note, a sheet with a folded corner, instead of plain text.
+    pub note: bool,
     pub route: Route,
     /// A connector ends in an arrow.
     pub arrow: bool,
@@ -369,6 +372,7 @@ impl Default for DiagramConfig {
     fn default() -> Self {
         DiagramConfig {
             rounded: false,
+            note: false,
             route: Route::Orthogonal,
             arrow: true,
             grid: false,

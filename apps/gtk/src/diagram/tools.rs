@@ -53,10 +53,12 @@ impl Tool {
         }
     }
 
-    /// File-specific style, falling back to the ordinary ring preset.
+    /// File-specific style, falling back to the ordinary ring preset. A Note is always draw.io's
+    /// own, the text box's Default Style being no Note's.
     pub fn style_in(self, file: &accent_drawio::File, options: &DiagramConfig) -> String {
         let stored = self
             .default_attr()
+            .filter(|_| !(self == Tool::Text && options.note))
             .and_then(|key| accent_drawio::model::attr(&file.attrs, key))
             .map(str::to_string);
         match stored {
@@ -112,18 +114,20 @@ impl Tool {
             Tool::Rect if options.rounded => presets::ROUNDED.to_string(),
             Tool::Rect => presets::RECT.to_string(),
             Tool::Ellipse => presets::ELLIPSE.to_string(),
+            Tool::Text if options.note => presets::NOTE.to_string(),
             Tool::Text => presets::TEXT.to_string(),
             Tool::Connector => presets::edge(edge_kind(options.route), options.arrow),
             Tool::Select | Tool::Image => String::new(),
         }
     }
+}
 
-    /// The text a new cell starts with: a text box is useless empty, a shape is not.
-    pub fn label(self) -> &'static str {
-        match self {
-            Tool::Text => "Text",
-            _ => "",
-        }
+/// The text a new cell of `style` starts with: a text box is useless empty, a shape, a Note too,
+/// is not.
+pub fn label(style: &str) -> &'static str {
+    match Style::parse(style).names("text") {
+        true => "Text",
+        false => "",
     }
 }
 
@@ -168,16 +172,20 @@ const ROUTE_KEYS: [&str; 5] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pick {
     Rounded(bool),
+    /// The text tool's Note, or plain text.
+    Note(bool),
     Route(Route),
     Arrow(bool),
 }
 
 impl Pick {
-    /// The tool whose new cells it is for.
-    pub fn tool(self) -> Tool {
+    /// The Default Style it is written into where the diagram has one: its tool's, and none for
+    /// Text or Note, which picks the shape the text tool draws, not a key of the text box's style.
+    pub fn default_attr(self) -> Option<&'static str> {
         match self {
-            Pick::Rounded(_) => Tool::Rect,
-            Pick::Route(_) | Pick::Arrow(_) => Tool::Connector,
+            Pick::Rounded(_) => Tool::Rect.default_attr(),
+            Pick::Route(_) | Pick::Arrow(_) => Tool::Connector.default_attr(),
+            Pick::Note(_) => None,
         }
     }
 
@@ -185,6 +193,7 @@ impl Pick {
     pub fn apply(self, options: DiagramConfig) -> DiagramConfig {
         match self {
             Pick::Rounded(rounded) => DiagramConfig { rounded, ..options },
+            Pick::Note(note) => DiagramConfig { note, ..options },
             Pick::Route(route) => DiagramConfig { route, ..options },
             Pick::Arrow(arrow) => DiagramConfig { arrow, ..options },
         }
@@ -196,6 +205,8 @@ impl Pick {
         let mut style = Style::parse(style);
         match self {
             Pick::Rounded(on) => style.set("rounded", Some(if on { "1" } else { "0" })),
+            // Never written into a Default Style (`Pick::default_attr`).
+            Pick::Note(_) => {}
             Pick::Arrow(on) => style.set("endArrow", (!on).then_some("none")),
             Pick::Route(route) => {
                 let preset = Style::parse(&presets::edge(edge_kind(route), true));
@@ -214,6 +225,7 @@ impl Pick {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Picks {
     pub rounded: bool,
+    pub note: bool,
     pub route: Option<Route>,
     pub arrow: bool,
 }
@@ -247,17 +259,21 @@ impl From<DiagramConfig> for Picks {
     fn from(options: DiagramConfig) -> Picks {
         Picks {
             rounded: options.rounded,
+            note: options.note,
             route: Some(options.route),
             arrow: options.arrow,
         }
     }
 }
 
-/// The glyphs on the outer orbit: what a rectangle's corners and a connector's line will be.
+/// The glyphs on the outer orbit: what a rectangle's corners, the text tool's cell and a
+/// connector's line will be.
 #[derive(Debug, Clone, Copy)]
 enum Glyph {
     Square,
     Rounded,
+    Text,
+    Note,
     Line(Route),
     Arrow,
 }
@@ -265,10 +281,12 @@ enum Glyph {
 type OnPick = RefCell<Option<Box<dyn Fn(Pick)>>>;
 
 /// The generic ring with a diagram's options on its outer orbit: plain or rounded corners while
-/// the rectangle is in hand, and the line's route and its arrow while the connector is.
+/// the rectangle is in hand, plain text or a Note while the text tool is, and the line's route and
+/// its arrow while the connector is.
 pub struct DiagramRing {
     ring: Rc<Ring<Tool>>,
     corners: Vec<(bool, gtk::ToggleButton)>,
+    texts: Vec<(bool, gtk::ToggleButton)>,
     lines: Vec<(Route, gtk::ToggleButton)>,
     arrow: gtk::ToggleButton,
     picks: Cell<Picks>,
@@ -288,6 +306,10 @@ impl DiagramRing {
             (false, option(0, Glyph::Square, "Square Corners")),
             (true, option(1, Glyph::Rounded, "Rounded Corners")),
         ];
+        let texts = vec![
+            (false, option(0, Glyph::Text, "Text")),
+            (true, option(1, Glyph::Note, "Note")),
+        ];
         let lines = vec![
             (
                 Route::Straight,
@@ -306,6 +328,7 @@ impl DiagramRing {
         let diagram = Rc::new(DiagramRing {
             ring,
             corners,
+            texts,
             lines,
             arrow,
             picks: Cell::new(DiagramConfig::default().into()),
@@ -316,6 +339,14 @@ impl DiagramRing {
             button.connect_clicked(move |_| {
                 if let Some(d) = weak.upgrade() {
                     d.choose(Pick::Rounded(rounded));
+                }
+            });
+        }
+        for (note, button) in &diagram.texts {
+            let (note, weak) = (*note, Rc::downgrade(&diagram));
+            button.connect_clicked(move |_| {
+                if let Some(d) = weak.upgrade() {
+                    d.choose(Pick::Note(note));
                 }
             });
         }
@@ -388,6 +419,9 @@ impl DiagramRing {
         for (rounded, button) in &self.corners {
             check(button, tool == Tool::Rect, *rounded == picks.rounded);
         }
+        for (note, button) in &self.texts {
+            check(button, tool == Tool::Text, *note == picks.note);
+        }
         for (route, button) in &self.lines {
             check(button, tool == Tool::Connector, Some(*route) == picks.route);
         }
@@ -435,6 +469,25 @@ fn glyph_area(glyph: Glyph) -> gtk::DrawingArea {
                     1.5 * std::f64::consts::PI,
                 );
                 cr.close_path();
+            }
+            Glyph::Text => {
+                cr.move_to(l + 2.0, t);
+                cr.line_to(r - 2.0, t);
+                cr.move_to(w / 2.0, t);
+                cr.line_to(w / 2.0, b);
+            }
+            // A sheet standing up, as draw.io's is, its top right corner folded over.
+            Glyph::Note => {
+                let (l, r, t, b, k) = (4.0, w - 4.0, 2.0, h - 2.0, 5.0);
+                cr.move_to(l, t);
+                cr.line_to(r - k, t);
+                cr.line_to(r, t + k);
+                cr.line_to(r, b);
+                cr.line_to(l, b);
+                cr.close_path();
+                cr.move_to(r - k, t);
+                cr.line_to(r - k, t + k);
+                cr.line_to(r, t + k);
             }
             Glyph::Line(Route::Straight) => {
                 cr.move_to(l, b);
@@ -487,6 +540,21 @@ mod tests {
         let edge = Tool::Connector.style(&options);
         assert!(edge.contains("curved=1") && edge.contains("endArrow=none"));
         assert!(Tool::Text.draws_box() && !Tool::Connector.draws_box());
+    }
+
+    /// Note picked, the text tool draws draw.io's Note, empty, whatever the text box's Default
+    /// Style, and the pick goes to the config, never into that style.
+    #[test]
+    fn the_text_tool_draws_a_note_when_picked() {
+        let mut file = accent_drawio::File::blank();
+        accent_drawio::model::set_attr(&mut file.attrs, "accentStyleText", "text;fontSize=20;");
+        let options = Pick::Note(true).apply(DiagramConfig::default());
+        assert_eq!(Tool::Text.style_in(&file, &options), presets::NOTE);
+        assert_eq!(label(presets::NOTE), "");
+        assert_eq!(Pick::Note(true).default_attr(), None);
+        let options = Pick::Note(false).apply(options);
+        assert_eq!(Tool::Text.style_in(&file, &options), "text;fontSize=20;");
+        assert_eq!(label(&Tool::Text.style_in(&file, &options)), "Text");
     }
 
     #[test]

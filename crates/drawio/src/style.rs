@@ -610,6 +610,9 @@ pub mod presets {
     pub const ELLIPSE: &str = "ellipse;whiteSpace=wrap;html=1;";
     /// `Editor.defaultTextStyle`.
     pub const TEXT: &str = "text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;";
+    /// The General palette's Note (`Sidebar.addGeneralPalette`).
+    pub const NOTE: &str =
+        "shape=note;whiteSpace=wrap;html=1;backgroundOutline=1;darkOpacity=0.05;";
 
     /// How a new connector is routed.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
