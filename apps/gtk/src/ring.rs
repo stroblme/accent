@@ -318,9 +318,11 @@ pub(crate) fn orbit(i: usize, n: usize, radius: f64) -> (f64, f64) {
 }
 
 /// Put a round button on the ring by its centre rather than its corner, which is how the
-/// positions above are worked out.
+/// positions above are worked out. A click on it leaves the keyboard on the page, so the page's
+/// keys, `Escape` putting Select's swatches away among them, still reach it.
 fn place(root: &RingBox, button: &impl IsA<gtk::Widget>, cx: f64, cy: f64, size: i32) {
     let button = button.as_ref();
+    button.set_focus_on_click(false);
     // The buttons are square and sized by their CSS, so the size request is what centres them.
     button.set_size_request(size, size);
     let half = f64::from(size) / 2.0;

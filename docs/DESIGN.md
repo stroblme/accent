@@ -1410,15 +1410,17 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A text box's Default Style does not apply to a Note, so that pick always goes to the config.
   It is out whenever a diagram is in front unless the Drawing toggle or presentation put it away; select is its resting tool and dims nothing, and a shape drawn or dropped puts the tool down again, a connector staying in hand.
   A click with the connector in hand selects what is under it and over empty page lets the selection go.
-- Six colour swatches follow the tool's options on the outer orbit, for every tool but image, in the same slots whatever the tool (user decisions 2026-11-13).
+- Six colour swatches follow the tool's options on the outer orbit, for every tool but select and image, in the same slots whatever the tool (user decisions 2026-11-13).
   They hold the colours this diagram's cells were given most recently, at first the file's own with its last cells' colours leading, as draw.io adds a cell after the rest, and the PDF ring's six swatches fill any slot left over.
   A colour an edit sets that is not on the ring comes in first and pushes the last one off, while one already there keeps its place, so a swatch never moves under the pointer that picked it.
   The swatch picked is the colour new cells are drawn in, over their tool's style or Default Style, a line's stroke, a text's font and any other shape's fill, and it recolours the selection the same way as one undo step, its groups and pictures aside.
   It lasts while the tab is open and is not kept in the config, since another diagram's swatches need not hold it.
   Picked again with nothing selected it is put down, and new cells take their style's own colours.
   Each swatch is painted as the canvas paints its colour under the theme, and its tooltip names the colour as the file writes it.
-- Three line widths follow the swatches, as the PDF ring's three, a `strokeWidth` of 1, 2 or 4 for every tool that draws a line, which is all but image and plain text (user decision 2026-11-13).
+- Three line widths follow the swatches, as the PDF ring's three, a `strokeWidth` of 1, 2 or 4 for every tool that draws a line, which is all but image and plain text, and for select while anything is selected (user decision 2026-11-13).
   A width works as a swatch does, the width new cells are drawn at and the selection's as one undo step, its groups aside, for as long as the tab is open, and picked again with nothing selected it is put down.
+- With select in hand its commands take the swatches' slots, as the PDF Select tool's do (user decision 2026-11-13), Cut, Copy, Duplicate and Delete while anything is selected and Paste while the clipboard holds something to paste, so with nothing selected Paste alone.
+  Colour, on the slot before Cut, puts the swatches out in the commands' place, and a swatch picked recolours the selection and brings the commands back, as Colour again or `Escape` does without a change.
 - With the connector in hand the shape under the pointer shows its connection points as small accent crosses, the one in reach lit, and an end dropped on one is pinned there.
   Otherwise an end attaches to the shape under it only when its other end lies outside that shape: an arrow drawn within a slide's text box is on it, not leaving it.
   An end on no shape dangles on the grid, as an end dragged does, the second with Shift at a step of 15° from the first.
@@ -2097,7 +2099,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 ### Diagram
 
 - The canvas's own keys, as a PDF's are, firing actions the palette lists without an accelerator: Undo Diagram Edit `Ctrl+Z`, Redo `Ctrl+Shift+Z` / `Ctrl+Y`, Delete Selection `Delete` / `Backspace` (the arrows on it left where they are drawn, as draw.io's), Delete with Edges `Ctrl+Delete` / `Ctrl+Backspace`, Select All Shapes `Ctrl+A`, Cut, Copy and Paste into Diagram `Ctrl+X`, `Ctrl+C` and `Ctrl+V`, Edit Label `Return` (or any character typed over one selected shape, which becomes the label's first), Next and Previous Diagram Page `Page Down` / `Page Up`, and while it is presented `Space` / `Shift+Space`, `Right` / `Left` and `n` / `p` too, with `Home` and `End` going to its first and last page as a PDF's do, its other keys then doing nothing (Views).
-  The arrows nudge the selection a unit and Shift+arrows ten; Space held pans; `Escape` puts the tool down, then clears the selection.
+  The arrows nudge the selection a unit and Shift+arrows ten; Space held pans; `Escape` puts the ring's Colour swatches away, then the tool down, then clears the selection.
 - Duplicate Selection is `Ctrl+D`, Duplicate Line's chord, and Group `Ctrl+G`, Go to Line's, which a diagram in front answers and a presented one leaves to Go to Line, going to a page as over a PDF; `Ctrl+Return` finishes a label being edited; `F2` stays the file's Rename.
 - The tools (Select and Move, Add Rectangle, Add Ellipse, Add Text, Add Connector, Add Image…), Ungroup, Bring to Front, Send to Back, Copy Shape, Paste Shape, Copy Style, Paste Style, and Add, Rename, Delete, Move Up and Move Down Diagram Page are unbound, on the ring and in the palette; a tool picked from the palette brings the ring out, and the same tool twice puts it down.
   The page commands act on the page shown, Add putting a page after the last: the thumbnail strip is where pages are organised by pointer.

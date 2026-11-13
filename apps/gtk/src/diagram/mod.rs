@@ -593,6 +593,7 @@ impl DiagramTab {
         // A change the Properties pane holds is the old selection's.
         self.props.flush();
         self.view.set_selection(&ids);
+        self.ring.set_held(!ids.is_empty());
         *self.selection.borrow_mut() = ids;
         self.fill_props();
         self.on_selection.emit(self);
@@ -735,6 +736,7 @@ impl DiagramTab {
             selection.clone()
         };
         self.view.set_selection(&selection);
+        self.ring.set_held(!selection.is_empty());
         self.view.show(sheet);
         self.strip.set_framed(self.page_index.get());
     }

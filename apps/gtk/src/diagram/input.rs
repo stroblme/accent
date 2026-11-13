@@ -193,6 +193,7 @@ impl DiagramTab {
                     gdk::Key::Up if !ctrl => tab.nudge(0.0, -step),
                     gdk::Key::Down if !ctrl => tab.nudge(0.0, step),
                     gdk::Key::space if !ctrl => tab.view.set_panning(true),
+                    gdk::Key::Escape if tab.ring.close_colours() => {}
                     gdk::Key::Escape if tab.tool.get() != Tool::Select => {
                         tab.run("win.diagram-select")
                     }

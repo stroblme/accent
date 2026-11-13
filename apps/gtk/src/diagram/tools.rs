@@ -292,10 +292,20 @@ const WIDTHS: [(f64, f64, &str); 3] = [
     (4.0, 15.0, "Wide Width"),
 ];
 
+/// The Select tool's commands, on the swatches' slots as the PDF ring has its own: Paste while
+/// there is something to paste, the rest while anything is selected.
+const COMMANDS: [(&str, &str); 5] = [
+    ("win.diagram-cut", "edit-cut-symbolic"),
+    ("win.diagram-copy", "edit-copy-symbolic"),
+    ("win.diagram-paste", "edit-paste-symbolic"),
+    ("win.diagram-duplicate", "tool-duplicate-symbolic"),
+    ("win.diagram-delete", "user-trash-symbolic"),
+];
+
 /// The generic ring with a diagram's options on its outer orbit: plain or rounded corners while
 /// the rectangle is in hand, plain text or a Note while the text tool is, and the line's route and
-/// its arrow while the connector is. Colour swatches follow them for every tool but the image,
-/// and line widths for every tool that draws a line.
+/// its arrow while the connector is. Colour swatches follow them for every drawing tool, and line
+/// widths for every tool that draws a line; Select has its commands in the swatches' place.
 pub struct DiagramRing {
     ring: Rc<Ring<Tool>>,
     corners: Vec<(bool, gtk::ToggleButton)>,
@@ -311,6 +321,14 @@ pub struct DiagramRing {
     tint: Rc<Cell<Tint>>,
     widths: Vec<gtk::ToggleButton>,
     width: Cell<Option<f64>>,
+    /// Select's [`COMMANDS`], its Colour on the slot before them, which puts the swatches out in
+    /// their place, whether they are out, and whether anything is selected.
+    commands: Vec<gtk::Button>,
+    colour: gtk::ToggleButton,
+    choosing: Cell<bool>,
+    held: Cell<bool>,
+    /// The clipboard's watch, which shows Paste as something to paste comes and goes.
+    clip_watch: RefCell<Option<(gtk::gdk::Clipboard, gtk::glib::SignalHandlerId)>>,
     on_pick: OnPick,
     on_colour: OnColour,
     on_width: OnWidth,
@@ -370,6 +388,12 @@ impl DiagramRing {
                 button
             })
             .collect();
+        let commands = (COMMANDS.iter().enumerate())
+            .map(|(i, (action, icon))| ring.add_button(4 + i, slots, icon, action))
+            .collect();
+        let palette = crate::ring::glyph("preferences-color-symbolic");
+        let colour = ring.add_option(3, slots, palette.upcast_ref());
+        colour.set_tooltip_text(Some("Colour"));
         let diagram = Rc::new(DiagramRing {
             ring,
             corners,
@@ -383,6 +407,11 @@ impl DiagramRing {
             tint,
             widths,
             width: Cell::new(None),
+            commands,
+            colour,
+            choosing: Cell::new(false),
+            held: Cell::new(false),
+            clip_watch: RefCell::new(None),
             on_pick: RefCell::new(None),
             on_colour: RefCell::new(None),
             on_width: RefCell::new(None),
@@ -436,6 +465,21 @@ impl DiagramRing {
                 }
             });
         }
+        let weak = Rc::downgrade(&diagram);
+        diagram.colour.connect_clicked(move |_| {
+            if let Some(d) = weak.upgrade() {
+                d.choosing.set(!d.choosing.get());
+                d.sync();
+            }
+        });
+        let clipboard = diagram.ring.widget().clipboard();
+        let weak = Rc::downgrade(&diagram);
+        let watch = clipboard.connect_changed(move |_| {
+            if let Some(d) = weak.upgrade() {
+                d.sync();
+            }
+        });
+        diagram.clip_watch.replace(Some((clipboard, watch)));
         diagram
     }
 
@@ -516,7 +560,35 @@ impl DiagramRing {
         *self.on_width.borrow_mut() = Some(Box::new(f));
     }
 
+    /// Whether anything is selected, which Select's commands, Colour and widths act on.
+    pub fn set_held(&self, held: bool) {
+        self.held.set(held);
+        self.sync();
+    }
+
+    /// Put Select's swatches away and its commands back, changing nothing: `Escape`. Whether they
+    /// were out.
+    pub fn close_colours(&self) -> bool {
+        let open = self.choosing.replace(false);
+        if open {
+            self.sync();
+        }
+        open
+    }
+
+    /// Whether Paste has something to paste: text or a picture, and neither the size nor the
+    /// style Paste Shape and Paste Style take, as the canvas's menu decides.
+    fn pasteable(&self) -> bool {
+        let clipboard = self.ring.widget().clipboard();
+        let formats = clipboard.formats();
+        let any = formats.contains_type(gtk::glib::Type::STRING)
+            || formats.contains_type(gtk::gdk::Texture::static_type());
+        any && super::props::Clip::held(&clipboard).is_none()
+    }
+
     fn choose_colour(&self, i: usize) {
+        // A swatch picked under Select brings its commands back.
+        self.choosing.set(false);
         let colour = self.colours.borrow().get(i).copied();
         if let (Some(colour), Some(f)) = (colour, self.on_colour.borrow().as_ref()) {
             f(colour);
@@ -543,19 +615,46 @@ impl DiagramRing {
             check(button, tool == Tool::Connector, Some(*route) == picks.route);
         }
         check(&self.arrow, tool == Tool::Connector, picks.arrow);
+        let (selecting, held) = (tool == Tool::Select, self.held.get());
+        let choosing = selecting && held && self.choosing.get();
+        self.choosing.set(choosing);
+        let pasteable = selecting && self.pasteable();
+        for (button, (action, _)) in self.commands.iter().zip(COMMANDS) {
+            let offered = match action {
+                "win.diagram-paste" => pasteable,
+                _ => held,
+            };
+            button.set_visible(selecting && offered && !choosing);
+        }
+        check(&self.colour, selecting && held, choosing);
         let colours = self.colours.borrow();
         for (i, button) in self.swatches.iter().enumerate() {
             let colour = colours.get(i).copied();
-            let shown = tool != Tool::Image && colour.is_some();
+            let shown = colour.is_some()
+                && match tool {
+                    Tool::Select => choosing,
+                    Tool::Image => false,
+                    _ => true,
+                };
             check(button, shown, shown && colour == self.picked.get());
         }
         let lines = match tool {
             Tool::Text => picks.note,
+            Tool::Select => held,
             Tool::Image => false,
             _ => true,
         };
         for (button, (width, ..)) in self.widths.iter().zip(WIDTHS) {
             check(button, lines, lines && self.width.get() == Some(width));
+        }
+    }
+}
+
+impl Drop for DiagramRing {
+    /// The clipboard outlives every tab, so its watch goes with the ring.
+    fn drop(&mut self) {
+        if let Some((clipboard, watch)) = self.clip_watch.take() {
+            clipboard.disconnect(watch);
         }
     }
 }
