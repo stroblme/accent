@@ -2,10 +2,10 @@
 //! anchors, math becomes MathML, every block carries the source line it starts on, and a
 //! conflict block its sides in boxes; for an exported file, what only the app can follow goes.
 
-use super::atoms::atoms;
+use super::atoms::{atoms, declarations};
 use super::links::{is_external, is_url, percent_decode, percent_encode};
 use super::options;
-use super::page::{Block, Node, Side, page};
+use super::page::{Block, Node, Side, declare, page};
 use crate::path::{parent_dir, resolve};
 use pulldown_cmark::{Event, LinkType, Parser, Tag as Cm, TagEnd};
 use pulldown_latex::{Event as LatexEvent, ParserError, Storage};
@@ -99,19 +99,25 @@ pub fn math_errors(text: &str) -> Vec<(Range<usize>, String)> {
     if !text.contains('$') {
         return Vec::new();
     }
-    Parser::new_ext(text, options())
+    let formulas: Vec<_> = Parser::new_ext(text, options())
         .into_offset_iter()
         .filter_map(|(ev, r)| match ev {
-            Event::InlineMath(src) | Event::DisplayMath(src) => {
-                let err = latex(&atoms(&src), &Storage::new()).err()?;
-                // Its `Display` draws the offending text with carets under it; the source is the
-                // reason alone, which is what fits on the end of an editor line.
-                let why = err
-                    .source()
-                    .map_or_else(|| err.to_string(), ToString::to_string);
-                Some((r, why))
-            }
+            Event::InlineMath(src) | Event::DisplayMath(src) => Some((r, src)),
             _ => None,
+        })
+        .collect();
+    // Read as the page reads them, after the operators any of them declares.
+    let declared = declarations(formulas.iter().map(|(_, src)| &**src));
+    formulas
+        .into_iter()
+        .filter_map(|(r, src)| {
+            let err = latex(&atoms(&format!("{declared}{src}")), &Storage::new()).err()?;
+            // Its `Display` draws the offending text with carets under it; the source is the
+            // reason alone, which is what fits on the end of an editor line.
+            let why = err
+                .source()
+                .map_or_else(|| err.to_string(), ToString::to_string);
+            Some((r, why))
         })
         .collect()
 }
@@ -134,8 +140,16 @@ pub fn to_html(text: &str) -> String {
 /// markers, a link into the vault as its text, a relative picture as an `accent://file/` address
 /// the app inlines, and no `<script>`. A mermaid fence stays its code block.
 pub fn to_html_file(text: &str, note: &str) -> String {
+    to_html_file_after(text, note, "")
+}
+
+/// [`to_html_file`] of a part of a larger page, whose formulas are read after `declared`, the
+/// operators the page declares ([`declarations`]): a notebook's cell.
+pub(crate) fn to_html_file_after(text: &str, note: &str, declared: &str) -> String {
+    let mut blocks = page(text);
+    declare(&mut blocks, declared);
     write(
-        &page(text),
+        &blocks,
         Mode::File {
             dir: parent_dir(note),
         },
@@ -502,6 +516,19 @@ mod tests {
         let h = bare("$\\nosuchcommand$");
         assert!(h.contains("class=\"math math-inline\""), "{h}");
         assert!(h.contains("\\nosuchcommand"), "{h}");
+    }
+
+    /// An operator one formula declares is known to every formula of the note, one above it
+    /// too, and the editor reports none of them; another note knows nothing of it.
+    #[test]
+    fn a_declared_operator_holds_for_the_note() {
+        let src =
+            "$\\argmax_x f$\n\n$$\\DeclareMathOperator*{\\argmax}{arg\\,max}$$\n\n$\\argmax_y g$\n";
+        let h = bare(src);
+        assert_eq!(h.matches("<math").count(), 3, "{h}");
+        assert!(!h.contains("argmax"), "{h}");
+        assert!(math_errors(src).is_empty());
+        assert!(bare("$\\argmax_x f$").contains("class=\"math math-inline\""));
     }
 
     /// The renderer's MathML is only good enough for an HTML parser; an XML parser has to read it.

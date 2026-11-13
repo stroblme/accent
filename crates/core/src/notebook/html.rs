@@ -12,6 +12,11 @@ impl Notebook {
     /// source beside its `[n]`, each output under it in the form [`output::pick`] gives the tab;
     /// a raw cell as preformatted text. A picture goes in as its file is, a `data:` URI.
     pub fn to_html_file(&self, rel: &str) -> String {
+        // JupyterLab's MathJax keeps an operator one cell declares for the whole notebook.
+        let declared: String = (self.cells.iter())
+            .filter(|c| c.kind == Kind::Markdown && c.source.contains("\\DeclareMathOperator"))
+            .map(|c| markdown::declarations(markdown::formulas(&markdown::page(&c.source))))
+            .collect();
         let mut html = String::new();
         for cell in &self.cells {
             let (class, count) = match (cell.kind, cell.count()) {
@@ -27,7 +32,7 @@ impl Notebook {
             ));
             match cell.kind {
                 Kind::Markdown => html.push_str(&attachments_in(
-                    &markdown::to_html_file(&cell.source, rel),
+                    &markdown::to_html_file_after(&cell.source, rel, &declared),
                     &cell.attachments,
                 )),
                 Kind::Code => {
@@ -39,7 +44,7 @@ impl Notebook {
                     for out in cell.outputs() {
                         html.push_str(&format!(
                             "<div class=\"nb-output\">{}</div>",
-                            output_html(out, rel)
+                            output_html(out, rel, &declared)
                         ));
                     }
                 }
@@ -54,8 +59,8 @@ impl Notebook {
     }
 }
 
-/// One output in the form the tab shows it.
-fn output_html(out: &Output, rel: &str) -> String {
+/// One output in the form the tab shows it, its formulas read after `declared`.
+fn output_html(out: &Output, rel: &str, declared: &str) -> String {
     match out {
         Output::Stream { stderr, text } => pre(&output::carriage(text), *stderr),
         Output::Error {
@@ -68,10 +73,10 @@ fn output_html(out: &Output, rel: &str) -> String {
                 format!("<img alt=\"\" src=\"{}\">", data_uri(mime, data))
             }
             Some(Form::Table(table)) => table_html(&table),
-            Some(Form::Markdown(text)) => markdown::to_html_file(text, rel),
+            Some(Form::Markdown(text)) => markdown::to_html_file_after(text, rel, declared),
             Some(Form::Latex(latex)) => {
                 let (tex, display) = output::tex(latex);
-                match markdown::mathml(tex, display) {
+                match markdown::mathml(&format!("{declared}{tex}"), display) {
                     Some(math) => format!("<div class=\"nb-math\">{math}</div>"),
                     None => pre(latex, false),
                 }
@@ -228,5 +233,22 @@ mod tests {
             "{html}"
         );
         assert!(html.contains("<code class=\"language-python\">import numpy as np\n"));
+    }
+
+    /// An operator one markdown cell declares is known to the cells after it, as JupyterLab's
+    /// MathJax keeps it for the notebook.
+    #[test]
+    fn a_declared_operator_holds_for_the_notebook() {
+        let cell = |source: &str| {
+            format!(r#"{{"cell_type": "markdown", "metadata": {{}}, "source": [{source:?}]}}"#)
+        };
+        let json = format!(
+            r#"{{"cells": [{}, {}], "metadata": {{}}, "nbformat": 4, "nbformat_minor": 5}}"#,
+            cell("$\\DeclareMathOperator{\\rank}{rank}$"),
+            cell("$\\rank A$"),
+        );
+        let html = read("n.ipynb", &json).unwrap().to_html_file("n.ipynb");
+        assert_eq!(html.matches("<math").count(), 2, "{html}");
+        assert!(!html.contains("\\rank"), "{html}");
     }
 }

@@ -128,10 +128,10 @@ impl Formula {
     /// its size, `None` where it does not lay out.
     fn lay(&self, page: &Page) -> Option<bool> {
         let imp = self.imp();
-        let (tex, mathml) = (imp.tex.get()?, imp.mathml.get()?);
+        let mathml = imp.mathml.get()?;
         let display = imp.display.get();
         let size = inline_px(page) * if display { DISPLAY } else { 1.0 };
-        let laid = crate::math::formula_of(&page.view, tex, mathml, display, size)?;
+        let laid = crate::math::formula_of(&page.view, mathml, display, size)?;
         let width = page.text_width() as f32;
         let shrink = match display && laid.width > width {
             true => width / laid.width,

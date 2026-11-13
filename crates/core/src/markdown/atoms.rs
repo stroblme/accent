@@ -26,6 +26,28 @@ const CLASSES: [&str; 7] = [
     "mathinner",
 ];
 
+/// The `\DeclareMathOperator` commands in `formulas`, which each formula of their page is read
+/// after: MathJax keeps an operator declared in one formula for the whole page.
+pub fn declarations<'a>(formulas: impl IntoIterator<Item = &'a str>) -> String {
+    let mut out = String::new();
+    for tex in formulas {
+        let mut rest = tex;
+        while let Some(i) = rest.find('\\') {
+            let at = &rest[i..];
+            let (cs, after) = control_sequence(at);
+            let args = || argument(star(after).1).and_then(|(_, after)| argument(after));
+            rest = match (cs == "\\DeclareMathOperator").then(args).flatten() {
+                Some((_, end)) => {
+                    out.push_str(&at[..at.len() - end.len()]);
+                    end
+                }
+                None => after,
+            };
+        }
+    }
+    out
+}
+
 /// `tex` with every class command pulldown-latex would misread rewritten.
 pub(super) fn atoms(tex: &str) -> Cow<'_, str> {
     let commands = [

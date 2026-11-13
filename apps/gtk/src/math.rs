@@ -133,16 +133,16 @@ pub fn formula(
     })
 }
 
-/// [`formula`] from the MathML core already wrote for `tex`, as a note's page carries it, so its
-/// TeX is not read a second time.
+/// [`formula`] from the MathML core already wrote, as a note's page carries it, so its TeX is not
+/// read a second time. It is kept by the MathML, which one TeX need not have twice: the operators
+/// a page declares change what it reads.
 pub fn formula_of(
     widget: &impl IsA<gtk::Widget>,
-    tex: &str,
     mathml: &str,
     display: bool,
     size: f32,
 ) -> Option<Rc<Layout>> {
-    lay_out(widget, tex, display, size, || Some(mathml.to_string()))
+    lay_out(widget, mathml, display, size, || Some(mathml.to_string()))
 }
 
 /// How tall the math font's capitals are, in ems: an upright `H`'s ink, what an inline formula is
@@ -158,15 +158,16 @@ pub fn cap_height(widget: &impl IsA<gtk::Widget>) -> f32 {
     })
 }
 
-/// [`formula`] laid out from the MathML `mathml` makes, unless it is kept.
+/// [`formula`] laid out from the MathML `mathml` makes, unless it is kept by `source`, its TeX or
+/// its MathML.
 fn lay_out(
     widget: &impl IsA<gtk::Widget>,
-    tex: &str,
+    source: &str,
     display: bool,
     size: f32,
     mathml: impl FnOnce() -> Option<String>,
 ) -> Option<Rc<Layout>> {
-    let key = (tex.to_string(), display, size.to_bits());
+    let key = (source.to_string(), display, size.to_bits());
     if let Some(kept) = FORMULAS.with_borrow(|laid| laid.get(&key).cloned()) {
         return kept;
     }
@@ -174,15 +175,15 @@ fn lay_out(
     // A panic here would abort the app from inside a GTK callback: the source is shown instead.
     let laid = catch_unwind(AssertUnwindSafe(|| {
         let root = accent_math::parse(&mathml()?)
-            .inspect_err(|e| tracing::debug!("{tex:?}: {e}"))
+            .inspect_err(|e| tracing::debug!("{source:?}: {e}"))
             .ok()?;
         if !root.warnings.is_empty() {
-            tracing::debug!("{tex:?}: {:?}", root.warnings);
+            tracing::debug!("{source:?}: {:?}", root.warnings);
         }
         Some(Rc::new(accent_math::layout(&root, &fonts.math, size)))
     }))
     .unwrap_or_else(|_| {
-        tracing::warn!("laying out {tex:?} panicked; its source is shown");
+        tracing::warn!("laying out {source:?} panicked; its source is shown");
         None
     });
     FORMULAS.with_borrow_mut(|laid_out| laid_out.insert(key, laid.clone()));

@@ -862,6 +862,7 @@ mod imp {
                 self.renders
                     .frame(obj.upcast_ref(), Rect::new(sx, sy, w, h)),
             );
+            cache.declare(prims);
             for (i, prim) in prims.iter().enumerate() {
                 if bounds[i].intersects(&visible) {
                     paint::prim(snapshot, obj.upcast_ref(), i, prim, &frame, cache, tint);

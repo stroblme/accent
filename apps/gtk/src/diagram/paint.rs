@@ -42,6 +42,9 @@ pub struct Cache {
     wants: RefCell<Vec<(Rc<Svg>, Want)>>,
     /// Whether SVG pictures are drawn as vectors, as an export draws them.
     vectors: Cell<bool>,
+    /// The operators the display list's formulas declare, which each of them is read after
+    /// (`accent_core::markdown::declarations`): the page is MathJax's page.
+    declared: RefCell<Option<Rc<str>>>,
 }
 
 /// Where a label was painted, in page units: the block its text took, turned `rotation`
@@ -59,6 +62,25 @@ impl Cache {
         self.layouts.borrow_mut().clear();
         self.textures.borrow_mut().clear();
         self.boxes.borrow_mut().clear();
+        self.declared.take();
+    }
+
+    /// Read the operators the formulas of `prims`, the display list on screen, declare, unless
+    /// they are known; called before its prims are painted.
+    pub fn declare(&self, prims: &[Prim]) {
+        if self.declared.borrow().is_some() {
+            return;
+        }
+        let formulas = prims.iter().flat_map(|prim| match prim {
+            Prim::Text { runs, .. } => runs.as_slice(),
+            _ => &[],
+        });
+        let formulas = formulas.filter_map(|run| match run {
+            Run::Math { tex, .. } => Some(tex.as_str()),
+            _ => None,
+        });
+        let declared = accent_core::markdown::declarations(formulas);
+        self.declared.replace(Some(declared.into()));
     }
 
     /// Reuse label and image layouts between drag-preview frames when prims retain
@@ -75,6 +97,7 @@ impl Cache {
             canvas: Cell::default(),
             wants: RefCell::default(),
             vectors: self.vectors.clone(),
+            declared: self.declared.clone(),
         }
     }
 
@@ -400,7 +423,8 @@ pub fn prim(
                 match layouts.get(&index) {
                     Some(laid) if laid.scale == frame.scale => laid.clone(),
                     _ => {
-                        let Some(laid) = lay_out(widget, prim, frame.scale, tint) else {
+                        let declared = cache.declared.borrow().clone().unwrap_or_default();
+                        let Some(laid) = lay_out(widget, prim, frame.scale, tint, &declared) else {
                             return;
                         };
                         layouts.insert(index, laid.clone());
@@ -906,8 +930,14 @@ fn text_of(
 /// A Pango layout of label `prim` at `scale`, wrapped where it wraps and its lines as far apart
 /// as draw.io sets them, its runs' own colours through `tint`, and where its formulas are set;
 /// `None` for anything but a label. A formula is laid out at the label's font size, in page
-/// units, so a zoom lays out only the Pango layout again.
-fn lay_out(widget: &gtk::Widget, prim: &Prim, scale: f64, tint: Tint) -> Option<Laid> {
+/// units, so a zoom lays out only the Pango layout again, and read after `declared`.
+fn lay_out(
+    widget: &gtk::Widget,
+    prim: &Prim,
+    scale: f64,
+    tint: Tint,
+    declared: &str,
+) -> Option<Laid> {
     let Prim::Text {
         rect,
         align,
@@ -922,7 +952,7 @@ fn lay_out(widget: &gtk::Widget, prim: &Prim, scale: f64, tint: Tint) -> Option<
     };
     let size = font.size as f32;
     let (text, spans) = text_of(runs, |tex, display| {
-        math::formula(widget, tex, display, size)
+        math::formula(widget, &format!("{declared}{tex}"), display, size)
     });
     let layout = widget.create_pango_layout(Some(&text));
     let px = |size: f64| (size * scale * f64::from(pango::SCALE)) as i32;

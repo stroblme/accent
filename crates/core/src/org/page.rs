@@ -16,8 +16,8 @@ use super::links::OrgLink;
 use super::table::{aligns, cookie};
 use super::{Search, closed, emphasis, heading, is_heading, keywords, lines, target};
 use crate::markdown::{
-    Align, Block, Cell, LinkKind, Mode, Node, Part, Style, cut, is_image, math, parts,
-    percent_encode, split, write,
+    Align, Block, Cell, LinkKind, Mode, Node, Part, Style, cut, declarations, declare, formulas,
+    is_image, math, parts, percent_encode, split, write,
 };
 use crate::path::parent_dir;
 use pulldown_cmark::{
@@ -52,7 +52,10 @@ pub fn page(text: &str) -> Vec<Block<'_>> {
             Part::Node(node, bytes) => page.nodes.push((node, bytes)),
         }
     }
-    page.finish()
+    let mut blocks = page.finish();
+    let declared = declarations(formulas(&blocks));
+    declare(&mut blocks, &declared);
+    blocks
 }
 
 /// The preview's HTML of an org file ([`crate::markdown::to_html`]'s rules).

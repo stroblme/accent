@@ -7,6 +7,7 @@
 //! edit changed. [`parts`], [`cut`], [`math`] and [`picture`] know no markdown, so another syntax
 //! (org, `crate::org::page`) builds the same blocks.
 
+use super::atoms::declarations;
 use super::blocks::block_ids;
 use super::frontmatter::scan_tags;
 use super::html::mathml;
@@ -243,7 +244,10 @@ pub fn page(text: &str) -> Vec<Block<'_>> {
             Part::Node(node, bytes) => page.nodes.push((node, bytes)),
         }
     }
-    cut(text, page.nodes, &page.headings, &page.anchors)
+    let mut blocks = cut(text, page.nodes, &page.headings, &page.anchors);
+    let declared = declarations(formulas(&blocks));
+    declare(&mut blocks, &declared);
+    blocks
 }
 
 /// A stretch of a note to read in its syntax, or a node of a conflict block, with its bytes.
@@ -379,7 +383,16 @@ fn saved_searches<'a>(nodes: Vec<(Node<'a>, Range<usize>)>) -> Vec<(Node<'a>, Ra
 /// The node of a formula: its MathML, or, if its LaTeX does not parse, its event, so a typo
 /// shows the source as written rather than nothing.
 pub(crate) fn math(tex: CowStr<'_>, display: bool) -> Node<'_> {
-    match mathml(&tex, display) {
+    math_after("", tex, display)
+}
+
+/// [`math`] for a formula read after `declarations`, its page's ([`declarations`]).
+fn math_after<'a>(declarations: &str, tex: CowStr<'a>, display: bool) -> Node<'a> {
+    let mathml = match declarations.is_empty() {
+        true => mathml(&tex, display),
+        false => mathml(&format!("{declarations}{tex}"), display),
+    };
+    match mathml {
         Some(mathml) => Node::Math {
             tex,
             display,
@@ -387,6 +400,35 @@ pub(crate) fn math(tex: CowStr<'_>, display: bool) -> Node<'_> {
         },
         None if display => Node::Event(Event::DisplayMath(tex)),
         None => Node::Event(Event::InlineMath(tex)),
+    }
+}
+
+/// The TeX of every formula on `blocks`, for [`declarations`].
+pub(crate) fn formulas<'b>(blocks: &'b [Block<'_>]) -> Vec<&'b str> {
+    let nodes = blocks.iter().flat_map(|b| &b.nodes);
+    nodes
+        .filter_map(|node| match node {
+            Node::Math { tex, .. }
+            | Node::Event(Event::InlineMath(tex) | Event::DisplayMath(tex)) => Some(&**tex),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Each formula on `blocks` read again after `declarations`, the operators its page declares,
+/// as MathJax keeps them for its page.
+pub(crate) fn declare(blocks: &mut [Block<'_>], declarations: &str) {
+    if declarations.is_empty() {
+        return;
+    }
+    for node in blocks.iter_mut().flat_map(|b| &mut b.nodes) {
+        let (tex, display) = match node {
+            Node::Math { tex, display, .. } => (tex.clone(), *display),
+            Node::Event(Event::InlineMath(tex)) => (tex.clone(), false),
+            Node::Event(Event::DisplayMath(tex)) => (tex.clone(), true),
+            _ => continue,
+        };
+        *node = math_after(declarations, tex, display);
     }
 }
 

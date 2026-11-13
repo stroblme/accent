@@ -196,6 +196,7 @@ impl PageStrip {
         let tint = imp.tint.get();
         if !thumb.painted {
             imp.cache.forget();
+            imp.cache.declare(&thumb.scene().prims);
             let drawn = gtk::Snapshot::new();
             let frame = Frame::default();
             for (j, prim) in thumb.scene().prims.iter().enumerate() {

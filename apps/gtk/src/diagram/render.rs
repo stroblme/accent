@@ -69,6 +69,7 @@ pub fn draw(file: &File, i: usize, area: Area, web: bool, pixels: f64) -> Option
     // Pango lays labels out through a widget; their sizes are absolute, so any one does.
     let widget = gtk::DrawingArea::new();
     let cache = Cache::default();
+    cache.declare(&scene.prims);
     cache.set_web(web);
     cache.set_vectors(true);
     let frame = Frame {
