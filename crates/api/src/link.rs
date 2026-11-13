@@ -18,7 +18,7 @@ const CHUNK: usize = 256 * 1024;
 /// known by on a host.
 #[derive(Debug, Clone)]
 pub struct Server {
-    /// Combined blake3 hash of every architecture build's SHA-256 ([`ssh::server_path`]),
+    /// Combined blake3 hash naming all architecture builds ([`ssh::server_path`]),
     /// so a shell knows the remote path before learning the host architecture.
     pub hash: String,
     builds: Vec<Build>,
@@ -31,9 +31,12 @@ struct Build {
     arch: &'static str,
     /// The binary, which a package holds only as its XZ archive beside it ([`Sums`]).
     path: PathBuf,
-    /// The binary's SHA-256, which names the build.
-    sha256: String,
+    /// What names the build: the binary's [`ssh::hash_of`], or in a package the SHA-256 its
+    /// archive's sums give, which needs no binary.
+    hash: String,
     size: usize,
+    /// Whether only the archive is here, as in a package.
+    packed: bool,
 }
 
 /// What `build-aux/compress-server.py` writes beside a server's XZ archive: the binary's SHA-256,
@@ -63,48 +66,61 @@ fn sha256(bytes: &[u8]) -> String {
         .collect()
 }
 
+fn changed() -> Error {
+    Error::Remote("the server binary changed while connecting; try again".to_string())
+}
+
 impl Build {
     /// The server for `arch` at `path`: the binary where there is one, beside which a rebuild may
     /// have left an older archive, and otherwise what its archive's sums say, as in a package.
     fn at(arch: &'static str, path: PathBuf) -> Result<Self> {
-        let (sha256, size) = match std::fs::read(&path) {
-            Ok(raw) => (sha256(&raw), raw.len()),
+        let (hash, size, packed) = match std::fs::read(&path) {
+            Ok(raw) => (ssh::hash_of(&raw), raw.len(), false),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 let sums = Sums::of(&path).ok_or_else(|| unreadable(&path, e))?;
-                (sums.raw, sums.size)
+                (sums.raw, sums.size, true)
             }
             Err(e) => return Err(unreadable(&path, e)),
         };
         Ok(Self {
             arch,
             path,
-            sha256,
+            hash,
             size,
+            packed,
         })
     }
 
     /// The archive when the host can unpack it and the sums bind it to this build, otherwise the
-    /// binary, unpacked here where a package holds only the archive. Both digests of the sums
-    /// must match: a rebuild or an interrupted install can leave them from another build, even
-    /// one of the same length.
+    /// binary, unpacked here from a package's archive. Both digests of the sums must match: a
+    /// rebuild or an interrupted install can leave them from another build, even one of the same
+    /// length.
     fn payload(&self, xz: bool) -> Result<(Vec<u8>, bool)> {
         let archive = self.path.with_extension("xz");
+        let raw = match self.packed {
+            true => None,
+            false => {
+                let raw = std::fs::read(&self.path).map_err(|e| unreadable(&self.path, e))?;
+                if ssh::hash_of(&raw) != self.hash {
+                    return Err(changed());
+                }
+                Some(raw)
+            }
+        };
         if xz
             && let Some(sums) = Sums::of(&self.path)
-            && sums.raw == self.sha256
+            && sums.raw == raw.as_deref().map_or_else(|| self.hash.clone(), sha256)
             && let Ok(bytes) = std::fs::read(&archive)
             && sha256(&bytes) == sums.packed
         {
             return Ok((bytes, true));
         }
-        let raw = match std::fs::read(&self.path) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => unpack(&archive, self.size)?,
-            raw => raw.map_err(|e| unreadable(&self.path, e))?,
-        };
-        if sha256(&raw) != self.sha256 {
-            return Err(Error::Remote(
-                "the server binary changed while connecting; try again".to_string(),
-            ));
+        if let Some(raw) = raw {
+            return Ok((raw, false));
+        }
+        let raw = unpack(&archive, self.size)?;
+        if sha256(&raw) != self.hash {
+            return Err(changed());
         }
         Ok((raw, false))
     }
@@ -192,7 +208,7 @@ pub fn server() -> Result<Server> {
     for (arch, binary, _) in found {
         builds.push(Build::at(arch, binary)?);
     }
-    let hashes: Vec<&str> = builds.iter().map(|b| b.sha256.as_str()).collect();
+    let hashes: Vec<&str> = builds.iter().map(|b| b.hash.as_str()).collect();
     let server = Server {
         hash: ssh::hash_of(hashes.join(" ").as_bytes()),
         builds,
@@ -590,13 +606,11 @@ mod tests {
         assert_eq!(build.payload(true).unwrap(), (packed.clone(), true));
         assert_eq!(build.payload(false).unwrap(), (raw.to_vec(), false));
 
-        // A rebuild can leave an older archive beside a binary of the same size: the archive
-        // still goes under the name it was hashed for, the new binary under none but its own.
+        // A rebuild can leave an older archive beside a binary of the same size.
         let rebuilt = b"a newer binary!";
         assert_eq!(rebuilt.len(), raw.len());
         std::fs::write(&path, rebuilt).unwrap();
-        assert_eq!(build.payload(true).unwrap(), (packed.clone(), true));
-        assert!(build.payload(false).is_err());
+        assert!(build.payload(true).is_err());
         build = Build::at("x86_64", path.clone()).unwrap();
         assert_eq!(build.payload(true).unwrap(), (rebuilt.to_vec(), false));
 
@@ -609,9 +623,9 @@ mod tests {
         assert_eq!(build.payload(true).unwrap(), (raw.to_vec(), false));
     }
 
-    /// A package holds a server only as its archive: the sums name the build as the binary
-    /// would, a host with `xz` gets the archive and one without the binary unpacked here, and
-    /// either installs the binary's exact bytes. A damaged archive has no binary to fall back on.
+    /// A package holds a server only as its archive: the sums name the build, a host with `xz`
+    /// gets the archive and one without the binary unpacked here, and either installs the
+    /// binary's exact bytes. A damaged archive has no binary to fall back on.
     #[test]
     fn a_package_uploads_its_archive_or_the_binary_unpacked_from_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -621,12 +635,11 @@ mod tests {
             .collect();
         std::fs::write(&path, &raw).unwrap();
         compress(&path);
-        let built = Build::at("x86_64", path.clone()).unwrap();
         std::fs::remove_file(&path).unwrap();
         let packaged = Build::at("x86_64", path.clone()).unwrap();
         assert_eq!(
-            (&packaged.sha256, packaged.size),
-            (&built.sha256, raw.len())
+            (packaged.hash.clone(), packaged.size),
+            (sha256(&raw), raw.len())
         );
 
         let home = dir.path().join("home");
@@ -684,8 +697,9 @@ mod tests {
         let build = |arch| Build {
             arch,
             path: PathBuf::new(),
-            sha256: String::new(),
+            hash: String::new(),
             size: 1,
+            packed: false,
         };
         let server = Server {
             hash: "0123456789abcdef".to_string(),
