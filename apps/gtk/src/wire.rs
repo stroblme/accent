@@ -1244,6 +1244,14 @@ pub fn escape_first(app: &Rc<App>) -> bool {
         app.show_chrome();
         return false;
     }
+    // The find bar goes first, as wherever Escape is pressed, and what is presented has the
+    // keyboard back; the next Escape leaves.
+    let pane = app.pane();
+    if pane.find.is_open() {
+        pane.find.close();
+        app.focus_presented();
+        return true;
+    }
     app.set_presenting(false);
     true
 }

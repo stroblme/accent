@@ -1022,7 +1022,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - In a comparison, a merge and a staged change's or a commit's tab the bar searches the column the keyboard is in, a read-only one included, as VS Code's diff editor and Meld do (user decision 2026-11-06).
   Moving the keyboard to another column takes the readout, the painted matches and the steps with it, and Replace is offered over the editor's column alone.
 - Previous and next are `go-up-symbolic` and `go-down-symbolic`: the matches are places in a vertical document, and back and forward arrows read as history.
-- **Escape closes the bar wherever it is pressed**, from the bar ahead of `GtkSearchEntry`'s own Escape (which only clears the query), and from the document once nothing nearer the focus has answered it.
+- **Escape closes the bar wherever it is pressed**, in presentation too before it leaves it, from the bar ahead of `GtkSearchEntry`'s own Escape (which only clears the query), and from the document once nothing nearer the focus has answered it.
 
 ### Start screen
 
@@ -2255,7 +2255,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
   A diagram is a slide deck: each page is fitted as it is shown, Space, Page Down, Right and a wheel notch down go to the next and Shift+Space, Page Up, Left and a notch up to the one before, and leaving gives back its zoom, and its scroll if the page is the one it began on.
   The drawing ring goes away meanwhile, a PDF's and a diagram's alike, and the tool in hand is put down (a PDF back to reading, a diagram to select), a diagram's label being edited finished and its selection let go, so a click never draws on what is presented; leaving brings the ring back as it was, with no tool in hand.
   A presented diagram is read only: a click selects nothing, a drag moves the page rather than what is on it, its menu stays shut and its keys do nothing but page, `Ctrl+G` going to a page as it does over a PDF, so only paging, zoom and panning are left.
-  What is presented has the keyboard, from F5 and from each tab a held `Ctrl+Tab` steps to — the rendered note, a source file, a PDF, a diagram, an image, a shell — so Space, Page Down, the arrows, Home and End read it as they do outside presentation and a shell takes typing; F5 and `Esc` still leave it, ahead of a presented shell too, which gets neither.
+  What is presented has the keyboard, from F5 and from each tab a held `Ctrl+Tab` steps to — the rendered note, a source file, a PDF, a diagram, an image, a shell — so Space, Page Down, the arrows, Home and End read it as they do outside presentation and a shell takes typing; F5 and `Esc` still leave it, ahead of a presented shell too, which gets neither, though `Esc` closes the find bar first while it is up.
   Leaving gives the keyboard back to the document in front.
 - It does not resize the window: fullscreen stays `F11`'s, so the two compose.
 - The bars go through `AdwToolbarView::set_reveal_top_bars(false)`, not the opacity fade, which would leave an empty band; the pointer-motion reveal is off meanwhile.
