@@ -1395,6 +1395,13 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A text box's Default Style does not apply to a Note, so that pick always goes to the config.
   It is out whenever a diagram is in front unless the Drawing toggle or presentation put it away; select is its resting tool and dims nothing, and a shape drawn or dropped puts the tool down again, a connector staying in hand.
   A click with the connector in hand selects what is under it and over empty page lets the selection go.
+- Six colour swatches follow the tool's options on the outer orbit, for every tool but image, in the same slots whatever the tool (user decisions 2026-11-13).
+  They hold the colours this diagram's cells were given most recently, at first the file's own with its last cells' colours leading, as draw.io adds a cell after the rest, and the PDF ring's six swatches fill any slot left over.
+  A colour an edit sets that is not on the ring comes in first and pushes the last one off, while one already there keeps its place, so a swatch never moves under the pointer that picked it.
+  The swatch picked is the colour new cells are drawn in, over their tool's style or Default Style, a line's stroke, a text's font and any other shape's fill, and it recolours the selection the same way as one undo step, its groups and pictures aside.
+  It lasts while the tab is open and is not kept in the config, since another diagram's swatches need not hold it.
+  Picked again with nothing selected it is put down, and new cells take their style's own colours.
+  Each swatch is painted as the canvas paints its colour under the theme, and its tooltip names the colour as the file writes it.
 - With the connector in hand the shape under the pointer shows its connection points as small accent crosses, the one in reach lit, and an end dropped on one is pinned there.
   Otherwise an end attaches to the shape under it only when its other end lies outside that shape: an arrow drawn within a slide's text box is on it, not leaving it.
   An end on no shape dangles on the grid, as an end dragged does, the second with Shift at a step of 15° from the first.

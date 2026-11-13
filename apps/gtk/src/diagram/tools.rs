@@ -5,10 +5,12 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use accent_core::config::{DiagramConfig, Route};
-use accent_drawio::Style;
 use accent_drawio::presets::{self, EdgeKind};
+use accent_drawio::{Color, Style};
 use adw::prelude::*;
 
+use super::colours::{SLOTS, hex};
+use super::paint::Tint;
 use crate::ring::Ring;
 
 /// What a drag over the page does.
@@ -279,10 +281,11 @@ enum Glyph {
 }
 
 type OnPick = RefCell<Option<Box<dyn Fn(Pick)>>>;
+type OnColour = RefCell<Option<Box<dyn Fn([u8; 3])>>>;
 
 /// The generic ring with a diagram's options on its outer orbit: plain or rounded corners while
 /// the rectangle is in hand, plain text or a Note while the text tool is, and the line's route and
-/// its arrow while the connector is.
+/// its arrow while the connector is. Colour swatches follow them for every tool but the image.
 pub struct DiagramRing {
     ring: Rc<Ring<Tool>>,
     corners: Vec<(bool, gtk::ToggleButton)>,
@@ -290,13 +293,22 @@ pub struct DiagramRing {
     lines: Vec<(Route, gtk::ToggleButton)>,
     arrow: gtk::ToggleButton,
     picks: Cell<Picks>,
+    swatches: Vec<gtk::ToggleButton>,
+    /// The swatches' colours as the file is given them, and the one picked.
+    colours: Rc<RefCell<Vec<[u8; 3]>>>,
+    picked: Cell<Option<[u8; 3]>>,
+    /// The canvas's recolouring, which the swatches are painted through.
+    tint: Rc<Cell<Tint>>,
     on_pick: OnPick,
+    on_colour: OnColour,
 }
 
 impl DiagramRing {
     pub fn new() -> Rc<DiagramRing> {
         let ring = Ring::<Tool>::new();
-        let slots = 6;
+        // The tool's options from the top, at most the connector's four, then the swatches, in the
+        // same slots for every tool.
+        let slots = 4 + SLOTS;
         let option = |i: usize, glyph: Glyph, tooltip: &str| {
             let button = ring.add_option(i, slots, glyph_area(glyph).upcast_ref());
             button.set_tooltip_text(Some(tooltip));
@@ -325,6 +337,18 @@ impl DiagramRing {
             ),
         ];
         let arrow = option(3, Glyph::Arrow, "Arrow at the End");
+        let colours: Rc<RefCell<Vec<[u8; 3]>>> = Rc::default();
+        let tint: Rc<Cell<Tint>> = Rc::default();
+        let swatches = (0..SLOTS)
+            .map(|i| {
+                let (colours, tint) = (colours.clone(), tint.clone());
+                let colour = move |_: &gtk::DrawingArea| {
+                    let [r, g, b] = colours.borrow().get(i).copied().unwrap_or_default();
+                    tint.get().rgba(Color::rgb(r, g, b))
+                };
+                ring.add_option(4 + i, slots, crate::ring::dot(18.0, colour).upcast_ref())
+            })
+            .collect();
         let diagram = Rc::new(DiagramRing {
             ring,
             corners,
@@ -332,7 +356,12 @@ impl DiagramRing {
             lines,
             arrow,
             picks: Cell::new(DiagramConfig::default().into()),
+            swatches,
+            colours,
+            picked: Cell::new(None),
+            tint,
             on_pick: RefCell::new(None),
+            on_colour: RefCell::new(None),
         });
         for (rounded, button) in &diagram.corners {
             let (rounded, weak) = (*rounded, Rc::downgrade(&diagram));
@@ -364,6 +393,14 @@ impl DiagramRing {
                 d.choose(Pick::Arrow(!d.picks.get().arrow));
             }
         });
+        for (i, button) in diagram.swatches.iter().enumerate() {
+            let weak = Rc::downgrade(&diagram);
+            button.connect_clicked(move |_| {
+                if let Some(d) = weak.upgrade() {
+                    d.choose_colour(i);
+                }
+            });
+        }
         diagram
     }
 
@@ -407,6 +444,43 @@ impl DiagramRing {
         self.sync();
     }
 
+    /// Show `colours` on the swatches, `picked` checked where it is one of them.
+    pub fn set_swatches(&self, colours: Vec<[u8; 3]>, picked: Option<[u8; 3]>) {
+        for (button, colour) in self.swatches.iter().zip(&colours) {
+            button.set_tooltip_text(Some(&hex(*colour)));
+        }
+        self.colours.replace(colours);
+        self.picked.set(picked);
+        self.redraw_swatches();
+        self.sync();
+    }
+
+    /// Paint the swatches as the canvas paints their colours.
+    pub fn set_tint(&self, tint: Tint) {
+        self.tint.set(tint);
+        self.redraw_swatches();
+    }
+
+    fn redraw_swatches(&self) {
+        for dot in self.swatches.iter().filter_map(|b| b.child()) {
+            dot.queue_draw();
+        }
+    }
+
+    /// Call `f` with the colour of each swatch clicked; it answers with
+    /// [`DiagramRing::set_swatches`].
+    pub fn connect_colour(&self, f: impl Fn([u8; 3]) + 'static) {
+        *self.on_colour.borrow_mut() = Some(Box::new(f));
+    }
+
+    fn choose_colour(&self, i: usize) {
+        let colour = self.colours.borrow().get(i).copied();
+        if let (Some(colour), Some(f)) = (colour, self.on_colour.borrow().as_ref()) {
+            f(colour);
+        }
+        self.sync();
+    }
+
     /// Show active-tool options, deriving checked state from the picks rather than clicks.
     fn sync(&self) {
         let (tool, picks) = (self.ring.tool(), self.picks.get());
@@ -426,6 +500,12 @@ impl DiagramRing {
             check(button, tool == Tool::Connector, Some(*route) == picks.route);
         }
         check(&self.arrow, tool == Tool::Connector, picks.arrow);
+        let colours = self.colours.borrow();
+        for (i, button) in self.swatches.iter().enumerate() {
+            let colour = colours.get(i).copied();
+            let shown = tool != Tool::Image && colour.is_some();
+            check(button, shown, shown && colour == self.picked.get());
+        }
     }
 }
 

@@ -5,6 +5,7 @@
 //! editing, `props` the Properties pane, `input` menus, keys and scrolling, and `strip` the page
 //! thumbnails the Outline pane shows.
 
+mod colours;
 pub mod embed;
 pub mod export;
 mod face;
@@ -88,6 +89,8 @@ pub struct DiagramTab {
     tool: Cell<Tool>,
     /// How the tools draw: the config's `[diagram]`, which the ring's outer orbit changes.
     options: Cell<DiagramConfig>,
+    /// The ring's colour swatches, and the colour picked on them, for as long as the tab is open.
+    swatches: RefCell<colours::Swatches>,
     /// Last clipboard text and repeat-paste count, used to offset each repeat by a
     /// grid step (`Graph.lastPasteXml`, `pasteCounter`).
     pasted: RefCell<(Option<String>, u32)>,
@@ -187,6 +190,7 @@ pub fn open(
         kept: RefCell::default(),
         tool: Cell::new(Tool::Select),
         options: Cell::new(DiagramConfig::default()),
+        swatches: RefCell::default(),
         pasted: RefCell::new((None, 0)),
         save: SaveState::at(etag, digest),
         autosave: Debounce::new(crate::editor::AUTOSAVE),
@@ -279,6 +283,11 @@ pub fn open(
         #[weak]
         tab,
         move |pick| tab.ring_pick(pick)
+    ));
+    tab.ring.connect_colour(glib::clone!(
+        #[weak]
+        tab,
+        move |colour| tab.ring_colour(colour)
     ));
     tab.banner.connect_button_clicked(glib::clone!(
         #[weak]
@@ -486,10 +495,11 @@ impl DiagramTab {
         self.show_picks();
     }
 
-    /// Show on the ring what the next cell of each tool will be.
+    /// Show on the ring what the next cell of each tool will be, and the colours it offers.
     fn show_picks(&self) {
         let picks = Picks::of(self.editor.borrow().file(), &self.options.get());
         self.ring.set_picks(picks);
+        self.show_swatches();
     }
 
     pub fn ring_shown(&self) -> bool {
@@ -545,6 +555,7 @@ impl DiagramTab {
         let page = crate::theme::onto(crate::theme::recolour().diagrams, self.inverted.get());
         self.view.set_tint(paint::Tint::onto(page));
         self.strip.set_tint(paint::Tint::onto(page));
+        self.ring.set_tint(paint::Tint::onto(page));
     }
 
     pub fn toggle_invert(&self) {
@@ -714,7 +725,10 @@ impl DiagramTab {
     /// pinned where they were dropped on connection points.
     fn new_style(&self, edit: &Edit) -> String {
         let editor = self.editor.borrow();
-        let style = |tool: Tool| tool.style_in(editor.file(), &self.options.get());
+        let style = |tool: Tool| {
+            let style = tool.style_in(editor.file(), &self.options.get());
+            self.coloured(style, tool == Tool::Connector)
+        };
         match edit {
             Edit::Add { tool, .. } => style(*tool),
             Edit::Connect { source, target } => accent_drawio::presets::constrained(
