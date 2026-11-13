@@ -1443,9 +1443,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A thumbnail is its page in the canvas's colours, painted when it first comes on screen and again only once an edit has changed it, and its corners are rounded as a PDF thumbnail's are.
 - A page edit is one undo step: the reader lands on a page put in, and otherwise stays on the page they were reading, wherever it went, or the one that took its place, Undo and Redo included, and the pane's Back and Forward places follow the pages.
   A note names a diagram's page by its name, so no link changes with one.
-- A shape's link (draw.io's `link`) is followed as a PDF's is, by a click on a presented page and by Ctrl+click while editing, which on a shape with a link takes the place of adding it to the selection.
+- A shape's link (draw.io's `link`) shows where it leads while Ctrl is held over the shape, as a PDF's does, in a popover of the page's thumbnail and name or the address, and a click on that popover follows it, the popover waiting 400 ms for the pointer on its way over.
+  A click on a presented page follows it too, while editing a click on the shape edits as on any other, Ctrl+click and Ctrl+drag included (user decision 2026-11-13).
   A page of the diagram, which draw.io names `data:page/id,…`, is gone to as a jump Back returns from, an address is opened as a PDF's link to the web is, and draw.io's other `data:` links go nowhere.
-  Ctrl held over the shape shows where it leads without going there, the page's thumbnail and name or the address.
 - Group puts the selected cells that share the first one's parent, two at least, into a transparent `group` cell sized to them and in front of its siblings, as draw.io's does; they stay where they are, and the group is selected.
   Ungroup hands a group's cells to its parent, in front, and removes the group when it has no fill, line or picture of its own, keeping it as a shape otherwise.
 - The clipboard is draw.io's: Copy writes the selection as the `<mxGraphModel>` XML draw.io's own Copy writes, as text, the topmost cells with all under them, an arrow whose shape stayed behind let go of it where it is drawn; Cut does the same and removes them, the arrows on them let go.
@@ -2462,6 +2462,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 | Focus mode's fades: the chrome, the receding panes, the line fade, a notebook's outputs | 250 ms | `fade.rs::RAMP_MS` |
 | A wheel notch's scroll | 200 ms | `widgets.rs::WHEEL_MS` |
 | A push past a diagram page's edge rests and is let go | 300 ms | `diagram/geometry.rs::REST_MS` |
+| A diagram link's popover waits for the pointer on its way over | 400 ms | `diagram/link.rs::LEAVE_MS` |
 | A file still opening shows its loading page | 160 ms | `loading.rs::OPENING` |
 | A Git command still running shows its button's spinner | 160 ms | `git/mod.rs::SPIN_AFTER` |
 | A held `Ctrl+Tab` shows its card | 200 ms | `switcher.rs::DELAY` |

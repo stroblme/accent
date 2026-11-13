@@ -325,13 +325,14 @@ drill_diagram_find() {
 		'bench nav find go to page 3 readout="" page=3 selected=[]'
 }
 
-# A diagram's links shown with Ctrl held and followed by Ctrl+click while editing and by a click on
-# a presented page, a plain click while editing selecting (DESIGN.md, Diagram).
+# A diagram's links shown with Ctrl held and followed by a click on that popover or on a presented
+# page, Ctrl+click and a plain click while editing selecting (DESIGN.md, Diagram).
 drill_diagram_links() {
 	launch 60 ACCENT_BENCH_DIAGRAM_NAV=links:links.drawio >"$dir/links"
 	has "$dir/links" \
 		'bench nav link preview=Some("https://example.org/")' \
-		'bench nav link ctrl-click page=2 selected=[]' \
+		'bench nav link ctrl-click page=1 selected=["go"]' \
+		'bench nav link popover page=2 selected=[]' \
 		'bench nav link click page=2 selected=["back"]' \
 		'bench nav link presented click page=1 selected=[]'
 }

@@ -45,8 +45,9 @@ const LINKS: &str = r#"<mxfile host="accent">
 /// `find:<rel>` writes three pages of labels and searches them in the pane's find bar, then goes
 /// to the last page through Go to Diagram Page…, printing the readout, the page and the selection.
 /// `links:<rel>` writes two pages whose shapes link to each other and to the web, and with real
-/// input shows a link with Ctrl held, follows one by Ctrl+click and one by a click on a presented
-/// page, a plain click while editing selecting.
+/// input shows a link with Ctrl held, selects a linked shape by Ctrl+click while editing, follows
+/// a link by a click on its popover and one by a click on a presented page, a plain click while
+/// editing selecting.
 pub(super) fn bench_diagram_nav(app: &Rc<App>, arg: &str) {
     match arg.split_once(':') {
         Some(("spring", rel)) => spring(app, rel),
@@ -130,22 +131,31 @@ fn links(app: &Rc<App>, rel: &str) {
         let Some(tab) = opened(&app, &rel, LINKS).await else {
             return bench_quit(&app);
         };
-        // The middle of cell `id` on the screen, as the page is laid out now.
-        let at = |id: &str| {
+        // `up` pixels above the middle of cell `id` on the screen, as the page is laid out now.
+        let above = |id: &str, up: f64| {
             let r = tab.frame_of(id).map(|r| tab.to_widget(&r))?;
-            on_screen(&app, &tab.key_target(), r.x + r.w / 2.0, r.y + r.h / 2.0)
+            on_screen(
+                &app,
+                &tab.key_target(),
+                r.x + r.w / 2.0,
+                r.y + r.h / 2.0 - up,
+            )
         };
-        let (go, web) = (at("go").unwrap_or_default(), at("web").unwrap_or_default());
+        let at = |id: &str| above(id, 0.0).unwrap_or_default();
+        let (go, web) = (at("go"), at("web"));
         super::git::xtest(&format!(
             "move {go}; focus; keydown ctrl; move {web}; sleep 0.3"
         ))
         .await;
-        let preview = find_widget(app.window.upcast_ref(), &|w| {
-            w.is::<gtk::Popover>() && w.is_visible()
-        })
-        .and_then(|popover| find_widget(&popover, &|w| w.is::<gtk::Label>()))
-        .and_downcast::<gtk::Label>()
-        .map(|label| label.label().to_string());
+        let popover = || {
+            find_widget(app.window.upcast_ref(), &|w| {
+                w.is::<gtk::Popover>() && w.is_visible()
+            })
+        };
+        let preview = popover()
+            .and_then(|popover| find_widget(&popover, &|w| w.is::<gtk::Label>()))
+            .and_downcast::<gtk::Label>()
+            .map(|label| label.label().to_string());
         println!("bench nav link preview={preview:?}");
         super::git::xtest(&format!("move {go}; down; up; keyup ctrl")).await;
         let say = |step: &str| {
@@ -156,12 +166,32 @@ fn links(app: &Rc<App>, rel: &str) {
             );
         };
         say("ctrl-click");
-        let back = at("back").unwrap_or_default();
+        // Ctrl over the shape and let go, then over to the middle of its popover, a surface of its
+        // own: where its parent's puts it, its shadow and the content in it.
+        let near = above("go", 1.0).unwrap_or_default();
+        super::git::xtest(&format!("keydown ctrl; move {near}; sleep 0.3; keyup ctrl")).await;
+        let over = popover().and_then(|popover| {
+            let content = popover.first_child()?;
+            let bounds = content.compute_bounds(&popover)?;
+            let native = popover.native()?;
+            let (sx, sy) = native.surface_transform();
+            let surface = native.surface()?;
+            let popup = surface.dynamic_cast_ref::<gdk::Popup>()?;
+            Some(format!(
+                "{} {}",
+                f64::from(popup.position_x()) + sx + f64::from(bounds.center().x()),
+                f64::from(popup.position_y()) + sy + f64::from(bounds.center().y())
+            ))
+        });
+        let over = over.unwrap_or_default();
+        super::git::xtest(&format!("move {over}; sleep 0.2; down; up")).await;
+        say("popover");
+        let back = at("back");
         super::git::xtest(&format!("move {back}; down; up")).await;
         say("click");
         app.set_presenting(true);
         glib::timeout_future(Duration::from_millis(500)).await;
-        let back = at("back").unwrap_or_default();
+        let back = at("back");
         super::git::xtest(&format!("move {back}; down; up")).await;
         say("presented click");
         app.set_presenting(false);

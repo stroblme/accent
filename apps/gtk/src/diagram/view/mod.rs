@@ -842,7 +842,7 @@ mod imp {
             let placing = self.moved.get()
                 && !matches!(
                     self.drag.borrow().as_ref(),
-                    None | Some(Drag::Band { .. } | Drag::Pan { .. } | Drag::Link { .. })
+                    None | Some(Drag::Band { .. } | Drag::Pan { .. })
                 );
             let shown = placing || (self.show_grid.get() && !self.read_only.get());
             if let Some(step) = obj.grid(false).filter(|_| shown)
