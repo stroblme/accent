@@ -13,7 +13,11 @@ pub(super) fn link(clipboard: &str, selection: &str, flavour: Flavour) -> Option
     let url = clipboard.trim();
     (could_link(selection, flavour) && is_url(url)).then(|| match flavour {
         Flavour::Note(Syntax::Org) => accent_core::org::link(url, Some(selection)),
-        _ => format!("[{}]({})", link_text(selection), destination(url)),
+        _ => format!(
+            "[{}]({})",
+            link_text(selection),
+            accent_core::markdown::link_destination(url)
+        ),
     })
 }
 
@@ -59,24 +63,6 @@ fn code_span(rest: &str) -> usize {
         at = start + len;
     }
     run
-}
-
-/// Format a destination literally when valid, otherwise use CommonMark
-/// `<…>` with escaped angle brackets for spaces or unbalanced parentheses.
-fn destination(url: &str) -> String {
-    let mut depth = 0i32;
-    let balanced = url.chars().all(|c| {
-        depth += match c {
-            '(' => 1,
-            ')' => -1,
-            _ => 0,
-        };
-        depth >= 0
-    }) && depth == 0;
-    match balanced && !url.contains([' ', '<', '>']) {
-        true => url.to_string(),
-        false => format!("<{}>", url.replace('<', "\\<").replace('>', "\\>")),
-    }
 }
 
 /// Check clipboard-independent eligibility: prose with a non-address,
