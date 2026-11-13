@@ -430,6 +430,12 @@ impl PdfDoc {
         }
     }
 
+    /// How many of the file's first bytes a [`save_to`](Self::save_to) keeps as they were read,
+    /// the session's section following them; `None` for a repaired file, which it writes whole.
+    pub fn base_len(&self) -> Option<u64> {
+        (!self.repaired).then_some(self.base_len)
+    }
+
     /// The document as `accent_pdf` reads it now: the file, with the session's update over it.
     fn document(&self) -> accent_pdf::Document<'_> {
         accent_pdf::Document::new(&self.cos.pdf, Some(&self.cos.update), &self.cos.pages)

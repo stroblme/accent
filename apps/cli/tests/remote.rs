@@ -197,7 +197,7 @@ fn a_remote_vault_connects_indexes_and_answers() {
     let mine: Vec<u8> = (0..16 << 20).map(|i| (i % 253) as u8).collect();
     std::fs::write(&cached, &mine).unwrap();
     let pushed = std::thread::scope(|s| {
-        let push = s.spawn(|| remote.push("race.pdf", true));
+        let push = s.spawn(|| remote.push("race.pdf", true, None));
         let t = Instant::now();
         let staged = || {
             let names = on_host(&url, &format!("ls -A {p}"));
@@ -226,7 +226,8 @@ fn a_remote_vault_connects_indexes_and_answers() {
     assert!(!on_host(&url, &format!("ls -A {p}")).contains(".accent-up-"));
 
     // A write-back of a PDF drawn on is the vault's own write on the host: its watcher's news
-    // of it is no change for the window, while a write there by anyone else is.
+    // of it is no change for the window, while a write there by anyone else is. Only what was
+    // drawn after the bytes the host has goes up, and the host's file is the copy once it lands.
     vault.write_file("drawn.pdf", &bookmarked_pdf()).unwrap();
     let cached = vault.fetch("drawn.pdf").unwrap();
     let news = |change: &dyn Fn()| {
@@ -242,10 +243,13 @@ fn a_remote_vault_connects_indexes_and_answers() {
     };
     let drawn = || {
         let mut bytes = std::fs::read(&cached).unwrap();
+        let kept = bytes.len() as u64;
         bytes.extend_from_slice(b"\n% drawn\n");
         std::fs::write(&cached, &bytes).unwrap();
-        let pushed = remote.push("drawn.pdf", true);
+        let pushed = remote.push("drawn.pdf", true, Some(kept));
         assert!(matches!(pushed, Ok(accent_api::remote::Pushed::Sent)));
+        let host = on_host(&url, &format!("cat {p}/drawn.pdf"));
+        assert_eq!(host.as_bytes(), bytes, "the host's file is not the copy");
     };
     assert!(!news(&drawn), "the window heard of its own write-back");
     let theirs = || drop(on_host(&url, &format!("echo theirs >> {p}/drawn.pdf")));

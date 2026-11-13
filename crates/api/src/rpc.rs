@@ -849,6 +849,13 @@ fn dispatch(vault: &Local, method: &str, p: &Value) -> Result<Value> {
             arg(p, 2)?,
             arg(p, 3)?,
         )),
+        "prefix_staged" => answer(vault.prefix_staged(
+            &arg::<String>(p, 0)?,
+            &arg::<String>(p, 1)?,
+            arg(p, 2)?,
+            arg(p, 3)?,
+            &arg::<String>(p, 4)?,
+        )),
         "create_note" => answer(vault.create_note(
             &arg::<String>(p, 0)?,
             arg::<Option<String>>(p, 1)?.as_deref(),

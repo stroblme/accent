@@ -793,7 +793,10 @@ impl Remote {
     /// `same_text` when no page edit goes up with it, so the host's index keeps the text it read.
     /// A commit whose answer is lost, past its deadline or with the link, is found landed by the
     /// next push where the host's file is the one it staged.
-    pub fn push(&self, rel: &str, same_text: bool) -> Result<Pushed> {
+    /// `base_len` where the copy is a PDF's save, the first that many bytes of the file it read
+    /// with the session's section after them: only the section goes up where the host's file
+    /// starts with the same bytes ([`stage_appended`](Self::stage_appended)).
+    pub fn push(&self, rel: &str, same_text: bool, base_len: Option<u64>) -> Result<Pushed> {
         let (Some(dest), Some(stamp)) = (
             ssh::cache_path(&self.url, rel),
             ssh::stamp_path(&self.url, rel),
@@ -818,16 +821,31 @@ impl Remote {
             let _ = stamp.set(&stamped);
             return Ok(Pushed::Sent);
         }
-        let staged = staged_name();
-        let path = self.remote_path(rel);
-        let stage = |size| ssh::run(&self.url, &self.ctl, &ssh::stage_cmd(&path, &staged, size));
-        let copy = self.send(&dest, stage, &|_, _| (), &link::Stop::default())?;
-        // Asked before the commit, which takes the staged file's name away, and no commit is
-        // asked of a host that does not answer this. A file that is a link stages beside its
-        // target, out of the vault's sight: none is found, and a lost answer then leaves a
-        // conflict copy as before.
-        let beside = accent_core::path::resolve(accent_core::path::parent_dir(rel), &staged);
-        if let Some(host) = self.call::<Option<crate::Etag>>("stat", json!([beside]))? {
+        let appended = match self.stage_appended(&dest, rel, current, base_len) {
+            Err(Error::Core(accent_core::Error::ChangedOnDisk { .. })) => {
+                return Ok(self.push_beside(&dest, rel));
+            }
+            appended => appended?,
+        };
+        let (staged, copy, host) = match appended {
+            Some((staged, copy, host)) => (staged, copy, Some(host)),
+            None => {
+                let staged = staged_name();
+                let path = self.remote_path(rel);
+                let stage =
+                    |size| ssh::run(&self.url, &self.ctl, &ssh::stage_cmd(&path, &staged, size));
+                let copy = self.send(&dest, stage, &|_, _| (), &link::Stop::default())?;
+                // Asked before the commit, which takes the staged file's name away, and no commit
+                // is asked of a host that does not answer this. A file that is a link stages
+                // beside its target, out of the vault's sight: none is found, and a lost answer
+                // then leaves a conflict copy as before.
+                let beside =
+                    accent_core::path::resolve(accent_core::path::parent_dir(rel), &staged);
+                let host = self.call::<Option<crate::Etag>>("stat", json!([beside]))?;
+                (staged, copy, host)
+            }
+        };
+        if let Some(host) = host {
             let landing = Some((host, copy));
             let _ = stamp.set(&Stamped { landing, ..stamped });
         }
@@ -846,6 +864,40 @@ impl Remote {
             }
             Err(e) => Err(e),
         }
+    }
+
+    /// Stage what follows the first `len` bytes of the cached copy `dest` beside `rel` on the
+    /// host, and have the host put its own file's first `len` bytes before it where they are the
+    /// copy's, which their digest tells ([`crate::Local::prefix_staged`]). The name staged, the
+    /// copy's etag and the staged file's; `None` where the bytes differ, or `len` is none or past
+    /// either file's end, and the copy goes whole.
+    fn stage_appended(
+        &self,
+        dest: &Path,
+        rel: &str,
+        current: crate::Etag,
+        len: Option<u64>,
+    ) -> Result<Option<(String, crate::Etag, crate::Etag)>> {
+        let Some(len) = len.filter(|&len| len <= current.size) else {
+            return Ok(None);
+        };
+        let unread = |e| accent_core::Error::io(dest.display(), e);
+        let file = std::fs::File::open(dest).map_err(unread)?;
+        let copy = crate::Etag::from_meta(&file.metadata().map_err(unread)?);
+        let Some(section) = copy.size.checked_sub(len) else {
+            return Ok(None);
+        };
+        // Read up to the section, which is what is sent from there.
+        let mut kept = blake3::Hasher::new();
+        std::io::copy(&mut (&file).take(len), &mut kept).map_err(unread)?;
+        let staged = staged_name();
+        let stage = ssh::stage_cmd(&self.remote_path(rel), &staged, section);
+        let stage = ssh::run(&self.url, &self.ctl, &stage);
+        link::send(&stage, file, section, &|_, _| (), &link::Stop::default())?;
+        let digest = kept.finalize().to_hex().to_string();
+        let staged_etag: Option<crate::Etag> =
+            self.call("prefix_staged", json!([rel, staged, current, len, digest]))?;
+        Ok(staged_etag.map(|host| (staged, copy, host)))
     }
 
     /// Move the cached file or folder, stamp and pending page edits from `from`

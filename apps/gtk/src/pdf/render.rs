@@ -541,6 +541,7 @@ fn render_loop(
                                 Reply::Saved {
                                     etag: written,
                                     paged,
+                                    base_len: doc.base_len(),
                                 },
                             );
                         }
@@ -596,6 +597,7 @@ fn render_loop(
                                     Reply::Saved {
                                         etag: written,
                                         paged,
+                                        base_len: doc.base_len(),
                                     },
                                 );
                                 for (page, area) in pages {

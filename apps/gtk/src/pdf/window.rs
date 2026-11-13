@@ -462,10 +462,11 @@ impl App {
         // The page edits in the file now are what this upload carries, so their notes follow once
         // it lands; one made meanwhile waits for the next.
         let (carried, same_text) = (self.pages_carried(&key), !self.carries_pages(&key));
+        let base_len = pdf.saved_base_len.get();
         let (weak_app, pdf) = (Rc::downgrade(self), pdf.clone());
         glib::spawn_future_local(async move {
             let asked = key.clone();
-            let push = move || remote.push(&asked, same_text);
+            let push = move || remote.push(&asked, same_text, base_len);
             let sent = crate::work::off_thread("upload", push).await;
             let Some(app) = weak_app.upgrade() else {
                 return;
@@ -571,7 +572,8 @@ impl App {
         let weak_app = Rc::downgrade(self);
         glib::spawn_future_local(async move {
             let asked = key.clone();
-            let push = move || remote.push(&asked, same_text);
+            // No tab says what its file's save kept, so the copy goes whole.
+            let push = move || remote.push(&asked, same_text, None);
             let sent = crate::work::off_thread("upload", push).await;
             let Some(app) = weak_app.upgrade() else {
                 return;

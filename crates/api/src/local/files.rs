@@ -115,6 +115,22 @@ impl Local {
         Ok(etag)
     }
 
+    /// Put the first `len` bytes of `rel` before the upload staged beside it, where they have the
+    /// window's `digest` and `rel` still has `expected`'s etag ([`fs::prefix_staged`]): a remote
+    /// PDF's write-back that sent only the section its save puts after them, which
+    /// [`commit`](Self::commit) then lands. The staged file's etag, or `None` where the bytes
+    /// differ and the window sends the whole file.
+    pub fn prefix_staged(
+        &self,
+        rel: &str,
+        staged: &str,
+        expected: Etag,
+        len: u64,
+        digest: &str,
+    ) -> Result<Option<Etag>> {
+        fs::prefix_staged(&self.resolve(rel)?, staged, expected, len, digest).map_err(named(rel))
+    }
+
     /// Read any file as text, saying so when it is binary or too big to hold. What a tab opens
     /// with; [`read`](Self::read) is the note-shaped version the rename and conflict paths use.
     pub fn read_text(&self, rel: &str) -> Result<fs::Read> {

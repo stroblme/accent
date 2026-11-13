@@ -187,6 +187,9 @@ pub struct PdfTab {
     pub(super) saved: Cell<Option<accent_core::fs::Etag>>,
     /// Whether that write carried a page edit, which changes the file's text where ink does not.
     pub(super) saved_paged: Cell<bool>,
+    /// How many of that write's first bytes are the file it read, which a remote vault's upload
+    /// need not send again (`Remote::push`).
+    pub(super) saved_base_len: Cell<Option<u64>>,
     /// Whether Undo, and then Redo, has anything to walk: what the header's two buttons show.
     pub(super) history: Cell<(bool, bool)>,
     pub(super) outline: RefCell<Vec<pdf::Outline>>,
@@ -354,6 +357,7 @@ pub fn open(
         unsent: Cell::new(false),
         saved: Cell::new(None),
         saved_paged: Cell::new(false),
+        saved_base_len: Cell::new(None),
         history: Cell::new((false, false)),
         outline: RefCell::new(Vec::new()),
         info: RefCell::default(),

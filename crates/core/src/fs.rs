@@ -373,6 +373,51 @@ pub fn commit(path: &Path, staged: &str, expected: Etag) -> Result<Etag> {
     landed
 }
 
+/// Put the first `len` bytes of `path`'s target before `staged`, an upload streamed beside it,
+/// where the target still has `expected`'s etag and those bytes have the [`digest`] `digest` (in
+/// hex): a write-back that sent only what follows bytes the file has, which [`commit`] then lands.
+/// Answers the staged file's etag, or `None` where those bytes are not the window's. `staged` is
+/// removed unless it is answered.
+pub fn prefix_staged(
+    path: &Path,
+    staged: &str,
+    expected: Etag,
+    len: u64,
+    digest: &str,
+) -> Result<Option<Etag>> {
+    if !staged.starts_with(".accent-") || staged.contains('/') {
+        return Err(Error::Invalid(format!("{staged} is not a staged upload")));
+    }
+    let failed = |e| Error::io(path.display(), e);
+    let canonical = canonical_target(path).map_err(failed)?;
+    let tmp = canonical.with_file_name(staged);
+    let prefixed = (|| {
+        let file = std::fs::File::open(&canonical).map_err(failed)?;
+        let meta = file.metadata().map_err(failed)?;
+        if Etag::from_meta(&meta) != expected {
+            return Err(Error::ChangedOnDisk {
+                current: Etag::from_meta(&meta),
+            });
+        }
+        let mut read = blake3::Hasher::new();
+        io::copy(&mut (&file).take(len), &mut read).map_err(failed)?;
+        if read.finalize().to_hex().as_str() != digest {
+            return Ok(None);
+        }
+        let parent = canonical.parent().unwrap_or(Path::new("."));
+        let mut whole = temp_file(parent, Some(&meta)).map_err(failed)?;
+        copy_range(&file, whole.as_file_mut(), len).map_err(failed)?;
+        let mut section = std::fs::File::open(&tmp).map_err(failed)?;
+        io::copy(&mut section, whole.as_file_mut()).map_err(failed)?;
+        whole.persist(&tmp).map_err(|e| failed(e.error))?;
+        Ok(Some(Etag::of(&tmp)?))
+    })();
+    if !matches!(prefixed, Ok(Some(_))) {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    prefixed
+}
+
 /// Give `tmp` the mode and owner of `existing`, the file it is to replace.
 fn keep_owner(tmp: &Path, existing: &std::fs::Metadata, canonical: &Path) {
     // Neither is allowed to fail the save. exFAT, SMB and Android's FUSE `/sdcard` have no
@@ -812,6 +857,44 @@ mod tests {
         }
         assert_eq!(std::fs::read_to_string(&real).unwrap(), "new");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    /// A write-back that sent only what follows the bytes the file has gets those bytes put
+    /// before it, through the file's link, where they are the ones the window has and the file is
+    /// the one it was sent for; otherwise the staged bytes go and the file stays as it is.
+    #[test]
+    fn a_staged_section_follows_the_files_own_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (real, link) = (dir.path().join("real.pdf"), dir.path().join("link.pdf"));
+        std::fs::write(&real, "base|old section").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let stage = |name: &str| std::fs::write(dir.path().join(name), "new section").unwrap();
+        let sent_for = Etag::of(&real).unwrap();
+        let base = digest("base|").to_hex().to_string();
+
+        stage(".accent-up-1");
+        let other = digest("BASE|").to_hex().to_string();
+        assert_eq!(
+            prefix_staged(&link, ".accent-up-1", sent_for, 5, &other).unwrap(),
+            None
+        );
+        stage(".accent-up-2");
+        let gone = Etag {
+            size: 1,
+            ..sent_for
+        };
+        assert!(matches!(
+            prefix_staged(&link, ".accent-up-2", gone, 5, &base),
+            Err(Error::ChangedOnDisk { current }) if current == sent_for
+        ));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+
+        stage(".accent-up-3");
+        let staged = prefix_staged(&link, ".accent-up-3", sent_for, 5, &base).unwrap();
+        assert_eq!(staged, Etag::of(&dir.path().join(".accent-up-3")).ok());
+        let landed = commit(&link, ".accent-up-3", sent_for).unwrap();
+        assert_eq!(Some(landed), staged);
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "base|new section");
     }
 
     #[test]
