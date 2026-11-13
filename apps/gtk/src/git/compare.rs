@@ -26,6 +26,7 @@ impl Panel {
         let asked = self.asked.get() + 1;
         self.asked.set(asked);
         self.put_up(&what);
+        let (key, generation) = (self.tab_key(&what), self.source_generation.get());
         let panel = self.clone();
         let vault = self.source();
         glib::spawn_future_local(async move {
@@ -42,8 +43,9 @@ impl Panel {
             if panel.asked.get() != asked {
                 return;
             }
-            let key = panel.tab_key(&what);
+            // Read from a source the pane has left since, which keys its tabs otherwise.
             let shown = match read {
+                _ if panel.source_generation.get() != generation => false,
                 Some(Ok(read)) => panel.show(what, read, false),
                 Some(Err(why)) => {
                     (panel.hooks.toast)(&why);
@@ -115,8 +117,15 @@ impl Panel {
             key: key.to_string(),
             sides: Sides::Merge,
         };
-        if !self.is_shell_remote() {
-            self.put_up(&what);
+        match self.is_shell_remote() {
+            false => self.put_up(&what),
+            // Resolved in the host's terminal, so nothing is put up, and one an earlier click put
+            // up goes as a newer click's would let it go.
+            true => {
+                if let Some(earlier) = self.put.take() {
+                    (self.hooks.let_go)(&earlier);
+                }
+            }
         }
         self.show_merge(what, Some(asked));
     }

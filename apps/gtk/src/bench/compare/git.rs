@@ -132,10 +132,13 @@ pub(in crate::bench) fn bench_compare_row(app: &Rc<App>, rel: &str) {
         // settles.
         for _ in 0..60 {
             wait(250).await;
+            // A row's tab is up before its comparison is in, which it waits for.
             if app.toasted.get() > said
-                || matches!(app.doc_for(&key), Some(Doc::Diff(_)))
+                || matches!(app.doc_for(&key), Some(Doc::Diff(diff)) if diff.filled())
                 || app.open_tabs().iter().any(|tab| tab.comparison().is_some())
-                || app.doc_for(&rel).is_some_and(|doc| doc.tab().is_none())
+                || app
+                    .doc_for(&rel)
+                    .is_some_and(|doc| doc.tab().is_none() && !matches!(doc, Doc::Loading(_)))
             {
                 break;
             }
