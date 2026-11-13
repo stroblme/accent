@@ -163,6 +163,13 @@ impl DiagramTab {
                     gdk::Key::Left | gdk::Key::Page_Up if presenting && !ctrl => {
                         tab.run("win.diagram-previous-page")
                     }
+                    // `n`, `p`, `Home` and `End` read a presented PDF, and a presented diagram so.
+                    gdk::Key::n if presenting && !ctrl => tab.run("win.diagram-next-page"),
+                    gdk::Key::p if presenting && !ctrl => tab.run("win.diagram-previous-page"),
+                    gdk::Key::Home if presenting && !ctrl => tab.show_page(0),
+                    gdk::Key::End if presenting && !ctrl => {
+                        tab.show_page(tab.page_count().saturating_sub(1))
+                    }
                     _ if presenting && (ctrl || alt) => return glib::Propagation::Proceed,
                     _ if presenting => {}
                     gdk::Key::z | gdk::Key::Z if ctrl && shift => tab.run("win.diagram-redo"),
