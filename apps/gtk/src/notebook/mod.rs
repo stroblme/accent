@@ -141,6 +141,8 @@ pub struct NotebookTab {
     on_select: TabHook,
     /// Ctrl+scroll over the notebook: `true` zooms out.
     on_zoom: Hook<dyn Fn(bool)>,
+    /// A cell's count changed, `[*]` as a run waits or runs and `[n]` once it is done.
+    on_count: Hook<dyn Fn()>,
     /// The caret went far at once from the place handed over (`selection::leaped`).
     on_leap: Hook<dyn Fn(&gtk::TextIter)>,
     /// The find bar's query over the cells and where it matches (`find`).
@@ -302,6 +304,7 @@ fn build(
         on_banner: Hook::default(),
         on_select: Hook::default(),
         on_zoom: Hook::default(),
+        on_count: Hook::default(),
         on_leap: Hook::default(),
         find: RefCell::default(),
         on_matches: Hook::default(),
@@ -1258,10 +1261,11 @@ impl NotebookTab {
         self.place_soon();
     }
 
-    /// A viewer takes the notebook as it is now, `notebook` its source's snapshot: each cell's
-    /// text and rendered page brought up to date, and a code cell's outputs drawn again from the
-    /// first that changed, so a stream that grew only grows.
-    pub fn follow(self: &Rc<Self>, notebook: Notebook) {
+    /// A viewer takes the notebook as it is now, `notebook` its source's snapshot and `queued`
+    /// the cells its kernel has yet to finish, which count `[*]`: each cell's text and rendered
+    /// page brought up to date, and a code cell's outputs drawn again from the first that changed,
+    /// so a stream that grew only grows.
+    pub fn follow(self: &Rc<Self>, notebook: Notebook, queued: &[CellId]) {
         let old = self.model.replace(notebook);
         self.reconcile();
         {
@@ -1270,7 +1274,10 @@ impl NotebookTab {
                 let Some(view) = self.view_of(Some(cell.id())) else {
                     continue;
                 };
-                view.set_count(&cell::count_label(cell));
+                match queued.contains(&cell.id()) {
+                    true => view.set_count("[*]"),
+                    false => view.set_count(&cell::count_label(cell)),
+                }
                 let was = old.position(cell.id()).map(|at| &old.cells()[at]);
                 let Some(was) =
                     was.filter(|was| was.kind() == Kind::Code && cell.kind() == Kind::Code)
@@ -1677,6 +1684,10 @@ impl NotebookTab {
         self.on_select.set(Rc::new(f));
     }
 
+    pub fn connect_count(&self, f: impl Fn() + 'static) {
+        self.on_count.set(Rc::new(f));
+    }
+
     pub fn connect_zoom(&self, f: impl Fn(bool) + 'static) {
         self.on_zoom.set(Rc::new(f));
     }
@@ -2037,6 +2048,11 @@ impl NotebookTab {
             });
         }
         texts
+    }
+
+    /// Cell `n`'s id.
+    pub fn bench_id(&self, n: usize) -> CellId {
+        self.views.borrow()[n].id
     }
 
     /// Whether no cell can be typed into and no cell button or add strip is out.

@@ -142,6 +142,13 @@ impl App {
             }
         }));
         tab.connect_follow(on(|app, _| app.go_to_definition()));
+        // A run's `[*]` coming and going shows in the notebook's preview tab too.
+        let (weak, page) = (Rc::downgrade(self), tab.page.downgrade());
+        tab.connect_count(move || {
+            if let (Some(app), Some(page)) = (weak.upgrade(), page.upgrade()) {
+                app.queue_rendered(&page);
+            }
+        });
         self.wire_notebook_places(tab);
         tab.connect_autosave(on(|app, tab| app.save_model(tab, false)));
         tab.connect_banner(on(|app, tab| app.resolve_model(tab)));

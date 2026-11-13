@@ -493,7 +493,7 @@ impl App {
         };
         // A notebook's view takes the notebook as it is now, and its selected cell's place.
         if let (Note::Notebook(nb), Some(viewer)) = (&note, rendered.viewer()) {
-            viewer.follow(nb.snapshot());
+            viewer.follow(nb.snapshot(), &nb.queued());
             if follow {
                 viewer.show_place_of(nb);
             }

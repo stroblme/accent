@@ -387,9 +387,21 @@ impl NotebookTab {
         self.kernel.kernel.borrow().clone()
     }
 
+    /// The cells whose runs wait or run, which count `[*]`: what a preview tab's view shows.
+    pub fn queued(&self) -> Vec<CellId> {
+        let kernel = self.kernel();
+        let runs = kernel
+            .as_ref()
+            .map(|k| k.runs.borrow().values().map(|j| j.cell).collect());
+        runs.unwrap_or_default()
+    }
+
     /// Cell `id`'s count as the model has it, or `[*]` while a run of it waits or runs; and the
     /// cell buttons' Run Cell or Stop, the run the kernel is on having changed with it.
     fn relabel(&self, id: CellId) {
+        if let Some(told) = self.on_count.get() {
+            told();
+        }
         self.show_turn();
         let Some(view) = self.view_of(Some(id)) else {
             return;

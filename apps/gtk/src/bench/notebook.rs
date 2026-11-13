@@ -944,14 +944,23 @@ async fn preview_drill(app: &Rc<App>, tab: &Rc<NotebookTab>) {
         viewer.bench_source(0).ends_with(" followed")
     });
     let followed = followed.await.is_some();
+    // A cell the notebook's kernel has yet to finish counts `[*]` in the preview too.
+    let code =
+        (0..tab.cell_count()).find(|n| tab.bench_cell(*n).is_some_and(|c| c.0.starts_with('[')));
+    let running = code.is_some_and(|n| {
+        viewer.follow(tab.snapshot(), &[tab.bench_id(n)]);
+        viewer.bench_cell(n).is_some_and(|c| c.0 == "[*]")
+    });
+    viewer.follow(tab.snapshot(), &[]);
     app.toggle_preview();
     tab.undo();
     println!(
-        "bench notebook preview read_only={} rendered={} keys={} find_page={page} find_source={source} followed={} kernel_away={} find_ms={find_ms:.0}",
+        "bench notebook preview read_only={} rendered={} keys={} find_page={page} find_source={source} followed={} running={} kernel_away={} find_ms={find_ms:.0}",
         u8::from(read_only),
         u8::from(rendered),
         u8::from(keys),
         u8::from(followed),
+        u8::from(running),
         u8::from(away && back)
     );
 }
