@@ -46,6 +46,12 @@ pub enum Reply {
         theme: pdf::Theme,
         image: accent_core::pdf::RgbaImage,
     },
+    /// The band of a page the link preview asked for, as [`Request::Band`] named it.
+    Band {
+        page: usize,
+        rect: (i32, i32, i32, i32),
+        image: accent_core::pdf::RgbaImage,
+    },
     Links(usize, Vec<accent_core::pdf::Link>),
     /// What other readers wrote on one page, answered with its links.
     Comments(usize, Vec<pdf::Comment>),
@@ -142,8 +148,6 @@ pub enum Reply {
 pub enum Asker {
     Reader,
     Strip,
-    /// The Ctrl-hover link preview, for the stand-in of the page a link goes to.
-    Preview,
 }
 
 /// What the render thread is asked for.
@@ -158,6 +162,14 @@ pub enum Request {
         scale: f32,
         theme: pdf::Theme,
         wants: Vec<Want>,
+    },
+    /// The part of one page the Ctrl-hover link preview shows, `rect` its `(x, y, w, h)` in
+    /// device pixels of the page at `scale` device pixels per point.
+    Band {
+        page: usize,
+        scale: f32,
+        rect: (i32, i32, i32, i32),
+        theme: pdf::Theme,
     },
     /// One page's links, and its comments with them.
     Links(usize),

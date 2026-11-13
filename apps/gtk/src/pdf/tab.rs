@@ -396,6 +396,9 @@ pub fn open(
         tab,
         move || {
             tab.place_text();
+            // Ctrl+scroll is a zoom with Ctrl held: a preview would point at where the link was,
+            // drawn at the zoom it was.
+            tab.hide_preview();
             tab.on_zoom.emit(&tab);
         }
     ));

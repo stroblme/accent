@@ -43,6 +43,7 @@ mod outline;
 mod panes;
 mod pdf;
 mod pdf_draw;
+mod pdf_hover;
 mod pdf_outline;
 mod pdf_picture;
 mod pdf_remote;
@@ -263,6 +264,9 @@ use user_commands::bench_commands;
 ///   build, or XTEST missing-data menu probe without SyncTeX),
 ///   `comments:<rel_path>` (tooltips, pinning, highlights and comment outline;
 ///   scratch generated `Attachments/comments.pdf`),
+///   `hover:<rel_path>` (the Ctrl-hover link preview of every link on the first page at 100 %
+///   and 200 %, Ctrl held and the pointer moved through XTEST to where each `bench hover aim`
+///   line says, each held two seconds for a screenshot; generated `Attachments/comments.pdf`),
 ///   `walk:<rel_path>` (comment-list loading/cancellation; hundreds of pages),
 ///   `pen:<rel_path>[,stop][,<n>]` (main-loop gaps under 24 XTEST pen strokes while the PDF text
 ///   pass runs, or stopped, onto `n` strokes put on the first page first; render-thread work per
@@ -725,6 +729,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
             }
             if let Some(rel) = rel.strip_prefix("comments:") {
                 return bench_pdf_comments(&app, rel);
+            }
+            if let Some(rel) = rel.strip_prefix("hover:") {
+                return pdf_hover::bench_pdf_hover(&app, rel);
             }
             if let Some(rel) = rel.strip_prefix("walk:") {
                 return pdf_outline::bench_pdf_walk(&app, rel);

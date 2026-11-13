@@ -118,6 +118,7 @@ impl PdfTab {
             // What the watcher says too, for a file it watches; this is the render thread
             // finding out first, or for a file nothing watches.
             Reply::Changed => self.refresh(),
+            Reply::Band { page, rect, image } => self.band_landed(page, rect, image),
             // Textures never reach here; `PdfView::deliver` keeps those.
             Reply::Tile(..) | Reply::Lowres { .. } => {}
         }

@@ -111,6 +111,11 @@ impl PdfView {
         self.imp().zoom.get()
     }
 
+    /// Logical pixels per point the pages are laid out at, whatever the zoom mode.
+    pub fn pixels_per_point(&self) -> f32 {
+        self.imp().layout.borrow().scale
+    }
+
     pub fn set_zoom(&self, zoom: PdfZoom) {
         if self.imp().zoom.get() == zoom {
             return;
@@ -290,8 +295,7 @@ impl PdfView {
         *self.imp().on_motion.borrow_mut() = Some(Box::new(f));
     }
 
-    /// Called with a page number when its low-resolution stand-in lands in the cache. The link
-    /// preview waits on this: the page it wants a band of has usually never been drawn.
+    /// Called with a page number when its low-resolution stand-in lands in the cache.
     pub fn connect_lowres(&self, f: impl Fn(u32) + 'static) {
         *self.imp().on_lowres.borrow_mut() = Some(Box::new(f));
     }

@@ -208,6 +208,17 @@ fn render_loop(
                         at += 1;
                     }
                 }
+                Request::Band {
+                    page,
+                    scale,
+                    rect,
+                    theme,
+                } => {
+                    let (x, y, w, h) = rect;
+                    if let Ok(image) = doc.render_tile(page, scale, x, y, w, h, theme) {
+                        send(view, Reply::Band { page, rect, image });
+                    }
+                }
                 Request::Links(page) => {
                     if let Ok(links) = doc.links(page) {
                         send(view, Reply::Links(page, links));

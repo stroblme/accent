@@ -1122,7 +1122,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Fallbacks match the page and theme, leave already sharp tiles alone and exclude tiles invalidated by an edit.
   They use the existing tile budget and meet on the device pixel grid, so zooming introduces no tile seams.
   One render thread per document also opens it, so a large file costs nothing at startup.
-  The reading view, the thumbnail strip and the link preview each ask it for what they lack, a newer list replacing only its own asker's: each asks again only when its list changes, so one dropping another's left pages blank.
+  The reading view and the thumbnail strip each ask it for what they lack, a newer list replacing only its own asker's: each asks again only when its list changes, so one dropping another's left pages blank.
+  The link preview asks it for its band alone, which lands in the popover and never in the cache.
 - The Rust core retains the last PDFium page rendered, sharing its parsed paths and decoded images between tiles and zoom levels.
   A different page releases it, and an edit closes it before replacing the document, all under the PDFium lock.
   PDFium's limited image cache is enabled, and recolouring runs outside the lock as before.
@@ -2038,6 +2039,9 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 - Back and Forward are the window's (History): a PDF keeps no stack of its own.
   Only jumps go in — a link, an outline row, a page typed into Go to Line, a search's first step; paging is reading, and a history of single steps would have nothing to go back to.
 - Ctrl held over a link previews where it leads without following it: a band of the target page around the destination, in this document or in another PDF under that file's name, or an external link's address.
+  The band is drawn at the zoom the PDF is read at, so it reads as the page will once the link is followed, and it is as wide as the page and three eighths as tall, about a quarter of a portrait page.
+  The preview stays inside the PDF pane, above the link or below it where there is no room above and slid along to keep clear of the sides, and a page too wide for the pane is drawn smaller to fit.
+  The page's stand-in shows under the band until it is drawn, and a zoom takes the preview away.
   Ctrl+click on a link follows it; anywhere else on a LaTeX build's page it is Go to Source.
 - Fit Width and Fit Height from the zoom readout's right-click and the palette; Invert PDF Colours from the palette, and over an image Invert Image Colours.
 - Drawing `Ctrl+Shift+I` opens the ring.

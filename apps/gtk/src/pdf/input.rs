@@ -23,10 +23,7 @@ impl PdfTab {
         view.connect_lowres(glib::clone!(
             #[weak(rename_to = tab)]
             self,
-            move |page| {
-                tab.thumbs.queue_draw();
-                tab.band_landed(page);
-            }
+            move |_| tab.thumbs.queue_draw()
         ));
         view.connect_page(glib::clone!(
             #[weak(rename_to = tab)]

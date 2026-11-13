@@ -10,21 +10,26 @@ use std::time::SystemTime;
 use accent_core::pdf::{PdfDoc, Remote, RgbaImage, Theme};
 use futures_channel::oneshot;
 
-use super::LOWRES_W;
+use super::preview::Band;
 
-/// A page of another PDF as a link preview shows it: its number, the y down it the link wants at
-/// the top of the view, its height in points, and the page drawn at the preview's width.
+/// A page of another PDF as a link preview shows it: its number, and the band of it around the
+/// place the link names, drawn.
 pub struct Seen {
     pub page: usize,
-    pub top: Option<f32>,
-    pub height: f32,
+    pub band: Band,
     pub image: RgbaImage,
 }
+
+/// How a band is drawn, which [`Band::around`] works out once the page is known: the reading
+/// view's logical pixels per point, the room the band has, and the display's device pixels to a
+/// logical one.
+pub type Fit = (f32, (i32, i32), i32);
 
 struct Ask {
     path: PathBuf,
     dest: Remote,
     theme: Theme,
+    fit: Fit,
     answer: oneshot::Sender<Option<Seen>>,
 }
 
@@ -32,9 +37,15 @@ struct Ask {
 /// when it did, which tell a file written since from the one read.
 type Open = Option<(PathBuf, Option<(SystemTime, u64)>, PdfDoc)>;
 
-/// Ask for the page `dest` names in the PDF at `path`, drawn in `theme`. It answers `None` for a
-/// file that does not open as a PDF or a place it has not, and drops an ask a newer one overtook.
-pub fn page(path: PathBuf, dest: Remote, theme: Theme) -> oneshot::Receiver<Option<Seen>> {
+/// Ask for the page `dest` names in the PDF at `path`, its band drawn in `theme` as `fit` says.
+/// It answers `None` for a file that does not open as a PDF or a place it has not, and drops an
+/// ask a newer one overtook.
+pub fn page(
+    path: PathBuf,
+    dest: Remote,
+    theme: Theme,
+    fit: Fit,
+) -> oneshot::Receiver<Option<Seen>> {
     static ASKS: OnceLock<Sender<Ask>> = OnceLock::new();
     let asks = ASKS.get_or_init(|| {
         let (asks, asked) = channel();
@@ -49,6 +60,7 @@ pub fn page(path: PathBuf, dest: Remote, theme: Theme) -> oneshot::Receiver<Opti
         path,
         dest,
         theme,
+        fit,
         answer,
     });
     answered
@@ -77,14 +89,9 @@ fn read(open: &mut Open, ask: &Ask) -> Option<Seen> {
     }
     let doc = &open.as_ref()?.2;
     let (page, top) = doc.destination(&ask.dest).ok()??;
-    let (width, height) = doc.page_size(page).ok()?;
-    let image = doc
-        .render_page(page, LOWRES_W as f32 / width.max(1.0), ask.theme)
-        .ok()?;
-    Some(Seen {
-        page,
-        top,
-        height,
-        image,
-    })
+    let (scale, room, sf) = ask.fit;
+    let band = Band::around(doc.page_size(page).ok()?, top, scale, room);
+    let (scale, (x, y, w, h)) = band.pixels(sf);
+    let image = doc.render_tile(page, scale, x, y, w, h, ask.theme).ok()?;
+    Some(Seen { page, band, image })
 }

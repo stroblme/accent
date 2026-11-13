@@ -4,23 +4,64 @@ use std::rc::Rc;
 
 use accent_core::pdf::{self, LinkTarget};
 use adw::prelude::*;
-use gtk::glib;
+use gtk::{gdk, glib, graphene};
 
-use super::protocol::{Asker, Request};
+use super::protocol::Request;
 use super::tab::PdfTab;
-use super::{LOWRES_W, Want};
 
-/// How tall a link preview's band is, in the low-resolution page's own pixels. Roughly a quarter
-/// of a portrait page at [`LOWRES_W`], which is a heading and the lines under it: a
-/// whole page shrunk to a popover says nothing a reader can read.
-const BAND: i32 = 96;
+/// How tall a band is for its width: 96 pixels of 256, about a quarter of a portrait page, which
+/// is a heading and the lines under it. A whole page shrunk to a popover says nothing a reader
+/// can read.
+const TALL: f32 = 0.375;
+
+/// What a preview keeps clear of the PDF pane's edges, in logical pixels.
+const MARGIN: i32 = 12;
+
+/// The part of a page a link preview shows: drawn at `scale` logical pixels to a point, `size`
+/// logical pixels large, and starting `offset` of them down the page.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct Band {
+    pub scale: f32,
+    pub size: (i32, i32),
+    pub offset: i32,
+}
+
+impl Band {
+    /// The band of a page `page` points large around the destination `top` points down it, drawn
+    /// at the reading view's `scale` so it reads as the page will once the link is followed: as
+    /// wide as the page and [`TALL`] of that high. A page wider than `room` allows is drawn
+    /// smaller to fit, and a band taller than it is cut down.
+    ///
+    /// The destination is centred, and the band stays inside the page at both ends: a link to the
+    /// last line shows the foot of the page rather than a strip of nothing under it.
+    pub(super) fn around(page: (f32, f32), top: Option<f32>, scale: f32, room: (i32, i32)) -> Band {
+        let scale = scale.min(room.0.max(1) as f32 / page.0.max(1.0));
+        let (width, height) = (page.0 * scale, page.1 * scale);
+        let tall = (width * TALL).min(height).min(room.1.max(0) as f32).round();
+        let at = top.unwrap_or(0.0) * scale - tall / 2.0;
+        Band {
+            scale,
+            size: (width.round() as i32, tall as i32),
+            offset: at.clamp(0.0, (height - tall).max(0.0)).round() as i32,
+        }
+    }
+
+    /// What is rendered for it on a display of `sf` device pixels to a logical one: device pixels
+    /// per point, and the band as `(x, y, w, h)` in device pixels of the page at that scale.
+    pub(super) fn pixels(&self, sf: i32) -> (f32, (i32, i32, i32, i32)) {
+        let rect = (0, self.offset * sf, self.size.0 * sf, self.size.1 * sf);
+        (self.scale * sf as f32, rect)
+    }
+}
 
 /// The Ctrl-hover link preview currently on screen.
 pub(super) struct Preview {
     popover: gtk::Popover,
-    /// Where the band of the target page goes. Empty until the render lands, which for a page
-    /// nobody has looked at yet is a moment after the popover is up.
-    band: adw::Bin,
+    /// Where the band of the target page goes: the page's stand-in, if it has one, until the band
+    /// itself lands, which for a page of another PDF is all there is.
+    band: gtk::Picture,
+    /// The band of a page of this document still being drawn, which is what an answer must be.
+    asked: Option<(usize, Band)>,
     /// What it is showing, so a pointer still on the same link asks for nothing again.
     target: LinkTarget,
 }
@@ -50,16 +91,26 @@ impl PdfTab {
         ));
     }
 
-    /// A page's stand-in landed. The band arrives after the popover does, for any page nobody has
-    /// read yet, so a preview up for that page fills in now.
-    pub(super) fn band_landed(self: &Rc<Self>, ready: u32) {
-        let waiting = match self.preview.borrow().as_ref().map(|p| p.target.clone()) {
-            Some(LinkTarget::Page { page, top }) if page as u32 == ready => Some((page, top)),
-            _ => None,
+    /// The band a preview asked for landed. One for a link the pointer has left since is dropped.
+    pub(super) fn band_landed(
+        &self,
+        page: usize,
+        rect: (i32, i32, i32, i32),
+        image: pdf::RgbaImage,
+    ) {
+        let sf = self.view.scale_factor().max(1);
+        let mut preview = self.preview.borrow_mut();
+        let Some(shown) = preview.as_mut() else {
+            return;
         };
-        if let Some((page, top)) = waiting {
-            self.fill_band(page, top);
-        }
+        let Some((_, band)) = shown
+            .asked
+            .filter(|(at, band)| *at == page && band.pixels(sf).1 == rect)
+        else {
+            return;
+        };
+        shown.asked = None;
+        put_band(&shown.band, band, &super::cache::texture(image), sf);
     }
 
     /// Ctrl over a link: show where it leads. Anything else takes the preview away.
@@ -93,16 +144,19 @@ impl PdfTab {
     /// external one gets the address it would open, which is the thing worth knowing before
     /// clicking it, and one into another PDF the same band of that file's page under its name,
     /// read once the file is ([`PdfTab::fill_band_elsewhere`]).
+    ///
+    /// The popover stays inside the PDF pane: above the link where it fits, below it otherwise,
+    /// and slid along to keep clear of the pane's sides.
     fn show_preview(self: &Rc<Self>, target: LinkTarget, x: f64, y: f64) {
         let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        let band = adw::Bin::new();
+        let band = gtk::Picture::new();
         let caption = gtk::Label::builder()
             .css_classes(["caption", "dimmed"])
             .xalign(0.0)
             .build();
+        let mut elsewhere = None;
         match &target {
             LinkTarget::Page { page, .. } => {
-                band.set_size_request(LOWRES_W, BAND);
                 content.append(&band);
                 caption.set_label(&format!("Page {}", page + 1));
                 content.append(&caption);
@@ -117,10 +171,9 @@ impl PdfTab {
                     .build(),
             ),
             LinkTarget::File(to) => {
-                if let Some(path) = self.on_locate.get().and_then(|f| f(self, &to.file)) {
-                    band.set_size_request(LOWRES_W, BAND);
+                elsewhere = self.on_locate.get().and_then(|f| f(self, &to.file));
+                if elsewhere.is_some() {
                     content.append(&band);
-                    self.fill_band_elsewhere(path, to, &band, &caption);
                 }
                 content.append(
                     &gtk::Label::builder()
@@ -133,7 +186,6 @@ impl PdfTab {
                 if let pdf::Remote::Page { page, .. } = to.dest {
                     caption.set_label(&format!("Page {}", page + 1));
                 }
-                caption.set_visible(!caption.label().is_empty());
                 content.append(&caption);
             }
         }
@@ -143,75 +195,106 @@ impl PdfTab {
         let popover = gtk::Popover::builder()
             .autohide(false)
             .can_target(false)
-            .position(gtk::PositionType::Top)
             .child(&content)
             .build();
         popover.set_parent(&self.host);
-        popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        let at = (x as i32, y as i32);
+        // The pointer's row and one either side of it, so the popover never starts on it: under
+        // X11 the pointer then goes into the popover, and its leave takes the preview away.
+        popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(at.0, at.1 - 1, 1, 3)));
         // A popover parented by hand stays parented until it is unparented by hand.
         popover.connect_closed(|popover| popover.unparent());
+        // Up before it is measured, as a hidden widget measures nothing: what follows changes it
+        // before its first frame is drawn.
         popover.popup();
-        let page = match target {
-            LinkTarget::Page { page, top } => Some((page, top)),
+
+        // The room the band has: the pane less the popover around it, across, and half the
+        // pane's height less the rest of the popover, which fits above the link or below it.
+        let pane = (self.host.width(), self.host.height());
+        let (_, inner, _, _) = content.measure(gtk::Orientation::Horizontal, -1);
+        let (_, outer, _, _) = popover.measure(gtk::Orientation::Horizontal, -1);
+        let (_, chrome, _, _) = popover.measure(gtk::Orientation::Vertical, -1);
+        let room = (
+            pane.0 - 2 * MARGIN - (outer - inner),
+            pane.1 / 2 - MARGIN - chrome,
+        );
+        // Measured as a line all the same, which a named destination's page fills once read.
+        caption.set_visible(!caption.label().is_empty());
+        let sf = self.view.scale_factor().max(1);
+        let scale = self.view.pixels_per_point();
+        let asked = match target {
+            LinkTarget::Page { page, top } => self
+                .view
+                .page_size(page)
+                .map(|size| (page, size, Band::around(size, top, scale, room))),
             LinkTarget::Uri(_) | LinkTarget::File(_) => None,
         };
+        // Another file's page is not read yet: its band is at most as tall as the room's width
+        // makes one.
+        let tall = match (&asked, &elsewhere) {
+            (Some((_, _, fitted)), _) => fitted.size.1,
+            (None, Some(_)) => ((room.0 as f32 * TALL) as i32).min(room.1),
+            (None, None) => 0,
+        };
+        if let Some((_, _, fitted)) = asked {
+            band.set_size_request(fitted.size.0, fitted.size.1);
+        }
+        popover.set_position(side(at.1, chrome + tall));
+        slide(&popover, pane.0, at.0);
+
+        if let Some((page, size, fitted)) = asked {
+            // The page's stand-in under the band meanwhile, as the reading view paints one.
+            let low = self
+                .view
+                .cache()
+                .borrow_mut()
+                .lowres(page as u32, self.view.theme());
+            if let Some(low) = low {
+                let (w, h) = (size.0 * fitted.scale, size.1 * fitted.scale);
+                let at = graphene::Rect::new(0.0, -fitted.offset as f32, w, h);
+                paint(&band, fitted.size, &low, at);
+            }
+            let (device, rect) = fitted.pixels(sf);
+            self.ask(Request::Band {
+                page,
+                scale: device,
+                rect,
+                theme: self.view.theme(),
+            });
+        }
+        if let (Some(path), LinkTarget::File(to)) = (elsewhere, &target) {
+            let fit = (scale, room, sf);
+            self.fill_band_elsewhere(path, to, fit, (&popover, &band, &caption), (pane.0, at.0));
+        }
         *self.preview.borrow_mut() = Some(Preview {
             popover,
             band,
+            asked: asked.map(|(page, _, fitted)| (page, fitted)),
             target,
         });
-        if let Some((page, top)) = page {
-            self.fill_band(page, top);
-        }
     }
 
-    /// Render a target's low-resolution stand-in if needed and position it behind the preview
-    /// band. Only changed Ctrl-hover targets request a render, avoiding pdfium work on every
-    /// pointer event.
-    fn fill_band(self: &Rc<Self>, page: usize, top: Option<f32>) {
-        let theme = self.view.theme();
-        let ready = self.view.cache().borrow_mut().lowres(page as u32, theme);
-        let Some(texture) = ready else {
-            return self.ask(Request::Tiles {
-                from: Asker::Preview,
-                scale: 1.0,
-                theme,
-                wants: vec![Want {
-                    page: page as u32,
-                    tx: u16::MAX,
-                    ty: u16::MAX,
-                }],
-            });
-        };
-        let Some((_, page_h)) = self.view.page_size(page) else {
-            return;
-        };
-        let preview = self.preview.borrow();
-        let Some(band) = preview.as_ref().map(|shown| shown.band.clone()) else {
-            return;
-        };
-        drop(preview);
-        if band.child().is_none() {
-            put_band(&band, &texture, top, page_h);
-        }
-    }
-
-    /// Fill `band` with the page a link into the PDF at `path` leads to, and `caption` with its
-    /// number, once the thread that reads other files has drawn it; a file that does not read
-    /// takes the band away. A popover gone meanwhile has nothing left to fill.
+    /// Fill `band` with the page a link into the PDF at `path` leads to, drawn as `fit` says
+    /// ([`super::elsewhere::page`]), and `caption` with its number, once the thread that reads
+    /// other files has drawn it; a file that does not read takes the band away. The popover,
+    /// wider now, slides back inside the pane `across.0` wide over the link at `across.1`. A
+    /// popover gone meanwhile has nothing left to fill.
     fn fill_band_elsewhere(
         &self,
         path: std::path::PathBuf,
         to: &pdf::Elsewhere,
-        band: &adw::Bin,
-        caption: &gtk::Label,
+        fit: super::elsewhere::Fit,
+        (popover, band, caption): (&gtk::Popover, &gtk::Picture, &gtk::Label),
+        across: (i32, i32),
     ) {
-        let asked = super::elsewhere::page(path, to.dest.clone(), self.view.theme());
-        let (band, caption) = (band.downgrade(), caption.downgrade());
+        let asked = super::elsewhere::page(path, to.dest.clone(), self.view.theme(), fit);
+        let (popover, band, caption) = (popover.downgrade(), band.downgrade(), caption.downgrade());
         glib::spawn_future_local(async move {
             // Dropped for a newer link's: that popover has taken this one's place.
             let Ok(seen) = asked.await else { return };
-            let (Some(band), Some(caption)) = (band.upgrade(), caption.upgrade()) else {
+            let (Some(popover), Some(band), Some(caption)) =
+                (popover.upgrade(), band.upgrade(), caption.upgrade())
+            else {
                 return;
             };
             let Some(seen) = seen else {
@@ -219,70 +302,149 @@ impl PdfTab {
             };
             caption.set_label(&format!("Page {}", seen.page + 1));
             caption.set_visible(true);
-            let texture = super::cache::texture(seen.image);
-            put_band(&band, &texture, seen.top, seen.height);
+            put_band(&band, seen.band, &super::cache::texture(seen.image), fit.2);
+            slide(&popover, across.0, across.1);
         });
+    }
+
+    /// One page's links, once read. Only drills ask.
+    #[cfg(feature = "bench")]
+    pub fn page_links(&self, page: usize) -> Option<Vec<pdf::Link>> {
+        self.links.borrow().get(&page).cloned()
+    }
+
+    /// The preview on screen against the PDF pane: the pane's size and the reading view's
+    /// pixels per point, the band's size and whether it is still being drawn, and where the
+    /// popover's surface is in the pane. Only drills ask.
+    #[cfg(feature = "bench")]
+    pub fn preview_report(&self) -> String {
+        let preview = self.preview.borrow();
+        let Some(shown) = preview.as_ref() else {
+            return "none".to_string();
+        };
+        let pane = (self.host.width(), self.host.height());
+        let band = (shown.band.paintable()).map(|p| (p.intrinsic_width(), p.intrinsic_height()));
+        // The pane's corner in the window's surface, which is what a popup is placed against.
+        let corner = self.host.root().and_then(|root| {
+            let (dx, dy) = root.surface_transform();
+            let at = self.host.compute_point(&root, &graphene::Point::zero())?;
+            Some((f64::from(at.x()) + dx, f64::from(at.y()) + dy))
+        });
+        let surface = shown.popover.surface().and_downcast::<gdk::Popup>();
+        let placed = surface.zip(corner).map(|(s, (cx, cy))| {
+            let (x, y) = (s.position_x() - cx as i32, s.position_y() - cy as i32);
+            (x, y, s.width(), s.height())
+        });
+        let inside = placed
+            .is_some_and(|(x, y, w, h)| x >= 0 && y >= 0 && x + w <= pane.0 && y + h <= pane.1);
+        format!(
+            "pane={}x{} scale={:.3} band={band:?} waiting={} side={:?} popover={placed:?} \
+             inside={inside}",
+            pane.0,
+            pane.1,
+            self.view.pixels_per_point(),
+            shown.asked.is_some(),
+            shown.popover.position(),
+        )
     }
 }
 
-/// Show the band of a page's stand-in `texture` around `top`, points down a page `page_h` tall.
-fn put_band(band: &adw::Bin, texture: &gtk::gdk::MemoryTexture, top: Option<f32>, page_h: f32) {
-    let offset = band_offset(top, page_h, texture.height() as f32);
-    let strip = crop(texture, offset, BAND);
-    let picture = gtk::Picture::for_paintable(&strip);
-    picture.set_size_request(strip.width(), strip.height());
-    band.set_child(Some(&picture));
+/// Which side of a link at `y` down the pane a popover `height` tall goes: above it, unless it
+/// would run past the pane's top. A band is at most half the pane, so below then has the room.
+fn side(y: i32, height: i32) -> gtk::PositionType {
+    if y - MARGIN >= height {
+        gtk::PositionType::Top
+    } else {
+        gtk::PositionType::Bottom
+    }
 }
 
-/// How far to slide a low-resolution page up so the band shows what a link points at.
-///
-/// `top` is points down the target page, `page_h` its height in points and `texture_h` the
-/// stand-in's height in pixels. The destination is centred in the band, and the band stays inside
-/// the page at both ends: a link to the last line shows the foot of the page rather than a strip
-/// of nothing under it.
-fn band_offset(top: Option<f32>, page_h: f32, texture_h: f32) -> i32 {
-    let at = top.unwrap_or(0.0) / page_h.max(1.0) * texture_h;
-    let band = BAND as f32;
-    (at - band / 2.0).clamp(0.0, (texture_h - band).max(0.0)) as i32
+/// Slide `popover`, centred over a link `x` across a pane `pane_w` wide, to keep it inside the
+/// pane. The arrow still points at the link.
+fn slide(popover: &gtk::Popover, pane_w: i32, x: i32) {
+    let (_, width, _, _) = popover.measure(gtk::Orientation::Horizontal, -1);
+    popover.set_offset(slid(pane_w, x, width), 0);
 }
 
-/// Crop a horizontal pixel band into a texture. Widget clipping would retain full-page size
-/// requests and enlarge the popover.
-fn crop(texture: &gtk::gdk::MemoryTexture, top: i32, height: i32) -> gtk::gdk::MemoryTexture {
-    let (w, h) = (texture.width(), texture.height());
-    let height = height.min(h);
-    let top = top.clamp(0, h - height);
-    let stride = w as usize * 4;
-    let mut pixels = vec![0u8; stride * h as usize];
-    texture.download(&mut pixels, stride);
-    let from = top as usize * stride;
-    let bytes = glib::Bytes::from(&pixels[from..from + stride * height as usize]);
-    // The layout `GdkTexture::download` writes, on every platform GTK builds for.
-    gtk::gdk::MemoryTexture::new(
-        w,
-        height,
-        gtk::gdk::MemoryFormat::B8g8r8a8Premultiplied,
-        &bytes,
-        stride,
-    )
+/// How far a popover `width` wide, centred over `x`, has to move to stay inside a pane `pane_w`
+/// wide.
+fn slid(pane_w: i32, x: i32, width: i32) -> i32 {
+    let left = x - width / 2;
+    left.clamp(MARGIN, (pane_w - MARGIN - width).max(MARGIN)) - left
+}
+
+/// Show `band`'s rendered `texture`, `sf` device pixels to a logical one.
+fn put_band(picture: &gtk::Picture, band: Band, texture: &gdk::MemoryTexture, sf: i32) {
+    let (w, h) = (texture.width() as f32, texture.height() as f32);
+    let at = graphene::Rect::new(0.0, 0.0, w / sf as f32, h / sf as f32);
+    paint(picture, band.size, texture, at);
+}
+
+/// Paint `texture` into `picture` over `at`, cut to a band `size` logical pixels large: the band
+/// itself, or a page's stand-in stretched under it.
+fn paint(
+    picture: &gtk::Picture,
+    size: (i32, i32),
+    texture: &gdk::MemoryTexture,
+    at: graphene::Rect,
+) {
+    let (w, h) = (size.0 as f32, size.1 as f32);
+    let snapshot = gtk::Snapshot::new();
+    snapshot.push_clip(&graphene::Rect::new(0.0, 0.0, w, h));
+    snapshot.append_texture(texture, &at);
+    snapshot.pop();
+    // A paintable of the band's logical size: a texture's own is its pixels, which a display of
+    // two device pixels to one would show twice as large.
+    picture.set_paintable(
+        snapshot
+            .to_paintable(Some(&graphene::Size::new(w, h)))
+            .as_ref(),
+    );
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{BAND, band_offset};
+    use super::{Band, MARGIN, slid};
 
-    /// The band follows the destination but never runs off either end of the page.
+    /// At the reading view's zoom a band is as wide as the page and centred on the destination,
+    /// never running off either end of the page.
     #[test]
-    fn a_band_is_centred_on_the_destination_and_stays_on_the_page() {
-        let (page_h, texture_h) = (800.0, 400.0);
-        // Halfway down the page, so the band is centred on the middle of the stand-in.
-        assert_eq!(band_offset(Some(400.0), page_h, texture_h), 200 - BAND / 2);
+    fn a_band_is_at_the_zoom_and_centred_on_the_destination() {
+        let (page, room) = ((600.0, 800.0), (2000, 1000));
+        let band = |top| Band::around(page, top, 2.0, room);
+        assert_eq!(band(Some(400.0)).scale, 2.0);
+        assert_eq!(band(Some(400.0)).size, (1200, 450));
+        // Halfway down the page, so the band is centred on the middle of it.
+        assert_eq!(band(Some(400.0)).offset, 800 - 225);
         // The top of the page, and a destination with no y at all, both start at the top.
-        assert_eq!(band_offset(Some(0.0), page_h, texture_h), 0);
-        assert_eq!(band_offset(None, page_h, texture_h), 0);
+        assert_eq!(band(Some(0.0)).offset, 0);
+        assert_eq!(band(None).offset, 0);
         // The last line shows the foot of the page rather than a strip of nothing under it.
-        assert_eq!(band_offset(Some(800.0), page_h, texture_h), 400 - BAND);
-        // A page shorter than the band does not scroll at all.
-        assert_eq!(band_offset(Some(400.0), page_h, 50.0), 0);
+        assert_eq!(band(Some(800.0)).offset, 1600 - 450);
+        // A page shorter than the band is the band.
+        let slide = Band::around((600.0, 100.0), Some(50.0), 2.0, room);
+        assert_eq!((slide.size, slide.offset), ((1200, 200), 0));
+    }
+
+    /// A page wider than the room is drawn smaller to fit it, and a band taller than the room is
+    /// cut down to it.
+    #[test]
+    fn a_band_fits_the_room() {
+        let band = Band::around((600.0, 800.0), None, 2.0, (900, 1000));
+        assert_eq!((band.scale, band.size), (1.5, (900, 338)));
+        let band = Band::around((600.0, 800.0), None, 2.0, (2000, 300));
+        assert_eq!((band.scale, band.size), (2.0, (1200, 300)));
+        // Device pixels: twice as many of everything on a display of two to one.
+        assert_eq!(band.pixels(2), (4.0, (0, 0, 2400, 600)));
+    }
+
+    /// A popover too close to a side of the pane slides in until it keeps the margin; one too
+    /// wide for the pane at all keeps it on the left.
+    #[test]
+    fn a_popover_slides_inside_the_pane() {
+        assert_eq!(slid(1000, 500, 400), 0);
+        assert_eq!(slid(1000, 100, 400), MARGIN + 100);
+        assert_eq!(slid(1000, 950, 400), 1000 - MARGIN - 400 - 750);
+        assert_eq!(slid(300, 150, 400), MARGIN + 50);
     }
 }
