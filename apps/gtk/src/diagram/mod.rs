@@ -737,6 +737,7 @@ impl DiagramTab {
         };
         self.view.set_selection(&selection);
         self.ring.set_held(!selection.is_empty());
+        self.ring.show_inserts(self.can_insert());
         self.view.show(sheet);
         self.strip.set_framed(self.page_index.get());
     }

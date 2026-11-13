@@ -505,6 +505,11 @@ impl DiagramRing {
         self.sync();
     }
 
+    /// Show the insert tools only while the page has a layer to put a new cell into.
+    pub fn show_inserts(&self, shown: bool) {
+        self.ring.show_tools(|tool| shown || tool == Tool::Select);
+    }
+
     pub fn set_picks(&self, picks: Picks) {
         self.picks.set(picks);
         self.sync();

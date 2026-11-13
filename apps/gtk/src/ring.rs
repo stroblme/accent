@@ -236,6 +236,13 @@ impl<T: Tool> Ring<T> {
         self.tool.set(tool);
     }
 
+    /// Show only the tools `shown` keeps, each in its own place on the orbit.
+    pub fn show_tools(&self, shown: impl Fn(T) -> bool) {
+        for (tool, button) in &self.buttons {
+            button.set_visible(shown(*tool));
+        }
+    }
+
     /// The tool in hand.
     pub fn tool(&self) -> T {
         self.tool.get()

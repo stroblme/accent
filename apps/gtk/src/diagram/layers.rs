@@ -122,9 +122,12 @@ impl Layers {
             row.row
                 .upcast_ref::<gtk::Widget>()
                 .update_state(&[gtk::accessible::State::Selected(Some(picked))]);
+            // A lone layer has nowhere to move and cannot go, so it slides none of the three out.
+            for button in [&row.up, &row.down, &row.delete] {
+                button.set_visible(n > 1);
+            }
             row.up.set_sensitive(i > 0);
             row.down.set_sensitive(i + 1 < n);
-            row.delete.set_sensitive(n > 1);
         }
     }
 

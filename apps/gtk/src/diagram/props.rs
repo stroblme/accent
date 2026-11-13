@@ -310,7 +310,7 @@ impl ColourRow {
 
     fn fill(&self, colour: Option<Color>) {
         self.switch.set_active(colour.is_some());
-        self.button.set_sensitive(colour.is_some());
+        self.button.set_visible(colour.is_some());
         self.button
             .set_rgba(&super::paint::rgba(colour.unwrap_or(self.blank)));
     }
@@ -329,7 +329,7 @@ impl ColourRow {
         let (me, guard, g) = (Rc::downgrade(self), filling.clone(), f.clone());
         self.switch.connect_active_notify(move |switch| {
             if let Some(me) = me.upgrade() {
-                me.button.set_sensitive(switch.is_active());
+                me.button.set_visible(switch.is_active());
                 if !guard.get() {
                     g(me.value());
                 }
@@ -367,6 +367,8 @@ pub struct Props {
     page_group: adw::PreferencesGroup,
     fill: Rc<ColourRow>,
     gradient: Rc<ColourRow>,
+    /// Whether the cells shown take a gradient: a fill that is not a picture's background.
+    takes_gradient: Cell<bool>,
     direction: adw::ComboRow,
     stroke: Rc<ColourRow>,
     stroke_width: adw::SpinRow,
@@ -731,6 +733,7 @@ impl Props {
             page_group,
             fill,
             gradient,
+            takes_gradient: Cell::new(false),
             direction,
             stroke,
             stroke_width,
@@ -1204,8 +1207,8 @@ impl Props {
                 }
                 for (clip, copy, paste) in &self.clips {
                     match clip {
-                        Clip::Style => copy.set_sensitive(*count == 1),
-                        _ => paste.set_sensitive(!geometry.is_some_and(|(_, pinned)| pinned)),
+                        Clip::Style => copy.set_visible(*count == 1),
+                        _ => paste.set_visible(!geometry.is_some_and(|(_, pinned)| pinned)),
                     }
                 }
                 // A picture's fill and line are its background and border, as draw.io's panel
@@ -1221,7 +1224,7 @@ impl Props {
                 // the route and the heads for arrows. draw.io offers a shape's perimeter only
                 // with shapes alone selected, and a swimlane's divider with one among them.
                 self.fill.row.set_visible(*fills);
-                self.gradient.row.set_visible(*fills && !picture);
+                self.takes_gradient.set(*fills && !picture);
                 self.rounded.set_visible(*vertices);
                 self.divider.set_visible(*swimlane);
                 self.perimeter.set_visible(*vertices && !edges);
@@ -1387,9 +1390,9 @@ impl Props {
                 };
                 self.line_style.set_selected(corners);
                 // A style string is one cell's: with several selected there is none to show.
-                self.raw.set_sensitive(*count == 1);
+                self.raw.set_visible(*count == 1);
                 self.raw.set_text(if *count == 1 { raw } else { "" });
-                self.default_style.set_sensitive(default_tool.is_some());
+                self.default_style.set_visible(default_tool.is_some());
                 if let Some((tool, existing)) = default_tool {
                     let kind = match tool {
                         Tool::Rect => "rectangles",
@@ -1410,7 +1413,7 @@ impl Props {
             } => {
                 self.position.set_visible(false);
                 self.size.set_visible(false);
-                self.default_style.set_sensitive(false);
+                self.default_style.set_visible(false);
                 self.page_name.set_text(name);
                 self.background.fill(*background);
                 self.page_width.set_value(size.0);
@@ -1501,14 +1504,13 @@ impl Props {
         &self.layers
     }
 
-    /// A gradient runs from the fill, so it is greyed without one, and its direction shows only
-    /// while there is a gradient; the corners' size shows only while they are rounded.
+    /// A gradient runs from the fill, so it shows only with one, and its direction only while
+    /// there is a gradient; the corners' size shows only while they are rounded.
     fn sync_rows(&self) {
-        let fill = self.fill.switch.is_active();
-        self.gradient.row.set_sensitive(fill);
-        self.direction.set_visible(
-            self.gradient.row.is_visible() && fill && self.gradient.switch.is_active(),
-        );
+        let gradient = self.takes_gradient.get() && self.fill.switch.is_active();
+        self.gradient.row.set_visible(gradient);
+        self.direction
+            .set_visible(gradient && self.gradient.switch.is_active());
         self.arc_size
             .set_visible(self.rounded.is_visible() && self.rounded.is_active());
     }

@@ -129,12 +129,12 @@ pub(super) fn layers(app: &Rc<App>, rel: &str) {
             "bench diagram layers relocked selection={:?}",
             tab.selection()
         );
-        // Whether the ring's Add Rectangle can be pressed, and the tool in hand.
+        // Whether the ring shows Add Rectangle, and the tool in hand.
         let rect_tool = || {
             let button = find_widget(app.window.upcast_ref(), &|w| {
                 w.is::<gtk::ToggleButton>() && w.tooltip_text().as_deref() == Some("Add Rectangle")
             });
-            (button.is_some_and(|b| b.is_sensitive()), tab.tool())
+            (button.is_some_and(|b| b.is_visible()), tab.tool())
         };
         let _ = WidgetExt::activate_action(&app.window, "win.diagram-rect", None);
         tab.select(vec!["c".to_string()]);
