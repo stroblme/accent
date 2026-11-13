@@ -600,7 +600,7 @@ mod tests {
     #[test]
     fn list_dir_lists_the_folder_links_the_walk_does_not_follow() {
         let f = Fixture::open(VaultConfig::default());
-        f.write("Other/b.md", "b");
+        f.write("Other/b.md", "zorblat");
         f.write("Notes/a.md", "a");
         let root = f.vault.root();
         std::os::unix::fs::symlink(root.join("Other"), root.join("Notes/inside")).unwrap();
@@ -617,6 +617,13 @@ mod tests {
             names(&f.vault.list_dir("Notes/inside").unwrap()),
             ["Notes/inside/b.md"]
         );
+        // Opened through the link, the note is still found once, under its own name.
+        f.vault.keep_opened("Notes/inside/b.md").unwrap();
+        f.vault.settle_index();
+        assert_eq!(f.vault.search("zorblat", 10, false).unwrap().len(), 1);
+        // Deleted, as a remote vault deletes, the link goes and its target stays.
+        f.vault.delete("Notes/inside").unwrap();
+        assert!(root.join("Other/b.md").exists());
     }
 
     /// A time sort reads each row's time off the disk, a folder the index never walked included.
