@@ -89,8 +89,7 @@ impl App {
     /// The banner's button: an attempt that may prompt, whatever was counting down.
     pub fn reconnect_now(&self) {
         self.retry.stop();
-        self.connection.set_title("Reconnecting…");
-        self.connection.set_sensitive(false);
+        self.say_reconnecting();
         if let Some(vault) = self.vault() {
             vault.reconnect();
         }
@@ -100,7 +99,6 @@ impl App {
     fn count_down(self: &Rc<Self>, at: Instant) {
         self.say_count(at);
         self.connection.set_button_label(Some("Reconnect Now"));
-        self.connection.set_sensitive(true);
         self.connection.set_revealed(true);
         let app = Rc::downgrade(self);
         let tick = glib::timeout_add_local(Duration::from_secs(1), move || {
@@ -113,14 +111,24 @@ impl App {
             }
             // Gone from the slot before it returns, so nothing removes it a second time.
             app.retry.tick.take();
-            app.connection.set_title("Reconnecting…");
-            app.connection.set_sensitive(false);
+            app.say_reconnecting();
             if let Some(remote) = app.vault().and_then(|v| v.remote()) {
                 remote.reconnect_quietly();
             }
             glib::ControlFlow::Break
         });
         self.retry.tick.replace(Some(tick));
+    }
+
+    /// Say an attempt is under way, the button gone until it answers; a keyboard on the button
+    /// goes back to the document.
+    fn say_reconnecting(&self) {
+        let focused = (self.connection.state_flags()).contains(gtk::StateFlags::FOCUS_WITHIN);
+        self.connection.set_title("Reconnecting…");
+        self.connection.set_button_label(None);
+        if focused {
+            self.focus_document(&self.pane());
+        }
     }
 
     fn say_count(&self, at: Instant) {

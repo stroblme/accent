@@ -87,8 +87,8 @@ impl Panel {
 
     /// The one way a command runs, with a repository or before there is one ([`Panel::init`]):
     /// one at a time, the pane held meanwhile ([`Panel::hold`]), and `roots` stopped when the
-    /// window closes. A Sync or a Sync All also disables the status bar's branch through
-    /// [`Hooks::syncing`].
+    /// window closes. A Sync or a Sync All also leaves the status bar's branch doing nothing
+    /// through [`Hooks::syncing`].
     fn run(
         self: &Rc<Self>,
         what: String,

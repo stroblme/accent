@@ -378,10 +378,15 @@ impl Bar {
         self.branch.set_visible(branch.is_some());
     }
 
-    /// Dim the branch control while syncing and explain its disabled state in the tooltip.
+    /// Let the branch control do nothing while syncing, looking as it does, its tooltip saying why.
     /// The Git pane owns the spinner.
     pub fn set_syncing(&self, on: bool) {
-        self.branch.set_sensitive(!on);
+        // Without the action a press does nothing. Taking the action away also greys the button, so
+        // it is made sensitive again here, and putting the action back sets it as the action says.
+        self.branch.set_action_name((!on).then_some("win.git-sync"));
+        if on {
+            self.branch.set_sensitive(true);
+        }
         self.branch
             .set_tooltip_text(Some(if on { "Syncing…" } else { "Sync" }));
     }
