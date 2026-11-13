@@ -13,6 +13,7 @@ mod corpus;
 mod debug;
 mod diagnostics;
 mod diagram;
+mod diagram_nav;
 mod dismiss;
 mod export;
 mod files;
@@ -404,6 +405,9 @@ use user_commands::bench_commands;
 ///   absent; `shot:<rel>:<dir>`: render pages; `export:<rel>:<dir>`: dark-theme
 ///   PDF/PNG/SVG export and print output. `ACCENT_BENCH_DIAGRAM_SHOT=<png>` adds a picture
 ///   of the window (`diagram::bench_diagram`).
+/// - `ACCENT_BENCH_DIAGRAM_NAV=spring:<rel>`: a diagram's pages turned by XTEST wheel notches,
+///   pulled off their edge while edited and at once presented (`diagram_nav::bench_diagram_nav`).
+///   Writes `<rel>`.
 /// - `ACCENT_BENCH_NOTEBOOK=<ipynb>,<marimo .py>,<long ipynb>`: outputs, cell edits with undo
 ///   and save, marimo kept as written, a long notebook's open time and memory, presentation
 ///   (`notebook::bench_notebook`). Saves: a scratch vault under `/tmp`. `look:<ipynb>:<dir>`:
@@ -490,6 +494,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let layout = std::env::var("ACCENT_BENCH_LAYOUT").ok();
     let collapse = std::env::var("ACCENT_BENCH_COLLAPSE").is_ok();
     let diagram = std::env::var("ACCENT_BENCH_DIAGRAM").ok();
+    let diagram_nav = std::env::var("ACCENT_BENCH_DIAGRAM_NAV").ok();
     let notebook = std::env::var("ACCENT_BENCH_NOTEBOOK").ok();
     let motion = std::env::var("ACCENT_BENCH_MOTION").ok();
     let notebook_lsp = std::env::var("ACCENT_BENCH_NOTEBOOK_LSP").ok();
@@ -544,6 +549,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && drop.is_none()
         && watch.is_none()
         && diagram.is_none()
+        && diagram_nav.is_none()
         && notebook.is_none()
         && motion.is_none()
         && notebook_lsp.is_none()
@@ -848,6 +854,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(arg) = diagram {
             return bench_diagram(&app, &arg);
+        }
+        if let Some(arg) = diagram_nav {
+            return diagram_nav::bench_diagram_nav(&app, &arg);
         }
         if let Some(arg) = notebook {
             return bench_notebook(&app, &arg);

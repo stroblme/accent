@@ -1340,7 +1340,10 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 - A draw.io file (`.drawio`, `.dio`, `.drawio.xml`, or an `.xml` whose first element says so) in a tab of its own, on a canvas painting `accent-drawio`'s display list: fitted to the window on open and at `Ctrl+0`, zoomed around the pointer and scrolled like a PDF, panned by middle-drag or Space+drag.
 - The plain wheel reads on through the pages as through a continuous PDF: pushed on past the bottom of the page, it turns to the next one, at the same zoom and on its top; past the top, to the one before, on its bottom.
-  Only a push made at the edge turns: the scroll that reaches the edge stops there, a wheel then turns a page a notch, and a touchpad a page a swipe, by a swipe begun at the edge, so one fling never reads through several (`geometry::Overshoot`).
+  Only a push made at the edge turns: the scroll that reaches the edge stops there, and a touchpad turns a page a swipe at most, by a swipe begun at the edge, so one fling never reads through several (`geometry::Overshoot`).
+  While the page is edited the push first pulls it off its edge as a spring would, 21 px a notch, and turns it at the third notch or after 120 px of a swipe.
+  Let go before that, after 300 ms with no notch or with the fingers off the touchpad, the page springs back, and after a turn no push turns another until the wheel has rested for 300 ms, so a spin turns one page (user decision 2026-11-13).
+  A presented page is a slide, turned by a notch or 40 px of a swipe and never pulled.
   The margin round the drawing does not count as page, or a stroke on a fitted page's edge would take a notch of its own.
 - The page is drawn on a sheet with a hairline edge, in the theme's look as a PDF page is (Colour).
   A page with its page view off (`page="0"`) has no sheet, as in draw.io: the whole canvas takes the page's colour, the drawing's own bounds are what is fitted, scrolled over and turned from at the edge, and a move has no page middle to snap to.
@@ -2398,6 +2401,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 - Every fade, crossfade and slide takes 250 ms and eases out, libadwaita's ease-out cubic (`widgets::FADE_MS`, user decision 2026-10-28): GtkRevealer's own default, which a revealer keeps and a stack is set to, a stylesheet transition writing the easing out (`widgets::CSS_EASING`).
   Switches crossfade and new pages fade in: the sidebar's panes, a tab picked in the pane the reader is in (a newly opened one too), a PDF's pages on their first open, a file's loading page once its open has taken 160 ms and its document crossfading in from it (Loading), the PDF's "Cannot Open" page, the card a held `Ctrl+Tab` shows, and each new output of a notebook's run (Notebook).
   A toast slides into the pile and out of it, and the toasts slide out of the status bar's way in presentation mode.
+  A diagram's page pulled off its edge by the wheel springs back the same way (Diagram).
 - Buttons a hover brings slide in where they take room (a list row's, Sidebar) and fade where they keep it or lie over something (a branch's trash, a page thumbnail's round buttons, a notebook's add strips); the Search pane's replace row and a folder field's list slide open.
   The line numbers brighten as the pointer comes into the gutter and dim again as it leaves, one fade that turns round where it is (Typography).
   A folder the reader opens in the Files tree turns its arrow, one `pan-down` turned a quarter back while closed, and fades in the rows its listing lands under it, so what opened reads as coming out of it; a section of the sidebar, a variable of the Debug pane and a folder of the Git pane's changes turn theirs too.
@@ -2425,6 +2429,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 | Every fade, crossfade, slide and turn above, the toasts' lift over the status bar too | 250 ms | `widgets.rs::FADE_MS` |
 | Focus mode's fades: the chrome, the receding panes, the line fade, a notebook's outputs | 250 ms | `fade.rs::RAMP_MS` |
 | A wheel notch's scroll | 200 ms | `widgets.rs::WHEEL_MS` |
+| A push past a diagram page's edge rests and is let go | 300 ms | `diagram/geometry.rs::REST_MS` |
 | A file still opening shows its loading page | 160 ms | `loading.rs::OPENING` |
 | A Git command still running shows its button's spinner | 160 ms | `git/mod.rs::SPIN_AFTER` |
 | A held `Ctrl+Tab` shows its card | 200 ms | `switcher.rs::DELAY` |

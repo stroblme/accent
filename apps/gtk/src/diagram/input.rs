@@ -1,13 +1,14 @@
 //! Diagram context menus, action keys and page-turning scroll overshoot.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::Duration;
 
 use accent_drawio::CellId;
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 
-use super::geometry::Overshoot;
+use super::geometry::{Overshoot, REST_MS};
 use super::props::Clip;
 use super::{DiagramTab, Tool};
 
@@ -215,16 +216,20 @@ impl DiagramTab {
         self.view.add_controller(focus);
     }
 
-    /// A plain wheel pushed on past the top or bottom of the page turns it ([`Overshoot`]). Ahead
-    /// of the scrolled window, which scrolls whatever this passes on.
+    /// A plain wheel pushed on past the top or bottom of the page turns it ([`Overshoot`]): a
+    /// page being edited is pulled off its edge first, and springs back once the push rests for
+    /// [`REST_MS`]. Ahead of the scrolled window, which scrolls whatever this passes on.
     pub(super) fn wire_wheel(self: &Rc<Self>) {
         let overshoot = Rc::new(Cell::new(Overshoot::default()));
+        let resting: Rc<RefCell<Option<glib::SourceId>>> = Rc::default();
         let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
         wheel.connect_scroll(glib::clone!(
             #[weak(rename_to = tab)]
             self,
             #[strong]
             overshoot,
+            #[strong]
+            resting,
             #[upgrade_or]
             glib::Propagation::Proceed,
             move |wheel, dx, dy| {
@@ -236,11 +241,26 @@ impl DiagramTab {
                 let room = tab.view.has_room(dy > 0.0);
                 let ahead = tab.next_page(dy > 0.0).is_some();
                 let swipe = wheel.unit() == gdk::ScrollUnit::Surface;
+                // A presented page is a slide, turned by a notch as a presented PDF's is.
+                let spring = tab.presenting.get().is_none();
                 let mut push = overshoot.get();
-                if let Some(forward) = push.scroll(dy, room, swipe) {
-                    tab.turn_page(forward);
-                }
+                let turn = push.scroll(dy, room, swipe, spring);
                 overshoot.set(push);
+                match turn {
+                    Some(forward) => {
+                        tab.view.set_pull(0.0);
+                        tab.turn_page(forward);
+                    }
+                    // Pulled only towards a page to turn to, and let go at once by a scroll.
+                    None if spring => tab.view.set_pull(match ahead {
+                        true => push.pull(swipe),
+                        false => 0.0,
+                    }),
+                    None => {}
+                }
+                if spring {
+                    tab.rest_after(&overshoot, &resting);
+                }
                 // At the edge only the margin is left for the scrolled window to scroll, and a
                 // swipe it saw begin would be its own to the end (its `smooth_scroll`), never
                 // reaching here again: the push is kept while there is a page to turn to.
@@ -250,9 +270,43 @@ impl DiagramTab {
                 }
             }
         ));
-        // The fingers left the touchpad: the next swipe may turn the page again.
-        wheel.connect_scroll_end(move |_| overshoot.set(Overshoot::default()));
+        // The fingers left the touchpad: the page springs back, and the next swipe may turn it.
+        wheel.connect_scroll_end(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            move |_| {
+                overshoot.set(Overshoot::default());
+                if let Some(rest) = resting.take() {
+                    rest.remove();
+                }
+                tab.view.release_pull();
+            }
+        ));
         self.view.add_controller(wheel);
+    }
+
+    /// Let the push go once it has rested for [`REST_MS`], each scroll putting that off: the page
+    /// springs back, and after a turn the next push may turn again.
+    fn rest_after(
+        self: &Rc<Self>,
+        overshoot: &Rc<Cell<Overshoot>>,
+        resting: &Rc<RefCell<Option<glib::SourceId>>>,
+    ) {
+        if let Some(rest) = resting.take() {
+            rest.remove();
+        }
+        let (tab, overshoot, kept) = (Rc::downgrade(self), overshoot.clone(), resting.clone());
+        let rest = glib::timeout_add_local_once(Duration::from_millis(REST_MS), move || {
+            // Gone by now, so never removed again.
+            kept.take();
+            let mut push = overshoot.get();
+            push.rest();
+            overshoot.set(push);
+            if let Some(tab) = tab.upgrade() {
+                tab.view.release_pull();
+            }
+        });
+        resting.replace(Some(rest));
     }
 
     /// Fire a window action from the canvas's own keys (the PDF tab's `run`).

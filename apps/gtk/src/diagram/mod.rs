@@ -1009,6 +1009,12 @@ impl DiagramTab {
         self.view.laid_out()
     }
 
+    /// How far the page is pulled off its edge, for a drill.
+    #[cfg(feature = "bench")]
+    pub fn pull(&self) -> f64 {
+        self.view.pull()
+    }
+
     /// Whether the web banner is out, for a drill.
     #[cfg(feature = "bench")]
     pub fn web_banner_shown(&self) -> bool {

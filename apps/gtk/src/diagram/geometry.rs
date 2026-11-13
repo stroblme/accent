@@ -96,33 +96,47 @@ pub fn fit_scale(page: (f64, f64), viewport: (f64, f64)) -> f64 {
     clamp_scale(fit)
 }
 
-/// How far a touchpad swipe pushes on past the edge of the page to turn it: about what a wheel
-/// notch scrolls, `GtkScrolledWindow` scrolling 2.5 px for each of a swipe's.
+/// How far a touchpad swipe pushes on past the edge of a presented page to turn it: about what a
+/// wheel notch scrolls, `GtkScrolledWindow` scrolling 2.5 px for each of a swipe's.
 pub const SWIPE_TURN: f64 = 40.0;
+
+/// How many times a presented page's push turns a page being edited: three notches, or a swipe of
+/// 120 px, the page pulled off its edge meanwhile ([`Overshoot::pull`]).
+const SPRING: f64 = 3.0;
+
+/// How far the page is pulled off its edge as the push nears a turn, in pixels: 21 a notch.
+pub const PULL_PX: f64 = 64.0;
+
+/// How long a push past the edge rests before it is let go, in ms: the page springs back, and
+/// after a turn the next push may turn again.
+pub const REST_MS: u64 = 300;
 
 /// Turn pages only when scrolling starts at an edge, preventing a scroll that
 /// reaches the edge from also turning it. A wheel turns once per notch; a touchpad
 /// swipe turns only if it has not scrolled or turned yet, preventing multi-page flings.
+/// While editing a push turns only at [`SPRING`] times that, and a turn holds every push after it
+/// until the wheel rests, so a spin turns one page.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Overshoot {
     /// How far the push has gone past the edge, down positive.
     past: f64,
     /// The swipe under way has scrolled or turned the page, and turns nothing more.
     spent: bool,
+    /// A page being edited was turned, and nothing turns until [`Overshoot::rest`].
+    turned: bool,
 }
 
 impl Overshoot {
     /// One plain scroll of `dy` (down positive: notches, or a swipe's pixels), `room` saying
-    /// whether the page can still scroll that way. `Some(forward)` turns the page.
-    pub fn scroll(&mut self, dy: f64, room: bool, swipe: bool) -> Option<bool> {
+    /// whether the page can still scroll that way, and `spring` whether it is being edited.
+    /// `Some(forward)` turns the page.
+    pub fn scroll(&mut self, dy: f64, room: bool, swipe: bool, spring: bool) -> Option<bool> {
         if room {
-            *self = Overshoot {
-                past: 0.0,
-                spent: swipe,
-            };
+            self.past = 0.0;
+            self.spent = swipe;
             return None;
         }
-        if self.spent {
+        if self.spent || self.turned {
             return None;
         }
         // A push back the other way starts again.
@@ -130,16 +144,34 @@ impl Overshoot {
             self.past = 0.0;
         }
         self.past += dy;
-        let notch = if swipe { SWIPE_TURN } else { 1.0 };
-        if self.past.abs() < notch {
+        if self.past.abs() < reach(swipe, spring) {
             return None;
         }
         *self = Overshoot {
             past: 0.0,
             spent: swipe,
+            turned: spring,
         };
         Some(dy > 0.0)
     }
+
+    /// How far a page being edited is pulled off its edge, in pixels, down positive.
+    pub fn pull(&self, swipe: bool) -> f64 {
+        self.past / reach(swipe, true) * PULL_PX
+    }
+
+    /// The push rested for [`REST_MS`]: it is let go, and the next one may turn a page.
+    pub fn rest(&mut self) {
+        self.past = 0.0;
+        self.turned = false;
+    }
+}
+
+/// How far a push goes past the edge to turn the page: a notch or [`SWIPE_TURN`], [`SPRING`]
+/// times that while editing.
+fn reach(swipe: bool, spring: bool) -> f64 {
+    let push = if swipe { SWIPE_TURN } else { 1.0 };
+    if spring { push * SPRING } else { push }
 }
 
 pub fn snap(v: f64, grid: f64) -> f64 {
@@ -1025,29 +1057,57 @@ mod tests {
     fn a_wheel_turns_the_page_a_notch_past_the_edge() {
         let mut o = Overshoot::default();
         // The notch that scrolls to the edge turns nothing; the next one, at it, does.
-        assert_eq!(o.scroll(1.0, true, false), None);
-        assert_eq!(o.scroll(1.0, false, false), Some(true));
-        assert_eq!(o.scroll(-1.0, false, false), Some(false));
+        assert_eq!(o.scroll(1.0, true, false, false), None);
+        assert_eq!(o.scroll(1.0, false, false, false), Some(true));
+        assert_eq!(o.scroll(-1.0, false, false, false), Some(false));
         // A notch in eighths, as a high-resolution wheel sends one, turns once it is whole.
         for _ in 0..7 {
-            assert_eq!(o.scroll(0.125, false, false), None);
+            assert_eq!(o.scroll(0.125, false, false, false), None);
         }
-        assert_eq!(o.scroll(0.125, false, false), Some(true));
+        assert_eq!(o.scroll(0.125, false, false, false), Some(true));
     }
 
     #[test]
     fn a_swipe_turns_one_page_and_only_from_the_edge() {
         let mut o = Overshoot::default();
         // A swipe that scrolled to the edge does not read on past it, however far it pushes.
-        assert_eq!(o.scroll(30.0, true, true), None);
-        assert_eq!(o.scroll(300.0, false, true), None);
+        assert_eq!(o.scroll(30.0, true, true, false), None);
+        assert_eq!(o.scroll(300.0, false, true, false), None);
         o = Overshoot::default();
         // One begun at the edge turns once it has pushed far enough, and only once.
-        assert_eq!(o.scroll(SWIPE_TURN / 2.0, false, true), None);
-        assert_eq!(o.scroll(SWIPE_TURN / 2.0, false, true), Some(true));
-        assert_eq!(o.scroll(300.0, false, true), None);
+        assert_eq!(o.scroll(SWIPE_TURN / 2.0, false, true, false), None);
+        assert_eq!(o.scroll(SWIPE_TURN / 2.0, false, true, false), Some(true));
+        assert_eq!(o.scroll(300.0, false, true, false), None);
         o = Overshoot::default();
-        assert_eq!(o.scroll(-SWIPE_TURN, false, true), Some(false));
+        assert_eq!(o.scroll(-SWIPE_TURN, false, true, false), Some(false));
+    }
+
+    #[test]
+    fn an_edited_page_is_pulled_three_notches_before_it_turns_and_a_spin_turns_one() {
+        let mut o = Overshoot::default();
+        assert_eq!(o.scroll(1.0, false, false, true), None);
+        assert!((o.pull(false) - PULL_PX / 3.0).abs() < 1e-9);
+        // A push the other way lets go at once and pulls the other way.
+        assert_eq!(o.scroll(-1.0, false, false, true), None);
+        assert!((o.pull(false) + PULL_PX / 3.0).abs() < 1e-9);
+        assert_eq!(o.scroll(-1.0, false, false, true), None);
+        assert_eq!(o.scroll(-1.0, false, false, true), Some(false));
+        assert_eq!(o.pull(false), 0.0);
+        // The spin goes on: nothing more turns until it rests.
+        for _ in 0..6 {
+            assert_eq!(o.scroll(-1.0, false, false, true), None);
+        }
+        o.rest();
+        assert_eq!(o.scroll(-1.0, false, false, true), None);
+        // Rested before the third notch, a push starts again.
+        o.rest();
+        assert_eq!(o.scroll(-1.0, false, false, true), None);
+        assert_eq!(o.scroll(-1.0, false, false, true), None);
+        assert_eq!(o.scroll(-1.0, false, false, true), Some(false));
+        // A swipe turns at three times a presented page's.
+        let mut o = Overshoot::default();
+        assert_eq!(o.scroll(SWIPE_TURN * 2.0, false, true, true), None);
+        assert_eq!(o.scroll(SWIPE_TURN, false, true, true), Some(true));
     }
 
     #[test]

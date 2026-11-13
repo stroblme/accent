@@ -381,8 +381,59 @@ impl DiagramView {
 
     /// The page point under a widget coordinate.
     fn page_at(&self, x: f64, y: f64) -> Point {
-        let (sx, sy) = self.scroll();
+        let (sx, sy) = self.shown_scroll();
         self.imp().frame.get().to_page(Point::new(x + sx, y + sy))
+    }
+
+    /// Where the content is drawn from: the scroll, and the pull of a push past the page's edge.
+    fn shown_scroll(&self) -> (f64, f64) {
+        let (x, y) = self.scroll();
+        (x, y + self.imp().pull.get().round())
+    }
+
+    /// Pull the page `px` off its edge at once, down positive, stopping a spring back under way.
+    pub fn set_pull(&self, px: f64) {
+        let imp = self.imp();
+        if let Some(spring) = imp.spring.take() {
+            spring.pause();
+        }
+        if imp.pull.replace(px) != px {
+            self.queue_draw();
+        }
+    }
+
+    /// Let the pull go: the page springs back over [`crate::widgets::FADE_MS`], easing out, and at
+    /// once with animations off.
+    pub fn release_pull(&self) {
+        let from = self.imp().pull.get();
+        if from == 0.0 {
+            return;
+        }
+        let target = adw::CallbackAnimationTarget::new(glib::clone!(
+            #[weak(rename_to = view)]
+            self,
+            move |px| {
+                view.imp().pull.set(px);
+                view.queue_draw();
+            }
+        ));
+        let spring = adw::TimedAnimation::new(self, from, 0.0, crate::widgets::FADE_MS, target);
+        spring.set_easing(adw::Easing::EaseOutCubic);
+        spring.connect_done(glib::clone!(
+            #[weak(rename_to = view)]
+            self,
+            move |_| drop(view.imp().spring.take())
+        ));
+        if let Some(old) = self.imp().spring.replace(Some(spring.clone())) {
+            old.pause();
+        }
+        spring.play();
+    }
+
+    /// How far the page is pulled off its edge now, for a drill.
+    #[cfg(feature = "bench")]
+    pub fn pull(&self) -> f64 {
+        self.imp().pull.get()
     }
 
     fn centre_page(&self) {
@@ -478,6 +529,11 @@ mod imp {
         pub on_drag: RefCell<Option<OnDrag>>,
         /// A Properties row's change held until it lands, shown as a drag's would be.
         pub held: RefCell<Option<Edit>>,
+        /// How far a push past the page's edge has pulled the page off it, in pixels, down
+        /// positive (`geometry::Overshoot::pull`).
+        pub pull: Cell<f64>,
+        /// The pull let go, easing back to nothing.
+        pub spring: RefCell<Option<adw::TimedAnimation>>,
     }
 
     // `gtk::ScrollablePolicy` has no `Default`, so the struct spells its own out.
@@ -510,6 +566,8 @@ mod imp {
                 new_cell: RefCell::new(None),
                 on_drag: RefCell::new(None),
                 held: RefCell::new(None),
+                pull: Cell::new(0.0),
+                spring: RefCell::new(None),
             }
         }
     }
@@ -725,7 +783,7 @@ mod imp {
             let obj = self.obj();
             let Some(sheet) = obj.sheet() else { return };
             let frame = self.frame.get();
-            let (sx, sy) = obj.scroll();
+            let (sx, sy) = obj.shown_scroll();
             let (w, h) = (f64::from(obj.width()), f64::from(obj.height()));
             snapshot.save();
             snapshot.translate(&graphene::Point::new(-sx as f32, -sy as f32));

@@ -292,6 +292,19 @@ drill_retype() {
 		'bench retype retype.png doc=image flavour=None language=None same=false undo=false at=Some(0)'
 }
 
+# A diagram's pages turned by real wheel notches: pulled off their edge while edited, turned at the
+# third notch, a spin turning one, and a presented one turned by a notch (DESIGN.md, Diagram).
+drill_diagram_spring() {
+	launch 60 ACCENT_BENCH_DIAGRAM_NAV=spring:spring.drawio >"$dir/spring"
+	has "$dir/spring" \
+		'bench nav spring one notch page=1 pull=21 rested=0' \
+		'bench nav spring two notches page=1 pull=43 rested=0' \
+		'bench nav spring three notches page=2 pull=43 rested=0' \
+		'bench nav spring a spin of six page=3 pull=43 rested=0' \
+		'bench nav spring one notch up page=3 pull=-21 rested=0' \
+		'bench nav spring presented one notch page=4 pull=0'
+}
+
 # The vault's root in each sort, with a folder left open staying open. Each file's creation time
 # is the order it was written in, c, a then B, apart by more than a coarse clock's tick.
 drill_sort() {

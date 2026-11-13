@@ -1185,7 +1185,7 @@ fn on_screen(app: &App, widget: &impl IsA<gtk::Widget>, x: f64, y: f64) -> Optio
 }
 
 /// Where the middle of `widget` is on the screen.
-fn middle_on_screen(app: &App, widget: &impl IsA<gtk::Widget>) -> Option<String> {
+pub(super) fn middle_on_screen(app: &App, widget: &impl IsA<gtk::Widget>) -> Option<String> {
     let (w, h) = (f64::from(widget.width()), f64::from(widget.height()));
     on_screen(app, widget, w / 2.0, h / 2.0)
 }
