@@ -2052,7 +2052,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 - Back and Forward are the window's (History): a PDF keeps no stack of its own.
   Only jumps go in — a link, an outline row, a page typed into Go to Line, a search's first step; paging is reading, and a history of single steps would have nothing to go back to.
 - Ctrl held over a link previews where it leads without following it: a band of the target page around the destination, in this document or in another PDF under that file's name, or an external link's address.
-  The band is drawn at the zoom the PDF is read at, so it reads as the page will once the link is followed, and it is as wide as the page and three eighths as tall, about a quarter of a portrait page.
+  The band is drawn at the zoom the PDF is read at, so it reads as the page will once the link is followed, though never below 100 % where it would be unreadable again, and it is as wide as the page and three eighths as tall, about a quarter of a portrait page.
   The preview stays inside the PDF pane, above the link or below it where there is no room above and slid along to keep clear of the sides, and a page too wide for the pane is drawn smaller to fit.
   The page's stand-in shows under the band until it is drawn, and a zoom takes the preview away.
   Ctrl+click on a link follows it; anywhere else on a LaTeX build's page it is Go to Source.

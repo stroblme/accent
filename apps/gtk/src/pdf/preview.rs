@@ -6,6 +6,7 @@ use accent_core::pdf::{self, LinkTarget};
 use adw::prelude::*;
 use gtk::{gdk, glib, graphene};
 
+use super::geometry::PT_TO_PX;
 use super::protocol::Request;
 use super::tab::PdfTab;
 
@@ -29,13 +30,16 @@ pub(super) struct Band {
 impl Band {
     /// The band of a page `page` points large around the destination `top` points down it, drawn
     /// at the reading view's `scale` so it reads as the page will once the link is followed: as
-    /// wide as the page and [`TALL`] of that high. A page wider than `room` allows is drawn
+    /// wide as the page and [`TALL`] of that high. A view zoomed out past 100 % draws it at 100 %
+    /// all the same, as smaller is unreadable again. A page wider than `room` allows is drawn
     /// smaller to fit, and a band taller than it is cut down.
     ///
     /// The destination is centred, and the band stays inside the page at both ends: a link to the
     /// last line shows the foot of the page rather than a strip of nothing under it.
     pub(super) fn around(page: (f32, f32), top: Option<f32>, scale: f32, room: (i32, i32)) -> Band {
-        let scale = scale.min(room.0.max(1) as f32 / page.0.max(1.0));
+        let scale = scale
+            .max(PT_TO_PX)
+            .min(room.0.max(1) as f32 / page.0.max(1.0));
         let (width, height) = (page.0 * scale, page.1 * scale);
         let tall = (width * TALL).min(height).min(room.1.max(0) as f32).round();
         let at = top.unwrap_or(0.0) * scale - tall / 2.0;
@@ -404,7 +408,7 @@ fn paint(
 
 #[cfg(test)]
 mod tests {
-    use super::{Band, MARGIN, slid};
+    use super::{Band, MARGIN, PT_TO_PX, slid};
 
     /// At the reading view's zoom a band is as wide as the page and centred on the destination,
     /// never running off either end of the page.
@@ -427,11 +431,16 @@ mod tests {
     }
 
     /// A page wider than the room is drawn smaller to fit it, and a band taller than the room is
-    /// cut down to it.
+    /// cut down to it. A view zoomed out past 100 % gets its band at 100 %, unless that is too
+    /// wide for the room.
     #[test]
     fn a_band_fits_the_room() {
         let band = Band::around((600.0, 800.0), None, 2.0, (900, 1000));
         assert_eq!((band.scale, band.size), (1.5, (900, 338)));
+        let band = Band::around((600.0, 800.0), None, 0.4, (2000, 1000));
+        assert_eq!((band.scale, band.size), (PT_TO_PX, (800, 300)));
+        let band = Band::around((600.0, 800.0), None, 0.4, (600, 1000));
+        assert_eq!((band.scale, band.size), (1.0, (600, 225)));
         let band = Band::around((600.0, 800.0), None, 2.0, (2000, 300));
         assert_eq!((band.scale, band.size), (2.0, (1200, 300)));
         // Device pixels: twice as many of everything on a display of two to one.
