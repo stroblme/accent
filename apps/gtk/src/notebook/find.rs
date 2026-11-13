@@ -49,6 +49,10 @@ impl NotebookTab {
             find.query != text || find.options != options || !find.highlight
         };
         if asked {
+            // Read rendered, the cells are matched as they show, so every one is rendered.
+            for view in self.views.borrow().clone() {
+                self.render_cell(&view);
+            }
             self.set_query(text, options);
             self.find.borrow_mut().highlight = true;
             self.hook_scroll();
@@ -95,12 +99,28 @@ impl NotebookTab {
     }
 
     /// Select characters `chars` of the `cell`th cell and bring them into view, the keyboard left
-    /// where it is, in the find bar.
+    /// where it is, in the find bar: in its rendered page where it shows one.
     fn show_match(self: &Rc<Self>, cell: usize, chars: Range<i32>) {
-        let Some(id) = self.views.borrow().get(cell).map(|v| v.id) else {
+        let Some(view) = self.views.borrow().get(cell).cloned() else {
             return;
         };
+        let id = view.id;
         self.select(id);
+        if let Some(buffer) = rendered_buffer(&view) {
+            buffer.select_range(
+                &buffer.iter_at_offset(chars.start),
+                &buffer.iter_at_offset(chars.end),
+            );
+            let content = self.content();
+            let place = view.with_rendered(|page| {
+                let at = buffer.iter_at_offset(chars.start);
+                super::selection::line_in(&page.text_view(), &at, content.as_ref()?)
+            });
+            if let Some((top, height)) = place.flatten() {
+                self.scroll_into_view(top, top + height);
+            }
+            return;
+        }
         let Some((_, editor)) = self.editor(id) else {
             return;
         };
@@ -120,32 +140,41 @@ impl NotebookTab {
         };
         let base = self.position_of(id).and_then(|at| starts.get(at).copied());
         let base = base.unwrap_or(0);
-        let Some(editor) = self.view_of(Some(id)).and_then(|v| v.editor().cloned()) else {
-            return base..base;
+        let view = self.view_of(Some(id));
+        let rendered = view.as_ref().and_then(rendered_buffer);
+        let buffer: gtk::TextBuffer = match (rendered, view.and_then(|v| v.editor().cloned())) {
+            (Some(rendered), _) => rendered,
+            (None, Some(editor)) => editor.buffer.upcast(),
+            (None, None) => return base..base,
         };
-        let buffer = &editor.buffer;
+        let buffer = &buffer;
         let caret = buffer.iter_at_mark(&buffer.get_insert());
         let (start, end) = buffer.selection_bounds().unwrap_or((caret, caret));
         base + start.offset()..base + end.offset()
     }
 
     /// Match the query again if the cells changed since, over the model brought up to date, so
-    /// no cell's editor has to be built for it.
+    /// no cell's editor has to be built for it; a cell showing its rendered page over what that
+    /// shows.
     fn rematch(&self) {
         if !self.find.borrow().stale {
             return;
         }
         self.sync_model();
         let model = self.model.borrow();
+        let views = self.views.borrow();
         let find = &mut *self.find.borrow_mut();
         let (mut matches, mut starts, mut at) = (Vec::new(), Vec::new(), 0);
-        for cell in model.cells() {
+        for (cell, view) in model.cells().iter().zip(views.iter()) {
             starts.push(at);
+            let shown =
+                rendered_buffer(view).map(|b| b.slice(&b.start_iter(), &b.end_iter(), true));
+            let text = shown.as_deref().unwrap_or(cell.source());
             if let Some(re) = &find.re {
-                let found = search::char_ranges(re, cell.source()).into_iter();
+                let found = search::char_ranges(re, text).into_iter();
                 matches.extend(found.map(|m| at + m.start as i32..at + m.end as i32));
             }
-            at += cell.source().chars().count() as i32 + 1;
+            at += text.chars().count() as i32 + 1;
         }
         (find.matches, find.starts, find.stale) = (matches, starts, false);
     }
@@ -154,13 +183,14 @@ impl NotebookTab {
     /// that had it: a tag on each of a hundred thousand matches is seconds of work.
     fn paint(&self) {
         let painted = std::mem::take(&mut self.find.borrow_mut().painted);
-        for editor in painted
-            .into_iter()
-            .filter_map(|id| self.view_of(Some(id))?.editor().cloned())
-        {
-            if let Some(tag) = editor.buffer.tag_table().lookup(TAG) {
-                let (start, end) = editor.buffer.bounds();
-                editor.buffer.remove_tag(&tag, &start, &end);
+        for view in painted.into_iter().filter_map(|id| self.view_of(Some(id))) {
+            let rendered = view.with_rendered(|page| page.buffer());
+            let editor = view.editor().map(|e| e.buffer.clone().upcast());
+            for buffer in rendered.into_iter().chain(editor) {
+                if let Some(tag) = buffer.tag_table().lookup(TAG) {
+                    let (start, end) = buffer.bounds();
+                    buffer.remove_tag(&tag, &start, &end);
+                }
             }
         }
         if !self.find.borrow().highlight {
@@ -169,9 +199,14 @@ impl NotebookTab {
         self.rematch();
         let mut painted = Vec::new();
         for view in self.near() {
-            let (Some(editor), Some(cell)) = (view.editor(), self.position_of(view.id)) else {
+            let Some(cell) = self.position_of(view.id) else {
                 continue;
             };
+            let rendered = rendered_buffer(&view).and_downcast::<sourceview5::Buffer>();
+            let editor = view.editor().cloned();
+            if rendered.is_none() && editor.is_none() {
+                continue;
+            }
             let mine: Vec<Range<i32>> = {
                 let find = self.find.borrow();
                 let start = find.starts[cell];
@@ -187,10 +222,16 @@ impl NotebookTab {
             if mine.is_empty() {
                 continue;
             }
-            let buffer = &editor.buffer;
+            let buffer = match (&rendered, &editor) {
+                (Some(rendered), _) => rendered,
+                (None, Some(editor)) => &editor.buffer,
+                (None, None) => continue,
+            };
             let tag = find_tag(buffer);
             // Focus mode's fade leaves a line holding a match whole.
-            if let Some(view) = editor.view.downcast_ref::<multicaret::View>() {
+            if let Some(view) = (editor.as_ref().filter(|_| rendered.is_none()))
+                .and_then(|e| e.view.downcast_ref::<multicaret::View>().cloned())
+            {
                 view.set_find_tag(&tag);
             }
             for m in mine {
@@ -286,9 +327,9 @@ impl NotebookTab {
         (!text.is_empty() && !text.contains('\n')).then_some(text)
     }
 
-    /// Whether the cells can be rewritten: not while presented.
+    /// Whether the cells can be rewritten: not while read.
     pub fn rewritable(&self) -> bool {
-        !self.presenting.get()
+        !self.reading()
     }
 
     /// Replace the selected match and go on to the next, one Undo step; or `all` of them, in every
@@ -397,6 +438,13 @@ fn substitute(re: &Regex, text: &str, with: &str, options: Options) -> String {
     }
 }
 
+/// The buffer of `view`'s rendered page while it shows, which find matches in its place.
+fn rendered_buffer(view: &Rc<super::cell::CellView>) -> Option<gtk::TextBuffer> {
+    view.shows_rendered()
+        .then(|| view.with_rendered(|page| page.buffer()))
+        .flatten()
+}
+
 /// `buffer`'s match tag, above every other tag as the editor's own find tag is, in the colours
 /// the style scheme gives a match now.
 fn find_tag(buffer: &sourceview5::Buffer) -> gtk::TextTag {
@@ -412,14 +460,18 @@ fn find_tag(buffer: &sourceview5::Buffer) -> gtk::TextTag {
 }
 
 impl App {
-    /// The notebook `pane` shows, which its find bar searches as it does a PDF.
+    /// The notebook `pane` shows, which its find bar searches as it does a PDF: a notebook's own
+    /// tab, or the view in its preview tab.
     pub(crate) fn notebook_of(&self, pane: &Pane) -> Option<Rc<NotebookTab>> {
-        self.doc_of(pane)?.notebook().cloned()
+        match self.doc_of(pane)? {
+            Doc::Rendered(rendered) => rendered.viewer(),
+            doc => doc.notebook().cloned(),
+        }
     }
 
     /// The find bar of the pane `tab` is in front in says its matches, and the Outline follows its
     /// caret while it is the tab in front.
-    pub(super) fn wire_notebook_places(self: &Rc<Self>, tab: &Rc<NotebookTab>) {
+    pub(crate) fn wire_notebook_places(self: &Rc<Self>, tab: &Rc<NotebookTab>) {
         let weak = Rc::downgrade(self);
         tab.on_matches.set(Rc::new(move |tab: &Rc<NotebookTab>| {
             let Some(app) = weak.upgrade() else {
@@ -452,9 +504,10 @@ impl NotebookTab {
         self.rematch();
         let count = self.find.borrow().matches.len();
         let selected = self.view_of(self.selected.get()).and_then(|v| {
-            let editor = v.editor()?;
-            let (start, end) = editor.buffer.selection_bounds()?;
-            Some(editor.buffer.text(&start, &end, false).to_string())
+            let buffer =
+                rendered_buffer(&v).or_else(|| Some(v.editor()?.buffer.clone().upcast()))?;
+            let (start, end) = buffer.selection_bounds()?;
+            Some(buffer.text(&start, &end, false).to_string())
         });
         (count, self.selected_at(), selected.unwrap_or_default())
     }

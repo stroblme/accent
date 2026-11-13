@@ -361,10 +361,8 @@ impl App {
         *self.preview.borrow_mut() = Some(preview);
     }
 
-    /// A preview wired to the window: links, tags and images, the document zoom and column, and
-    /// the wheel's zoom. `found` takes its find readout.
-    pub(crate) fn new_preview(self: &Rc<Self>, found: impl Fn(&str) + 'static) -> preview::Preview {
-        let resolve = self.asset_resolver();
+    /// What every page of the window reaches: links, tags, images and saved searches.
+    pub(crate) fn preview_wiring(self: &Rc<Self>) -> preview::Wiring {
         // A note's saved searches, never superseding the Search pane's query nor superseded.
         let vault = self.vault().cloned();
         let search: preview::SavedSearch = std::sync::Arc::new(move |query: &str, limit| {
@@ -373,32 +371,31 @@ impl App {
                 .inspect_err(|e| tracing::warn!("saved search: {e}"))
                 .ok()
         });
-        let preview = preview::Preview::new(
-            move |rel: &str| resolve(rel),
-            self.inverted_images.clone(),
-            self.web_images.clone(),
-            glib::clone!(
-                #[weak(rename_to = app)]
-                self,
-                move |target: &str| app.open_target(target)
-            ),
-            glib::clone!(
-                #[weak(rename_to = app)]
-                self,
-                move |tag: &str| app.show_tag(tag)
-            ),
-            glib::clone!(
-                #[weak(rename_to = app)]
-                self,
-                move |query: &str| app.show_search(query)
-            ),
-            glib::clone!(
-                #[weak(rename_to = app)]
-                self,
-                move |key: &str| app.invert_image(key)
-            ),
+        let app = Rc::downgrade(self);
+        let with = move |f: fn(&Rc<App>, &str)| -> Rc<dyn Fn(&str)> {
+            let app = app.clone();
+            Rc::new(move |s: &str| {
+                if let Some(app) = app.upgrade() {
+                    f(&app, s);
+                }
+            })
+        };
+        preview::Wiring {
+            resolve: self.asset_resolver(),
+            inverted: self.inverted_images.clone(),
+            web: self.web_images.clone(),
+            on_open: with(|app, target| app.open_target(target)),
+            on_tag: with(|app, tag| app.show_tag(tag)),
+            on_search: with(|app, query| app.show_search(query)),
+            on_invert: with(|app, key| app.invert_image(key)),
             search,
-        );
+        }
+    }
+
+    /// A preview wired to the window: links, tags and images, the document zoom and column, and
+    /// the wheel's zoom. `found` takes its find readout.
+    pub(crate) fn new_preview(self: &Rc<Self>, found: impl Fn(&str) + 'static) -> preview::Preview {
+        let preview = preview::Preview::new(&self.preview_wiring());
         preview.set_font(self.config.borrow().preview_font.as_deref());
         preview.set_zoom(self.zoom.get());
         preview.set_column(&self.config.borrow());
@@ -474,7 +471,7 @@ impl App {
     /// the entire buffer on each keystroke. A note's preview tab has a timer of its own, and is
     /// rendered whether or not the note is the tab in front.
     pub fn queue_refresh(self: &Rc<Self>, tab: &Rc<Tab>) {
-        self.queue_rendered(tab);
+        self.queue_rendered(&tab.page);
         if !self.is_active(tab) {
             return;
         }

@@ -866,10 +866,7 @@ impl App {
                 self,
                 #[weak]
                 nb,
-                move |(id, at)| {
-                    app.mark();
-                    nb.goto(id, at)
-                }
+                move |at| app.notebook_outline_jump(&nb, at)
             );
             if sidebar.set_outline_rows(&doc.key(), &rows, jump, None) {
                 self.follow_outline();
@@ -1140,8 +1137,9 @@ impl App {
         for diagram in self.diagrams() {
             diagram.restyle();
         }
-        // A notebook's editors take the new scheme, and its pictures are recoloured again.
-        for notebook in self.notebooks() {
+        // A notebook's editors take the new scheme, and its pictures are recoloured again, those
+        // of its preview tab's view too.
+        for notebook in self.notebooks().iter().chain(&self.notebook_viewers()) {
             notebook.restyle();
         }
         // An image is recoloured again from the texture it was read to.
@@ -1793,6 +1791,15 @@ impl App {
             tab.set_column_width(config.column_width);
             tab.set_indent_width(config.indent_width);
         }
+        let notebooks: Vec<_> = self
+            .notebooks()
+            .into_iter()
+            .chain(self.notebook_viewers())
+            .collect();
+        // A notebook's rendered cells are set in the Preview Font by the notebook's own rule.
+        for notebook in &notebooks {
+            notebook.set_preview_font(config.preview_font.as_deref());
+        }
         self.each_preview(|p| {
             p.set_font(config.preview_font.as_deref());
             p.set_column(config);
@@ -1801,7 +1808,7 @@ impl App {
             for diff in self.diffs() {
                 diff.set_font(config.editor_font.as_deref(), self.zoom.get());
             }
-            for notebook in self.notebooks() {
+            for notebook in &notebooks {
                 notebook.set_font(config.editor_font.as_deref(), self.zoom.get());
             }
             // The goals are set in the editor's font when they land.

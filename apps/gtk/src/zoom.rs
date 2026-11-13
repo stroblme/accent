@@ -78,7 +78,7 @@ impl App {
         for diff in self.diffs() {
             diff.set_font(font.as_deref(), zoom);
         }
-        for notebook in self.notebooks() {
+        for notebook in self.notebooks().iter().chain(&self.notebook_viewers()) {
             notebook.set_font(font.as_deref(), zoom);
         }
         self.each_preview(|p| p.set_zoom(zoom));

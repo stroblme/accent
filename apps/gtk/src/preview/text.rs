@@ -888,6 +888,18 @@ pub(super) fn collapse_margin(page: &Page, at: &gtk::TextIter) {
     }
 }
 
+/// An inline page's first line, where it is a heading, without the room above it that sets it off
+/// from what comes before on a page of its own: the cell's own gap is that room.
+pub(super) fn collapse_top(page: &Page) {
+    let start = page.buffer.start_iter();
+    let mut end = start;
+    end.forward_line();
+    page.buffer.remove_tag(&page.tags.collapsed, &start, &end);
+    if page.tags.headings.iter().any(|h| start.has_tag(h)) {
+        page.buffer.apply_tag(&page.tags.collapsed, &start, &end);
+    }
+}
+
 /// A list item being written.
 struct OpenItem {
     /// Where its first line starts, from the block's start.

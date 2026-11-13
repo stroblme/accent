@@ -36,6 +36,12 @@ impl NotebookTab {
     /// puts down is not followed, being where the pointer is. A caret put down ten lines of the
     /// cells or more from where it was, in this cell or another, leaves a place to come back to.
     pub(super) fn press(self: &Rc<Self>, id: CellId) {
+        // Read with the reading keys, a press only selects the cell.
+        if self.viewer || self.renders(id) {
+            self.select(id);
+            self.column.grab_focus();
+            return;
+        }
         let from = self.caret().map(|at| (at.buffer(), at.offset()));
         self.select(id);
         self.pressing.set(true);
@@ -89,9 +95,14 @@ impl NotebookTab {
         self.on_select.emit(self);
     }
 
-    /// Select cell `id` and give its editor the keyboard.
+    /// Select cell `id` and give its editor the keyboard; read with the reading keys, the column
+    /// keeps the keyboard and the cell is brought into view.
     pub(super) fn focus_cell(self: &Rc<Self>, id: CellId) {
         self.select(id);
+        if self.viewer || self.renders(id) {
+            self.column.grab_focus();
+            return self.show(id, None);
+        }
         if let Some((_, editor)) = self.editor(id) {
             editor.view.grab_focus();
             self.follow_caret(id);
@@ -247,13 +258,23 @@ impl NotebookTab {
         let Some((top, bottom)) = self.caret_at(editor) else {
             return;
         };
+        match align {
+            Some(align) => {
+                let adjustment = self.scroller.vadjustment();
+                adjustment.set_value(top - align * adjustment.page_size());
+            }
+            None => self.scroll_into_view(top, bottom),
+        }
+    }
+
+    /// Scroll by as little as keeps `top` to `bottom` of the content a margin inside the view.
+    pub(super) fn scroll_into_view(&self, top: f64, bottom: f64) {
         let adjustment = self.scroller.vadjustment();
         let (value, page, margin) = (adjustment.value(), adjustment.page_size(), 24.0);
-        match align {
-            Some(align) => adjustment.set_value(top - align * page),
-            None if top < value => adjustment.set_value(top - margin),
-            None if bottom > value + page => adjustment.set_value(bottom - page + margin),
-            None => {}
+        if top < value {
+            adjustment.set_value(top - margin);
+        } else if bottom > value + page {
+            adjustment.set_value(bottom - page + margin);
         }
     }
 
@@ -270,8 +291,17 @@ impl NotebookTab {
         let Some((id, align)) = self.reveal.get() else {
             return;
         };
-        match self.view_of(Some(id)).and_then(|v| v.editor().cloned()) {
-            Some(editor) if editor.view.height() == 0 => {}
+        let view = self.view_of(Some(id));
+        let rendered = view.as_ref().is_some_and(|v| v.shows_rendered());
+        let shown = |editor: &Editor| match rendered {
+            true => view
+                .as_ref()
+                .and_then(|v| v.rendered_line(1))
+                .is_some_and(|(v, _)| v.height() > 0),
+            false => editor.view.height() > 0,
+        };
+        match view.as_ref().and_then(|v| v.editor().cloned()) {
+            Some(editor) if !shown(&editor) => {}
             Some(editor) => {
                 self.reveal.set(None);
                 self.scroll_to_caret(&editor, align);
@@ -296,10 +326,20 @@ impl NotebookTab {
 
     /// The top and bottom of `view`'s caret in the scrolled content, where the scroll's value is
     /// measured, so a scroll not yet laid out does not move it.
+    ///
+    /// In a cell read rendered, the caret's line is where its element shows on the page.
     pub(super) fn caret_at(&self, editor: &Editor) -> Option<(f64, f64)> {
         let buffer = &editor.buffer;
         let insert = buffer.iter_at_mark(&buffer.get_insert());
-        let (top, height) = line_in(editor.view.upcast_ref(), &insert, &self.content()?)?;
+        let rendered = self.views.borrow().iter().find_map(|v| {
+            let own = v.editor().is_some_and(|e| e.buffer == editor.buffer);
+            own.then(|| v.rendered_line(insert.line() as u32 + 1))
+                .flatten()
+        });
+        let (top, height) = match rendered {
+            Some((view, at)) => line_in(&view, &at, &self.content()?)?,
+            None => line_in(editor.view.upcast_ref(), &insert, &self.content()?)?,
+        };
         Some((top, top + height))
     }
 

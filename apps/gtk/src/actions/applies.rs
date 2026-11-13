@@ -204,7 +204,7 @@ pub fn applies(action: &str, cx: &Context) -> bool {
         "win.toggle-task" => note,
         "win.toggle-wrap" => text || front == Some(Diff),
         "win.fold" | "win.unfold" | "win.fold-all" | "win.unfold-all" | "win.minimap" => text,
-        "win.view-mode" => note || preview || cx.editor_note,
+        "win.view-mode" => note || preview || notebook || cx.editor_note,
         "win.insert-template" => note && vault,
         "win.insert-sketch" => markdown && cx.file == Some(File::Vault),
         "win.zoom-in" | "win.zoom-out" | "win.zoom-reset" => {
@@ -322,6 +322,8 @@ mod tests {
             );
         }
         assert!(!org.contains(&"win.insert-sketch"));
+        // A notebook opens a preview tab as a note does.
+        assert!(listed(&vault_file(Front::Notebook)).contains(&"win.view-mode"));
     }
 
     /// Show Changes is a commit's file's, in front: a staged change's comparison has no toggle.

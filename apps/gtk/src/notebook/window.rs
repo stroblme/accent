@@ -70,8 +70,10 @@ impl App {
         tab.set_kernel_pick(pick);
         // A notebook inside the vault opens its code cells' program there; a loose one has none.
         tab.attach_language(self.vault().filter(|_| !doc::is_loose_key(key)).cloned());
+        tab.set_wiring(Some(self.preview_wiring()));
         {
             let config = self.config.borrow();
+            tab.set_preview_font(config.preview_font.as_deref());
             tab.set_font(config.editor_font.as_deref(), self.zoom.get());
             tab.set_spellcheck(config.spellcheck);
             tab.set_ghost_text(config.ghost_text);
@@ -102,11 +104,12 @@ impl App {
                 }
             }
         };
-        // An edit keeps a preview, as typing keeps a note's.
+        // An edit keeps a preview, as typing keeps a note's, and its preview tab follows it.
         tab.connect_history(on(|app, tab| {
             if tab.save.modified.get() {
                 app.promote(&tab.page);
             }
+            app.queue_rendered(&tab.page);
             if app.is_active_notebook(tab) {
                 app.sync_history();
                 app.sync_status();

@@ -942,6 +942,19 @@ impl App {
                 }
                 continue;
             }
+            // A notebook's preview tab opens once the notebook has, which lands as no text tab,
+            // so nothing below waits on it: the panes are put back again with it in place.
+            if previewed {
+                let restore = restore.clone();
+                let preview = move |app: &Rc<App>, doc: &Doc| {
+                    if let Doc::Notebook(nb) = doc {
+                        app.open_rendered(&rendered::Note::Notebook(nb.clone()), Opened::Restored);
+                        app.put_back(&restore);
+                    }
+                };
+                self.pending
+                    .reveal(key, open::Reveal::Then(Box::new(preview)));
+            }
             // At once rather than from `Asked`'s idle, so nothing a landing moves is painted before
             // it is put back. A note compared with the index comes back compared, and one merging
             // as a merge while git still lists it unmerged.

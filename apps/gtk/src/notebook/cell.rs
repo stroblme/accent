@@ -16,6 +16,7 @@ use gtk::{gdk, gio, glib};
 use super::output::Outputs;
 use super::placeholder::{Margins, Placeholder};
 use crate::editor::Flavour;
+use crate::preview::Preview;
 use crate::widgets::Fade;
 
 pub struct CellView {
@@ -44,6 +45,11 @@ pub struct CellView {
     /// The source laid out as the editor will lay it out, holding its place until it is built.
     placeholder: Placeholder,
     editor: OnceCell<Editor>,
+    /// A markdown cell's page, rendered while the notebook is read (`NotebookTab::reading`), and
+    /// shown in place of its source once a render has settled ([`reveal_rendered`]).
+    ///
+    /// [`reveal_rendered`]: Self::reveal_rendered
+    rendered: RefCell<Option<Preview>>,
     /// The height a new editor is held at, its placeholder's, until its lines are laid out as
     /// far ([`refit`](Self::refit)).
     hold: Rc<std::cell::Cell<i32>>,
@@ -194,6 +200,7 @@ impl CellView {
             body,
             placeholder,
             editor: OnceCell::new(),
+            rendered: RefCell::default(),
             hold: Rc::default(),
             paste_link: OnceCell::new(),
             spell: RefCell::default(),
@@ -213,6 +220,9 @@ impl CellView {
         self.placeholder.set_left_margin(start);
         if let Some(editor) = self.editor() {
             editor.view.set_left_margin(start);
+        }
+        if let Some(page) = self.rendered.borrow().as_ref() {
+            page.set_margins(start, MARGIN, EDGE, EDGE);
         }
     }
 
@@ -366,6 +376,8 @@ impl CellView {
         }
         self.body.prepend(&view);
         self.body.remove(&self.placeholder);
+        // Read rendered, the cell keeps its editor out of sight for the caret's place.
+        view.set_visible(!self.shows_rendered());
         let editor = Editor {
             view,
             buffer,
@@ -375,13 +387,84 @@ impl CellView {
         editor
     }
 
-    /// The cell's text views: its editor, once built, and its outputs drawn as text.
+    /// The cell's text views: its editor, once built, its rendered page, and its outputs drawn
+    /// as text.
     pub fn text_views(&self) -> Vec<gtk::TextView> {
         let mut views = self.outputs.text_views();
+        if let Some(page) = self.rendered.borrow().as_ref() {
+            views.insert(0, page.text_view());
+        }
         if let Some(editor) = self.editor() {
             views.insert(0, editor.view.clone().upcast());
         }
         views
+    }
+
+    /// Render `source` on `page` in this markdown cell, out of sight until the render has settled
+    /// and [`reveal_rendered`](Self::reveal_rendered) shows it in place of the source; `rel` is
+    /// the notebook, which the page's links are read from.
+    pub fn set_rendered(&self, page: Preview, rel: &str, source: &str) {
+        page.set_margins(text_start(self.kind, self.gutter.get()), MARGIN, EDGE, EDGE);
+        let widget = page.widget().clone();
+        widget.set_visible(false);
+        widget.set_focusable(false);
+        widget.set_hexpand(true);
+        self.body.prepend(&widget);
+        page.render(rel, source);
+        self.rendered.replace(Some(page));
+    }
+
+    /// Whether the cell has a rendered page, shown or still rendering.
+    pub fn has_rendered(&self) -> bool {
+        self.rendered.borrow().is_some()
+    }
+
+    /// The rendered page in place of the source, once its render has settled.
+    pub fn reveal_rendered(&self) {
+        let rendered = self.rendered.borrow();
+        let Some(page) = rendered.as_ref().filter(|p| p.settled()) else {
+            return;
+        };
+        page.widget().set_visible(true);
+        self.placeholder.set_visible(false);
+        if let Some(editor) = self.editor() {
+            editor.view.set_visible(false);
+        }
+    }
+
+    /// Whether the rendered page shows in place of the source.
+    pub fn shows_rendered(&self) -> bool {
+        (self.rendered.borrow().as_ref()).is_some_and(|p| p.widget().is_visible())
+    }
+
+    /// The source again in place of the rendered page, which goes.
+    pub fn drop_rendered(&self) {
+        if let Some(page) = self.rendered.take() {
+            self.body.remove(page.widget());
+        }
+        self.placeholder.set_visible(true);
+        if let Some(editor) = self.editor() {
+            editor.view.set_visible(true);
+        }
+    }
+
+    /// Render `source` again on the page, if there is one; the same text again changes nothing.
+    pub fn render_source(&self, rel: &str, source: &str) {
+        if let Some(page) = self.rendered.borrow().as_ref() {
+            page.render(rel, source);
+        }
+    }
+
+    /// Run `f` on the rendered page, if there is one.
+    pub fn with_rendered<T>(&self, f: impl FnOnce(&Preview) -> T) -> Option<T> {
+        self.rendered.borrow().as_ref().map(f)
+    }
+
+    /// Where source line `line` (1-based) shows on the rendered page, while it shows.
+    pub fn rendered_line(&self, line: u32) -> Option<(gtk::TextView, gtk::TextIter)> {
+        let rendered = self.rendered.borrow();
+        let page = rendered.as_ref().filter(|p| p.widget().is_visible())?;
+        Some((page.text_view(), page.iter_of_line(line)))
     }
 
     /// Ask again for the height of each text view whose request no longer matches what it was

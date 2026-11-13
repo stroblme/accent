@@ -4,11 +4,11 @@
 //! click and following the arrows, the marimo notebook kept as written, the long notebook's open
 //! time, memory and editors built, the view kept still as more are built above what shows, its
 //! outputs built as they near the view in the place of placeholders as tall, what a zoom keeps
-//! still, and a presented notebook's read-only, and a notebook of its own written beside them
-//! taking a text tab's editing chords, occurrences, heading markers, spelling and links in its
-//! cells. All under Dark, which recolours the pictures.
+//! still, a presented notebook's read-only and rendered, its preview tab, and a notebook of its own
+//! written beside them taking a text tab's editing chords, occurrences, heading markers, spelling
+//! and links in its cells. All under Dark, which recolours the pictures.
 //! `ACCENT_BENCH_NOTEBOOK_SHOT=<png>` adds a picture of the window with the first notebook open,
-//! for looking at rather than asserting on.
+//! and of the long one presented and in its preview tab, for looking at rather than asserting on.
 
 use super::*;
 use crate::notebook::NotebookTab;
@@ -863,15 +863,86 @@ async fn text_drill(app: &Rc<App>, ipynb: &str) {
     );
 }
 
+/// A picture of the window under `ACCENT_BENCH_NOTEBOOK_SHOT`, named after it with `-<what>`.
+async fn shot(app: &Rc<App>, what: &str) {
+    if let Ok(path) = std::env::var("ACCENT_BENCH_NOTEBOOK_SHOT") {
+        glib::timeout_future(Duration::from_millis(300)).await;
+        pumped().await;
+        let path = path.replace(".png", &format!("-{what}.png"));
+        super::diagram::shoot(app.window.upcast_ref(), std::path::Path::new(&path));
+    }
+}
+
+/// A presented notebook: read only, its markdown cells rendered, and their sources back after.
 async fn present_drill(app: &Rc<App>) {
     let Some(tab) = app.active_notebook() else {
         return;
     };
     app.set_presenting(true);
-    glib::timeout_future(Duration::from_millis(300)).await;
+    let rendered = until("notebook", "presented rendered", 5000, || {
+        tab.bench_rendered() > 0
+    });
+    let rendered = rendered.await.is_some();
     let read_only = tab.bench_read_only();
+    shot(app, "present").await;
     app.set_presenting(false);
-    println!("bench notebook present read_only={}", u8::from(read_only));
+    println!(
+        "bench notebook present read_only={} rendered={} after={}",
+        u8::from(read_only),
+        u8::from(rendered),
+        tab.bench_rendered()
+    );
+    preview_drill(app, &tab).await;
+}
+
+/// The notebook's preview tab (Toggle Preview): read only, its markdown cells rendered, the
+/// keyboard on its column, find matching what it shows (a heading's `## ` in the source and
+/// nowhere on the page), and an edit of the notebook followed.
+async fn preview_drill(app: &Rc<App>, tab: &Rc<NotebookTab>) {
+    app.toggle_preview();
+    let viewer = until("notebook", "preview tab", 5000, || {
+        app.notebook_of(&app.pane()).filter(|v| !Rc::ptr_eq(v, tab))
+    });
+    let Some(viewer) = viewer.await else {
+        return;
+    };
+    let rendered = until("notebook", "preview rendered", 5000, || {
+        viewer.bench_rendered() > 0
+    });
+    let rendered = rendered.await.is_some();
+    glib::timeout_future(Duration::from_millis(200)).await;
+    shot(app, "preview").await;
+    let keys = app.focused().is_some_and(|f| f == viewer.key_target());
+    // Every markdown cell is rendered for a find, the count following as each page settles.
+    viewer.find("## ", Default::default());
+    let t = Instant::now();
+    until("notebook", "preview find", 10_000, || {
+        viewer.bench_found().0 == 0
+    })
+    .await;
+    let (page, ..) = viewer.bench_found();
+    let find_ms = ms_since(t);
+    viewer.find_clear();
+    tab.find("## ", Default::default());
+    let (source, ..) = tab.bench_found();
+    tab.find_clear();
+    let read_only = viewer.bench_read_only();
+    app.toggle_preview();
+    tab.bench_type(0, " followed");
+    app.toggle_preview();
+    let followed = until("notebook", "preview followed", 5000, || {
+        viewer.bench_source(0).ends_with(" followed")
+    });
+    let followed = followed.await.is_some();
+    app.toggle_preview();
+    tab.undo();
+    println!(
+        "bench notebook preview read_only={} rendered={} keys={} find_page={page} find_source={source} followed={} find_ms={find_ms:.0}",
+        u8::from(read_only),
+        u8::from(rendered),
+        u8::from(keys),
+        u8::from(followed)
+    );
 }
 
 /// The notebook the parity step writes: a markdown cell whose heading markers hang and whose link

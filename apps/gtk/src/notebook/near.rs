@@ -143,8 +143,14 @@ impl NotebookTab {
         }
         let near = self.near();
         for view in &near {
-            if view.editor().is_none() {
-                self.build_editor(view);
+            // A cell read rendered gets its page instead, its editor built only when it is asked
+            // for, out of sight.
+            match self.renders(view.id) {
+                true => self.render_cell(view),
+                false if view.editor().is_none() => {
+                    self.build_editor(view);
+                }
+                false => {}
             }
         }
         {

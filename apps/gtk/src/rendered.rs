@@ -1,14 +1,17 @@
 //! A note's rendered preview in a tab of its own, right of the note in its pane (`Ctrl+M`), which
 //! a drag takes into another pane to read the two side by side. The note is a text tab's, or a
-//! terminal editor's, read as it was last saved.
+//! terminal editor's, read as it was last saved; a notebook's preview tab is a read-only view of
+//! the notebook, its markdown cells rendered (`notebook::viewer`).
 //!
-//! The tab holds a [`Preview`] only while it is on screen and a while after
+//! The tab holds a [`Preview`], or a notebook's view, only while it is on screen and a while after
 //! ([`crate::preview::idle_for`]), so a preview tab behind another holds no page. It closes with
 //! its note, and a note has one at most.
 
 use super::*;
+use crate::notebook::NotebookTab;
 use crate::preview::Preview;
 use crate::terminal::Term;
+use accent_core::notebook::CellId;
 use std::cell::Ref;
 use std::rc::Weak;
 
@@ -39,14 +42,23 @@ pub fn note_for(doc: Doc) -> Option<Doc> {
 }
 
 /// What a preview tab renders: a note in accent's own tab, or one a terminal editor has open, as
-/// last saved ([`crate::editors::Saved`]).
+/// last saved ([`crate::editors::Saved`]), or a notebook.
 #[derive(Clone)]
 pub enum Note {
     Tab(Rc<Tab>),
     Editor(Rc<Term>),
+    Notebook(Rc<NotebookTab>),
 }
 
 impl Note {
+    /// What `doc` holds that Toggle Preview shows a preview tab of: a note, or a notebook.
+    pub fn previewed(doc: &Doc) -> Option<Note> {
+        match doc {
+            Doc::Notebook(nb) => Some(Note::Notebook(nb.clone())),
+            doc => Note::of(doc),
+        }
+    }
+
     /// The note `doc` holds, which Toggle Preview renders.
     pub fn of(doc: &Doc) -> Option<Note> {
         match doc {
@@ -67,6 +79,7 @@ impl Note {
         match self {
             Note::Tab(tab) => &tab.page,
             Note::Editor(term) => &term.page,
+            Note::Notebook(nb) => &nb.page,
         }
     }
 
@@ -74,13 +87,16 @@ impl Note {
         match self {
             Note::Tab(tab) => tab.rel(),
             Note::Editor(term) => term.file().unwrap_or_default(),
+            Note::Notebook(nb) => nb.key(),
         }
     }
 
-    fn text(&self) -> String {
+    /// A note's text; a notebook's view follows the notebook itself.
+    fn text(&self) -> Option<String> {
         match self {
-            Note::Tab(tab) => tab.text(),
-            Note::Editor(term) => term.saved.text(),
+            Note::Tab(tab) => Some(tab.text()),
+            Note::Editor(term) => Some(term.saved.text()),
+            Note::Notebook(_) => None,
         }
     }
 
@@ -88,7 +104,16 @@ impl Note {
     fn caret(&self) -> Option<u32> {
         match self {
             Note::Tab(tab) => Some(tab.cursor_line()),
-            Note::Editor(_) => None,
+            Note::Editor(_) | Note::Notebook(_) => None,
+        }
+    }
+
+    /// Whether the note's own view is on screen, which its preview then follows to its caret.
+    fn on_screen(&self) -> bool {
+        match self {
+            Note::Tab(tab) => tab.view.is_mapped(),
+            Note::Editor(_) => false,
+            Note::Notebook(nb) => nb.on_screen(),
         }
     }
 
@@ -96,6 +121,7 @@ impl Note {
         match self {
             Note::Tab(tab) => Doc::Text(tab.clone()),
             Note::Editor(term) => Doc::Terminal(term.clone()),
+            Note::Notebook(nb) => Doc::Notebook(nb.clone()),
         }
     }
 
@@ -103,6 +129,7 @@ impl Note {
         match self {
             Note::Tab(tab) => Held::Tab(Rc::downgrade(tab)),
             Note::Editor(term) => Held::Editor(Rc::downgrade(term)),
+            Note::Notebook(nb) => Held::Notebook(Rc::downgrade(nb)),
         }
     }
 }
@@ -112,6 +139,7 @@ impl Note {
 enum Held {
     Tab(Weak<Tab>),
     Editor(Weak<Term>),
+    Notebook(Weak<NotebookTab>),
 }
 
 impl Held {
@@ -119,6 +147,7 @@ impl Held {
         match self {
             Held::Tab(tab) => tab.upgrade().map(Note::Tab),
             Held::Editor(term) => term.upgrade().map(Note::Editor),
+            Held::Notebook(nb) => nb.upgrade().map(Note::Notebook),
         }
     }
 }
@@ -137,6 +166,8 @@ pub struct Rendered {
     /// The page's child, which holds the preview while there is one.
     frame: adw::Bin,
     preview: RefCell<Option<Preview>>,
+    /// A notebook's read-only view, in the preview's place.
+    viewer: RefCell<Option<Rc<NotebookTab>>>,
     /// The preview's release, from when the tab went out of sight.
     idle: widgets::Debounce,
     /// The render after the note was edited ([`RENDER`]).
@@ -162,6 +193,11 @@ impl Rendered {
         self.preview.borrow()
     }
 
+    /// A notebook's read-only view, while it has one.
+    pub fn viewer(&self) -> Option<Rc<NotebookTab>> {
+        self.viewer.borrow().clone()
+    }
+
     /// Whether the tab is on screen, the only place anything is rendered.
     pub fn shown(&self) -> bool {
         self.frame.is_mapped()
@@ -169,6 +205,9 @@ impl Rendered {
 
     /// What takes the keyboard: the page, which scrolls with the reading keys.
     pub fn key_target(&self) -> gtk::Widget {
+        if let Some(viewer) = self.viewer() {
+            return viewer.key_target();
+        }
         match self.preview.borrow().as_ref() {
             Some(preview) => preview.focus_target().clone(),
             None => self.frame.clone().upcast(),
@@ -188,6 +227,7 @@ impl Rendered {
             if let Some(rendered) = rendered.upgrade() {
                 rendered.frame.set_child(gtk::Widget::NONE);
                 rendered.preview.take();
+                rendered.viewer.take();
             }
         });
     }
@@ -210,7 +250,7 @@ impl App {
                 Some(note) => note.page().clone(),
                 None => return,
             },
-            doc => match doc.as_ref().and_then(Note::of) {
+            doc => match doc.as_ref().and_then(Note::previewed) {
                 Some(note) => match self.rendered_of(note.page()) {
                     Some(rendered) => rendered.page.clone(),
                     None => self.open_rendered(&note, Opened::Kept).page.clone(),
@@ -267,6 +307,7 @@ impl App {
             named: Some(named),
             frame,
             preview: RefCell::new(None),
+            viewer: RefCell::new(None),
             idle: widgets::Debounce::new(crate::preview::idle_for()),
             refresh: widgets::Debounce::new(RENDER),
         });
@@ -320,7 +361,8 @@ impl App {
                 self.mark();
                 tab.goto_pos(at)
             }
-            (None, Note::Editor(_)) => {}
+            // A notebook's rows are its cells' (`notebook_outline_jump`).
+            (None, Note::Editor(_) | Note::Notebook(_)) => {}
         }
     }
 
@@ -344,6 +386,8 @@ impl App {
     }
 
     /// Every preview of the window: the presented note's, and each preview tab's that has one.
+    ///
+    /// A notebook's rendered cells are previews too, a presented notebook's and a preview tab's.
     pub(crate) fn each_preview(&self, mut f: impl FnMut(&Preview)) {
         if let Some(preview) = self.preview.borrow().as_ref() {
             f(preview);
@@ -351,6 +395,29 @@ impl App {
         for rendered in self.rendereds() {
             if let Some(preview) = rendered.preview().as_ref() {
                 f(preview);
+            }
+        }
+        for notebook in self.notebooks().iter().chain(&self.notebook_viewers()) {
+            notebook.each_page(&mut f);
+        }
+    }
+
+    /// The notebooks' preview tabs' views, those that have one.
+    pub(crate) fn notebook_viewers(&self) -> Vec<Rc<NotebookTab>> {
+        self.rendereds().iter().filter_map(|r| r.viewer()).collect()
+    }
+
+    /// An Outline row of notebook `nb`: in its preview tab while that is in front, as a note's
+    /// preview scrolls to a heading rather than moving the note's caret, else at the caret.
+    pub(crate) fn notebook_outline_jump(&self, nb: &Rc<NotebookTab>, (id, at): (CellId, i32)) {
+        let viewer = (self.rendered_in(&self.pane()))
+            .filter(|r| r.is_of(&nb.page))
+            .and_then(|r| r.viewer());
+        match viewer {
+            Some(viewer) => viewer.goto(id, at),
+            None => {
+                self.mark();
+                nb.goto(id, at)
             }
         }
     }
@@ -379,6 +446,20 @@ impl App {
     /// caret, as any render does.
     fn show_rendered(self: &Rc<Self>, rendered: &Rc<Rendered>) {
         rendered.idle.cancel();
+        if let Some(Note::Notebook(nb)) = rendered.note() {
+            if rendered.viewer.borrow().is_none() {
+                let viewer = crate::notebook::viewer(&nb, &rendered.page, &rendered.frame);
+                self.wire_notebook_places(&viewer);
+                let weak = Rc::downgrade(self);
+                viewer.connect_zoom(move |out| {
+                    if let Some(app) = weak.upgrade() {
+                        app.set_zoom(crate::zoom::stepped_zoom(app.zoom.get(), out));
+                    }
+                });
+                *rendered.viewer.borrow_mut() = Some(viewer);
+            }
+            return self.render_rendered(rendered, true);
+        }
         if rendered.preview.borrow().is_none() {
             let found = Rc::downgrade(rendered);
             let preview = self.new_preview(glib::clone!(
@@ -400,24 +481,32 @@ impl App {
     /// Render the note into its preview tab while that is on screen, scrolled to the note's caret
     /// if `follow`.
     pub(crate) fn render_rendered(&self, rendered: &Rendered, follow: bool) {
-        let preview = rendered.preview.borrow();
-        let (Some(preview), Some(note)) = (preview.as_ref(), rendered.note()) else {
+        let Some(note) = rendered.note().filter(|_| rendered.shown()) else {
             return;
         };
-        if !rendered.shown() {
+        // A notebook's view takes the notebook as it is now, and its selected cell's place.
+        if let (Note::Notebook(nb), Some(viewer)) = (&note, rendered.viewer()) {
+            viewer.follow(nb.snapshot());
+            if follow {
+                viewer.show_place_of(nb);
+            }
             return;
         }
-        preview.render(&note.rel(), &note.text());
+        let preview = rendered.preview.borrow();
+        let (Some(preview), Some(text)) = (preview.as_ref(), note.text()) else {
+            return;
+        };
+        preview.render(&note.rel(), &text);
         if let (true, Some(line)) = (follow, note.caret()) {
             preview.scroll_to_line(line);
         }
     }
 
-    /// Render `note`'s preview tab [`RENDER`] after the last edit. It follows the caret while the
-    /// note is on screen too; one changed behind it, as a sync does, leaves the page where it is
-    /// being read.
-    pub(crate) fn queue_rendered(self: &Rc<Self>, note: &Rc<Tab>) {
-        let Some(rendered) = self.rendered_of(&note.page) else {
+    /// Render the preview tab of the note or notebook whose own tab is `page` [`RENDER`] after
+    /// the last change. It follows the caret while the note is on screen too; one changed behind
+    /// it, as a sync does, leaves the page where it is being read.
+    pub(crate) fn queue_rendered(self: &Rc<Self>, page: &adw::TabPage) {
+        let Some(rendered) = self.rendered_of(page) else {
             return;
         };
         let weak = Rc::downgrade(&rendered);
@@ -426,8 +515,7 @@ impl App {
             self,
             move || {
                 if let Some(rendered) = weak.upgrade() {
-                    let follow =
-                        matches!(rendered.note(), Some(Note::Tab(note)) if note.view.is_mapped());
+                    let follow = rendered.note().is_some_and(|note| note.on_screen());
                     app.render_rendered(&rendered, follow);
                 }
             }

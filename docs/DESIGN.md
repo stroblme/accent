@@ -728,7 +728,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 ### Preview
 
 - **A note's preview is a tab of its own** (user decision 2026-10-28): Toggle Preview (`Ctrl+M`) on a note, markdown or org, opens it right of the note in the note's bar, or brings it to the front where it is open, and on the preview goes back to the note, the keyboard going along; side by side is the preview dragged into another pane.
-  One a note, closed by its × or with the note, which a click down the Files tree no longer replaces once it has a preview (the note is kept, Tabs); over anything else Toggle Preview is greyed out.
+  One a note, closed by its × or with the note, which a click down the Files tree no longer replaces once it has a preview (the note is kept, Tabs); over anything but a note or a notebook (Notebook) Toggle Preview is greyed out.
   Its icon is `x-office-presentation-symbolic`, and its title the note's file name; Print…, the exports and Open in Browser on it act on the note.
   It follows the note's edits wherever it is, and the note's caret while the note is on screen too; a note changed behind it, as a sync changes it, leaves the page where it is being read.
   A session puts it back beside its note; another window does not take it, a drag there sending it back with the toast a shell gets.
@@ -895,7 +895,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 ### View modes
 
-- One, the editor: a note's preview is a tab beside it (Preview), and F5 presents one document (Views).
+- One, the editor: a note's or a notebook's preview is a tab beside it (Preview, Notebook), and F5 presents one document (Views).
 
 ### Tabs
 
@@ -1437,6 +1437,11 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 - A Jupyter (`.ipynb`) or marimo notebook in a tab of cells, VS Code's notebook editor (user decision 2026-10-19), its kernel an ipykernel where the vault is (user decision 2026-10-20), or another language's kernelspec (Running): a code cell is a code tab's view in the notebook's language, with its execution count beside it and its stored outputs under it; a markdown cell is a note's styled text, always editable, its attachments under it.
   A markdown cell has no execution count: its text starts where a code cell's code does, and its heading markers hang out into the room the count leaves, as a note's hang into its page margin (user decision 2026-10-22).
+- **A notebook's preview is a tab of its own**, as a note's is (Preview, user decision 2026-11-13): Toggle Preview (`Ctrl+M`) opens it beside the notebook and goes back, and it is the notebook read only, each markdown cell rendered as a note's preview renders it, in the Preview Font, and each code cell read only with its outputs, no cell buttons or strips that add cells.
+  It runs nothing and saves nothing, follows the notebook's edits and outputs wherever it is, and the notebook's caret while the notebook is on screen, once the caret has moved, so outputs coming in leave it where it is read.
+  It reads with the reading keys on its column, Space and Page Down a page on, Shift+Space and Page Up one back, the arrows a step, Home and End to either end, and a click selects a cell without giving it the keyboard.
+  Its find matches what shows, a rendered cell's text as rendered, and an Outline row scrolls it rather than moving the notebook's caret.
+  A rendered cell is built as it comes within a screen of the view, its source holding its place until its page is in, and a link to a heading (`#Part`) goes to that heading in whichever cell has it.
   The cells are one column in one scroller; a cell's editor and its outputs are built as the cell comes within a screen of the view, its text wrapped as its editor will wrap it, a heading at its size, and a blank as tall as the outputs will be at the column's width holding their places until then, and a new editor held at its text's height until it has laid its lines out that far, so the scroll's range keeps still as they are built, and what shows stays still while the cells above it change height (user decision 2026-10-20); a cell scrolled to — a match, a heading, a search hit — stays where it lands while the cells around it are built.
 - An output shows in the first form a widget draws: a PNG, JPEG or SVG picture at its own size up to a column's width, recoloured as an image is (Image); a plain HTML table, a pandas or polars frame's, as a grid; markdown as a note's text; LaTeX typeset as a diagram's formula is, its source where it does not parse; JSON and text in monospace, ANSI colours from the terminal's palette and a progress bar's carriage returns played out, stderr and a traceback tinted.
   A line holding a run of more than 1,000 characters with nowhere to break it wraps between any two characters, as in a text tab (Typography).
@@ -2239,11 +2244,11 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 
 ### Views
 
-- Toggle Preview `Ctrl+M` (a note's preview tab and back, Preview), Toggle Minimap (unbound), Presentation `F5`, which is Continue while a debug session runs (Debugging).
+- Toggle Preview `Ctrl+M` (a note's or a notebook's preview tab and back, Preview and Notebook), Toggle Minimap (unbound), Presentation `F5`, which is Continue while a debug session runs (Debugging).
 - Presentation hides the sidebar, the other panes, the tab bars and both header bars, and shows the note rendered.
   The presented pane stays where it is in the pane tree with the branches beside it hidden, so its find bar and its `Ctrl+Tab` card stay its own and every divider is where it was afterwards; the rendered note is the preview laid over the pane's tabs.
   A tab that draws its own document — a source file, a PDF, a diagram, a notebook, an image, a diff, a terminal, a note's preview tab — is presented as it is; a PDF fits a whole page meanwhile and gets its zoom back afterwards.
-  A presented notebook is read only and runs nothing, its cell buttons and the strips that add cells put away.
+  A presented notebook is read only and runs nothing, its cell buttons and the strips that add cells put away, and its markdown cells rendered as its preview tab renders them (user decision 2026-11-13), their sources back afterwards; the selected code cell's editor keeps the keyboard, and over a rendered cell the notebook reads with the preview tab's reading keys.
   A diagram is a slide deck: each page is fitted as it is shown, Space, Page Down, Right and a wheel notch down go to the next and Shift+Space, Page Up, Left and a notch up to the one before, and leaving gives back its zoom, and its scroll if the page is the one it began on.
   The drawing ring goes away meanwhile, a PDF's and a diagram's alike, and the tool in hand is put down (a PDF back to reading, a diagram to select), a diagram's label being edited finished and its selection let go, so a click never draws on what is presented; leaving brings the ring back as it was, with no tool in hand.
   A presented diagram is read only: a click selects nothing, a drag moves the page rather than what is on it, its menu stays shut and its keys do nothing but page, `Ctrl+G` going to a page as it does over a PDF, so only paging, zoom and panning are left.

@@ -32,7 +32,6 @@ use gtk::{gdk, gio, glib};
 use pulldown_cmark::{Event, Tag as Cm};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 use text::{Facts, Href, Ink, Tags};
@@ -45,7 +44,23 @@ pub fn idle_for() -> Duration {
 
 /// The window's image keys a preview reads: the images inverted, the diagrams whose pictures on
 /// the web are drawn.
-type Keys = Rc<RefCell<HashSet<String>>>;
+pub(crate) type Keys = Rc<RefCell<HashSet<String>>>;
+
+/// What a page reaches in the window: assets through `resolve`, the inverted and web images'
+/// keys, links through `on_open`, tags through `on_tag`, a link to a search's results through
+/// `on_search`, Invert Image Colours through `on_invert`, and `search` for its saved searches.
+/// One for every page of a window, a notebook's rendered cells sharing it.
+#[derive(Clone)]
+pub struct Wiring {
+    pub resolve: std::sync::Arc<crate::assets::Resolve>,
+    pub inverted: Keys,
+    pub web: Keys,
+    pub on_open: Rc<dyn Fn(&str)>,
+    pub on_tag: Rc<dyn Fn(&str)>,
+    pub on_search: Rc<dyn Fn(&str)>,
+    pub on_invert: Rc<dyn Fn(&str)>,
+    pub search: SavedSearch,
+}
 
 /// How long one batch of a first render may hold the main loop.
 const BATCH: Duration = Duration::from_millis(8);
@@ -124,18 +139,24 @@ struct Page {
     pub px: Cell<f64>,
     pub figures: figure::Figures,
     on_open: Rc<dyn Fn(&str)>,
-    on_tag: Box<dyn Fn(&str)>,
-    on_search: Box<dyn Fn(&str)>,
+    on_tag: Rc<dyn Fn(&str)>,
+    on_search: Rc<dyn Fn(&str)>,
     /// What answers the page's saved searches, and their blocks on show (`saved`).
     search: SavedSearch,
     saved: RefCell<Vec<Rc<saved::Block>>>,
     /// The vault changed while the page was out of sight, so its saved searches ask once shown.
     saved_dirty: Cell<bool>,
     saved_soon: crate::widgets::Debounce,
-    clamp: adw::ClampScrollable,
-    scroller: gtk::ScrolledWindow,
-    /// The page, or the failure page in its place once a render's worker panicked.
-    frame: gtk::Stack,
+    /// The scroller a page of its own stands in; `None` for an inline page ([`Preview::inline`]).
+    frame: Option<Frame>,
+    /// An inline page's owner, told when a render settles and asked for an anchor in another
+    /// cell; its room left and right of the text, which the owner sets as it sets its font.
+    settled_hook: crate::widgets::Hook<dyn Fn()>,
+    anchor_hook: crate::widgets::Hook<dyn Fn(&str)>,
+    margins: Cell<(i32, i32)>,
+    /// An inline page's last line break is taken out while the render is settled, so it ends with
+    /// its text rather than an empty line ([`Page::trim`]).
+    trimmed: Cell<bool>,
     pub zoom: Cell<f64>,
     /// The share of the view in percent, `None` under Full-Width Preview.
     column: Cell<Option<u32>>,
@@ -161,37 +182,27 @@ struct Page {
     patched: Cell<(usize, usize)>,
 }
 
+/// The scroller a page of its own stands in, in the editor's frame (`editor/open.rs`).
+struct Frame {
+    clamp: adw::ClampScrollable,
+    scroller: gtk::ScrolledWindow,
+    /// The page, or the failure page in its place once a render's worker panicked.
+    stack: gtk::Stack,
+}
+
 pub struct Preview {
-    /// [`Page::frame`], the page in the editor's frame (`editor/open.rs`): an overlay over the
-    /// scroller, with a zero-size area laid over it that reports the width the column is a share
-    /// of.
+    /// [`Frame::stack`], over an overlay over the scroller, with a zero-size area laid over it
+    /// that reports the width the column is a share of; an inline page's view itself.
     root: gtk::Widget,
     page: Rc<Page>,
     find: Find,
 }
 
 impl Preview {
-    /// A preview resolving assets through `resolve` and following links through `on_open`, tags
-    /// through `on_tag`, a link to a search's results through `on_search` and Invert Image
-    /// Colours through `on_invert`; `search` answers its saved searches.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        resolve: impl Fn(&str) -> Option<(String, PathBuf)> + Send + Sync + 'static,
-        inverted: Keys,
-        web: Keys,
-        on_open: impl Fn(&str) + 'static,
-        on_tag: impl Fn(&str) + 'static,
-        on_search: impl Fn(&str) + 'static,
-        on_invert: impl Fn(&str) + 'static,
-        search: SavedSearch,
-    ) -> Preview {
+    /// A page of its own in its scroller, wired to the window by `wiring`.
+    pub fn new(wiring: &Wiring) -> Preview {
         let view = PreviewView::new();
-        view.add_css_class("accent-doc");
         view.set_widget_name(&editor::next_view_name());
-        let buffer = view.buffer();
-        if let Some(source) = buffer.downcast_ref::<sourceview5::Buffer>() {
-            editor::sync_scheme(source);
-        }
         let clamp = adw::ClampScrollable::builder()
             .child(&view)
             .unit(adw::LengthUnit::Px)
@@ -213,8 +224,75 @@ impl Preview {
             .transition_duration(crate::widgets::FADE_MS)
             .build();
         crate::loading::put(&frame, &overlay);
+        let page = Page::new(
+            view,
+            wiring,
+            Some(Frame {
+                clamp,
+                scroller,
+                stack: frame,
+            }),
+        );
+        width.connect_resize(glib::clone!(
+            #[weak]
+            page,
+            move |_, _, _| page.set_clamp()
+        ));
+        // A reader scrolling into a render under way finds its tables in place.
+        if let Some(frame) = &page.frame {
+            frame
+                .scroller
+                .vadjustment()
+                .connect_value_changed(glib::clone!(
+                    #[weak]
+                    page,
+                    move |_| page.attach_waiting()
+                ));
+        }
+        page.set_zoom(1.0);
+        page.restyle();
+        let root = page.frame.as_ref().map(|f| f.stack.clone().upcast());
+        Preview {
+            root: root.expect("a page of its own has its frame"),
+            find: Find::new(&page),
+            page,
+        }
+    }
 
-        let figures = figure::Figures::new(&view, resolve, inverted, web, on_invert);
+    /// A page with no scroller of its own, in a notebook's rendered markdown cell: as tall as its
+    /// text, its font the notebook's rule for `.accent-preview`, its margins set by
+    /// [`set_margins`](Self::set_margins).
+    pub fn inline(wiring: &Wiring) -> Preview {
+        let view = PreviewView::new();
+        view.add_css_class("accent-preview");
+        let page = Page::new(view, wiring, None);
+        page.set_zoom(1.0);
+        page.restyle();
+        Preview {
+            root: page.view.clone().upcast(),
+            find: Find::new(&page),
+            page,
+        }
+    }
+}
+
+impl Page {
+    /// The state of a page showing in `view`, standing in `frame` or inline.
+    fn new(view: PreviewView, wiring: &Wiring, frame: Option<Frame>) -> Rc<Page> {
+        view.add_css_class("accent-doc");
+        let buffer = view.buffer();
+        if let Some(source) = buffer.downcast_ref::<sourceview5::Buffer>() {
+            editor::sync_scheme(source);
+        }
+        let resolve = wiring.resolve.clone();
+        let on_invert = wiring.on_invert.clone();
+        let figures = figure::Figures::new(
+            &view,
+            move |rel: &str| resolve(rel),
+            wiring.inverted.clone(),
+            wiring.web.clone(),
+            move |key: &str| on_invert(key),
+        );
         let page = Rc::new(Page {
             tags: Tags::new(&buffer.tag_table()),
             view,
@@ -222,16 +300,18 @@ impl Preview {
             ink: Rc::default(),
             px: Cell::new(font_px(&crate::platform::document_font(), 1.0)),
             figures,
-            on_open: Rc::new(on_open),
-            on_tag: Box::new(on_tag),
-            on_search: Box::new(on_search),
-            search,
+            on_open: wiring.on_open.clone(),
+            on_tag: wiring.on_tag.clone(),
+            on_search: wiring.on_search.clone(),
+            search: wiring.search.clone(),
             saved: RefCell::default(),
             saved_dirty: Cell::new(false),
             saved_soon: crate::widgets::Debounce::new(saved::SETTLE),
-            clamp,
-            scroller,
             frame,
+            settled_hook: Default::default(),
+            anchor_hook: Default::default(),
+            margins: Cell::new((0, 0)),
+            trimmed: Cell::new(false),
             zoom: Cell::new(1.0),
             column: Cell::new(None),
             prose_font: RefCell::default(),
@@ -248,11 +328,6 @@ impl Preview {
             #[cfg(feature = "bench")]
             patched: Cell::default(),
         });
-        width.connect_resize(glib::clone!(
-            #[weak]
-            page,
-            move |_, _, _| page.set_clamp()
-        ));
         page.view.on_width(glib::clone!(
             #[weak]
             page,
@@ -278,14 +353,6 @@ impl Preview {
             page,
             move |href| page.follow(href)
         ));
-        // A reader scrolling into a render under way finds its tables in place.
-        page.scroller
-            .vadjustment()
-            .connect_value_changed(glib::clone!(
-                #[weak]
-                page,
-                move |_| page.attach_waiting()
-            ));
         page.view.on_copy(glib::clone!(
             #[weak]
             page,
@@ -301,15 +368,11 @@ impl Preview {
             }
         ));
         wire(&page);
-        page.set_zoom(1.0);
-        page.restyle();
-        Preview {
-            root: page.frame.clone().upcast(),
-            find: Find::new(&page),
-            page,
-        }
+        page
     }
+}
 
+impl Preview {
     pub fn widget(&self) -> &gtk::Widget {
         &self.root
     }
@@ -399,6 +462,45 @@ impl Preview {
     pub fn connect_found(&self, f: impl Fn(&str) + 'static) {
         self.find.connect_found(f);
     }
+
+    /// Whether the latest render is all in.
+    pub fn settled(&self) -> bool {
+        self.page.settled.get()
+    }
+
+    pub fn buffer(&self) -> gtk::TextBuffer {
+        self.page.buffer.clone()
+    }
+
+    /// An inline page's view.
+    pub fn text_view(&self) -> gtk::TextView {
+        self.page.view.clone().upcast()
+    }
+
+    /// An inline page's room around its text: `left` and `right` of it, and above and below.
+    pub fn set_margins(&self, left: i32, right: i32, top: i32, bottom: i32) {
+        self.page.margins.set((left, right));
+        self.page.view.set_top_margin(top);
+        self.page.view.set_bottom_margin(bottom);
+        self.page.set_zoom(self.page.zoom.get());
+    }
+
+    /// Call `f` each time a render has all gone in.
+    pub fn connect_settled(&self, f: impl Fn() + 'static) {
+        self.page.settled_hook.set(Rc::new(f));
+    }
+
+    /// Hand a link to an anchor (`#heading`) to `f`, where an inline page's owner finds it in
+    /// another cell, rather than looking for it on the page alone.
+    pub fn connect_anchor(&self, f: impl Fn(&str) + 'static) {
+        self.page.anchor_hook.set(Rc::new(f));
+    }
+
+    /// Where source line `line` (1-based) shows: the start of the element it is in, the page's
+    /// start above every block.
+    pub fn iter_of_line(&self, line: u32) -> gtk::TextIter {
+        (self.page.iter_of_line(line)).map_or(self.page.buffer.start_iter(), |(at, _)| at)
+    }
 }
 
 impl Drop for Preview {
@@ -421,12 +523,13 @@ impl Page {
     /// line's end for the cursor (`SPACE_FOR_CURSOR`), by which a table as wide as the rest
     /// widened the page. Before the view is laid out, the column's cap.
     fn text_width(&self) -> i32 {
-        let column = match self.view.width() {
-            0 => self
+        let column = match (self.view.width(), &self.frame) {
+            (0, Some(frame)) => frame
                 .clamp
                 .maximum_size()
-                .min(self.scroller.width().max(600)),
-            width => width,
+                .min(frame.scroller.width().max(600)),
+            (0, None) => 600,
+            (width, _) => width,
         };
         (column - self.view.left_margin() - self.view.right_margin() - 1).max(1)
     }
@@ -448,22 +551,36 @@ impl Page {
     }
 
     fn set_clamp(&self) {
+        let Some(frame) = &self.frame else {
+            return;
+        };
         let max = match self.column.get() {
-            Some(percent) => editor::column_max(self.scroller.width(), percent, self.zoom.get()),
+            Some(percent) => editor::column_max(frame.scroller.width(), percent, self.zoom.get()),
             None => i32::MAX / 4,
         };
-        self.clamp.set_maximum_size(max);
-        self.clamp.set_tightening_threshold(max * 3 / 4);
+        frame.clamp.set_maximum_size(max);
+        frame.clamp.set_tightening_threshold(max * 3 / 4);
     }
 
+    /// The zoom, and the font and margins at it: a page of its own installs its font rule and
+    /// takes the editor's margins, while an inline page's owner sets both.
     fn set_zoom(&self, zoom: f64) {
         self.zoom.set(zoom);
-        editor::set_margins(self.view.upcast_ref(), zoom);
-        let name = self.view.widget_name();
-        let note = Flavour::Note(Syntax::Markdown);
         let font = self.prose_font.borrow().clone();
         let font = font.unwrap_or_else(crate::platform::document_font);
-        editor::install_font(&self.font, note, Some(&font), zoom, &name);
+        match self.frame {
+            Some(_) => {
+                editor::set_margins(self.view.upcast_ref(), zoom);
+                let name = self.view.widget_name();
+                let note = Flavour::Note(Syntax::Markdown);
+                editor::install_font(&self.font, note, Some(&font), zoom, &name);
+            }
+            None => {
+                let (left, right) = self.margins.get();
+                self.view.set_left_margin(left);
+                self.view.set_right_margin(right);
+            }
+        }
         editor::refont(&self.view);
         self.px.set(font_px(&font, zoom));
         let context = self.view.pango_context();
@@ -535,7 +652,10 @@ impl Page {
                 Ok(laid) => laid,
                 Err(why) => return page.fail(&why),
             };
-            crate::loading::show(&page.frame);
+            if let Some(frame) = &page.frame {
+                crate::loading::show(&frame.stack);
+            }
+            page.untrim();
             match another || !page.whole.get() {
                 true => page.show(laid, source, generation),
                 false => {
@@ -549,12 +669,21 @@ impl Page {
     /// The render's worker panicked: the failure page in the page's place, saying what the panic
     /// said, as a file that fails to load does (DESIGN.md, Loading). Retry renders the note again,
     /// and so does any render of it, which takes the failure page down once it goes through.
+    ///
+    /// An inline page shows its source as plain text instead, having no room for a failure page.
     fn fail(self: &Rc<Self>, why: &str) {
+        let Some(frame) = &self.frame else {
+            tracing::warn!("preview: cannot render a cell: {why}");
+            let text = self.note.borrow().1.clone();
+            self.clear();
+            self.buffer.set_text(&text);
+            return self.settle();
+        };
         let (rel, text) = self.note.replace((String::new(), "".into()));
         let title = format!("Cannot Preview {}", crate::doc::file_name(&rel));
         let page = Rc::downgrade(self);
         let why = crate::loading::sentence(why);
-        crate::loading::failed(&self.frame, &title, &why, move || {
+        crate::loading::failed(&frame.stack, &title, &why, move || {
             if let Some(page) = page.upgrade() {
                 page.render(&rel, &text);
             }
@@ -566,16 +695,37 @@ impl Page {
             self.buffer.delete_mark(&shown.mark);
         }
         self.buffer.set_text("");
+        self.trimmed.set(false);
         self.defer.set(false);
         self.waiting.borrow_mut().clear();
         self.saved.borrow_mut().clear();
+    }
+
+    /// An inline page's last line break out, which every block ends with: a page of its own ends
+    /// in an empty line nobody sees, a cell would show it as room under its text.
+    fn trim(&self) {
+        let mut end = self.buffer.end_iter();
+        let mut last = end;
+        if !self.trimmed.get() && last.backward_char() && last.char() == '\n' {
+            self.buffer.delete(&mut last, &mut end);
+            self.trimmed.set(true);
+        }
+    }
+
+    /// The line break [`trim`](Self::trim) took out back, before a render writes the page.
+    fn untrim(&self) {
+        if self.trimmed.replace(false) {
+            self.buffer.insert(&mut self.buffer.end_iter(), "\n");
+        }
     }
 
     /// Another note: the view cleared, then `laid` put in from the top by batches.
     fn show(self: &Rc<Self>, laid: Vec<Laid>, source: Rc<str>, generation: u64) {
         self.clear();
         self.whole.set(false);
-        self.scroller.vadjustment().set_value(0.0);
+        if let Some(frame) = &self.frame {
+            frame.scroller.vadjustment().set_value(0.0);
+        }
         let mut laid = laid.into_iter().peekable();
         let mut first = true;
         let page = Rc::downgrade(self);
@@ -708,6 +858,13 @@ impl Page {
     fn settle(self: &Rc<Self>) {
         self.settled.set(true);
         code::settled();
+        if self.frame.is_none() {
+            text::collapse_top(self);
+            self.trim();
+        }
+        if let Some(hook) = self.settled_hook.get() {
+            hook();
+        }
         if self.pending.get().is_none() {
             return;
         }
@@ -729,24 +886,28 @@ impl Page {
             }
             return;
         }
-        let at = {
-            let shown = self.shown.borrow();
-            match shown.partition_point(|s| s.laid.block.lines.start <= line) {
-                0 => None,
-                i => {
-                    let s = &shown[i - 1];
-                    let within = line - s.laid.block.lines.start;
-                    let first = s.facts.lines.first().map_or(0, |l| l.1);
-                    let offset = (s.facts.lines.iter().rev())
-                        .find(|(at, _)| *at <= within)
-                        .map_or(first, |l| l.1);
-                    let start = self.buffer.iter_at_mark(&s.mark).offset();
-                    // The page's first element is its top, margin included.
-                    (i > 1 || offset > first).then(|| self.buffer.iter_at_offset(start + offset))
-                }
+        let at = self.iter_of_line(line).filter(|(_, top)| !top);
+        self.jump(at.map(|(at, _)| at));
+    }
+
+    /// Where source line `line` (1-based) shows: the start of the element it is in, and whether
+    /// that is the page's first element, whose top is the page's own. `None` above every block.
+    fn iter_of_line(&self, line: u32) -> Option<(gtk::TextIter, bool)> {
+        let shown = self.shown.borrow();
+        match shown.partition_point(|s| s.laid.block.lines.start <= line) {
+            0 => None,
+            i => {
+                let s = &shown[i - 1];
+                let within = line - s.laid.block.lines.start;
+                let first = s.facts.lines.first().map_or(0, |l| l.1);
+                let offset = (s.facts.lines.iter().rev())
+                    .find(|(at, _)| *at <= within)
+                    .map_or(first, |l| l.1);
+                let start = self.buffer.iter_at_mark(&s.mark).offset();
+                let top = i == 1 && offset <= first;
+                Some((self.buffer.iter_at_offset(start + offset), top))
             }
-        };
-        self.jump(at);
+        }
     }
 
     /// Scroll once the view is laid out, from an idle after its first frame, as the editor's
@@ -776,7 +937,10 @@ impl Page {
     /// way. Set at once, the line is the view's first paragraph, which GTK keeps in place while
     /// it measures the rest; a wheel's easing under way gives way to it.
     fn jump(&self, at: Option<gtk::TextIter>) {
-        let vadj = self.scroller.vadjustment();
+        let Some(frame) = &self.frame else {
+            return;
+        };
+        let vadj = frame.scroller.vadjustment();
         let Some(at) = at else {
             return vadj.set_value(vadj.lower());
         };
@@ -852,7 +1016,11 @@ impl Page {
             Click::Search(query) => (self.on_search)(&query),
             Click::Scroll => {
                 if let Some((_, id)) = uri.split_once('#') {
-                    self.scroll_to_id(&markdown::percent_decode(id));
+                    let id = markdown::percent_decode(id);
+                    match self.anchor_hook.get() {
+                        Some(hook) => hook(&id),
+                        None => self.scroll_to_id(&id),
+                    }
                 }
             }
             Click::Leave => {
@@ -988,13 +1156,9 @@ fn wire(page: &Rc<Page>) {
 /// What a drill reads of the page.
 #[cfg(feature = "bench")]
 impl Preview {
-    pub fn settled(&self) -> bool {
-        self.page.settled.get()
-    }
-
     /// The failure page's title and description, while it is the one shown.
     pub fn failure(&self) -> Option<(String, String)> {
-        let frame = &self.page.frame;
+        let frame = &self.page.frame.as_ref()?.stack;
         if frame.visible_child_name().as_deref() != Some(crate::loading::FAILED) {
             return None;
         }
@@ -1004,7 +1168,8 @@ impl Preview {
 
     /// The failure page's Retry, clicked.
     pub fn retry(&self) {
-        let failed = self.page.frame.child_by_name(crate::loading::FAILED);
+        let failed =
+            (self.page.frame.as_ref()).and_then(|f| f.stack.child_by_name(crate::loading::FAILED));
         let status = failed.and_downcast::<adw::StatusPage>();
         if let Some(button) = status.and_then(|s| s.child()).and_downcast::<gtk::Button>() {
             button.emit_clicked();
@@ -1012,16 +1177,12 @@ impl Preview {
     }
 
     pub fn scroll_y(&self) -> f64 {
-        self.page.scroller.vadjustment().value()
+        (self.page.frame.as_ref()).map_or(0.0, |f| f.scroller.vadjustment().value())
     }
 
     /// Blocks kept and written by the last patch.
     pub fn patched(&self) -> (usize, usize) {
         self.page.patched.get()
-    }
-
-    pub fn buffer(&self) -> gtk::TextBuffer {
-        self.page.buffer.clone()
     }
 
     /// The pictures on the page, and how many reads they took.

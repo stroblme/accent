@@ -110,6 +110,19 @@ pub struct NotebookTab {
     /// A press in a cell is being handled: the caret it puts down is under the pointer.
     pressing: Cell<bool>,
     presenting: Cell<bool>,
+    /// A notebook's preview tab's view of it (`rendered.rs`): always read, as a presented notebook
+    /// is, its markdown cells rendered, and fed the notebook as it changes ([`follow`]).
+    ///
+    /// [`follow`]: Self::follow
+    viewer: bool,
+    /// What a rendered cell's page reaches in the window, set by it.
+    wiring: RefCell<Option<crate::preview::Wiring>>,
+    /// The notebook's caret a viewer last followed ([`show_place_of`]), its cell and line.
+    ///
+    /// [`show_place_of`]: Self::show_place_of
+    followed: Cell<Option<(CellId, i32)>>,
+    /// The editor font and the Preview Font, `None` the system's, which the font rule is made of.
+    fonts: RefCell<(Option<String>, Option<String>)>,
     /// The kernel its runs go to, and what they changed (`kernel`).
     kernel: kernel::Hold,
     /// The notebook's fonts at its zoom, one rule for all its cells.
@@ -142,6 +155,16 @@ pub struct NotebookTab {
     focus: focus::State,
 }
 
+impl Drop for NotebookTab {
+    /// Take the font rule off the display, as a closed editor tab does: a preview tab's view is
+    /// made again each time the tab comes back into sight.
+    fn drop(&mut self) {
+        if let (Some(display), Some(provider)) = (gdk::Display::default(), self.font.take()) {
+            gtk::style_context_remove_provider_for_display(&display, &provider);
+        }
+    }
+}
+
 /// The tab `held` up for `key`, showing `notebook` as it was read, at its etag and digest.
 pub fn open(
     key: &str,
@@ -150,6 +173,47 @@ pub fn open(
     tooltip: &str,
     held: &crate::loading::Held,
     (notebook, etag, digest): (Notebook, Etag, Digest),
+) -> Rc<NotebookTab> {
+    let save = SaveState::at(etag, digest);
+    let tab = build(key, path, notebook, save, |host| held.fill(host), false);
+    tab.page.set_title(title);
+    tab.page.set_tooltip(tooltip);
+    crate::doc::set_file_icon(&tab.page, key);
+    tab
+}
+
+/// The read-only view of `source` in its preview tab `page`, whose child `frame` holds it: the
+/// notebook as it is now, which [`NotebookTab::follow`] keeps up with.
+pub fn viewer(source: &NotebookTab, page: &adw::TabPage, frame: &adw::Bin) -> Rc<NotebookTab> {
+    let host = |host: &gtk::Box| {
+        frame.set_child(Some(host));
+        page.clone()
+    };
+    let save = SaveState::default();
+    let tab = build(
+        &source.key(),
+        &source.path(),
+        source.snapshot(),
+        save,
+        host,
+        true,
+    );
+    tab.set_wiring(source.wiring.borrow().clone());
+    let (font, preview) = source.fonts.borrow().clone();
+    tab.fonts.borrow_mut().1 = preview;
+    tab.set_font(font.as_deref(), source.zoom.get());
+    tab
+}
+
+/// The tab for `key` at `path` showing `notebook`, its page the one `page` gives for its widget, a
+/// viewer's or a notebook's own.
+fn build(
+    key: &str,
+    path: &Path,
+    notebook: Notebook,
+    save: SaveState,
+    page: impl FnOnce(&gtk::Box) -> adw::TabPage,
+    viewer: bool,
 ) -> Rc<NotebookTab> {
     cell::install_css();
     let (head, add_code, add_markdown) = cell::inserter();
@@ -181,10 +245,7 @@ pub fn open(
     let host = gtk::Box::new(gtk::Orientation::Vertical, 0);
     host.append(&banner);
     host.append(&scroller);
-    let page = held.fill(&host);
-    page.set_title(title);
-    page.set_tooltip(tooltip);
-    crate::doc::set_file_icon(&page, key);
+    let page = page(&host);
 
     let language = crate::editor::language_for(&format!("cell{}", notebook.extension()), "");
     let tab = Rc::new(NotebookTab {
@@ -225,11 +286,15 @@ pub fn open(
         replaying: Cell::new(false),
         pressing: Cell::new(false),
         presenting: Cell::new(false),
+        viewer,
+        wiring: RefCell::default(),
+        followed: Cell::new(None),
+        fonts: RefCell::default(),
         kernel: kernel::Hold::default(),
         font: RefCell::default(),
         zoom: Rc::new(Cell::new(1.0)),
         refit_after_layout: Cell::new(false),
-        save: SaveState::at(etag, digest),
+        save,
         autosave: Debounce::new(crate::editor::AUTOSAVE),
         monitor: RefCell::default(),
         on_history: Hook::default(),
@@ -245,6 +310,7 @@ pub fn open(
         focus: focus::State::default(),
     });
     tab.gutter.set(cell::count_width(&tab.scroller));
+    tab.head.set_visible(!viewer);
     overlay.add_overlay(&tab.tools.bar);
     let rail = tab.tools.rail.clone();
     overlay.connect_get_child_position(move |overlay, bar| {
@@ -277,6 +343,7 @@ pub fn open(
     tab.wire_tools(&gap_code, &gap_markdown);
     tab.wire_building();
     tab.wire_keys(&host);
+    tab.wire_reading();
     tab.wire_outside();
     let pointer = crate::zoom::track_pointer(&tab.scroller);
     crate::zoom::zoom_on_wheel(
@@ -316,18 +383,31 @@ impl NotebookTab {
             .map(|cell| cell.kind)
     }
 
-    /// The widget the keys go to: the selected cell's editor, else the first.
+    /// The widget the keys go to: the selected cell's editor, else the first; the column, which
+    /// reads with the reading keys, in a viewer and over a rendered cell.
     pub fn key_target(self: &Rc<Self>) -> gtk::Widget {
         let first = || self.views.borrow().first().map(|v| v.id);
-        match self
-            .selected
-            .get()
-            .or_else(first)
-            .and_then(|id| self.editor(id))
-        {
+        let id = self.selected.get().or_else(first);
+        if self.viewer || id.is_some_and(|id| self.renders(id)) {
+            return self.column.clone().upcast();
+        }
+        match id.and_then(|id| self.editor(id)) {
             Some((_, editor)) => editor.view.upcast(),
             None => self.scroller.clone().upcast(),
         }
+    }
+
+    /// Whether the notebook is only read: a viewer, or presented.
+    fn reading(&self) -> bool {
+        self.viewer || self.presenting.get()
+    }
+
+    /// Whether cell `id` is read rendered: a markdown cell of a notebook being read.
+    fn renders(&self, id: CellId) -> bool {
+        self.reading()
+            && self
+                .view_of(Some(id))
+                .is_some_and(|v| v.kind == Kind::Markdown)
     }
 
     /// A rename landed: follow the file.
@@ -410,6 +490,7 @@ impl NotebookTab {
                 }
                 self.source_changed(&view, &source);
             }
+            view.render_source(&self.key(), &source);
             views.push(view);
         }
         for gone in old {
@@ -423,7 +504,7 @@ impl NotebookTab {
             }
             self.column.reorder_child_after(&view.root, Some(&before));
             before = view.root.clone().upcast();
-            view.set_presenting(self.presenting.get());
+            view.set_presenting(self.reading());
             view.set_selected(Some(view.id) == self.selected.get());
         }
         if self.fade_new.get() {
@@ -520,7 +601,9 @@ impl NotebookTab {
             at.map(|at| model.cells()[at].source().to_string())
                 .unwrap_or_default()
         };
-        let editor = view.build_editor(&source, self.language.as_ref(), self.presenting.get());
+        let editor = view.build_editor(&source, self.language.as_ref(), self.reading());
+        // A viewer's cells take no keyboard: its column reads with the reading keys.
+        editor.view.set_focusable(!self.viewer);
         editor.view.set_tab_width(self.indent.get());
         crate::editor::refont(&editor.view);
         // A key that takes the caret far within the cell leaves a place to come back to; a click
@@ -768,7 +851,7 @@ impl NotebookTab {
     }
 
     fn walk(self: &Rc<Self>, back: bool) {
-        if self.presenting.get() {
+        if self.reading() {
             return;
         }
         self.flush_pending();
@@ -851,7 +934,7 @@ impl NotebookTab {
 
     /// Make a cell operation through the model, on the history as one step.
     fn operate(self: &Rc<Self>, op: impl FnOnce(&mut Notebook) -> Option<Vec<Edit>>) -> bool {
-        if self.presenting.get() {
+        if self.reading() {
             return false;
         }
         self.flush_pending();
@@ -1120,7 +1203,7 @@ impl NotebookTab {
     /// The buttons over the cell under the pointer, else the selected one, and the add strip in
     /// the gap under the pointer; neither while presented.
     fn place(&self) {
-        let shown = |id: Option<CellId>| match self.presenting.get() {
+        let shown = |id: Option<CellId>| match self.reading() {
             true => None,
             false => self.view_of(id),
         };
@@ -1144,14 +1227,134 @@ impl NotebookTab {
 
     // ------------------------------------------------------------------------- window state
 
-    /// Read only, the buttons and the inserters away, while presented.
+    /// Read only, the buttons and the inserters away, and the markdown cells rendered, while
+    /// presented; their pages go afterwards, the cells' sources showing again.
     pub fn set_presenting(self: &Rc<Self>, on: bool) {
-        self.presenting.set(on);
-        self.head.set_visible(!on);
-        for view in self.views.borrow().iter() {
-            view.set_presenting(on);
+        if self.viewer || self.presenting.replace(on) == on {
+            return;
         }
+        self.head.set_visible(!on);
+        let views = self.views.borrow().clone();
+        for view in &views {
+            view.set_presenting(on);
+            if !on {
+                view.drop_rendered();
+            }
+        }
+        // The cells in view at once, so presenting shows them rendered from its first frames.
+        if on {
+            for view in self.near.borrow().clone() {
+                self.render_cell(&view);
+            }
+        }
+        self.built_at.set(-1);
+        self.scroller.queue_allocate();
+        self.find_changed();
         self.place_soon();
+    }
+
+    /// A viewer takes the notebook as it is now, `notebook` its source's snapshot: each cell's
+    /// text and rendered page brought up to date, and a code cell's outputs drawn again from the
+    /// first that changed, so a stream that grew only grows.
+    pub fn follow(self: &Rc<Self>, notebook: Notebook) {
+        let old = self.model.replace(notebook);
+        self.reconcile();
+        {
+            let model = self.model.borrow();
+            for cell in model.cells() {
+                let Some(view) = self.view_of(Some(cell.id())) else {
+                    continue;
+                };
+                view.set_count(&cell::count_label(cell));
+                let was = old.position(cell.id()).map(|at| &old.cells()[at]);
+                let Some(was) =
+                    was.filter(|was| was.kind() == Kind::Code && cell.kind() == Kind::Code)
+                else {
+                    continue;
+                };
+                let (was, now) = (was.outputs(), cell.outputs());
+                let from = was.iter().zip(now).take_while(|(a, b)| a == b).count();
+                if from < was.len().max(now.len()) {
+                    view.outputs.show(from, &now[from..]);
+                }
+            }
+        }
+        self.find_changed();
+    }
+
+    /// Whether the notebook is on screen.
+    pub fn on_screen(&self) -> bool {
+        self.scroller.is_mapped()
+    }
+
+    /// Follow `source`'s caret in a viewer, as a note's preview follows its note's: the cell it
+    /// is in selected and its line a quarter down the view, once it has moved since last time,
+    /// so outputs coming in leave the view where it is read.
+    pub fn show_place_of(self: &Rc<Self>, source: &Rc<NotebookTab>) {
+        let Some(id) = source.selected.get() else {
+            return;
+        };
+        let caret = source.view_of(Some(id)).and_then(|v| v.editor().cloned());
+        let line = caret.map_or(0, |e| e.buffer.iter_at_mark(&e.buffer.get_insert()).line());
+        if self.followed.replace(Some((id, line))) == Some((id, line)) {
+            return;
+        }
+        self.select(id);
+        if let Some((_, editor)) = self.editor(id) {
+            let buffer = &editor.buffer;
+            buffer.place_cursor(&buffer.iter_at_line(line).unwrap_or(buffer.start_iter()));
+        }
+        self.show(id, Some(0.25));
+    }
+
+    /// What a rendered cell's page reaches in the window.
+    pub fn set_wiring(&self, wiring: Option<crate::preview::Wiring>) {
+        self.wiring.replace(wiring);
+    }
+
+    /// Render markdown cell `view` on a page of its own, if the notebook is read and it has
+    /// none: its source shows until the page has settled.
+    fn render_cell(self: &Rc<Self>, view: &Rc<CellView>) {
+        if !self.renders(view.id) || view.has_rendered() {
+            return;
+        }
+        let Some(wiring) = self.wiring.borrow().clone() else {
+            return;
+        };
+        let page = crate::preview::Preview::inline(&wiring);
+        let (_, font) = self.fonts.borrow().clone();
+        page.set_font(font.as_deref());
+        page.set_zoom(self.zoom.get());
+        let (cell, tab) = (Rc::downgrade(view), Rc::downgrade(self));
+        page.connect_settled(move || {
+            let (Some(cell), Some(tab)) = (cell.upgrade(), tab.upgrade()) else {
+                return;
+            };
+            // From an idle: the page is still settling, and its height asks for a layout.
+            glib::idle_add_local_once(move || {
+                cell.reveal_rendered();
+                tab.find_changed();
+            });
+        });
+        let weak = Rc::downgrade(self);
+        page.connect_anchor(move |anchor| {
+            if let Some(tab) = weak.upgrade() {
+                tab.goto_heading(anchor);
+            }
+        });
+        let source = {
+            let model = self.model.borrow();
+            let at = model.position(view.id);
+            at.map(|at| model.cells()[at].source().to_string())
+        };
+        view.set_rendered(page, &self.key(), &source.unwrap_or_default());
+    }
+
+    /// Run `f` on each rendered cell's page: what the window does to every preview.
+    pub fn each_page(&self, f: &mut dyn FnMut(&crate::preview::Preview)) {
+        for view in self.views.borrow().iter() {
+            view.with_rendered(|page| f(page));
+        }
     }
 
     /// The theme, or Preferences' Images switch, changed: the editors' schemes, the markdown's
@@ -1170,6 +1373,16 @@ impl NotebookTab {
         self.restyle_language();
     }
 
+    /// Preferences' Preview Font, which a rendered cell's prose is set in.
+    pub fn set_preview_font(&self, font: Option<&str>) {
+        if self.fonts.borrow().1.as_deref() == font {
+            return;
+        }
+        self.fonts.borrow_mut().1 = font.map(str::to_string);
+        let editor = self.fonts.borrow().0.clone();
+        self.set_font(editor.as_deref(), self.zoom.get());
+    }
+
     /// The editor font and the document zoom, one rule for every cell.
     pub fn set_font(&self, font: Option<&str>, zoom: f64) {
         // What shows stays where it is as the cells take the heights of a new zoom, read while
@@ -1186,12 +1399,19 @@ impl NotebookTab {
             gtk::style_context_remove_provider_for_display(&display, &old);
         }
         let name = self.column.widget_name();
+        self.fonts.borrow_mut().0 = font.map(str::to_string);
         let doc = font
             .filter(|f| !f.is_empty())
             .map_or_else(crate::editor::default_font, str::to_string);
         let mono = crate::platform::monospace_font();
+        // A rendered cell's prose is in the Preview Font, as a note's preview is.
+        let prose = self.fonts.borrow().1.clone();
+        let prose = prose
+            .filter(|f| !f.is_empty())
+            .unwrap_or_else(crate::platform::document_font);
         let css = [
             crate::editor::font_css(&doc, &format!("#{name} .accent-doc"), zoom),
+            crate::editor::font_css(&prose, &format!("#{name} .accent-doc.accent-preview"), zoom),
             crate::editor::font_css(&mono, &format!("#{name} .accent-code"), zoom),
             crate::editor::font_css(&mono, &format!("#{name} .notebook-output"), zoom),
             // What outputs draw in the interface font, a table and the lines about it, scaled too.
@@ -1210,6 +1430,7 @@ impl NotebookTab {
         );
         *self.font.borrow_mut() = Some(provider);
         self.gutter.set(cell::count_width(&self.scroller));
+        let prose_font = self.fonts.borrow().1.clone();
         let rezoomed = self.zoom.replace(zoom) != zoom;
         for view in self.views.borrow().iter() {
             view.set_gutter(self.gutter.get());
@@ -1219,6 +1440,10 @@ impl NotebookTab {
             if let Some(editor) = view.editor() {
                 crate::editor::refont(&editor.view);
             }
+            view.with_rendered(|page| {
+                page.set_font(prose_font.as_deref());
+                page.set_zoom(zoom);
+            });
         }
         self.refit_after_layout.set(true);
         // What is measured in the cells' fonts, once the new rule has reached their views.
@@ -1371,6 +1596,43 @@ impl NotebookTab {
             }
         ));
         host.add_controller(keys);
+    }
+
+    /// The reading keys over the column while it holds the keyboard, a viewer's always and a
+    /// presented notebook's over a rendered cell: Space and Page Down a page on, Shift+Space and
+    /// Page Up one back, the arrows a step, Home and End to either end, as a note's preview reads.
+    fn wire_reading(self: &Rc<Self>) {
+        let keys = gtk::EventControllerKey::new();
+        keys.connect_key_pressed(glib::clone!(
+            #[weak(rename_to = tab)]
+            self,
+            #[upgrade_or]
+            glib::Propagation::Proceed,
+            move |_, key, _, state| {
+                let shift = state.contains(gdk::ModifierType::SHIFT_MASK);
+                let others =
+                    gtk::accelerator_get_default_mod_mask() - gdk::ModifierType::SHIFT_MASK;
+                if !tab.reading() || !tab.column.has_focus() || state.intersects(others) {
+                    return glib::Propagation::Proceed;
+                }
+                let adjustment = tab.scroller.vadjustment();
+                let (value, page) = (adjustment.value(), adjustment.page_increment());
+                let step = adjustment.step_increment();
+                let to = match key {
+                    gdk::Key::space if shift => value - page,
+                    gdk::Key::space | gdk::Key::Page_Down | gdk::Key::KP_Page_Down => value + page,
+                    gdk::Key::Page_Up | gdk::Key::KP_Page_Up => value - page,
+                    gdk::Key::Down | gdk::Key::KP_Down => value + step,
+                    gdk::Key::Up | gdk::Key::KP_Up => value - step,
+                    gdk::Key::Home | gdk::Key::KP_Home => adjustment.lower(),
+                    gdk::Key::End | gdk::Key::KP_End => adjustment.upper(),
+                    _ => return glib::Propagation::Proceed,
+                };
+                adjustment.set_value(to);
+                glib::Propagation::Stop
+            }
+        ));
+        self.column.add_controller(keys);
     }
 
     pub fn connect_history(&self, f: impl Fn(&Rc<NotebookTab>) + 'static) {
@@ -1725,6 +1987,15 @@ impl NotebookTab {
     }
 
     /// Whether no cell can be typed into and no cell button or add strip is out.
+    /// How many markdown cells show their rendered page.
+    pub fn bench_rendered(&self) -> usize {
+        self.views
+            .borrow()
+            .iter()
+            .filter(|v| v.shows_rendered())
+            .count()
+    }
+
     pub fn bench_read_only(&self) -> bool {
         let views = self.views.borrow();
         views
