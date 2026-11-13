@@ -100,19 +100,28 @@ fn command<'a>(name: &str, after: &'a str) -> Option<(String, &'a str)> {
 }
 
 /// `\operatorname`'s argument set upright, as MathJax sets it, with its limits beside it, or
-/// above and below in display where starred.
+/// above and below in display where starred. A plain name without the star pulldown-latex reads
+/// right itself.
 fn operatorname(arg: &str, star: bool) -> String {
+    let arg = arg.trim();
+    if !star && plain(arg) {
+        return format!("\\operatorname{{{arg}}}");
+    }
     op(arg, "mathrm", if star { "" } else { "\\nolimits" })
 }
 
 /// An operator of `arg` that pulldown-latex reads right, followed by `limits`. A symbol is its
 /// character, made the operator itself; a name, plain or upright, is set as `\sin` is; anything
-/// else is a group in `font`, whose limits `\mathop` places as it does a symbol's.
+/// else, a single letter too, which pulldown-latex would make an operator symbol, is a group in
+/// `font`, whose limits `\mathop` places as it does a symbol's.
 fn op(arg: &str, font: &str, limits: &str) -> String {
     let arg = arg.trim();
     if let Some(c) = symbol(arg) {
         format!("\\mathop{{{c}}}{limits}")
-    } else if let Some(name) = upright(arg).or(plain(arg).then_some(arg)) {
+    } else if let Some(name) = upright(arg)
+        .or(plain(arg).then_some(arg))
+        .filter(|name| name.chars().nth(1).is_some())
+    {
         format!("\\mathop{{{name}}}{limits}")
     } else {
         format!("\\mathop\\{font}{{{}}}{limits}", rewrite(arg))
@@ -120,16 +129,33 @@ fn op(arg: &str, font: &str, limits: &str) -> String {
 }
 
 /// The one symbol `arg` is, such as `×` for `\times`, though not a letter, which keeps its
-/// look as the group pulldown-latex makes of it; a brace or another character special to TeX
+/// look as the group pulldown-latex makes of it, nor a sized or small one such as `\big|`,
+/// whose character is set at its natural size; a brace or another character special to TeX
 /// cannot stand in for its command.
 fn symbol(arg: &str) -> Option<char> {
     let c = content(arg, |c| match *c {
-        Content::BinaryOp { content, .. }
-        | Content::LargeOp { content, .. }
-        | Content::Delimiter { content, .. }
+        Content::BinaryOp {
+            content,
+            small: false,
+        }
+        | Content::LargeOp {
+            content,
+            small: false,
+        }
+        | Content::Delimiter {
+            content,
+            size: None,
+            ..
+        }
         | Content::Punctuation(content) => Some(content),
-        Content::Ordinary { content, .. } if !content.is_alphanumeric() => Some(content),
-        Content::Relation { content, .. } => {
+        Content::Ordinary {
+            content,
+            stretchy: false,
+        } if !content.is_alphanumeric() => Some(content),
+        Content::Relation {
+            content,
+            small: false,
+        } => {
             let mut buf = [0; 8];
             let text = std::str::from_utf8(content.encode_utf8_to_buf(&mut buf)).ok()?;
             let mut chars = text.chars();
@@ -181,8 +207,14 @@ fn control_sequence(s: &str) -> (&str, &str) {
 }
 
 /// A command's argument, as TeX reads one after any spaces: a braced group's content, or a
-/// single token; and what follows it. `None` at the end of a group or for an unclosed one.
+/// single token; and what follows it. `None` at the end of a group or for an unclosed one, and
+/// for a macro's parameter, which only the macro's use fills in.
 fn argument(s: &str) -> Option<(&str, &str)> {
+    let (arg, rest) = token_or_group(s)?;
+    (!arg.contains('#')).then_some((arg, rest))
+}
+
+fn token_or_group(s: &str) -> Option<(&str, &str)> {
     let s = s.trim_start();
     let Some(group) = s.strip_prefix('{') else {
         if s.starts_with('\\') {

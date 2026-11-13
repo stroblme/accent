@@ -272,6 +272,9 @@ fn a_class_command_takes_a_symbol_command() {
             laid(r"\sum_a^b", display)
         );
     }
+    // A sized one keeps its size.
+    let sized = accent_core::markdown::mathml(r"\mathopen{\big(}", false).unwrap();
+    assert!(sized.contains("minsize"), "{sized}");
 }
 
 /// An operator's limits go above and below it in display or after `\limits`, and after it inline
@@ -292,6 +295,7 @@ fn an_operator_places_its_limits() {
 /// An operator's name is set upright, a space and all, and `\DeclareMathOperator` names it.
 #[test]
 fn an_operator_name_is_upright() {
+    assert_eq!(laid(r"\operatorname{E}", false), laid(r"\mathrm{E}", false));
     assert_eq!(
         laid(r"\operatorname{arg\,max}", false),
         laid(r"\mathrm{arg\,max}", false)
