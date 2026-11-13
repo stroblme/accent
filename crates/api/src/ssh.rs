@@ -626,7 +626,7 @@ pub fn server_places(arch: &str) -> Vec<PathBuf> {
             [
                 dir.join(format!("lib/accent/accent-cli-{arch}")),
                 dir.join(format!("../lib/accent/accent-cli-{arch}")),
-                dir.join(format!("{arch}-unknown-linux-musl/release/accent-cli")),
+                dir.join(format!("{arch}-unknown-linux-musl/dist/accent-cli")),
             ]
         })
         .collect()

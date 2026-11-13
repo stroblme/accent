@@ -51,6 +51,36 @@ opt-level = "s"
 [profile.release.package.rmcp]
 opt-level = "s"
 
+# What ships: `make install`, the packages, Accent.app, the uploaded servers, the Flatpak, Nix and
+# the release APKs (`android-dist`), while every build a developer checks with stays on release
+# (user decision 2026-11-13). Full LTO and the serialization and command-handling crates for size
+# took the stripped app from 26.6 to 24.6 MB, accent-cli from 14.5 to 12.7 MB, the x86_64 server
+# from 13.6 to 11.9 MB and the arm64 Android library from 8.2 to 7.6 MB, with cold indexing of the
+# generated vault and typing timing the same within noise (2026-11-13, six interleaved rounds).
+# Full LTO lengthens the app's build by about half, hence a profile of its own. Either half alone
+# saved less, and these crates at "s" under thin LTO cost typing about 10 %.
+[profile.dist]
+inherits = "release"
+lto = "fat"
+[profile.dist.package.accent-api]
+opt-level = "s"
+[profile.dist.package.serde_json]
+opt-level = "s"
+[profile.dist.package.toml]
+opt-level = "s"
+[profile.dist.package.toml_parser]
+opt-level = "s"
+[profile.dist.package.toml_writer]
+opt-level = "s"
+[profile.dist.package.toml_edit]
+opt-level = "s"
+[profile.dist.package.toml_datetime]
+opt-level = "s"
+[profile.dist.package.clap_builder]
+opt-level = "s"
+[profile.dist.package.clap_lex]
+opt-level = "s"
+
 # The Android core, built for speed as the desktop's is: a vault's first index is the one slow
 # thing the app does, and it is CPU-bound on one core. `opt-level = "z"` cost it ~15 % on the host
 # (2026-10-14, the generated vault: 9.7 against 8.4 s of CPU), for a smaller download: the
@@ -59,5 +89,10 @@ opt-level = "s"
 # where uniffi keeps its metadata, which is why `make bindings` reads a host build instead.
 [profile.android]
 inherits = "release"
+opt-level = 3
+strip = "symbols"
+# The same for the release APKs (`make apk-release`), on dist's settings.
+[profile.android-dist]
+inherits = "dist"
 opt-level = 3
 strip = "symbols"

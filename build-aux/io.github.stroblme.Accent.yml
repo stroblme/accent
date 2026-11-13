@@ -133,7 +133,8 @@ modules:
         CARGO_ZIGBUILD_ZIG_PATH: /run/build/accent/zig/zig
     build-commands:
       - cargo --offline fetch --manifest-path Cargo.toml
-      - cargo --offline build --release -p accent
+      # The dist profile, full LTO, as every build that ships (Cargo.toml).
+      - cargo --offline build --profile dist -p accent
       # The server a remote vault uploads, static so it starts on any distribution, for this
       # machine's architecture only: Flathub refuses a build holding another's binaries, so a
       # host of the other one is refused (`link::Server::for_host`). The extension's sysroot is
@@ -142,10 +143,10 @@ modules:
       - mkdir -p sysroot/lib/rustlib
       - ln -s /usr/lib/sdk/rust-stable/lib/rustlib/*-linux-gnu "$PWD"/rust-std/*/lib/rustlib/*-musl sysroot/lib/rustlib
       # Without the SDK's CFLAGS, which the C compiler for musl does not take (-fcf-protection).
-      - env -u CFLAGS cargo --offline zigbuild --release -p accent-cli --target $FLATPAK_ARCH-unknown-linux-musl
-      - install -Dm755 target/$FLATPAK_ARCH-unknown-linux-musl/release/accent-cli /app/lib/accent/accent-cli-$FLATPAK_ARCH
+      - env -u CFLAGS cargo --offline zigbuild --profile dist -p accent-cli --target $FLATPAK_ARCH-unknown-linux-musl
+      - install -Dm755 target/$FLATPAK_ARCH-unknown-linux-musl/dist/accent-cli /app/lib/accent/accent-cli-$FLATPAK_ARCH
       # Five install lines beat adding a meson build system that nothing else in the tree needs.
-      - install -Dm755 target/release/accent -t /app/bin
+      - install -Dm755 target/dist/accent -t /app/bin
       - install -Dm644 data/io.github.stroblme.Accent.desktop -t /app/share/applications
       - install -Dm644 data/io.github.stroblme.Accent.metainfo.xml -t /app/share/metainfo
       - install -Dm644 data/icons/hicolor/scalable/apps/io.github.stroblme.Accent.svg -t /app/share/icons/hicolor/scalable/apps

@@ -19,6 +19,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The desktop links it directly; Android uses UniFFI.
 - **One optional part**: the `termprops` cargo feature, on by default, holds what VTE 0.78 brings (a program's OSC 52 copy, the shell's commands and prompts), so accent builds where only VTE 0.76 is packaged, as on macOS 12.
   The desktop app carries no web engine: the preview is accent's own (Preview), and printing and export go through the system browser.
+- **What ships** is built with Cargo's `dist` profile, full LTO with the serialization and command-handling crates built for size, and every build a developer checks with stays on `release`, thin LTO, since full LTO takes about half as long again to build (user decision 2026-11-13).
 - **Crates**: `crates/core` has no UI types; `crates/api` exposes `Vault` for local and remote backends, JSON-RPC for `accent-cli`, and UniFFI behind the `android` feature.
   `crates/drawio` is independent; core reads diagram labels through it for indexing.
   `crates/math` (from formulary) lays out the MathML core writes in a math font the system HarfBuzz reads; only the desktop app links it.

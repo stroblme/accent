@@ -82,6 +82,8 @@ val cargoNdk = tasks.register<Exec>("cargoNdk") {
         repo.resolve(".cargo/config.toml"),
         repo.resolve("Makefile"),
     )
+    // The Cargo profile `make apk-release` names, so a release build never takes a debug one's.
+    inputs.property("profile", providers.environmentVariable("ANDROID_PROFILE").orElse("android"))
     outputs.dir(repo.resolve("android/app/src/main/jniLibs"))
 }
 

@@ -104,7 +104,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: servers
-          path: target/*-unknown-linux-musl/release/accent-cli.xz*
+          path: target/*-unknown-linux-musl/dist/accent-cli.xz*
           if-no-files-found: error
 
   # A .deb or .rpm per distribution, each built and install-tested in containers of that
@@ -183,11 +183,11 @@ jobs:
       - run: make dmg VERSION="${GITHUB_REF_NAME#v}"
       # dyld resolves every library at launch, so this fails on one the bundle lacks; `--help`
       # exits before GTK opens a window.
-      - run: target/release/Accent.app/Contents/MacOS/accent --help
+      - run: target/dist/Accent.app/Contents/MacOS/accent --help
       - uses: actions/upload-artifact@v7
         with:
           name: accent-${{ matrix.os }}
-          path: target/release/accent-*.dmg
+          path: target/dist/accent-*.dmg
           if-no-files-found: error
 
   release:

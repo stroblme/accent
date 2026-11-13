@@ -57,8 +57,10 @@ PDFIUM_ASSET_x86_64    := x64
 ANDROID_TARGETS := aarch64-linux-android x86_64-linux-android
 # A release cross build takes `[profile.android]` from Cargo.toml — release plus `strip`, because
 # the `.so` ships in the APK, and at release's speed, which a phone's first index needs more than
-# the 1.7 MB a size build saved (Cargo.toml says what was measured).
-ANDROID_PROFILE_FLAG := $(if $(filter release,$(PROFILE)),--profile android,)
+# the 1.7 MB a size build saved (Cargo.toml says what was measured). The release APKs take
+# `android-dist`, which `apk-release` hands the cross build Gradle runs through the environment.
+ANDROID_PROFILE ?= android
+ANDROID_PROFILE_FLAG := $(if $(filter release,$(PROFILE)),--profile $(ANDROID_PROFILE),)
 # uniffi keeps its metadata in the symbol table, which that profile strips, so the bindings are
 # read out of a host build of the same crate — the flow uniffi documents. Dev profile, because
 # that is the one the generator itself is built with.
@@ -72,11 +74,14 @@ READELF ?= $(ANDROID_NDK_HOME)/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-re
 # once per machine `uname -m` names, and a connection uploads the one its host runs. Its name on
 # the remote is the builds' blake3, so a rebuild re-provisions exactly once.
 SERVER_ARCHES := x86_64 aarch64
-SERVER_BIN     = $(TARGET_ROOT)/$(1)-unknown-linux-musl/$(PROFILE)/accent-cli
+SERVER_BIN     = $(TARGET_ROOT)/$(1)-unknown-linux-musl/dist/accent-cli
 
 # `cargo build` puts a release build under target/release and a dev build under target/debug.
 CARGO_PROFILE_FLAG := $(if $(filter release,$(PROFILE)),--release,)
 TARGET_DIR := $(TARGET_ROOT)/$(PROFILE)
+# What ships — `install`, the packages, Accent.app and the servers — is built with Cargo.toml's
+# dist profile, full LTO, under target/dist; everything else here builds with PROFILE.
+DIST_DIR := $(TARGET_ROOT)/dist
 
 # The vault used by every test and benchmark. Never point these at a real vault.
 VAULT     ?= testvault
@@ -92,7 +97,7 @@ export DISPLAY_NUM ?= 99
 .PHONY: all core gtk gtk-bench clean distclean install uninstall test test-pdf check fmt fmt-check \
         clippy doc run smoke drills xvfb vault validate icons flatpak cargo-sources pdfium server \
         help requirements install-requirements android android-check android-test android-tools apk apk-release \
-        pdfium-android bindings screenshots docs app dmg release pkgroot deb rpm stencils
+        pdfium-android bindings screenshots docs app dmg release pkgroot deb rpm stencils dist
 
 ## all: build everything, core plus the desktop app
 all: core gtk
@@ -109,6 +114,11 @@ GTK_FEATURES = $(if $(DARWIN),--no-default-features \
 ## gtk: build the desktop app (needs gtk4, libadwaita, gtksourceview5, libsoup-3.0, libspelling, vte-2.91-gtk4 dev packages)
 gtk:
 	$(CARGO) build $(CARGO_PROFILE_FLAG) -p accent $(GTK_FEATURES)
+
+## dist: build what ships, core and the desktop app, with the dist profile
+dist:
+	$(CARGO) build --profile dist
+	$(CARGO) build --profile dist -p accent $(GTK_FEATURES)
 
 ## gtk-bench: build the desktop app with the ACCENT_BENCH_* drills in, which a shipped build leaves out
 #
@@ -258,7 +268,7 @@ apk: pdfium-android
 # Unsigned, on purpose: whoever publishes a build signs it with their own key, which is how
 # F-Droid and a GitHub release both work. `apksigner sign` is the last step, not this file's.
 apk-release: pdfium-android
-	cd android && ./gradlew assembleRelease
+	cd android && ANDROID_PROFILE=android-dist ./gradlew assembleRelease
 
 ## android-check: the Android gate — lint the bindings on the host, then cross-build them
 android-check:
@@ -364,14 +374,14 @@ server:
 		exit 1; }
 	rustup target add $(SERVER_ARCHES:%=%-unknown-linux-musl)
 	@for arch in $(SERVER_ARCHES); do \
-		$(CARGO) zigbuild -p accent-cli $(CARGO_PROFILE_FLAG) --target "$$arch-unknown-linux-musl" \
+		$(CARGO) zigbuild -p accent-cli --profile dist --target "$$arch-unknown-linux-musl" \
 			|| exit 1; \
 		python3 build-aux/compress-server.py "$(call SERVER_BIN,$$arch)" || exit 1; \
 		echo "Server binary: $(call SERVER_BIN,$$arch)"; \
 	done
 
 # macOS's app icon, from the SVG: iconutil reads a folder named .iconset with each size and its @2x.
-$(TARGET_DIR)/accent.icns: data/icons/hicolor/scalable/apps/$(APP_ID).svg
+$(DIST_DIR)/accent.icns: data/icons/hicolor/scalable/apps/$(APP_ID).svg
 	iconset=$$(mktemp -d)/accent.iconset && mkdir $$iconset && \
 	for s in 16 32 128 256 512; do \
 		rsvg-convert -w $$s -h $$s -o $$iconset/icon_$${s}x$$s.png $< && \
@@ -380,17 +390,17 @@ $(TARGET_DIR)/accent.icns: data/icons/hicolor/scalable/apps/$(APP_ID).svg
 	mkdir -p $(dir $@) && iconutil -c icns -o $@ $$iconset && rm -rf $$(dirname $$iconset)
 
 ## app: build Accent.app in the target folder, holding every library and file it loads (macOS)
-app: all pdfium $(TARGET_DIR)/accent.icns
-	build-aux/macos-bundle.sh $(TARGET_DIR) $(VERSION)
+app: dist pdfium $(DIST_DIR)/accent.icns
+	build-aux/macos-bundle.sh $(DIST_DIR) $(VERSION)
 
 ## dmg: Accent.app as a disk image to ship, with a link to Applications to drag it onto (macOS)
 dmg: app
-	rm -rf $(TARGET_DIR)/dmg && mkdir $(TARGET_DIR)/dmg
-	ditto $(TARGET_DIR)/Accent.app $(TARGET_DIR)/dmg/Accent.app
-	ln -s /Applications $(TARGET_DIR)/dmg/Applications
-	hdiutil create -volname Accent -srcfolder $(TARGET_DIR)/dmg -ov -format ULFO \
-		$(TARGET_DIR)/accent-$(VERSION)-macos-$(shell uname -m).dmg
-	rm -rf $(TARGET_DIR)/dmg
+	rm -rf $(DIST_DIR)/dmg && mkdir $(DIST_DIR)/dmg
+	ditto $(DIST_DIR)/Accent.app $(DIST_DIR)/dmg/Accent.app
+	ln -s /Applications $(DIST_DIR)/dmg/Applications
+	hdiutil create -volname Accent -srcfolder $(DIST_DIR)/dmg -ov -format ULFO \
+		$(DIST_DIR)/accent-$(VERSION)-macos-$(shell uname -m).dmg
+	rm -rf $(DIST_DIR)/dmg
 
 ## release: set the version to TAG=vX.Y.Z, commit it, tag it (NOTES="summary" optional) and push both, which starts the Release workflow
 release: VER = $(TAG:v%=%)
@@ -416,21 +426,21 @@ INSTALL_STRIPPED = { test ! -f $(2) || rm -f $(call DEBUG_FILE,$(2)); } && insta
 	objcopy --only-keep-debug $(2) $$debug && chmod 644 $$debug && strip --strip-unneeded $(2)
 
 ## install: install into ~/.local (no sudo), on macOS Accent.app into ~/Applications; override PREFIX for a system-wide install
-install: $(if $(DARWIN),app,all)
+install: $(if $(DARWIN),app,dist)
 ifdef DARWIN
 	@# The app, and `accent` and `accent-cli` in $(BINDIR) starting its own, for a launch from a
 	@# shell and an MCP client's config: scripts rather than links, so that the binary still runs
 	@# from inside the app (`platform/bundle.rs`).
 	mkdir -p $(DESTDIR)$(APPSDIR) $(DESTDIR)$(BINDIR)
 	rm -rf $(DESTDIR)$(APPSDIR)/Accent.app
-	ditto $(TARGET_DIR)/Accent.app $(DESTDIR)$(APPSDIR)/Accent.app
+	ditto $(DIST_DIR)/Accent.app $(DESTDIR)$(APPSDIR)/Accent.app
 	for bin in accent accent-cli; do \
 		printf '#!/bin/sh\nexec "%s" "$$@"\n' '$(APPSDIR)/Accent.app/Contents/MacOS/'$$bin \
 			>$(DESTDIR)$(BINDIR)/$$bin && chmod 755 $(DESTDIR)$(BINDIR)/$$bin || exit 1; \
 	done
 else
-	$(call INSTALL_STRIPPED,$(TARGET_DIR)/accent,$(DESTDIR)$(BINDIR)/accent)
-	$(call INSTALL_STRIPPED,$(TARGET_DIR)/accent-cli,$(DESTDIR)$(BINDIR)/accent-cli)
+	$(call INSTALL_STRIPPED,$(DIST_DIR)/accent,$(DESTDIR)$(BINDIR)/accent)
+	$(call INSTALL_STRIPPED,$(DIST_DIR)/accent-cli,$(DESTDIR)$(BINDIR)/accent-cli)
 	install -Dm644 data/$(APP_ID).desktop $(DESTDIR)$(DATADIR)/applications/$(APP_ID).desktop
 	install -Dm644 data/$(APP_ID).metainfo.xml $(DESTDIR)$(DATADIR)/metainfo/$(APP_ID).metainfo.xml
 	install -Dm644 data/icons/hicolor/scalable/apps/$(APP_ID).svg \
@@ -493,8 +503,8 @@ endif
 # What a .deb or .rpm packs: the files `install` puts under /usr, with libpdfium and both servers
 # required rather than best effort. `build-aux/native-package.sh` builds either one in a container
 # of the distribution it is for.
-PKGROOT = $(abspath $(TARGET_DIR))/pkgroot
-pkgroot: all pdfium
+PKGROOT = $(abspath $(DIST_DIR))/pkgroot
+pkgroot: dist pdfium
 	@for arch in $(SERVER_ARCHES); do test -f $(call SERVER_BIN,$$arch).xz || \
 		{ echo "missing $(call SERVER_BIN,$$arch).xz: run make server first"; exit 1; }; done
 	rm -rf $(PKGROOT) $(PKGROOT)-debug
@@ -509,21 +519,21 @@ pkgroot: all pdfium
 # empty one of its own. The servers are static and need nothing.
 deb: pkgroot
 	install -Dm644 LICENSE $(PKGROOT)/usr/share/doc/accent/copyright
-	rm -rf $(TARGET_DIR)/deb && mkdir -p $(TARGET_DIR)/deb/debian $(PKGROOT)/DEBIAN
-	touch $(TARGET_DIR)/deb/debian/control
-	cd $(TARGET_DIR)/deb && dpkg-shlibdeps -O $(PKGROOT)/usr/bin/accent $(PKGROOT)/usr/bin/accent-cli \
+	rm -rf $(DIST_DIR)/deb && mkdir -p $(DIST_DIR)/deb/debian $(PKGROOT)/DEBIAN
+	touch $(DIST_DIR)/deb/debian/control
+	cd $(DIST_DIR)/deb && dpkg-shlibdeps -O $(PKGROOT)/usr/bin/accent $(PKGROOT)/usr/bin/accent-cli \
 		$(PKGROOT)/usr/lib/accent/libpdfium.so | sed 's/^shlibs:Depends=//' > depends
 	@# glib-networking is what gives libsoup HTTPS, which no linked library names.
 	printf '%s\n' "Package: accent" "Version: $(VERSION)" "Architecture: $$(dpkg --print-architecture)" \
-		"Maintainer: Melvin Strobl <stroblme@posteo.de>" "Depends: $$(cat $(TARGET_DIR)/deb/depends), glib-networking" \
+		"Maintainer: Melvin Strobl <stroblme@posteo.de>" "Depends: $$(cat $(DIST_DIR)/deb/depends), glib-networking" \
 		"Recommends: git, openssh-client" "Section: editors" "Priority: optional" \
 		"Homepage: https://github.com/stroblme/accent" "Description: Markdown and PDF knowledge editor" \
 		> $(PKGROOT)/DEBIAN/control
-	dpkg-deb --root-owner-group --build $(PKGROOT) $(TARGET_DIR)/accent_$(VERSION)_$$(dpkg --print-architecture).deb
+	dpkg-deb --root-owner-group --build $(PKGROOT) $(DIST_DIR)/accent_$(VERSION)_$$(dpkg --print-architecture).deb
 
 ## rpm: package the app as an .rpm in the target folder, for the Fedora or openSUSE it is built on
 rpm: pkgroot
-	rpmbuild -bb --build-in-place --define "_topdir $(abspath $(TARGET_DIR))/rpm" \
+	rpmbuild -bb --build-in-place --define "_topdir $(abspath $(DIST_DIR))/rpm" \
 		--define "ver $(VERSION)" --define "pkgroot $(PKGROOT)" build-aux/accent.spec
 
 ## validate: check the desktop file and the AppStream metainfo

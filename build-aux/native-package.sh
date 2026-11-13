@@ -33,7 +33,7 @@ docker run --rm -v "$PWD:/src" -w /src "$image" bash -euc "
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --quiet --profile minimal
     . \$HOME/.cargo/env
     make $format
-    find target/release -maxdepth 4 -name 'accent*.$format' -exec mv {} '$package' ';'"
+    find target/dist -maxdepth 4 -name 'accent*.$format' -exec mv {} '$package' ';'"
 
 docker run --rm -v "$PWD:/src" -w /src "$image" bash -euc "
     $install ./'$package'

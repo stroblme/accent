@@ -53,6 +53,8 @@
               "-p"
               "accent-cli"
             ];
+            # The profile every build that ships takes, full LTO (Cargo.toml).
+            buildType = "dist";
             # The test suite needs Xvfb and a generated vault.
             doCheck = false;
 
