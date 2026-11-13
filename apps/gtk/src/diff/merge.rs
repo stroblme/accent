@@ -91,14 +91,6 @@ impl Merge {
             pane.header.prepend(&picker);
             picker
         });
-        let unfold = gtk::ToggleButton::builder()
-            .icon_name("diff-unfold-symbolic")
-            .tooltip_text("Show All Unchanged Lines")
-            .css_classes(["flat", "chrome-fade"])
-            .focus_on_click(false)
-            .build();
-        mid.header
-            .insert_child_after(&unfold, mid.header.first_child().as_ref());
         let resolved = gtk::Button::builder()
             .icon_name("object-select-symbolic")
             .tooltip_text("Mark Resolved")
@@ -107,6 +99,15 @@ impl Merge {
             .build();
         mid.header
             .insert_child_after(&resolved, mid.header.first_child().as_ref());
+        // Before Mark Resolved, so that nothing moves under the pointer as it hides.
+        let unfold = gtk::ToggleButton::builder()
+            .icon_name("diff-unfold-symbolic")
+            .tooltip_text("Show All Unchanged Lines")
+            .css_classes(["flat", "chrome-fade"])
+            .focus_on_click(false)
+            .build();
+        mid.header
+            .insert_child_after(&unfold, mid.header.first_child().as_ref());
 
         let columns = Columns::new(vec![left, mid, right], Some(MID));
         let this = Rc::new_cyclic(|weak| Merge {
@@ -425,7 +426,7 @@ impl Merge {
             (starts[c][n(gap.start) - 1], starts[c][n(gap.end - 1)])
         };
         let gaps = diff::gaps_of(&changed, CONTEXT);
-        self.unfold.set_sensitive(!gaps.is_empty());
+        self.unfold.set_visible(!gaps.is_empty());
         let mut hidden = Vec::new();
         for gap in gaps.into_iter().filter(|_| !self.unfold.is_active()) {
             let key = lines[gap.start][0].unwrap_or(0);

@@ -1603,8 +1603,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Each is one undo step; a column showing the base has no arrow.
   Accept Current, Accept Incoming and Accept Both from the palette act on the block holding the caret.
 - It opens with the unchanged runs hidden and the caret on the first block; the runs, Show All Unchanged Lines and a new width behave as in a comparison.
-  Here Show All Unchanged Lines stays greyed while there is no run to hide, so Mark Resolved beside it keeps its place (States).
-  Stop Merging, beside the toggle, leaves it.
+  Show All Unchanged Lines sits left of Mark Resolved, so nothing moves under the pointer as it hides (user decision 2026-11-13).
+  Stop Merging, beside Mark Resolved, leaves it.
 - Mark Resolved, a check in the middle column's title row and in the palette, writes the file as it stands and stages it.
   A file that could not be written is not staged, and one with blocks left asks first, their markers going into the commit as text.
   The view ends by itself once git no longer lists the file unmerged — Mark Resolved, Stage on its row, a `git add` in a terminal — and leaves the file in its tab.
@@ -2396,7 +2396,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 - **A control that cannot act is hidden, not greyed**, so whatever is on screen can be pressed (user decision 2026-11-13).
   The rule is for the controls accent builds, so what GTK builds itself, a text view's menu or a spin row's button at its limit, still greys as GTK greys it.
   A control stays greyed in four cases.
-  One whose going would move its neighbours under the pointer keeps its place greyed, as Undo and Redo, the debugger's and the kernel's strips, a cell's Run, a layer's Move Up and Move Down and a merge's Show All Unchanged Lines do.
+  One whose going would move its neighbours under the pointer keeps its place greyed, as Undo and Redo, the debugger's and the kernel's strips, a cell's Run and a layer's Move Up and Move Down do.
   One held for a moment while work runs greys until the work answers, as the Git pane's actions and a Ports row being cancelled do.
   A form's confirming button greys until the form can be confirmed, as Commit, Create, Connect, Add and Replace All do.
   A command that says why it cannot run stays greyed beside its reason, as Go to Source and Show in PDF without SyncTeX data and Initialize Git Repository in a repository do, and so does a value shown on a control, as a locked shape's Position and Size are.
