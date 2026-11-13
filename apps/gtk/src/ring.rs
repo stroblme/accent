@@ -12,7 +12,7 @@ const ORBIT: f64 = 54.0;
 /// The distance from the hub to an option button: just clear of the tools.
 const OPTIONS: f64 = 91.0;
 /// The whole ring's box, wide enough for the outer orbit plus a button either side of it.
-const SIZE: i32 = 216;
+pub(crate) const SIZE: i32 = 216;
 /// How far the ring sits from the corner it starts in.
 const INSET: f64 = 24.0;
 

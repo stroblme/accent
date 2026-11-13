@@ -444,16 +444,18 @@ async fn scene_debug(app: &Rc<App>, shot: &Shot) {
 /// Scene 6's diagram, `build-aux/screenshots/readout-chain.drawio.xml`.
 const DIAGRAM: &str = "Submissions/grant-2026/figures/readout-chain.drawio";
 
+/// Where scene 6 centres the drawing ring: the empty middle of the diagram's 4 K stage, between its
+/// attenuator and its HEMT, in page units.
+const RING_AT: (f64, f64) = (405.0, 300.0);
+
 /// Scene 6: a draw.io diagram of a readout chain, its qubit chip selected and the Properties
-/// pane on it, the drawing tools put away.
+/// pane on it, the drawing ring out with the rectangle in hand, as scene 3's is with the pen.
 async fn scene_diagram(app: &Rc<App>, shot: &Shot) {
     open_all(app, &[DIAGRAM]).await;
     until("diagram", 10_000, || {
         app.active_diagram().is_some_and(|tab| tab.laid_out())
     })
     .await;
-    // Out by default, the ring would cover the page's top corner.
-    app.set_drawing(false);
     until("properties", 5_000, || {
         app.sidebar.get().is_some_and(|s| s.has_pane("properties"))
     })
@@ -461,6 +463,22 @@ async fn scene_diagram(app: &Rc<App>, shot: &Shot) {
     app.show_pane("properties");
     if let Some(tab) = app.active_diagram() {
         tab.select(vec!["chip".to_string()]);
+        // The rectangle shows its corners, the diagram's own colours and the widths.
+        tab.set_tool(crate::diagram::Tool::Rect);
+        // Out by default in the page's top corner, over its title stage: moved off every shape.
+        style::bench_painted(&app.window, String::new).await;
+        let canvas = tab.key_target();
+        let at = tab.to_widget(&accent_drawio::Rect::new(RING_AT.0, RING_AT.1, 0.0, 0.0));
+        let overlay = canvas.ancestor(gtk::Overlay::static_type());
+        let centre = overlay.and_then(|overlay| {
+            canvas.compute_point(&overlay, &graphene::Point::new(at.x as f32, at.y as f32))
+        });
+        if let Some(centre) = centre {
+            let half = f64::from(crate::ring::SIZE) / 2.0;
+            let corner = (f64::from(centre.x()) - half, f64::from(centre.y()) - half);
+            app.ring_at.set(Some(corner));
+            app.set_drawing(true);
+        }
     }
     for dark in [false, true] {
         set_dark(app, dark).await;
