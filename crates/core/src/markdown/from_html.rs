@@ -402,7 +402,7 @@ fn image(img: &Element) -> Option<String> {
             &mut alt,
             &collapse(attr(&img.attrs, "alt").unwrap_or_default()),
         );
-        format!("![{alt}]({})", link_destination(src))
+        format!("![{}]({})", after_markup(&alt), link_destination(src))
     })
 }
 
@@ -611,7 +611,12 @@ impl Writer {
                 self.cell = true;
                 let blocks = self.blocks(&cell.children, cell);
                 self.cell = false;
-                let md: Vec<String> = blocks.iter().map(|b| b.md.replace('\n', "<br>")).collect();
+                let md: Vec<String> = (blocks.iter().enumerate())
+                    .map(|(i, b)| match i {
+                        0 => b.md.replace('\n', "<br>"),
+                        _ => after_markup(&b.md.replace('\n', "<br>")),
+                    })
+                    .collect();
                 cells.push(escape_pipes(&md.join("<br>")));
                 let span: usize = attr(&cell.attrs, "colspan")
                     .and_then(|s| s.trim().parse().ok())
@@ -679,7 +684,7 @@ impl Writer {
                     underline: true,
                     ..e.look
                 };
-                let text = self.render(&inner, base, " ");
+                let text = after_markup(&self.render(&inner, base, " "));
                 let plain = match inner.as_slice() {
                     [Piece::Text(plain, _)] => Some(plain.trim()),
                     _ => None,
@@ -889,6 +894,15 @@ fn code_span(code: &str) -> String {
         false => "",
     };
     format!("{ticks}{pad}{code}{pad}{ticks}")
+}
+
+/// Markdown rendered on its own and put straight after markup that is no space (a link's `[`, a
+/// picture's `![`, a cell's `<br>`), where a `$` it starts with could close a formula.
+fn after_markup(md: &str) -> String {
+    match md.starts_with('$') {
+        true => format!("\\{md}"),
+        false => md.to_string(),
+    }
 }
 
 /// The most `c` in a row in `s`.
@@ -1335,6 +1349,18 @@ After",
             ("<b>b</b> $5 and $10", "**b** $5 and $10"),
             ("<b>b</b> $x$ and 10$", r"**b** $x\$ and 10\$"),
             ("<b>b</b> $5-$10, a$5 b$6", r"**b** $5-\$10, a\$5 b\$6"),
+            (
+                "<b>b</b> was $20, now <a href='https://a.org'>$15 today</a>",
+                r"**b** was $20, now [\$15 today](https://a.org)",
+            ),
+            (
+                "$5 <img src='https://a.org/x.png' alt='$4 off'>",
+                r"$5 ![\$4 off](https://a.org/x.png)",
+            ),
+            (
+                "<table><tr><th>a</th><th>b</th></tr><tr><td><div>$5</div><div>$6</div></td><td>x</td></tr></table>",
+                "| a | b |\n| --- | --- |\n| $5<br>\\$6 | x |",
+            ),
             (
                 "<b>b</b> [[x]] #tag [^1] ![a]",
                 r"**b** \[\[x\]\] #tag \[^1\] !\[a\]",
