@@ -356,10 +356,10 @@ mod tests {
                 "slots {i} and next are {gap} px apart"
             );
         }
-        // The most options the outer orbit holds a button apart; a diagram's connector shows ten.
-        for i in 0..10 {
-            let a = orbit(i, 10, OPTIONS);
-            let b = orbit((i + 1) % 10, 10, OPTIONS);
+        // The most options the outer orbit holds a button apart; a diagram's connector shows 13.
+        for i in 0..13 {
+            let a = orbit(i, 13, OPTIONS);
+            let b = orbit((i + 1) % 13, 13, OPTIONS);
             let gap = (a.0 - b.0).hypot(a.1 - b.1);
             assert!(
                 gap >= f64::from(OPTION),

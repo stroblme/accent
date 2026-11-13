@@ -282,10 +282,20 @@ enum Glyph {
 
 type OnPick = RefCell<Option<Box<dyn Fn(Pick)>>>;
 type OnColour = RefCell<Option<Box<dyn Fn([u8; 3])>>>;
+type OnWidth = RefCell<Option<Box<dyn Fn(f64)>>>;
+
+/// The line widths on the outer orbit, as the PDF ring's three: the `strokeWidth`, the diameter of
+/// the dot that shows it and its name.
+const WIDTHS: [(f64, f64, &str); 3] = [
+    (1.0, 6.0, "Narrow Width"),
+    (2.0, 10.0, "Medium Width"),
+    (4.0, 15.0, "Wide Width"),
+];
 
 /// The generic ring with a diagram's options on its outer orbit: plain or rounded corners while
 /// the rectangle is in hand, plain text or a Note while the text tool is, and the line's route and
-/// its arrow while the connector is. Colour swatches follow them for every tool but the image.
+/// its arrow while the connector is. Colour swatches follow them for every tool but the image,
+/// and line widths for every tool that draws a line.
 pub struct DiagramRing {
     ring: Rc<Ring<Tool>>,
     corners: Vec<(bool, gtk::ToggleButton)>,
@@ -299,16 +309,19 @@ pub struct DiagramRing {
     picked: Cell<Option<[u8; 3]>>,
     /// The canvas's recolouring, which the swatches are painted through.
     tint: Rc<Cell<Tint>>,
+    widths: Vec<gtk::ToggleButton>,
+    width: Cell<Option<f64>>,
     on_pick: OnPick,
     on_colour: OnColour,
+    on_width: OnWidth,
 }
 
 impl DiagramRing {
     pub fn new() -> Rc<DiagramRing> {
         let ring = Ring::<Tool>::new();
-        // The tool's options from the top, at most the connector's four, then the swatches, in the
-        // same slots for every tool.
-        let slots = 4 + SLOTS;
+        // The tool's options from the top, at most the connector's four, then the swatches and
+        // the widths, in the same slots for every tool.
+        let slots = 4 + SLOTS + WIDTHS.len();
         let option = |i: usize, glyph: Glyph, tooltip: &str| {
             let button = ring.add_option(i, slots, glyph_area(glyph).upcast_ref());
             button.set_tooltip_text(Some(tooltip));
@@ -349,6 +362,14 @@ impl DiagramRing {
                 ring.add_option(4 + i, slots, crate::ring::dot(18.0, colour).upcast_ref())
             })
             .collect();
+        let widths = (WIDTHS.iter().enumerate())
+            .map(|(i, (_, diameter, name))| {
+                let dot = crate::ring::dot(*diameter, |area| area.color());
+                let button = ring.add_option(4 + SLOTS + i, slots, dot.upcast_ref());
+                button.set_tooltip_text(Some(name));
+                button
+            })
+            .collect();
         let diagram = Rc::new(DiagramRing {
             ring,
             corners,
@@ -360,8 +381,11 @@ impl DiagramRing {
             colours,
             picked: Cell::new(None),
             tint,
+            widths,
+            width: Cell::new(None),
             on_pick: RefCell::new(None),
             on_colour: RefCell::new(None),
+            on_width: RefCell::new(None),
         });
         for (rounded, button) in &diagram.corners {
             let (rounded, weak) = (*rounded, Rc::downgrade(&diagram));
@@ -398,6 +422,17 @@ impl DiagramRing {
             button.connect_clicked(move |_| {
                 if let Some(d) = weak.upgrade() {
                     d.choose_colour(i);
+                }
+            });
+        }
+        for (button, (width, ..)) in diagram.widths.iter().zip(WIDTHS) {
+            let weak = Rc::downgrade(&diagram);
+            button.connect_clicked(move |_| {
+                if let Some(d) = weak.upgrade() {
+                    if let Some(f) = d.on_width.borrow().as_ref() {
+                        f(width);
+                    }
+                    d.sync();
                 }
             });
         }
@@ -444,13 +479,15 @@ impl DiagramRing {
         self.sync();
     }
 
-    /// Show `colours` on the swatches, `picked` checked where it is one of them.
-    pub fn set_swatches(&self, colours: Vec<[u8; 3]>, picked: Option<[u8; 3]>) {
+    /// Show `colours` on the swatches, `picked` checked where it is one of them, and `width`
+    /// checked among the widths.
+    pub fn set_swatches(&self, colours: Vec<[u8; 3]>, picked: Option<[u8; 3]>, width: Option<f64>) {
         for (button, colour) in self.swatches.iter().zip(&colours) {
             button.set_tooltip_text(Some(&hex(*colour)));
         }
         self.colours.replace(colours);
         self.picked.set(picked);
+        self.width.set(width);
         self.redraw_swatches();
         self.sync();
     }
@@ -471,6 +508,12 @@ impl DiagramRing {
     /// [`DiagramRing::set_swatches`].
     pub fn connect_colour(&self, f: impl Fn([u8; 3]) + 'static) {
         *self.on_colour.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// Call `f` with the `strokeWidth` of each width clicked; it answers with
+    /// [`DiagramRing::set_swatches`].
+    pub fn connect_width(&self, f: impl Fn(f64) + 'static) {
+        *self.on_width.borrow_mut() = Some(Box::new(f));
     }
 
     fn choose_colour(&self, i: usize) {
@@ -505,6 +548,14 @@ impl DiagramRing {
             let colour = colours.get(i).copied();
             let shown = tool != Tool::Image && colour.is_some();
             check(button, shown, shown && colour == self.picked.get());
+        }
+        let lines = match tool {
+            Tool::Text => picks.note,
+            Tool::Image => false,
+            _ => true,
+        };
+        for (button, (width, ..)) in self.widths.iter().zip(WIDTHS) {
+            check(button, lines, lines && self.width.get() == Some(width));
         }
     }
 }

@@ -1417,6 +1417,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   It lasts while the tab is open and is not kept in the config, since another diagram's swatches need not hold it.
   Picked again with nothing selected it is put down, and new cells take their style's own colours.
   Each swatch is painted as the canvas paints its colour under the theme, and its tooltip names the colour as the file writes it.
+- Three line widths follow the swatches, as the PDF ring's three, a `strokeWidth` of 1, 2 or 4 for every tool that draws a line, which is all but image and plain text (user decision 2026-11-13).
+  A width works as a swatch does, the width new cells are drawn at and the selection's as one undo step, its groups aside, for as long as the tab is open, and picked again with nothing selected it is put down.
 - With the connector in hand the shape under the pointer shows its connection points as small accent crosses, the one in reach lit, and an end dropped on one is pinned there.
   Otherwise an end attaches to the shape under it only when its other end lies outside that shape: an arrow drawn within a slide's text box is on it, not leaving it.
   An end on no shape dangles on the grid, as an end dragged does, the second with Shift at a step of 15° from the first.

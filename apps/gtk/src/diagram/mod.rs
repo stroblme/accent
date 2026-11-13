@@ -301,6 +301,11 @@ pub fn open(
         tab,
         move |colour| tab.ring_colour(colour)
     ));
+    tab.ring.connect_width(glib::clone!(
+        #[weak]
+        tab,
+        move |width| tab.ring_width(width)
+    ));
     tab.banner.connect_button_clicked(glib::clone!(
         #[weak]
         tab,
@@ -740,7 +745,7 @@ impl DiagramTab {
         let editor = self.editor.borrow();
         let style = |tool: Tool| {
             let style = tool.style_in(editor.file(), &self.options.get());
-            self.coloured(style, tool == Tool::Connector)
+            self.ring_style(style, tool == Tool::Connector)
         };
         match edit {
             Edit::Add { tool, .. } => style(*tool),

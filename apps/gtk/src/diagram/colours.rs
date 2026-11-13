@@ -1,5 +1,5 @@
-//! The colour swatches on a diagram's ring: the colours the diagram's cells were given most
-//! recently, and the colour a pick gives new cells and the selection.
+//! The colour swatches and line widths on a diagram's ring: the colours the diagram's cells were
+//! given most recently, and the colour and the width a pick gives new cells and the selection.
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -52,6 +52,8 @@ type Place = (String, CellId, &'static str);
 pub struct Swatches {
     /// The colour new cells are drawn in; `None` leaves them their style's own.
     pub picked: Option<[u8; 3]>,
+    /// The line width they are drawn at, the same way.
+    pub width: Option<f64>,
     slots: Vec<[u8; 3]>,
     /// Every cell's colours at the last look, to tell which a change set; `None` before it.
     seen: Option<HashMap<Place, [u8; 3]>>,
@@ -115,20 +117,27 @@ impl DiagramTab {
     /// Show the swatches on the ring as the diagram now stands.
     pub(super) fn show_swatches(&self) {
         let fill = crate::theme::swatches().map(|s| s.unwrap_or_else(crate::theme::accent_rgb));
-        let (slots, picked) = {
+        let (slots, picked, width) = {
             let mut swatches = self.swatches.borrow_mut();
             let slots = swatches.update(self.editor.borrow().file(), &fill).to_vec();
-            (slots, swatches.picked)
+            (slots, swatches.picked, swatches.width)
         };
-        self.ring.set_swatches(slots, picked);
+        self.ring.set_swatches(slots, picked, width);
     }
 
-    /// A style in the colour picked on the ring, if there is one.
-    pub(super) fn coloured(&self, style: String, edge: bool) -> String {
-        match self.swatches.borrow().picked {
+    /// A new cell's style in the colour and the line width picked on the ring, where they are.
+    pub(super) fn ring_style(&self, style: String, edge: bool) -> String {
+        let swatches = self.swatches.borrow();
+        let style = match swatches.picked {
             Some(colour) => painted(&style, edge, colour),
             None => style,
-        }
+        };
+        let Some(width) = swatches.width else {
+            return style;
+        };
+        let mut style = Style::parse(&style);
+        style.set("strokeWidth", Some(&width.to_string()));
+        style.to_string()
     }
 
     /// A swatch picked on the ring: the colour new cells are drawn in, and the selection's as
@@ -165,6 +174,32 @@ impl DiagramTab {
                     Ok(())
                 })
             });
+        }
+        self.show_swatches();
+    }
+
+    /// A line width picked on the ring, which works as a swatch does: the width new cells are
+    /// drawn at, and the selection's as one undo step, its groups aside. The width already picked,
+    /// with nothing selected, puts it down.
+    pub(super) fn ring_width(self: &Rc<Self>, width: f64) {
+        let ids = self.selection();
+        {
+            let mut swatches = self.swatches.borrow_mut();
+            let down = ids.is_empty() && swatches.width == Some(width);
+            swatches.width = (!down).then_some(width);
+        }
+        let lines: Vec<CellId> = {
+            let editor = self.editor.borrow();
+            let page = editor.page(self.page_index.get()).ok();
+            let line = |id: &CellId| {
+                page.and_then(|p| p.cell(id))
+                    .is_some_and(|c| !c.style.names("group"))
+            };
+            ids.into_iter().filter(line).collect()
+        };
+        if !lines.is_empty() {
+            let value = width.to_string();
+            self.edit(|e, page| e.set_style(page, &lines, "strokeWidth", Some(&value)));
         }
         self.show_swatches();
     }
