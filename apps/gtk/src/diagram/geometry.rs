@@ -888,6 +888,25 @@ impl Sheet {
         }
     }
 
+    /// The innermost shape or connector under `p` that has a link (draw.io's `link`), itself or
+    /// one it is in, and the link.
+    pub fn link_at(&self, p: Point, tolerance: f64) -> Option<(CellId, String)> {
+        let mut at = self.scene.hit(p, tolerance);
+        while let Some(id) = at {
+            let link = self.page.cell(id).and_then(|cell| match &cell.value {
+                accent_drawio::model::Value::Object { attrs, .. } => {
+                    accent_drawio::model::attr(attrs, "link")
+                }
+                accent_drawio::model::Value::Text(_) => None,
+            });
+            if let Some(link) = link.filter(|link| !link.is_empty()) {
+                return Some((id.to_string(), link.to_string()));
+            }
+            at = self.parent(id);
+        }
+        None
+    }
+
     /// The shape under `p` an edge can be attached to: the innermost vertex, never an edge.
     pub fn vertex_at(&self, p: Point, tolerance: f64) -> Option<CellId> {
         self.scene

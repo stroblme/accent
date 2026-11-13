@@ -83,6 +83,8 @@ pub enum Edit {
         id: CellId,
         points: Vec<Point>,
     },
+    /// Go where a shape's link leads (draw.io's `link`).
+    Follow(String),
 }
 
 /// The layer and the style the tab gives the cell an [`Edit::Add`] or an [`Edit::Connect`] makes
@@ -324,6 +326,12 @@ impl DiagramView {
         x = x.min(c.x - HANDLE).max(c.right() + HANDLE - w);
         y = y.min(c.y - HANDLE).max(c.bottom() + HANDLE - h);
         self.set_scroll((x, y));
+    }
+
+    /// The shape with a link under widget `(x, y)`, and the link (`Sheet::link_at`).
+    pub fn link_at(&self, x: f64, y: f64) -> Option<(CellId, String)> {
+        let tolerance = TOLERANCE / self.scale();
+        self.sheet()?.link_at(self.page_at(x, y), tolerance)
     }
 
     /// Bring `r` (page units) to the middle of the view, unless it is on screen whole already.
@@ -824,7 +832,7 @@ mod imp {
             let placing = self.moved.get()
                 && !matches!(
                     self.drag.borrow().as_ref(),
-                    None | Some(Drag::Band { .. } | Drag::Pan { .. })
+                    None | Some(Drag::Band { .. } | Drag::Pan { .. } | Drag::Link { .. })
                 );
             let shown = placing || (self.show_grid.get() && !self.read_only.get());
             if let Some(step) = obj.grid(false).filter(|_| shown)

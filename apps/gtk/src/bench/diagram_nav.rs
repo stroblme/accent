@@ -1,6 +1,6 @@
 //! Reading through a diagram's pages with real input, through XTEST.
 
-use super::diagram::middle_on_screen;
+use super::diagram::{middle_on_screen, on_screen};
 use super::*;
 
 /// Four pages small enough to be fitted, so each is at both its edges.
@@ -27,15 +27,31 @@ const LABELS: &str = r#"<mxfile host="accent">
 </mxfile>
 "#;
 
+/// Two pages whose shapes link to each other, and one to the web.
+const LINKS: &str = r#"<mxfile host="accent">
+  <diagram name="One" id="link-1"><mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/>
+    <UserObject label="Go" link="data:page/id,link-2" id="go"><mxCell style="rounded=0;" parent="1" vertex="1"><mxGeometry x="40" y="40" width="120" height="60" as="geometry"/></mxCell></UserObject>
+    <UserObject label="Web" link="https://example.org/" id="web"><mxCell style="rounded=0;" parent="1" vertex="1"><mxGeometry x="240" y="40" width="120" height="60" as="geometry"/></mxCell></UserObject>
+  </root></mxGraphModel></diagram>
+  <diagram name="Two" id="link-2"><mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/>
+    <UserObject label="Back" link="data:page/id,link-1" id="back"><mxCell style="rounded=0;" parent="1" vertex="1"><mxGeometry x="40" y="40" width="120" height="60" as="geometry"/></mxCell></UserObject>
+  </root></mxGraphModel></diagram>
+</mxfile>
+"#;
+
 /// `ACCENT_BENCH_DIAGRAM_NAV=spring:<rel>` writes four small pages to `<rel>` and turns them with
 /// the wheel (DESIGN.md, Diagram): each step prints the page it left the reader on, the furthest
 /// the page was pulled off its edge meanwhile and the pull once it has rested, presented last.
 /// `find:<rel>` writes three pages of labels and searches them in the pane's find bar, then goes
 /// to the last page through Go to Diagram Page…, printing the readout, the page and the selection.
+/// `links:<rel>` writes two pages whose shapes link to each other and to the web, and with real
+/// input shows a link with Ctrl held, follows one by Ctrl+click and one by a click on a presented
+/// page, a plain click while editing selecting.
 pub(super) fn bench_diagram_nav(app: &Rc<App>, arg: &str) {
     match arg.split_once(':') {
         Some(("spring", rel)) => spring(app, rel),
         Some(("find", rel)) => find(app, rel),
+        Some(("links", rel)) => links(app, rel),
         _ => {
             println!("bench nav unknown {arg}");
             bench_quit(app);
@@ -104,6 +120,51 @@ fn find(app: &Rc<App>, rel: &str) {
         pane.find.line_box().emit_activate();
         glib::timeout_future(Duration::from_millis(300)).await;
         say("go to page 3");
+        bench_quit(&app);
+    });
+}
+
+fn links(app: &Rc<App>, rel: &str) {
+    let (app, rel) = (app.clone(), rel.to_string());
+    glib::spawn_future_local(async move {
+        let Some(tab) = opened(&app, &rel, LINKS).await else {
+            return bench_quit(&app);
+        };
+        // The middle of cell `id` on the screen, as the page is laid out now.
+        let at = |id: &str| {
+            let r = tab.frame_of(id).map(|r| tab.to_widget(&r))?;
+            on_screen(&app, &tab.key_target(), r.x + r.w / 2.0, r.y + r.h / 2.0)
+        };
+        let (go, web) = (at("go").unwrap_or_default(), at("web").unwrap_or_default());
+        super::git::xtest(&format!(
+            "move {go}; focus; keydown ctrl; move {web}; sleep 0.3"
+        ))
+        .await;
+        let preview = find_widget(app.window.upcast_ref(), &|w| {
+            w.is::<gtk::Popover>() && w.is_visible()
+        })
+        .and_then(|popover| find_widget(&popover, &|w| w.is::<gtk::Label>()))
+        .and_downcast::<gtk::Label>()
+        .map(|label| label.label().to_string());
+        println!("bench nav link preview={preview:?}");
+        super::git::xtest(&format!("move {go}; down; up; keyup ctrl")).await;
+        let say = |step: &str| {
+            println!(
+                "bench nav link {step} page={} selected={:?}",
+                tab.page_index() + 1,
+                tab.selection()
+            );
+        };
+        say("ctrl-click");
+        let back = at("back").unwrap_or_default();
+        super::git::xtest(&format!("move {back}; down; up")).await;
+        say("click");
+        app.set_presenting(true);
+        glib::timeout_future(Duration::from_millis(500)).await;
+        let back = at("back").unwrap_or_default();
+        super::git::xtest(&format!("move {back}; down; up")).await;
+        say("presented click");
+        app.set_presenting(false);
         bench_quit(&app);
     });
 }

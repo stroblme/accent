@@ -266,7 +266,8 @@ impl DiagramView {
             | Drag::End { .. }
             | Drag::Knob { .. }
             | Drag::Label { .. }
-            | Drag::Pan { .. } => {}
+            | Drag::Pan { .. }
+            | Drag::Link { .. } => {}
         }
     }
 }

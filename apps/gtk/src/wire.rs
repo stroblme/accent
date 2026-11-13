@@ -794,11 +794,20 @@ pub fn wire_window(app: &Rc<App>) {
                 bar_menu(&app, button, &menu);
                 return;
             }
-            // A diagram's goes to a page, which its `Ctrl+G` (Group) does not.
+            // A diagram's goes to a page too, which its `Ctrl+G` (Group) does not.
             if app.active_diagram().is_some() {
                 let menu = gio::Menu::new();
                 let go = "win.diagram-go-to-page";
                 menu.append(Some(label_of(go)), Some(go));
+                let pages = gio::Menu::new();
+                for action in [
+                    "win.diagram-add-page-before",
+                    "win.diagram-add-page-after",
+                    "win.diagram-delete-page",
+                ] {
+                    pages.append(Some(label_of(action)), Some(action));
+                }
+                menu.append_section(None, &pages);
                 bar_menu(&app, button, &menu);
                 return;
             }

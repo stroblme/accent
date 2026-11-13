@@ -317,6 +317,12 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.diagram-fit-width", "Fit Width", &[]),
     ("win.diagram-fit-height", "Fit Height", &[]),
     ("win.diagram-add-page", "Add Diagram Page", &[]),
+    (
+        "win.diagram-add-page-before",
+        "Add Diagram Page Before",
+        &[],
+    ),
+    ("win.diagram-add-page-after", "Add Diagram Page After", &[]),
     ("win.diagram-rename-page", "Rename Diagram Page…", &[]),
     ("win.diagram-delete-page", "Delete Diagram Page", &[]),
     ("win.diagram-move-page-up", "Move Diagram Page Up", &[]),

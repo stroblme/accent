@@ -1052,7 +1052,7 @@ impl App {
             (_, Some(true)) => Some("Show these in the text"),
             (_, Some(false)) => Some("Hide these in the text; the pointer still shows them"),
             (Some(Doc::Pdf(pdf)), None) if pdf.page_count() > 0 => Some("Add or delete a page"),
-            (Some(Doc::Diagram(_)), None) => Some("Go to a page"),
+            (Some(Doc::Diagram(_)), None) => Some("Go to, add or delete a page"),
             _ => None,
         };
         self.statusbar.set_facts(facts.as_deref(), press);

@@ -1174,7 +1174,12 @@ fn props(app: &Rc<App>, rel: &str) {
 
 /// Where `(x, y)` of `widget` is on the screen, for XTEST: the window sits at 0,0 with no window
 /// manager, its client-side shadow putting the widgets a margin in from the surface's corner.
-fn on_screen(app: &App, widget: &impl IsA<gtk::Widget>, x: f64, y: f64) -> Option<String> {
+pub(super) fn on_screen(
+    app: &App,
+    widget: &impl IsA<gtk::Widget>,
+    x: f64,
+    y: f64,
+) -> Option<String> {
     let p = widget.compute_point(&app.window, &graphene::Point::new(x as f32, y as f32))?;
     let (sx, sy) = app.window.surface_transform();
     Some(format!(

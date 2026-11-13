@@ -884,7 +884,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - The facts: what the file is (`Markdown`, `PDF`, `Image`, `Notebook · <language>`, or `<language> · UTF-8 · LF` for code), whether it has unsaved edits, one count of its own, and its zoom; last, at the corner, while a text tab has a selection (a comparison's editor side included), how many characters it holds ("42 characters"): Unicode characters, the unit GTK's offsets count, whitespace and line breaks included, every caret's selection summed, so it reads no text and costs the same at any size.
 - The count is what the tab counts: a note's words (300 ms after the last keystroke), a code tab's errors and warnings, a PDF's `Page 4 of 12` (the page under the middle of the viewport), a notebook's cells, and after them its errors and warnings in every cell, which press as a code tab's do.
   A PDF's count is a button opening Add Page Before, Add Page After and Delete Page for that page, as the page's own menu offers them.
-  A diagram's opens Go to Diagram Page…, the find bar's go-to row, which its `Ctrl+G` (Group) does not reach outside presentation.
+  A diagram's opens Go to Diagram Page…, the find bar's go-to row, which its `Ctrl+G` (Group) does not reach outside presentation, then Add Diagram Page Before, Add Diagram Page After and Delete Diagram Page for the page shown.
 - The unsaved mark is the `•` a dirty tab wears: one symbol, one meaning.
   A saved file shows nothing.
 - The branch (which syncs the document's repository) and the zoom (which resets it) are flat buttons held to the caption's line height (`.accent-bar-button`): Adwaita's button minimum would otherwise make the bar 46 px tall instead of 29.
@@ -1428,6 +1428,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A thumbnail is its page in the canvas's colours, painted when it first comes on screen and again only once an edit has changed it, and its corners are rounded as a PDF thumbnail's are.
 - A page edit is one undo step: the reader lands on a page put in, and otherwise stays on the page they were reading, wherever it went, or the one that took its place, Undo and Redo included, and the pane's Back and Forward places follow the pages.
   A note names a diagram's page by its name, so no link changes with one.
+- A shape's link (draw.io's `link`) is followed as a PDF's is, by a click on a presented page and by Ctrl+click while editing, which on a shape with a link takes the place of adding it to the selection.
+  A page of the diagram, which draw.io names `data:page/id,…`, is gone to as a jump Back returns from, an address is opened as a PDF's link to the web is, and draw.io's other `data:` links go nowhere.
+  Ctrl held over the shape shows where it leads without going there, the page's thumbnail and name or the address.
 - Group puts the selected cells that share the first one's parent, two at least, into a transparent `group` cell sized to them and in front of its siblings, as draw.io's does; they stay where they are, and the group is selected.
   Ungroup hands a group's cells to its parent, in front, and removes the group when it has no fill, line or picture of its own, keeping it as a shape otherwise.
 - The clipboard is draw.io's: Copy writes the selection as the `<mxGraphModel>` XML draw.io's own Copy writes, as text, the topmost cells with all under them, an arrow whose shape stayed behind let go of it where it is drawn; Cut does the same and removes them, the arrows on them let go.
@@ -2076,7 +2079,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 - Duplicate Selection is `Ctrl+D`, Duplicate Line's chord, and Group `Ctrl+G`, Go to Line's, which a diagram in front answers and a presented one leaves to Go to Line, going to a page as over a PDF; `Ctrl+Return` finishes a label being edited; `F2` stays the file's Rename.
 - The tools (Select and Move, Add Rectangle, Add Ellipse, Add Text, Add Connector, Add Image…), Ungroup, Bring to Front, Send to Back, Copy Shape, Paste Shape, Copy Style, Paste Style, and Add, Rename, Delete, Move Up and Move Down Diagram Page are unbound, on the ring and in the palette; a tool picked from the palette brings the ring out, and the same tool twice puts it down.
   The page commands act on the page shown, Add putting a page after the last: the thumbnail strip is where pages are organised by pointer.
-  Go to Diagram Page…, Fit Width and Fit Height are unbound too, in the palette, the first also on the status bar's page count and the other two on the zoom readout's right-click.
+  Go to Diagram Page…, Add Diagram Page Before and After, Fit Width and Fit Height are unbound too, in the palette, the first three also on the status bar's page count and the last two on the zoom readout's right-click.
   Invert Diagram Colours is unbound and in the palette alone.
 
 ### Notebook

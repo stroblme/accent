@@ -319,6 +319,17 @@ drill_diagram_find() {
 		'bench nav find go to page 3 readout="" page=3 selected=[]'
 }
 
+# A diagram's links shown with Ctrl held and followed by Ctrl+click while editing and by a click on
+# a presented page, a plain click while editing selecting (DESIGN.md, Diagram).
+drill_diagram_links() {
+	launch 60 ACCENT_BENCH_DIAGRAM_NAV=links:links.drawio >"$dir/links"
+	has "$dir/links" \
+		'bench nav link preview=Some("https://example.org/")' \
+		'bench nav link ctrl-click page=2 selected=[]' \
+		'bench nav link click page=2 selected=["back"]' \
+		'bench nav link presented click page=1 selected=[]'
+}
+
 # The vault's root in each sort, with a folder left open staying open. Each file's creation time
 # is the order it was written in, c, a then B, apart by more than a coarse clock's tick.
 drill_sort() {

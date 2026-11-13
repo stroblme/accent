@@ -14,6 +14,7 @@ pub(crate) mod geometry;
 mod input;
 pub mod label;
 mod layers;
+mod link;
 mod paint;
 mod props;
 mod render;
@@ -123,6 +124,8 @@ pub struct DiagramTab {
     on_toast: TextHook,
     /// The find bar's hits changed, or the one shown.
     on_matches: TabHook,
+    /// A link to the web was followed: the window opens it.
+    on_uri: TextHook,
 }
 
 /// The tab `held` up for `key`, showing `file` as it was read, at its etag and digest, where the
@@ -215,6 +218,7 @@ pub fn open(
         on_web: Hook::default(),
         on_toast: Hook::default(),
         on_matches: Hook::default(),
+        on_uri: Hook::default(),
     });
     tab.strip.set_pages(tab.editor.borrow().file());
     tab.organize.connect_goto(glib::clone!(
@@ -309,6 +313,7 @@ pub fn open(
     tab.wire_keys();
     tab.wire_wheel();
     tab.wire_menu();
+    tab.wire_link_preview();
     tab
 }
 
@@ -761,6 +766,7 @@ impl DiagramTab {
     fn apply(self: &Rc<Self>, edit: Edit) {
         match edit {
             Edit::Select(ids) => self.select(ids),
+            Edit::Follow(link) => self.follow(&link),
             Edit::Move { ids, delta } => self.move_cells(&ids, delta.x, delta.y),
             Edit::Copy { ids, delta } => self.copy_to(&ids, delta),
             Edit::Resize { id, rect } => self.edit(|e, page| e.resize(page, &id, rect)),
@@ -1088,6 +1094,12 @@ impl DiagramTab {
     /// A blank page after the last, which the reader is taken to.
     pub fn add_page(self: &Rc<Self>) {
         self.edit_pages(&[PageEdit::insert(self.page_count())]);
+    }
+
+    /// Put a blank page in before the page being read, or after it.
+    pub fn insert_page(self: &Rc<Self>, after: bool) {
+        let at = self.page_index.get() + usize::from(after);
+        self.edit_pages(&[PageEdit::insert(at)]);
     }
 
     pub fn rename_page(self: &Rc<Self>, name: &str) {

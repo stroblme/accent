@@ -116,6 +116,10 @@ pub(super) enum Drag {
     Pan {
         scroll: (f64, f64),
     },
+    /// Ctrl pressed on a shape with `link`, which a release where it was pressed follows.
+    Link {
+        link: String,
+    },
 }
 
 impl DiagramView {
@@ -185,6 +189,10 @@ impl DiagramView {
                             id,
                         },
                     });
+                }
+                // Ctrl+click on a shape with a link follows it, as on a PDF.
+                if add && let Some((_, link)) = sheet.link_at(p, tolerance) {
+                    return Some(Drag::Link { link });
                 }
                 let Some(pick) = sheet.pick(p, tolerance, &selection) else {
                     if !add {
@@ -609,6 +617,13 @@ impl DiagramView {
             Drag::Move {
                 click: Some(ids), ..
             } if !moved => self.emit(Edit::Select(ids)),
+            Drag::Link { link } if !moved => self.emit(Edit::Follow(link)),
+            // A click on a presented page follows a link, as one on a PDF read does.
+            Drag::Pan { .. } if !moved && !self.imp().panning.get() => {
+                if let Some(link) = sheet.link_at(p, TOLERANCE / self.scale()) {
+                    self.emit(Edit::Follow(link.1));
+                }
+            }
             Drag::Band { from, add } if moved => {
                 let mut ids = sheet.band(Rect::from_corners(from, p));
                 if add {

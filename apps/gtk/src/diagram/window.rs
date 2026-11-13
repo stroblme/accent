@@ -156,6 +156,14 @@ impl App {
         }));
         // A page picked from the Outline pane is a place left, as a PDF's outline row is.
         tab.connect_jump(on(|app, tab| app.mark_page(&tab.page)));
+        tab.connect_uri(glib::clone!(
+            #[weak(rename_to = app)]
+            self,
+            move |uri| {
+                let launcher = gtk::UriLauncher::new(uri);
+                launcher.launch(Some(&app.window), gio::Cancellable::NONE, |_| {});
+            }
+        ));
         tab.connect_matches(on(|app, tab| {
             if let Some(pane) = app.pane_of(&tab.page) {
                 pane.find.set_matches_text(&tab.matches_label());
@@ -277,6 +285,8 @@ impl App {
             "diagram-fit-width" => tab.fit(super::geometry::Zoom::Width),
             "diagram-fit-height" => tab.fit(super::geometry::Zoom::Height),
             "diagram-add-page" => tab.add_page(),
+            "diagram-add-page-before" => tab.insert_page(false),
+            "diagram-add-page-after" => tab.insert_page(true),
             "diagram-rename-page" => self.rename_diagram_page(&tab),
             "diagram-delete-page" => tab.delete_page(),
             "diagram-move-page-up" => tab.move_page(false),
