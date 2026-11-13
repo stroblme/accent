@@ -887,9 +887,9 @@ async fn bench_unfold(compare: &diff::Compare, views: &[gtk::TextView; 2], on: b
     };
     let what = if on { "on" } else { "off" };
     format!(
-        "{what} hidden={hidden}->{} {tops} {change} sensitive={}",
+        "{what} hidden={hidden}->{} {tops} {change} shown={}",
         compare.counts().2,
-        toggle.is_sensitive()
+        toggle.is_visible()
     )
 }
 

@@ -236,12 +236,14 @@ impl PdfTab {
             menu.append_section(None, &clipboard);
         }
         let file = gio::Menu::new();
-        for action in PAGE_ACTIONS
-            .into_iter()
-            .chain(["win.pdf-export-highlights"])
-        {
+        for action in PAGE_ACTIONS {
             file.append(Some(crate::actions::label_of(action)), Some(action));
         }
+        // Hidden over a PDF no note links to (`App::sync_export`).
+        let export = "win.pdf-export-highlights";
+        let export = gio::MenuItem::new(Some(crate::actions::label_of(export)), Some(export));
+        export.set_attribute_value("hidden-when", Some(&"action-disabled".to_variant()));
+        file.append_item(&export);
         menu.append_section(None, &file);
         // Parented to the box rather than to the view, and pointed at the box's own coordinates:
         // a popover hung off a widget with a `size_allocate` of its own never re-presents and

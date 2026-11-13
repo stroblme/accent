@@ -918,8 +918,8 @@ impl App {
     }
 
     /// Export Highlights is offered only where there is a highlight to export: over a PDF no note
-    /// links to, the command greys out in the page's menu and in the palette rather than being
-    /// offered and answering "Nothing new to export".
+    /// links to, the page's menu and the palette leave the command out, where it would answer
+    /// "Nothing new to export".
     pub fn sync_export(&self) {
         let offered = self.active_pdf().is_some_and(|pdf| pdf.has_note_links());
         if let Some(action) = self
@@ -932,7 +932,7 @@ impl App {
     }
 
     /// Recolour Selection is offered only while the PDF in front's Select tool holds something a
-    /// recolour reaches, greyed in the palette otherwise as Export Highlights is.
+    /// recolour reaches, left out of the palette otherwise as Export Highlights is.
     pub fn sync_recolour(&self) {
         let offered = self.active_pdf().is_some_and(|pdf| pdf.recolourable());
         let names =

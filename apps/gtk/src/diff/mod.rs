@@ -485,7 +485,15 @@ impl Compare {
             Some(Side::Old) => &old.header,
             _ => &new.header,
         };
-        host.insert_child_after(&unfold, host.first_child().as_ref());
+        let title = host.first_child();
+        host.insert_child_after(&unfold, title.as_ref());
+        // The title keeps the toggle's height while the toggle is hidden, so a row with no other
+        // button does not shrink: a size group measures a hidden member too.
+        let row = gtk::SizeGroup::new(gtk::SizeGroupMode::Vertical);
+        row.add_widget(&unfold);
+        if let Some(title) = &title {
+            row.add_widget(title);
+        }
 
         let this = Rc::new_cyclic(|weak| Compare {
             weak: weak.clone(),
@@ -1019,7 +1027,7 @@ impl Compare {
         });
         let mut hidden = Vec::new();
         let gaps = diff::gaps(&lines, &rows, CONTEXT);
-        self.unfold.set_sensitive(!gaps.is_empty());
+        self.unfold.set_visible(!gaps.is_empty());
         if let Some(shown) = self.was_shown.take() {
             *self.opened.borrow_mut() = kept_open(&lines, &rows, &gaps, keyed, &shown);
         }
