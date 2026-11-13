@@ -18,7 +18,7 @@ const CHUNK: usize = 256 * 1024;
 /// known by on a host.
 #[derive(Debug, Clone)]
 pub struct Server {
-    /// Combined blake3 hash naming all architecture builds ([`ssh::server_path`]),
+    /// Combined blake3 hash of every architecture build's SHA-256 ([`ssh::server_path`]),
     /// so a shell knows the remote path before learning the host architecture.
     pub hash: String,
     builds: Vec<Build>,
@@ -29,39 +29,95 @@ pub struct Server {
 struct Build {
     /// As `uname -m` names it: one of [`ssh::SERVER_ARCHES`].
     arch: &'static str,
+    /// The binary, which a package holds only as its XZ archive beside it ([`Sums`]).
     path: PathBuf,
-    hash: String,
+    /// The binary's SHA-256, which names the build.
+    sha256: String,
     size: usize,
 }
 
-impl Build {
-    /// A checked build-time archive when the host can unpack it; otherwise the raw binary.
-    fn payload(&self, xz: bool) -> Result<(Vec<u8>, bool)> {
-        use sha2::{Digest, Sha256};
+/// What `build-aux/compress-server.py` writes beside a server's XZ archive: the binary's SHA-256,
+/// the archive's, and the binary's length.
+struct Sums {
+    raw: String,
+    packed: String,
+    size: usize,
+}
 
-        let sha256 = |bytes: &[u8]| -> String {
-            Sha256::digest(bytes)
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect()
+impl Sums {
+    fn of(binary: &Path) -> Option<Self> {
+        let text = std::fs::read_to_string(binary.with_extension("xz.sha256")).ok()?;
+        let mut lines = text.lines();
+        let (raw, packed) = (lines.next()?.to_string(), lines.next()?.to_string());
+        let size = lines.next()?.parse().ok()?;
+        Some(Self { raw, packed, size })
+    }
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+impl Build {
+    /// The server for `arch` at `path`: the binary where there is one, beside which a rebuild may
+    /// have left an older archive, and otherwise what its archive's sums say, as in a package.
+    fn at(arch: &'static str, path: PathBuf) -> Result<Self> {
+        let (sha256, size) = match std::fs::read(&path) {
+            Ok(raw) => (sha256(&raw), raw.len()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                let sums = Sums::of(&path).ok_or_else(|| unreadable(&path, e))?;
+                (sums.raw, sums.size)
+            }
+            Err(e) => return Err(unreadable(&path, e)),
         };
-        let raw = std::fs::read(&self.path).map_err(|e| unreadable(&self.path, e))?;
-        if ssh::hash_of(&raw) != self.hash {
+        Ok(Self {
+            arch,
+            path,
+            sha256,
+            size,
+        })
+    }
+
+    /// The archive when the host can unpack it and the sums bind it to this build, otherwise the
+    /// binary, unpacked here where a package holds only the archive. Both digests of the sums
+    /// must match: a rebuild or an interrupted install can leave them from another build, even
+    /// one of the same length.
+    fn payload(&self, xz: bool) -> Result<(Vec<u8>, bool)> {
+        let archive = self.path.with_extension("xz");
+        if xz
+            && let Some(sums) = Sums::of(&self.path)
+            && sums.raw == self.sha256
+            && let Ok(bytes) = std::fs::read(&archive)
+            && sha256(&bytes) == sums.packed
+        {
+            return Ok((bytes, true));
+        }
+        let raw = match std::fs::read(&self.path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => unpack(&archive, self.size)?,
+            raw => raw.map_err(|e| unreadable(&self.path, e))?,
+        };
+        if sha256(&raw) != self.sha256 {
             return Err(Error::Remote(
                 "the server binary changed while connecting; try again".to_string(),
             ));
         }
-        // Both digests must match: a rebuild or an interrupted install can leave either
-        // sidecar from another build, even when the uncompressed sizes are identical.
-        if xz
-            && let Ok(sums) = std::fs::read_to_string(self.path.with_extension("xz.sha256"))
-            && let Ok(bytes) = std::fs::read(self.path.with_extension("xz"))
-            && sums == format!("{}\n{}\n", sha256(&raw), sha256(&bytes))
-        {
-            return Ok((bytes, true));
-        }
         Ok((raw, false))
     }
+}
+
+/// The binary of `size` bytes packed in the XZ archive at `path`, for a host without `xz`.
+fn unpack(path: &Path, size: usize) -> Result<Vec<u8>> {
+    let file = std::fs::File::open(path).map_err(|e| unreadable(path, e))?;
+    let mut raw = Vec::with_capacity(size);
+    xz4rust::XzReader::new(file)
+        .read_to_end(&mut raw)
+        .map_err(|e| unreadable(path, e))?;
+    Ok(raw)
 }
 
 impl Server {
@@ -102,9 +158,19 @@ pub fn server() -> Result<Server> {
     type Stamp = Vec<(PathBuf, u64, Option<std::time::SystemTime>)>;
     static HASHED: Mutex<Option<(Stamp, Server)>> = Mutex::new(None);
 
-    let found: Vec<(&'static str, PathBuf)> = ssh::SERVER_ARCHES
+    // A package holds each binary only as its archive, whose sums then name the build.
+    let found: Vec<(&'static str, PathBuf, PathBuf)> = ssh::SERVER_ARCHES
         .iter()
-        .filter_map(|arch| Some((*arch, ssh::server_binary(arch)?)))
+        .filter_map(|arch| {
+            ssh::server_places(arch).into_iter().find_map(|binary| {
+                let sums = binary.with_extension("xz.sha256");
+                let named = match binary.is_file() {
+                    true => binary.clone(),
+                    false => sums.is_file().then_some(sums)?,
+                };
+                Some((*arch, binary, named))
+            })
+        })
         .collect();
     if found.is_empty() {
         return Err(Error::Remote(
@@ -112,9 +178,9 @@ pub fn server() -> Result<Server> {
         ));
     }
     let mut stamp = Vec::new();
-    for (_, path) in &found {
-        let meta = std::fs::metadata(path).map_err(|e| unreadable(path, e))?;
-        stamp.push((path.clone(), meta.len(), meta.modified().ok()));
+    for (_, _, named) in &found {
+        let meta = std::fs::metadata(named).map_err(|e| unreadable(named, e))?;
+        stamp.push((named.clone(), meta.len(), meta.modified().ok()));
     }
     let mut hashed = locked(&HASHED);
     if let Some((seen, server)) = &*hashed
@@ -123,16 +189,10 @@ pub fn server() -> Result<Server> {
         return Ok(server.clone());
     }
     let mut builds = Vec::new();
-    for (arch, path) in found {
-        let bytes = std::fs::read(&path).map_err(|e| unreadable(&path, e))?;
-        builds.push(Build {
-            arch,
-            hash: ssh::hash_of(&bytes),
-            size: bytes.len(),
-            path,
-        });
+    for (arch, binary, _) in found {
+        builds.push(Build::at(arch, binary)?);
     }
-    let hashes: Vec<&str> = builds.iter().map(|b| b.hash.as_str()).collect();
+    let hashes: Vec<&str> = builds.iter().map(|b| b.sha256.as_str()).collect();
     let server = Server {
         hash: ssh::hash_of(hashes.join(" ").as_bytes()),
         builds,
@@ -508,49 +568,95 @@ mod tests {
         assert_eq!(prepared(&b).unwrap(), "fedcba9876543210");
     }
 
+    /// Pack `binary` as `make server` does, with its sums beside the archive.
+    fn compress(binary: &Path) {
+        let script =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../build-aux/compress-server.py");
+        let packed = Command::new("python3").arg(script).arg(binary).status();
+        assert!(packed.unwrap().success());
+    }
+
     #[test]
     fn a_server_upload_uses_only_a_matching_archive() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("accent-cli");
         let raw = b"a server binary";
         std::fs::write(&path, raw).unwrap();
-        let mut build = Build {
-            arch: "x86_64",
-            path: path.clone(),
-            hash: ssh::hash_of(raw),
-            size: raw.len(),
-        };
+        let mut build = Build::at("x86_64", path.clone()).unwrap();
         assert_eq!(build.payload(true).unwrap(), (raw.to_vec(), false));
-        let script =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../build-aux/compress-server.py");
-        assert!(
-            Command::new("python3")
-                .arg(script)
-                .arg(&path)
-                .status()
-                .unwrap()
-                .success()
-        );
+        compress(&path);
         let archive = path.with_extension("xz");
         let packed = std::fs::read(&archive).unwrap();
         assert_eq!(build.payload(true).unwrap(), (packed.clone(), true));
         assert_eq!(build.payload(false).unwrap(), (raw.to_vec(), false));
 
-        // A rebuild can leave an older archive beside a binary of the same size.
+        // A rebuild can leave an older archive beside a binary of the same size: the archive
+        // still goes under the name it was hashed for, the new binary under none but its own.
         let rebuilt = b"a newer binary!";
         assert_eq!(rebuilt.len(), raw.len());
         std::fs::write(&path, rebuilt).unwrap();
-        assert!(build.payload(true).is_err());
-        build.hash = ssh::hash_of(rebuilt);
+        assert_eq!(build.payload(true).unwrap(), (packed.clone(), true));
+        assert!(build.payload(false).is_err());
+        build = Build::at("x86_64", path.clone()).unwrap();
         assert_eq!(build.payload(true).unwrap(), (rebuilt.to_vec(), false));
 
         std::fs::write(&path, raw).unwrap();
-        build.hash = ssh::hash_of(raw);
+        build = Build::at("x86_64", path.clone()).unwrap();
         std::fs::write(&archive, &packed[..packed.len() - 1]).unwrap();
         assert_eq!(build.payload(true).unwrap(), (raw.to_vec(), false));
         std::fs::write(&archive, packed).unwrap();
         std::fs::remove_file(path.with_extension("xz.sha256")).unwrap();
         assert_eq!(build.payload(true).unwrap(), (raw.to_vec(), false));
+    }
+
+    /// A package holds a server only as its archive: the sums name the build as the binary
+    /// would, a host with `xz` gets the archive and one without the binary unpacked here, and
+    /// either installs the binary's exact bytes. A damaged archive has no binary to fall back on.
+    #[test]
+    fn a_package_uploads_its_archive_or_the_binary_unpacked_from_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("accent-cli-x86_64");
+        let raw: Vec<u8> = (0..200_000u32)
+            .flat_map(|i| (i / 3).to_le_bytes())
+            .collect();
+        std::fs::write(&path, &raw).unwrap();
+        compress(&path);
+        let built = Build::at("x86_64", path.clone()).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let packaged = Build::at("x86_64", path.clone()).unwrap();
+        assert_eq!(
+            (&packaged.sha256, packaged.size),
+            (&built.sha256, raw.len())
+        );
+
+        let home = dir.path().join("home");
+        let installed = home
+            .join(ssh::SERVER_DIR)
+            .join(ssh::server_name("0123456789abcdef"));
+        for xz in [true, false] {
+            let (bytes, packed) = packaged.payload(xz).unwrap();
+            assert_eq!(packed, xz);
+            let install = ssh::install_server_cmd("0123456789abcdef", packaged.size, packed);
+            let set_home = format!("HOME={}", home.display());
+            let argv: [&str; 5] = ["env", &set_home, "sh", "-c", &install];
+            let argv = argv.map(String::from);
+            send(
+                &argv,
+                bytes.as_slice(),
+                bytes.len() as u64,
+                &|_, _| (),
+                &Stop::default(),
+            )
+            .unwrap();
+            assert!(std::fs::read(&installed).unwrap() == raw);
+            std::fs::remove_file(&installed).unwrap();
+        }
+
+        let archive = path.with_extension("xz");
+        let packed = std::fs::read(&archive).unwrap();
+        std::fs::write(&archive, &packed[..packed.len() / 2]).unwrap();
+        assert!(packaged.payload(true).is_err());
+        assert!(packaged.payload(false).is_err());
     }
 
     /// ssh ending on its own (255) is the link that went; the command failing is the host
@@ -578,7 +684,7 @@ mod tests {
         let build = |arch| Build {
             arch,
             path: PathBuf::new(),
-            hash: String::new(),
+            sha256: String::new(),
             size: 1,
         };
         let server = Server {

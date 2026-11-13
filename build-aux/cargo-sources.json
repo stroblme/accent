@@ -3770,6 +3770,19 @@
     {
         "type": "archive",
         "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/xz4rust/xz4rust-0.2.3.crate",
+        "sha256": "606930b71bad6379f366994e4e6252a3462fa28bfc3695c33b07bef8f967d6d6",
+        "dest": "cargo/vendor/xz4rust-0.2.3"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"606930b71bad6379f366994e4e6252a3462fa28bfc3695c33b07bef8f967d6d6\", \"files\": {}}",
+        "dest": "cargo/vendor/xz4rust-0.2.3",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
         "url": "https://static.crates.io/crates/zmij/zmij-1.0.23.crate",
         "sha256": "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b",
         "dest": "cargo/vendor/zmij-1.0.23"

@@ -4,8 +4,9 @@
 #
 # The libraries go to Contents/Frameworks, relinked through @rpath. GLib's, gdk-pixbuf's and GIO's
 # data and modules go to Contents/Resources, which `apps/gtk/src/platform/bundle.rs` points them
-# at, the paths built into them being the build machine's. libpdfium and the remote servers go to
-# Contents/lib/accent, the `../lib/accent` beside the binary where the app looks for them anyway.
+# at, the paths built into them being the build machine's. libpdfium and the remote servers' XZ
+# archives go to Contents/lib/accent, the `../lib/accent` beside the binary where the app looks for
+# them anyway.
 # No spell checking: the packaged enchant looks for its providers under its own prefix only
 # (NOTEPAD.md, macOS).
 #
@@ -31,10 +32,11 @@ cp "$bin/accent" "$bin/accent-cli" "$c/MacOS/"
 cp "$bin/accent.icns" "$res/"
 cp vendor/pdfium/libpdfium.dylib "$c/lib/accent/"
 # Best effort, as `make install`: `make server` needs a musl toolchain, and only a remote vault
-# needs its output, which sits beside this profile's folder.
+# needs its output, which sits beside this profile's folder. Each server goes in as its archive
+# alone, which the app unpacks for a host without xz.
 for arch in x86_64 aarch64; do
 	server=$(dirname "$bin")/$arch-unknown-linux-musl/$(basename "$bin")/accent-cli
-	for suffix in "" .xz .xz.sha256; do
+	for suffix in .xz .xz.sha256; do
 		if [ -f "$server$suffix" ]; then cp "$server$suffix" "$c/lib/accent/accent-cli-$arch$suffix"; fi
 	done
 done

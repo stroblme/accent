@@ -605,22 +605,31 @@ pub fn revoke_cmd(server: &str, id: &str) -> String {
 /// installed and development launches without config. The local glibc-linked
 /// `accent-cli` may not run on older hosts.
 pub fn server_binary(arch: &str) -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
+    server_places(arch)
+        .into_iter()
+        .find(|binary| binary.is_file())
+}
+
+/// Where [`server_binary`] looks, in order. A package holds the binary only as its XZ archive
+/// beside where it would be (`link`).
+pub fn server_places(arch: &str) -> Vec<PathBuf> {
+    let Ok(exe) = std::env::current_exe() else {
+        return Vec::new();
+    };
     // Up the ancestors rather than one fixed step: the installed layout puts us in `bin/` beside
     // `lib/accent`, a development build runs from `target/<profile>/`, and a test binary from
     // `target/debug/deps/`. Four levels reaches the cargo target directory from all three.
-    for dir in exe.ancestors().skip(1).take(4) {
-        for candidate in [
-            dir.join(format!("lib/accent/accent-cli-{arch}")),
-            dir.join(format!("../lib/accent/accent-cli-{arch}")),
-            dir.join(format!("{arch}-unknown-linux-musl/release/accent-cli")),
-        ] {
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-        }
-    }
-    None
+    exe.ancestors()
+        .skip(1)
+        .take(4)
+        .flat_map(|dir| {
+            [
+                dir.join(format!("lib/accent/accent-cli-{arch}")),
+                dir.join(format!("../lib/accent/accent-cli-{arch}")),
+                dir.join(format!("{arch}-unknown-linux-musl/release/accent-cli")),
+            ]
+        })
+        .collect()
 }
 
 /// Where files fetched from this remote are kept, under the same short name as the socket.

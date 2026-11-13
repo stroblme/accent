@@ -84,8 +84,9 @@ jobs:
           bundle: accent-${{ github.ref_name }}-${{ matrix.arch }}.flatpak
           cache-key: flatpak-builder-${{ matrix.arch }}-${{ github.sha }}
 
-  # The static servers a remote vault uploads, for Accent.app and the native packages to carry;
-  # macOS has no musl toolchain of its own. Not named accent-*, so the release below leaves them out.
+  # The static servers a remote vault uploads, as the XZ archives Accent.app and the native packages
+  # carry; macOS has no musl toolchain of its own. Not named accent-*, so the release below leaves
+  # them out.
   server:
     name: remote servers
     needs: tests
@@ -103,7 +104,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: servers
-          path: target/*-unknown-linux-musl/release/accent-cli*
+          path: target/*-unknown-linux-musl/release/accent-cli.xz*
           if-no-files-found: error
 
   # A .deb or .rpm per distribution, each built and install-tested in containers of that

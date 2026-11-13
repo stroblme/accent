@@ -36,6 +36,9 @@ chrono.workspace = true
 blake3.workspace = true
 # Already in the kernel client; checks that a packaged XZ archive belongs to its server binary.
 sha2 = "0.11"
+# Unpacks that archive for a host without `xz`, where a package holds no binary: pure Rust, decoder
+# only, with the CRC64 check Python's `lzma` writes.
+xz4rust = { version = "0.2", default-features = false, features = ["std", "crc64"] }
 # Already built for `ignore`: a language server's `willRename` filters are globs.
 globset = "0.4"
 # Already in core; `renameat2` lands a download where the vault's filesystem has no links.

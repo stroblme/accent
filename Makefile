@@ -443,12 +443,13 @@ else
 		$(call INSTALL_STRIPPED,$(PDFIUM_LIB),$(DESTDIR)$(LIBDIR)/accent/$(notdir $(PDFIUM_LIB)))
 	@# Also best effort: `make server` needs a musl toolchain, and everything but opening a vault
 	@# on another machine works without it. Same `../lib/accent` the app looks in for libpdfium.
+	@# Each server goes in as its archive alone, which the app unpacks for a host without xz; a
+	@# binary an older install left beside it would name the build instead (crates/api/src/link.rs).
 	-@for arch in $(SERVER_ARCHES); do \
-		test -f $(call SERVER_BIN,$$arch) || continue; \
-		install -Dm755 $(call SERVER_BIN,$$arch) $(DESTDIR)$(LIBDIR)/accent/accent-cli-$$arch; \
+		test -f $(call SERVER_BIN,$$arch).xz || continue; \
+		rm -f $(DESTDIR)$(LIBDIR)/accent/accent-cli-$$arch; \
 		for suffix in .xz .xz.sha256; do \
-			test ! -f $(call SERVER_BIN,$$arch)$$suffix || \
-				install -m644 $(call SERVER_BIN,$$arch)$$suffix $(DESTDIR)$(LIBDIR)/accent/accent-cli-$$arch$$suffix; \
+			install -Dm644 $(call SERVER_BIN,$$arch)$$suffix $(DESTDIR)$(LIBDIR)/accent/accent-cli-$$arch$$suffix; \
 		done; \
 	done; true
 	@# Best effort: without these the launcher and icon can take a re-login to appear. Never into
