@@ -43,8 +43,9 @@ pub fn hex([r, g, b]: [u8; 3]) -> String {
     Color::rgb(r, g, b).hex()
 }
 
-/// Where a cell's colour is: its page, its id and the key.
-type Place = (usize, CellId, &'static str);
+/// Where a cell's colour is: its page's id, its own and the key. The page's id, not its place, so
+/// a page put in, moved or taken away leaves the other pages' cells where they were.
+type Place = (String, CellId, &'static str);
 
 /// What the swatches show for one diagram, and the colour picked on them.
 #[derive(Default)]
@@ -96,11 +97,13 @@ impl Swatches {
 fn colours(file: &File) -> Vec<(Place, [u8; 3])> {
     let mut all = Vec::new();
     for (i, page) in file.pages().iter().enumerate() {
+        let id = accent_drawio::model::attr(&page.attrs, "id")
+            .map_or_else(|| i.to_string(), str::to_string);
         for cell in &page.cells {
             for key in KEYS {
                 let colour = cell.style.get(key).and_then(Color::parse);
                 if let Some(c) = colour.filter(|c| c.a > 0) {
-                    all.push(((i, cell.id.clone(), key), [c.r, c.g, c.b]));
+                    all.push(((id.clone(), cell.id.clone(), key), [c.r, c.g, c.b]));
                 }
             }
         }
@@ -211,6 +214,13 @@ mod tests {
             swatches.update(editor.file(), &FILL),
             [[0x12, 0x34, 0x56], blue, green, [0, 0, 0], red, FILL[0]]
         );
+        // Red, still in the file, falls off the ring; a page put in before changes no swatch.
+        add(&mut editor, "fillColor=#000001;");
+        add(&mut editor, "fillColor=#000002;");
+        let before = swatches.update(editor.file(), &FILL).to_vec();
+        assert!(!before.contains(&red));
+        editor.insert_page(0).unwrap();
+        assert_eq!(swatches.update(editor.file(), &FILL), before);
     }
 
     #[test]
