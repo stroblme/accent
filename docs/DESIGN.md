@@ -1002,11 +1002,11 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   `Ctrl+F` and its neighbours open the bar of the pane the reader is in.
 - Over a shell the bar goes and the chord opens nothing: vte keeps its own scrollback.
 - F5 keeps the presented pane where it is, so its bar stays its own over the rendered note.
-- **A query is searched as it is typed** and its first match shown, everywhere alike: in a buffer the first from the caret, over a PDF the first on or after the page being read, wrapping round (or the page of the match shown while it is still on screen, so typing on does not move on from it), over a notebook the first from the selected cell's caret, through the cells in order, in the rendered preview the first from the selection or the top of the view.
+- **A query is searched as it is typed** and its first match shown, everywhere alike: in a buffer the first from the caret, over a PDF the first on or after the page being read, wrapping round (or the page of the match shown while it is still on screen, so typing on does not move on from it), over a notebook the first from the selected cell's caret, through the cells in order, over a diagram the first label on or after the page shown, in the rendered preview the first from the selection or the top of the view.
   A long PDF's pages are searched in the background, so its count grows ("1 of 3", then "1 of 57").
   A page edit searches the PDF again without moving the reader, and the next step goes from the page being read.
 - Enter steps to the next match and Shift+Enter to the previous, in every bar.
-- The readout says "3 of 12" in the buffer, a notebook, a PDF and the rendered preview alike.
+- The readout says "3 of 12" in the buffer, a notebook, a PDF, a diagram and the rendered preview alike.
 - Beside the query sit the Search pane's Match Case, Match Whole Word and Regular Expression toggles, the same text buttons in the same `.linked` group, and a buffer, a notebook's cells and the rendered preview are matched by the Search pane's own matcher (`accent_core::search`): the whole text at once, a cell at a time in a notebook, so `^` is the start of the note or the cell and a pattern may run across lines, a whole word ends where `\b` says (`_` is a word character), and under Regular Expression a replacement's `$1` names a group, as Replace All in Files writes it.
   Each bar keeps its own toggles, apart from the Search pane's and the other pane's bar.
 - A query that does not compile marks the box as the Search pane marks its own, and the readout says "Invalid pattern".
@@ -1014,6 +1014,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   A toggle searches again over it, as over a buffer; a remote vault's PDF is searched in the copy on this machine, so nothing crosses the link.
 - Over the rendered preview the page's text is searched as a buffer is, a table's cells each alone and counted where the table stands; the matches within a screen of the view are painted and painted again as it scrolls, the current one is the selection, in its cell for a cell's, and a step scrolls an unseen match a third of the way down.
   An edit beside it keeps the match selected.
+- Over a diagram the bar searches its labels, each on the one line Search reads it as, by the Search pane's matcher: a hit is the cell, counted through the pages in document order, and a step selects it and brings it to the middle of the view, or on a presented page, which selects nothing, shows its page.
 - Over a notebook the bar searches its cells' sources, not their outputs, as Search does: a step selects the match's cell and scrolls the match into view, the keyboard staying in the bar.
   Replace takes one match, one Undo step, and Replace All every match in every cell as one step through the notebook's model (user decision 2026-10-20).
   Go to Line is Go to Cell there ("of 14 cells").

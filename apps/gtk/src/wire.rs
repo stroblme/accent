@@ -68,6 +68,15 @@ pub fn wire_pane(app: &Rc<App>, pane: &Rc<Pane>) {
                     .or_else(|| app.notebook_of(&pane).map(|nb| nb.cell_count()))
             }
         )),
+        pdf: Box::new(glib::clone!(
+            #[weak]
+            app,
+            #[weak]
+            pane,
+            #[upgrade_or]
+            false,
+            move || app.pdf_of(&pane).is_some()
+        )),
         mark: Box::new(glib::clone!(
             #[weak]
             app,

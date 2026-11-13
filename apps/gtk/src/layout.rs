@@ -508,16 +508,21 @@ impl App {
             }
             return;
         }
-        // A diagram goes to a page as a PDF does, and takes the keyboard back as the bar closes.
+        // A diagram finds its labels and goes to a page as a PDF does, and takes the keyboard
+        // back as the bar closes.
         if let Some(diagram) = self.diagram_of(pane) {
             match op {
+                find::PreviewOp::Find(text, options) => diagram.find(&text, options),
+                find::PreviewOp::Next => diagram.step_match(true),
+                find::PreviewOp::Previous => diagram.step_match(false),
                 find::PreviewOp::Line { line, commit: true } => {
                     diagram.goto_page((line as usize).saturating_sub(1))
                 }
                 find::PreviewOp::Clear => {
+                    diagram.find_clear();
                     diagram.key_target().grab_focus();
                 }
-                _ => {}
+                find::PreviewOp::Line { commit: false, .. } | find::PreviewOp::Replace { .. } => {}
             }
             return;
         }

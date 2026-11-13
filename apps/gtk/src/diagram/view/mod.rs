@@ -326,6 +326,17 @@ impl DiagramView {
         self.set_scroll((x, y));
     }
 
+    /// Bring `r` (page units) to the middle of the view, unless it is on screen whole already.
+    pub fn centre(&self, r: &Rect) {
+        let c = self.imp().frame.get().rect(r);
+        let (w, h) = (f64::from(self.width()), f64::from(self.height()));
+        let (x, y) = self.scroll();
+        if c.x >= x && c.y >= y && c.right() <= x + w && c.bottom() <= y + h {
+            return;
+        }
+        self.set_scroll((c.x + c.w / 2.0 - w / 2.0, c.y + c.h / 2.0 - h / 2.0));
+    }
+
     /// Whether the page has been laid out at the canvas's size: a drill aiming at it waits.
     #[cfg(feature = "bench")]
     pub fn laid_out(&self) -> bool {

@@ -305,6 +305,20 @@ drill_diagram_spring() {
 		'bench nav spring presented one notch page=4 pull=0'
 }
 
+# A diagram's labels found in the find bar through its pages and round, by a regular expression
+# and not by one that does not compile, and a page gone to from Go to Diagram Page… (DESIGN.md,
+# Find bar).
+drill_diagram_find() {
+	launch 60 ACCENT_BENCH_DIAGRAM_NAV=find:find.drawio >"$dir/find"
+	has "$dir/find" \
+		'bench nav find alpha readout="1 of 2" page=1 selected=["a"]' \
+		'bench nav find next readout="2 of 2" page=2 selected=["c"]' \
+		'bench nav find round readout="1 of 2" page=1 selected=["a"]' \
+		'bench nav find regex readout="1 of 1" page=1 selected=["b"]' \
+		'bench nav find invalid readout="Invalid pattern" page=1 selected=["b"]' \
+		'bench nav find go to page 3 readout="" page=3 selected=[]'
+}
+
 # The vault's root in each sort, with a folder left open staying open. Each file's creation time
 # is the order it was written in, c, a then B, apart by more than a coarse clock's tick.
 drill_sort() {

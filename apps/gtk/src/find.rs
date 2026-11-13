@@ -78,6 +78,9 @@ pub struct Wiring {
     /// How many pages the thing being looked at has, when it is counted in pages rather than
     /// lines. `None` for an editor, which counts lines.
     pub pages: Box<dyn Fn() -> Option<usize>>,
+    /// Whether that is a PDF, which pdfium matches by words alone, so Regular Expression is
+    /// greyed over it.
+    pub pdf: Box<dyn Fn() -> bool>,
     /// Record where the reader is in this pane, so Back returns to where the search started.
     pub mark: Box<dyn Fn()>,
 }
@@ -478,9 +481,9 @@ impl Bar {
     }
 
     /// Grey Regular Expression out over a PDF, whose search is pdfium's and matches none, keeping
-    /// its state. A PDF is counted in pages; a buffer, a notebook and the preview are not.
+    /// its state.
     fn sync_toggles(&self) {
-        let pdf = self.presenting() && self.wiring.get().is_some_and(|w| (w.pages)().is_some());
+        let pdf = self.wiring.get().is_some_and(|w| (w.pdf)());
         let [_, _, regex] = &self.toggles;
         regex.set_sensitive(!pdf);
         if pdf {

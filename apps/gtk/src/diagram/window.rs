@@ -156,6 +156,11 @@ impl App {
         }));
         // A page picked from the Outline pane is a place left, as a PDF's outline row is.
         tab.connect_jump(on(|app, tab| app.mark_page(&tab.page)));
+        tab.connect_matches(on(|app, tab| {
+            if let Some(pane) = app.pane_of(&tab.page) {
+                pane.find.set_matches_text(&tab.matches_label());
+            }
+        }));
         tab.connect_page(on(|app, _| {
             app.sync_diagram_tools();
             app.sync_status();

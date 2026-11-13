@@ -9,6 +9,7 @@ mod colours;
 pub mod embed;
 pub mod export;
 mod face;
+mod find;
 pub(crate) mod geometry;
 mod input;
 pub mod label;
@@ -82,6 +83,8 @@ pub struct DiagramTab {
     editor: RefCell<Editor>,
     page_index: Cell<usize>,
     selection: RefCell<Vec<CellId>>,
+    /// The find bar's query over the labels, and its hits.
+    finding: RefCell<find::Find>,
     /// What was selected on each page the reader left, by its page id, selected again when they
     /// come back. It lasts as long as the tab and is never written; a page without an id keeps
     /// nothing.
@@ -118,6 +121,8 @@ pub struct DiagramTab {
     /// Something to tell the reader in a toast: what was copied, or that there was nothing to
     /// paste.
     on_toast: TextHook,
+    /// The find bar's hits changed, or the one shown.
+    on_matches: TabHook,
 }
 
 /// The tab `held` up for `key`, showing `file` as it was read, at its etag and digest, where the
@@ -187,6 +192,7 @@ pub fn open(
         editor: RefCell::new(Editor::new(file)),
         page_index: Cell::new(place.page.min(pages.saturating_sub(1))),
         selection: RefCell::new(Vec::new()),
+        finding: RefCell::default(),
         kept: RefCell::default(),
         tool: Cell::new(Tool::Select),
         options: Cell::new(DiagramConfig::default()),
@@ -208,6 +214,7 @@ pub fn open(
         on_options: Hook::default(),
         on_web: Hook::default(),
         on_toast: Hook::default(),
+        on_matches: Hook::default(),
     });
     tab.strip.set_pages(tab.editor.borrow().file());
     tab.organize.connect_goto(glib::clone!(

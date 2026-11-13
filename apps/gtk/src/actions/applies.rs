@@ -187,7 +187,9 @@ pub fn applies(action: &str, cx: &Context) -> bool {
         "win.copy-relative-path" | "win.reveal-in-sidebar" => cx.file == Some(File::Vault),
 
         // What searches, edits and moves about in the document.
-        "win.find" | "win.find-next" | "win.find-previous" => text || pdf || notebook || preview,
+        "win.find" | "win.find-next" | "win.find-previous" => {
+            text || pdf || notebook || preview || diagram
+        }
         "win.replace" => text || notebook,
         // `Ctrl+G` groups a diagram's selection, `Ctrl+D` duplicates it, and `Ctrl+Return`
         // finishes a diagram's label or a PDF's typed text.

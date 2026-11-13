@@ -406,8 +406,8 @@ use user_commands::bench_commands;
 ///   PDF/PNG/SVG export and print output. `ACCENT_BENCH_DIAGRAM_SHOT=<png>` adds a picture
 ///   of the window (`diagram::bench_diagram`).
 /// - `ACCENT_BENCH_DIAGRAM_NAV=spring:<rel>`: a diagram's pages turned by XTEST wheel notches,
-///   pulled off their edge while edited and at once presented (`diagram_nav::bench_diagram_nav`).
-///   Writes `<rel>`.
+///   pulled off their edge while edited and at once presented; `find:<rel>`: its labels searched
+///   in the find bar and a page gone to (`diagram_nav::bench_diagram_nav`). Writes `<rel>`.
 /// - `ACCENT_BENCH_NOTEBOOK=<ipynb>,<marimo .py>,<long ipynb>`: outputs, cell edits with undo
 ///   and save, marimo kept as written, a long notebook's open time and memory, presentation
 ///   (`notebook::bench_notebook`). Saves: a scratch vault under `/tmp`. `look:<ipynb>:<dir>`:
