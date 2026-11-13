@@ -542,7 +542,8 @@ fn menu_items(view: &sourceview5::View) {
     view.add_controller(keys);
 }
 
-/// Enable menu Cut/Copy after popup creation; omit Cut for read-only views.
+/// Enable menu Cut/Copy after popup creation; Cut stays greyed in a read-only view, as GTK's own
+/// menu greys what it cannot do.
 fn arm_menu_items(view: &sourceview5::View) {
     let view = view.clone();
     glib::idle_add_local_once(move || {
