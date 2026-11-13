@@ -424,14 +424,14 @@ fn walk(
     }
 }
 
-/// Which toggles take a click over `place`, and what Match Whole Word says it does there.
+/// Which toggles show over `place`, and what Match Whole Word says it does there.
 fn toggles(place: &str, bar: &Rc<Bar>) {
     let [case, word, regex] = bar.toggles();
     println!(
         "bench find options case={place} toggles case={} word={} regex={} word_tooltip={:?}",
-        case.is_sensitive(),
-        word.is_sensitive(),
-        regex.is_sensitive(),
+        case.is_visible(),
+        word.is_visible(),
+        regex.is_visible(),
         word.tooltip_text().unwrap_or_default()
     );
 }

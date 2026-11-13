@@ -480,12 +480,16 @@ impl Bar {
         options([case, word, regex])
     }
 
-    /// Grey Regular Expression out over a PDF, whose search is pdfium's and matches none, keeping
-    /// its state.
+    /// Hide Regular Expression over a PDF, whose search is pdfium's and matches none, keeping its
+    /// state.
     fn sync_toggles(&self) {
         let pdf = self.wiring.get().is_some_and(|w| (w.pdf)());
         let [_, _, regex] = &self.toggles;
-        regex.set_sensitive(!pdf);
+        // The query takes its keyboard, which GTK would hand to the window's first control.
+        if pdf && regex.has_focus() {
+            self.query.grab_focus();
+        }
+        regex.set_visible(!pdf);
         if pdf {
             self.query.remove_css_class("error");
         }

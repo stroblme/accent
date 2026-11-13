@@ -240,7 +240,7 @@ async fn find_drill(app: &Rc<App>, rel: &str) {
     bar.step(true);
     let next = bar.readout().0;
     let [_, _, regex] = bar.toggles();
-    let sensitive = regex.is_sensitive();
+    let regex_shown = regex.is_visible();
     regex.set_active(true);
     bar.query_box().set_text("^import");
     settle().await;
@@ -277,7 +277,7 @@ async fn find_drill(app: &Rc<App>, rel: &str) {
         expected("fidelity", false),
         u8::from(shown),
         expected("^import", true),
-        u8::from(sensitive),
+        u8::from(regex_shown),
         u8::from(invalid),
         u8::from(one),
         u8::from(undone),

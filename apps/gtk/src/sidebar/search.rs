@@ -585,7 +585,11 @@ impl Search {
     fn start(self: &Rc<Self>) {
         let key = self.key();
         // An exact search reads a qualifier as the text it is, so there is nothing to filter by.
-        self.filter.set_sensitive(!key.grep);
+        // The box takes the button's keyboard, which GTK would hand to the window's first control.
+        if key.grep && (self.filter.state_flags()).contains(gtk::StateFlags::FOCUS_WITHIN) {
+            self.entry.grab_focus();
+        }
+        self.filter.set_visible(!key.grep);
         // Taken before anything else, so the branches that paint without asking the vault also
         // put the answer of a query still in flight out of date.
         let mine = if self.opened.borrow().0.as_ref() != Some(&key) {
