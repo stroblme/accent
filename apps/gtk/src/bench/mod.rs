@@ -42,6 +42,7 @@ mod notebook_lsp;
 mod opens;
 mod outline;
 mod panes;
+mod paste;
 mod pdf;
 mod pdf_draw;
 mod pdf_hover;
@@ -335,6 +336,8 @@ use user_commands::bench_commands;
 /// - `ACCENT_BENCH_CARRY=<local vault>`: on a remote vault, rows carried to and from a second
 ///   window on the local vault, as another window's tree drop hands them over.
 /// - `ACCENT_BENCH_ATTACH=<rel_note>,<rel_vault_png>,<rel_code>`: image paste/drop.
+/// - `ACCENT_BENCH_PASTE=1`: formatted paste and Paste as Plain Text in a note, an org note, a code
+///   tab, a notebook and a diagram (`paste::bench_paste`).
 /// - `ACCENT_BENCH_ANSWER=<rel_note>`: conflict responses and main-loop timing;
 ///   `same:<rel_note>`: etag-only change during typing; `doc:<rel_ipynb>,<rel_drawio>`: a
 ///   notebook's and a diagram's saves and reloads on a slow host (`answer::bench_answer_doc`).
@@ -518,6 +521,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
     let quickfix = std::env::var("ACCENT_BENCH_QUICKFIX").ok();
     let save_as = std::env::var("ACCENT_BENCH_SAVE_AS").ok();
     let attach = std::env::var("ACCENT_BENCH_ATTACH").ok();
+    let pasting = std::env::var("ACCENT_BENCH_PASTE").is_ok();
     let answer = std::env::var("ACCENT_BENCH_ANSWER").ok();
     let export = std::env::var("ACCENT_BENCH_EXPORT").ok();
     let scroll = std::env::var("ACCENT_BENCH_SCROLL").ok();
@@ -531,6 +535,7 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         && wheel.is_none()
         && moving.is_none()
         && attach.is_none()
+        && !pasting
         && answer.is_none()
         && export.is_none()
         && save_as.is_none()
@@ -796,6 +801,9 @@ pub fn install_bench_hooks(app: &Rc<App>) {
         }
         if let Some(arg) = attach {
             return bench_attach(&app, &arg);
+        }
+        if pasting {
+            return paste::bench_paste(&app);
         }
         if let Some(rel) = answer.as_deref().and_then(|a| a.strip_prefix("same:")) {
             return bench_answer_same(&app, rel);

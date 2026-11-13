@@ -7,12 +7,13 @@ use std::rc::Rc;
 
 use accent_core::pdf::{Clip, InkStyle, Matrix, then};
 use adw::prelude::*;
-use gtk::{gdk, gio, glib};
+use gtk::{gdk, glib};
 
 use super::pictures::Incoming;
 use super::protocol::{Clipping, Request, fresh_id};
 use super::tab::PdfTab;
 use super::tools::{Kind, Picked, clamp_move};
+use crate::clipboard::read;
 
 /// What the clipboard calls strokes and texts copied off a PDF: a JSON list of [`Clip`]s.
 pub const MIME: &str = "application/x-accent-pdf-ink";
@@ -333,23 +334,4 @@ async fn picture(clipboard: &gdk::Clipboard) -> Option<Incoming> {
         .ok()??;
     let read = move || Incoming::pasted(&texture);
     crate::work::off_thread("read the pasted picture", read).await?
-}
-
-/// What `clipboard` holds as `mime`: the JSON a copy put there, or a JPEG's bytes. `None` when it
-/// holds none.
-async fn read(clipboard: &gdk::Clipboard, mime: &str) -> Option<Vec<u8>> {
-    let (stream, _) = (clipboard
-        .read_future(&[mime], glib::Priority::DEFAULT)
-        .await)
-        .inspect_err(|e| tracing::debug!("no {mime} on the clipboard: {e}"))
-        .ok()?;
-    // Read whole, however large: a page of strokes is easily more than a buffer's guess.
-    let out = gio::MemoryOutputStream::new_resizable();
-    let flags =
-        gio::OutputStreamSpliceFlags::CLOSE_SOURCE | gio::OutputStreamSpliceFlags::CLOSE_TARGET;
-    (out.splice_future(&stream, flags, glib::Priority::DEFAULT)
-        .await)
-        .inspect_err(|e| tracing::warn!("reading the clipboard's drawing: {e}"))
-        .ok()?;
-    Some(out.steal_as_bytes().to_vec())
 }

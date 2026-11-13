@@ -941,8 +941,9 @@ impl DiagramTab {
     }
 
     /// Paste diagram XML as cells or other text as a cell at the viewport's top-left
-    /// (`EditorUi.pasteXml`). Offset repeated pastes by a grid step; select pasted cells.
-    pub fn paste_text(self: &Rc<Self>, text: &str) {
+    /// (`EditorUi.pasteXml`), labelled `label` where a formatted paste or Paste as Plain Text
+    /// gives one, which is never cells. Offset repeated pastes by a grid step; select pasted cells.
+    pub fn paste_text(self: &Rc<Self>, text: &str, label: Option<String>) {
         let grid = {
             let editor = self.editor.borrow();
             let page = editor.page(self.page_index.get());
@@ -958,7 +959,10 @@ impl DiagramTab {
         };
         let d = f64::from(steps) * grid;
         let mut chosen = Vec::new();
-        let pages = accent_drawio::clipboard::pages_in(text);
+        let pages = match label {
+            Some(_) => Vec::new(),
+            None => accent_drawio::clipboard::pages_in(text),
+        };
         let count = self.page_count();
         match pages.is_empty() {
             false => self.edit(|e, page| {
@@ -969,7 +973,7 @@ impl DiagramTab {
                 let at = self.view.insert_point(grid);
                 let (w, h) = text_size(&self.view, text);
                 let rect = accent_drawio::Rect::new(at.x + d, at.y + d, w + grid, h + grid);
-                let label = accent_drawio::clipboard::text_label(text);
+                let label = label.unwrap_or_else(|| accent_drawio::clipboard::text_label(text));
                 self.edit(|e, page| {
                     let style = "text;whiteSpace=wrap;html=1;";
                     chosen = vec![e.add_vertex(page, None, rect, style, &label)?];

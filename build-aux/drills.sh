@@ -330,6 +330,24 @@ drill_diagram_links() {
 		'bench nav link presented click page=1 selected=[]'
 }
 
+# Ctrl+V with a browser's HTML on the clipboard, and Paste as Plain Text, in a note (beside its code
+# block, table and front matter too), an org note, a code tab, a notebook's cells and a diagram.
+drill_paste() {
+	printf -- '---\ntitle: Note\n---\n\n# Note\n\nbefore\n\n```text\ncode\n```\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\nend\n' >"$vault/paste.md"
+	echo "* Org" >"$vault/paste.org"
+	echo "x = 1" >"$vault/paste.py"
+	cat >"$vault/paste.ipynb" <<'EOF'
+{"cells": [{"cell_type": "markdown", "metadata": {}, "source": ["Notes\n"]},
+ {"cell_type": "code", "execution_count": null, "metadata": {}, "outputs": [], "source": ["x = 1\n"]}],
+ "metadata": {}, "nbformat": 4, "nbformat_minor": 5}
+EOF
+	cat >"$vault/paste.drawio" <<'EOF'
+<mxfile><diagram id="p" name="Page-1"><mxGraphModel><root><mxCell id="0"/><mxCell id="1" parent="0"/></root></mxGraphModel></diagram></mxfile>
+EOF
+	launch 60 ACCENT_BENCH_PASTE=1 >"$dir/paste"
+	expect paste paste
+}
+
 # The vault's root in each sort, with a folder left open staying open. Each file's creation time
 # is the order it was written in, c, a then B, apart by more than a coarse clock's tick.
 drill_sort() {

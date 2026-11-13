@@ -1,11 +1,46 @@
 //! Paste a single address over selected note text as `[selection](address)`, or org's
-//! `[[address][selection]]` in an org note.
-//! `Ctrl+Shift+V` bypasses this transformation (DESIGN.md, Editing).
+//! `[[address][selection]]` in an org note, and formatted text another application copied as the
+//! Markdown it reads as. `Ctrl+Shift+V` bypasses both (DESIGN.md, Editing).
 
 use super::{Flavour, Syntax, Tab};
 use crate::multicaret;
+use gtk::glib;
 use gtk::prelude::*;
-use gtk::{gio, glib};
+
+/// What a formatted paste makes of clipboard HTML: the Markdown it writes, or `None` for the
+/// clipboard's plain text.
+pub(crate) type Convert = fn(&str) -> Option<String>;
+
+/// What VS Code copies beside its HTML, whose styled spans are code, not formatting.
+const VSCODE: &str = "vscode-editor-data";
+
+/// How a view of `flavour` converts a formatted paste: a markdown note or cell into its Markdown.
+/// Org, code and tables take the plain text.
+pub(crate) fn converter(flavour: Flavour) -> Option<Convert> {
+    (flavour == Flavour::Note(Syntax::Markdown))
+        .then_some(accent_core::markdown::from_html as Convert)
+}
+
+/// A diagram label's formatted paste: the Markdown its editor keeps (`accent_drawio::label`),
+/// bold, italic, underline, bullets and line breaks. `None`, for the plain text, where the copy
+/// marks none of those, or holds a table or code, whose cells and lines a label runs together.
+pub(crate) fn label_markdown(html: &str) -> Option<String> {
+    use accent_drawio::label::{Run, html_to_runs, runs_to_markdown};
+    let copied = accent_core::markdown::formatted(html)?;
+    let lower = copied.to_ascii_lowercase();
+    if lower.contains("<table") || lower.contains("<pre") {
+        return None;
+    }
+    let runs = html_to_runs(copied, true);
+    let shown = runs.iter().any(|run| match run {
+        Run::Bullet => true,
+        Run::Text { text, marks } => {
+            !text.trim().is_empty() && (marks.bold || marks.italic || marks.underline)
+        }
+        _ => false,
+    });
+    shown.then(|| runs_to_markdown(&runs))
+}
 
 /// Return a link for an eligible `selection` and single trimmed clipboard
 /// address, or `None` for ordinary paste in this `flavour`.
@@ -86,67 +121,91 @@ fn is_url(text: &str) -> bool {
         })
 }
 
-/// Replace eligible selected note text with a link when the clipboard contains an address.
+/// Take the paste a note, a cell or a label editor does its own way: a URL over a selection
+/// [`link`]s it, and formatted text `convert` reads becomes its Markdown, outside a code block,
+/// the front matter and a table, where the plain text goes in. Each is one undo step.
 ///
-/// Otherwise preserve GTK's paste; columns, code, read-only views and empty selections use
-/// existing handlers. Handle the shared paste signal before GTK, returning its ID so
-/// [`Tab::paste_verbatim`] can temporarily bypass it.
-pub(super) fn link_paste(view: &sourceview5::View, flavour: Flavour) -> glib::SignalHandlerId {
+/// Anything else is GTK's paste: a column of carets, a view not editable, and a clipboard with no
+/// text, whose image is filed as an attachment (`App::wire_attachments`) by a handler connected
+/// after this one. Answers the handler's id, which [`Tab::paste_verbatim`] holds back.
+pub(super) fn formatted_paste(
+    view: &sourceview5::View,
+    flavour: Flavour,
+    convert: Option<Convert>,
+) -> glib::SignalHandlerId {
     view.connect_paste_clipboard(move |view| {
         let buffer = view.buffer();
         let column = view
             .downcast_ref::<multicaret::View>()
             .is_some_and(|v| v.has_carets());
-        let Some((start, end)) = buffer.selection_bounds() else {
+        let clipboard = view.clipboard();
+        let formats = clipboard.formats();
+        if column || !view.is_editable() || !formats.contains_type(glib::Type::STRING) {
             return;
-        };
-        // A clipboard with no text on it holds no address, and an image on its own is pasted as
-        // an attachment (`App::wire_attachments`), whose handler runs after this one.
-        let text = view.clipboard().formats().contains_type(glib::Type::STRING);
-        if column
-            || !text
-            || !view.is_editable()
-            || !could_link(&buffer.text(&start, &end, true), flavour)
-        {
+        }
+        let (start, end) = buffer.selection_bounds().unwrap_or_else(|| {
+            let caret = buffer.iter_at_mark(&buffer.get_insert());
+            (caret, caret)
+        });
+        let selection = buffer.text(&start, &end, true);
+        let linking = could_link(&selection, flavour);
+        let convert = convert.filter(|_| {
+            formats.contain_mime_type(crate::clipboard::HTML)
+                && !formats.contain_mime_type(VSCODE)
+                && !verbatim(&buffer, &start)
+        });
+        if !linking && convert.is_none() {
             return;
         }
         view.stop_signal_emission_by_name("paste-clipboard");
-        // The read is asynchronous even from this process; the marks ride out an edit meanwhile.
+        // The reads are asynchronous even from this process; the marks ride out an edit meanwhile.
         let (from, to) = (
             buffer.create_mark(None, &start, true),
             buffer.create_mark(None, &end, false),
         );
-        view.clipboard().read_text_async(
-            gio::Cancellable::NONE,
-            glib::clone!(
-                #[weak]
-                view,
-                move |read| {
-                    let buffer = view.buffer();
-                    let (mut start, mut end) =
-                        (buffer.iter_at_mark(&from), buffer.iter_at_mark(&to));
-                    buffer.delete_mark(&from);
-                    buffer.delete_mark(&to);
-                    let Ok(Some(clipboard)) = read else {
-                        return;
-                    };
-                    let selection = buffer.text(&start, &end, true);
-                    let text = link(&clipboard, &selection, flavour)
-                        .unwrap_or_else(|| clipboard.to_string());
-                    // One undo step, the link or the paste.
-                    buffer.begin_user_action();
-                    buffer.delete(&mut start, &mut end);
-                    buffer.insert(&mut start, &text);
-                    buffer.end_user_action();
-                    view.scroll_mark_onscreen(&buffer.get_insert());
-                }
-            ),
-        );
+        let view = view.downgrade();
+        glib::spawn_future_local(async move {
+            let plain = clipboard.read_text_future().await.ok().flatten();
+            let linked = (plain.as_deref())
+                .filter(|_| linking)
+                .and_then(|plain| link(plain, &selection, flavour));
+            let converted = match (&linked, convert) {
+                (None, Some(convert)) => crate::clipboard::html(&clipboard)
+                    .await
+                    .as_deref()
+                    .and_then(convert),
+                _ => None,
+            };
+            let Some(view) = view.upgrade() else { return };
+            let buffer = view.buffer();
+            let (mut start, mut end) = (buffer.iter_at_mark(&from), buffer.iter_at_mark(&to));
+            buffer.delete_mark(&from);
+            buffer.delete_mark(&to);
+            let Some(text) = linked.or(converted).or(plain.map(String::from)) else {
+                return;
+            };
+            // One undo step, the link, the Markdown or the paste.
+            buffer.begin_user_action();
+            buffer.delete(&mut start, &mut end);
+            buffer.insert(&mut start, &text);
+            buffer.end_user_action();
+            view.scroll_mark_onscreen(&buffer.get_insert());
+        });
     })
 }
 
-/// Paste verbatim at all of `view`'s carets using GTK, suppressing its [`link_paste`] handler
-/// `link` for this emission (`Ctrl+Shift+V`).
+/// Whether `at` is in a code block, the front matter or a table row, where Markdown is text.
+fn verbatim(buffer: &gtk::TextBuffer, at: &gtk::TextIter) -> bool {
+    if crate::typing::verbatim(buffer, at) {
+        return true;
+    }
+    let text = buffer.text(&buffer.start_iter(), &buffer.end_iter(), true);
+    let lines: Vec<&str> = text.split('\n').collect();
+    accent_core::markdown::in_table(&lines, at.line() as usize)
+}
+
+/// Paste verbatim at all of `view`'s carets using GTK, suppressing its [`formatted_paste`]
+/// handler `link` for this emission (`Ctrl+Shift+V`).
 pub(crate) fn paste_verbatim(view: &sourceview5::View, link: &glib::SignalHandlerId) {
     view.block_signal(link);
     view.emit_paste_clipboard();
@@ -162,7 +221,25 @@ impl Tab {
 
 #[cfg(test)]
 mod tests {
-    use super::{Flavour, Syntax, link};
+    use super::{Flavour, Syntax, label_markdown, link};
+
+    /// A label keeps bold, italic, underline, bullets and lines, and pastes the plain text of a
+    /// copy that marks none of them or holds a table, whose cells it would run together.
+    #[test]
+    fn a_label_takes_what_it_can_show() {
+        assert_eq!(
+            label_markdown("<h2>Title</h2><ul><li>one <i>it</i></li></ul>").as_deref(),
+            Some("**Title**\n- one *it*")
+        );
+        for html in [
+            "<table><tr><th>Tool</th><th>Time</th></tr><tr><td><b>rg</b></td><td>1s</td></tr></table>",
+            "<p><img src='https://a.org/x.png' alt=''></p>",
+            "<p>see <a href='https://a.org/'>the page</a></p>",
+            "<p>text <code>x</code></p>",
+        ] {
+            assert_eq!(label_markdown(html), None, "{html}");
+        }
+    }
 
     #[test]
     fn a_url_pasted_over_prose_links_it() {

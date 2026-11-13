@@ -60,7 +60,7 @@ pub(crate) use lines::{
 #[cfg(feature = "bench")]
 pub(crate) use lines::{newline_below, paste_primary};
 pub use open::open;
-pub(crate) use open::{Clamped, LINE_SPACING, build, clamped, interact};
+pub(crate) use open::{Clamped, LINE_SPACING, build, clamped, interact, interact_with};
 pub(crate) use page::COLUMN_FLOOR;
 pub use page::default_font;
 use page::{GUTTER, line_numbers};
@@ -68,7 +68,7 @@ pub(crate) use page::{
     cap_column, column_max, font_css, install_font, next_view_name, refont, remeasure,
     restyle_note, set_margins, style_note,
 };
-pub(crate) use paste::paste_verbatim;
+pub(crate) use paste::{label_markdown, paste_verbatim};
 use search::matched;
 pub(crate) use search::{
     FIND_TAG, match_style, mute, next_match, occurrence_tag, paint_occurrences,
@@ -374,7 +374,8 @@ pub struct Tab {
     /// Last template snippet, whose retained buffer indicates its Tab stops
     /// are still active.
     snippet: RefCell<Option<sourceview5::Snippet>>,
-    /// The paste that makes a URL over a selection a link, which `Ctrl+Shift+V` holds back.
+    /// The paste that makes a URL over a selection a link and formatted text Markdown, which
+    /// `Ctrl+Shift+V` holds back.
     paste_link: glib::SignalHandlerId,
     /// The post-edit pass: the change bars, and the styling a note too long to restyle inside a
     /// frame owes the rest of its text.

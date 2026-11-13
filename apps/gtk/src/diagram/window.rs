@@ -271,7 +271,7 @@ impl App {
             "diagram-group" => tab.group(),
             "diagram-copy" => tab.copy(),
             "diagram-cut" => tab.cut(),
-            "diagram-paste" => self.paste_diagram(&tab),
+            "diagram-paste" => self.paste_diagram(&tab, false),
             "diagram-copy-shape" => tab.copy_property(Clip::Size),
             "diagram-paste-shape" => tab.paste_property(Clip::Size),
             "diagram-copy-style" => tab.copy_property(Clip::Style),
@@ -382,20 +382,40 @@ impl App {
     }
 
     /// Paste into a diagram: text first, as GTK's own paste reads it, a diagram in it or a text
-    /// cell (`DiagramTab::paste_text`); else a picture, embedded as Add Image embeds one.
-    fn paste_diagram(self: &Rc<Self>, tab: &Rc<DiagramTab>) {
+    /// cell (`DiagramTab::paste_text`), formatted as the clipboard's HTML has it; else a picture,
+    /// embedded as Add Image embeds one. `plain` is Paste as Plain Text: into the label being
+    /// edited as into a note, else the text as it is in a text cell, a diagram in it included.
+    pub(crate) fn paste_diagram(self: &Rc<Self>, tab: &Rc<DiagramTab>, plain: bool) {
+        if plain && tab.paste_plain_label() {
+            return;
+        }
         let clipboard = tab.key_target().clipboard();
         let formats = clipboard.formats();
         let (app, tab) = (Rc::downgrade(self), Rc::downgrade(tab));
         glib::spawn_future_local(async move {
             let text = formats.contains_type(glib::Type::STRING);
-            let picture = !text && formats.contains_type(gdk::Texture::static_type());
+            let html = !plain && formats.contain_mime_type(crate::clipboard::HTML);
+            let picture = !plain && !text && formats.contains_type(gdk::Texture::static_type());
             let (Some(app), Some(tab)) = (app.upgrade(), tab.upgrade()) else {
                 return;
             };
             if text {
                 match clipboard.read_text_future().await {
-                    Ok(Some(text)) => tab.paste_text(&text),
+                    Ok(Some(text)) => {
+                        let label = match plain {
+                            true => Some(accent_drawio::clipboard::text_label(&text)),
+                            // A diagram in the text wins over its formatting.
+                            false
+                                if html && accent_drawio::clipboard::pages_in(&text).is_empty() =>
+                            {
+                                let html = crate::clipboard::html(&clipboard).await;
+                                (html.as_deref().and_then(editor::label_markdown))
+                                    .map(|md| accent_drawio::label::markdown_to_html(&md))
+                            }
+                            false => None,
+                        };
+                        tab.paste_text(&text, label);
+                    }
                     Ok(None) => {}
                     Err(e) => app.cannot("paste", e),
                 }

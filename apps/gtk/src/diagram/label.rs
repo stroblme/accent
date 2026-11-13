@@ -67,6 +67,8 @@ pub struct LabelEditor<T = CellId> {
     original: String,
     /// The toplevel and the press handler on it, taken off again when the editor closes.
     press: RefCell<Option<(gtk::Widget, gtk::GestureClick)>>,
+    /// A label's own paste, which Paste as Plain Text holds back; typed text has none.
+    paste: Option<glib::SignalHandlerId>,
 }
 
 /// The zoom that makes the note font, `doc_pt` points, show a label at `px` pixels on screen.
@@ -111,9 +113,15 @@ impl<T: 'static> LabelEditor<T> {
         look: Look,
     ) -> Rc<LabelEditor<T>> {
         let note = matches!(look, Look::Note { .. });
-        let (view, buffer) = match note {
-            true => editor::overlay_view(text),
-            false => plain_view(text),
+        let (view, buffer, paste) = match note {
+            true => {
+                let (view, buffer, paste) = editor::overlay_view(text);
+                (view, buffer, Some(paste))
+            }
+            false => {
+                let (view, buffer) = plain_view(text);
+                (view, buffer, None)
+            }
         };
         // Lines as close as draw.io sets them, so a label that fits its shape fits the editor;
         // typed text's padding is its size's (`set_font`).
@@ -170,6 +178,7 @@ impl<T: 'static> LabelEditor<T> {
             px: Cell::new(0.0),
             original: text.to_string(),
             press: RefCell::new(None),
+            paste,
         });
         if !note {
             editor.buffer.place_cursor(&editor.buffer.end_iter());
@@ -355,6 +364,13 @@ impl<T: 'static> LabelEditor<T> {
 
     pub fn has_focus(&self) -> bool {
         self.view.has_focus()
+    }
+
+    /// Paste as Plain Text: the clipboard's text as it is, a label's formatted paste held back.
+    pub fn paste_plain(&self) {
+        if let Some(paste) = &self.paste {
+            editor::paste_verbatim(&self.view, paste);
+        }
     }
 
     pub fn view(&self) -> &sourceview5::View {
@@ -674,6 +690,21 @@ impl DiagramTab {
         let editor = self.label.borrow().clone()?;
         let (at, content, px) = editor.at();
         Some((at, content, px, editor.has_focus()))
+    }
+
+    /// Paste as Plain Text into the label being edited. `false` when no label is being edited here.
+    pub fn paste_plain_label(&self) -> bool {
+        let editor = self.label.borrow().clone().filter(|e| e.has_focus());
+        if let Some(editor) = &editor {
+            editor.paste_plain();
+        }
+        editor.is_some()
+    }
+
+    /// The label editor's view, while a label is being edited.
+    #[cfg(feature = "bench")]
+    pub fn label_view(&self) -> Option<sourceview5::View> {
+        Some(self.label.borrow().as_ref()?.view().clone())
     }
 
     /// `Ctrl+Return` in the label editor, which the window's accelerator took first: finish the

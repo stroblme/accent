@@ -96,6 +96,12 @@ pub fn table_key(lines: &[&str], at: usize, column: usize, key: TableKey) -> Opt
     .key(lines, at, column, key)
 }
 
+/// Whether line `at` of `lines` is a row of a pipe table: its header, its delimiter row or a row
+/// under them.
+pub fn in_table(lines: &[&str], at: usize) -> bool {
+    table_key(lines, at, 0, TableKey::Tab).is_some()
+}
+
 impl Table {
     /// [`table_key`] in this table, read off `lines`, `at` being one of its lines.
     pub(crate) fn key(

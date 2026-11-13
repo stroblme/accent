@@ -201,7 +201,8 @@ pub fn applies(action: &str, cx: &Context) -> bool {
             text || notebook || front == Some(Diff)
         }
         "win.delete-line" | "win.toggle-comment" | "win.scroll-up" | "win.scroll-down"
-        | "win.paste-plain" | "win.follow-link" | "win.quick-fix" => text || notebook,
+        | "win.follow-link" | "win.quick-fix" => text || notebook,
+        "win.paste-plain" => text || notebook || diagram,
         "win.source-action" | "win.lsp-restart-file" => code || notebook,
         "win.toggle-task" => note,
         "win.toggle-wrap" => text || front == Some(Diff),
@@ -215,7 +216,7 @@ pub fn applies(action: &str, cx: &Context) -> bool {
 
         // The tab kinds' own commands.
         "win.terminal-copy" => front == Some(Terminal),
-        "win.terminal-paste" => front == Some(Terminal) || text || notebook,
+        "win.terminal-paste" => front == Some(Terminal) || text || notebook || diagram,
         "win.terminal-share" => front == Some(Terminal) && cx.shared == Some(false),
         "win.terminal-revoke" => front == Some(Terminal) && cx.shared == Some(true),
         "win.open-in-accent" => cx.editor,

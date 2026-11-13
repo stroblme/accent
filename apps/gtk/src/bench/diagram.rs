@@ -1054,7 +1054,7 @@ fn props(app: &Rc<App>, rel: &str) {
               <mxGeometry relative="1" as="geometry"><mxPoint x="600" y="100" as="sourcePoint"/>
                 <mxPoint x="700" y="150" as="targetPoint"/></mxGeometry></mxCell>
             </root></mxGraphModel>"#;
-        tab.paste_text(model);
+        tab.paste_text(model, None);
         let pasted = tab.file().pages[0].clone();
         let find = |kind: &str| {
             let cell = pasted
@@ -1367,7 +1367,7 @@ fn layers(app: &Rc<App>, rel: &str) {
         }
         let added = tab.file().pages[0].layers().last().map(|l| l.id.clone());
         let added = added.unwrap_or_default();
-        tab.paste_text("Pasted");
+        tab.paste_text("Pasted", None);
         let pasted = tab.selection();
         println!(
             "bench diagram layers added rows={:?} paste_parent={:?}",
@@ -1377,7 +1377,7 @@ fn layers(app: &Rc<App>, rel: &str) {
         if let Some(row) = tab.layer_row("2") {
             row.emit_by_name::<()>("entry-activated", &[]);
         }
-        tab.paste_text("Again");
+        tab.paste_text("Again", None);
         let pasted = tab.selection();
         println!(
             "bench diagram layers picked rows={:?} paste_parent={:?}",

@@ -1,8 +1,8 @@
 //! Tab-hosted comparisons and merges, with read-only companion columns.
 
 use super::{
-    Alert, FIND_TAG, Finder, Flavour, Syntax, Tab, build, interact, keys, line_numbers,
-    match_style, refont, sync_scheme,
+    Alert, FIND_TAG, Finder, Flavour, Syntax, Tab, build, interact, interact_with, keys,
+    line_numbers, match_style, refont, sync_scheme,
 };
 use crate::{diff, fold, highlight, wrap};
 use adw::prelude::*;
@@ -145,14 +145,20 @@ fn line_text(at: &gtk::TextIter) -> String {
 }
 
 /// Build an editable Markdown view for diagram labels without a tab
-/// (`diagram/label.rs`).
-pub fn overlay_view(text: &str) -> (sourceview5::View, sourceview5::Buffer) {
+/// (`diagram/label.rs`), with its paste's handler, which [`super::paste_verbatim`] holds back.
+pub fn overlay_view(
+    text: &str,
+) -> (
+    sourceview5::View,
+    sourceview5::Buffer,
+    glib::SignalHandlerId,
+) {
     let note = Flavour::Note(Syntax::Markdown);
     let (view, buffer) = build(note, None, text);
-    interact(&view, note);
+    let paste = interact_with(&view, note, Some(super::paste::label_markdown));
     keys::attach_plain(&view, note);
     style_companion(note, &buffer, &view);
-    (view, buffer)
+    (view, buffer, paste)
 }
 
 /// Apply companion styling like [`Tab::analyse`], without tab-specific work.

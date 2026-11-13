@@ -212,8 +212,9 @@ impl App {
                     term.copy();
                 }
             }
-            // `Ctrl+Shift+V` over a text tab is Paste as Plain Text: an application accelerator
-            // is dispatched at the window, so the editor cannot claim the chord for itself.
+            // `Ctrl+Shift+V` over a text tab, a notebook or a diagram is Paste as Plain Text: an
+            // application accelerator is dispatched at the window, so the editor cannot claim the
+            // chord for itself.
             "terminal-paste" => match self.active_doc() {
                 Some(Doc::Terminal(term)) => term.paste(),
                 Some(Doc::Text(_)) => {
@@ -222,6 +223,7 @@ impl App {
                     }
                 }
                 Some(Doc::Notebook(notebook)) => notebook.paste_verbatim(),
+                Some(Doc::Diagram(diagram)) => self.paste_diagram(&diagram, true),
                 _ => {}
             },
             "terminal-share" | "terminal-revoke" => {
@@ -252,9 +254,10 @@ impl App {
                     }
                 });
             }
-            "paste-plain" => match self.active_notebook() {
-                Some(notebook) => notebook.paste_verbatim(),
-                None => {
+            "paste-plain" => match (self.active_notebook(), self.active_diagram()) {
+                (Some(notebook), _) => notebook.paste_verbatim(),
+                (None, Some(diagram)) => self.paste_diagram(&diagram, true),
+                (None, None) => {
                     if let Some(tab) = self.editing_tab() {
                         tab.paste_verbatim();
                     }

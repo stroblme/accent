@@ -12,6 +12,7 @@ mod attach;
 mod bench;
 mod bibliography;
 mod build;
+mod clipboard;
 mod codeblocks;
 mod commands;
 mod comment;

@@ -66,8 +66,9 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ),
     ("win.terminal-share", "Share with MCP", &[]),
     ("win.terminal-revoke", "Revoke MCP Access", &[]),
-    // A paste that never makes a link of a URL over a selection. Unbound: `Ctrl+Shift+V` is
-    // Paste in Terminal's chord, which a text tab in front answers with this.
+    // A paste that never makes a link of a URL over a selection nor Markdown of formatted text.
+    // Unbound: `Ctrl+Shift+V` is Paste in Terminal's chord, which a text tab, a notebook or a
+    // diagram in front answers with this.
     ("win.paste-plain", "Paste as Plain Text", &[]),
     // Split Right takes VS Code's chord; the other three are menu and palette only, because
     // three more accelerators for the same idea is three more chords nobody has to spare.

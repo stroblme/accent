@@ -35,7 +35,7 @@ pub use page::{Block, Node, Side, page};
 pub(crate) use page::{Part, cut, math, parts};
 /// What an org table shares with a pipe table's layout (`crate::org`).
 pub(crate) use table::{Align, Cell, Rules, Table, split};
-pub use table::{TableEdit, TableKey, table_key};
+pub use table::{TableEdit, TableKey, in_table, table_key};
 /// What org's Toggle Task shares with a markdown note's (`crate::org`).
 pub(crate) use task::toggle_box;
 pub use task::toggle_task;
