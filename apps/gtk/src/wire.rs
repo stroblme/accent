@@ -785,6 +785,14 @@ pub fn wire_window(app: &Rc<App>) {
                 bar_menu(&app, button, &menu);
                 return;
             }
+            // A diagram's goes to a page, which its `Ctrl+G` (Group) does not.
+            if app.active_diagram().is_some() {
+                let menu = gio::Menu::new();
+                let go = "win.diagram-go-to-page";
+                menu.append(Some(label_of(go)), Some(go));
+                bar_menu(&app, button, &menu);
+                return;
+            }
             if let Some(notebook) = app.active_notebook() {
                 notebook.hide_diagnostics(!notebook.diagnostics_hidden());
                 return app.sync_status();
@@ -1294,13 +1302,15 @@ pub fn dismiss(app: &App) -> bool {
     }
 }
 
-/// A PDF's two fitting modes, off the zoom readout; nothing for any other tab.
+/// A PDF's and a diagram's two fitting modes, off the zoom readout; nothing for any other tab.
 fn fit_menu(app: &Rc<App>) {
-    if app.active_pdf().is_none() {
-        return;
-    }
+    let actions = match (app.active_pdf(), app.active_diagram()) {
+        (Some(_), _) => ["win.pdf-fit-width", "win.pdf-fit-page"],
+        (None, Some(_)) => ["win.diagram-fit-width", "win.diagram-fit-height"],
+        (None, None) => return,
+    };
     let menu = gio::Menu::new();
-    for action in ["win.pdf-fit-width", "win.pdf-fit-page"] {
+    for action in actions {
         menu.append(Some(label_of(action)), Some(action));
     }
     bar_menu(app, app.statusbar.zoom(), &menu);

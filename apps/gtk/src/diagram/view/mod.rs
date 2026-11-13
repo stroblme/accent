@@ -207,18 +207,18 @@ impl DiagramView {
         self.imp().frame.get().scale
     }
 
-    /// Fit the page, or zoom to a scale keeping the middle of the view where it is. Fitting
-    /// also brings the page to the middle, which is what a reset is for.
+    /// Fit the page, its width or its height, or zoom to a scale keeping the middle of the view
+    /// where it is. Fitting also brings the page to the middle, which is what a reset is for.
     pub fn set_zoom(&self, zoom: Zoom) {
         let (w, h) = (f64::from(self.width()), f64::from(self.height()));
         match zoom {
-            Zoom::Fit => {
+            Zoom::Scale(_) => self.zoom_around(zoom, Some((w / 2.0, h / 2.0))),
+            _ => {
                 self.imp().zoom.set(zoom);
                 self.relayout();
                 self.centre_page();
                 self.zoomed();
             }
-            Zoom::Scale(_) => self.zoom_around(zoom, Some((w / 2.0, h / 2.0))),
         }
     }
 
@@ -244,6 +244,8 @@ impl DiagramView {
     pub fn zoom_label(&self) -> String {
         match self.zoom() {
             Zoom::Fit => "Fit".to_string(),
+            Zoom::Width => "Fit Width".to_string(),
+            Zoom::Height => "Fit Height".to_string(),
             Zoom::Scale(s) => format!("{:.0} %", s * 100.0),
         }
     }
@@ -451,13 +453,8 @@ impl DiagramView {
         if w <= 1.0 || h <= 1.0 {
             return;
         }
-        let scale = match imp.zoom.get() {
-            Zoom::Fit => {
-                let shown = sheet.shown();
-                geometry::fit_scale((shown.w, shown.h), (w, h))
-            }
-            Zoom::Scale(s) => crate::zoom::clamp_scale(s),
-        };
+        let shown = sheet.shown();
+        let scale = geometry::zoom_scale(imp.zoom.get(), (shown.w, shown.h), (w, h));
         let (frame, size) = geometry::frame(sheet.extent, scale, (w, h));
         if imp.frame.replace(frame).scale != frame.scale {
             imp.cache.forget();

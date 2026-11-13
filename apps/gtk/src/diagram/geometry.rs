@@ -26,10 +26,13 @@ pub const ROTATE_GAP: f64 = 12.0;
 /// The smallest a shape can be resized to, in page units.
 pub const MIN_SIZE: f64 = 10.0;
 
-/// How big the page is drawn: fitted to the window, or at a chosen scale.
+/// How big the page is drawn: fitted to the window, by its width or its height alone as a PDF's
+/// Fit Width and Fit Height fit it, or at a chosen scale.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Zoom {
     Fit,
+    Width,
+    Height,
     Scale(f64),
 }
 
@@ -89,11 +92,16 @@ pub fn frame(extent: Rect, scale: f64, viewport: (f64, f64)) -> (Frame, (f64, f6
     (frame, size)
 }
 
-/// The scale that shows the whole page in `viewport`, [`GAP`] around it.
-pub fn fit_scale(page: (f64, f64), viewport: (f64, f64)) -> f64 {
-    let fit = ((viewport.0 - 2.0 * GAP) / page.0.max(1.0))
-        .min((viewport.1 - 2.0 * GAP) / page.1.max(1.0));
-    clamp_scale(fit)
+/// The scale `zoom` shows the page at in `viewport`, [`GAP`] around what it fits.
+pub fn zoom_scale(zoom: Zoom, page: (f64, f64), viewport: (f64, f64)) -> f64 {
+    let width = (viewport.0 - 2.0 * GAP) / page.0.max(1.0);
+    let height = (viewport.1 - 2.0 * GAP) / page.1.max(1.0);
+    clamp_scale(match zoom {
+        Zoom::Fit => width.min(height),
+        Zoom::Width => width,
+        Zoom::Height => height,
+        Zoom::Scale(s) => s,
+    })
 }
 
 /// How far a touchpad swipe pushes on past the edge of a presented page to turn it: about what a
@@ -1060,11 +1068,13 @@ mod tests {
     }
 
     #[test]
-    fn fitting_shows_the_whole_page_and_clamps() {
-        let s = fit_scale((1000.0, 600.0), (500.0, 500.0));
-        assert!((s - (500.0 - 2.0 * GAP) / 1000.0).abs() < 1e-9);
-        assert_eq!(fit_scale((1.0, 1.0), (1e9, 1e9)), MAX_SCALE);
-        assert_eq!(fit_scale((1e9, 1e9), (100.0, 100.0)), MIN_SCALE);
+    fn fitting_shows_the_whole_page_its_width_or_its_height_and_clamps() {
+        let fit = |zoom| zoom_scale(zoom, (1000.0, 600.0), (500.0, 500.0));
+        assert!((fit(Zoom::Fit) - (500.0 - 2.0 * GAP) / 1000.0).abs() < 1e-9);
+        assert_eq!(fit(Zoom::Width), fit(Zoom::Fit));
+        assert!((fit(Zoom::Height) - (500.0 - 2.0 * GAP) / 600.0).abs() < 1e-9);
+        assert_eq!(zoom_scale(Zoom::Fit, (1.0, 1.0), (1e9, 1e9)), MAX_SCALE);
+        assert_eq!(zoom_scale(Zoom::Fit, (1e9, 1e9), (100.0, 100.0)), MIN_SCALE);
     }
 
     #[test]

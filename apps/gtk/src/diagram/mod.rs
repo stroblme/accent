@@ -325,7 +325,7 @@ impl DiagramTab {
             page: self.page_index.get(),
             zoom: match self.view.zoom() {
                 Zoom::Fit => None,
-                Zoom::Scale(s) => Some(s),
+                _ => Some(self.view.scale()),
             },
             x,
             y,
@@ -1228,6 +1228,11 @@ impl DiagramTab {
 
     pub fn fit_page(&self) {
         self.view.set_zoom(Zoom::Fit);
+    }
+
+    /// Fit the page's width or its height to the window (Fit Width, Fit Height).
+    pub fn fit(&self, zoom: Zoom) {
+        self.view.set_zoom(zoom);
     }
 
     pub fn zoom_label(&self) -> String {

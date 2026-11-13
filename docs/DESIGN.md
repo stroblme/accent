@@ -884,6 +884,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - The facts: what the file is (`Markdown`, `PDF`, `Image`, `Notebook · <language>`, or `<language> · UTF-8 · LF` for code), whether it has unsaved edits, one count of its own, and its zoom; last, at the corner, while a text tab has a selection (a comparison's editor side included), how many characters it holds ("42 characters"): Unicode characters, the unit GTK's offsets count, whitespace and line breaks included, every caret's selection summed, so it reads no text and costs the same at any size.
 - The count is what the tab counts: a note's words (300 ms after the last keystroke), a code tab's errors and warnings, a PDF's `Page 4 of 12` (the page under the middle of the viewport), a notebook's cells, and after them its errors and warnings in every cell, which press as a code tab's do.
   A PDF's count is a button opening Add Page Before, Add Page After and Delete Page for that page, as the page's own menu offers them.
+  A diagram's opens Go to Diagram Page…, the find bar's go-to row, which its `Ctrl+G` (Group) does not reach outside presentation.
 - The unsaved mark is the `•` a dirty tab wears: one symbol, one meaning.
   A saved file shows nothing.
 - The branch (which syncs the document's repository) and the zoom (which resets it) are flat buttons held to the caption's line height (`.accent-bar-button`): Adwaita's button minimum would otherwise make the bar 46 px tall instead of 29.
@@ -1338,7 +1339,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 
 ### Diagram
 
-- A draw.io file (`.drawio`, `.dio`, `.drawio.xml`, or an `.xml` whose first element says so) in a tab of its own, on a canvas painting `accent-drawio`'s display list: fitted to the window on open and at `Ctrl+0`, zoomed around the pointer and scrolled like a PDF, panned by middle-drag or Space+drag.
+- A draw.io file (`.drawio`, `.dio`, `.drawio.xml`, or an `.xml` whose first element says so) in a tab of its own, on a canvas painting `accent-drawio`'s display list: fitted to the window on open and at `Ctrl+0`, its width or its height alone by Fit Width and Fit Height from the zoom readout's right-click and the palette as a PDF's, zoomed around the pointer and scrolled like a PDF, panned by middle-drag or Space+drag.
 - The plain wheel reads on through the pages as through a continuous PDF: pushed on past the bottom of the page, it turns to the next one, at the same zoom and on its top; past the top, to the one before, on its bottom.
   Only a push made at the edge turns: the scroll that reaches the edge stops there, and a touchpad turns a page a swipe at most, by a swipe begun at the edge, so one fling never reads through several (`geometry::Overshoot`).
   While the page is edited the push first pulls it off its edge as a spring would, 21 px a notch, and turns it at the third notch or after 120 px of a swipe.
@@ -2074,6 +2075,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 - Duplicate Selection is `Ctrl+D`, Duplicate Line's chord, and Group `Ctrl+G`, Go to Line's, which a diagram in front answers and a presented one leaves to Go to Line, going to a page as over a PDF; `Ctrl+Return` finishes a label being edited; `F2` stays the file's Rename.
 - The tools (Select and Move, Add Rectangle, Add Ellipse, Add Text, Add Connector, Add Image…), Ungroup, Bring to Front, Send to Back, Copy Shape, Paste Shape, Copy Style, Paste Style, and Add, Rename, Delete, Move Up and Move Down Diagram Page are unbound, on the ring and in the palette; a tool picked from the palette brings the ring out, and the same tool twice puts it down.
   The page commands act on the page shown, Add putting a page after the last: the thumbnail strip is where pages are organised by pointer.
+  Go to Diagram Page…, Fit Width and Fit Height are unbound too, in the palette, the first also on the status bar's page count and the other two on the zoom readout's right-click.
   Invert Diagram Colours is unbound and in the palette alone.
 
 ### Notebook
