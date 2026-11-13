@@ -816,8 +816,9 @@ impl Sheet {
     }
 
     /// Resolve click selection and drag target at `p`. Clicks enter groups one level
-    /// at a time, starting at the outermost group below a layer; drags move the already
-    /// selected cell under the pointer, matching draw.io.
+    /// at a time, starting at the outermost group below a layer, a container's shape or a
+    /// selected shape's sibling at once; drags move the already selected cell under the
+    /// pointer, matching draw.io.
     pub fn pick(&self, p: Point, tolerance: f64, selection: &[CellId]) -> Option<Pick> {
         let hit = self.scene.hit(p, tolerance)?;
         let mut chain = vec![hit];
@@ -830,12 +831,53 @@ impl Sheet {
         let cell = match held {
             Some(0) => chain[0],
             Some(k) => chain[k - 1],
-            None => chain[chain.len() - 1],
+            None => *chain
+                .iter()
+                .find(|id| !self.climbs(id, selection))
+                .unwrap_or(&chain[chain.len() - 1]),
         };
         Some(Pick {
             cell: cell.to_string(),
             held: held.map(|k| chain[k].to_string()),
         })
+    }
+
+    /// Whether a click on `id`, with nothing above it selected, selects its group instead, as
+    /// draw.io's first click does (`mxGraphHandler.isPropagateSelectionCell`): not while a
+    /// sibling is selected (`isSiblingSelected`), and not out of a container unless `id` is a
+    /// label or a part of it. A table's rows and cells always go on to the table (`Editor.js`).
+    fn climbs(&self, id: &str, selection: &[CellId]) -> bool {
+        let Some(parent) = self.parent(id) else {
+            return false;
+        };
+        let table = |id: &str| {
+            let cell = self.page.cell(id);
+            cell.is_some_and(|c| c.style.resolve(false).get("childLayout") == Some("tableLayout"))
+        };
+        if table(parent) || self.parent(parent).is_some_and(table) {
+            return true;
+        }
+        let sibling = selection
+            .iter()
+            .any(|s| s != id && self.parent(s) == Some(parent));
+        let attached = self.page.cell(id).is_some_and(|c| {
+            c.geometry.as_ref().is_some_and(|g| g.relative)
+                || c.style.resolve(c.edge).get("part") == Some("1")
+        });
+        !sibling && (attached || !self.is_container(parent))
+    }
+
+    /// Whether vertex `id` holds its shapes as a container, as draw.io's `Graph.isContainer`
+    /// says: a swimlane or a table unless `container=0`, anything else with `container=1`.
+    fn is_container(&self, id: &str) -> bool {
+        let Some(cell) = self.page.cell(id).filter(|c| !c.edge) else {
+            return false;
+        };
+        let style = cell.style.resolve(false);
+        match style.get("shape") {
+            Some("swimlane" | "table" | "tableRow") => style.get("container") != Some("0"),
+            _ => style.get("container") == Some("1"),
+        }
     }
 
     /// The shape under `p` an edge can be attached to: the innermost vertex, never an edge.
@@ -1080,6 +1122,39 @@ mod tests {
         assert_eq!(o.scroll(300.0, false, true, false), None);
         o = Overshoot::default();
         assert_eq!(o.scroll(-SWIPE_TURN, false, true, false), Some(false));
+    }
+
+    #[test]
+    fn a_first_click_stops_beside_a_selected_sibling_and_inside_a_container() {
+        let xml = r#"<mxfile><diagram name="P" id="p"><mxGraphModel><root>
+            <mxCell id="0"/><mxCell id="1" parent="0"/>
+            <mxCell id="g" parent="1" vertex="1" style="group"><mxGeometry x="0" y="0" width="50" height="50" as="geometry"/></mxCell>
+            <mxCell id="c" parent="g" vertex="1" style=""><mxGeometry x="0" y="0" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="d" parent="g" vertex="1" style=""><mxGeometry x="20" y="0" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="s" parent="1" vertex="1" style="swimlane;"><mxGeometry x="100" y="0" width="50" height="50" as="geometry"/></mxCell>
+            <mxCell id="e" parent="s" vertex="1" style=""><mxGeometry x="0" y="30" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="k" parent="1" vertex="1" style="container=1;"><mxGeometry x="200" y="0" width="50" height="50" as="geometry"/></mxCell>
+            <mxCell id="m" parent="k" vertex="1" style=""><mxGeometry x="0" y="0" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="t" parent="1" vertex="1" style="shape=table;childLayout=tableLayout;"><mxGeometry x="300" y="0" width="50" height="50" as="geometry"/></mxCell>
+            <mxCell id="r" parent="t" vertex="1" style="shape=tableRow;"><mxGeometry x="0" y="0" width="50" height="25" as="geometry"/></mxCell>
+            <mxCell id="x" parent="r" vertex="1" style=""><mxGeometry x="0" y="0" width="25" height="25" as="geometry"/></mxCell>
+            <mxCell id="y" parent="r" vertex="1" style=""><mxGeometry x="25" y="0" width="25" height="25" as="geometry"/></mxCell>
+            </root></mxGraphModel></diagram></mxfile>"#;
+        let file = accent_drawio::File::from_bytes(xml.as_bytes()).unwrap();
+        let sheet = Sheet::of(&file.pages()[0], &Context::default());
+        let ids = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        let first = |p: Point, selected: &[&str]| sheet.pick(p, 1.0, &ids(selected)).unwrap().cell;
+        let on_d = Point::new(25.0, 5.0);
+        // A group's shape is reached through the group.
+        assert_eq!(first(on_d, &[]), "g");
+        // With its sibling selected, at once, as draw.io switches between a group's shapes.
+        assert_eq!(first(on_d, &["c"]), "d");
+        // A swimlane's and a container's shapes at once.
+        assert_eq!(first(Point::new(105.0, 35.0), &[]), "e");
+        assert_eq!(first(Point::new(205.0, 5.0), &[]), "m");
+        // A table's cell goes to its table, a sibling selected or not.
+        assert_eq!(first(Point::new(330.0, 10.0), &[]), "t");
+        assert_eq!(first(Point::new(330.0, 10.0), &["x"]), "t");
     }
 
     #[test]
