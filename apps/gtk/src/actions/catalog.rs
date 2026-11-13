@@ -308,6 +308,38 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.diagram-paste-shape", "Paste Shape", &[]),
     ("win.diagram-copy-style", "Copy Style", &[]),
     ("win.diagram-paste-style", "Paste Style", &[]),
+    // The ring's swatches by the names their tooltips give them, each recolouring the selection
+    // as its click does.
+    (
+        "win.diagram-recolour-1",
+        "Recolour Selection: Swatch 1",
+        &[],
+    ),
+    (
+        "win.diagram-recolour-2",
+        "Recolour Selection: Swatch 2",
+        &[],
+    ),
+    (
+        "win.diagram-recolour-3",
+        "Recolour Selection: Swatch 3",
+        &[],
+    ),
+    (
+        "win.diagram-recolour-4",
+        "Recolour Selection: Swatch 4",
+        &[],
+    ),
+    (
+        "win.diagram-recolour-5",
+        "Recolour Selection: Swatch 5",
+        &[],
+    ),
+    (
+        "win.diagram-recolour-6",
+        "Recolour Selection: Swatch 6",
+        &[],
+    ),
     ("win.diagram-group", "Group", &[]),
     ("win.diagram-ungroup", "Ungroup", &[]),
     ("win.diagram-select-all", "Select All Shapes", &[]),

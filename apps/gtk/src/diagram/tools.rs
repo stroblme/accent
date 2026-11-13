@@ -526,8 +526,9 @@ impl DiagramRing {
     /// Show `colours` on the swatches, `picked` checked where it is one of them, and `width`
     /// checked among the widths.
     pub fn set_swatches(&self, colours: Vec<[u8; 3]>, picked: Option<[u8; 3]>, width: Option<f64>) {
-        for (button, colour) in self.swatches.iter().zip(&colours) {
-            button.set_tooltip_text(Some(&hex(*colour)));
+        for (i, (button, colour)) in self.swatches.iter().zip(&colours).enumerate() {
+            let name = format!("{}, {}", swatch_name(i), hex(*colour));
+            button.set_tooltip_text(Some(&name));
         }
         self.colours.replace(colours);
         self.picked.set(picked);
@@ -650,6 +651,11 @@ impl DiagramRing {
     }
 }
 
+/// What swatch `i` is called, on the ring and in Recolour Selection's palette rows.
+fn swatch_name(i: usize) -> String {
+    format!("Swatch {}", i + 1)
+}
+
 impl Drop for DiagramRing {
     /// The clipboard outlives every tab, so its watch goes with the ring.
     fn drop(&mut self) {
@@ -753,6 +759,16 @@ fn glyph_area(glyph: Glyph) -> gtk::DrawingArea {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Recolour Selection names each swatch in the palette as the ring's tooltip does.
+    #[test]
+    fn the_palette_names_the_swatches_as_the_ring_does() {
+        for i in 0..SLOTS {
+            let action = format!("win.diagram-recolour-{}", i + 1);
+            let label = format!("Recolour Selection: {}", swatch_name(i));
+            assert_eq!(crate::actions::label_of(&action), label);
+        }
+    }
 
     #[test]
     fn each_tool_makes_draw_io_s_own_cell() {

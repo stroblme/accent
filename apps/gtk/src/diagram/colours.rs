@@ -178,6 +178,15 @@ impl DiagramTab {
         self.show_swatches();
     }
 
+    /// Recolour Selection: swatch `i`'s colour on the selection, as its click gives it, and
+    /// nothing with nothing selected.
+    pub(super) fn recolour_swatch(self: &Rc<Self>, i: usize) {
+        let colour = self.swatches.borrow().slots.get(i).copied();
+        if let Some(colour) = colour.filter(|_| self.has_selection()) {
+            self.ring_colour(colour);
+        }
+    }
+
     /// A line width picked on the ring, which works as a swatch does: the width new cells are
     /// drawn at, and the selection's as one undo step, its groups aside. The width already picked,
     /// with nothing selected, puts it down.

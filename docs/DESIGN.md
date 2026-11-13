@@ -1416,7 +1416,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   The swatch picked is the colour new cells are drawn in, over their tool's style or Default Style, a line's stroke, a text's font and any other shape's fill, and it recolours the selection the same way as one undo step, its groups and pictures aside.
   It lasts while the tab is open and is not kept in the config, since another diagram's swatches need not hold it.
   Picked again with nothing selected it is put down, and new cells take their style's own colours.
-  Each swatch is painted as the canvas paints its colour under the theme, and its tooltip names the colour as the file writes it.
+  Each swatch is painted as the canvas paints its colour under the theme, and its tooltip names it by its place, `Swatch 1` to `Swatch 6`, and the colour as the file writes it.
+  The palette has the six as Recolour Selection commands of those names, offered while a diagram is in front as its Delete Selection is, each recolouring the selection as its swatch does and doing nothing with nothing selected.
 - Three line widths follow the swatches, as the PDF ring's three, a `strokeWidth` of 1, 2 or 4 for every tool that draws a line, which is all but image and plain text, and for select while anything is selected (user decision 2026-11-13).
   A width works as a swatch does, the width new cells are drawn at and the selection's as one undo step, its groups aside, for as long as the tab is open, and picked again with nothing selected it is put down.
 - With select in hand its commands take the swatches' slots, as the PDF Select tool's do (user decision 2026-11-13), Cut, Copy, Duplicate and Delete while anything is selected and Paste while the clipboard holds something to paste, so with nothing selected Paste alone.
@@ -2104,7 +2105,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 - The tools (Select and Move, Add Rectangle, Add Ellipse, Add Text, Add Connector, Add Image…), Ungroup, Bring to Front, Send to Back, Copy Shape, Paste Shape, Copy Style, Paste Style, and Add, Rename, Delete, Move Up and Move Down Diagram Page are unbound, on the ring and in the palette; a tool picked from the palette brings the ring out, and the same tool twice puts it down.
   The page commands act on the page shown, Add putting a page after the last: the thumbnail strip is where pages are organised by pointer.
   Go to Diagram Page…, Add Diagram Page Before and After, Fit Width and Fit Height are unbound too, in the palette, the first three also on the status bar's page count and the last two on the zoom readout's right-click.
-  Invert Diagram Colours is unbound and in the palette alone.
+  Invert Diagram Colours is unbound and in the palette alone, and so are the six Recolour Selection commands.
 
 ### Notebook
 

@@ -276,6 +276,13 @@ impl App {
             "diagram-paste-shape" => tab.paste_property(Clip::Size),
             "diagram-copy-style" => tab.copy_property(Clip::Style),
             "diagram-paste-style" => tab.paste_property(Clip::Style),
+            // Recolour Selection: the ring's swatch of that number, as its click recolours.
+            a if a.starts_with("diagram-recolour-") => {
+                let n = a["diagram-recolour-".len()..].parse::<usize>().ok();
+                if let Some(swatch) = n.and_then(|n| n.checked_sub(1)) {
+                    tab.recolour_swatch(swatch);
+                }
+            }
             "diagram-ungroup" => tab.ungroup(),
             "diagram-select-all" => tab.select_all(),
             "diagram-edit-label" => tab.edit_label(),
