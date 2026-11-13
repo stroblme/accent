@@ -344,6 +344,14 @@ fn open_on_host(
         .ok_or_else(|| Error::Protocol(format!("the host would not open {rel}")))
 }
 
+/// What a PDF's push left on the host after the first `len` bytes of the file its save read: the
+/// session's section as the copy whose etag is `copy` held it.
+struct Section {
+    len: u64,
+    copy: crate::Etag,
+    bytes: Vec<u8>,
+}
+
 /// One vault on a remote host.
 pub struct Remote {
     url: Url,
@@ -363,6 +371,9 @@ pub struct Remote {
     /// so the fresh server can answer existing tabs without reopening them.
     /// Stored here because only `Remote` knows the connection was replaced.
     docs: Mutex<HashMap<String, Doc>>,
+    /// The section each PDF's last push left on the host, by vault path: the next push sends only
+    /// what follows the bytes its own section shares with it ([`Remote::stage_appended`]).
+    sections: Mutex<HashMap<String, Section>>,
     /// The unindexed folders the window asked to have watched, which a new server has to be
     /// asked again for the same reason. See [`Vault::watch_unindexed`](crate::Vault::watch_unindexed).
     unindexed: Mutex<BTreeSet<String>>,
@@ -392,6 +403,7 @@ impl Remote {
             hellos: Mutex::new(()),
             client: Mutex::new(None),
             docs: Mutex::new(HashMap::new()),
+            sections: Mutex::new(HashMap::new()),
             unindexed: Mutex::new(BTreeSet::new()),
             unknown: Mutex::new(BTreeSet::new()),
             forwards: Mutex::new(Vec::new()),
@@ -795,7 +807,8 @@ impl Remote {
     /// next push where the host's file is the one it staged.
     /// `base_len` where the copy is a PDF's save, the first that many bytes of the file it read
     /// with the session's section after them: only the section goes up where the host's file
-    /// starts with the same bytes ([`stage_appended`](Self::stage_appended)).
+    /// starts with the same bytes, and of it only what the last push did not leave there
+    /// ([`stage_appended`](Self::stage_appended)).
     pub fn push(&self, rel: &str, same_text: bool, base_len: Option<u64>) -> Result<Pushed> {
         let (Some(dest), Some(stamp)) = (
             ssh::cache_path(&self.url, rel),
@@ -821,14 +834,14 @@ impl Remote {
             let _ = stamp.set(&stamped);
             return Ok(Pushed::Sent);
         }
-        let appended = match self.stage_appended(&dest, rel, current, base_len) {
+        let appended = match self.stage_appended(&dest, rel, current, stamped.copy, base_len) {
             Err(Error::Core(accent_core::Error::ChangedOnDisk { .. })) => {
                 return Ok(self.push_beside(&dest, rel));
             }
             appended => appended?,
         };
-        let (staged, copy, host) = match appended {
-            Some((staged, copy, host)) => (staged, copy, Some(host)),
+        let (staged, copy, host, section) = match appended {
+            Some((staged, host, section)) => (staged, section.copy, Some(host), Some(section)),
             None => {
                 let staged = staged_name();
                 let path = self.remote_path(rel);
@@ -842,7 +855,7 @@ impl Remote {
                 let beside =
                     accent_core::path::resolve(accent_core::path::parent_dir(rel), &staged);
                 let host = self.call::<Option<crate::Etag>>("stat", json!([beside]))?;
-                (staged, copy, host)
+                (staged, copy, host, None)
             }
         };
         if let Some(host) = host {
@@ -856,6 +869,11 @@ impl Remote {
                     copy,
                     landing: None,
                 });
+                let mut sections = self.locked(&self.sections);
+                match section {
+                    Some(section) => sections.insert(rel.to_string(), section),
+                    None => sections.remove(rel),
+                };
                 Ok(Pushed::Sent)
             }
             // Edited on the host while the bytes were on their way.
@@ -866,38 +884,56 @@ impl Remote {
         }
     }
 
-    /// Stage what follows the first `len` bytes of the cached copy `dest` beside `rel` on the
-    /// host, and have the host put its own file's first `len` bytes before it where they are the
-    /// copy's, which their digest tells ([`crate::Local::prefix_staged`]). The name staged, the
-    /// copy's etag and the staged file's; `None` where the bytes differ, or `len` is none or past
-    /// either file's end, and the copy goes whole.
+    /// Stage what follows the first `len` bytes of the cached copy `dest`, the section of a PDF's
+    /// save, beside `rel` on the host, and have the host put its own file's bytes before it where
+    /// they are the copy's, which their digest tells ([`crate::Local::prefix_staged`]). Where the
+    /// host's file is still the copy `synced` the last push left, the start the section shares
+    /// with that push's stays on the host too. The name staged, the staged file's etag and the
+    /// section; `None` where the bytes differ, or `len` is none or past either file's end, and
+    /// the copy goes whole.
     fn stage_appended(
         &self,
         dest: &Path,
         rel: &str,
         current: crate::Etag,
+        synced: crate::Etag,
         len: Option<u64>,
-    ) -> Result<Option<(String, crate::Etag, crate::Etag)>> {
+    ) -> Result<Option<(String, crate::Etag, Section)>> {
         let Some(len) = len.filter(|&len| len <= current.size) else {
             return Ok(None);
         };
         let unread = |e| accent_core::Error::io(dest.display(), e);
         let file = std::fs::File::open(dest).map_err(unread)?;
         let copy = crate::Etag::from_meta(&file.metadata().map_err(unread)?);
-        let Some(section) = copy.size.checked_sub(len) else {
+        let Some(after) = copy.size.checked_sub(len) else {
             return Ok(None);
         };
-        // Read up to the section, which is what is sent from there.
         let mut kept = blake3::Hasher::new();
         std::io::copy(&mut (&file).take(len), &mut kept).map_err(unread)?;
+        let mut bytes = Vec::with_capacity(after as usize);
+        (&file).read_to_end(&mut bytes).map_err(unread)?;
+        let shared = match self.locked(&self.sections).get(rel) {
+            Some(last) if last.len == len && last.copy == synced => {
+                let pairs = last.bytes.iter().zip(&bytes);
+                pairs.take_while(|(a, b)| a == b).count()
+            }
+            _ => 0,
+        };
+        kept.update(&bytes[..shared]);
+        let (sent, never) = (&bytes[shared..], link::Stop::default());
+        let size = sent.len() as u64;
         let staged = staged_name();
-        let stage = ssh::stage_cmd(&self.remote_path(rel), &staged, section);
+        let stage = ssh::stage_cmd(&self.remote_path(rel), &staged, size);
         let stage = ssh::run(&self.url, &self.ctl, &stage);
-        link::send(&stage, file, section, &|_, _| (), &link::Stop::default())?;
+        link::send(&stage, sent, size, &|_, _| (), &never)?;
+        let kept_len = len + shared as u64;
         let digest = kept.finalize().to_hex().to_string();
-        let staged_etag: Option<crate::Etag> =
-            self.call("prefix_staged", json!([rel, staged, current, len, digest]))?;
-        Ok(staged_etag.map(|host| (staged, copy, host)))
+        let staged_etag: Option<crate::Etag> = self.call(
+            "prefix_staged",
+            json!([rel, staged, current, kept_len, digest]),
+        )?;
+        let section = Section { len, copy, bytes };
+        Ok(staged_etag.map(|host| (staged, host, section)))
     }
 
     /// Move the cached file or folder, stamp and pending page edits from `from`
@@ -1603,6 +1639,7 @@ mod tests {
             hellos: Mutex::new(()),
             client: Mutex::new(Some(Arc::new(client))),
             docs: Mutex::new(HashMap::new()),
+            sections: Mutex::new(HashMap::new()),
             unindexed: Mutex::new(BTreeSet::new()),
             unknown: Mutex::new(BTreeSet::new()),
             forwards: Mutex::new(Vec::new()),

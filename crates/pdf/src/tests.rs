@@ -428,6 +428,27 @@ fn a_section_after_an_xref_stream_round_trips() {
     round_trip(compressed().0, true);
 }
 
+/// A stroke adds its objects and sets its page's list again, which moves the list to the end: the
+/// next stroke's section starts as this one's did up to the list, and reads back as the session.
+#[test]
+fn a_section_written_again_keeps_its_bytes_before_what_was_set_since() {
+    let base = classic();
+    let pdf = open(base.clone()).unwrap();
+    let mut update = Update::new(&pdf);
+    let stroke = |update: &mut Update, n: i64| {
+        let ink = update.add(Object::Int(n));
+        update.set(r(4), Object::Array(vec![Object::Ref(ink)]));
+    };
+    stroke(&mut update, 1);
+    let first = update.section();
+    stroke(&mut update, 2);
+    let second = update.section();
+    let list = first.windows(8).position(|w| w == b"4 0 obj\n").unwrap();
+    assert_eq!(first[..list], second[..list]);
+    let after = open([base, second].concat()).unwrap();
+    assert_eq!(after.get(r(4)).unwrap(), update.get(&pdf, r(4)).unwrap());
+}
+
 #[test]
 fn a_new_document_is_one_page_of_its_size() {
     let pdf = open(new_document((595.0, 842.5))).unwrap();

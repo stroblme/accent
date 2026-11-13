@@ -33,8 +33,11 @@ pub struct Update {
     trailer: Dict,
     /// The number the next new object gets.
     next: u32,
-    /// The session's objects, each serialised once, when added or set.
-    objects: BTreeMap<u32, (Ref, Object, Vec<u8>)>,
+    /// The session's objects, each serialised once, when added or set, with the turn it was last
+    /// set in, which is where a section writes it.
+    objects: BTreeMap<u32, (Ref, Object, Vec<u8>, u64)>,
+    /// How many times an object has been set.
+    sets: u64,
     /// An encrypted base's handler: what the session writes is encrypted as the file is.
     crypt: Option<Crypt>,
 }
@@ -66,6 +69,7 @@ impl Update {
             trailer,
             next: u32::try_from(size).unwrap_or(0).max(highest).max(1),
             objects: BTreeMap::new(),
+            sets: 0,
             crypt: base.crypt.clone(),
         }
     }
@@ -92,7 +96,8 @@ impl Update {
             }
             None => write::indirect(&mut bytes, r, &object),
         }
-        self.objects.insert(r.num, (r, object, bytes));
+        self.sets += 1;
+        self.objects.insert(r.num, (r, object, bytes, self.sets));
     }
 
     /// Whether the session has written nothing yet.
@@ -103,23 +108,28 @@ impl Update {
     /// `r` as the session has it: its own version, else the file's.
     pub fn get(&self, base: &Pdf, r: Ref) -> Result<Object> {
         match self.objects.get(&r.num) {
-            Some((own, object, _)) if *own == r => Ok(object.clone()),
+            Some((own, object, ..)) if *own == r => Ok(object.clone()),
             _ => base.get(r),
         }
     }
 
     /// The section that, written after the base, makes it the session's document: the objects in
-    /// number order, an xref of them, the trailer, `startxref`.
+    /// the order they were last set, an xref of them, the trailer, `startxref`. An object set
+    /// again moves to the end, so a section written later starts as an earlier one did up to the
+    /// first object set since, which is all a remote vault's upload sends again of it.
     pub fn section(&self) -> Vec<u8> {
         let mut out = Vec::new();
         if !self.base_ends_line {
             out.push(b'\n');
         }
+        let mut objects: Vec<_> = self.objects.values().collect();
+        objects.sort_by_key(|(.., set)| *set);
         let mut rows = Vec::new();
-        for (r, _, bytes) in self.objects.values() {
+        for (r, _, bytes, _) in objects {
             rows.push((*r, self.base_len + out.len() as u64));
             out.extend(bytes);
         }
+        rows.sort_by_key(|(r, _)| r.num);
         let xref = self.base_len + out.len() as u64;
         let mut trailer = self.trailer.clone();
         trailer.set(b"Prev", Object::Int(self.prev as i64));
