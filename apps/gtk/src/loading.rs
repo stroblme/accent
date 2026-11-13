@@ -83,6 +83,11 @@ pub(crate) fn show(holder: &gtk::Stack) {
     holder.set_visible_child_full(DOC, transition);
 }
 
+/// Whether `holder` shows its document.
+pub(crate) fn shown(holder: &gtk::Stack) -> bool {
+    holder.visible_child_name().as_deref() == Some(DOC)
+}
+
 /// [`put`] and [`show`] at once.
 pub(crate) fn fill(holder: &gtk::Stack, content: &impl IsA<gtk::Widget>) {
     put(holder, content);
@@ -156,6 +161,8 @@ pub struct Held {
     pub page: adw::TabPage,
     holder: gtk::Stack,
     failed: Cell<bool>,
+    /// Put up before its read was asked for ([`Held::defer`]).
+    unread: Cell<bool>,
 }
 
 impl Held {
@@ -171,6 +178,7 @@ impl Held {
             page,
             holder,
             failed: Cell::new(false),
+            unread: Cell::new(false),
         })
     }
 
@@ -203,7 +211,18 @@ impl Held {
     /// Another read is on its way.
     pub fn again(&self) {
         self.failed.set(false);
+        self.unread.set(false);
         again(&self.holder);
+    }
+
+    /// Hold the read back until what the tab was put up for asks for it (`App::hold_unread`).
+    pub fn defer(&self) {
+        self.unread.set(true);
+    }
+
+    /// Whether the tab waits for its read to be asked for.
+    pub fn unread(&self) -> bool {
+        self.unread.get()
     }
 }
 

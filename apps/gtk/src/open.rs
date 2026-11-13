@@ -164,9 +164,9 @@ impl App {
     }
 
     /// Read a held tab's file again, after its read failed: its Retry, its file opened again, or
-    /// the link back.
+    /// the link back. Or for the first time, where its read was held back ([`App::hold_unread`]).
     pub(crate) fn read_again(self: &Rc<Self>, held: &loading::Held) {
-        if !held.failed() {
+        if !held.failed() && !held.unread() {
             return;
         }
         let Some((key, path)) = self.locate(&held.key()) else {
@@ -893,6 +893,47 @@ impl App {
         self.landed(&page, how);
     }
 
+    /// Put up the tab a Git row compares `key` in before the comparison is read, so a click on a
+    /// slow host shows it at once (DESIGN.md, Loading): its file's own, whose read waits for the
+    /// comparison (`with_tab`) or [`App::let_go`]. A tab open on it comes to the front instead,
+    /// and a file that is no text tab opens as it would.
+    pub fn hold_unread(self: &Rc<Self>, key: &str) {
+        if let Some(doc) = self.doc_for(key) {
+            return self.reveal_page(doc.page());
+        }
+        let text = matches!(doc::kind_of(key), Kind::Note | Kind::Text);
+        match self.locate(key) {
+            Some((key, _)) if text && self.editing(&key).is_none() => {
+                self.hold(&key, Opened::Preview);
+                if let Some(Doc::Loading(held)) = self.doc_for(&key) {
+                    held.defer();
+                }
+            }
+            _ => self.open_preview(key),
+        }
+    }
+
+    /// [`App::hold_unread`] for a comparison of two texts that are not files: its tab, titled,
+    /// on the loading page until [`App::open_diff`] builds the comparison in it.
+    pub fn hold_diff(self: &Rc<Self>, key: &str, file: &str, title: &str, old: &str) {
+        match self.doc_for(key) {
+            Some(doc) => self.reveal_page(doc.page()),
+            None => {
+                self.add_diff(key, file, title, (old, ""), (title, ""), Opened::Preview);
+            }
+        }
+    }
+
+    /// What a tab was put up for will not come: a file's tab reads its file, and a comparison's
+    /// tab with nothing in it closes.
+    pub fn let_go(self: &Rc<Self>, key: &str) {
+        match self.doc_for(key) {
+            Some(Doc::Loading(held)) if held.unread() => self.read_again(&held),
+            Some(Doc::Diff(tab)) if !tab.filled() => self.close_page(&tab.page),
+            _ => {}
+        }
+    }
+
     /// Open or refresh a blob comparison keyed by `key`, using `file` for syntax styling.
     ///
     /// Git-row comparisons use preview tabs to avoid accumulating one per click. Restored
@@ -907,12 +948,66 @@ impl App {
         restored: bool,
     ) -> Rc<difftab::DiffTab> {
         if let Some(Doc::Diff(tab)) = self.doc_for(key) {
-            tab.set_texts(old.1, new.1);
+            let tab = match tab.filled() {
+                true => {
+                    tab.set_texts(old.1, new.1);
+                    tab
+                }
+                false => self.rebuild_diff(&tab, old, new),
+            };
+            tab.show();
             if !restored {
                 self.reveal_page(&tab.page);
             }
             return tab;
         }
+        let how = match restored {
+            true => Opened::Restored,
+            false => Opened::Preview,
+        };
+        let tab = self.add_diff(key, file, title, old, new, how);
+        tab.show();
+        tab
+    }
+
+    /// A comparison's tab put up before its texts were read ([`App::hold_diff`]), built from
+    /// them in its place: filling the empty one would leave every line shown, as a side read
+    /// again keeps what it showed.
+    fn rebuild_diff(
+        self: &Rc<Self>,
+        tab: &Rc<difftab::DiffTab>,
+        old: (&str, &str),
+        new: (&str, &str),
+    ) -> Rc<difftab::DiffTab> {
+        let font = self.config.borrow().editor_font.clone();
+        let built = tab.rebuild(old, new, font.as_deref(), self.zoom.get());
+        self.set_diff_prefs(&built);
+        for doc in self.docs.borrow_mut().iter_mut() {
+            if matches!(doc, Doc::Diff(d) if Rc::ptr_eq(d, tab)) {
+                *doc = Doc::Diff(built.clone());
+            }
+        }
+        // What the window took from the tab in front, the find bar's columns among it.
+        self.sync_active();
+        built
+    }
+
+    fn set_diff_prefs(&self, tab: &difftab::DiffTab) {
+        let config = self.config.borrow();
+        tab.set_indent_width(config.indent_width);
+        tab.set_page(config.column_width, config.line_numbers);
+    }
+
+    /// A comparison's tab, placed as `how` says, its texts not shown yet.
+    fn add_diff(
+        self: &Rc<Self>,
+        key: &str,
+        file: &str,
+        title: &str,
+        old: (&str, &str),
+        new: (&str, &str),
+        how: Opened,
+    ) -> Rc<difftab::DiffTab> {
         let flavour = match doc::kind_of(file) {
             Kind::Note => Flavour::Note(Syntax::Markdown),
             _ => flavour_of(file),
@@ -929,16 +1024,8 @@ impl App {
             font.as_deref(),
             self.zoom.get(),
         );
-        {
-            let config = self.config.borrow();
-            tab.set_indent_width(config.indent_width);
-            tab.set_page(config.column_width, config.line_numbers);
-        }
+        self.set_diff_prefs(&tab);
         self.docs.borrow_mut().push(Doc::Diff(tab.clone()));
-        let how = match restored {
-            true => Opened::Restored,
-            false => Opened::Preview,
-        };
         self.select_new_page(&tab.page, how);
         self.mark_opened(&tab.page, how);
         tab

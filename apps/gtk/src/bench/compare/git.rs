@@ -106,6 +106,28 @@ pub(in crate::bench) fn bench_compare_row(app: &Rc<App>, rel: &str) {
                 format!("diff:index:{rel}")
             }
         };
+        // On a slow host (`ACCENT_BENCH_SLOW_READ`), the tab the row opens is up before its sides
+        // are read, showing the loading page once 160 ms have passed.
+        if crate::bench::SLOW_READ_MS.load(std::sync::atomic::Ordering::Relaxed) > 0 {
+            wait(300).await;
+            let shows = |key: &str| {
+                let doc = app.doc_for(key)?;
+                let kind = match doc {
+                    Doc::Loading(_) => "loading",
+                    Doc::Diff(_) => "diff",
+                    Doc::Text(_) => "text",
+                    _ => "other",
+                };
+                let stack = doc.page().child().downcast::<gtk::Stack>().ok();
+                let page = stack.and_then(|stack| stack.visible_child_name());
+                Some(format!("{kind}/{}", page.as_deref().unwrap_or("-")))
+            };
+            println!(
+                "bench compare_row at_once file={:?} diff={:?}",
+                shows(&rel),
+                shows(&key)
+            );
+        }
         // Both sides are read on a worker, over the wire on a remote vault; then the comparison
         // settles.
         for _ in 0..60 {
@@ -222,7 +244,9 @@ async fn bench_alone(app: &Rc<App>, diff: &crate::difftab::DiffTab) {
         text(&alone) == text(&right),
         top(&alone)
     );
-    let stack = diff.page.child().downcast::<gtk::Stack>().ok();
+    let stack = crate::loading::content(&diff.page)
+        .downcast::<gtk::Stack>()
+        .ok();
     let again = stack
         .and_then(|stack| stack.visible_child())
         .and_then(|shown| find_widget(&shown, &|w| w.is::<gtk::ToggleButton>()))

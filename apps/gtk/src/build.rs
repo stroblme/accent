@@ -789,7 +789,8 @@ fn ports_data(vault: &Arc<Vault>) -> sidebar::PortsData {
 
 /// Wire Git hooks with weak window captures to avoid retaining the vault after window closure.
 fn build_git(app: &Rc<App>, source: Arc<git::Source>) -> Rc<git::Panel> {
-    let (toast, open, diff, compare, merge, leave, trash, changed, syncing, files) = (
+    let (held, toast, open, diff, compare, merge, leave, trash, changed, syncing, files) = (
+        Rc::downgrade(app),
         Rc::downgrade(app),
         Rc::downgrade(app),
         Rc::downgrade(app),
@@ -831,9 +832,32 @@ fn build_git(app: &Rc<App>, source: Arc<git::Source>) -> Rc<git::Panel> {
                 app.open_preview(key);
             }
         }),
+        // A row's tab was put up as it was clicked (`hold_diff`), and one closed since stays so.
         open_diff: Box::new(move |key, file, title, old, new, restored| {
             diff.upgrade()
+                .filter(|app| restored || app.doc_for(key).is_some())
                 .map(|app| app.open_diff(key, file, title, old, new, restored))
+        }),
+        hold_file: Box::new({
+            let held = held.clone();
+            move |key| {
+                if let Some(app) = held.upgrade() {
+                    app.hold_unread(key);
+                }
+            }
+        }),
+        hold_diff: Box::new({
+            let held = held.clone();
+            move |key, file, title, old| {
+                if let Some(app) = held.upgrade() {
+                    app.hold_diff(key, file, title, old);
+                }
+            }
+        }),
+        let_go: Box::new(move |key| {
+            if let Some(app) = held.upgrade() {
+                app.let_go(key);
+            }
         }),
         compare_file: Box::new(move |key, title, text, restored, register| {
             let Some(app) = compare.upgrade() else {
@@ -866,7 +890,9 @@ fn build_git(app: &Rc<App>, source: Arc<git::Source>) -> Rc<git::Panel> {
                         show(&app, &tab);
                     }
                 }
-                // The file's own tab, as a preview like any other single click in the sidebar.
+                // The file's own tab, put up as the row was clicked (`hold_file`) and read now,
+                // unless it was closed since.
+                false if app.doc_for(key).is_none() => {}
                 false => app.with_tab(key, Opened::Preview, "compare", show),
             }
         }),
@@ -893,7 +919,8 @@ fn build_git(app: &Rc<App>, source: Arc<git::Source>) -> Rc<git::Panel> {
                         show(&app, &tab);
                     }
                 }
-                // The file's own tab, as a preview like any other single click in the sidebar.
+                // The file's own tab, put up as the row was clicked, unless it was closed since.
+                false if app.doc_for(key).is_none() => {}
                 false => app.with_tab(key, Opened::Preview, "merge", show),
             }
         }),

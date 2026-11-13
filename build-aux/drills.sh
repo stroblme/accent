@@ -202,10 +202,9 @@ drill_find_compare() {
 		END { exit !(n == 9 && !bad) }' "$dir/find-compare" || { cat "$dir/find-compare"; return 1; }
 }
 
-# A file from the history, Show Changes let go, shows the commit's version alone from the line the
-# comparison had at its top, and the comparison again once it is pressed, and the palette's Show
-# Changes lets it go again.
-drill_history_file() {
+# The vault a repository: note.md committed twice, and untracked.md a row in Changes, which a
+# drill waits for.
+history_repo() {
 	note() { awk -v at="$1" 'BEGIN { for (i = 1; i <= 80; i++) print (i % at ? "Line " i : "Changed " i) ".\n" }'; }
 	commit() { git -C "$vault" -c user.name=drill -c user.email=drill@invalid -c commit.gpgsign=false commit -qam "$1"; }
 	git -C "$vault" init -q
@@ -214,13 +213,33 @@ drill_history_file() {
 	commit one
 	note 30 >"$vault/note.md"
 	commit two
-	# A row in Changes, which the drill waits for.
 	echo "# Untracked" >"$vault/untracked.md"
+}
+
+# A file from the history, Show Changes let go, shows the commit's version alone from the line the
+# comparison had at its top, and the comparison again once it is pressed, and the palette's Show
+# Changes lets it go again.
+drill_history_file() {
+	history_repo
 	launch 60 ACCENT_BENCH_COMPARE=row:commit:note.md >"$dir/history-file"
 	grep -Eqx 'bench compare_row alone offered=true shown=true text=true top=([0-9]+)->\1' "$dir/history-file" ||
 		{ cat "$dir/history-file"; return 1; }
 	has "$dir/history-file" 'bench compare_row alone pressed shown=false down=true' \
 		'bench compare_row alone action listed=true ran=true shown=true state=Some(false)'
+}
+
+# On a slow host, each read held 800 ms, a Git row's tab is up before git answers and shows the
+# loading page: one of its own for a file from the history, which opens with its unchanged runs
+# hidden as a quick one does, and the file's own for a change in the working tree. The commit's
+# row goes first, the second launch restoring its tab.
+drill_compare_loading() {
+	history_repo
+	launch 60 ACCENT_BENCH_SLOW_READ=800 ACCENT_BENCH_COMPARE=row:commit:note.md >"$dir/compare-loading"
+	launch 60 ACCENT_BENCH_SLOW_READ=800 ACCENT_BENCH_COMPARE=row:untracked.md >>"$dir/compare-loading"
+	has "$dir/compare-loading" 'bench compare_row at_once file=None diff=Some("diff/loading")' \
+		'bench compare_row at_once file=Some("loading/loading") diff=None'
+	grep -Eq '^bench compare_row opened key=.* hidden=[1-9]' "$dir/compare-loading" ||
+		{ cat "$dir/compare-loading"; return 1; }
 }
 
 drill_preview() {

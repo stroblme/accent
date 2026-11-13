@@ -25,22 +25,76 @@ impl Panel {
         };
         let asked = self.asked.get() + 1;
         self.asked.set(asked);
+        self.put_up(&what);
         let panel = self.clone();
         let vault = self.source();
         glib::spawn_future_local(async move {
             let read = {
                 let what = what.clone();
-                crate::work::off_thread("git", move || read(&what, &vault)).await
+                crate::work::off_thread("git", move || {
+                    // A slow host, for `ACCENT_BENCH_SLOW_READ` under `ACCENT_BENCH_COMPARE=row:`.
+                    #[cfg(feature = "bench")]
+                    crate::bench::hold(&crate::bench::SLOW_READ_MS);
+                    read(&what, &vault)
+                })
+                .await
             };
             if panel.asked.get() != asked {
                 return;
             }
-            match read {
+            let key = panel.tab_key(&what);
+            let shown = match read {
                 Some(Ok(read)) => panel.show(what, read, false),
-                Some(Err(why)) => (panel.hooks.toast)(&why),
-                None => {}
+                Some(Err(why)) => {
+                    (panel.hooks.toast)(&why);
+                    false
+                }
+                None => false,
+            };
+            if !shown {
+                (panel.hooks.let_go)(&key);
             }
         });
+    }
+
+    /// Put up the tab `what` is shown in before its sides are read, so a click on a slow host
+    /// is answered at once (DESIGN.md, Loading), and let go of one an earlier click put up and
+    /// its comparison, outrun by this one, never filled.
+    fn put_up(&self, what: &Comparison) {
+        let key = self.tab_key(what);
+        let earlier = self.put.replace(Some(key.clone()));
+        if let Some(earlier) = earlier.filter(|earlier| *earlier != key) {
+            (self.hooks.let_go)(&earlier);
+        }
+        if self.in_file_tab(&what.sides) {
+            return (self.hooks.hold_file)(&key);
+        }
+        let (left, right) = titles(what);
+        (self.hooks.hold_diff)(&key, split_name(&what.rel).1, &right, &left);
+    }
+
+    /// Whether `sides` are compared in the file's own tab, its editor the working tree: a merge,
+    /// and the working tree of a file on this machine or in the vault.
+    fn in_file_tab(&self, sides: &Sides) -> bool {
+        match sides {
+            Sides::Worktree | Sides::Merge => !self.is_shell_remote(),
+            _ => false,
+        }
+    }
+
+    /// The key of the tab `what` is shown in: its file's, or one of its own for two texts that
+    /// are not files, so the comparisons of one file are a tab each and asking twice reveals the
+    /// one already open.
+    fn tab_key(&self, what: &Comparison) -> String {
+        if self.in_file_tab(&what.sides) {
+            return what.key.clone();
+        }
+        match self.source().as_ref() {
+            Source::Remote { git, .. } => {
+                format!("diff:{}:{}:{}", git.url(), tag(&what.sides), what.key)
+            }
+            _ => format!("diff:{}:{}", tag(&what.sides), what.key),
+        }
     }
 
     /// Open the file at `rel`, keyed `key`, git left unmerged as a merge of its stages: a row's
@@ -61,6 +115,9 @@ impl Panel {
             key: key.to_string(),
             sides: Sides::Merge,
         };
+        if !self.is_shell_remote() {
+            self.put_up(&what);
+        }
         self.show_merge(what, Some(asked));
     }
 
@@ -98,6 +155,9 @@ impl Panel {
                 read => {
                     let why = read.into_iter().find_map(Result::err);
                     let why = why.map(|e| format!("{e:#}")).unwrap_or_default();
+                    if asked.is_some() {
+                        (panel.hooks.let_go)(&what.key);
+                    }
                     return (panel.hooks.toast)(&format!("Cannot read {name}'s conflict: {why}"));
                 }
             };
@@ -150,7 +210,7 @@ impl Panel {
             };
             match read {
                 Some(Ok(read)) if panel.source_generation.get() == generation => {
-                    panel.show(what, read, true)
+                    panel.show(what, read, true);
                 }
                 Some(Ok(_)) => {}
                 Some(Err(why)) => tracing::debug!("{why}"),
@@ -175,9 +235,9 @@ impl Panel {
     }
 
     /// Put a freshly read comparison on screen, and remember it for the refreshes to come and
-    /// for the session. A `restored` one says nothing where it shows nothing: the reader did not
-    /// ask for it in this sitting.
-    fn show(self: &Rc<Self>, what: Comparison, read: (Blob, Blob), restored: bool) {
+    /// for the session, answering whether it went into the tab put up for it. A `restored` one
+    /// says nothing where it shows nothing: the reader did not ask for it in this sitting.
+    fn show(self: &Rc<Self>, what: Comparison, read: (Blob, Blob), restored: bool) -> bool {
         let name = split_name(&what.rel).1.to_string();
         let say = {
             let panel = Rc::downgrade(self);
@@ -193,11 +253,9 @@ impl Panel {
             if !restored {
                 self.open_current(&what);
             }
-            return;
+            return false;
         };
-        let left_name = split_name(left_rel(&what)).1;
-        let left_title = format!("{left_name} ({})", left_title(&what.sides));
-        let right_title = format!("{name} ({})", right_title(&what.sides));
+        let (left_title, right_title) = titles(&what);
         let nothing = nothing_to_show(&what.sides);
         let endings = line_endings_only(&left, &right);
         let unchanged = left == right;
@@ -240,6 +298,7 @@ impl Panel {
                     true
                 };
                 (self.hooks.compare_file)(&key, &left_title, &left, restored, Box::new(register));
+                true
             }
             // A host shell has no editable file tab on this machine; its worktree comparison
             // uses the same read-only diff as staged and historical changes.
@@ -257,17 +316,13 @@ impl Panel {
                     if !restored {
                         self.schedule_refresh(Depth::Everything);
                     }
-                    return;
+                    return false;
                 }
                 if endings {
-                    return say(&format!("{name} differs only in line endings"));
+                    say(&format!("{name} differs only in line endings"));
+                    return false;
                 }
-                let key = match self.source().as_ref() {
-                    Source::Remote { git, .. } => {
-                        format!("diff:{}:{}:{}", git.url(), tag(&what.sides), what.key)
-                    }
-                    _ => format!("diff:{}:{}", tag(&what.sides), what.key),
-                };
+                let key = self.tab_key(&what);
                 let tab = (self.hooks.open_diff)(
                     &key,
                     &name,
@@ -276,13 +331,15 @@ impl Panel {
                     (&right_title, &right),
                     restored,
                 );
-                if let Some(tab) = tab {
-                    if shows_alone(&what.sides, &right) {
-                        tab.offer_alone();
-                    }
-                    self.offer_lines(tab.comparison(), &what);
-                    self.watch(what, Target::Diff(Rc::downgrade(&tab)));
+                let Some(tab) = tab else {
+                    return false;
+                };
+                if shows_alone(&what.sides, &right) {
+                    tab.offer_alone();
                 }
+                self.offer_lines(tab.comparison(), &what);
+                self.watch(what, Target::Diff(Rc::downgrade(&tab)));
+                true
             }
         }
     }
@@ -505,6 +562,16 @@ impl Panel {
             .find(|what| what.key == key && what.sides == Sides::Merge)
             .cloned()
     }
+}
+
+/// Both columns' titles, the left one first: each file's name and its side.
+fn titles(what: &Comparison) -> (String, String) {
+    let left = split_name(left_rel(what)).1;
+    let right = split_name(&what.rel).1;
+    (
+        format!("{left} ({})", left_title(&what.sides)),
+        format!("{right} ({})", right_title(&what.sides)),
+    )
 }
 
 /// The revision the left pane reads, `None` meaning there is nothing on that side at all.

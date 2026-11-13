@@ -24,6 +24,11 @@ pub struct DiffTab {
     header: gtk::Box,
     /// The comparison, or the right text alone once Show Changes is let go.
     stack: gtk::Stack,
+    /// The page's child, which shows the loading page until the comparison is in
+    /// ([`DiffTab::show`]).
+    holder: gtk::Stack,
+    /// The file name behind the comparison, which picks its language.
+    file: String,
     /// Show Changes, once [`DiffTab::offer_alone`] has put it in: down while the comparison is
     /// shown.
     changes: OnceCell<gtk::ToggleButton>,
@@ -56,14 +61,57 @@ struct Alone {
 }
 
 impl DiffTab {
-    /// `old` and `new` are (title, text). `key` is what the tab is keyed by, see
-    /// `App::open_diff`; the file name behind it picks the language and the flavour.
+    /// `old` and `new` are (title, text), shown once [`DiffTab::show`] says so. `key` is what the
+    /// tab is keyed by, see `App::open_diff`; the file name behind it picks the language and the
+    /// flavour.
     #[allow(clippy::too_many_arguments)]
     pub fn open(
         tabs: &adw::TabView,
         key: &str,
         file: &str,
         title: &str,
+        flavour: Flavour,
+        old: (&str, &str),
+        new: (&str, &str),
+        font: Option<&str>,
+        zoom: f64,
+    ) -> Rc<DiffTab> {
+        let holder = crate::loading::holder();
+        let page = tabs.append(&holder);
+        page.set_title(title);
+        page.set_icon(Some(&gtk::gio::ThemedIcon::new("view-dual-symbolic")));
+        Self::build(page, holder, key, file, flavour, old, new, font, zoom)
+    }
+
+    /// The tab built again from `old` and `new` in its page, as a comparison of them opens: one
+    /// put up before its texts were read (`App::hold_diff`).
+    pub fn rebuild(
+        &self,
+        old: (&str, &str),
+        new: (&str, &str),
+        font: Option<&str>,
+        zoom: f64,
+    ) -> Rc<DiffTab> {
+        let (page, holder) = (self.page.clone(), self.holder.clone());
+        Self::build(
+            page,
+            holder,
+            &self.key,
+            &self.file,
+            self.flavour,
+            old,
+            new,
+            font,
+            zoom,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        page: adw::TabPage,
+        holder: gtk::Stack,
+        key: &str,
+        file: &str,
         flavour: Flavour,
         old: (&str, &str),
         new: (&str, &str),
@@ -83,9 +131,7 @@ impl DiffTab {
         let compare = Compare::new(old, new, None, false);
         let stack = gtk::Stack::new();
         stack.add_child(compare.widget());
-        let page = tabs.append(&stack);
-        page.set_title(title);
-        page.set_icon(Some(&gtk::gio::ThemedIcon::new("view-dual-symbolic")));
+        crate::loading::put(&holder, &stack);
         let tab = Rc::new(DiffTab {
             page,
             key: key.to_string(),
@@ -94,6 +140,8 @@ impl DiffTab {
             finders,
             header,
             stack,
+            holder,
+            file: file.to_string(),
             changes: OnceCell::new(),
             alone: OnceCell::new(),
             flavour,
@@ -324,6 +372,16 @@ impl DiffTab {
         self.compare.set_side(Side::New, new);
     }
 
+    /// The comparison, in place of the loading page.
+    pub fn show(&self) {
+        crate::loading::show(&self.holder);
+    }
+
+    /// Whether the comparison is shown ([`DiffTab::show`]).
+    pub fn filled(&self) -> bool {
+        crate::loading::shown(&self.holder)
+    }
+
     pub fn comparison(&self) -> &Rc<Compare> {
         &self.compare
     }
@@ -369,6 +427,18 @@ impl DiffTab {
         match self.shown_alone() {
             Some(alone) => &alone.view,
             None => &self.views[1],
+        }
+    }
+}
+
+impl Drop for DiffTab {
+    /// Release the font provider, as a text tab does: a Git row's tab is built twice, once as it
+    /// is put up and again once its texts are read.
+    fn drop(&mut self) {
+        if let (Some(display), Some(provider)) =
+            (gtk::gdk::Display::default(), self.font.borrow_mut().take())
+        {
+            gtk::style_context_remove_provider_for_display(&display, &provider);
         }
     }
 }

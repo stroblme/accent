@@ -105,6 +105,14 @@ pub struct Hooks {
     /// and incoming texts, whether it goes into the tab already showing the file rather than the
     /// pane's preview, and what to call once the merge exists so a refresh can reach it.
     pub merge_file: Box<dyn Fn(&str, [String; 3], bool, Box<dyn FnOnce(Weak<Merge>)>)>,
+    /// Put up the file's own tab a row's click compares or merges in, by vault key, before the
+    /// comparison is read: its file is read once `compare_file` or `merge_file` asks for it.
+    pub hold_file: Box<dyn Fn(&str)>,
+    /// Put up a comparison's tab of two texts that are not files before they are read: key, the
+    /// file name behind it, the tab title and the left side's title. `open_diff` fills it.
+    pub hold_diff: Box<dyn Fn(&str, &str, &str, &str)>,
+    /// The comparison a tab was put up for, by its key, will not come: see `App::let_go`.
+    pub let_go: Box<dyn Fn(&str)>,
     /// Put the file's tab back to the file alone, from a comparison or a merge git has moved past.
     pub leave: Box<dyn Fn(&str)>,
     /// Move vault files to the trash, with one toast for the lot, or delete them on a remote
@@ -255,6 +263,9 @@ pub struct Panel {
     /// How many comparisons a row has asked for, so only the last one asked shows: see
     /// [`Panel::compare`].
     asked: Cell<u64>,
+    /// The key of the tab the last row clicked put up ([`Panel::put_up`]), which the next click
+    /// lets go of if the comparison never filled it.
+    put: RefCell<Option<String>>,
     /// Set while the repository chooser's list is being filled, so the selection notify that
     /// follows is not read as the user picking a repository.
     syncing: Cell<bool>,
@@ -502,6 +513,7 @@ impl Panel {
             rediscover_later: crate::widgets::Debounce::new(REDISCOVER),
             watches: RefCell::new(Vec::new()),
             asked: Cell::new(0),
+            put: RefCell::default(),
             syncing: Cell::new(false),
             acting: RefCell::new(None),
             actors: RefCell::new(Vec::new()),
