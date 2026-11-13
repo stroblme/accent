@@ -223,6 +223,22 @@ fn big_delimiters_are_taller() {
     assert!(height(laid(r"\big(", false)) > height(laid("(", false)));
 }
 
+/// A delimiter alone in a group takes its own size and not the row's: `{\Big(}` is as tall as
+/// `\Big(`, and a grouped `\vert` beside a fraction keeps the glyph it has alone.
+#[test]
+fn a_grouped_delimiter_keeps_its_own_size() {
+    let height = |l: Layout| l.ascent + l.descent;
+    assert_eq!(
+        height(laid(r"{\Big(}", false)),
+        height(laid(r"\Big(", false))
+    );
+    let bar = |tex| match laid(tex, false).items[0] {
+        Item::Glyph { id, .. } => id,
+        ref other => panic!("{tex}: {other:?}"),
+    };
+    assert_eq!(bar(r"{\vert}\frac{a}{b}"), bar(r"\vert"));
+}
+
 /// `\displaystyle`, which SymPy starts every formula with, sets a large operator large.
 #[test]
 fn display_style_enlarges_an_integral() {

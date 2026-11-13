@@ -1096,6 +1096,11 @@ fn layout_embellished_stretchy(
                 layout_embellished_stretchy(ctx, base, symmetric, max_ascent, max_descent);
             layout_scripts_on(ctx, base_box, sub.as_deref(), sup.as_deref())
         }
+        // Alone in a group it stretches to the group, which has no extent of its own: `{\big(}`
+        // takes its size, and a grouped `\vert` keeps its glyph beside a fraction, as in TeX.
+        Node::Row(children) if children.len() == 1 => {
+            layout_embellished_stretchy(ctx, &children[0], symmetric, 0.0, 0.0)
+        }
         _ => layout_node(ctx, node),
     }
 }
