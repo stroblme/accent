@@ -293,6 +293,26 @@ fn a_class_command_takes_a_symbol_command() {
     assert!(sized.contains("minsize"), "{sized}");
 }
 
+/// A class command that gives a symbol or a group another class spaces it as TeX spaces that
+/// class between ordinary atoms, where MathML would space it by the operator dictionary: thick
+/// round a relation, a run of symbols such as `:=` set close, the trailing space after the
+/// scripts, and none on a side with nothing to space it from. One operator, decorated, keeps the
+/// space MathML gives its core.
+#[test]
+fn a_class_command_spaces_by_its_class() {
+    let same = |tex, spaced| assert_eq!(laid(tex, false), laid(spaced, false), "{tex}");
+    same(r"a\mathrel{\times}b", r"a\;\mathord{\times}\;b");
+    same(r"a\mathrel{:=}b", r"a\;\mathord{:}\mathord{=}\;b");
+    same(r"a\mathbin{xy}b", r"a\:xy\:b");
+    same(r"a\mathinner{\ldots}b", r"a\,\mathord{\ldots}\,b");
+    same(r"a\mathrel{\times}_1b", r"a\;{\mathord{\times}}_1\;b");
+    same(r"(\mathrel{\times}b)", r"(\mathord{\times}\;b)");
+    same(r"a\mathrel{\overset{!}{=}}b", r"a\overset{!}{=}b");
+    let width = |tex| laid(tex, false).width;
+    assert!(width(r"a\mathrel{\times}b") > width(r"a\mathbin{\times}b"));
+    assert!(width(r"a\mathrel{:=}b") < width(r"a:=b"));
+}
+
 /// An operator's limits go above and below it in display or after `\limits`, and after it inline
 /// or after `\nolimits`, `\operatorname` keeping them after it unless starred.
 #[test]
