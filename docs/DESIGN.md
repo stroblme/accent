@@ -1470,7 +1470,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - A page edit is one undo step: the reader lands on a page put in, and otherwise stays on the page they were reading, wherever it went, or the one that took its place, Undo and Redo included, and the pane's Back and Forward places follow the pages.
   A note names a diagram's page by its name, so no link changes with one.
 - A shape's link (draw.io's `link`) shows where it leads while Ctrl is held over the shape, as a PDF's does, in a popover of the page's thumbnail and name or the address, and a click on that popover follows it, the popover waiting 400 ms for the pointer on its way over.
-  The popover stays inside the pane as a PDF's does, and its thumbnail is cut to the room the pane has as a PDF's band is, so a tall page's popover never runs past a short pane's foot (user decision 2026-11-15).
+  The popover stays inside the pane as a PDF's does, and its thumbnail is cut to the room the pane has as a PDF's band is, so a tall page's popover never runs past a short pane's foot, while one narrower than its caption keeps its own size, centred above it (user decisions 2026-11-15).
   A click on a presented page follows it too, while editing a click on the shape edits as on any other, Ctrl+click and Ctrl+drag included (user decision 2026-11-13).
   A page of the diagram, which draw.io names `data:page/id,…`, is gone to as a jump Back returns from, an address is opened as a PDF's link to the web is, and draw.io's other `data:` links go nowhere.
 - Group puts the selected cells that share the first one's parent, two at least, into a transparent `group` cell sized to them and in front of its siblings, as draw.io's does; they stay where they are, and the group is selected.

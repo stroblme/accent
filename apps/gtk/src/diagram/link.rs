@@ -179,9 +179,11 @@ impl DiagramTab {
                 if let Some(texture) = self.strip.picture(*page) {
                     let picture = gtk::Picture::new();
                     picture.set_can_shrink(false);
-                    // In a row of its own, which keeps it at its own width: given a wider
-                    // caption's, a picture grows to fill it, its aspect kept, past the room.
+                    // In a row of its own, centred above a wider caption, which keeps it at its
+                    // own width: given the caption's, a picture grows to fill it, its aspect
+                    // kept, past the room.
                     let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+                    row.set_halign(gtk::Align::Center);
                     row.append(&picture);
                     content.append(&row);
                     thumbnail = Some((picture, texture));

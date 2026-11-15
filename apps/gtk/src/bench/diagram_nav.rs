@@ -296,9 +296,9 @@ fn links(app: &Rc<App>, rel: &str) {
         let shown = popover().and_downcast::<gtk::Popover>();
         match shown.and_then(|p| placed(&p).map(|at| (p, at))) {
             Some((shown, (r, pane))) => {
-                let thumbnail = find_widget(shown.upcast_ref(), &|w| w.is::<gtk::Picture>())
-                    .and_downcast::<gtk::Picture>()
-                    .and_then(|p| p.paintable())
+                let picture = find_widget(shown.upcast_ref(), &|w| w.is::<gtk::Picture>())
+                    .and_downcast::<gtk::Picture>();
+                let thumbnail = (picture.as_ref().and_then(|p| p.paintable()))
                     .map(|p| (p.intrinsic_width(), p.intrinsic_height()));
                 let (side, size) = (shown.position(), (pane.width(), pane.height()));
                 println!(
@@ -306,6 +306,14 @@ fn links(app: &Rc<App>, rel: &str) {
                      pane={size:?}"
                 );
                 println!("bench nav link tall inside={}", inside(&r, &pane));
+                // Where the thumbnail starts across the popover and its middle, against the
+                // popover's middle.
+                let bounds = picture.and_then(|p| p.compute_bounds(&shown));
+                let across = bounds.map(|b| (b.x(), b.x() + b.width() / 2.0));
+                let half = shown.width() as f32 / 2.0;
+                println!("bench nav link tall thumbnail across={across:?} popover middle={half}");
+                let centred = across.is_some_and(|(_, middle)| (middle - half).abs() <= 1.0);
+                println!("bench nav link tall centred={centred}");
             }
             None => println!("bench nav link tall none"),
         }
