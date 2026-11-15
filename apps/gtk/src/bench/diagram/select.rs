@@ -114,8 +114,8 @@ pub(super) fn select(app: &Rc<App>, rel: &str) {
         say("click inside g between its shapes");
         tab.select(Vec::new());
         click(on("c")).await;
-        super::super::git::xtest(&band((140.0, 70.0), (250.0, 110.0))).await;
-        say("band from inside g over d");
+        super::super::git::xtest(&band((140.0, 70.0), (380.0, 230.0))).await;
+        say("band from inside g over c2 and d1");
         for id in ["p1", "t1", "xl"] {
             tab.select(Vec::new());
             click(on(id)).await;

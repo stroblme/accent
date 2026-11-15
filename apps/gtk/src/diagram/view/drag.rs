@@ -101,9 +101,13 @@ pub(super) enum Drag {
         id: CellId,
         rect: Rect,
     },
+    /// A band from `from`, adding what it takes to the selection with `add`; a release that
+    /// did not move selects `open` instead, when there is one (a click on a selected group's
+    /// empty middle).
     Band {
         from: Point,
         add: bool,
+        open: Option<Vec<CellId>>,
     },
     Draw {
         tool: Tool,
@@ -187,10 +191,13 @@ impl DiagramView {
                     });
                 }
                 let Some(pick) = sheet.pick(p, tolerance, &selection) else {
-                    if !add {
+                    // A click on a selected group's empty middle opens it, where draw.io's lets go
+                    // of the selection (user decision 2026-11-15); a drag still draws a band.
+                    let open = sheet.opened_at(p, &selection).filter(|_| !add);
+                    if !add && open.is_none() {
                         self.emit(Edit::Select(Vec::new()));
                     }
-                    return Some(Drag::Band { from: p, add });
+                    return Some(Drag::Band { from: p, add, open });
                 };
                 // The cell under the pointer, whose parent and edges pick the guides.
                 let pressed = pick.held.clone().unwrap_or(pick.cell.clone());
@@ -615,7 +622,10 @@ impl DiagramView {
                     self.emit(Edit::Follow(link.1));
                 }
             }
-            Drag::Band { from, add } if moved => {
+            Drag::Band {
+                open: Some(ids), ..
+            } if !moved => self.emit(Edit::Select(ids)),
+            Drag::Band { from, add, .. } if moved => {
                 let mut ids = sheet.band(Rect::from_corners(from, p));
                 if add {
                     let mut all = self.selection();

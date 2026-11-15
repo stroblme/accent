@@ -899,6 +899,28 @@ impl Sheet {
         }
     }
 
+    /// What a click at `p` on no cell opens: the cells shown in the innermost selected group that
+    /// `p` is inside, `None` where it is inside none.
+    pub fn opened_at(&self, p: Point, selection: &[CellId]) -> Option<Vec<CellId>> {
+        let depth = |id: &str| std::iter::successors(Some(id), |c| self.parent(c)).count();
+        let drawn = |id: &str| {
+            let mut prims = self.scene.prims.iter().filter(|p| !p.locked());
+            prims.any(|p| self.is_within(p.cell(), id))
+        };
+        let shapes = |group: &str| -> Vec<CellId> {
+            let inside = self.page.cells.iter();
+            let inside = inside.filter(|c| self.parent(&c.id) == Some(group) && drawn(&c.id));
+            inside.map(|c| c.id.clone()).collect()
+        };
+        selection
+            .iter()
+            .filter(|id| self.contains(id, p))
+            .map(|id| (depth(id), shapes(id)))
+            .filter(|(_, shapes)| !shapes.is_empty())
+            .max_by_key(|(depth, _)| *depth)
+            .map(|(_, shapes)| shapes)
+    }
+
     /// The innermost shape or connector under `p` that has a link (draw.io's `link`), itself or
     /// one it is in, and the link.
     pub fn link_at(&self, p: Point, tolerance: f64) -> Option<(CellId, String)> {
@@ -1304,6 +1326,31 @@ mod tests {
         // Of a group partly inside, the shapes wholly inside.
         assert_eq!(sheet.band(Rect::new(-5.0, -5.0, 20.0, 20.0)), ids(&["c"]));
         assert_eq!(sheet.band(Rect::new(-5.0, -5.0, 30.0, 20.0)), ids(&["c"]));
+    }
+
+    #[test]
+    fn a_click_on_a_selected_group_s_empty_middle_opens_it() {
+        let xml = r#"<mxfile><diagram name="P" id="p"><mxGraphModel><root>
+            <mxCell id="0"/><mxCell id="1" parent="0"/>
+            <mxCell id="G" parent="1" vertex="1" style="group"><mxGeometry x="0" y="0" width="100" height="10" as="geometry"/></mxCell>
+            <mxCell id="g" parent="G" vertex="1" style="group"><mxGeometry x="0" y="0" width="30" height="10" as="geometry"/></mxCell>
+            <mxCell id="c" parent="g" vertex="1" style=""><mxGeometry x="0" y="0" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="d" parent="g" vertex="1" style=""><mxGeometry x="20" y="0" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="h" parent="G" vertex="1" style="" visible="0"><mxGeometry x="40" y="0" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="e" parent="G" vertex="1" style=""><mxGeometry x="90" y="0" width="10" height="10" as="geometry"/></mxCell>
+            </root></mxGraphModel></diagram></mxfile>"#;
+        let file = accent_drawio::File::from_bytes(xml.as_bytes()).unwrap();
+        let sheet = Sheet::of(&file.pages()[0], &Context::default());
+        let ids = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        let open = |p: Point, selected: &[&str]| sheet.opened_at(p, &ids(selected));
+        let (in_g, in_g_only) = (Point::new(15.0, 5.0), Point::new(60.0, 5.0));
+        // What is shown in it, one level in.
+        assert_eq!(open(in_g_only, &["G"]), Some(ids(&["g", "e"])));
+        // The innermost selected group the click is in.
+        assert_eq!(open(in_g, &["G", "g"]), Some(ids(&["c", "d"])));
+        // Outside every group selected, nothing.
+        assert_eq!(open(in_g_only, &["g"]), None);
+        assert_eq!(open(Point::new(200.0, 5.0), &["G"]), None);
     }
 
     #[test]
