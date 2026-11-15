@@ -294,7 +294,7 @@ impl DiagramTab {
     }
 
     /// Let the push go once it has rested for [`REST_MS`], each scroll putting that off: the page
-    /// springs back, and after a turn the next push may turn again.
+    /// springs back.
     fn rest_after(
         self: &Rc<Self>,
         overshoot: &Rc<Cell<Overshoot>>,

@@ -417,7 +417,8 @@ use user_commands::bench_commands;
 ///   cost at 100, 200 and 400 %. `ACCENT_BENCH_DIAGRAM_SHOT=<png>` adds a picture
 ///   of the window (`diagram::bench_diagram`).
 /// - `ACCENT_BENCH_DIAGRAM_NAV=spring:<rel>`: a diagram's pages turned by XTEST wheel notches,
-///   pulled off their edge while edited and at once presented; `find:<rel>`: its labels searched
+///   pulled off their edge while edited and at once presented; `steady:<rel>`: the pages a steady
+///   wheel reads through, fitted, presented and taller than the view; `find:<rel>`: its labels searched
 ///   in the find bar and a page gone to; `links:<rel>`: shapes' links shown and followed by XTEST
 ///   (`diagram_nav::bench_diagram_nav`). Writes `<rel>`.
 /// - `ACCENT_BENCH_NOTEBOOK=<ipynb>,<marimo .py>,<long ipynb>`: outputs, cell edits with undo

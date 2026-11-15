@@ -299,16 +299,29 @@ drill_retype() {
 }
 
 # A diagram's pages turned by real wheel notches: pulled off their edge while edited, turned at the
-# third notch, a spin turning one, and a presented one turned by a notch (DESIGN.md, Diagram).
+# third notch, a spin turning a page every third, and a presented one turned by a notch (DESIGN.md,
+# Diagram).
 drill_diagram_spring() {
 	launch 60 ACCENT_BENCH_DIAGRAM_NAV=spring:spring.drawio >"$dir/spring"
 	has "$dir/spring" \
 		'bench nav spring one notch page=1 pull=21 rested=0' \
 		'bench nav spring two notches page=1 pull=43 rested=0' \
 		'bench nav spring three notches page=2 pull=43 rested=0' \
-		'bench nav spring a spin of six page=3 pull=43 rested=0' \
-		'bench nav spring one notch up page=3 pull=-21 rested=0' \
-		'bench nav spring presented one notch page=4 pull=0'
+		'bench nav spring a spin of six page=4 pull=43 rested=0' \
+		'bench nav spring one notch up page=4 pull=-21 rested=0' \
+		'bench nav spring presented one notch page=5 pull=0'
+}
+
+# A steady wheel reading on through a diagram's pages: fitted ones edited a page every third notch,
+# presented ones a page a notch, and pages taller than the view scrolled through and turned at each
+# edge, down and up (DESIGN.md, Diagram).
+drill_diagram_steady() {
+	launch 90 ACCENT_BENCH_DIAGRAM_NAV=steady:steady.drawio >"$dir/steady"
+	has "$dir/steady" \
+		'bench nav steady fitted nine at 120 ms pages=1>2>3>4 pull=0' \
+		'bench nav steady presented four at 120 ms pages=1>2>3>4>5 pull=0' \
+		'bench nav steady tall down twenty-eight at 120 ms pages=1>2>3 pull=0' \
+		'bench nav steady tall up twenty-eight at 120 ms pages=4>3>2 pull=0'
 }
 
 # A diagram's labels found in the find bar through its pages and round, by a regular expression
