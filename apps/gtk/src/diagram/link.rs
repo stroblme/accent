@@ -211,7 +211,9 @@ impl DiagramTab {
             .child(&button)
             .build();
         popover.set_parent(&host);
-        popover.set_pointing_to(Some(&gdk::Rectangle::new(at.0, at.1, 1, 1)));
+        // The pointer's row and one either side of it, as a PDF's, so the popover never starts on
+        // it: under X11 the pointer then goes into its edge, and the page's leave takes it away.
+        popover.set_pointing_to(Some(&gdk::Rectangle::new(at.0, at.1 - 1, 1, 3)));
         // The pointer on its way over keeps it up.
         let over = gtk::EventControllerMotion::new();
         over.connect_enter(glib::clone!(
