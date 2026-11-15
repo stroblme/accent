@@ -428,7 +428,7 @@ fn tab_point(app: &App, title: &str) -> Option<String> {
 }
 
 /// Save the screen as `<dir>/<name>.png` when the drill was given a directory.
-async fn shot(dir: &Option<String>, name: &str) {
+pub(super) async fn shot(dir: &Option<String>, name: &str) {
     let Some(dir) = dir else { return };
     let display = std::env::var("DISPLAY").unwrap_or_default();
     let file = format!("{dir}/{name}.png");

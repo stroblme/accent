@@ -1085,10 +1085,12 @@ impl Page {
     }
 }
 
-/// The offset of the character at `x`, `y` of the view.
+/// The offset of the character at `x`, `y` of the view. By position: `iter_at_location` hands
+/// back the character after the one whose right half the point is in, so a picture's right half
+/// had no menu items.
 fn offset_at(view: &PreviewView, x: f64, y: f64) -> Option<i32> {
     let (bx, by) = view.window_to_buffer_coords(gtk::TextWindowType::Widget, x as i32, y as i32);
-    view.iter_at_location(bx, by).map(|at| at.offset())
+    view.iter_at_position(bx, by).map(|(at, _)| at.offset())
 }
 
 /// The view's input: a click on a link follows it, the pointer over one is a hand, Space pages,
@@ -1157,7 +1159,7 @@ fn wire(page: &Rc<Page>) {
             items.append(Some("Copy"), Some("clipboard.copy"));
             items.append(Some("Select All"), Some("selection.select-all"));
             let over = offset_at(&page.view, x, y);
-            if let Some(item) = over.and_then(|o| figure::menu_item(&page, o)) {
+            for item in over.map_or_else(Vec::new, |o| figure::menu_items(&page, o)) {
                 items.append_item(&item);
             }
             let at = gdk::Rectangle::new(x as i32, y as i32, 1, 1);

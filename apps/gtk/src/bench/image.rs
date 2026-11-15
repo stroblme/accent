@@ -13,7 +13,13 @@ use accent_core::config::Theme;
 /// `=anchor:<rel>` zooms 40 steps in and 10 out around a point two fifths into the view,
 /// then by chord about the centre. Print `under` fractions to check anchor stability.
 /// Repeat pinches to 1.5× zoom and half that value (`App::zoom_image_to`).
+/// `=copy:<rel>,…[:<dir>]` under Light inverts each image onto Dark's page, right-clicks it and
+/// clicks the menu's Copy Image, printing the menu, the image's size and the clipboard's
+/// (`copied`); with `<dir>` it saves the screen with the menu up there (ImageMagick's `import`).
 pub(super) fn bench_image(app: &Rc<App>, arg: &str) {
+    if let Some(rels) = arg.strip_prefix("copy:") {
+        return copy_images(app, rels);
+    }
     if let Some(rels) = arg.strip_prefix("zoom:") {
         return zoom_svgs(app, rels);
     }
@@ -46,6 +52,141 @@ pub(super) fn bench_image(app: &Rc<App>, arg: &str) {
             });
         });
     });
+}
+
+/// See `=copy:` on [`bench_image`].
+fn copy_images(app: &Rc<App>, arg: &str) {
+    let (rels, shots) = match arg.split_once(':') {
+        Some((rels, dir)) => (rels, Some(dir.to_string())),
+        None => (arg, None),
+    };
+    let rels: Vec<String> = rels.split(',').map(str::to_string).collect();
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        crate::theme::apply(Theme::Light);
+        app.restyle_all();
+        for rel in rels {
+            app.open_path(&rel);
+            let t = Instant::now();
+            let shown = || match app.active_doc() {
+                Some(Doc::Image(image)) if image.image.borrow().is_some() => Some(image),
+                _ => None,
+            };
+            while shown().is_none() && t.elapsed() < Duration::from_secs(20) {
+                glib::timeout_future(Duration::from_millis(20)).await;
+            }
+            let Some((image, picture)) =
+                shown().and_then(|i| Some((i.clone(), picture_of(&i.page)?)))
+            else {
+                println!("bench image copy {rel} not_shown");
+                continue;
+            };
+            let _ = WidgetExt::activate_action(&app.window, "win.image-invert", None);
+            glib::timeout_future(Duration::from_millis(800)).await;
+            let middle = (
+                f64::from(picture.width()) / 2.0,
+                f64::from(picture.height()) / 2.0,
+            );
+            let clipboard = app.window.clipboard();
+            let _ = clipboard.set_content(None::<&gdk::ContentProvider>);
+            // A toast over the picture would take the click.
+            app.toasts.dismiss_all();
+            let menu = right_click(&app, picture.upcast_ref(), middle).await;
+            let menu_labels = labels(menu.as_ref());
+            super::menus::shot(&shots, &rel.replace('/', "-")).await;
+            if let Some(menu) = &menu {
+                click_item(menu, "Copy Image").await;
+            }
+            let state = app.window.lookup_action("image-invert");
+            let state = state.and_then(|a| a.state()).and_then(|s| s.get::<bool>());
+            let shown = picture.paintable().as_ref().and_then(texture_of);
+            let file = (image.image.borrow().as_ref())
+                .and_then(|(_, original)| original.as_ref().map(|o| o.texture.clone()));
+            println!(
+                "bench image copy {rel} menu={menu_labels:?} inverted={} size={:?} shown={} \
+                 file={} copied={}",
+                state.unwrap_or_default(),
+                image.size.get().unwrap_or_default(),
+                described(shown.as_ref()),
+                described(file.as_ref()),
+                copied(&clipboard).await,
+            );
+            let _ = WidgetExt::activate_action(&app.window, "win.image-invert", None);
+        }
+        bench_quit(&app);
+    });
+}
+
+/// Right-click `widget` at `(x, y)` through XTEST, and the menu that comes up.
+async fn right_click(
+    app: &App,
+    widget: &gtk::Widget,
+    (x, y): (f64, f64),
+) -> Option<gtk::PopoverMenu> {
+    let at = graphene::Point::new(x as f32, y as f32);
+    let at = widget.compute_point(&app.window, &at)?;
+    let (sx, sy) = app.window.surface_transform();
+    let (x, y) = (f64::from(at.x()) + sx, f64::from(at.y()) + sy);
+    super::git::xtest(&format!("move {x:.0} {y:.0}; down 3; up 3")).await;
+    find_widget(app.window.upcast_ref(), &|w| {
+        w.is::<gtk::PopoverMenu>() && w.is_visible()
+    })
+    .and_downcast()
+}
+
+/// Click the item of `menu` labelled `label` through XTEST, where its popup is on the screen:
+/// a surface of its own, placed against the window's, which sits at the screen's corner with no
+/// window manager to move it.
+async fn click_item(menu: &gtk::PopoverMenu, label: &str) {
+    let item = find_widget(menu.upcast_ref(), &|w| {
+        w.downcast_ref::<gtk::Label>()
+            .is_some_and(|l| l.label() == label)
+    });
+    let popup = menu.surface().and_downcast::<gdk::Popup>();
+    let (Some(item), Some(popup)) = (item, popup) else {
+        return println!("bench image copy no_item {label}");
+    };
+    let middle = graphene::Point::new(item.width() as f32 / 2.0, item.height() as f32 / 2.0);
+    let Some(at) = item.compute_point(menu, &middle) else {
+        return;
+    };
+    let (sx, sy) = menu.surface_transform();
+    let x = f64::from(popup.position_x()) + sx + f64::from(at.x());
+    let y = f64::from(popup.position_y()) + sy + f64::from(at.y());
+    super::git::xtest(&format!("move {x:.0} {y:.0}; down; up")).await;
+}
+
+/// The labels of `menu`, `None` for no menu.
+fn labels(menu: Option<&gtk::PopoverMenu>) -> Option<Vec<String>> {
+    Some(crate::fileops::labels(&menu?.menu_model()?))
+}
+
+/// What the clipboard holds once Copy Image's worker is done: its texture ([`described`]) and
+/// whether it offers PNG.
+async fn copied(clipboard: &gdk::Clipboard) -> String {
+    let png = || clipboard.formats().contain_mime_type("image/png");
+    let t = Instant::now();
+    while !png() && t.elapsed() < Duration::from_secs(5) {
+        glib::timeout_future(Duration::from_millis(20)).await;
+    }
+    let texture = clipboard.read_texture_future().await.ok().flatten();
+    format!("{} png={}", described(texture.as_ref()), png())
+}
+
+/// `texture`'s pixels and its pixels (2, 2) and in the middle as `r,g,b,a`, or `-`.
+fn described(texture: Option<&gdk::Texture>) -> String {
+    let Some(texture) = texture else {
+        return "-".to_string();
+    };
+    let mut downloader = gdk::TextureDownloader::new(texture);
+    downloader.set_format(gdk::MemoryFormat::R8g8b8a8);
+    let (bytes, stride) = downloader.download_bytes();
+    let (w, h) = (texture.width(), texture.height());
+    let px = |x: i32, y: i32| {
+        let p = &bytes[y as usize * stride + x as usize * 4..][..4];
+        format!("{},{},{},{}", p[0], p[1], p[2], p[3])
+    };
+    format!("{w}x{h}@{}/{}", px(2, 2), px(w / 2, h / 2))
 }
 
 /// See `=zoom:` on [`bench_image`].
@@ -320,7 +461,13 @@ fn look_state(image: &doc::Viewer, rel: &str, theme: Theme, inverted: bool) {
 ///   through 200 ms after load, and whether the latest simultaneous render wins.
 /// - `=change:<note>,<img>,<other>` replaces an image; `=gone:<note>,<img>[,<to>]` deletes
 ///   or renames it. Remote changes run on the host to exercise its watcher.
+/// - `=copy:<rel_note>` under Dark right-clicks each picture where the window shows it, printing
+///   its menu, then copies it through the menu's action, printing the pixels it holds and the
+///   clipboard's (`copied`).
 pub(super) fn bench_preview_look(app: &Rc<App>, rel: &str) {
+    if let Some(rel) = rel.strip_prefix("copy:") {
+        return copy_preview(app, rel);
+    }
     if let Some(arg) = rel.strip_prefix("change:") {
         return change_preview(app, "cp", arg);
     }
@@ -374,6 +521,51 @@ pub(super) fn bench_preview_look(app: &Rc<App>, rel: &str) {
             app.invert_image(key);
         }
         preview_look(&app, "inverted").await;
+        bench_quit(&app);
+    });
+}
+
+/// See `=copy:` on [`bench_preview_look`].
+fn copy_preview(app: &Rc<App>, rel: &str) {
+    app.open_path(rel);
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        crate::theme::apply(Theme::Dark);
+        app.restyle_all();
+        glib::timeout_future(Duration::from_millis(400)).await;
+        super::preview::beside(&app).await;
+        preview_look(&app, "copy").await;
+        let view = super::preview::shown(&app)
+            .and_then(|r| Some(r.preview().as_ref()?.focus_target().clone()));
+        let (Some(view), Some((figures, _))) = (view, figures(&app)) else {
+            println!("bench preview_look copy no_preview");
+            return bench_quit(&app);
+        };
+        let clipboard = view.clipboard();
+        for f in figures {
+            let at = (f64::from(f.at.0), f64::from(f.at.1));
+            app.toasts.dismiss_all();
+            let menu = right_click(&app, &view, at).await;
+            let menu_labels = labels(menu.as_ref());
+            if let Some(menu) = menu {
+                menu.popdown();
+            }
+            glib::timeout_future(Duration::from_millis(300)).await;
+            let _ = clipboard.set_content(None::<&gdk::ContentProvider>);
+            let _ = view.activate_action("preview.copy-image", Some(&f.uri.to_variant()));
+            println!(
+                "bench preview_look copy {} at={},{} menu={menu_labels:?} held={}x{}@{}/{} \
+                 copied={}",
+                f.uri,
+                f.at.0,
+                f.at.1,
+                f.pixels.0,
+                f.pixels.1,
+                f.corner,
+                f.centre,
+                copied(&clipboard).await,
+            );
+        }
         bench_quit(&app);
     });
 }

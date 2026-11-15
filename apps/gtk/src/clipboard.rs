@@ -1,5 +1,5 @@
 //! What the clipboard holds beyond the text GTK's own paste reads: one MIME type's bytes, and
-//! the HTML another application copies formatted text as.
+//! the HTML another application copies formatted text as; and an image put on it.
 
 use gtk::prelude::*;
 use gtk::{gdk, gio, glib};
@@ -23,6 +23,22 @@ pub async fn read(clipboard: &gdk::Clipboard, mime: &str) -> Option<Vec<u8>> {
         .inspect_err(|e| tracing::warn!("reading the clipboard's {mime}: {e}"))
         .ok()?;
     Some(out.steal_as_bytes().to_vec())
+}
+
+/// Put the picture `draw` makes on `clipboard`, which GDK offers as PNG among the image types it
+/// writes. `draw` runs on a worker: decoding a large file or drawing an SVG would hold the window.
+pub fn set_texture(
+    clipboard: &gdk::Clipboard,
+    draw: impl FnOnce() -> Result<gdk::Texture, glib::Error> + Send + 'static,
+) {
+    let clipboard = clipboard.clone();
+    glib::spawn_future_local(async move {
+        match crate::work::off_thread("copied image", draw).await {
+            Some(Ok(texture)) => clipboard.set_texture(&texture),
+            Some(Err(e)) => tracing::warn!("cannot copy the image: {e}"),
+            None => {}
+        }
+    });
 }
 
 /// The clipboard's HTML as text, or `None` when it holds none.

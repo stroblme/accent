@@ -182,17 +182,19 @@ fn keep_under(scroller: &gtk::ScrolledWindow, size: (i32, i32), at: (f64, f64)) 
 
 /// The `GtkPicture` inside a page built by [`App::open_image`].
 ///
-/// Through the viewport: a picture is not a `GtkScrollable`, so the scroller puts one in between,
-/// and the `child` property hands that back rather than what was put in it.
+/// Through the viewport and the box its menu hangs from: a box is not a `GtkScrollable`, so the
+/// scroller puts a viewport in between, and the `child` property hands that back rather than
+/// what was put in it.
 pub fn picture_of(page: &adw::TabPage) -> Option<gtk::Picture> {
     let child = crate::loading::content(page)
         .downcast::<gtk::ScrolledWindow>()
         .ok()?
         .child()?;
-    match child.downcast::<gtk::Viewport>() {
-        Ok(viewport) => viewport.child().and_downcast(),
-        Err(child) => child.downcast().ok(),
-    }
+    let host = match child.downcast::<gtk::Viewport>() {
+        Ok(viewport) => viewport.child()?,
+        Err(child) => child,
+    };
+    host.first_child().and_downcast()
 }
 
 /// Clamp font zoom to 0.5–3.0 and round to tenths to prevent drift and invalid saved sizes.

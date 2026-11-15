@@ -242,6 +242,7 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.pdf-fit-page", "Fit Height", &[]),
     ("win.pdf-invert", "Invert PDF Colours", &[]),
     ("win.image-invert", "Invert Image Colours", &[]),
+    ("win.image-copy", "Copy Image", &[]),
     ("win.pdf-copy", "Copy Selection", &[]),
     // The Select tool's, which the PDF tab's key controller fires on `Ctrl+X`, `Ctrl+V`, `Ctrl+D`
     // and `Delete`, carrying none here for the paging commands' reason.

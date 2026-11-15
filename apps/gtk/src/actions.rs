@@ -389,6 +389,7 @@ impl App {
             "forward" => self.navigate(true),
             "pdf-invert" => self.with_pdf(|pdf| pdf.toggle_invert()),
             "image-invert" => self.with_image(|image| self.invert_image(&image.key())),
+            "image-copy" => self.with_image(|image| self.copy_image(image)),
             "pdf-copy" => self.with_pdf(|pdf| pdf.copy()),
             "pdf-cut" => self.with_pdf(|pdf| pdf.cut()),
             "pdf-duplicate" => self.with_pdf(|pdf| pdf.duplicate()),
@@ -1157,8 +1158,9 @@ pub fn install_actions(app: &Rc<App>) {
         if let Some(name) = full.strip_prefix("win.") {
             // Show Hidden Files and Show Grid carry their values, which a menu draws as a check
             // item and a switch shows. Activating one runs the handler below like any other; the
-            // value follows the preference in `App::apply_config`, and Show Changes' the
-            // comparison in front's in `App::sync_applicable`.
+            // value follows the preference in `App::apply_config`, Show Changes' the comparison
+            // in front's in `App::sync_applicable`, and Invert Image Colours' the image in
+            // front's in `App::sync_image_invert`.
             let action = match name {
                 "show-hidden-files" => gio::SimpleAction::new_stateful(
                     name,
@@ -1173,6 +1175,7 @@ pub fn install_actions(app: &Rc<App>) {
                 "diff-show-changes" => {
                     gio::SimpleAction::new_stateful(name, None, &true.to_variant())
                 }
+                "image-invert" => gio::SimpleAction::new_stateful(name, None, &false.to_variant()),
                 _ => gio::SimpleAction::new(name, None),
             };
             action.connect_activate(glib::clone!(

@@ -527,10 +527,16 @@ impl App {
         let picture = gtk::Picture::new();
         picture.set_content_fit(gtk::ContentFit::ScaleDown);
         picture.set_can_shrink(true);
+        // In a box its menu hangs from: a popover is presented again by its parent's layout
+        // manager, which a picture has none of (DESIGN.md, States).
+        picture.set_hexpand(true);
+        picture.set_vexpand(true);
+        let host = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        host.append(&picture);
         let scroller = gtk::ScrolledWindow::builder()
             .hexpand(true)
             .vexpand(true)
-            .child(&picture)
+            .child(&host)
             .build();
         crate::widgets::smooth_wheel(&scroller);
         // Held back until it is decoded, the loading page up meanwhile once the open has taken a
@@ -591,6 +597,32 @@ impl App {
                 }
             ),
         );
+        // Copy Image and Invert Image Colours, once there is an image to act on; on the scroller,
+        // as the wheel, for the space around a fitted image.
+        let viewer = Rc::downgrade(&image);
+        let menu = gtk::GestureClick::builder()
+            .button(gdk::BUTTON_SECONDARY)
+            .build();
+        menu.connect_pressed(glib::clone!(
+            #[weak]
+            scroller,
+            move |menu, _, x, y| {
+                let image = viewer.upgrade();
+                if image.is_none_or(|image| image.image.borrow().is_none()) {
+                    return;
+                }
+                menu.set_state(gtk::EventSequenceState::Claimed);
+                let items = gio::Menu::new();
+                for action in ["win.image-copy", "win.image-invert"] {
+                    items.append(Some(crate::actions::label_of(action)), Some(action));
+                }
+                let at = graphene::Point::new(x as f32, y as f32);
+                let at = scroller.compute_point(&host, &at).unwrap_or(at);
+                let anchor = gdk::Rectangle::new(at.x() as i32, at.y() as i32, 1, 1);
+                crate::widgets::popup_menu(&host, &items, Some(anchor));
+            }
+        ));
+        scroller.add_controller(menu);
         // The decoder needs real bytes, and the protocol deliberately carries none.
         let viewer = Rc::downgrade(&image);
         self.local_copy(key, path, &image.page, move |app, copy| {
@@ -720,13 +752,38 @@ impl App {
         });
     }
 
-    /// Offer Invert Image Colours over an image alone.
+    /// Offer Invert Image Colours over an image alone, checked while it is inverted, and Copy
+    /// Image once it is read.
     pub(crate) fn sync_image_invert(&self) {
-        let image = matches!(self.active_doc(), Some(Doc::Image(_)));
+        let image = match self.active_doc() {
+            Some(Doc::Image(image)) => Some(image),
+            _ => None,
+        };
         let action = self.window.lookup_action("image-invert");
         if let Some(action) = action.and_downcast::<gio::SimpleAction>() {
-            action.set_enabled(image);
+            action.set_enabled(image.is_some());
+            let inverted = image.as_ref().map(|image| image.key());
+            let inverted = inverted.is_some_and(|key| self.inverted_images.borrow().contains(&key));
+            action.set_state(&inverted.to_variant());
         }
+        let action = self.window.lookup_action("image-copy");
+        if let Some(action) = action.and_downcast::<gio::SimpleAction>() {
+            action.set_enabled(image.is_some_and(|image| image.size.get().is_some()));
+        }
+    }
+
+    /// Put the image in front on the clipboard as its file is, neither recoloured nor inverted:
+    /// a raster's own pixels as decoded, an SVG drawn at the scale and zoom the tab draws it at,
+    /// an animation's first frame.
+    pub(crate) fn copy_image(&self, image: &doc::Viewer) {
+        let Some((path, original)) = image.image.borrow().clone() else {
+            return;
+        };
+        let (scale, zoom) = image.look.get().map_or((1, 1.0), |(_, _, s, z)| (s, z));
+        let paper = look::Look::paper();
+        crate::clipboard::set_texture(&self.window.clipboard(), move || {
+            look::show(&path, original, paper, false, scale, zoom, None).map(|s| s.texture)
+        });
     }
 
     /// Toggle key's image appearance in tabs and preview for this process, reversing theme recolouring.
@@ -741,6 +798,7 @@ impl App {
             self.show_image(image, None);
         }
         self.reshow_preview_image(key);
+        self.sync_image_invert();
     }
 
     /// Resolve `key` to local bytes for PDF and image readers, then call `landed`.

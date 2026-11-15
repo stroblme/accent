@@ -98,7 +98,7 @@ fn section(action: &str) -> Option<&'static str> {
         "duplicate-line" | "delete-line" | "newline-below" | "toggle-comment" | "toggle-task"
         | "toggle-wrap" | "scroll-up" | "scroll-down" | "caret-above" | "caret-below"
         | "next-occurrence" | "all-occurrences" | "paste-plain" => "Editing",
-        "image-invert" | "insert-sketch" | "show-in-pdf" => "PDF",
+        "image-invert" | "image-copy" | "insert-sketch" | "show-in-pdf" => "PDF",
         _ if starts(&["pdf-"]) => "PDF",
         "new-drawing" => "Diagram",
         _ if starts(&["diagram-"]) => "Diagram",

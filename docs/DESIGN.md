@@ -765,7 +765,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - A table's cells wrap, ruled and padded as the stylesheet's, each column aligned as its delimiter row says and the header bold; a cell holds the prose's inline styles, and a link, a wikilink or a tag in one is followed as on the page.
   Its columns share the page as a browser's automatic table layout shares them (CSS 2.1, user decision 2026-10-30), so a cell wraps at the words a printout's does: each column as wide as its widest cell where they all fit, otherwise its longest word and a share of the rest in proportion to what more its cells would take unwrapped.
 - Its text is one selection across blocks, and Copy writes a formula, a picture, a table and a task's box as the markdown they came from.
-  Its menu is Copy and Select All, and Invert Image Colours over a picture (Image).
+  Its menu is Copy and Select All, and Copy Image and Invert Image Colours over a picture (Image).
   Page Up, Page Down, the arrows, Home and End scroll it, and Space and Shift+Space page.
 - Its page follows the editor's column rule (Typography): Column Width's share of the preview's own width over the same floor, gutters included, scaled by the zoom.
   Full-Width Preview, off by default, lets it fill the pane, for a note of wide tables (user decision 2026-10-14).
@@ -1343,13 +1343,15 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   With Images switched off it goes onto the theme's own page instead, whatever it shows.
   A page that is not the window's own fills the image's transparent parts with its paper, so a drawing on nothing reads as a page.
   It lasts until the app quits and is written nowhere.
+- A right-click on the image opens its menu with Copy Image and Invert Image Colours, checked while the image is inverted, both also palette commands with no chord.
+  Copy Image puts the file's own pixels on the clipboard as a PNG, never recoloured or inverted, with an SVG drawn at the size the tab draws it and an animation as its first frame.
 - A theme change, or the Images switch, recolours the texture already decoded, the file read again only when it changes on disk; an SVG is drawn again from its file, and an animation's frames read again.
 - The preview shows an image as its tab would: read through the vault on a worker, at the file's size up to the column's width, recoloured as above, and read again when the file changes on disk; an animation plays as in its tab.
   A raster wider than the column at the display's scale is held reduced to that width and a quarter more, judged for recolouring on every pixel of the file first, and read again once a wider column or a zoom outgrows it, the reduced copy enlarged until then (user decision 2026-11-05).
   The tab holds every pixel of its file, while the preview reduces even an image over 64 megapixels, averaging a band of its rows at a time so that it is never held twice.
   A page reads two pictures at a time, since each holds its file decoded whole until it is reduced and GLib's pool would run about ten.
   An embedded diagram is drawn the same way, as the SVG of its page (Diagram).
-  Its menu over an image ends with Invert Image Colours, the same toggle as the palette's.
+  Its menu over a picture ends with Copy Image, which copies the file whole even where the preview holds it reduced and a diagram as the SVG of its page, and Invert Image Colours, the same toggle as the palette's.
 
 ### Diagram
 
@@ -2093,7 +2095,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
   The preview stays inside the PDF pane, above the link or below it where there is no room above and slid along to keep clear of the sides, and a page too wide for the pane is drawn smaller to fit.
   The page's stand-in shows under the band until it is drawn, and a zoom takes the preview away.
   Ctrl+click on a link follows it; anywhere else on a LaTeX build's page it is Go to Source.
-- Fit Width and Fit Height from the zoom readout's right-click and the palette; Invert PDF Colours from the palette, and over an image Invert Image Colours.
+- Fit Width and Fit Height from the zoom readout's right-click and the palette; Invert PDF Colours from the palette, and over an image Invert Image Colours and Copy Image.
 - Drawing `Ctrl+Shift+I` opens the ring.
   Pen, Highlighter, Eraser, Line, Rectangle, Circle, Text and Select (unbound) are on the ring and in the palette, a tool picked from the palette bringing the ring out.
   `Ctrl+Return` finishes a text being typed, as it does a diagram's label; the text's own box keeps its own undo.

@@ -2,7 +2,8 @@
 //! a markdown or an HTML image. Each is a [`Figure`] in the text, loaded as its tab shows the
 //! file: through the asset resolver, which holds it to the vault (refresh N12), on a worker, and
 //! recoloured as the theme and Preferences say (`look`). A picture on the web is never fetched:
-//! its alt text stands in, dimmed. Over a picture the menu offers Invert Image Colours.
+//! its alt text stands in, dimmed. Over a picture the menu offers Copy Image and Invert Image
+//! Colours.
 //!
 //! What is loaded is kept by the address the page names it with, so a block written again shows
 //! its pictures at once, and a new look recolours each from the file as decoded.
@@ -93,20 +94,28 @@ fn picture(w: &mut Writer, uri: &str, name: &str, source: String, kind: &str) {
     }
 }
 
-/// The menu's own item over the picture at `offset`, if any: Invert Image Colours.
-pub(super) fn menu_item(page: &Page, offset: i32) -> Option<gio::MenuItem> {
-    let figure = page.buffer.iter_at_offset(offset).paintable()?;
-    let loaded = figure
-        .downcast::<Figure>()
-        .ok()?
-        .imp()
-        .loaded
-        .borrow()
-        .clone()?;
-    let key = loaded.key.as_ref().filter(|_| loaded.shown.is_some())?;
-    let item = gio::MenuItem::new(Some("Invert Image Colours"), None);
-    item.set_action_and_target_value(Some("preview.invert-image"), Some(&key.to_variant()));
-    Some(item)
+/// The menu's own items over the picture at `offset`, if any: Copy Image, by the picture's
+/// address, and Invert Image Colours, by its file's key.
+pub(super) fn menu_items(page: &Page, offset: i32) -> Vec<gio::MenuItem> {
+    let figure = page.buffer.iter_at_offset(offset).paintable();
+    let Some(figure) = figure.and_then(|f| f.downcast::<Figure>().ok()) else {
+        return Vec::new();
+    };
+    let loaded = figure.imp().loaded.borrow().clone();
+    let shown = loaded.filter(|l| l.shown.is_some());
+    let Some(key) = shown.as_ref().and_then(|l| l.key.as_ref()) else {
+        return Vec::new();
+    };
+    // Labelled as the palette's commands, which do the same over an image's tab.
+    let item = |command, action, target: &str| {
+        let item = gio::MenuItem::new(Some(crate::actions::label_of(command)), None);
+        item.set_action_and_target_value(Some(action), Some(&target.to_variant()));
+        item
+    };
+    vec![
+        item("win.image-copy", "preview.copy-image", figure.uri()),
+        item("win.image-invert", "preview.invert-image", key),
+    ]
 }
 
 /// Whether the look the pictures are drawn in changed with the theme, which
@@ -201,11 +210,12 @@ fn may_name(uri: &str, key: &str) -> bool {
 
 // ------------------------------------------------------------------------------------ figures
 
-/// A picture as loaded: the vault key of its file, and what it shows with what is drawn of it,
-/// `None` for no such file or one that does not read.
+/// A picture as loaded: the vault key of its file and the copy on this disk it was read from,
+/// and what it shows with what is drawn of it, `None` for no such file or one that does not read.
 #[derive(Default)]
 struct Loaded {
     key: Option<String>,
+    path: Option<PathBuf>,
     shown: Option<(look::Shown, gdk::Paintable)>,
     /// The zoom an SVG was drawn for.
     zoom: f64,
@@ -261,7 +271,8 @@ struct State {
 
 impl Figures {
     /// The pictures of the page `view` shows, found through `resolve` and drawn as `inverted` and
-    /// `web` say (the window's keys); Invert Image Colours hands `on_invert` a picture's key.
+    /// `web` say (the window's keys); Invert Image Colours hands `on_invert` a picture's key, and
+    /// Copy Image puts one on `view`'s clipboard ([`State::copy`]).
     pub(super) fn new(
         view: &impl IsA<gtk::Widget>,
         resolve: impl Fn(&str) -> Option<(String, PathBuf)> + Send + Sync + 'static,
@@ -275,10 +286,12 @@ impl Figures {
                 on_invert(key);
             }
         });
+        let copy = gio::SimpleAction::new("copy-image", Some(glib::VariantTy::STRING));
         let actions = gio::SimpleActionGroup::new();
         actions.add_action(&invert);
+        actions.add_action(&copy);
         view.insert_action_group("preview", Some(&actions));
-        Figures(Rc::new(State {
+        let state = Rc::new(State {
             resolve: Arc::new(resolve),
             inverted,
             web,
@@ -293,7 +306,18 @@ impl Figures {
             solid: OnceCell::new(),
             #[cfg(feature = "bench")]
             reads: Cell::new(0),
-        }))
+        });
+        let view = view.upcast_ref::<gtk::Widget>().downgrade();
+        let copied = Rc::downgrade(&state);
+        copy.connect_activate(move |_, uri| {
+            let (Some(state), Some(view)) = (copied.upgrade(), view.upgrade()) else {
+                return;
+            };
+            if let Some(uri) = uri.and_then(|u| u.str()) {
+                state.copy(uri, &view);
+            }
+        });
+        Figures(state)
     }
 
     /// See [`State::solid`]; made after the page's tags, so it wins over them.
@@ -403,6 +427,39 @@ impl State {
         }
     }
 
+    /// Copy Image: the picture at `uri` on `view`'s clipboard as its file is, neither recoloured
+    /// nor inverted, from the copy on this disk it was read from: a raster's every pixel, held
+    /// whole or decoded again, and an SVG or a diagram's page drawn at the scale and zoom the page
+    /// draws it at.
+    fn copy(&self, uri: &str, view: &gtk::Widget) {
+        let Some(loaded) = self.loaded.borrow().get(uri).cloned() else {
+            return;
+        };
+        let (Some(key), Some(path)) = (loaded.key.clone(), loaded.path.clone()) else {
+            return;
+        };
+        let (clipboard, scale, zoom) = (view.clipboard(), view.scale_factor(), loaded.zoom);
+        if !accent_core::path::is_diagram(&key) {
+            let original = loaded.shown.as_ref().and_then(|(s, _)| s.original.clone());
+            // One reduced to the column has fewer pixels than its file.
+            let original = original.filter(|decoded| decoded.size.is_none());
+            return crate::clipboard::set_texture(&clipboard, move || {
+                look::show(&path, original, Look::paper(), false, scale, zoom, None)
+                    .map(|shown| shown.texture)
+            });
+        }
+        let (page, web) = (assets::diagram_page(uri), self.web.borrow().contains(&key));
+        glib::spawn_future_local(async move {
+            let Some(svg) = crate::diagram::embed::svg(&path, page.as_deref(), web).await else {
+                return;
+            };
+            let svg = svg.to_string();
+            crate::clipboard::set_texture(&clipboard, move || {
+                look::show_diagram(&svg, Look::paper(), false, scale, zoom).map(|s| s.texture)
+            });
+        });
+    }
+
     /// Show what the read of `ticket` found in every picture of `uri`, unless a later read
     /// replaced it, and read again (`again`) a raster reduced for a column that grew meanwhile.
     fn land(self: &Rc<Self>, ticket: u64, uri: String, loaded: Loaded, again: Read) {
@@ -483,6 +540,7 @@ impl Read {
         };
         Loaded {
             key: Some(key),
+            path: Some(path),
             shown: shown.map(|s| {
                 let paintable = s.paintable();
                 (s, paintable)
