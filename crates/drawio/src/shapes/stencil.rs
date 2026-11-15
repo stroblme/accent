@@ -217,6 +217,13 @@ impl Stencil {
         })
     }
 
+    /// The line width a cell styled `style` is put on whole pixels by: its own as written, not
+    /// scaled to the cell, or the cell's where it inherits that (`mxShape.getSvgScreenOffset`).
+    pub(crate) fn snap_width(&self, style: &Resolved) -> f64 {
+        self.stroke_width
+            .unwrap_or_else(|| style.num("strokeWidth", 1.0))
+    }
+
     /// Its own connection points (`<connections>`), none where it names none.
     pub(crate) fn constraints(&self) -> &[Constraint] {
         &self.constraints

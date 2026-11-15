@@ -98,6 +98,7 @@ mod tests {
             }),
             opacity: 1.0,
             shadow: false,
+            snap: Some(width),
         }
     }
 

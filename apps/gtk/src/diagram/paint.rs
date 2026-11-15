@@ -528,12 +528,13 @@ pub fn prim(
             stroke,
             opacity,
             shadow,
+            snap,
             ..
         } => {
             // As far over as draw.io draws the shape, which keeps a one-pixel line on whole
             // pixels (`screen_offset`), in content units.
-            let width = stroke.as_ref().map_or(1.0, |s| s.width);
-            let over = screen_offset(width, frame.pixels) * frame.scale / frame.pixels;
+            let over = snap.map_or(0.0, |w| screen_offset(w, frame.pixels));
+            let over = over * frame.scale / frame.pixels;
             snapshot.save();
             snapshot.translate(&graphene::Point::new(over as f32, over as f32));
             outline(

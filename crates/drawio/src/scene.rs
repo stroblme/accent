@@ -179,6 +179,10 @@ pub enum Prim {
         opacity: f64,
         /// Paint [`SHADOW_COLOR`] under it at [`SHADOW_OFFSET`] first.
         shadow: bool,
+        /// The line width its whole shape is put on whole pixels by ([`screen_offset`]): its
+        /// cell's, stroked or not, or its stencil's own; `None` for a picture's background and
+        /// border, which stay where they are set (`mxShape.getSvgScreenOffset`, `mxImageShape`).
+        snap: Option<f64>,
     },
     /// A label. With `wrap` the runs are wrapped to [`wrap_width`] of `rect.w`, else laid out
     /// unbounded; [`Prim::text_origin`] places the text by `align`/`valign` on `anchor`, and it is
@@ -556,6 +560,7 @@ impl<'a> Builder<'a> {
                 stroke,
                 opacity,
                 shadow: shadow && i == 0,
+                snap: Some(style.num("strokeWidth", 1.0)),
             });
         }
         if shape == "image" {
@@ -580,9 +585,9 @@ impl<'a> Builder<'a> {
     /// on what it paints, and across its box only where the style says `pointerEvents=1`
     /// (`mxStencil.drawShape`).
     // ponytail: text in a mirrored stencil is set the right way round, where draw.io mirrors its
-    // letters too; the legacy `stencilFlipH`/`stencilFlipV` keys are not read; and each piece is
-    // put on whole pixels by its own line width (`screen_offset`), where draw.io moves the whole
-    // shape by the stencil's.
+    // letters too; the legacy `stencilFlipH`/`stencilFlipV` keys are not read; and its text and
+    // pictures stay where they are set, where draw.io moves them with its lines
+    // (`screen_offset`).
     fn stencil(
         &mut self,
         cell: &Cell,
@@ -594,6 +599,7 @@ impl<'a> Builder<'a> {
     ) {
         let id = || cell.id.clone();
         let opacity = style.num("opacity", 100.0) / 100.0;
+        let snap = Some(stencil.snap_width(style));
         if style.get("pointerEvents") == Some("1") {
             let mut path = shapes::rect(place.bounds);
             geom::map_path(&mut path, |p| place.apply(p));
@@ -605,6 +611,7 @@ impl<'a> Builder<'a> {
                 stroke: None,
                 opacity,
                 shadow: false,
+                snap,
             });
         }
         let mirrored = place.flip_h != place.flip_v;
@@ -633,6 +640,7 @@ impl<'a> Builder<'a> {
                         opacity,
                         // Under the first thing painted, as under any shape's body.
                         shadow: std::mem::take(&mut shadow),
+                        snap,
                     });
                 }
                 Piece::Text {
@@ -727,6 +735,7 @@ impl<'a> Builder<'a> {
                 stroke: None,
                 opacity,
                 shadow: false,
+                snap: None,
             });
         }
         if let Some(src) = style.get("image").filter(|s| !s.is_empty()) {
@@ -755,6 +764,7 @@ impl<'a> Builder<'a> {
                 stroke: Some(stroke_in(style, border, style.flag("dashed", false))),
                 opacity,
                 shadow: false,
+                snap: None,
             });
         }
     }
@@ -790,6 +800,7 @@ impl<'a> Builder<'a> {
         let opacity = style.num("opacity", 100.0) / 100.0;
         let shadow = style.flag("shadow", false);
         let line = stroke(&style);
+        let snap = Some(style.num("strokeWidth", 1.0));
         let mut jiggle = Jiggle::of(&cell.id, &style);
         if style.shape() == "flexArrow" {
             // A band, filled; its outline is stroked only if it has a stroke colour.
@@ -808,6 +819,7 @@ impl<'a> Builder<'a> {
                     path: part.path,
                     opacity,
                     shadow: shadow && i == 0,
+                    snap,
                 });
             }
         } else if let Some(line) = line {
@@ -827,6 +839,7 @@ impl<'a> Builder<'a> {
                 stroke,
                 opacity,
                 shadow,
+                snap,
             });
             for mut head in heads.into_iter().flatten().flatten() {
                 let stroke = Stroke {
@@ -842,6 +855,7 @@ impl<'a> Builder<'a> {
                     stroke,
                     opacity,
                     shadow: false,
+                    snap,
                 });
             }
         }
@@ -1814,5 +1828,35 @@ mod tests {
         // It takes a click on what it paints and none in the empty half of its box.
         assert_eq!(s.hit(Point::new(10.0, 30.0), 1.0), Some("s"));
         assert_eq!(s.hit(Point::new(10.0, 10.0), 1.0), None);
+    }
+
+    #[test]
+    fn a_shape_is_put_on_whole_pixels_by_one_line_width() {
+        let snaps = |style: &str, w: f64, h: f64| {
+            let p = page(vec![Cell::new_vertex(
+                "s",
+                "1",
+                Rect::new(0.0, 0.0, w, h),
+                style,
+                "",
+            )]);
+            let s = scene(&p);
+            let snap = |p: &Prim| match p {
+                Prim::Path { stroke, snap, .. } => Some((stroke.as_ref().map(|s| s.width), *snap)),
+                _ => None,
+            };
+            s.prims.iter().filter_map(snap).collect::<Vec<_>>()
+        };
+        // A 10 by 10 box at a stencil's own width, 1, drawn one and a half times its size.
+        let own = "shape=stencil(UzV2Ls5ILEhVNTIoVzV2UTUyMjQAEkBuBjLX2FXV2Dktvyg1vSi/NC8Fwi9KTS4BKqyAKIRqq0Th4TPTyA1iTHFJUX52KpwLZKBbBBSCONLYFQA=);";
+        assert_eq!(snaps(own, 15.0, 15.0), [(Some(1.5), Some(1.0))]);
+        // Two boxes of a stencil that inherits the cell's width, the second set 1 wide at twice
+        // its size.
+        let inherits = "shape=stencil(rZBBDoQgDEVP0z3QI6hzj8lYhZjIpGLQ21tTEsW1G8Lrb/8vADaL//4JnMmALTjnjByCXtEWXBLHiXLoUxHC7IlDOlXsAJshMo0c17lXZvqJaDbtLi57RbmOqBM/aqO5D9Q1xOBax96H6mz7Vrhcnq+Ukv4fdgc=);strokeWidth=1.5;";
+        let both = [(Some(1.5), Some(1.5)), (Some(2.0), Some(1.5))];
+        assert_eq!(snaps(inherits, 40.0, 20.0), both);
+        // An unstroked shape by the width it would be stroked with.
+        let unstroked = "strokeColor=none;strokeWidth=2;";
+        assert_eq!(snaps(unstroked, 20.0, 20.0), [(None, Some(2.0))]);
     }
 }
