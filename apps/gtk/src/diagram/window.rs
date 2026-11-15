@@ -119,6 +119,7 @@ impl App {
         );
         self.wire_diagram(&tab);
         tab.allow_web(self.web_images.borrow().contains(key));
+        tab.set_files(Some(super::files::Files::new(self.asset_resolver(), key)));
         // Nothing else watches a loose file: the vault's worker only reports on its own tree.
         if doc::is_loose_key(key) {
             tab.watch_file(glib::clone!(

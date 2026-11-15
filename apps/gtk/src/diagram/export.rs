@@ -12,7 +12,7 @@ use gtk::prelude::*;
 use gtk::{gio, glib};
 
 use super::DiagramTab;
-use super::render::{self, Area, Drawn};
+use super::render::{self, Area, Drawn, Pictures};
 use crate::App;
 use crate::export::Export;
 
@@ -38,16 +38,23 @@ pub fn offered_name(tab: &DiagramTab, to: Export) -> Option<String> {
 pub fn export_to(app: &Rc<App>, tab: &Rc<DiagramTab>, to: Export, dest: PathBuf) {
     let name = crate::export::dest_name(&dest);
     let (file, page) = (tab.file(), tab.page_index());
-    let web = tab.web_allowed();
+    let (web, files) = (tab.web_allowed(), tab.files());
     let done = format!("Exported {name}");
     app.busy_with(
         format!("Exporting {name}…"),
         format!("export {name}"),
         async move {
+            if let Some(files) = &files {
+                files.fetch(&file).await;
+            }
+            let pictures = Pictures {
+                web,
+                files: files.as_ref(),
+            };
             let bytes = match to {
-                Export::Pdf => render::pdf(&file, web),
-                Export::Png => render::png(&file, page, web, None),
-                Export::Svg => render::svg(&file, page, Area::Drawing, web),
+                Export::Pdf => render::pdf(&file, pictures),
+                Export::Png => render::png(&file, page, pictures, None),
+                Export::Svg => render::svg(&file, page, Area::Drawing, pictures),
                 Export::Html => return Ok(None),
             }?;
             let write = move || accent_core::fs::write_bytes(&dest, &bytes, None);
@@ -90,7 +97,7 @@ fn render_stdin(page: Option<OsString>) -> Result<(), String> {
     std::io::stdin().read_to_end(&mut xml).map_err(say)?;
     let file = File::from_bytes(&xml).map_err(say)?;
     gtk::init().map_err(|e| format!("there is no display to draw on ({e})"))?;
-    let png = render::png(&file, page, false, Some(RENDER_LONGEST))?;
+    let png = render::png(&file, page, Pictures::default(), Some(RENDER_LONGEST))?;
     std::io::stdout().write_all(&png).map_err(say)
 }
 
@@ -102,12 +109,19 @@ fn say(e: impl std::fmt::Display) -> String {
 pub fn print(app: &Rc<App>, tab: &Rc<DiagramTab>) {
     let name = crate::doc::file_name(&tab.key()).to_string();
     let (file, window) = (tab.file(), app.window.clone());
-    let web = tab.web_allowed();
+    let (web, files) = (tab.web_allowed(), tab.files());
     app.busy_with(
         format!("Printing {name}…"),
         format!("print {name}"),
         async move {
-            let op = operation(&file, web, &name);
+            if let Some(files) = &files {
+                files.fetch(&file).await;
+            }
+            let pictures = Pictures {
+                web,
+                files: files.as_ref(),
+            };
+            let op = operation(&file, pictures, &name);
             // From an idle, as a note's print: the dialog runs a main loop of its own, and glib
             // aborts on a future polled inside another's poll.
             let ran = gio::GioFuture::new(&op, move |op, _, done| {
@@ -124,10 +138,10 @@ pub fn print(app: &Rc<App>, tab: &Rc<DiagramTab>) {
 
 /// Print one sheet per page, aspect-preserving and centred within note margins.
 /// Match paper orientation to each page.
-pub fn operation(file: &File, web: bool, name: &str) -> gtk::PrintOperation {
+pub fn operation(file: &File, pictures: Pictures, name: &str) -> gtk::PrintOperation {
     let mut pages: Vec<Drawn> = Vec::new();
     for i in 0..file.pages.len() {
-        pages.extend(render::draw(file, i, Area::Sheet, web, 1.0));
+        pages.extend(render::draw(file, i, Area::Sheet, pictures, 1.0));
     }
     let pages = Rc::new(pages);
     let op = gtk::PrintOperation::new();

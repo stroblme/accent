@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::assets;
+use crate::diagram::files::Files;
 use crate::editor::Flavour;
 use crate::look::{self, Look, Served};
 use accent_core::note::Syntax;
@@ -232,13 +233,13 @@ async fn drawn_diagrams(
         .map(|uri| uri.replace("&amp;", "&"))
         .filter(|uri| assets::is_diagram(uri));
     for uri in sources {
-        let (resolve, note, at) = (resolve.clone(), note.to_string(), uri.clone());
-        let found =
-            crate::work::off_thread("asset", move || assets::asset_of(&*resolve, &note, &at));
+        let (find, note, at) = (resolve.clone(), note.to_string(), uri.clone());
+        let found = crate::work::off_thread("asset", move || assets::asset_of(&*find, &note, &at));
         let svg = match found.await.flatten() {
             Some((key, path)) => {
                 let page = assets::diagram_page(&uri);
-                diagram::embed::svg(&path, page.as_deref(), web.contains(&key)).await
+                let files = Some(Files::new(resolve.clone(), &key));
+                diagram::embed::svg(&path, page.as_deref(), web.contains(&key), files).await
             }
             None => None,
         };

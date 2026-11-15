@@ -9,6 +9,7 @@ mod colours;
 pub mod embed;
 pub mod export;
 mod face;
+pub(crate) mod files;
 mod find;
 pub(crate) mod geometry;
 mod input;
@@ -60,6 +61,8 @@ pub struct DiagramTab {
     /// Permission to download web images, granted here or restored from the window's
     /// `web_images` session state.
     web: Cell<bool>,
+    /// Where the pictures the diagram names by a path are read, once the window says.
+    files: RefCell<Option<files::Files>>,
     /// The canvas's overlay: the ring and the label editor float over the page in it.
     overlay: gtk::Overlay,
     view: DiagramView,
@@ -181,6 +184,7 @@ pub fn open(
         banner,
         web_banner,
         web: Cell::new(false),
+        files: RefCell::default(),
         overlay,
         view,
         ring,
@@ -353,6 +357,8 @@ impl DiagramTab {
     /// A rename landed: follow the file.
     pub fn retarget(&self, root: &Path, key: &str) {
         *self.key.borrow_mut() = key.to_string();
+        let files = self.files.borrow().as_ref().map(|f| f.moved(key));
+        self.set_files(files);
         *self.path.borrow_mut() = root.join(key);
         self.set_title();
         self.page
@@ -652,6 +658,24 @@ impl DiagramTab {
     /// Whether the pictures the diagram links from the web are drawn.
     pub fn web_allowed(&self) -> bool {
         self.web.get()
+    }
+
+    /// Where the pictures the diagram names by a path are read, for an output.
+    pub fn files(&self) -> Option<files::Files> {
+        self.files.borrow().clone()
+    }
+
+    /// Read the pictures the diagram names by a path through `files`: the window gives its
+    /// vault's on opening, and a rename moves them along. They are found on a worker first, so
+    /// a thumbnail taken as a picture, which decodes at once, does not wait on a remote host.
+    pub fn set_files(&self, files: Option<files::Files>) {
+        if let Some(found) = files.clone() {
+            let file = self.file();
+            glib::spawn_future_local(async move { found.fetch(&file).await });
+        }
+        self.view.set_files(files.clone());
+        self.strip.set_files(files.clone());
+        self.files.replace(files);
     }
 
     /// Draw the pictures the diagram links from the web, or not: the window says so on opening,

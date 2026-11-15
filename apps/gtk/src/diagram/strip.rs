@@ -138,6 +138,12 @@ impl PageStrip {
         self.forget();
     }
 
+    /// Read the pictures the diagram names by a path, as the canvas does.
+    pub fn set_files(&self, files: Option<super::files::Files>) {
+        self.imp().cache.borrow().set_files(files);
+        self.forget();
+    }
+
     /// How many thumbnails are painted, for a drill.
     #[cfg(feature = "bench")]
     pub fn painted(&self) -> usize {

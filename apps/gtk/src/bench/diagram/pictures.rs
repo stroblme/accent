@@ -5,7 +5,8 @@ use super::*;
 
 /// Probe a web-image diagram before/after Load: banner, canvas pixel, download state,
 /// note-embed images and saved permission. Run twice with the same scratch home,
-/// server offline on the second run; permission and cached drawing must persist.
+/// server offline on the second run; permission and cached drawing must persist. A `url` that
+/// is a path is a picture beside the diagram, drawn with no banner and no Load.
 pub(super) fn web(app: &Rc<App>, rel: &str, url: &str) {
     let path = app.root().join(rel);
     if !path.exists() {
@@ -45,9 +46,9 @@ pub(super) fn web(app: &Rc<App>, rel: &str, url: &str) {
             );
         };
         let embed = |web: bool| {
-            let path = tab.path();
+            let (path, files) = (tab.path(), tab.files());
             async move {
-                let svg = crate::diagram::embed::svg(&path, None, web).await;
+                let svg = crate::diagram::embed::svg(&path, None, web, files).await;
                 svg.map_or(0, |s| s.matches("<image").count())
             }
         };

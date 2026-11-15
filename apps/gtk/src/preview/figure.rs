@@ -12,6 +12,7 @@ use super::Keys;
 use super::Page;
 use super::text::{Href, Ink, Object, Writer};
 use crate::assets::{self, Resolve};
+use crate::diagram::files::Files;
 use crate::look::{self, Look};
 use accent_core::markdown::{self, percent_encode};
 use gtk::prelude::*;
@@ -449,8 +450,10 @@ impl State {
             });
         }
         let (page, web) = (assets::diagram_page(uri), self.web.borrow().contains(&key));
+        let files = Files::new(self.resolve.clone(), &key);
         glib::spawn_future_local(async move {
-            let Some(svg) = crate::diagram::embed::svg(&path, page.as_deref(), web).await else {
+            let embed = crate::diagram::embed::svg(&path, page.as_deref(), web, Some(files));
+            let Some(svg) = embed.await else {
                 return;
             };
             let svg = svg.to_string();
@@ -510,6 +513,7 @@ impl Read {
             fit,
         } = self;
         let page = assets::diagram_page(&uri);
+        let resolver = resolve.clone();
         let file = crate::work::off_thread("picture", move || {
             let (key, path) = assets::asset_of(&*resolve, &note, &uri)?;
             let inverted = inverted.contains(&key);
@@ -526,7 +530,9 @@ impl Read {
         let shown = match shown {
             Some(shown) => shown,
             None => {
-                match crate::diagram::embed::svg(&path, page.as_deref(), web.contains(&key)).await {
+                let files = Some(Files::new(resolver, &key));
+                let page = page.as_deref();
+                match crate::diagram::embed::svg(&path, page, web.contains(&key), files).await {
                     Some(svg) => {
                         let svg = svg.to_string();
                         let drawn = crate::work::off_thread("diagram picture", move || {

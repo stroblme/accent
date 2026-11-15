@@ -12,7 +12,8 @@ use std::rc::Rc;
 
 use accent_drawio::File;
 
-use super::render::{self, Area};
+use super::files::Files;
+use super::render::{self, Area, Pictures};
 use crate::look::{self, Stamp};
 
 /// An embed: the file on this machine, the page asked for, and whether its pictures on the web
@@ -26,8 +27,14 @@ thread_local! {
 
 /// The diagram at `path` as an SVG of its page called `page`, its first without one; `None` for
 /// a file that is no diagram or has no such page. Where `web` (the reader said Load for the
-/// diagram), its pictures on the web are downloaded first if they are not yet, and drawn.
-pub async fn svg(path: &Path, page: Option<&str>, web: bool) -> Option<Rc<str>> {
+/// diagram), its pictures on the web are downloaded first if they are not yet, and drawn, and
+/// those it names by a path are read through `files`.
+pub async fn svg(
+    path: &Path,
+    page: Option<&str>,
+    web: bool,
+    files: Option<Files>,
+) -> Option<Rc<str>> {
     let stamp = look::stamp(path)?;
     let key = (path.to_path_buf(), page.map(str::to_string), web);
     let kept = DRAWN.with_borrow(|drawn| {
@@ -51,7 +58,14 @@ pub async fn svg(path: &Path, page: Option<&str>, web: bool) -> Option<Rc<str>> 
     if web {
         super::web::fetch(&super::web::urls(&file)).await;
     }
-    let bytes = render::svg(&file, i, Area::Drawing, web).ok()?;
+    if let Some(files) = &files {
+        files.fetch(&file).await;
+    }
+    let pictures = Pictures {
+        web,
+        files: files.as_ref(),
+    };
+    let bytes = render::svg(&file, i, Area::Drawing, pictures).ok()?;
     let svg: Rc<str> = String::from_utf8(bytes).ok()?.into();
     DRAWN.with_borrow_mut(|drawn| drawn.insert(key, (stamp, svg.clone())));
     Some(svg)

@@ -385,6 +385,18 @@ drill_diagram_links() {
 		'bench nav link tall inside=true'
 }
 
+# A diagram's picture named by a path, read beside it in the vault, on the canvas and in a note's
+# embed, with no web banner.
+drill_diagram_file_picture() {
+	mkdir -p "$vault/d/pics"
+	echo iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAIAAAAmkwkpAAAAEElEQVR4nGP4z8AARwzEcQCukw/x0F8jngAAAABJRU5ErkJggg== |
+		base64 -d >"$vault/d/pics/red.png"
+	launch 60 ACCENT_BENCH_DIAGRAM=web:d/pic.drawio:pics/red.png >"$dir/file_picture"
+	has "$dir/file_picture" \
+		'bench diagram web opened banner=false allowed=false pixel=Some([255, 0, 0]) downloaded=false' \
+		'bench diagram web embed pictures=1'
+}
+
 # What real clicks and bands select among a diagram's groups, as draw.io selects (DESIGN.md,
 # Diagram).
 drill_diagram_select() {

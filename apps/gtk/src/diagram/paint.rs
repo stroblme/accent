@@ -16,6 +16,7 @@ use accent_drawio::{
 use gtk::prelude::*;
 use gtk::{gdk, glib, graphene, gsk, pango};
 
+use super::files::{Files, is_file};
 use super::geometry::Frame;
 use super::sharp::{self, Canvas, Svg, Want};
 use crate::theme::gsk_matrix;
@@ -27,7 +28,7 @@ pub struct Cache {
     /// By prim index.
     layouts: RefCell<HashMap<usize, Laid>>,
     /// By prim index, for the display list on screen: its picture's key in `decoded`, or `None`
-    /// for a picture on the web not downloaded yet.
+    /// for a picture on the web not downloaded yet, or named by a path with no folder to look in.
     keys: RefCell<HashMap<usize, Option<u64>>>,
     /// By a hash of the data URI or the address, across display lists, so an edit does not
     /// decode every picture on the page again; shared with the caches [`Cache::carried`] and
@@ -47,6 +48,8 @@ pub struct Cache {
     /// Whether pictures on the web are drawn, from the download cache (`super::web`): the
     /// reader said Load for this diagram.
     web: Cell<bool>,
+    /// Where the pictures the diagram names by a path are read, `None` where it has no folder.
+    files: RefCell<Option<Files>>,
     /// The canvas's frame being painted, whose SVG pictures are drawn at its pixels (`sharp`).
     canvas: Cell<Option<Canvas>>,
     /// The copies of SVG pictures the frame asked for.
@@ -132,6 +135,7 @@ impl Cache {
             waiting: Cell::default(),
             boxes: RefCell::default(),
             web: self.web.clone(),
+            files: self.files.clone(),
             canvas: Cell::default(),
             wants: RefCell::default(),
             vectors: self.vectors.clone(),
@@ -194,6 +198,11 @@ impl Cache {
         self.web.set(on);
     }
 
+    /// Read the pictures the diagram names by a path through `files`, or draw them as their boxes.
+    pub fn set_files(&self, files: Option<Files>) {
+        self.files.replace(files);
+    }
+
     /// Hit-test the topmost unlocked label by its painted text. Edge labels have
     /// only an anchor in the display list, so their painted bounds are needed.
     pub fn label_at<'a>(&self, prims: &'a [Prim], p: Point) -> Option<&'a str> {
@@ -236,6 +245,16 @@ impl Cache {
         self.shown(index, widget, || {
             let uri = uri.to_string();
             Some((hash(&uri), move || accent_drawio::decode_data_uri(&uri)))
+        })
+    }
+
+    /// The picture prim `index` draws from the file `src` names beside the diagram.
+    fn file_picture(&self, index: usize, src: &str, widget: &gtk::Widget) -> Option<Rc<Picture>> {
+        self.shown(index, widget, || {
+            let files = self.files.borrow().clone()?;
+            let src = src.to_string();
+            let key = hash(&format!("{}\n{src}", files.key()));
+            Some((key, move || files.read(&src)))
         })
     }
 
@@ -610,6 +629,7 @@ pub fn prim(
             let r = frame.rect(rect);
             let picture = match source {
                 ImageSource::DataUri(uri) => cache.picture(index, uri, widget),
+                ImageSource::Url(src) if is_file(src) => cache.file_picture(index, src, widget),
                 ImageSource::Url(url) if cache.web.get() => cache.web_picture(index, url, widget),
                 ImageSource::Url(_) => None,
             };

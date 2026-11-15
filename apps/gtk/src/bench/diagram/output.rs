@@ -42,7 +42,7 @@ pub(super) fn export(app: &Rc<App>, rel: &str, dir: &Path) {
         }
         let print = dir.join("print.pdf");
         let _ = std::fs::remove_file(&print);
-        let op = operation(&tab.file(), false, "print");
+        let op = operation(&tab.file(), Default::default(), "print");
         op.set_export_filename(&print);
         // From an idle, as Print… runs it: the export runs a main loop of its own.
         let ran = gio::GioFuture::new(&op, |op, _, done| {
@@ -56,7 +56,7 @@ pub(super) fn export(app: &Rc<App>, rel: &str, dir: &Path) {
         // A note's embed: the first page, its formulas glyphs as in an export, and page Two.
         for page in [None, Some("Two")] {
             let started = Instant::now();
-            let svg = crate::diagram::embed::svg(&tab.path(), page, false).await;
+            let svg = crate::diagram::embed::svg(&tab.path(), page, false, None).await;
             println!(
                 "bench diagram embed page={page:?} ms={:.0} bytes={} pictures={}",
                 ms_since(started),

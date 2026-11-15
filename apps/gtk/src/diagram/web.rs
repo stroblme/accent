@@ -19,7 +19,7 @@ thread_local! {
 }
 
 /// Whether `src`, an `image=` value, is a picture on the web.
-fn on_web(src: &str) -> bool {
+pub(super) fn on_web(src: &str) -> bool {
     src.starts_with("https://") || src.starts_with("http://")
 }
 

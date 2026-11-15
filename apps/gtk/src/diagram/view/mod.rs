@@ -168,6 +168,15 @@ impl DiagramView {
         self.queue_draw();
     }
 
+    /// Read the pictures the page names by a path through `files`, or draw them as their boxes.
+    pub fn set_files(&self, files: Option<super::files::Files>) {
+        let imp = self.imp();
+        imp.cache.set_files(files);
+        imp.cache.forget();
+        imp.preview.take();
+        self.queue_draw();
+    }
+
     pub fn set_selection(&self, ids: &[CellId]) {
         *self.imp().selection.borrow_mut() = ids.to_vec();
         self.queue_draw();

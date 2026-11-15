@@ -7,6 +7,7 @@ use accent_drawio::{Color, File, Prim, Rect};
 use gtk::prelude::*;
 use gtk::{cairo, gsk};
 
+use super::files::Files;
 use super::geometry::Frame;
 use super::paint::{self, Cache, Tint};
 
@@ -60,17 +61,26 @@ impl Drawn {
     }
 }
 
-/// Page `i` of `file`, its pictures on the web drawn as downloaded where `web` (the reader said
-/// Load for it), for an output of `pixels` a page unit (`Frame::pixels`). `None` for no such
-/// page.
-pub fn draw(file: &File, i: usize, area: Area, web: bool, pixels: f64) -> Option<Drawn> {
+/// The pictures an output draws that are not written into the diagram: those on the web, as
+/// downloaded, where `web` (the reader said Load for it), and those it names by a path, read
+/// through `files`. Any other is drawn as its box.
+#[derive(Clone, Copy, Default)]
+pub struct Pictures<'a> {
+    pub web: bool,
+    pub files: Option<&'a Files>,
+}
+
+/// Page `i` of `file` with `pictures`, for an output of `pixels` a page unit (`Frame::pixels`).
+/// `None` for no such page.
+pub fn draw(file: &File, i: usize, area: Area, pictures: Pictures, pixels: f64) -> Option<Drawn> {
     let page = file.pages.get(i)?;
     let scene = accent_drawio::scene_with(page, &super::shown(i, file.pages.len()));
     // Pango lays labels out through a widget; their sizes are absolute, so any one does.
     let widget = gtk::DrawingArea::new();
     let cache = Cache::default();
     cache.declare(&scene.prims);
-    cache.set_web(web);
+    cache.set_web(pictures.web);
+    cache.set_files(pictures.files.cloned());
     cache.set_vectors(true);
     let frame = Frame {
         scale: DETAIL,
@@ -126,10 +136,10 @@ fn painted(prims: &[Prim], cache: &Cache) -> Option<Rect> {
 }
 
 /// Every page of `file` as a PDF, a PDF page the size of each sheet.
-pub fn pdf(file: &File, web: bool) -> Result<Vec<u8>, String> {
+pub fn pdf(file: &File, pictures: Pictures) -> Result<Vec<u8>, String> {
     let surface = cairo::PdfSurface::for_stream(1.0, 1.0, Vec::<u8>::new()).map_err(say)?;
     for i in 0..file.pages.len() {
-        let Some(drawn) = draw(file, i, Area::Sheet, web, 1.0) else {
+        let Some(drawn) = draw(file, i, Area::Sheet, pictures, 1.0) else {
             continue;
         };
         let (w, h) = (drawn.area.w * PDF_POINT, drawn.area.h * PDF_POINT);
@@ -142,8 +152,8 @@ pub fn pdf(file: &File, web: bool) -> Result<Vec<u8>, String> {
 }
 
 /// Page `i` of `file` as an SVG of `area`, a page unit to a pixel.
-pub fn svg(file: &File, i: usize, area: Area, web: bool) -> Result<Vec<u8>, String> {
-    let drawn = draw(file, i, area, web, 1.0).ok_or("there is no such page")?;
+pub fn svg(file: &File, i: usize, area: Area, pictures: Pictures) -> Result<Vec<u8>, String> {
+    let drawn = draw(file, i, area, pictures, 1.0).ok_or("there is no such page")?;
     let mut surface =
         cairo::SvgSurface::for_stream(drawn.area.w, drawn.area.h, Vec::<u8>::new()).map_err(say)?;
     surface.set_document_unit(cairo::SvgUnit::Px);
@@ -155,8 +165,13 @@ pub fn svg(file: &File, i: usize, area: Area, web: bool) -> Result<Vec<u8>, Stri
 
 /// Page `i` of `file`, its drawing, as a PNG at [`PNG_SCALE`] pixels per page unit, or fewer
 /// where its longer side would be more than `longest` pixels.
-pub fn png(file: &File, i: usize, web: bool, longest: Option<f64>) -> Result<Vec<u8>, String> {
-    let drawn = draw(file, i, Area::Drawing, web, PNG_SCALE).ok_or("there is no such page")?;
+pub fn png(
+    file: &File,
+    i: usize,
+    pictures: Pictures,
+    longest: Option<f64>,
+) -> Result<Vec<u8>, String> {
+    let drawn = draw(file, i, Area::Drawing, pictures, PNG_SCALE).ok_or("there is no such page")?;
     let scale = png_scale((drawn.area.w, drawn.area.h), longest);
     let (w, h) = (drawn.area.w * scale, drawn.area.h * scale);
     let surface =
