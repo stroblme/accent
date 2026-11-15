@@ -339,6 +339,7 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
             "Dash Pattern",
             "Perimeter",
             "Arc Size",
+            "Fixed Corner Size",
             "Divider",
             "Vertical Text",
             "Text Opacity",
@@ -530,6 +531,18 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
         );
         glib::timeout_future(Duration::from_millis(400)).await;
         pane_shot("shape");
+        // Fixed Corner Size writes the corner a is drawn with as a size of its own, and back.
+        for on in [true, false] {
+            if let Some(fixed) = row("Fixed Corner Size").and_downcast::<adw::SwitchRow>() {
+                fixed.set_active(on);
+            }
+            let arc = row("Arc Size").and_downcast::<adw::SpinRow>();
+            println!(
+                "bench diagram props corners fixed={on} a={:?} arc={:?}",
+                style("a"),
+                arc.map(|r| r.text().to_string())
+            );
+        }
         tab.select(vec!["e".to_string()]);
         set("Start Spacing", 3.0);
         set("End Spacing", -2.0);

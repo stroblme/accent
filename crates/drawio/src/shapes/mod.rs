@@ -4,12 +4,14 @@
 //! draw.io adds in `Shapes.js`, and [`stencil`] draws the ones an XML program describes.
 
 mod constraints;
+mod corner;
 mod grapheditor;
 pub mod library;
 mod mxgraph;
 mod stencil;
 
 pub use constraints::constraints;
+pub use corner::Corner;
 pub use grapheditor::flex_arrow;
 pub use mxgraph::edge_line;
 pub(crate) use mxgraph::ellipse;

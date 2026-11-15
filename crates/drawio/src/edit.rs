@@ -272,6 +272,11 @@ impl Editor {
         self.edit(page, |p, _| paste_style(p, ids, from))
     }
 
+    /// [`fix_corners`] on page `page`, as one step.
+    pub fn fix_corners(&mut self, page: usize, ids: &[CellId], fixed: bool) -> Result<(), Error> {
+        self.edit(page, |p, _| fix_corners(p, ids, fixed))
+    }
+
     /// Replace a cell's whole style string.
     pub fn set_style_string(&mut self, page: usize, id: &str, style: &str) -> Result<(), Error> {
         self.edit(page, |p, _| {
@@ -1287,6 +1292,31 @@ pub fn set_styles(
                 (_, key) => key,
             };
             cell.style.set(key, *value);
+        }
+    }
+    Ok(())
+}
+
+/// Give the shapes of `ids` whose rounded corner grows with them ([`Corner`]) a corner of a
+/// fixed size (`absoluteArcSize=1`), or let it grow again, each with the `arcSize` that keeps
+/// its corner where it is drawn; the others, and shapes already so, are left as they are.
+pub fn fix_corners(page: &mut Page, ids: &[CellId], fixed: bool) -> Result<(), Error> {
+    use crate::shapes::{Corner, Placement};
+    for id in ids {
+        let cell = cell_mut(page, id)?;
+        let style = cell.style.resolve(false);
+        let corner = Corner::of(style.shape()).filter(|_| cell.vertex);
+        let (Some(corner), Some(g)) = (corner, cell.geometry.as_ref()) else {
+            continue;
+        };
+        if style.flag("absoluteArcSize", false) == fixed {
+            continue;
+        }
+        let bounds = Placement::of(Rect::new(0.0, 0.0, g.width, g.height), &style).bounds;
+        let arc = corner.kept(bounds, &style, fixed).map(|a| a.to_string());
+        cell.style.set("absoluteArcSize", fixed.then_some("1"));
+        if let Some(arc) = arc {
+            cell.style.set("arcSize", Some(&arc));
         }
     }
     Ok(())

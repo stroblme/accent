@@ -18,6 +18,8 @@ use super::view::Edit;
 use super::{DiagramTab, Tool};
 use crate::widgets::{Debounce, hover_revealer, icon_button, reveal_on_hover};
 
+mod effects;
+
 /// What the pane shows.
 pub enum Target {
     /// Cells: the first one's resolved style and its style string, and what kinds are selected.
@@ -31,6 +33,8 @@ pub enum Target {
         fills: bool,
         /// Some cell is a swimlane, whose divider draw.io offers (`ss.swimlane`).
         swimlane: bool,
+        /// Some shape's corner grows with it ([`accent_drawio::shapes::Corner`]).
+        corners: bool,
         /// The one shape selected: its place and size in its parent, as the file has them, and
         /// whether it is pinned where it is (locked, or on a locked layer).
         geometry: Option<(Rect, bool)>,
@@ -59,6 +63,8 @@ pub enum Change {
     Geometry(Rect),
     /// draw.io's Flip of the selected shapes, across (else up and down).
     Flip(bool),
+    /// Fixed Corner Size on or off, each selected shape's corner kept where it is drawn.
+    FixedCorners(bool),
     /// A group's Copy button: what it shows, onto the clipboard.
     Copy(Clip),
     /// A group's Paste button: what the clipboard holds, onto the selection.
@@ -379,6 +385,7 @@ pub struct Props {
     perimeter: adw::SpinRow,
     rounded: adw::SwitchRow,
     arc_size: adw::SpinRow,
+    effects: effects::Effects,
     /// A swimlane's divider under its title (`swimlaneLine`).
     divider: adw::SwitchRow,
     shadow: adw::SwitchRow,
@@ -477,7 +484,8 @@ fn spin(title: &str, range: (f64, f64, f64)) -> adw::SpinRow {
     row
 }
 
-/// A row of the geometry: whole units a step, fractions kept, shown as the file writes them.
+/// A row of the geometry or a corner's size: whole units a step, fractions kept, shown as the
+/// file writes them.
 fn coordinate(title: &str, low: f64) -> adw::SpinRow {
     let row = spin(title, (low, 1e6, 1.0));
     row.set_digits(2);
@@ -563,7 +571,8 @@ impl Props {
         let dash_pattern = entry_row("Dash Pattern");
         let perimeter = spin("Perimeter", (0.0, 999.0, 1.0));
         let rounded = adw::SwitchRow::builder().title("Rounded").build();
-        let arc_size = spin("Arc Size", (0.0, 999.0, 1.0));
+        let arc_size = coordinate("Arc Size", 0.0);
+        let effects = effects::Effects::new();
         let divider = adw::SwitchRow::builder().title("Divider").build();
         let shadow = adw::SwitchRow::builder().title("Shadow").build();
         let opacity = spin("Opacity", (0.0, 100.0, 5.0));
@@ -573,6 +582,7 @@ impl Props {
         shape.add(&direction);
         shape.add(&rounded);
         shape.add(&arc_size);
+        shape.add(&effects.fixed);
         shape.add(&divider);
         shape.add(&shadow);
         shape.add(&opacity);
@@ -742,6 +752,7 @@ impl Props {
             perimeter,
             rounded,
             arc_size,
+            effects,
             divider,
             shadow,
             opacity,
@@ -842,6 +853,7 @@ impl Props {
                 }
             });
         }
+        self.effects.wire(send.clone());
         colour(&self.font_colour, "fontColor");
         colour(&self.label_background, "labelBackgroundColor");
         colour(&self.label_border, "labelBorderColor");
@@ -1190,6 +1202,7 @@ impl Props {
                 edges,
                 fills,
                 swimlane,
+                corners,
                 geometry,
                 default_tool,
             } => {
@@ -1295,6 +1308,7 @@ impl Props {
                     15.0
                 };
                 self.arc_size.set_value(style.num("arcSize", arc));
+                self.effects.fill(style, *corners);
                 self.divider.set_active(style.flag("swimlaneLine", true));
                 self.shadow.set_active(style.flag("shadow", false));
                 self.opacity.set_value(style.num("opacity", 100.0));
@@ -1505,14 +1519,16 @@ impl Props {
     }
 
     /// A gradient runs from the fill, so it shows only with one, and its direction only while
-    /// there is a gradient; the corners' size shows only while they are rounded.
+    /// there is a gradient; the corners' size and Fixed Corner Size show only while they are
+    /// rounded.
     fn sync_rows(&self) {
         let gradient = self.takes_gradient.get() && self.fill.switch.is_active();
         self.gradient.row.set_visible(gradient);
         self.direction
             .set_visible(gradient && self.gradient.switch.is_active());
-        self.arc_size
-            .set_visible(self.rounded.is_visible() && self.rounded.is_active());
+        let rounded = self.rounded.is_visible() && self.rounded.is_active();
+        self.arc_size.set_visible(rounded);
+        self.effects.sync(rounded);
     }
 }
 
@@ -1624,6 +1640,10 @@ impl DiagramTab {
                     swimlane: cells
                         .iter()
                         .any(|c| c.vertex && c.style.resolve(false).shape() == "swimlane"),
+                    corners: cells.iter().any(|c| {
+                        let style = c.style.resolve(false);
+                        c.vertex && accent_drawio::shapes::Corner::of(style.shape()).is_some()
+                    }),
                     geometry,
                     default_tool,
                 },
@@ -1699,6 +1719,9 @@ impl DiagramTab {
                 if let [id] = ids.as_slice() {
                     self.set_geometry(id, rect);
                 }
+            }
+            Change::FixedCorners(fixed) if !ids.is_empty() => {
+                self.edit(|e, page| e.fix_corners(page, &ids, fixed))
             }
             Change::Flip(across) if !ids.is_empty() => {
                 let shown = self.view.sheet().unwrap_or_default();

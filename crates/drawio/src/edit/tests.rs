@@ -196,6 +196,39 @@ fn a_pasted_style_gives_its_look_and_keeps_the_shape() {
 }
 
 #[test]
+fn fixed_corners_keep_each_shape_s_corner_and_then_share_one_size() {
+    let cell = |id, w, h, style| Cell::new_vertex(id, "1", Rect::new(0.0, 0.0, w, h), style, "");
+    let mut e = open([
+        cell("small", 100.0, 40.0, "rounded=1;"),
+        cell("big", 300.0, 120.0, "rounded=1;arcSize=10;"),
+        cell("hex", 100.0, 40.0, "shape=hexagon;rounded=1;arcSize=10;"),
+    ]);
+    let ids = list(&["small", "big", "hex"]);
+    e.fix_corners(0, &ids, true).unwrap();
+    let style = |e: &Editor, id: &str| e.page(0).unwrap().cell(id).unwrap().style.to_string();
+    // 15 % of the 40 side and 10 % of the 120 one, as twice the radius.
+    assert_eq!(
+        style(&e, "small"),
+        "rounded=1;absoluteArcSize=1;arcSize=12;"
+    );
+    assert_eq!(style(&e, "big"), "rounded=1;arcSize=24;absoluteArcSize=1;");
+    assert_eq!(
+        style(&e, "hex"),
+        "shape=hexagon;rounded=1;arcSize=10;",
+        "already units"
+    );
+    assert_eq!(e.undo.len(), 1, "one step");
+    // One size for both, then back to each one's share of its side.
+    e.set_styles(0, &ids[..2], &[("arcSize", Some("20"))])
+        .unwrap();
+    e.fix_corners(0, &ids, false).unwrap();
+    assert_eq!(style(&e, "small"), "rounded=1;arcSize=25;");
+    assert_eq!(style(&e, "big"), "rounded=1;arcSize=8.33;");
+    e.fix_corners(0, &ids, false).unwrap();
+    assert_eq!(e.undo.len(), 3, "nothing to let grow is no step");
+}
+
+#[test]
 fn layers_are_added_locked_hidden_reordered_and_deleted_a_step_each() {
     let mut e = editor();
     let layers = |e: &Editor| -> Vec<String> {

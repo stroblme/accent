@@ -75,15 +75,20 @@ pub(super) fn rectangle(b: Rect, style: &Resolved) -> Vec<PathCmd> {
     if !style.flag("rounded", false) {
         return rect(b);
     }
-    let r = if style.flag("absoluteArcSize", false) {
+    round_rect(b, rectangle_corner(b, style))
+}
+
+/// The corner radius of a rounded `rectangle` in `b`, which [`round_rect`] keeps within half
+/// of either side.
+pub(super) fn rectangle_corner(b: Rect, style: &Resolved) -> f64 {
+    if style.flag("absoluteArcSize", false) {
         (b.w / 2.0)
             .min(b.h / 2.0)
             .min(style.num("arcSize", LINE_ARCSIZE) / 2.0)
     } else {
         let f = style.num("arcSize", RECTANGLE_ROUNDING_FACTOR * 100.0) / 100.0;
         (b.w * f).min(b.h * f)
-    };
-    round_rect(b, r)
+    }
 }
 
 /// Match SVG rounded rectangles (`mxSvgCanvas2D.roundrect`): quarter-ellipse
@@ -288,9 +293,7 @@ pub(super) fn swimlane(b: Rect, style: &Resolved) -> Vec<Part> {
     let horizontal = style.flag("horizontal", true);
     let start = start.min(if horizontal { h } else { w });
     let r = match style.flag("rounded", false) {
-        true => swimlane_arc(w, h, start, style)
-            .min(start)
-            .min(if horizontal { h } else { w } - start),
+        true => swimlane_corner(b, style),
         false => 0.0,
     };
     let p = |x: f64, y: f64| Point::new(b.x + x, b.y + y);
@@ -428,6 +431,33 @@ fn swimlane_footer(b: Rect, horizontal: bool, footer: f64, r: f64) -> Vec<PathCm
     };
     path.push(PathCmd::Close);
     path
+}
+
+/// A swimlane's title bar depth: `startSize` within its height, or its width with
+/// `horizontal=0`.
+pub(super) fn swimlane_start(b: Rect, style: &Resolved) -> f64 {
+    let along = if style.flag("horizontal", true) {
+        b.h
+    } else {
+        b.w
+    };
+    style
+        .num("startSize", DEFAULT_STARTSIZE)
+        .max(0.0)
+        .min(along)
+}
+
+/// A rounded swimlane's corner radius as drawn, within its title bar and its body.
+pub(super) fn swimlane_corner(b: Rect, style: &Resolved) -> f64 {
+    let along = if style.flag("horizontal", true) {
+        b.h
+    } else {
+        b.w
+    };
+    let start = swimlane_start(b, style);
+    swimlane_arc(b.w, b.h, start, style)
+        .min(start)
+        .min(along - start)
 }
 
 /// A rounded swimlane's corner radius (`mxSwimlane.getSwimlaneArcSize`, mxSwimlane.js 177-191).
