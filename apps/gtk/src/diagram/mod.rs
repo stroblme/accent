@@ -1277,6 +1277,12 @@ impl DiagramTab {
         self.view.svg_copies()
     }
 
+    /// How many pictures of the page are drawn, for a drill.
+    #[cfg(feature = "bench")]
+    pub fn pictures_drawn(&self) -> usize {
+        self.view.pictures_drawn()
+    }
+
     pub fn fit_page(&self) {
         self.view.set_zoom(Zoom::Fit);
     }

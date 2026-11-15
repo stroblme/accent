@@ -352,6 +352,12 @@ impl DiagramView {
         self.imp().cache.svg_copies()
     }
 
+    /// How many pictures of the page are drawn, for a drill.
+    #[cfg(feature = "bench")]
+    pub fn pictures_drawn(&self) -> usize {
+        self.imp().cache.pictures_drawn()
+    }
+
     /// Whether the page has been laid out at the canvas's size: a drill aiming at it waits.
     #[cfg(feature = "bench")]
     pub fn laid_out(&self) -> bool {

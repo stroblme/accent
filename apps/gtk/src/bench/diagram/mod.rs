@@ -74,6 +74,9 @@ pub(super) fn bench_diagram(app: &Rc<App>, arg: &str) {
     if let Some(rel) = arg.strip_prefix("sharp:") {
         return pictures::sharp(app, rel);
     }
+    if let Some(rel) = arg.strip_prefix("pictures:") {
+        return pictures::pictures(app, rel);
+    }
     if let Some(rel) = arg.strip_prefix("layers:") {
         return layers::layers(app, rel);
     }

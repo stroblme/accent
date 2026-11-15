@@ -26,11 +26,14 @@ use crate::{math, theme};
 pub struct Cache {
     /// By prim index.
     layouts: RefCell<HashMap<usize, Laid>>,
-    /// By prim index, for the display list on screen.
-    textures: RefCell<HashMap<usize, Option<Rc<Picture>>>>,
-    /// By a hash of the data URI, across display lists, so an edit does not decode every
-    /// picture on the page again.
-    decoded: RefCell<HashMap<u64, Option<Rc<Picture>>>>,
+    /// By prim index, for the display list on screen: its picture's key in `decoded`, or `None`
+    /// for a picture on the web not downloaded yet.
+    keys: RefCell<HashMap<usize, Option<u64>>>,
+    /// By a hash of the data URI or the address, across display lists, so an edit does not
+    /// decode every picture on the page again; shared with the caches [`Cache::carried`] makes.
+    decoded: Rc<RefCell<HashMap<u64, Decoding>>>,
+    /// Where the canvas's pictures are decoded, one after another, shared as `decoded` is.
+    queue: sharp::Queue,
     /// By prim index: where each label on screen was painted, for finding a label by its text.
     boxes: RefCell<HashMap<usize, Painted>>,
     /// Whether pictures on the web are drawn, from the download cache (`super::web`): the
@@ -60,7 +63,7 @@ impl Cache {
     /// A new display list is on screen: its prims are numbered afresh.
     pub fn forget(&self) {
         self.layouts.borrow_mut().clear();
-        self.textures.borrow_mut().clear();
+        self.keys.borrow_mut().clear();
         self.boxes.borrow_mut().clear();
         self.declared.take();
     }
@@ -90,8 +93,9 @@ impl Cache {
         let keep = |i: usize| old.len() == new.len() && alike(&old[i], &new[i]);
         Cache {
             layouts: kept(&self.layouts, keep),
-            textures: kept(&self.textures, keep),
+            keys: kept(&self.keys, keep),
             decoded: self.decoded.clone(),
+            queue: self.queue.clone(),
             boxes: RefCell::default(),
             web: self.web.clone(),
             canvas: Cell::default(),
@@ -114,7 +118,7 @@ impl Cache {
         let mut room = sharp::BUDGET;
         if let Some(canvas) = self.canvas.get() {
             let decoded = self.decoded.borrow();
-            for svg in decoded.values().flatten().filter_map(|p| p.svg.as_ref()) {
+            for svg in decoded.values().filter_map(Decoding::svg) {
                 svg.sweep(canvas.frame);
                 room -= svg.held(canvas.frame);
             }
@@ -132,8 +136,17 @@ impl Cache {
     #[cfg(feature = "bench")]
     pub fn svg_copies(&self) -> Vec<Want> {
         let decoded = self.decoded.borrow();
-        let svgs = decoded.values().flatten().filter_map(|p| p.svg.as_ref());
+        let svgs = decoded.values().filter_map(Decoding::svg);
         svgs.flat_map(|svg| svg.copies()).collect()
+    }
+
+    /// How many pictures of the display list on screen are drawn, for a drill.
+    #[cfg(feature = "bench")]
+    pub fn pictures_drawn(&self) -> usize {
+        let decoded = self.decoded.borrow();
+        let keys = self.keys.borrow();
+        let drawn = |key: &&u64| matches!(decoded.get(key), Some(Decoding::Done(Some(_))));
+        keys.values().flatten().filter(drawn).count()
     }
 
     /// Draw SVG pictures as vectors, as an export does.
@@ -183,40 +196,115 @@ impl Cache {
         self.boxes.borrow_mut().insert(index, painted);
     }
 
-    fn picture(&self, index: usize, uri: &str) -> Option<Rc<Picture>> {
-        if let Some(t) = self.textures.borrow().get(&index) {
-            return t.clone();
-        }
-        let picture = self
-            .decoded
-            .borrow_mut()
-            .entry(hash(uri))
-            .or_insert_with(|| {
-                let (mime, bytes) = accent_drawio::decode_data_uri(uri)?;
-                decode(bytes, &mime)
-            })
-            .clone();
-        self.textures.borrow_mut().insert(index, picture.clone());
-        picture
+    /// The picture prim `index` draws from the data URI `uri`.
+    fn picture(&self, index: usize, uri: &str, widget: &gtk::Widget) -> Option<Rc<Picture>> {
+        self.shown(index, widget, || {
+            let uri = uri.to_string();
+            Some((hash(&uri), move || accent_drawio::decode_data_uri(&uri)))
+        })
     }
 
-    /// Decode a cached web image; return none before download. Do not cache decode
-    /// failures so a later download can be drawn.
-    fn web_picture(&self, index: usize, url: &str) -> Option<Rc<Picture>> {
-        if let Some(t) = self.textures.borrow().get(&index) {
-            return t.clone();
+    /// The picture prim `index` draws from the download cache, `None` before it is downloaded:
+    /// the page is shown afresh once it is (`DiagramTab::sync_web`).
+    fn web_picture(&self, index: usize, url: &str, widget: &gtk::Widget) -> Option<Rc<Picture>> {
+        self.shown(index, widget, || {
+            if !super::web::path(url).is_file() {
+                return None;
+            }
+            let url = url.to_string();
+            Some((hash(&url), move || {
+                let bytes = super::web::cached(&url)?;
+                let mime = gtk::gio::content_type_guess(None::<&str>, Some(bytes.as_slice())).0;
+                Some((mime.to_string(), bytes))
+            }))
+        })
+    }
+
+    /// The picture prim `index` draws, `None` until it is decoded. The first time, `source`
+    /// says where it comes from: its key in `decoded`, and what reads its type and bytes, or
+    /// `None` for nothing to draw.
+    fn shown<R>(
+        &self,
+        index: usize,
+        widget: &gtk::Widget,
+        source: impl FnOnce() -> Option<(u64, R)>,
+    ) -> Option<Rc<Picture>>
+    where
+        R: FnOnce() -> Option<(String, Vec<u8>)> + Send + 'static,
+    {
+        let known = self.keys.borrow().get(&index).copied();
+        let key = known.unwrap_or_else(|| {
+            let key = source().map(|(key, read)| {
+                self.ask(key, read, widget);
+                key
+            });
+            self.keys.borrow_mut().insert(index, key);
+            key
+        })?;
+        match self.decoded.borrow().get(&key) {
+            Some(Decoding::Done(picture)) => picture.clone(),
+            _ => None,
         }
-        let key = hash(url);
-        let known = self.decoded.borrow().get(&key).cloned().flatten();
-        let picture = known.or_else(|| {
-            let bytes = super::web::cached(url)?;
-            let mime = gtk::gio::content_type_guess(None::<&str>, Some(bytes.as_slice())).0;
-            let picture = decode(bytes, &mime)?;
-            self.decoded.borrow_mut().insert(key, Some(picture.clone()));
-            Some(picture)
+    }
+
+    /// Decode what `read` reads as the picture under `key`, unless it has been asked for: for
+    /// an output at once, for the canvas on a worker (`sharp::Queue`), which measures it too
+    /// (`Picture::document`), `widget` drawn again once it lands.
+    fn ask(
+        &self,
+        key: u64,
+        read: impl FnOnce() -> Option<(String, Vec<u8>)> + Send + 'static,
+        widget: &gtk::Widget,
+    ) {
+        if self.decoded.borrow().contains_key(&key) {
+            return;
+        }
+        let work = move || read().and_then(|(mime, bytes)| decode(bytes, &mime));
+        if self.canvas.get().is_none() {
+            let done = Decoding::Done(work().map(Picture::new));
+            self.decoded.borrow_mut().insert(key, done);
+            return;
+        }
+        self.decoded.borrow_mut().insert(key, Decoding::Asked);
+        let (decoded, widget) = (Rc::downgrade(&self.decoded), widget.downgrade());
+        self.queue.push(async move {
+            // Not for a tab closed meanwhile.
+            if decoded.strong_count() == 0 {
+                return;
+            }
+            let done = crate::work::off_thread("diagram picture", move || {
+                let decoded = work()?;
+                let measure = || crate::look::measure(&decoded.texture).document;
+                decoded.document.get_or_init(measure);
+                Some(decoded)
+            })
+            .await;
+            let Some(decoded) = decoded.upgrade() else {
+                return;
+            };
+            let picture = done.flatten().map(Picture::new);
+            decoded.borrow_mut().insert(key, Decoding::Done(picture));
+            if let Some(widget) = widget.upgrade() {
+                widget.queue_draw();
+            }
         });
-        self.textures.borrow_mut().insert(index, picture.clone());
-        picture
+    }
+}
+
+/// A picture of `Cache::decoded`: being decoded on a worker, or decoded, `None` for one that
+/// does not decode.
+enum Decoding {
+    Asked,
+    Done(Option<Rc<Picture>>),
+}
+
+impl Decoding {
+    /// The picture decoded, if it is an SVG, which draws copies of itself (`sharp`).
+    fn svg(&self) -> Option<&Rc<Svg>> {
+        match self {
+            Decoding::Done(Some(picture)) => picture.svg.as_ref(),
+            _ => None,
+        }
     }
 }
 
@@ -226,8 +314,16 @@ fn hash(s: &str) -> u64 {
     h.finish()
 }
 
+/// A picture decoded, on any thread: its pixels, an SVG's text, and whether it reads as a
+/// document where its kind says.
+struct Decoded {
+    texture: gdk::Texture,
+    svg: Option<glib::Bytes>,
+    document: OnceCell<bool>,
+}
+
 /// A picture's bytes, of type `mime`, decoded under the raster allowance (`look::picture`).
-fn decode(bytes: Vec<u8>, mime: &str) -> Option<Rc<Picture>> {
+fn decode(bytes: Vec<u8>, mime: &str) -> Option<Decoded> {
     // As the image tab takes them: an SVG is line art, an animation its own content.
     let document = match mime {
         "image/svg+xml" => OnceCell::from(true),
@@ -236,13 +332,12 @@ fn decode(bytes: Vec<u8>, mime: &str) -> Option<Rc<Picture>> {
     };
     let bytes = glib::Bytes::from_owned(bytes);
     let texture = crate::look::picture(&bytes, mime).ok()?;
-    let own = (f64::from(texture.width()), f64::from(texture.height()));
-    let svg = (mime == "image/svg+xml").then(|| Rc::new(Svg::new(bytes, own)));
-    Some(Rc::new(Picture {
+    let svg = (mime == "image/svg+xml").then_some(bytes);
+    Some(Decoded {
         texture,
-        document,
         svg,
-    }))
+        document,
+    })
 }
 
 /// A cell's picture, decoded, and whether it reads as a document.
@@ -250,12 +345,23 @@ pub struct Picture {
     texture: gdk::Texture,
     /// An SVG's text, which librsvg draws at the size shown (`sharp`).
     svg: Option<Rc<Svg>>,
-    /// Set for an SVG and an animation; a still raster's is measured the first time a theme
-    /// that remaps documents asks (`look::measure`, on the main thread).
+    /// Set for an SVG and an animation; a still raster's is measured on the canvas's worker as it
+    /// is decoded, or else the first time a theme that remaps documents asks (`look::measure`).
     document: OnceCell<bool>,
 }
 
 impl Picture {
+    fn new(decoded: Decoded) -> Rc<Picture> {
+        let texture = decoded.texture;
+        let own = (f64::from(texture.width()), f64::from(texture.height()));
+        let svg = decoded.svg.map(|text| Rc::new(Svg::new(text, own)));
+        Rc::new(Picture {
+            texture,
+            svg,
+            document: decoded.document,
+        })
+    }
+
     fn document(&self) -> bool {
         *self
             .document
@@ -463,8 +569,8 @@ pub fn prim(
         } => {
             let r = frame.rect(rect);
             let picture = match source {
-                ImageSource::DataUri(uri) => cache.picture(index, uri),
-                ImageSource::Url(url) if cache.web.get() => cache.web_picture(index, url),
+                ImageSource::DataUri(uri) => cache.picture(index, uri, widget),
+                ImageSource::Url(url) if cache.web.get() => cache.web_picture(index, url, widget),
                 ImageSource::Url(_) => None,
             };
             placed(snapshot, r.centre(), *rotation, (*flip_h, *flip_v), || {

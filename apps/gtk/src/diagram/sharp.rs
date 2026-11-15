@@ -2,8 +2,12 @@
 //! part on screen at the display's pixels, rendered on a worker once the view has settled
 //! (`zoom::ZOOM_SETTLE`), the copy before scaled or the picture as decoded (`paint::Picture`)
 //! showing meanwhile, so a frame only ever draws textures. An export draws it as vectors.
+//! A picture of any kind is decoded on a worker too, the first time the canvas paints it
+//! ([`Queue`]).
 
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
+use std::pin::Pin;
 use std::rc::Rc;
 
 use accent_drawio::Rect;
@@ -247,6 +251,39 @@ impl Renders {
     }
 }
 
+/// The canvas's pictures decoded on a worker, one after another in the order the canvas first
+/// painted them, as [`Renders`] draws its copies, so no frame waits for a page of many pictures.
+#[derive(Clone, Default)]
+pub struct Queue(Rc<RefCell<Jobs>>);
+
+#[derive(Default)]
+struct Jobs {
+    waiting: VecDeque<Pin<Box<dyn Future<Output = ()>>>>,
+    running: bool,
+}
+
+impl Queue {
+    /// Run `job` once the jobs before it are done.
+    pub fn push(&self, job: impl Future<Output = ()> + 'static) {
+        let mut jobs = self.0.borrow_mut();
+        jobs.waiting.push_back(Box::pin(job));
+        if std::mem::replace(&mut jobs.running, true) {
+            return;
+        }
+        let queue = self.clone();
+        glib::spawn_future_local(async move {
+            loop {
+                let next = queue.0.borrow_mut().waiting.pop_front();
+                let Some(job) = next else {
+                    break;
+                };
+                job.await;
+            }
+            queue.0.borrow_mut().running = false;
+        });
+    }
+}
+
 /// What a picture at `dest` (content coordinates, before its turn and flips) asks for on
 /// `canvas`, and the part of it on screen: its box at the display's pixels, the part on screen
 /// with half a view round it, or all of a turned one. `None` when none of it is on screen, or
@@ -379,6 +416,31 @@ mod tests {
             device: 2.0,
             frame: 1,
         }
+    }
+
+    #[test]
+    fn a_queue_runs_its_jobs_one_at_a_time_in_the_order_pushed() {
+        let context = glib::MainContext::new();
+        context
+            .with_thread_default(|| {
+                let (queue, log) = (Queue::default(), Rc::new(RefCell::new(Vec::new())));
+                let (open, gate) = futures_channel::oneshot::channel::<()>();
+                let (a, b, c) = (log.clone(), log.clone(), log.clone());
+                queue.push(async move {
+                    a.borrow_mut().push("a starts");
+                    let _ = gate.await;
+                    a.borrow_mut().push("a ends");
+                });
+                queue.push(async move { b.borrow_mut().push("b") });
+                while context.iteration(false) {}
+                assert_eq!(*log.borrow(), ["a starts"]);
+                // Pushed while one runs.
+                queue.push(async move { c.borrow_mut().push("c") });
+                let _ = open.send(());
+                while context.iteration(false) {}
+                assert_eq!(*log.borrow(), ["a starts", "a ends", "b", "c"]);
+            })
+            .expect("a main context of the test's own");
     }
 
     #[test]
