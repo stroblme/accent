@@ -351,7 +351,8 @@ drill_diagram_links() {
 }
 
 # Ctrl+V with a browser's HTML on the clipboard, and Paste as Plain Text, in a note (beside its code
-# block, table and front matter too), an org note, a code tab, a notebook's cells and a diagram.
+# block, table and front matter too), an org note, a code tab, a note renamed between markdown and
+# org, a notebook's cells and a diagram.
 drill_paste() {
 	printf -- '---\ntitle: Note\n---\n\n# Note\n\nbefore\n\n```text\ncode\n```\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\nend\n' >"$vault/paste.md"
 	echo "* Org" >"$vault/paste.org"

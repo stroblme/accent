@@ -93,14 +93,16 @@ pub(crate) fn build(
 /// selection linking it and formatted text pasted as its Markdown. Answers that paste's handler,
 /// which [`paste_verbatim`] holds back.
 pub(crate) fn interact(view: &sourceview5::View, flavour: Flavour) -> glib::SignalHandlerId {
-    interact_with(view, flavour, paste::converter(flavour))
+    interact_with(view, Rc::new(Cell::new(flavour)), paste::converter)
 }
 
-/// [`interact`], a formatted paste written as `convert` writes it: a diagram label's own Markdown.
+/// [`interact`] with the flavour read off `flavour` at each paste, where a tab's rename changes it,
+/// and formatted text written as `convert` has that flavour write it: a diagram label's own
+/// Markdown.
 pub(crate) fn interact_with(
     view: &sourceview5::View,
-    flavour: Flavour,
-    convert: Option<paste::Convert>,
+    flavour: Rc<Cell<Flavour>>,
+    convert: fn(Flavour) -> Option<paste::Convert>,
 ) -> glib::SignalHandlerId {
     line_clipboard(view);
     primary_paste(view);
@@ -138,7 +140,9 @@ pub fn open(
         view.set_editable(false);
     }
     let (numbers, marks, diagnostics, folds) = gutters(&view, &buffer, flavour);
-    let paste_link = interact(&view, flavour);
+    // The tab's flavour, which the paste reads each time and a rename sets (`Tab::set_syntax`).
+    let syntax = Rc::new(Cell::new(flavour));
+    let paste_link = interact_with(&view, syntax.clone(), paste::converter);
     let Frame {
         clamp,
         scroller,
@@ -192,7 +196,7 @@ pub fn open(
         sticky_bar: sticky_bar.clone(),
         head: RefCell::new(None),
         marks: marks.clone(),
-        flavour: Cell::new(flavour),
+        flavour: syntax,
         crlf: Cell::new(text.crlf),
         lossy: Cell::new(text.lossy),
         page,

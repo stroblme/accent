@@ -8,6 +8,7 @@ use crate::{diff, fold, highlight, wrap};
 use adw::prelude::*;
 use gtk::glib;
 use sourceview5::prelude::*;
+use std::cell::Cell;
 use std::rc::Rc;
 
 /// A comparison ([`Tab::compare`]) or merge ([`Tab::merge`]) hosted around
@@ -155,7 +156,9 @@ pub fn overlay_view(
 ) {
     let note = Flavour::Note(Syntax::Markdown);
     let (view, buffer) = build(note, None, text);
-    let paste = interact_with(&view, note, Some(super::paste::label_markdown));
+    let paste = interact_with(&view, Rc::new(Cell::new(note)), |_| {
+        Some(super::paste::label_markdown)
+    });
     keys::attach_plain(&view, note);
     style_companion(note, &buffer, &view);
     (view, buffer, paste)

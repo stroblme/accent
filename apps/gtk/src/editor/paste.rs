@@ -6,6 +6,8 @@ use super::{Flavour, Syntax, Tab};
 use crate::multicaret;
 use gtk::glib;
 use gtk::prelude::*;
+use std::cell::Cell;
+use std::rc::Rc;
 
 /// What a formatted paste makes of clipboard HTML: the Markdown it writes, or `None` for the
 /// clipboard's plain text.
@@ -121,19 +123,22 @@ fn is_url(text: &str) -> bool {
         })
 }
 
-/// Take the paste a note, a cell or a label editor does its own way: a URL over a selection
-/// [`link`]s it, and formatted text `convert` reads becomes its Markdown, outside a code block,
-/// the front matter and a table, where the plain text goes in. Each is one undo step.
+/// Take the paste a note, a cell or a label editor does its own way, in the flavour `flavour`
+/// holds at that moment, which a tab's rename changes (`Tab::set_syntax`): a URL over a selection
+/// [`link`]s it, and formatted text `convert` reads in that flavour becomes its Markdown, outside
+/// a code block, the front matter and a table, where the plain text goes in. Each is one undo
+/// step.
 ///
 /// Anything else is GTK's paste: a column of carets, a view not editable, and a clipboard with no
 /// text, whose image is filed as an attachment (`App::wire_attachments`) by a handler connected
 /// after this one. Answers the handler's id, which [`Tab::paste_verbatim`] holds back.
 pub(super) fn formatted_paste(
     view: &sourceview5::View,
-    flavour: Flavour,
-    convert: Option<Convert>,
+    flavour: Rc<Cell<Flavour>>,
+    convert: fn(Flavour) -> Option<Convert>,
 ) -> glib::SignalHandlerId {
     view.connect_paste_clipboard(move |view| {
+        let flavour = flavour.get();
         let buffer = view.buffer();
         let column = view
             .downcast_ref::<multicaret::View>()
@@ -149,7 +154,7 @@ pub(super) fn formatted_paste(
         });
         let selection = buffer.text(&start, &end, true);
         let linking = could_link(&selection, flavour);
-        let convert = convert.filter(|_| {
+        let convert = convert(flavour).filter(|_| {
             formats.contain_mime_type(crate::clipboard::HTML)
                 && !formats.contain_mime_type(VSCODE)
                 && !verbatim(&buffer, &start)

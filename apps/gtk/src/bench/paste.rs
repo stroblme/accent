@@ -10,7 +10,8 @@ const PLAIN: &str = "Pasted\nSome bold and a link.\none\ntwo";
 /// `ACCENT_BENCH_PASTE=1` on a vault holding `paste.md`, `paste.org`, `paste.py`, `paste.ipynb`
 /// and `paste.drawio` (`build-aux/drills.sh`): Ctrl+V and Paste as Plain Text in a note, beside
 /// its code block, table, a URL over a selection and VS Code's HTML; in an org note and a code
-/// tab; in a notebook's markdown and code cells; on a diagram's canvas and in its label editor.
+/// tab; in a note renamed between markdown and org; in a notebook's markdown and code cells; on a
+/// diagram's canvas and in its label editor.
 /// Prints what each put in.
 pub(super) fn bench_paste(app: &Rc<App>) {
     let app = app.clone();
@@ -98,10 +99,45 @@ pub(super) fn bench_paste(app: &Rc<App>) {
             println!("bench paste {rel}={put:?}");
         }
 
+        renamed(&app).await;
         notebook(&app, &act).await;
         diagram(&app, &act).await;
         bench_quit(&app);
     });
+}
+
+/// A note renamed to the other syntax keeps its tab (`Tab::retarget`) and pastes as one opened in
+/// it does: a URL over a selection links in org's way and formatted text goes in as its text in
+/// `paste.md` renamed to org, and the reverse in `paste.org` renamed to markdown. Leaves the
+/// browser's HTML on the clipboard, which the cases after it paste.
+async fn renamed(app: &Rc<App>) {
+    let Some(ops) = app.ops().cloned() else {
+        println!("bench paste renamed no_vault");
+        return;
+    };
+    until("paste", "reconcile", 30_000, || app.reconciled.get()).await;
+    let url = "https://example.org/x";
+    for (from, to, word) in [
+        ("paste.md", "renamed.org", "end"),
+        ("paste.org", "renamed.md", "Org"),
+    ] {
+        crate::fileops::move_all(&ops, vec![(from.to_string(), to.to_string())]);
+        let Some(tab) = until("paste", to, 10_000, || app.tab_for(to)).await else {
+            continue;
+        };
+        let buffer = &tab.buffer;
+        let all = text(buffer);
+        let start = all.find(word).map_or(0, |at| all[..at].chars().count()) as i32;
+        let end = start + word.chars().count() as i32;
+        buffer.select_range(&buffer.iter_at_offset(start), &buffer.iter_at_offset(end));
+        offer(app, url, url, false);
+        let put = pasted(buffer, || tab.view.emit_paste_clipboard()).await;
+        println!("bench paste {to} link={put:?}");
+        offer(app, HTML, PLAIN, false);
+        buffer.place_cursor(&buffer.end_iter());
+        let put = pasted(buffer, || tab.view.emit_paste_clipboard()).await;
+        println!("bench paste {to} formatted={put:?}");
+    }
 }
 
 /// A markdown cell converts and a code cell takes the plain text.

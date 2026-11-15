@@ -314,7 +314,8 @@ pub struct Tab {
     sticky_bar: gtk::Box,
     /// Text flavour, gating Markdown styling, completion, spelling, column cap and hanging
     /// markers. Its kind is fixed, and only a rename changes its syntax ([`Tab::set_syntax`]).
-    flavour: Cell<Flavour>,
+    /// Shared with the paste's handler, which reads it at each paste.
+    flavour: Rc<Cell<Flavour>>,
     /// Original CRLF endings, normalized in the buffer and restored on save
     /// to avoid rewriting every unchanged line.
     crlf: Cell<bool>,
