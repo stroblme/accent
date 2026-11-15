@@ -263,18 +263,19 @@ impl Prim {
 
     /// Where a label's laid-out text goes, as draw.io's canvas sets it (`mxSvgCanvas2D`), in page
     /// units: the top of its block, and the left of the box a wrapped label's lines are aligned
-    /// across ([`wrap_width`]) or else of its widest line, and how far below the block's top its
-    /// lines are drawn. `block` is the text's widest line across and its lines down, `baseline`
-    /// its first baseline and `tops` each line's top below its top, and `metrics` its font's
-    /// ascent and descent. `None` for anything but a label.
+    /// across ([`wrap_width`]) or else of its widest line, and how far below where the toolkit
+    /// set them its lines are drawn, each line's own or one for all. `block` is the text's widest
+    /// line across and its lines down, `baseline` its first baseline and `tops` each line's top
+    /// below its top, and `metrics` its font's ascent and descent. `None` for anything but a
+    /// label.
     ///
     /// An HTML label is a block aligned, overflowing as it must, in a flex box a unit square at
     /// the anchor rounded to whole units, or as wide as it wraps (`updateTextNodes`, `createCss`).
     /// Chromium draws each of its lines' tops on a whole unit (`TextFragmentPainter`), and the
     /// baseline below it by the font's ascent and the leading above that, each in whole units
     /// (`FontMetrics::AscentDescentWithHacks`, `CalculateLeadingSpace`), on boxes measured in
-    /// 64ths of a unit (`LayoutUnit`). The toolkit sets its lines evenly, so they are drawn down
-    /// together by how far they are from Chromium's on average, a one-line label's onto it.
+    /// 64ths of a unit (`LayoutUnit`). The toolkit sets its lines evenly, so each is drawn down
+    /// onto Chromium's on its own.
     /// SVG text has its first baseline a font size less one below the anchor, less half the
     /// text's height middle-aligned and all of it and one more bottom-aligned, the text a font
     /// size tall and a line more for every line after the first (`plainText`).
@@ -284,7 +285,7 @@ impl Prim {
         baseline: f64,
         tops: &[f64],
         metrics: (f64, f64),
-    ) -> Option<(Point, f64)> {
+    ) -> Option<(Point, Vec<f64>)> {
         let Prim::Text {
             rect,
             anchor,
@@ -318,7 +319,7 @@ impl Prim {
                 VAlign::Bottom => text + 1.0,
             };
             let first = anchor.y + font.size - 1.0 - above;
-            return Some((Point::new(anchor.x - mx * w, first - baseline), 0.0));
+            return Some((Point::new(anchor.x - mx * w, first - baseline), vec![0.0]));
         }
         // JavaScript's `Math.round`, halves up.
         let round = |v: f64| (v + 0.5).floor();
@@ -337,9 +338,8 @@ impl Prim {
         let chromium = fixed((line - ascent - descent) / 2.0).floor() + ascent;
         let ours = (line - metrics.0 - metrics.1) / 2.0 + metrics.0;
         let top = round(anchor.y) + fixed(my * (1.0 - snap(h)));
-        let rounded = |t: f64| round(top + snap(t)) - (top + snap(t));
-        let mean = tops.iter().map(|&t| rounded(t)).sum::<f64>() / tops.len().max(1) as f64;
-        Some((Point::new(left, top), mean + chromium - ours))
+        let down = |&t: &f64| round(top + snap(t)) - (top + t) + chromium - ours;
+        Some((Point::new(left, top), tops.iter().map(down).collect()))
     }
 }
 
@@ -1375,7 +1375,7 @@ mod tests {
         // of 12 + 14.
         let (x, y) = (60.0 - 15.0, 230.0 + 11.0 - 13.0 - 11.0);
         let at = origin("svg", (30.0, 28.0), &[0.0, 14.0]);
-        assert_eq!(at, Some((Point::new(x, y), 0.0)));
+        assert_eq!(at, Some((Point::new(x, y), vec![0.0])));
     }
 
     #[test]
@@ -1392,18 +1392,18 @@ mod tests {
             let baseline = (line - metrics.0 - metrics.1) / 2.0 + metrics.0;
             let block = (30.0, tops.len() as f64 * line);
             let origin = |p: &Prim| p.text_origin(block, baseline, tops, metrics);
-            let (at, down) = s.prims.iter().find_map(origin).expect("a label");
-            let lines = tops.iter().map(|top| at.y + down + top + baseline - 50.0);
-            lines.collect::<Vec<_>>()
+            let (at, downs) = s.prims.iter().find_map(origin).expect("a label");
+            let drawn = |(top, down): (&f64, f64)| at.y + down + top + baseline - 50.0;
+            tops.iter().zip(downs).map(drawn).collect::<Vec<_>>()
         };
         for (size, below) in [(12.0, 4.0), (16.0, 6.0), (24.0, 8.0)] {
             assert!((set(size, &[0.0])[0] - below).abs() < 1e-9, "{size} px");
         }
-        // Pango's lines are evenly spaced, so each is within half a unit of Chromium's.
+        // Pango's lines are evenly spaced, and each is drawn down onto Chromium's.
         let line = line_height(12.0, true);
         let three = set(12.0, &[0.0, line, 2.0 * line]);
         for (at, chromium) in three.iter().zip([-10.0, 4.0, 19.0]) {
-            assert!((at - chromium).abs() < 0.5, "{three:?}");
+            assert!((at - chromium).abs() < 1e-9, "{three:?}");
         }
     }
 

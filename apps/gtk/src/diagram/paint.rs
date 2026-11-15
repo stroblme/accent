@@ -604,13 +604,13 @@ pub fn prim(
             let block = (unit(logical.width()), unit(logical.height()));
             let baseline = unit(layout.baseline());
             let origin = prim.text_origin(block, baseline, &laid.tops, laid.metrics);
-            let (origin, down) = origin.unwrap_or_default();
+            let (origin, downs) = origin.unwrap_or_default();
             // A wrapped label's lines are aligned across its layout, an unwrapped one's block
             // starts at its widest line.
             let left = if *wrap { 0.0 } else { unit(logical.x()) };
             let placed = Placed {
                 origin: frame.to_content(Point::new(origin.x - left, origin.y)),
-                down: down * frame.scale,
+                downs: downs.iter().map(|down| down * frame.scale).collect(),
                 anchor: frame.to_content(*anchor),
             };
             let block = label(snapshot, &laid, &placed, *rotation, font.color, look, tint);
@@ -955,11 +955,12 @@ impl Look {
     }
 }
 
-/// Where a label goes, in content coordinates: its layout's top-left, how far below that its
-/// lines are drawn, and the point it is turned about.
+/// Where a label goes, in content coordinates: its layout's top-left, how far below where the
+/// layout sets them its lines are drawn (each line's own, or one for all), and the point it is
+/// turned about.
 struct Placed {
     origin: Point,
-    down: f64,
+    downs: Vec<f64>,
     anchor: Point,
 }
 
@@ -1005,9 +1006,39 @@ fn label(
         with_opacity(snapshot, look.opacity, || {
             look.frame(snapshot, &block, tint);
             snapshot.save();
-            snapshot.translate(&graphene::Point::new(x as f32, (y + at.down) as f32));
+            snapshot.translate(&graphene::Point::new(x as f32, y as f32));
             let ink = tint.rgba(colour);
-            snapshot.append_layout(layout, &ink);
+            // How far below where the layout sets it a line is drawn, and its top in the layout,
+            // far below past the last line.
+            const FAR: f32 = 1e6;
+            let down = |line: usize| at.downs.get(line).or(at.downs.last()).copied();
+            let top = |line: usize| laid.tops.get(line).map_or(FAR, |t| (t * laid.scale) as f32);
+            let shifted = |line: usize, paint: &dyn Fn()| {
+                snapshot.save();
+                let down = down(line).unwrap_or_default() as f32;
+                snapshot.translate(&graphene::Point::new(0.0, down));
+                paint();
+                snapshot.restore();
+            };
+            let lines = at.downs.len();
+            if lines < 2 {
+                shifted(0, &|| snapshot.append_layout(layout, &ink));
+            } else {
+                // The layout drawn once a line, moved by that line's own offset and clipped to
+                // that line, the first open above and the last below for ink past them.
+                for line in 0..lines {
+                    let from = if line == 0 { -FAR } else { top(line) };
+                    let to = top(line + 1);
+                    shifted(line, &|| {
+                        let band = graphene::Rect::new(-FAR, from, 2.0 * FAR, to - from);
+                        snapshot.push_clip(&band);
+                        snapshot.append_layout(layout, &ink);
+                        snapshot.pop();
+                    });
+                }
+            }
+            // A formula moves with the line it is set on.
+            let line_at = |y: f32| (1..lines).take_while(|&line| top(line) <= y).count();
             let colour = |c: accent_math::Color| {
                 tint.rgba(Color {
                     r: c.r,
@@ -1017,14 +1048,16 @@ fn label(
                 })
             };
             for set in laid.formulas.iter() {
-                math::paint(
-                    snapshot,
-                    &set.formula,
-                    set.at,
-                    laid.scale as f32,
-                    &ink,
-                    colour,
-                );
+                shifted(line_at(set.at.1), &|| {
+                    math::paint(
+                        snapshot,
+                        &set.formula,
+                        set.at,
+                        laid.scale as f32,
+                        &ink,
+                        colour,
+                    )
+                });
             }
             snapshot.restore();
         })
