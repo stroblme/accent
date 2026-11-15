@@ -314,8 +314,8 @@ fn spring(app: &Rc<App>, rel: &str) {
         for (name, scroll) in steps {
             furthest.set(0.0);
             super::git::xtest(scroll).await;
-            // Past the rest and the spring back, which the 600 ms after the steps may not be.
-            glib::timeout_future(Duration::from_millis(400)).await;
+            // Past the spring back and the second a push is remembered, so each step starts afresh.
+            glib::timeout_future(Duration::from_millis(1200)).await;
             println!(
                 "bench nav spring {name} page={} pull={:.0} rested={:.0}",
                 tab.page_index() + 1,

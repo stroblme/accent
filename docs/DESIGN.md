@@ -1356,7 +1356,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - The plain wheel reads on through the pages as through a continuous PDF: pushed on past the bottom of the page, it turns to the next one, at the same zoom and on its top; past the top, to the one before, on its bottom.
   Only a push made at the edge turns: the scroll that reaches the edge stops there, and a touchpad turns a page a swipe at most, by a swipe begun at the edge, so one fling never reads through several (`geometry::Overshoot`).
   While the page is edited the push first pulls it off its edge as a spring would, 21 px a notch, and turns it at the third notch or after 120 px of a swipe.
-  Let go before that, after 300 ms with no notch or with the fingers off the touchpad, the page springs back, and a steady spin goes on turning a page every third notch (user decision 2026-11-15).
+  Let go before that, after 300 ms with no notch or with the fingers off the touchpad, the page springs back, though a wheel's notches still add up for a second after the last, so three slow ones turn it too, and a steady spin goes on turning a page every third notch (user decisions 2026-11-15).
   A presented page is a slide, turned by a notch or 40 px of a swipe and never pulled.
   The margin round the drawing does not count as page, or a stroke on a fitted page's edge would take a notch of its own.
 - The page is drawn on a sheet with a hairline edge, in the theme's look as a PDF page is (Colour).

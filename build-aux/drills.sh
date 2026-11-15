@@ -339,12 +339,14 @@ drill_diagram_spring() {
 }
 
 # A steady wheel reading on through a diagram's pages: fitted ones edited a page every third notch,
-# presented ones a page a notch, and pages taller than the view scrolled through and turned at each
-# edge, down and up (DESIGN.md, Diagram).
+# at 120 ms a notch and at 450 ms, the page springing back between, presented ones a page a notch,
+# and pages taller than the view scrolled through and turned at each edge, down and up (DESIGN.md,
+# Diagram).
 drill_diagram_steady() {
 	launch 90 ACCENT_BENCH_DIAGRAM_NAV=steady:steady.drawio >"$dir/steady"
 	has "$dir/steady" \
 		'bench nav steady fitted nine at 120 ms pages=1>2>3>4 pull=0' \
+		'bench nav steady fitted nine at 450 ms pages=1>2>3>4 pull=0' \
 		'bench nav steady presented four at 120 ms pages=1>2>3>4>5 pull=0' \
 		'bench nav steady tall down twenty-eight at 120 ms pages=1>2>3 pull=0' \
 		'bench nav steady tall up twenty-eight at 120 ms pages=4>3>2 pull=0'

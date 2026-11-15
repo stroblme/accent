@@ -226,7 +226,8 @@ impl DiagramTab {
 
     /// A plain wheel pushed on past the top or bottom of the page turns it ([`Overshoot`]): a
     /// page being edited is pulled off its edge first, and springs back once the push rests for
-    /// [`REST_MS`]. Ahead of the scrolled window, which scrolls whatever this passes on.
+    /// [`REST_MS`], the push still counting a while longer. Ahead of the scrolled window, which
+    /// scrolls whatever this passes on.
     pub(super) fn wire_wheel(self: &Rc<Self>) {
         let overshoot = Rc::new(Cell::new(Overshoot::default()));
         let resting: Rc<RefCell<Option<glib::SourceId>>> = Rc::default();
@@ -252,7 +253,7 @@ impl DiagramTab {
                 // A presented page is a slide, turned by a notch as a presented PDF's is.
                 let spring = tab.presenting.get().is_none();
                 let mut push = overshoot.get();
-                let turn = push.scroll(dy, room, swipe, spring);
+                let turn = push.scroll(dy, room, swipe, spring, wheel.current_event_time());
                 overshoot.set(push);
                 match turn {
                     Some(forward) => {
@@ -267,7 +268,7 @@ impl DiagramTab {
                     None => {}
                 }
                 if spring {
-                    tab.rest_after(&overshoot, &resting);
+                    tab.rest_after(&resting);
                 }
                 // At the edge only the margin is left for the scrolled window to scroll, and a
                 // swipe it saw begin would be its own to the end (its `smooth_scroll`), never
@@ -293,23 +294,16 @@ impl DiagramTab {
         self.view.add_controller(wheel);
     }
 
-    /// Let the push go once it has rested for [`REST_MS`], each scroll putting that off: the page
-    /// springs back.
-    fn rest_after(
-        self: &Rc<Self>,
-        overshoot: &Rc<Cell<Overshoot>>,
-        resting: &Rc<RefCell<Option<glib::SourceId>>>,
-    ) {
+    /// Spring the page back once the push has rested for [`REST_MS`], each scroll putting that
+    /// off. The push itself is remembered longer ([`Overshoot::scroll`]).
+    fn rest_after(self: &Rc<Self>, resting: &Rc<RefCell<Option<glib::SourceId>>>) {
         if let Some(rest) = resting.take() {
             rest.remove();
         }
-        let (tab, overshoot, kept) = (Rc::downgrade(self), overshoot.clone(), resting.clone());
+        let (tab, kept) = (Rc::downgrade(self), resting.clone());
         let rest = glib::timeout_add_local_once(Duration::from_millis(REST_MS), move || {
             // Gone by now, so never removed again.
             kept.take();
-            let mut push = overshoot.get();
-            push.rest();
-            overshoot.set(push);
             if let Some(tab) = tab.upgrade() {
                 tab.view.release_pull();
             }
