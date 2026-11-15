@@ -32,8 +32,8 @@ pub use links::{
     path_keys, path_link_keys, pdf_anchor, percent_decode, percent_encode, repage_links,
     rewrite_moved, section, section_end, section_in, slugs, strip_ext,
 };
-pub use page::{Block, Node, Side, page};
-pub(crate) use page::{Part, cut, declare, formulas, math, parts};
+pub use page::{Block, Node, Side, declare, page};
+pub(crate) use page::{Part, cut, formulas, math, parts};
 /// What an org table shares with a pipe table's layout (`crate::org`).
 pub(crate) use table::{Align, Cell, Rules, Table, split};
 pub use table::{TableEdit, TableKey, in_table, table_key};

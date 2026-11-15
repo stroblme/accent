@@ -141,7 +141,7 @@ impl NotebookTab {
             let tab = weak.upgrade()?;
             let page = tab.inline_page()?;
             page.set_margins(0, 0, 0, 0);
-            page.render(&tab.key(), text);
+            page.render_after(&tab.key(), text, &tab.declared.borrow());
             Some(page)
         })
     }
@@ -171,7 +171,8 @@ impl NotebookTab {
             let at = model.position(view.id);
             at.map(|at| model.cells()[at].source().to_string())
         };
-        view.set_rendered(page, &self.key(), &source.unwrap_or_default());
+        let declared = self.declared.borrow();
+        view.set_rendered(page, &self.key(), &source.unwrap_or_default(), &declared);
     }
 
     /// Run `f` on each rendered cell's and output's page: what the window does to every preview.

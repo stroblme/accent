@@ -87,6 +87,8 @@ impl NotebookTab {
             && view.kind == Kind::Markdown
         {
             crate::editor::style_note(&editor.view, &editor.buffer, Syntax::Markdown);
+            self.sync_model();
+            self.redeclare();
         }
         // Typing moves the caret without setting its mark.
         self.follow_caret(id);
@@ -216,6 +218,8 @@ impl NotebookTab {
         }
         if view.kind == Kind::Markdown {
             crate::editor::style_note(&editor.view, buffer, Syntax::Markdown);
+            self.sync_model();
+            self.redeclare();
         }
         self.select(id);
         editor.view.grab_focus();

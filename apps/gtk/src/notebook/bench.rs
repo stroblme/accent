@@ -327,6 +327,24 @@ impl NotebookTab {
         texts
     }
 
+    /// The TeX of each formula typeset on cell `n`'s rendered page, once it has settled.
+    pub fn bench_typeset(&self, n: usize) -> Option<Vec<String>> {
+        let view = self.views.borrow().get(n).cloned()?;
+        let formulas = view.with_rendered(|page| page.settled().then(|| page.formulas()))??;
+        Some(formulas.into_iter().map(|(tex, ..)| tex).collect())
+    }
+
+    /// How many rendered pages, the cells' and the outputs', have a render yet to land, and how
+    /// many wrote a block in their last patch.
+    pub fn bench_pages_busy(&self) -> (usize, usize) {
+        let (mut unsettled, mut written) = (0, 0);
+        self.each_page(&mut |page| {
+            unsettled += usize::from(!page.settled());
+            written += usize::from(page.patched().1 > 0);
+        });
+        (unsettled, written)
+    }
+
     /// Cell `n`'s id.
     pub fn bench_id(&self, n: usize) -> CellId {
         self.views.borrow()[n].id

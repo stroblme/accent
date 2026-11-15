@@ -136,6 +136,9 @@ pub struct NotebookTab {
     font: RefCell<Option<gtk::CssProvider>>,
     /// Its zoom, which its outputs' pictures and formulas are drawn at as the rule sets its text.
     zoom: Rc<Cell<f64>>,
+    /// The operators its markdown cells declare, which every formula in it is read after, the
+    /// outputs' too ([`redeclare`](Self::redeclare)).
+    declared: Rc<RefCell<String>>,
     /// A font change recuts code-cell messages after the new text layout has landed.
     refit_after_layout: Cell<bool>,
     pub save: SaveState,
@@ -302,6 +305,7 @@ fn build(
         kernel: kernel::Hold::default(),
         font: RefCell::default(),
         zoom: Rc::new(Cell::new(1.0)),
+        declared: Rc::default(),
         refit_after_layout: Cell::new(false),
         save,
         autosave: Debounce::new(crate::editor::AUTOSAVE),

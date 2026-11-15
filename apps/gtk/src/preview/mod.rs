@@ -91,16 +91,18 @@ impl PartialEq for Laid {
 #[cfg(feature = "bench")]
 pub static PANIC: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// `text`'s page, in the syntax `rel` is written in. Footnotes are numbered as pulldown-cmark's
-/// HTML writer numbers them: in the order a reference or a definition first names each.
-fn lay(rel: &str, text: &str) -> Vec<Laid> {
+/// `text`'s page, in the syntax `rel` is written in, its formulas read after `declared`. Footnotes
+/// are numbered as pulldown-cmark's HTML writer numbers them: in the order a reference or a
+/// definition first names each.
+fn lay(rel: &str, text: &str, declared: &str) -> Vec<Laid> {
     #[cfg(feature = "bench")]
     if PANIC.load(std::sync::atomic::Ordering::Relaxed) {
         panic!("a panic the drill asked for");
     }
     let mut numbers: HashMap<String, usize> = HashMap::new();
-    Syntax::of(rel)
-        .page(text)
+    let mut blocks = Syntax::of(rel).page(text);
+    markdown::declare(&mut blocks, declared);
+    blocks
         .into_iter()
         .map(|block| {
             let mut notes = Vec::new();
@@ -167,6 +169,8 @@ struct Page {
     shown: RefCell<Vec<Shown>>,
     /// The note and the text last asked for, which an unchanged render skips (refresh T6).
     pub note: RefCell<(String, Rc<str>)>,
+    /// The operators its formulas were last read after ([`Preview::render_after`]).
+    declared: RefCell<Rc<str>>,
     /// The latest render's number: an older one's worker answer, or batch, is dropped.
     generation: Cell<u64>,
     /// Whether the latest render is all in; a scroll asked before waits in `pending`.
@@ -319,6 +323,7 @@ impl Page {
             rises: RefCell::default(),
             shown: RefCell::default(),
             note: RefCell::new((String::new(), "".into())),
+            declared: RefCell::new("".into()),
             generation: Cell::new(0),
             settled: Cell::new(true),
             whole: Cell::new(false),
@@ -396,7 +401,13 @@ impl Preview {
 
     /// Put `text` up, `rel` being the note it is; the same again changes nothing.
     pub fn render(&self, rel: &str, text: &str) {
-        self.page.render(rel, text);
+        self.page.render(rel, text, "");
+    }
+
+    /// [`render`](Self::render) a part of a larger page, its formulas read after `declared`, the
+    /// operators that page declares ([`markdown::declarations`]): a notebook's cell.
+    pub fn render_after(&self, rel: &str, text: &str, declared: &str) {
+        self.page.render(rel, text, declared);
     }
 
     /// Bring source line `line` (1-based) to the top: the start of the element it is in; the
@@ -625,23 +636,25 @@ impl Page {
         figure::restyle(self)
     }
 
-    fn render(self: &Rc<Self>, rel: &str, text: &str) {
+    fn render(self: &Rc<Self>, rel: &str, text: &str, declared: &str) {
         let another = {
             let note = self.note.borrow();
-            if note.0 == rel && &*note.1 == text {
+            if note.0 == rel && &*note.1 == text && &**self.declared.borrow() == declared {
                 return;
             }
             note.0 != rel
         };
         let source: Rc<str> = text.into();
         *self.note.borrow_mut() = (rel.to_string(), source.clone());
+        self.declared.replace(declared.into());
         let generation = self.generation.get() + 1;
         self.generation.set(generation);
         self.settled.set(false);
-        let (rel, text) = (rel.to_string(), text.to_string());
+        let (rel, text, declared) = (rel.to_string(), text.to_string(), declared.to_string());
         let page = Rc::downgrade(self);
         glib::spawn_future_local(async move {
-            let laid = crate::work::caught("preview page", move || lay(&rel, &text)).await;
+            let laid =
+                crate::work::caught("preview page", move || lay(&rel, &text, &declared)).await;
             let Some(page) = page.upgrade() else {
                 return;
             };
@@ -680,12 +693,13 @@ impl Page {
             return self.settle();
         };
         let (rel, text) = self.note.replace((String::new(), "".into()));
+        let declared = self.declared.borrow().clone();
         let title = format!("Cannot Preview {}", crate::doc::file_name(&rel));
         let page = Rc::downgrade(self);
         let why = crate::loading::sentence(why);
         crate::loading::failed(&frame.stack, &title, &why, move || {
             if let Some(page) = page.upgrade() {
-                page.render(&rel, &text);
+                page.render(&rel, &text, &declared);
             }
         });
     }

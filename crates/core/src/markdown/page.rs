@@ -417,7 +417,7 @@ pub(crate) fn formulas<'b>(blocks: &'b [Block<'_>]) -> Vec<&'b str> {
 
 /// Each formula on `blocks` read again after `declarations`, the operators its page declares,
 /// as MathJax keeps them for its page.
-pub(crate) fn declare(blocks: &mut [Block<'_>], declarations: &str) {
+pub fn declare(blocks: &mut [Block<'_>], declarations: &str) {
     if declarations.is_empty() {
         return;
     }

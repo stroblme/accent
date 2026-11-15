@@ -8,12 +8,14 @@
 //! notebook's zoom, as its text is set ([`Figure`]).
 //! A run's new output fades in ([`Outputs::show`]); a right-click on an output offers Copy Output
 //! for it alone ([`copied`]). While the notebook is read, a markdown output is rendered as a note's
-//! preview renders it ([`Outputs::set_render`]).
+//! preview renders it ([`Outputs::set_render`]). Their formulas are read after the operators the
+//! notebook's markdown cells declare ([`Outputs::redeclare`]).
 
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use accent_core::markdown;
 use accent_core::note::Syntax;
 use accent_core::notebook::bound;
 use accent_core::notebook::output::{self as core, Form, Item, Output, Table};
@@ -53,7 +55,8 @@ enum Part {
     Ansi(gtk::TextView),
     /// Markdown as a note's styled text, and its rendered page while the notebook is read.
     Markdown(sourceview5::View, sourceview5::Buffer, Option<Preview>),
-    Latex,
+    /// LaTeX, and its MathML as last read, `None` where it does not parse.
+    Latex(String, Option<String>),
     Table,
     Placeholder,
 }
@@ -72,6 +75,8 @@ pub struct Outputs {
     cleared: Cell<bool>,
     /// What renders a markdown output's text on a page of its own while the notebook is read.
     render: RefCell<Option<Render>>,
+    /// The operators the notebook declares, which the formulas are read after.
+    declared: Rc<RefCell<String>>,
     /// How many outputs have faded in.
     #[cfg(feature = "bench")]
     faded: Cell<usize>,
@@ -104,8 +109,9 @@ struct Stream {
 
 impl Outputs {
     /// The place of `cell`'s outputs, a code cell's, or of the pictures a markdown cell carries,
-    /// held until they are [built](Self::build), at the notebook's `zoom`.
-    pub fn new(cell: &NotebookCell, zoom: Rc<Cell<f64>>) -> Outputs {
+    /// held until they are [built](Self::build), at the notebook's `zoom`, their formulas read
+    /// after the operators it has `declared`.
+    pub fn new(cell: &NotebookCell, zoom: Rc<Cell<f64>>, declared: Rc<RefCell<String>>) -> Outputs {
         let shapes: Vec<Shape> = match cell.kind() {
             Kind::Code => cell.outputs().iter().map(shape).collect(),
             _ => pictures(cell.attachments()).map(picture_shape).collect(),
@@ -126,6 +132,7 @@ impl Outputs {
             zoom,
             cleared: Cell::new(false),
             render: RefCell::default(),
+            declared,
             #[cfg(feature = "bench")]
             faded: Cell::new(0),
         }
@@ -172,6 +179,37 @@ impl Outputs {
             }
         });
         Some(page)
+    }
+
+    /// The operators the notebook declares changed: each markdown output's page rendered again
+    /// after them, `rel` the notebook, and each LaTeX output whose MathML they change typeset
+    /// again in its place.
+    pub fn redeclare(&self, rel: &str) {
+        let declared = self.declared.borrow().clone();
+        for (n, slot) in self.slots.borrow_mut().iter_mut().enumerate() {
+            for part in &mut slot.parts {
+                match part {
+                    Part::Markdown(_, buffer, Some(page)) => {
+                        let (start, end) = buffer.bounds();
+                        page.render_after(rel, &buffer.text(&start, &end, false), &declared);
+                    }
+                    Part::Latex(latex, mathml) => {
+                        let read = self.mathml(latex);
+                        if read == *mathml {
+                            continue;
+                        }
+                        // A LaTeX output is the one widget of its slot.
+                        let widget = self.typeset(latex, read.as_deref());
+                        let old = std::mem::replace(&mut slot.widgets[0], widget.clone());
+                        self.widget.insert_child_after(&widget, Some(&old));
+                        self.widget.remove(&old);
+                        offer_copy(&widget, &copy_menu(n));
+                        *mathml = read;
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 
     /// Run `f` on each markdown output's rendered page.
@@ -372,7 +410,7 @@ impl Outputs {
                     c.pictures += 1;
                     c.recoloured += usize::from(recoloured.get());
                 }
-                Part::Latex => c.latex += 1,
+                Part::Latex(..) => c.latex += 1,
                 Part::Ansi(_) => c.ansi += 1,
                 Part::Table => c.tables += 1,
                 Part::Placeholder => c.placeholders += 1,
@@ -553,16 +591,29 @@ impl Outputs {
     }
 
     fn latex(&self, latex: &str) {
+        let mathml = self.mathml(latex);
+        self.put(&self.typeset(latex, mathml.as_deref()));
+        self.keep(Part::Latex(latex.to_string(), mathml));
+    }
+
+    /// `latex`'s MathML, read after the operators the notebook declares; `None` where it does not
+    /// parse.
+    fn mathml(&self, latex: &str) -> Option<String> {
         let (tex, display) = core::tex(latex);
-        match math::formula(&self.widget, tex, display, 16.0) {
+        markdown::mathml(&format!("{}{tex}", self.declared.borrow()), display)
+    }
+
+    /// LaTeX output `latex` typeset from its `mathml`, else as its source.
+    fn typeset(&self, latex: &str, mathml: Option<&str>) -> gtk::Widget {
+        let display = core::tex(latex).1;
+        match mathml.and_then(|mathml| math::formula_of(&self.widget, mathml, display, 16.0)) {
             Some(formula) => {
                 let view = math::FormulaView::new(formula, self.zoom.clone());
                 view.set_halign(gtk::Align::Start);
-                self.put(&view);
+                view.upcast()
             }
-            None => self.put(&output_view(latex)),
+            None => output_view(latex).upcast(),
         }
-        self.keep(Part::Latex);
     }
 
     /// One line naming what only a script could have shown.
@@ -588,7 +639,7 @@ impl Outputs {
                     crate::editor::sync_scheme(buffer);
                     highlight::restyle(buffer, view);
                 }
-                Part::Latex | Part::Table | Part::Placeholder => {}
+                Part::Latex(..) | Part::Table | Part::Placeholder => {}
             }
         }
     }

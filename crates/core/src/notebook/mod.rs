@@ -23,7 +23,7 @@ pub use ipynb::EMPTY as EMPTY_IPYNB;
 pub use output::{Attachment, Data, Item, Output};
 pub use program::Program;
 
-use crate::{Error, Result, conflict, path};
+use crate::{Error, Result, conflict, markdown, path};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
@@ -557,6 +557,16 @@ impl Notebook {
         sources.join("\n")
     }
 
+    /// The `\DeclareMathOperator`s of the markdown cells' formulas, in the cells' order: what
+    /// every formula of the notebook is read after, a cell's or an output's, as JupyterLab's
+    /// MathJax keeps an operator one cell declares for the whole notebook.
+    pub fn declarations(&self) -> String {
+        (self.cells.iter())
+            .filter(|c| c.kind == Kind::Markdown && c.source.contains("\\DeclareMathOperator"))
+            .map(|c| markdown::declarations(markdown::formulas(&markdown::page(&c.source))))
+            .collect()
+    }
+
     /// Where each cell's source starts in [`sources`](Self::sources).
     pub fn starts(&self) -> Vec<usize> {
         let mut start = 0;
@@ -695,6 +705,30 @@ mod tests {
                 kind: Kind::Raw
             })
             .is_none()
+        );
+    }
+
+    /// Every markdown cell's operators, in the cells' order, the cell using one above it too; a
+    /// code cell's and one in a code span are no formula's.
+    #[test]
+    fn the_declarations_are_every_markdown_cells() {
+        let cell = |kind: &str, source: &str| {
+            format!(r#"{{"cell_type": "{kind}", "metadata": {{}}, "source": [{source:?}]}}"#)
+        };
+        let cells = [
+            cell("markdown", "$\\rank A = \\nul B$"),
+            cell("markdown", "Let $\\DeclareMathOperator{\\rank}{rank}$ be"),
+            cell("code", "s = '$\\DeclareMathOperator{\\code}{code}$'"),
+            cell("markdown", "`$\\DeclareMathOperator{\\span}{span}$`"),
+            cell("markdown", "$$\\DeclareMathOperator*{\\nul}{null}$$"),
+        ];
+        let json = format!(
+            r#"{{"cells": [{}], "metadata": {{}}, "nbformat": 4, "nbformat_minor": 5}}"#,
+            cells.join(", ")
+        );
+        assert_eq!(
+            read("n.ipynb", &json).unwrap().declarations(),
+            "\\DeclareMathOperator{\\rank}{rank}\\DeclareMathOperator*{\\nul}{null}"
         );
     }
 

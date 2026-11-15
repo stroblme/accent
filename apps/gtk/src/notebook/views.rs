@@ -13,8 +13,11 @@ use super::cell::{CellView, Editor};
 
 impl NotebookTab {
     /// Bring the views in line with the model: one per cell in its order, of its kind, holding
-    /// its source. A view the model still has is kept, its caret and its outputs with it.
+    /// its source and rendered after the operators the cells declare. A view the model still has
+    /// is kept, its caret and its outputs with it.
     pub(super) fn reconcile(self: &Rc<Self>) {
+        self.redeclare();
+        let declared = self.declared.borrow().clone();
         let mut old = self.views.take();
         let (mut views, mut new) = (Vec::new(), Vec::new());
         let cells: Vec<(CellId, Kind, String)> = self
@@ -40,7 +43,7 @@ impl NotebookTab {
                 }
                 self.source_changed(&view, &source);
             }
-            view.render_source(&self.key(), &source);
+            view.render_source(&self.key(), &source, &declared);
             views.push(view);
         }
         for gone in old {
@@ -73,6 +76,24 @@ impl NotebookTab {
         self.place_soon();
     }
 
+    /// Read again the operators the markdown cells declare (`Notebook::declarations`), which every
+    /// formula in the notebook is read after; where they changed, each output's formulas are read
+    /// again. A rendered cell's page takes them at its next render ([`reconcile`]), the one way
+    /// the cells of a notebook being read change.
+    ///
+    /// [`reconcile`]: Self::reconcile
+    pub(super) fn redeclare(&self) {
+        let declared = self.model.borrow().declarations();
+        if *self.declared.borrow() == declared {
+            return;
+        }
+        self.declared.replace(declared);
+        let key = self.key();
+        for view in self.views.borrow().iter() {
+            view.outputs.redeclare(&key);
+        }
+    }
+
     pub(super) fn view_of(&self, id: Option<CellId>) -> Option<Rc<CellView>> {
         let id = id?;
         self.views.borrow().iter().find(|v| v.id == id).cloned()
@@ -92,6 +113,7 @@ impl NotebookTab {
                 &model.cells()[at],
                 self.gutter.get(),
                 &self.zoom,
+                &self.declared,
             ))
         };
         // Read, its markdown outputs are rendered as they are built.

@@ -136,8 +136,14 @@ impl Editor {
 
 impl CellView {
     /// `cell`'s widgets, its source shown by a placeholder until [`build_editor`](Self::build_editor),
-    /// its `[n]` column `gutter` wide, its outputs at the notebook's `zoom`.
-    pub fn new(cell: &Cell, gutter: i32, zoom: &Rc<std::cell::Cell<f64>>) -> CellView {
+    /// its `[n]` column `gutter` wide, its outputs at the notebook's `zoom` and read after the
+    /// operators it `declared`.
+    pub fn new(
+        cell: &Cell,
+        gutter: i32,
+        zoom: &Rc<std::cell::Cell<f64>>,
+        declared: &Rc<RefCell<String>>,
+    ) -> CellView {
         let count = gtk::Label::builder()
             .label(count_label(cell))
             .width_request(gutter)
@@ -158,7 +164,7 @@ impl CellView {
             },
         );
 
-        let outputs = Outputs::new(cell, zoom.clone());
+        let outputs = Outputs::new(cell, zoom.clone(), declared.clone());
         let body = gtk::Box::new(gtk::Orientation::Vertical, 6);
         body.set_hexpand(true);
         body.append(&placeholder);
@@ -402,15 +408,16 @@ impl CellView {
 
     /// Render `source` on `page` in this markdown cell, out of sight until the render has settled
     /// and [`reveal_rendered`](Self::reveal_rendered) shows it in place of the source; `rel` is
-    /// the notebook, which the page's links are read from.
-    pub fn set_rendered(&self, page: Preview, rel: &str, source: &str) {
+    /// the notebook, which the page's links are read from, and `declared` the operators its
+    /// formulas are read after.
+    pub fn set_rendered(&self, page: Preview, rel: &str, source: &str, declared: &str) {
         page.set_margins(text_start(self.kind, self.gutter.get()), MARGIN, EDGE, EDGE);
         let widget = page.widget().clone();
         widget.set_visible(false);
         widget.set_focusable(false);
         widget.set_hexpand(true);
         self.body.prepend(&widget);
-        page.render(rel, source);
+        page.render_after(rel, source, declared);
         self.rendered.replace(Some(page));
     }
 
@@ -448,10 +455,11 @@ impl CellView {
         }
     }
 
-    /// Render `source` again on the page, if there is one; the same text again changes nothing.
-    pub fn render_source(&self, rel: &str, source: &str) {
+    /// Render `source` again on the page, if there is one, after `declared`; the same text after
+    /// the same operators again changes nothing.
+    pub fn render_source(&self, rel: &str, source: &str, declared: &str) {
         if let Some(page) = self.rendered.borrow().as_ref() {
-            page.render(rel, source);
+            page.render_after(rel, source, declared);
         }
     }
 

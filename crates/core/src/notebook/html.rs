@@ -12,11 +12,7 @@ impl Notebook {
     /// source beside its `[n]`, each output under it in the form [`output::pick`] gives the tab;
     /// a raw cell as preformatted text. A picture goes in as its file is, a `data:` URI.
     pub fn to_html_file(&self, rel: &str) -> String {
-        // JupyterLab's MathJax keeps an operator one cell declares for the whole notebook.
-        let declared: String = (self.cells.iter())
-            .filter(|c| c.kind == Kind::Markdown && c.source.contains("\\DeclareMathOperator"))
-            .map(|c| markdown::declarations(markdown::formulas(&markdown::page(&c.source))))
-            .collect();
+        let declared = self.declarations();
         let mut html = String::new();
         for cell in &self.cells {
             let (class, count) = match (cell.kind, cell.count()) {

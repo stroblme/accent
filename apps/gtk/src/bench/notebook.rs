@@ -4,14 +4,16 @@
 //! click and following the arrows, the marimo notebook kept as written, the long notebook's open
 //! time, memory and editors built, the view kept still as more are built above what shows, its
 //! outputs built as they near the view in the place of placeholders as tall, what a zoom keeps
-//! still, a presented notebook's read-only and rendered, its preview tab, and a notebook of its own
-//! written beside them taking a text tab's editing chords, occurrences, heading markers, spelling
-//! and links in its cells. All under Dark, which recolours the pictures.
+//! still, a presented notebook's read-only and rendered, its preview tab, an operator one cell
+//! declares typeset in another and in a LaTeX output, and a notebook of its own written beside them
+//! taking a text tab's editing chords, occurrences, heading markers, spelling and links in its
+//! cells. All under Dark, which recolours the pictures.
 //! `ACCENT_BENCH_NOTEBOOK_SHOT=<png>` adds a picture of the window with the first notebook open,
 //! and of the long one presented and in its preview tab, for looking at rather than asserting on.
 
 use super::*;
 use crate::notebook::NotebookTab;
+use accent_core::notebook::Edit;
 
 pub(super) fn bench_notebook(app: &Rc<App>, arg: &str) {
     if let Some((rel, dir)) = arg.strip_prefix("look:").and_then(|a| a.split_once(':')) {
@@ -894,6 +896,8 @@ async fn present_drill(app: &Rc<App>) {
     );
     preview_drill(app, &tab).await;
     md_output_drill(app).await;
+    declare_drill(app).await;
+    declare_big_drill(app).await;
 }
 
 /// The notebook's preview tab (Toggle Preview): read only, its markdown cells rendered, the
@@ -995,6 +999,166 @@ async fn md_output_drill(app: &Rc<App>) {
         .is_some_and(|text| text.starts_with("Bold result"));
     app.toggle_preview();
     println!("bench notebook md_output rendered={}", u8::from(rendered));
+}
+
+/// `cells`, a list of cells' JSON, as an `.ipynb` in Python.
+fn ipynb(cells: serde_json::Value) -> String {
+    let metadata = serde_json::json!({"language_info": {"name": "python"}});
+    serde_json::json!({"cells": cells, "metadata": metadata, "nbformat": 4, "nbformat_minor": 5})
+        .to_string()
+}
+
+/// A notebook whose second markdown cell and LaTeX output use the operator its first cell comes
+/// to declare: typed into the first cell, the output is typeset in the notebook and the second
+/// cell in its preview tab; the typing undone, both show their source again.
+async fn declare_drill(app: &Rc<App>) {
+    let rel = "Notebooks/declare.ipynb";
+    let latex = serde_json::json!({"output_type": "display_data", "metadata": {},
+        "data": {"text/latex": ["$\\rank B$"], "text/plain": ["<Math>"]}});
+    let notebook = ipynb(serde_json::json!([
+        {"cell_type": "markdown", "id": "a", "metadata": {}, "source": ["Ranks"]},
+        {"cell_type": "markdown", "id": "b", "metadata": {}, "source": ["$\\rank A$"]},
+        {"cell_type": "code", "execution_count": 1, "id": "c", "metadata": {},
+            "outputs": [latex], "source": ["display(Math(r'\\rank B'))"]},
+    ]));
+    if std::fs::write(app.root().join(rel), notebook).is_err() {
+        return println!("bench notebook declare unwritten");
+    }
+    let Some((tab, _)) = opened(app, rel).await else {
+        return;
+    };
+    // How many LaTeX outputs are typeset, once the one there is is built.
+    let typeset = |tab: &NotebookTab| {
+        let c = tab.counts().3;
+        (c.latex == 1).then_some(c.typeset)
+    };
+    let output = |n: usize, what: &'static str| {
+        let tab = tab.clone();
+        async move {
+            let typeset = until("notebook", what, 5000, || typeset(&tab).filter(|t| *t == n));
+            typeset.await.unwrap_or(1 - n)
+        }
+    };
+    let before = output(0, "declare output").await;
+    tab.bench_type(0, " $\\DeclareMathOperator{\\rank}{rank}$");
+    let declared = output(1, "declare typed").await;
+    // The second cell's formulas typeset in the preview tab, once there are some if `want`, else
+    // once there are none; `None` if that does not come.
+    let second = |want: bool, what: &'static str| {
+        let (app, tab) = (app.clone(), tab.clone());
+        async move {
+            app.toggle_preview();
+            let viewer = until("notebook", what, 5000, || {
+                app.notebook_of(&app.pane())
+                    .filter(|v| !Rc::ptr_eq(v, &tab))
+            });
+            let typeset = match viewer.await {
+                Some(viewer) => {
+                    let cell = until("notebook", what, 5000, || {
+                        viewer.bench_typeset(1).filter(|t| t.is_empty() != want)
+                    });
+                    cell.await
+                }
+                None => None,
+            };
+            app.toggle_preview();
+            typeset
+        }
+    };
+    let cell = second(true, "declare cell").await;
+    // Typing is undone a word at a time.
+    for _ in 0..20 {
+        if tab.bench_source(0) == "Ranks" {
+            break;
+        }
+        tab.undo();
+    }
+    let undone = output(0, "declare undone").await;
+    let undone_cell = second(false, "declare undone cell").await;
+    println!(
+        "bench notebook declare output={before}>{declared}>{undone} cell={cell:?} \
+         undone_cell={undone_cell:?}"
+    );
+}
+
+/// What a changed declaration costs in the preview tab of a notebook of 200 cells, every markdown
+/// cell rendered: the pages rendered again and those of them that changed, the follow's own time,
+/// the time until every page has settled and the longest the main loop was held meanwhile, and
+/// how long reading the notebook's declarations takes.
+async fn declare_big_drill(app: &Rc<App>) {
+    let rel = "Notebooks/declare-big.ipynb";
+    let cells: Vec<serde_json::Value> = (0..200)
+        .map(|i| {
+            let id = format!("{i:08x}");
+            if i % 2 == 1 {
+                let output = serde_json::json!({"name": "stdout", "output_type": "stream",
+                    "text": [format!("{i}\n")]});
+                return serde_json::json!({"cell_type": "code", "execution_count": i, "id": id,
+                    "metadata": {}, "outputs": [output], "source": [format!("print({i})")]});
+            }
+            let mut text = format!("## Part {i}\n\nCell {i}: $x_{{{i}}}^2$, $\\frac{{a}}{{b}}$");
+            if i == 0 {
+                text.push_str(", $\\DeclareMathOperator{\\rank}{rank}$");
+            }
+            if i % 20 == 0 {
+                text.push_str(" and $\\nul N$");
+            }
+            serde_json::json!({"cell_type": "markdown", "id": id, "metadata": {}, "source": [text]})
+        })
+        .collect();
+    if std::fs::write(app.root().join(rel), ipynb(cells.into())).is_err() {
+        return println!("bench notebook declare big unwritten");
+    }
+    let Some((tab, _)) = opened(app, rel).await else {
+        return;
+    };
+    app.toggle_preview();
+    let viewer = until("notebook", "declare big preview", 5000, || {
+        app.notebook_of(&app.pane())
+            .filter(|v| !Rc::ptr_eq(v, &tab))
+    });
+    let Some(viewer) = viewer.await else {
+        return;
+    };
+    // A find renders every markdown cell.
+    viewer.find("Cell", Default::default());
+    let all = until("notebook", "declare big rendered", 30_000, || {
+        viewer.bench_rendered() == 100 && viewer.bench_pages_busy().0 == 0
+    });
+    all.await;
+    viewer.find_clear();
+    let rendered = viewer.bench_rendered();
+    let mut notebook = tab.snapshot();
+    let t = Instant::now();
+    for _ in 0..100 {
+        std::hint::black_box(notebook.declarations());
+    }
+    let read_us = ms_since(t) * 10.0;
+    let text = format!(
+        "{}$\\DeclareMathOperator{{\\nul}}{{null}}$",
+        tab.bench_source(0)
+    );
+    let id = tab.bench_id(0);
+    notebook.apply(Edit::Source { id, text });
+    let t = Instant::now();
+    viewer.follow(notebook, &[]);
+    let follow_ms = ms_since(t);
+    let relaid = viewer.bench_pages_busy().0;
+    let (mut held_ms, mut last) = (0.0f64, Instant::now());
+    while viewer.bench_pages_busy().0 > 0 && t.elapsed() < Duration::from_secs(30) {
+        glib::timeout_future(Duration::from_millis(2)).await;
+        held_ms = held_ms.max(ms_since(last));
+        last = Instant::now();
+    }
+    let settled_ms = ms_since(t);
+    let written = viewer.bench_pages_busy().1;
+    let typeset = viewer.bench_typeset(20).map_or(0, |t| t.len());
+    app.toggle_preview();
+    println!(
+        "bench notebook declare big rendered={rendered} relaid={relaid} written={written} \
+         typeset={typeset} follow_ms={follow_ms:.1} settled_ms={settled_ms:.0} \
+         held_ms={held_ms:.0} read_us={read_us:.0}"
+    );
 }
 
 /// The notebook the parity step writes: a markdown cell whose heading markers hang and whose link
