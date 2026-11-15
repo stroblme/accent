@@ -75,7 +75,31 @@ pub(super) fn rectangle(b: Rect, style: &Resolved) -> Vec<PathCmd> {
     if !style.flag("rounded", false) {
         return rect(b);
     }
-    round_rect(b, rectangle_corner(b, style))
+    let r = rectangle_corner(b, style);
+    match crate::comic::is_comic(style) {
+        true => hand_round_rect(b, r),
+        false => round_rect(b, r),
+    }
+}
+
+/// A rounded rectangle drawn by hand, which draw.io draws as lines and quadratic corners for
+/// the lines to wobble, where SVG's would be one element (`mxRectangleShape.paintBackground`'s
+/// override in Shapes.js 1906-1964).
+fn hand_round_rect(b: Rect, r: f64) -> Vec<PathCmd> {
+    let (x0, y0, x1, y1) = (b.x, b.y, b.right(), b.bottom());
+    let p = Point::new;
+    vec![
+        PathCmd::MoveTo(p(x0 + r, y0)),
+        PathCmd::LineTo(p(x1 - r, y0)),
+        PathCmd::QuadTo(p(x1, y0), p(x1, y0 + r)),
+        PathCmd::LineTo(p(x1, y1 - r)),
+        PathCmd::QuadTo(p(x1, y1), p(x1 - r, y1)),
+        PathCmd::LineTo(p(x0 + r, y1)),
+        PathCmd::QuadTo(p(x0, y1), p(x0, y1 - r)),
+        PathCmd::LineTo(p(x0, y0 + r)),
+        PathCmd::QuadTo(p(x0, y0), p(x0 + r, y0)),
+        PathCmd::Close,
+    ]
 }
 
 /// The corner radius of a rounded `rectangle` in `b`, which [`round_rect`] keeps within half
@@ -519,6 +543,11 @@ mod tests {
         assert!(near(start(path), Point::new(30.0, 20.0)));
         let path = &vertex("rectangle", BOX, &style("rounded=0;", false))[0].path;
         assert_eq!(path, &rect(BOX));
+        // Drawn by hand, its corners are quadratic, at the same radius.
+        let path = &vertex("rectangle", BOX, &style("rounded=1;comic=1;", false))[0].path;
+        assert!(near(start(path), Point::new(16.0, 20.0)));
+        let quads = path.iter().filter(|c| matches!(c, PathCmd::QuadTo(..)));
+        assert_eq!(quads.count(), 4);
     }
 
     #[test]

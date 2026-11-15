@@ -584,6 +584,7 @@ impl Props {
         shape.add(&arc_size);
         shape.add(&effects.fixed);
         shape.add(&divider);
+        shape.add(&effects.sketch);
         shape.add(&shadow);
         shape.add(&opacity);
         shape.add(&rotation);

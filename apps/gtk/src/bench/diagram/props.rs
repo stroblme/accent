@@ -341,6 +341,7 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
             "Arc Size",
             "Fixed Corner Size",
             "Divider",
+            "Sketch",
             "Vertical Text",
             "Text Opacity",
             "Spacing",
@@ -542,6 +543,13 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
                 style("a"),
                 arc.map(|r| r.text().to_string())
             );
+        }
+        // Sketch writes draw.io's comic drawing onto a and takes it, and `comic`, off again.
+        for on in [true, false] {
+            if let Some(sketch) = row("Sketch").and_downcast::<adw::SwitchRow>() {
+                sketch.set_active(on);
+            }
+            println!("bench diagram props sketch on={on} a={:?}", style("a"));
         }
         tab.select(vec!["e".to_string()]);
         set("Start Spacing", 3.0);

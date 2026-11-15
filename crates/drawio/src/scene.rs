@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 
+use crate::comic::{self, Jiggle};
 use crate::geom::{self, PathCmd, Point, Rect};
 use crate::label::{self, Run};
 use crate::marker;
@@ -538,9 +539,11 @@ impl<'a> Builder<'a> {
             Some(_) => Vec::new(),
             None => shapes::vertex(drawn, place.bounds, &style),
         };
+        let mut jiggle = Jiggle::of(&cell.id, &style);
         for (i, mut part) in parts.into_iter().enumerate() {
-            let fill = fill(&style, part.fill, &part.path, &place);
             let stroke = part_stroke(&style, stroke.as_ref(), &part);
+            let stroke = comic::draw(&mut jiggle, &mut part.path, stroke);
+            let fill = fill(&style, part.fill, &part.path, &place);
             if fill.is_none() && stroke.is_none() && !hittable {
                 continue;
             }
@@ -606,6 +609,7 @@ impl<'a> Builder<'a> {
         }
         let mirrored = place.flip_h != place.flip_v;
         let mut shadow = shadow;
+        let mut jiggle = Jiggle::of(&cell.id, style);
         for piece in stencil.draw(place.bounds, style) {
             match piece {
                 Piece::Path {
@@ -614,6 +618,7 @@ impl<'a> Builder<'a> {
                     stroke,
                     opacity,
                 } => {
+                    let stroke = comic::draw(&mut jiggle, &mut path, stroke);
                     let fill = fill(style, ink, &path, place);
                     if fill.is_none() && stroke.is_none() {
                         continue;
@@ -785,18 +790,21 @@ impl<'a> Builder<'a> {
         let opacity = style.num("opacity", 100.0) / 100.0;
         let shadow = style.flag("shadow", false);
         let line = stroke(&style);
+        let mut jiggle = Jiggle::of(&cell.id, &style);
         if style.shape() == "flexArrow" {
             // A band, filled; its outline is stroked only if it has a stroke colour.
             let width = style.num("strokeWidth", 1.0);
-            for (i, part) in shapes::flex_arrow(&points, &style, width)
+            for (i, mut part) in shapes::flex_arrow(&points, &style, width)
                 .into_iter()
                 .enumerate()
             {
+                let stroke = part_stroke(&style, line.as_ref(), &part);
+                let stroke = comic::draw(&mut jiggle, &mut part.path, stroke);
                 self.prims.push(Prim::Path {
                     cell: cell.id.clone(),
                     locked,
                     fill: fill(&style, part.fill, &part.path, &Placement::default()),
-                    stroke: part_stroke(&style, line.as_ref(), &part),
+                    stroke,
                     path: part.path,
                     opacity,
                     shadow: shadow && i == 0,
@@ -809,25 +817,29 @@ impl<'a> Builder<'a> {
                 self.head(&style, &mut points, false, &line),
                 self.head(&style, &mut points, true, &line),
             ];
+            let mut path = shapes::edge_line(&points, &style);
+            let stroke = comic::draw(&mut jiggle, &mut path, Some(line.clone()));
             self.prims.push(Prim::Path {
                 cell: cell.id.clone(),
                 locked,
-                path: shapes::edge_line(&points, &style),
+                path,
                 fill: None,
-                stroke: Some(line.clone()),
+                stroke,
                 opacity,
                 shadow,
             });
-            for head in heads.into_iter().flatten().flatten() {
+            for mut head in heads.into_iter().flatten().flatten() {
+                let stroke = Stroke {
+                    dash: None,
+                    ..line.clone()
+                };
+                let stroke = comic::draw(&mut jiggle, &mut head.path, Some(stroke));
                 self.prims.push(Prim::Path {
                     cell: cell.id.clone(),
                     locked,
                     path: head.path,
                     fill: head.fill.map(Paint::Solid),
-                    stroke: Some(Stroke {
-                        dash: None,
-                        ..line.clone()
-                    }),
+                    stroke,
                     opacity,
                     shadow: false,
                 });
@@ -1562,6 +1574,51 @@ mod tests {
         assert!(strokes.iter().all(|s| s.width == 3.0 && s.color == red));
         assert_eq!(strokes[0].dash, Some(vec![9.0, 9.0]), "in widths");
         assert_eq!(strokes[1].dash, None);
+    }
+
+    #[test]
+    fn a_comic_cell_wobbles_where_it_is_and_draws_its_lines_round() {
+        let drawn = |dx: f64, style: &str| {
+            let rect = Rect::new(dx, 0.0, 100.0, 40.0);
+            let edge = Cell::new_edge(
+                "e",
+                "1",
+                (None, Point::new(dx, 100.0)),
+                (None, Point::new(dx + 100.0, 100.0)),
+                &format!("edgeStyle=none;{style}"),
+            );
+            let s = scene(&page(vec![
+                Cell::new_vertex("a", "1", rect, style, ""),
+                edge,
+            ]));
+            let paths: Vec<(Vec<PathCmd>, Option<Stroke>)> = s
+                .prims
+                .into_iter()
+                .filter_map(|p| match p {
+                    Prim::Path { path, stroke, .. } => Some((path, stroke)),
+                    _ => None,
+                })
+                .collect();
+            paths
+        };
+        let comic = "sketch=1;sketchStyle=comic;";
+        let (plain, drawn_by_hand) = (drawn(0.0, ""), drawn(0.0, comic));
+        assert_eq!(drawn_by_hand.len(), 3, "the box, the line and its head");
+        for ((plain, _), (by_hand, stroke)) in plain.iter().zip(&drawn_by_hand) {
+            assert!(by_hand.len() > plain.len());
+            let stroke = stroke.as_ref().unwrap();
+            assert_eq!((stroke.cap, stroke.join), (Cap::Round, Join::Round));
+        }
+        assert_eq!(drawn_by_hand, drawn(0.0, comic), "the same every time");
+        // Moved, it wobbles as it did where it was.
+        for ((here, _), (there, _)) in drawn_by_hand.iter().zip(&drawn(50.0, comic)) {
+            let (a, b) = (
+                geom::path_bounds(here).unwrap(),
+                geom::path_bounds(there).unwrap(),
+            );
+            assert_eq!(here.len(), there.len());
+            assert!((a.x + 50.0 - b.x).abs() < 1e-9 && (a.w - b.w).abs() < 1e-9 && a.h == b.h);
+        }
     }
 
     #[test]

@@ -7,6 +7,7 @@
 
 mod base64;
 pub mod clipboard;
+mod comic;
 pub mod edit;
 pub mod entities;
 pub mod geom;
@@ -26,6 +27,7 @@ pub mod style;
 pub mod text;
 mod xml;
 
+pub use comic::is_comic;
 pub use edit::{Editor, ZOrder};
 pub use geom::{PathCmd, Point, Rect};
 pub use label::{Marks, Run};
