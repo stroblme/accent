@@ -376,6 +376,23 @@ drill_diagram_links() {
 		'bench nav link presented click page=1 selected=[]'
 }
 
+# What real clicks and bands select among a diagram's groups, as draw.io selects (DESIGN.md,
+# Diagram).
+drill_diagram_select() {
+	launch 60 ACCENT_BENCH_DIAGRAM=select:select.drawio >"$dir/select"
+	has "$dir/select" \
+		'bench diagram select click c ["g"]' \
+		'bench diagram select click c again ["c"]' \
+		'bench diagram select click sibling d ["d"]' \
+		'bench diagram select click c1 ["G"]' \
+		'bench diagram select click c1 again ["g1"]' \
+		'bench diagram select click c1 a third time ["c1"]' \
+		'bench diagram select click c again moving 2 px ["c"]' \
+		'bench diagram select first click p1 ["p"]' \
+		'bench diagram select first click t1 ["t1"]' \
+		'bench diagram select first click xl ["xl"]'
+}
+
 # Ctrl+V with a browser's HTML on the clipboard, and Paste as Plain Text, in a note (beside its code
 # block, table and front matter too), an org note, a code tab, a note renamed between markdown and
 # org, a notebook's cells and a diagram.

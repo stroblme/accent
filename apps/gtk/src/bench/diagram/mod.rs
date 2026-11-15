@@ -10,6 +10,7 @@ mod output;
 mod pictures;
 mod props;
 mod round;
+mod select;
 
 /// A two-page diagram with a shape, an ellipse, an edge between them, a formula, a label of text
 /// and formulas, and a bracket and a text turned a quarter each way.
@@ -62,6 +63,7 @@ pub(super) const SAMPLE: &str = r#"<mxfile host="accent">
 /// - `=present:<rel>,<pdf>`, `=look:<rel>:<dir>`, `=export:<rel>:<dir>`, `=props:<rel>`,
 ///   `=layers:<rel>` and `=web:<rel>:<url>` probe presentation, recolouring, output,
 ///   Properties, Layers and web images through the corresponding helpers.
+/// - `=select:<rel>` writes groups to `<rel>` and prints what real clicks and bands select.
 ///
 /// `ACCENT_BENCH_DIAGRAM_SHOT=<png>` adds a picture of the window to the plain round, `props:`,
 /// `layers:` and `hold:`, for looking at.
@@ -83,6 +85,9 @@ pub(super) fn bench_diagram(app: &Rc<App>, arg: &str) {
     }
     if let Some(rel) = arg.strip_prefix("props:") {
         return props::props(app, rel);
+    }
+    if let Some(rel) = arg.strip_prefix("select:") {
+        return select::select(app, rel);
     }
     if let Some((rel, dir)) = arg.strip_prefix("export:").and_then(|a| a.split_once(':')) {
         return output::export(app, rel, Path::new(dir));

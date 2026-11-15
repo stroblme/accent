@@ -846,9 +846,11 @@ impl Sheet {
     }
 
     /// Whether a click on `id`, with nothing above it selected, selects its group instead, as
-    /// draw.io's first click does (`mxGraphHandler.isPropagateSelectionCell`): not while a
-    /// sibling is selected (`isSiblingSelected`), and not out of a container unless `id` is a
-    /// label or a part of it. A table's rows and cells always go on to the table (`Editor.js`).
+    /// draw.io's first click does (`mxGraphHandler.isPropagateSelectionCell`, as `Graph.js`
+    /// and `Editor.js` change it): always out of a parent with `selectParentFirst=1` and never
+    /// out of one with `transparentBounds=1` or out of a connector, else not while a sibling is
+    /// selected (`isSiblingSelected`), and not out of a container unless `id` is a label or a
+    /// part of it. A table's rows and cells always go on to the table.
     fn climbs(&self, id: &str, selection: &[CellId]) -> bool {
         let Some(parent) = self.parent(id) else {
             return false;
@@ -863,6 +865,16 @@ impl Sheet {
         let sibling = selection
             .iter()
             .any(|s| s != id && self.parent(s) == Some(parent));
+        let says = |key: &str| {
+            let cell = self.page.cell(parent);
+            cell.is_some_and(|c| c.style.resolve(c.edge).get(key) == Some("1"))
+        };
+        if says("selectParentFirst") {
+            return !sibling;
+        }
+        if says("transparentBounds") || self.is_edge(parent) {
+            return false;
+        }
         let attached = self.page.cell(id).is_some_and(|c| {
             c.geometry.as_ref().is_some_and(|g| g.relative)
                 || c.style.resolve(c.edge).get("part") == Some("1")
@@ -1179,6 +1191,32 @@ mod tests {
         // A table's cell goes to its table, a sibling selected or not.
         assert_eq!(first(Point::new(330.0, 10.0), &[]), "t");
         assert_eq!(first(Point::new(330.0, 10.0), &["x"]), "t");
+    }
+
+    #[test]
+    fn a_first_click_climbs_as_draw_io_s_select_parent_first_transparent_bounds_and_labels_say() {
+        let xml = r#"<mxfile><diagram name="P" id="p"><mxGraphModel><root>
+            <mxCell id="0"/><mxCell id="1" parent="0"/>
+            <mxCell id="s" parent="1" vertex="1" style="swimlane;selectParentFirst=1;"><mxGeometry x="0" y="0" width="50" height="50" as="geometry"/></mxCell>
+            <mxCell id="e" parent="s" vertex="1" style=""><mxGeometry x="0" y="30" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="f" parent="s" vertex="1" style=""><mxGeometry x="20" y="30" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="b" parent="1" vertex="1" style="group;transparentBounds=1;"><mxGeometry as="geometry"/></mxCell>
+            <mxCell id="c" parent="b" vertex="1" style=""><mxGeometry x="100" y="0" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="x" parent="1" edge="1" style=""><mxGeometry relative="1" as="geometry"><mxPoint x="200" y="0" as="sourcePoint"/><mxPoint x="200" y="50" as="targetPoint"/></mxGeometry></mxCell>
+            <mxCell id="l" value="Label" parent="x" vertex="1" style="edgeLabel;"><mxGeometry relative="1" as="geometry"><mxPoint as="offset"/></mxGeometry></mxCell>
+            </root></mxGraphModel></diagram></mxfile>"#;
+        let file = accent_drawio::File::from_bytes(xml.as_bytes()).unwrap();
+        let sheet = Sheet::of(&file.pages()[0], &Context::default());
+        let ids = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        let first = |p: Point, selected: &[&str]| sheet.pick(p, 1.0, &ids(selected)).unwrap().cell;
+        // A swimlane asking to be selected first is, though it holds its shapes, but not while
+        // one of them is selected.
+        assert_eq!(first(Point::new(5.0, 35.0), &[]), "s");
+        assert_eq!(first(Point::new(5.0, 35.0), &["f"]), "e");
+        // A shape in a group whose bounds are its shapes' at once.
+        assert_eq!(first(Point::new(105.0, 5.0), &[]), "c");
+        // A connector's own label is its own.
+        assert!(!sheet.climbs("l", &[]));
     }
 
     #[test]
