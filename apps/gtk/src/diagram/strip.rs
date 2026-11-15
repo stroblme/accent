@@ -72,9 +72,11 @@ glib::wrapper! {
 }
 
 impl PageStrip {
-    /// A strip of no pages yet, and the scrolled window it is shown in.
-    pub fn new() -> (PageStrip, gtk::ScrolledWindow) {
+    /// A strip of no pages yet, drawing the pictures `cache` holds (the canvas's, shared), and
+    /// the scrolled window it is shown in.
+    pub fn new(cache: Cache) -> (PageStrip, gtk::ScrolledWindow) {
         let strip: PageStrip = glib::Object::new();
+        *strip.imp().cache.borrow_mut() = cache;
         let scroller = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vexpand(true)
@@ -132,8 +134,15 @@ impl PageStrip {
 
     /// Draw the pictures the diagram links from the web, as the canvas does once allowed.
     pub fn set_web(&self, on: bool) {
-        self.imp().cache.set_web(on);
+        self.imp().cache.borrow().set_web(on);
         self.forget();
+    }
+
+    /// How many thumbnails are painted, for a drill.
+    #[cfg(feature = "bench")]
+    pub fn painted(&self) -> usize {
+        let thumbs = self.imp().thumbs.borrow();
+        thumbs.iter().filter(|t| t.painted).count()
     }
 
     /// Frame `page`, the one the canvas shows.
@@ -175,13 +184,15 @@ impl PageStrip {
         let (first, last) = (page_at(&layout, top), page_at(&layout, top + height));
         let mut thumbs = imp.thumbs.borrow_mut();
         let picked = imp.picked.borrow();
-        for (i, rect) in layout.pages.iter().enumerate().take(last + 1).skip(first) {
-            let Some(thumb) = thumbs.get_mut(i) else {
-                break;
-            };
-            let framed = crate::organize::framed(&picked, imp.framed.get(), i);
-            self.paint_page(snapshot, thumb, *rect, framed);
-        }
+        imp.cache.borrow().on_screen(|| {
+            for (i, rect) in layout.pages.iter().enumerate().take(last + 1).skip(first) {
+                let Some(thumb) = thumbs.get_mut(i) else {
+                    break;
+                };
+                let framed = crate::organize::framed(&picked, imp.framed.get(), i);
+                self.paint_page(snapshot, thumb, *rect, framed);
+            }
+        });
     }
 
     /// One page into `rect`, painted first if it has not been since it changed.
@@ -195,15 +206,17 @@ impl PageStrip {
         let imp = self.imp();
         let tint = imp.tint.get();
         if !thumb.painted {
-            imp.cache.forget();
-            imp.cache.declare(&thumb.scene().prims);
+            let cache = imp.cache.borrow();
+            cache.forget();
+            cache.declare(&thumb.scene().prims);
             let drawn = gtk::Snapshot::new();
             let frame = Frame::default();
             for (j, prim) in thumb.scene().prims.iter().enumerate() {
-                paint::prim(&drawn, self.upcast_ref(), j, prim, &frame, &imp.cache, tint);
+                paint::prim(&drawn, self.upcast_ref(), j, prim, &frame, &cache, tint);
             }
             thumb.node = drawn.to_node();
-            thumb.painted = true;
+            // Painted again once the pictures still being decoded have landed.
+            thumb.painted = !cache.waiting();
         }
         let bounds = graphene::Rect::new(rect.x, rect.y, rect.w, rect.h);
         // As round as the buttons over its corners (`organize::CORNER`).
@@ -279,8 +292,9 @@ mod imp {
         /// The pages framed in its place, while any are picked.
         pub(super) picked: RefCell<Vec<usize>>,
         pub(super) tint: Cell<Tint>,
-        /// Label layouts and decoded pictures, kept across the pages painted.
-        pub(super) cache: Cache,
+        /// Label layouts, kept across the pages painted, and the canvas's pictures
+        /// (`Cache::sharing`).
+        pub(super) cache: RefCell<Cache>,
     }
 
     #[glib::object_subclass]

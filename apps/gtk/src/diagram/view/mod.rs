@@ -346,6 +346,11 @@ impl DiagramView {
         self.set_scroll((c.x + c.w / 2.0 - w / 2.0, c.y + c.h / 2.0 - h / 2.0));
     }
 
+    /// A cache sharing the canvas's pictures, for the Outline's thumbnails.
+    pub fn pictures(&self) -> Cache {
+        self.imp().cache.sharing()
+    }
+
     /// The copies of the SVG pictures drawn on the page, for a drill.
     #[cfg(feature = "bench")]
     pub fn svg_copies(&self) -> Vec<super::sharp::Want> {

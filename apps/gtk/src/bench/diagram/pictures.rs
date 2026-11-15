@@ -236,11 +236,13 @@ fn pictures_sample() -> String {
     )
 }
 
-/// `=pictures:<rel>`: turn from a blank page to one of [`PICTURES`] pictures (`rel`, written from
-/// [`pictures_sample`] if absent) and time every frame of the canvas on the main thread, from
-/// its frame clock's before-paint to its after-paint, until each picture is drawn: how many
-/// frames, the worst and their sum, and when the last picture was drawn after the turn.
-pub(super) fn pictures(app: &Rc<App>, rel: &str) {
+/// `=pictures:<rel>[:outline]`: turn from a blank page to one of [`PICTURES`] pictures (`rel`,
+/// written from [`pictures_sample`] if absent) and time every frame of the canvas on the main
+/// thread, from its frame clock's before-paint to its after-paint, until each picture is drawn:
+/// how many frames, the worst and their sum, and when the last picture was drawn after the turn.
+/// With `:outline` the Outline pane is shown as the page turns, and its thumbnails are waited for
+/// too.
+pub(super) fn pictures(app: &Rc<App>, rel: &str, outline: bool) {
     let path = app.root().join(rel);
     if !path.exists() {
         std::fs::write(&path, pictures_sample()).expect("write the sample diagram");
@@ -268,8 +270,14 @@ pub(super) fn pictures(app: &Rc<App>, rel: &str) {
             }
         });
         let turned = Instant::now();
+        if outline {
+            app.show_pane("outline");
+        }
         tab.show_page(1);
-        while tab.pictures_drawn() < PICTURES && turned.elapsed() < Duration::from_secs(10) {
+        let thumbs = || tab.thumbs_painted() == tab.page_count() || !outline;
+        while (tab.pictures_drawn() < PICTURES || !thumbs())
+            && turned.elapsed() < Duration::from_secs(10)
+        {
             glib::timeout_future(Duration::from_millis(2)).await;
         }
         let drawn_ms = ms_since(turned);
@@ -280,9 +288,11 @@ pub(super) fn pictures(app: &Rc<App>, rel: &str) {
         let worst = frames.iter().copied().fold(0.0, f64::max);
         let shown: Vec<String> = frames.iter().map(|ms| format!("{ms:.1}")).collect();
         println!(
-            "bench diagram pictures drawn={}/{PICTURES} frames={} worst_ms={worst:.1} \
+            "bench diagram pictures drawn={}/{PICTURES} thumbs={}/{} frames={} worst_ms={worst:.1} \
              sum_ms={:.1} drawn_ms={drawn_ms:.0} each_ms=[{}]",
             tab.pictures_drawn(),
+            tab.thumbs_painted(),
+            tab.page_count(),
             frames.len(),
             frames.iter().sum::<f64>(),
             shown.join(",")

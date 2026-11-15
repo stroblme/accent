@@ -1380,8 +1380,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Fills, lines, text, formulas and SVG pictures stay vectors in the PDF and the SVG, and any other picture goes in at three pixels a unit.
   The chooser offers draw.io's names: `flow.pdf`, and `flow-Page-2.png` for a page of several.
   The status bar and the toast say the work as a note's do.
-- The canvas decodes a picture on a worker the first time it shows it, one picture after another, with its dashed box showing until it lands, so a page of many pictures, or one scrolled into view, shows without waiting for them.
-  An export, a printout and a note's embed decode theirs at once.
+- The canvas and the Outline's thumbnails decode a picture on a worker the first time either shows it, once for both, one picture after another, with its dashed box showing until it lands, so a page of many pictures, or one scrolled into view, shows without waiting for them.
+  An export, a printout, a note's embed and a link's preview of a page decode theirs at once.
 - An SVG picture is drawn by librsvg, the system's, at the size it is shown on the display, on a worker once the zoom and the scroll have been left alone for 300 ms, while the drawing before is scaled to fit, so a frame only draws textures and a drag keeps its frame rate.
   A picture larger than the view is drawn where it is on screen and half a view round it, so it is sharp at any zoom, while a turned one is drawn whole up to 16 megapixels, past which a deeper zoom enlarges the drawing it has.
   The pictures on screen hold at most 64 megapixels of drawings together, and a picture leaving the screen lets its drawing go.

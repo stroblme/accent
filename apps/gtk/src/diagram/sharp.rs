@@ -2,8 +2,8 @@
 //! part on screen at the display's pixels, rendered on a worker once the view has settled
 //! (`zoom::ZOOM_SETTLE`), the copy before scaled or the picture as decoded (`paint::Picture`)
 //! showing meanwhile, so a frame only ever draws textures. An export draws it as vectors.
-//! A picture of any kind is decoded on a worker too, the first time the canvas paints it
-//! ([`Queue`]).
+//! A picture of any kind is decoded on a worker too, the first time the canvas or the Outline's
+//! thumbnails paint it ([`Queue`]).
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -251,8 +251,8 @@ impl Renders {
     }
 }
 
-/// The canvas's pictures decoded on a worker, one after another in the order the canvas first
-/// painted them, as [`Renders`] draws its copies, so no frame waits for a page of many pictures.
+/// A diagram's pictures decoded on a worker, one after another in the order they were first
+/// painted, as [`Renders`] draws its copies, so no frame waits for a page of many pictures.
 #[derive(Clone, Default)]
 pub struct Queue(Rc<RefCell<Jobs>>);
 

@@ -30,10 +30,18 @@ pub struct Cache {
     /// for a picture on the web not downloaded yet.
     keys: RefCell<HashMap<usize, Option<u64>>>,
     /// By a hash of the data URI or the address, across display lists, so an edit does not
-    /// decode every picture on the page again; shared with the caches [`Cache::carried`] makes.
+    /// decode every picture on the page again; shared with the caches [`Cache::carried`] and
+    /// [`Cache::sharing`] make.
     decoded: Rc<RefCell<HashMap<u64, Decoding>>>,
-    /// Where the canvas's pictures are decoded, one after another, shared as `decoded` is.
+    /// Where pictures are decoded for the screen, one after another, shared as `decoded` is.
     queue: sharp::Queue,
+    /// Whether a picture not decoded yet is asked of the worker, drawn as its box until it lands:
+    /// on the canvas (`begin`) and the Outline's thumbnails on screen (`on_screen`), not in an
+    /// output or a thumbnail taken as a picture.
+    deferred: Cell<bool>,
+    /// Whether a picture painted since `forget` was still being decoded, so the display list is
+    /// to be painted again once it lands.
+    waiting: Cell<bool>,
     /// By prim index: where each label on screen was painted, for finding a label by its text.
     boxes: RefCell<HashMap<usize, Painted>>,
     /// Whether pictures on the web are drawn, from the download cache (`super::web`): the
@@ -66,6 +74,30 @@ impl Cache {
         self.keys.borrow_mut().clear();
         self.boxes.borrow_mut().clear();
         self.declared.take();
+        self.waiting.set(false);
+    }
+
+    /// A cache of its own for the Outline's thumbnails of the same diagram, sharing this one's
+    /// pictures, so each is decoded once and held once.
+    pub fn sharing(&self) -> Cache {
+        Cache {
+            decoded: self.decoded.clone(),
+            queue: self.queue.clone(),
+            ..Cache::default()
+        }
+    }
+
+    /// Run `paint` for the screen, as the canvas paints: a picture not decoded yet is asked of
+    /// the worker, drawn as its box until it lands and the widget painting it is drawn again.
+    pub fn on_screen(&self, paint: impl FnOnce()) {
+        let was = self.deferred.replace(true);
+        paint();
+        self.deferred.set(was);
+    }
+
+    /// Whether a picture painted since `forget` was still being decoded.
+    pub fn waiting(&self) -> bool {
+        self.waiting.get()
     }
 
     /// Read the operators the formulas of `prims`, the display list on screen, declare, unless
@@ -96,6 +128,8 @@ impl Cache {
             keys: kept(&self.keys, keep),
             decoded: self.decoded.clone(),
             queue: self.queue.clone(),
+            deferred: self.deferred.clone(),
+            waiting: Cell::default(),
             boxes: RefCell::default(),
             web: self.web.clone(),
             canvas: Cell::default(),
@@ -106,9 +140,10 @@ impl Cache {
     }
 
     /// Paint the SVG pictures of the canvas's frame `canvas` at its pixels, noting the copies it
-    /// still lacks.
+    /// still lacks, and any picture not decoded yet on the worker.
     pub fn begin(&self, canvas: Canvas) {
         self.canvas.set(Some(canvas));
+        self.deferred.set(true);
         self.wants.borrow_mut().clear();
     }
 
@@ -220,9 +255,9 @@ impl Cache {
         })
     }
 
-    /// The picture prim `index` draws, `None` until it is decoded. The first time, `source`
-    /// says where it comes from: its key in `decoded`, and what reads its type and bytes, or
-    /// `None` for nothing to draw.
+    /// The picture prim `index` draws, `None` until it is decoded, `widget` drawn again once it
+    /// is. The first time, `source` says where it comes from: its key in `decoded`, and what
+    /// reads its type and bytes, or `None` for nothing to draw.
     fn shown<R>(
         &self,
         index: usize,
@@ -235,38 +270,40 @@ impl Cache {
         let known = self.keys.borrow().get(&index).copied();
         let key = known.unwrap_or_else(|| {
             let key = source().map(|(key, read)| {
-                self.ask(key, read, widget);
+                self.ask(key, read);
                 key
             });
             self.keys.borrow_mut().insert(index, key);
             key
         })?;
-        match self.decoded.borrow().get(&key) {
-            Some(Decoding::Done(picture)) => picture.clone(),
-            _ => None,
+        match self.decoded.borrow_mut().get_mut(&key)? {
+            Decoding::Done(picture) => picture.clone(),
+            Decoding::Asked(waiting) => {
+                if !waiting.iter().any(|w| w.upgrade().as_ref() == Some(widget)) {
+                    waiting.push(widget.downgrade());
+                }
+                self.waiting.set(true);
+                None
+            }
         }
     }
 
-    /// Decode what `read` reads as the picture under `key`, unless it has been asked for: for
-    /// an output at once, for the canvas on a worker (`sharp::Queue`), which measures it too
-    /// (`Picture::document`), `widget` drawn again once it lands.
-    fn ask(
-        &self,
-        key: u64,
-        read: impl FnOnce() -> Option<(String, Vec<u8>)> + Send + 'static,
-        widget: &gtk::Widget,
-    ) {
+    /// Decode what `read` reads as the picture under `key`, unless it has been asked for: at
+    /// once, or for the screen on a worker (`sharp::Queue`), which measures it too
+    /// (`Picture::document`), the widgets showing it drawn again once it lands.
+    fn ask(&self, key: u64, read: impl FnOnce() -> Option<(String, Vec<u8>)> + Send + 'static) {
         if self.decoded.borrow().contains_key(&key) {
             return;
         }
         let work = move || read().and_then(|(mime, bytes)| decode(bytes, &mime));
-        if self.canvas.get().is_none() {
+        if !self.deferred.get() {
             let done = Decoding::Done(work().map(Picture::new));
             self.decoded.borrow_mut().insert(key, done);
             return;
         }
-        self.decoded.borrow_mut().insert(key, Decoding::Asked);
-        let (decoded, widget) = (Rc::downgrade(&self.decoded), widget.downgrade());
+        let asked = Decoding::Asked(Vec::new());
+        self.decoded.borrow_mut().insert(key, asked);
+        let decoded = Rc::downgrade(&self.decoded);
         self.queue.push(async move {
             // Not for a tab closed meanwhile.
             if decoded.strong_count() == 0 {
@@ -283,18 +320,20 @@ impl Cache {
                 return;
             };
             let picture = done.flatten().map(Picture::new);
-            decoded.borrow_mut().insert(key, Decoding::Done(picture));
-            if let Some(widget) = widget.upgrade() {
-                widget.queue_draw();
+            let was = decoded.borrow_mut().insert(key, Decoding::Done(picture));
+            if let Some(Decoding::Asked(waiting)) = was {
+                for widget in waiting.iter().filter_map(|w| w.upgrade()) {
+                    widget.queue_draw();
+                }
             }
         });
     }
 }
 
-/// A picture of `Cache::decoded`: being decoded on a worker, or decoded, `None` for one that
-/// does not decode.
+/// A picture of `Cache::decoded`: being decoded on a worker for the widgets waiting on it, or
+/// decoded, `None` for one that does not decode.
 enum Decoding {
-    Asked,
+    Asked(Vec<glib::WeakRef<gtk::Widget>>),
     Done(Option<Rc<Picture>>),
 }
 

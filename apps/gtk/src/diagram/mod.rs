@@ -170,7 +170,7 @@ pub fn open(
     page.set_tooltip(tooltip);
     crate::doc::set_file_icon(&page, key);
 
-    let (strip, thumbs) = strip::PageStrip::new();
+    let (strip, thumbs) = strip::PageStrip::new(view.pictures());
     let organize =
         crate::organize::Organize::new(&thumbs, &strip, crate::doc::Kind::Diagram, &view);
     let pages = file.pages.len();
@@ -1288,6 +1288,12 @@ impl DiagramTab {
     #[cfg(feature = "bench")]
     pub fn pictures_drawn(&self) -> usize {
         self.view.pictures_drawn()
+    }
+
+    /// How many of the Outline's thumbnails are painted, for a drill.
+    #[cfg(feature = "bench")]
+    pub fn thumbs_painted(&self) -> usize {
+        self.strip.painted()
     }
 
     pub fn fit_page(&self) {
