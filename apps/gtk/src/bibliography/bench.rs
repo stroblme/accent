@@ -313,38 +313,35 @@ pub fn run(app: &Rc<App>) {
             &app.window.clone().upcast(),
             "/tmp/accent-bibliography-narrow.png",
         );
-        // Add Reference downloads the new reference's PDF by itself, the switch on by default.
+        // Add Reference reviews on its second page, then downloads the new reference's PDF by
+        // itself, the switch on by default, and a toast offers to open it.
         assert!(app.config.borrow().bibliography_download_pdf);
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/auto.pdf", listener.local_addr().unwrap());
-        std::thread::spawn(move || {
-            use std::io::{Read, Write};
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = Vec::new();
-            let mut byte = [0];
-            while !request.ends_with(b"\r\n\r\n") && stream.read_exact(&mut byte).is_ok() {
-                request.push(byte[0]);
-            }
-            let body = "%PDF-1.4\n% downloaded on add\n";
-            let _ = write!(
-                stream,
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-        });
-        app.review_import(
-            &tab.rel(),
-            "@article{auto,title={Automatic Download},author={Doe, Ada},year=2026}".into(),
-            true,
-            url,
-        );
+        let url = serve("%PDF-1.4\n% downloaded on add\n", false);
+        app.add_reference(&tab.rel());
         glib::timeout_future(Duration::from_millis(200)).await;
-        let dialog = app.window.visible_dialog().expect("reference review");
-        descendant::<gtk::Button>(&dialog.clone().upcast(), |b| {
-            b.label().as_deref() == Some("Add Reference")
-        })
-        .unwrap()
-        .emit_clicked();
+        let dialog = app.window.visible_dialog().expect("add reference");
+        let pages = dialog
+            .child()
+            .and_downcast::<adw::NavigationView>()
+            .unwrap();
+        let page = || pages.visible_page().unwrap().upcast::<gtk::Widget>();
+        let confirm = |page: &gtk::Widget| {
+            descendant::<gtk::Button>(page, |b| b.has_css_class("suggested-action"))
+                .unwrap()
+                .emit_clicked()
+        };
+        descendant::<gtk::TextView>(&page(), |_| true)
+            .unwrap()
+            .buffer()
+            .set_text("@article{auto,title={Automatic Download},author={Doe, Ada},year=2026}");
+        descendant::<gtk::Label>(&page(), |l| l.label() == "PDF URL (optional)")
+            .and_then(|l| l.mnemonic_widget())
+            .and_downcast::<gtk::Entry>()
+            .unwrap()
+            .set_text(&url);
+        confirm(&page());
+        until(|| page().property::<String>("title") == "Review Reference").await;
+        confirm(&page());
         let mut attached = None;
         for _ in 0..100 {
             let bib = Library::parse(&tab.text()).unwrap();
@@ -361,6 +358,38 @@ pub fn run(app: &Rc<App>) {
         }
         let pdf = bib::attachment_path(&tab.rel(), &attached.expect("PDF attached").path).unwrap();
         assert!(vault.read(&pdf).unwrap().0.starts_with("%PDF-"));
+        until(|| app.window.visible_dialog().is_none()).await;
+        let toasted = |said: &str| app.toasts.shown().iter().any(|t| t == said);
+        let name = accent_core::path::basename(&pdf);
+        until(|| toasted(&format!("Downloaded {name}"))).await;
+        assert!(app.doc_for(&pdf).is_none(), "nothing opens unasked");
+        // Download PDF… counts its bytes on the status bar, whose Stop ends it with nothing kept.
+        let bib = Library::parse(&tab.text()).unwrap();
+        let bare = (bib.entries.iter())
+            .position(|e| bib.value(e, "file").is_empty())
+            .unwrap();
+        let key = bib.entries[bare].key.clone();
+        app.download_reference(&tab, bib, bare);
+        glib::timeout_future(Duration::from_millis(200)).await;
+        let dialog = app
+            .window
+            .visible_dialog()
+            .expect("download PDF")
+            .upcast::<gtk::Widget>();
+        let url = serve("%PDF-1.4\n", true);
+        descendant::<gtk::Entry>(&dialog, |_| true)
+            .unwrap()
+            .set_text(&url);
+        descendant::<gtk::Button>(&dialog, |b| b.label().as_deref() == Some("Download"))
+            .unwrap()
+            .emit_clicked();
+        let line = format!("Downloading {key}.pdf… 0.0/1.0 MB");
+        until(|| app.statusbar.progress_text() == line).await;
+        assert!(app.statusbar.transfer_stop().is_visible());
+        app.statusbar.transfer_stop().emit_clicked();
+        until(|| toasted("Download stopped (reference kept)")).await;
+        let bib = Library::parse(&tab.text()).unwrap();
+        assert!(bib.value(&bib.entries[bare], "file").is_empty());
         // The pane reads its file again for a change made elsewhere to it, and for no other file.
         panel.select("project/references.bib");
         vault.write_file("note.md", b"# Note\n").unwrap();
@@ -403,6 +432,32 @@ pub fn run(app: &Rc<App>) {
         );
         app.window.application().unwrap().quit();
     });
+}
+
+/// A one-request PDF server on localhost: `body` under a 200, or under a header promising a
+/// megabyte when `stall`, the rest never coming until the client hangs up.
+fn serve(body: &'static str, stall: bool) -> String {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/paper.pdf", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
+        let mut request = Vec::new();
+        let mut byte = [0];
+        while !request.ends_with(b"\r\n\r\n") && stream.read_exact(&mut byte).is_ok() {
+            request.push(byte[0]);
+        }
+        let length = if stall { 1 << 20 } else { body.len() };
+        let _ = write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n{body}"
+        );
+        let _ = stream.flush();
+        // Read until the client hangs up, as a stopped download does.
+        while stall && stream.read(&mut byte).is_ok_and(|n| n > 0) {}
+    });
+    url
 }
 
 async fn wait_tab(app: &App, path: &str) -> Rc<Tab> {

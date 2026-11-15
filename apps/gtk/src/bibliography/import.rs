@@ -1,5 +1,6 @@
-use super::edit::{apply, field, form_dialog, review};
+use super::edit::{apply, field, form_dialog, form_view, form_window, review};
 use super::*;
+use crate::statusbar::Bytes;
 use accent_core::bib::Attachment;
 
 impl App {
@@ -31,25 +32,40 @@ impl App {
             .xalign(0.0)
             .build();
         form.append(&note);
+        let dialog = form_window("Add Reference");
+        let pages = adw::NavigationView::new();
+        let (toolbar, button, error) = form_view("Review Reference", &form);
+        pages.add(&adw::NavigationPage::new(&toolbar, "Add Reference"));
+        dialog.set_child(Some(&pages));
+        // A DOI's metadata is waited for on the button: greyed, a spinner in its label's room.
+        let label = gtk::Stack::new();
+        label.add_named(&gtk::Label::new(Some("Review Reference")), Some("idle"));
+        label.add_named(&adw::Spinner::new(), Some("busy"));
+        button.set_child(Some(&label));
+        let cancel = gio::Cancellable::new();
+        dialog.connect_closed(glib::clone!(
+            #[strong]
+            cancel,
+            move |_| cancel.cancel()
+        ));
         let app = self.clone();
         let path = path.to_string();
-        let parent = app.clone();
-        form_dialog(
-            &parent,
-            "Add Reference",
-            "Review Reference",
-            &form,
-            move || {
+        button.connect_clicked(glib::clone!(
+            #[weak]
+            pages,
+            move |button| {
+                error.set_text("");
                 let input = input.text().to_string();
                 let raw = raw
                     .text(&raw.start_iter(), &raw.end_iter(), false)
                     .to_string();
                 if input.trim().is_empty() {
-                    Library::parse(&raw).map_err(|e| e.to_string())?;
+                    if let Err(e) = Library::parse(&raw) {
+                        return error.set_text(&e.to_string());
+                    }
                 } else if bib::doi(&input).is_none() {
-                    return Err("Enter a DOI or doi.org URL".into());
+                    return error.set_text("Enter a DOI or doi.org URL");
                 }
-                let (app, path) = (app.clone(), path.clone());
                 let download = download.is_active();
                 if app.config.borrow().bibliography_download_pdf != download {
                     app.config.borrow_mut().bibliography_download_pdf = download;
@@ -58,49 +74,54 @@ impl App {
                     }
                 }
                 let direct = direct.text().to_string();
+                if input.trim().is_empty() {
+                    return app.review_import(&pages, &error, &path, raw, download, direct);
+                }
+                button.set_sensitive(false);
+                label.set_visible_child_name("busy");
+                let (app, path, pages) = (app.clone(), path.clone(), pages.clone());
+                let (button, label, error, cancel) =
+                    (button.clone(), label.clone(), error.clone(), cancel.clone());
                 glib::spawn_future_local(async move {
-                    let fetched = if input.trim().is_empty() {
-                        Ok(raw)
-                    } else {
-                        let (progress, cancel) =
-                            web::progress(&app, "Retrieving Reference Metadata…");
-                        let result = web::metadata(&input, &cancel).await;
-                        let cancelled = cancel.is_cancelled();
-                        progress.close();
-                        if cancelled {
-                            return;
-                        }
-                        result
-                    };
+                    let fetched = web::metadata(&input, &cancel).await;
+                    button.set_sensitive(true);
+                    label.set_visible_child_name("idle");
                     match fetched {
-                        Ok(raw) => app.review_import(&path, raw, download, direct),
-                        Err(why) => app.cannot("retrieve reference", why),
+                        Ok(raw) => app.review_import(&pages, &error, &path, raw, download, direct),
+                        Err(_) if cancel.is_cancelled() => {}
+                        Err(why) => error.set_text(&format!("Cannot retrieve reference: {why}")),
                     }
                 });
-                Ok(())
-            },
-        );
+            }
+        ));
+        dialog.present(Some(&self.window));
     }
 
-    pub(super) fn review_import(
+    /// Add Reference's second page: `raw`'s fields to review, then the entry put into `path` and,
+    /// with `download`, its PDF fetched. What keeps the page from coming is said in `said`, on
+    /// the first page, whose input stays.
+    fn review_import(
         self: &Rc<Self>,
+        pages: &adw::NavigationView,
+        said: &gtk::Label,
         path: &str,
         raw: String,
         download: bool,
         direct: String,
     ) {
+        let (pages, said) = (pages.clone(), said.clone());
         self.with_tab(path, Opened::Kept, "add reference", move |app, tab| {
             let imported = match Library::parse(&raw) {
                 Ok(b) => b,
-                Err(e) => return app.cannot("import reference", e),
+                Err(e) => return said.set_text(&format!("Cannot import reference: {e}")),
             };
             if imported.entries.len() != 1 {
-                return app.toast("Import one reference at a time");
+                return said.set_text("Import one reference at a time");
             }
             let before = tab.text();
             let destination = match Library::parse(&before) {
                 Ok(b) => b,
-                Err(e) => return app.cannot("read bibliography", e),
+                Err(e) => return said.set_text(&format!("Cannot read bibliography: {e}")),
             };
             let doi = imported.value(&imported.entries[0], "doi");
             if let Some(doi) = bib::doi(&doi)
@@ -109,11 +130,10 @@ impl App {
                     .iter()
                     .find(|e| bib::doi(&destination.value(e, "doi")).as_ref() == Some(&doi))
             {
-                app.toast(&format!(
+                return said.set_text(&format!(
                     "{} is already in this bibliography. Use Refresh Metadata or Download PDF.",
                     existing.key
                 ));
-                return;
             }
             let form = dialogs::form();
             let mut proposed = imported
@@ -139,9 +159,11 @@ impl App {
                     .xalign(0.0)
                     .build(),
             );
+            let (toolbar, button, error) = form_view("Add Reference", &form);
+            pages.push(&adw::NavigationPage::new(&toolbar, "Review Reference"));
             let target = tab.clone();
             let parent = app.clone();
-            form_dialog(app, "Review Reference", "Add Reference", &form, move || {
+            let add = move || -> Result<(), String> {
                 let mut text = imported.rename(0, &key.text()).map_err(|e| e.to_string())?;
                 for (name, old, entry) in &rows {
                     if entry.text().as_str() != old {
@@ -157,22 +179,32 @@ impl App {
                 apply(&target, &before, &after)?;
                 let entry = &incoming.entries[0];
                 let doi = bib::doi(&incoming.value(entry, "doi"));
-                let direct = match direct.trim() {
-                    "" => incoming.arxiv_pdf(entry).unwrap_or_default(),
-                    url => url.to_string(),
-                };
+                let arxiv = incoming.arxiv_pdf(entry);
+                let direct = direct.trim().to_string();
                 // Nothing to try without one, as for a manual entry; the switch stays quiet.
-                if download && (doi.is_some() || !direct.is_empty()) {
+                if download && (doi.is_some() || arxiv.is_some() || !direct.is_empty()) {
                     let key = key.text().to_string();
-                    let email = parent.config.borrow().bibliography_unpaywall_email.clone();
                     let rel = pdf_path(&key);
                     // The reference is in already, so a failure is told, not kept in the dialog.
-                    if let Err(why) = parent.fetch_pdf(&target, key, doi, direct, email, rel) {
+                    if let Err(why) = parent.fetch_pdf(&target, key, doi, direct, arxiv, rel) {
                         parent.cannot("download PDF (reference kept)", why);
                     }
                 }
                 Ok(())
-            });
+            };
+            button.connect_clicked(glib::clone!(
+                #[weak]
+                pages,
+                move |_| match add() {
+                    Ok(()) => {
+                        let dialog = pages.ancestor(adw::Dialog::static_type());
+                        if let Some(dialog) = dialog.and_downcast::<adw::Dialog>() {
+                            dialog.close();
+                        }
+                    }
+                    Err(why) => error.set_text(&why),
+                }
+            ));
         });
     }
 
@@ -183,12 +215,12 @@ impl App {
         };
         let app = self.clone();
         let tab = tab.clone();
-        let (progress, cancel) = web::progress(self, "Retrieving Reference Metadata…");
+        let line = format!("Retrieving metadata for {}…", bib.entries[index].key);
         glib::spawn_future_local(async move {
-            let result = web::metadata(&doi, &cancel).await;
-            let cancelled = cancel.is_cancelled();
-            progress.close();
-            if cancelled {
+            let cancel = gio::Cancellable::new();
+            let fetching = web::metadata(&doi, &cancel);
+            let result = web::on_bar(&app, move || line.clone(), &cancel, fetching).await;
+            if cancel.is_cancelled() {
                 return;
             }
             let raw = match result {
@@ -260,7 +292,7 @@ impl App {
         let form = dialogs::form();
         let url = field(
             &form,
-            "PDF URL (optional, uses the arXiv ID or DOI if empty)",
+            "PDF URL (optional, uses the DOI, then the arXiv ID, if empty)",
             "",
         );
         let email = field(
@@ -274,76 +306,109 @@ impl App {
         let parent = self.clone();
         let target = tab.clone();
         form_dialog(self, "Download PDF", "Download", &form, move || {
-            let doi = bib::doi(&bib.value(&bib.entries[index], "doi"));
-            let url = match url.text().trim() {
-                "" => bib.arxiv_pdf(&bib.entries[index]).unwrap_or_default(),
-                url => url.to_string(),
-            };
+            let entry = &bib.entries[index];
+            let doi = bib::doi(&bib.value(entry, "doi"));
             let email = email.text().trim().to_string();
             if parent.config.borrow().bibliography_unpaywall_email != email {
-                parent.config.borrow_mut().bibliography_unpaywall_email = email.clone();
+                parent.config.borrow_mut().bibliography_unpaywall_email = email;
                 if let Some(shell) = parent.shell.upgrade() {
                     shell.save_config_soon();
                 }
             }
-            parent.fetch_pdf(&target, key.clone(), doi, url, email, path.text().into())
+            let url = url.text().trim().to_string();
+            let arxiv = bib.arxiv_pdf(entry);
+            parent.fetch_pdf(&target, key.clone(), doi, url, arxiv, path.text().into())
         });
     }
-    /// Download `key`'s PDF from `url`, or else the DOI's open-access and publisher links, to
-    /// `rel` beside the bibliography, and attach it; failing leaves the reference as it is.
+    /// Download `key`'s PDF to `rel` beside the bibliography and attach it: from `url` alone when
+    /// there is one, else from the DOI's open-access and publisher copies, then from `arxiv`. The
+    /// status bar says how far it has got, its Stop beside it; failing leaves the reference as it is.
     fn fetch_pdf(
         self: &Rc<Self>,
         tab: &Rc<Tab>,
         key: String,
         doi: Option<String>,
         url: String,
-        email: String,
+        arxiv: Option<String>,
         rel: String,
     ) -> Result<(), String> {
         let dest = bib::attachment_path(&tab.rel(), &rel).map_err(|e| e.to_string())?;
-        if url.is_empty() && doi.is_none() {
+        if url.is_empty() && doi.is_none() && arxiv.is_none() {
             return Err("Enter a PDF URL or add a DOI or arXiv ID to the reference".into());
         }
         let Some(vault) = self.vault().cloned() else {
             return Err("Open a vault to download attachments".into());
         };
+        let email = self.config.borrow().bibliography_unpaywall_email.clone();
+        let name = accent_core::path::basename(&dest).to_string();
         let (app, tab) = (self.clone(), tab.clone());
         glib::spawn_future_local(async move {
-            let (progress, cancel) = web::progress(&app, "Downloading PDF…");
-            let urls = match doi {
-                Some(doi) if url.is_empty() => web::pdf_urls(&doi, &email, &cancel).await,
-                _ => Ok(vec![url]),
-            };
-            let bytes = match urls {
-                Ok(urls) => web::pdf(&urls, &cancel).await,
-                Err(e) => Err(e),
-            };
-            let cancelled = cancel.is_cancelled();
-            progress.close();
-            if cancelled {
-                return;
-            }
-            let bytes = match bytes {
-                Ok(bytes) => bytes,
-                Err(why) => return app.cannot("download PDF (reference kept)", why),
+            let cancel = gio::Cancellable::new();
+            let counted = Rc::new(Bytes::default());
+            let finding = Rc::new(Cell::new(url.is_empty() && doi.is_some()));
+            let line = {
+                let (counted, finding) = (counted.clone(), finding.clone());
+                let (looking, what) = (
+                    format!("Finding a PDF for {key}…"),
+                    format!("Downloading {name}"),
+                );
+                move || match finding.get() {
+                    true => looking.clone(),
+                    false => counted.line(&what).unwrap_or_else(|| format!("{what}…")),
+                }
             };
             let saved = dest.clone();
-            let done = work::attempt("save PDF", move || {
-                if let Some(dir) = std::path::Path::new(&saved).parent() {
-                    vault.create_dir(&dir.to_string_lossy(), true)?;
+            let fetching = async {
+                let urls = if url.is_empty() {
+                    let mut urls = match &doi {
+                        Some(doi) => web::pdf_urls(doi, &email, &cancel).await,
+                        None => Vec::new(),
+                    };
+                    urls.extend(arxiv);
+                    urls
+                } else {
+                    vec![url]
+                };
+                finding.set(false);
+                let bytes = web::pdf(&urls, &cancel, &counted).await?;
+                Ok::<_, String>(
+                    work::attempt("save PDF", move || {
+                        if let Some(dir) = std::path::Path::new(&saved).parent() {
+                            vault.create_dir(&dir.to_string_lossy(), true)?;
+                        }
+                        vault.write_file(&saved, &bytes)
+                    })
+                    .await,
+                )
+            };
+            let app = &app;
+            match web::on_bar(app, line, &cancel, fetching).await {
+                // A Stop during the save is too late: the save goes on, and so does this.
+                Err(_) if cancel.is_cancelled() => app.toast("Download stopped (reference kept)"),
+                Err(why) => {
+                    let (weak, key) = (Rc::downgrade(app), key.clone());
+                    let text = format!("Cannot download PDF (reference kept): {why}");
+                    app.toast_with(&text, "Attach PDF…", move || {
+                        if let Some(app) = weak.upgrade()
+                            && let Ok(bib) = Library::parse(&tab.text())
+                            && let Some(index) = bib.entries.iter().position(|e| e.key == key)
+                        {
+                            app.attach_reference(&tab, bib, index);
+                        }
+                    });
                 }
-                vault.write_file(&saved, &bytes)
-            })
-            .await;
-            match done {
-                Ok(()) => match attach(&tab, &key, &rel) {
+                Ok(Err(why)) => app.toast(&why),
+                Ok(Ok(())) => match attach(&tab, &key, &rel) {
                     Ok(()) => {
-                        app.toast("PDF downloaded and attached");
-                        app.open_path(&dest);
+                        let weak = Rc::downgrade(app);
+                        app.toast_with(&format!("Downloaded {name}"), "Open", move || {
+                            if let Some(app) = weak.upgrade() {
+                                app.open_path(&dest);
+                            }
+                        });
                     }
                     Err(why) => app.cannot(&format!("attach downloaded {dest} (file kept)"), why),
                 },
-                Err(why) => app.toast(&why),
             }
         });
         Ok(())

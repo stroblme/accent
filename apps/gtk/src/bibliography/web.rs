@@ -1,5 +1,7 @@
 //! DOI metadata and optional full text are separate, cancellable network operations.
 use super::*;
+use crate::statusbar::Bytes;
+use accent_api::link::Stop;
 use soup::prelude::*;
 
 pub(super) fn session() -> soup::Session {
@@ -13,12 +15,14 @@ pub(super) fn session() -> soup::Session {
     session
 }
 
+/// `url`'s body, at most `limit` bytes, counted into `counted` as they come.
 pub(super) async fn get(
     session: &soup::Session,
     url: &str,
     accept: &str,
     limit: usize,
     cancel: &gio::Cancellable,
+    counted: Option<&Bytes>,
 ) -> Result<Vec<u8>, String> {
     if !url.starts_with("https://") && !url.starts_with("http://") {
         return Err("Use an HTTP or HTTPS URL".into());
@@ -41,6 +45,7 @@ pub(super) async fn get(
         let host = message.uri().and_then(|u| u.host()).unwrap_or_default();
         return Err(format!("{host} answered HTTP {}", message.status_code()));
     }
+    let total = message.response_headers().map_or(0, |h| h.content_length());
     let mut bytes = Vec::new();
     loop {
         if cancel.is_cancelled() {
@@ -60,6 +65,9 @@ pub(super) async fn get(
             return Err("Download exceeds the size limit".into());
         }
         bytes.extend_from_slice(&chunk);
+        if let Some(counted) = counted {
+            counted.set(bytes.len() as u64, total.max(0) as u64);
+        }
     }
     Ok(bytes)
 }
@@ -76,6 +84,7 @@ pub(super) async fn metadata(input: &str, cancel: &gio::Cancellable) -> Result<S
         "application/x-bibtex",
         2 << 20,
         cancel,
+        None,
     )
     .await?;
     let text = String::from_utf8(bytes).map_err(|e| e.to_string())?;
@@ -86,20 +95,21 @@ pub(super) async fn metadata(input: &str, cancel: &gio::Cancellable) -> Result<S
     Ok(text)
 }
 
-pub(super) async fn pdf_urls(
-    doi: &str,
-    email: &str,
-    cancel: &gio::Cancellable,
-) -> Result<Vec<String>, String> {
-    let session = session();
+/// The DOI's open-access copies, Unpaywall's when the reader gave an email, then Crossref's PDF
+/// links. An arXiv DOI is DataCite's, which neither knows, so it is not sent.
+pub(super) async fn pdf_urls(doi: &str, email: &str, cancel: &gio::Cancellable) -> Vec<String> {
     let mut urls = Vec::new();
+    if bib::arxiv_pdf(doi).is_some() {
+        return urls;
+    }
+    let session = session();
     if !email.trim().is_empty() {
         let url = format!(
             "https://api.unpaywall.org/v2/{}?email={}",
             encoded(doi),
             encoded(email.trim())
         );
-        if let Ok(bytes) = get(&session, &url, "application/json", 2 << 20, cancel).await
+        if let Ok(bytes) = get(&session, &url, "application/json", 2 << 20, cancel, None).await
             && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes)
         {
             if let Some(url) = json["best_oa_location"]["url_for_pdf"].as_str() {
@@ -115,7 +125,7 @@ pub(super) async fn pdf_urls(
         }
     }
     let url = format!("https://api.crossref.org/works/{}", encoded(doi));
-    if let Ok(bytes) = get(&session, &url, "application/json", 2 << 20, cancel).await
+    if let Ok(bytes) = get(&session, &url, "application/json", 2 << 20, cancel, None).await
         && let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes)
     {
         for link in json["message"]["link"].as_array().into_iter().flatten() {
@@ -126,19 +136,29 @@ pub(super) async fn pdf_urls(
             }
         }
     }
-    if urls.is_empty() {
-        return Err(
-            "No PDF found. Enter a direct PDF URL or attach a file from your browser.".into(),
-        );
-    }
-    Ok(urls)
+    urls
 }
 
-pub(super) async fn pdf(urls: &[String], cancel: &gio::Cancellable) -> Result<Vec<u8>, String> {
+/// The first of `urls` that answers with a PDF, its bytes counted into `counted`.
+pub(super) async fn pdf(
+    urls: &[String],
+    cancel: &gio::Cancellable,
+    counted: &Bytes,
+) -> Result<Vec<u8>, String> {
     let session = session();
-    let mut error = "No PDF URL".to_string();
+    let mut error =
+        "No PDF found. Enter a direct PDF URL or attach a file from your browser.".to_string();
     for url in urls {
-        match get(&session, url, "application/pdf", 100 << 20, cancel).await {
+        match get(
+            &session,
+            url,
+            "application/pdf",
+            100 << 20,
+            cancel,
+            Some(counted),
+        )
+        .await
+        {
             Ok(bytes) if bytes.windows(5).take(1024).any(|w| w == b"%PDF-") => return Ok(bytes),
             Ok(_) => {
                 error =
@@ -154,38 +174,29 @@ pub(super) async fn pdf(urls: &[String], cancel: &gio::Cancellable) -> Result<Ve
     Err(error)
 }
 
-pub(super) fn progress(app: &App, title: &str) -> (adw::Dialog, gio::Cancellable) {
-    let cancel = gio::Cancellable::new();
-    let dialog = adw::Dialog::builder()
-        .title(title)
-        .content_width(380)
-        .build();
-    let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&adw::HeaderBar::new());
-    let form = dialogs::form();
-    form.set_margin_start(24);
-    form.set_margin_end(24);
-    form.set_margin_top(24);
-    form.set_margin_bottom(24);
-    form.append(&gtk::Label::builder().label(title).wrap(true).build());
-    let stop = gtk::Button::with_label("Cancel");
-    form.append(&stop);
-    toolbar.set_content(Some(&form));
-    dialog.set_child(Some(&toolbar));
-    stop.connect_clicked(glib::clone!(
-        #[weak]
-        dialog,
-        move |_| {
-            dialog.close();
-        }
-    ));
-    dialog.connect_closed(glib::clone!(
-        #[strong]
-        cancel,
-        move |_| cancel.cancel()
-    ));
-    dialog.present(Some(&app.window));
-    (dialog, cancel)
+/// Await `work` with `line()` on the status bar and a Stop beside it that cancels `cancel`, as
+/// a copy's line has.
+pub(super) async fn on_bar<T>(
+    app: &Rc<App>,
+    line: impl Fn() -> String + 'static,
+    cancel: &gio::Cancellable,
+    work: impl std::future::Future<Output = T>,
+) -> T {
+    let stop = Stop::default();
+    let (bar, retold, cancel, stopped) = (app.clone(), app.clone(), cancel.clone(), stop.clone());
+    crate::statusbar::counting(
+        move |text, running| bar.statusbar.set_stoppable(text, running, &stop),
+        move |from, to| retold.statusbar.retell_transfer(from, to),
+        // A Stop only raises its flag, so the bar's tick is where it reaches the request.
+        move || {
+            if stopped.stopped() {
+                cancel.cancel();
+            }
+            Some(line())
+        },
+        work,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -227,32 +238,38 @@ mod tests {
             .with_thread_default(|| {
                 context.block_on(async {
                     let cancel = gio::Cancellable::new();
+                    let counted = Bytes::default();
                     assert!(
-                        pdf(std::slice::from_ref(&url), &cancel)
+                        pdf(std::slice::from_ref(&url), &cancel, &counted)
                             .await
                             .unwrap()
                             .starts_with(b"%PDF-")
                     );
+                    assert_eq!(counted.line("PDF").as_deref(), Some("PDF… 0.0/0.0 MB"));
                     assert!(
-                        pdf(std::slice::from_ref(&url), &cancel)
+                        pdf(std::slice::from_ref(&url), &cancel, &counted)
                             .await
                             .unwrap_err()
                             .contains("web page")
                     );
                     assert!(
-                        get(&session(), &url, "*/*", 3, &cancel)
+                        get(&session(), &url, "*/*", 3, &cancel, None)
                             .await
                             .unwrap_err()
                             .contains("size limit")
                     );
                     assert_eq!(
-                        get(&session(), &url, "*/*", 100, &cancel)
+                        get(&session(), &url, "*/*", 100, &cancel, None)
                             .await
                             .unwrap_err(),
                         "127.0.0.1 answered HTTP 403"
                     );
                     cancel.cancel();
-                    assert!(get(&session(), &url, "*/*", 100, &cancel).await.is_err());
+                    assert!(
+                        get(&session(), &url, "*/*", 100, &cancel, None)
+                            .await
+                            .is_err()
+                    );
                 })
             })
             .unwrap();
@@ -266,7 +283,8 @@ mod tests {
         let context = glib::MainContext::new();
         context
             .with_thread_default(|| {
-                let bytes = context.block_on(pdf(&[url], &gio::Cancellable::new()));
+                let counted = Bytes::default();
+                let bytes = context.block_on(pdf(&[url], &gio::Cancellable::new(), &counted));
                 assert!(bytes.unwrap().starts_with(b"%PDF-"));
             })
             .unwrap();

@@ -8,11 +8,37 @@ pub(super) fn form_dialog(
     body: &impl IsA<gtk::Widget>,
     apply: impl Fn() -> Result<(), String> + 'static,
 ) -> adw::Dialog {
-    let dialog = adw::Dialog::builder()
+    let dialog = form_window(title);
+    let (toolbar, button, error) = form_view(verb, body);
+    dialog.set_child(Some(&toolbar));
+    button.connect_clicked(glib::clone!(
+        #[weak]
+        dialog,
+        move |_| match apply() {
+            Ok(()) => {
+                dialog.close();
+            }
+            Err(why) => error.set_text(&why),
+        }
+    ));
+    dialog.present(Some(&app.window));
+    dialog
+}
+
+pub(super) fn form_window(title: &str) -> adw::Dialog {
+    adw::Dialog::builder()
         .title(title)
         .content_width(660)
         .content_height(560)
-        .build();
+        .build()
+}
+
+/// A form's page: `verb` as the header's suggested button, over an error line and `body`.
+/// [`form_dialog`] shows one alone; Add Reference stacks two.
+pub(super) fn form_view(
+    verb: &str,
+    body: &impl IsA<gtk::Widget>,
+) -> (adw::ToolbarView, gtk::Button, gtk::Label) {
     let toolbar = adw::ToolbarView::new();
     let header = adw::HeaderBar::new();
     let button = gtk::Button::with_label(verb);
@@ -34,19 +60,7 @@ pub(super) fn form_dialog(
         .build();
     crate::widgets::smooth_wheel(&scroller);
     toolbar.set_content(Some(&scroller));
-    dialog.set_child(Some(&toolbar));
-    button.connect_clicked(glib::clone!(
-        #[weak]
-        dialog,
-        move |_| match apply() {
-            Ok(()) => {
-                dialog.close();
-            }
-            Err(why) => error.set_text(&why),
-        }
-    ));
-    dialog.present(Some(&app.window));
-    dialog
+    (toolbar, button, error)
 }
 
 pub(super) fn field(form: &gtk::Box, name: &str, value: &str) -> gtk::Entry {

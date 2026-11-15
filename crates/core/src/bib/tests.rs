@@ -76,6 +76,7 @@ fn arxiv_identifiers_map_to_arxivs_own_pdf() {
     ] {
         assert_eq!(arxiv_pdf(input), None, "{input}");
     }
+    // `c`'s arXiv copy is found beside its publisher DOI; a download tries it after the DOI's.
     let bib = Library::parse(
         "@misc{a,eprint={2611.11858},archivePrefix={arXiv}}\n@misc{b,eprint={hep-th/9901001},eprinttype={arxiv}}\n@misc{c,doi={10.1103/x},url={https://arxiv.org/abs/2611.11858}}\n@misc{d,eprint={2611.11858},archivePrefix={HAL}}\n@misc{e,doi={10.1103/x}}",
     )
