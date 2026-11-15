@@ -5,8 +5,9 @@ use super::*;
 
 /// Probe Properties on the sample: position/size after nudging, burst edits as one
 /// undo, hover-revealed buttons, Copy/Paste Position and Style, wrong-type paste toasts, the
-/// line rows an arrow and a shape share, the rows of a flex arrow and a swimlane, Flip of an
-/// arrow and of a box placed by fractions, and Custom picked and typed by XTEST, as saved.
+/// line rows an arrow and a shape share, the rows of a flex arrow and a swimlane, a free line's
+/// ends dragged and typed, Flip of an arrow and of a box placed by fractions, and Custom picked
+/// and typed by XTEST, as saved.
 /// Create the sample at `rel` if absent.
 pub(super) fn props(app: &Rc<App>, rel: &str) {
     let path = app.root().join(rel);
@@ -605,6 +606,99 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
         glib::timeout_future(Duration::from_millis(600)).await;
         println!("bench diagram props flex style={:?}", style(&flex));
         pane_shot("flex");
+
+        // A free line's ends as numbers, draw.io's Line Start and Line End, a line on shapes
+        // having none: the rows follow its end dragged by XTEST, and End X typed shows on the
+        // canvas, lands with Return as one step and is the file's targetPoint once saved.
+        let end_row = |group: &str, title: &str| {
+            let group = find_widget(&pane, &|w| {
+                w.downcast_ref::<adw::PreferencesGroup>()
+                    .is_some_and(|g| g.title() == group)
+            })?;
+            find_widget(&group, &|w| {
+                w.downcast_ref::<adw::SpinRow>()
+                    .is_some_and(|r| r.title() == title)
+            })
+            .and_downcast::<adw::SpinRow>()
+        };
+        let end_rows = || {
+            let rows = [("Start", "X"), ("Start", "Y"), ("End", "X"), ("End", "Y")];
+            rows.map(|(end, axis)| {
+                let row = end_row(&format!("Line {end}"), axis).filter(|r| r.is_mapped())?;
+                Some(row.text().to_string())
+            })
+        };
+        tab.select(vec!["e".to_string()]);
+        println!("bench diagram props ends joined={:?}", end_rows());
+        tab.select(vec![flex.clone()]);
+        println!(
+            "bench diagram props ends free rows={:?} model={:?}",
+            end_rows(),
+            ends(&flex)
+        );
+        let handle = ends(&flex)
+            .and_then(|(_, end)| end)
+            .and_then(|at| screen(accent_drawio::Rect::new(at.x, at.y, 0.0, 0.0)));
+        if let (Some(from), Some(on), Some(to)) = (
+            point(handle.clone(), 0.0, 0.0),
+            point(handle.clone(), 15.0, 10.0),
+            point(handle, 30.0, 20.0),
+        ) {
+            super::super::git::xtest(&format!(
+                "move {from}; down; move {on}; sleep 0.1; move {to}"
+            ))
+            .await;
+            println!(
+                "bench diagram props ends dragged rows={:?} model={:?}",
+                end_rows(),
+                ends(&flex)
+            );
+            super::super::git::xtest("up").await;
+            println!(
+                "bench diagram props ends dropped rows={:?} model={:?}",
+                end_rows(),
+                ends(&flex)
+            );
+            tab.undo();
+        }
+        let typing = ends(&flex);
+        // The page's own scroller, which earlier steps left scrolled down, back to its top.
+        let scroller = end_row("Line Start", "X")
+            .and_then(|row| row.ancestor(gtk::ScrolledWindow::static_type()))
+            .and_downcast::<gtk::ScrolledWindow>();
+        if let Some(scroller) = scroller {
+            scroller.vadjustment().set_value(0.0);
+        }
+        glib::timeout_future(Duration::from_millis(300)).await;
+        let end_x = end_row("Line End", "X").and_then(|x| {
+            let text = find_widget(x.upcast_ref(), &|w| w.is::<gtk::Text>())?;
+            middle_on_screen(&app, &text)
+        });
+        if let Some(at) = end_x {
+            super::super::git::xtest(&format!("move {at}; focus; down; up; key ctrl+a; type 720"))
+                .await;
+            println!(
+                "bench diagram props ends typed held={:?} model={:?}",
+                tab.held(),
+                ends(&flex)
+            );
+            super::super::git::xtest("key Return").await;
+            glib::timeout_future(Duration::from_millis(600)).await;
+            println!(
+                "bench diagram props ends entered rows={:?} model={:?}",
+                end_rows(),
+                ends(&flex)
+            );
+            glib::timeout_future(Duration::from_millis(1600)).await;
+            let saved = std::fs::read(&path).ok().and_then(|xml| {
+                let file = accent_drawio::File::from_bytes(&xml).ok()?;
+                file.pages[0].cell(&flex)?.geometry.as_ref()?.target_point
+            });
+            println!("bench diagram props ends saved target={saved:?}");
+            tab.undo();
+            println!("bench diagram props ends undone={}", ends(&flex) == typing);
+        }
+        tab.key_target().grab_focus();
         let before = ends(&flex);
         click("Flip Horizontally");
         println!(

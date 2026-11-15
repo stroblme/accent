@@ -10,7 +10,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
-use accent_drawio::{CellId, Color, Rect, Resolved};
+use accent_drawio::{CellId, Color, Point, Rect, Resolved};
 use adw::prelude::*;
 use gtk::glib;
 
@@ -19,6 +19,7 @@ use super::{DiagramTab, Tool};
 use crate::widgets::{Debounce, hover_revealer, icon_button, reveal_on_hover};
 
 mod effects;
+mod ends;
 
 /// What the pane shows.
 pub enum Target {
@@ -61,6 +62,8 @@ pub enum Change {
     PageName(String),
     /// The one selected shape's place and size in its parent.
     Geometry(Rect),
+    /// The one selected line's free start (else end), at a point in its parent.
+    End(bool, Point),
     /// draw.io's Flip of the selected shapes, across (else up and down).
     Flip(bool),
     /// Fixed Corner Size on or off, each selected shape's corner kept where it is drawn.
@@ -71,16 +74,17 @@ pub enum Change {
     Paste(Clip),
     /// A row of the Layers group.
     Layer(super::layers::LayerChange),
-    /// What a Position, Size or Rotation row holds, for the canvas to show until it lands.
+    /// What a geometry or Rotation row holds, for the canvas to show until it lands.
     Held(Placed),
 }
 
-/// The one shape's place and size in its parent, or its turn in degrees: what a drag under way
-/// gives it, or what a row holds.
+/// The one shape's place and size in its parent or its turn in degrees, or the one line's free
+/// ends (`None` one left as it is): what a drag under way gives it, or what a row holds.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Placed {
     Frame(Rect),
     Turn(f64),
+    Ends([Option<Point>; 2]),
 }
 
 /// What a Copy or Paste button carries: `x, y`, `w, h`, or the style string.
@@ -362,6 +366,7 @@ pub struct Props {
     y: adw::SpinRow,
     width: adw::SpinRow,
     height: adw::SpinRow,
+    ends: ends::Ends,
     /// Each group's Copy and Paste buttons, by what they carry.
     clips: Vec<(Clip, gtk::Button, gtk::Button)>,
     /// The page's layers, shown whatever is selected.
@@ -540,6 +545,7 @@ impl Props {
             g
         };
         let (position, size) = (group("Position"), group("Size"));
+        let ends = ends::Ends::new([group("Line Start"), group("Line End")]);
         let (x, y) = (coordinate("X", -1e6), coordinate("Y", -1e6));
         let (width, height) = (coordinate("Width", 0.0), coordinate("Height", 0.0));
         position.add(&x);
@@ -735,6 +741,7 @@ impl Props {
             y,
             width,
             height,
+            ends,
             clips,
             layers,
             shape,
@@ -1012,6 +1019,7 @@ impl Props {
                 me.held(Placed::Frame(r));
             });
         }
+        self.ends.wire(self, send.clone());
         let set = style("aspect");
         self.aspect
             .connect_active_notify(move |row| set(row.is_active().then(|| "fixed".to_string())));
@@ -1504,6 +1512,7 @@ impl Props {
                 }
             }
             Placed::Turn(degrees) => self.rotation.set_value(degrees),
+            Placed::Ends(ends) => self.ends.show(ends),
         }
         self.filling.set(false);
     }
@@ -1657,6 +1666,7 @@ impl DiagramTab {
             (target, layers, current)
         };
         self.props.fill(&target);
+        self.fill_ends();
         self.props.fill_layers(&layers, current.as_deref());
     }
 
@@ -1721,6 +1731,7 @@ impl DiagramTab {
                     self.set_geometry(id, rect);
                 }
             }
+            Change::End(source, at) => self.place_end(source, at),
             Change::FixedCorners(fixed) if !ids.is_empty() => {
                 self.edit(|e, page| e.fix_corners(page, &ids, fixed))
             }
@@ -1772,7 +1783,7 @@ impl DiagramTab {
         }
     }
 
-    /// Show on the canvas what a Position, Size or Rotation row holds for the one shape.
+    /// Show on the canvas what a geometry or Rotation row holds for the one shape or line.
     fn show_held(&self, placed: Placed) {
         let held = {
             let selection = self.selection.borrow();
@@ -1791,18 +1802,19 @@ impl DiagramTab {
                     }
                 }
                 Placed::Turn(degrees) => Edit::Rotate { id, degrees },
+                Placed::Ends(at) => return self.view.show_held(ends::held(page, id, at)),
             }
         };
         self.view.show_held(Some(held));
     }
 
-    /// A drag under way in the one shape's Position and Size rows, or in Rotation, every frame
-    /// of it and nothing written until the drop; once it is over, the model again. What a row
-    /// still holds lands as the drag begins, so the drag starts from it. Called as the canvas
-    /// paints, so the rows change right after.
+    /// A drag under way in the one shape's Position, Size or Rotation rows, or the one line's
+    /// ends, every frame of it and nothing written until the drop; once it is over, the model
+    /// again. What a row still holds lands as the drag begins, so the drag starts from it.
+    /// Called as the canvas paints, so the rows change right after.
     pub(super) fn drag_preview(self: &Rc<Self>, edit: Option<&Edit>) {
         let was = self.props.dragging.replace(edit.is_some());
-        let placed = edit.and_then(|edit| self.placed(edit));
+        let placed = edit.and_then(|edit| self.placed(edit).or_else(|| self.dragged_ends(edit)));
         let (began, over) = (!was && edit.is_some(), was && edit.is_none());
         if !began && !over && placed.is_none() {
             return;

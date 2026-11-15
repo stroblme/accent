@@ -206,6 +206,17 @@ impl Editor {
         self.edit(page, |p, _| set_end(p, id, source, on, constraint))
     }
 
+    /// [`place_end`] on page `page`.
+    pub fn place_end(
+        &mut self,
+        page: usize,
+        id: &str,
+        source: bool,
+        at: Point,
+    ) -> Result<(), Error> {
+        self.edit(page, |p, _| place_end(p, id, source, at))
+    }
+
     /// [`move_label`] on page `page`.
     pub fn move_label(
         &mut self,
@@ -1199,6 +1210,32 @@ pub fn set_end(
         false => cell.target = on,
     }
     Ok(())
+}
+
+/// Put the free source (else target) end of edge `id` at `at`, in its parent as the file has
+/// it, as draw.io's Arrange panel types a line's start and end and nothing else; an end on a
+/// shape, or one with no point, has none to place.
+// ArrangePanel.addEdgeGeometry, Format.js 3670-3812
+pub fn place_end(page: &mut Page, id: &str, source: bool, at: Point) -> Result<(), Error> {
+    let cell = cell_mut(page, id)?;
+    let free = cell.edge
+        && match source {
+            true => cell.source.is_none(),
+            false => cell.target.is_none(),
+        };
+    let point = cell.geometry.as_mut().and_then(|g| match source {
+        true => g.source_point.as_mut(),
+        false => g.target_point.as_mut(),
+    });
+    match point.filter(|_| free) {
+        Some(point) => {
+            *point = at;
+            Ok(())
+        }
+        None => Err(Error::Refused(
+            "only a line's free end has a point to place",
+        )),
+    }
 }
 
 /// Place edge `id`'s label at absolute point `at` along `route` (`mxEdgeHandler.moveLabel`).

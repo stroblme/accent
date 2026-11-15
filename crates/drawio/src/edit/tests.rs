@@ -373,6 +373,34 @@ fn an_end_pins_floats_or_dangles() {
 }
 
 #[test]
+fn a_free_end_takes_the_point_typed_in_its_group() {
+    // In group g at (100, 50), the line's start is free and its end is on box a.
+    let group = Cell::new_vertex("g", "1", Rect::new(100.0, 50.0, 200.0, 100.0), "group", "");
+    let a = Cell::new_vertex("a", "g", Rect::new(0.0, 0.0, 40.0, 40.0), "", "a");
+    let start = (None, Point::new(10.0, 20.0));
+    let line = Cell::new_edge(
+        "l",
+        "g",
+        start,
+        (Some("a"), Point::new(5.0, 5.0)),
+        "exitX=1;",
+    );
+    let mut e = open([group, a, line]);
+    e.place_end(0, "l", true, Point::new(60.5, 70.0)).unwrap();
+    let g = geometry(&e, "l");
+    assert_eq!(g.source_point, Some(Point::new(60.5, 70.0)));
+    assert_eq!(g.target_point, Some(Point::new(5.0, 5.0)));
+    let style = e.page(0).unwrap().cell("l").unwrap().style.to_string();
+    assert_eq!(style, "exitX=1;");
+    assert!(matches!(
+        e.place_end(0, "l", false, Point::default()),
+        Err(Error::Refused(_))
+    ));
+    assert!(e.undo() && geometry(&e, "l").source_point == Some(start.1));
+    assert!(!e.can_undo());
+}
+
+#[test]
 fn a_line_turns_its_ends_and_waypoints_about_a_point() {
     let mut line = Cell::new_edge(
         "l",
