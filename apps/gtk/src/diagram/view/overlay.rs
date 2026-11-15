@@ -61,9 +61,9 @@ impl DiagramView {
             }) if turned == id => (r, *degrees),
             _ => (r, sheet.rotation(id)),
         };
-        // A page rectangle turned `rotation` degrees, outlined on screen, solid or `dashed` as
-        // the PDF Select tool dashes each of several items.
-        let turned = |r: &Rect, rotation: f64, dashed: bool| {
+        // A page rectangle turned `rotation` degrees, outlined on screen in `colour`, solid or
+        // `dashed` as the PDF Select tool dashes each of several items.
+        let turned = |r: &Rect, rotation: f64, dashed: bool, colour: &gdk::RGBA| {
             if rotation == 0.0 && !dashed {
                 return outline(&frame.rect(r));
             }
@@ -83,7 +83,7 @@ impl DiagramView {
             if dashed {
                 stroke.set_dash(&[3.0, 3.0]);
             }
-            snapshot.append_stroke(&builder.to_path(), &stroke, &accent);
+            snapshot.append_stroke(&builder.to_path(), &stroke, colour);
         };
         // Each cell's frame where it is drawn now, just outside its ink (`Sheet::padding`), and
         // how far it is turned.
@@ -100,10 +100,16 @@ impl DiagramView {
         };
         // As the PDF Select tool frames what it holds: one cell in a solid box, several each in a
         // dashed one and all of them in a solid box round the lot.
+        let faded = theme::at(accent, FADED_ALPHA);
+        // The group the selection is inside, dashed in the faded accent: quieter than what is
+        // selected (user decision 2026-11-15).
+        if let Some((r, rotation)) = sheet.open_group(&selection).and_then(|g| framed(&g)) {
+            turned(&r, rotation, true, &faded);
+        }
         let several = selection.len() > 1;
         let mut all: Option<Rect> = None;
         for (r, rotation) in selection.iter().filter_map(|id| framed(id)) {
-            turned(&r, rotation, several);
+            turned(&r, rotation, several, &accent);
             let around = geom::bounding_box(&r, rotation);
             all = Some(all.map_or(around, |a| a.union(&around)));
         }
@@ -117,7 +123,6 @@ impl DiagramView {
         };
         // An edge's handles are draw.io's: dots, faded ones for a virtual bend or an edge with
         // no waypoints of its own, and a diamond for its label.
-        let faded = theme::at(accent, FADED_ALPHA);
         let dot = |at: Point, colour: &gdk::RGBA| {
             let c = frame.to_content(at);
             let builder = gsk::PathBuilder::new();

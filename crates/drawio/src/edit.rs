@@ -392,13 +392,14 @@ impl Editor {
         })
     }
 
-    /// Paste clipboard pages as one undo step. Import the first onto `page`
-    /// ([`paste_into`]); append the rest with fresh ids and missing names filled in.
+    /// Paste clipboard pages as one undo step. Import the first onto `page`, into `group` where
+    /// one is given ([`paste_into`]); append the rest with fresh ids and missing names filled in.
     /// Returns the cells pasted onto `page` for selection.
     // diagramly/EditorUi.js 11240-11330
     pub fn paste(
         &mut self,
         page: usize,
+        group: Option<&str>,
         from: &[Page],
         dx: f64,
         dy: f64,
@@ -409,11 +410,14 @@ impl Editor {
         let current = self.current.clone();
         let current = current.as_deref();
         if rest.is_empty() {
-            return self.edit(page, |p, ids| paste_into(p, ids, current, first, dx, dy));
+            return self.edit(page, |p, ids| {
+                paste_into(p, ids, current, group, first, dx, dy)
+            });
         }
         self.file.page(page)?;
         let mut pages = self.file.pages.clone();
-        let pasted = paste_into(&mut pages[page], &mut self.ids, current, first, dx, dy)?;
+        let onto = &mut pages[page];
+        let pasted = paste_into(onto, &mut self.ids, current, group, first, dx, dy)?;
         for from in rest {
             let mut added = from.clone();
             added.set_id(&guid());
@@ -725,14 +729,16 @@ fn page_copy(page: &Page) -> Page {
 }
 
 /// Import a clipboard page with fresh cell ids (`importGraphModel`). A single
-/// layer's cells go into the current insertion layer, translated by (`dx`, `dy`);
-/// a multi-layer page retains its layers. Drop references to cells not pasted.
-/// Returns the cells pasted onto a layer.
+/// layer's cells go into the current insertion layer, or into `group` where there is one,
+/// placed from its corner, translated by (`dx`, `dy`); a multi-layer page retains
+/// its layers. Drop references to cells not pasted. Returns the cells pasted onto a layer or
+/// into the group.
 // Graph.js 17723-17810
 fn paste_into(
     page: &mut Page,
     new_ids: &mut Ids,
     current: Option<&str>,
+    group: Option<&str>,
     from: &Page,
     dx: f64,
     dy: f64,
@@ -754,13 +760,18 @@ fn paste_into(
     let layers: Vec<CellId> = from.layers().iter().map(|l| fresh[&l.id].clone()).collect();
     let pasted: Vec<CellId>;
     if let [layer] = layers.as_slice() {
-        let into = default_layer(page, current)?;
+        // A group's cells are placed from its corner, a layer's from the page's.
+        let group = group.and_then(|id| Some((id.to_string(), page.absolute_rect(id)?)));
+        let (into, corner) = match group {
+            Some((id, r)) => (id, Point::new(r.x, r.y)),
+            None => (default_layer(page, current)?, Point::default()),
+        };
         copies.retain(|c| &c.id != layer);
         for copy in &mut copies {
             if copy.parent.as_ref() == Some(layer) {
                 copy.parent = Some(into.clone());
                 if let Some(g) = &mut copy.geometry {
-                    translate(g, dx, dy);
+                    translate(g, dx - corner.x, dy - corner.y);
                 }
             }
         }

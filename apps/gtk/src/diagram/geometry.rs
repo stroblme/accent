@@ -867,11 +867,7 @@ impl Sheet {
         let Some(parent) = self.parent(id) else {
             return false;
         };
-        let table = |id: &str| {
-            let cell = self.page.cell(id);
-            cell.is_some_and(|c| c.style.resolve(false).get("childLayout") == Some("tableLayout"))
-        };
-        if table(parent) || self.parent(parent).is_some_and(table) {
+        if self.in_table(parent) {
             return true;
         }
         // A group that holds the selection keeps a click inside it, a level below it, where
@@ -907,6 +903,33 @@ impl Sheet {
             Some("swimlane" | "table" | "tableRow") => style.get("container") != Some("0"),
             _ => style.get("container") == Some("1"),
         }
+    }
+
+    /// Whether `id` is a table or one of its rows, which hold their cells as the table lays them
+    /// out.
+    fn in_table(&self, id: &str) -> bool {
+        let table = |id: &str| {
+            let cell = self.page.cell(id);
+            cell.is_some_and(|c| c.style.resolve(false).get("childLayout") == Some("tableLayout"))
+        };
+        table(id) || self.parent(id).is_some_and(table)
+    }
+
+    /// The group open while the selection is inside it: the innermost shape holding every cell
+    /// selected, none of them being it, a table and its rows aside. Its outline shows and a paste
+    /// goes into it (user decision 2026-11-15).
+    pub fn open_group(&self, selection: &[CellId]) -> Option<CellId> {
+        let (first, rest) = selection.split_first()?;
+        let mut at = self.parent(first);
+        while let Some(group) = at {
+            let holds = rest.iter().all(|s| s != group && self.is_within(s, group));
+            let shape = self.rects.contains_key(group) && !self.is_edge(group);
+            if holds && shape && !self.in_table(group) {
+                return Some(group.to_string());
+            }
+            at = self.parent(group);
+        }
+        None
     }
 
     /// What a click at `p` on no cell opens: the cells shown in the innermost selected group that
@@ -1364,6 +1387,36 @@ mod tests {
         // Outside every group selected, nothing.
         assert_eq!(open(in_g_only, &["g"]), None);
         assert_eq!(open(Point::new(200.0, 5.0), &["G"]), None);
+    }
+
+    #[test]
+    fn a_group_is_open_while_the_selection_is_inside_it() {
+        let xml = r#"<mxfile><diagram name="P" id="p"><mxGraphModel><root>
+            <mxCell id="0"/><mxCell id="1" parent="0"/>
+            <mxCell id="G" parent="1" vertex="1" style="group"><mxGeometry x="0" y="0" width="100" height="10" as="geometry"/></mxCell>
+            <mxCell id="g" parent="G" vertex="1" style="group"><mxGeometry x="0" y="0" width="30" height="10" as="geometry"/></mxCell>
+            <mxCell id="c" parent="g" vertex="1" style=""><mxGeometry x="0" y="0" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="d" parent="g" vertex="1" style=""><mxGeometry x="20" y="0" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="e" parent="G" vertex="1" style=""><mxGeometry x="90" y="0" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="a" parent="1" vertex="1" style=""><mxGeometry x="200" y="0" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="t" parent="1" vertex="1" style="shape=table;childLayout=tableLayout;"><mxGeometry x="300" y="0" width="50" height="25" as="geometry"/></mxCell>
+            <mxCell id="r" parent="t" vertex="1" style="shape=tableRow;"><mxGeometry x="0" y="0" width="50" height="25" as="geometry"/></mxCell>
+            <mxCell id="x" parent="r" vertex="1" style=""><mxGeometry x="0" y="0" width="25" height="25" as="geometry"/></mxCell>
+            </root></mxGraphModel></diagram></mxfile>"#;
+        let file = accent_drawio::File::from_bytes(xml.as_bytes()).unwrap();
+        let sheet = Sheet::of(&file.pages()[0], &Context::default());
+        let ids = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        let open = |selected: &[&str]| sheet.open_group(&ids(selected));
+        assert_eq!(open(&["c"]).as_deref(), Some("g"));
+        assert_eq!(open(&["c", "d"]).as_deref(), Some("g"));
+        assert_eq!(open(&["c", "e"]).as_deref(), Some("G"));
+        // A group selected is not open itself, the one holding it is.
+        assert_eq!(open(&["g"]).as_deref(), Some("G"));
+        assert_eq!(open(&["G"]), None);
+        assert_eq!(open(&["c", "a"]), None);
+        assert_eq!(open(&[]), None);
+        // A table's cell opens neither its row nor its table.
+        assert_eq!(open(&["x"]), None);
     }
 
     #[test]

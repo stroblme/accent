@@ -852,9 +852,9 @@ impl DiagramTab {
             };
             clipboard::pages_in(&clipboard::copy(page, ids, &shown.scene))
         };
-        let mut copies = Vec::new();
+        let (group, mut copies) = (self.open_group(), Vec::new());
         self.edit(|e, page| {
-            copies = e.paste(page, &pages, delta.x, delta.y)?;
+            copies = e.paste(page, group.as_deref(), &pages, delta.x, delta.y)?;
             Ok(())
         });
         self.select(copies);
@@ -951,6 +951,8 @@ impl DiagramTab {
     /// Paste diagram XML as cells or other text as a cell at the viewport's top-left
     /// (`EditorUi.pasteXml`), labelled `label` where a formatted paste or Paste as Plain Text
     /// gives one, which is never cells. Offset repeated pastes by a grid step; select pasted cells.
+    /// They go into the group the selection is inside, where draw.io's go onto the layer unless
+    /// the group was entered (`Graph.enterGroup`, user decision 2026-11-15).
     pub fn paste_text(self: &Rc<Self>, text: &str, label: Option<String>) {
         let grid = {
             let editor = self.editor.borrow();
@@ -966,7 +968,7 @@ impl DiagramTab {
             pasted.1
         };
         let d = f64::from(steps) * grid;
-        let mut chosen = Vec::new();
+        let (group, mut chosen) = (self.open_group(), Vec::new());
         let pages = match label {
             Some(_) => Vec::new(),
             None => accent_drawio::clipboard::pages_in(text),
@@ -974,7 +976,7 @@ impl DiagramTab {
         let count = self.page_count();
         match pages.is_empty() {
             false => self.edit(|e, page| {
-                chosen = e.paste(page, &pages, d, d)?;
+                chosen = e.paste(page, group.as_deref(), &pages, d, d)?;
                 Ok(())
             }),
             true => {
@@ -984,7 +986,7 @@ impl DiagramTab {
                 let label = label.unwrap_or_else(|| accent_drawio::clipboard::text_label(text));
                 self.edit(|e, page| {
                     let style = "text;whiteSpace=wrap;html=1;";
-                    chosen = vec![e.add_vertex(page, None, rect, style, &label)?];
+                    chosen = vec![e.add_vertex(page, group.as_deref(), rect, style, &label)?];
                     Ok(())
                 });
             }
@@ -995,6 +997,11 @@ impl DiagramTab {
         if !chosen.is_empty() {
             self.select(chosen);
         }
+    }
+
+    /// The group the selection is inside (`Sheet::open_group`), which a paste goes into.
+    pub fn open_group(&self) -> Option<CellId> {
+        self.view.sheet()?.open_group(&self.selection())
     }
 
     /// Move the selection by `dx`, `dy` page units: the arrow keys.

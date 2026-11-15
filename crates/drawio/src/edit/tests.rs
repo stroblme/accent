@@ -458,12 +458,33 @@ fn a_group_holds_its_cells_where_they_were_and_ungrouping_lets_them_go() {
 }
 
 #[test]
+fn a_paste_into_a_group_is_placed_from_its_corner() {
+    let mut e = open([
+        Cell::new_vertex("g", "1", Rect::new(100.0, 50.0, 100.0, 50.0), "group", ""),
+        Cell::new_vertex("c", "g", Rect::new(0.0, 0.0, 40.0, 40.0), "", "c"),
+    ]);
+    let drawn = crate::scene::scene(e.page(0).unwrap());
+    let xml = crate::clipboard::copy(e.page(0).unwrap(), &list(&["c"]), &drawn);
+    let from = crate::clipboard::pages_in(&xml);
+    let pasted = e.paste(0, Some("g"), &from, 10.0, 10.0).unwrap();
+    let copy = e.page(0).unwrap().cell(&pasted[0]).unwrap();
+    assert_eq!(copy.parent.as_deref(), Some("g"));
+    // A grid step from c, as on the layer, in g's own coordinates.
+    assert_eq!(
+        geometry(&e, &pasted[0]).rect(),
+        Rect::new(10.0, 10.0, 40.0, 40.0)
+    );
+    assert!(e.undo());
+    assert!(e.page(0).unwrap().cell(&pasted[0]).is_none());
+}
+
+#[test]
 fn a_paste_takes_fresh_ids_on_the_current_layer_and_a_cut_lets_edges_go() {
     let mut e = editor();
     let drawn = crate::scene::scene(e.page(0).unwrap());
     let xml = crate::clipboard::copy(e.page(0).unwrap(), &list(&["a", "e"]), &drawn);
     let from = crate::clipboard::pages_in(&xml);
-    let pasted = e.paste(0, &from, 10.0, 10.0).unwrap();
+    let pasted = e.paste(0, None, &from, 10.0, 10.0).unwrap();
     assert_eq!(pasted.len(), 2);
     let page = e.page(0).unwrap();
     let (a2, e2) = (
@@ -488,7 +509,7 @@ fn a_paste_takes_fresh_ids_on_the_current_layer_and_a_cut_lets_edges_go() {
     let before = e.file().pages.len();
     e.rename_page(0, "Page-2").unwrap();
     let pasted = e
-        .paste(0, &crate::clipboard::pages_in(&file), 0.0, 0.0)
+        .paste(0, None, &crate::clipboard::pages_in(&file), 0.0, 0.0)
         .unwrap();
     assert_eq!((pasted.len(), e.file().pages.len()), (2, before + 1));
     let added = &e.file().pages[before];

@@ -403,7 +403,10 @@ drill_diagram_select() {
 		'bench diagram select band from inside g over c2 and d1 ["c2", "d1"]' \
 		'bench diagram select first click p1 ["p"]' \
 		'bench diagram select first click t1 ["t1"]' \
-		'bench diagram select first click xl ["xl"]'
+		'bench diagram select first click xl ["xl"]' \
+		'bench diagram select open inside g Some("g")' \
+		'bench diagram select paste inside g [Some("g")] open=Some("g")' \
+		'bench diagram select paste outside [Some("1")] open=None'
 }
 
 # Ctrl+V with a browser's HTML on the clipboard, and Paste as Plain Text, in a note (beside its code

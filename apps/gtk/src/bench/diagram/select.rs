@@ -38,8 +38,8 @@ const GROUPS: &str = r#"<mxfile host="accent">
 /// `ACCENT_BENCH_DIAGRAM=select:<rel>` writes [`GROUPS`] to `<rel>` and with real clicks and
 /// bands prints what each selects: a band over a group and over part of one, clicks into a group
 /// and on to a sibling, into a nested group and on to a cousin, a click and a band from a
-/// selected group's empty middle, and first clicks under the three parents draw.io's
-/// `isPropagateSelectionCell` treats apart.
+/// selected group's empty middle, first clicks under the three parents draw.io's
+/// `isPropagateSelectionCell` treats apart, and pastes inside a group and outside it.
 pub(super) fn select(app: &Rc<App>, rel: &str) {
     std::fs::write(app.root().join(rel), GROUPS).expect("write the diagram");
     let (app, rel) = (app.clone(), rel.to_string());
@@ -121,6 +121,25 @@ pub(super) fn select(app: &Rc<App>, rel: &str) {
             click(on(id)).await;
             say(&format!("first click {id}"));
         }
+        // A group is open while the selection is inside it: its outline shows and a paste goes
+        // into it, and once the selection is let go of a paste lands on the layer.
+        let parents = || {
+            let file = accent_drawio::File::from_bytes(tab.text().as_bytes()).ok();
+            let page = file.as_ref().and_then(|f| f.pages.first());
+            let parent = |id: &String| page.and_then(|p| p.cell(id)?.parent.clone());
+            tab.selection().iter().map(parent).collect::<Vec<_>>()
+        };
+        tab.select(Vec::new());
+        click(on("c")).await;
+        click(on("c")).await;
+        println!("bench diagram select open inside g {:?}", tab.open_group());
+        super::super::git::xtest("key ctrl+c; key ctrl+v").await;
+        let (open, inside) = (tab.open_group(), parents());
+        println!("bench diagram select paste inside g {inside:?} open={open:?}");
+        click(at(20.0, 560.0)).await;
+        super::super::git::xtest("key ctrl+v").await;
+        let (open, outside) = (tab.open_group(), parents());
+        println!("bench diagram select paste outside {outside:?} open={open:?}");
         bench_quit(&app);
     });
 }
