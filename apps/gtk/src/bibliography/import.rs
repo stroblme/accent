@@ -221,7 +221,7 @@ impl App {
             let fetching = web::metadata(&doi, &cancel);
             let result = web::on_bar(&app, move || line.clone(), &cancel, fetching).await;
             if cancel.is_cancelled() {
-                return;
+                return app.toast("Metadata refresh stopped");
             }
             let raw = match result {
                 Ok(s) => s,
