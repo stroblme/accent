@@ -434,7 +434,7 @@ impl App {
                             return app.toast("Choose an image no larger than 2 MiB");
                         }
                         let size = (f64::from(texture.width()), f64::from(texture.height()));
-                        tab.add_image("image/png", &bytes, size);
+                        tab.add_image("image/png", &bytes, size, tab.open_group());
                     }
                     Ok(None) => {}
                     Err(e) => app.cannot("paste the picture", e),
@@ -509,7 +509,7 @@ impl App {
                     return app.cannot("add the picture", "it is not an image accent can read");
                 }
             };
-            tab.add_image(&mime, &bytes, size);
+            tab.add_image(&mime, &bytes, size, None);
         });
     }
 }

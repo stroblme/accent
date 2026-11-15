@@ -466,14 +466,16 @@ fn a_paste_into_a_group_is_placed_from_its_corner() {
     let drawn = crate::scene::scene(e.page(0).unwrap());
     let xml = crate::clipboard::copy(e.page(0).unwrap(), &list(&["c"]), &drawn);
     let from = crate::clipboard::pages_in(&xml);
-    let pasted = e.paste(0, Some("g"), &from, 10.0, 10.0).unwrap();
+    let pasted = e.paste(0, Some("g"), &from, 10.0, 20.0).unwrap();
     let copy = e.page(0).unwrap().cell(&pasted[0]).unwrap();
     assert_eq!(copy.parent.as_deref(), Some("g"));
-    // A grid step from c, as on the layer, in g's own coordinates.
+    // A grid step from c, as on the layer, in g's own coordinates, g grown down to hold it.
     assert_eq!(
         geometry(&e, &pasted[0]).rect(),
-        Rect::new(10.0, 10.0, 40.0, 40.0)
+        Rect::new(10.0, 20.0, 40.0, 40.0)
     );
+    let grown = geometry(&e, "g").rect();
+    assert_eq!(grown, Rect::new(100.0, 50.0, 100.0, 60.0));
     assert!(e.undo());
     assert!(e.page(0).unwrap().cell(&pasted[0]).is_none());
 }

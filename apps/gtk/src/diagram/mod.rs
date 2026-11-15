@@ -1471,8 +1471,15 @@ impl DiagramTab {
         self.on_banner.set(Rc::new(f));
     }
 
-    /// Embed a picture the window read, at the middle of what is on screen, no wider than 400.
-    pub fn add_image(self: &Rc<Self>, mime: &str, bytes: &[u8], size: (f64, f64)) {
+    /// Embed a picture the window read, at the middle of what is on screen, no wider than 400,
+    /// into `group` where there is one: a picture pasted while a group is open.
+    pub fn add_image(
+        self: &Rc<Self>,
+        mime: &str,
+        bytes: &[u8],
+        size: (f64, f64),
+        group: Option<CellId>,
+    ) {
         let (w, h) = size;
         let s = (400.0 / w.max(1.0)).min(1.0);
         let (w, h) = (w * s, h * s);
@@ -1489,7 +1496,7 @@ impl DiagramTab {
         let style = accent_drawio::presets::image(mime, bytes);
         let mut added = None;
         self.edit(|e, page| {
-            added = Some(e.add_vertex(page, None, rect, &style, "")?);
+            added = Some(e.add_vertex(page, group.as_deref(), rect, &style, "")?);
             Ok(())
         });
         self.set_tool(Tool::Select);

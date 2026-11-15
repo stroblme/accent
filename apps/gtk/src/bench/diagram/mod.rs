@@ -66,7 +66,7 @@ pub(super) const SAMPLE: &str = r#"<mxfile host="accent">
 /// - `=select:<rel>` writes groups to `<rel>` and prints what real clicks and bands select.
 ///
 /// `ACCENT_BENCH_DIAGRAM_SHOT=<png>` adds a picture of the window to the plain round, `props:`,
-/// `layers:` and `hold:`, for looking at.
+/// `layers:`, `hold:` and `select:` (a group open), for looking at.
 pub(super) fn bench_diagram(app: &Rc<App>, arg: &str) {
     if let Some((rel, url)) = arg.strip_prefix("web:").and_then(|a| a.split_once(':')) {
         return pictures::web(app, rel, url);

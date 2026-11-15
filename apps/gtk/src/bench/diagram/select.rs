@@ -133,6 +133,10 @@ pub(super) fn select(app: &Rc<App>, rel: &str) {
         click(on("c")).await;
         click(on("c")).await;
         println!("bench diagram select open inside g {:?}", tab.open_group());
+        if let Ok(path) = std::env::var("ACCENT_BENCH_DIAGRAM_SHOT") {
+            let shot = shoot(app.window.upcast_ref(), Path::new(&path));
+            println!("bench diagram select shot {shot}");
+        }
         super::super::git::xtest("key ctrl+c; key ctrl+v").await;
         let (open, inside) = (tab.open_group(), parents());
         println!("bench diagram select paste inside g {inside:?} open={open:?}");

@@ -146,12 +146,15 @@ impl Editor {
     ) -> Result<CellId, Error> {
         let current = self.current.clone();
         self.edit(page, |p, ids| {
-            let parent = match parent {
+            let into = match parent {
                 Some(id) => id.to_string(),
                 None => default_layer(p, current.as_deref())?,
             };
             let id = ids.fresh(p);
-            add_vertex(p, &id, &parent, rect, style, label)?;
+            add_vertex(p, &id, &into, rect, style, label)?;
+            if parent.is_some() {
+                extend_parent(p, &id);
+            }
             Ok(id)
         })
     }
@@ -761,8 +764,8 @@ fn paste_into(
     let pasted: Vec<CellId>;
     if let [layer] = layers.as_slice() {
         // A group's cells are placed from its corner, a layer's from the page's.
-        let group = group.and_then(|id| Some((id.to_string(), page.absolute_rect(id)?)));
-        let (into, corner) = match group {
+        let placed = group.and_then(|id| Some((id.to_string(), page.absolute_rect(id)?)));
+        let (into, corner) = match placed {
             Some((id, r)) => (id, Point::new(r.x, r.y)),
             None => (default_layer(page, current)?, Point::default()),
         };
@@ -782,6 +785,9 @@ fn paste_into(
             .collect();
         let at = subtree_end(page, &into);
         page.cells.splice(at..at, copies);
+        if group.is_some() {
+            pasted.iter().for_each(|id| extend_parent(page, id));
+        }
     } else {
         let into = page.root().map(|c| c.id.clone());
         for copy in copies.iter_mut().filter(|c| layers.contains(&c.id)) {
@@ -1086,6 +1092,30 @@ pub fn add_vertex(
     page.cells
         .push(Cell::new_vertex(id, parent, local, style, label));
     Ok(())
+}
+
+/// Grow the shape vertex `id` is in right and down to hold it, as draw.io grows the parent a
+/// cell is added to (`mxGraph.extendParent`), but not one collapsed, one with `expand=0` or a
+/// group whose bounds are its shapes' (`transparentBounds=1`, `Graph.isExtendParent`).
+// mxGraph.js 6302-6335; Graph.js 17928-17950
+fn extend_parent(p: &mut Page, id: &str) {
+    let Some(cell) = p.cell(id).filter(|c| c.vertex) else {
+        return;
+    };
+    let (Some(parent), Some(g)) = (cell.parent.clone(), cell.geometry.clone()) else {
+        return;
+    };
+    let Some(holder) = p.cell_mut(&parent).filter(|c| c.vertex && !g.relative) else {
+        return;
+    };
+    let style = holder.style.resolve(false);
+    let kept = holder.attr("collapsed") == Some("1")
+        || style.get("expand") == Some("0")
+        || style.get("transparentBounds") == Some("1");
+    if let Some(r) = holder.geometry.as_mut().filter(|_| !kept) {
+        r.width = r.width.max(g.x + g.width);
+        r.height = r.height.max(g.y + g.height);
+    }
 }
 
 /// An edge `id` in `layer`. An end without a cell dangles at its point; an end with one keeps
