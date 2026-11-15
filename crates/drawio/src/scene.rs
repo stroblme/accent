@@ -1174,7 +1174,8 @@ fn stroke(style: &Resolved) -> Option<Stroke> {
 }
 
 /// The cell's stroke in `color`, at its `strokeOpacity` and width. A dashed line's pattern is in
-/// multiples of the width unless `fixDash=1` (`mxSvgCanvas2D.createDashPattern`).
+/// multiples of the width, a line thinner than a unit's too, unless `fixDash=1`
+/// (`mxSvgCanvas2D.updateStroke`, `createDashPattern`).
 fn stroke_in(style: &Resolved, color: Color, dashed: bool) -> Stroke {
     let color = color.fade(style.num("strokeOpacity", 100.0) / 100.0);
     let width = style.num("strokeWidth", 1.0).max(0.0);
@@ -1182,7 +1183,7 @@ fn stroke_in(style: &Resolved, color: Color, dashed: bool) -> Stroke {
         let scale = if style.flag("fixDash", false) {
             1.0
         } else {
-            width.max(1.0)
+            width
         };
         let pattern: Vec<f64> = style
             .get("dashPattern")
@@ -1541,6 +1542,20 @@ mod tests {
         let style = crate::style::Style::parse("dashed=1;dashPattern=1e999 -2 NaN 3;");
         let dash = stroke(&style.resolve(false)).unwrap().dash;
         assert_eq!(dash, Some(vec![3.0]));
+    }
+
+    #[test]
+    fn a_thin_line_has_its_dashes_in_its_own_width() {
+        let dash = |s: &str| {
+            stroke(&crate::style::Style::parse(s).resolve(false))
+                .unwrap()
+                .dash
+        };
+        assert_eq!(dash("dashed=1;strokeWidth=0.5;"), Some(vec![1.5, 1.5]));
+        assert_eq!(
+            dash("dashed=1;strokeWidth=0.5;fixDash=1;"),
+            Some(vec![3.0, 3.0])
+        );
     }
 
     #[test]
