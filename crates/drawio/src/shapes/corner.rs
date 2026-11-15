@@ -9,7 +9,9 @@ use crate::style::Resolved;
 /// The shapes whose `arcSize` is a share of their size unless `absoluteArcSize=1` makes it
 /// twice the radius in units (`mxRectangleShape.paintBackground`, `mxSwimlane.getSwimlaneArcSize`).
 // ponytail: a folder reads its `arcSize` as a 0–1 share and with `absoluteArcSize` as the radius
-// itself, which the Properties pane's Arc Size row does not offer yet, so it is left out.
+// itself, which the Properties pane's Arc Size row does not offer yet, so it is left out. So are
+// a process and an internal storage, whose bars and lines keep off a corner read as a percentage
+// whatever `absoluteArcSize` says (Shapes.js 2006-2011, 4080-4085), so they would move.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Corner {
     /// A rectangle and the shapes drawn on one: the share is a percentage of the shorter side.
@@ -21,8 +23,7 @@ pub enum Corner {
 impl Corner {
     pub fn of(shape: &str) -> Option<Corner> {
         match shape {
-            "label" | "rectangle" | "rect" | "process" | "process2" | "internalStorage"
-            | "plus" => Some(Corner::Rectangle),
+            "label" | "rectangle" | "rect" | "plus" => Some(Corner::Rectangle),
             "swimlane" => Some(Corner::Swimlane),
             _ => None,
         }
@@ -108,14 +109,17 @@ mod tests {
     #[test]
     fn only_shapes_whose_corner_grows_with_them_have_one() {
         assert_eq!(Corner::of("label"), Some(Corner::Rectangle));
-        assert_eq!(Corner::of("process"), Some(Corner::Rectangle));
+        assert_eq!(Corner::of("plus"), Some(Corner::Rectangle));
         assert_eq!(Corner::of("swimlane"), Some(Corner::Swimlane));
-        // A polygon's corner is already in units, and a folder's share is its own.
+        // A polygon's corner is already in units, a folder's share is its own, and a process's
+        // bars would move.
         for shape in [
             "hexagon",
             "rhombus",
             "ellipse",
             "folder",
+            "process",
+            "internalStorage",
             "mxgraph.aws4.lambda",
         ] {
             assert_eq!(Corner::of(shape), None, "{shape}");
