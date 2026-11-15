@@ -18,7 +18,7 @@ use super::view::Edit;
 use super::{DiagramTab, Tool};
 use crate::widgets::{Debounce, hover_revealer, icon_button, reveal_on_hover};
 
-mod effects;
+pub(super) mod effects;
 mod ends;
 
 /// What the pane shows.
@@ -34,8 +34,8 @@ pub enum Target {
         fills: bool,
         /// Some cell is a swimlane, whose divider draw.io offers (`ss.swimlane`).
         swimlane: bool,
-        /// Some shape's corner grows with it ([`accent_drawio::shapes::Corner`]).
-        corners: bool,
+        /// What the switches beside Rounded can change on them.
+        effects: effects::Shown,
         /// The one shape selected: its place and size in its parent, as the file has them, and
         /// whether it is pinned where it is (locked, or on a locked layer).
         geometry: Option<(Rect, bool)>,
@@ -66,8 +66,8 @@ pub enum Change {
     End(bool, Point),
     /// draw.io's Flip of the selected shapes, across (else up and down).
     Flip(bool),
-    /// Fixed Corner Size on or off, each selected shape's corner kept where it is drawn.
-    FixedCorners(bool),
+    /// Fixed Corner Size or Fixed Size on or off, each selected shape kept as it is drawn.
+    Fixed(accent_drawio::Fixed, bool),
     /// A group's Copy button: what it shows, onto the clipboard.
     Copy(Clip),
     /// A group's Paste button: what the clipboard holds, onto the selection.
@@ -588,7 +588,7 @@ impl Props {
         shape.add(&direction);
         shape.add(&rounded);
         shape.add(&arc_size);
-        shape.add(&effects.fixed);
+        effects.add_fixed(&shape);
         shape.add(&divider);
         shape.add(&effects.sketch);
         shape.add(&shadow);
@@ -1211,7 +1211,7 @@ impl Props {
                 edges,
                 fills,
                 swimlane,
-                corners,
+                effects,
                 geometry,
                 default_tool,
             } => {
@@ -1317,7 +1317,7 @@ impl Props {
                     15.0
                 };
                 self.arc_size.set_value(style.num("arcSize", arc));
-                self.effects.fill(style, *corners);
+                self.effects.fill(style, effects);
                 self.divider.set_active(style.flag("swimlaneLine", true));
                 self.shadow.set_active(style.flag("shadow", false));
                 self.opacity.set_value(style.num("opacity", 100.0));
@@ -1650,10 +1650,10 @@ impl DiagramTab {
                     swimlane: cells
                         .iter()
                         .any(|c| c.vertex && c.style.resolve(false).shape() == "swimlane"),
-                    corners: cells.iter().any(|c| {
-                        let style = c.style.resolve(false);
-                        c.vertex && accent_drawio::shapes::Corner::of(style.shape()).is_some()
-                    }),
+                    effects: effects::Shown::of(
+                        &cells,
+                        self.view.sheet().as_deref().map(|s| &s.scene),
+                    ),
                     geometry,
                     default_tool,
                 },
@@ -1732,8 +1732,8 @@ impl DiagramTab {
                 }
             }
             Change::End(source, at) => self.place_end(source, at),
-            Change::FixedCorners(fixed) if !ids.is_empty() => {
-                self.edit(|e, page| e.fix_corners(page, &ids, fixed))
+            Change::Fixed(what, on) if !ids.is_empty() => {
+                self.edit(|e, page| e.fix(page, &ids, what, on))
             }
             Change::Flip(across) if !ids.is_empty() => {
                 let shown = self.view.sheet().unwrap_or_default();

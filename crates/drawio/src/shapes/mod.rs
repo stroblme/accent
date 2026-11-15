@@ -6,6 +6,7 @@
 mod constraints;
 mod corner;
 mod grapheditor;
+mod inset;
 pub mod library;
 mod mxgraph;
 mod stencil;
@@ -13,6 +14,7 @@ mod stencil;
 pub use constraints::constraints;
 pub use corner::Corner;
 pub use grapheditor::flex_arrow;
+pub use inset::Inset;
 pub use mxgraph::edge_line;
 pub(crate) use mxgraph::ellipse;
 pub use stencil::{Piece, Stencil};

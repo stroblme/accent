@@ -341,6 +341,7 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
             "Perimeter",
             "Arc Size",
             "Fixed Corner Size",
+            "Fixed Size",
             "Divider",
             "Sketch",
             "Vertical Text",
@@ -784,6 +785,31 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
             style("a"),
             style("b")
         );
+        // Fixed Size writes how far a hexagon's corners reach in as a length of its own, and
+        // back, shown only where there is such a shape, Sketch only where it wobbles a line.
+        let rect = accent_drawio::Rect::new(600.0, 200.0, 120.0, 60.0);
+        tab.edit(|e, page| {
+            e.add_vertex(page, None, rect, "shape=hexagon;", "")
+                .map(drop)
+        });
+        let hexagon = tab.file().pages[0].cells.last().map(|c| c.id.clone());
+        tab.select(hexagon.iter().cloned().collect());
+        for on in [true, false] {
+            if let Some(sized) = row("Fixed Size").and_downcast::<adw::SwitchRow>() {
+                sized.set_active(on);
+            }
+            println!(
+                "bench diagram props sized fixed={on} hexagon={:?} shown={:?}",
+                hexagon.as_deref().and_then(style),
+                shown(&pane, "Fixed Size")
+            );
+        }
+        let rows = ["Fixed Size", "Sketch"];
+        for cells in [vec!["a"], vec!["m"], vec!["m", "e"]] {
+            tab.select(cells.iter().map(|id| id.to_string()).collect());
+            let showing = rows.map(|title| shown(&pane, title).is_some());
+            println!("bench diagram props sized shown {cells:?} {showing:?}");
+        }
         bench_quit(&app);
     });
 }

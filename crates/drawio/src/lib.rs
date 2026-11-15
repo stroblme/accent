@@ -28,7 +28,7 @@ pub mod text;
 mod xml;
 
 pub use comic::is_comic;
-pub use edit::{Editor, ZOrder};
+pub use edit::{Editor, Fixed, ZOrder};
 pub use geom::{PathCmd, Point, Rect};
 pub use label::{Marks, Run};
 pub use model::{Cell, CellId, File, Page};

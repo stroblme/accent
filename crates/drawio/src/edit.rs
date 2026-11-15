@@ -286,9 +286,9 @@ impl Editor {
         self.edit(page, |p, _| paste_style(p, ids, from))
     }
 
-    /// [`fix_corners`] on page `page`, as one step.
-    pub fn fix_corners(&mut self, page: usize, ids: &[CellId], fixed: bool) -> Result<(), Error> {
-        self.edit(page, |p, _| fix_corners(p, ids, fixed))
+    /// [`fix`] on page `page`, as one step.
+    pub fn fix(&mut self, page: usize, ids: &[CellId], what: Fixed, on: bool) -> Result<(), Error> {
+        self.edit(page, |p, _| fix(p, ids, what, on))
     }
 
     /// Replace a cell's whole style string.
@@ -1375,26 +1375,43 @@ pub fn set_styles(
     Ok(())
 }
 
-/// Give the shapes of `ids` whose rounded corner grows with them ([`Corner`]) a corner of a
-/// fixed size (`absoluteArcSize=1`), or let it grow again, each with the `arcSize` that keeps
-/// its corner where it is drawn; the others, and shapes already so, are left as they are.
-pub fn fix_corners(page: &mut Page, ids: &[CellId], fixed: bool) -> Result<(), Error> {
-    use crate::shapes::{Corner, Placement};
+/// What a shape's switch to a length of its own fixes, where it would grow with the shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fixed {
+    /// Its rounded corner, `arcSize`, with `absoluteArcSize=1` ([`Corner`](crate::shapes::Corner)).
+    Corner,
+    /// How far in its `size` reaches, with `fixedSize=1` ([`Inset`](crate::shapes::Inset)).
+    Size,
+}
+
+/// Fix `what` on the shapes of `ids` that have it, or let it grow with them again, each with the
+/// value that keeps it where it is drawn; the others, and shapes already so, are left as they
+/// are.
+pub fn fix(page: &mut Page, ids: &[CellId], what: Fixed, on: bool) -> Result<(), Error> {
+    use crate::shapes::{Corner, Inset, Placement};
     for id in ids {
         let cell = cell_mut(page, id)?;
         let style = cell.style.resolve(false);
-        let corner = Corner::of(style.shape()).filter(|_| cell.vertex);
-        let (Some(corner), Some(g)) = (corner, cell.geometry.as_ref()) else {
+        let Some(g) = cell.geometry.as_ref().filter(|_| cell.vertex) else {
             continue;
         };
-        if style.flag("absoluteArcSize", false) == fixed {
+        let b = Placement::of(Rect::new(0.0, 0.0, g.width, g.height), &style).bounds;
+        let (flag, key, kept) = match what {
+            Fixed::Corner => match Corner::of(style.shape()) {
+                Some(corner) => ("absoluteArcSize", "arcSize", corner.kept(b, &style, on)),
+                None => continue,
+            },
+            Fixed::Size => match Inset::of(style.shape()) {
+                Some(inset) => ("fixedSize", "size", inset.kept(b, &style, on)),
+                None => continue,
+            },
+        };
+        if style.flag(flag, false) == on {
             continue;
         }
-        let bounds = Placement::of(Rect::new(0.0, 0.0, g.width, g.height), &style).bounds;
-        let arc = corner.kept(bounds, &style, fixed).map(|a| a.to_string());
-        cell.style.set("absoluteArcSize", fixed.then_some("1"));
-        if let Some(arc) = arc {
-            cell.style.set("arcSize", Some(&arc));
+        cell.style.set(flag, on.then_some("1"));
+        if let Some(value) = kept {
+            cell.style.set(key, Some(&value.to_string()));
         }
     }
     Ok(())

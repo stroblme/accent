@@ -11,11 +11,39 @@ use crate::style::Resolved;
 /// `Editor.sketchDefaultJiggle`, how far a line wobbles where the style gives no `jiggle`.
 const DEFAULT_JIGGLE: f64 = 2.0;
 
+/// A straight piece shorter than this stays straight (`HandJiggle.lineTo`).
+const STEADY: f64 = 2.0;
+
 /// Whether a cell is drawn by hand: `comic=1`, or `sketch=1` in either `sketchStyle`, rough.js's
 /// rough drawing being drawn as comic (`mxShape.createHandJiggle` and its override in Editor.js
 /// 2093-2111).
 pub fn is_comic(style: &Resolved) -> bool {
     style.flag("sketch", false) || style.flag("comic", false)
+}
+
+/// Whether drawing `path` by hand changes it: some straight piece of it, the closing one
+/// included, is long enough to wobble.
+pub(crate) fn wobbles(path: &[PathCmd]) -> bool {
+    let (mut first, mut last) = (None, None);
+    path.iter().any(|&cmd| {
+        let to = match cmd {
+            PathCmd::MoveTo(p) => {
+                (first, last) = (Some(p), Some(p));
+                return false;
+            }
+            PathCmd::QuadTo(_, p) | PathCmd::CurveTo(_, _, p) => {
+                last = Some(p);
+                return false;
+            }
+            PathCmd::LineTo(p) => p,
+            PathCmd::Close => match first {
+                Some(p) => p,
+                None => return false,
+            },
+        };
+        last.replace(to)
+            .is_some_and(|from| from.distance(to) >= STEADY)
+    })
 }
 
 /// `path` and its `stroke` as `jiggle` draws them by hand, round at the ends and corners where
@@ -112,7 +140,7 @@ impl Jiggle {
         };
         let (dx, dy) = ((to.x - from.x).abs(), (to.y - from.y).abs());
         let dist = dx.hypot(dy);
-        if dist < 2.0 {
+        if dist < STEADY {
             out.push(PathCmd::LineTo(to));
             return;
         }
@@ -191,6 +219,25 @@ mod tests {
             assert_eq!(p.x, 10.0 * s as f64);
             assert!(p.y.abs() <= 2.0 && p.y != 0.0, "{p:?}");
         }
+    }
+
+    #[test]
+    fn a_path_wobbles_where_it_has_a_straight_piece_of_two_units() {
+        let p = Point::new;
+        assert!(wobbles(&square()));
+        let tiny = [
+            PathCmd::MoveTo(p(0.0, 0.0)),
+            PathCmd::LineTo(p(1.0, 1.0)),
+            PathCmd::QuadTo(p(50.0, 50.0), p(0.0, 0.0)),
+            PathCmd::Close,
+        ];
+        assert!(!wobbles(&tiny), "curves and short lines stay");
+        let closing = [
+            PathCmd::MoveTo(p(0.0, 0.0)),
+            PathCmd::QuadTo(p(50.0, 50.0), p(0.0, 10.0)),
+            PathCmd::Close,
+        ];
+        assert!(wobbles(&closing), "the closing piece is a line");
     }
 
     #[test]

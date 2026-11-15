@@ -6,7 +6,7 @@
 //! Toolkit-independent display lists in paint order and page coordinates.
 //! The toolkit paints each [`Prim`] and measures text.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::comic::{self, Jiggle};
 use crate::geom::{self, PathCmd, Point, Rect};
@@ -27,6 +27,8 @@ pub struct Scene {
     pub background: Option<Color>,
     /// Each drawn edge's route, by id; see [`Scene::route`].
     pub(crate) routes: HashMap<CellId, Vec<Point>>,
+    /// The cells a hand would draw otherwise; see [`Scene::wobbles`].
+    pub(crate) hand: HashSet<CellId>,
 }
 
 impl Scene {
@@ -34,6 +36,12 @@ impl Scene {
     /// (mxGraph's `absolutePoints`); `None` when the edge is not drawn.
     pub fn route(&self, id: &str) -> Option<&[Point]> {
         self.routes.get(id).map(Vec::as_slice)
+    }
+
+    /// Whether drawing cell `id` by hand ([`crate::is_comic`]) changes it, drawn so or not:
+    /// something it paints has a straight piece long enough to wobble.
+    pub fn wobbles(&self, id: &str) -> bool {
+        self.hand.contains(id)
     }
 }
 
@@ -387,6 +395,7 @@ pub fn scene_with(page: &Page, ctx: &Context) -> Scene {
             .into_iter()
             .map(|(id, points)| (id.to_string(), points))
             .collect(),
+        hand: b.hand,
     }
 }
 
@@ -399,6 +408,7 @@ impl<'a> Builder<'a> {
             math: page.model_attr("math") == Some("1"),
             prims: Vec::new(),
             edge_points: HashMap::new(),
+            hand: HashSet::new(),
             index: page
                 .cells
                 .iter()
@@ -454,6 +464,8 @@ struct Builder<'a> {
     prims: Vec<Prim>,
     /// Each edge's routed points, for the labels that sit on it.
     edge_points: HashMap<&'a str, Vec<Point>>,
+    /// The cells a hand would draw otherwise ([`Scene::wobbles`]).
+    hand: HashSet<CellId>,
     index: HashMap<&'a str, usize>,
     /// Each cell's children, by index into `page.cells`, in document order.
     children: HashMap<&'a str, Vec<usize>>,
@@ -546,11 +558,14 @@ impl<'a> Builder<'a> {
         let mut jiggle = Jiggle::of(&cell.id, &style);
         for (i, mut part) in parts.into_iter().enumerate() {
             let stroke = part_stroke(&style, stroke.as_ref(), &part);
+            let wobbles = comic::wobbles(&part.path);
             let stroke = comic::draw(&mut jiggle, &mut part.path, stroke);
             let fill = fill(&style, part.fill, &part.path, &place);
-            if fill.is_none() && stroke.is_none() && !hittable {
+            let painted = fill.is_some() || stroke.is_some();
+            if !painted && !hittable {
                 continue;
             }
+            self.note(&cell.id, painted && wobbles);
             geom::map_path(&mut part.path, |p| place.apply(p));
             self.prims.push(Prim::Path {
                 cell: cell.id.clone(),
@@ -625,11 +640,13 @@ impl<'a> Builder<'a> {
                     stroke,
                     opacity,
                 } => {
+                    let wobbles = comic::wobbles(&path);
                     let stroke = comic::draw(&mut jiggle, &mut path, stroke);
                     let fill = fill(style, ink, &path, place);
                     if fill.is_none() && stroke.is_none() {
                         continue;
                     }
+                    self.note(&cell.id, wobbles);
                     geom::map_path(&mut path, |p| place.apply(p));
                     self.prims.push(Prim::Path {
                         cell: id(),
@@ -810,11 +827,14 @@ impl<'a> Builder<'a> {
                 .enumerate()
             {
                 let stroke = part_stroke(&style, line.as_ref(), &part);
+                let wobbles = comic::wobbles(&part.path);
                 let stroke = comic::draw(&mut jiggle, &mut part.path, stroke);
+                let fill = fill(&style, part.fill, &part.path, &Placement::default());
+                self.note(&cell.id, wobbles && (fill.is_some() || stroke.is_some()));
                 self.prims.push(Prim::Path {
                     cell: cell.id.clone(),
                     locked,
-                    fill: fill(&style, part.fill, &part.path, &Placement::default()),
+                    fill,
                     stroke,
                     path: part.path,
                     opacity,
@@ -830,6 +850,7 @@ impl<'a> Builder<'a> {
                 self.head(&style, &mut points, true, &line),
             ];
             let mut path = shapes::edge_line(&points, &style);
+            self.note(&cell.id, comic::wobbles(&path));
             let stroke = comic::draw(&mut jiggle, &mut path, Some(line.clone()));
             self.prims.push(Prim::Path {
                 cell: cell.id.clone(),
@@ -846,6 +867,7 @@ impl<'a> Builder<'a> {
                     dash: None,
                     ..line.clone()
                 };
+                self.note(&cell.id, comic::wobbles(&head.path));
                 let stroke = comic::draw(&mut jiggle, &mut head.path, Some(stroke));
                 self.prims.push(Prim::Path {
                     cell: cell.id.clone(),
@@ -861,6 +883,13 @@ impl<'a> Builder<'a> {
         }
         let routed = self.edge_points[cell.id.as_str()].clone();
         self.label(cell, &style, LabelAt::Edge(&routed, &g), 0.0, locked);
+    }
+
+    /// Note cell `id` as one a hand would draw otherwise ([`Scene::wobbles`]) when `wobbles`.
+    fn note(&mut self, id: &str, wobbles: bool) {
+        if wobbles {
+            self.hand.insert(id.to_string());
+        }
     }
 
     /// The arrow head at one end of `points`, which it shortens: its outlines, each with its fill.
@@ -1648,6 +1677,33 @@ mod tests {
             assert_eq!(here.len(), there.len());
             assert!((a.x + 50.0 - b.x).abs() < 1e-9 && (a.w - b.w).abs() < 1e-9 && a.h == b.h);
         }
+    }
+
+    #[test]
+    fn a_cell_wobbles_by_hand_where_it_paints_a_straight_piece() {
+        let shape =
+            |id, x, style| Cell::new_vertex(id, "1", Rect::new(x, 0.0, 80.0, 40.0), style, "");
+        let edge = |id, style| {
+            let (from, to) = (Point::new(0.0, 200.0), Point::new(100.0, 250.0));
+            Cell::new_edge(id, "1", (None, from), (None, to), style)
+        };
+        let s = scene(&page(vec![
+            shape("box", 0.0, ""),
+            shape("oval", 100.0, "ellipse;"),
+            Cell::new_vertex(
+                "text",
+                "1",
+                Rect::new(200.0, 0.0, 80.0, 40.0),
+                "text;",
+                "Hi",
+            ),
+            shape("group", 300.0, "group"),
+            edge("curve", "curved=1;endArrow=none;"),
+            edge("headed", "curved=1;"),
+        ]));
+        let ids = ["box", "oval", "text", "group", "curve", "headed"];
+        let by_hand: Vec<&str> = ids.into_iter().filter(|id| s.wobbles(id)).collect();
+        assert_eq!(by_hand, ["box", "headed"], "the curve's head is lines");
     }
 
     #[test]

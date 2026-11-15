@@ -204,7 +204,7 @@ fn fixed_corners_keep_each_shape_s_corner_and_then_share_one_size() {
         cell("hex", 100.0, 40.0, "shape=hexagon;rounded=1;arcSize=10;"),
     ]);
     let ids = list(&["small", "big", "hex"]);
-    e.fix_corners(0, &ids, true).unwrap();
+    e.fix(0, &ids, Fixed::Corner, true).unwrap();
     let style = |e: &Editor, id: &str| e.page(0).unwrap().cell(id).unwrap().style.to_string();
     // 15 % of the 40 side and 10 % of the 120 one, as twice the radius.
     assert_eq!(
@@ -221,11 +221,32 @@ fn fixed_corners_keep_each_shape_s_corner_and_then_share_one_size() {
     // One size for both, then back to each one's share of its side.
     e.set_styles(0, &ids[..2], &[("arcSize", Some("20"))])
         .unwrap();
-    e.fix_corners(0, &ids, false).unwrap();
+    e.fix(0, &ids, Fixed::Corner, false).unwrap();
     assert_eq!(style(&e, "small"), "rounded=1;arcSize=25;");
     assert_eq!(style(&e, "big"), "rounded=1;arcSize=8.33;");
-    e.fix_corners(0, &ids, false).unwrap();
+    e.fix(0, &ids, Fixed::Corner, false).unwrap();
     assert_eq!(e.undo.len(), 3, "nothing to let grow is no step");
+}
+
+#[test]
+fn a_fixed_size_reaches_as_far_into_each_shape_and_back() {
+    let cell = |id, w, style| Cell::new_vertex(id, "1", Rect::new(0.0, 0.0, w, 60.0), style, "");
+    let mut e = open([
+        cell("p", 120.0, "shape=parallelogram;"),
+        cell("h", 300.0, "shape=hexagon;size=0.1;"),
+        cell("r", 120.0, "rounded=1;"),
+    ]);
+    let ids = list(&["p", "h", "r"]);
+    let style = |e: &Editor, id: &str| e.page(0).unwrap().cell(id).unwrap().style.to_string();
+    e.fix(0, &ids, Fixed::Size, true).unwrap();
+    // A fifth of 120 and a tenth of 300, as lengths; a rectangle has no size to fix.
+    assert_eq!(style(&e, "p"), "shape=parallelogram;fixedSize=1;size=24;");
+    assert_eq!(style(&e, "h"), "shape=hexagon;size=30;fixedSize=1;");
+    assert_eq!(style(&e, "r"), "rounded=1;");
+    e.fix(0, &ids, Fixed::Size, false).unwrap();
+    assert_eq!(style(&e, "p"), "shape=parallelogram;size=0.2;");
+    assert_eq!(style(&e, "h"), "shape=hexagon;size=0.1;");
+    assert_eq!(e.undo.len(), 2, "a step each");
 }
 
 #[test]

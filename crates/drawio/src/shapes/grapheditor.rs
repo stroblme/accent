@@ -3,8 +3,8 @@
 
 use super::mxgraph::{ellipse, rectangle};
 use super::{
-    Direction, Fill, LINE_ARCSIZE, Margins, Part, Pen, RECTANGLE_ROUNDING_FACTOR, add_points,
-    polygon, polyline, quarter, rect,
+    Direction, Fill, Inset, LINE_ARCSIZE, Margins, Part, Pen, RECTANGLE_ROUNDING_FACTOR,
+    add_points, polygon, polyline, quarter, rect,
 };
 use crate::geom::{PathCmd, Point, Rect, relative_ccw};
 use crate::scene::{Cap, Join};
@@ -377,21 +377,6 @@ pub(super) fn curly_bracket(b: Rect, style: &Resolved) -> Vec<Part> {
     ))]
 }
 
-/// `size` as the fixed-size shapes read it: with `fixedSize=1` in page units (`fixed` by
-/// default) and at most `max`, otherwise a share of `extent` (`share` by default) no more than
-/// `limit` of it.
-fn inset(
-    style: &Resolved,
-    extent: f64,
-    (fixed, max): (f64, f64),
-    (share, limit): (f64, f64),
-) -> f64 {
-    match style.flag("fixedSize", false) {
-        true => style.num("size", fixed).min(max).max(0.0),
-        false => extent * style.num("size", share).min(limit).max(0.0),
-    }
-}
-
 /// `process`: a rectangle with a bar `size` of the width in at either side (`ProcessShape`,
 /// Shapes.js 1969-2057).
 pub(super) fn process(b: Rect, style: &Resolved) -> Vec<Part> {
@@ -407,12 +392,8 @@ pub(super) fn process(b: Rect, style: &Resolved) -> Vec<Part> {
 /// least a rounded corner.
 fn process_inset(b: Rect, style: &Resolved, label: bool) -> f64 {
     let (w, h) = (b.w, b.h);
-    let size = style.num("size", 0.1);
     let fixed = style.flag("fixedSize", false);
-    let mut inset = match fixed {
-        true => size.min(w).max(0.0),
-        false => w * size.clamp(0.0, 1.0),
-    };
+    let mut inset = Inset::PROCESS.length(w, style);
     // The label keeps a fixed bar's width alone (Shapes.js 1998-2012).
     if style.flag("rounded", false) && !(label && fixed) {
         let f = style.num("arcSize", RECTANGLE_ROUNDING_FACTOR * 100.0) / 100.0;
@@ -440,7 +421,7 @@ pub(super) fn process_label(rect: Rect, style: &Resolved) -> Rect {
 /// 1578-1605).
 pub(super) fn parallelogram(b: Rect, style: &Resolved) -> Vec<Part> {
     let (w, h) = (b.w, b.h);
-    let dx = inset(style, w, (20.0, w), (0.2, 1.0));
+    let dx = Inset::PARALLELOGRAM.length(w, style);
     let pts = [(0.0, h), (dx, 0.0), (w, 0.0), (w - dx, h)];
     vec![Part::body(polygon(b, style, &pts, &[]))]
 }
@@ -449,7 +430,7 @@ pub(super) fn parallelogram(b: Rect, style: &Resolved) -> Vec<Part> {
 /// 1608-1635).
 pub(super) fn trapezoid(b: Rect, style: &Resolved) -> Vec<Part> {
     let (w, h) = (b.w, b.h);
-    let dx = inset(style, w, (20.0, w * 0.5), (0.2, 0.5));
+    let dx = Inset::TRAPEZOID.length(w, style);
     let pts = [(0.0, h), (dx, 0.0), (w - dx, 0.0), (w, h)];
     vec![Part::body(polygon(b, style, &pts, &[]))]
 }
@@ -457,7 +438,7 @@ pub(super) fn trapezoid(b: Rect, style: &Resolved) -> Vec<Part> {
 /// `step`: a chevron, `size` of the width deep (`StepShape`, Shapes.js 2283-2310).
 pub(super) fn step(b: Rect, style: &Resolved) -> Vec<Part> {
     let (w, h) = (b.w, b.h);
-    let s = inset(style, w, (20.0, w), (0.2, 1.0));
+    let s = Inset::STEP.length(w, style);
     let pts = [
         (0.0, 0.0),
         (w - s, 0.0),
@@ -473,7 +454,7 @@ pub(super) fn step(b: Rect, style: &Resolved) -> Vec<Part> {
 /// `HexagonShape`, Shapes.js 2313-2338, in place of mxGraph's `mxHexagon`).
 pub(super) fn hexagon(b: Rect, style: &Resolved) -> Vec<Part> {
     let (w, h) = (b.w, b.h);
-    let s = inset(style, w, (20.0, w * 0.5), (0.25, 1.0));
+    let s = Inset::HEXAGON.length(w, style);
     let pts = [
         (s, 0.0),
         (w - s, 0.0),
@@ -740,7 +721,7 @@ pub(super) fn xor(b: Rect) -> Vec<Part> {
 /// (`DataStorageShape`, Shapes.js 4260-4286).
 pub(super) fn data_storage(b: Rect, style: &Resolved) -> Vec<Part> {
     let (w, h) = (b.w, b.h);
-    let s = inset(style, w, (20.0, w), (0.1, 1.0));
+    let s = Inset::DATA_STORAGE.length(w, style);
     let p = |x: f64, y: f64| Point::new(b.x + x, b.y + y);
     vec![Part::body(vec![
         PathCmd::MoveTo(p(s, 0.0)),
