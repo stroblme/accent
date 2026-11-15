@@ -15,7 +15,7 @@ use super::tab::PdfTab;
 /// can read.
 const TALL: f32 = 0.375;
 
-/// What a preview keeps clear of the PDF pane's edges, in logical pixels.
+/// What a link preview keeps clear of its pane's edges, a PDF's or a diagram's, in logical pixels.
 const MARGIN: i32 = 12;
 
 /// The part of a page a link preview shows: drawn at `scale` logical pixels to a point, `size`
@@ -354,8 +354,9 @@ impl PdfTab {
 }
 
 /// Which side of a link at `y` down the pane a popover `height` tall goes: above it, unless it
-/// would run past the pane's top. A band is at most half the pane, so below then has the room.
-fn side(y: i32, height: i32) -> gtk::PositionType {
+/// would run past the pane's top. A PDF's band is at most half the pane, so below then has the
+/// room.
+pub(crate) fn side(y: i32, height: i32) -> gtk::PositionType {
     if y - MARGIN >= height {
         gtk::PositionType::Top
     } else {
@@ -365,7 +366,7 @@ fn side(y: i32, height: i32) -> gtk::PositionType {
 
 /// Slide `popover`, centred over a link `x` across a pane `pane_w` wide, to keep it inside the
 /// pane. The arrow still points at the link.
-fn slide(popover: &gtk::Popover, pane_w: i32, x: i32) {
+pub(crate) fn slide(popover: &gtk::Popover, pane_w: i32, x: i32) {
     let (_, width, _, _) = popover.measure(gtk::Orientation::Horizontal, -1);
     popover.set_offset(slid(pane_w, x, width), 0);
 }

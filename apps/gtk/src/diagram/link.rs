@@ -13,6 +13,7 @@ use gtk::{gdk, glib};
 
 use super::DiagramTab;
 use crate::organize::Thumbnails;
+use crate::pdf::preview::{side, slide};
 
 /// How long the popover waits for the pointer on its way over to it before it goes, in ms.
 const LEAVE_MS: u64 = 400;
@@ -149,8 +150,9 @@ impl DiagramTab {
         self.view.connect_unmap(move |_| preview.hide());
     }
 
-    /// The popover over widget point `(x, y)` saying where `to` leads, up, which a click on goes
-    /// there.
+    /// The popover at widget point `(x, y)` saying where `to` leads, up, which a click on goes
+    /// there. It stays inside the pane as a PDF's does: above the point where it fits, below it
+    /// otherwise, and slid along to keep clear of the pane's sides.
     fn link_popover(
         self: &Rc<Self>,
         to: &Link,
@@ -203,18 +205,13 @@ impl DiagramTab {
         let host = self.overlay.parent().and_downcast::<gtk::Box>()?;
         let at = gtk::graphene::Point::new(x as f32, y as f32);
         let at = self.view.compute_point(&host, &at).unwrap_or(at);
+        let at = (at.x() as i32, at.y() as i32);
         let popover = gtk::Popover::builder()
             .autohide(false)
-            .position(gtk::PositionType::Top)
             .child(&button)
             .build();
         popover.set_parent(&host);
-        popover.set_pointing_to(Some(&gdk::Rectangle::new(
-            at.x() as i32,
-            at.y() as i32,
-            1,
-            1,
-        )));
+        popover.set_pointing_to(Some(&gdk::Rectangle::new(at.0, at.1, 1, 1)));
         // The pointer on its way over keeps it up.
         let over = gtk::EventControllerMotion::new();
         over.connect_enter(glib::clone!(
@@ -230,7 +227,13 @@ impl DiagramTab {
         popover.add_controller(over);
         // A popover parented by hand stays parented until it is unparented by hand.
         popover.connect_closed(|popover| popover.unparent());
+        // Up before it is measured, as a hidden widget measures nothing: placed before its first
+        // frame is drawn, as tall as it is at its width, for a caption that wraps.
         popover.popup();
+        let (_, width, _, _) = popover.measure(gtk::Orientation::Horizontal, -1);
+        let (_, height, _, _) = popover.measure(gtk::Orientation::Vertical, width);
+        popover.set_position(side(at.1, height));
+        slide(&popover, host.width(), at.0);
         Some(popover)
     }
 }

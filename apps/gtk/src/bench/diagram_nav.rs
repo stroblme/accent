@@ -42,6 +42,41 @@ const LINKS: &str = r#"<mxfile host="accent">
 </mxfile>
 "#;
 
+/// The corners of the page [`corners`] writes, each a shape's id.
+const CORNERS: [&str; 4] = ["top-left", "top-right", "bottom-left", "bottom-right"];
+
+/// A page `w` by `h` without a sheet, with a shape in each of its [`CORNERS`], so fitted to a
+/// canvas that size it has one near each corner of the pane. Each links to an address of its own,
+/// long enough that a popover centred over the corner would cross the pane's side.
+fn corners(w: i32, h: i32) -> String {
+    let shapes: String = CORNERS
+        .iter()
+        .map(|id| {
+            let x = if id.ends_with("left") { 0 } else { w - 200 };
+            let y = if id.starts_with("top") { 0 } else { h - 100 };
+            format!(
+                r#"<UserObject label="" link="https://example.org/{id}/an-address-long-enough-to-cross-the-side-of-the-pane" id="{id}"><mxCell style="rounded=0;" parent="1" vertex="1"><mxGeometry x="{x}" y="{y}" width="200" height="100" as="geometry"/></mxCell></UserObject>"#
+            )
+        })
+        .collect();
+    format!(
+        r#"<mxfile host="accent"><diagram name="Corners" id="corners"><mxGraphModel page="0"><root><mxCell id="0"/><mxCell id="1" parent="0"/>{shapes}</root></mxGraphModel></diagram></mxfile>"#
+    )
+}
+
+/// Where `popover`'s surface is in the pane it is parented to, and that pane.
+fn placed(popover: &gtk::Popover) -> Option<(gdk::Rectangle, gtk::Widget)> {
+    let pane = popover.parent()?;
+    let root = pane.root()?;
+    let (dx, dy) = root.surface_transform();
+    let corner = pane.compute_point(&root, &graphene::Point::zero())?;
+    let surface = popover.surface().and_downcast::<gdk::Popup>()?;
+    let x = surface.position_x() - (f64::from(corner.x()) + dx) as i32;
+    let y = surface.position_y() - (f64::from(corner.y()) + dy) as i32;
+    let rect = gdk::Rectangle::new(x, y, surface.width(), surface.height());
+    Some((rect, pane))
+}
+
 /// `ACCENT_BENCH_DIAGRAM_NAV=spring:<rel>` writes five small pages to `<rel>` and turns them with
 /// the wheel (DESIGN.md, Diagram): each step prints the page it left the reader on, the furthest
 /// the page was pulled off its edge meanwhile and the pull once it has rested, presented last.
@@ -50,7 +85,9 @@ const LINKS: &str = r#"<mxfile host="accent">
 /// `links:<rel>` writes two pages whose shapes link to each other and to the web, and with real
 /// input shows a link with Ctrl held, selects a linked shape by Ctrl+click while editing, follows
 /// a link by a click on its popover and one by a click on a presented page, a plain click while
-/// editing selecting.
+/// editing selecting. Then it holds Ctrl over a link near each corner of the pane, printing where
+/// the pointer and the popover are in the pane, which side of the link it is on and whether it
+/// is inside the pane.
 pub(super) fn bench_diagram_nav(app: &Rc<App>, arg: &str) {
     match arg.split_once(':') {
         Some(("spring", rel)) => spring(app, rel),
@@ -199,6 +236,43 @@ fn links(app: &Rc<App>, rel: &str) {
         super::git::xtest(&format!("move {back}; down; up")).await;
         say("presented click");
         app.set_presenting(false);
+        let canvas = tab.key_target();
+        let xml = corners(canvas.width(), canvas.height());
+        let Some(fitted) = opened(&app, "corners.drawio", &xml).await else {
+            return bench_quit(&app);
+        };
+        let canvas = fitted.key_target();
+        for id in CORNERS {
+            let Some(r) = fitted.frame_of(id).map(|r| fitted.to_widget(&r)) else {
+                continue;
+            };
+            // Three pixels in from the shape's corner in the pane's corner.
+            let (left, top) = (id.ends_with("left"), id.starts_with("top"));
+            let x = if left { r.x + 3.0 } else { r.x + r.w - 3.0 };
+            let y = if top { r.y + 3.0 } else { r.y + r.h - 3.0 };
+            let at = on_screen(&app, &canvas, x, y).unwrap_or_default();
+            // Longer than the popover waits for a pointer that left the link (`LEAVE_MS`).
+            super::git::xtest(&format!("keydown ctrl; move {at}; sleep 0.6")).await;
+            let shown = popover().and_downcast::<gtk::Popover>();
+            let Some((shown, (r, pane))) = shown.and_then(|p| placed(&p).map(|at| (p, at))) else {
+                println!("bench nav link corner {id} none");
+                continue;
+            };
+            let pointer = canvas.compute_point(&pane, &graphene::Point::new(x as f32, y as f32));
+            let pointer = pointer.map(|at| (at.x() as i32, at.y() as i32));
+            let (pw, ph) = (pane.width(), pane.height());
+            let (px, py, w, h) = (r.x(), r.y(), r.width(), r.height());
+            let inside = px >= 0 && py >= 0 && px + w <= pw && py + h <= ph;
+            println!(
+                "bench nav link corner {id} pointer={pointer:?} popover=({px}, {py}, {w}, {h}) \
+                 pane={pw}x{ph}"
+            );
+            println!(
+                "bench nav link corner {id} side={:?} inside={inside}",
+                shown.position()
+            );
+        }
+        super::git::xtest("keyup ctrl").await;
         bench_quit(&app);
     });
 }

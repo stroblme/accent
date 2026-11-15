@@ -365,7 +365,9 @@ drill_diagram_find() {
 }
 
 # A diagram's links shown with Ctrl held and followed by a click on that popover or on a presented
-# page, Ctrl+click and a plain click while editing selecting (DESIGN.md, Diagram).
+# page, Ctrl+click and a plain click while editing selecting, and the popover of a link near each
+# corner of the pane inside it, below a link at the top and above one at the foot (DESIGN.md,
+# Diagram).
 drill_diagram_links() {
 	launch 60 ACCENT_BENCH_DIAGRAM_NAV=links:links.drawio >"$dir/links"
 	has "$dir/links" \
@@ -373,7 +375,11 @@ drill_diagram_links() {
 		'bench nav link ctrl-click page=1 selected=["go"]' \
 		'bench nav link popover page=2 selected=[]' \
 		'bench nav link click page=2 selected=["back"]' \
-		'bench nav link presented click page=1 selected=[]'
+		'bench nav link presented click page=1 selected=[]' \
+		'bench nav link corner top-left side=Bottom inside=true' \
+		'bench nav link corner top-right side=Bottom inside=true' \
+		'bench nav link corner bottom-left side=Top inside=true' \
+		'bench nav link corner bottom-right side=Top inside=true'
 }
 
 # What real clicks and bands select among a diagram's groups, as draw.io selects (DESIGN.md,
