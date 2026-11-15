@@ -1,9 +1,6 @@
-//! Point hit testing and rubber-band selection.
-
-use std::collections::HashMap;
+//! Point hit testing.
 
 use crate::geom::{self, PathCmd, Point, Rect};
-use crate::model::CellId;
 use crate::scene::{Prim, Scene};
 
 impl Scene {
@@ -24,27 +21,6 @@ impl Scene {
             .filter(|prim| prim.cell() == id)
             .map(Prim::bounds)
             .reduce(|a, b| a.union(&b))
-    }
-
-    /// Every unlocked cell whose painting lies wholly inside `band`, in paint order.
-    pub fn cells_in(&self, band: Rect) -> Vec<CellId> {
-        let mut cells: Vec<(&str, Rect)> = Vec::new();
-        let mut index: HashMap<&str, usize> = HashMap::new();
-        for prim in self.prims.iter().filter(|prim| !prim.locked()) {
-            let bounds = prim.bounds();
-            match index.get(prim.cell()) {
-                Some(&i) => cells[i].1 = cells[i].1.union(&bounds),
-                None => {
-                    index.insert(prim.cell(), cells.len());
-                    cells.push((prim.cell(), bounds));
-                }
-            }
-        }
-        cells
-            .into_iter()
-            .filter(|(_, bounds)| band.contains_rect(bounds))
-            .map(|(id, _)| id.to_string())
-            .collect()
     }
 }
 
@@ -229,34 +205,6 @@ mod tests {
         )]);
         assert_eq!(s.hit(Point::new(50.0, -30.0), 0.0), Some("t"));
         assert_eq!(s.hit(Point::new(90.0, 10.0), 0.0), None);
-    }
-
-    #[test]
-    fn band_takes_only_whole_cells() {
-        let s = scene(vec![
-            path("a", outline(Rect::new(10.0, 10.0, 30.0, 30.0)), true, 1.0),
-            path("b", outline(Rect::new(60.0, 10.0, 30.0, 30.0)), true, 1.0),
-            text(
-                "a",
-                Rect::new(10.0, 20.0, 30.0, 10.0),
-                Point::new(25.0, 25.0),
-                0.0,
-            ),
-            // b's label hangs out of the band.
-            text(
-                "b",
-                Rect::new(60.0, 45.0, 30.0, 80.0),
-                Point::new(75.0, 85.0),
-                0.0,
-            ),
-            locked(path(
-                "c",
-                outline(Rect::new(20.0, 60.0, 10.0, 10.0)),
-                true,
-                1.0,
-            )),
-        ]);
-        assert_eq!(s.cells_in(Rect::new(0.0, 0.0, 100.0, 100.0)), ["a"]);
     }
 
     #[test]

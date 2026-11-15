@@ -381,6 +381,8 @@ drill_diagram_links() {
 drill_diagram_select() {
 	launch 60 ACCENT_BENCH_DIAGRAM=select:select.drawio >"$dir/select"
 	has "$dir/select" \
+		'bench diagram select band over g ["g", "c", "d"]' \
+		'bench diagram select band over c1 ["c1"]' \
 		'bench diagram select click c ["g"]' \
 		'bench diagram select click c again ["c"]' \
 		'bench diagram select click sibling d ["d"]' \

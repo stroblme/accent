@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use accent_drawio::geom::rotate;
+use accent_drawio::geom::{bounding_box, rotate};
 use accent_drawio::guide::Neighbour;
 use accent_drawio::handle::{self, Kind, Knob, Terminal};
 use accent_drawio::{CellId, Constraint, Context, Page, PathCmd, Point, Prim, Rect, Scene};
@@ -1036,12 +1036,43 @@ impl Sheet {
         (source, target)
     }
 
-    /// The cells a band drawn over the page takes: every whole top-level cell inside it.
+    /// The cells a band drawn over the page takes, as draw.io's `selectRegion` takes them: every
+    /// cell at any depth whose box lies wholly inside it, a box being what the cell draws and its
+    /// rectangle as turned. A group draws nothing of its own, so it comes by its rectangle with
+    /// the shapes in it, and a group partly inside gives the shapes the band covers. Nothing
+    /// locked or hidden is taken.
     pub fn band(&self, band: Rect) -> Vec<CellId> {
-        self.scene
-            .cells_in(band)
-            .into_iter()
-            .filter(|id| self.parent(id).is_none())
+        // What each cell draws unlocked, and the groups those cells are in, which draw nothing.
+        let mut drawn: HashMap<&str, Option<Rect>> = HashMap::new();
+        let prims = self.scene.prims.iter().zip(&self.bounds);
+        for (prim, b) in prims.filter(|(p, _)| !p.locked()) {
+            let id = prim.cell();
+            let ink = drawn.entry(id).or_default();
+            *ink = Some(ink.map_or(*b, |r| r.union(b)));
+            let mut up = self.parent(id);
+            while let Some(group) = up.filter(|g| !drawn.contains_key(*g)) {
+                drawn.insert(group, None);
+                up = self.parent(group);
+            }
+        }
+        let inside = |id: &str, ink: Option<Rect>| {
+            let rect = self.rect(id).filter(|r| r.w > 0.0 || r.h > 0.0);
+            let turned = rect.map(|r| bounding_box(&r, self.rotation(id)));
+            let whole = match (ink, turned) {
+                (Some(a), Some(b)) => Some(a.union(&b)),
+                (a, b) => a.or(b),
+            };
+            whole.is_some_and(|r| band.contains_rect(&r))
+        };
+        self.page
+            .cells
+            .iter()
+            .filter(|c| {
+                drawn
+                    .get(c.id.as_str())
+                    .is_some_and(|ink| inside(&c.id, *ink))
+            })
+            .map(|c| c.id.clone())
             .collect()
     }
 
@@ -1249,6 +1280,30 @@ mod tests {
         // selected.
         assert_eq!(first(Point::new(25.0, 5.0), &["c1"]), "c2");
         assert_eq!(first(on_d1, &["a"]), "G");
+    }
+
+    #[test]
+    fn a_band_takes_every_cell_it_covers_a_group_with_its_shapes() {
+        let xml = r#"<mxfile><diagram name="P" id="p"><mxGraphModel><root>
+            <mxCell id="0"/><mxCell id="1" parent="0"/>
+            <mxCell id="g" parent="1" vertex="1" style="group"><mxGeometry x="0" y="0" width="30" height="10" as="geometry"/></mxCell>
+            <mxCell id="c" parent="g" vertex="1" style=""><mxGeometry x="0" y="0" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="d" parent="g" vertex="1" style=""><mxGeometry x="20" y="0" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="h" parent="1" vertex="1" style="" visible="0"><mxGeometry x="40" y="0" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="2" parent="0" style="locked=1;"/>
+            <mxCell id="k" parent="2" vertex="1" style=""><mxGeometry x="60" y="0" width="10" height="10" as="geometry"/></mxCell>
+            </root></mxGraphModel></diagram></mxfile>"#;
+        let file = accent_drawio::File::from_bytes(xml.as_bytes()).unwrap();
+        let sheet = Sheet::of(&file.pages()[0], &Context::default());
+        let ids = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        // A group by its rectangle, with its shapes; nothing hidden or on a locked layer.
+        assert_eq!(
+            sheet.band(Rect::new(-5.0, -5.0, 80.0, 20.0)),
+            ids(&["g", "c", "d"])
+        );
+        // Of a group partly inside, the shapes wholly inside.
+        assert_eq!(sheet.band(Rect::new(-5.0, -5.0, 20.0, 20.0)), ids(&["c"]));
+        assert_eq!(sheet.band(Rect::new(-5.0, -5.0, 30.0, 20.0)), ids(&["c"]));
     }
 
     #[test]
