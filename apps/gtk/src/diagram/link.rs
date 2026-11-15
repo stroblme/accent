@@ -13,7 +13,7 @@ use gtk::{gdk, glib};
 
 use super::DiagramTab;
 use crate::organize::Thumbnails;
-use crate::pdf::preview::{side, slide};
+use crate::pdf::preview::{paint, room, side, slide};
 
 /// How long the popover waits for the pointer on its way over to it before it goes, in ms.
 const LEAVE_MS: u64 = 400;
@@ -152,7 +152,8 @@ impl DiagramTab {
 
     /// The popover at widget point `(x, y)` saying where `to` leads, up, which a click on goes
     /// there. It stays inside the pane as a PDF's does: above the point where it fits, below it
-    /// otherwise, and slid along to keep clear of the pane's sides.
+    /// otherwise, and slid along to keep clear of the pane's sides, a page's thumbnail cut to the
+    /// room the pane has as a PDF's band is.
     fn link_popover(
         self: &Rc<Self>,
         to: &Link,
@@ -170,13 +171,20 @@ impl DiagramTab {
                 .xalign(0.0)
                 .build()
         };
+        let mut thumbnail = None;
         match to {
             Link::Page(page) => {
-                // The thumbnail, where the Outline pane has drawn the strip.
+                // The thumbnail, where the Outline pane has drawn the strip, painted once the
+                // popover has been measured without it.
                 if let Some(texture) = self.strip.picture(*page) {
-                    let picture = gtk::Picture::for_paintable(&texture);
+                    let picture = gtk::Picture::new();
                     picture.set_can_shrink(false);
-                    content.append(&picture);
+                    // In a row of its own, which keeps it at its own width: given a wider
+                    // caption's, a picture grows to fill it, its aspect kept, past the room.
+                    let row = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+                    row.append(&picture);
+                    content.append(&row);
+                    thumbnail = Some((picture, texture));
                 }
                 let names = self.page_names();
                 content.append(&caption(names.get(*page).map_or("", String::as_str)));
@@ -232,6 +240,12 @@ impl DiagramTab {
         // Up before it is measured, as a hidden widget measures nothing: placed before its first
         // frame is drawn, as tall as it is at its width, for a caption that wraps.
         popover.popup();
+        if let Some((picture, texture)) = thumbnail {
+            let (room, _) = room((host.width(), host.height()), &popover, &content);
+            let (w, h) = fitted((texture.width(), texture.height()), room);
+            let at = gtk::graphene::Rect::new(0.0, 0.0, w as f32, h as f32);
+            paint(&picture, (w, h), &texture, at);
+        }
         let (_, width, _, _) = popover.measure(gtk::Orientation::Horizontal, -1);
         let (_, height, _, _) = popover.measure(gtk::Orientation::Vertical, width);
         popover.set_position(side(at.1, height));
@@ -240,9 +254,27 @@ impl DiagramTab {
     }
 }
 
+/// The size a thumbnail `size` large is shown at in `room`: its own, or smaller to fit, its
+/// aspect kept.
+fn fitted(size: (i32, i32), room: (i32, i32)) -> (i32, i32) {
+    let scale = |room: i32, side: i32| f64::from(room.max(1)) / f64::from(side.max(1));
+    let scale = scale(room.0, size.0).min(scale(room.1, size.1)).min(1.0);
+    let at = |side: i32| (f64::from(side) * scale).round() as i32;
+    (at(size.0), at(size.1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A thumbnail taller or wider than the room is shown smaller to fit it, its aspect kept, and
+    /// one that fits keeps its own size.
+    #[test]
+    fn a_thumbnail_fits_the_room() {
+        assert_eq!(fitted((200, 4000), (500, 250)), (13, 250));
+        assert_eq!(fitted((400, 200), (200, 500)), (200, 100));
+        assert_eq!(fitted((200, 280), (500, 300)), (200, 280));
+    }
 
     #[test]
     fn a_link_leads_to_its_page_by_id_or_to_its_address() {

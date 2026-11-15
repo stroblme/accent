@@ -212,16 +212,9 @@ impl PdfTab {
         // before its first frame is drawn.
         popover.popup();
 
-        // The room the band has: the pane less the popover around it, across, and half the
-        // pane's height less the rest of the popover, which fits above the link or below it.
+        // The room the band has, which fits above the link or below it.
         let pane = (self.host.width(), self.host.height());
-        let (_, inner, _, _) = content.measure(gtk::Orientation::Horizontal, -1);
-        let (_, outer, _, _) = popover.measure(gtk::Orientation::Horizontal, -1);
-        let (_, chrome, _, _) = popover.measure(gtk::Orientation::Vertical, -1);
-        let room = (
-            pane.0 - 2 * MARGIN - (outer - inner),
-            pane.1 / 2 - MARGIN - chrome,
-        );
+        let (room, chrome) = room(pane, &popover, &content);
         // Measured as a line all the same, which a named destination's page fills once read.
         caption.set_visible(!caption.label().is_empty());
         let sf = self.view.scale_factor().max(1);
@@ -354,8 +347,8 @@ impl PdfTab {
 }
 
 /// Which side of a link at `y` down the pane a popover `height` tall goes: above it, unless it
-/// would run past the pane's top. A PDF's band is at most half the pane, so below then has the
-/// room.
+/// would run past the pane's top. A preview whose picture is cut to its [`room`] is at most half
+/// the pane, so below then has the room.
 pub(crate) fn side(y: i32, height: i32) -> gtk::PositionType {
     if y - MARGIN >= height {
         gtk::PositionType::Top
@@ -378,6 +371,25 @@ fn slid(pane_w: i32, x: i32, width: i32) -> i32 {
     left.clamp(MARGIN, (pane_w - MARGIN - width).max(MARGIN)) - left
 }
 
+/// The room a link preview's picture has in a pane `pane` large, measured while `popover` holds
+/// its `content` without it: the pane less the popover around the content and the margins,
+/// across, and half the pane's height less the rest of the popover, which then fits above its
+/// link or below it ([`side`]). Returned with the height of that rest.
+pub(crate) fn room(
+    pane: (i32, i32),
+    popover: &gtk::Popover,
+    content: &impl IsA<gtk::Widget>,
+) -> ((i32, i32), i32) {
+    let (_, inner, _, _) = content.measure(gtk::Orientation::Horizontal, -1);
+    let (_, outer, _, _) = popover.measure(gtk::Orientation::Horizontal, -1);
+    let (_, chrome, _, _) = popover.measure(gtk::Orientation::Vertical, -1);
+    let room = (
+        pane.0 - 2 * MARGIN - (outer - inner),
+        pane.1 / 2 - MARGIN - chrome,
+    );
+    (room, chrome)
+}
+
 /// Show `band`'s rendered `texture`, `sf` device pixels to a logical one.
 fn put_band(picture: &gtk::Picture, band: Band, texture: &gdk::MemoryTexture, sf: i32) {
     let (w, h) = (texture.width() as f32, texture.height() as f32);
@@ -386,11 +398,11 @@ fn put_band(picture: &gtk::Picture, band: Band, texture: &gdk::MemoryTexture, sf
 }
 
 /// Paint `texture` into `picture` over `at`, cut to a band `size` logical pixels large: the band
-/// itself, or a page's stand-in stretched under it.
-fn paint(
+/// itself, a page's stand-in stretched under it, or a diagram page's thumbnail cut to the room.
+pub(crate) fn paint(
     picture: &gtk::Picture,
     size: (i32, i32),
-    texture: &gdk::MemoryTexture,
+    texture: &impl IsA<gdk::Texture>,
     at: graphene::Rect,
 ) {
     let (w, h) = (size.0 as f32, size.1 as f32);

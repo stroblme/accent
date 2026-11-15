@@ -47,7 +47,9 @@ const CORNERS: [&str; 4] = ["top-left", "top-right", "bottom-left", "bottom-righ
 
 /// A page `w` by `h` without a sheet, with a shape in each of its [`CORNERS`], so fitted to a
 /// canvas that size it has one near each corner of the pane. Each links to an address of its own,
-/// long enough that a popover centred over the corner would cross the pane's side.
+/// long enough that a popover centred over the corner would cross the pane's side. A shape in
+/// its middle links to a second page twenty times taller than wide, whose thumbnail at the
+/// Outline strip's width is taller than any pane.
 fn corners(w: i32, h: i32) -> String {
     let shapes: String = CORNERS
         .iter()
@@ -59,8 +61,10 @@ fn corners(w: i32, h: i32) -> String {
             )
         })
         .collect();
+    let (mx, my) = (w / 2 - 100, h / 2 - 50);
     format!(
-        r#"<mxfile host="accent"><diagram name="Corners" id="corners"><mxGraphModel page="0"><root><mxCell id="0"/><mxCell id="1" parent="0"/>{shapes}</root></mxGraphModel></diagram></mxfile>"#
+        r#"<mxfile host="accent"><diagram name="Corners" id="corners"><mxGraphModel page="0"><root><mxCell id="0"/><mxCell id="1" parent="0"/>{shapes}<UserObject label="" link="data:page/id,tall" id="middle"><mxCell style="rounded=0;" parent="1" vertex="1"><mxGeometry x="{mx}" y="{my}" width="200" height="100" as="geometry"/></mxCell></UserObject></root></mxGraphModel></diagram>
+  <diagram name="Tall" id="tall"><mxGraphModel page="0"><root><mxCell id="0"/><mxCell id="1" parent="0"/><mxCell id="t" style="rounded=0;" parent="1" vertex="1"><mxGeometry x="0" y="0" width="100" height="2000" as="geometry"/></mxCell></root></mxGraphModel></diagram></mxfile>"#
     )
 }
 
@@ -77,6 +81,12 @@ fn placed(popover: &gtk::Popover) -> Option<(gdk::Rectangle, gtk::Widget)> {
     Some((rect, pane))
 }
 
+/// Whether `r`, in `pane`'s coordinates, is inside it.
+fn inside(r: &gdk::Rectangle, pane: &gtk::Widget) -> bool {
+    let (w, h) = (pane.width(), pane.height());
+    r.x() >= 0 && r.y() >= 0 && r.x() + r.width() <= w && r.y() + r.height() <= h
+}
+
 /// `ACCENT_BENCH_DIAGRAM_NAV=spring:<rel>` writes five small pages to `<rel>` and turns them with
 /// the wheel (DESIGN.md, Diagram): each step prints the page it left the reader on, the furthest
 /// the page was pulled off its edge meanwhile and the pull once it has rested, presented last.
@@ -85,9 +95,10 @@ fn placed(popover: &gtk::Popover) -> Option<(gdk::Rectangle, gtk::Widget)> {
 /// `links:<rel>` writes two pages whose shapes link to each other and to the web, and with real
 /// input shows a link with Ctrl held, selects a linked shape by Ctrl+click while editing, follows
 /// a link by a click on its popover and one by a click on a presented page, a plain click while
-/// editing selecting. Then it holds Ctrl over a link near each corner of the pane, printing where
-/// the pointer and the popover are in the pane, which side of the link it is on and whether it
-/// is inside the pane.
+/// editing selecting. Then, with the Outline pane up, it holds Ctrl over a link near each corner
+/// of the pane and over one to a page taller than the pane, printing where the pointer and the
+/// popover are in the pane, which side of the link it is on and whether it is inside the pane,
+/// and the tall page's thumbnail's size.
 pub(super) fn bench_diagram_nav(app: &Rc<App>, arg: &str) {
     match arg.split_once(':') {
         Some(("spring", rel)) => spring(app, rel),
@@ -236,6 +247,10 @@ fn links(app: &Rc<App>, rel: &str) {
         super::git::xtest(&format!("move {back}; down; up")).await;
         say("presented click");
         app.set_presenting(false);
+        // The Outline pane up from here, as its strip draws the thumbnail a page's link shows,
+        // and the canvas measured once it has made room for it.
+        app.show_pane("outline");
+        glib::timeout_future(Duration::from_millis(1000)).await;
         let canvas = tab.key_target();
         let xml = corners(canvas.width(), canvas.height());
         let Some(fitted) = opened(&app, "corners.drawio", &xml).await else {
@@ -262,15 +277,37 @@ fn links(app: &Rc<App>, rel: &str) {
             let pointer = pointer.map(|at| (at.x() as i32, at.y() as i32));
             let (pw, ph) = (pane.width(), pane.height());
             let (px, py, w, h) = (r.x(), r.y(), r.width(), r.height());
-            let inside = px >= 0 && py >= 0 && px + w <= pw && py + h <= ph;
             println!(
                 "bench nav link corner {id} pointer={pointer:?} popover=({px}, {py}, {w}, {h}) \
                  pane={pw}x{ph}"
             );
             println!(
-                "bench nav link corner {id} side={:?} inside={inside}",
-                shown.position()
+                "bench nav link corner {id} side={:?} inside={}",
+                shown.position(),
+                inside(&r, &pane)
             );
+        }
+        super::git::xtest("keyup ctrl").await;
+        // The middle shape's link to the tall page, with its thumbnail.
+        let middle = fitted.frame_of("middle").map(|r| fitted.to_widget(&r));
+        let at = middle.and_then(|r| on_screen(&app, &canvas, r.x + r.w / 2.0, r.y + r.h / 2.0));
+        let at = at.unwrap_or_default();
+        super::git::xtest(&format!("keydown ctrl; move {at}; sleep 0.6")).await;
+        let shown = popover().and_downcast::<gtk::Popover>();
+        match shown.and_then(|p| placed(&p).map(|at| (p, at))) {
+            Some((shown, (r, pane))) => {
+                let thumbnail = find_widget(shown.upcast_ref(), &|w| w.is::<gtk::Picture>())
+                    .and_downcast::<gtk::Picture>()
+                    .and_then(|p| p.paintable())
+                    .map(|p| (p.intrinsic_width(), p.intrinsic_height()));
+                let (side, size) = (shown.position(), (pane.width(), pane.height()));
+                println!(
+                    "bench nav link tall thumbnail={thumbnail:?} side={side:?} popover={r:?} \
+                     pane={size:?}"
+                );
+                println!("bench nav link tall inside={}", inside(&r, &pane));
+            }
+            None => println!("bench nav link tall none"),
         }
         super::git::xtest("keyup ctrl").await;
         bench_quit(&app);
