@@ -387,6 +387,7 @@ drill_diagram_select() {
 		'bench diagram select click c1 ["G"]' \
 		'bench diagram select click c1 again ["g1"]' \
 		'bench diagram select click c1 a third time ["c1"]' \
+		'bench diagram select click cousin d1 ["g2"]' \
 		'bench diagram select click c again moving 2 px ["c"]' \
 		'bench diagram select first click p1 ["p"]' \
 		'bench diagram select first click t1 ["t1"]' \

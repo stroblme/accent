@@ -510,10 +510,11 @@ pub struct Pick {
 }
 
 impl Pick {
-    /// What a click on a selected cell selects once released where it was pressed, as draw.io's
-    /// delayed selection does (`mxGraphHandler.selectDelayed`): the cell under the pointer alone,
+    /// What a click on a selected cell selects once released where it was pressed, draw.io's
+    /// delayed selection (`mxGraphHandler.selectDelayed`): the cell under the pointer alone,
     /// one level into a selected group or one of several cells selected; `None` where that is the
-    /// whole selection already.
+    /// whole selection already. draw.io's climbs from a selected shape back out to its group
+    /// instead, which accent leaves out (user decision 2026-11-15).
     pub fn clicked(&self, selection: &[CellId]) -> Option<Vec<CellId>> {
         (selection != std::slice::from_ref(&self.cell)).then(|| vec![self.cell.clone()])
     }
@@ -819,9 +820,9 @@ impl Sheet {
     }
 
     /// Resolve click selection and drag target at `p`. Clicks enter groups one level
-    /// at a time, starting at the outermost group below a layer, a container's shape or a
-    /// selected shape's sibling at once; drags move the already selected cell under the
-    /// pointer, matching draw.io.
+    /// at a time, starting at the outermost group below a layer, a container's shape at once and
+    /// one level below a group that holds the selection; drags move the already selected cell
+    /// under the pointer, matching draw.io.
     pub fn pick(&self, p: Point, tolerance: f64, selection: &[CellId]) -> Option<Pick> {
         let hit = self.scene.hit(p, tolerance)?;
         let mut chain = vec![hit];
@@ -848,9 +849,10 @@ impl Sheet {
     /// Whether a click on `id`, with nothing above it selected, selects its group instead, as
     /// draw.io's first click does (`mxGraphHandler.isPropagateSelectionCell`, as `Graph.js`
     /// and `Editor.js` change it): always out of a parent with `selectParentFirst=1` and never
-    /// out of one with `transparentBounds=1` or out of a connector, else not while a sibling is
-    /// selected (`isSiblingSelected`), and not out of a container unless `id` is a label or a
-    /// part of it. A table's rows and cells always go on to the table.
+    /// out of one with `transparentBounds=1` or out of a connector, else not while the parent
+    /// holds the selection, a sibling's (`isSiblingSelected`) or one further in, and not out of
+    /// a container unless `id` is a label or a part of it. A table's rows and cells always go on
+    /// to the table.
     fn climbs(&self, id: &str, selection: &[CellId]) -> bool {
         let Some(parent) = self.parent(id) else {
             return false;
@@ -862,15 +864,17 @@ impl Sheet {
         if table(parent) || self.parent(parent).is_some_and(table) {
             return true;
         }
-        let sibling = selection
+        // A group that holds the selection keeps a click inside it, a level below it, where
+        // draw.io's keeps one beside a selected sibling alone (user decision 2026-11-15).
+        let opened = selection
             .iter()
-            .any(|s| s != id && self.parent(s) == Some(parent));
+            .any(|s| s != id && s != parent && self.is_within(s, parent));
         let says = |key: &str| {
             let cell = self.page.cell(parent);
             cell.is_some_and(|c| c.style.resolve(c.edge).get(key) == Some("1"))
         };
         if says("selectParentFirst") {
-            return !sibling;
+            return !opened;
         }
         if says("transparentBounds") || self.is_edge(parent) {
             return false;
@@ -879,7 +883,7 @@ impl Sheet {
             c.geometry.as_ref().is_some_and(|g| g.relative)
                 || c.style.resolve(c.edge).get("part") == Some("1")
         });
-        !sibling && (attached || !self.is_container(parent))
+        !opened && (attached || !self.is_container(parent))
     }
 
     /// Whether vertex `id` holds its shapes as a container, as draw.io's `Graph.isContainer`
@@ -1217,6 +1221,34 @@ mod tests {
         assert_eq!(first(Point::new(105.0, 5.0), &[]), "c");
         // A connector's own label is its own.
         assert!(!sheet.climbs("l", &[]));
+    }
+
+    #[test]
+    fn a_first_click_stays_in_the_group_that_holds_the_selection() {
+        let xml = r#"<mxfile><diagram name="P" id="p"><mxGraphModel><root>
+            <mxCell id="0"/><mxCell id="1" parent="0"/>
+            <mxCell id="G" parent="1" vertex="1" style="group"><mxGeometry x="0" y="0" width="100" height="10" as="geometry"/></mxCell>
+            <mxCell id="g1" parent="G" vertex="1" style="group"><mxGeometry x="0" y="0" width="30" height="10" as="geometry"/></mxCell>
+            <mxCell id="c1" parent="g1" vertex="1" style=""><mxGeometry x="0" y="0" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="c2" parent="g1" vertex="1" style=""><mxGeometry x="20" y="0" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="g2" parent="G" vertex="1" style="group"><mxGeometry x="50" y="0" width="30" height="10" as="geometry"/></mxCell>
+            <mxCell id="d1" parent="g2" vertex="1" style=""><mxGeometry x="0" y="0" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="d2" parent="g2" vertex="1" style=""><mxGeometry x="20" y="0" width="10" height="10" as="geometry"/></mxCell>
+            <mxCell id="a" parent="1" vertex="1" style=""><mxGeometry x="200" y="0" width="10" height="10" as="geometry"/></mxCell>
+            </root></mxGraphModel></diagram></mxfile>"#;
+        let file = accent_drawio::File::from_bytes(xml.as_bytes()).unwrap();
+        let sheet = Sheet::of(&file.pages()[0], &Context::default());
+        let ids = |ids: &[&str]| ids.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        let first = |p: Point, selected: &[&str]| sheet.pick(p, 1.0, &ids(selected)).unwrap().cell;
+        let on_d1 = Point::new(55.0, 5.0);
+        // With a shape of g1 selected, G holds the selection: a click on d1 opens g2 beside g1,
+        // where draw.io would go back out to G.
+        assert_eq!(first(on_d1, &["c1"]), "g2");
+        assert_eq!(first(on_d1, &["g1"]), "g2");
+        // Beside a selected sibling as before, and from the outermost group with nothing of it
+        // selected.
+        assert_eq!(first(Point::new(25.0, 5.0), &["c1"]), "c2");
+        assert_eq!(first(on_d1, &["a"]), "G");
     }
 
     #[test]
