@@ -155,16 +155,19 @@ impl App {
                     .copy_entries(&[0], &before)
                     .map_err(|e| e.to_string())?;
                 apply(&target, &before, &after)?;
-                let doi = bib::doi(&incoming.value(&incoming.entries[0], "doi"));
-                // Nothing to try without either, as for a manual entry; the switch stays quiet.
-                if download && (doi.is_some() || !direct.trim().is_empty()) {
+                let entry = &incoming.entries[0];
+                let doi = bib::doi(&incoming.value(entry, "doi"));
+                let direct = match direct.trim() {
+                    "" => incoming.arxiv_pdf(entry).unwrap_or_default(),
+                    url => url.to_string(),
+                };
+                // Nothing to try without one, as for a manual entry; the switch stays quiet.
+                if download && (doi.is_some() || !direct.is_empty()) {
                     let key = key.text().to_string();
                     let email = parent.config.borrow().bibliography_unpaywall_email.clone();
                     let rel = pdf_path(&key);
                     // The reference is in already, so a failure is told, not kept in the dialog.
-                    if let Err(why) =
-                        parent.fetch_pdf(&target, key, doi, direct.trim().into(), email, rel)
-                    {
+                    if let Err(why) = parent.fetch_pdf(&target, key, doi, direct, email, rel) {
                         parent.cannot("download PDF (reference kept)", why);
                     }
                 }
@@ -255,7 +258,11 @@ impl App {
 
     pub(super) fn download_reference(self: &Rc<Self>, tab: &Rc<Tab>, bib: Library, index: usize) {
         let form = dialogs::form();
-        let url = field(&form, "PDF URL (optional, uses DOI if empty)", "");
+        let url = field(
+            &form,
+            "PDF URL (optional, uses the arXiv ID or DOI if empty)",
+            "",
+        );
         let email = field(
             &form,
             "Unpaywall Email (optional, shared for open-access lookup)",
@@ -268,6 +275,10 @@ impl App {
         let target = tab.clone();
         form_dialog(self, "Download PDF", "Download", &form, move || {
             let doi = bib::doi(&bib.value(&bib.entries[index], "doi"));
+            let url = match url.text().trim() {
+                "" => bib.arxiv_pdf(&bib.entries[index]).unwrap_or_default(),
+                url => url.to_string(),
+            };
             let email = email.text().trim().to_string();
             if parent.config.borrow().bibliography_unpaywall_email != email {
                 parent.config.borrow_mut().bibliography_unpaywall_email = email.clone();
@@ -275,14 +286,7 @@ impl App {
                     shell.save_config_soon();
                 }
             }
-            parent.fetch_pdf(
-                &target,
-                key.clone(),
-                doi,
-                url.text().into(),
-                email,
-                path.text().into(),
-            )
+            parent.fetch_pdf(&target, key.clone(), doi, url, email, path.text().into())
         });
     }
     /// Download `key`'s PDF from `url`, or else the DOI's open-access and publisher links, to
@@ -298,7 +302,7 @@ impl App {
     ) -> Result<(), String> {
         let dest = bib::attachment_path(&tab.rel(), &rel).map_err(|e| e.to_string())?;
         if url.is_empty() && doi.is_none() {
-            return Err("Enter a PDF URL or add a DOI to the reference".into());
+            return Err("Enter a PDF URL or add a DOI or arXiv ID to the reference".into());
         }
         let Some(vault) = self.vault().cloned() else {
             return Err("Open a vault to download attachments".into());

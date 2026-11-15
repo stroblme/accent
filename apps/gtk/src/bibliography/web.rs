@@ -38,7 +38,8 @@ pub(super) async fn get(
         return Err("Cancelled".into());
     }
     if message.status_code() != 200 {
-        return Err(format!("HTTP {}", message.status_code()));
+        let host = message.uri().and_then(|u| u.host()).unwrap_or_default();
+        return Err(format!("{host} answered HTTP {}", message.status_code()));
     }
     let mut bytes = Vec::new();
     loop {
@@ -248,7 +249,7 @@ mod tests {
                         get(&session(), &url, "*/*", 100, &cancel)
                             .await
                             .unwrap_err(),
-                        "HTTP 403"
+                        "127.0.0.1 answered HTTP 403"
                     );
                     cancel.cancel();
                     assert!(get(&session(), &url, "*/*", 100, &cancel).await.is_err());
@@ -256,5 +257,18 @@ mod tests {
             })
             .unwrap();
         server.join().unwrap();
+    }
+
+    #[test]
+    #[ignore = "network: cargo test -p accent -- --ignored arxiv"]
+    fn downloads_an_arxiv_doi_from_arxiv() {
+        let url = bib::arxiv_pdf("https://doi.org/10.48550/arXiv.2611.11858").unwrap();
+        let context = glib::MainContext::new();
+        context
+            .with_thread_default(|| {
+                let bytes = context.block_on(pdf(&[url], &gio::Cancellable::new()));
+                assert!(bytes.unwrap().starts_with(b"%PDF-"));
+            })
+            .unwrap();
     }
 }

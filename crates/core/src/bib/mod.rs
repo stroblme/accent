@@ -438,6 +438,22 @@ impl Library {
             year
         }
     }
+
+    /// arXiv's PDF of the entry, read from its DOI, its `eprint` unless `archivePrefix` or
+    /// `eprinttype` names another archive, or its URL.
+    pub fn arxiv_pdf(&self, e: &Entry) -> Option<String> {
+        let other = ["archiveprefix", "eprinttype"]
+            .iter()
+            .any(|f| !matches!(self.value(e, f).to_ascii_lowercase().as_str(), "" | "arxiv"));
+        let eprint = if other {
+            String::new()
+        } else {
+            self.value(e, "eprint")
+        };
+        [self.value(e, "doi"), eprint, self.value(e, "url")]
+            .iter()
+            .find_map(|v| arxiv_pdf(v))
+    }
 }
 
 pub fn valid_key(key: &str) -> bool {
@@ -482,6 +498,44 @@ pub fn doi(input: &str) -> Option<String> {
         && !suffix.is_empty()
         && !value.chars().any(|c| c.is_whitespace() || c.is_control()))
     .then_some(value)
+}
+
+/// arXiv's PDF URL for an arXiv identifier, new (`2611.11858v2`) or old (`hep-th/9901001`),
+/// given as is, after `arXiv:`, as an arxiv.org abstract or PDF URL, or as the arXiv DOI
+/// `10.48550/arXiv.<id>`, which neither Unpaywall nor Crossref knows.
+pub fn arxiv_pdf(input: &str) -> Option<String> {
+    let input = input.trim().to_ascii_lowercase();
+    let id = match doi(&input) {
+        Some(doi) => doi.strip_prefix("10.48550/arxiv.")?.to_string(),
+        None => {
+            let page = input
+                .strip_prefix("https://")
+                .or(input.strip_prefix("http://"));
+            let page = page.map(|p| p.strip_prefix("www.").unwrap_or(p));
+            match page {
+                Some(p) => (p.strip_prefix("arxiv.org/abs/"))
+                    .or(p.strip_prefix("arxiv.org/pdf/"))?
+                    .trim_end_matches(".pdf")
+                    .to_string(),
+                None => input.strip_prefix("arxiv:").unwrap_or(&input).to_string(),
+            }
+        }
+    };
+    let digits =
+        |s: &str, len: &[usize]| len.contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit());
+    let base = (id.rsplit_once('v'))
+        .filter(|(_, version)| digits(version, &[1, 2, 3]))
+        .map_or(id.as_str(), |(base, _)| base);
+    let valid = match base.split_once('/') {
+        Some((archive, number)) => {
+            !archive.is_empty()
+                && (archive.bytes()).all(|b| b.is_ascii_lowercase() || b"-.".contains(&b))
+                && digits(number, &[7])
+        }
+        None => (base.split_once('.'))
+            .is_some_and(|(month, number)| digits(month, &[4]) && digits(number, &[4, 5])),
+    };
+    valid.then(|| format!("https://arxiv.org/pdf/{id}"))
 }
 
 struct Parser<'a> {

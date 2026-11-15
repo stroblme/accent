@@ -49,6 +49,51 @@ fn identity_and_keys_preserve_distinct_versions() {
 }
 
 #[test]
+fn arxiv_identifiers_map_to_arxivs_own_pdf() {
+    let pdf = |id: &str| Some(format!("https://arxiv.org/pdf/{id}"));
+    for (input, id) in [
+        ("https://doi.org/10.48550/arXiv.2611.11858", "2611.11858"),
+        ("10.48550/ARXIV.2611.11858", "2611.11858"),
+        ("10.48550/arXiv.hep-th/9901001", "hep-th/9901001"),
+        ("arXiv:2611.11858v2", "2611.11858v2"),
+        ("0704.0001", "0704.0001"),
+        ("math.GT/0309136", "math.gt/0309136"),
+        ("solv-int/9901001v1", "solv-int/9901001v1"),
+        ("https://arxiv.org/abs/2611.11858", "2611.11858"),
+        (
+            "http://www.arxiv.org/pdf/hep-th/9901001v1.pdf",
+            "hep-th/9901001v1",
+        ),
+    ] {
+        assert_eq!(arxiv_pdf(input), pdf(id), "{input}");
+    }
+    for input in [
+        "10.1234/2611.11858",
+        "https://example.org/abs/2611.11858",
+        "2611.118",
+        "hep-th/990100",
+        "",
+    ] {
+        assert_eq!(arxiv_pdf(input), None, "{input}");
+    }
+    let bib = Library::parse(
+        "@misc{a,eprint={2611.11858},archivePrefix={arXiv}}\n@misc{b,eprint={hep-th/9901001},eprinttype={arxiv}}\n@misc{c,doi={10.1103/x},url={https://arxiv.org/abs/2611.11858}}\n@misc{d,eprint={2611.11858},archivePrefix={HAL}}\n@misc{e,doi={10.1103/x}}",
+    )
+    .unwrap();
+    let found: Vec<_> = bib.entries.iter().map(|e| bib.arxiv_pdf(e)).collect();
+    assert_eq!(
+        found,
+        [
+            pdf("2611.11858"),
+            pdf("hep-th/9901001"),
+            pdf("2611.11858"),
+            None,
+            None
+        ]
+    );
+}
+
+#[test]
 fn attachments_rebase_and_escape_jabref_separators() {
     let files = Attachment::parse("Paper:papers/a\\;b.pdf:PDF;:papers/other.pdf:PDF").unwrap();
     assert_eq!(files[0].path, "papers/a;b.pdf");
