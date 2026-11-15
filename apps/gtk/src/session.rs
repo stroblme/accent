@@ -43,6 +43,7 @@ impl App {
         };
         // Told again with the lists, so a vault opened or a link come back has it too.
         self.share_used();
+        self.refresh_templates();
         // A file from outside the vault has no path in it to ask about.
         let opened: Vec<String> = self
             .recent_files
@@ -183,6 +184,7 @@ impl App {
         };
         let config = self.config.borrow();
         let key = self.key.borrow();
+        let templates = crate::templates::items(&config, &self.templates.borrow(), &used);
         let sources = palette::Sources {
             recent,
             mru,
@@ -199,6 +201,7 @@ impl App {
                     listed: why(action).is_some() || listed(action),
                 })
                 .chain(crate::commands::items(&config, &used))
+                .chain(templates)
                 .collect(),
             tags: self.corpus.borrow().tags.clone(),
             // Filtered here rather than in the dialog: the window is the only thing that knows

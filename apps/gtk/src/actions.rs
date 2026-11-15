@@ -706,7 +706,11 @@ impl App {
             "present" => self.set_presenting(self.presenting.get().is_none()),
             "fullscreen" => self.window.set_fullscreened(!self.window.is_fullscreen()),
             "preferences" => self.preferences(),
-            "shortcuts" => shortcuts::present(&self.window, &self.config.borrow()),
+            "shortcuts" => shortcuts::present(
+                &self.window,
+                &self.config.borrow(),
+                &self.templates.borrow(),
+            ),
             "menu" => self.menu.popup(),
             "about" => self.about(),
             _ => tracing::warn!("no handler for action {name}"),
@@ -1447,10 +1451,15 @@ impl Shell {
         };
         let forward = config.forward_keys_to_terminal;
         let commands = (0..config.commands.len()).map(crate::commands::action);
+        // A template's chord is installed whether or not this window's vault has the template:
+        // the table is the application's, and a window without the action passes the chord on.
+        let templates = config.shortcuts.keys();
+        let templates = templates.filter(|action| crate::templates::template(action).is_some());
         for action in ACTIONS
             .iter()
             .map(|(action, _, _)| action.to_string())
             .chain(commands)
+            .chain(templates.cloned())
         {
             let accels = accels_for(&config, &action);
             let accels: Vec<&str> = accels
@@ -1460,9 +1469,14 @@ impl Shell {
                 .collect();
             gtk_app.set_accels_for_action(&action, &accels);
         }
-        // A command taken out of the file takes its chord with it.
+        // A command taken out of the file takes its chord with it, and so does a template's put
+        // back to none, which leaves `[shortcuts]` and with it the loop above.
         for action in gtk_app.list_action_descriptions() {
-            if crate::commands::index(&action).is_some_and(|i| i >= config.commands.len()) {
+            let command =
+                crate::commands::index(&action).is_some_and(|i| i >= config.commands.len());
+            let template = crate::templates::template(&action).is_some()
+                && !config.shortcuts.contains_key(action.as_str());
+            if command || template {
                 gtk_app.set_accels_for_action(&action, &[]);
             }
         }

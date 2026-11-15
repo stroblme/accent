@@ -56,18 +56,18 @@ pub(super) fn bench_listed(app: &Rc<App>) {
             app.active_key().as_deref() == Some(note) && app.tab_for(note).is_some()
         })
         .await;
-        let over_note = rows(&app).await;
+        let over_note = rows(&app, "").await;
         if super::pdf::opened(&app, pdf).await.is_none() {
             println!("bench listed no_pdf");
             std::process::exit(1);
         }
-        let over_pdf = rows(&app).await;
+        let over_pdf = rows(&app, "").await;
         let mut right = true;
         for (kind, rows, own, other) in [
             ("note", &over_note, &NOTE_ONLY[..], &PDF_ONLY[..]),
             ("pdf", &over_pdf, &PDF_ONLY[..], &NOTE_ONLY[..]),
         ] {
-            let listed = |a: &&str| rows.iter().any(|row| row == a);
+            let listed = |a: &&str| rows.iter().any(|(_, action)| action == a);
             let other: Vec<&str> = other.iter().copied().filter(listed).collect();
             let missing: Vec<&str> = own.iter().copied().filter(|a| !listed(a)).collect();
             // A full page may have cut a command off, which says nothing either way.
@@ -85,13 +85,20 @@ pub(super) fn bench_listed(app: &Rc<App>) {
     });
 }
 
-/// The actions of Run Command's rows, opened on an empty query over the tab in front.
-async fn rows(app: &Rc<App>) -> Vec<String> {
+/// The labels and actions of Run Command's rows, opened over the tab in front with `query` typed.
+pub(super) async fn rows(app: &Rc<App>, query: &str) -> Vec<(String, String)> {
     let _ = WidgetExt::activate_action(&app.window, "win.palette-commands", None);
     glib::timeout_future(Duration::from_millis(400)).await;
     let Some(dialog) = app.window.visible_dialog() else {
         return Vec::new();
     };
+    if !query.is_empty() {
+        let entry = find_widget(dialog.upcast_ref(), &|w| w.is::<gtk::SearchEntry>());
+        if let Some(entry) = entry.and_downcast::<gtk::SearchEntry>() {
+            entry.set_text(query);
+        }
+        glib::timeout_future(Duration::from_millis(400)).await;
+    }
     let list = find_widget(dialog.upcast_ref(), &|w| w.is::<gtk::ListView>());
     let model = list.and_downcast::<gtk::ListView>().and_then(|l| l.model());
     let mut actions = Vec::new();
@@ -100,8 +107,9 @@ async fn rows(app: &Rc<App>) -> Vec<String> {
         let Some(boxed) = boxed.and_downcast::<glib::BoxedAnyObject>() else {
             continue;
         };
-        if let palette::Item::Command { action, .. } = &**boxed.borrow::<Rc<palette::Item>>() {
-            actions.push(action.clone());
+        if let palette::Item::Command { action, label, .. } = &**boxed.borrow::<Rc<palette::Item>>()
+        {
+            actions.push((label.clone(), action.clone()));
         }
     }
     dialog.force_close();

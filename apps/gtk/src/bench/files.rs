@@ -6,8 +6,9 @@ use super::*;
 
 /// What New from Template would list: every template, and the destination each one names today.
 /// `=open` then makes each one's note as Create does, and prints whether its caret is on screen;
-/// `=insert:<rel_note>` puts them into a note instead ([`bench_template_insert`]), and
-/// `=walk:<rel_note>` stays up for its stops to be typed into ([`bench_template_walk`]).
+/// `=insert:<rel_note>` puts them into a note instead ([`bench_template_insert`]),
+/// `=walk:<rel_note>` stays up for its stops to be typed into ([`bench_template_walk`]), and
+/// `=commands` runs each one's command of its own ([`bench_template_commands`]).
 ///
 /// The dialog itself cannot be driven under Xvfb, so this is what proves `templates()`, the
 /// `accent-target:` directive and the rendered target end to end without a widget.
@@ -28,6 +29,9 @@ pub(super) fn bench_templates(app: &Rc<App>) {
     }
     if let Some(rel) = arg.strip_prefix("walk:") {
         return bench_template_walk(app, rel);
+    }
+    if arg == "commands" {
+        return bench_template_commands(app);
     }
     if arg != "open" {
         return bench_quit(app);
@@ -55,6 +59,80 @@ pub(super) fn bench_templates(app: &Rc<App>) {
         }
         bench_quit(&app);
     });
+}
+
+/// `=commands`: each template that names a target is a Run Command row, New and its name, which
+/// makes its note run as a pick runs it; a chord given another through the palette's rebind runs
+/// it through XTEST; with that template deleted its row and action go and the chord stays stored,
+/// opening nothing; and Restore Default takes the chord out of the application's table. Deletes a
+/// template, so a scratch vault under `/tmp`.
+fn bench_template_commands(app: &Rc<App>) {
+    scratch_only(app, "ACCENT_BENCH_TEMPLATE=commands");
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        until("template_commands", "listed", 30_000, || {
+            app.templates.borrow().len() == 2
+        })
+        .await;
+        let rows = template_rows(&app).await;
+        println!("bench template_commands rows={rows:?}");
+        let front = |rel: &str| app.active_key().as_deref() == Some(rel);
+
+        let meta = crate::templates::action("Templates/Meta.md");
+        let _ = WidgetExt::activate_action(&app.window, &meta, None);
+        let made = until("template_commands", "run", 5000, || front("Meta.md")).await;
+        println!(
+            "bench template_commands run made={} used={:?}",
+            made.is_some(),
+            app.recent_commands.borrow().first()
+        );
+
+        let (inbox, note) = (
+            crate::templates::action("Templates/Inbox Note.md"),
+            "Inbox/Inbox Note.md",
+        );
+        app.rebind(&inbox, Some(vec!["<Control><Shift>m".to_string()]));
+        super::git::xtest("move 700 450; focus; key ctrl+shift+m").await;
+        let opened = until("template_commands", "chord", 5000, || front(note)).await;
+        println!(
+            "bench template_commands chord opened={} made={}",
+            opened.is_some(),
+            app.root().join(note).exists()
+        );
+
+        let _ = std::fs::remove_file(app.root().join("Templates/Inbox Note.md"));
+        let name = &inbox["win.".len()..];
+        let gone = until("template_commands", "gone", 10_000, || {
+            app.window.lookup_action(name).is_none()
+        })
+        .await;
+        app.open_path("Meta.md");
+        until("template_commands", "back", 5000, || front("Meta.md")).await;
+        super::git::xtest("key ctrl+shift+m").await;
+        let stored = app.config.borrow().shortcuts.contains_key(&inbox);
+        println!(
+            "bench template_commands deleted gone={} rows={:?} stored={stored} front={:?}",
+            gone.is_some(),
+            template_rows(&app).await,
+            app.active_key()
+        );
+
+        app.rebind(&inbox, None);
+        let left = app
+            .window
+            .application()
+            .map(|a| a.accels_for_action(&inbox));
+        println!("bench template_commands restored accels={left:?}");
+        bench_quit(&app);
+    });
+}
+
+/// The templates' rows of Run Command with "New" typed, by label.
+async fn template_rows(app: &Rc<App>) -> Vec<(String, String)> {
+    let mut rows = super::listed::rows(app, "New").await;
+    rows.retain(|(_, action)| crate::templates::template(action).is_some());
+    rows.sort();
+    rows
 }
 
 /// `=insert:<rel_note>` puts each template that has a stop at the caret of that note, as Insert

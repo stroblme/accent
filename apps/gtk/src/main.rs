@@ -83,6 +83,7 @@ mod start;
 mod statusbar;
 mod switcher;
 mod synctex;
+mod templates;
 mod terminal;
 mod theme;
 mod toasts;
@@ -230,9 +231,11 @@ fn main() -> glib::ExitCode {
     });
     shell.watch_config();
     // A `[shortcuts]` key naming no action binds nothing, silently — an action that was renamed
-    // leaves exactly that behind. Said once per process; there is no migration.
+    // leaves exactly that behind. Said once per process; there is no migration. A template's
+    // command is no table action, and is kept while its template is gone (`templates`).
     for name in shell.config.borrow().shortcuts.keys() {
-        if !ACTIONS.iter().any(|(action, _, _)| action == name) {
+        let template = templates::template(name).is_some();
+        if !template && !ACTIONS.iter().any(|(action, _, _)| action == name) {
             tracing::warn!("shortcut for unknown action {name:?} in config.toml");
         }
     }
@@ -419,6 +422,8 @@ struct App {
     /// MRU files and commands for palette ranking; record opens because the index only knows mtimes.
     recent_files: RefCell<Vec<String>>,
     recent_commands: RefCell<Vec<String>>,
+    /// The templates that name a target, each a command of its own (`templates`).
+    templates: RefCell<Vec<String>>,
     /// Window-captured editor chords; rebuild the controller on rebinding (`actions::fill_captured`).
     captured: gtk::ShortcutController,
 }
@@ -1752,6 +1757,8 @@ impl App {
             };
             let python_changed = vault.config().debug.python != next.debug.python;
             vault.set_config(next);
+            // The Templates folder may be another.
+            self.refresh_templates();
             vault.set_ghost(config.ghost_text);
             vault.set_words(config.word_suggestions);
             if python_changed {

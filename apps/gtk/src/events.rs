@@ -225,6 +225,8 @@ impl App {
             }
             // The saved searches on a preview's page answer from the same index.
             self.each_preview(|preview| preview.requery_soon());
+            // And which templates name a target, each a command of its own.
+            self.follow_templates(&event);
         }
         // A note's hints are about the index as much as about its own text: the file a
         // `[[link]]` names may have just been created, renamed or deleted, and none of that is

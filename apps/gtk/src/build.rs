@@ -356,6 +356,7 @@ pub fn build_window(
         session: widgets::Debounce::new(session::SESSION),
         recent_files: RefCell::new(Vec::new()),
         recent_commands: RefCell::new(Vec::new()),
+        templates: RefCell::new(Vec::new()),
         captured: gtk::ShortcutController::new(),
     });
     if let Some(vault) = &vault {
@@ -409,6 +410,7 @@ pub fn build_window(
     wire_pane(&app, &first);
 
     install_actions(&app);
+    app.refresh_templates();
     wire_window(&app);
     app.install_collapse();
     if vault.is_some() {

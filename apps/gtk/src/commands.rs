@@ -52,7 +52,7 @@ pub fn items(config: &Config, used: &[String]) -> Vec<palette::Item> {
 }
 
 /// Every chord in use with what holds it, but the command at `except`'s own: the table's, the
-/// other commands' and the tab bar's, which the rebind dialog refuses by name.
+/// other commands', the templates' and the tab bar's, which the rebind dialog refuses by name.
 pub fn taken(config: &Config, except: Option<usize>) -> Vec<(String, String)> {
     let table = crate::actions::ACTIONS
         .iter()
@@ -68,7 +68,8 @@ pub fn taken(config: &Config, except: Option<usize>) -> Vec<(String, String)> {
     let tabs = tabs
         .into_iter()
         .map(|(a, what)| (a.to_string(), what.to_string()));
-    table.chain(commands).chain(tabs).collect()
+    let templates = crate::templates::taken(config);
+    table.chain(commands).chain(templates).chain(tabs).collect()
 }
 
 impl App {

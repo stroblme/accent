@@ -3,7 +3,7 @@
 //! Its rows are [`ACTIONS`] through [`accels_for`], the palette's command mode and `[shortcuts]`
 //! overrides included, so a rebind shows and an unbound command does not: the palette lists every
 //! command, bound or not, and is where they are rebound. The user's own commands (`[[commands]]`)
-//! follow under Terminal, as they open one.
+//! follow under Terminal, as they open one, and the window's templates' under Notes.
 
 use crate::actions::{ACTIONS, accels_for};
 use crate::commands;
@@ -131,7 +131,8 @@ fn section(action: &str) -> Option<&'static str> {
 type Section = (&'static str, Vec<(String, Vec<String>)>);
 
 /// Each heading with its bound commands, in the table's order; a heading with none is left out.
-fn rows(config: &Config) -> Vec<Section> {
+/// `templates` are the window's, so a chord stored for a template it has not is not shown.
+fn rows(config: &Config, templates: &[String]) -> Vec<Section> {
     SECTIONS
         .into_iter()
         .filter_map(|title| {
@@ -155,6 +156,10 @@ fn rows(config: &Config) -> Vec<Section> {
                         .filter(|_| title == "Terminal")
                         .map(|i| (config.commands[i].name.clone(), commands::accels(config, i))),
                 )
+                .chain(templates.iter().filter(|_| title == "Notes").map(|rel| {
+                    let action = crate::templates::action(rel);
+                    (crate::templates::label(rel), accels_for(config, &action))
+                }))
                 .filter(|(_, accels)| !accels.is_empty())
                 .collect();
             (!items.is_empty()).then_some((title, items))
@@ -163,9 +168,9 @@ fn rows(config: &Config) -> Vec<Section> {
 }
 
 /// Present the dialog over `window`, built afresh so it shows the bindings in force now.
-pub fn present(window: &adw::ApplicationWindow, config: &Config) {
+pub fn present(window: &adw::ApplicationWindow, config: &Config, templates: &[String]) {
     let dialog = adw::ShortcutsDialog::new();
-    for (title, items) in rows(config) {
+    for (title, items) in rows(config, templates) {
         let section = adw::ShortcutsSection::new(Some(title));
         for (label, accels) in items {
             let mut shown: Vec<String> = Vec::new();
@@ -226,7 +231,7 @@ mod tests {
     #[test]
     fn rows_follow_the_effective_bindings() {
         let mut config = Config::default();
-        let shown = rows(&config);
+        let shown = rows(&config, &[]);
         assert_eq!(shown[0].0, "Files");
         assert_eq!(
             accels_of(&shown, "Save"),
@@ -261,7 +266,7 @@ mod tests {
         config
             .shortcuts
             .insert("win.duplicate-line".into(), Vec::new());
-        let shown = rows(&config);
+        let shown = rows(&config, &[]);
         assert_eq!(accels_of(&shown, "Save"), None);
         assert_eq!(accels_under(&shown, "Diagram", "Duplicate Selection"), None);
         let (_, tab_menu) = shown
@@ -286,9 +291,28 @@ mod tests {
             command("Claude", Some("<Control><Shift>k")),
             command("Build", None),
         ];
-        let shown = rows(&config);
+        let shown = rows(&config, &[]);
         let (_, terminal) = shown.iter().find(|(t, _)| *t == "Terminal").unwrap();
         assert!(terminal.contains(&("Claude".to_string(), vec!["<Control><Shift>k".to_string()])));
         assert_eq!(accels_of(&shown, "Build"), None);
+
+        // A template the window has is a Notes row once bound; one it has not is not listed.
+        let (daily, gone) = ("Templates/Daily.md", "Templates/Gone.md");
+        for rel in [daily, gone] {
+            let chord = vec!["<Control><Shift>j".to_string()];
+            config
+                .shortcuts
+                .insert(crate::templates::action(rel), chord);
+        }
+        let shown = rows(
+            &config,
+            &[daily.to_string(), "Templates/Meeting.md".to_string()],
+        );
+        assert_eq!(
+            accels_under(&shown, "Notes", "New Daily"),
+            Some(vec!["<Control><Shift>j".into()])
+        );
+        assert_eq!(accels_of(&shown, "New Meeting"), None);
+        assert_eq!(accels_of(&shown, "New Gone"), None);
     }
 }

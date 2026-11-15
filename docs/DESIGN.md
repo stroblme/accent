@@ -2212,6 +2212,8 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 ### Notes
 
 - Rename `F2`, Move to Trash `Delete` (tree only), Delete… (a remote vault's Move to Trash, unbound), New from Template… `Ctrl+Shift+D`, Insert Template… (unbound).
+- Each template that names an `accent-target:` is also a command of its own, New and the template's name, which does what New from Template does with that template.
+  It is unbound until its palette row is given a chord, and a template without a target has no such command, since New from Template has nowhere to put its note.
 - A name with `/` in it is a path from the file's own folder, `..` included, so Rename is the move too and the keyboard needs no second dialog.
   It opens with a file's name selected up to its last dot, so typing keeps the extension, and a folder's selected whole.
 - A template names where its notes go with an `accent-target:` front-matter line, so `accent-target: Daily/{{date:%Y-%m-%d}}.md` is the daily note, and asking twice in a day opens the one already made.
@@ -2341,6 +2343,8 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
   An empty list is deliberately unbound, and an unbound action still lists in the palette wherever it applies, so nothing becomes unreachable.
 - A chord in use is refused by naming the command that holds it; a clash from a hand edit is marked on both rows.
 - A user's command (Terminal) is `win.command-<i>`, in the file's order, unbound unless its entry names a `shortcut`; rebound from the palette or Preferences → Commands, its one chord is written to that entry, not to `[shortcuts]`, and Restore Default leaves it unbound.
+- A template's command (Notes) is `win.new-template-` and the template's vault-relative path, every byte but an ASCII letter, a digit or a dot written as `-` and two hex digits (`Templates/Daily.md` is `win.new-template-Templates-2fDaily.md`), so its chord in `[shortcuts]` follows the file.
+  Once the template is renamed or deleted, its row goes and the chord stays stored, firing nothing until a template is back at that path.
 - The never-bind list is shown in the rebind dialog, not enforced: the desktop and the widget keep those chords whatever is stored.
 
 ### Widget chords

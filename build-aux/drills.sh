@@ -285,6 +285,32 @@ EOF
 	has "$dir/template" "bench template_caret Meta.md on_screen=true"
 }
 
+# A command for each template that names a target, picked, given a chord and pressed, then gone
+# with its template while its chord stays stored. Loose names none, so it has no command.
+drill_template_commands() {
+	mkdir "$vault/Templates"
+	cat >"$vault/Templates/Meta.md" <<'EOF'
+---
+accent-target: Meta.md
+---
+# Meta
+EOF
+	cat >"$vault/Templates/Inbox Note.md" <<'EOF'
+---
+accent-target: Inbox/{{title}}.md
+---
+# {{title}}
+EOF
+	echo "# Loose" >"$vault/Templates/Loose.md"
+	launch 60 ACCENT_BENCH_TEMPLATE=commands >"$dir/template-commands"
+	has "$dir/template-commands" \
+		'bench template_commands rows=[("New Inbox Note", "win.new-template-Templates-2fInbox-20Note.md"), ("New Meta", "win.new-template-Templates-2fMeta.md")]' \
+		'bench template_commands run made=true used=Some("win.new-template-Templates-2fMeta.md")' \
+		'bench template_commands chord opened=true made=true' \
+		'bench template_commands deleted gone=true rows=[("New Meta", "win.new-template-Templates-2fMeta.md")] stored=true front=Some("Meta.md")' \
+		'bench template_commands restored accels=Some([])'
+}
+
 # An open note renamed to other extensions: the same tab while it stays the same kind of page, its
 # place in the bar otherwise.
 drill_retype() {

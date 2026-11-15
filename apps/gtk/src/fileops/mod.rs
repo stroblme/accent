@@ -477,24 +477,30 @@ fn new_from_template_with(ops: &Rc<Ops>, templates: Vec<String>) {
         if response != CONFIRM {
             return;
         }
-        let Some(template) = templates.get(picker.selected() as usize).cloned() else {
-            return;
-        };
-        let (name, vault) = (basename(&template).to_string(), ops.vault.clone());
-        glib::spawn_future_local(async move {
-            let made = crate::work::attempt(&format!("create a note from {name}"), move || {
-                vault
-                    .note_from_template(&template)
-                    .map_err(|e| e.to_string())
-            })
-            .await;
-            match made {
-                Ok(Some((rel, stops))) => (ops.open)(&rel, &stops),
-                // The file changed under the dialog; nothing was created, so nothing to undo.
-                Ok(None) => (ops.toast)(&format!("{name} no longer has a destination")),
-                Err(why) => (ops.toast)(&why),
-            }
-        });
+        if let Some(template) = templates.get(picker.selected() as usize) {
+            note_from_template(&ops, template);
+        }
+    });
+}
+
+/// Make the note `template`'s `accent-target:` names and open it, or open the one already made:
+/// New from Template's Create, and a template's own command (`crate::templates`).
+pub fn note_from_template(ops: &Rc<Ops>, template: &str) {
+    let (name, template) = (basename(template).to_string(), template.to_string());
+    let (vault, ops) = (ops.vault.clone(), ops.clone());
+    glib::spawn_future_local(async move {
+        let made = crate::work::attempt(&format!("create a note from {name}"), move || {
+            vault
+                .note_from_template(&template)
+                .map_err(|e| e.to_string())
+        })
+        .await;
+        match made {
+            Ok(Some((rel, stops))) => (ops.open)(&rel, &stops),
+            // The file changed since it was listed; nothing was created, so nothing to undo.
+            Ok(None) => (ops.toast)(&format!("{name} no longer has a destination")),
+            Err(why) => (ops.toast)(&why),
+        }
     });
 }
 

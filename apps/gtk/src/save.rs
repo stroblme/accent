@@ -275,7 +275,7 @@ impl App {
 
     /// What follows a write that landed: the etag it left, and — when the buffer is still what
     /// was written — the tab clean again.
-    fn wrote(&self, tab: &Rc<Tab>, etag: Etag, clean: bool) {
+    fn wrote(self: &Rc<Self>, tab: &Rc<Tab>, etag: Etag, clean: bool) {
         if clean {
             tab.mark_clean(etag);
             tab.clear_disk_alert();
@@ -290,6 +290,8 @@ impl App {
         if let Some(git) = self.git.get() {
             git.schedule_paths([tab.rel()], false);
         }
+        // A template given or rid of its `accent-target:` here gains or loses its command.
+        self.follow_templates(&Event::FileChanged(tab.rel()));
     }
 
     /// Write the buffer before returning, landing any in-flight save first.
