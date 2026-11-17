@@ -231,7 +231,7 @@ impl DiagramTab {
     pub(super) fn wire_wheel(self: &Rc<Self>) {
         let overshoot = Rc::new(Cell::new(Overshoot::default()));
         let resting: Rc<RefCell<Option<glib::SourceId>>> = Rc::default();
-        // What Alt+wheel has scrolled short of a notch (`zoom::page_steps`).
+        // What Alt+wheel has scrolled short of a notch (`zoom::wheel_steps`).
         let alt = Rc::new(Cell::new(0.0));
         let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
         wheel.connect_scroll(glib::clone!(
@@ -256,7 +256,7 @@ impl DiagramTab {
                 // Straight onto the next or previous page's top at the zoom it is at, or fitted
                 // while presented, with no push at the edge of the one it leaves.
                 if state.contains(gdk::ModifierType::ALT_MASK) {
-                    let steps = crate::zoom::page_steps(&alt, dy, wheel.unit());
+                    let steps = crate::zoom::wheel_steps(&alt, dy, wheel.unit());
                     let land = tab.presenting.get().is_none().then_some(true);
                     for _ in 0..steps.unsigned_abs() {
                         if let Some(next) = tab.next_page(steps > 0) {

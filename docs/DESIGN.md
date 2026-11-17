@@ -2210,6 +2210,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
   The preview is zoomed with the editor, so presentation follows.
 - A step is a tenth for the document font, a PDF page and an image alike, from the chord, the wheel or a pinch, and lands on the next tenth: a page fitted at 137 % steps to 140 %.
   A pinch follows the fingers in the same tenths, around the point between them.
+  A two-finger scroll with Ctrl takes a step every 40 px of it, about what a wheel notch scrolls, so a swipe zooms a few tenths and never a tenth an event (`zoom::wheel_steps`).
   A step is taken from the zoom asked for, never read back off the rendered pixels, and counted in whole percent, so a zoom a hair off its tenth still moves.
 - A wheel notch keeps what is under the pointer under it on a PDF page, an image and a notebook alike, and a pinch what is between the fingers.
   A chord, having no pointer, keeps a PDF's reading position, the view's top-left corner, the line at the top of a notebook's view, and the middle of an image's view, as a diagram's.

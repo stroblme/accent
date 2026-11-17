@@ -234,22 +234,18 @@ pub fn zoomed_scroll(at: f64, offset: f64, was: f64, now: f64) -> f64 {
     (offset + at) * now / was.max(1.0) - at
 }
 
-/// Accumulate fractional smooth-scroll deltas so one wheel notch yields one zoom step.
-pub fn wheel_steps(accum: &Cell<f64>, dy: f64) -> i32 {
-    let total = accum.get() + dy;
-    accum.set(total.fract());
-    total.trunc() as i32
-}
-
-/// Alt+wheel's pages in `dy`, a notch a page as [`wheel_steps`] counts them and a touchpad's
-/// [`SWIPE_TURN`](crate::diagram::geometry::SWIPE_TURN) pixels a notch, about what a notch
-/// scrolls, so a swipe turns a page per notch's worth and never one per event.
-pub fn page_steps(accum: &Cell<f64>, dy: f64, unit: gdk::ScrollUnit) -> i32 {
+/// The whole notches in a scroll of `dy`, for a step a notch (a zoom step, a page): the remainder
+/// is kept in `accum`, so a high-resolution wheel's fractions add up to one, and a touchpad's
+/// pixels count [`SWIPE_TURN`](crate::diagram::geometry::SWIPE_TURN) to the notch, about what a
+/// notch scrolls, so a swipe steps a notch's worth at a time and never once an event.
+pub fn wheel_steps(accum: &Cell<f64>, dy: f64, unit: gdk::ScrollUnit) -> i32 {
     let notches = match unit {
         gdk::ScrollUnit::Wheel => dy,
         _ => dy / crate::diagram::geometry::SWIPE_TURN,
     };
-    wheel_steps(accum, notches)
+    let total = accum.get() + notches;
+    accum.set(total.fract());
+    total.trunc() as i32
 }
 
 /// Step zoom on Ctrl+scroll: `step(true)` zooms out and `step(false)` zooms in.
@@ -265,9 +261,10 @@ pub fn zoom_on_wheel(
     phase: gtk::PropagationPhase,
     step: impl Fn(bool) + 'static,
 ) {
-    let accum = Cell::new(0.0);
+    let accum = Rc::new(Cell::new(0.0));
     let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
     wheel.set_propagation_phase(phase);
+    let held = accum.clone();
     wheel.connect_scroll(move |controller, _, dy| {
         if !controller
             .current_event_state()
@@ -275,12 +272,14 @@ pub fn zoom_on_wheel(
         {
             return glib::Propagation::Proceed;
         }
-        let steps = wheel_steps(&accum, dy);
+        let steps = wheel_steps(&held, dy, controller.unit());
         for _ in 0..steps.abs() {
             step(steps > 0);
         }
         glib::Propagation::Stop
     });
+    // A swipe's remainder, near a step, is not the next scroll's.
+    wheel.connect_scroll_end(move |_| accum.set(0.0));
     widget.add_controller(wheel);
 }
 
@@ -403,28 +402,23 @@ mod tests {
     #[test]
     fn a_wheel_notch_is_one_step() {
         let accum = Cell::new(0.0);
-        assert_eq!(
-            wheel_steps(&accum, 0.5),
-            0,
-            "half a notch is not a step yet"
-        );
-        assert_eq!(wheel_steps(&accum, 0.5), 1, "the other half completes it");
-        assert_eq!(wheel_steps(&accum, 1.0), 1);
-        assert_eq!(wheel_steps(&accum, -2.0), -2);
+        let wheel = |dy| wheel_steps(&accum, dy, gdk::ScrollUnit::Wheel);
+        assert_eq!(wheel(0.5), 0, "half a notch is not a step yet");
+        assert_eq!(wheel(0.5), 1, "the other half completes it");
+        assert_eq!(wheel(1.0), 1);
+        assert_eq!(wheel(-2.0), -2);
+        // A high-resolution wheel's eighths of a notch add up the same way.
+        assert_eq!((0..8).map(|_| wheel(0.125)).sum::<i32>(), 1);
     }
 
     #[test]
-    fn a_swipe_pages_a_notch_worth_at_a_time() {
+    fn a_swipe_steps_a_notch_worth_at_a_time() {
         let accum = Cell::new(0.0);
-        let swipe = |dy| page_steps(&accum, dy, gdk::ScrollUnit::Surface);
-        assert_eq!(swipe(15.0), 0, "a swipe's event is not a page");
+        let swipe = |dy| wheel_steps(&accum, dy, gdk::ScrollUnit::Surface);
+        assert_eq!(swipe(15.0), 0, "a swipe's event is not a step");
         assert_eq!(swipe(15.0), 0);
         assert_eq!(swipe(15.0), 1, "40 px of it are");
         assert_eq!(swipe(120.0), 3);
-        // A high-resolution wheel's eighths of a notch add up the same way.
-        let wheel = |dy| page_steps(&accum, dy, gdk::ScrollUnit::Wheel);
-        accum.set(0.0);
-        assert_eq!(wheel(0.125), 0);
-        assert_eq!((0..7).map(|_| wheel(0.125)).sum::<i32>(), 1);
+        assert_eq!(swipe(-45.0), -1, "back the other way");
     }
 }

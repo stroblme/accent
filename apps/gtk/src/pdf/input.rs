@@ -394,7 +394,7 @@ impl PdfTab {
     /// where a wheel goes to the one under the pointer. In bubble phase on the view, ahead of its
     /// scrolled window, which would scroll as well.
     pub(super) fn wire_wheel(self: &Rc<Self>) {
-        // What Alt+wheel has scrolled short of a notch (`zoom::page_steps`).
+        // What Alt+wheel has scrolled short of a notch (`zoom::wheel_steps`).
         let alt = Rc::new(Cell::new(0.0));
         let wheel = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
         wheel.connect_scroll(glib::clone!(
@@ -412,7 +412,7 @@ impl PdfTab {
                     alt.set(0.0);
                     return glib::Propagation::Proceed;
                 }
-                let steps = crate::zoom::page_steps(&alt, dy, wheel.unit());
+                let steps = crate::zoom::wheel_steps(&alt, dy, wheel.unit());
                 for _ in 0..steps.unsigned_abs() {
                     match steps > 0 {
                         // Not back up to the last page's top from further down it.

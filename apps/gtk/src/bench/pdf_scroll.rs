@@ -1,4 +1,5 @@
-//! PDF frame pacing under real wheel input and continuous adjustment motion, and Alt+wheel paging.
+//! PDF frame pacing under real wheel input and continuous adjustment motion, then Alt+wheel
+//! paging and Ctrl+wheel zoom.
 
 use super::*;
 
@@ -104,6 +105,7 @@ pub(super) fn run(app: &Rc<App>, rel: &str) {
         clock.disconnect(update);
         clock.disconnect(paint);
         alt(&app, &pdf, &reader, &scroller).await;
+        ctrl(&app, &pdf, &reader, &scroller).await;
         bench_quit(&app);
     });
 }
@@ -153,6 +155,35 @@ async fn alt(
             page + 1,
             value != from
         );
+    }
+}
+
+/// Ctrl+wheel at 100 %: a notch down and one up, each printing the zoom it left, a step a notch
+/// (DESIGN.md, Zoom).
+async fn ctrl(
+    app: &Rc<App>,
+    pdf: &Rc<pdftab::PdfTab>,
+    reader: &pdfview::PdfView,
+    scroller: &gtk::ScrolledWindow,
+) {
+    pdf.set_zoom(pdfview::PdfZoom::Scale(1.0));
+    let middle = graphene::Point::new(
+        scroller.width() as f32 / 2.0,
+        scroller.height() as f32 / 2.0,
+    );
+    let at = scroller.compute_point(&app.window, &middle).unwrap();
+    let (sx, sy) = app.window.surface_transform();
+    let pointer = format!("move {:.0} {:.0}", at.x() as f64 + sx, at.y() as f64 + sy);
+    for (name, scroll) in [("down", "scroll -1"), ("up", "scroll 1")] {
+        super::git::xtest(&format!(
+            "{pointer}; keydown ctrl; {scroll}; sleep 0.3; keyup ctrl"
+        ))
+        .await;
+        let zoom = match reader.zoom() {
+            pdfview::PdfZoom::Scale(scale) => format!("{:.0}%", scale * 100.0),
+            fit => format!("{fit:?}"),
+        };
+        println!("bench pdf scroll ctrl notch {name} zoom={zoom}");
     }
 }
 
