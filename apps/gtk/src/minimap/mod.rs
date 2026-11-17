@@ -631,6 +631,10 @@ impl imp::Minimap {
         {
             return glib::Propagation::Proceed;
         }
+        // Alt scrolls the view a screenful a notch, as over it.
+        if let Some(taken) = self.eased.get().and_then(|eased| eased.alt(wheel, dy)) {
+            return taken;
+        }
         let Some(adjustment) = self.view.upgrade().and_then(|view| view.vadjustment()) else {
             return glib::Propagation::Proceed;
         };

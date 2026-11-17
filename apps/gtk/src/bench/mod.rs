@@ -418,8 +418,9 @@ use user_commands::bench_commands;
 ///   without Shift (`refer::bench_refer`). Writes its files under `refer/`.
 /// - `ACCENT_BENCH_SCROLL=<rel_dir>`: list scroll retention during vault/git
 ///   changes. Creates a repository; requires a scratch vault under `/tmp`.
-/// - `ACCENT_BENCH_WHEEL=<rel>`: XTEST wheel notches and a touchpad's scroll over the note, the
-///   Files tree, the switcher and Preferences, and how far each went (`wheel::bench_wheel`).
+/// - `ACCENT_BENCH_WHEEL=<rel>[,<rel>…]`: XTEST wheel notches, one Alt notch and a touchpad's
+///   scroll over the note, its preview, each further file, the Files tree, the switcher and
+///   Preferences, and how far each went (`wheel::bench_wheel`).
 /// - `ACCENT_BENCH_DIAGRAM=<rel>`: diagram edits/save, creating a sample if
 ///   absent; `shot:<rel>:<dir>`: render pages; `export:<rel>:<dir>`: dark-theme
 ///   PDF/PNG/SVG export and print output; `sharp:<rel>`: an SVG picture's copies and a frame's

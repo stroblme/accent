@@ -710,7 +710,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   No other syntax colour.
   An h1 or an h2 stands on the map as a label in the UI font and the text's tone, as VS Code draws a section header, the h2 smaller and further in, and a deeper heading is bars like the text around it (user decision 2026-11-03).
   A conflict block's row tints come along as the page has them.
-  A rounded band, as Xcode draws its visible region, covers the lines on screen, always, stronger under the pointer: a press puts the line pressed in the middle of the view, a press on the band takes hold of it, a drag keeps it under the pointer, the wheel scrolls the view, and the caret never moves.
+  A rounded band, as Xcode draws its visible region, covers the lines on screen, always, stronger under the pointer: a press puts the line pressed in the middle of the view, a press on the band takes hold of it, a drag keeps it under the pointer, the wheel scrolls the view, Alt's a screenful a notch (Motion), and the caret never moves.
   The rows are estimated from the characters on each line and the column's width, never asked of GTK's layout, where its hidden-text aborts are; hidden lines take none.
   Once the document is taller than the map, the map scrolls itself in step with the band, which then runs from its top to its bottom as the view goes from the first screen to the last.
   A comparison or a merge hides it, since their columns have no room to spare, and the scrollbar stands in until the editor is alone again.
@@ -2530,13 +2530,15 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
 - `gtk-enable-animations` off stops all of it, read as each motion starts, so a change to it holds at once: libadwaita's and GTK's animations skip to their end, GTK runs no stylesheet transition, and our own ramps check it themselves; the outline then holds the three seconds and goes at once.
   The other timings we own are debounces, which keep the main loop free.
 - A mouse wheel's notch eases over 200 ms, ease-out cubic, as GTK eases a page key or a scrollbar press (`widgets::smooth_wheel`): GTK moves a notch's whole step at once, which reads as a stutter over text.
-  Notches in quick succession add up to one target; a touchpad, Shift's sideways scroll and Control's zoom stay GTK's, and over a PDF or a diagram Alt pages instead (Diagram).
+  Notches in quick succession add up to one target; a touchpad, Shift's sideways scroll and Control's zoom stay GTK's.
   Every scroller that scrolls up and down eases it: documents, the minimap (the view's own easing), images, diagrams, terminals, popovers, dialogs and the sidebar's panes, the Git pane's among them.
   The scrollers libadwaita builds into Preferences, Keyboard Shortcuts and About ease it too (`widgets::smooth_wheels`).
   Any other scroll meanwhile takes over where the easing is: the caret followed, a page key, a heading jumped to, a diagram's page turned at its edge.
   A list (`GtkListView`) keeps its scroll in whole pixels, so the easing takes the pixel or two it rounds away as its own, which otherwise stopped each notch after its first frame, a fifth of its step at 60 Hz (`widgets::holds`).
   For the same reason a touchpad's delta goes onto the value GTK asked for last, not the one the list rounded down, which took a fifth off a scroll of 2.5 px a frame going down, added a fifth going up and kept a slower one from going down at all.
   A terminal's scrollback is its scroller's, in pixels (VTE's fallback scrolling off), so a touchpad glides there too; a program reading the mouse, and the alternate screen turning the wheel into arrow keys, keep the wheel.
+- Alt with the wheel is a page wherever it is: every scroller that eases the wheel scrolls a screenful a notch, or every 40 px of a swipe, as far as Page Down scrolls and eased as a notch is (`Wheel::alt`), and a PDF or a diagram turns to the next page's top instead (Diagram).
+  That is the sidebar's panes, popovers and dialogs as much as a note, a code tab, the preview, a notebook and a terminal's scrollback, so the gesture never needs a second thought.
 - Motion the platform owns keeps its own timing: GtkSearchBar, AdwBanner, AdwTabBar, AdwToolbarView (presentation mode's status bar coming up on a hover), AdwDialog, a popover.
 - The document follows the caret and nothing else: GTK keeps the insert mark on screen by itself (arrows, typing, find, Go to Line, a search hit, every extra caret), a wheel scroll away from the caret stays put, and a dialog opening and closing over it puts nothing back.
 

@@ -1,8 +1,10 @@
-//! `ACCENT_BENCH_WHEEL=<rel>`: how far three wheel notches sent through XTEST scroll each kind of
-//! scroller the reader meets, against GTK's step of `page^(2/3)` a notch: the note `<rel>`, the
-//! Files tree with `Daily` open, the switcher's list (Open Recent's) and Preferences.
+//! `ACCENT_BENCH_WHEEL=<rel>[,<rel>…]`: how far three wheel notches sent through XTEST scroll
+//! each kind of scroller the reader meets, against GTK's step of `page^(2/3)` a notch: the note
+//! `<rel>`, its preview, each further file named (a code file, a notebook), the Files tree with
+//! `Daily` open, the switcher's list (Open Recent's) and Preferences.
 //! A line gives the distance, the frames it took, the worst gap between them and a frame's median
-//! layout and paint. Then a touchpad's scroll as GTK applies one (`unclamped + 2.5 × delta`, a
+//! layout and paint. A second, how far one Alt notch went against the screenful Page Down
+//! scrolls, the adjustment's page increment (DESIGN.md, Motion). Then a touchpad's scroll as GTK applies one (`unclamped + 2.5 × delta`, a
 //! frame at a time) for a second down and a second up from the middle, at a delta of 1 and of 0.3
 //! a frame, by GTK alone and with `Wheel::touchpad` carrying what a list rounds away.
 
@@ -14,15 +16,24 @@ const NOTCHES: i32 = 3;
 const TOUCHPAD_FRAMES: u32 = 60;
 const TOUCHPAD_PX: [f64; 2] = [2.5, 0.75];
 
-pub(super) fn bench_wheel(app: &Rc<App>, rel: &str) {
-    app.open_path(rel);
-    let app = app.clone();
+pub(super) fn bench_wheel(app: &Rc<App>, arg: &str) {
+    let mut files = arg.split(',').map(str::to_string);
+    app.open_path(&files.next().unwrap_or_default());
+    let (app, others): (_, Vec<String>) = (app.clone(), files.collect());
     glib::spawn_future_local(async move {
         glib::timeout_future(Duration::from_secs(2)).await;
         let editor = app
             .active()
             .and_then(|tab| tab.view.ancestor(gtk::ScrolledWindow::static_type()));
         measure(&app, "editor", editor).await;
+        let _ = WidgetExt::activate_action(&app.window, "win.view-mode", None);
+        glib::timeout_future(Duration::from_secs(2)).await;
+        measure(&app, "preview", front_scroller(&app)).await;
+        for rel in &others {
+            app.open_path(rel);
+            glib::timeout_future(Duration::from_secs(2)).await;
+            measure(&app, rel, front_scroller(&app)).await;
+        }
 
         app.show_pane("files");
         let tree = app.tree.get().expect("a tree");
@@ -51,6 +62,15 @@ pub(super) fn bench_wheel(app: &Rc<App>, rel: &str) {
         measure(&app, "preferences", page.and_then(|p| p.first_child())).await;
         bench_quit(&app);
     });
+}
+
+/// The outermost scroller that scrolls up and down in the tab in front.
+fn front_scroller(app: &Rc<App>) -> Option<gtk::Widget> {
+    let page = app.tabs().selected_page()?;
+    find_widget(&page.child(), &|w| {
+        w.downcast_ref::<gtk::ScrolledWindow>()
+            .is_some_and(|s| s.vscrollbar_policy() != gtk::PolicyType::Never)
+    })
 }
 
 /// The parent of the first widget in the open dialog that `found` accepts.
@@ -141,6 +161,23 @@ async fn measure(app: &Rc<App>, name: &str, scroller: Option<gtk::Widget>) {
         moving.len(),
         median(|p| p.2),
         median(|p| p.3),
+    );
+
+    // One Alt notch: a screenful, as far as Page Down scrolls.
+    adj.set_value(adj.lower());
+    glib::timeout_future(Duration::from_millis(300)).await;
+    let start = adj.value();
+    let room = adj.upper() - adj.page_size() - start;
+    super::git::xtest(&format!(
+        "move {x:.0} {y:.0}; keydown alt; scroll -1; sleep 0.4; keyup alt"
+    ))
+    .await;
+    println!(
+        "bench wheel {name} alt moved={:.0} expected={:.0} page_increment={:.0} page_size={:.0}",
+        adj.value() - start,
+        adj.page_increment().min(room),
+        adj.page_increment(),
+        adj.page_size(),
     );
 
     // A second easing of this scroller's, for its touchpad hook: no real event reaches it.

@@ -43,10 +43,11 @@ const WHEEL_MS: u32 = 200;
 ///
 /// GTK 4 moves a wheel notch's whole step at once. Only the wheel is eased: a touchpad's pixel
 /// deltas already scroll smoothly, Shift scrolls sideways and Control zooms, all left to GTK.
+/// Alt scrolls a screenful a notch, wheel or touchpad ([`Wheel::alt`]).
 /// On the scroller in bubble phase: what is inside it hears the wheel first (a scroller of its
-/// own, a diagram's page turn, Alt's paging of a PDF or a diagram), and of one widget's controllers GTK runs the last added first,
-/// so this one is ahead of the scroller's own. At an edge the wheel goes on to GTK, for its
-/// overshoot and for any scroller around this one.
+/// own, a diagram's page turn, Alt's paging of a PDF or a diagram), and of one widget's
+/// controllers GTK runs the last added first, so this one is ahead of the scroller's own. At an
+/// edge the wheel goes on to GTK, for its overshoot and for any scroller around this one.
 ///
 /// A list (`GtkListView`) keeps its scroll in whole pixels, so a touchpad's scroll also needs
 /// help there: GTK adds each delta to the value the list rounded down, which lost a slow scroll
@@ -90,6 +91,7 @@ pub(crate) fn smooth_wheel(scroller: &gtk::ScrolledWindow) -> Wheel {
         set,
         asked: Rc::new(Cell::new(f64::NAN)),
         landing: Rc::new(Cell::new(false)),
+        alt: Rc::new(Cell::new(0.0)),
     };
     // A list keeps its scroller's adjustment, so the one there now is the one to watch.
     scroller.vadjustment().connect_value_changed({
@@ -103,6 +105,9 @@ pub(crate) fn smooth_wheel(scroller: &gtk::ScrolledWindow) -> Wheel {
     let notches = wheel.clone();
     let controller = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
     controller.connect_scroll(move |controller, _, dy| {
+        if let Some(taken) = notches.alt(controller, dy) {
+            return taken;
+        }
         if controller.unit() != gdk::ScrollUnit::Wheel {
             notches.touchpad();
             return glib::Propagation::Proceed;
@@ -115,6 +120,8 @@ pub(crate) fn smooth_wheel(scroller: &gtk::ScrolledWindow) -> Wheel {
             false => glib::Propagation::Proceed,
         }
     });
+    let ended = wheel.clone();
+    controller.connect_scroll_end(move |_| ended.alt.set(0.0));
     scroller.add_controller(controller);
     wheel
 }
@@ -141,19 +148,65 @@ pub struct Wheel {
     /// What GTK's touchpad scroll last asked of the adjustment, recorded as it lands.
     asked: Rc<Cell<f64>>,
     landing: Rc<Cell<bool>>,
+    /// What Alt's wheel has scrolled short of a notch (`zoom::wheel_steps`).
+    alt: Rc<Cell<f64>>,
 }
 
 impl Wheel {
     /// Ease `dy` notches on from where the last is headed; false where the scroller has no room
     /// that way, or scrolls only sideways.
     pub(crate) fn notch(&self, dy: f64) -> bool {
-        let Some(scroller) = self
-            .scroller
-            .upgrade()
-            .filter(|s| s.vscrollbar_policy() != gtk::PolicyType::Never)
-        else {
+        let Some((adj, from, easing)) = self.headed() else {
             return false;
         };
+        let to = wheel_target(from, dy, adj.lower(), adj.upper(), adj.page_size());
+        self.ease(&adj, from, to, easing)
+    }
+
+    /// Alt's wheel, `None` unless Alt is held alone: a screenful a notch, as far as Page Down
+    /// scrolls (the adjustment's page increment), eased as a notch is, and a touchpad's 40 px a
+    /// notch (`zoom::wheel_steps`). At an edge it goes on, as a notch does, before it counts.
+    pub(crate) fn alt(
+        &self,
+        wheel: &gtk::EventControllerScroll,
+        dy: f64,
+    ) -> Option<glib::Propagation> {
+        let state = wheel.current_event_state();
+        let others = gdk::ModifierType::SHIFT_MASK
+            | gdk::ModifierType::CONTROL_MASK
+            | crate::platform::PRIMARY_MODIFIER;
+        if !state.contains(gdk::ModifierType::ALT_MASK) || state.intersects(others) {
+            self.alt.set(0.0);
+            return None;
+        }
+        let room = self.headed().filter(|(adj, from, easing)| {
+            *easing
+                || match dy > 0.0 {
+                    true => *from < adj.upper() - adj.page_size(),
+                    false => *from > adj.lower(),
+                }
+        });
+        let Some((adj, from, easing)) = room else {
+            self.alt.set(0.0);
+            return Some(glib::Propagation::Proceed);
+        };
+        let pages = crate::zoom::wheel_steps(&self.alt, dy, wheel.unit());
+        if pages != 0 {
+            let to = (from + f64::from(pages) * adj.page_increment())
+                .min(adj.upper() - adj.page_size())
+                .max(adj.lower());
+            self.ease(&adj, from, to, easing);
+        }
+        Some(glib::Propagation::Stop)
+    }
+
+    /// The scroller's adjustment and where it is headed, an easing's target while one runs, and
+    /// whether one does; `None` where the scroller scrolls only sideways.
+    fn headed(&self) -> Option<(gtk::Adjustment, f64, bool)> {
+        let scroller = self
+            .scroller
+            .upgrade()
+            .filter(|s| s.vscrollbar_policy() != gtk::PolicyType::Never)?;
         let adj = scroller.vadjustment();
         let easing =
             self.animation.state() == adw::AnimationState::Playing && holds(&adj, self.set.get());
@@ -161,7 +214,11 @@ impl Wheel {
             true => self.animation.value_to(),
             false => adj.value(),
         };
-        let to = wheel_target(from, dy, adj.lower(), adj.upper(), adj.page_size());
+        Some((adj, from, easing))
+    }
+
+    /// Ease `adj` from `from`, where it is headed, on to `to`; false where that moves nothing.
+    fn ease(&self, adj: &gtk::Adjustment, from: f64, to: f64, easing: bool) -> bool {
         // On its way to the edge already: a notch more is taken, and changes nothing.
         if easing && to == from {
             return true;
