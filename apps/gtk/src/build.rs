@@ -1428,6 +1428,14 @@ thread_local! {
 //
 // The hover's popover takes the view's font, which libadwaita resets on a popover, as the text it
 // is about has it.
+//
+// An Outline row's number lies over the end of its title, so the title keeps its room and nothing
+// moves when it shows. Its backing is painted as the row is, the pane's background under
+// libadwaita's tint for the row's state (7 % hovered, 13 % hovered and selected, 16 % and 19 %
+// pressed), faded in over 12 px so a long title runs out under it, 6 px short of the number. Each
+// layer fades from its own colour at no alpha, since a fade from `transparent` passes through
+// black, a dark band on a dark theme. Only its label is dimmed: a dimmed backing would let the
+// title show through.
 /// Register embedded icons and GtkSourceView language specifications and style schemes.
 ///
 /// GResources make icons available before installation while retaining normal theme lookup
@@ -1467,7 +1475,7 @@ fn install_chrome_css() {
                background-image {ms}ms ease; }} \
              .accent-toasts {{ transition: transform {lift}ms {easing}; }} \
              .file-tree > row > treeexpander {{ transition: box-shadow {flash}ms ease-out; }} \
-             .git-actions {{ transition: opacity {lift}ms {easing}; }} \
+             .git-actions, .accent-row-number {{ transition: opacity {lift}ms {easing}; }} \
              treeexpander.accent-turning > expander, image.accent-chevron.accent-turning, \
              expander-widget > box > title > expander {{ \
                transition: -gtk-icon-transform {lift}ms {easing}; }} ",
@@ -1519,6 +1527,18 @@ fn install_chrome_css() {
              popover.git-branches button, popover.python-environments button {{ \
                font-weight: normal; }} \
              row:hover .git-actions, row:focus-within .git-actions {{ opacity: 1; }} \
+             .accent-row-number {{ opacity: 0; padding-left: 18px; --accent-row-tint: 7%; \
+               background-image: linear-gradient(to right, rgb(from currentColor r g b / 0), \
+                 color-mix(in srgb, currentColor var(--accent-row-tint), transparent) 12px), \
+               linear-gradient(to right, rgb(from var(--view-bg-color) r g b / 0), \
+                 var(--view-bg-color) 12px); }} \
+             .navigation-sidebar > row:hover .accent-row-number {{ opacity: 1; }} \
+             .navigation-sidebar > row:selected:hover .accent-row-number {{ \
+               --accent-row-tint: 13%; }} \
+             .navigation-sidebar > row:active .accent-row-number {{ --accent-row-tint: 16%; }} \
+             .navigation-sidebar > row:selected:active .accent-row-number {{ \
+               --accent-row-tint: 19%; }} \
+             .accent-page-number {{ padding: 2px 8px; border-radius: 9999px; }} \
              .git-log > row {{ margin-top: 0; margin-bottom: 0; }} \
              .git-ref {{ padding: 0 4px; border-radius: 6px; \
                background-color: color-mix(in srgb, currentColor 10%, transparent); }} \

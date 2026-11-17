@@ -520,7 +520,7 @@ impl App {
             term,
             move |at| app.outline_jump(&Note::Editor(term), at)
         );
-        sidebar.set_outline_rows(&term.key(), &rows, jump, None);
+        sidebar.set_outline_rows(&term.key(), &rows, jump, sidebar::line_number, None);
     }
 
     /// Where a terminal editor on `key` runs: at the vault root, on the host for a remote vault's

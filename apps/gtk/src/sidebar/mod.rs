@@ -23,7 +23,7 @@ pub use debug::Shown as DebugShown;
 pub use debug::Why as DebugWhy;
 pub use debug::{Data as DebugData, Watched};
 pub use details::{Fact, Group};
-pub use outline::{Line, above, outline_note};
+pub use outline::{Line, above, line_number, outline_note};
 pub use ports::Data as PortsData;
 pub use python::{Data as PythonData, KernelChoices};
 pub(crate) use search::hit_text;
@@ -840,15 +840,17 @@ impl Sidebar {
                 .is_some_and(|split| self.outline_bin.child() == Some(split))
     }
 
-    /// Show the outline of the document `key` as rows that jump, over `below` when there is one
-    /// (a PDF's thumbnail strip). The list on screen is refilled when it is already that
-    /// document's, so an edit, a save, a language server's answer or a page edit leaves it
-    /// scrolled where it was; another document gets a new list, from the top, and `true` back.
+    /// Show the outline of the document `key` as rows that jump, each showing the page or line
+    /// `number_of` gives while the pointer is on it, over `below` when there is one (a PDF's
+    /// thumbnail strip). The list on screen is refilled when it is already that document's, so
+    /// an edit, a save, a language server's answer or a page edit leaves it scrolled where it
+    /// was; another document gets a new list, from the top, and `true` back.
     pub fn set_outline_rows<T: Copy + 'static>(
         &self,
         key: &str,
         rows: &[(Line, T)],
         on_jump: impl Fn(T) + 'static,
+        number_of: impl Fn(T) -> Option<usize> + 'static,
         below: Option<&gtk::Widget>,
     ) -> bool {
         let mut kept = self.outline_list.borrow_mut();
@@ -861,7 +863,7 @@ impl Sidebar {
             *kept = Some(list);
         }
         if let Some(list) = kept.as_ref() {
-            list.fill(rows, on_jump);
+            list.fill(rows, on_jump, number_of);
         }
         fresh
     }

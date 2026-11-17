@@ -2,8 +2,8 @@
 //!
 //! The strip is one canvas in a scrolled window, so its page layout determines thumbnail targets.
 //! Overlay buttons provide Copy Page, Delete Page, Insert Page Here and Paste Page Here, fading in
-//! like Git row actions. A copied page is held for the whole app until the next copy, so it pastes
-//! into any strip of its kind.
+//! like Git row actions, beside the page's number. A copied page is held for the whole app until
+//! the next copy, so it pastes into any strip of its kind.
 //! Ctrl+click and Shift+click pick several pages, which the buttons and a drag on one of them
 //! take together, as one edit.
 //! Points are taken in the scrolled window's coordinates, which are the same for a canvas that
@@ -186,6 +186,8 @@ pub struct Organize {
     /// Insert Page Here, with Paste Page Here before it while a page of this kind is held.
     insert: gtk::Revealer,
     paste: gtk::Button,
+    /// The page's number, which takes no click: the thumbnail under it does.
+    number: gtk::Revealer,
     /// The line in the gap a dragged page would be dropped into.
     bar: gtk::Box,
     /// The page the buttons are over: the one under the pointer, or above the gap it is in.
@@ -273,6 +275,16 @@ impl Organize {
             gap.append(&paste);
             gap.append(&button("list-add-symbolic", "Insert Page Here", add));
             let insert = floating(&gap);
+            let number = floating(
+                &gtk::Label::builder()
+                    .css_classes([
+                        "caption",
+                        "numeric",
+                        "accent-floating",
+                        "accent-page-number",
+                    ])
+                    .build(),
+            );
             let bar = gtk::Box::builder()
                 .height_request(3)
                 .can_target(false)
@@ -282,6 +294,7 @@ impl Organize {
             pane.add_overlay(&trash);
             pane.add_overlay(&copy);
             pane.add_overlay(&insert);
+            pane.add_overlay(&number);
             pane.add_overlay(&bar);
             Organize {
                 pane,
@@ -298,6 +311,7 @@ impl Organize {
                 copy,
                 insert,
                 paste,
+                number,
                 bar,
                 hovered: Cell::new(None),
                 pointer: Cell::new(None),
@@ -599,13 +613,17 @@ impl Organize {
                 Some(format!("{},{}", x.round(), y.round()))
             })
             .collect();
+        let number = (self.number.child().and_downcast::<gtk::Label>())
+            .filter(|_| self.number.reveals_child())
+            .map(|label| label.text());
         format!(
-            "strip={:?} insert={:?} copy={:?} paste={:?} out=trash:{},insert:{},copy:{},paste:{} \
-             picked={:?} shown={} thumbs={}",
+            "strip={:?} insert={:?} copy={:?} paste={:?} number={number:?}@{:?} \
+             out=trash:{},insert:{},copy:{},paste:{} picked={:?} shown={} thumbs={}",
             at(self.pane.upcast_ref()),
             at(self.insert.upcast_ref()),
             at(self.copy.upcast_ref()),
             at(self.paste.upcast_ref()),
+            at(self.number.upcast_ref()),
             self.trash.reveals_child(),
             self.insert.reveals_child(),
             self.copy.reveals_child(),
@@ -616,10 +634,10 @@ impl Organize {
         )
     }
 
-    /// Show the buttons over the page under the pointer, or put them away: with the pointer gone,
-    /// while pages are being dragged, the trash where it would take every page, which a document
-    /// keeps one of, and Paste while no page of this kind is held. Each says how many pages it
-    /// takes.
+    /// Show the buttons and the number of the page under the pointer, or put them away: with the
+    /// pointer gone, while pages are being dragged, the trash where it would take every page,
+    /// which a document keeps one of, and Paste while no page of this kind is held. Each button
+    /// says how many pages it takes.
     pub fn hover(&self) {
         let layout = self.thumbs.layout();
         let top = self.scrolled().1;
@@ -631,9 +649,14 @@ impl Organize {
             .filter(|y| *y < f64::from(layout.height))
             .map(|y| page_at(&layout, y))
             .filter(|page| *page < layout.pages.len());
-        if page.is_some() {
-            self.hovered.set(page);
+        if let Some(page) = page {
+            self.hovered.set(Some(page));
+            if let Some(label) = self.number.child().and_downcast::<gtk::Label>() {
+                label.set_text(&(page + 1).to_string());
+            }
         }
+        // Never targetable, unlike the buttons: a click on it is one on the thumbnail.
+        self.number.set_reveal_child(page.is_some());
         let taken = page.map_or(1, |page| self.taking(page).len());
         reveal(&self.trash, page.is_some() && taken < layout.pages.len());
         reveal(&self.copy, page.is_some());
@@ -701,8 +724,9 @@ impl Organize {
     }
 
     /// Where one of the overlay's floating children goes, in the overlay's coordinates: the trash
-    /// in the hovered thumbnail's top-right corner and Copy in its top-left, the insert and paste
-    /// buttons centred on the gap below it, and the bar across the gap a drop would land in.
+    /// in the hovered thumbnail's top-right corner, Copy in its top-left and its number in its
+    /// bottom-left, the insert and paste buttons centred on the gap below it, and the bar across
+    /// the gap a drop would land in.
     fn place_on_strip(&self, child: &gtk::Widget) -> Option<gdk::Rectangle> {
         let layout = self.thumbs.layout();
         let origin = graphene::Point::zero();
@@ -719,6 +743,13 @@ impl Organize {
                 .get(gap)
                 .or_else(|| layout.pages.get(gap.checked_sub(1)?))?;
             (beside.x, gap_middle(&layout, gap) - top - h / 2.0, beside.w)
+        } else if child == self.number.upcast_ref::<gtk::Widget>() {
+            let rect = layout.pages.get(self.hovered.get()?)?;
+            // Its round end on the bottom-left corner's arc, as the buttons are on theirs, kept on
+            // what shows of a page scrolled half out of the strip.
+            let shown = (rect.y + rect.h - top).min(origin.y() + self.strip.height() as f32);
+            let y = (shown - CORNER).max(rect.y - top + CORNER) - h / 2.0;
+            (rect.x + CORNER - h / 2.0, y, w)
         } else {
             let page = self.hovered.get()?;
             let rect = layout.pages.get(page)?;

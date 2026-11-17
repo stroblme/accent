@@ -326,7 +326,8 @@ use user_commands::bench_commands;
 ///   Ctrl+click jump within the note leaves nothing selected.
 ///   Any text file can exercise URL underlines.
 /// - `ACCENT_BENCH_OUTLINE=<rel_note>,<rel_other>`: caret following and edits;
-///   `hold:<rel_note>`: 20 s XTEST probe; `index:<rel_code>`: indexed symbols.
+///   `hold:<rel_note>`: 20 s XTEST probe; `index:<rel_code>`: indexed symbols; `hover`: the
+///   numbers rows and thumbnails show under the XTEST pointer, in a scratch vault under `/tmp`.
 /// - `ACCENT_BENCH_OCCUR=<rel_note>`: occurrence tags, colours and priorities.
 ///   Requires a scratch vault under `/tmp`.
 /// - `ACCENT_BENCH_NUMBERS=<rel_note>,<rel_code>,<rel_note>`: line-number

@@ -96,10 +96,22 @@ impl Line {
     }
 }
 
+/// The line a text file's row shows, its heading's or its symbol's, counted from one.
+pub fn line_number(at: accent_api::Pos) -> Option<usize> {
+    Some(at.line as usize + 1)
+}
+
 /// What activating a row does, by the row's position. Shared with the list's `activate` handler,
 /// which clones it out before it runs: a jump moves the focus, and what that sets off may refill
 /// the list.
 type Jump = Rc<RefCell<Rc<dyn Fn(u32)>>>;
+
+/// The page or line number a row shows while the pointer is on it, by the row's position, counted
+/// from one, or `None` for a row without. Replaced on every refill, as [`Jump`] is.
+type Number = Rc<RefCell<Rc<dyn Fn(u32) -> Option<usize>>>>;
+
+/// Each row widget's list item and number label, which a refill numbers again.
+type Numbered = Rc<RefCell<Vec<(glib::WeakRef<gtk::ListItem>, glib::WeakRef<gtk::Label>)>>>;
 
 /// Outline list refilled in place to retain scroll position. Generic jump targets support text
 /// positions, PDF bookmarks and diagram pages. Use level indentation rather than expanders so
@@ -118,6 +130,9 @@ pub(super) struct List {
     /// Replaced on every refill, because an edit moves where the rows jump to even when they read
     /// the same.
     jump: Jump,
+    number: Number,
+    /// The row widgets made so far, which a refill whose text left them unbound numbers again.
+    numbered: Numbered,
     view: gtk::ListView,
     selection: gtk::SingleSelection,
     /// The row the caret is in, which the selection shows. Shared with the pointer-leave handler.
@@ -137,39 +152,66 @@ impl List {
         let model = gtk::StringList::new(&[]);
         let rows: Rc<RefCell<Vec<Line>>> = Rc::default();
         let jump: Jump = Rc::new(RefCell::new(Rc::new(|_| {})));
+        let number: Number = Rc::new(RefCell::new(Rc::new(|_| None)));
+        let numbered: Numbered = Rc::default();
         let followed = Rc::new(Cell::new(gtk::INVALID_LIST_POSITION));
         let drag = drag(key, &rows, dragging);
 
         let factory = factory(
-            move |item| {
-                let lead = gtk::Label::builder()
-                    .xalign(0.0)
-                    .max_width_chars(16)
-                    .ellipsize(pango::EllipsizeMode::End)
-                    .css_classes(["dimmed"])
-                    .build();
-                let text = gtk::Label::builder()
-                    .xalign(0.0)
-                    .hexpand(true)
-                    .ellipsize(pango::EllipsizeMode::End)
-                    .build();
-                let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-                row.append(&lead);
-                row.append(&text);
-                if let Some(drag) = &drag {
-                    drag.attach(&row, item);
+            {
+                let numbered = numbered.clone();
+                move |item| {
+                    let lead = gtk::Label::builder()
+                        .xalign(0.0)
+                        .max_width_chars(16)
+                        .ellipsize(pango::EllipsizeMode::End)
+                        .css_classes(["dimmed"])
+                        .build();
+                    let text = gtk::Label::builder()
+                        .xalign(0.0)
+                        .hexpand(true)
+                        .ellipsize(pango::EllipsizeMode::End)
+                        .build();
+                    let line = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+                    line.append(&lead);
+                    line.append(&text);
+                    // Laid over the end of the title, on a backing of the row's own tint, and
+                    // shown only while the pointer is on the row (`.accent-row-number`): the
+                    // title keeps its room, so nothing moves.
+                    let numeral = gtk::Label::builder()
+                        .css_classes(["caption", "dimmed", "numeric"])
+                        .build();
+                    let backing = gtk::Box::builder()
+                        .halign(gtk::Align::End)
+                        .can_target(false)
+                        .css_classes(["accent-row-number"])
+                        .build();
+                    backing.append(&numeral);
+                    let row = gtk::Overlay::builder().child(&line).build();
+                    row.add_overlay(&backing);
+                    numbered
+                        .borrow_mut()
+                        .push((item.downgrade(), numeral.downgrade()));
+                    if let Some(drag) = &drag {
+                        drag.attach(&row, item);
+                    }
+                    row
                 }
-                row
             },
             {
-                let rows = rows.clone();
-                move |row: &gtk::Box, item| {
-                    let (Some(lead), Some(text)) = (
-                        row.first_child().and_downcast::<gtk::Label>(),
-                        row.last_child().and_downcast::<gtk::Label>(),
+                let (rows, number) = (rows.clone(), number.clone());
+                move |row: &gtk::Overlay, item| {
+                    let label = |w: Option<gtk::Widget>| w.and_downcast::<gtk::Label>();
+                    let content = row.child();
+                    let (Some(lead), Some(text), Some(numeral)) = (
+                        label(content.as_ref().and_then(|c| c.first_child())),
+                        label(content.as_ref().and_then(|c| c.last_child())),
+                        label(row.last_child().and_then(|b| b.first_child())),
                     ) else {
                         return;
                     };
+                    let number_of = number.borrow().clone();
+                    show_number(&numeral, number_of(item.position()));
                     let rows = rows.borrow();
                     let Some(line) = rows.get(item.position() as usize) else {
                         return;
@@ -235,6 +277,8 @@ impl List {
             model,
             rows,
             jump,
+            number,
+            numbered,
             view,
             selection,
             followed,
@@ -273,16 +317,24 @@ impl List {
         }
     }
 
-    /// Show `rows`, splicing in only the run that differs from what is shown.
+    /// Show `rows`, splicing in only the run that differs from what is shown, each numbered by
+    /// `number_of` while the pointer is on it.
     pub(super) fn fill<T: Copy + 'static>(
         &self,
         rows: &[(Line, T)],
         on_jump: impl Fn(T) + 'static,
+        number_of: impl Fn(T) -> Option<usize> + 'static,
     ) {
         let shown: Vec<Line> = rows.iter().map(|(line, _)| line.clone()).collect();
         let (at, removed, added) = changed_run(&self.rows.borrow(), &shown);
+        let targets: Rc<[T]> = rows.iter().map(|(_, target)| *target).collect();
+        let number: Rc<dyn Fn(u32) -> Option<usize>> = {
+            let targets = targets.clone();
+            Rc::new(move |row: u32| targets.get(row as usize).copied().and_then(&number_of))
+        };
         // Before the splice, because binding the new rows reads them from here.
         *self.rows.borrow_mut() = shown;
+        *self.number.borrow_mut() = number.clone();
         let shown = self.rows.borrow();
         let texts: Vec<&str> = shown[at..at + added]
             .iter()
@@ -294,8 +346,16 @@ impl List {
         self.followed
             .set(spliced(self.followed.get(), at, removed, added));
         select(&self.selection, self.followed.get());
+        // A row whose text is unchanged is not bound again, but its number may have moved with a
+        // line typed above it. Only the rows on screen have widgets, so this is a few rows.
+        self.numbered.borrow_mut().retain(|(item, numeral)| {
+            let (Some(item), Some(numeral)) = (item.upgrade(), numeral.upgrade()) else {
+                return false;
+            };
+            show_number(&numeral, number(item.position()));
+            true
+        });
 
-        let targets: Vec<T> = rows.iter().map(|(_, target)| *target).collect();
         *self.jump.borrow_mut() = Rc::new(move |row| {
             if let Some(target) = targets.get(row as usize) {
                 on_jump(*target);
@@ -349,6 +409,14 @@ fn drag(
         }),
         dragging: dragging.clone(),
     })
+}
+
+/// Show `number` on a row's number label, or hide the label and its backing where there is none.
+fn show_number(numeral: &gtk::Label, number: Option<usize>) {
+    numeral.set_text(&number.map_or_else(String::new, |n| n.to_string()));
+    if let Some(backing) = numeral.parent() {
+        backing.set_visible(number.is_some());
+    }
 }
 
 /// Put the selection on `row`, leaving it alone when it is already there.

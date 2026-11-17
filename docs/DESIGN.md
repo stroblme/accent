@@ -446,6 +446,9 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - On a notebook the caret is followed through its cells: the heading it is under is the last before it, in its own cell or a markdown cell above.
 - While the pointer is over the list it follows nothing, a tab's caret or a PDF's page alike: the list is being read, and a PDF comment's row goes to a page under another bookmark, which following would scroll the row clicked out of sight.
   The followed row comes back as the pointer leaves.
+- The row under the pointer shows its page dim at its right end, a bookmark's or a diagram page's, or its line, a heading's or a symbol's (user decision 2026-11-17).
+  It lies over the end of the title on a backing of the row's own tint, so the title keeps its room and nothing moves as the number comes and goes.
+  A notebook's headings and a PDF's comments show none, since a heading's place there is a cell and a comment sits under its page's row.
 
 **Code**
 
@@ -1290,6 +1293,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   Both write through the vault, on the host for a remote one, off the main loop.
 - **The thumbnail strip organises pages:** dragging a thumbnail moves its page, an accent bar marks the destination gap, and the strip scrolls near an edge.
   The thumbnail under the pointer carries round buttons, opaque as the ring's are, with Copy Page in its top-left corner, Delete Page in its top-right (absent where it would take every page, as a PDF keeps one) and Insert Page Here on the gap below.
+  Its page number shows in its bottom-left corner on a pill as opaque as the buttons, the pill's round end on the corner's arc (user decision 2026-11-17).
   A wheel over them scrolls the strip as it does beside them.
   A thumbnail's corners are as round as those buttons, 17 px, and each corner button is centred on its corner's arc, so it fills the corner (user decision 2026-11-09).
   A press on one of them, as a page dropped into a gap, hands the keyboard to the page, so `Ctrl+Z` right after it takes the edit back.
@@ -1470,7 +1474,7 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
   In a label a formula's room is kept by one placeholder character Pango sizes to it, so wrapping, alignment, bullets and line height stay Pango's; a display formula takes a line of its own, with an em of room above and below it as MathJax gives one, and a formula that does not parse shows its TeX, dimmed.
   A formula is laid out once at its label's font size and kept by its TeX and size for the app's life, so a zoom lays out only the label again; it is painted in its label's colour, a `\color` through the same remap, and is not clipped to its box, which a stretched accent may overhang as in TeX.
   A notebook's LaTeX output is the same layout at 16 px in a widget of its own, painted in the widget's colour.
-- Pages are the Outline pane's rows, the one shown selected, over a thumbnail strip that organises them as a PDF's does (PDF): a click goes to the page, Ctrl+click and Shift+click pick pages to take together, dragging a thumbnail moves its page, and the thumbnail under the pointer carries Copy Page, Delete Page (absent where it would take every page, as a diagram keeps one) and Insert Page Here, with Paste Page Here before it while a diagram's page is held.
+- Pages are the Outline pane's rows, the one shown selected, over a thumbnail strip that organises them as a PDF's does (PDF): a click goes to the page, Ctrl+click and Shift+click pick pages to take together, dragging a thumbnail moves its page, and the thumbnail under the pointer carries its page number, Copy Page, Delete Page (absent where it would take every page, as a diagram keeps one) and Insert Page Here, with Paste Page Here before it while a diagram's page is held.
   A page put in is blank and named as draw.io names one, the first `Page-N` from the page count on that no page has.
   A page pasted is the one copied, from this diagram or another, with a page id of its own and every cell renumbered, as draw.io's Duplicate Page makes one, and keeps its name without draw.io's "Copy of", since a draw.io file may hold a name twice (user decision 2026-11-09).
   A thumbnail is its page in the canvas's colours, painted when it first comes on screen and again only once an edit has changed it, and its corners are rounded as a PDF thumbnail's are.
@@ -2485,7 +2489,7 @@ In a bibliography list, `Ctrl+Z` undoes and `Ctrl+Shift+Z` / `Ctrl+Y` redoes thr
   Switches crossfade and new pages fade in: the sidebar's panes, a tab picked in the pane the reader is in (a newly opened one too), a PDF's pages on their first open, a file's loading page once its open has taken 160 ms and its document crossfading in from it (Loading), the PDF's "Cannot Open" page, the card a held `Ctrl+Tab` shows, and each new output of a notebook's run (Notebook).
   A toast slides into the pile and out of it, and the toasts slide out of the status bar's way in presentation mode.
   A diagram's page pulled off its edge by the wheel springs back the same way (Diagram).
-- Buttons a hover brings slide in where they take room (a list row's, Sidebar) and fade where they keep it or lie over something (a branch's trash, a page thumbnail's round buttons, a notebook's add strips); the Search pane's replace row and a folder field's list slide open.
+- Buttons a hover brings slide in where they take room (a list row's, Sidebar) and fade where they keep it or lie over something (a branch's trash, a page thumbnail's round buttons and its number, an Outline row's number, a notebook's add strips); the Search pane's replace row and a folder field's list slide open.
   The line numbers brighten as the pointer comes into the gutter and dim again as it leaves, one fade that turns round where it is (Typography).
   A folder the reader opens in the Files tree turns its arrow, one `pan-down` turned a quarter back while closed, and fades in the rows its listing lands under it, so what opened reads as coming out of it; a section of the sidebar, a variable of the Debug pane and a folder of the Git pane's changes turn theirs too.
   Only on the reader's toggle: a list binds its row widgets to other rows as it scrolls, so an arrow that turned on every change of its widget's state would spin under a scroll; and only the rows bound in the frame the listing lands, so a row scrolled to, a refill (Show Hidden, a change on disk) and the folders Reveal in Sidebar opens come at once, as a closing folder's rows go.

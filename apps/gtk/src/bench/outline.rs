@@ -1,5 +1,6 @@
-//! The Outline pane following the caret.
+//! The Outline pane following the caret, and the numbers its rows and thumbnails show.
 
+use super::git::xtest;
 use super::*;
 
 /// Caret positions covering section changes and returns to the top, clamped to note length.
@@ -11,6 +12,9 @@ const WALK: [i32; 8] = [0, 6, 60, 120, 400, 0, 12, 190];
 pub(super) fn bench_outline(app: &Rc<App>, arg: &str) {
     if let Some(rel) = arg.strip_prefix("index:") {
         return bench_outline_index(app, rel);
+    }
+    if arg == "hover" {
+        return bench_outline_hover(app);
     }
     let (hold, note, other) = match arg.strip_prefix("hold:") {
         Some(note) => (true, note, ""),
@@ -331,4 +335,340 @@ fn heading_above(tab: &Rc<Tab>, line: i32) -> Option<String> {
         .filter(|l| l.starts_with('#'))
         .last()
         .map(|l| l.trim_start_matches('#').trim().to_string())
+}
+
+/// A title longer than the sidebar is wide, which runs on under a row's number.
+const LONG: &str = "A title that runs on well past the width of the sidebar";
+
+/// `hover`: page and line numbers under the real pointer (XTEST), on a PDF, a diagram and a note
+/// the drill writes into the vault, which must be a scratch one under `/tmp`. The second page's
+/// thumbnail shows its number in its bottom-left corner. A row shows its page or line at its right
+/// end, drawn over a backing of the row's own colour, its title keeping its width. With the
+/// pointer gone neither shows, and on the note a line typed above the heading under the parked
+/// pointer moves its number.
+fn bench_outline_hover(app: &Rc<App>) {
+    scratch_only(app, "ACCENT_BENCH_OUTLINE=hover");
+    let root = app.root();
+    let page = |(id, name): (usize, &&str)| {
+        format!(
+            "<diagram id=\"{id}\" name=\"{name}\"><mxGraphModel><root><mxCell id=\"0\"/>\
+             <mxCell id=\"1\" parent=\"0\"/></root></mxGraphModel></diagram>"
+        )
+    };
+    let diagram: String = ["First", LONG, "Third"]
+        .iter()
+        .enumerate()
+        .map(page)
+        .collect();
+    let note = format!("# Hover\n\nSome text.\n\n## Short\n\ntext\n\n## {LONG}\n\ntext\n");
+    for (rel, bytes) in [
+        ("hover.pdf", outlined_pdf()),
+        (
+            "hover.drawio",
+            format!("<mxfile>{diagram}</mxfile>").into_bytes(),
+        ),
+        ("hover.md", note.into_bytes()),
+    ] {
+        std::fs::write(root.join(rel), bytes).expect("bench fixture");
+    }
+    let app = app.clone();
+    glib::spawn_future_local(async move {
+        app.show_pane("outline");
+        for (rel, short) in [
+            ("hover.pdf", "Introduction"),
+            ("hover.drawio", "First"),
+            ("hover.md", "Short"),
+        ] {
+            app.open_path(rel);
+            let listed = || {
+                let lines = app.sidebar.get()?.outline_lines(None);
+                lines.iter().any(|l| l.trim() == short).then_some(())
+            };
+            if until("outline hover", rel, 15_000, listed).await.is_none() {
+                return bench_quit(&app);
+            }
+            glib::timeout_future(Duration::from_millis(800)).await;
+            hover_thumbnail(&app, rel).await;
+            for title in [short, LONG] {
+                let before = row_facts(&app, title, None).map(|f| f.width);
+                xtest(&format!(
+                    "move {}",
+                    row_aim(&app, title).unwrap_or_default()
+                ))
+                .await;
+                let after = row_facts(&app, title, Some(&format!("{rel}-{}", title.len())));
+                let Some(f) = after else {
+                    println!("bench outline hover {rel} row={title:?} missing");
+                    continue;
+                };
+                println!(
+                    "bench outline hover {rel} row={title:?} hovered={} number={:?} drawn={} \
+                     matched={} kept={}",
+                    f.hovered,
+                    f.number,
+                    f.drawn,
+                    f.matched,
+                    before == Some(f.width)
+                );
+            }
+            if rel == "hover.md" {
+                hover_parked(&app, short).await;
+            }
+            xtest("move 5 5").await;
+            let thumb = strip_number(&app).map(|s| s.number);
+            let f = row_facts(&app, short, None);
+            println!(
+                "bench outline hover {rel} away thumb={thumb:?} row={short:?} drawn={:?}",
+                f.map(|f| f.drawn)
+            );
+        }
+        bench_quit(&app);
+    });
+}
+
+/// The second page's thumbnail, scrolled to the middle of the strip, under the pointer: the
+/// number it shows, and whether that sits in its bottom-left quarter.
+async fn hover_thumbnail(app: &Rc<App>, rel: &str) {
+    let Some(strip) = strip_number(app) else {
+        return;
+    };
+    let (Some(&(_, my)), Some((_, top, _, height))) = (strip.middles.get(1), strip.pane) else {
+        return println!("bench outline hover {rel} thumb missing");
+    };
+    let canvas = (app.sidebar.get().and_then(|s| s.outline_child()))
+        .and_then(|c| find_widget(&c, &|w| w.has_css_class("accent-page-strip")));
+    let scroller = canvas.and_then(|c| c.ancestor(gtk::ScrolledWindow::static_type()));
+    if let Some(scroller) = scroller.and_downcast::<gtk::ScrolledWindow>() {
+        let adjustment = scroller.vadjustment();
+        adjustment.set_value(adjustment.value() + my - (top + height / 2.0));
+    }
+    glib::timeout_future(Duration::from_millis(300)).await;
+    let Some((mx, my)) = strip_number(app).and_then(|s| s.middles.get(1).copied()) else {
+        return;
+    };
+    let (sx, sy) = app.window.surface_transform();
+    xtest(&format!("move {} {}", mx + sx, my + sy)).await;
+    let shot = std::env::temp_dir().join(format!("outline-hover-{rel}-thumb.png"));
+    super::minimap::window_png(&app.window, &shot);
+    let Some(strip) = strip_number(app) else {
+        return;
+    };
+    let corner = (strip.at).is_some_and(|(x, y, w, h)| x + w / 2.0 < mx && y + h / 2.0 > my);
+    let number = strip.number;
+    println!("bench outline hover {rel} thumb page=2 number={number:?} corner={corner}");
+}
+
+/// The pointer parked on the row `title` while a line is typed at the top of the note in front:
+/// its number moves down with its heading, and its backing still matches the row. Then a heading
+/// typed there, which adds a row above the others: every row on screen says its own line.
+async fn hover_parked(app: &Rc<App>, title: &str) {
+    xtest(&format!("move {}", row_aim(app, title).unwrap_or_default())).await;
+    let Some(tab) = app.active() else {
+        return;
+    };
+    let line = |tab: &Rc<Tab>| {
+        let rows = tab.lang.outline();
+        rows.iter().find(|r| r.1 == title).map(|r| r.2.line)
+    };
+    let was = line(&tab);
+    tab.buffer
+        .insert(&mut tab.buffer.start_iter(), "A line typed above.\n");
+    until("outline hover", "refill", 10_000, || line(&tab) != was).await;
+    glib::timeout_future(Duration::from_millis(400)).await;
+    if let Some(f) = row_facts(app, title, Some("parked")) {
+        println!(
+            "bench outline hover parked row={title:?} hovered={} number={:?} drawn={} matched={}",
+            f.hovered, f.number, f.drawn, f.matched
+        );
+    }
+    let rows = || tab.lang.outline().len();
+    let was = rows();
+    tab.buffer
+        .insert(&mut tab.buffer.start_iter(), "## Added\n");
+    until("outline hover", "spliced", 10_000, || rows() != was).await;
+    glib::timeout_future(Duration::from_millis(400)).await;
+    let numbers: Vec<_> = ["Added", "Hover", title, LONG]
+        .into_iter()
+        .map(|t| (t, row_facts(app, t, None).and_then(|f| f.number)))
+        .collect();
+    println!("bench outline hover spliced numbers={numbers:?}");
+}
+
+/// What a thumbnail strip prints of its page number (`Organize::buttons`), read back.
+struct Strip {
+    /// Where the strip is in the window: x, y, width and height.
+    pane: Option<(f64, f64, f64, f64)>,
+    /// The number shown, `None` while it is away.
+    number: Option<String>,
+    /// Where it is in the window: x, y, width and height.
+    at: Option<(f64, f64, f64, f64)>,
+    /// Each thumbnail's middle in the window.
+    middles: Vec<(f64, f64)>,
+}
+
+/// The document in front's thumbnail strip, if it has one.
+fn strip_number(app: &Rc<App>) -> Option<Strip> {
+    let window = app.window.upcast_ref::<gtk::Widget>();
+    let strip = match (app.active_pdf(), app.active_diagram()) {
+        (Some(pdf), _) => pdf.strip_buttons(window),
+        (_, Some(d)) => d.strip_buttons(window),
+        _ => return None,
+    };
+    let field = |name: &str| strip.split(' ').find_map(|w| w.strip_prefix(name));
+    let numbers = |s: &str| -> Vec<f64> { s.split(',').filter_map(|n| n.parse().ok()).collect() };
+    let some = |s: &str| {
+        s.strip_prefix("Some(\"")?
+            .strip_suffix("\")")
+            .map(str::to_string)
+    };
+    let rect = |s: Option<String>| {
+        let n = numbers(&s?);
+        (n.len() == 4).then(|| (n[0], n[1], n[2], n[3]))
+    };
+    let (shown, at) = field("number=")?.split_once('@')?;
+    let middles = field("thumbs=")?.split(';').map(numbers);
+    let middles = middles
+        .filter(|n| n.len() == 2)
+        .map(|n| (n[0], n[1]))
+        .collect();
+    Some(Strip {
+        pane: rect(some(field("strip=")?)),
+        number: some(shown),
+        at: rect(some(at)),
+        middles,
+    })
+}
+
+/// How the Outline row titled `title` is painted.
+struct RowFacts {
+    /// The pointer is on it.
+    hovered: bool,
+    /// What its number label says, shown or not.
+    number: Option<String>,
+    /// The number's glyphs are on screen.
+    drawn: bool,
+    /// Its number's backing is the colour of the row beside it.
+    matched: bool,
+    /// How wide its title is laid out.
+    width: i32,
+}
+
+/// The row of the Outline pane's list titled `title`, as painted now, the window pictured into
+/// `$TMPDIR/outline-hover-<shot>.png` when `shot` names one.
+fn row_facts(app: &Rc<App>, title: &str, shot: Option<&str>) -> Option<RowFacts> {
+    let row = outline_row_widget(app, title)?;
+    let overlay = row.first_child().and_downcast::<gtk::Overlay>()?;
+    let text = overlay.child()?.last_child()?;
+    let backing = overlay.last_child()?;
+    let numeral = backing.first_child().and_downcast::<gtk::Label>()?;
+    let window = app.window.upcast_ref::<gtk::Widget>();
+    let (w, h) = (f64::from(window.width()), f64::from(window.height()));
+    let snapshot = gtk::Snapshot::new();
+    gtk::WidgetPaintable::new(Some(window)).snapshot(&snapshot, w, h);
+    let texture = window
+        .native()?
+        .renderer()?
+        .render_texture(&snapshot.to_node()?, None);
+    if let Some(shot) = shot {
+        let path = std::env::temp_dir().join(format!("outline-hover-{shot}.png"));
+        let _ = texture.save_to_png(path);
+    }
+    let mut downloader = gdk::TextureDownloader::new(&texture);
+    downloader.set_format(gdk::MemoryFormat::R8g8b8a8);
+    let (bytes, stride) = downloader.download_bytes();
+    let pixel = |widget: &gtk::Widget, x: f32, y: f32| {
+        let at = widget.compute_point(window, &graphene::Point::new(x, y))?;
+        let i = at.y() as usize * stride + at.x() as usize * 4;
+        bytes.get(i..i + 3).map(|p| [p[0], p[1], p[2]])
+    };
+    let apart = |a: [u8; 3], b: [u8; 3], by: u8| a.iter().zip(b).any(|(a, b)| a.abs_diff(b) > by);
+    // Above the digits, where only the backing is; and in the row's own padding at that height.
+    let backed = pixel(numeral.upcast_ref(), numeral.width() as f32 / 2.0, 1.0)?;
+    let top = numeral
+        .compute_point(&row, &graphene::Point::new(0.0, 1.0))?
+        .y();
+    let beside = pixel(&row, row.width() as f32 - 4.0, top)?;
+    let drawn = (0..numeral.width()).any(|x| {
+        (0..numeral.height()).any(|y| {
+            pixel(numeral.upcast_ref(), x as f32, y as f32).is_some_and(|p| apart(p, backed, 60))
+        })
+    });
+    Some(RowFacts {
+        hovered: row.state_flags().contains(gtk::StateFlags::PRELIGHT),
+        number: backing.is_visible().then(|| numeral.text().to_string()),
+        drawn,
+        matched: !apart(backed, beside, 2),
+        width: text.width(),
+    })
+}
+
+/// The list row widget of the Outline pane titled `title`, if it is on screen.
+fn outline_row_widget(app: &Rc<App>, title: &str) -> Option<gtk::Widget> {
+    let list = app
+        .sidebar
+        .get()
+        .and_then(|s| s.outline_child())
+        .and_then(|c| find_widget(&c, &|w| w.is::<gtk::ListView>()))?;
+    let mut child = list.first_child();
+    while let Some(row) = child {
+        child = row.next_sibling();
+        let text = (row.first_child().and_downcast::<gtk::Overlay>())
+            .and_then(|o| o.child()?.last_child())
+            .and_downcast::<gtk::Label>();
+        if text.is_some_and(|t| t.text() == title) {
+            return Some(row);
+        }
+    }
+    None
+}
+
+/// Where XTEST puts the pointer on the row titled `title`: its middle, on screen.
+fn row_aim(app: &Rc<App>, title: &str) -> Option<String> {
+    let row = outline_row_widget(app, title)?;
+    let middle = graphene::Point::new(row.width() as f32 / 2.0, row.height() as f32 / 2.0);
+    let at = row.compute_point(&app.window, &middle)?;
+    let (sx, sy) = app.window.surface_transform();
+    Some(format!(
+        "{} {}",
+        f64::from(at.x()) + sx,
+        f64::from(at.y()) + sy
+    ))
+}
+
+/// Four A4 pages, their bookmarks Introduction on page 2, [`LONG`] on page 3 and Appendix on
+/// page 4.
+fn outlined_pdf() -> Vec<u8> {
+    // 1 the catalog, 2 the page tree, 3 to 6 the pages, 7 the outline and 8 to 10 its entries.
+    let entry = |title: &str, page: usize, links: &str| {
+        format!(
+            "<</Title({title})/Parent 7 0 R{links}/Dest[{} 0 R/Fit]>>",
+            page + 2
+        )
+    };
+    let mut objects = vec![
+        "<</Type/Catalog/Pages 2 0 R/Outlines 7 0 R>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R 4 0 R 5 0 R 6 0 R]/Count 4>>".to_string(),
+    ];
+    objects.extend((0..4).map(|_| "<</Type/Page/Parent 2 0 R/MediaBox[0 0 595 842]>>".into()));
+    objects.extend([
+        "<</Type/Outlines/First 8 0 R/Last 10 0 R/Count 3>>".to_string(),
+        entry("Introduction", 2, "/Next 9 0 R"),
+        entry(LONG, 3, "/Prev 8 0 R/Next 10 0 R"),
+        entry("Appendix", 4, "/Prev 9 0 R"),
+    ]);
+    let mut out = String::from("%PDF-1.4\n");
+    let mut offsets = Vec::new();
+    for (i, o) in objects.iter().enumerate() {
+        offsets.push(out.len());
+        out.push_str(&format!("{} 0 obj\n{o}\nendobj\n", i + 1));
+    }
+    let (xref, size) = (out.len(), objects.len() + 1);
+    out.push_str(&format!("xref\n0 {size}\n0000000000 65535 f \n"));
+    for at in offsets {
+        out.push_str(&format!("{at:010} 00000 n \n"));
+    }
+    out.push_str(&format!(
+        "trailer\n<</Size {size}/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n"
+    ));
+    out.into_bytes()
 }

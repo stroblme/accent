@@ -807,8 +807,8 @@ impl App {
                 return sidebar.set_outline(Some(&sidebar::outline_note(title, body)));
             }
             // A bookmark's row goes where it leads, a comment's to the comment, which it pins.
-            let mut rows: Vec<(sidebar::Line, pdftab::Row)> = pdf
-                .outline()
+            let outline = pdf.outline();
+            let mut rows: Vec<(sidebar::Line, pdftab::Row)> = outline
                 .iter()
                 .enumerate()
                 .map(|(at, entry)| {
@@ -830,7 +830,13 @@ impl App {
                 pdf,
                 move |row| pdf.go_to_row(row)
             );
-            sidebar.set_outline_rows(&doc.key(), &rows, jump, Some(&pdf.thumbnails()));
+            // A bookmark shows the page it leads to here; a comment's rows are under their page's.
+            let pages: Vec<Option<usize>> = outline.iter().map(|entry| entry.page).collect();
+            let number = move |row| match row {
+                pdftab::Row::Bookmark(at) => pages.get(at).copied().flatten().map(|p| p + 1),
+                pdftab::Row::Page(_) | pdftab::Row::Comment(..) => None,
+            };
+            sidebar.set_outline_rows(&doc.key(), &rows, jump, number, Some(&pdf.thumbnails()));
             // The bookmarks are new, or a page edit moved them: either way the one the page being
             // read is under may be another.
             return self.follow_outline();
@@ -849,7 +855,8 @@ impl App {
                 d,
                 move |page| d.goto_page(page)
             );
-            sidebar.set_outline_rows(&doc.key(), &rows, jump, Some(&d.thumbnails()));
+            let number = |page: usize| Some(page + 1);
+            sidebar.set_outline_rows(&doc.key(), &rows, jump, number, Some(&d.thumbnails()));
             return self.follow_outline();
         }
         // A notebook's is its markdown cells' headings.
@@ -871,7 +878,8 @@ impl App {
                 nb,
                 move |at| app.notebook_outline_jump(&nb, at)
             );
-            if sidebar.set_outline_rows(&doc.key(), &rows, jump, None) {
+            // A heading's place is a cell and a character in it, which no single number says.
+            if sidebar.set_outline_rows(&doc.key(), &rows, jump, |_| None, None) {
                 self.follow_outline();
             }
             return;
@@ -922,6 +930,7 @@ impl App {
                 tab,
                 move |at| app.outline_jump(&rendered::Note::Tab(tab), at)
             ),
+            sidebar::line_number,
             None,
         );
         // A new list opens on the caret's section, and a refill catches up with a caret moved
