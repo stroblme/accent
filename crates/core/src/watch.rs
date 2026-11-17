@@ -220,32 +220,33 @@ impl Watcher {
     /// Symlink paths retain their vault names in events. Fall back to polling near the watch
     /// budget, or once inotify refuses a watch for want of it ([`polling`](Self::polling)).
     ///
-    /// New directories require [`set_dirs`](Self::set_dirs). `on_event` runs on the debouncer
-    /// thread and must return promptly, handing work to a channel or main context.
+    /// New directories require [`set_dirs`](Self::set_dirs). `on_events` runs on the debouncer
+    /// thread with what it hands over at once, a checkout's files together, and must return
+    /// promptly, handing work to a channel or main context.
     pub fn new(
         root: &Path,
         dirs: &[PathBuf],
-        on_event: impl Fn(VaultEvent) + Send + Sync + 'static,
+        on_events: impl Fn(Vec<VaultEvent>) + Send + Sync + 'static,
     ) -> crate::Result<Watcher> {
         let refused =
             |e: notify::Error| crate::Error::Io(format!("watching {}: {e}", root.display()));
         // Shared, as an inotify debouncer refused a watch hands over to a polling one.
-        let on_event = Arc::new(on_event);
+        let on_events = Arc::new(on_events);
         let handler = || {
-            let on_event = on_event.clone();
+            let on_events = on_events.clone();
             move |result: DebounceEventResult| match result {
                 Ok(events) => {
-                    for event in events {
-                        for mapped in classify(&event.event) {
-                            on_event(mapped);
-                        }
+                    let mapped: Vec<VaultEvent> =
+                        events.iter().flat_map(|e| classify(&e.event)).collect();
+                    if !mapped.is_empty() {
+                        on_events(mapped);
                     }
                 }
                 Err(errors) => {
                     for e in &errors {
                         tracing::warn!(error = %e, "watch error; asking for a rescan");
                     }
-                    on_event(VaultEvent::Rescan);
+                    on_events(vec![VaultEvent::Rescan]);
                 }
             }
         };
@@ -530,8 +531,10 @@ mod tests {
 
     fn start_with(root: &Path, dirs: &[PathBuf]) -> (Watcher, Receiver<VaultEvent>) {
         let (tx, rx) = std::sync::mpsc::channel();
-        let w = Watcher::new(root, dirs, move |e| {
-            let _ = tx.send(e);
+        let w = Watcher::new(root, dirs, move |events| {
+            for e in events {
+                let _ = tx.send(e);
+            }
         })
         .unwrap();
         // Let the watcher settle before the test perturbs the directory.

@@ -116,8 +116,9 @@ fn a_file_a_walk_finds_changed_is_reported_as_changed() {
 }
 
 /// A file that appears in the vault is reported as added once the opening walk has ended, which
-/// reports none: written straight, through a temporary renamed into place, by this vault, or in a
-/// folder moved in. An edit, or a move within the vault, brings no new file. Real watcher events.
+/// reports none: written straight, through a temporary renamed into place (a hidden one indexed
+/// before the rename too), by this vault, or in a folder moved in. An edit, or a move within the
+/// vault, brings no new file. Real watcher events.
 #[test]
 fn a_new_file_is_reported_as_added_and_an_edit_or_a_move_is_not() {
     let root = tempfile::tempdir().unwrap();
@@ -133,13 +134,13 @@ fn a_new_file_is_reported_as_added_and_an_edit_or_a_move_is_not() {
         VaultConfig::default(),
     )
     .unwrap();
-    // Every `FilesAdded` until `last` arrives, and for a moment after it.
+    // Every `FilesUsed` until `last` arrives, and for a moment after it.
     let added_until = |last: &dyn Fn(&Event) -> bool| {
         let mut added = Vec::new();
         let mut deadline = Instant::now() + BUDGET;
         while let Some(left) = deadline.checked_duration_since(Instant::now()) {
             match events.recv_timeout(left) {
-                Ok(Event::FilesAdded(rels)) => added.extend(rels),
+                Ok(Event::FilesUsed(rels)) => added.extend(rels),
                 Ok(e) if last(&e) => deadline = Instant::now() + Duration::from_millis(800),
                 Ok(_) => {}
                 Err(_) => break,
@@ -171,6 +172,11 @@ fn a_new_file_is_reported_as_added_and_an_edit_or_a_move_is_not() {
         "a move of ours"
     );
 
+    // A hidden temporary the index took in on its own counts as nothing, and its rename as a write.
+    std::fs::write(path(".Big.pdf.tmp"), "pdf\n").unwrap();
+    let listed = |e: &Event| matches!(e, Event::DirsChanged(_));
+    assert_eq!(added_until(&listed), Vec::<String>::new(), "a hidden file");
+    std::fs::rename(path(".Big.pdf.tmp"), path("Big.pdf")).unwrap();
     std::fs::write(path("New.md"), "new\n").unwrap();
     std::fs::write(path("Atomic.md.tmp"), "new\n").unwrap();
     std::fs::rename(path("Atomic.md.tmp"), path("Atomic.md")).unwrap();
@@ -181,7 +187,58 @@ fn a_new_file_is_reported_as_added_and_an_edit_or_a_move_is_not() {
     std::fs::rename(outside.path().join("Box"), path("Box")).unwrap();
     let mut added = added_until(&walked("Box"));
     added.sort();
-    assert_eq!(added, ["Atomic.md", "Box/In.md", "New.md", "Pasted.png"]);
+    assert_eq!(
+        added,
+        ["Atomic.md", "Big.pdf", "Box/In.md", "New.md", "Pasted.png"]
+    );
+}
+
+/// More than `BULK_ADDED` files added at once, a checkout's, count as used none of them, so the
+/// files the reader used stay; and of a few, a hidden file or a non-note git ignores never does.
+#[test]
+fn a_bulk_or_a_hidden_or_an_ignored_file_is_not_reported_as_added() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join(".gitignore"), "*.log\ndraft-*\n").unwrap();
+    let f = Fixture::open_dir(root, VaultConfig::default());
+    let added_until = |dir: &str| {
+        let mut added = Vec::new();
+        let mut deadline = Instant::now() + BUDGET;
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            match f.events.recv_timeout(left) {
+                Ok(Event::FilesUsed(rels)) => added.extend(rels),
+                Ok(Event::Reconciled(s)) if s.dir == dir => {
+                    deadline = Instant::now() + Duration::from_millis(800)
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        added.sort();
+        added
+    };
+    // A folder moved in is one walk, whatever the debouncer makes of its files.
+    let outside = tempfile::tempdir().unwrap();
+    let bulk = outside.path().join("bulk");
+    std::fs::create_dir(&bulk).unwrap();
+    for i in 0..=super::BULK_ADDED {
+        std::fs::write(bulk.join(format!("{i}.md")), "x\n").unwrap();
+    }
+    std::fs::rename(&bulk, f.vault.root().join("bulk")).unwrap();
+    assert_eq!(added_until("bulk"), Vec::<String>::new(), "a bulk");
+
+    let few = outside.path().join("few");
+    std::fs::create_dir(&few).unwrap();
+    for rel in [
+        ".note.md.swp",
+        "build.log",
+        "draft-1.md",
+        "draft-2.png",
+        "kept.png",
+    ] {
+        std::fs::write(few.join(rel), "x\n").unwrap();
+    }
+    std::fs::rename(&few, f.vault.root().join("few")).unwrap();
+    assert_eq!(added_until("few"), ["few/draft-1.md", "few/kept.png"]);
 }
 
 /// Depends on real inotify events.

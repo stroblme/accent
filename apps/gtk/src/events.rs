@@ -427,7 +427,9 @@ impl App {
                 }
             }
             Event::FileChanged(rel) => self.changed_on_disk(&rel),
-            Event::FilesAdded(rels) => self.files_added(&rels),
+            // Its pictures were looked at above.
+            Event::FilesAdded(_) => {}
+            Event::FilesUsed(rels) => self.files_used(&rels),
             Event::FileRemoved(rel) => {
                 self.file_gone(&rel);
                 self.reshow_preview_image(&rel);

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use crate::Result;
 
 use accent_core::index::{Change, Index};
-use accent_core::path::{is_under, parent_dir};
+use accent_core::path::{is_note, is_under, parent_dir};
 use accent_core::walk::{self, FileKind, ScanOptions};
 use accent_core::watch::{VaultEvent, Watcher};
 
@@ -89,6 +89,12 @@ pub(crate) fn spawn(
 /// into one scan at its end; later requests run immediately.
 const WALK_FLOOR: Duration = Duration::from_secs(2);
 
+/// The most files one batch, with the walk it asks for, may add and still count as used
+/// ([`Event::FilesUsed`]). A download (its file and the `.part` beside it), a few pictures pasted
+/// or an agent's turn stay under it, while a checkout, a sync or a folder copied in goes over;
+/// and a batch of ten takes at most a fifth of the fifty files the window keeps as used.
+const BULK_ADDED: usize = 10;
+
 /// What `stop` says: walk on.
 pub(crate) const RUN: u8 = 0;
 /// The user stopped the walk: see [`Worker::paused`].
@@ -99,6 +105,10 @@ pub(crate) const CLOSE: u8 = 2;
 /// The worker's inbox. The watcher pushes `Fs`, the public API pushes the rest.
 pub(crate) enum Msg {
     Fs(VaultEvent),
+    /// What the watcher handed over at once ([`Watcher::new`]), taken apart into [`Msg::Fs`] as it
+    /// is read ([`Msg::apart`]), so one batch holds all of it: a checkout's files are counted
+    /// together ([`BULK_ADDED`]).
+    Watched(Vec<VaultEvent>),
     Update {
         rel: String,
         own: bool,
@@ -144,6 +154,17 @@ pub(crate) enum Msg {
     /// Panic on the worker's thread, as a bug would.
     #[cfg(test)]
     Panic,
+}
+
+impl Msg {
+    /// A [`Watched`](Msg::Watched) handover as the [`Fs`](Msg::Fs) messages it holds, any other
+    /// message as it is.
+    fn apart(self) -> Vec<Msg> {
+        match self {
+            Msg::Watched(events) => events.into_iter().map(Msg::Fs).collect(),
+            msg => vec![msg],
+        }
+    }
 }
 
 /// Owns the writing connection and the watcher. Everything here runs on one thread, so the
@@ -227,7 +248,7 @@ impl Worker {
         // missed until the rebuild below. Build the watch set from the scan result instead of
         // the cache if that ever bites.
         self.rebuild_watcher();
-        self.reconcile("", &BTreeSet::new());
+        self.reconcile("", &BTreeSet::new(), Vec::new());
 
         loop {
             // One `recv` plus the rest of the burst: a Syncthing pull of 500 files is one batch,
@@ -252,6 +273,7 @@ impl Worker {
                 batch.push(first);
             }
             batch.extend(self.rx.try_iter());
+            let batch: Vec<Msg> = batch.into_iter().flat_map(Msg::apart).collect();
             let stop = batch.iter().any(|m| matches!(m, Msg::Shutdown));
             self.process(batch);
             if stop {
@@ -389,7 +411,7 @@ impl Worker {
                     if let Msg::Fs(VaultEvent::Renamed { from, to }) = msg
                         && let (Some(from), Some(to)) = (self.rel(from), self.rel(to))
                     {
-                        if matches!(self.index.get_file(&from), Ok(Some(_))) {
+                        if self.moved(&from) {
                             moved.insert(to.clone());
                         }
                         self.emit(Event::FileRenamed { from, to });
@@ -398,7 +420,7 @@ impl Worker {
                         moved.insert(to.clone());
                     }
                 }
-                self.reconcile("", &moved);
+                self.reconcile("", &moved, Vec::new());
                 return;
             } else {
                 // A folder's walk leaves the rest of the vault to the batch, applied first.
@@ -408,8 +430,10 @@ impl Worker {
         let mut batched = Batch::default();
         for msg in batch {
             match msg {
-                // `Settled` is answered by the caller of this one and never reaches here.
+                // `Settled` is answered by the caller of this one and never reaches here, nor does
+                // `Watched`, taken apart as it is read.
                 Msg::Rescan(_)
+                | Msg::Watched(_)
                 | Msg::Resume
                 | Msg::Shutdown
                 | Msg::WatchGit(_)
@@ -451,14 +475,14 @@ impl Worker {
         if !batched.dirs.is_empty() {
             self.emit(Event::DirsChanged(batched.dirs.into_iter().collect()));
         }
-        if self.walked && !batched.added.is_empty() {
-            self.emit(Event::FilesAdded(batched.added));
-        }
         if batched.pdfs {
             self.wake_pdf_text();
         }
-        if let Some(dir) = walk_after {
-            self.reconcile(&dir, &batched.moved);
+        // The files the walk adds are counted with the batch's own: a checkout's new folder is
+        // part of the checkout ([`BULK_ADDED`]).
+        match walk_after {
+            Some(dir) => self.reconcile(&dir, &batched.moved, batched.added),
+            None => self.emit_added(batched.added),
         }
     }
 
@@ -541,8 +565,9 @@ impl Worker {
     /// and symlinks. [`Event::Reconciled`] means both indexing and watching are ready.
     /// During long scans, process git events, watch changes and exclusions between
     /// batches; defer other messages to [`Worker::run`] in arrival order. The files it adds are
-    /// new ([`Event::FilesAdded`]) unless they lie under `moved`, where a move put them.
-    fn reconcile(&mut self, dir: &str, moved: &BTreeSet<String>) {
+    /// new ([`Event::FilesAdded`]) unless they lie under `moved`, where a move put them, and are
+    /// counted with `added`, what the batch asking for the walk added.
+    fn reconcile(&mut self, dir: &str, moved: &BTreeSet<String>, mut added: Vec<String>) {
         // Whatever asked for a walk of this folder or of one inside it is answered by this one.
         if self
             .due
@@ -574,7 +599,7 @@ impl Worker {
             |index, p| {
                 let _ = events.send(Event::Progress(p));
                 let mut git = false;
-                for msg in rx.try_iter() {
+                for msg in rx.try_iter().flat_map(Msg::apart) {
                     match msg {
                         Msg::Fs(VaultEvent::Git(_)) => git = true,
                         Msg::WatchGit(dirs) => {
@@ -638,14 +663,12 @@ impl Worker {
                 for rel in std::mem::take(&mut stats.changed) {
                     self.emit_changed(rel, &aliases);
                 }
-                // The vault's opening walk finds what the index had not reached yet, new or not.
-                let added: Vec<String> = std::mem::take(&mut stats.added_files)
-                    .into_iter()
-                    .filter(|rel| !moved.iter().any(|to| is_under(rel, to)))
-                    .collect();
-                if self.walked && !added.is_empty() {
-                    self.emit(Event::FilesAdded(added));
-                }
+                added.extend(
+                    std::mem::take(&mut stats.added_files)
+                        .into_iter()
+                        .filter(|rel| !moved.iter().any(|to| is_under(rel, to))),
+                );
+                self.emit_added(added);
                 self.walked |= stats.dir.is_empty() && !stats.stopped;
                 // Emitted for a stopped walk too, carrying `stopped`: it is what tells the window
                 // it is looking at a partial index rather than a finished one.
@@ -836,9 +859,7 @@ impl Worker {
             }
             VaultEvent::Renamed { from, to } => {
                 if let (Some(from), Some(to)) = (self.rel(&from), self.rel(&to)) {
-                    // A temporary file nobody indexed, renamed into place, is a file written; one
-                    // the index held is a move.
-                    if matches!(self.index.get_file(&from), Ok(Some(_))) {
+                    if self.moved(&from) {
                         b.moved.insert(to.clone());
                     }
                     if let Err(e) = self.index.remove_file_batched(&from) {
@@ -982,6 +1003,48 @@ impl Worker {
         self.emit(Event::FileChanged(rel));
     }
 
+    /// Tell the window of `added`, the files one batch and its walk added ([`Event::FilesAdded`]),
+    /// and which of them count as used ([`Event::FilesUsed`]), none of more than [`BULK_ADDED`].
+    /// Nothing before the vault's opening walk has ended, which finds what the index had not
+    /// reached yet, new or not.
+    fn emit_added(&self, added: Vec<String>) {
+        if !self.walked || added.is_empty() {
+            return;
+        }
+        let used: Vec<String> = match added.len() > BULK_ADDED {
+            true => Vec::new(),
+            false => added
+                .iter()
+                .filter(|rel| self.counts(rel))
+                .cloned()
+                .collect(),
+        };
+        self.emit(Event::FilesAdded(added));
+        if !used.is_empty() {
+            self.emit(Event::FilesUsed(used));
+        }
+    }
+
+    /// Whether a file added at `rel` counts as used: not a hidden one (a dot name, or one inside
+    /// a dot folder, as an editor's swap file), nor SyncTeX's `main.synctex(busy)` a TeX build
+    /// writes and renames, a conflict copy, or a file git ignores that is no note, which
+    /// `Index::recent_files` leaves out too.
+    fn counts(&self, rel: &str) -> bool {
+        !rel.split('/').any(|part| part.starts_with('.'))
+            && !rel.ends_with("(busy)")
+            && conflict_original_rel(rel).is_none()
+            && (is_note(rel) || !walk::ignored_file(&self.root, rel))
+    }
+
+    /// Whether a rename from `from` brings no new file: a move of one the index held that would
+    /// count, or SyncTeX's `(busy)` file taking its name, which is the build's whatever it is
+    /// called. A temporary nobody indexed, or a hidden one (rsync's `.name.XXXXXX`), renamed into
+    /// place, is a file written.
+    fn moved(&self, from: &str) -> bool {
+        from.ends_with("(busy)")
+            || (matches!(self.index.get_file(from), Ok(Some(_))) && self.counts(from))
+    }
+
     /// The vault's aliases as `(row, alias)`.
     fn aliases(&mut self) -> Vec<(String, String)> {
         self.index.aliases().unwrap_or_else(|e| {
@@ -1115,8 +1178,8 @@ fn watch(
     // Dropped first: two registrations on one tree would double every event.
     *watcher = None;
     let tx = tx.clone();
-    *watcher = Some(Watcher::new(root, &dirs, move |e| {
-        let _ = tx.send(Msg::Fs(e));
+    *watcher = Some(Watcher::new(root, &dirs, move |events| {
+        let _ = tx.send(Msg::Watched(events));
     })?);
     Ok(())
 }

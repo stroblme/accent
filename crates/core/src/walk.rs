@@ -72,6 +72,12 @@ fn dir_ignores(root: &Path) -> IncrementalIgnore {
         .expect("one walk root yields one matcher")
 }
 
+/// Whether git ignores the file `rel` by a pattern of its own, which the index holds all the same
+/// ([`stat_one`]) and `Index::recent_files` leaves out unless it is a note.
+pub fn ignored_file(root: &Path, rel: &str) -> bool {
+    dir_ignores(root).matched(rel, false).is_ignore()
+}
+
 /// Whether git ignores a directory at or above `rel`.
 ///
 /// For files, check only the parent: individually ignored files remain indexed.
@@ -1529,6 +1535,22 @@ mod tests {
         assert_eq!(
             rows.iter().map(|(r, ..)| r.as_str()).collect::<Vec<_>>(),
             [".venv"]
+        );
+    }
+
+    #[test]
+    fn an_ignored_file_is_told_by_its_own_pattern_and_a_nested_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        std::fs::write(root.join(".gitignore"), "*.log\n").unwrap();
+        std::fs::write(root.join("sub/.gitignore"), "*.aux\n").unwrap();
+        assert!(ignored_file(root, "sub/build.log"));
+        assert!(ignored_file(root, "sub/main.aux"));
+        assert!(!ignored_file(root, "sub/main.pdf"));
+        assert!(
+            !ignored_file(root, "main.aux"),
+            "the nested rule holds below its folder alone"
         );
     }
 

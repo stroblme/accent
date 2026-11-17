@@ -83,9 +83,13 @@ pub enum Event {
     /// Someone else changed this note's content. Never fires for our own saves.
     FileChanged(String),
     /// Files that appeared in the vault while it was open, whoever made them, this vault included,
-    /// in the order the index took them in: what the window counts as used. Never a file a move
-    /// brought, nor one the vault's opening walk found.
+    /// in the order the index took them in. Never a file a move brought, nor one the vault's
+    /// opening walk found.
     FilesAdded(Vec<String>),
+    /// Those of the [`FilesAdded`](Self::FilesAdded) just sent the window counts as used: none of
+    /// a batch of more than a few, and never a hidden file, a conflict copy or a file git ignores
+    /// that is no note (`Worker::emit_added`).
+    FilesUsed(Vec<String>),
     FileRemoved(String),
     FileRenamed {
         from: String,

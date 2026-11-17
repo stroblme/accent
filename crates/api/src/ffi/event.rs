@@ -77,6 +77,7 @@ pub(crate) fn narrow(e: crate::Event) -> Option<Event> {
         // here ever has to match them. A file added is not counted as used on a phone yet.
         crate::Event::GitChanged
         | crate::Event::FilesAdded(_)
+        | crate::Event::FilesUsed(_)
         | crate::Event::UnindexedChanged(_)
         | crate::Event::Connecting { .. }
         | crate::Event::Connected

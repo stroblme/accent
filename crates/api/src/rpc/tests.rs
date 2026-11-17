@@ -249,6 +249,7 @@ fn an_event_on_the_far_side_arrives_as_a_notification() {
     );
     // As new to the window as a note a citation download or an agent writes on the host.
     assert!(w.wait(|e| matches!(e, Event::FilesAdded(rels) if rels == &["c.md"])));
+    assert!(w.wait(|e| matches!(e, Event::FilesUsed(rels) if rels == &["c.md"])));
 }
 
 /// A language request runs where the files are, and what the provider has to say about the

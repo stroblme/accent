@@ -343,15 +343,11 @@ impl App {
     }
 
     /// Count files that appeared in the vault as used, the last of them first: a PDF a citation
-    /// downloaded, a picture pasted, a note a sync or an agent wrote. A conflict copy is never a
-    /// file to open and stays out.
-    pub fn files_added(self: &Rc<Self>, rels: &[String]) {
-        let shown = rels
-            .iter()
-            .filter(|rel| accent_api::conflict_original_rel(rel).is_none());
+    /// downloaded, a picture pasted, a note a sync or an agent wrote ([`Event::FilesUsed`]).
+    pub fn files_used(self: &Rc<Self>, rels: &[String]) {
         {
             let mut recent = self.recent_files.borrow_mut();
-            for rel in shown {
+            for rel in rels {
                 accent_core::config::touch(&mut recent, rel, RECENT_FILES);
             }
         }

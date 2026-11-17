@@ -1688,7 +1688,8 @@ Shared decisions are here; Android-specific decisions are in [MOBILE_DESIGN.md](
 - **Files rank as Go to File ranks them** in `[[`, `![[` and a link's `(` (user decision 2026-11-09).
   The files the window used lately lead their tier, the latest first, and before anything is typed the files changed last follow them, so an empty `[[` lists what was just worked on.
   A file that appears in the vault while it is open counts as used from then on, whoever made it, so a citation's downloaded PDF, a pasted picture or a note a sync, a pull or an agent wrote is the first one offered (user decision 2026-11-17).
-  The watcher reports it as added (`Event::FilesAdded`), and a move, an edit or a conflict copy is none, nor is whatever the vault's opening walk finds, while a file deleted leaves the list.
+  The watcher reports it as added (`Event::FilesAdded`) and says whether it counts (`Event::FilesUsed`), and a move, an edit, a hidden file, a conflict copy or a file git ignores that is no note is none, nor is whatever the vault's opening walk finds, while a file deleted leaves the list.
+  Nor are the files of a batch adding more than ten at once (`BULK_ADDED`), a checkout's, a sync's or a folder's copied in, so a bulk never pushes the files the reader used out of the fifty the window keeps (user decision 2026-11-17).
   The note being written is never offered, here or in an org file's `[[`, since a link to itself is rarely wanted.
   The popup keeps the provider's order inside a path's tier, where a name starting with what was typed counts as the path starting with it.
 - `[[` also offers the notes in the folders git ignores, after the indexed ones and marked ignored, and a link to one opens it with no dangling hint (Architecture, Gitignored folders).
