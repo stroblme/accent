@@ -4,7 +4,7 @@
 //! remote vault's link, holds no more than a cell will.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, Weak};
@@ -55,14 +55,28 @@ pub(super) async fn start(
     let parent = ("JPY_PARENT_PID".to_string(), std::process::id().to_string());
     let env: Vec<(String, String)> = launch.env.into_iter().chain([parent]).collect();
     let started = Kernel::start(&argv, cwd, &env, &under).await;
-    // A kernel that binds `tcp` whatever the connection file says is never reached.
-    let (kernel, incomings, info) = started.map_err(|e| match e {
-        accent_jupyter::Error::Timeout(_) if launch.kernelspec => Error::Language(format!(
-            "{e}: Accent reaches kernels over the ipc transport, which {} may not take",
-            launch.called
-        )),
-        e => failed(e),
-    })?;
+    let (kernel, incomings, info) = match (started, launch.python) {
+        (Ok(started), _) => started,
+        // A kernel that binds `tcp` whatever the connection file says is never reached.
+        (Err(e @ accent_jupyter::Error::Timeout(_)), None) => {
+            return Err(Error::Language(format!(
+                "{e}: Accent reaches kernels over the ipc transport, which {} may not take",
+                launch.called
+            )));
+        }
+        // Asked only once it has ended unanswered, so a start that works costs no second Python.
+        (Err(e @ accent_jupyter::Error::Exited(_)), Some(python)) => {
+            let root = kernels.root.clone();
+            let lacks = move || {
+                crate::python::lacks_ipykernel(&root, &python).then(|| named(&root, python))
+            };
+            return Err(match tokio::task::spawn_blocking(lacks).await? {
+                Some(python) => Error::Language(format!("ipykernel is not installed in {python}")),
+                None => failed(e),
+            });
+        }
+        (Err(e), _) => return Err(failed(e)),
+    };
     let text = |key: &str| info[key].as_str().unwrap_or_default().to_string();
     let info = Info {
         interpreter: launch.called,
@@ -134,6 +148,16 @@ impl Session {
     pub(super) async fn stop(&self) {
         self.kernel.shutdown().await;
     }
+}
+
+/// `python` as the Python Environment dropdown names it, the vault's own by its path in the vault.
+fn named(root: &Path, mut python: Vec<String>) -> String {
+    if let Some(exe) = python.first_mut()
+        && let Ok(rel) = Path::new(exe.as_str()).strip_prefix(root)
+    {
+        *exe = rel.to_string_lossy().into_owned();
+    }
+    python.join(" ")
 }
 
 fn failed(e: accent_jupyter::Error) -> Error {

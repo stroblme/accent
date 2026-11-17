@@ -196,12 +196,6 @@ fn fill(
         Ok(environments) => environments,
         Err(why) => return notes.append(&note(&format!("Cannot list Python environments: {why}"))),
     };
-    if environments.choices.len() == 1 {
-        notes.append(&note(
-            "No environment with ipykernel was found in the vault: install ipykernel in one, \
-             then open this list again",
-        ));
-    }
     for Environment { command, label } in environments.choices {
         let chosen = command == environments.selected;
         let button = row(&label, chosen);

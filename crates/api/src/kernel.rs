@@ -172,8 +172,9 @@ pub(crate) struct Launch {
     env: Vec<(String, String)>,
     /// The interpreter, or the kernelspec's display name: [`Info::interpreter`].
     called: String,
-    /// A kernelspec's, which may not take the `ipc` transport.
-    kernelspec: bool,
+    /// The vault's Python it runs ipykernel in, `None` for a kernelspec's, which may not take
+    /// the `ipc` transport.
+    python: Option<Vec<String>>,
     message_interrupt: bool,
 }
 
@@ -185,14 +186,14 @@ fn launch(
     python: &[String],
 ) -> Result<Launch> {
     let Some(name) = kernel else {
-        let mut argv = crate::debug::interpreter(root, notebook, python);
-        let called = argv.first().cloned().unwrap_or_default();
-        argv.extend(["-m", "ipykernel_launcher", "-f", "{connection_file}"].map(String::from));
+        let python = crate::debug::interpreter(root, notebook, python);
+        let called = python.first().cloned().unwrap_or_default();
+        let ipykernel = ["-m", "ipykernel_launcher", "-f", "{connection_file}"].map(String::from);
         return Ok(Launch {
-            argv,
+            argv: python.iter().cloned().chain(ipykernel).collect(),
             env: Vec::new(),
             called,
-            kernelspec: false,
+            python: Some(python),
             message_interrupt: false,
         });
     };
@@ -206,7 +207,7 @@ fn launch(
         argv: spec::argv(spec),
         env: spec.env.clone().into_iter().collect(),
         called: spec.display_name.clone(),
-        kernelspec: true,
+        python: None,
         message_interrupt: spec.message_interrupt,
     })
 }
@@ -407,5 +408,29 @@ IPYTHONDIR="$PWD/ipython" exec python3 "$@""#;
         let gone = || unsafe { libc::kill(pid, 0) } != 0;
         let gone = poll_until(gone, Duration::from_secs(5));
         assert!(gone, "the kernel outlived its vault");
+    }
+
+    /// The vault's own `.venv` without ipykernel is the default Python's, and a notebook started
+    /// in it says why it cannot run rather than how its kernel exited.
+    #[test]
+    fn a_python_without_ipykernel_is_named() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        std::fs::create_dir_all(dir.join(".venv/bin")).unwrap();
+        // `sh` refuses `-m ipykernel_launcher` and `-c "import ipykernel"` as such a Python does.
+        std::os::unix::fs::symlink("/bin/sh", dir.join(".venv/bin/python")).unwrap();
+        let (events, _news) = std::sync::mpsc::channel();
+        let kernels = Arc::new(Kernels::new(dir.to_path_buf(), events));
+        let start = Start {
+            notebook: "run.ipynb".to_string(),
+            kernel: None,
+        };
+        let started = kernels.start(1, &start, &DebugConfig::default());
+        let started = accent_lsp::runtime()
+            .block_on(async { tokio::time::timeout(Duration::from_secs(60), started).await });
+        let Ok(Err(Error::Language(why))) = started else {
+            panic!("{started:?}");
+        };
+        assert_eq!(why, "ipykernel is not installed in .venv/bin/python");
     }
 }

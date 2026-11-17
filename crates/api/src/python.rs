@@ -13,7 +13,7 @@ use crate::{Local, Result, Vault};
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// A Python command with ipykernel installed, selectable for this vault.
+/// A Python command selectable for this vault.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Environment {
     pub command: Vec<String>,
@@ -76,7 +76,6 @@ fn discover(
     let mut choices: Vec<Environment> = commands
         .into_iter()
         .filter(|command| !command.is_empty())
-        .filter(|command| has_ipykernel(root, command))
         .map(|command| Environment {
             label: command.join(" "),
             command,
@@ -130,16 +129,18 @@ pub(crate) fn venvs(root: &Path) -> Vec<PathBuf> {
     found
 }
 
-fn has_ipykernel(root: &Path, command: &[String]) -> bool {
-    has_ipykernel_within(root, command, PROBE_TIMEOUT)
+/// Whether `command` runs and cannot import ipykernel. One that does not answer in time says
+/// nothing.
+pub(crate) fn lacks_ipykernel(root: &Path, command: &[String]) -> bool {
+    lacks_ipykernel_within(root, command, PROBE_TIMEOUT)
 }
 
-fn has_ipykernel_within(root: &Path, command: &[String], timeout: Duration) -> bool {
+fn lacks_ipykernel_within(root: &Path, command: &[String], timeout: Duration) -> bool {
     let Some(mut check) = python_command(root, command) else {
         return false;
     };
     check.args(["-c", "import ipykernel"]);
-    run_within(check, timeout, false).is_some_and(|(status, _)| status.success())
+    run_within(check, timeout, false).is_some_and(|(status, _)| !status.success())
 }
 
 /// Resolve a wrapper command to the interpreter it actually starts, for Pyright and Jedi.
@@ -304,16 +305,14 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn finds_a_nested_python_environment_with_ipykernel() {
-        use std::os::unix::fs::PermissionsExt;
-
+    fn lists_a_nested_python_environment_without_ipykernel() {
         let root = tempfile::tempdir().unwrap();
         let env = root.path().join("project/.venv/bin");
         std::fs::create_dir_all(&env).unwrap();
         std::fs::write(root.path().join("project/code.py"), "print(1)").unwrap();
-        let python = env.join("python");
-        std::fs::write(&python, "#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // A Python without ipykernel, which a script, the debugger and language analysis do
+        // without.
+        std::os::unix::fs::symlink("/bin/false", env.join("python")).unwrap();
 
         let found = discover(
             root.path(),
@@ -395,7 +394,7 @@ mod tests {
         std::fs::write(&shim, "#!/bin/sh\nsleep 5\n").unwrap();
         std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
         let start = std::time::Instant::now();
-        assert!(!has_ipykernel_within(
+        assert!(!lacks_ipykernel_within(
             root.path(),
             &[shim.to_string_lossy().into_owned()],
             Duration::from_millis(100),
