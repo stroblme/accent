@@ -305,8 +305,8 @@ pub const ACTIONS: &[(&str, &str, &[&str])] = &[
     ("win.diagram-paste", "Paste into Diagram", &[]),
     // The one shape's size and the one cell's style, as the Properties pane's Size and Style
     // groups copy them, and pasted onto the selection.
-    ("win.diagram-copy-shape", "Copy Shape", &[]),
-    ("win.diagram-paste-shape", "Paste Shape", &[]),
+    ("win.diagram-copy-size", "Copy Size", &[]),
+    ("win.diagram-paste-size", "Paste Size", &[]),
     ("win.diagram-copy-style", "Copy Style", &[]),
     ("win.diagram-paste-style", "Paste Style", &[]),
     // The ring's swatches by the names their tooltips give them, each recolouring the selection

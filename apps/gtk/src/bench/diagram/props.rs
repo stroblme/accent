@@ -156,16 +156,16 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
             "bench diagram props menu shapes {:?}",
             menu_labels(&app, a.as_deref()).await
         );
-        run("win.diagram-copy-shape");
+        run("win.diagram-copy-size");
         let said = super::super::export::toast(&app, "Copied size").await;
         println!(
             "bench diagram props menu size said={said:?} {:?}",
             menu_labels(&app, m.as_deref()).await
         );
-        run("win.diagram-paste-shape");
+        run("win.diagram-paste-size");
         glib::timeout_future(Duration::from_millis(300)).await;
         println!(
-            "bench diagram props paste_shape selection={:?} a={:?} m={:?}",
+            "bench diagram props menu paste_size selection={:?} a={:?} m={:?}",
             tab.selection(),
             tab.frame_of("a"),
             tab.frame_of("m")

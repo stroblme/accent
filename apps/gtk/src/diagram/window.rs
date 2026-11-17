@@ -273,8 +273,8 @@ impl App {
             "diagram-copy" => tab.copy(),
             "diagram-cut" => tab.cut(),
             "diagram-paste" => self.paste_diagram(&tab, false),
-            "diagram-copy-shape" => tab.copy_property(Clip::Size),
-            "diagram-paste-shape" => tab.paste_property(Clip::Size),
+            "diagram-copy-size" => tab.copy_property(Clip::Size),
+            "diagram-paste-size" => tab.paste_property(Clip::Size),
             "diagram-copy-style" => tab.copy_property(Clip::Style),
             "diagram-paste-style" => tab.paste_property(Clip::Style),
             // Recolour Selection: the ring's swatch of that number, as its click recolours.

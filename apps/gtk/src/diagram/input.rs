@@ -35,9 +35,9 @@ impl DiagramTab {
     }
 
     /// The menu under the pointer, at widget `(x, y)`: the clipboard and Duplicate and Delete,
-    /// Copy Shape for one shape and Copy Style for one cell, Group or Ungroup where they apply,
+    /// Copy Size for one shape and Copy Style for one cell, Group or Ungroup where they apply,
     /// the order, and Edit Label for one cell; over nothing selected, Paste alone. The one paste
-    /// offered is for what the clipboard holds: Paste Shape for a size, Paste Style for a style,
+    /// offered is for what the clipboard holds: Paste Size for a size, Paste Style for a style,
     /// none for a position, and Paste for anything else. Window actions, so the palette lists
     /// them and they can be rebound.
     fn menu_at(self: &Rc<Self>, x: f64, y: f64) {
@@ -85,9 +85,9 @@ impl DiagramTab {
             };
             let mut looks = Vec::new();
             if let Some(pinned) = shape {
-                looks.push("win.diagram-copy-shape");
+                looks.push("win.diagram-copy-size");
                 if !pinned && held == Some(Clip::Size) {
-                    looks.push("win.diagram-paste-shape");
+                    looks.push("win.diagram-paste-size");
                 }
             }
             if ids.len() == 1 {
