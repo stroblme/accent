@@ -320,10 +320,11 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
             "Gradient",
             "Rounded",
             "Shadow",
-            "Opacity",
+            "Fill Opacity",
             "Rotation",
             "Flip",
             "Line Colour",
+            "Line Opacity",
             "Line Width",
             "Pattern",
             "Waypoints",
@@ -553,6 +554,19 @@ pub(super) fn props(app: &Rc<App>, rel: &str) {
             }
             println!("bench diagram props sketch on={on} a={:?}", style("a"));
         }
+        // Fill Opacity and Line Opacity write the fill's and the line's own opacity, each its own
+        // step, and never the whole cell's, which would fade the label too.
+        tab.select(vec!["b".to_string()]);
+        set("Fill Opacity", 40.0);
+        set("Line Opacity", 70.0);
+        glib::timeout_future(Duration::from_millis(600)).await;
+        let faded = style("b");
+        tab.undo();
+        println!(
+            "bench diagram props opacity b={faded:?} undone={:?}",
+            style("b")
+        );
+        tab.undo();
         tab.select(vec!["e".to_string()]);
         set("Start Spacing", 3.0);
         set("End Spacing", -2.0);

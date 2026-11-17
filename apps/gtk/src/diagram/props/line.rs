@@ -1,5 +1,5 @@
-//! The Line group, draw.io's Line section: the line's colour, width and pattern, which an
-//! arrow's line and a shape's outline share, a shape's perimeter spacing, and an arrow's route
+//! The Line group, draw.io's Line section: the line's colour, opacity, width and pattern, which
+//! an arrow's line and a shape's outline share, a shape's perimeter spacing, and an arrow's route
 //! and heads, which change the arrows selected and nothing else.
 
 use std::cell::Cell;
@@ -139,6 +139,8 @@ type Pairs = &'static [(&'static str, Option<&'static str>)];
 pub(super) struct Line {
     pub(super) group: adw::PreferencesGroup,
     stroke: Rc<ColourRow>,
+    /// The line's own opacity (`strokeOpacity`), which leaves the fill and the label as they are.
+    opacity: adw::SpinRow,
     stroke_width: adw::SpinRow,
     pattern: adw::ComboRow,
     /// The numbers of a pattern draw.io's menu does not list, its Custom prompt.
@@ -166,6 +168,7 @@ impl Line {
     /// Its rows in `group`: the line's own, then an arrow's.
     pub(super) fn new(group: adw::PreferencesGroup) -> Line {
         let stroke = Rc::new(ColourRow::new("Line Colour", Color::BLACK));
+        let opacity = spin("Line Opacity", (0.0, 100.0, 5.0));
         let stroke_width = spin("Line Width", (0.0, 20.0, 0.5));
         stroke_width.set_digits(1);
         let pattern = combo(
@@ -175,6 +178,7 @@ impl Line {
         let dash_pattern = entry_row("Dash Pattern");
         let perimeter = spin("Perimeter", (0.0, 999.0, 1.0));
         group.add(&stroke.row);
+        group.add(&opacity);
         group.add(&stroke_width);
         group.add(&pattern);
         group.add(&dash_pattern);
@@ -205,6 +209,7 @@ impl Line {
         Line {
             group,
             stroke,
+            opacity,
             stroke_width,
             pattern,
             dash_pattern,
@@ -232,6 +237,7 @@ impl Line {
         props.spins(
             &send,
             &[
+                (&self.opacity, "strokeOpacity", Some(100.0), false),
                 (&self.stroke_width, "strokeWidth", None, false),
                 (&self.perimeter, "perimeterSpacing", Some(0.0), false),
                 (&self.start_size, "startSize", Some(6.0), true),
@@ -356,6 +362,7 @@ impl Line {
         self.end_spacing
             .set_value(style.num("targetPerimeterSpacing", 0.0));
         self.stroke.fill(style.color(stroke_key));
+        self.opacity.set_value(style.num("strokeOpacity", 100.0));
         self.stroke_width.set_value(style.num("strokeWidth", 1.0));
         // A pattern draw.io's menu does not list is Custom, its numbers in the row below.
         let numbers = style

@@ -723,7 +723,8 @@ impl<'a> Builder<'a> {
                         rotation: place.degrees,
                         flip_h: flip_h != place.flip_h,
                         flip_v: flip_v != place.flip_v,
-                        opacity,
+                        // At the fill's opacity too, as `mxSvgCanvas2D.image` draws it.
+                        opacity: opacity * style.num("fillOpacity", 100.0) / 100.0,
                     });
                 }
             }
@@ -731,7 +732,8 @@ impl<'a> Builder<'a> {
     }
 
     /// A picture cell's background, the picture, and its border (`mxImageShape`), placed as its
-    /// shape is: facing its direction, mirrored by its flips and turned.
+    /// shape is: facing its direction, mirrored by its flips and turned. The background and the
+    /// picture take the fill's opacity and the border the line's, as `mxSvgCanvas2D` draws them.
     fn image(
         &mut self,
         cell: &Cell,
@@ -741,6 +743,7 @@ impl<'a> Builder<'a> {
         locked: bool,
     ) {
         let (rect, rotation) = (place.bounds, place.degrees);
+        let fill_alpha = style.num("fillOpacity", 100.0) / 100.0;
         let mut outline = shapes::rect(rect);
         geom::rotate_path(&mut outline, rect.centre(), rotation);
         if let Some(bg) = style.color("imageBackground") {
@@ -748,7 +751,7 @@ impl<'a> Builder<'a> {
                 cell: cell.id.clone(),
                 locked,
                 path: outline.clone(),
-                fill: Some(Paint::Solid(bg)),
+                fill: Some(Paint::Solid(bg.fade(fill_alpha))),
                 stroke: None,
                 opacity,
                 shadow: false,
@@ -769,7 +772,7 @@ impl<'a> Builder<'a> {
                 rotation,
                 flip_h: place.flip_h,
                 flip_v: place.flip_v,
-                opacity,
+                opacity: opacity * fill_alpha,
             });
         }
         if let Some(border) = style.color("imageBorder") {
@@ -1798,6 +1801,33 @@ mod tests {
             placed("shape=image;image=x.png;flipH=1;direction=south;"),
             Some((Rect::new(20.0, -20.0, 40.0, 80.0), 90.0, false, true))
         );
+    }
+
+    #[test]
+    fn a_picture_takes_the_fill_opacity_and_its_border_the_line_opacity() {
+        let style = "shape=image;image=x.png;imageBackground=#ff0000;imageBorder=#0000ff;\
+                     fillOpacity=50;strokeOpacity=40;opacity=80;";
+        let r = Rect::new(0.0, 0.0, 80.0, 40.0);
+        let s = scene(&page(vec![Cell::new_vertex("i", "1", r, style, "")]));
+        let alphas: Vec<(u8, f64)> = s
+            .prims
+            .iter()
+            .filter_map(|prim| match prim {
+                Prim::Path {
+                    fill: Some(Paint::Solid(c)),
+                    opacity,
+                    ..
+                } => Some((c.a, *opacity)),
+                Prim::Path {
+                    stroke: Some(line),
+                    opacity,
+                    ..
+                } => Some((line.color.a, *opacity)),
+                Prim::Image { opacity, .. } => Some((255, *opacity)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(alphas, [(128, 0.8), (255, 0.4), (102, 0.8)]);
     }
 
     #[test]

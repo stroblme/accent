@@ -233,13 +233,14 @@ pub struct Props {
     /// Whether the cells shown take a gradient: a fill that is not a picture's background.
     takes_gradient: Cell<bool>,
     direction: adw::ComboRow,
+    /// The fill's own opacity (`fillOpacity`), which leaves the line and the label as they are.
+    fill_opacity: adw::SpinRow,
     rounded: adw::SwitchRow,
     arc_size: adw::SpinRow,
     effects: effects::Effects,
     /// A swimlane's divider under its title (`swimlaneLine`).
     divider: adw::SwitchRow,
     shadow: adw::SwitchRow,
-    opacity: adw::SpinRow,
     rotation: adw::SpinRow,
     flip: [gtk::Button; 2],
     /// Constrain Proportions (`aspect=fixed`).
@@ -378,23 +379,23 @@ impl Props {
         let fill = Rc::new(ColourRow::new("Fill", Color::WHITE));
         let gradient = Rc::new(ColourRow::new("Gradient", Color::WHITE));
         let direction = combo("Gradient Direction", &DIRECTIONS.map(|(_, l)| l));
+        let fill_opacity = spin("Fill Opacity", (0.0, 100.0, 5.0));
         let rounded = adw::SwitchRow::builder().title("Rounded").build();
         let arc_size = coordinate("Arc Size", 0.0);
         let effects = effects::Effects::new();
         let divider = adw::SwitchRow::builder().title("Divider").build();
         let shadow = adw::SwitchRow::builder().title("Shadow").build();
-        let opacity = spin("Opacity", (0.0, 100.0, 5.0));
         let rotation = spin("Rotation", (-180.0, 180.0, 1.0));
         shape.add(&fill.row);
         shape.add(&gradient.row);
         shape.add(&direction);
+        shape.add(&fill_opacity);
         shape.add(&rounded);
         shape.add(&arc_size);
         effects.add_fixed(&shape);
         shape.add(&divider);
         shape.add(&effects.sketch);
         shape.add(&shadow);
-        shape.add(&opacity);
         shape.add(&rotation);
         let flip = [
             icon_button("object-flip-horizontal-symbolic", "Flip Horizontally"),
@@ -481,12 +482,12 @@ impl Props {
             gradient,
             takes_gradient: Cell::new(false),
             direction,
+            fill_opacity,
             rounded,
             arc_size,
             effects,
             divider,
             shadow,
-            opacity,
             rotation,
             flip,
             aspect,
@@ -570,8 +571,8 @@ impl Props {
         self.spins(
             &send,
             &[
+                (&self.fill_opacity, "fillOpacity", Some(100.0), false),
                 (&self.arc_size, "arcSize", None, false),
-                (&self.opacity, "opacity", Some(100.0), false),
                 (&self.rotation, "rotation", Some(0.0), false),
             ],
         );
@@ -802,6 +803,7 @@ impl Props {
                 // the route and the heads for arrows. draw.io offers a shape's perimeter only
                 // with shapes alone selected, and a swimlane's divider with one among them.
                 self.fill.row.set_visible(*fills);
+                self.fill_opacity.set_visible(*fills);
                 self.takes_gradient.set(*fills && !picture);
                 self.rounded.set_visible(*vertices);
                 self.divider.set_visible(*swimlane);
@@ -810,6 +812,7 @@ impl Props {
                 self.text.fill(style, *vertices);
                 self.fill.fill(style.color(fill_key));
                 self.gradient.fill(style.color("gradientColor"));
+                self.fill_opacity.set_value(style.num("fillOpacity", 100.0));
                 self.rounded.set_active(style.flag("rounded", false));
                 // mxGraph's corner when the style gives none: `LINE_ARCSIZE` units with
                 // `absoluteArcSize`, else `RECTANGLE_ROUNDING_FACTOR` of the shorter side.
@@ -822,7 +825,6 @@ impl Props {
                 self.effects.fill(style, effects);
                 self.divider.set_active(style.flag("swimlaneLine", true));
                 self.shadow.set_active(style.flag("shadow", false));
-                self.opacity.set_value(style.num("opacity", 100.0));
                 // draw.io keeps any turn it was given; the row shows it within a half turn.
                 let turn = (style.num("rotation", 0.0) + 180.0).rem_euclid(360.0) - 180.0;
                 self.rotation.set_value(turn);
